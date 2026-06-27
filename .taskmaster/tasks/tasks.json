@@ -374,6 +374,17 @@
             "dependencies": []
           }
         ]
+      },
+      {
+        "id": 11,
+        "title": "ICC color management (in-shader)",
+        "description": "Color-manage wide-gamut sources: parse the source ICC profile and convert to the display space in-shader (3x3 matrix + TRC), so Display-P3 / AdobeRGB / ProPhoto images render correctly instead of being treated as sRGB.",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [],
+        "details": "MOTIVATING BUG: Display-P3 iPhone HEICs render OVERSATURATED because every decoder hands back RGBA8 that the renderer treats as sRGB (no profile handling). Plan (CLAUDE.md 'Color'): in-shader matrix+TRC via moxcms (pure Rust, ALREADY a transitive dep of the image crate); lcms2 behind a cargo feature only for exotic CLUT/CMYK. Steps: (1) add a color-space/ICC field to pb_decode::DecodedImage (default sRGB) and extract per backend — image crate icc_profile() for PNG/JPEG/TIFF/WebP; zune APP2 for JPEG; the HEIF container profile in wic.rs (WIC does NOT color-manage — it returns native P3 pixels, which is exactly why P3 HEICs are oversaturated now); RAW/imagepipe already sRGB; SVG/QOI/BMP assume sRGB. (2) pass it to pb-render and apply matrix+TRC in gpu.rs's WGSL fragment shader. (3) keep consistent with the new ALPHA_BLENDING photo pipeline. Test with a Display-P3 HEIC (e.g. D:\\Media\\Pictures\\2021\\2021-01-02 - Home\\IMG_0357.HEIC); oracle = Windows Photos. Full handoff in .taskmaster/current-status.md. HDR/EXR tone-mapping is a related but separate follow-up.",
+        "testStrategy": "Perceptual/golden-image compare a known P3 source vs a color-managed reference. Unit-test the ICC->matrix/TRC extraction (moxcms) on embedded sRGB/P3/AdobeRGB profiles. Confirm sRGB sources are unchanged (identity transform). No regression in the gated-advance engine or decode-to-fit.",
+        "subtasks": []
       }
     ]
   }
