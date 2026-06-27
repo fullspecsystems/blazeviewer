@@ -3,6 +3,7 @@ name = "pb-app"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+authors = ["JD Lien <jd@jdlien.com>"]
 description = "PhotoBlaze binary: the winit window + event loop wiring core, decode, and render together."
 
 [[bin]]
@@ -16,3 +17,20 @@ pb-render = { workspace = true }
 winit = "0.30"
 # Rasterizes the info-panel text using the OS UI font (loaded at runtime).
 fontdue = "0.9"
+# Native file/folder picker (Open dialog); uses the OS dialog on Windows. Default
+# features pull the Linux xdg-portal/zbus backend we don't need, so disable them —
+# the Windows (and later macOS) native backend is always compiled.
+rfd = { version = "0.14", default-features = false }
+
+# Embeds the .exe icon + version metadata on Windows (build.rs). Best-effort: if
+# the resource compiler is absent the build still succeeds (see build.rs).
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+# WiX/MSI packaging (cargo-wix). The installer source lives at wix/main.wxs and
+# registers PhotoBlaze as an "Open with" candidate + a folder right-click verb.
+# No EULA dialog (skip the license-agreement screen).
+[package.metadata.wix]
+eula = false
+name = "PhotoBlaze"
+product-name = "PhotoBlaze"

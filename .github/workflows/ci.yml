@@ -1,0 +1,43 @@
+# Lint + test on every push / PR.
+#
+# Windows is the real target (winit, wgpu/DX12, WIC decode, the build.rs icon),
+# so the full workspace builds and tests there. The pure `pb-core` crate is also
+# checked on Linux — it has no I/O or GPU, matching the project's "gate the
+# platform-independent logic on Linux" methodology (decisions.md ADR-010/011).
+
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (stable + rustfmt + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+
+  core-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test pb-core (pure, platform-independent)
+        run: cargo test -p pb-core

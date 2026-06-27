@@ -1,0 +1,113 @@
+# Build, sign, and publish the PhotoBlaze Windows MSI.
+#
+# Triggers on a version tag (e.g. `v0.1.0`) — builds the release binary, embeds
+# the icon (build.rs), packages a signed MSI with cargo-wix, and attaches it to
+# the GitHub Release. Also runnable manually (workflow_dispatch) to produce an
+# MSI artifact without a release.
+#
+# Code signing uses **Azure Trusted Signing** (see decisions.md ADR-018). It is
+# skipped automatically when the signing secrets aren't configured, so forks /
+# early builds still produce an (unsigned) MSI. To enable signing, set:
+#   secrets:  AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET
+#   vars:     AZURE_SIGNING_ENDPOINT (e.g. https://eus.codesigning.azure.net/)
+#             AZURE_SIGNING_ACCOUNT  (Trusted Signing account name)
+#             AZURE_SIGNING_PROFILE  (certificate profile name)
+# The service principal needs the "Trusted Signing Certificate Profile Signer"
+# role on the account. The .exe is signed before packaging so the installed
+# binary is trusted too, then the MSI is signed.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # create releases and upload assets
+
+jobs:
+  windows-msi:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-wix
+        run: cargo install cargo-wix --locked
+
+      - name: Verify WiX toolset is available
+        shell: pwsh
+        run: |
+          if (-not $env:WIX) {
+            Write-Error "WiX v3 toolset not found (WIX env var unset). GitHub windows runners ship it preinstalled; if that changes, install it in a prior step."
+            exit 1
+          }
+          Write-Host "Using WiX at $env:WIX"
+
+      - name: Build release binary
+        run: cargo build --release -p pb-app
+
+      # --- Signing is gated on whether the secrets exist ---
+      - name: Detect signing configuration
+        id: signing
+        shell: pwsh
+        run: |
+          $configured = -not [string]::IsNullOrEmpty("${{ secrets.AZURE_CLIENT_ID }}")
+          "configured=$($configured.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          if (-not $configured) { Write-Host "::warning::Azure Trusted Signing secrets not set — producing an UNSIGNED MSI." }
+
+      - name: Sign the executable (Azure Trusted Signing)
+        if: steps.signing.outputs.configured == 'true'
+        uses: azure/trusted-signing-action@v0.5.1
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}/target/release
+          files-folder-filter: exe
+          files-folder-recurse: false
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Package MSI (no rebuild — wraps the signed exe)
+        run: cargo wix --package pb-app --no-build --nocapture
+
+      - name: Sign the MSI (Azure Trusted Signing)
+        if: steps.signing.outputs.configured == 'true'
+        uses: azure/trusted-signing-action@v0.5.1
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}/target/wix
+          files-folder-filter: msi
+          files-folder-recurse: false
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Upload MSI as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: photoblaze-msi
+          path: target/wix/*.msi
+
+      - name: Attach MSI to the GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/wix/*.msi
+          generate_release_notes: true

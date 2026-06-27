@@ -14,6 +14,8 @@
 //!   8 / 9       scaling mode: fit / fill (all prefetched)
 //!   0           toggle original 1:1 ↔ fit
 //!   r / Shift+R rotate 90° clockwise / counter-clockwise (per-image, RAM-only)
+//!   Ctrl+R      toggle recursive subfolder scan (keeps the current photo)
+//!   o / Shift+O open file(s) / open a folder (native picker)
 //!   i / Shift+I info panel (path · WxH · codec) / full-EXIF "nerd" panel
 //!   / or ?      keybindings help overlay
 //!   esc         quit
@@ -24,6 +26,7 @@
 //!   cargo run -p pb-app --release -- "D:\Media\Pictures" -r --windowed --metrics
 
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
@@ -34,11 +37,13 @@ use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{Fullscreen, Window, WindowId};
+use winit::window::{Fullscreen, Icon, Window, WindowId};
 
+use pb_core::open::{self, LaunchInput, Source};
 use pb_core::{prefetch_targets, Playlist, ResidentRing};
 use pb_decode::{
-    decode_image_file, is_supported_extension, read_exif_fields, DecodedImage, FitBox, PixelFormat,
+    decode_bytes, decode_image_file, is_supported_extension, read_exif_fields, DecodedImage,
+    FitBox, PixelFormat,
 };
 use pb_render::{
     test_pattern, Renderer, Rotation, ScaleMode, ViewTransform, WgpuRenderer, MAX_ZOOM, MIN_ZOOM,
@@ -171,6 +176,46 @@ struct Active {
     renderer: WgpuRenderer,
 }
 
+/// A transient bottom-center status toast (e.g. "Recursive folders: on"): a pill
+/// rasterized once, held briefly at full opacity, then faded out by re-uploading
+/// the bitmap with scaled alpha. Used for command feedback that has no other
+/// on-screen cue (tasks.json #10) — deliberately NOT shown for next/prev/zoom.
+struct Toast {
+    rgba: Vec<u8>,
+    w: u32,
+    h: u32,
+    started: Instant,
+    /// Alpha last pushed to the renderer, so the fade re-uploads only on change.
+    uploaded_alpha: f32,
+}
+
+impl Toast {
+    /// Full-opacity hold, then a short linear fade (~1.3 s total).
+    const HOLD: Duration = Duration::from_millis(950);
+    const FADE: Duration = Duration::from_millis(380);
+
+    /// The toast's alpha at `now`, or `None` once it has fully expired.
+    fn alpha(&self, now: Instant) -> Option<f32> {
+        let e = now.saturating_duration_since(self.started);
+        if e <= Self::HOLD {
+            Some(1.0)
+        } else {
+            let f = (e - Self::HOLD).as_secs_f32() / Self::FADE.as_secs_f32();
+            (f < 1.0).then_some(1.0 - f)
+        }
+    }
+}
+
+/// A copy of `rgba` with its alpha channel scaled by `factor` (clamped 0..=1).
+fn scale_alpha(rgba: &[u8], factor: f32) -> Vec<u8> {
+    let f = factor.clamp(0.0, 1.0);
+    let mut out = rgba.to_vec();
+    for px in out.chunks_exact_mut(4) {
+        px[3] = (px[3] as f32 * f).round().clamp(0.0, 255.0) as u8;
+    }
+    out
+}
+
 struct App {
     windowed: bool,
     paths: Vec<Arc<Path>>,
@@ -244,6 +289,19 @@ struct App {
     rotations: HashMap<usize, Rotation>,
     /// Whether a Shift key is currently held (for `Shift+R`, `Shift+I`).
     shift: bool,
+    /// Whether a Ctrl key is held (for `Ctrl+R` = toggle recursive scan).
+    ctrl: bool,
+    /// Whether the current scan-based playlist is recursive (`Ctrl+R` toggles).
+    recursive: bool,
+    /// The directory the current playlist was scanned from — enables the `Ctrl+R`
+    /// recursive toggle and re-scans. `None` for an explicit file list (a
+    /// multi-select or dropped photos), where recursion has no folder to walk.
+    scan_root: Option<PathBuf>,
+    /// Files dropped on the window this burst; winit delivers one event per file,
+    /// so they're coalesced here and applied once in `about_to_wait`.
+    pending_drops: Vec<PathBuf>,
+    /// The transient bottom-center status toast (e.g. recursion on/off), or `None`.
+    toast: Option<Toast>,
     /// Hold timers for the zoom/pan acceleration ramps (start = when the hold
     /// began; last = previous step, for time-based deltas).
     zoom_started: Option<Instant>,
@@ -253,9 +311,18 @@ struct App {
 }
 
 impl App {
-    fn new(windowed: bool, root: PathBuf, paths: Vec<PathBuf>, metrics: StageTimes) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        windowed: bool,
+        root: PathBuf,
+        paths: Vec<PathBuf>,
+        start: usize,
+        recursive: bool,
+        scan_root: Option<PathBuf>,
+        metrics: StageTimes,
+    ) -> Self {
         let paths: Vec<Arc<Path>> = paths.into_iter().map(Arc::from).collect();
-        let playlist = Playlist::new(paths.len(), 0);
+        let playlist = Playlist::new(paths.len(), 0).with_cursor(start);
         let decode: Arc<DecodeFn> = Arc::new(|p: &Path, fit| decode_image_file(p, fit));
         let (pool, results) = DecodePool::new(recommended_workers(), POOL_BUDGET_BYTES, decode);
         Self {
@@ -292,6 +359,11 @@ impl App {
             pending_uploads: Vec::new(),
             rotations: HashMap::new(),
             shift: false,
+            ctrl: false,
+            recursive,
+            scan_root,
+            pending_drops: Vec::new(),
+            toast: None,
             zoom_started: None,
             zoom_last: None,
             pan_started: None,
@@ -642,6 +714,119 @@ impl App {
         }
     }
 
+    /// Open a launch input at runtime (the file picker or a drag-drop): plan it,
+    /// build the playlist, and jump to the plan's cursor (the dropped/clicked
+    /// photo, or the first of a folder). Empty selections are ignored so the
+    /// current photo isn't blanked.
+    fn open_input(&mut self, input: LaunchInput, event_loop: &ActiveEventLoop) {
+        let plan = open::plan(input);
+        let (paths, root, scan_root, recursive) = resolve_source(&plan.source);
+        if paths.is_empty() {
+            eprintln!("PhotoBlaze: no supported images in that selection");
+            return;
+        }
+        let start = open::resolve_cursor(&paths, &plan.cursor);
+        self.rebuild_playlist(paths, root, scan_root, recursive, start, event_loop);
+    }
+
+    /// Toggle recursive scanning of the current folder (`Ctrl+R`), keeping the
+    /// current photo in view. A no-op for an explicit file list (multi-select /
+    /// dropped photos): there is no single root to walk.
+    fn toggle_recursive(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(root) = self.scan_root.clone() else {
+            return;
+        };
+        let keep = self
+            .displayed_item
+            .and_then(|i| self.paths.get(i))
+            .map(|p| p.to_path_buf());
+        let source = Source::Scan {
+            roots: vec![root],
+            recursive: !self.recursive,
+        };
+        let (paths, root, scan_root, recursive) = resolve_source(&source);
+        if paths.is_empty() {
+            return;
+        }
+        let start = keep
+            .as_ref()
+            .and_then(|k| paths.iter().position(|p| p == k))
+            .unwrap_or(0);
+        self.rebuild_playlist(paths, root, scan_root, recursive, start, event_loop);
+        let msg = if recursive {
+            "Recursive folders: on"
+        } else {
+            "Recursive folders: off"
+        };
+        self.show_toast(msg, event_loop);
+    }
+
+    /// Show the native picker (`O` = file(s), `Shift+O` = folder) and open the
+    /// result. Modal — it blocks the event loop while open, which is fine: the app
+    /// isn't flying through photos with a dialog up.
+    fn open_picker(&mut self, folder: bool, event_loop: &ActiveEventLoop) {
+        let start_dir = self.scan_root.clone().unwrap_or_else(|| self.root.clone());
+        let input = if folder {
+            match rfd::FileDialog::new()
+                .set_directory(&start_dir)
+                .pick_folder()
+            {
+                Some(p) => LaunchInput::Directory(p),
+                None => return,
+            }
+        } else {
+            match rfd::FileDialog::new()
+                .add_filter("Images", IMAGE_FILTER_EXTS)
+                .set_directory(&start_dir)
+                .pick_files()
+            {
+                Some(ps) if !ps.is_empty() => LaunchInput::Files(ps),
+                _ => return,
+            }
+        };
+        self.open_input(input, event_loop);
+    }
+
+    /// Replace the playlist with a new path set and re-show at `start`. Every bit
+    /// of index-keyed state (per-item rotation overrides, the metadata cache, the
+    /// failed set, the resident ring) is dropped because the indices are
+    /// reassigned; the geometry-epoch bump discards any in-flight decode for the
+    /// old set.
+    fn rebuild_playlist(
+        &mut self,
+        paths: Vec<PathBuf>,
+        root: PathBuf,
+        scan_root: Option<PathBuf>,
+        recursive: bool,
+        start: usize,
+        event_loop: &ActiveEventLoop,
+    ) {
+        if paths.is_empty() {
+            return;
+        }
+        let paths: Vec<Arc<Path>> = paths.into_iter().map(Arc::from).collect();
+        let start = start.min(paths.len() - 1);
+        self.paths = paths;
+        self.root = root;
+        self.scan_root = scan_root;
+        self.recursive = recursive;
+        self.playlist = Playlist::new(self.paths.len(), 0).with_cursor(start);
+        // Indices are reassigned — drop everything keyed by item index.
+        self.rotations.clear();
+        self.meta_cache.clear();
+        self.failed.clear();
+        // Invalidate the ring + bump the epoch (discards in-flight old decodes),
+        // then synchronously show the new current photo and refill around it.
+        self.invalidate_geometry();
+        self.displayed_item = self.playlist.current();
+        self.target_item = self.playlist.current();
+        self.load_current_sync(event_loop);
+        self.request_prefetch();
+        if let Some(a) = self.active.as_ref() {
+            a.window.request_redraw();
+        }
+    }
+
     /// Push the current view transform to the renderer (re-places the quad).
     fn push_view(&mut self) {
         let view = self.view;
@@ -760,6 +945,8 @@ impl App {
             ("9", "Fill screen (crop)"),
             ("0", "Toggle original 1:1 ↔ fit"),
             ("r / Shift+R", "Rotate 90° cw / ccw"),
+            ("Ctrl+R", "Toggle recursive folders"),
+            ("o / Shift+O", "Open file(s) / folder"),
             ("i / Shift+I", "Info / full-EXIF panel"),
             ("/ or ?", "This help"),
             ("Esc", "Quit"),
@@ -896,6 +1083,69 @@ impl App {
         self.overlay_shown = false;
         self.overlay_item = None;
         self.draw(event_loop);
+    }
+
+    /// Flash a transient status message at the bottom-center (tasks.json #10) — for
+    /// commands that otherwise give no visual feedback, e.g. the recursion toggle.
+    /// A new toast replaces any current one.
+    fn show_toast(&mut self, msg: &str, event_loop: &ActiveEventLoop) {
+        let px = (30.0 * self.scale_factor).max(16.0);
+        let pad = (12.0 * self.scale_factor).round().max(4.0) as u32;
+        let Some(hud) = self.hud.as_ref() else {
+            return; // no system font -> no toast (same as the info panels)
+        };
+        let Some((rgba, w, h)) = hud.render_panel(msg, px, pad) else {
+            return;
+        };
+        self.toast = Some(Toast {
+            rgba,
+            w,
+            h,
+            started: Instant::now(),
+            uploaded_alpha: -1.0,
+        });
+        self.push_toast(1.0);
+        self.draw(event_loop);
+    }
+
+    /// Upload the current toast bitmap to the renderer at `alpha` (its alpha
+    /// channel scaled), centered near the bottom.
+    fn push_toast(&mut self, alpha: f32) {
+        let (faded, w, h) = {
+            let Some(t) = self.toast.as_mut() else {
+                return;
+            };
+            t.uploaded_alpha = alpha;
+            (scale_alpha(&t.rgba, alpha), t.w, t.h)
+        };
+        let margin = (64.0 * self.scale_factor).round().max(8.0) as u32;
+        if let Some(a) = self.active.as_mut() {
+            a.renderer.set_toast(Some((&faded, w, h)), margin);
+        }
+    }
+
+    /// Advance the toast's hold/fade and return whether one is still active (so the
+    /// event loop keeps ticking). Re-uploads only on a meaningful alpha change;
+    /// clears the layer once expired.
+    fn tick_toast(&mut self, now: Instant, event_loop: &ActiveEventLoop) -> bool {
+        let Some(alpha) = self.toast.as_ref().and_then(|t| t.alpha(now)) else {
+            if self.toast.take().is_some() {
+                if let Some(a) = self.active.as_mut() {
+                    a.renderer.set_toast(None, 0);
+                }
+                self.draw(event_loop);
+            }
+            return false;
+        };
+        let changed = self
+            .toast
+            .as_ref()
+            .is_some_and(|t| (alpha - t.uploaded_alpha).abs() > 0.02);
+        if changed {
+            self.push_toast(alpha);
+            self.draw(event_loop);
+        }
+        true
     }
 
     /// Render one frame.
@@ -1075,6 +1325,9 @@ impl ApplicationHandler for App {
         let mut attrs = Window::default_attributes()
             .with_title("PhotoBlaze")
             .with_visible(false);
+        if let Some(icon) = load_window_icon() {
+            attrs = attrs.with_window_icon(Some(icon));
+        }
         attrs = if self.windowed {
             attrs.with_inner_size(PhysicalSize::new(1280, 800))
         } else {
@@ -1191,6 +1444,16 @@ impl ApplicationHandler for App {
 
             WindowEvent::RedrawRequested => self.draw(event_loop),
 
+            // Drag-and-drop: winit sends one event per file. Coalesce and apply on
+            // the next `about_to_wait` tick (a folder browses recursively; dropped
+            // photos become the playlist).
+            WindowEvent::DroppedFile(path) => {
+                self.pending_drops.push(path);
+                if let Some(a) = self.active.as_ref() {
+                    a.window.request_redraw();
+                }
+            }
+
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
@@ -1242,8 +1505,17 @@ impl ApplicationHandler for App {
                             }
                             KeyCode::Digit8 => self.set_scale_mode(ScaleMode::Fit, event_loop),
                             KeyCode::Digit9 => self.set_scale_mode(ScaleMode::Fill, event_loop),
-                            // Rotate 90° clockwise, or counter-clockwise with Shift.
-                            KeyCode::KeyR => self.rotate(self.shift, event_loop),
+                            // R: rotate (cw, or ccw with Shift). Ctrl+R: toggle the
+                            // recursive subfolder scan, keeping the current photo.
+                            KeyCode::KeyR => {
+                                if self.ctrl {
+                                    self.toggle_recursive(event_loop);
+                                } else {
+                                    self.rotate(self.shift, event_loop);
+                                }
+                            }
+                            // Open: o = file picker, Shift+O = folder picker.
+                            KeyCode::KeyO => self.open_picker(self.shift, event_loop),
                             // Info panel: i basic, Shift+I full EXIF.
                             KeyCode::KeyI => self.toggle_info(self.shift, event_loop),
                             // Keybindings help (`/` or `?` — same physical key).
@@ -1260,6 +1532,7 @@ impl ApplicationHandler for App {
             // Track Shift for Shift+R / Shift+I.
             WindowEvent::ModifiersChanged(mods) => {
                 self.shift = mods.state().shift_key();
+                self.ctrl = mods.state().control_key();
             }
 
             // Focus loss can swallow the key-up event; clear held keys so
@@ -1269,6 +1542,7 @@ impl ApplicationHandler for App {
                 self.held.clear();
                 self.hold_start = None;
                 self.shift = false;
+                self.ctrl = false;
                 self.zoom_started = None;
                 self.zoom_last = None;
                 self.pan_started = None;
@@ -1281,6 +1555,12 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
+        // 0. Apply any files dropped on the window this burst (coalesced — winit
+        // delivers one `DroppedFile` per file).
+        if !self.pending_drops.is_empty() {
+            let drops = std::mem::take(&mut self.pending_drops);
+            self.open_input(classify_inputs(drops), event_loop);
+        }
         // 1. Absorb finished decodes (uploads; presents the target if it arrived).
         self.drain_results(event_loop);
 
@@ -1334,9 +1614,14 @@ impl ApplicationHandler for App {
             }
         }
 
+        // 4b. Transient status toast: hold then fade (re-uploading only when the
+        // alpha changes); clears itself when expired. Shown only for specific
+        // commands (e.g. the recursion toggle) — never per photo.
+        let toast_active = self.tick_toast(now, event_loop);
+
         // 5. Poll at the frame rate while interacting or work is outstanding;
         //    otherwise go fully idle until the next event.
-        if nav.is_some() || transforming || self.work_pending() {
+        if nav.is_some() || transforming || self.work_pending() || toast_active {
             event_loop.set_control_flow(ControlFlow::WaitUntil(now + self.frame_interval));
         } else {
             event_loop.set_control_flow(ControlFlow::Wait);
@@ -1400,26 +1685,122 @@ fn scan_images(dir: &Path, recursive: bool) -> Vec<PathBuf> {
     paths
 }
 
+/// Extensions advertised in the file picker's "Images" filter (a hint only — the
+/// user can still switch to "All Files"). A representative subset of what we decode.
+const IMAGE_FILTER_EXTS: &[&str] = &[
+    "jpg", "jpeg", "jpe", "jfif", "png", "gif", "bmp", "tif", "tiff", "webp", "tga", "qoi", "jxl",
+    "svg", "svgz", "heic", "heif", "avif", "hdr", "exr", "arw", "nef", "cr2", "cr3", "dng", "raf",
+    "rw2", "orf", "srw", "pef", "raw",
+];
+
+/// The window / taskbar icon, decoded from the PNG embedded in the binary
+/// (downscaled to 256²). `None` if decoding fails — the app just runs with the
+/// default icon. (The .exe file icon for Explorer is embedded separately by
+/// `build.rs`.)
+fn load_window_icon() -> Option<Icon> {
+    const PNG: &[u8] = include_bytes!("../icons/photoblaze.png");
+    let fit = FitBox {
+        max_width: 256,
+        max_height: 256,
+    };
+    let img = decode_bytes(PNG, Some(fit), false).ok()?;
+    Icon::from_rgba(img.pixels, img.width, img.height).ok()
+}
+
+/// Classify launch / drop / picker paths into a [`LaunchInput`] — the one step
+/// that touches the disk (an `fs::metadata` "file or folder?"). A lone directory
+/// becomes `Directory`; anything else collects the files into `Files`.
+fn classify_inputs(paths: Vec<PathBuf>) -> LaunchInput {
+    let paths: Vec<PathBuf> = paths
+        .into_iter()
+        .filter(|p| !p.as_os_str().is_empty())
+        .collect();
+    if paths.is_empty() {
+        return LaunchInput::Empty;
+    }
+    if paths.len() == 1 && fs::metadata(&paths[0]).map(|m| m.is_dir()).unwrap_or(false) {
+        return LaunchInput::Directory(paths.into_iter().next().expect("len == 1"));
+    }
+    // One or more files (a directory inside a multi-selection is uncommon and is
+    // ignored here). If somehow every path is a directory, open the first.
+    let files: Vec<PathBuf> = paths
+        .iter()
+        .filter(|p| !fs::metadata(p).map(|m| m.is_dir()).unwrap_or(false))
+        .cloned()
+        .collect();
+    if files.is_empty() {
+        return LaunchInput::Directory(paths.into_iter().next().expect("non-empty"));
+    }
+    LaunchInput::Files(files)
+}
+
+/// Execute an [`open::OpenPlan`]'s [`Source`]: scan the roots (or filter the
+/// explicit list) into the ordered image paths to play. Returns the paths, the
+/// root for relative-path display, the scan root (for `Ctrl+R`; `None` for an
+/// explicit list), and whether the scan was recursive.
+fn resolve_source(source: &Source) -> (Vec<PathBuf>, PathBuf, Option<PathBuf>, bool) {
+    match source {
+        Source::Scan { roots, recursive } => {
+            let mut paths = Vec::new();
+            for r in roots {
+                paths.extend(scan_images(r, *recursive));
+            }
+            paths.sort();
+            let root = roots.first().cloned().unwrap_or_else(|| PathBuf::from("."));
+            (paths, root, roots.first().cloned(), *recursive)
+        }
+        Source::Explicit(files) => {
+            let paths: Vec<PathBuf> = files
+                .iter()
+                .filter(|p| is_supported_image(p.as_path()))
+                .cloned()
+                .collect();
+            let root = files
+                .first()
+                .and_then(|p| p.parent())
+                .filter(|d| !d.as_os_str().is_empty())
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."));
+            (paths, root, None, false)
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let windowed = args.iter().any(|a| a == "--windowed" || a == "-w");
-    let recursive = args.iter().any(|a| a == "--recursive" || a == "-r");
+    let force_recursive = args.iter().any(|a| a == "--recursive" || a == "-r");
+    let force_flat = args.iter().any(|a| a == "--no-recursive");
     let metrics_on = args.iter().any(|a| a == "--metrics");
-    let dir = args
-        .iter()
-        .find(|a| !a.starts_with('-'))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
 
-    let paths = scan_images(&dir, recursive);
+    // Every entry point (CLI, double-click via association, drag-drop, picker)
+    // funnels through the same pure plan: classify the paths, decide the source +
+    // cursor, then scan. A folder opens recursively by default; `--no-recursive`
+    // forces flat and `-r` forces recursive on the command line.
+    let positional: Vec<PathBuf> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(PathBuf::from)
+        .collect();
+    let mut plan = open::plan(classify_inputs(positional));
+    if let Source::Scan { recursive, .. } = &mut plan.source {
+        if force_recursive {
+            *recursive = true;
+        }
+        if force_flat {
+            *recursive = false;
+        }
+    }
+    let (paths, root, scan_root, recursive) = resolve_source(&plan.source);
+    let start = open::resolve_cursor(&paths, &plan.cursor);
+
     println!(
-        "PhotoBlaze: {} image(s) in {}{}",
+        "PhotoBlaze: {} image(s){}",
         paths.len(),
-        dir.display(),
         if recursive { " (recursive)" } else { "" }
     );
     if paths.is_empty() {
-        eprintln!("(no supported images found — showing a placeholder; pass a folder path)");
+        eprintln!("(no images — drop a photo or folder on the window, or press O to open)");
     }
 
     let event_loop = EventLoop::new().expect("create event loop");
@@ -1430,7 +1811,7 @@ fn main() {
     } else {
         StageTimes::disabled()
     };
-    let mut app = App::new(windowed, dir, paths, metrics);
+    let mut app = App::new(windowed, root, paths, start, recursive, scan_root, metrics);
     event_loop.run_app(&mut app).expect("event loop");
 
     let report = app.metrics.report();
@@ -1453,6 +1834,59 @@ mod tests {
             "iPhone 11 Pro Max back triple camera"
         ));
         assert!(!is_exif_blob("Make", "Apple"));
+    }
+
+    #[test]
+    fn classify_empty_and_files() {
+        assert_eq!(classify_inputs(vec![]), LaunchInput::Empty);
+        // Empty path strings are filtered out.
+        assert_eq!(classify_inputs(vec![PathBuf::from("")]), LaunchInput::Empty);
+        // Several paths (non-existent here, so treated as files) collect to Files.
+        let files = vec![PathBuf::from("a.jpg"), PathBuf::from("b.png")];
+        assert_eq!(classify_inputs(files.clone()), LaunchInput::Files(files));
+    }
+
+    #[test]
+    fn resolve_explicit_filters_unsupported_and_keeps_order() {
+        let src = Source::Explicit(vec![
+            PathBuf::from("/p/a.jpg"),
+            PathBuf::from("/p/notes.txt"),
+            PathBuf::from("/p/b.png"),
+        ]);
+        let (paths, root, scan_root, recursive) = resolve_source(&src);
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("/p/a.jpg"), PathBuf::from("/p/b.png")]
+        );
+        assert_eq!(root, PathBuf::from("/p"));
+        assert_eq!(scan_root, None);
+        assert!(!recursive);
+    }
+
+    #[test]
+    fn toast_alpha_holds_then_fades_then_expires() {
+        let t0 = Instant::now();
+        let toast = Toast {
+            rgba: Vec::new(),
+            w: 1,
+            h: 1,
+            started: t0,
+            uploaded_alpha: -1.0,
+        };
+        assert_eq!(toast.alpha(t0), Some(1.0));
+        assert_eq!(toast.alpha(t0 + Toast::HOLD / 2), Some(1.0));
+        let mid = toast.alpha(t0 + Toast::HOLD + Toast::FADE / 2).unwrap();
+        assert!(mid > 0.0 && mid < 1.0, "mid-fade alpha was {mid}");
+        assert_eq!(toast.alpha(t0 + Toast::HOLD + Toast::FADE), None);
+    }
+
+    #[test]
+    fn scale_alpha_scales_only_the_alpha_channel() {
+        let src = [10u8, 20, 30, 200];
+        assert_eq!(scale_alpha(&src, 0.5), vec![10, 20, 30, 100]);
+        assert_eq!(scale_alpha(&src, 0.0)[3], 0);
+        assert_eq!(scale_alpha(&src, 1.0), src.to_vec());
+        assert_eq!(scale_alpha(&src, 5.0)[3], 200); // clamped to 1.0
     }
 
     #[test]

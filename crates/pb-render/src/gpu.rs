@@ -573,6 +573,44 @@ fn overlay_quad_vertices(
     ]
 }
 
+/// The four corners of the bottom-center toast quad: `panel_w`×`panel_h` px,
+/// horizontally centered and `bottom_margin` px up from the bottom edge.
+fn toast_quad_vertices(
+    panel_w: u32,
+    panel_h: u32,
+    screen_w: u32,
+    screen_h: u32,
+    bottom_margin: u32,
+) -> [Vertex; 4] {
+    let (sw, sh) = (screen_w as f32, screen_h as f32);
+    let x0 = ((sw - panel_w as f32) * 0.5).max(0.0);
+    let x1 = x0 + panel_w as f32;
+    let y1 = sh - bottom_margin as f32;
+    let y0 = y1 - panel_h as f32;
+    let x0n = (x0 / sw) * 2.0 - 1.0;
+    let x1n = (x1 / sw) * 2.0 - 1.0;
+    let y_top = 1.0 - (y0 / sh) * 2.0;
+    let y_bot = 1.0 - (y1 / sh) * 2.0;
+    [
+        Vertex {
+            pos: [x0n, y_top],
+            uv: [0.0, 0.0],
+        },
+        Vertex {
+            pos: [x1n, y_top],
+            uv: [1.0, 0.0],
+        },
+        Vertex {
+            pos: [x1n, y_bot],
+            uv: [1.0, 1.0],
+        },
+        Vertex {
+            pos: [x0n, y_bot],
+            uv: [0.0, 1.0],
+        },
+    ]
+}
+
 /// Downscale `image` (RGBA8) so neither dimension exceeds `max`, preserving
 /// aspect with nearest-neighbor sampling. Returns the input borrowed unchanged
 /// when it already fits.
@@ -855,6 +893,9 @@ pub struct WgpuRenderer {
     /// Per-photo view transform (scaling mode + rotation + zoom + pan).
     view: ViewTransform,
     overlay: Option<OverlayDraw>,
+    /// The transient bottom-center status toast, drawn as its own overlay layer
+    /// (independent of the info panel) — e.g. "Recursive folders: on".
+    toast: Option<OverlayDraw>,
     upload: Box<dyn UploadStrategy>,
     /// Resident texture ring (Phase 3). Empty until `reserve_ring`; each `Some`
     /// slot holds a pre-uploaded photo. `present_slot` selects which one draws.
@@ -1008,6 +1049,7 @@ impl WgpuRenderer {
             sdr_scale,
             view,
             overlay: None,
+            toast: None,
             upload,
             ring: Vec::new(),
             present_idx: None,
@@ -1053,6 +1095,53 @@ impl WgpuRenderer {
     }
 }
 
+impl WgpuRenderer {
+    /// Set or clear the transient bottom-center status toast (tasks.json #10). It
+    /// is an independent overlay layer, so it composites *over* the info panel
+    /// rather than replacing it; the caller fades it by re-uploading with scaled
+    /// alpha. `bottom_margin` is the gap from the bottom edge.
+    pub fn set_toast(&mut self, panel: Option<(&[u8], u32, u32)>, bottom_margin: u32) {
+        self.toast = match panel {
+            Some((rgba, w, h)) => {
+                let scale = self.scene_scale(false);
+                let bind_group = upload_image(
+                    &self.device,
+                    &self.queue,
+                    &self.bgl,
+                    self.upload.as_mut(),
+                    rgba,
+                    w,
+                    h,
+                    &ColorTransform::srgb(),
+                    false,
+                    scale,
+                );
+                let vbuf = self
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("toast-vbuf"),
+                        contents: bytemuck::cast_slice(&toast_quad_vertices(
+                            w,
+                            h,
+                            self.config.width,
+                            self.config.height,
+                            bottom_margin,
+                        )),
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    });
+                Some(OverlayDraw {
+                    bind_group,
+                    vbuf,
+                    panel_w: w,
+                    panel_h: h,
+                    margin: bottom_margin,
+                })
+            }
+            None => None,
+        };
+    }
+}
+
 impl Renderer for WgpuRenderer {
     fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
@@ -1089,6 +1178,15 @@ impl Renderer for WgpuRenderer {
                 0,
                 bytemuck::cast_slice(&overlay_quad_vertices(
                     ov.panel_w, ov.panel_h, width, height, ov.margin,
+                )),
+            );
+        }
+        if let Some(t) = &self.toast {
+            self.queue.write_buffer(
+                &t.vbuf,
+                0,
+                bytemuck::cast_slice(&toast_quad_vertices(
+                    t.panel_w, t.panel_h, width, height, t.margin,
                 )),
             );
         }
@@ -1322,6 +1420,29 @@ impl Renderer for WgpuRenderer {
             rp.set_pipeline(&self.overlay_pipeline);
             rp.set_bind_group(0, &ov.bind_group, &[]);
             rp.set_vertex_buffer(0, ov.vbuf.slice(..));
+            rp.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint16);
+            rp.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+        }
+        // Pass 2b: the transient status toast (bottom-center), composited on top of
+        // the photo and the info panel.
+        if let Some(t) = &self.toast {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("toast"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &intermediate_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rp.set_pipeline(&self.overlay_pipeline);
+            rp.set_bind_group(0, &t.bind_group, &[]);
+            rp.set_vertex_buffer(0, t.vbuf.slice(..));
             rp.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint16);
             rp.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
         }

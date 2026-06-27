@@ -1,0 +1,155 @@
+<?xml version='1.0' encoding='windows-1252'?>
+<!--
+  PhotoBlaze MSI installer (WiX v3, built via cargo-wix).
+
+  Registers PhotoBlaze as an "Open with" *candidate* (a ProgId + per-extension
+  OpenWithProgids) for the common raster formats, plus a folder right-click verb
+  ("Open with PhotoBlaze") that browses recursively. It deliberately does NOT
+  seize any default file association — Windows 10/11 forbid that (the SID-salted
+  UserChoice hash); the user confirms the default via the Open-with dialog or
+  Settings. See decisions.md ADR-018.
+
+  cargo-wix binder variables used: $(var.Version), $(var.CargoTargetBinDir),
+  $(var.PlatformProgramFilesFolder). Icon/verb glyphs come from the icon embedded
+  in the .exe by build.rs ("[Bin]photoblaze.exe",0); the ARP + shortcut icon is the .ico.
+-->
+
+<?if $(sys.BUILDARCH) = x64 or $(sys.BUILDARCH) = arm64 ?>
+    <?define PlatformProgramFilesFolder = "ProgramFiles64Folder" ?>
+<?else ?>
+    <?define PlatformProgramFilesFolder = "ProgramFilesFolder" ?>
+<?endif ?>
+
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+
+    <Product
+        Id='*'
+        Name='PhotoBlaze'
+        UpgradeCode='34D8BD15-1E86-45E3-807C-82090CF911C7'
+        Manufacturer='JD Lien'
+        Language='1033'
+        Codepage='1252'
+        Version='$(var.Version)'>
+
+        <Package Id='*'
+            Keywords='Installer'
+            Description='PhotoBlaze — a fast, keyboard-driven photo viewer.'
+            Manufacturer='JD Lien'
+            InstallerVersion='450'
+            Languages='1033'
+            Compressed='yes'
+            InstallScope='perMachine'
+            SummaryCodepage='1252'
+            />
+
+        <MajorUpgrade
+            Schedule='afterInstallInitialize'
+            DowngradeErrorMessage='A newer version of [ProductName] is already installed. Setup will now exit.'/>
+
+        <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1'/>
+        <Property Id='DiskPrompt' Value='PhotoBlaze Installation'/>
+
+        <Directory Id='TARGETDIR' Name='SourceDir'>
+            <Directory Id='$(var.PlatformProgramFilesFolder)' Name='PFiles'>
+                <Directory Id='APPLICATIONFOLDER' Name='PhotoBlaze'>
+                    <Directory Id='Bin' Name='bin'>
+                        <Component Id='binary0' Guid='*'>
+                            <File
+                                Id='exe0'
+                                Name='photoblaze.exe'
+                                DiskId='1'
+                                Source='$(var.CargoTargetBinDir)\photoblaze.exe'
+                                KeyPath='yes'/>
+                        </Component>
+                    </Directory>
+
+                    <!-- ProgId: PhotoBlaze.Image. Its open command launches the
+                         exe with the clicked file; the glyph is the exe's icon. -->
+                    <Component Id='ProgId' Guid='*'>
+                        <RegistryValue Root='HKCR' Key='PhotoBlaze.Image' Value='PhotoBlaze Image' Type='string' KeyPath='yes'/>
+                        <RegistryValue Root='HKCR' Key='PhotoBlaze.Image' Name='FriendlyTypeName' Value='PhotoBlaze Image' Type='string'/>
+                        <RegistryValue Root='HKCR' Key='PhotoBlaze.Image\DefaultIcon' Value='"[Bin]photoblaze.exe",0' Type='string'/>
+                        <RegistryValue Root='HKCR' Key='PhotoBlaze.Image\shell\open\command' Value='"[Bin]photoblaze.exe" "%1"' Type='string'/>
+                    </Component>
+
+                    <!-- Candidate associations: list PhotoBlaze.Image under each
+                         extension's OpenWithProgids (does NOT change the default). -->
+                    <Component Id='Associations' Guid='*'>
+                        <RegistryValue Root='HKCR' Key='.jpg\OpenWithProgids'  Name='PhotoBlaze.Image' Value='' Type='string' KeyPath='yes'/>
+                        <RegistryValue Root='HKCR' Key='.jpeg\OpenWithProgids' Name='PhotoBlaze.Image' Value='' Type='string'/>
+                        <RegistryValue Root='HKCR' Key='.jpe\OpenWithProgids'  Name='PhotoBlaze.Image' Value='' Type='string'/>
+                        <RegistryValue Root='HKCR' Key='.jfif\OpenWithProgids' Name='PhotoBlaze.Image' Value='' Type='string'/>
+                        <RegistryValue Root='HKCR' Key='.png\OpenWithProgids'  Name='PhotoBlaze.Image' Value='' Type='string'/>
+                        <RegistryValue Root='HKCR' Key='.gif\OpenWithProgids'  Name='PhotoBlaze.Image' Value='' Type='string'/>
+                        <RegistryValue Root='HKCR' Key='.bmp\OpenWithProgids'  Name='PhotoBlaze.Image' Value='' Type='string'/>
+                        <RegistryValue Root='HKCR' Key='.tif\OpenWithProgids'  Name='PhotoBlaze.Image' Value='' Type='string'/>
+                        <RegistryValue Root='HKCR' Key='.tiff\OpenWithProgids' Name='PhotoBlaze.Image' Value='' Type='string'/>
+                        <RegistryValue Root='HKCR' Key='.webp\OpenWithProgids' Name='PhotoBlaze.Image' Value='' Type='string'/>
+                        <RegistryValue Root='HKCR' Key='.heic\OpenWithProgids' Name='PhotoBlaze.Image' Value='' Type='string'/>
+                        <RegistryValue Root='HKCR' Key='.heif\OpenWithProgids' Name='PhotoBlaze.Image' Value='' Type='string'/>
+                        <RegistryValue Root='HKCR' Key='.avif\OpenWithProgids' Name='PhotoBlaze.Image' Value='' Type='string'/>
+                        <RegistryValue Root='HKCR' Key='.jxl\OpenWithProgids'  Name='PhotoBlaze.Image' Value='' Type='string'/>
+                    </Component>
+
+                    <!-- Folder verb: right-click a folder (or its background) ->
+                         "Open with PhotoBlaze". Opening a folder browses it
+                         recursively (the app's default). %V is the folder path. -->
+                    <Component Id='FolderVerb' Guid='*'>
+                        <RegistryValue Root='HKCR' Key='Directory\shell\PhotoBlaze' Value='Open with PhotoBlaze' Type='string' KeyPath='yes'/>
+                        <RegistryValue Root='HKCR' Key='Directory\shell\PhotoBlaze' Name='Icon' Value='"[Bin]photoblaze.exe",0' Type='string'/>
+                        <RegistryValue Root='HKCR' Key='Directory\shell\PhotoBlaze\command' Value='"[Bin]photoblaze.exe" "%V"' Type='string'/>
+                        <RegistryValue Root='HKCR' Key='Directory\Background\shell\PhotoBlaze' Value='Open with PhotoBlaze' Type='string'/>
+                        <RegistryValue Root='HKCR' Key='Directory\Background\shell\PhotoBlaze' Name='Icon' Value='"[Bin]photoblaze.exe",0' Type='string'/>
+                        <RegistryValue Root='HKCR' Key='Directory\Background\shell\PhotoBlaze\command' Value='"[Bin]photoblaze.exe" "%V"' Type='string'/>
+                    </Component>
+                </Directory>
+            </Directory>
+
+            <!-- Start-menu shortcut. -->
+            <Directory Id='ProgramMenuFolder' Name='Programs'>
+                <Component Id='StartMenuShortcut' Guid='*'>
+                    <Shortcut Id='AppShortcut'
+                        Name='PhotoBlaze'
+                        Description='A fast, keyboard-driven photo viewer'
+                        Target='[#exe0]'
+                        WorkingDirectory='Bin'
+                        Icon='ProductICO'/>
+                    <!-- HKCU keypath is the canonical WiX idiom for a non-advertised
+                         Start-menu shortcut (satisfies ICE38/43/57), even though the
+                         rest of the install is perMachine. -->
+                    <RegistryValue Root='HKCU' Key='Software\PhotoBlaze' Name='installed' Type='integer' Value='1' KeyPath='yes'/>
+                </Component>
+            </Directory>
+        </Directory>
+
+        <Feature
+            Id='Binaries'
+            Title='PhotoBlaze'
+            Description='Installs PhotoBlaze, file associations, and the folder verb.'
+            Level='1'
+            ConfigurableDirectory='APPLICATIONFOLDER'
+            AllowAdvertise='no'
+            Display='expand'
+            Absent='disallow'>
+            <ComponentRef Id='binary0'/>
+            <ComponentRef Id='ProgId'/>
+            <ComponentRef Id='Associations'/>
+            <ComponentRef Id='FolderVerb'/>
+            <ComponentRef Id='StartMenuShortcut'/>
+        </Feature>
+
+        <SetProperty Id='ARPINSTALLLOCATION' Value='[APPLICATIONFOLDER]' After='CostFinalize'/>
+
+        <!-- Add/Remove Programs + shortcut icon (the .ico embedded in the MSI). -->
+        <Icon Id='ProductICO' SourceFile='$(sys.SOURCEFILEDIR)..\icons\photoblaze.ico'/>
+        <Property Id='ARPPRODUCTICON' Value='ProductICO'/>
+
+        <UI>
+            <UIRef Id='WixUI_FeatureTree'/>
+            <Publish Dialog='WelcomeDlg' Control='Next' Event='NewDialog' Value='CustomizeDlg' Order='99'>1</Publish>
+            <Publish Dialog='CustomizeDlg' Control='Back' Event='NewDialog' Value='WelcomeDlg' Order='99'>1</Publish>
+        </UI>
+
+    </Product>
+
+</Wix>

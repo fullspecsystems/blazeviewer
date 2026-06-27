@@ -31,22 +31,43 @@ recorded in [`.taskmaster/docs/decisions.md`](./.taskmaster/docs/decisions.md).
 - Rust (stable; see [`rust-toolchain.toml`](./rust-toolchain.toml))
 - A GPU with Vulkan or D3D12 (wgpu)
 
+## Install (Windows)
+
+Download the signed `PhotoBlaze-x.y.z-x86_64.msi` from the **Releases** page and
+run it. The installer adds PhotoBlaze to the **Open with** list for common image
+types and an **Open with PhotoBlaze** entry to the folder right-click menu.
+Windows won't let any installer silently take over the default viewer — to make
+it the default, open a photo's *Open with → Choose another app*, pick PhotoBlaze,
+and tick *Always*. Building the MSI yourself: see
+[`.taskmaster/docs/packaging.md`](./.taskmaster/docs/packaging.md).
+
 ## Build & run
 
 ```sh
-cargo run -p pb-app --release -- "C:\path\to\photos"        # a folder of JPEGs
-cargo run -p pb-app --release -- "C:\path\to\photos" -r     # recurse subfolders
-cargo run -p pb-app --release -- "C:\path\to\photos" -r --windowed
+cargo run -p pb-app --release -- "C:\path\to\photos"          # a folder (recursive by default)
+cargo run -p pb-app --release -- "C:\path\to\photo.jpg"       # one photo (opens its folder, flat)
+cargo run -p pb-app --release -- "C:\path\to\photos" --no-recursive
+cargo run -p pb-app --release -- --windowed                   # dev window; then drop a photo or press O
 ```
+
+At runtime you can also **double-click** an image (once installed), **drag-and-drop**
+photos or a folder onto the window, or press **`O`** for the native open dialog.
 
 ### Keys
 
 | Key | Action |
 |---|---|
-| `space` / `→` | next photo |
-| `backspace` / `←` | previous photo |
-| `0` / `o` | toggle fit-to-screen ↔ original 1:1 (centered) |
-| `i` | toggle info panel (path · resolution · codec) |
+| `space` | next photo |
+| `backspace` | previous photo |
+| `enter` | random photo (precomputed shuffle) |
+| `← ↑ ↓ →` | pan around the photo (hold to accelerate) |
+| `=` / `-` | zoom in / out (hold; numpad `+`/`-` too) |
+| `8` / `9` / `0` | fit / fill / toggle original 1:1 ↔ fit |
+| `r` / `Shift+R` | rotate 90° cw / ccw (per-image, RAM-only) |
+| `Ctrl+R` | toggle recursive subfolder browsing |
+| `o` / `Shift+O` | open file(s) / open a folder |
+| `i` / `Shift+I` | info panel / full-EXIF panel |
+| `/` or `?` | keyboard-shortcut help |
 | `esc` | quit |
 
 Hold a nav key to page through every photo (advance is self-paced and capped at
