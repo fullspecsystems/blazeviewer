@@ -223,10 +223,17 @@ impl App {
     fn request_prefetch(&mut self) {
         self.targets = prefetch_targets(&self.playlist, self.ahead, self.behind);
         let fit = self.decode_fit();
+        // Items already decoded and waiting to upload must not be re-requested:
+        // the pool no longer tracks them, so it would decode them a second time.
+        let pending: HashSet<usize> = self.pending_uploads.iter().map(|o| o.key.item).collect();
         let jobs: Vec<(usize, Arc<Path>, Option<FitBox>)> = self
             .targets
             .iter()
-            .filter(|&&t| self.ring.slot_for(t).is_none() && !self.failed.contains(&t))
+            .filter(|&&t| {
+                self.ring.slot_for(t).is_none()
+                    && !self.failed.contains(&t)
+                    && !pending.contains(&t)
+            })
             .map(|&t| (t, self.paths[t].clone(), fit))
             .collect();
         self.pool.set_targets(self.epoch, &jobs);

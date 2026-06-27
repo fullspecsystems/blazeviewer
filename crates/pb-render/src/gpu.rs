@@ -363,14 +363,18 @@ fn instance() -> wgpu::Instance {
     })
 }
 
-/// Per-adapter limits: conservative defaults everywhere except
-/// `max_texture_dimension_2d`, raised to whatever *this* GPU actually supports
-/// (16384 on a 5090, often 8192 on integrated/older GPUs). Keeping the rest at
-/// defaults stays portable to weaker/downlevel backends, and `clamp_to_max`
-/// downscales images that exceed whatever limit we end up with.
+/// Per-adapter limits: conservative defaults except two raised to what *this* GPU
+/// supports — `max_texture_dimension_2d` (16384 on a 5090, often 8192 elsewhere)
+/// and `max_buffer_size`. The latter matters because the staging-ring upload
+/// stages a whole frame in one buffer; a large Original-mode/panorama image can
+/// exceed wgpu's 256 MiB default even while fitting the texture-dimension limit.
+/// Keeping the rest at defaults stays portable, and `clamp_to_max` downscales
+/// images that exceed whatever limit we end up with.
 fn device_limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
+    let adapter_limits = adapter.limits();
     wgpu::Limits {
-        max_texture_dimension_2d: adapter.limits().max_texture_dimension_2d,
+        max_texture_dimension_2d: adapter_limits.max_texture_dimension_2d,
+        max_buffer_size: adapter_limits.max_buffer_size,
         ..wgpu::Limits::default()
     }
 }
