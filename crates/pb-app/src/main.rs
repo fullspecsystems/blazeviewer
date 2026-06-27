@@ -369,7 +369,11 @@ impl App {
                 let m = meta_for_path(&self.paths[item], &self.root, img);
                 self.meta_cache.insert(item, m);
             }
-            if let Some(res) = self.ring.reserve(item, self.epoch, &self.targets) {
+            let item_bytes = img.pixels.len() as u64;
+            if let Some(res) = self
+                .ring
+                .reserve_bytes(item, self.epoch, item_bytes, &self.targets)
+            {
                 if let Some(a) = self.active.as_mut() {
                     let t0 = Instant::now();
                     a.renderer
@@ -432,7 +436,7 @@ impl App {
             max_height: 1,
         });
         let cap = ring_capacity(self.slot_bytes_estimate());
-        self.ring = ResidentRing::new(cap);
+        self.ring = ResidentRing::new_with_budget(cap, RING_BUDGET_BYTES);
         if let Some(a) = self.active.as_mut() {
             a.renderer.reserve_ring(cap, fit.max_width, fit.max_height);
         }
@@ -675,7 +679,7 @@ impl ApplicationHandler for App {
             max_height: 1,
         });
         let cap = ring_capacity(self.slot_bytes_estimate());
-        self.ring = ResidentRing::new(cap);
+        self.ring = ResidentRing::new_with_budget(cap, RING_BUDGET_BYTES);
         renderer.reserve_ring(cap, fit.max_width, fit.max_height);
         let (ahead, behind) = window_for_capacity(cap);
         self.ahead = ahead;

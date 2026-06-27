@@ -29,22 +29,40 @@ pub struct Reservation {
     pub epoch: u64,
 }
 
-/// Tracks item↔slot residency for a fixed-capacity texture ring.
+/// Tracks item↔slot residency for a texture ring, bounded by both a slot count
+/// and a VRAM byte budget (so full-res Original-mode slots can't OOM a mixed
+/// folder even though they're far larger than fit slots).
 #[derive(Debug, Clone)]
 pub struct ResidentRing {
     slots: Vec<SlotState>,
+    /// Committed VRAM bytes per slot (0 when Empty); a Pending/Resident slot holds
+    /// its decoded image's byte size so total residency can be bounded.
+    slot_bytes: Vec<u64>,
     /// item -> slot, for every Pending or Resident item (keeps lookups O(1)).
     by_item: HashMap<usize, usize>,
     /// The on-screen slot, pinned so it is never an eviction victim.
     displayed: Option<usize>,
+    /// Hard VRAM cap: reserving evicts until `committed_bytes + new ≤ this`.
+    byte_budget: u64,
+    /// Sum of `slot_bytes` over Pending + Resident slots.
+    committed_bytes: u64,
 }
 
 impl ResidentRing {
+    /// A count-only ring (no byte limit). Convenient for pure nav/cache tests.
     pub fn new(capacity: usize) -> Self {
+        Self::new_with_budget(capacity, u64::MAX)
+    }
+
+    /// A ring bounded by `capacity` slots *and* `byte_budget` resident bytes.
+    pub fn new_with_budget(capacity: usize, byte_budget: u64) -> Self {
         Self {
             slots: vec![SlotState::Empty; capacity],
+            slot_bytes: vec![0; capacity],
             by_item: HashMap::new(),
             displayed: None,
+            byte_budget: byte_budget.max(1),
+            committed_bytes: 0,
         }
     }
 
@@ -78,46 +96,95 @@ impl ResidentRing {
         for s in &mut self.slots {
             *s = SlotState::Empty;
         }
+        for b in &mut self.slot_bytes {
+            *b = 0;
+        }
         self.by_item.clear();
         self.displayed = None;
+        self.committed_bytes = 0;
     }
 
-    /// Choose and reserve a slot to upload `item` into, marking it `Pending`.
-    ///
-    /// `keep` is the prioritized target list (index 0 = highest priority). Victim
-    /// preference: an Empty slot, else an occupied slot whose item is *not* in
-    /// `keep`, else the lowest-priority `keep` item — but only if it is strictly
-    /// lower priority than `item` (so we never evict something more important).
-    /// The displayed slot is never a victim. Returns `None` when `item` is already
-    /// tracked, doesn't belong resident (rank ≥ capacity), or nothing is freeable.
+    /// Choose and reserve a slot for `item` with no byte accounting (count-only).
     pub fn reserve(&mut self, item: usize, epoch: u64, keep: &[usize]) -> Option<Reservation> {
+        self.reserve_bytes(item, epoch, 0, keep)
+    }
+
+    /// Choose and reserve a slot to upload `item` (`item_bytes` of VRAM) into,
+    /// marking it `Pending`.
+    ///
+    /// `keep` is the prioritized target list (index 0 = highest priority). Evicts
+    /// the lowest-priority victims — an item not in `keep`, else a `keep` item
+    /// strictly lower priority than `item` — until there is a free slot **and**
+    /// `committed_bytes + item_bytes ≤ byte_budget`. The displayed slot is never a
+    /// victim. A single item larger than the whole budget is still allowed once
+    /// nothing else is resident (so the current photo always shows). Returns `None`
+    /// when `item` is already tracked, doesn't belong resident (rank ≥ capacity),
+    /// or nothing lower-priority can be freed to make room.
+    pub fn reserve_bytes(
+        &mut self,
+        item: usize,
+        epoch: u64,
+        item_bytes: u64,
+        keep: &[usize],
+    ) -> Option<Reservation> {
         let cap = self.slots.len();
         if cap == 0 || self.by_item.contains_key(&item) {
             return None;
         }
         let rank_of = |it: usize| keep.iter().position(|&k| k == it);
         // Only reserve items still wanted (present in `keep`): a decode that
-        // finished after navigation moved on must not consume a slot or the
-        // per-tick upload budget ahead of the current targets.
+        // finished after navigation moved on must not consume a slot ahead of the
+        // current targets.
         let item_rank = rank_of(item)?;
         // A target ranked beyond the ring's capacity doesn't belong resident.
         if item_rank >= cap {
             return None;
         }
 
-        // Pick the best victim. Score tiers (higher = better victim):
-        //   2 = Empty, 1 = occupied but not in `keep`, 0 = occupied and wanted.
-        // Within tier 0, a higher `keep` rank (lower priority) is the better victim.
+        loop {
+            let free = self
+                .slots
+                .iter()
+                .position(|s| matches!(s, SlotState::Empty));
+            if let Some(slot) = free {
+                // Reserve once it fits the budget, or once nothing else is resident
+                // (a single over-budget image must still be showable).
+                if self.committed_bytes + item_bytes <= self.byte_budget
+                    || self.committed_bytes == 0
+                {
+                    self.slots[slot] = SlotState::Pending { item, epoch };
+                    self.slot_bytes[slot] = item_bytes;
+                    self.committed_bytes += item_bytes;
+                    self.by_item.insert(item, slot);
+                    return Some(Reservation { item, slot, epoch });
+                }
+            }
+            match self.pick_victim(&rank_of, item_rank) {
+                Some(slot) => self.free_slot(slot),
+                None => return None,
+            }
+        }
+    }
+
+    /// The lowest-priority evictable occupied slot, or `None` when every candidate
+    /// is the displayed slot or not strictly lower priority than `item_rank`.
+    /// Score tiers (higher = better victim): 1 = occupied but not in `keep`,
+    /// 0 = occupied and wanted (higher `keep` rank within tier 0 is a better victim).
+    fn pick_victim<F: Fn(usize) -> Option<usize>>(
+        &self,
+        rank_of: &F,
+        item_rank: usize,
+    ) -> Option<usize> {
         let mut best: Option<(u8, usize, usize)> = None; // (tier, rank, slot)
         for (slot, state) in self.slots.iter().enumerate() {
             if Some(slot) == self.displayed {
                 continue;
             }
             let (tier, rank) = match state {
-                SlotState::Empty => (2u8, usize::MAX),
+                SlotState::Empty => continue,
                 SlotState::Pending { item: it, .. } | SlotState::Resident { item: it } => {
                     match rank_of(*it) {
-                        None => (1, usize::MAX),
+                        None => (1u8, usize::MAX),
                         Some(r) => (0, r),
                     }
                 }
@@ -131,22 +198,23 @@ impl ResidentRing {
                 best = Some(cand);
             }
         }
-
         let (tier, rank, slot) = best?;
-        // When every freeable slot holds a wanted item, only evict one strictly
-        // lower priority (higher rank) than the incoming item.
         if tier == 0 && rank <= item_rank {
-            return None;
+            return None; // would evict an equal-or-higher-priority item
         }
+        Some(slot)
+    }
 
+    /// Empty a slot, releasing its item mapping and committed bytes.
+    fn free_slot(&mut self, slot: usize) {
         if let SlotState::Pending { item: old, .. } | SlotState::Resident { item: old } =
             self.slots[slot]
         {
             self.by_item.remove(&old);
         }
-        self.slots[slot] = SlotState::Pending { item, epoch };
-        self.by_item.insert(item, slot);
-        Some(Reservation { item, slot, epoch })
+        self.committed_bytes -= self.slot_bytes[slot];
+        self.slot_bytes[slot] = 0;
+        self.slots[slot] = SlotState::Empty;
     }
 
     /// Commit a completed upload: `Pending(item, epoch)` → `Resident(item)`.
@@ -307,6 +375,73 @@ mod tests {
         // A decode that finished after navigation moved on: item 99 isn't wanted.
         assert_eq!(r.reserve(99, 1, &[1, 2, 3]), None);
         assert!(!r.is_tracked(99));
+    }
+
+    #[test]
+    fn byte_budget_bounds_residency() {
+        // 8 slots but a 250-byte budget: only ~2 of the 100-byte items fit, so a
+        // mixed folder of big full-res images can't blow past the VRAM budget.
+        let mut r = ResidentRing::new_with_budget(8, 250);
+        for item in [10usize, 11] {
+            let res = r.reserve_bytes(item, 1, 100, &[10, 11, 12]).unwrap();
+            r.mark_resident(item, res.slot, 1);
+        }
+        // committed = 200; a third 100-byte item (200+100 > 250) evicts the lowest.
+        let keep = [12usize, 11, 10]; // 12 highest priority now
+        let c = r.reserve_bytes(12, 1, 100, &keep).unwrap();
+        r.mark_resident(12, c.slot, 1);
+        let resident = [10, 11, 12]
+            .iter()
+            .filter(|&&i| r.slot_for(i).is_some())
+            .count();
+        assert_eq!(resident, 2, "byte budget caps residency at 2 of 3");
+        assert!(
+            r.slot_for(12).is_some(),
+            "the top-priority item stays resident"
+        );
+    }
+
+    #[test]
+    fn single_item_larger_than_budget_still_reserves() {
+        let mut r = ResidentRing::new_with_budget(4, 100);
+        // 500 > budget, but with nothing else resident the current photo must show.
+        assert!(r.reserve_bytes(7, 1, 500, &[7]).is_some());
+    }
+
+    #[test]
+    fn randomized_byte_budget_is_respected() {
+        let mut rng = SplitMix64::new(0xB16B_00B5);
+        let cap = 16;
+        let budget = 1000u64;
+        let n_items = 30u64;
+        let mut ring = ResidentRing::new_with_budget(cap, budget);
+        for _ in 0..20_000 {
+            let mut keep = Vec::new();
+            while keep.len() < cap {
+                let it = rng.next_bounded(n_items) as usize;
+                if !keep.contains(&it) {
+                    keep.push(it);
+                }
+            }
+            let item = keep[rng.next_bounded(keep.len() as u64) as usize];
+            // Each item is well under budget, so committed must never exceed it.
+            let bytes = 1 + rng.next_bounded(budget / 4);
+            if let Some(res) = ring.reserve_bytes(item, 1, bytes, &keep) {
+                if rng.next_bounded(4) != 0 {
+                    ring.mark_resident(res.item, res.slot, 1);
+                }
+            }
+            let sum: u64 = ring.slot_bytes.iter().sum();
+            assert_eq!(
+                ring.committed_bytes, sum,
+                "committed out of sync with slots"
+            );
+            assert!(
+                ring.committed_bytes <= budget,
+                "budget exceeded: {} > {budget}",
+                ring.committed_bytes
+            );
+        }
     }
 
     #[test]
