@@ -1,59 +1,89 @@
 # PhotoBlaze — Current Status (session handoff)
 
-_Last updated: 2026-06-27. On `main`, **pushed to origin** (HEAD `16aaf77`)._
+_Last updated: 2026-06-27. On `main`._
 
 A fast, chrome-less, keyboard-driven photo viewer. The prefetch engine ("hold a
-key and fly") is done. **This session added broad multi-codec support, full-res +
-upright RAW, panic-safety, transparent-image rendering, decode-failure handling,
-and a HUD/EXIF overhaul** — all committed and pushed.
+key and fly") is done. Earlier sessions added broad multi-codec support, full-res
+RAW, panic-safety, transparent rendering, the HUD/EXIF overhaul, and rotation /
+zoom / pan / scaling-mode / help-overlay UI (tasks #1,#3,#4,#5,#7).
 
-**➡ NEXT TASK is ICC color management (see the top section).** It's handed to a
-fresh agent with full context here.
+**This session shipped the full color story (tasks.json #11): in-shader ICC color
+management → wide-gamut → HDR output.** Display-P3 images render correctly and look
+visibly wider than sRGB, and HDR (PQ/HLG) AVIF/HEIC get real highlight headroom — all
+owner-confirmed on a Display-P3 / HDR / ~1000-nit panel.
 
-**Green bar:** `cargo test --workspace` (**~117 passing**, +1 ignored),
-`cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`
-— all clean. Release builds.
+**Green bar:** `cargo test --workspace` (**152 passing**, +1 ignored),
+`cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo fmt --all -- --check` — all clean. Release builds.
+
+> **Also uncommitted in the tree from parallel work (not this session):** the
+> `pb-core::open` launch-policy seam (`open.rs` + `playlist.rs`, task #12 subtask 1,
+> done+tested), `photoblaze-icon.png`, and `decisions.md` edits. Bundled into this
+> session's commit at the owner's request.
 
 ---
 
-## ⏭ NEXT TASK: ICC color management (in-shader)
+## ✅ DONE: color management + wide-gamut + HDR output
 
-**The gap:** every decoder hands back RGBA8 that the renderer treats as **sRGB**,
-with no profile handling. Wide-gamut sources are therefore wrong:
-- **Display-P3 iPhone HEICs render oversaturated** — the big one; the library is
-  full of them. (This is also *proof* the WIC HEIC path returns native P3 pixels,
-  un-converted — see below.)
-- AdobeRGB / ProPhoto JPEG/TIFF exports: wrong colors.
-- HDR/EXR clamped to SDR (no tone-map) — related but a separate sub-task.
+Three layers, all behind the established seams (`ImageDecoder`, `Renderer`):
 
-**The plan (per `CLAUDE.md` → "Color"):** do it **in-shader** — parse the source
-ICC profile to a 3×3 matrix (source primaries → display) + transfer curve (TRC),
-apply matrix+TRC in the fragment shader. GPU-cheap and ports to macOS unchanged.
-**`moxcms`** is the picked crate (pure Rust; **already in the tree** as a transitive
-dep of the `image` crate). `lcms2` behind a cargo feature only if exotic CLUT/CMYK
-profiles turn up.
+### 1. In-shader ICC color management
+`pb_decode::color::ColorTransform { matrix:[[f32;3];3], trc:[f32;7], enabled }` —
+source-linear→BT.709 3×3 (via `moxcms` `transform_matrix`) + the source EOTF as
+moxcms's unified 7-param curve. Carried on `DecodedImage::color` (default sRGB
+passthrough). Per-backend extraction:
+- **JPEG** APP2 (`zune` `icc_profile`); **PNG/TIFF/WebP** (`image`-crate concrete
+  decoder `icc_profile` — `load_with_icc`); **JXL** `rendered_icc`.
+- **HEIC/AVIF** (`wic.rs`): the MS HEIF decoder returns **0 WIC color contexts**
+  (verified), so the ISOBMFF **`colr` box** is parsed from bytes — `prof`/`rICC`
+  embedded ICC *and* `nclx` CICP. (WIC color-context query kept as a fallback.)
+- sRGB / ~2.2-gamma-with-sRGB-primaries → `enabled=false` passthrough (bit-exact).
 
-**Where to wire it:**
-1. **Extract the profile on decode.** Add a color-space/ICC field to
-   `pb_decode::DecodedImage` (default = sRGB). Per backend:
-   - `image` crate (PNG/JPEG/TIFF/WebP): `DynamicImage`/decoders expose
-     `icc_profile()`.
-   - JPEG (zune): read the ICC from APP2 chunks (or zune's info).
-   - **WIC (HEIC/AVIF):** WIC's format converter does **not** color-manage — it
-     returns the codec's native pixels (Display-P3 for iPhone) with the profile in
-     the HEIF container. Extract it (or detect P3) in `wic.rs`.
-   - RAW: imagepipe outputs sRGB already; the embedded JPEG preview carries the
-     camera profile (usually sRGB/AdobeRGB).
-   - SVG/QOI/BMP/farbfeld/etc.: assume sRGB.
-2. **Pass it to `pb-render`** and apply matrix+TRC in `gpu.rs`'s WGSL fragment
-   shader (the draw path). `moxcms` parses the ICC and builds the matrix/TRC.
-3. **Test:** open a Display-P3 iPhone HEIC (any in `D:\Media\Pictures`, e.g.
-   `2021\2021-01-02 - Home\IMG_0357.HEIC`) and confirm it's correctly saturated, not
-   neon. Use Windows Photos (color-managed) as the oracle.
+### 2. fp16 scRGB render path (`pb-render`)
+Scene → `Rgba16Float` **scRGB-linear intermediate** (`SCENE_WGSL`: source→scene-linear,
+mode 0 sRGB / 1 convert-no-clamp / 2 scene-linear-passthrough; per-image output
+`scale`). Then a fullscreen **present** pass (`PRESENT_WGSL`) → the surface: SDR 8-bit
+= extended-Reinhard tone-map (per-image `peak`) + sRGB-encode; HDR fp16 = copy through.
+Overlay composites into the linear intermediate so one present pass serves both.
 
-**Watch out:** the photo pipeline now uses `ALPHA_BLENDING` (transparent images
-composite over the letterbox) — keep color-conversion consistent with that. Do not
-disturb the gated-advance engine (`main.rs`) or the decode-to-fit path.
+### 3. Wide-gamut + HDR output — **pure wgpu, no native D3D12 interop**
+**Key fact:** a DXGI **fp16 (`Rgba16Float`) flip-model swapchain is always scRGB**
+(linear, BT.709, extended range; 1.0 = 80 nits) — no `SetColorSpace1` needed, and
+wgpu already offers `Rgba16Float`. So `pb_render::display::primary_hdr()` (DXGI
+`GetDesc1`) detects an HDR desktop and configures an fp16 surface; else 8-bit
+non-sRGB. HDR AVIF/HEIC decode to fp16 scene-linear via WIC `128bppRGBAFloat` (**WIC
+does the PQ/HLG decode + gamut + linearization for us**; `PixelFormat::Rgba16F`,
+`common::finalize_hdr_scrgb`). Brightness baked in the scene pass: SDR content ×
+SDR-white-scale, HDR content × 1.0 (absolute scRGB → highlights blow past SDR white).
+
+**Tests:** color unit tests (passthrough / P3 / AdobeRGB / CICP / LUT-sRGB / garbage);
+`colr`-box byte fixtures (prof + nclx + HDR-transfer); `finalize_hdr_scrgb` fp16
+tests; pb-render golden tests (SDR round-trip, enabled-curve). Verified live via the
+`decode` example + the `offscreen_png` render; on-screen wide-gamut/HDR confirmed by
+the owner (the fp16/HDR swapchain is uncapturable by GDI — see caveat).
+
+### Open followups (color/HDR)
+- Real **SDR-white level** via the DisplayConfig API (currently a 200-nit default in
+  `display.rs`); revisit WIC's scRGB reference-white assumption if brightness drifts.
+- **Per-output** HDR detection (currently the primary output only).
+- **Radiance-HDR / OpenEXR** (image-crate, not WIC) still clamped to SDR; CMYK JPEG
+  mis-colored; LUT/CLUT & gray ICC → sRGB passthrough (`lcms2`-behind-a-flag).
+- **Committable color test fixtures**: tiny re-tagged P3/AdobeRGB swatches +
+  integration test (`magick` can tag PNG/TIFF/WebP/JPEG; emit the ICC via
+  `moxcms::encode()`). AVIF/JXL/HEIC need delegates we lack, but `colr` is unit-tested.
+- macOS output = wgpu `Rgba16Float` surface + CAMetalLayer EDR (deferred; cheap port).
+
+### ⚠ Capture caveat
+On an **HDR desktop**, GDI `CopyFromScreen` *and* `PrintWindow` capture the
+flip-model swapchain as **all-white** (a Windows limitation, not a render bug). Use
+`cargo run -q --example offscreen_png -p pb-app -- <img> out.rgba` (then
+`magick -size WxH -depth 8 rgba:out.rgba out.png`) to verify rendering off-screen.
+
+### Spike / dev tools (kept)
+- `crates/pb-render/examples/hdr_probe.rs` — DXGI display-capability probe (→ folds
+  into a real `DisplayCaps` detector later).
+- `crates/pb-app/examples/offscreen_png.rs` — render the real pipeline to a buffer
+  (visual verification while on-screen capture is broken).
 
 ---
 
@@ -69,94 +99,48 @@ i / Shift+I      info panel / full-EXIF "nerd" panel
 / or ?           keybindings help overlay
 esc              quit
 ```
-(`enter` random nav still unwired.)
 
 ## Run it
 ```
 cargo run -p pb-app --release -- "D:\Media\Pictures" -r     # fullscreen, recursive
 cargo run -p pb-app --release -- "<leaf folder>" --windowed # dev window
-cargo run -p pb-app --release -- "<folder>" --metrics       # stage timings on exit
-cargo run -q --example decode -p pb-decode -- <files...>    # decode-only CLI (codec smoke test)
+cargo run -q --example decode -p pb-decode -- <files...>    # decode + color-transform report
+cargo run -q --example hdr_probe -p pb-render               # display HDR/gamut/nits probe
 ```
-
-## Image format support (this session's big add)
-Multi-codec dispatch behind the `ImageDecoder` seam (`pb_decode::decode_bytes`
-sniff-registry + extension routing for RAW/SVG/TGA):
-- **JPEG** zune-jpeg; **PNG/GIF/BMP/TIFF/WebP/TGA/QOI/ICO/PNM/HDR/EXR** the
-  pure-Rust `image` crate.
-- **JXL** jxl-oxide; **SVG/SVGZ** resvg/usvg/tiny-skia (rasterized at display res,
-  straight alpha; usvg inflates svgz itself).
-- **RAW** (ARW/NEF/CR2/DNG/…): full-size embedded preview when present (Nikon
-  ≈7360), else **demosaic** via rawloader+imagepipe to true sensor res (Sony
-  1616/3968 → 6048) on a **256 MB-stack thread** (some NEFs overflow the default
-  stack; full-preview cameras skip the demosaic).
-- **AVIF + HEIC/HEIF**: **Windows WIC** (`wic.rs`, `cfg(windows)`, the `windows`
-  crate — no vcpkg/dav1d/libheif), via OS codec extensions (AV1/HEVC/HEIF). COM
-  init per-call so it works on the decode-pool worker threads.
-- **Orientation:** `common::read_orientation` scans **all** EXIF IFDs (HEIC/RAW
-  store it outside the primary IFD). WIC + imagepipe self-orient, so those paths
-  pass orientation=1; the RAW preview path applies the container orientation.
-  Verified: portrait HEIC→3024×4032, portrait NEF→4924×7374, portrait Sony
-  demosaic→4024×6048.
-- **Panic-safe:** decoders wrapped in `catch_panics`; **release profile is now
-  `panic = "unwind"`** (was abort) so a panicking decoder skips the file, not the
-  app. Stack overflows are still uncatchable → the big-stack demosaic thread.
-- **Decode failure:** `App::present_failed` sets a "decode error" title + clears
-  the stale panel/metadata; the previous frame is held (no black flash). Verified
-  against corrupt JPEG/PNG files.
-- **Transparent rendering:** photo pipeline switched to `ALPHA_BLENDING` so
-  transparent PNG/WebP/SVG/icons composite over the letterbox (was REPLACE).
-- `is_supported_extension` is the single source of truth the scanner filters on.
 
 ## Architecture
 ```
-crates/pb-core    pure nav/shuffle/prefetch/cache + ResidentRing (no I/O, no GPU)
-crates/pb-decode  ImageDecoder backends (zune/image/jxl/svg/raw/wic) + dispatch + decode-to-fit + EXIF + orientation
-crates/pb-render  wgpu presenter (gpu.rs + WGSL shader); ViewTransform (view.rs); UploadStrategy (upload.rs)
-crates/pb-app     winit loop, decode_pool (priority workers), hud.rs (overlay/table), main.rs (engine wiring)
+crates/pb-core    pure nav/shuffle/prefetch/cache + ResidentRing + open (launch policy) — no I/O, no GPU
+crates/pb-decode  ImageDecoder backends (zune/image/jxl/svg/raw/wic) + dispatch + decode-to-fit + EXIF + color (ICC→shader transform, fp16 HDR)
+crates/pb-render  wgpu presenter (gpu.rs: scene→fp16 scRGB intermediate→present; WGSL); display (HDR detect); ViewTransform; UploadStrategy
+crates/pb-app     winit loop, decode_pool (priority workers), hud.rs, main.rs (engine wiring)
 ```
 
 ## The prefetch engine (don't break it)
 Decode/I-O are off the event loop on a priority worker pool; neighbors are
-prefetched into a byte-budgeted (~1.5 GB) resident GPU texture ring; a keypress is
-a **rebind, not a decode**. Advance is **gated on readiness** — every photo shown
-in order; a miss holds the previous frame until its decode lands. The
-gated-advance/failure paths in `main.rs` (`advance` / `about_to_wait` /
-`drain_results` / `present_item` / `present_failed`) are subtle — re-read before
-changing them. The DXGI photon-timing step is the only Phase-3 item still deferred.
+prefetched into a byte-budgeted (~1.5 GB) resident GPU texture ring; a keypress is a
+**rebind, not a decode** (the color/scale uniforms are baked at upload; present_slot
+only updates a 16-byte peak uniform). Advance is **gated on readiness**. The
+gated-advance/failure paths in `main.rs` (`advance`/`about_to_wait`/`drain_results`/
+`present_item`/`present_failed`) are subtle — re-read before changing them.
 
-## Known gaps / deferred (besides color management)
-- HDR/EXR clamped to SDR (no tone-map); CMYK JPEG mis-colored; **first-frame-only**
-  for GIF/animated-WebP/Live-Photo/multipage-TIFF.
-- RAW demosaic is slow (~1 s/file); "preview-first then refine" is the future fix.
-- AVIF/HEIC are Windows-only (WIC); macOS would mirror with ImageIO.
-- Native scaled-decode (JPEG DCT 1/2·1/4·1/8, WebP downscale-on-decode) not done —
-  currently full-decode + Lanczos.
-- `enter` random nav unwired; a pinned `#[ignore]`d test for the random-prefetch
-  cycle boundary (`pb-core::prefetch`) — fix when random nav is wired.
-- `tasks.json` backlog: #2 privacy/no-trace, #6 esc-teardown, #8 configurable
-  keybindings (TOML), #9 recursive ordering, #10 feedback toast, #11 color
-  management (new). #1/#3/#4/#5/#7 done.
-
-## Review tooling (codex)
-Codex reviewed this session's codec/render work — the alpha-blend, SVG
-straight-alpha, and decode-failure items came from that pass. To re-review vs the
-pushed baseline:
-```
-& "C:\Users\jdlien\.codex\packages\standalone\releases\0.142.3-x86_64-pc-windows-msvc\bin\codex.exe" exec review --base origin/main
-```
-**Concurrency note:** a Codex agent has edited this tree in parallel this session —
-re-check `git status` before large edits to avoid collisions.
+## Other backlog (tasks.json)
+- #2 privacy/no-trace, #6 esc-teardown, #8 configurable keybindings (TOML),
+  #9 recursive ordering, #10 feedback toast.
+- #12 Windows open (file-arg/drag-drop/picker) — **in progress** (subtask 1, the pure
+  `pb-core::open` seam, done in the tree); #13 MSI/associations; #14 polish; #15 macOS.
+- #1/#3/#4/#5/#7/#11 done.
+- Native scaled-decode (JPEG DCT, WebP downscale-on-decode) still a TODO.
+- `enter` random nav unwired (+ the pinned `#[ignore]`d prefetch test). The DXGI
+  photon-timing step is the only Phase-3 item still deferred.
 
 ## Environment / gotchas
 - `cargo` at `~/.cargo/bin` (`$env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"`).
-- MSRV **1.80** (`rust-version` in Cargo.toml): no `Option::is_none_or` (1.82+) —
-  use a plain `match`; `is_some_and` (1.70) is fine. (Owner is fine bumping if a
-  feature needs it.)
-- GPU tests run on the RTX 5090. Don't launch the **fullscreen** app from
-  automation — use a short `--windowed` `Start-Process` + kill; quote paths with
-  spaces. Display 7680×2160 @ 120 Hz.
-- `D:\Media\Pictures` is the real corpus (subfolders → use `-r`); it has many
-  Display-P3 iPhone HEICs for color-mgmt testing. `D:\Media\Pictures\test-images`
-  is the one-per-format codec corpus (jpg/png/qoi/webp×2/jxl/avif/heic/svg/arw/nef).
-- Line endings: git warns LF→CRLF (harmless); `Cargo.lock` is committed.
+- MSRV **1.80**: no `Option::is_none_or` (1.82+) — use `match`; `is_some_and` is fine.
+- GPU tests run on the RTX 5090. Don't launch the **fullscreen** app from automation —
+  use a short `--windowed` `Start-Process` + kill; quote paths with spaces.
+  Desktop is currently in **HDR mode** (so the app uses the fp16 scRGB surface, and GDI
+  screen capture is broken — see the capture caveat).
+- `D:\Media\Pictures` is the real corpus (use `-r`); `D:\Media\Pictures\test-images`
+  has the per-format corpus **plus wide-gamut/HDR test images** (`WideGamut-*-DisplayP3*.jpg/.avif`,
+  `*-HDR.avif`, and `-sRGB` twins for A/B).

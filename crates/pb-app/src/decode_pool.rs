@@ -317,6 +317,8 @@ mod tests {
             format: PixelFormat::Rgba8,
             pixels: vec![item as u8; bytes],
             is_preview: false,
+            color: pb_decode::ColorTransform::srgb(),
+            peak: 1.0,
         }
     }
 

@@ -12,4 +12,14 @@ wgpu = "22"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.3"
 
+# Query the display's HDR/wide-gamut state via DXGI (`display::primary_hdr`) to
+# choose the output path: an fp16 scRGB surface (wide gamut + HDR) vs SDR 8-bit.
+[target."cfg(windows)".dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Foundation",
+] }
+
 [dev-dependencies]

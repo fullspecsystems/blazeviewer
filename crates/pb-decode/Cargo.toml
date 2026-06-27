@@ -16,6 +16,15 @@ kamadak-exif = "0.6"
 fast_image_resize = "5"
 image = { version = "0.25.10", default-features = false, features = ["png", "gif", "bmp", "ico", "tiff", "webp", "tga", "qoi", "pnm", "hdr", "exr", "ff", "dds"] }
 jxl-oxide = "0.12.6"
+# ICC color management: parse the source profile to a 3x3 (source primaries ->
+# sRGB) + transfer curve, applied in-shader by pb-render. Pure Rust; already in
+# the tree transitively via `image`. Only the parse/matrix/TRC API is used here.
+moxcms = "0.8"
+# f32 -> f16 packing for HDR (WIC scRGB-linear) buffers handed to the GPU as
+# Rgba16Float. Already in the tree transitively.
+half = "2"
+# Reinterpret f32 pixel buffers as bytes for the f32 resize path. In-tree already.
+bytemuck = "1"
 resvg = { version = "0.47.0", default-features = false }
 flate2 = "1"
 imagepipe = "0.5.0"

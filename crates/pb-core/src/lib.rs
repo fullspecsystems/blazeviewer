@@ -14,6 +14,7 @@
 //!   microbenchmarks with zero GPU/I/O noise, and reach >80% coverage trivially.
 
 pub mod cache;
+pub mod open;
 pub mod playlist;
 pub mod prefetch;
 pub mod ring;
@@ -21,6 +22,7 @@ pub mod rng;
 pub mod shuffle;
 
 pub use cache::{plan_residency, ResidencyPlan};
+pub use open::{plan, resolve_cursor, Cursor, LaunchInput, OpenPlan, Source};
 pub use playlist::{Direction, Playlist};
 pub use prefetch::prefetch_targets;
 pub use ring::{Reservation, ResidentRing};

@@ -52,6 +52,17 @@ impl Playlist {
         self
     }
 
+    /// Builder: start the cursor at `index` (clamped to `[0, len)`), e.g. on the
+    /// photo the user double-clicked. A no-op on an empty playlist. The cursor
+    /// resolution itself lives in [`crate::open::resolve_cursor`]; this just
+    /// seats the result.
+    pub fn with_cursor(mut self, index: usize) -> Self {
+        if self.len > 0 {
+            self.cursor = index.min(self.len - 1);
+        }
+        self
+    }
+
     pub fn len(&self) -> usize {
         self.len
     }
@@ -238,5 +249,14 @@ mod tests {
         pl.random_next();
         pl.random_prev();
         assert_eq!(pl.current().unwrap(), first);
+    }
+
+    #[test]
+    fn with_cursor_seats_and_clamps_the_start() {
+        assert_eq!(Playlist::new(5, 1).with_cursor(3).current(), Some(3));
+        // Out-of-range clamps to the last item.
+        assert_eq!(Playlist::new(5, 1).with_cursor(99).current(), Some(4));
+        // Empty playlist stays empty.
+        assert_eq!(Playlist::new(0, 1).with_cursor(2).current(), None);
     }
 }

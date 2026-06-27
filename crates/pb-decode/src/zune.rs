@@ -8,7 +8,7 @@
 
 use zune_jpeg::JpegDecoder;
 
-use crate::{common, DecodeError, DecodeRequest, DecodedImage, ImageDecoder};
+use crate::{common, ColorTransform, DecodeError, DecodeRequest, DecodedImage, ImageDecoder};
 
 /// JPEG decoder backed by `zune-jpeg`.
 #[derive(Debug, Clone, Copy, Default)]
@@ -21,9 +21,15 @@ impl ImageDecoder for ZuneJpegDecoder {
     }
 
     fn decode(&self, req: &DecodeRequest) -> Result<DecodedImage, DecodeError> {
-        let (rgba, w, h) = decode_rgba(req.bytes)?;
+        let (rgba, w, h, icc) = decode_rgba_with_icc(req.bytes)?;
         // Shared finalize: EXIF orientation (from the JPEG bytes) + decode-to-fit.
-        common::finalize(rgba, w, h, Some(req.bytes), "JPEG", req.fit, false)
+        let mut img = common::finalize(rgba, w, h, Some(req.bytes), "JPEG", req.fit, false)?;
+        // An embedded ICC profile (Adobe RGB / ProPhoto exports) drives in-shader
+        // color management; untagged JPEGs stay sRGB passthrough.
+        if let Some(icc) = icc {
+            img.color = ColorTransform::from_icc(&icc);
+        }
+        Ok(img)
     }
 
     fn name(&self) -> &'static str {
@@ -36,6 +42,16 @@ impl ImageDecoder for ZuneJpegDecoder {
 /// an embedded preview JPEG but must apply orientation from the RAW *container*,
 /// not the preview's own (often absent) EXIF.
 pub(crate) fn decode_rgba(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), DecodeError> {
+    let (rgba, w, h, _icc) = decode_rgba_with_icc(bytes)?;
+    Ok((rgba, w, h))
+}
+
+/// Like [`decode_rgba`] but also returns the embedded ICC profile (APP2 chunks,
+/// reassembled by zune) when present, for in-shader color management.
+#[allow(clippy::type_complexity)]
+pub(crate) fn decode_rgba_with_icc(
+    bytes: &[u8],
+) -> Result<(Vec<u8>, u32, u32, Option<Vec<u8>>), DecodeError> {
     let mut decoder = JpegDecoder::new(bytes);
     let out = decoder
         .decode()
@@ -48,6 +64,7 @@ pub(crate) fn decode_rgba(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), DecodeErr
     if n == 0 {
         return Err(DecodeError::Corrupt("zero-size image".into()));
     }
+    let icc = decoder.icc_profile();
     // zune emits RGB for color JPEGs and Luma for grayscale; normalize to RGBA.
     let rgba = match out.len() / n {
         4 => out,
@@ -55,7 +72,7 @@ pub(crate) fn decode_rgba(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), DecodeErr
         1 => luma_to_rgba(&out, n),
         other => return Err(DecodeError::Corrupt(format!("unexpected {other} channels"))),
     };
-    Ok((rgba, w, h))
+    Ok((rgba, w, h, icc))
 }
 
 fn rgb_to_rgba(rgb: &[u8], n: usize) -> Vec<u8> {

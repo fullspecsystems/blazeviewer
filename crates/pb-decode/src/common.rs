@@ -9,7 +9,7 @@
 use std::io::Cursor;
 
 use crate::orientation::apply_orientation;
-use crate::{DecodeError, DecodedImage, FitBox, PixelFormat};
+use crate::{ColorTransform, DecodeError, DecodedImage, FitBox, PixelFormat};
 
 /// Read the EXIF Orientation tag (1..=8) from a container's bytes; 1 (upright) if
 /// absent or unparseable. Works for any container `exif` understands (JPEG, TIFF,
@@ -95,7 +95,96 @@ pub(crate) fn finalize_oriented(
         format: PixelFormat::Rgba8,
         pixels,
         is_preview,
+        // sRGB passthrough by default; a backend that extracted an ICC profile
+        // overrides `color` on the returned image (see e.g. `zune`, `wic`).
+        color: ColorTransform::srgb(),
+        peak: 1.0,
     })
+}
+
+/// Finalize an HDR buffer that is already **scene-linear scRGB** (linear, BT.709
+/// primaries, extended range — what WIC hands back for PQ/HLG sources) into an
+/// `Rgba16F` [`DecodedImage`]: decode-to-fit downscale (in f32, since
+/// `fast_image_resize` has no f16 path), then pack to half-floats. `peak` is the
+/// max RGB value (the SDR-display tone-map white point). Orientation is assumed
+/// applied already (WIC self-orients), so none is done here.
+pub(crate) fn finalize_hdr_scrgb(
+    mut linear: Vec<f32>,
+    mut w: u32,
+    mut h: u32,
+    codec: &'static str,
+    fit: Option<FitBox>,
+) -> Result<DecodedImage, DecodeError> {
+    if w == 0 || h == 0 || linear.len() != (w as usize) * (h as usize) * 4 {
+        return Err(DecodeError::Corrupt("bad HDR buffer".into()));
+    }
+    let (orig_width, orig_height) = (w, h);
+    if let Some(fit) = fit {
+        let (out, nw, nh) = downscale_to_fit_f32(linear, w, h, fit)?;
+        linear = out;
+        w = nw;
+        h = nh;
+    }
+    // Peak (max RGB) before packing — the SDR tone-map white point.
+    let mut peak = 1.0f32;
+    for px in linear.chunks_exact(4) {
+        for &v in &px[0..3] {
+            if v > peak {
+                peak = v;
+            }
+        }
+    }
+    // Pack f32 → f16 (little-endian) for an Rgba16Float texture.
+    let mut pixels = vec![0u8; linear.len() * 2];
+    for (dst, &v) in pixels.chunks_exact_mut(2).zip(linear.iter()) {
+        dst.copy_from_slice(&half::f16::from_f32(v).to_le_bytes());
+    }
+    Ok(DecodedImage {
+        width: w,
+        height: h,
+        orig_width,
+        orig_height,
+        codec,
+        format: PixelFormat::Rgba16F,
+        pixels,
+        is_preview: false,
+        color: ColorTransform::srgb(), // already scene-linear; shader passes through
+        peak,
+    })
+}
+
+/// Downscale an RGBA **f32** image to fit `fit` (Lanczos3), for the HDR path.
+fn downscale_to_fit_f32(
+    pixels: Vec<f32>,
+    w: u32,
+    h: u32,
+    fit: FitBox,
+) -> Result<(Vec<f32>, u32, u32), DecodeError> {
+    let scale = (fit.max_width as f64 / w as f64)
+        .min(fit.max_height as f64 / h as f64)
+        .min(1.0);
+    if scale >= 0.999 {
+        return Ok((pixels, w, h));
+    }
+    let tw = ((w as f64 * scale).round() as u32).max(1);
+    let th = ((h as f64 * scale).round() as u32).max(1);
+
+    use fast_image_resize::images::Image;
+    use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
+
+    let bytes = bytemuck::cast_slice::<f32, u8>(&pixels).to_vec();
+    let src = Image::from_vec_u8(w, h, bytes, PixelType::F32x4)
+        .map_err(|e| DecodeError::Corrupt(e.to_string()))?;
+    let mut dst = Image::new(tw, th, PixelType::F32x4);
+    let opts = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Lanczos3));
+    Resizer::new()
+        .resize(&src, &mut dst, &opts)
+        .map_err(|e| DecodeError::Corrupt(e.to_string()))?;
+    Ok((
+        bytemuck::cast_slice::<u8, f32>(&dst.into_vec()).to_vec(),
+        tw,
+        th,
+    ))
 }
 
 /// Expand tightly-packed RGB8 to RGBA8 (opaque). Used by backends that decode to
@@ -193,6 +282,37 @@ mod tests {
                 red[k]
             );
         }
+    }
+
+    #[test]
+    fn finalize_hdr_packs_f16_and_records_peak() {
+        // 1x1 scRGB-linear HDR pixel with an 8x highlight in green.
+        let img = finalize_hdr_scrgb(vec![0.5f32, 8.0, 0.25, 1.0], 1, 1, "AVIF", None).unwrap();
+        assert_eq!(img.format, PixelFormat::Rgba16F);
+        assert_eq!(img.pixels.len(), 8); // 1px * 4 channels * 2 bytes
+        assert!((img.peak - 8.0).abs() < 0.1, "peak {}", img.peak);
+        // Round-trip the green half-float back to f32.
+        let g = half::f16::from_le_bytes([img.pixels[2], img.pixels[3]]).to_f32();
+        assert!((g - 8.0).abs() < 0.05, "green {g}");
+    }
+
+    #[test]
+    fn finalize_hdr_downscales_to_fit() {
+        let big = vec![1.0f32; 100 * 100 * 4];
+        let img = finalize_hdr_scrgb(
+            big,
+            100,
+            100,
+            "AVIF",
+            Some(FitBox {
+                max_width: 40,
+                max_height: 40,
+            }),
+        )
+        .unwrap();
+        assert_eq!((img.width, img.height), (40, 40));
+        assert_eq!((img.orig_width, img.orig_height), (100, 100));
+        assert_eq!(img.pixels.len(), 40 * 40 * 8);
     }
 
     #[test]

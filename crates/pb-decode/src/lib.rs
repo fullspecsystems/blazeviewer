@@ -15,6 +15,7 @@
 //! Backends implement [`ImageDecoder`] and are swappable, so we can A/B (e.g.)
 //! `turbojpeg` vs `zune-jpeg` purely through this seam.
 
+mod color;
 mod common;
 mod image_backend;
 mod jxl;
@@ -28,6 +29,7 @@ mod zune;
 
 use std::path::Path;
 
+pub use color::ColorTransform;
 pub use image_backend::ImageCrateDecoder;
 pub use jxl::JxlDecoder;
 pub use metadata::read_exif_fields;
@@ -42,16 +44,19 @@ pub use zune::ZuneJpegDecoder;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PixelFormat {
     /// 8 bits per channel, R,G,B,A order, straight (non-premultiplied) alpha.
+    /// sRGB-encoded (source-encoded); the renderer linearizes per `ColorTransform`.
     Rgba8,
-    /// 16 bits per channel (for HDR / deep-color sources), R,G,B,A order.
-    Rgba16,
+    /// 16-bit **half-float** per channel, R,G,B,A. Carries HDR / wide-gamut sources
+    /// as **scene-linear scRGB** (linear, BT.709 primaries, extended range), ready
+    /// to present to an fp16 scRGB swapchain.
+    Rgba16F,
 }
 
 impl PixelFormat {
     pub fn bytes_per_pixel(self) -> usize {
         match self {
             PixelFormat::Rgba8 => 4,
-            PixelFormat::Rgba16 => 8,
+            PixelFormat::Rgba16F => 8,
         }
     }
 }
@@ -72,6 +77,13 @@ pub struct DecodedImage {
     pub pixels: Vec<u8>,
     /// True if this is a fast preview/thumbnail to be refined later.
     pub is_preview: bool,
+    /// Source→sRGB color conversion for the renderer (in-shader matrix + TRC).
+    /// Defaults to sRGB passthrough; backends override it when the source carries
+    /// a wide-gamut ICC profile (Display-P3 HEIC, Adobe RGB JPEG, …).
+    pub color: ColorTransform,
+    /// Peak scene-linear value, for HDR (`Rgba16F`) images — the tone-map white
+    /// point used when presenting to an SDR display. 1.0 for SDR sources.
+    pub peak: f32,
 }
 
 impl DecodedImage {
@@ -174,6 +186,8 @@ impl ImageDecoder for SolidColorDecoder {
             format: PixelFormat::Rgba8,
             pixels,
             is_preview: false,
+            color: ColorTransform::srgb(),
+            peak: 1.0,
         })
     }
 
@@ -429,7 +443,7 @@ mod tests {
     #[test]
     fn bytes_per_pixel_is_correct() {
         assert_eq!(PixelFormat::Rgba8.bytes_per_pixel(), 4);
-        assert_eq!(PixelFormat::Rgba16.bytes_per_pixel(), 8);
+        assert_eq!(PixelFormat::Rgba16F.bytes_per_pixel(), 8);
     }
 
     #[test]

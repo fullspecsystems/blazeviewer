@@ -9,15 +9,46 @@
 //! The pure **fit-to-screen** math lives in [`fit`]; it is deterministic,
 //! unit-testable, and on the hot path every frame.
 
+pub mod display;
 pub mod fit;
 pub mod gpu;
 pub mod upload;
 pub mod view;
 
 pub use fit::{cover_rect, fit_rect, original_rect, FitRect};
-pub use gpu::{render_offscreen, test_pattern, WgpuRenderer, LETTERBOX};
+pub use gpu::{render_offscreen, render_offscreen_color, test_pattern, WgpuRenderer, LETTERBOX};
 pub use upload::{StagingUpload, UploadStrategy};
 pub use view::{Placement, Rotation, ViewTransform, MAX_ZOOM, MIN_ZOOM};
+
+/// A source→sRGB color conversion the fragment shader applies per texel: a 3×3
+/// matrix (source-linear RGB → sRGB-linear RGB, row-major) plus the source EOTF as
+/// moxcms's 7-param parametric curve `(g, a, b, c, d, e, f)`. `enabled == false`
+/// means "sRGB or unknown" — the shader passes the texel through unchanged, so the
+/// common case stays bit-exact and free. Built in `pb-decode` from the image's ICC
+/// profile and handed in via [`Renderer::set_image`] / [`Renderer::upload_slot`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ColorTransform {
+    pub matrix: [[f32; 3]; 3],
+    pub trc: [f32; 7],
+    pub enabled: bool,
+}
+
+impl ColorTransform {
+    /// The sRGB passthrough (disabled) transform.
+    pub const fn srgb() -> Self {
+        Self {
+            matrix: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            trc: [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            enabled: false,
+        }
+    }
+}
+
+impl Default for ColorTransform {
+    fn default() -> Self {
+        Self::srgb()
+    }
+}
 
 /// How the image is sized to the viewport (the base scale of a [`ViewTransform`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -35,8 +66,19 @@ pub enum ScaleMode {
 pub trait Renderer {
     /// React to a surface/window resize.
     fn resize(&mut self, width: u32, height: u32);
-    /// Replace the displayed image with a new RGBA8 buffer (`width*height*4`).
-    fn set_image(&mut self, rgba: &[u8], width: u32, height: u32);
+    /// Replace the displayed image. `rgba` is `width*height*4` RGBA8 (sRGB-encoded)
+    /// unless `hdr`, in which case it is `width*height*8` `Rgba16Float` scene-linear
+    /// scRGB. `color` is the source→sRGB transform (SDR); `peak` is the scene-linear
+    /// peak (HDR tone-map white point on an SDR display).
+    fn set_image(
+        &mut self,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        color: ColorTransform,
+        hdr: bool,
+        peak: f32,
+    );
     /// Set the per-photo view transform (scaling mode + rotation + zoom + pan).
     fn set_view(&mut self, view: ViewTransform);
     /// Set or clear the corner info-panel overlay: an RGBA8 bitmap (`w*h*4`)
@@ -47,9 +89,21 @@ pub trait Renderer {
     /// `slot_h` are the intended slot size for the fixed-size variant; the v1
     /// image-sized implementation ignores them. Resets any existing ring.
     fn reserve_ring(&mut self, capacity: usize, slot_w: u32, slot_h: u32);
-    /// Upload a decoded RGBA8 image (`w*h*4`) into ring slot `slot`. Runs during
-    /// prefetch, off the keypress frame.
-    fn upload_slot(&mut self, slot: usize, rgba: &[u8], w: u32, h: u32);
+    /// Upload a decoded image into ring slot `slot`, baking its `color`/`hdr`/`peak`
+    /// into the slot's bind group (see [`Renderer::set_image`] for the buffer layout).
+    /// Runs during prefetch, off the keypress frame — so the later `present_slot`
+    /// rebind carries everything for free.
+    #[allow(clippy::too_many_arguments)]
+    fn upload_slot(
+        &mut self,
+        slot: usize,
+        rgba: &[u8],
+        w: u32,
+        h: u32,
+        color: ColorTransform,
+        hdr: bool,
+        peak: f32,
+    );
     /// Select ring slot `slot` as the displayed image (the keypress fast path: a
     /// rebind, no decode or upload). A no-op if the slot isn't uploaded yet.
     fn present_slot(&mut self, slot: usize);

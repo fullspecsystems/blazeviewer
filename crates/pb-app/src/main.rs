@@ -38,7 +38,7 @@ use winit::window::{Fullscreen, Window, WindowId};
 
 use pb_core::{prefetch_targets, Playlist, ResidentRing};
 use pb_decode::{
-    decode_image_file, is_supported_extension, read_exif_fields, DecodedImage, FitBox,
+    decode_image_file, is_supported_extension, read_exif_fields, DecodedImage, FitBox, PixelFormat,
 };
 use pb_render::{
     test_pattern, Renderer, Rotation, ScaleMode, ViewTransform, WgpuRenderer, MAX_ZOOM, MIN_ZOOM,
@@ -88,6 +88,21 @@ fn window_for_capacity(cap: usize) -> (usize, usize) {
     let ahead = (usable * 4 / 5).max(1);
     let behind = usable.saturating_sub(ahead);
     (ahead, behind)
+}
+
+/// Translate the decoder's color transform into the renderer's (identical fields,
+/// distinct crate types so neither crate depends on the other).
+fn render_color(c: &pb_decode::ColorTransform) -> pb_render::ColorTransform {
+    pb_render::ColorTransform {
+        matrix: c.matrix,
+        trc: c.trc,
+        enabled: c.enabled,
+    }
+}
+
+/// Whether a decoded image is HDR (scene-linear fp16 → the renderer's HDR path).
+fn is_hdr(img: &DecodedImage) -> bool {
+    img.format == PixelFormat::Rgba16F
 }
 
 /// One photo's info, for the corner overlay panel.
@@ -518,8 +533,15 @@ impl App {
             {
                 if let Some(a) = self.active.as_mut() {
                     let t0 = Instant::now();
-                    a.renderer
-                        .upload_slot(res.slot, &img.pixels, img.width, img.height);
+                    a.renderer.upload_slot(
+                        res.slot,
+                        &img.pixels,
+                        img.width,
+                        img.height,
+                        render_color(&img.color),
+                        is_hdr(img),
+                        img.peak,
+                    );
                     self.metrics.record("upload", t0.elapsed());
                 }
                 self.ring.mark_resident(item, res.slot, self.epoch);
@@ -552,7 +574,14 @@ impl App {
                 let title = title_for(&self.paths[idx], idx, self.paths.len());
                 if let Some(a) = self.active.as_mut() {
                     a.renderer.set_view(view);
-                    a.renderer.set_image(&img.pixels, img.width, img.height);
+                    a.renderer.set_image(
+                        &img.pixels,
+                        img.width,
+                        img.height,
+                        render_color(&img.color),
+                        is_hdr(&img),
+                        img.peak,
+                    );
                     a.renderer.set_overlay(None, 0);
                     a.window.set_title(&title);
                 }
@@ -622,7 +651,19 @@ impl App {
     }
 
     /// Decode the first image at the display size for an instant first frame.
-    fn initial_image(&mut self) -> (Vec<u8>, u32, u32, String) {
+    /// Returns `(pixels, w, h, color, hdr, peak, title)`.
+    fn initial_image(
+        &mut self,
+    ) -> (
+        Vec<u8>,
+        u32,
+        u32,
+        pb_render::ColorTransform,
+        bool,
+        f32,
+        String,
+    ) {
+        let srgb = pb_render::ColorTransform::srgb();
         match self.playlist.current() {
             Some(idx) => match decode_image_file(&self.paths[idx], self.decode_fit()) {
                 Ok(img) => {
@@ -630,19 +671,37 @@ impl App {
                     self.current = Some(meta.clone());
                     self.meta_cache.insert(idx, meta);
                     let title = title_for(&self.paths[idx], idx, self.paths.len());
-                    (img.pixels, img.width, img.height, title)
+                    let (w, h, hdr, peak) = (img.width, img.height, is_hdr(&img), img.peak);
+                    let color = render_color(&img.color);
+                    (img.pixels, w, h, color, hdr, peak, title)
                 }
                 Err(e) => {
                     eprintln!("decode failed: {}: {e}", self.paths[idx].display());
                     self.current = None;
                     let p = test_pattern(1600, 1000);
-                    (p, 1600, 1000, "PhotoBlaze (decode error)".to_string())
+                    (
+                        p,
+                        1600,
+                        1000,
+                        srgb,
+                        false,
+                        1.0,
+                        "PhotoBlaze (decode error)".to_string(),
+                    )
                 }
             },
             None => {
                 self.current = None;
                 let p = test_pattern(1600, 1000);
-                (p, 1600, 1000, "PhotoBlaze (no images)".to_string())
+                (
+                    p,
+                    1600,
+                    1000,
+                    srgb,
+                    false,
+                    1.0,
+                    "PhotoBlaze (no images)".to_string(),
+                )
             }
         }
     }
@@ -1038,7 +1097,7 @@ impl ApplicationHandler for App {
         });
 
         // Decode the first image at the display size while the window is hidden.
-        let (rgba, iw, ih, title) = self.initial_image();
+        let (rgba, iw, ih, color, hdr, peak, title) = self.initial_image();
         window.set_title(&title);
 
         let mut renderer = WgpuRenderer::new(
@@ -1048,6 +1107,9 @@ impl ApplicationHandler for App {
             &rgba,
             iw,
             ih,
+            color,
+            hdr,
+            peak,
         );
         let now = window.inner_size();
         if now != isz {
@@ -1066,7 +1128,14 @@ impl ApplicationHandler for App {
                     let meta = meta_for_path(&self.paths[idx], &self.root, &img);
                     self.current = Some(meta.clone());
                     self.meta_cache.insert(idx, meta);
-                    renderer.set_image(&img.pixels, img.width, img.height);
+                    renderer.set_image(
+                        &img.pixels,
+                        img.width,
+                        img.height,
+                        render_color(&img.color),
+                        is_hdr(&img),
+                        img.peak,
+                    );
                 }
             }
         }

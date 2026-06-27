@@ -7,7 +7,7 @@ use std::io::Cursor;
 
 use jxl_oxide::{JxlImage, PixelFormat};
 
-use crate::{common, DecodeError, DecodeRequest, DecodedImage, ImageDecoder};
+use crate::{common, ColorTransform, DecodeError, DecodeRequest, DecodedImage, ImageDecoder};
 
 /// JXL signature box that opens a container-format `.jxl` file.
 const JXL_BOX_SIG: [u8; 12] = [
@@ -38,8 +38,13 @@ impl ImageDecoder for JxlDecoder {
             return Err(DecodeError::Corrupt("jxl framebuffer too small".into()));
         }
         let rgba = to_rgba8(fb.buf(), n, ch, fmt)?;
-        // jxl-oxide renders in the image's own color space (sRGB-encoded f32).
-        common::finalize(rgba, w, h, None, "JXL", req.fit, false)
+        // jxl-oxide renders in the image's own color space; `rendered_icc` is the
+        // profile describing exactly the buffer we just quantized. Feed it to the
+        // in-shader color path (sRGB images resolve to a no-op passthrough).
+        let icc = image.rendered_icc();
+        let mut img = common::finalize(rgba, w, h, None, "JXL", req.fit, false)?;
+        img.color = ColorTransform::from_icc(&icc);
+        Ok(img)
     }
 
     fn name(&self) -> &'static str {

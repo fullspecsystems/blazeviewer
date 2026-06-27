@@ -201,9 +201,28 @@ pragmatic crate choices differ from the table above and are the current baseline
   big-stack thread, not `catch_unwind`.
 - **TGA is routed by extension** (`.tga`), not content — Targa has no magic number, so
   `image::guess_format` can't sniff it; `decode_image_file` hands it an explicit format hint.
-- **Known v1 limitations** (deliberate): no ICC color management (Display-P3 iPhone HEICs
-  render oversaturated — treated as sRGB); HDR/EXR clamped to SDR; CMYK JPEG mis-colored;
-  first frame only (GIF/animated-WebP/Live-Photo/multipage-TIFF).
+- **Color management + wide-gamut + HDR output are wired** (tasks.json #11). Three layers:
+  1. **In-shader ICC CMS.** `pb_decode::color` parses the source profile (`moxcms`) to a
+     3×3 (source primaries → BT.709) + a 7-param TRC, carried on `DecodedImage::color`.
+     Read per backend: JPEG APP2 (zune `icc_profile`), PNG/TIFF/WebP (`image` `icc_profile`),
+     JXL `rendered_icc`, and — because the Windows HEIF decoder returns **no** WIC color
+     contexts — the ISOBMFF `colr` box parsed directly (`prof`/`rICC` ICC or `nclx` CICP) in
+     `wic.rs`. sRGB / ~2.2-gamma-sRGB-primaries → passthrough. Fixes oversaturated P3 HEICs.
+  2. **fp16 scRGB render path.** `pb-render` renders to an `Rgba16Float` scRGB-linear
+     intermediate (no gamut clamp), then a present pass → the surface: SDR 8-bit gets an
+     extended-Reinhard tone-map (per-image `peak`) + sRGB-encode; HDR fp16 copies straight.
+  3. **Wide-gamut + HDR output (pure wgpu, no native D3D12).** A DXGI **fp16 flip swapchain
+     is always scRGB**, so `pb_render::display::primary_hdr()` (DXGI `GetDesc1`) detects an
+     HDR desktop and configures an `Rgba16Float` surface. HDR AVIF/HEIC (PQ/HLG) decode to
+     fp16 scene-linear via WIC `128bppRGBAFloat` (`PixelFormat::Rgba16F`); brightness is baked
+     in the scene pass (SDR×SDR-white-scale, HDR×1.0 absolute). P3 shows wider and HDR gets
+     real headroom on a capable panel.
+- **Known v1 limitations** (deliberate): Radiance-HDR / OpenEXR (image-crate, not WIC) still
+  clamped to SDR; CMYK JPEG mis-colored; first frame only (GIF/animated-WebP/Live-Photo/
+  multipage-TIFF). LUT/CLUT & gray/CMYK ICC profiles → sRGB passthrough (the `lcms2`-behind-a-
+  flag escalation). SDR-white level is a 200-nit default (real value via DisplayConfig = TODO).
+  ⚠ On an **HDR desktop**, GDI screen capture of the flip swapchain returns all-white — a
+  Windows limit, not a render bug (use the `offscreen_png` example to verify rendering).
 
 ## Build, test, bench
 

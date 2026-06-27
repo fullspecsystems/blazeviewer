@@ -2,7 +2,7 @@
   "master": {
     "metadata": {
       "created": "2026-06-26",
-      "updated": "2026-06-26",
+      "updated": "2026-06-27",
       "description": "Post-core feature backlog for PhotoBlaze. These ship AFTER the core viewer is stable (roadmap Phases 0-3: window, decode-to-fit, prefetch ring, hold-to-fly). Every task obeys the prime directive (faster or perf-neutral) and the project's TDD rules: pure logic isolated and unit-tested, GPU work behind the Renderer seam, golden-image tests for visuals. Shared infrastructure is factored out so it is built once: a per-photo ViewTransform (rotation + zoom + scaling mode), a translucent HUD/overlay layer, and a central configurable action/keymap."
     },
     "tasks": [
@@ -51,13 +51,13 @@
       },
       {
         "id": 2,
-        "title": "Privacy: no persistent caches, no disk traces",
-        "description": "Keep zero persistent caches and no on-disk metadata. Nothing about what was viewed survives the process; once cleared there is no trace of what you were looking at.",
+        "title": "Privacy: no record of viewed photos or their metadata",
+        "description": "Nothing about which photos were viewed - or their pixels/metadata - is ever written to disk. The app's existence is fine to record: installation, registry file-associations, and read-only config are all allowed (owner re-scope 2026-06-27). The line is drawn at viewing history and photo data, not at the app being installed.",
         "status": "pending",
         "priority": "high",
         "dependencies": [],
-        "details": "A cross-cutting design constraint, best baked in early rather than retrofitted. No thumbnail DB, no recent-files list, no config writes of viewed paths, no temp files of decoded pixels. Every cache - the compressed-byte LRU, the decoded ring, VRAM textures, rotation/zoom overrides (Tasks 1/3), and on-demand metadata reads (Task 5) - is RAM-backed and dropped on exit (Task 6). If on-disk scratch is ever required it must be opt-in and explicitly cleared. No logging of viewed paths to disk by default. This is partly principle (enforced in review) and partly verifiable (the no-trace test).",
-        "testStrategy": "Integration 'no-trace' test: run a view session pointed at a sandbox and assert (via before/after filesystem diff) that no files are created or modified outside the binary's own directories. Static audit: no disk-write APIs on the view/cache hot paths; all caches are RAM-backed types. Document the guarantee in CLAUDE.md.",
+        "details": "RE-SCOPED 2026-06-27 (owner): this guarantee is about CONTENT, not the app's footprint. ALLOWED: the MSI installer's registry writes (ProgID, file associations, folder verb), a Start-menu shortcut, and read-only config (Task 8). FORBIDDEN: any persistent record of what was viewed or the data behind it - no thumbnail DB/cache, no recent-files/MRU of photo paths, no temp files of decoded pixels, no logging of viewed paths. Every runtime cache - the compressed-byte LRU, the decoded ring, VRAM textures, rotation/zoom overrides (Tasks 1/3), and on-demand EXIF reads (Task 5) - is RAM-backed and dropped on exit (Task 6). Any future on-disk scratch must be opt-in and explicitly cleared. Partly principle (enforced in review), partly verifiable (the no-trace test, scoped to photo-derived files).",
+        "testStrategy": "Integration 'no-trace' test: run a view session pointed at a sandbox and assert (via before/after filesystem diff) that NO photo-derived files (thumbnails, caches, MRU lists, decoded-pixel temp files) are created anywhere - the installer/registry are a separate process and out of scope. Static audit: no disk-write APIs on the view/cache hot paths; all caches are RAM-backed types. Document the guarantee and its new boundary in CLAUDE.md.",
         "subtasks": [
           {
             "id": 1,
@@ -309,7 +309,7 @@
         "status": "pending",
         "priority": "medium",
         "dependencies": [],
-        "details": "When recursive mode is on, the scan walks the whole tree and rebuilds the playlist. ORDERING (confirm with owner): directory-grouped depth-first - within a directory its own images come first (natural/numeric sort so img2 < img10), then descend into each subdirectory in natural order, recursively. This differs subtly from a pure lexicographic full-path sort (where a file 'z.jpg' would sort after a subfolder 'a/'); the grouped traversal matches the owner's 'current dir's photos first, then each subfolder'. REBUILD: the app owns the ordered path list while pb-core Playlist holds count + index, so toggling re-scans, re-sorts, rebuilds Playlist (and its precomputed shuffle for the new length), and keeps the current photo by re-finding its new index. PRIVACY (Task 2): scanning reads directory entries only - no on-disk index is written. Use walkdir; skip unreadable dirs; guard against symlink loops. KEY CONFLICT: 'R' (Shift+R) was assigned to rotate-CCW in Task 1 - recommend recursive=R and moving rotate-CCW to another default (trivial via Task 8); confirm with owner.",
+        "details": "When recursive mode is on, the scan walks the whole tree and rebuilds the playlist. ORDERING (confirm with owner): directory-grouped depth-first - within a directory its own images come first (natural/numeric sort so img2 < img10), then descend into each subdirectory in natural order, recursively. This differs subtly from a pure lexicographic full-path sort (where a file 'z.jpg' would sort after a subfolder 'a/'); the grouped traversal matches the owner's 'current dir's photos first, then each subfolder'. REBUILD: the app owns the ordered path list while pb-core Playlist holds count + index, so toggling re-scans, re-sorts, rebuilds Playlist (and its precomputed shuffle for the new length), and keeps the current photo by re-finding its new index. PRIVACY (Task 2): scanning reads directory entries only - no on-disk index is written. Use walkdir; skip unreadable dirs; guard against symlink loops. KEY CONFLICT: 'R' (Shift+R) was assigned to rotate-CCW in Task 1 - recommend recursive=R and moving rotate-CCW to another default (trivial via Task 8); confirm with owner. RESOLVED 2026-06-27 (owner): the recursion toggle is Ctrl+R (NOT R), leaving R/Shift+R for rotate (Task 1); and a folder opened via picker/drag-drop/association is recursive BY DEFAULT (Task 12), so this folder-grouped ordering function is the shared one those folder opens reuse.",
         "testStrategy": "Pure unit tests on the path-ordering function over a synthetic tree: a folder's files precede its subfolders' files, folders appear in natural order, natural (numeric) sort holds within a folder. Test toggle on/off keeps the current photo (index re-found). Edge cases: empty subdirs, non-image files filtered out, unreadable dirs skipped.",
         "subtasks": [
           {
@@ -377,14 +377,174 @@
       },
       {
         "id": 11,
-        "title": "ICC color management (in-shader)",
-        "description": "Color-manage wide-gamut sources: parse the source ICC profile and convert to the display space in-shader (3x3 matrix + TRC), so Display-P3 / AdobeRGB / ProPhoto images render correctly instead of being treated as sRGB.",
-        "status": "pending",
+        "title": "ICC color management (in-shader) + wide-gamut & HDR output",
+        "description": "Color-manage wide-gamut sources in-shader (3x3 matrix + TRC) so Display-P3 / AdobeRGB / ProPhoto render correctly; then present wide-gamut + HDR to a capable display via an fp16 scRGB swapchain.",
+        "status": "done",
         "priority": "high",
         "dependencies": [],
-        "details": "MOTIVATING BUG: Display-P3 iPhone HEICs render OVERSATURATED because every decoder hands back RGBA8 that the renderer treats as sRGB (no profile handling). Plan (CLAUDE.md 'Color'): in-shader matrix+TRC via moxcms (pure Rust, ALREADY a transitive dep of the image crate); lcms2 behind a cargo feature only for exotic CLUT/CMYK. Steps: (1) add a color-space/ICC field to pb_decode::DecodedImage (default sRGB) and extract per backend — image crate icc_profile() for PNG/JPEG/TIFF/WebP; zune APP2 for JPEG; the HEIF container profile in wic.rs (WIC does NOT color-manage — it returns native P3 pixels, which is exactly why P3 HEICs are oversaturated now); RAW/imagepipe already sRGB; SVG/QOI/BMP assume sRGB. (2) pass it to pb-render and apply matrix+TRC in gpu.rs's WGSL fragment shader. (3) keep consistent with the new ALPHA_BLENDING photo pipeline. Test with a Display-P3 HEIC (e.g. D:\\Media\\Pictures\\2021\\2021-01-02 - Home\\IMG_0357.HEIC); oracle = Windows Photos. Full handoff in .taskmaster/current-status.md. HDR/EXR tone-mapping is a related but separate follow-up.",
-        "testStrategy": "Perceptual/golden-image compare a known P3 source vs a color-managed reference. Unit-test the ICC->matrix/TRC extraction (moxcms) on embedded sRGB/P3/AdobeRGB profiles. Confirm sRGB sources are unchanged (identity transform). No regression in the gated-advance engine or decode-to-fit.",
+        "details": "DONE (2026-06-27), grew well beyond the original sRGB-correctness scope into full wide-gamut + HDR OUTPUT. THREE layers:\n\n(1) IN-SHADER ICC CMS — pb_decode::color reduces a source ICC to a shader-ready ColorTransform { 3x3 source-linear->BT.709 matrix, 7-param moxcms TRC, enabled }, carried on DecodedImage::color (default sRGB passthrough). Extracted per backend: JPEG APP2 (zune icc_profile), PNG/TIFF/WebP (image-crate concrete-decoder icc_profile via load_with_icc), JXL rendered_icc, HEIC/AVIF the ISOBMFF `colr` box parsed directly in wic.rs (the MS HEIF decoder returns 0 WIC color contexts — verified) handling `prof`/`rICC` ICC and `nclx` CICP. moxcms (pure Rust, was already transitive). sRGB / ~2.2-gamma-with-sRGB-primaries detected as passthrough (bit-exact). Fixes the oversaturated Display-P3 iPhone HEICs.\n\n(2) fp16 scRGB RENDER PATH — pb-render renders the scene to an Rgba16Float scRGB-linear intermediate (SCENE_WGSL: source->scene-linear, no gamut clamp), then a present pass -> the surface. SDR 8-bit surface: extended-Reinhard tone-map (per-image peak) + sRGB-encode. HDR fp16 surface: copy scene-linear straight through. Overlay composites into the linear intermediate so one present pass serves both.\n\n(3) WIDE-GAMUT + HDR OUTPUT (pure wgpu, NO native D3D12 interop — a DXGI fp16 flip swapchain is always scRGB) — pb_render::display::primary_hdr() (DXGI GetDesc1) detects HDR-on; if so the surface is Rgba16Float (scRGB). HDR AVIF/HEIC (PQ/HLG) decode to fp16 scene-linear via WIC's 128bppRGBAFloat (WIC does the PQ/HLG decode for us), carried through (PixelFormat::Rgba16F). Brightness baked in the scene pass (ColorUniform.scale): SDR content x sdr_white-scale, HDR content x 1.0 (absolute scRGB). Owner-confirmed on a Display-P3/HDR/1000-nit panel: P3 visibly wider than sRGB; HDR images get real highlight headroom.\n\nDEVIATION from the original 'assume sRGB display' plan: full wide-gamut + HDR output shipped. Open tuning (followups): real SDR-white-level via DisplayConfig (200-nit default); WIC scRGB reference-white assumption; per-output (not just primary) HDR detection. macOS port = wgpu Rgba16Float surface + EDR (deferred). Known still-SDR: Radiance HDR / OpenEXR (image-crate, not WIC); CMYK JPEG.",
+        "testStrategy": "DONE: pb-decode::color unit tests (sRGB passthrough, Display-P3/AdobeRGB matrix+TRC, CICP nclx, LUT-sRGB detection, garbage->passthrough); wic.rs colr-box byte-fixture tests (prof ICC + nclx, HDR-transfer detection); common::finalize_hdr_scrgb fp16 tests; pb-render golden tests (SDR round-trip bit-exact, enabled-transform curve). Verified on the real corpus via the decode example + offscreen PNG render; on-screen wide-gamut/HDR confirmed visually by the owner (the fp16/HDR swapchain is uncapturable by GDI).",
         "subtasks": []
+      },
+      {
+        "id": 12,
+        "title": "Windows: open photos directly (file-arg, drag-drop, picker, recursive-by-default)",
+        "description": "Make PhotoBlaze open photos the way a desktop app should: double-click a photo (a file association launches it with a path), drag photos or folders onto the window, or use the file picker (O). Opening a photo shows its folder flat; opening a folder browses it recursively; Ctrl+R toggles recursion at runtime.",
+        "status": "in-progress",
+        "priority": "high",
+        "dependencies": [],
+        "details": "Milestone A of the Windows-integration track - behavior only, plain exe, no packaging (ADR-018/019). All entry points normalize to pb-core::open: a thin app I/O shim classifies args/drops into LaunchInput { Empty | Files | Directory } (one fs::metadata call), then the PURE pb-core::open::plan -> OpenPlan { Source::Scan{roots,recursive} | Source::Explicit(files), Cursor::First | At(path) }. Policy: single file -> scan its folder FLAT, cursor on that file; many files -> exactly those; a directory -> scan RECURSIVELY, cursor first; nothing -> empty state + picker. The fs scan + extension filter stay in the app (pb-core has no I/O); pb-core resolves the cursor index (open::resolve_cursor + Playlist::with_cursor). Add the rfd crate for the native Open dialog (O = open file(s); Shift+O = open folder). Wire winit WindowEvent::DroppedFile/HoveredFile (currently unhandled). Ctrl+R re-scans with the opposite recursion and re-finds the current photo (reuse Task 9's folder-grouped ordering). Embed an app .ico + version info via a winres/embed-resource build script so the taskbar/Explorer/association icon is real. CURRENT entry point (main.rs) only accepts a directory and read_dir's it, so a double-clicked FILE path fails today - this task fixes that. This seam makes the macOS port delivery-only (Task 15).",
+        "testStrategy": "Pure pb-core::open tests (DONE): plan() per LaunchInput variant; resolve_cursor finds target / falls back to 0; Playlist::with_cursor clamps. App-layer: file-vs-dir classification, folders default to recursive, Ctrl+R round-trip keeps the current photo, drop of file vs folder. Manual: double-click (after Task 13 assoc), drop a photo, drop a folder, bare launch -> picker.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "pb-core::open launch-policy + cursor seam (pure, tested)",
+            "description": "LaunchInput/OpenPlan/Source/Cursor + plan() + resolve_cursor() + Playlist::with_cursor, all unit-tested.",
+            "status": "done",
+            "dependencies": []
+          },
+          {
+            "id": 2,
+            "title": "Classify CLI args / drops into LaunchInput; build playlist via plan()",
+            "description": "App I/O shim: fs::metadata file-vs-dir classification; perform the scan the plan asks for; seat the cursor.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 3,
+            "title": "Drag-and-drop (winit DroppedFile/HoveredFile)",
+            "description": "Handle dropped files/folders through the same plan() path; optional hover affordance.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 4,
+            "title": "File picker (rfd) + bare-launch empty state; bind O / Shift+O",
+            "description": "Native Open dialog for file(s) and folder; show an empty state instead of scanning '.' on a bare launch.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 5,
+            "title": "Recursive-by-default for folders + Ctrl+R runtime toggle",
+            "description": "Folders open recursive; Ctrl+R re-scans the other way and keeps the current photo (reuse Task 9 ordering).",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 6,
+            "title": "App icon + version metadata (winres build script)",
+            "description": "Embed an .ico + product/version info so the taskbar, Explorer, and association icon are real.",
+            "status": "pending",
+            "dependencies": []
+          }
+        ]
+      },
+      {
+        "id": 13,
+        "title": "Windows packaging: signed WiX/MSI installer + file associations + GitHub CI",
+        "description": "Ship an installable, code-signed MSI that registers PhotoBlaze as an 'Open with' candidate for common image types and a folder right-click verb, installs a Start-menu shortcut, and uninstalls cleanly. Built and signed in GitHub Actions.",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [12],
+        "details": "Milestone B (ADR-018). WiX Toolset via cargo-wix produces the MSI from workspace metadata. The .wxs declares: a PhotoBlaze.Image ProgID, per-extension OpenWithProgids for jpg/jpeg/png/gif/webp/bmp/tiff/heic/avif/jxl (NOT RAW/SVG by default), an 'Open with PhotoBlaze' Directory\\shell verb (a cheap registry key - the reason we skip MSIX), a Start-menu shortcut, the app icon, and clean uninstall. Code signing via Azure Trusted Signing (owner has an account; signtool-compatible) on the .exe and .msi removes SmartScreen without MSIX. GitHub Actions: windows runner -> cargo build --release -> cargo wix -> AzureSignTool -> upload the MSI to the tagged Release. NOTE: no app/installer can silently set the Windows default handler (SID-salted UserChoice hash); the MSI only registers a candidate, and an in-app 'Set as default' deep-links ms-settings:defaultapps (Task 14). Privacy (Task 2): installer registry writes are explicitly in-bounds; the running app still writes no viewed-photo data.",
+        "testStrategy": "CI produces a signed MSI artifact. Manual: install -> double-click a .jpg offers PhotoBlaze in 'Open with' and opens at that photo; right-click a folder -> 'Open with PhotoBlaze' browses it recursively; uninstall removes all keys/shortcuts. signtool verify -> a signed binary raises no SmartScreen prompt.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Author the .wxs (ProgID, OpenWithProgids, folder verb, shortcut, icon)",
+            "description": "WiX source for associations + shortcut + icon + clean uninstall.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 2,
+            "title": "Wire cargo-wix to the workspace",
+            "description": "cargo wix builds the MSI from Cargo metadata; versioning stays in Cargo.toml.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 3,
+            "title": "Azure Trusted Signing of exe + msi",
+            "description": "Sign both artifacts (signtool/AzureSignTool) so installs are SmartScreen-free.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 4,
+            "title": "GitHub Actions release workflow (build -> wix -> sign -> upload)",
+            "description": "Tag-triggered windows job that emits one signed MSI per release.",
+            "status": "pending",
+            "dependencies": []
+          }
+        ]
+      },
+      {
+        "id": 14,
+        "title": "Windows polish: 'Set as default' deep-link, single-instance, optional MSIX/Store",
+        "description": "Quality-of-life after the installer lands: an in-app 'Set as default photo viewer' button (deep-links Windows Settings), optional single-instance window reuse, and - only if discovery/monetization ever matters - an MSIX/Store package.",
+        "status": "pending",
+        "priority": "low",
+        "dependencies": [13],
+        "details": "Milestone C (ADR-018). Set-default: a button/hotkey opens ms-settings:defaultapps (or the Default Programs UI), since Windows forbids silent default seizure. Single-instance (optional): forward a newly-opened path to the running window (named pipe / mutex) instead of spawning a second window - nicer for double-click bursts; defer if it complicates the hot path. A modern Win11 inline folder verb would need an IExplorerCommand COM handler - only pursue if the 'Show more options' legacy verb from Task 13 feels inadequate. MSIX/Store: revisit only when charging money - it buys discovery + MS-managed signing/updates but costs the cheap folder verb and adds container friction.",
+        "testStrategy": "Manual: 'Set as default' opens the right Settings page; a second launch with single-instance adopts the new photo in the existing window. MSIX evaluation deferred.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "'Set as default' deep-link button/action",
+            "description": "Open ms-settings:defaultapps so the user can one-click confirm the default.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 2,
+            "title": "Single-instance window reuse (optional)",
+            "description": "Forward a new path to the running instance instead of a second window.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 3,
+            "title": "Evaluate MSIX/Store if/when monetizing (deferred)",
+            "description": "Re-open the MSIX/Store decision only when discovery or paid distribution matters.",
+            "status": "pending",
+            "dependencies": []
+          }
+        ]
+      },
+      {
+        "id": 15,
+        "title": "macOS delivery: .app bundle, Info.plist UTIs, openFiles, notarize + .dmg",
+        "description": "Port PhotoBlaze to macOS at the delivery layer only - the pb-core open-request seam and the wgpu/Metal renderer already carry over. Bundle as a signed, notarized .app/.dmg with file-type associations.",
+        "status": "pending",
+        "priority": "low",
+        "dependencies": [12],
+        "details": "Reuses pb-core::open unchanged (ADR-019): macOS hands files via the openFiles Apple Event (and drag-drop) instead of argv - feed both into the same LaunchInput -> plan path. Bundle: cargo-bundle / cargo-packager builds a .app with Info.plist CFBundleDocumentTypes + UTImportedTypeDeclarations (the image UTIs). HEIC/AVIF would swap WIC for ImageIO behind the decode seam (later). Distribution: Apple Developer ID signing + notarization (Gatekeeper) + a .dmg. wgpu already targets the Metal backend (ADR-002a), so there is no renderer work. Deferred to after Windows is solid (roadmap Phase 8 / v2).",
+        "testStrategy": "Builds a notarized .app/.dmg; double-click a photo opens it via the Apple Event; associations show PhotoBlaze in 'Open With'. Deferred - v2.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": ".app bundle + Info.plist UTIs (cargo-bundle/packager)",
+            "description": "Bundle the binary with document-type/UTI declarations for the image formats.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 2,
+            "title": "openFiles Apple Event -> LaunchInput",
+            "description": "Map the macOS open hand-off (and drag-drop) into the shared pb-core::open path.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 3,
+            "title": "Developer ID signing + notarization + .dmg",
+            "description": "Sign, notarize for Gatekeeper, and package a .dmg for distribution.",
+            "status": "pending",
+            "dependencies": []
+          }
+        ]
       }
     ]
   }

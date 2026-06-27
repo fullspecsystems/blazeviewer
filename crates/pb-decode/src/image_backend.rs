@@ -6,9 +6,13 @@
 //! tuned `zune` backend, and AVIF/HEIC/JXL to their own backends, so this one
 //! only claims the formats it actually decodes well.
 
-use image::ImageFormat;
+use std::io::Cursor;
 
-use crate::{common, DecodeError, DecodeRequest, DecodedImage, FitBox, ImageDecoder};
+use image::{DynamicImage, ImageFormat};
+
+use crate::{
+    common, ColorTransform, DecodeError, DecodeRequest, DecodedImage, FitBox, ImageDecoder,
+};
 
 /// Decoder over the `image` crate's pure-Rust formats.
 #[derive(Debug, Clone, Copy, Default)]
@@ -81,14 +85,53 @@ pub(crate) fn decode_format(
     if !supported(fmt) {
         return Err(DecodeError::Unsupported);
     }
-    let img = image::load_from_memory_with_format(bytes, fmt)
-        .map_err(|e| DecodeError::Corrupt(e.to_string()))?;
+    let (img, icc) = load_with_icc(bytes, fmt)?;
     let rgba = img.to_rgba8();
     let (w, h) = (rgba.width(), rgba.height());
     // Only TIFF and WebP carry EXIF orientation among these; for the rest, skip
     // the parse (read_orientation would just return 1).
     let exif = matches!(fmt, ImageFormat::Tiff | ImageFormat::WebP).then_some(bytes);
-    common::finalize(rgba.into_raw(), w, h, exif, codec_name(fmt), fit, false)
+    let mut decoded = common::finalize(rgba.into_raw(), w, h, exif, codec_name(fmt), fit, false)?;
+    // Wide-gamut PNG/TIFF/WebP carry an ICC profile → in-shader color management.
+    if let Some(icc) = icc {
+        decoded.color = ColorTransform::from_icc(&icc);
+    }
+    Ok(decoded)
+}
+
+/// Decode to a [`DynamicImage`], also returning the embedded ICC profile for the
+/// formats that carry one (PNG `iCCP`, TIFF ICC tag, WebP `ICCP`). The plain
+/// [`image::load_from_memory_with_format`] path drops the profile, so those three
+/// go through their concrete decoders (which expose `icc_profile`) first.
+fn load_with_icc(
+    bytes: &[u8],
+    fmt: ImageFormat,
+) -> Result<(DynamicImage, Option<Vec<u8>>), DecodeError> {
+    use image::ImageDecoder as _;
+    let corrupt = |e: image::ImageError| DecodeError::Corrupt(e.to_string());
+    match fmt {
+        ImageFormat::Png => {
+            let mut d = image::codecs::png::PngDecoder::new(Cursor::new(bytes)).map_err(corrupt)?;
+            let icc = d.icc_profile().ok().flatten();
+            Ok((DynamicImage::from_decoder(d).map_err(corrupt)?, icc))
+        }
+        ImageFormat::Tiff => {
+            let mut d =
+                image::codecs::tiff::TiffDecoder::new(Cursor::new(bytes)).map_err(corrupt)?;
+            let icc = d.icc_profile().ok().flatten();
+            Ok((DynamicImage::from_decoder(d).map_err(corrupt)?, icc))
+        }
+        ImageFormat::WebP => {
+            let mut d =
+                image::codecs::webp::WebPDecoder::new(Cursor::new(bytes)).map_err(corrupt)?;
+            let icc = d.icc_profile().ok().flatten();
+            Ok((DynamicImage::from_decoder(d).map_err(corrupt)?, icc))
+        }
+        _ => {
+            let img = image::load_from_memory_with_format(bytes, fmt).map_err(corrupt)?;
+            Ok((img, None))
+        }
+    }
 }
 
 /// Decode a Targa file (routed by extension, since TGA carries no magic number).

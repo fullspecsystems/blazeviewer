@@ -50,13 +50,15 @@ impl UploadStrategy for StagingUpload {
         w: u32,
         h: u32,
     ) {
+        // Bytes per pixel from the texture format (4 for Rgba8*, 8 for Rgba16Float).
+        let bpp = tex.format().block_copy_size(None).unwrap_or(4);
         // Keep each staging buffer within the device's max buffer size by copying
         // the image in horizontal row-bands. Normal (fit-sized) images are a
         // single band; only huge Original-mode/panorama images split.
-        let padded = padded_row_bytes(w);
+        let padded = padded_row_bytes(w, bpp);
         let max_rows = (device.limits().max_buffer_size / padded.max(1) as u64).max(1);
         let rows_per_band = max_rows.min(h.max(1) as u64) as u32;
-        copy_via_staging(device, queue, tex, rgba, w, h, rows_per_band);
+        copy_via_staging(device, queue, tex, rgba, w, h, bpp, rows_per_band);
     }
 
     fn name(&self) -> &'static str {
@@ -64,10 +66,10 @@ impl UploadStrategy for StagingUpload {
     }
 }
 
-/// The 256-byte-aligned row stride for a `w`-pixel RGBA8 row, as
+/// The 256-byte-aligned row stride for a `w`-pixel row of `bpp` bytes/pixel, as
 /// `copy_buffer_to_texture` requires.
-fn padded_row_bytes(w: u32) -> u32 {
-    let unpadded = w * 4;
+fn padded_row_bytes(w: u32, bpp: u32) -> u32 {
+    let unpadded = w * bpp;
     let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
     unpadded.div_ceil(align) * align
 }
@@ -77,6 +79,7 @@ fn padded_row_bytes(w: u32) -> u32 {
 /// `copy_buffer_to_texture` at the band's `y` origin. One encoder, one submit.
 /// Banding bounds each staging buffer by the device's buffer-size limit so an
 /// arbitrarily tall image uploads without exceeding it.
+#[allow(clippy::too_many_arguments)]
 fn copy_via_staging(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -84,10 +87,11 @@ fn copy_via_staging(
     rgba: &[u8],
     w: u32,
     h: u32,
+    bpp: u32,
     rows_per_band: u32,
 ) {
-    let unpadded = w as usize * 4;
-    let padded = padded_row_bytes(w);
+    let unpadded = w as usize * bpp as usize;
+    let padded = padded_row_bytes(w, bpp);
     let rows_per_band = rows_per_band.max(1);
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("staging-copy"),
@@ -205,7 +209,7 @@ mod tests {
             view_formats: &[],
         });
 
-        copy_via_staging(&device, &queue, &tex, &src, w, h, rows_per_band);
+        copy_via_staging(&device, &queue, &tex, &src, w, h, 4, rows_per_band);
 
         // Read the texture back (padded rows) and reconstruct it tightly packed.
         let unpadded = w * 4;

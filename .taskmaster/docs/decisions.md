@@ -117,6 +117,42 @@ budget) — pure wgpu. v1 uploads through a staging-buffer ring behind an
 `UploadStrategy` seam. Still to measure: a faithful end-to-end run (per-frame CPU
 write into mapped staging → copy → draw → present while holding nav at 120 Hz).
 
+### ADR-018 — Windows desktop integration & distribution: a signed WiX/MSI, not MSIX
+*Decided 2026-06-27.* PhotoBlaze ships as a **code-signed WiX → MSI**, built and
+signed (**Azure Trusted Signing**, which the owner has) in **GitHub Actions** and
+attached to Releases. **MSIX/Store is deferred until there is a reason to charge
+money** — its only real draw here is Store *discovery*, which we don't need yet,
+and it actively costs us: a folder right-click verb is a one-line registry key in
+an MSI but requires a packaged `IExplorerCommand` COM handler under MSIX, plus
+container/iteration friction. Signing — not packaging — is what removes the
+SmartScreen prompt, so a classic installer is signed and warning-free all the same.
+- **Associations:** the MSI registers PhotoBlaze as a *candidate* handler (a
+  `PhotoBlaze.Image` ProgID + per-extension `OpenWithProgids` for the common raster
+  set: jpg/jpeg/png/gif/webp/bmp/tiff/heic/avif/jxl — **not** RAW/SVG by default)
+  plus an "Open with PhotoBlaze" `Directory\shell` verb, a Start-menu shortcut, the
+  app icon, and clean uninstall. **No app or installer can silently seize the
+  Windows default** (the SID-salted `UserChoice` hash is OS-protected); an in-app
+  "Set as default" deep-links `ms-settings:defaultapps`.
+- **Open behavior (owner):** a **photo** opens its folder *flat*; a **folder**
+  opens *recursively*; **Ctrl+R** toggles recursion at runtime; **O** = file
+  picker. Moving the recursion toggle to Ctrl+R frees **R/Shift+R** for rotate,
+  resolving the Task-1 ↔ Task-9 key conflict.
+- **Privacy boundary (owner, re-scoping Task 2):** install/registry/associations
+  are explicitly fine — the guarantee is "no persistent record of *viewed photos or
+  their metadata*," not "the app leaves no footprint at all."
+
+### ADR-019 — Launch handed to a pure open-request seam (`pb-core::open`)
+*Decided 2026-06-27.* Every entry point — CLI path, double-click via association,
+drag-and-drop, file picker, and later the macOS `openFiles` Apple Event — is
+normalized by a thin app-layer I/O shim into a `LaunchInput { Empty | Files |
+Directory }` (the one step that reads the disk: an `fs::metadata` file-or-folder
+check). A **pure** `pb-core::open::plan` then yields an `OpenPlan` (`Source::Scan {
+roots, recursive }` or `Source::Explicit(files)`, plus a `Cursor`). The filesystem
+scan + extension filter stay in the app (`pb-core` keeps its no-I/O rule); ordering
+and `resolve_cursor` are pure and unit-tested. This is the seam that makes the
+**macOS port a delivery-layer change only** (a different shim builds the same
+`LaunchInput`); it also keeps Task-9's recursive ordering reusable by folder opens.
+
 ---
 
 ## Owner decisions (resolved 2026-06-26)

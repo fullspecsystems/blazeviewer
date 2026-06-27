@@ -1830,12 +1830,15 @@ version = "0.1.0"
 name = "pb-decode"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "fast_image_resize",
  "flate2",
+ "half",
  "image 0.25.10",
  "imagepipe",
  "jxl-oxide",
  "kamadak-exif",
+ "moxcms",
  "rawloader",
  "resvg",
  "windows 0.62.2",
@@ -1849,6 +1852,7 @@ dependencies = [
  "bytemuck",
  "pollster",
  "wgpu",
+ "windows 0.62.2",
 ]
 
 [[package]]
