@@ -93,10 +93,10 @@
         "id": 3,
         "title": "Zoom in/out (+ / -), including below fit",
         "description": "+ and - zoom the current photo about its center. Zooming out can go smaller than the screen bounds (under-fit), not just larger.",
-        "status": "pending",
+        "status": "done",
         "priority": "medium",
         "dependencies": [4],
-        "details": "Add a zoom scalar (and pan offset) to the ViewTransform (Task 4). + increases, - decreases; the zoom factor may go below 1.0 (smaller than the fit size) and above 1.0. Clamp to sane bounds (e.g. 0.05x-32x). Zoom is a transform on the quad - perf-neutral. When zoomed past the decoded fit resolution, optionally request a higher-resolution Tier-2 decode for crispness (later). Zoom is per-photo and non-persistent; reset on photo change. Register actions zoom_in / zoom_out / zoom_reset (Task 8).",
+        "details": "DONE (zoom + pan). Zoom scalar (clamped 0.05x-32x) + pan offset on ViewTransform; perf-neutral GPU transforms, reset per photo. =/+ and numpad+ zoom in, -/numpad- out; HOLD-TO-ZOOM with a time-based exponential acceleration ramp (gentle start for fine tuning, faster the longer held) applied in about_to_wait. PAN added in the same change (owner request): arrow keys pan around the photo, same accel ramp, clamped to image bounds (max_pan in pb-render::view); arrows no longer advance (space=next, backspace=prev). Tier-2 re-decode when zoomed past native is deferred (GPU-scaled for now). Zoom-about-pan-focus (vs center) is a noted refinement.",
         "testStrategy": "Pure tests on zoom math: factor stepping, clamping at bounds, center-preserving transform. Property: N zoom_in steps then N zoom_out steps returns to baseline within epsilon. Golden-image tests at representative zoom levels (incl. under-fit).",
         "subtasks": [
           {

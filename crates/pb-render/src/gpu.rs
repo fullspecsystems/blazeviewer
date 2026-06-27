@@ -517,6 +517,11 @@ impl WgpuRenderer {
         self.config.present_mode
     }
 
+    /// The currently displayed image's texture dimensions (for pan-clamp math).
+    pub fn image_size(&self) -> (u32, u32) {
+        (self.img_w, self.img_h)
+    }
+
     /// Process completed GPU work and free dropped resources (the previous
     /// image's texture). Call once per frame so rapid navigation doesn't let GPU
     /// memory pile up. (Phase 3 replaces per-image textures with a reused ring.)

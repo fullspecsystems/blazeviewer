@@ -8,8 +8,9 @@
 //! every photo is shown in order (none skipped); a cache miss holds the previous
 //! frame until its decode lands, then shows it — fly speed is min(refresh, decode).
 //!
-//!   space / →   next photo
-//!   ⌫ / ←       previous photo
+//!   space       next photo  ·  ⌫  previous photo
+//!   ← ↑ ↓ →     pan around the photo (hold; accelerates)
+//!   = / -       zoom in / out (hold; accelerates; numpad +/- too)
 //!   0 / 8 / 9   scaling mode: original 1:1 / fit / fill (all prefetched)
 //!   r / Shift+R rotate 90° clockwise / counter-clockwise (per-image, RAM-only)
 //!   i           toggle info panel (path · resolution · codec)
@@ -35,7 +36,9 @@ use winit::window::{Fullscreen, Window, WindowId};
 
 use pb_core::{prefetch_targets, Playlist, ResidentRing};
 use pb_decode::{decode_image_file, DecodedImage, FitBox};
-use pb_render::{test_pattern, Renderer, Rotation, ScaleMode, ViewTransform, WgpuRenderer};
+use pb_render::{
+    test_pattern, Renderer, Rotation, ScaleMode, ViewTransform, WgpuRenderer, MAX_ZOOM, MIN_ZOOM,
+};
 
 mod decode_pool;
 mod hud;
@@ -52,6 +55,19 @@ const POOL_BUDGET_BYTES: usize = 512 * 1024 * 1024;
 /// Max slot uploads performed per `about_to_wait` tick, so a burst of finished
 /// decodes can't blow the frame budget.
 const UPLOADS_PER_TICK: usize = 2;
+
+/// Hold-to-zoom curve: the e-folding zoom rate (per second) ramps from a gentle
+/// start (fine tuning) to a fast max over `ZOOM_RAMP_SECS`. Time-based so it's
+/// frame-rate independent.
+const ZOOM_MIN_RATE: f32 = 0.5;
+const ZOOM_MAX_RATE: f32 = 2.5;
+const ZOOM_RAMP_SECS: f32 = 0.7;
+
+/// Hold-to-pan curve: pan speed (px/sec) ramps from a gentle start to a fast max
+/// over `PAN_RAMP_SECS`. Time-based, same shape as zoom (per the owner's note).
+const PAN_MIN_SPEED: f32 = 450.0;
+const PAN_MAX_SPEED: f32 = 3200.0;
+const PAN_RAMP_SECS: f32 = 0.7;
 
 /// Ring capacity from the per-slot byte size and the VRAM budget. Full-res
 /// (Original) slots are several times bigger than fit slots, so the prefetch
@@ -173,6 +189,12 @@ struct App {
     rotations: HashMap<usize, Rotation>,
     /// Whether a Shift key is currently held (for `Shift+R`, `Shift+I`).
     shift: bool,
+    /// Hold timers for the zoom/pan acceleration ramps (start = when the hold
+    /// began; last = previous step, for time-based deltas).
+    zoom_started: Option<Instant>,
+    zoom_last: Option<Instant>,
+    pan_started: Option<Instant>,
+    pan_last: Option<Instant>,
 }
 
 impl App {
@@ -215,6 +237,10 @@ impl App {
             pending_uploads: Vec::new(),
             rotations: HashMap::new(),
             shift: false,
+            zoom_started: None,
+            zoom_last: None,
+            pan_started: None,
+            pan_last: None,
         }
     }
 
@@ -616,15 +642,108 @@ impl App {
     }
 
     /// Which way we're currently paging, from held keys (both/neither = idle).
+    /// Arrows are pan now, so only space/backspace advance.
     fn held_direction(&self) -> Option<bool> {
-        let fwd = self.held.contains(&KeyCode::ArrowRight) || self.held.contains(&KeyCode::Space);
-        let bwd =
-            self.held.contains(&KeyCode::ArrowLeft) || self.held.contains(&KeyCode::Backspace);
+        let fwd = self.held.contains(&KeyCode::Space);
+        let bwd = self.held.contains(&KeyCode::Backspace);
         match (fwd, bwd) {
             (true, false) => Some(true),
             (false, true) => Some(false),
             _ => None,
         }
+    }
+
+    /// Zoom direction from held keys: `+1` in (`=`/`+`/numpad+), `-1` out
+    /// (`-`/numpad-), `None` if neither or both.
+    fn zoom_held(&self) -> Option<f32> {
+        let zin = self.held.contains(&KeyCode::Equal) || self.held.contains(&KeyCode::NumpadAdd);
+        let zout =
+            self.held.contains(&KeyCode::Minus) || self.held.contains(&KeyCode::NumpadSubtract);
+        match (zin, zout) {
+            (true, false) => Some(1.0),
+            (false, true) => Some(-1.0),
+            _ => None,
+        }
+    }
+
+    /// Pan velocity direction from held arrows (image-space; positive pan reveals
+    /// the right/bottom). Diagonals combine. `(0, 0)` if no arrow is held.
+    fn pan_held(&self) -> (f32, f32) {
+        let mut x = 0.0;
+        let mut y = 0.0;
+        if self.held.contains(&KeyCode::ArrowLeft) {
+            x += 1.0;
+        }
+        if self.held.contains(&KeyCode::ArrowRight) {
+            x -= 1.0;
+        }
+        if self.held.contains(&KeyCode::ArrowUp) {
+            y += 1.0;
+        }
+        if self.held.contains(&KeyCode::ArrowDown) {
+            y -= 1.0;
+        }
+        (x, y)
+    }
+
+    /// The current image texture + screen dimensions for pan-clamp math.
+    fn screen_and_image(&self) -> Option<(u32, u32, u32, u32)> {
+        let fit = self.fit?;
+        let (iw, ih) = self.active.as_ref()?.renderer.image_size();
+        Some((iw, ih, fit.max_width, fit.max_height))
+    }
+
+    /// Apply continuous zoom/pan while their keys are held, with a time-based
+    /// acceleration ramp (gentle start for fine tuning, faster the longer held).
+    /// Returns whether anything changed (so the loop keeps polling + redrawing).
+    fn apply_view_holds(&mut self, now: Instant, event_loop: &ActiveEventLoop) -> bool {
+        let mut changed = false;
+
+        match self.zoom_held() {
+            Some(dir) => {
+                let start = *self.zoom_started.get_or_insert(now);
+                let last = self.zoom_last.replace(now).unwrap_or(start);
+                let dt = (now - last).as_secs_f32().min(0.1);
+                let t = (now - start).as_secs_f32();
+                let rate =
+                    ZOOM_MIN_RATE + (ZOOM_MAX_RATE - ZOOM_MIN_RATE) * (t / ZOOM_RAMP_SECS).min(1.0);
+                // Exponential (multiplicative) zoom about the screen center.
+                self.view.zoom =
+                    (self.view.zoom * (rate * dir * dt).exp()).clamp(MIN_ZOOM, MAX_ZOOM);
+                changed = true;
+            }
+            None => {
+                self.zoom_started = None;
+                self.zoom_last = None;
+            }
+        }
+
+        let (px, py) = self.pan_held();
+        if px != 0.0 || py != 0.0 {
+            let start = *self.pan_started.get_or_insert(now);
+            let last = self.pan_last.replace(now).unwrap_or(start);
+            let dt = (now - last).as_secs_f32().min(0.1);
+            let t = (now - start).as_secs_f32();
+            let speed =
+                PAN_MIN_SPEED + (PAN_MAX_SPEED - PAN_MIN_SPEED) * (t / PAN_RAMP_SECS).min(1.0);
+            self.view.pan[0] += px * speed * dt;
+            self.view.pan[1] += py * speed * dt;
+            if let Some((iw, ih, sw, sh)) = self.screen_and_image() {
+                let mp = self.view.max_pan(iw, ih, sw, sh);
+                self.view.pan[0] = self.view.pan[0].clamp(-mp[0], mp[0]);
+                self.view.pan[1] = self.view.pan[1].clamp(-mp[1], mp[1]);
+            }
+            changed = true;
+        } else {
+            self.pan_started = None;
+            self.pan_last = None;
+        }
+
+        if changed {
+            self.push_view();
+            self.draw(event_loop);
+        }
+        changed
     }
 
     /// Whether prefetch/upload work is still outstanding (keep polling if so).
@@ -784,15 +903,27 @@ impl ApplicationHandler for App {
                         // can't queue up and delay the release. Holding is driven
                         // by `about_to_wait`.
                         match code {
-                            KeyCode::Space | KeyCode::ArrowRight => {
+                            KeyCode::Space => {
                                 self.held.insert(code);
                                 self.hold_start = Some(Instant::now());
                                 self.advance(true, event_loop);
                             }
-                            KeyCode::Backspace | KeyCode::ArrowLeft => {
+                            KeyCode::Backspace => {
                                 self.held.insert(code);
                                 self.hold_start = Some(Instant::now());
                                 self.advance(false, event_loop);
+                            }
+                            // Pan (arrows) and zoom (=/- and numpad) are continuous
+                            // while held — tracked here, applied in `about_to_wait`.
+                            KeyCode::ArrowLeft
+                            | KeyCode::ArrowRight
+                            | KeyCode::ArrowUp
+                            | KeyCode::ArrowDown
+                            | KeyCode::Equal
+                            | KeyCode::Minus
+                            | KeyCode::NumpadAdd
+                            | KeyCode::NumpadSubtract => {
+                                self.held.insert(code);
                             }
                             // Scaling mode: 0 original, 8 fit, 9 fill.
                             KeyCode::Digit0 => self.set_scale_mode(ScaleMode::Original, event_loop),
@@ -823,6 +954,10 @@ impl ApplicationHandler for App {
                 self.held.clear();
                 self.hold_start = None;
                 self.shift = false;
+                self.zoom_started = None;
+                self.zoom_last = None;
+                self.pan_started = None;
+                self.pan_last = None;
             }
 
             _ => {}
@@ -830,61 +965,58 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
         // 1. Absorb finished decodes (uploads; presents the target if it arrived).
         self.drain_results(event_loop);
 
-        // 2. Gated self-paced advance.
-        match self.held_direction() {
-            Some(forward) => {
-                let now = Instant::now();
-                // The initial tap delay gates *repeat*, not draining/presenting:
-                // keep polling so a first-press miss shows the moment it decodes
-                // (the earlier `return` here added up to the full delay of latency).
-                // (plain `match`, not `map_or`/`is_none_or`: the latter is Rust
-                // 1.82+ and this workspace's MSRV is 1.80.)
-                let past_delay = match self.hold_start {
-                    Some(t) => now >= t + self.initial_delay,
-                    None => true,
-                };
-                // Advance only when caught up (target shown) AND a frame elapsed —
-                // so every photo is shown and a miss simply holds.
-                let caught_up = self.displayed_item == self.target_item;
-                let due = match self.last_present {
-                    Some(t) => now >= t + self.frame_interval,
-                    None => true,
-                };
-                if past_delay && caught_up && due {
-                    self.advance(forward, event_loop);
-                } else if !caught_up {
-                    self.try_present_target(event_loop);
-                }
-                event_loop.set_control_flow(ControlFlow::WaitUntil(now + self.frame_interval));
+        // 2. Continuous zoom/pan while their keys are held (accelerating ramp).
+        let transforming = self.apply_view_holds(now, event_loop);
+
+        // 3. Gated self-paced advance while a nav key (space/backspace) is held.
+        let nav = self.held_direction();
+        if let Some(forward) = nav {
+            // The initial tap delay gates *repeat*, not draining/presenting, so a
+            // first-press miss shows the moment it decodes. (plain `match`, not
+            // `is_none_or`: that's 1.82+ vs the 1.80 MSRV.)
+            let past_delay = match self.hold_start {
+                Some(t) => now >= t + self.initial_delay,
+                None => true,
+            };
+            // Advance only when caught up (target shown) AND a frame elapsed, so
+            // every photo is shown and a miss simply holds.
+            let caught_up = self.displayed_item == self.target_item;
+            let due = match self.last_present {
+                Some(t) => now >= t + self.frame_interval,
+                None => true,
+            };
+            if past_delay && caught_up && due {
+                self.advance(forward, event_loop);
+            } else if !caught_up {
+                self.try_present_target(event_loop);
             }
-            None => {
-                self.hold_start = None;
-                // Show the info panel once we've been idle past the short delay.
-                if self.info_visible && !self.overlay_shown && self.current.is_some() {
-                    let now = Instant::now();
-                    let due = self
-                        .last_present
-                        .map(|t| t + self.idle_delay)
-                        .unwrap_or(now);
-                    if now < due {
-                        event_loop.set_control_flow(ControlFlow::WaitUntil(due));
-                        return;
-                    }
-                    self.show_overlay(event_loop);
-                }
-                // Keep polling while prefetch is still filling or a target isn't
-                // shown yet; otherwise go fully idle until the next event.
-                if self.work_pending() {
-                    event_loop.set_control_flow(ControlFlow::WaitUntil(
-                        Instant::now() + self.frame_interval,
-                    ));
-                } else {
-                    event_loop.set_control_flow(ControlFlow::Wait);
-                }
+        } else {
+            self.hold_start = None;
+        }
+
+        // 4. Show the info panel once idle (not interacting) past the short delay.
+        let panel_pending = self.info_visible && !self.overlay_shown && self.current.is_some();
+        if nav.is_none() && !transforming && panel_pending {
+            let due = match self.last_present {
+                Some(t) => t + self.idle_delay,
+                None => now,
+            };
+            if now >= due {
+                self.show_overlay(event_loop);
             }
+        }
+
+        // 5. Poll at the frame rate while interacting or work is outstanding;
+        //    otherwise go fully idle until the next event.
+        let panel_pending = self.info_visible && !self.overlay_shown && self.current.is_some();
+        if nav.is_some() || transforming || self.work_pending() || panel_pending {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(now + self.frame_interval));
+        } else {
+            event_loop.set_control_flow(ControlFlow::Wait);
         }
     }
 }

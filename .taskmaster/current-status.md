@@ -10,10 +10,13 @@ rotation/zoom/pan are perf-neutral GPU transforms (no re-decode). Keymap is bein
 reworked (arrows will become pan; `space`/`backspace` stay next/prev; `0/8/9`
 modes; `r`/`Shift+R` rotate; `=`/`-` zoom; `Shift+I` full EXIF).
 
-- ✅ **Scaling modes 0/8/9** (original / fit / **fill**) — tasks.json #4. Mode is
-  global/sticky; Fill & Original decode full-res (byte-budgeted ring bounds VRAM).
-- ⏳ Rotation (`r`/`Shift+R`), smooth zoom (`=`/`-` hold), pan (arrows), full-EXIF
-  panel (`Shift+I`) — next.
+- ✅ **Scaling modes 0/8/9** (original / fit / **fill**) — tasks.json #4. Global/sticky;
+  Fill & Original decode full-res (byte-budgeted ring bounds VRAM).
+- ✅ **Rotation** `r`/`Shift+R` (cw/ccw), per-image RAM-only — tasks.json #1.
+- ✅ **Smooth zoom** `=`/`-` + **pan** arrows — tasks.json #3. Hold-to-act with a
+  time-based exponential acceleration ramp (gentle start → fast). Arrows are pan
+  now (so `space`=next, `⌫`=prev); pan clamped to image bounds.
+- ⏳ **Full-EXIF "nerd" panel** `Shift+I` — next (tasks.json #5).
 
 See the keymap in `crates/pb-app/src/main.rs` (module doc). Recursive `R` dropped
 (recursion comes from invocation, not a hotkey).
