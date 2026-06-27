@@ -45,8 +45,7 @@ struct Vertex {
     uv: [f32; 2],
 }
 
-const ATTRS: [wgpu::VertexAttribute; 2] =
-    wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2];
+const ATTRS: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2];
 
 const INDICES: [u16; 6] = [0, 1, 2, 0, 2, 3];
 
@@ -80,10 +79,22 @@ fn quad_vertices(
     let y_top = 1.0 - (oy / sh) * 2.0;
     let y_bot = 1.0 - ((oy + h) / sh) * 2.0;
     [
-        Vertex { pos: [x0, y_top], uv: [0.0, 0.0] },
-        Vertex { pos: [x1, y_top], uv: [1.0, 0.0] },
-        Vertex { pos: [x1, y_bot], uv: [1.0, 1.0] },
-        Vertex { pos: [x0, y_bot], uv: [0.0, 1.0] },
+        Vertex {
+            pos: [x0, y_top],
+            uv: [0.0, 0.0],
+        },
+        Vertex {
+            pos: [x1, y_top],
+            uv: [1.0, 0.0],
+        },
+        Vertex {
+            pos: [x1, y_bot],
+            uv: [1.0, 1.0],
+        },
+        Vertex {
+            pos: [x0, y_bot],
+            uv: [0.0, 1.0],
+        },
     ]
 }
 
@@ -99,7 +110,11 @@ fn clear_color(rgba: [u8; 4]) -> wgpu::Color {
 fn build_pipelines(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
-) -> (wgpu::RenderPipeline, wgpu::RenderPipeline, wgpu::BindGroupLayout) {
+) -> (
+    wgpu::RenderPipeline,
+    wgpu::RenderPipeline,
+    wgpu::BindGroupLayout,
+) {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("pb-shader"),
         source: wgpu::ShaderSource::Wgsl(SHADER.into()),
@@ -188,10 +203,22 @@ fn overlay_quad_vertices(
     let y_top = 1.0 - (y0 / sh) * 2.0;
     let y_bot = 1.0 - (y1 / sh) * 2.0;
     [
-        Vertex { pos: [x0n, y_top], uv: [0.0, 0.0] },
-        Vertex { pos: [x1n, y_top], uv: [1.0, 0.0] },
-        Vertex { pos: [x1n, y_bot], uv: [1.0, 1.0] },
-        Vertex { pos: [x0n, y_bot], uv: [0.0, 1.0] },
+        Vertex {
+            pos: [x0n, y_top],
+            uv: [0.0, 0.0],
+        },
+        Vertex {
+            pos: [x1n, y_top],
+            uv: [1.0, 0.0],
+        },
+        Vertex {
+            pos: [x1n, y_bot],
+            uv: [1.0, 1.0],
+        },
+        Vertex {
+            pos: [x0n, y_bot],
+            uv: [0.0, 1.0],
+        },
     ]
 }
 
@@ -462,7 +489,14 @@ impl WgpuRenderer {
         let scale_mode = ScaleMode::Fit;
         let (pipeline, overlay_pipeline, bgl) = build_pipelines(&device, format);
         let bind_group = upload_image(&device, &queue, &bgl, image, img_w, img_h);
-        let vbuf = vertex_buffer(&device, scale_mode, img_w, img_h, config.width, config.height);
+        let vbuf = vertex_buffer(
+            &device,
+            scale_mode,
+            img_w,
+            img_h,
+            config.width,
+            config.height,
+        );
         let ibuf = index_buffer(&device);
 
         Self {
@@ -569,18 +603,26 @@ impl Renderer for WgpuRenderer {
         self.overlay = match panel {
             Some((rgba, w, h)) => {
                 let bind_group = upload_image(&self.device, &self.queue, &self.bgl, rgba, w, h);
-                let vbuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("overlay-vbuf"),
-                    contents: bytemuck::cast_slice(&overlay_quad_vertices(
-                        w,
-                        h,
-                        self.config.width,
-                        self.config.height,
-                        margin,
-                    )),
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                });
-                Some(OverlayDraw { bind_group, vbuf, panel_w: w, panel_h: h, margin })
+                let vbuf = self
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("overlay-vbuf"),
+                        contents: bytemuck::cast_slice(&overlay_quad_vertices(
+                            w,
+                            h,
+                            self.config.width,
+                            self.config.height,
+                            margin,
+                        )),
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    });
+                Some(OverlayDraw {
+                    bind_group,
+                    vbuf,
+                    panel_w: w,
+                    panel_h: h,
+                    margin,
+                })
             }
             None => None,
         };
@@ -601,7 +643,9 @@ impl Renderer for WgpuRenderer {
             .create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("present") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("present"),
+            });
         draw(
             &mut encoder,
             &view,
@@ -706,8 +750,9 @@ async fn render_offscreen_async(
         mapped_at_creation: false,
     });
 
-    let mut encoder =
-        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("offscreen") });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("offscreen"),
+    });
     draw(&mut encoder, &view, &pipeline, &bind_group, &vbuf, &ibuf);
     encoder.copy_texture_to_buffer(
         wgpu::ImageCopyTexture {

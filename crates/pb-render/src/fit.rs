@@ -24,7 +24,12 @@ pub fn fit_rect(
     allow_upscale: bool,
 ) -> FitRect {
     if img_w == 0 || img_h == 0 || screen_w == 0 || screen_h == 0 {
-        return FitRect { width: 0, height: 0, offset_x: 0, offset_y: 0 };
+        return FitRect {
+            width: 0,
+            height: 0,
+            offset_x: 0,
+            offset_y: 0,
+        };
     }
 
     // Scale to fit both dimensions (object-fit: contain).
@@ -40,7 +45,12 @@ pub fn fit_rect(
     let offset_x = ((screen_w as i64 - w as i64) / 2) as i32;
     let offset_y = ((screen_h as i64 - h as i64) / 2) as i32;
 
-    FitRect { width: w, height: h, offset_x, offset_y }
+    FitRect {
+        width: w,
+        height: h,
+        offset_x,
+        offset_y,
+    }
 }
 
 #[cfg(test)]

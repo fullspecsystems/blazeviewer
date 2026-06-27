@@ -110,11 +110,15 @@ fn candidate_font_paths() -> Vec<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         v.push(PathBuf::from("/Library/Fonts/Arial.ttf"));
-        v.push(PathBuf::from("/System/Library/Fonts/Supplemental/Arial.ttf"));
+        v.push(PathBuf::from(
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+        ));
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        v.push(PathBuf::from("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"));
+        v.push(PathBuf::from(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ));
         v.push(PathBuf::from("/usr/share/fonts/TTF/DejaVuSans.ttf"));
     }
     v

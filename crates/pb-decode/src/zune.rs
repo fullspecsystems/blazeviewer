@@ -144,7 +144,8 @@ fn downscale_to_fit(
 /// Convenience: read a file from disk and decode it to an upright RGBA image,
 /// downscaled to fit `fit` (the display size) when provided.
 pub fn decode_image_file(path: &Path, fit: Option<FitBox>) -> Result<DecodedImage, DecodeError> {
-    let bytes = std::fs::read(path).map_err(|e| DecodeError::Corrupt(format!("read error: {e}")))?;
+    let bytes =
+        std::fs::read(path).map_err(|e| DecodeError::Corrupt(format!("read error: {e}")))?;
     let req = DecodeRequest {
         bytes: &bytes,
         fit,
@@ -181,8 +182,16 @@ mod tests {
     #[test]
     fn downscale_to_fit_leaves_fitting_images_untouched() {
         let pixels = vec![1u8; 8 * 8 * 4];
-        let (out, w, h) =
-            downscale_to_fit(pixels, 8, 8, FitBox { max_width: 100, max_height: 100 }).unwrap();
+        let (out, w, h) = downscale_to_fit(
+            pixels,
+            8,
+            8,
+            FitBox {
+                max_width: 100,
+                max_height: 100,
+            },
+        )
+        .unwrap();
         assert_eq!((w, h), (8, 8));
         assert_eq!(out.len(), 8 * 8 * 4);
     }
@@ -197,8 +206,16 @@ mod tests {
             .cycle()
             .take((w * h * 4) as usize)
             .collect();
-        let (out, ow, oh) =
-            downscale_to_fit(pixels, w, h, FitBox { max_width: 50, max_height: 50 }).unwrap();
+        let (out, ow, oh) = downscale_to_fit(
+            pixels,
+            w,
+            h,
+            FitBox {
+                max_width: 50,
+                max_height: 50,
+            },
+        )
+        .unwrap();
         assert_eq!((ow, oh), (50, 50));
         assert_eq!(out.len(), (50 * 50 * 4) as usize);
         // A solid color survives the resize (interior is exact; allow tiny tol).

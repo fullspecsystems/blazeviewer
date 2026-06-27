@@ -40,7 +40,9 @@ use pb_decode::{decode_image_file, DecodedImage, FitBox};
 use pb_render::{test_pattern, Renderer, ScaleMode, WgpuRenderer};
 
 mod hud;
+mod metrics;
 use hud::Hud;
+use metrics::StageTimes;
 
 /// One photo's info, for the corner overlay panel.
 struct PhotoMeta {
@@ -89,10 +91,12 @@ struct App {
     scale_factor: f32,
     /// Idle time before the panel appears once you stop navigating.
     idle_delay: Duration,
+    /// Per-stage timing (decode/render/...); disabled unless `--metrics` is passed.
+    metrics: StageTimes,
 }
 
 impl App {
-    fn new(windowed: bool, root: PathBuf, paths: Vec<PathBuf>) -> Self {
+    fn new(windowed: bool, root: PathBuf, paths: Vec<PathBuf>, metrics: StageTimes) -> Self {
         let playlist = Playlist::new(paths.len(), 0);
         Self {
             windowed,
@@ -113,6 +117,7 @@ impl App {
             current: None,
             scale_factor: 1.0,
             idle_delay: Duration::from_millis(50),
+            metrics,
         }
     }
 
@@ -225,7 +230,10 @@ impl App {
         let Some(idx) = self.playlist.current() else {
             return;
         };
-        match decode_image_file(&self.paths[idx], self.decode_fit()) {
+        let t0 = Instant::now();
+        let decoded = decode_image_file(&self.paths[idx], self.decode_fit());
+        self.metrics.record("decode", t0.elapsed());
+        match decoded {
             Ok(img) => {
                 self.current = Some(self.meta_for(idx, &img));
                 let title = title_for(&self.paths[idx], idx, self.paths.len());
@@ -244,12 +252,19 @@ impl App {
 
     /// Render one frame and reclaim the previous image's GPU texture.
     fn draw(&mut self, event_loop: &ActiveEventLoop) {
-        if let Some(a) = self.active.as_mut() {
+        let t0 = Instant::now();
+        let drew = if let Some(a) = self.active.as_mut() {
             if let Err(e) = a.renderer.render() {
                 eprintln!("fatal render error: {e:?}");
                 event_loop.exit();
             }
             a.renderer.poll();
+            true
+        } else {
+            false
+        };
+        if drew {
+            self.metrics.record("render", t0.elapsed());
         }
     }
 
@@ -268,8 +283,7 @@ impl App {
 
     /// Which way we're currently paging, from held keys (both/neither = idle).
     fn held_direction(&self) -> Option<bool> {
-        let fwd =
-            self.held.contains(&KeyCode::ArrowRight) || self.held.contains(&KeyCode::Space);
+        let fwd = self.held.contains(&KeyCode::ArrowRight) || self.held.contains(&KeyCode::Space);
         let bwd =
             self.held.contains(&KeyCode::ArrowLeft) || self.held.contains(&KeyCode::Backspace);
         match (fwd, bwd) {
@@ -343,6 +357,17 @@ impl ApplicationHandler for App {
                 max_height: now.height.max(1),
             });
             renderer.resize(now.width, now.height);
+            // The real window size differs from what we decoded for — re-decode
+            // the first image at the corrected fit so the first frame isn't soft.
+            if let Some(idx) = self.playlist.current() {
+                let t0 = Instant::now();
+                let decoded = decode_image_file(&self.paths[idx], self.decode_fit());
+                self.metrics.record("decode", t0.elapsed());
+                if let Ok(img) = decoded {
+                    self.current = Some(self.meta_for(idx, &img));
+                    renderer.set_image(&img.pixels, img.width, img.height);
+                }
+            }
         }
 
         // Present the first frame WHILE HIDDEN, then reveal — no white startup gap.
@@ -413,6 +438,14 @@ impl ApplicationHandler for App {
                 }
             },
 
+            // Focus loss can swallow the key-up event; clear held keys so
+            // navigation never gets stuck auto-advancing (a known winit repeat /
+            // lost-key-up hazard, called out in CLAUDE.md).
+            WindowEvent::Focused(false) => {
+                self.held.clear();
+                self.hold_start = None;
+            }
+
             _ => {}
         }
     }
@@ -450,7 +483,10 @@ impl ApplicationHandler for App {
                 // Show the info panel once we've been idle past the short delay.
                 if self.info_visible && !self.overlay_shown && self.current.is_some() {
                     let now = Instant::now();
-                    let due = self.last_advance.map(|t| t + self.idle_delay).unwrap_or(now);
+                    let due = self
+                        .last_advance
+                        .map(|t| t + self.idle_delay)
+                        .unwrap_or(now);
                     if now < due {
                         event_loop.set_control_flow(ControlFlow::WaitUntil(due));
                         return;
@@ -524,6 +560,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let windowed = args.iter().any(|a| a == "--windowed" || a == "-w");
     let recursive = args.iter().any(|a| a == "--recursive" || a == "-r");
+    let metrics_on = args.iter().any(|a| a == "--metrics");
     let dir = args
         .iter()
         .find(|a| !a.starts_with('-'))
@@ -544,6 +581,16 @@ fn main() {
     let event_loop = EventLoop::new().expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = App::new(windowed, dir, paths);
+    let metrics = if metrics_on {
+        StageTimes::enabled()
+    } else {
+        StageTimes::disabled()
+    };
+    let mut app = App::new(windowed, dir, paths, metrics);
     event_loop.run_app(&mut app).expect("event loop");
+
+    let report = app.metrics.report();
+    if !report.is_empty() {
+        print!("\n{report}");
+    }
 }

@@ -210,7 +210,11 @@ mod tests {
             pl.random_next();
             seen.insert(pl.current().unwrap());
         }
-        assert_eq!(seen.len(), len, "a full cycle should visit each item exactly once");
+        assert_eq!(
+            seen.len(),
+            len,
+            "a full cycle should visit each item exactly once"
+        );
         assert_eq!(pl.last_direction(), Direction::Random);
     }
 

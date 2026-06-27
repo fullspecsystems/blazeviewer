@@ -180,7 +180,10 @@ mod tests {
         let d = SolidColorDecoder::new([10, 20, 30, 255]);
         let req = DecodeRequest {
             bytes: &[],
-            fit: Some(FitBox { max_width: 4, max_height: 2 }),
+            fit: Some(FitBox {
+                max_width: 4,
+                max_height: 2,
+            }),
             allow_preview: false,
         };
         let img = d.decode(&req).unwrap();
@@ -192,7 +195,11 @@ mod tests {
     #[test]
     fn solid_decoder_full_res_is_one_by_one() {
         let d = SolidColorDecoder::new([0, 0, 0, 255]);
-        let req = DecodeRequest { bytes: &[], fit: None, allow_preview: false };
+        let req = DecodeRequest {
+            bytes: &[],
+            fit: None,
+            allow_preview: false,
+        };
         let img = d.decode(&req).unwrap();
         assert_eq!((img.width, img.height), (1, 1));
         assert!(img.is_well_formed());

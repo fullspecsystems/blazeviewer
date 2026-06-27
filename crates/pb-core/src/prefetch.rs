@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn wraps_at_boundaries() {
         let pl = Playlist::new(4, 1); // wrap on by default
-        // at 0, Forward
+                                      // at 0, Forward
         let t = prefetch_targets(&pl, 2, 2);
         // 0, then +1,+2 => 1,2, then -1,-2 => 3,2(dup) => 3
         assert_eq!(t, vec![0, 1, 2, 3]);
@@ -146,8 +146,9 @@ mod tests {
         let mut pl = Playlist::new(20, 0xC0FFEE);
         pl.random_next();
         let pos = pl.shuffle_pos();
-        let expected_ahead: Vec<usize> =
-            (1..=3).map(|k| pl.shuffle().at(pos + k).unwrap() as usize).collect();
+        let expected_ahead: Vec<usize> = (1..=3)
+            .map(|k| pl.shuffle().at(pos + k).unwrap() as usize)
+            .collect();
         let t = prefetch_targets(&pl, 3, 0);
         assert_eq!(t[0], pl.current().unwrap());
         assert_eq!(&t[1..], &expected_ahead[..]);
@@ -157,6 +158,35 @@ mod tests {
     fn empty_playlist_has_no_targets() {
         let pl = Playlist::new(0, 1);
         assert!(prefetch_targets(&pl, 5, 5).is_empty());
+    }
+
+    // KNOWN BUG (pinned, not yet fixed): `extend_random` peeks the *current*
+    // shuffle deck, but `Playlist::random_next` swaps in a fresh `reshuffled()`
+    // deck once the cycle is exhausted — so prefetching ahead at the cycle
+    // boundary targets the old cycle's first items, not the next cycle's. This
+    // doesn't bite yet (random/`enter` nav isn't wired into the app); ignored
+    // until random prefetch goes live. Fix: make the next cycle peekable.
+    // See `.taskmaster/docs/phase3-plan.md` §7.
+    #[test]
+    #[ignore = "pb-core cycle-boundary prefetch bug; fix when random nav is wired (plan §7)"]
+    fn random_prefetch_spans_the_cycle_boundary() {
+        let len = 8;
+        let mut pl = Playlist::new(len, 0xABCD);
+        // Walk to the final position of the current shuffle cycle.
+        for _ in 0..len {
+            pl.random_next();
+        }
+        // What the engine would prefetch ahead from here...
+        let predicted = prefetch_targets(&pl, 3, 0);
+        // ...vs. what the user actually sees next, across the reshuffle boundary.
+        let mut upcoming = Vec::new();
+        for _ in 0..3 {
+            pl.random_next();
+            upcoming.push(pl.current().unwrap());
+        }
+        // The prefetched "ahead" set should equal the upcoming items. It won't,
+        // until the boundary is fixed.
+        assert_eq!(&predicted[1..], &upcoming[..]);
     }
 
     fn assert_no_duplicates(v: &[usize]) {
