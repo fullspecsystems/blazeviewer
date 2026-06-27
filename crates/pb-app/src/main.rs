@@ -11,15 +11,17 @@
 //!   space       next photo  ·  ⌫  previous photo
 //!   ← ↑ ↓ →     pan around the photo (hold; accelerates)
 //!   = / -       zoom in / out (hold; accelerates; numpad +/- too)
-//!   0 / 8 / 9   scaling mode: original 1:1 / fit / fill (all prefetched)
+//!   8 / 9       scaling mode: fit / fill (all prefetched)
+//!   0           toggle original 1:1 ↔ fit
 //!   r / Shift+R rotate 90° clockwise / counter-clockwise (per-image, RAM-only)
 //!   i / Shift+I info panel (path · WxH · codec) / full-EXIF "nerd" panel
+//!   / or ?      keybindings help overlay
 //!   esc         quit
 //!
 //! Usage:
-//!   cargo run -p pb-app --release -- "D:\Pictures\2003\Halloween"
-//!   cargo run -p pb-app --release -- "D:\Pictures" -r          # recurse subfolders
-//!   cargo run -p pb-app --release -- "D:\Pictures" -r --windowed --metrics
+//!   cargo run -p pb-app --release -- "D:\Media\Pictures\2003\Halloween"
+//!   cargo run -p pb-app --release -- "D:\Media\Pictures" -r          # recurse subfolders
+//!   cargo run -p pb-app --release -- "D:\Media\Pictures" -r --windowed --metrics
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -35,7 +37,9 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Fullscreen, Window, WindowId};
 
 use pb_core::{prefetch_targets, Playlist, ResidentRing};
-use pb_decode::{decode_image_file, read_exif_fields, DecodedImage, FitBox};
+use pb_decode::{
+    decode_image_file, is_supported_extension, read_exif_fields, DecodedImage, FitBox,
+};
 use pb_render::{
     test_pattern, Renderer, Rotation, ScaleMode, ViewTransform, WgpuRenderer, MAX_ZOOM, MIN_ZOOM,
 };
@@ -44,7 +48,7 @@ mod decode_pool;
 mod hud;
 mod metrics;
 use decode_pool::{recommended_workers, DecodeFn, DecodePool, Outcome};
-use hud::Hud;
+use hud::{Hud, Row};
 use metrics::StageTimes;
 
 /// VRAM budget for the resident texture ring (~1.5 GB → ~16–32 fit-size slots on
@@ -95,13 +99,15 @@ struct PhotoMeta {
     codec: &'static str,
 }
 
-/// Which info overlay is showing: nothing, the one-line basic panel (`i`), or the
-/// full-EXIF "nerd" table (`Shift+I`). Mutually exclusive.
+/// Which overlay is showing: nothing, the one-line basic panel (`i`), the
+/// full-EXIF "nerd" table (`Shift+I`), or the keybindings help (`/` or `?`). All
+/// share the single overlay quad, so they're mutually exclusive.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InfoMode {
     Off,
     Basic,
     Full,
+    Help,
 }
 
 /// Build a photo's info panel data from its path + decoded image.
@@ -119,6 +125,29 @@ fn meta_for_path(path: &Path, root: &Path, img: &DecodedImage) -> PhotoMeta {
         w: img.orig_width,
         h: img.orig_height,
         codec: img.codec,
+    }
+}
+
+/// Max displayed characters for an EXIF value; longer ones are truncated so a
+/// single field can't blow out the panel width.
+const EXIF_VALUE_MAX: usize = 72;
+
+/// Whether an EXIF `(tag, value)` is a binary blob better left out of the panel —
+/// Apple's MakerNote/Padding render as kilobytes of hex, and any value that long
+/// is binary noise, not human-readable metadata.
+fn is_exif_blob(tag: &str, value: &str) -> bool {
+    matches!(tag, "MakerNote" | "Padding") || value.len() > 256
+}
+
+/// Truncate an over-long EXIF value to `EXIF_VALUE_MAX` characters with an
+/// ellipsis (counted in chars, so multibyte values aren't split mid-codepoint).
+fn truncate_exif_value(value: &str) -> String {
+    if value.chars().count() <= EXIF_VALUE_MAX {
+        value.to_string()
+    } else {
+        let mut s: String = value.chars().take(EXIF_VALUE_MAX).collect();
+        s.push('…');
+        s
     }
 }
 
@@ -154,14 +183,16 @@ struct App {
     hud: Option<Hud>,
     /// Which info overlay is active (`i` basic / `Shift+I` full EXIF / off).
     info: InfoMode,
-    /// Whether the panel is currently drawn (rebuilt only when the photo changes).
+    /// Whether the panel is currently drawn.
     overlay_shown: bool,
+    /// Which item the drawn panel was built for; when it differs from
+    /// `displayed_item` the panel is stale and gets rebuilt (so it tracks the
+    /// photo with no blank flash on single-step navigation).
+    overlay_item: Option<usize>,
     /// The current photo's info, for the panel.
     current: Option<PhotoMeta>,
     /// Display scale factor, for sizing the panel.
     scale_factor: f32,
-    /// Idle time before the panel appears once you stop navigating.
-    idle_delay: Duration,
     /// Per-stage timing (decode/upload/render); disabled unless `--metrics` is passed.
     metrics: StageTimes,
 
@@ -228,9 +259,9 @@ impl App {
             hud: Hud::load(),
             info: InfoMode::Off,
             overlay_shown: false,
+            overlay_item: None,
             current: None,
             scale_factor: 1.0,
-            idle_delay: Duration::from_millis(50),
             metrics,
             pool,
             results,
@@ -343,14 +374,14 @@ impl App {
         if let Some(a) = self.active.as_mut() {
             a.renderer.set_view(view);
             a.renderer.present_slot(slot);
-            // The photo changed — drop the stale panel; it returns once idle.
-            a.renderer.set_overlay(None, 0);
             a.window.set_title(&title);
         }
         self.ring.set_displayed(slot);
         self.displayed_item = Some(item);
         self.current = self.meta_cache.get(&item).cloned();
-        self.overlay_shown = false;
+        // The panel (if shown) is now stale for the old photo; `about_to_wait`
+        // rebuilds it for `item` next tick (or hides it while flying), so it
+        // tracks the photo with no blank flash. The bitmap stays up meanwhile.
         self.last_present = Some(Instant::now());
         self.draw(event_loop);
     }
@@ -489,6 +520,7 @@ impl App {
                     a.window.set_title(&title);
                 }
                 self.overlay_shown = false;
+                self.overlay_item = None;
                 self.displayed_item = Some(idx);
             }
             Err(e) => {
@@ -523,21 +555,25 @@ impl App {
         self.pending_uploads.clear();
     }
 
-    /// Switch the scaling mode (0 = original, 8 = fit, 9 = fill). Changing the mode
-    /// can change the decode resolution, so it bumps the geometry epoch and
-    /// re-buffers neighbors at the new resolution; it also resets zoom/pan.
+    /// Apply a scaling mode (8 = fit, 9 = fill, 0 toggles original ↔ fill). Always
+    /// resets zoom/pan back to the mode's natural framing — so tapping a mode key
+    /// is also "reset my zoom." Only an actual mode *change* bumps the geometry
+    /// epoch and re-buffers neighbors (the decode resolution can change); pressing
+    /// the current mode's key just re-frames, no re-decode.
     fn set_scale_mode(&mut self, mode: ScaleMode, event_loop: &ActiveEventLoop) {
-        if self.view.mode == mode {
-            return;
-        }
+        let changed = self.view.mode != mode;
         self.view.mode = mode;
         self.view.zoom = 1.0;
         self.view.pan = [0.0, 0.0];
         self.push_view();
-        self.invalidate_geometry();
-        self.load_current_sync(event_loop);
-        self.target_item = self.playlist.current();
-        self.request_prefetch();
+        if changed {
+            self.invalidate_geometry();
+            self.load_current_sync(event_loop);
+            self.target_item = self.playlist.current();
+            self.request_prefetch();
+        } else {
+            self.draw(event_loop);
+        }
     }
 
     /// Push the current view transform to the renderer (re-places the quad).
@@ -590,50 +626,129 @@ impl App {
             target
         };
         if self.info == InfoMode::Off {
-            if let Some(a) = self.active.as_mut() {
-                a.renderer.set_overlay(None, 0);
-            }
-            self.overlay_shown = false;
-            self.draw(event_loop);
+            self.hide_overlay(event_loop);
         } else {
             self.show_overlay(event_loop);
         }
     }
 
-    /// The full-EXIF panel lines for the displayed photo: identity + dimensions,
-    /// file size, then every EXIF tag. Read on-demand from RAM (privacy task #2:
-    /// nothing cached to disk). Capped to roughly fit the screen height.
-    fn exif_lines(&self) -> Vec<String> {
+    /// Toggle the keybindings help overlay (`/` or `?`). Shares the single overlay
+    /// with the info panels, so it replaces whichever was showing.
+    fn toggle_help(&mut self, event_loop: &ActiveEventLoop) {
+        self.info = if self.info == InfoMode::Help {
+            InfoMode::Off
+        } else {
+            InfoMode::Help
+        };
+        if self.info == InfoMode::Off {
+            self.hide_overlay(event_loop);
+        } else {
+            self.show_overlay(event_loop);
+        }
+    }
+
+    /// The keybindings help table: a title row, then every hotkey → action as a
+    /// shaded-key / description pair. Static (independent of the current photo).
+    fn help_rows(&self) -> Vec<Row> {
+        let mut rows = vec![Row::Span {
+            text: "PhotoBlaze — Keys".to_string(),
+            bold: true,
+        }];
+        let keys: &[(&str, &str)] = &[
+            ("Space", "Next photo"),
+            ("Backspace", "Previous photo"),
+            ("Hold nav key", "Fly through photos"),
+            ("← ↑ ↓ →", "Pan (hold to accelerate)"),
+            ("= / -", "Zoom in / out (hold)"),
+            ("8", "Fit to screen"),
+            ("9", "Fill screen (crop)"),
+            ("0", "Toggle original 1:1 ↔ fit"),
+            ("r / Shift+R", "Rotate 90° cw / ccw"),
+            ("i / Shift+I", "Info / full-EXIF panel"),
+            ("/ or ?", "This help"),
+            ("Esc", "Quit"),
+        ];
+        rows.extend(keys.iter().map(|(k, d)| Row::Pair {
+            label: k.to_string(),
+            value: d.to_string(),
+        }));
+        rows
+    }
+
+    /// The full-EXIF "nerd" panel rows for the displayed photo: a filename/path
+    /// header (spanning both columns), then a two-column table of dimensions,
+    /// codec, exact byte size, and every EXIF tag. Read on-demand from RAM
+    /// (privacy task #2: nothing cached to disk). Capped to fit the screen height.
+    fn exif_rows(&self) -> Vec<Row> {
         let Some(item) = self.displayed_item else {
             return Vec::new();
         };
         let path = &self.paths[item];
-        let mut lines = Vec::new();
+        let mut rows = Vec::new();
+        // Identity header: filename (bold) over its folder (the filename is already
+        // shown above, so the path row is the parent directory only).
+        let filename = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_string();
+        rows.push(Row::Span {
+            text: filename,
+            bold: true,
+        });
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            rows.push(Row::Span {
+                text: dir.display().to_string(),
+                bold: false,
+            });
+        }
         if let Some(meta) = &self.current {
-            lines.push(meta.rel.clone());
-            lines.push(format!("{}×{}  ·  {}", meta.w, meta.h, meta.codec));
+            rows.push(Row::Pair {
+                label: "Dimensions".to_string(),
+                value: format!("{} × {}", meta.w, meta.h),
+            });
+            rows.push(Row::Pair {
+                label: "Codec".to_string(),
+                value: meta.codec.to_uppercase(),
+            });
         }
         if let Ok(md) = std::fs::metadata(path) {
-            lines.push(format!("file size  ·  {} KB", md.len() / 1024));
+            rows.push(Row::Pair {
+                label: "File Size".to_string(),
+                value: format!("{} bytes", hud::format_thousands(md.len())),
+            });
         }
         if let Ok(bytes) = std::fs::read(path) {
             for (tag, val) in read_exif_fields(&bytes) {
-                lines.push(format!("{tag}:  {val}"));
+                // Skip binary blobs that render as meaningless hex (Apple
+                // MakerNote/Padding are kilobytes long); truncate anything else
+                // that's overlong so one field can't blow out the panel width.
+                if is_exif_blob(&tag, &val) {
+                    continue;
+                }
+                rows.push(Row::Pair {
+                    label: tag,
+                    value: truncate_exif_value(&val),
+                });
             }
         }
         // Cap to what fits the screen height (~1.5x the font size per line).
         if let Some(fit) = self.fit {
             let line_h = ((15.0 * self.scale_factor).max(8.0) * 1.5).max(1.0);
-            let max_lines = (((fit.max_height as f32) - 40.0) / line_h).max(1.0) as usize;
-            if lines.len() > max_lines {
-                lines.truncate(max_lines.saturating_sub(1));
-                lines.push("…".to_string());
+            let max_rows = (((fit.max_height as f32) - 40.0) / line_h).max(1.0) as usize;
+            if rows.len() > max_rows {
+                rows.truncate(max_rows.saturating_sub(1));
+                rows.push(Row::Span {
+                    text: "…".to_string(),
+                    bold: false,
+                });
             }
         }
-        lines
+        rows
     }
 
-    /// Rasterize the active info panel for the current photo and draw it.
+    /// Rasterize the active overlay (info panel or help) and draw it. The help
+    /// overlay uses a larger font than the info panels.
     fn show_overlay(&mut self, event_loop: &ActiveEventLoop) {
         let px = (15.0 * self.scale_factor).max(8.0);
         let pad = (7.0 * self.scale_factor).round().max(2.0) as u32;
@@ -647,14 +762,22 @@ impl App {
                 hud.render_panel(&text, px, pad)
             }
             InfoMode::Full => {
-                let lines = self.exif_lines();
+                let rows = self.exif_rows();
                 let Some(hud) = self.hud.as_ref() else {
                     return;
                 };
-                if lines.is_empty() {
+                if rows.is_empty() {
                     return;
                 }
-                hud.render_lines(&lines, px, pad)
+                hud.render_table(&rows, px, pad)
+            }
+            InfoMode::Help => {
+                let help_px = (20.0 * self.scale_factor).max(12.0);
+                let rows = self.help_rows();
+                let Some(hud) = self.hud.as_ref() else {
+                    return;
+                };
+                hud.render_table(&rows, help_px, pad)
             }
         };
         let Some((bitmap, w, h)) = panel else {
@@ -665,6 +788,17 @@ impl App {
             a.renderer.set_overlay(Some((&bitmap, w, h)), margin);
         }
         self.overlay_shown = true;
+        self.overlay_item = self.displayed_item;
+        self.draw(event_loop);
+    }
+
+    /// Hide the info panel (clears the overlay quad).
+    fn hide_overlay(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(a) = self.active.as_mut() {
+            a.renderer.set_overlay(None, 0);
+        }
+        self.overlay_shown = false;
+        self.overlay_item = None;
         self.draw(event_loop);
     }
 
@@ -991,14 +1125,23 @@ impl ApplicationHandler for App {
                             | KeyCode::NumpadSubtract => {
                                 self.held.insert(code);
                             }
-                            // Scaling mode: 0 original, 8 fit, 9 fill.
-                            KeyCode::Digit0 => self.set_scale_mode(ScaleMode::Original, event_loop),
+                            // Scaling mode: 8 fit, 9 fill, 0 toggles original ↔ fit.
+                            KeyCode::Digit0 => {
+                                let next = if self.view.mode == ScaleMode::Original {
+                                    ScaleMode::Fit
+                                } else {
+                                    ScaleMode::Original
+                                };
+                                self.set_scale_mode(next, event_loop);
+                            }
                             KeyCode::Digit8 => self.set_scale_mode(ScaleMode::Fit, event_loop),
                             KeyCode::Digit9 => self.set_scale_mode(ScaleMode::Fill, event_loop),
                             // Rotate 90° clockwise, or counter-clockwise with Shift.
                             KeyCode::KeyR => self.rotate(self.shift, event_loop),
                             // Info panel: i basic, Shift+I full EXIF.
                             KeyCode::KeyI => self.toggle_info(self.shift, event_loop),
+                            // Keybindings help (`/` or `?` — same physical key).
+                            KeyCode::Slash => self.toggle_help(event_loop),
                             _ => {}
                         }
                     }
@@ -1039,15 +1182,15 @@ impl ApplicationHandler for App {
         let transforming = self.apply_view_holds(now, event_loop);
 
         // 3. Gated self-paced advance while a nav key (space/backspace) is held.
+        // The initial tap delay gates *repeat*, not draining/presenting, so a
+        // first-press miss shows the moment it decodes. (plain `match`, not
+        // `is_none_or`: that's 1.82+ vs the 1.80 MSRV.)
         let nav = self.held_direction();
+        let past_delay = match self.hold_start {
+            Some(t) => now >= t + self.initial_delay,
+            None => true,
+        };
         if let Some(forward) = nav {
-            // The initial tap delay gates *repeat*, not draining/presenting, so a
-            // first-press miss shows the moment it decodes. (plain `match`, not
-            // `is_none_or`: that's 1.82+ vs the 1.80 MSRV.)
-            let past_delay = match self.hold_start {
-                Some(t) => now >= t + self.initial_delay,
-                None => true,
-            };
             // Advance only when caught up (target shown) AND a frame elapsed, so
             // every photo is shown and a miss simply holds.
             let caught_up = self.displayed_item == self.target_item;
@@ -1064,24 +1207,30 @@ impl ApplicationHandler for App {
             self.hold_start = None;
         }
 
-        // 4. Show the info panel once idle (not interacting) past the short delay.
-        let panel_pending =
-            self.info != InfoMode::Off && !self.overlay_shown && self.current.is_some();
-        if nav.is_none() && !transforming && panel_pending {
-            let due = match self.last_present {
-                Some(t) => t + self.idle_delay,
-                None => now,
-            };
-            if now >= due {
+        // 4. Info panel visibility. "Blaze mode" = actually flying (a nav key held
+        // *past* the tap delay): hide the panel so it isn't a strobing distraction
+        // while photos fly by. Otherwise — idle, or a single tap inside the delay —
+        // keep it shown and tracking the current photo (rebuilt when the photo
+        // changes, so single-stepping never blanks/flashes it). No timed delay:
+        // the blaze gate alone keeps it off the fly. Left untouched mid zoom/pan.
+        let flying = nav.is_some() && past_delay;
+        if self.info != InfoMode::Off {
+            if flying {
+                if self.overlay_shown {
+                    self.hide_overlay(event_loop);
+                }
+            } else if !transforming
+                // Help is static (no photo needed); the info panels need a photo.
+                && (self.info == InfoMode::Help || self.current.is_some())
+                && (!self.overlay_shown || self.overlay_item != self.displayed_item)
+            {
                 self.show_overlay(event_loop);
             }
         }
 
         // 5. Poll at the frame rate while interacting or work is outstanding;
         //    otherwise go fully idle until the next event.
-        let panel_pending =
-            self.info != InfoMode::Off && !self.overlay_shown && self.current.is_some();
-        if nav.is_some() || transforming || self.work_pending() || panel_pending {
+        if nav.is_some() || transforming || self.work_pending() {
             event_loop.set_control_flow(ControlFlow::WaitUntil(now + self.frame_interval));
         } else {
             event_loop.set_control_flow(ControlFlow::Wait);
@@ -1094,14 +1243,13 @@ fn title_for(path: &Path, idx: usize, n: usize) -> String {
     format!("PhotoBlaze — {name} ({}/{n})", idx + 1)
 }
 
-fn has_jpeg_ext(p: &Path) -> bool {
-    matches!(
-        p.extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_ascii_lowercase())
-            .as_deref(),
-        Some("jpg") | Some("jpeg")
-    )
+/// Whether a path's extension is a supported image format (the decoder's single
+/// source of truth — see `pb_decode::is_supported_extension`).
+fn is_supported_image(p: &Path) -> bool {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .map(is_supported_extension)
+        .unwrap_or(false)
 }
 
 fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -1115,16 +1263,16 @@ fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
         let path = entry.path();
         if ft.is_dir() {
             collect_recursive(&path, out);
-        } else if ft.is_file() && has_jpeg_ext(&path) {
+        } else if ft.is_file() && is_supported_image(&path) {
             out.push(path);
         }
     }
 }
 
-/// Scan `dir` for JPEGs, sorted by full path. `recursive` also walks subfolders
-/// (a `-r` convenience now; the R-key toggle with folder-grouped ordering is
-/// tasks.json #9). Non-recursive is the default, matching that design.
-fn scan_jpegs(dir: &Path, recursive: bool) -> Vec<PathBuf> {
+/// Scan `dir` for supported images, sorted by full path. `recursive` also walks
+/// subfolders (a `-r` convenience now; the R-key toggle with folder-grouped
+/// ordering is tasks.json #9). Non-recursive is the default, matching that design.
+fn scan_images(dir: &Path, recursive: bool) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if recursive {
         collect_recursive(dir, &mut paths);
@@ -1134,7 +1282,7 @@ fn scan_jpegs(dir: &Path, recursive: bool) -> Vec<PathBuf> {
                 for entry in rd.flatten() {
                     let is_file = entry.file_type().map(|ft| ft.is_file()).unwrap_or(false);
                     let path = entry.path();
-                    if is_file && has_jpeg_ext(&path) {
+                    if is_file && is_supported_image(&path) {
                         paths.push(path);
                     }
                 }
@@ -1157,15 +1305,15 @@ fn main() {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
 
-    let paths = scan_jpegs(&dir, recursive);
+    let paths = scan_images(&dir, recursive);
     println!(
-        "PhotoBlaze: {} JPEG(s) in {}{}",
+        "PhotoBlaze: {} image(s) in {}{}",
         paths.len(),
         dir.display(),
         if recursive { " (recursive)" } else { "" }
     );
     if paths.is_empty() {
-        eprintln!("(no JPEGs found — showing a placeholder; pass a folder path)");
+        eprintln!("(no supported images found — showing a placeholder; pass a folder path)");
     }
 
     let event_loop = EventLoop::new().expect("create event loop");
@@ -1182,5 +1330,33 @@ fn main() {
     let report = app.metrics.report();
     if !report.is_empty() {
         print!("\n{report}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exif_blob_filters_makernote_and_oversized() {
+        assert!(is_exif_blob("MakerNote", "0x4170706c..."));
+        assert!(is_exif_blob("Padding", ""));
+        assert!(is_exif_blob("Whatever", &"x".repeat(257))); // oversized → binary
+        assert!(!is_exif_blob(
+            "LensModel",
+            "iPhone 11 Pro Max back triple camera"
+        ));
+        assert!(!is_exif_blob("Make", "Apple"));
+    }
+
+    #[test]
+    fn truncate_exif_value_caps_long_values() {
+        assert_eq!(truncate_exif_value("1/250 s"), "1/250 s");
+        let out = truncate_exif_value(&"a".repeat(100));
+        assert_eq!(out.chars().count(), EXIF_VALUE_MAX + 1); // value + ellipsis
+        assert!(out.ends_with('…'));
+        // Multibyte values are truncated on char boundaries, not bytes.
+        let out = truncate_exif_value(&"é".repeat(100));
+        assert_eq!(out.chars().count(), EXIF_VALUE_MAX + 1);
     }
 }

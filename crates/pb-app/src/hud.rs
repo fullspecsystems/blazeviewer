@@ -1,127 +1,376 @@
 //! The info-panel text layer.
 //!
-//! Rasterizes a one-line info string into a translucent-black panel with white
-//! text, using the OS UI font (Segoe UI on Windows, loaded at runtime — not
-//! bundled). The result is an RGBA8 bitmap the renderer draws as a single
-//! alpha-blended quad, so it's rebuilt only when the info changes, never per
-//! frame. Reusable later for the help overlay and command-feedback toast.
+//! Rasterizes overlay text into a translucent panel using the OS UI font (Segoe
+//! UI on Windows, loaded at runtime — not bundled), plus its bold face for
+//! emphasis. The result is an RGBA8 bitmap the renderer draws as a single
+//! alpha-blended quad, so it's rebuilt only when the content changes, never per
+//! frame. Two layouts: a one-line panel ([`Hud::render_panel`], the basic `i`
+//! overlay) and a two-column table ([`Hud::render_table`], the full-EXIF "nerd"
+//! panel and the help overlay). All text gets a soft black outline for
+//! legibility over bright photos.
 
 use std::path::PathBuf;
 
+/// Panel background: translucent black (≈60%).
+const BG: [u8; 4] = [0, 0, 0, 153];
+/// All overlay text is white; the label column is distinguished by weight
+/// (semibold) rather than color, which reads far better over busy photos than a
+/// dim gray. Legibility comes from the per-glyph outline (`SHADOW`).
+const TEXT: [u8; 3] = [255, 255, 255];
+/// Text outline/shadow color and its peak alpha (a soft black halo).
+const SHADOW: [u8; 3] = [0, 0, 0];
+const SHADOW_ALPHA: f32 = 0.65;
+
+/// A row of the table layout ([`Hud::render_table`]).
+pub enum Row {
+    /// A full-width line spanning both columns — used for the filename (bold) /
+    /// path header and section titles.
+    Span { text: String, bold: bool },
+    /// A two-column row: a semibold label on the left + a regular value.
+    Pair { label: String, value: String },
+}
+
+/// Font weight to render a run of text in.
+#[derive(Clone, Copy)]
+enum Weight {
+    Regular,
+    Semibold,
+    Bold,
+}
+
 pub struct Hud {
     font: fontdue::Font,
+    /// The semibold face (label column emphasis); falls back to bold then regular.
+    semibold: Option<fontdue::Font>,
+    /// The bold face (filename / titles); falls back to semibold then regular.
+    bold: Option<fontdue::Font>,
 }
+
+/// One laid-out glyph: its metrics, coverage bitmap, and pen x-offset on the line.
+type Glyph = (fontdue::Metrics, Vec<u8>, f32);
 
 impl Hud {
-    /// Load the system UI font. Returns `None` if none is found, in which case
-    /// the overlay is simply disabled (no crash).
+    /// Load the system UI font (and its semibold/bold faces if present). Returns
+    /// `None` if no regular font is found, in which case the overlay is disabled.
     pub fn load() -> Option<Hud> {
-        let bytes = system_font()?;
-        let font = fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()).ok()?;
-        Some(Hud { font })
+        let load_face = |paths: &[PathBuf]| {
+            first_readable(paths)
+                .and_then(|b| fontdue::Font::from_bytes(b, fontdue::FontSettings::default()).ok())
+        };
+        let font = load_face(&regular_font_paths())?;
+        let semibold = load_face(&semibold_font_paths());
+        let bold = load_face(&bold_font_paths());
+        Some(Hud {
+            font,
+            semibold,
+            bold,
+        })
     }
 
-    /// Rasterize one line into a 40%-black panel with white text. See [`render_lines`].
+    /// The face for a given weight, falling back gracefully when a face is absent.
+    fn font_for(&self, weight: Weight) -> &fontdue::Font {
+        match weight {
+            Weight::Regular => &self.font,
+            Weight::Semibold => self
+                .semibold
+                .as_ref()
+                .or(self.bold.as_ref())
+                .unwrap_or(&self.font),
+            Weight::Bold => self
+                .bold
+                .as_ref()
+                .or(self.semibold.as_ref())
+                .unwrap_or(&self.font),
+        }
+    }
+
+    /// Rasterize one line into the translucent panel with white, outlined text.
+    /// Used for the basic `i` overlay. Returns `(rgba, w, h)`.
     pub fn render_panel(&self, text: &str, px: f32, pad: u32) -> Option<(Vec<u8>, u32, u32)> {
-        self.render_lines(std::slice::from_ref(&text.to_string()), px, pad)
+        let line_h = self.line_height(px)?;
+        let (glyphs, advance) = self.layout(text, px, Weight::Regular);
+        let pw = advance.ceil() as u32 + 2 * pad;
+        let ph = line_h + 2 * pad;
+        let mut canvas = Canvas::new(pw, ph, BG, (px * 0.5).round());
+        let baseline = pad as f32 + self.ascent(px)?;
+        self.draw_line(&mut canvas, pad as f32, baseline, &glyphs, TEXT, px);
+        Some((canvas.into_rgba(), pw, ph))
     }
 
-    /// Rasterize `lines` (stacked top-to-bottom) into a 40%-black panel with white
-    /// text, at font size `px` and `pad` px of padding. Returns `(rgba, w, h)`.
-    /// Used for the multi-line full-EXIF "nerd" panel (tasks.json #5).
-    pub fn render_lines(&self, lines: &[String], px: f32, pad: u32) -> Option<(Vec<u8>, u32, u32)> {
-        if lines.is_empty() {
+    /// Rasterize `rows` into a two-column table inside the translucent panel: a
+    /// semibold label column + a regular value column, with full-width `Span` rows
+    /// on top. Used for the full-EXIF "nerd" panel (tasks.json #5) and help overlay.
+    pub fn render_table(&self, rows: &[Row], px: f32, pad: u32) -> Option<(Vec<u8>, u32, u32)> {
+        if rows.is_empty() {
             return None;
         }
+        let line_h = self.line_height(px)?;
+        let ascent = self.ascent(px)?;
+        // Gap between the label column and the value column.
+        let col_gap = (px * 0.7).round().max(6.0);
+
+        // Lay every row out once, measuring column widths as we go. Labels are
+        // semibold, values regular, spans bold (filename) or regular (path).
+        enum Laid {
+            Span(Vec<Glyph>),
+            Pair(Vec<Glyph>, Vec<Glyph>),
+        }
+        let mut laid = Vec::with_capacity(rows.len());
+        let mut label_w = 0.0f32;
+        let mut value_w = 0.0f32;
+        let mut span_w = 0.0f32;
+        for row in rows {
+            match row {
+                Row::Span { text, bold } => {
+                    let weight = if *bold { Weight::Bold } else { Weight::Regular };
+                    let (g, adv) = self.layout(text, px, weight);
+                    span_w = span_w.max(adv);
+                    laid.push(Laid::Span(g));
+                }
+                Row::Pair { label, value } => {
+                    let (lg, la) = self.layout(label, px, Weight::Semibold);
+                    let (vg, va) = self.layout(value, px, Weight::Regular);
+                    label_w = label_w.max(la);
+                    value_w = value_w.max(va);
+                    laid.push(Laid::Pair(lg, vg));
+                }
+            }
+        }
+
+        let has_pairs = label_w > 0.0;
+        let value_x = pad as f32 + label_w + if has_pairs { col_gap } else { 0.0 };
+        let content_w = (value_x - pad as f32 + value_w).max(span_w);
+        let pw = content_w.ceil() as u32 + 2 * pad;
+        let ph = rows.len() as u32 * line_h + 2 * pad;
+        let mut canvas = Canvas::new(pw, ph, BG, (px * 0.5).round());
+
+        for (i, item) in laid.iter().enumerate() {
+            let row_top = pad as f32 + i as f32 * line_h as f32;
+            let baseline = row_top + ascent;
+            match item {
+                Laid::Span(g) => {
+                    self.draw_line(&mut canvas, pad as f32, baseline, g, TEXT, px);
+                }
+                Laid::Pair(lg, vg) => {
+                    self.draw_line(&mut canvas, pad as f32, baseline, lg, TEXT, px);
+                    self.draw_line(&mut canvas, value_x, baseline, vg, TEXT, px);
+                }
+            }
+        }
+        Some((canvas.into_rgba(), pw, ph))
+    }
+
+    fn line_height(&self, px: f32) -> Option<u32> {
         let lm = self.font.horizontal_line_metrics(px)?;
-        let ascent = lm.ascent;
-        let line_h = (lm.ascent - lm.descent + lm.line_gap).ceil().max(1.0) as u32;
+        Some((lm.ascent - lm.descent + lm.line_gap).ceil().max(1.0) as u32)
+    }
 
-        // Rasterize each line's glyphs and track the widest line.
-        let mut laid: Vec<Vec<(fontdue::Metrics, Vec<u8>, f32)>> = Vec::with_capacity(lines.len());
-        let mut max_w = 1.0f32;
-        for line in lines {
-            let mut glyphs = Vec::new();
-            let mut pen = 0.0f32;
-            for ch in line.chars() {
-                let (m, bitmap) = self.font.rasterize(ch, px);
-                glyphs.push((m, bitmap, pen));
-                pen += m.advance_width;
-            }
-            max_w = max_w.max(pen);
-            laid.push(glyphs);
+    fn ascent(&self, px: f32) -> Option<f32> {
+        Some(self.font.horizontal_line_metrics(px)?.ascent)
+    }
+
+    /// Rasterize `text` into glyphs with their pen offsets; returns them plus the
+    /// total advance width.
+    fn layout(&self, text: &str, px: f32, weight: Weight) -> (Vec<Glyph>, f32) {
+        let font = self.font_for(weight);
+        let mut glyphs = Vec::new();
+        let mut pen = 0.0f32;
+        for ch in text.chars() {
+            let (m, bitmap) = font.rasterize(ch, px);
+            glyphs.push((m, bitmap, pen));
+            pen += m.advance_width;
         }
+        (glyphs, pen)
+    }
 
-        let pw = max_w.ceil() as u32 + 2 * pad;
-        let ph = lines.len() as u32 * line_h + 2 * pad;
-        let mut panel = vec![0u8; (pw as usize) * (ph as usize) * 4];
-        for px4 in panel.chunks_exact_mut(4) {
-            px4.copy_from_slice(&[0, 0, 0, 102]); // 40% black background
-        }
-
-        for (li, glyphs) in laid.iter().enumerate() {
-            let baseline = pad as f32 + li as f32 * line_h as f32 + ascent;
+    /// Composite one laid-out line at `origin_x`/`baseline`: a soft black outline
+    /// first (for legibility over photos), then the colored glyphs on top.
+    fn draw_line(
+        &self,
+        canvas: &mut Canvas,
+        origin_x: f32,
+        baseline: f32,
+        glyphs: &[Glyph],
+        rgb: [u8; 3],
+        px: f32,
+    ) {
+        let s = (px * 0.06).round().max(1.0) as i32; // outline thickness
+        for &(dx, dy) in &[(s, 0), (-s, 0), (0, s), (0, -s)] {
             for (m, bitmap, gx) in glyphs {
-                if m.width == 0 || m.height == 0 {
-                    continue; // e.g. a space — advance only, no pixels
-                }
-                let x0 = (pad as f32 + gx + m.xmin as f32).round() as i32;
-                let y0 = (baseline - m.ymin as f32 - m.height as f32).round() as i32;
-                for row in 0..m.height {
-                    for col in 0..m.width {
-                        let cov = bitmap[row * m.width + col];
-                        if cov == 0 {
-                            continue;
-                        }
-                        let x = x0 + col as i32;
-                        let y = y0 + row as i32;
-                        if x < 0 || y < 0 || x >= pw as i32 || y >= ph as i32 {
-                            continue;
-                        }
-                        let idx = ((y as u32 * pw + x as u32) * 4) as usize;
-                        composite_white_over(&mut panel[idx..idx + 4], cov);
-                    }
-                }
+                canvas.blit_glyph(
+                    m,
+                    bitmap,
+                    origin_x + *gx,
+                    baseline,
+                    dx,
+                    dy,
+                    SHADOW,
+                    SHADOW_ALPHA,
+                );
             }
         }
-        Some((panel, pw, ph))
+        for (m, bitmap, gx) in glyphs {
+            canvas.blit_glyph(m, bitmap, origin_x + *gx, baseline, 0, 0, rgb, 1.0);
+        }
     }
 }
 
-/// Composite white text (coverage `cov`, 0..=255) over the existing
-/// straight-alpha pixel.
-fn composite_white_over(dst: &mut [u8], cov: u8) {
-    let a_src = cov as f32 / 255.0;
-    let rgb_d = dst[0] as f32;
-    let a_d = dst[3] as f32 / 255.0;
-    let a_out = a_src + a_d * (1.0 - a_src);
-    if a_out <= 0.0 {
-        return;
+/// A straight-alpha RGBA8 software canvas for compositing the panel.
+struct Canvas {
+    px: Vec<u8>,
+    w: i32,
+    h: i32,
+}
+
+impl Canvas {
+    /// A panel filled with `bg`, with anti-aliased rounded corners of `radius` px
+    /// (corner pixels outside the rounded rect fade to transparent). The renderer
+    /// draws it as an alpha-blended quad, so the rounding just lives in the alpha.
+    fn new(w: u32, h: u32, bg: [u8; 4], radius: f32) -> Self {
+        let (wi, hi) = (w as i32, h as i32);
+        let r = radius.clamp(0.0, (w.min(h) as f32) / 2.0);
+        let mut px = vec![0u8; (w as usize) * (h as usize) * 4];
+        for y in 0..hi {
+            for x in 0..wi {
+                let cov = corner_coverage(x, y, wi, hi, r);
+                if cov <= 0.0 {
+                    continue; // fully outside a rounded corner → leave transparent
+                }
+                let idx = ((y * wi + x) * 4) as usize;
+                px[idx] = bg[0];
+                px[idx + 1] = bg[1];
+                px[idx + 2] = bg[2];
+                px[idx + 3] = (bg[3] as f32 * cov).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+        Self { px, w: wi, h: hi }
     }
-    let rgb_out = (255.0 * a_src + rgb_d * a_d * (1.0 - a_src)) / a_out;
-    let v = rgb_out.round().clamp(0.0, 255.0) as u8;
-    dst[0] = v;
-    dst[1] = v;
-    dst[2] = v;
-    dst[3] = (a_out * 255.0).round().clamp(0.0, 255.0) as u8;
+
+    fn into_rgba(self) -> Vec<u8> {
+        self.px
+    }
+
+    /// Composite `rgba` (straight-alpha) over the pixel at `(x, y)`, if in bounds.
+    fn over(&mut self, x: i32, y: i32, rgb: [u8; 3], a: f32) {
+        if a <= 0.0 || x < 0 || y < 0 || x >= self.w || y >= self.h {
+            return;
+        }
+        let idx = ((y * self.w + x) * 4) as usize;
+        let dst = &mut self.px[idx..idx + 4];
+        let ad = dst[3] as f32 / 255.0;
+        let ao = a + ad * (1.0 - a);
+        if ao <= 0.0 {
+            return;
+        }
+        for (d, &c) in dst[..3].iter_mut().zip(rgb.iter()) {
+            let cd = *d as f32;
+            *d = ((c as f32 * a + cd * ad * (1.0 - a)) / ao)
+                .round()
+                .clamp(0.0, 255.0) as u8;
+        }
+        dst[3] = (ao * 255.0).round().clamp(0.0, 255.0) as u8;
+    }
+
+    /// Composite a single glyph's coverage at the given pen position, offset by
+    /// `(dx, dy)`, in `rgb` scaled by `alpha`.
+    #[allow(clippy::too_many_arguments)]
+    fn blit_glyph(
+        &mut self,
+        m: &fontdue::Metrics,
+        bitmap: &[u8],
+        pen_x: f32,
+        baseline: f32,
+        dx: i32,
+        dy: i32,
+        rgb: [u8; 3],
+        alpha: f32,
+    ) {
+        if m.width == 0 || m.height == 0 {
+            return; // e.g. a space — advance only, no pixels
+        }
+        let x0 = (pen_x + m.xmin as f32).round() as i32 + dx;
+        let y0 = (baseline - m.ymin as f32 - m.height as f32).round() as i32 + dy;
+        for row in 0..m.height {
+            for col in 0..m.width {
+                let cov = bitmap[row * m.width + col];
+                if cov == 0 {
+                    continue;
+                }
+                self.over(
+                    x0 + col as i32,
+                    y0 + row as i32,
+                    rgb,
+                    (cov as f32 / 255.0) * alpha,
+                );
+            }
+        }
+    }
 }
 
-fn system_font() -> Option<Vec<u8>> {
-    candidate_font_paths()
-        .into_iter()
-        .find_map(|p| std::fs::read(p).ok())
+/// Coverage (0..=1) of pixel `(x, y)` inside a `w×h` rectangle with `r`-px rounded
+/// corners — 1.0 everywhere except the four corner arcs, where it feathers over
+/// ~1px for anti-aliasing.
+fn corner_coverage(x: i32, y: i32, w: i32, h: i32, r: f32) -> f32 {
+    if r <= 0.0 {
+        return 1.0;
+    }
+    let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5); // pixel center
+                                                     // Nearest point on the inner rect whose corners are the arc centers; distance
+                                                     // to it is 0 except in the corner regions.
+    let cx = fx.clamp(r, w as f32 - r);
+    let cy = fy.clamp(r, h as f32 - r);
+    let d = ((fx - cx).powi(2) + (fy - cy).powi(2)).sqrt();
+    if d <= 0.0 {
+        1.0
+    } else {
+        (r - d + 0.5).clamp(0.0, 1.0)
+    }
 }
 
-fn candidate_font_paths() -> Vec<PathBuf> {
-    let mut v = Vec::new();
+/// Group an integer's digits with thousands separators: `6000123` → `6,000,123`.
+/// Counter-based (no `% 3`) so it stays clear of the 1.87-only `is_multiple_of`
+/// the lint would otherwise push us toward (MSRV is 1.80).
+pub fn format_thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out: Vec<u8> = Vec::with_capacity(digits.len() + digits.len() / 3);
+    let mut since_comma = 0u8;
+    for &b in digits.as_bytes().iter().rev() {
+        if since_comma == 3 {
+            out.push(b',');
+            since_comma = 0;
+        }
+        out.push(b);
+        since_comma += 1;
+    }
+    out.reverse();
+    String::from_utf8(out).expect("digits and commas are ASCII")
+}
+
+fn first_readable(paths: &[PathBuf]) -> Option<Vec<u8>> {
+    paths.iter().find_map(|p| std::fs::read(p).ok())
+}
+
+fn fonts_dir() -> PathBuf {
     #[cfg(windows)]
     {
         let windir = std::env::var("WINDIR")
             .or_else(|_| std::env::var("SystemRoot"))
             .unwrap_or_else(|_| "C:\\Windows".to_string());
-        let fonts = PathBuf::from(windir).join("Fonts");
-        v.push(fonts.join("segoeui.ttf"));
-        v.push(fonts.join("arial.ttf"));
+        PathBuf::from(windir).join("Fonts")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/")
+    }
+}
+
+fn regular_font_paths() -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    #[cfg(windows)]
+    {
+        let f = fonts_dir();
+        v.push(f.join("segoeui.ttf"));
+        v.push(f.join("arial.ttf"));
     }
     #[cfg(target_os = "macos")]
     {
@@ -138,4 +387,79 @@ fn candidate_font_paths() -> Vec<PathBuf> {
         v.push(PathBuf::from("/usr/share/fonts/TTF/DejaVuSans.ttf"));
     }
     v
+}
+
+fn semibold_font_paths() -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    #[cfg(windows)]
+    {
+        let f = fonts_dir();
+        v.push(f.join("seguisb.ttf")); // Segoe UI Semibold
+        v.push(f.join("segoeuib.ttf")); // fall back to bold
+    }
+    #[cfg(target_os = "macos")]
+    {
+        v.push(PathBuf::from("/System/Library/Fonts/SFNSText-Semibold.otf"));
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        v.push(PathBuf::from(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        ));
+    }
+    v
+}
+
+fn bold_font_paths() -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    #[cfg(windows)]
+    {
+        let f = fonts_dir();
+        v.push(f.join("segoeuib.ttf"));
+        v.push(f.join("arialbd.ttf"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        v.push(PathBuf::from("/Library/Fonts/Arial Bold.ttf"));
+        v.push(PathBuf::from(
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        ));
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        v.push(PathBuf::from(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        ));
+        v.push(PathBuf::from("/usr/share/fonts/TTF/DejaVuSans-Bold.ttf"));
+    }
+    v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thousands_separates_every_three_digits() {
+        assert_eq!(format_thousands(0), "0");
+        assert_eq!(format_thousands(7), "7");
+        assert_eq!(format_thousands(999), "999");
+        assert_eq!(format_thousands(1000), "1,000");
+        assert_eq!(format_thousands(6_000_123), "6,000,123");
+        assert_eq!(format_thousands(1_000_000_000), "1,000,000,000");
+    }
+
+    #[test]
+    fn corner_coverage_rounds_only_the_corners() {
+        let r = 10.0;
+        // Interior and straight edges are fully covered.
+        assert!((corner_coverage(50, 50, 100, 100, r) - 1.0).abs() < 1e-6);
+        assert!((corner_coverage(50, 0, 100, 100, r) - 1.0).abs() < 1e-6); // top edge
+        assert!((corner_coverage(0, 50, 100, 100, r) - 1.0).abs() < 1e-6); // left edge
+                                                                           // The extreme corner pixel is outside the arc → transparent.
+        assert_eq!(corner_coverage(0, 0, 100, 100, r), 0.0);
+        assert_eq!(corner_coverage(99, 99, 100, 100, r), 0.0);
+        // Radius 0 → no rounding anywhere.
+        assert_eq!(corner_coverage(0, 0, 100, 100, 0.0), 1.0);
+    }
 }
