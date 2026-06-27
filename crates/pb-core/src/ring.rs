@@ -96,12 +96,13 @@ impl ResidentRing {
             return None;
         }
         let rank_of = |it: usize| keep.iter().position(|&k| k == it);
-        let item_rank = rank_of(item);
+        // Only reserve items still wanted (present in `keep`): a decode that
+        // finished after navigation moved on must not consume a slot or the
+        // per-tick upload budget ahead of the current targets.
+        let item_rank = rank_of(item)?;
         // A target ranked beyond the ring's capacity doesn't belong resident.
-        if let Some(r) = item_rank {
-            if r >= cap {
-                return None;
-            }
+        if item_rank >= cap {
+            return None;
         }
 
         // Pick the best victim. Score tiers (higher = better victim):
@@ -133,12 +134,9 @@ impl ResidentRing {
 
         let (tier, rank, slot) = best?;
         // When every freeable slot holds a wanted item, only evict one strictly
-        // lower priority than the incoming item.
-        if tier == 0 {
-            match item_rank {
-                Some(ir) if rank > ir => {}
-                _ => return None,
-            }
+        // lower priority (higher rank) than the incoming item.
+        if tier == 0 && rank <= item_rank {
+            return None;
         }
 
         if let SlotState::Pending { item: old, .. } | SlotState::Resident { item: old } =
@@ -301,6 +299,14 @@ mod tests {
         // B is rank 1 with capacity 1 -> doesn't belong resident; A must stay.
         assert_eq!(r.reserve(20, 1, &[10, 20]), None);
         assert_eq!(r.slot_for(10), Some(a.slot));
+    }
+
+    #[test]
+    fn reserve_rejects_an_item_not_in_keep() {
+        let mut r = ResidentRing::new(4);
+        // A decode that finished after navigation moved on: item 99 isn't wanted.
+        assert_eq!(r.reserve(99, 1, &[1, 2, 3]), None);
+        assert!(!r.is_tracked(99));
     }
 
     #[test]

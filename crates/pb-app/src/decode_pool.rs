@@ -232,7 +232,7 @@ fn worker_loop(shared: Arc<Shared>) {
         // Cancelled before it ran: forget it and move on.
         if job.cancel.load(Ordering::Acquire) {
             let mut inner = shared.inner.lock().unwrap();
-            inner.tracked.remove(&job.key.item);
+            untrack(&mut inner, job.key.item, &job.cancel);
             continue;
         }
 
@@ -246,7 +246,7 @@ fn worker_loop(shared: Arc<Shared>) {
         // cancelled mid-decode, in which case discard the result entirely.
         {
             let mut inner = shared.inner.lock().unwrap();
-            inner.tracked.remove(&job.key.item);
+            untrack(&mut inner, job.key.item, &job.cancel);
             if job.cancel.load(Ordering::Acquire) {
                 continue;
             }
@@ -264,6 +264,20 @@ fn worker_loop(shared: Arc<Shared>) {
         if shared.results_tx.send(outcome).is_err() {
             return; // receiver gone; the guard frees the bytes as it drops
         }
+    }
+}
+
+/// Remove the dedup entry for `item` only if it still maps to *this* job's flag.
+/// A newer job for the same item (e.g. re-requested after an epoch change while
+/// this one was cancelled mid-decode) must keep its own entry so it can still be
+/// deduped and cancelled.
+fn untrack(inner: &mut Inner, item: usize, flag: &Arc<AtomicBool>) {
+    if inner
+        .tracked
+        .get(&item)
+        .is_some_and(|f| Arc::ptr_eq(f, flag))
+    {
+        inner.tracked.remove(&item);
     }
 }
 
@@ -319,6 +333,27 @@ mod tests {
             got.push(o.key.item);
         }
         got
+    }
+
+    #[test]
+    fn untrack_only_removes_matching_flag() {
+        let mut inner = Inner {
+            queue: Vec::new(),
+            tracked: HashMap::new(),
+            inflight_bytes: 0,
+            epoch: 0,
+            shutdown: false,
+        };
+        let old = Arc::new(AtomicBool::new(false));
+        let new = Arc::new(AtomicBool::new(false));
+        // A fresh job (re-requested after an epoch change) now owns item 5.
+        inner.tracked.insert(5, new.clone());
+        // The old, cancelled job finishing must NOT drop the new job's entry.
+        untrack(&mut inner, 5, &old);
+        assert!(inner.tracked.contains_key(&5));
+        // The owning job removes its own entry.
+        untrack(&mut inner, 5, &new);
+        assert!(!inner.tracked.contains_key(&5));
     }
 
     #[test]

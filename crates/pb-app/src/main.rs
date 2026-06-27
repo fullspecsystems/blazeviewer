@@ -157,6 +157,9 @@ struct App {
     /// Prefetch window: items ahead / behind the cursor.
     ahead: usize,
     behind: usize,
+    /// Items whose decode failed (corrupt/unreadable): skipped, never retried, so
+    /// a bad JPEG can't stall hold-to-fly or spin the event loop forever.
+    failed: HashSet<usize>,
 }
 
 impl App {
@@ -195,6 +198,7 @@ impl App {
             meta_cache: HashMap::new(),
             ahead: 8,
             behind: 2,
+            failed: HashSet::new(),
         }
     }
 
@@ -215,7 +219,7 @@ impl App {
         let jobs: Vec<(usize, Arc<Path>, Option<FitBox>)> = self
             .targets
             .iter()
-            .filter(|&&t| self.ring.slot_for(t).is_none())
+            .filter(|&&t| self.ring.slot_for(t).is_none() && !self.failed.contains(&t))
             .map(|&t| (t, self.paths[t].clone(), fit))
             .collect();
         self.pool.set_targets(self.epoch, &jobs);
@@ -275,6 +279,12 @@ impl App {
                 Ok(ref img) => img,
                 Err(ref e) => {
                     eprintln!("decode failed for item {item}: {e}");
+                    self.failed.insert(item);
+                    // Unstick the gated loop: a corrupt target counts as "shown"
+                    // (the previous frame stays up) so hold-to-fly skips past it.
+                    if self.target_item == Some(item) {
+                        self.displayed_item = Some(item);
+                    }
                     continue;
                 }
             };
@@ -446,6 +456,12 @@ impl App {
     /// Advance one photo. In Fit mode this is the gated engine path (present on a
     /// ring hit, else hold + prefetch); Original mode decodes synchronously.
     fn advance(&mut self, forward: bool, event_loop: &ActiveEventLoop) {
+        // Never advance while the previous target is still pending (a miss in
+        // flight): a fast second press would overwrite it and skip that photo.
+        // Holding still flies — `about_to_wait` re-advances once it's caught up.
+        if self.displayed_item != self.target_item {
+            return;
+        }
         if forward {
             self.playlist.next();
         } else {
@@ -482,7 +498,7 @@ impl App {
             || self
                 .targets
                 .iter()
-                .any(|&t| self.ring.slot_for(t).is_none())
+                .any(|&t| self.ring.slot_for(t).is_none() && !self.failed.contains(&t))
     }
 }
 
@@ -677,20 +693,19 @@ impl ApplicationHandler for App {
         match self.held_direction() {
             Some(forward) => {
                 let now = Instant::now();
-                // Within the initial tap delay: don't repeat yet.
-                if let Some(begin) = self.hold_start.map(|t| t + self.initial_delay) {
-                    if now < begin {
-                        event_loop.set_control_flow(ControlFlow::WaitUntil(begin));
-                        return;
-                    }
-                }
+                // The initial tap delay gates *repeat*, not draining/presenting:
+                // keep polling so a first-press miss shows the moment it decodes
+                // (the earlier `return` here added up to the full delay of latency).
+                let past_delay = self
+                    .hold_start
+                    .is_none_or(|t| now >= t + self.initial_delay);
                 // Advance only when caught up (target shown) AND a frame elapsed —
                 // so every photo is shown and a miss simply holds.
                 let caught_up = self.displayed_item == self.target_item;
                 let due = self
                     .last_advance
                     .is_none_or(|t| now >= t + self.frame_interval);
-                if caught_up && due {
+                if past_delay && caught_up && due {
                     self.advance(forward, event_loop);
                 } else if !caught_up {
                     self.try_present_target(event_loop);
