@@ -33,6 +33,9 @@ pub trait Renderer {
     fn set_image(&mut self, rgba: &[u8], width: u32, height: u32);
     /// Choose how the image is sized to the viewport (fit vs. original).
     fn set_scale_mode(&mut self, mode: ScaleMode);
+    /// Set or clear the corner info-panel overlay: an RGBA8 bitmap (`w*h*4`)
+    /// drawn alpha-blended `margin` px in from the bottom-right. `None` hides it.
+    fn set_overlay(&mut self, panel: Option<(&[u8], u32, u32)>, margin: u32);
     /// Draw and present one frame.
     fn render(&mut self) -> Result<(), RenderError>;
 }

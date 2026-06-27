@@ -8,6 +8,7 @@
 //!   space / →   next photo
 //!   ⌫ / ←       previous photo
 //!   0 / o       toggle fit-to-screen <-> original 1:1 (centered)
+//!   i           toggle info panel (path · resolution · codec)
 //!   esc         quit
 //!
 //! Holding a key is **self-paced**: OS auto-repeats are ignored, and advancing is
@@ -35,8 +36,19 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Fullscreen, Window, WindowId};
 
 use pb_core::Playlist;
-use pb_decode::{decode_image_file, FitBox};
+use pb_decode::{decode_image_file, DecodedImage, FitBox};
 use pb_render::{test_pattern, Renderer, ScaleMode, WgpuRenderer};
+
+mod hud;
+use hud::Hud;
+
+/// One photo's info, for the corner overlay panel.
+struct PhotoMeta {
+    rel: String,
+    w: u32,
+    h: u32,
+    codec: &'static str,
+}
 
 struct Active {
     window: Arc<Window>,
@@ -63,10 +75,24 @@ struct App {
     fit: Option<FitBox>,
     /// Fit-to-screen (default) vs. original 1:1 centered.
     scale_mode: ScaleMode,
+    /// Scan root, for showing paths relative to it.
+    root: PathBuf,
+    /// Text renderer for the info panel (None if no system font was found).
+    hud: Option<Hud>,
+    /// Whether the info panel is enabled (toggled by `I`).
+    info_visible: bool,
+    /// Whether the panel is currently drawn (rebuilt only when the photo changes).
+    overlay_shown: bool,
+    /// The current photo's info, for the panel.
+    current: Option<PhotoMeta>,
+    /// Display scale factor, for sizing the panel.
+    scale_factor: f32,
+    /// Idle time before the panel appears once you stop navigating.
+    idle_delay: Duration,
 }
 
 impl App {
-    fn new(windowed: bool, paths: Vec<PathBuf>) -> Self {
+    fn new(windowed: bool, root: PathBuf, paths: Vec<PathBuf>) -> Self {
         let playlist = Playlist::new(paths.len(), 0);
         Self {
             windowed,
@@ -80,6 +106,13 @@ impl App {
             initial_delay: Duration::from_millis(400),
             fit: None,
             scale_mode: ScaleMode::Fit,
+            root,
+            hud: Hud::load(),
+            info_visible: false,
+            overlay_shown: false,
+            current: None,
+            scale_factor: 1.0,
+            idle_delay: Duration::from_millis(50),
         }
     }
 
@@ -107,26 +140,83 @@ impl App {
     }
 
     /// Decode the image at the current cursor (or a fallback) for first display.
-    fn initial_image(&self) -> (Vec<u8>, u32, u32, String) {
+    fn initial_image(&mut self) -> (Vec<u8>, u32, u32, String) {
         match self.playlist.current() {
             Some(idx) => match decode_image_file(&self.paths[idx], self.decode_fit()) {
-                Ok(img) => (
-                    img.pixels,
-                    img.width,
-                    img.height,
-                    title_for(&self.paths[idx], idx, self.paths.len()),
-                ),
+                Ok(img) => {
+                    self.current = Some(self.meta_for(idx, &img));
+                    let title = title_for(&self.paths[idx], idx, self.paths.len());
+                    (img.pixels, img.width, img.height, title)
+                }
                 Err(e) => {
                     eprintln!("decode failed: {}: {e}", self.paths[idx].display());
+                    self.current = None;
                     let p = test_pattern(1600, 1000);
                     (p, 1600, 1000, "PhotoBlaze (decode error)".to_string())
                 }
             },
             None => {
+                self.current = None;
                 let p = test_pattern(1600, 1000);
                 (p, 1600, 1000, "PhotoBlaze (no images)".to_string())
             }
         }
+    }
+
+    /// Build the current photo's info from its decoded image + path.
+    fn meta_for(&self, idx: usize, img: &DecodedImage) -> PhotoMeta {
+        let path = &self.paths[idx];
+        let rel = match path.strip_prefix(&self.root) {
+            Ok(r) => r.to_string_lossy().replace('\\', "/"),
+            Err(_) => path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("?")
+                .to_string(),
+        };
+        PhotoMeta {
+            rel,
+            w: img.orig_width,
+            h: img.orig_height,
+            codec: img.codec,
+        }
+    }
+
+    /// Toggle the info panel. When turned on it shows immediately (we're idle);
+    /// after navigation it reappears once you stop (see `about_to_wait`).
+    fn toggle_info(&mut self, event_loop: &ActiveEventLoop) {
+        self.info_visible = !self.info_visible;
+        if self.info_visible {
+            self.show_overlay(event_loop);
+        } else {
+            if let Some(a) = self.active.as_mut() {
+                a.renderer.set_overlay(None, 0);
+            }
+            self.overlay_shown = false;
+            self.draw(event_loop);
+        }
+    }
+
+    /// Rasterize the current photo's info into a corner panel and draw it.
+    fn show_overlay(&mut self, event_loop: &ActiveEventLoop) {
+        let panel = {
+            let (Some(hud), Some(meta)) = (self.hud.as_ref(), self.current.as_ref()) else {
+                return;
+            };
+            let text = format!("{} · {}×{} · {}", meta.rel, meta.w, meta.h, meta.codec);
+            let px = (15.0 * self.scale_factor).max(8.0);
+            let pad = (7.0 * self.scale_factor).round().max(2.0) as u32;
+            hud.render_panel(&text, px, pad)
+        };
+        let Some((bitmap, w, h)) = panel else {
+            return;
+        };
+        let margin = (10.0 * self.scale_factor).round().max(1.0) as u32;
+        if let Some(a) = self.active.as_mut() {
+            a.renderer.set_overlay(Some((&bitmap, w, h)), margin);
+        }
+        self.overlay_shown = true;
+        self.draw(event_loop);
     }
 
     /// Decode the current cursor image into the renderer. On a decode error the
@@ -137,11 +227,16 @@ impl App {
         };
         match decode_image_file(&self.paths[idx], self.decode_fit()) {
             Ok(img) => {
+                self.current = Some(self.meta_for(idx, &img));
+                let title = title_for(&self.paths[idx], idx, self.paths.len());
                 if let Some(a) = self.active.as_mut() {
                     a.renderer.set_image(&img.pixels, img.width, img.height);
-                    a.window
-                        .set_title(&title_for(&self.paths[idx], idx, self.paths.len()));
+                    // The photo changed — drop the stale panel; it reappears once
+                    // you stop navigating (see `about_to_wait`).
+                    a.renderer.set_overlay(None, 0);
+                    a.window.set_title(&title);
                 }
+                self.overlay_shown = false;
             }
             Err(e) => eprintln!("decode failed: {}: {e}", self.paths[idx].display()),
         }
@@ -222,6 +317,7 @@ impl ApplicationHandler for App {
                 .expect("failed to create window"),
         );
 
+        self.scale_factor = window.scale_factor() as f32;
         let isz = window.inner_size();
         self.fit = Some(FitBox {
             max_width: isz.width.max(1),
@@ -306,6 +402,8 @@ impl ApplicationHandler for App {
                             }
                             // Toggle fit-to-screen <-> original 1:1 (centered).
                             KeyCode::Digit0 | KeyCode::KeyO => self.toggle_scale(event_loop),
+                            // Toggle the corner info panel.
+                            KeyCode::KeyI => self.toggle_info(event_loop),
                             _ => {}
                         }
                     }
@@ -349,7 +447,16 @@ impl ApplicationHandler for App {
             }
             None => {
                 self.hold_start = None;
-                self.last_advance = None;
+                // Show the info panel once we've been idle past the short delay.
+                if self.info_visible && !self.overlay_shown && self.current.is_some() {
+                    let now = Instant::now();
+                    let due = self.last_advance.map(|t| t + self.idle_delay).unwrap_or(now);
+                    if now < due {
+                        event_loop.set_control_flow(ControlFlow::WaitUntil(due));
+                        return;
+                    }
+                    self.show_overlay(event_loop);
+                }
                 event_loop.set_control_flow(ControlFlow::Wait);
             }
         }
@@ -437,6 +544,6 @@ fn main() {
     let event_loop = EventLoop::new().expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = App::new(windowed, paths);
+    let mut app = App::new(windowed, dir, paths);
     event_loop.run_app(&mut app).expect("event loop");
 }

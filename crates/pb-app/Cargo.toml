@@ -14,3 +14,5 @@ pb-core = { workspace = true }
 pb-decode = { workspace = true }
 pb-render = { workspace = true }
 winit = "0.30"
+# Rasterizes the info-panel text using the OS UI font (loaded at runtime).
+fontdue = "0.9"

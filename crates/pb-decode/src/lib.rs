@@ -44,6 +44,12 @@ impl PixelFormat {
 pub struct DecodedImage {
     pub width: u32,
     pub height: u32,
+    /// Original file dimensions (before decode-to-fit downscaling, after EXIF
+    /// orientation) — what the info panel reports as the photo's resolution.
+    pub orig_width: u32,
+    pub orig_height: u32,
+    /// Content-derived codec name (e.g. "JPEG"), not the file extension.
+    pub codec: &'static str,
     pub format: PixelFormat,
     /// Tightly packed pixel data, `width * height * format.bytes_per_pixel()`.
     pub pixels: Vec<u8>,
@@ -145,6 +151,9 @@ impl ImageDecoder for SolidColorDecoder {
         Ok(DecodedImage {
             width: w,
             height: h,
+            orig_width: w,
+            orig_height: h,
+            codec: "solid",
             format: PixelFormat::Rgba8,
             pixels,
             is_preview: false,

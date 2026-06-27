@@ -96,10 +96,10 @@ fn clear_color(rgba: [u8; 4]) -> wgpu::Color {
     }
 }
 
-fn build_pipeline(
+fn build_pipelines(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
-) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
+) -> (wgpu::RenderPipeline, wgpu::RenderPipeline, wgpu::BindGroupLayout) {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("pb-shader"),
         source: wgpu::ShaderSource::Wgsl(SHADER.into()),
@@ -130,36 +130,69 @@ fn build_pipeline(
         bind_group_layouts: &[&bgl],
         push_constant_ranges: &[],
     });
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("pb-pipeline"),
-        layout: Some(&layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: "vs_main",
-            compilation_options: Default::default(),
-            buffers: &[wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &ATTRS,
-            }],
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: "fs_main",
-            compilation_options: Default::default(),
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-        }),
-        primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
-        cache: None,
-    });
-    (pipeline, bgl)
+    // Two pipelines, same shader: the photo is opaque (REPLACE); the corner
+    // info overlay is alpha-blended over it.
+    let make = |blend: wgpu::BlendState, label: &str| {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_main",
+                compilation_options: Default::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &ATTRS,
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_main",
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(blend),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        })
+    };
+    let photo = make(wgpu::BlendState::REPLACE, "pb-photo-pipeline");
+    let overlay = make(wgpu::BlendState::ALPHA_BLENDING, "pb-overlay-pipeline");
+    (photo, overlay, bgl)
+}
+
+/// The four corners of the overlay panel quad: `panel_w`×`panel_h` pixels, placed
+/// `margin` px in from the bottom-right of the screen.
+fn overlay_quad_vertices(
+    panel_w: u32,
+    panel_h: u32,
+    screen_w: u32,
+    screen_h: u32,
+    margin: u32,
+) -> [Vertex; 4] {
+    let (sw, sh) = (screen_w as f32, screen_h as f32);
+    let m = margin as f32;
+    let x1 = sw - m;
+    let x0 = x1 - panel_w as f32;
+    let y1 = sh - m;
+    let y0 = y1 - panel_h as f32;
+    let x0n = (x0 / sw) * 2.0 - 1.0;
+    let x1n = (x1 / sw) * 2.0 - 1.0;
+    let y_top = 1.0 - (y0 / sh) * 2.0;
+    let y_bot = 1.0 - (y1 / sh) * 2.0;
+    [
+        Vertex { pos: [x0n, y_top], uv: [0.0, 0.0] },
+        Vertex { pos: [x1n, y_top], uv: [1.0, 0.0] },
+        Vertex { pos: [x1n, y_bot], uv: [1.0, 1.0] },
+        Vertex { pos: [x0n, y_bot], uv: [0.0, 1.0] },
+    ]
 }
 
 /// Downscale `image` (RGBA8) so neither dimension exceeds `max`, preserving
@@ -335,6 +368,15 @@ fn device_descriptor(limits: wgpu::Limits) -> wgpu::DeviceDescriptor<'static> {
     }
 }
 
+/// The corner info-panel overlay, when shown.
+struct OverlayDraw {
+    bind_group: wgpu::BindGroup,
+    vbuf: wgpu::Buffer,
+    panel_w: u32,
+    panel_h: u32,
+    margin: u32,
+}
+
 /// On-screen presenter for a window surface.
 pub struct WgpuRenderer {
     surface: wgpu::Surface<'static>,
@@ -342,6 +384,7 @@ pub struct WgpuRenderer {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    overlay_pipeline: wgpu::RenderPipeline,
     bgl: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
     vbuf: wgpu::Buffer,
@@ -349,6 +392,7 @@ pub struct WgpuRenderer {
     img_w: u32,
     img_h: u32,
     scale_mode: ScaleMode,
+    overlay: Option<OverlayDraw>,
 }
 
 impl WgpuRenderer {
@@ -416,7 +460,7 @@ impl WgpuRenderer {
         surface.configure(&device, &config);
 
         let scale_mode = ScaleMode::Fit;
-        let (pipeline, bgl) = build_pipeline(&device, format);
+        let (pipeline, overlay_pipeline, bgl) = build_pipelines(&device, format);
         let bind_group = upload_image(&device, &queue, &bgl, image, img_w, img_h);
         let vbuf = vertex_buffer(&device, scale_mode, img_w, img_h, config.width, config.height);
         let ibuf = index_buffer(&device);
@@ -427,6 +471,7 @@ impl WgpuRenderer {
             queue,
             config,
             pipeline,
+            overlay_pipeline,
             bgl,
             bind_group,
             vbuf,
@@ -434,6 +479,7 @@ impl WgpuRenderer {
             img_w,
             img_h,
             scale_mode,
+            overlay: None,
         }
     }
 
@@ -474,6 +520,16 @@ impl Renderer for WgpuRenderer {
                 height,
             )),
         );
+        // The overlay panel's corner position depends on the viewport.
+        if let Some(ov) = &self.overlay {
+            self.queue.write_buffer(
+                &ov.vbuf,
+                0,
+                bytemuck::cast_slice(&overlay_quad_vertices(
+                    ov.panel_w, ov.panel_h, width, height, ov.margin,
+                )),
+            );
+        }
     }
 
     fn set_image(&mut self, rgba: &[u8], width: u32, height: u32) {
@@ -509,6 +565,27 @@ impl Renderer for WgpuRenderer {
         );
     }
 
+    fn set_overlay(&mut self, panel: Option<(&[u8], u32, u32)>, margin: u32) {
+        self.overlay = match panel {
+            Some((rgba, w, h)) => {
+                let bind_group = upload_image(&self.device, &self.queue, &self.bgl, rgba, w, h);
+                let vbuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("overlay-vbuf"),
+                    contents: bytemuck::cast_slice(&overlay_quad_vertices(
+                        w,
+                        h,
+                        self.config.width,
+                        self.config.height,
+                        margin,
+                    )),
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                });
+                Some(OverlayDraw { bind_group, vbuf, panel_w: w, panel_h: h, margin })
+            }
+            None => None,
+        };
+    }
+
     fn render(&mut self) -> Result<(), RenderError> {
         let frame = match self.surface.get_current_texture() {
             Ok(f) => f,
@@ -533,6 +610,28 @@ impl Renderer for WgpuRenderer {
             &self.vbuf,
             &self.ibuf,
         );
+        // A second pass loads the photo and alpha-blends the info panel on top.
+        if let Some(ov) = &self.overlay {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("overlay"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rp.set_pipeline(&self.overlay_pipeline);
+            rp.set_bind_group(0, &ov.bind_group, &[]);
+            rp.set_vertex_buffer(0, ov.vbuf.slice(..));
+            rp.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint16);
+            rp.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+        }
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
         Ok(())
@@ -575,7 +674,7 @@ async fn render_offscreen_async(
         .expect("request device");
 
     let format = wgpu::TextureFormat::Rgba8Unorm;
-    let (pipeline, bgl) = build_pipeline(&device, format);
+    let (pipeline, _overlay_pipeline, bgl) = build_pipelines(&device, format);
     let bind_group = upload_image(&device, &queue, &bgl, image, img_w, img_h);
     let vbuf = vertex_buffer(&device, ScaleMode::Fit, img_w, img_h, screen_w, screen_h);
     let ibuf = index_buffer(&device);

@@ -52,6 +52,8 @@ impl ImageDecoder for ZuneJpegDecoder {
             o if o > 1 => apply_orientation(&rgba, w, h, o),
             _ => (rgba, w, h),
         };
+        // The photo's true resolution (oriented, before any decode-to-fit).
+        let (orig_width, orig_height) = (width, height);
 
         // Decode-to-fit: downscale to the display size with a high-quality filter
         // so large photos aren't minified (aliased/grainy) on the GPU.
@@ -63,6 +65,9 @@ impl ImageDecoder for ZuneJpegDecoder {
         Ok(DecodedImage {
             width,
             height,
+            orig_width,
+            orig_height,
+            codec: "JPEG",
             format: PixelFormat::Rgba8,
             pixels,
             is_preview: false,

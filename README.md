@@ -46,6 +46,7 @@ cargo run -p pb-app --release -- "C:\path\to\photos" -r --windowed
 | `space` / `→` | next photo |
 | `backspace` / `←` | previous photo |
 | `0` / `o` | toggle fit-to-screen ↔ original 1:1 (centered) |
+| `i` | toggle info panel (path · resolution · codec) |
 | `esc` | quit |
 
 Hold a nav key to page through every photo (advance is self-paced and capped at
