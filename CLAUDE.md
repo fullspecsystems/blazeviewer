@@ -166,6 +166,45 @@ replace any of them with data.
 JPEG ≫ WebP > JXL(C) ≫ everything else. Prioritize the scaled-decode path where
 it pays.
 
+### What's actually wired (2026-06-27) — deviations from the provisional table
+Multi-codec dispatch is implemented in `pb-decode` behind the `ImageDecoder` seam
+(`decode_bytes` sniff-registry + extension routing for the ambiguous ones). The
+pragmatic crate choices differ from the table above and are the current baseline:
+- **`image` crate** (one dep, `default-features` curated) covers PNG/GIF/BMP/TIFF/
+  **WebP**/TGA/QOI/ICO/PNM/HDR/EXR — chosen over the per-format crates (libwebp-sys,
+  png+zlib-rs, …) for zero build risk; swap individual formats back behind the seam if
+  benchmarks justify it.
+- **JXL** `jxl-oxide`; **SVG** `resvg/usvg/tiny-skia` (rasterized at display res).
+- **RAW** (ARW/NEF/CR2/DNG/…, `raw.rs`): hybrid. If the embedded preview is full-size
+  (long edge ≥ `PREVIEW_FULL_MIN`=4000, e.g. Nikon's ≈7360) use it (fast); else **demosaic
+  to true sensor res** via `rawloader` + `imagepipe` (e.g. Sony's 1616 thumbnail → 6048).
+  Demosaic runs on a **256 MB-stack thread** — some RAW decoders recurse deep enough to
+  overflow the default stack (a Nikon D800 NEF does; it's why the preview path exists for
+  full-preview cameras). Slower than preview-only; "preview-first then refine" is the
+  future optimization. JPEG-segment-parse finds embedded previews (`jpeg_spans`).
+- **AVIF + HEIC**: **Windows WIC** (`wic.rs`, `cfg(windows)`, `windows` crate) using the
+  OS codec extensions — NOT dav1d/libheif/vcpkg. First platform-specific decode backend
+  (macOS would mirror with ImageIO). Needs the AV1/HEVC/HEIF Store extensions; absent →
+  graceful decode error. **JPEG-2000 not added** (no pure-Rust decoder; OpenJPEG/C, rare).
+- **Orientation** (subtle, was buggy): `common::read_orientation` scans **all** EXIF IFDs
+  (HEIC/RAW put Orientation outside the primary IFD; a PRIMARY-only lookup wrongly read 1).
+  WIC **already applies** the container rotation, so the WIC path passes orientation=1 (re-
+  applying double-rotated). imagepipe also self-orients (demosaic path → 1). The RAW
+  *preview* path applies the container's orientation to the sensor-order preview.
+- Every backend returns full-res RGBA8 → shared `common::finalize`/`finalize_oriented`
+  (orientation + Lanczos decode-to-fit). Native scaled-decode (JPEG DCT, WebP) still a TODO.
+- **Panic-safety**: `decode_bytes`/`decode_image_file` wrap the decoders in `catch_panics`
+  (`catch_unwind`) — a third-party decoder panicking on a hostile file becomes a
+  `DecodeError`, not an app crash. **Release profile is `panic = "unwind"`** (changed from
+  abort) so this works; the GPU present hot path never panics, so unwind tables don't cost
+  it. A hard *stack overflow* (some NEFs) is still uncatchable — mitigated by the demosaic
+  big-stack thread, not `catch_unwind`.
+- **TGA is routed by extension** (`.tga`), not content — Targa has no magic number, so
+  `image::guess_format` can't sniff it; `decode_image_file` hands it an explicit format hint.
+- **Known v1 limitations** (deliberate): no ICC color management (Display-P3 iPhone HEICs
+  render oversaturated — treated as sRGB); HDR/EXR clamped to SDR; CMYK JPEG mis-colored;
+  first frame only (GIF/animated-WebP/Live-Photo/multipage-TIFF).
+
 ## Build, test, bench
 
 > Rust toolchain required (`rustup`); `rust-toolchain.toml` pins stable + the

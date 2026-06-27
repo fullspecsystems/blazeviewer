@@ -129,7 +129,7 @@
         "status": "done",
         "priority": "medium",
         "dependencies": [],
-        "details": "DONE. The shared per-photo ViewTransform (pb-render::view) composes mode + rotation + zoom + pan and is unit-tested; the renderer draws from it (rotation/zoom/pan are perf-neutral GPU transforms). cover_rect/original_rect added next to fit_rect. Keys 0/8/9 bound to Original/Fit/Fill. DEVIATION from the original plan: mode is GLOBAL/sticky (set once, applies as you browse) rather than per-photo non-persistent - better UX for a flick-viewer. Fill & Original decode full-res (so Fill isn't upscale-blurry); the byte-budgeted ring bounds VRAM. A mode change bumps the geometry epoch and re-buffers neighbors.",
+        "details": "DONE. The shared per-photo ViewTransform (pb-render::view) composes mode + rotation + zoom + pan and is unit-tested; the renderer draws from it (rotation/zoom/pan are perf-neutral GPU transforms). cover_rect/original_rect added next to fit_rect. Keys 0/8/9 bound to Original/Fit/Fill. DEVIATION from the original plan: mode is GLOBAL/sticky (set once, applies as you browse) rather than per-photo non-persistent - better UX for a flick-viewer. Fill & Original decode full-res (so Fill isn't upscale-blurry); the byte-budgeted ring bounds VRAM. A mode change bumps the geometry epoch and re-buffers neighbors.\n\nPOLISH (2026-06-27): per owner request, 0 now TOGGLES original 1:1 ↔ fit (whole photo in screen) (8=fit, 9=fill stay explicit), restoring the old fit↔original single-key flip. Also, pressing any mode key (8/9/0) always resets zoom/pan to that mode's natural framing — even when already in that mode — so a mode tap doubles as 'reset my zoom' (set_scale_mode resets unconditionally; only an actual mode change re-decodes).",
         "testStrategy": "Extend pb-render fit tests: cover() fully covers the screen and crops while preserving aspect; original() is exactly native size, centered (offsets may be negative). Property tests: Fill output covers the whole viewport; Fit output never exceeds it; Original equals native dimensions. Golden-image test per mode.",
         "subtasks": [
           {
@@ -233,31 +233,31 @@
         "id": 7,
         "title": "Keyboard-shortcut help overlay (/ or ?)",
         "description": "/ or ? shows a translucent overlay card listing the keyboard shortcuts. Pressing it again hides the card.",
-        "status": "pending",
+        "status": "done",
         "priority": "low",
         "dependencies": [5],
-        "details": "Reuse the HUD overlay layer from Task 5 to render a centered translucent card listing every bound action and its key(s). Source the list from the central keymap (Task 8) so it stays correct when bindings are remapped. Simple on/off toggle. Register action help_toggle (Task 8).",
+        "details": "Reuse the HUD overlay layer from Task 5 to render a centered translucent card listing every bound action and its key(s). Source the list from the central keymap (Task 8) so it stays correct when bindings are remapped. Simple on/off toggle. Register action help_toggle (Task 8).\n\nDONE (2026-06-27): added InfoMode::Help, toggled by KeyCode::Slash (one physical key serves both / and ?). Reuses the shared overlay via the new hud::Hud::render_table two-column layout (App::help_rows), at a larger font (~20px vs 15px). Shares the single overlay quad with the info panels (mutually exclusive) and obeys the same blaze-mode hide. DEVIATIONS: (1) the key list is a hardcoded table in help_rows(), NOT sourced from a central keymap — that wiring waits on Task 8; revisit help_rows to read the action map once #8 lands. (2) Anchored bottom-right (reuses the existing overlay placement), not centered — easy to move when the overlay gains anchor options. Subtask 1 (generate from keymap) therefore deferred to #8.",
         "testStrategy": "Unit-test that the help list is generated from the active keymap (every bound action appears with its key). Golden-image test the card. Toggle on/off state test.",
         "subtasks": [
           {
             "id": 1,
             "title": "Generate the shortcut list from the active keymap",
             "description": "Derive rows from the keymap so help stays accurate after remaps.",
-            "status": "pending",
+            "status": "deferred",
             "dependencies": []
           },
           {
             "id": 2,
             "title": "Render the translucent help card (reuse HUD)",
             "description": "Centered card via the Task 5 overlay layer.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 3,
             "title": "Bind / and ?; toggle",
             "description": "Wire help_toggle to both keys.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           }
         ]

@@ -27,9 +27,11 @@ All tests green: **~89 passing (+1 ignored)**, `clippy --all-targets -D warnings
 space            next photo            ⌫              previous photo
 ← ↑ ↓ →          pan (hold; accelerates)
 = / -            zoom in/out (hold; accelerates; numpad +/- too)
-0 / 8 / 9        scaling mode: original 1:1 / fit / fill
+8 / 9            scaling mode: fit / fill        0   toggle original 1:1 ↔ fit
+                 (any of 8/9/0 also resets zoom/pan to that mode's framing)
 r / Shift+R      rotate 90° cw / ccw (per-image, RAM-only)
 i / Shift+I      info panel / full-EXIF "nerd" panel
+/ or ?           keybindings help overlay
 esc              quit
 ```
 (Recursive `R` intentionally dropped — recursion comes from how the app is
@@ -38,15 +40,46 @@ unwired.)
 
 ## Run it
 ```
-cargo run -p pb-app --release -- "D:\Pictures" -r           # fullscreen, recursive
+cargo run -p pb-app --release -- "D:\Media\Pictures" -r     # fullscreen, recursive
 cargo run -p pb-app --release -- "<leaf folder>" --windowed # dev window
 cargo run -p pb-app --release -- "<folder>" --metrics       # stage timings on exit
+cargo run -q --example decode -p pb-decode -- <files...>    # decode-only CLI (codec smoke test)
 ```
+
+## Image format support (multi-codec dispatch)
+The scanner + `pb_decode::decode_image_file` now handle far more than JPEG, via a
+sniff-then-route registry (`decode_bytes`) + extension routing for the ambiguous ones:
+- **JPEG** `zune-jpeg`; **PNG/GIF/BMP/TIFF/WebP/TGA/QOI/ICO/PNM/HDR/EXR** the
+  pure-Rust `image` crate (one dep, `ImageCrateDecoder`).
+- **JXL** `jxl-oxide`; **SVG** `resvg`/`usvg`/`tiny-skia` (rasterized at display res, routed by ext).
+- **RAW** (ARW/NEF/CR2/DNG/…, routed by ext) — **hybrid** (`raw.rs`): full-size embedded
+  preview (Nikon ≈7360) used directly; thumbnail/reduced preview (Sony 1616/3968) →
+  **full demosaic** via `rawloader`+`imagepipe` to true sensor res (6048). Demosaic runs on a
+  **256 MB-stack thread** (some NEFs overflow the default stack). Slower than preview-only.
+- **AVIF + HEIC/HEIF** — **Windows WIC** (`wic.rs`, `cfg(windows)`, the `windows` crate;
+  no vcpkg/dav1d/libheif), using the OS codec extensions (AV1/HEVC/HEIF — all installed here).
+  COM is init'd per-call so it works on the decode-pool worker threads.
+- **Orientation fix** (RAW + HEIC were sideways): `common::read_orientation` scans all EXIF
+  IFDs (HEIC/RAW store it outside primary); WIC + imagepipe already self-orient so those
+  paths pass orientation=1 (re-applying double-rotated); the RAW preview path applies the
+  container orientation. Verified: portrait HEIC→3024×4032, portrait NEF→4924×7374.
+- All backends produce full-res RGBA8 then share `common::finalize`/`finalize_oriented`.
+  **Verified: all 11 corpus formats decode 0-fail** (`D:\Media\Pictures\test-images`); plus
+  portrait HEIC/RAW from the library decode upright (HEIC, NEF preview, Sony demosaic paths).
+- **Panic-safe**: `decode_*` wrap decoders in `catch_panics`; **release is now `panic = "unwind"`**
+  (was abort) so a panicking decoder skips the file instead of crashing the viewer. Stack
+  overflows (some NEFs) still uncatchable → demosaic runs on a 256 MB-stack thread.
+- **TGA** is routed by extension (no magic number); fixed a dispatch bug a regression test caught.
+- `is_supported_extension` is the single source of truth the scanner filters on.
+- **Known v1 gaps** (deliberate): no ICC color management (P3 iPhone HEICs render oversaturated);
+  HDR/EXR clamped to SDR; CMYK JPEG mis-colored; first-frame-only for animations. Color
+  management is the notable one — scope as its own task.
+- Tests: **111 passing** (added codec-dispatch + panic-safety regression tests).
 
 ## Architecture
 ```
 crates/pb-core    pure nav/shuffle/prefetch/cache + ResidentRing (no I/O, no GPU)
-crates/pb-decode  ImageDecoder (zune-jpeg) + decode-to-fit + EXIF (orientation, metadata)
+crates/pb-decode  ImageDecoder backends (jpeg/image/jxl/svg/raw/wic) + dispatch + decode-to-fit + EXIF
 crates/pb-render  wgpu presenter; ViewTransform (view.rs); UploadStrategy (upload.rs)
 crates/pb-app     winit loop, decode_pool (priority workers), hud.rs, metrics.rs
 ```
@@ -120,7 +153,8 @@ limit). When it resets, run:
 - GPU render/round-trip tests run on the RTX 5090. Don't launch the **fullscreen**
   app from automation (use a short `--windowed` `Start-Process` + kill; quote paths
   with spaces). Display: 7680×2160 @ 120 Hz (the smoke box reported 60 Hz windowed).
-- `D:\Pictures` is the real corpus; photos live in subfolders → use `-r`. A small
-  test folder used for smoke runs: `D:\Pictures\1990s\1990-12-24 - Christmas1990` (11).
+- `D:\Media\Pictures` is the real corpus (moved from `D:\Pictures`, which is gone);
+  photos live in subfolders → use `-r`. `D:\Media\Pictures\test-images` is the
+  one-per-format codec corpus (jpg/png/qoi/webp×2/jxl/avif/heic/svg/arw/nef).
 - Line endings: git warns LF→CRLF (harmless); `Cargo.lock` is committed.
 </content>

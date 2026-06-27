@@ -8,7 +8,7 @@
 //! latency) and across all cores (pool throughput). Pure Rust = no NASM/cmake, so
 //! it's a conservative lower bound; turbojpeg would be faster and scale finer.
 //!
-//! Usage: `decode-throughput-spike [DIR] [SAMPLE_CAP]`  (defaults: D:\Pictures, 200)
+//! Usage: `decode-throughput-spike [DIR] [SAMPLE_CAP]`  (defaults: D:\Media\Pictures, 200)
 
 use std::io::Cursor;
 use std::path::PathBuf;
@@ -70,7 +70,7 @@ fn decode_scaled_to_fit(bytes: &[u8], sw: u32, sh: u32) -> Option<(u32, u32, u32
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let dir = args.next().unwrap_or_else(|| r"D:\Pictures".to_string());
+    let dir = args.next().unwrap_or_else(|| r"D:\Media\Pictures".to_string());
     let cap: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(200);
 
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0);
