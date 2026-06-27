@@ -9,9 +9,8 @@ use std::borrow::Cow;
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
-use crate::fit::fit_rect;
 use crate::upload::{StagingUpload, UploadStrategy};
-use crate::{RenderError, Renderer, ScaleMode};
+use crate::{RenderError, Renderer, ViewTransform};
 
 /// Background (letterbox) color, straight RGBA8.
 pub const LETTERBOX: [u8; 4] = [10, 10, 12, 255];
@@ -50,51 +49,37 @@ const ATTRS: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![0 => Float32x
 
 const INDICES: [u16; 6] = [0, 1, 2, 0, 2, 3];
 
-/// The four corners of the image quad in clip space, placed per `ScaleMode`.
+/// The four corners of the image quad in clip space, placed and UV-mapped by the
+/// per-photo `ViewTransform` (scaling mode + rotation + zoom + pan).
 fn quad_vertices(
-    mode: ScaleMode,
+    view: &ViewTransform,
     img_w: u32,
     img_h: u32,
     screen_w: u32,
     screen_h: u32,
 ) -> [Vertex; 4] {
     let (sw, sh) = (screen_w as f32, screen_h as f32);
-    let (ox, oy, w, h) = match mode {
-        ScaleMode::Fit => {
-            let r = fit_rect(img_w, img_h, screen_w, screen_h, true);
-            (
-                r.offset_x as f32,
-                r.offset_y as f32,
-                r.width as f32,
-                r.height as f32,
-            )
-        }
-        ScaleMode::Original => {
-            // 1:1 pixel size, centered; larger-than-viewport overflows (no pan).
-            let (w, h) = (img_w as f32, img_h as f32);
-            ((sw - w) / 2.0, (sh - h) / 2.0, w, h)
-        }
-    };
-    let x0 = (ox / sw) * 2.0 - 1.0;
-    let x1 = ((ox + w) / sw) * 2.0 - 1.0;
-    let y_top = 1.0 - (oy / sh) * 2.0;
-    let y_bot = 1.0 - ((oy + h) / sh) * 2.0;
+    let p = view.placement(img_w, img_h, screen_w, screen_h);
+    let x0 = (p.x / sw) * 2.0 - 1.0;
+    let x1 = ((p.x + p.w) / sw) * 2.0 - 1.0;
+    let y_top = 1.0 - (p.y / sh) * 2.0;
+    let y_bot = 1.0 - ((p.y + p.h) / sh) * 2.0;
     [
         Vertex {
             pos: [x0, y_top],
-            uv: [0.0, 0.0],
+            uv: p.uvs[0],
         },
         Vertex {
             pos: [x1, y_top],
-            uv: [1.0, 0.0],
+            uv: p.uvs[1],
         },
         Vertex {
             pos: [x1, y_bot],
-            uv: [1.0, 1.0],
+            uv: p.uvs[2],
         },
         Vertex {
             pos: [x0, y_bot],
-            uv: [0.0, 1.0],
+            uv: p.uvs[3],
         },
     ]
 }
@@ -306,7 +291,7 @@ fn upload_image(
 
 fn vertex_buffer(
     device: &wgpu::Device,
-    mode: ScaleMode,
+    view: &ViewTransform,
     img_w: u32,
     img_h: u32,
     screen_w: u32,
@@ -314,7 +299,7 @@ fn vertex_buffer(
 ) -> wgpu::Buffer {
     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("vbuf"),
-        contents: bytemuck::cast_slice(&quad_vertices(mode, img_w, img_h, screen_w, screen_h)),
+        contents: bytemuck::cast_slice(&quad_vertices(view, img_w, img_h, screen_w, screen_h)),
         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
     })
 }
@@ -423,7 +408,8 @@ pub struct WgpuRenderer {
     ibuf: wgpu::Buffer,
     img_w: u32,
     img_h: u32,
-    scale_mode: ScaleMode,
+    /// Per-photo view transform (scaling mode + rotation + zoom + pan).
+    view: ViewTransform,
     overlay: Option<OverlayDraw>,
     upload: Box<dyn UploadStrategy>,
     /// Resident texture ring (Phase 3). Empty until `reserve_ring`; each `Some`
@@ -497,18 +483,11 @@ impl WgpuRenderer {
         };
         surface.configure(&device, &config);
 
-        let scale_mode = ScaleMode::Fit;
+        let view = ViewTransform::default();
         let (pipeline, overlay_pipeline, bgl) = build_pipelines(&device, format);
         let mut upload: Box<dyn UploadStrategy> = Box::new(StagingUpload::new());
         let bind_group = upload_image(&device, &queue, &bgl, upload.as_mut(), image, img_w, img_h);
-        let vbuf = vertex_buffer(
-            &device,
-            scale_mode,
-            img_w,
-            img_h,
-            config.width,
-            config.height,
-        );
+        let vbuf = vertex_buffer(&device, &view, img_w, img_h, config.width, config.height);
         let ibuf = index_buffer(&device);
 
         Self {
@@ -524,7 +503,7 @@ impl WgpuRenderer {
             ibuf,
             img_w,
             img_h,
-            scale_mode,
+            view,
             overlay: None,
             upload,
             ring: Vec::new(),
@@ -562,11 +541,7 @@ impl Renderer for WgpuRenderer {
             &self.vbuf,
             0,
             bytemuck::cast_slice(&quad_vertices(
-                self.scale_mode,
-                self.img_w,
-                self.img_h,
-                width,
-                height,
+                &self.view, self.img_w, self.img_h, width, height,
             )),
         );
         // The overlay panel's corner position depends on the viewport.
@@ -600,7 +575,7 @@ impl Renderer for WgpuRenderer {
             &self.vbuf,
             0,
             bytemuck::cast_slice(&quad_vertices(
-                self.scale_mode,
+                &self.view,
                 width,
                 height,
                 self.config.width,
@@ -609,13 +584,13 @@ impl Renderer for WgpuRenderer {
         );
     }
 
-    fn set_scale_mode(&mut self, mode: ScaleMode) {
-        self.scale_mode = mode;
+    fn set_view(&mut self, view: ViewTransform) {
+        self.view = view;
         self.queue.write_buffer(
             &self.vbuf,
             0,
             bytemuck::cast_slice(&quad_vertices(
-                mode,
+                &self.view,
                 self.img_w,
                 self.img_h,
                 self.config.width,
@@ -700,7 +675,7 @@ impl Renderer for WgpuRenderer {
             &self.vbuf,
             0,
             bytemuck::cast_slice(&quad_vertices(
-                self.scale_mode,
+                &self.view,
                 w,
                 h,
                 self.config.width,
@@ -813,7 +788,14 @@ async fn render_offscreen_async(
     let (pipeline, _overlay_pipeline, bgl) = build_pipelines(&device, format);
     let mut upload = StagingUpload::new();
     let bind_group = upload_image(&device, &queue, &bgl, &mut upload, image, img_w, img_h);
-    let vbuf = vertex_buffer(&device, ScaleMode::Fit, img_w, img_h, screen_w, screen_h);
+    let vbuf = vertex_buffer(
+        &device,
+        &ViewTransform::default(),
+        img_w,
+        img_h,
+        screen_w,
+        screen_h,
+    );
     let ibuf = index_buffer(&device);
 
     let target = device.create_texture(&wgpu::TextureDescriptor {
@@ -1005,13 +987,17 @@ mod tests {
 
     #[test]
     fn original_mode_is_one_to_one_centered() {
+        let view = ViewTransform {
+            mode: crate::ScaleMode::Original,
+            ..Default::default()
+        };
         // Image exactly the screen size -> full-screen quad (top-left at -1,+1).
-        let v = quad_vertices(ScaleMode::Original, 100, 100, 100, 100);
+        let v = quad_vertices(&view, 100, 100, 100, 100);
         assert!((v[0].pos[0] + 1.0).abs() < 1e-5, "x0 = {}", v[0].pos[0]);
         assert!((v[0].pos[1] - 1.0).abs() < 1e-5, "y_top = {}", v[0].pos[1]);
 
         // Image half the screen -> centered, top-left at -0.5,+0.5.
-        let v = quad_vertices(ScaleMode::Original, 50, 50, 100, 100);
+        let v = quad_vertices(&view, 50, 50, 100, 100);
         assert!((v[0].pos[0] + 0.5).abs() < 1e-5, "x0 = {}", v[0].pos[0]);
         assert!((v[0].pos[1] - 0.5).abs() < 1e-5, "y_top = {}", v[0].pos[1]);
     }

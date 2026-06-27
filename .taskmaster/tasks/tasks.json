@@ -126,17 +126,17 @@
         "id": 4,
         "title": "Scaling modes: 0 original, 8 fit (default), 9 fill",
         "description": "Number keys choose the scaling mode: 0 = pixel-for-pixel original centered on screen, 8 = fit-to-screen (default, no crop), 9 = fill the screen (crop the overflowing edges).",
-        "status": "pending",
+        "status": "done",
         "priority": "medium",
         "dependencies": [],
-        "details": "Introduces the shared per-photo ViewTransform that rotation (Task 1) and zoom (Task 3) build on. Three base modes: Original (scale 1.0, centered, may over/underflow the screen), Fit (contain - the existing pb-render::fit_rect), Fill (cover - scale to fill, crop edges that don't fit, aspect preserved). Mode is per-photo state, default Fit, non-persistent. fit_rect already implements Fit; add cover() and original() as pure functions next to it. Register actions mode_original / mode_fit / mode_fill (Task 8).",
+        "details": "DONE. The shared per-photo ViewTransform (pb-render::view) composes mode + rotation + zoom + pan and is unit-tested; the renderer draws from it (rotation/zoom/pan are perf-neutral GPU transforms). cover_rect/original_rect added next to fit_rect. Keys 0/8/9 bound to Original/Fit/Fill. DEVIATION from the original plan: mode is GLOBAL/sticky (set once, applies as you browse) rather than per-photo non-persistent - better UX for a flick-viewer. Fill & Original decode full-res (so Fill isn't upscale-blurry); the byte-budgeted ring bounds VRAM. A mode change bumps the geometry epoch and re-buffers neighbors.",
         "testStrategy": "Extend pb-render fit tests: cover() fully covers the screen and crops while preserving aspect; original() is exactly native size, centered (offsets may be negative). Property tests: Fill output covers the whole viewport; Fit output never exceeds it; Original equals native dimensions. Golden-image test per mode.",
         "subtasks": [
           {
             "id": 1,
             "title": "Define the ViewTransform abstraction",
             "description": "Per-photo transform composing base scaling mode + rotation slot + zoom/pan slot; pure and tested.",
-            "status": "pending",
+            "status": "done",
             "dependencies": [],
             "details": "The shared home for Tasks 1, 3, 4. Lives in pb-render (or pb-core for the pure math)."
           },
@@ -144,14 +144,14 @@
             "id": 2,
             "title": "Implement cover() and original()",
             "description": "Add Fill (cover) and Original (1:1 centered) alongside the existing fit_rect, with tests.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 3,
-            "title": "Bind 0/8/9; default Fit; per-photo non-persistent",
-            "description": "Wire the mode keys; default to Fit; reset to default on photo change.",
-            "status": "pending",
+            "title": "Bind 0/8/9; default Fit; global/sticky mode",
+            "description": "Wire the mode keys; default to Fit; mode is global/sticky (deviation from per-photo reset).",
+            "status": "done",
             "dependencies": []
           }
         ]

@@ -12,18 +12,22 @@
 pub mod fit;
 pub mod gpu;
 pub mod upload;
+pub mod view;
 
 pub use fit::{cover_rect, fit_rect, original_rect, FitRect};
 pub use gpu::{render_offscreen, test_pattern, WgpuRenderer, LETTERBOX};
 pub use upload::{StagingUpload, UploadStrategy};
+pub use view::{Placement, Rotation, ViewTransform};
 
-/// How the image is sized to the viewport.
+/// How the image is sized to the viewport (the base scale of a [`ViewTransform`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScaleMode {
     /// Scale to fit the viewport, preserving aspect, no crop (the default).
     #[default]
     Fit,
-    /// Native pixel-for-pixel size, centered (may overflow the viewport; no pan).
+    /// Cover the viewport, preserving aspect, cropping the overflow.
+    Fill,
+    /// Native pixel-for-pixel size, centered (may overflow the viewport).
     Original,
 }
 
@@ -33,8 +37,8 @@ pub trait Renderer {
     fn resize(&mut self, width: u32, height: u32);
     /// Replace the displayed image with a new RGBA8 buffer (`width*height*4`).
     fn set_image(&mut self, rgba: &[u8], width: u32, height: u32);
-    /// Choose how the image is sized to the viewport (fit vs. original).
-    fn set_scale_mode(&mut self, mode: ScaleMode);
+    /// Set the per-photo view transform (scaling mode + rotation + zoom + pan).
+    fn set_view(&mut self, view: ViewTransform);
     /// Set or clear the corner info-panel overlay: an RGBA8 bitmap (`w*h*4`)
     /// drawn alpha-blended `margin` px in from the bottom-right. `None` hides it.
     fn set_overlay(&mut self, panel: Option<(&[u8], u32, u32)>, margin: u32);

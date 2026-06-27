@@ -1,0 +1,262 @@
+//! The per-photo **view transform** — the shared geometry behind scaling modes
+//! (tasks.json #4), rotation (#1), zoom and pan (#3).
+//!
+//! It composes a base scaling mode (Fit / Fill / Original) with a 90° rotation
+//! quadrant, a zoom multiplier, and a pan offset into the final on-screen
+//! placement of the image plus the texture UVs to sample. Pure and unit-tested —
+//! the GPU just turns the resulting rect + UVs into a quad, so rotation/zoom/pan
+//! are perf-neutral transforms with no re-decode.
+
+use crate::ScaleMode;
+
+/// 90-degree rotation steps, clockwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Rotation {
+    #[default]
+    R0,
+    R90,
+    R180,
+    R270,
+}
+
+impl Rotation {
+    pub fn cw(self) -> Self {
+        match self {
+            Rotation::R0 => Rotation::R90,
+            Rotation::R90 => Rotation::R180,
+            Rotation::R180 => Rotation::R270,
+            Rotation::R270 => Rotation::R0,
+        }
+    }
+
+    pub fn ccw(self) -> Self {
+        match self {
+            Rotation::R0 => Rotation::R270,
+            Rotation::R90 => Rotation::R0,
+            Rotation::R180 => Rotation::R90,
+            Rotation::R270 => Rotation::R180,
+        }
+    }
+
+    /// True for 90°/270°, where the displayed width/height swap.
+    pub fn swaps_axes(self) -> bool {
+        matches!(self, Rotation::R90 | Rotation::R270)
+    }
+
+    /// Per-corner texture UVs in quad order (top-left, top-right, bottom-right,
+    /// bottom-left) so the sampled image appears rotated by this quadrant.
+    fn corner_uvs(self) -> [[f32; 2]; 4] {
+        match self {
+            Rotation::R0 => [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            Rotation::R90 => [[0.0, 1.0], [0.0, 0.0], [1.0, 0.0], [1.0, 1.0]],
+            Rotation::R180 => [[1.0, 1.0], [0.0, 1.0], [0.0, 0.0], [1.0, 0.0]],
+            Rotation::R270 => [[1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]],
+        }
+    }
+}
+
+/// Zoom clamp bounds (multipliers on the base scale).
+pub const MIN_ZOOM: f32 = 0.05;
+pub const MAX_ZOOM: f32 = 32.0;
+
+/// A per-photo transform: base scaling mode + rotation + zoom + pan.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViewTransform {
+    pub mode: ScaleMode,
+    pub rotation: Rotation,
+    /// Multiplier on the mode's base scale; clamped to `[MIN_ZOOM, MAX_ZOOM]`.
+    pub zoom: f32,
+    /// Pan offset from centered, in screen pixels (clamped to image bounds).
+    pub pan: [f32; 2],
+}
+
+impl Default for ViewTransform {
+    fn default() -> Self {
+        Self {
+            mode: ScaleMode::Fit,
+            rotation: Rotation::R0,
+            zoom: 1.0,
+            pan: [0.0, 0.0],
+        }
+    }
+}
+
+/// Screen-space placement of the image: a float rect (origin may be negative or
+/// overflow the screen) plus the per-corner UVs (TL, TR, BR, BL) to sample.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Placement {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub uvs: [[f32; 2]; 4],
+}
+
+impl ViewTransform {
+    /// The rotated image dimensions (width/height swapped for 90°/270°).
+    fn rotated_dims(&self, img_w: u32, img_h: u32) -> (f32, f32) {
+        if self.rotation.swaps_axes() {
+            (img_h as f32, img_w as f32)
+        } else {
+            (img_w as f32, img_h as f32)
+        }
+    }
+
+    /// The base (zoom = 1) scale for the current mode.
+    fn base_scale(&self, rw: f32, rh: f32, sw: f32, sh: f32) -> f32 {
+        match self.mode {
+            ScaleMode::Fit => (sw / rw).min(sh / rh),
+            ScaleMode::Fill => (sw / rw).max(sh / rh),
+            ScaleMode::Original => 1.0,
+        }
+    }
+
+    fn displayed_size(&self, img_w: u32, img_h: u32, screen_w: u32, screen_h: u32) -> (f32, f32) {
+        let (rw, rh) = self.rotated_dims(img_w, img_h);
+        if rw <= 0.0 || rh <= 0.0 || screen_w == 0 || screen_h == 0 {
+            return (0.0, 0.0);
+        }
+        let s = self.base_scale(rw, rh, screen_w as f32, screen_h as f32)
+            * self.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+        (rw * s, rh * s)
+    }
+
+    /// Largest pan offset (px, each axis) that keeps the image covering the
+    /// viewport — zero when the image is ≤ the screen on that axis (so it stays
+    /// centered and pan is a no-op).
+    pub fn max_pan(&self, img_w: u32, img_h: u32, screen_w: u32, screen_h: u32) -> [f32; 2] {
+        let (dw, dh) = self.displayed_size(img_w, img_h, screen_w, screen_h);
+        [
+            ((dw - screen_w as f32) / 2.0).max(0.0),
+            ((dh - screen_h as f32) / 2.0).max(0.0),
+        ]
+    }
+
+    /// Compute the on-screen placement + UVs. Pan is clamped to the image bounds.
+    pub fn placement(&self, img_w: u32, img_h: u32, screen_w: u32, screen_h: u32) -> Placement {
+        let (sw, sh) = (screen_w as f32, screen_h as f32);
+        let (dw, dh) = self.displayed_size(img_w, img_h, screen_w, screen_h);
+        let mp = self.max_pan(img_w, img_h, screen_w, screen_h);
+        let cx = sw / 2.0 + self.pan[0].clamp(-mp[0], mp[0]);
+        let cy = sh / 2.0 + self.pan[1].clamp(-mp[1], mp[1]);
+        Placement {
+            x: cx - dw / 2.0,
+            y: cy - dh / 2.0,
+            w: dw,
+            h: dh,
+            uvs: self.rotation.corner_uvs(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn approx(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-3
+    }
+
+    #[test]
+    fn rotation_steps_cycle() {
+        let mut r = Rotation::R0;
+        for _ in 0..4 {
+            r = r.cw();
+        }
+        assert_eq!(r, Rotation::R0);
+        assert_eq!(Rotation::R0.cw(), Rotation::R90);
+        assert_eq!(Rotation::R0.ccw(), Rotation::R270);
+        assert_eq!(Rotation::R90.ccw(), Rotation::R0);
+        assert!(Rotation::R90.swaps_axes() && Rotation::R270.swaps_axes());
+        assert!(!Rotation::R0.swaps_axes() && !Rotation::R180.swaps_axes());
+    }
+
+    #[test]
+    fn fit_contains_without_cropping() {
+        let v = ViewTransform::default(); // Fit, no rotation/zoom/pan
+        let p = v.placement(1000, 500, 800, 800);
+        // 2:1 image into 800x800 -> width-bound, 800x400, centered.
+        assert!(approx(p.w, 800.0) && approx(p.h, 400.0), "{p:?}");
+        assert!(approx(p.x, 0.0) && approx(p.y, 200.0), "{p:?}");
+        assert_eq!(p.uvs, Rotation::R0.corner_uvs());
+    }
+
+    #[test]
+    fn fill_covers_and_overflows() {
+        let v = ViewTransform {
+            mode: ScaleMode::Fill,
+            ..Default::default()
+        };
+        let p = v.placement(1000, 500, 800, 800);
+        // Cover: scale = max(0.8, 1.6) = 1.6 -> 1600x800. Overflows width.
+        assert!(p.w >= 800.0 && p.h >= 800.0, "must cover: {p:?}");
+        assert!(p.x < 0.0, "wide overflow hangs off-screen: {p:?}");
+    }
+
+    #[test]
+    fn original_is_native_times_zoom() {
+        let v = ViewTransform {
+            mode: ScaleMode::Original,
+            zoom: 2.0,
+            ..Default::default()
+        };
+        let p = v.placement(100, 50, 800, 800);
+        assert!(approx(p.w, 200.0) && approx(p.h, 100.0), "{p:?}");
+    }
+
+    #[test]
+    fn rotation_swaps_displayed_aspect() {
+        // A landscape image rotated 90° fits as a portrait.
+        let v = ViewTransform {
+            rotation: Rotation::R90,
+            ..Default::default()
+        };
+        let p = v.placement(1000, 500, 800, 800);
+        // Rotated dims 500x1000 (2:1 portrait) into 800x800 -> height-bound 400x800.
+        assert!(approx(p.w, 400.0) && approx(p.h, 800.0), "{p:?}");
+        assert_eq!(p.uvs, Rotation::R90.corner_uvs());
+    }
+
+    #[test]
+    fn pan_is_clamped_to_image_bounds() {
+        // Zoomed 2x past fit so the image overflows and pan is meaningful.
+        let v = ViewTransform {
+            zoom: 2.0,
+            pan: [100000.0, 0.0], // absurd pan
+            ..Default::default()
+        };
+        let (iw, ih, sw, sh) = (800, 800, 800, 800);
+        let mp = v.max_pan(iw, ih, sw, sh);
+        assert!(
+            approx(mp[0], 400.0),
+            "zoomed 2x: max pan = (1600-800)/2: {mp:?}"
+        );
+        let p = v.placement(iw, ih, sw, sh);
+        // Clamped to +400: center at 400+400=800, so the 1600-wide image's left
+        // edge sits at 0 and it still covers the screen (right edge at 1600).
+        assert!(
+            approx(p.x, 0.0),
+            "pan clamped, left edge at screen edge: {p:?}"
+        );
+        assert!(p.x <= 0.0 && p.x + p.w >= sw as f32, "still covers: {p:?}");
+    }
+
+    #[test]
+    fn small_image_cannot_pan() {
+        // Fit makes the image fill at most the screen, so there's nothing to pan.
+        let v = ViewTransform::default();
+        let mp = v.max_pan(400, 300, 800, 800);
+        assert_eq!(mp, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn zoom_is_clamped() {
+        let v = ViewTransform {
+            mode: ScaleMode::Original,
+            zoom: 1000.0, // beyond MAX_ZOOM
+            ..Default::default()
+        };
+        let p = v.placement(100, 100, 800, 800);
+        assert!(approx(p.w, 100.0 * MAX_ZOOM), "zoom clamped to MAX: {p:?}");
+    }
+}

@@ -10,7 +10,7 @@
 //!
 //!   space / →   next photo
 //!   ⌫ / ←       previous photo
-//!   0 / o       toggle fit-to-screen <-> original 1:1 (full-res, also prefetched)
+//!   0 / 8 / 9   scaling mode: original 1:1 / fit / fill (all prefetched)
 //!   i           toggle info panel (path · resolution · codec)
 //!   esc         quit
 //!
@@ -34,7 +34,7 @@ use winit::window::{Fullscreen, Window, WindowId};
 
 use pb_core::{prefetch_targets, Playlist, ResidentRing};
 use pb_decode::{decode_image_file, DecodedImage, FitBox};
-use pb_render::{test_pattern, Renderer, ScaleMode, WgpuRenderer};
+use pb_render::{test_pattern, Renderer, ScaleMode, ViewTransform, WgpuRenderer};
 
 mod decode_pool;
 mod hud;
@@ -120,8 +120,8 @@ struct App {
     initial_delay: Duration,
     /// Decode-to-fit target = the display size; photos are downscaled to it.
     fit: Option<FitBox>,
-    /// Fit-to-screen (default) vs. original 1:1 centered.
-    scale_mode: ScaleMode,
+    /// Per-photo view transform (scaling mode + rotation + zoom + pan).
+    view: ViewTransform,
     /// Scan root, for showing paths relative to it.
     root: PathBuf,
     /// Text renderer for the info panel (None if no system font was found).
@@ -186,7 +186,7 @@ impl App {
             hold_start: None,
             initial_delay: Duration::from_millis(400),
             fit: None,
-            scale_mode: ScaleMode::Fit,
+            view: ViewTransform::default(),
             root,
             hud: Hud::load(),
             info_visible: false,
@@ -211,11 +211,12 @@ impl App {
     }
 
     /// The decode-to-fit target for the current mode: the display size in Fit mode
-    /// (downscale large photos), or None in Original mode (decode full-res).
+    /// (downscale large photos), or full resolution for Fill / Original (so Fill
+    /// isn't upscale-blurry and Original is pixel-exact).
     fn decode_fit(&self) -> Option<FitBox> {
-        match self.scale_mode {
+        match self.view.mode {
             ScaleMode::Fit => self.fit,
-            ScaleMode::Original => None,
+            ScaleMode::Fill | ScaleMode::Original => None,
         }
     }
 
@@ -447,21 +448,29 @@ impl App {
         self.pending_uploads.clear();
     }
 
-    /// Toggle fit-to-screen <-> original 1:1. Bumps the geometry epoch (so the ring
-    /// re-buffers neighbors at the new resolution), shows the current image
-    /// immediately, then resumes prefetch. Both modes use the async engine.
-    fn toggle_scale(&mut self, event_loop: &ActiveEventLoop) {
-        self.scale_mode = match self.scale_mode {
-            ScaleMode::Fit => ScaleMode::Original,
-            ScaleMode::Original => ScaleMode::Fit,
-        };
-        if let Some(a) = self.active.as_mut() {
-            a.renderer.set_scale_mode(self.scale_mode);
+    /// Switch the scaling mode (0 = original, 8 = fit, 9 = fill). Changing the mode
+    /// can change the decode resolution, so it bumps the geometry epoch and
+    /// re-buffers neighbors at the new resolution; it also resets zoom/pan.
+    fn set_scale_mode(&mut self, mode: ScaleMode, event_loop: &ActiveEventLoop) {
+        if self.view.mode == mode {
+            return;
         }
+        self.view.mode = mode;
+        self.view.zoom = 1.0;
+        self.view.pan = [0.0, 0.0];
+        self.push_view();
         self.invalidate_geometry();
         self.load_current_sync(event_loop);
         self.target_item = self.playlist.current();
         self.request_prefetch();
+    }
+
+    /// Push the current view transform to the renderer (re-places the quad).
+    fn push_view(&mut self) {
+        let view = self.view;
+        if let Some(a) = self.active.as_mut() {
+            a.renderer.set_view(view);
+        }
     }
 
     /// Decode the first image at the display size for an instant first frame.
@@ -745,8 +754,10 @@ impl ApplicationHandler for App {
                                 self.hold_start = Some(Instant::now());
                                 self.advance(false, event_loop);
                             }
-                            // Toggle fit-to-screen <-> original 1:1 (centered).
-                            KeyCode::Digit0 | KeyCode::KeyO => self.toggle_scale(event_loop),
+                            // Scaling mode: 0 original, 8 fit, 9 fill.
+                            KeyCode::Digit0 => self.set_scale_mode(ScaleMode::Original, event_loop),
+                            KeyCode::Digit8 => self.set_scale_mode(ScaleMode::Fit, event_loop),
+                            KeyCode::Digit9 => self.set_scale_mode(ScaleMode::Fill, event_loop),
                             // Toggle the corner info panel.
                             KeyCode::KeyI => self.toggle_info(event_loop),
                             _ => {}
