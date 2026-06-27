@@ -40,7 +40,16 @@ bugs were in the gated-advance/failure interactions, which are subtle — re-rea
 - **`pb-app` wiring** — gated-advance state machine: **every photo shown in order;
   a miss holds the previous frame until its decode lands** (fly = min(refresh,
   decode)). Epoch bumps on resize/fit-toggle discard stale-geometry decodes.
-  Original (1:1) mode stays synchronous, outside the ring.
+- **Original (1:1) mode also flies** — routed through the same async engine (it was
+  synchronous + prefetch-cancelled = a speed cliff). Both modes are now
+  mode-agnostic: `decode_fit()` drives the per-mode resolution; a mode switch bumps
+  the epoch and re-buffers neighbors at the new resolution (one mode's worth
+  resident at a time). Adding a Fill/cover mode later is just a `ScaleMode` variant
+  + a `decode_fit()` arm + a keybinding.
+- **`ResidentRing` is byte-budgeted** (~1.5 GB) on top of the slot count, so full-res
+  Original slots can't OOM a mixed-resolution folder. `reserve_bytes` evicts the
+  lowest-priority victims to stay within budget; a single over-budget image still
+  shows. (Pure + 20k randomized invariant test.)
 - **`pb-app::metrics`** — opt-in (`--metrics`) per-stage timing (decode/upload/
   render) + tested `percentiles`; nothing written to disk (privacy task #2).
 - **Hardening** — focus-loss held-key clear; first-frame re-decode at true size;
