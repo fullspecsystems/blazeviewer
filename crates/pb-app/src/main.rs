@@ -54,6 +54,11 @@ struct App {
     last_advance: Option<Instant>,
     /// Minimum time between advances while holding (≈ one display refresh).
     frame_interval: Duration,
+    /// When the current hold's first press happened (for the initial-delay gate).
+    hold_start: Option<Instant>,
+    /// Delay after the first press before auto-repeat begins, so a quick tap is a
+    /// single photo rather than a burst.
+    initial_delay: Duration,
     /// Decode-to-fit target = the display size; photos are downscaled to it.
     fit: Option<FitBox>,
     /// Fit-to-screen (default) vs. original 1:1 centered.
@@ -71,6 +76,8 @@ impl App {
             held: HashSet::new(),
             last_advance: None,
             frame_interval: Duration::from_micros(8_333), // ~120 Hz until we read the real rate
+            hold_start: None,
+            initial_delay: Duration::from_millis(400),
             fit: None,
             scale_mode: ScaleMode::Fit,
         }
@@ -289,10 +296,12 @@ impl ApplicationHandler for App {
                         match code {
                             KeyCode::Space | KeyCode::ArrowRight => {
                                 self.held.insert(code);
+                                self.hold_start = Some(Instant::now());
                                 self.navigate(true, event_loop);
                             }
                             KeyCode::Backspace | KeyCode::ArrowLeft => {
                                 self.held.insert(code);
+                                self.hold_start = Some(Instant::now());
                                 self.navigate(false, event_loop);
                             }
                             // Toggle fit-to-screen <-> original 1:1 (centered).
@@ -311,24 +320,35 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // Self-paced advance: while a nav key is held, page at most once per frame
-        // interval. Releasing clears `held` and we go idle immediately.
+        // Self-paced auto-repeat: one photo on press, then — after an initial delay
+        // so a quick tap is a single photo — repeat at the frame rate while held.
+        // Releasing clears `held` and we go idle immediately.
         match self.held_direction() {
             Some(forward) => {
                 let now = Instant::now();
-                match self.last_advance {
-                    Some(t) if now < t + self.frame_interval => {
-                        event_loop.set_control_flow(ControlFlow::WaitUntil(t + self.frame_interval));
+                let repeat_begin = self.hold_start.map(|t| t + self.initial_delay);
+                match repeat_begin {
+                    // Still within the initial delay — don't repeat yet.
+                    Some(begin) if now < begin => {
+                        event_loop.set_control_flow(ControlFlow::WaitUntil(begin));
                     }
-                    _ => {
-                        self.navigate(forward, event_loop);
-                        event_loop.set_control_flow(ControlFlow::WaitUntil(
-                            Instant::now() + self.frame_interval,
-                        ));
-                    }
+                    // Repeating: advance at most once per frame interval.
+                    _ => match self.last_advance {
+                        Some(t) if now < t + self.frame_interval => {
+                            event_loop
+                                .set_control_flow(ControlFlow::WaitUntil(t + self.frame_interval));
+                        }
+                        _ => {
+                            self.navigate(forward, event_loop);
+                            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                                Instant::now() + self.frame_interval,
+                            ));
+                        }
+                    },
                 }
             }
             None => {
+                self.hold_start = None;
                 self.last_advance = None;
                 event_loop.set_control_flow(ControlFlow::Wait);
             }
