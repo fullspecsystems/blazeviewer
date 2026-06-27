@@ -38,6 +38,18 @@ pub trait Renderer {
     /// Set or clear the corner info-panel overlay: an RGBA8 bitmap (`w*h*4`)
     /// drawn alpha-blended `margin` px in from the bottom-right. `None` hides it.
     fn set_overlay(&mut self, panel: Option<(&[u8], u32, u32)>, margin: u32);
+
+    /// Allocate a resident texture ring of `capacity` slots (Phase 3). `slot_w`/
+    /// `slot_h` are the intended slot size for the fixed-size variant; the v1
+    /// image-sized implementation ignores them. Resets any existing ring.
+    fn reserve_ring(&mut self, capacity: usize, slot_w: u32, slot_h: u32);
+    /// Upload a decoded RGBA8 image (`w*h*4`) into ring slot `slot`. Runs during
+    /// prefetch, off the keypress frame.
+    fn upload_slot(&mut self, slot: usize, rgba: &[u8], w: u32, h: u32);
+    /// Select ring slot `slot` as the displayed image (the keypress fast path: a
+    /// rebind, no decode or upload). A no-op if the slot isn't uploaded yet.
+    fn present_slot(&mut self, slot: usize);
+
     /// Draw and present one frame.
     fn render(&mut self) -> Result<(), RenderError>;
 }

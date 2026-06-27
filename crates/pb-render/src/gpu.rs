@@ -393,6 +393,18 @@ struct OverlayDraw {
     margin: u32,
 }
 
+/// One resident ring slot: a pre-uploaded image texture reused across photos, so
+/// a keypress is a rebind (`present_slot`) — never a decode or upload. v1 slots
+/// are image-sized; the win is that the texture is uploaded during prefetch, off
+/// the keypress frame. Fixed-size slots + sub-rect UVs (zero prefetch-time
+/// allocation) are the documented next optimization behind `reserve_ring`'s
+/// `slot_w/slot_h` params.
+struct RingSlot {
+    bind_group: wgpu::BindGroup,
+    w: u32,
+    h: u32,
+}
+
 /// On-screen presenter for a window surface.
 pub struct WgpuRenderer {
     surface: wgpu::Surface<'static>,
@@ -410,6 +422,11 @@ pub struct WgpuRenderer {
     scale_mode: ScaleMode,
     overlay: Option<OverlayDraw>,
     upload: Box<dyn UploadStrategy>,
+    /// Resident texture ring (Phase 3). Empty until `reserve_ring`; each `Some`
+    /// slot holds a pre-uploaded photo. `present_slot` selects which one draws.
+    ring: Vec<Option<RingSlot>>,
+    /// When `Some(i)`, `render` draws ring slot `i` instead of `bind_group`.
+    present_idx: Option<usize>,
 }
 
 impl WgpuRenderer {
@@ -506,6 +523,8 @@ impl WgpuRenderer {
             scale_mode,
             overlay: None,
             upload,
+            ring: Vec::new(),
+            present_idx: None,
         }
     }
 
@@ -568,6 +587,8 @@ impl Renderer for WgpuRenderer {
             width,
             height,
         );
+        // Revert to the single-image path; a later present_slot re-selects a slot.
+        self.present_idx = None;
         self.img_w = width;
         self.img_h = height;
         // Re-place the quad for the new image.
@@ -636,6 +657,54 @@ impl Renderer for WgpuRenderer {
         };
     }
 
+    fn reserve_ring(&mut self, capacity: usize, _slot_w: u32, _slot_h: u32) {
+        // v1 uses image-sized slots, so slot_w/slot_h aren't needed yet (they're
+        // kept for the fixed-size + sub-rect-UV variant). Allocate empty slots.
+        self.ring = (0..capacity).map(|_| None).collect();
+        self.present_idx = None;
+    }
+
+    fn upload_slot(&mut self, slot: usize, rgba: &[u8], w: u32, h: u32) {
+        if slot >= self.ring.len() {
+            return;
+        }
+        let bind_group = upload_image(
+            &self.device,
+            &self.queue,
+            &self.bgl,
+            self.upload.as_mut(),
+            rgba,
+            w,
+            h,
+        );
+        self.ring[slot] = Some(RingSlot { bind_group, w, h });
+    }
+
+    fn present_slot(&mut self, slot: usize) {
+        let Some((w, h)) = self
+            .ring
+            .get(slot)
+            .and_then(|s| s.as_ref())
+            .map(|s| (s.w, s.h))
+        else {
+            return; // unknown / not-yet-uploaded slot: keep the current frame
+        };
+        self.present_idx = Some(slot);
+        self.img_w = w;
+        self.img_h = h;
+        self.queue.write_buffer(
+            &self.vbuf,
+            0,
+            bytemuck::cast_slice(&quad_vertices(
+                self.scale_mode,
+                w,
+                h,
+                self.config.width,
+                self.config.height,
+            )),
+        );
+    }
+
     fn render(&mut self) -> Result<(), RenderError> {
         let frame = match self.surface.get_current_texture() {
             Ok(f) => f,
@@ -654,11 +723,22 @@ impl Renderer for WgpuRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("present"),
             });
+        // Draw the selected resident-ring slot if one is presented, else the
+        // single image. A keypress rebinds via `present_idx` — no upload here.
+        let bind_group = match self.present_idx {
+            Some(i) => self
+                .ring
+                .get(i)
+                .and_then(|s| s.as_ref())
+                .map(|s| &s.bind_group)
+                .unwrap_or(&self.bind_group),
+            None => &self.bind_group,
+        };
         draw(
             &mut encoder,
             &view,
             &self.pipeline,
-            &self.bind_group,
+            bind_group,
             &self.vbuf,
             &self.ibuf,
         );
