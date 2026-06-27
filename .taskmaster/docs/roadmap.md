@@ -18,12 +18,19 @@ textures, never blocking the UI) come *before* any GPU-decode work.
 
 ## Progress & learnings (as of 2026-06-27)
 
-**Done:** Phase 0 (foundations, spikes), Phase 1 (wgpu window + render), and
-**Phase 2 (sequential viewer)** — plus polish beyond the plan: decode-to-fit
-downscaling (Lanczos3), linear sampling, fit/original scale-mode toggle (`0`/`o`),
-self-paced auto-repeat with an initial delay, GPU-adaptive texture limits, and an
-info-panel overlay (`i`) with a from-scratch text layer. See
-[`current-status.md`](../current-status.md) for the full handoff.
+**Done:** Phases 0–2, and **Phase 3 — the prefetch engine** (priority decode pool,
+byte-budgeted resident texture ring, gated-advance hold-to-fly, staging-ring
+upload; Original/Fill also async). Phase 3 was codex-reviewed clean over 7 rounds.
+Only Phase 3.5b (DXGI photon timing) is deferred.
+
+**Also started — the post-engine feature backlog** (`tasks.json`, which this
+roadmap defers until the engine is stable): the shared `ViewTransform` +
+**#4 scaling modes (fill), #1 rotation, #3 zoom + pan, #5 full-EXIF panel** are
+implemented (green; not yet owner-verified or codex-reviewed). These are the
+tasks.json items, NOT roadmap Phase 4 (which is "Instant previews," not started).
+
+See [`current-status.md`](../current-status.md) for the authoritative handoff and
+[`phase3-plan.md`](phase3-plan.md) for the engine plan/decisions.
 
 **Learned this session (informs later phases):**
 - The GPU-stack reversal (wgpu + CPU decode beats native-D3D12/zero-copy for this
@@ -38,8 +45,9 @@ info-panel overlay (`i`) with a from-scratch text layer. See
   generalizes it with the prefetch ring.
 - **Startup window flicker** on Windows needs hidden-until-first-frame.
 
-**Next:** Phase 3 (the prefetch engine) is where the wedding-photo case (4–5 fps,
-decode-bound) becomes instant. See below.
+**Next:** owner-verify + codex-review the feature-backlog batch (#1/#3/#4/#5), then
+continue the backlog (#2/#6/#7/#8/#9/#10) and/or roadmap Phase 4 (Instant previews).
+The Phase-0→8 engine plan is below for reference.
 
 ## Phase 0 — Foundations  *(largely done)*
 - [x] Cargo workspace + 4 crates; `pb-core` (rng, shuffle, playlist, prefetch,

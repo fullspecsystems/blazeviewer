@@ -2,124 +2,125 @@
 
 _Last updated: 2026-06-27._
 
-## Phase 4 — viewer features (all 5 requested features done; not owner-verified)
+A fast, chrome-less photo viewer. **Phase 3 (the "hold a key and fly" prefetch
+engine) is done and codex-reviewed-clean. The first batch of the tasks.json
+feature backlog (5 interactive viewer features: #1/#3/#4/#5) is implemented and
+green but NOT yet owner-verified or codex-reviewed.**
 
-Built a per-photo **`ViewTransform`** (`pb-render::view`, pure + tested) that
-composes scaling mode + rotation + zoom + pan; the renderer draws from it, so
-rotation/zoom/pan are perf-neutral GPU transforms (no re-decode). New keymap (see
-`main.rs` module doc): `space`/`⌫` next/prev, **arrows = pan**, `=`/`-` zoom,
-`0/8/9` modes, `r`/`Shift+R` rotate, `i`/`Shift+I` info/EXIF.
+(Note on naming: the roadmap's numbered phases differ — roadmap Phase 4 is
+"Instant previews," not yet started. These viewer features are the post-engine
+*feature backlog* the roadmap defers until the engine is stable.)
 
-- ✅ **Scaling modes 0/8/9** (original / fit / **fill**) — tasks.json #4. Global/sticky;
-  Fill & Original decode full-res (byte-budgeted ring bounds VRAM).
-- ✅ **Rotation** `r`/`Shift+R` (cw/ccw), per-image RAM-only — tasks.json #1.
-- ✅ **Smooth zoom** `=`/`-` + **pan** arrows — tasks.json #3. Hold-to-act with a
-  time-based exponential acceleration ramp (gentle start → fast). Arrows are pan
-  now (so `space`=next, `⌫`=prev); pan clamped to image bounds.
-- ✅ **Full-EXIF "nerd" panel** `Shift+I` — tasks.json #5. Mutually-exclusive
-  InfoMode; EXIF read on-demand from RAM (privacy). Panel is bottom-right (tall).
-
-**⚠ Owner verification needed** (couldn't be driven headless — builds + unit tests
-+ startup smoke only): hold arrows to pan / `=`/`-` to zoom (acceleration feel,
-tune the constants in `main.rs` if needed), `0/8/9`/`9`-fill framing, `r`/`Shift+R`
-rotation, `Shift+I` EXIF panel content/placement. **Codex review not yet run** on
-these (usage limit earlier — run `codex exec review --base main` when it resets).
-
-Recursive `R` dropped (recursion comes from invocation, not a hotkey). Deferred
-refinements noted in tasks.json: Tier-2 re-decode on deep zoom, zoom-about-pan-
-focus, carry-view-position-to-next-photo, EXIF scroll, top-right EXIF anchor.
-
-## Phase 3 — the prefetch engine (done)
-
-Phase 3 — **the prefetch engine ("hold a key and fly")** — is implemented. Decode
-is off the event loop, neighbors are prefetched into a resident GPU texture ring,
-and a keypress is a **rebind, not a decode**. Builds green, **83 tests pass** (+1 ignored),
-clippy (incl. `incompatible_msrv`) + fmt clean. **Not yet owner-verified for fly
-behavior** (see below).
-
-**Codex review: converged clean.** Ran `codex exec review --base main` iteratively;
-it found **15 issues across 6 rounds** (all P1/P2 — nav edge cases, failure/Original
-stalls, a visible-skip in the gated loop, drain ordering, staging buffer limits,
-the 1.80 MSRV) — **all fixed and re-verified**, and round 7 reported "no blocking
-correctness issues." Each fix is its own commit (`git log`). Worth knowing: several
-bugs were in the gated-advance/failure interactions, which are subtle — re-read
-`advance`/`about_to_wait`/`drain_results` in `main.rs` if you change them.
+All tests green: **~89 passing (+1 ignored)**, `clippy --all-targets -D warnings`
+(incl. `incompatible_msrv`) clean, `fmt` clean — on every commit.
 
 ## Branch / how to review
-- Work is on branch **`feature/phase3-prefetch-engine`** (NOT pushed; `main`
-  untouched). ~13 commits this session, one per step / per review round — read in
-  order: `3.0` harden · `3.1` staging upload · `3.3(core)` ResidentRing ·
-  `3.2/3.3(render)` renderer ring · `3.2/3.3/3.4` engine wiring · `#4` fit geom ·
-  then 6 codex-review fix commits.
-- Full plan + decisions: **`.taskmaster/docs/phase3-plan.md`** (revised twice after
-  two reviews; §5 has the per-step status, §6 the resolved decisions).
+- Everything is on branch **`feature/phase3-prefetch-engine`** — **NOT pushed**,
+  `main` untouched. **22 commits**, one per step / per review-fix. Read in order;
+  commit messages explain each.
+- Plan/decisions for the engine: **`.taskmaster/docs/phase3-plan.md`**.
+- Feature status + deviations: **`.taskmaster/tasks/tasks.json`** (#1, #3, #4, #5
+  are `done` with detailed completion notes; #2, #6, #7, #8, #9, #10 pending).
 
-## What got built (Phase 3)
-- **`pb-app::decode_pool`** — priority worker pool (capped 2–8), cancellation,
-  dedup, byte-budget backpressure; injected decode fn (6 concurrency tests).
-- **`pb-core::ring::ResidentRing`** — pure item↔slot bookkeeping: `Empty/Pending/
-  Resident` states, epoch-validated `reserve`/`mark_resident`, displayed-slot pin
-  (10 tests incl. a 20k randomized invariant stress).
-- **`pb-render::upload`** — `UploadStrategy` seam; `StagingUpload` replaces
-  `write_texture` with `copy_buffer_to_texture` (round-trip test on an unaligned
-  width covers the 256-byte row-padding path).
-- **`pb-render` ring** — `reserve_ring`/`upload_slot`/`present_slot` on the
-  `Renderer` trait; v1 slots are **image-sized** (full UVs, no bleed); fixed-size +
-  sub-rect-UV (zero prefetch-alloc) is the documented next optimization.
-- **`pb-app` wiring** — gated-advance state machine: **every photo shown in order;
-  a miss holds the previous frame until its decode lands** (fly = min(refresh,
-  decode)). Epoch bumps on resize/fit-toggle discard stale-geometry decodes.
-- **Original (1:1) mode also flies** — routed through the same async engine (it was
-  synchronous + prefetch-cancelled = a speed cliff). Both modes are now
-  mode-agnostic: `decode_fit()` drives the per-mode resolution; a mode switch bumps
-  the epoch and re-buffers neighbors at the new resolution (one mode's worth
-  resident at a time). Adding a Fill/cover mode later is just a `ScaleMode` variant
-  + a `decode_fit()` arm + a keybinding.
-- **`ResidentRing` is byte-budgeted** (~1.5 GB) on top of the slot count, so full-res
-  Original slots can't OOM a mixed-resolution folder. `reserve_bytes` evicts the
-  lowest-priority victims to stay within budget; a single over-budget image still
-  shows. (Pure + 20k randomized invariant test.)
-- **`pb-app::metrics`** — opt-in (`--metrics`) per-stage timing (decode/upload/
-  render) + tested `percentiles`; nothing written to disk (privacy task #2).
-- **Hardening** — focus-loss held-key clear; first-frame re-decode at true size;
-  `cargo fmt` drift cleared (fmt now part of the green bar).
-- **tasks.json #4** (subtask 4.2): pure `cover_rect` (fill) + `original_rect`.
+## Keymap (current)
+```
+space            next photo            ⌫              previous photo
+← ↑ ↓ →          pan (hold; accelerates)
+= / -            zoom in/out (hold; accelerates; numpad +/- too)
+0 / 8 / 9        scaling mode: original 1:1 / fit / fill
+r / Shift+R      rotate 90° cw / ccw (per-image, RAM-only)
+i / Shift+I      info panel / full-EXIF "nerd" panel
+esc              quit
+```
+(Recursive `R` intentionally dropped — recursion comes from how the app is
+invoked, e.g. a future Explorer "open folder" entry. `enter` random nav is still
+unwired.)
 
 ## Run it
 ```
-cargo run -p pb-app --release -- "D:\Pictures" -r              # fullscreen
-cargo run -p pb-app --release -- "<leaf folder>" --windowed    # dev window
-cargo run -p pb-app --release -- "<folder>" --metrics          # print stage timings on exit
+cargo run -p pb-app --release -- "D:\Pictures" -r           # fullscreen, recursive
+cargo run -p pb-app --release -- "<leaf folder>" --windowed # dev window
+cargo run -p pb-app --release -- "<folder>" --metrics       # stage timings on exit
 ```
-Keys unchanged: `space`/`→` next · `⌫`/`←` prev · `0`/`o` fit↔1:1 · `i` info · `esc`.
 
-## ⚠ Needs owner verification (couldn't be done headless)
-1. **The actual fly experience.** A windowed smoke run started cleanly on 11 real
-   JPEGs for 6 s with no panics/decode errors, but **keypress navigation / hold-to-
-   fly was not driven**. Please hold `→` through `D:\Pictures -r` and confirm: it
-   flies, every photo shows, a miss holds (never a blank/garbage frame), reverse is
-   cheap. Compare felt speed vs `main` on the 24–45 MP wedding folders.
-2. **VRAM**: ring budget is ~1.5 GB (`RING_BUDGET_BYTES` in `main.rs`) → ~16–32
-   fit-slots on the 7680-wide display. Watch VRAM on the big corpus.
-3. Run with `--metrics`, hold a key, `esc`, and eyeball the decode/upload/render
-   p50/p95/p99 printout (debug build has a console).
+## Architecture
+```
+crates/pb-core    pure nav/shuffle/prefetch/cache + ResidentRing (no I/O, no GPU)
+crates/pb-decode  ImageDecoder (zune-jpeg) + decode-to-fit + EXIF (orientation, metadata)
+crates/pb-render  wgpu presenter; ViewTransform (view.rs); UploadStrategy (upload.rs)
+crates/pb-app     winit loop, decode_pool (priority workers), hud.rs, metrics.rs
+```
 
-## What's next
-- **3.5b instrumentation (deferred):** photon-accurate keypress→photon via DXGI
-  `GetFrameStatistics` (unsafe wgpu-hal downcast, behind a `metrics` feature) +
-  PresentMon validation — the only Phase 3 step not done.
-- **Optimization (measure first):** recycled staging-buffer ring (zero per-upload
-  alloc); fixed-size ring slots + sub-rect UVs (zero prefetch-alloc).
-- **Known latent bug (pinned, ignored test):** random-prefetch cycle boundary in
-  `pb-core::prefetch` — fix when random/`enter` nav is wired (`phase3-plan.md` §7).
-- **Deferred (owner-confirmed):** incremental folder scan, after the engine.
-- **Feature backlog (`tasks.json`):** #4 finish (wire 8/9 keys + Fill decode-res),
-  #8 keymap, #1 rotate, #3 zoom, etc.
+## Phase 3 — the prefetch engine (DONE, codex-reviewed clean)
+Decode + I/O are off the event loop on a priority worker pool; neighbors are
+prefetched into a **byte-budgeted (~1.5 GB) resident GPU texture ring**; a keypress
+is a **rebind, not a decode**. Advance is **gated on readiness** — every photo is
+shown in order; a miss holds the previous frame until its decode lands. Both Fit
+and Original/Fill modes use this async engine (Original was a sync cliff, now fixed).
+- Key files: `pb-app::decode_pool`, `pb-core::ring::ResidentRing` (epoch-validated
+  reserve/mark_resident + displayed-slot pin + byte budget), `pb-render::upload`
+  (StagingUpload = `copy_buffer_to_texture`, not `write_texture`; row-banded).
+- **Codex converged clean** over 7 rounds (15 P1/P2 fixed: nav edge cases,
+  failure/Original stalls, a visible-skip, drain ordering, staging limits, the 1.80
+  MSRV, mixed-folder VRAM). The gated-advance/failure paths are subtle —
+  re-read `advance`/`about_to_wait`/`drain_results` in `main.rs` before changing them.
+- **Deferred:** photon-accurate keypress→photon (DXGI `GetFrameStatistics`, behind
+  a `metrics` feature) — the only Phase-3 step not done.
+
+## Viewer features — tasks.json #1/#3/#4/#5 (DONE, NOT verified/reviewed)
+A pure, tested **`ViewTransform`** (`pb-render::view`) composes scaling mode +
+rotation + zoom + pan → placement + UVs; the renderer draws from it, so
+rotation/zoom/pan are perf-neutral GPU transforms (no re-decode).
+- **Scaling modes** `0/8/9` original/fit/**fill** (#4). Global/sticky; Fill &
+  Original decode full-res (byte budget bounds VRAM); a mode switch bumps the
+  geometry epoch and re-buffers neighbors (one mode's worth resident at a time).
+- **Rotation** `r`/`Shift+R` (#1). Per-image RAM map; identity drops the entry.
+- **Zoom** `=`/`-` + **pan** arrows (#3). Hold-to-act with a **time-based
+  exponential acceleration ramp**; pan clamped to image bounds. Tunable constants
+  at the top of `main.rs` (`ZOOM_MIN/MAX_RATE`, `PAN_MIN/MAX_SPEED`, `*_RAMP_SECS`).
+- **Full-EXIF "nerd" panel** `Shift+I` (#5). Mutually-exclusive `InfoMode`; every
+  EXIF tag via `pb_decode::read_exif_fields`, read on-demand from RAM (privacy).
+
+## ⚠ Needs owner verification (couldn't be driven headless)
+Builds + unit tests + a windowed startup smoke (clean, no panics) only — **no
+keypress was ever driven**. Please run it and confirm:
+1. **Hold-to-fly** (`space`): flies on the corpus, every photo shows, a miss holds
+   (no blank/garbage), reverse is cheap. Compare felt speed vs `main` on 24–45 MP.
+2. **Interactions:** pan (arrows) + zoom (`=`/`-`) feel/acceleration; `9` fill crop;
+   `0` 1:1 pan; `r`/`Shift+R` rotation (incl. portrait aspect); `Shift+I` EXIF panel
+   content + placement (it's **bottom-right/tall**, not top-right — easy to move).
+3. **VRAM** on the big corpus (`RING_BUDGET_BYTES` in `main.rs`); `--metrics` p50/p95/p99.
+
+## ⚠ Codex review still pending on Phase 4
+Phase 3 is reviewed; the Phase-4 feature commits are **not** (hit the OpenAI usage
+limit). When it resets, run:
+```
+& "C:\Users\jdlien\.codex\packages\standalone\releases\0.142.3-x86_64-pc-windows-msvc\bin\codex.exe" exec review --base main
+```
+(Reviews the whole branch vs `main`. The earlier-session rounds are in the scratchpad.)
+
+## What's next / deferred
+- **Run codex on Phase 4**, fix findings, then push the branch / open a PR.
+- **Deferred refinements** (in tasks.json): Tier-2 re-decode on deep zoom (crispness),
+  zoom-about-pan-focus (vs center), carry-view-position-to-next-photo, EXIF scroll +
+  top-right anchor, mtime line.
+- **Pinned latent bug** (`#[ignore]`d test): random-prefetch cycle boundary in
+  `pb-core::prefetch` — fix when `enter`/random nav is wired (`phase3-plan.md` §7).
+- **Engine perf (measure first):** recycled staging-buffer ring; fixed-size ring
+  slots + sub-rect UVs; the DXGI photon timing (Phase 3.5b).
+- **Feature backlog (`tasks.json`):** #2 privacy/no-trace, #6 esc-teardown, #7 help
+  overlay, #8 configurable keybindings (TOML — would unify the keymap), #9 recursive
+  ordering, #10 feedback toast. Incremental folder scan (owner-deferred, post-engine).
 
 ## Environment / gotchas
 - `cargo` is at `~/.cargo/bin` (PATH-prepend: `$env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"`).
-- Gate: `cargo test --workspace`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo fmt --all -- --check`.
+- Green bar: `cargo test --workspace`; `cargo clippy --workspace --all-targets -- -D warnings`;
+  `cargo fmt --all -- --check`. MSRV is **1.80** (`rust-version` in Cargo.toml): no
+  `Option::is_none_or` (1.82+) — use a plain `match`; `is_some_and` (1.70) is fine.
 - GPU render/round-trip tests run on the RTX 5090. Don't launch the **fullscreen**
   app from automation (use a short `--windowed` `Start-Process` + kill; quote paths
-  with spaces). Display: 7680×2160 @ 120 Hz (smoke box reported 60 Hz windowed).
-- `D:\Pictures` is the real corpus; photos in subfolders → use `-r`.
+  with spaces). Display: 7680×2160 @ 120 Hz (the smoke box reported 60 Hz windowed).
+- `D:\Pictures` is the real corpus; photos live in subfolders → use `-r`. A small
+  test folder used for smoke runs: `D:\Pictures\1990s\1990-12-24 - Christmas1990` (11).
+- Line endings: git warns LF→CRLF (harmless); `Cargo.lock` is committed.
+</content>
