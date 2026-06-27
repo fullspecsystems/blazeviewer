@@ -4,7 +4,7 @@ _Last updated: 2026-06-27 (overnight autonomous session)._
 
 Phase 3 — **the prefetch engine ("hold a key and fly")** — is implemented. Decode
 is off the event loop, neighbors are prefetched into a resident GPU texture ring,
-and a keypress is a **rebind, not a decode**. Builds green, **84 tests pass**,
+and a keypress is a **rebind, not a decode**. Builds green, **83 tests pass** (+1 ignored),
 clippy (incl. `incompatible_msrv`) + fmt clean. **Not yet owner-verified for fly
 behavior** (see below).
 
