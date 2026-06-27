@@ -14,5 +14,16 @@ kamadak-exif = "0.6"
 # Decode-to-fit: high-quality SIMD downscale to the display size, so large photos
 # aren't minified (grainy/aliased) on the GPU. (zune-jpeg has no scaled decode.)
 fast_image_resize = "5"
+image = { version = "0.25.10", default-features = false, features = ["png", "gif", "bmp", "ico", "tiff", "webp", "tga", "qoi", "pnm", "hdr", "exr", "ff", "dds"] }
+jxl-oxide = "0.12.6"
+resvg = { version = "0.47.0", default-features = false }
+flate2 = "1"
+imagepipe = "0.5.0"
+rawloader = "0.37.1"
 
 [dev-dependencies]
+
+[target."cfg(windows)".dependencies]
+# AVIF + HEIC via the Windows Imaging Component (the OS codec extensions);
+# pure-Rust bindings, no native build. cfg-gated off on non-Windows targets.
+windows = { version = "0.62.2", features = ["Win32_Graphics_Imaging", "Win32_System_Com", "Win32_Foundation"] }

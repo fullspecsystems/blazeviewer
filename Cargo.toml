@@ -34,12 +34,15 @@ pb-decode = { path = "crates/pb-decode" }
 pb-render = { path = "crates/pb-render" }
 
 # Release profile is tuned for the hot path: maximum optimization, fat-ish LTO,
-# single codegen unit, and abort-on-panic (no unwinding tables on the fast path).
+# single codegen unit. `panic = "unwind"` (not abort) so the decode layer can
+# `catch_unwind` a panicking third-party decoder and skip the bad file instead of
+# killing the viewer — the GPU present hot path never panics, so the unwind-table
+# cost doesn't touch it (see pb-decode `catch_panics`).
 [profile.release]
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-panic = "abort"
+panic = "unwind"
 strip = "debuginfo"
 
 # A profiling profile: release-grade codegen but keep debug symbols so Tracy /

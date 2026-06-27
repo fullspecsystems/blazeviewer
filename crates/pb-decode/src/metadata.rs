@@ -13,11 +13,32 @@ pub fn read_exif_fields(bytes: &[u8]) -> Vec<(String, String)> {
     if let Ok(exif) = exif::Reader::new().read_from_container(&mut cursor) {
         for f in exif.fields() {
             let tag = f.tag.to_string();
-            let value = f.display_value().with_unit(&exif).to_string();
-            out.push((tag, value));
+            out.push((tag, field_value(f, &exif)));
         }
     }
     out
+}
+
+/// A field's display string. ASCII fields are decoded as UTF-8 (lossy) so
+/// multibyte text shows as real characters — e.g. a copyright "©" stored as the
+/// UTF-8 bytes `0xC2 0xA9` renders as `©`, not `display_value`'s `\xc2\xa9`
+/// escapes. Every other type keeps the crate's formatting, which carries units
+/// (e.g. `f/2.8`, `1/250 s`, `50 mm`).
+fn field_value(f: &exif::Field, exif: &exif::Exif) -> String {
+    match &f.value {
+        exif::Value::Ascii(parts) => parts
+            .iter()
+            .map(|b| {
+                String::from_utf8_lossy(b)
+                    .trim_end_matches('\0')
+                    .trim()
+                    .to_string()
+            })
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => f.display_value().with_unit(exif).to_string(),
+    }
 }
 
 #[cfg(test)]
