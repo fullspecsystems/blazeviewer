@@ -107,8 +107,10 @@ struct App {
     active: Option<Active>,
     /// Physical keys currently held (OS auto-repeat ignored).
     held: HashSet<KeyCode>,
-    /// When the last self-paced advance happened, to cap the rate.
-    last_advance: Option<Instant>,
+    /// When a frame was last actually presented. Caps the advance rate from the
+    /// presentation (not the advance attempt), so a late-arriving miss isn't
+    /// replaced in the same tick it finally shows; also delays the idle panel.
+    last_present: Option<Instant>,
     /// Minimum time between advances while holding (≈ one display refresh).
     frame_interval: Duration,
     /// When the current hold's first press happened (for the initial-delay gate).
@@ -160,6 +162,10 @@ struct App {
     /// Items whose decode failed (corrupt/unreadable): skipped, never retried, so
     /// a bad JPEG can't stall hold-to-fly or spin the event loop forever.
     failed: HashSet<usize>,
+    /// Decoded images that arrived faster than the per-tick upload budget; carried
+    /// (in priority order) to the next tick so no decode work is wasted. They hold
+    /// their pool byte-budget reservation, which is the intended backpressure.
+    pending_uploads: Vec<Outcome>,
 }
 
 impl App {
@@ -174,7 +180,7 @@ impl App {
             playlist,
             active: None,
             held: HashSet::new(),
-            last_advance: None,
+            last_present: None,
             frame_interval: Duration::from_micros(8_333), // ~120 Hz until we read the real rate
             hold_start: None,
             initial_delay: Duration::from_millis(400),
@@ -199,6 +205,7 @@ impl App {
             ahead: 8,
             behind: 2,
             failed: HashSet::new(),
+            pending_uploads: Vec::new(),
         }
     }
 
@@ -239,6 +246,7 @@ impl App {
         self.displayed_item = Some(item);
         self.current = self.meta_cache.get(&item).cloned();
         self.overlay_shown = false;
+        self.last_present = Some(Instant::now());
         self.draw(event_loop);
     }
 
@@ -265,34 +273,61 @@ impl App {
         }
     }
 
-    /// Drain finished decodes (budgeted): discard stale-epoch results, upload the
-    /// rest into ring slots, and present the target if its decode just arrived.
+    /// Drain finished decodes: discard stale/duplicate results, handle decode
+    /// errors, then upload the highest-priority ready images (**current target
+    /// first**) into ring slots — at most `UPLOADS_PER_TICK` per tick so a burst
+    /// can't blow the frame budget. Lower-priority leftovers are stashed for the
+    /// next tick (so the target never waits behind neighbors), keeping their pool
+    /// byte-budget reservation as backpressure.
     fn drain_results(&mut self, event_loop: &ActiveEventLoop) {
+        // Gather everything ready plus last tick's leftovers, dropping stale /
+        // duplicate / errored results so only live decoded images remain.
+        let mut ready: Vec<Outcome> = std::mem::take(&mut self.pending_uploads);
+        while let Ok(o) = self.results.try_recv() {
+            ready.push(o);
+        }
+        ready.retain(|o| {
+            if o.key.epoch != self.epoch || self.ring.slot_for(o.key.item).is_some() {
+                return false; // stale geometry or already resident
+            }
+            if let Err(ref e) = o.result {
+                let item = o.key.item;
+                eprintln!("decode failed for item {item}: {e}");
+                self.failed.insert(item);
+                // Unstick the gated loop: a corrupt target counts as "shown".
+                if self.target_item == Some(item) {
+                    self.displayed_item = Some(item);
+                }
+                return false;
+            }
+            true
+        });
+
+        // Current target first, then by prefetch priority, unknowns last.
+        let target = self.target_item;
+        ready.sort_by_key(|o| {
+            let item = o.key.item;
+            if target == Some(item) {
+                0usize
+            } else {
+                self.targets
+                    .iter()
+                    .position(|&t| t == item)
+                    .map(|p| p + 1)
+                    .unwrap_or(usize::MAX)
+            }
+        });
+
         let mut uploads = 0;
-        while uploads < UPLOADS_PER_TICK {
-            let outcome = match self.results.try_recv() {
-                Ok(o) => o,
-                Err(_) => break,
-            };
-            if outcome.key.epoch != self.epoch {
-                continue; // decoded for an old geometry; its bytes free on drop
+        let mut leftover = Vec::new();
+        for outcome in ready {
+            if uploads >= UPLOADS_PER_TICK {
+                leftover.push(outcome); // carried to the next tick, in order
+                continue;
             }
             let item = outcome.key.item;
-            if self.ring.slot_for(item).is_some() {
-                continue; // already resident (a rare duplicate decode)
-            }
-            let img = match outcome.result {
-                Ok(ref img) => img,
-                Err(ref e) => {
-                    eprintln!("decode failed for item {item}: {e}");
-                    self.failed.insert(item);
-                    // Unstick the gated loop: a corrupt target counts as "shown"
-                    // (the previous frame stays up) so hold-to-fly skips past it.
-                    if self.target_item == Some(item) {
-                        self.displayed_item = Some(item);
-                    }
-                    continue;
-                }
+            let Ok(ref img) = outcome.result else {
+                continue; // errors were already filtered out above
             };
             if !self.meta_cache.contains_key(&item) {
                 let m = meta_for_path(&self.paths[item], &self.root, img);
@@ -311,7 +346,9 @@ impl App {
                     self.present_item(item, res.slot, event_loop);
                 }
             }
+            // reserve == None (no longer wanted): drop the outcome, freeing budget.
         }
+        self.pending_uploads = leftover;
     }
 
     /// Synchronous decode + display of the current item (the first frame, geometry
@@ -345,6 +382,7 @@ impl App {
                 self.displayed_item = Some(idx);
             }
         }
+        self.last_present = Some(Instant::now());
         self.draw(event_loop);
     }
 
@@ -364,6 +402,8 @@ impl App {
         let (ahead, behind) = window_for_capacity(cap);
         self.ahead = ahead;
         self.behind = behind;
+        // Drop decodes staged for the old geometry; they free their pool budget.
+        self.pending_uploads.clear();
     }
 
     /// After a geometry change: resume prefetch in Fit mode, or — in Original mode
@@ -489,7 +529,6 @@ impl App {
         } else {
             self.playlist.prev();
         }
-        self.last_advance = Some(Instant::now());
         self.target_item = self.playlist.current();
         match self.scale_mode {
             ScaleMode::Original => {
@@ -622,6 +661,7 @@ impl ApplicationHandler for App {
         self.behind = behind;
         self.displayed_item = self.playlist.current();
         self.target_item = self.playlist.current();
+        self.last_present = Some(Instant::now());
 
         self.active = Some(Active { window, renderer });
         self.request_prefetch();
@@ -723,7 +763,7 @@ impl ApplicationHandler for App {
                 // so every photo is shown and a miss simply holds.
                 let caught_up = self.displayed_item == self.target_item;
                 let due = self
-                    .last_advance
+                    .last_present
                     .is_none_or(|t| now >= t + self.frame_interval);
                 if past_delay && caught_up && due {
                     self.advance(forward, event_loop);
@@ -738,7 +778,7 @@ impl ApplicationHandler for App {
                 if self.info_visible && !self.overlay_shown && self.current.is_some() {
                     let now = Instant::now();
                     let due = self
-                        .last_advance
+                        .last_present
                         .map(|t| t + self.idle_delay)
                         .unwrap_or(now);
                     if now < due {
