@@ -763,15 +763,19 @@ impl ApplicationHandler for App {
                 // The initial tap delay gates *repeat*, not draining/presenting:
                 // keep polling so a first-press miss shows the moment it decodes
                 // (the earlier `return` here added up to the full delay of latency).
-                let past_delay = self
-                    .hold_start
-                    .is_none_or(|t| now >= t + self.initial_delay);
+                // (plain `match`, not `map_or`/`is_none_or`: the latter is Rust
+                // 1.82+ and this workspace's MSRV is 1.80.)
+                let past_delay = match self.hold_start {
+                    Some(t) => now >= t + self.initial_delay,
+                    None => true,
+                };
                 // Advance only when caught up (target shown) AND a frame elapsed —
                 // so every photo is shown and a miss simply holds.
                 let caught_up = self.displayed_item == self.target_item;
-                let due = self
-                    .last_present
-                    .is_none_or(|t| now >= t + self.frame_interval);
+                let due = match self.last_present {
+                    Some(t) => now >= t + self.frame_interval,
+                    None => true,
+                };
                 if past_delay && caught_up && due {
                     self.advance(forward, event_loop);
                 } else if !caught_up {
