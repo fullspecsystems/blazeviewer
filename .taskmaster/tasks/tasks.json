@@ -10,10 +10,10 @@
         "id": 1,
         "title": "Photo rotation (r / Shift+R), non-persistent",
         "description": "Rotate the current photo 90 degrees clockwise (r) and counter-clockwise (Shift+R). Each altered photo's orientation is remembered in RAM only and discarded when the app closes.",
-        "status": "pending",
+        "status": "done",
         "priority": "medium",
         "dependencies": [4],
-        "details": "Extend the shared per-photo ViewTransform (Task 4) with a rotation quadrant (0/90/180/270). EXIF auto-orientation is the baseline; r/Shift+R adjust from there. Store per-image overrides in an in-RAM map keyed by image identity (path or playlist index) - never written to disk (see Task 2, privacy). Rotation is applied as part of the render transform on the textured quad: pure GPU, perf-neutral. A 90/270 rotation swaps width/height, so fit-to-screen must be recomputed. Register actions rotate_cw / rotate_ccw in the central keymap (Task 8).",
+        "details": "DONE. Rotation quadrant lives on ViewTransform (pb-render::view) with cw/ccw stepping + UV remap + w/h swap for fit; unit-tested (4x cw = identity). Per-image overrides in an in-RAM HashMap<item, Rotation> (privacy task #2); identity drops the entry. r/Shift+R bound (Shift tracked via ModifiersChanged). Applied as a GPU transform on the quad - perf-neutral, no re-decode. NOTE: a golden-image rotation render test is deferred (geometry is unit-tested instead).",
         "testStrategy": "Pure unit tests on the rotation state machine (cw wraps 0->1->2->3->0; ccw reverses). Extend pb-render fit tests for the w/h-swapped fit recompute. Property test: four cw rotations return to the original. Golden-image test: a rotated render matches its reference within tolerance.",
         "subtasks": [
           {

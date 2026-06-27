@@ -11,6 +11,7 @@
 //!   space / →   next photo
 //!   ⌫ / ←       previous photo
 //!   0 / 8 / 9   scaling mode: original 1:1 / fit / fill (all prefetched)
+//!   r / Shift+R rotate 90° clockwise / counter-clockwise (per-image, RAM-only)
 //!   i           toggle info panel (path · resolution · codec)
 //!   esc         quit
 //!
@@ -34,7 +35,7 @@ use winit::window::{Fullscreen, Window, WindowId};
 
 use pb_core::{prefetch_targets, Playlist, ResidentRing};
 use pb_decode::{decode_image_file, DecodedImage, FitBox};
-use pb_render::{test_pattern, Renderer, ScaleMode, ViewTransform, WgpuRenderer};
+use pb_render::{test_pattern, Renderer, Rotation, ScaleMode, ViewTransform, WgpuRenderer};
 
 mod decode_pool;
 mod hud;
@@ -167,6 +168,11 @@ struct App {
     /// (in priority order) to the next tick so no decode work is wasted. They hold
     /// their pool byte-budget reservation, which is the intended backpressure.
     pending_uploads: Vec<Outcome>,
+    /// Per-image rotation overrides (`r` / `Shift+R`); RAM-only, dropped on exit
+    /// (privacy task #2). Absent = upright (identity).
+    rotations: HashMap<usize, Rotation>,
+    /// Whether a Shift key is currently held (for `Shift+R`, `Shift+I`).
+    shift: bool,
 }
 
 impl App {
@@ -207,6 +213,8 @@ impl App {
             behind: 2,
             failed: HashSet::new(),
             pending_uploads: Vec::new(),
+            rotations: HashMap::new(),
+            shift: false,
         }
     }
 
@@ -264,11 +272,41 @@ impl App {
         self.pool.set_targets(self.epoch, &jobs);
     }
 
+    /// Load the per-photo view state for `item`: rotation from the RAM override
+    /// map (upright if absent), zoom/pan reset to a fresh framing. Returns the
+    /// view to push to the renderer. (Scaling mode is global and left unchanged.)
+    fn view_for(&mut self, item: usize) -> ViewTransform {
+        self.view.rotation = self.rotations.get(&item).copied().unwrap_or_default();
+        self.view.zoom = 1.0;
+        self.view.pan = [0.0, 0.0];
+        self.view
+    }
+
+    /// Rotate the on-screen photo 90° clockwise (counter-clockwise on `Shift+R`).
+    /// Per-image and RAM-only; returning to upright drops the override entry.
+    fn rotate(&mut self, ccw: bool, event_loop: &ActiveEventLoop) {
+        let Some(item) = self.displayed_item else {
+            return;
+        };
+        let cur = self.rotations.get(&item).copied().unwrap_or_default();
+        let new = if ccw { cur.ccw() } else { cur.cw() };
+        if new == Rotation::default() {
+            self.rotations.remove(&item);
+        } else {
+            self.rotations.insert(item, new);
+        }
+        self.view.rotation = new;
+        self.push_view();
+        self.draw(event_loop);
+    }
+
     /// Show ring `slot` (holding `item`): the keypress fast path — a rebind, no
     /// decode or upload. Updates the pin, title, and info panel.
     fn present_item(&mut self, item: usize, slot: usize, event_loop: &ActiveEventLoop) {
+        let view = self.view_for(item);
         let title = title_for(&self.paths[item], item, self.paths.len());
         if let Some(a) = self.active.as_mut() {
+            a.renderer.set_view(view);
             a.renderer.present_slot(slot);
             // The photo changed — drop the stale panel; it returns once idle.
             a.renderer.set_overlay(None, 0);
@@ -407,8 +445,10 @@ impl App {
                 let meta = meta_for_path(&self.paths[idx], &self.root, &img);
                 self.current = Some(meta.clone());
                 self.meta_cache.insert(idx, meta);
+                let view = self.view_for(idx);
                 let title = title_for(&self.paths[idx], idx, self.paths.len());
                 if let Some(a) = self.active.as_mut() {
+                    a.renderer.set_view(view);
                     a.renderer.set_image(&img.pixels, img.width, img.height);
                     a.renderer.set_overlay(None, 0);
                     a.window.set_title(&title);
@@ -758,6 +798,8 @@ impl ApplicationHandler for App {
                             KeyCode::Digit0 => self.set_scale_mode(ScaleMode::Original, event_loop),
                             KeyCode::Digit8 => self.set_scale_mode(ScaleMode::Fit, event_loop),
                             KeyCode::Digit9 => self.set_scale_mode(ScaleMode::Fill, event_loop),
+                            // Rotate 90° clockwise, or counter-clockwise with Shift.
+                            KeyCode::KeyR => self.rotate(self.shift, event_loop),
                             // Toggle the corner info panel.
                             KeyCode::KeyI => self.toggle_info(event_loop),
                             _ => {}
@@ -769,12 +811,18 @@ impl ApplicationHandler for App {
                 }
             },
 
+            // Track Shift for Shift+R / Shift+I.
+            WindowEvent::ModifiersChanged(mods) => {
+                self.shift = mods.state().shift_key();
+            }
+
             // Focus loss can swallow the key-up event; clear held keys so
             // navigation never gets stuck auto-advancing (a known winit repeat /
             // lost-key-up hazard, called out in CLAUDE.md).
             WindowEvent::Focused(false) => {
                 self.held.clear();
                 self.hold_start = None;
+                self.shift = false;
             }
 
             _ => {}
