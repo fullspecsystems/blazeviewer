@@ -11,5 +11,8 @@ description = "Image-decode abstraction for PhotoBlaze: decode-to-fit + preview-
 [dependencies]
 zune-jpeg = "0.4"
 kamadak-exif = "0.6"
+# Decode-to-fit: high-quality SIMD downscale to the display size, so large photos
+# aren't minified (grainy/aliased) on the GPU. (zune-jpeg has no scaled decode.)
+fast_image_resize = "5"
 
 [dev-dependencies]

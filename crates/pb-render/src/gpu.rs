@@ -10,7 +10,7 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
 use crate::fit::fit_rect;
-use crate::{RenderError, Renderer};
+use crate::{RenderError, Renderer, ScaleMode};
 
 /// Background (letterbox) color, straight RGBA8.
 pub const LETTERBOX: [u8; 4] = [10, 10, 12, 255];
@@ -50,14 +50,35 @@ const ATTRS: [wgpu::VertexAttribute; 2] =
 
 const INDICES: [u16; 6] = [0, 1, 2, 0, 2, 3];
 
-/// The four corners of the letterboxed image quad, in clip space.
-fn quad_vertices(img_w: u32, img_h: u32, screen_w: u32, screen_h: u32) -> [Vertex; 4] {
-    let r = fit_rect(img_w, img_h, screen_w, screen_h, true);
+/// The four corners of the image quad in clip space, placed per `ScaleMode`.
+fn quad_vertices(
+    mode: ScaleMode,
+    img_w: u32,
+    img_h: u32,
+    screen_w: u32,
+    screen_h: u32,
+) -> [Vertex; 4] {
     let (sw, sh) = (screen_w as f32, screen_h as f32);
-    let x0 = (r.offset_x as f32 / sw) * 2.0 - 1.0;
-    let x1 = ((r.offset_x as f32 + r.width as f32) / sw) * 2.0 - 1.0;
-    let y_top = 1.0 - (r.offset_y as f32 / sh) * 2.0;
-    let y_bot = 1.0 - ((r.offset_y as f32 + r.height as f32) / sh) * 2.0;
+    let (ox, oy, w, h) = match mode {
+        ScaleMode::Fit => {
+            let r = fit_rect(img_w, img_h, screen_w, screen_h, true);
+            (
+                r.offset_x as f32,
+                r.offset_y as f32,
+                r.width as f32,
+                r.height as f32,
+            )
+        }
+        ScaleMode::Original => {
+            // 1:1 pixel size, centered; larger-than-viewport overflows (no pan).
+            let (w, h) = (img_w as f32, img_h as f32);
+            ((sw - w) / 2.0, (sh - h) / 2.0, w, h)
+        }
+    };
+    let x0 = (ox / sw) * 2.0 - 1.0;
+    let x1 = ((ox + w) / sw) * 2.0 - 1.0;
+    let y_top = 1.0 - (oy / sh) * 2.0;
+    let y_bot = 1.0 - ((oy + h) / sh) * 2.0;
     [
         Vertex { pos: [x0, y_top], uv: [0.0, 0.0] },
         Vertex { pos: [x1, y_top], uv: [1.0, 0.0] },
@@ -236,6 +257,7 @@ fn upload_image(
 
 fn vertex_buffer(
     device: &wgpu::Device,
+    mode: ScaleMode,
     img_w: u32,
     img_h: u32,
     screen_w: u32,
@@ -243,7 +265,7 @@ fn vertex_buffer(
 ) -> wgpu::Buffer {
     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("vbuf"),
-        contents: bytemuck::cast_slice(&quad_vertices(img_w, img_h, screen_w, screen_h)),
+        contents: bytemuck::cast_slice(&quad_vertices(mode, img_w, img_h, screen_w, screen_h)),
         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
     })
 }
@@ -326,6 +348,7 @@ pub struct WgpuRenderer {
     ibuf: wgpu::Buffer,
     img_w: u32,
     img_h: u32,
+    scale_mode: ScaleMode,
 }
 
 impl WgpuRenderer {
@@ -392,9 +415,10 @@ impl WgpuRenderer {
         };
         surface.configure(&device, &config);
 
+        let scale_mode = ScaleMode::Fit;
         let (pipeline, bgl) = build_pipeline(&device, format);
         let bind_group = upload_image(&device, &queue, &bgl, image, img_w, img_h);
-        let vbuf = vertex_buffer(&device, img_w, img_h, config.width, config.height);
+        let vbuf = vertex_buffer(&device, scale_mode, img_w, img_h, config.width, config.height);
         let ibuf = index_buffer(&device);
 
         Self {
@@ -409,6 +433,7 @@ impl WgpuRenderer {
             ibuf,
             img_w,
             img_h,
+            scale_mode,
         }
     }
 
@@ -437,11 +462,17 @@ impl Renderer for WgpuRenderer {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
-        // Re-letterbox for the new aspect ratio.
+        // Re-place the quad for the new viewport.
         self.queue.write_buffer(
             &self.vbuf,
             0,
-            bytemuck::cast_slice(&quad_vertices(self.img_w, self.img_h, width, height)),
+            bytemuck::cast_slice(&quad_vertices(
+                self.scale_mode,
+                self.img_w,
+                self.img_h,
+                width,
+                height,
+            )),
         );
     }
 
@@ -449,11 +480,32 @@ impl Renderer for WgpuRenderer {
         self.bind_group = upload_image(&self.device, &self.queue, &self.bgl, rgba, width, height);
         self.img_w = width;
         self.img_h = height;
-        // Re-letterbox for the new image's aspect ratio.
+        // Re-place the quad for the new image.
         self.queue.write_buffer(
             &self.vbuf,
             0,
-            bytemuck::cast_slice(&quad_vertices(width, height, self.config.width, self.config.height)),
+            bytemuck::cast_slice(&quad_vertices(
+                self.scale_mode,
+                width,
+                height,
+                self.config.width,
+                self.config.height,
+            )),
+        );
+    }
+
+    fn set_scale_mode(&mut self, mode: ScaleMode) {
+        self.scale_mode = mode;
+        self.queue.write_buffer(
+            &self.vbuf,
+            0,
+            bytemuck::cast_slice(&quad_vertices(
+                mode,
+                self.img_w,
+                self.img_h,
+                self.config.width,
+                self.config.height,
+            )),
         );
     }
 
@@ -525,7 +577,7 @@ async fn render_offscreen_async(
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let (pipeline, bgl) = build_pipeline(&device, format);
     let bind_group = upload_image(&device, &queue, &bgl, image, img_w, img_h);
-    let vbuf = vertex_buffer(&device, img_w, img_h, screen_w, screen_h);
+    let vbuf = vertex_buffer(&device, ScaleMode::Fit, img_w, img_h, screen_w, screen_h);
     let ibuf = index_buffer(&device);
 
     let target = device.create_texture(&wgpu::TextureDescriptor {
@@ -712,5 +764,18 @@ mod tests {
         assert!(ow <= 8 && oh <= 8, "got {ow}x{oh}");
         assert_eq!((ow, oh), (8, 4)); // 2:1 aspect preserved
         assert_eq!(out.len(), (ow * oh * 4) as usize);
+    }
+
+    #[test]
+    fn original_mode_is_one_to_one_centered() {
+        // Image exactly the screen size -> full-screen quad (top-left at -1,+1).
+        let v = quad_vertices(ScaleMode::Original, 100, 100, 100, 100);
+        assert!((v[0].pos[0] + 1.0).abs() < 1e-5, "x0 = {}", v[0].pos[0]);
+        assert!((v[0].pos[1] - 1.0).abs() < 1e-5, "y_top = {}", v[0].pos[1]);
+
+        // Image half the screen -> centered, top-left at -0.5,+0.5.
+        let v = quad_vertices(ScaleMode::Original, 50, 50, 100, 100);
+        assert!((v[0].pos[0] + 0.5).abs() < 1e-5, "x0 = {}", v[0].pos[0]);
+        assert!((v[0].pos[1] - 0.5).abs() < 1e-5, "y_top = {}", v[0].pos[1]);
     }
 }

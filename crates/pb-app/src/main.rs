@@ -7,6 +7,7 @@
 //!
 //!   space / →   next photo
 //!   ⌫ / ←       previous photo
+//!   0 / o       toggle fit-to-screen <-> original 1:1 (centered)
 //!   esc         quit
 //!
 //! Holding a key is **self-paced**: OS auto-repeats are ignored, and advancing is
@@ -34,8 +35,8 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Fullscreen, Window, WindowId};
 
 use pb_core::Playlist;
-use pb_decode::decode_image_file;
-use pb_render::{test_pattern, Renderer, WgpuRenderer};
+use pb_decode::{decode_image_file, FitBox};
+use pb_render::{test_pattern, Renderer, ScaleMode, WgpuRenderer};
 
 struct Active {
     window: Arc<Window>,
@@ -53,6 +54,10 @@ struct App {
     last_advance: Option<Instant>,
     /// Minimum time between advances while holding (≈ one display refresh).
     frame_interval: Duration,
+    /// Decode-to-fit target = the display size; photos are downscaled to it.
+    fit: Option<FitBox>,
+    /// Fit-to-screen (default) vs. original 1:1 centered.
+    scale_mode: ScaleMode,
 }
 
 impl App {
@@ -66,13 +71,38 @@ impl App {
             held: HashSet::new(),
             last_advance: None,
             frame_interval: Duration::from_micros(8_333), // ~120 Hz until we read the real rate
+            fit: None,
+            scale_mode: ScaleMode::Fit,
         }
+    }
+
+    /// The decode-to-fit target for the current mode: the display size in Fit
+    /// mode (downscale large photos), or None in Original mode (decode full-res).
+    fn decode_fit(&self) -> Option<FitBox> {
+        match self.scale_mode {
+            ScaleMode::Fit => self.fit,
+            ScaleMode::Original => None,
+        }
+    }
+
+    /// Toggle between fit-to-screen and original 1:1 (re-decodes at the right
+    /// resolution: full-res for Original, downscaled for Fit).
+    fn toggle_scale(&mut self, event_loop: &ActiveEventLoop) {
+        self.scale_mode = match self.scale_mode {
+            ScaleMode::Fit => ScaleMode::Original,
+            ScaleMode::Original => ScaleMode::Fit,
+        };
+        if let Some(a) = self.active.as_mut() {
+            a.renderer.set_scale_mode(self.scale_mode);
+        }
+        self.load_current();
+        self.draw(event_loop);
     }
 
     /// Decode the image at the current cursor (or a fallback) for first display.
     fn initial_image(&self) -> (Vec<u8>, u32, u32, String) {
         match self.playlist.current() {
-            Some(idx) => match decode_image_file(&self.paths[idx]) {
+            Some(idx) => match decode_image_file(&self.paths[idx], self.decode_fit()) {
                 Ok(img) => (
                     img.pixels,
                     img.width,
@@ -98,7 +128,7 @@ impl App {
         let Some(idx) = self.playlist.current() else {
             return;
         };
-        match decode_image_file(&self.paths[idx]) {
+        match decode_image_file(&self.paths[idx], self.decode_fit()) {
             Ok(img) => {
                 if let Some(a) = self.active.as_mut() {
                     a.renderer.set_image(&img.pixels, img.width, img.height);
@@ -165,13 +195,11 @@ impl ApplicationHandler for App {
             }
         }
 
-        // Decode the first image while the window is still hidden (below).
-        let (rgba, iw, ih, title) = self.initial_image();
-
-        // Create HIDDEN so the unpainted client area never shows during GPU setup;
-        // let the OS size the fullscreen window (correct under any scale factor).
+        // Create the window HIDDEN first, so decode-to-fit can target its real
+        // client size and the unpainted area never shows during GPU setup; let
+        // the OS size fullscreen (correct under any scale factor).
         let mut attrs = Window::default_attributes()
-            .with_title(&title)
+            .with_title("PhotoBlaze")
             .with_visible(false);
         attrs = if self.windowed {
             attrs.with_inner_size(PhysicalSize::new(1280, 800))
@@ -188,6 +216,15 @@ impl ApplicationHandler for App {
         );
 
         let isz = window.inner_size();
+        self.fit = Some(FitBox {
+            max_width: isz.width.max(1),
+            max_height: isz.height.max(1),
+        });
+
+        // Decode the first image at the display size while the window is hidden.
+        let (rgba, iw, ih, title) = self.initial_image();
+        window.set_title(&title);
+
         let mut renderer = WgpuRenderer::new(
             window.clone(),
             isz.width.max(1),
@@ -198,6 +235,10 @@ impl ApplicationHandler for App {
         );
         let now = window.inner_size();
         if now != isz {
+            self.fit = Some(FitBox {
+                max_width: now.width.max(1),
+                max_height: now.height.max(1),
+            });
             renderer.resize(now.width, now.height);
         }
 
@@ -214,6 +255,12 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => event_loop.exit(),
 
             WindowEvent::Resized(size) => {
+                // Future decodes target the new size; the current image refits on
+                // the GPU until the next navigation re-decodes at the new size.
+                self.fit = Some(FitBox {
+                    max_width: size.width.max(1),
+                    max_height: size.height.max(1),
+                });
                 if let Some(a) = self.active.as_mut() {
                     a.renderer.resize(size.width, size.height);
                 }
@@ -248,6 +295,8 @@ impl ApplicationHandler for App {
                                 self.held.insert(code);
                                 self.navigate(false, event_loop);
                             }
+                            // Toggle fit-to-screen <-> original 1:1 (centered).
+                            KeyCode::Digit0 | KeyCode::KeyO => self.toggle_scale(event_loop),
                             _ => {}
                         }
                     }

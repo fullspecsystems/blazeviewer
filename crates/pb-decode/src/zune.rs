@@ -11,7 +11,7 @@ use std::path::Path;
 use zune_jpeg::JpegDecoder;
 
 use crate::orientation::apply_orientation;
-use crate::{DecodeError, DecodeRequest, DecodedImage, ImageDecoder, PixelFormat};
+use crate::{DecodeError, DecodeRequest, DecodedImage, FitBox, ImageDecoder, PixelFormat};
 
 /// JPEG decoder backed by `zune-jpeg`.
 #[derive(Debug, Clone, Copy, Default)]
@@ -51,6 +51,13 @@ impl ImageDecoder for ZuneJpegDecoder {
         let (pixels, width, height) = match read_orientation(bytes) {
             o if o > 1 => apply_orientation(&rgba, w, h, o),
             _ => (rgba, w, h),
+        };
+
+        // Decode-to-fit: downscale to the display size with a high-quality filter
+        // so large photos aren't minified (aliased/grainy) on the GPU.
+        let (pixels, width, height) = match req.fit {
+            Some(fit) => downscale_to_fit(pixels, width, height, fit)?,
+            None => (pixels, width, height),
         };
 
         Ok(DecodedImage {
@@ -98,12 +105,44 @@ fn read_orientation(bytes: &[u8]) -> u32 {
     1
 }
 
-/// Convenience: read a file from disk and decode it to an upright RGBA image.
-pub fn decode_image_file(path: &Path) -> Result<DecodedImage, DecodeError> {
+/// Downscale an RGBA8 image to fit within `fit` (preserving aspect, never
+/// upscaling) using a high-quality Lanczos3 filter. Returns the input unchanged
+/// when it already fits.
+fn downscale_to_fit(
+    pixels: Vec<u8>,
+    w: u32,
+    h: u32,
+    fit: FitBox,
+) -> Result<(Vec<u8>, u32, u32), DecodeError> {
+    let scale = (fit.max_width as f64 / w as f64)
+        .min(fit.max_height as f64 / h as f64)
+        .min(1.0);
+    if scale >= 0.999 {
+        return Ok((pixels, w, h));
+    }
+    let tw = ((w as f64 * scale).round() as u32).max(1);
+    let th = ((h as f64 * scale).round() as u32).max(1);
+
+    use fast_image_resize::images::Image;
+    use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
+
+    let src = Image::from_vec_u8(w, h, pixels, PixelType::U8x4)
+        .map_err(|e| DecodeError::Corrupt(e.to_string()))?;
+    let mut dst = Image::new(tw, th, PixelType::U8x4);
+    let opts = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Lanczos3));
+    Resizer::new()
+        .resize(&src, &mut dst, &opts)
+        .map_err(|e| DecodeError::Corrupt(e.to_string()))?;
+    Ok((dst.into_vec(), tw, th))
+}
+
+/// Convenience: read a file from disk and decode it to an upright RGBA image,
+/// downscaled to fit `fit` (the display size) when provided.
+pub fn decode_image_file(path: &Path, fit: Option<FitBox>) -> Result<DecodedImage, DecodeError> {
     let bytes = std::fs::read(path).map_err(|e| DecodeError::Corrupt(format!("read error: {e}")))?;
     let req = DecodeRequest {
         bytes: &bytes,
-        fit: None,
+        fit,
         allow_preview: false,
     };
     ZuneJpegDecoder.decode(&req)
@@ -132,5 +171,40 @@ mod tests {
     fn luma_expands_to_rgba() {
         let out = luma_to_rgba(&[7, 9], 2);
         assert_eq!(out, vec![7, 7, 7, 255, 9, 9, 9, 255]);
+    }
+
+    #[test]
+    fn downscale_to_fit_leaves_fitting_images_untouched() {
+        let pixels = vec![1u8; 8 * 8 * 4];
+        let (out, w, h) =
+            downscale_to_fit(pixels, 8, 8, FitBox { max_width: 100, max_height: 100 }).unwrap();
+        assert_eq!((w, h), (8, 8));
+        assert_eq!(out.len(), 8 * 8 * 4);
+    }
+
+    #[test]
+    fn downscale_to_fit_resizes_and_preserves_solid_color() {
+        let (w, h) = (100u32, 100u32);
+        let red = [200u8, 30, 40, 255];
+        let pixels: Vec<u8> = red
+            .iter()
+            .copied()
+            .cycle()
+            .take((w * h * 4) as usize)
+            .collect();
+        let (out, ow, oh) =
+            downscale_to_fit(pixels, w, h, FitBox { max_width: 50, max_height: 50 }).unwrap();
+        assert_eq!((ow, oh), (50, 50));
+        assert_eq!(out.len(), (50 * 50 * 4) as usize);
+        // A solid color survives the resize (interior is exact; allow tiny tol).
+        let c = ((25 * 50 + 25) * 4) as usize;
+        for k in 0..4 {
+            assert!(
+                (out[c + k] as i32 - red[k] as i32).abs() <= 2,
+                "channel {k}: {} vs {}",
+                out[c + k],
+                red[k]
+            );
+        }
     }
 }

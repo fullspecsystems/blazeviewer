@@ -15,12 +15,24 @@ pub mod gpu;
 pub use fit::{fit_rect, FitRect};
 pub use gpu::{render_offscreen, test_pattern, WgpuRenderer, LETTERBOX};
 
+/// How the image is sized to the viewport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScaleMode {
+    /// Scale to fit the viewport, preserving aspect, no crop (the default).
+    #[default]
+    Fit,
+    /// Native pixel-for-pixel size, centered (may overflow the viewport; no pan).
+    Original,
+}
+
 /// The swappable rendering seam (A/B backends slot in here; see ADR-002).
 pub trait Renderer {
     /// React to a surface/window resize.
     fn resize(&mut self, width: u32, height: u32);
     /// Replace the displayed image with a new RGBA8 buffer (`width*height*4`).
     fn set_image(&mut self, rgba: &[u8], width: u32, height: u32);
+    /// Choose how the image is sized to the viewport (fit vs. original).
+    fn set_scale_mode(&mut self, mode: ScaleMode);
     /// Draw and present one frame.
     fn render(&mut self) -> Result<(), RenderError>;
 }
