@@ -1,92 +1,77 @@
 # PhotoBlaze — Current Status (session handoff)
 
-_Last updated: 2026-06-27._
+_Last updated: 2026-06-27 (overnight autonomous session)._
 
-A working photo viewer. Sequential navigation through real folders is solid; the
-"hold a key and fly on full-res photos" engine (Phase 3) is the next milestone.
+Phase 3 — **the prefetch engine ("hold a key and fly")** — is implemented. Decode
+is off the event loop, neighbors are prefetched into a resident GPU texture ring,
+and a keypress is a **rebind, not a decode**. Builds green, **77 tests pass**,
+clippy + fmt clean. **Not yet owner-verified for fly behavior** (see below).
 
-## Where things stand
-- **Phase 0, 1, 2 are done** (foundations + spikes, wgpu window/render, sequential
-  viewer), plus polish beyond plan (see below).
-- **Repo:** https://github.com/jdlien/photoblaze (private, `main`). Latest commit
-  `3bf2e6a`. Working tree is committed except this status doc + roadmap update.
-- **54 tests pass; clippy clean** (`-D warnings`).
+## Branch / how to review
+- Work is on branch **`feature/phase3-prefetch-engine`** (NOT pushed; `main`
+  untouched). 7 commits this session, one per step — read them in order:
+  - `3.0` measurement + hardening · `3.1` staging upload · `3.3(core)` ResidentRing
+    · `3.2/3.3(render)` renderer ring · `3.2/3.3/3.4` engine wiring · `#4` fit geom.
+- Full plan + decisions: **`.taskmaster/docs/phase3-plan.md`** (revised twice after
+  two reviews; §5 has the per-step status, §6 the resolved decisions).
 
-## What works today
-Run it:
+## What got built (Phase 3)
+- **`pb-app::decode_pool`** — priority worker pool (capped 2–8), cancellation,
+  dedup, byte-budget backpressure; injected decode fn (6 concurrency tests).
+- **`pb-core::ring::ResidentRing`** — pure item↔slot bookkeeping: `Empty/Pending/
+  Resident` states, epoch-validated `reserve`/`mark_resident`, displayed-slot pin
+  (10 tests incl. a 20k randomized invariant stress).
+- **`pb-render::upload`** — `UploadStrategy` seam; `StagingUpload` replaces
+  `write_texture` with `copy_buffer_to_texture` (round-trip test on an unaligned
+  width covers the 256-byte row-padding path).
+- **`pb-render` ring** — `reserve_ring`/`upload_slot`/`present_slot` on the
+  `Renderer` trait; v1 slots are **image-sized** (full UVs, no bleed); fixed-size +
+  sub-rect-UV (zero prefetch-alloc) is the documented next optimization.
+- **`pb-app` wiring** — gated-advance state machine: **every photo shown in order;
+  a miss holds the previous frame until its decode lands** (fly = min(refresh,
+  decode)). Epoch bumps on resize/fit-toggle discard stale-geometry decodes.
+  Original (1:1) mode stays synchronous, outside the ring.
+- **`pb-app::metrics`** — opt-in (`--metrics`) per-stage timing (decode/upload/
+  render) + tested `percentiles`; nothing written to disk (privacy task #2).
+- **Hardening** — focus-loss held-key clear; first-frame re-decode at true size;
+  `cargo fmt` drift cleared (fmt now part of the green bar).
+- **tasks.json #4** (subtask 4.2): pure `cover_rect` (fill) + `original_rect`.
+
+## Run it
 ```
-cargo run -p pb-app --release -- "D:\Pictures" -r          # recurse subfolders
-cargo run -p pb-app --release -- "<a leaf folder>"          # non-recursive
-cargo run -p pb-app --release -- "<folder>" -r --windowed   # dev window
+cargo run -p pb-app --release -- "D:\Pictures" -r              # fullscreen
+cargo run -p pb-app --release -- "<leaf folder>" --windowed    # dev window
+cargo run -p pb-app --release -- "<folder>" --metrics          # print stage timings on exit
 ```
-Keys: `space`/`→` next · `⌫`/`←` prev · `0`/`o` fit↔original-1:1 · `i` info panel ·
-`esc` quit. Hold to fly (tap = one photo; ~400 ms before auto-repeat; release stops
-within one decode; **every photo shown, none skipped**).
+Keys unchanged: `space`/`→` next · `⌫`/`←` prev · `0`/`o` fit↔1:1 · `i` info · `esc`.
 
-Features: JPEG decode (`zune-jpeg`) with EXIF orientation; **decode-to-fit** Lanczos3
-downscaling (fixes grain on large photos, shrinks textures); linear sampling;
-chrome-less fullscreen (no startup flicker, HiDPI-correct); GPU-adaptive texture
-limits + oversize clamp; **info overlay** (path · WxH · codec) via a from-scratch
-text layer using the OS UI font.
+## ⚠ Needs owner verification (couldn't be done headless)
+1. **The actual fly experience.** A windowed smoke run started cleanly on 11 real
+   JPEGs for 6 s with no panics/decode errors, but **keypress navigation / hold-to-
+   fly was not driven**. Please hold `→` through `D:\Pictures -r` and confirm: it
+   flies, every photo shows, a miss holds (never a blank/garbage frame), reverse is
+   cheap. Compare felt speed vs `main` on the 24–45 MP wedding folders.
+2. **VRAM**: ring budget is ~1.5 GB (`RING_BUDGET_BYTES` in `main.rs`) → ~16–32
+   fit-slots on the 7680-wide display. Watch VRAM on the big corpus.
+3. Run with `--metrics`, hold a key, `esc`, and eyeball the decode/upload/render
+   p50/p95/p99 printout (debug build has a console).
 
-## Architecture (see `docs/architecture.md`, `docs/decisions.md`)
-```
-crates/pb-core    pure nav/shuffle/prefetch/cache logic (no I/O, no GPU) — 29 tests
-crates/pb-decode  ImageDecoder trait + zune-jpeg backend, orientation, decode-to-fit
-crates/pb-render  wgpu (DX12) presenter: textured quad, ScaleMode, overlay, fit math
-crates/pb-app     winit event loop, self-paced advance, hud.rs (text), folder scan
-spikes/           decode + upload throughput spikes (drove the architecture)
-.taskmaster/      docs (research/architecture/decisions/roadmap/review) + tasks.json
-```
-**Key decision (don't relitigate):** wgpu + CPU decode + staging-ring upload is the
-v1 engine; native-D3D12 + nvImageCodec/zero-copy is a *gated* later escalation. This
-was measured (decode 2.5×, upload 3.4× the 120 Hz budget) and codex-reviewed — full
-record in `docs/decisions.md` (post-spike update) and `docs/review-brief.md`.
+## What's next
+- **3.5b instrumentation (deferred):** photon-accurate keypress→photon via DXGI
+  `GetFrameStatistics` (unsafe wgpu-hal downcast, behind a `metrics` feature) +
+  PresentMon validation — the only Phase 3 step not done.
+- **Optimization (measure first):** recycled staging-buffer ring (zero per-upload
+  alloc); fixed-size ring slots + sub-rect UVs (zero prefetch-alloc).
+- **Known latent bug (pinned, ignored test):** random-prefetch cycle boundary in
+  `pb-core::prefetch` — fix when random/`enter` nav is wired (`phase3-plan.md` §7).
+- **Deferred (owner-confirmed):** incremental folder scan, after the engine.
+- **Feature backlog (`tasks.json`):** #4 finish (wire 8/9 keys + Fill decode-res),
+  #8 keymap, #1 rotate, #3 zoom, etc.
 
-## Lessons learned (this session)
-- Decode-to-fit is a **quality** fix, not just speed (GPU minification of full-res =
-  grain/aliasing). Color: surface must be **non-sRGB**. Nav must be **self-paced**
-  (ignore OS key-repeat). Startup needs **hidden-until-first-frame**. All applied.
-
-## What's next — Phase 3: the prefetch engine (the headline)
-Today decode is **synchronous on the main thread**, so big photos (e.g. 24–45 MP
-wedding JPEGs) page at ~4–5 fps — decode-bound. Phase 3 fixes this:
-- A **priority decode thread pool** (cancellation + on-screen preemption) — pull
-  jobs from the prefetch scheduler in `pb-core` (`prefetch_targets` + `plan_residency`
-  already exist and are tested).
-- A **resident texture ring** reused across photos (not a new texture per nav as
-  today) fed by the **staging-buffer upload** path (the upload spike proved
-  `copy_buffer_to_texture` ≈ 48 GB/s; never `write_texture`).
-- Self-paced advance (already in `pb-app`) then **shows photos streaming by** at
-  refresh because the next one is already decoded — the per-photo wait disappears.
-- Add **keypress→photon instrumentation** (DXGI `GetFrameStatistics`) + Tracy.
-
-After Phase 3: instant previews (Phase 4), format breadth incl. HEIC/AVIF (Phase 5).
-
-## Feature backlog (`tasks.json`) — partial progress
-- #3 zoom, #4 scaling modes: **partly done** — `0`/`o` toggles fit↔original 1:1
-  (no pan/zoom/fill yet; `9` fill and arbitrary zoom remain).
-- #5 metadata panel: **basic done** (`i`); `Shift+I` full-EXIF "nerd mode" remains.
-- #9 recursive: a `-r` flag exists; the `R`-key toggle + folder-grouped/natural sort
-  remain (note: `R` collides with rotate-CCW — unresolved, see tasks.json).
-- Untouched: #1 rotate, #2 privacy, #6 esc-cleanup, #7 help overlay, #8 configurable
-  keybindings (TOML), #10 feedback toast. The `hud.rs` text layer is reusable for
-  #7/#10.
-
-## Environment / gotchas for the next session
-- `cargo` is at `~/.cargo/bin` (not on PATH). Use `& "$env:USERPROFILE\.cargo\bin\cargo.exe"`.
-- Build/verify: `cargo test --workspace`; `cargo clippy --workspace --all-targets -- -D warnings`.
-  GPU is an RTX 5090; golden-image render test runs on it.
-- **turbojpeg** (faster JPEG + finer scaled-decode) is an A/B alternative but needs
-  **NASM + cmake** to build (absent here) — that's why v1 uses pure-Rust `zune-jpeg`.
-- The viewer is a **GUI subsystem** binary in release (no console); debug keeps the console.
-- Don't launch the fullscreen app from automation (it traps the session) — use a
-  short windowed `Start-Process` + kill, or rely on the headless render test.
-- `D:\Pictures` (~17.7k JPEGs) is the owner's real corpus; photos live in **subfolders**
-  so use `-r`. Display is **7680×2160 @ 120 Hz, 1.5× scale**.
-- Line endings: git warns LF→CRLF (harmless); `Cargo.lock` is committed.
-
-## To verify visually (not yet owner-confirmed this session)
-The info panel (`i`) was built + smoke-tested but the owner hasn't eyeballed the
-text rendering/placement. If the text is mis-aligned vertically, adjust the baseline
-math in `pb-app/src/hud.rs` (the `y0 = baseline - ymin - height` line).
+## Environment / gotchas
+- `cargo` is at `~/.cargo/bin` (PATH-prepend: `$env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"`).
+- Gate: `cargo test --workspace`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo fmt --all -- --check`.
+- GPU render/round-trip tests run on the RTX 5090. Don't launch the **fullscreen**
+  app from automation (use a short `--windowed` `Start-Process` + kill; quote paths
+  with spaces). Display: 7680×2160 @ 120 Hz (smoke box reported 60 Hz windowed).
+- `D:\Pictures` is the real corpus; photos in subfolders → use `-r`.

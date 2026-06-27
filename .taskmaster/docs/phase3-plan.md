@@ -303,11 +303,19 @@ rigor. Decoder fuzzing is already Phase 6.
 
 ## 5. Sequencing (each step is runnable, and green = test + clippy + **fmt**)
 
+> Status (2026-06-27): **3.0–3.4 implemented, green (77 tests), and windowed
+> smoke-tested** (clean startup with real JPEGs, no panics). The image-sized-slot
+> ring shipped instead of fixed-size+sub-rect-UV (simpler, still moves allocation
+> off the keypress — see §3.2). **3.5b (DXGI photon timing) is the only step not
+> done** — deferred as the heavy, unsafe, Windows-specific piece; basic stage
+> timing (3.0/3.6a) already gives before/after numbers. GUI *fly behavior* is not
+> yet owner-verified.
+
 > Measurement moves to the front (per "we do not guess about speed"): without
 > per-stage numbers we can't prove 3.1/3.2 helped. The photon-accurate DXGI work
 > still lands last, when there's something fast to measure precisely.
 
-0. **3.0 Measure + harden (prereqs)** — land *before* touching the hot path:
+0. ✅ **3.0 Measure + harden (prereqs)** — land *before* touching the hot path:
    - **Stage timers (3.6a):** `tracing` zones + per-frame NDJSON for
      scan/read/decode/upload/render + ready-miss rate, and a unit-tested
      `percentiles` helper. Every later step now shows a before/after.
@@ -316,20 +324,22 @@ rigor. Decoder fuzzing is already Phase 6.
      window settles to its true size; `cargo fmt --all` to clear the drift.
    - **TDD red:** a failing test pinning the random-prefetch cycle-boundary bug
      (§7), left red until random nav is wired.
-1. **3.1 Staging-ring `UploadStrategy`** — swap `write_texture` → recycled staging
-   ring behind the new seam. Isolated, golden-test-proven byte-identical.
-   Removes the documented trap; unblocks the ring. **Lowest risk.**
-2. **3.2 Decode pool (no ring yet)** — move read+decode off the event loop with
-   keys/cancel/byte-budget; `about_to_wait` drains (budgeted) and uploads into the
-   single texture. The loop stops freezing on big photos even before prefetch.
-3. **3.3 Prefetch + resident ring** — `pb-core::ring` (states/reserve/pin),
-   renderer slots + UV gutter, wire `prefetch_targets → pool → reserve →
-   upload_slot → mark_resident`, keypress→`present_slot`. **This is hold-to-fly.**
-4. **3.4 Gated advance + miss handling** — the §3.5 state machine, displayed-slot
-   pin, per-tick upload budget; tune `ahead/behind`.
-5. **3.5 Photon-accurate keypress→photon (3.6b)** — DXGI `GetFrameStatistics`
-   behind `metrics`, validated vs PresentMon; produce p50/p95/p99 and check the
-   exit criterion.
+1. ✅ **3.1 Staging-ring `UploadStrategy`** — swapped `write_texture` → staging
+   buffer + `copy_buffer_to_texture` behind the new seam; round-trip test on an
+   unaligned width proves the row-padding path. (v1 allocates a staging buffer per
+   upload; the recycled mapped-ring is the noted optimization.)
+2. ✅ **3.2 Decode pool** — read+decode off the event loop with keys/cancel/
+   byte-budget; 6 concurrency tests with a fake decoder.
+3. ✅ **3.3 Prefetch + resident ring** — `pb-core::ring` (states/reserve/pin,
+   10 tests incl. a 20k randomized stress), image-sized renderer slots, wired
+   `prefetch_targets → pool → reserve → upload_slot → mark_resident`,
+   keypress→`present_slot`.
+4. ✅ **3.4 Gated advance + miss handling** — the §3.5 state machine, displayed
+   pin, per-tick upload budget, frame-rate polling while active.
+5. ⏳ **3.5 Photon-accurate keypress→photon (3.6b)** — **deferred.** DXGI
+   `GetFrameStatistics` via an unsafe wgpu-hal downcast, behind a `metrics` feature,
+   validated vs PresentMon. Heavy + unverifiable headless; basic stage timing
+   (3.6a) already lands the before/after numbers.
 
 **Exit criterion (from `roadmap.md`):** holding →/space sustains ~refresh-rate
 paging on the corpus with cache-hit **keypress→photon ≤ ~1 frame (p95)**; misses
