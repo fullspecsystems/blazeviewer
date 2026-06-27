@@ -12,7 +12,7 @@ management → wide-gamut → HDR output.** Display-P3 images render correctly a
 visibly wider than sRGB, and HDR (PQ/HLG) AVIF/HEIC get real highlight headroom — all
 owner-confirmed on a Display-P3 / HDR / ~1000-nit panel.
 
-**Green bar:** `cargo test --workspace` (**152 passing**, +1 ignored),
+**Green bar:** `cargo test --workspace` (**158 passing**, 0 ignored),
 `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo fmt --all -- --check` — all clean. Release builds.
 
@@ -125,14 +125,23 @@ gated-advance/failure paths in `main.rs` (`advance`/`about_to_wait`/`drain_resul
 `present_item`/`present_failed`) are subtle — re-read before changing them.
 
 ## Other backlog (tasks.json)
-- #2 privacy/no-trace, #6 esc-teardown, #8 configurable keybindings (TOML),
-  #9 recursive ordering, #10 feedback toast.
+- #8 configurable keybindings (TOML), #9 recursive ordering, #10 feedback toast.
+- **#2 privacy/no-trace — DONE** (static audit + `viewing_a_folder_writes_nothing_to_disk`
+  no-trace test + CLAUDE.md "Privacy guarantee" section; opt-in-persistence subtask
+  deferred — nothing on disk to gate yet). **#6 esc-teardown — DONE** (`begin_exit`:
+  hide window first → `clear_session_state` (RAM-only) → exit; Drop frees VRAM/pool
+  after).
 - #12 Windows open (file-arg/drag-drop/picker) — **in progress** (subtask 1, the pure
   `pb-core::open` seam, done in the tree); #13 MSI/associations; #14 polish; #15 macOS.
 - #1/#3/#4/#5/#7/#11 done.
 - Native scaled-decode (JPEG DCT, WebP downscale-on-decode) still a TODO.
-- `enter` random nav unwired (+ the pinned `#[ignore]`d prefetch test). The DXGI
-  photon-timing step is the only Phase-3 item still deferred.
+- **`enter` random nav — WIRED** (Enter/NumpadEnter → `Playlist::random_next`, hold-to-fly
+  via the new `Nav` enum). The pinned cycle-boundary prefetch bug is **fixed**
+  (`extend_random` now peeks `Playlist::next_shuffle()` across the reshuffle seam) and
+  its test un-ignored. NOTE: the shuffle seed is fixed (0), so the random order repeats
+  each launch — fine for now (deterministic/testable/privacy-safe); vary the seed later
+  if per-launch variety is wanted. The DXGI photon-timing step is the only Phase-3 item
+  still deferred.
 
 ## Environment / gotchas
 - `cargo` at `~/.cargo/bin` (`$env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"`).

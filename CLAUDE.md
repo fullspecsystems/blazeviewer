@@ -119,6 +119,33 @@ backend, cache/eviction policy, present mode, upload strategy.
   key-repeat events, plus a focus-loss release net (avoids known winit repeat/lost
   key-up bugs).
 
+## Privacy guarantee (no record of viewed photos) — tasks.json #2
+
+**The line is content, not footprint** (owner, ADR-018): PhotoBlaze keeps **no
+persistent record of which photos were viewed, or any pixel/metadata derived from
+them.** The app's own *existence* on disk is fine — the MSI's registry writes
+(ProgID, file associations, folder verb), a Start-menu shortcut, and read-only
+config (the future task #8) are all explicitly in-bounds. What's forbidden is a
+trace of the *viewing*: no thumbnail DB or pixel cache, no recent-files/MRU of
+photo paths, no decoded-pixel temp files, no log of viewed paths.
+
+- **Every runtime cache is RAM-only and dropped on exit.** Inventory: the resident
+  GPU texture ring + its `pb-core::ResidentRing` mirror, the decode pool's in-flight
+  buffers + `pending_uploads`, `meta_cache` (per-photo panel data), per-image
+  `rotations`, the `failed` set, the transient `toast`, and on-demand EXIF reads
+  (`Shift+I`) — all in memory, never serialized. `pb-core` is pure (no `std::fs`).
+- **On-disk I/O is read-only on every view/cache hot path.** The only files
+  PhotoBlaze opens are the photos themselves, and only to *read*: directory scan
+  (`read_dir`), decode (`fs::read`), and the panel's `fs::read`/`fs::metadata`.
+- **Esc teardown writes nothing** (task #6): hide the window, drop the RAM caches
+  (`clear_session_state`), exit — no flush-to-disk step exists.
+- **Enforced two ways:** a no-trace integration test
+  (`viewing_a_folder_writes_nothing_to_disk`) diffs a sandbox before/after a real
+  scan+decode+EXIF session and asserts zero files created or modified; and a static
+  audit (the only `fs::write`/`File::create` in the tree are in `#[cfg(test)]` code
+  and the `offscreen_png` example — never in app/decode code). Re-run the audit
+  before adding any disk write; any future on-disk scratch must be opt-in + cleared.
+
 ## Cross-platform discipline (Windows now, Apple Silicon later)
 
 Windows 11 is the target, but the spikes + codex review (see `decisions.md`,

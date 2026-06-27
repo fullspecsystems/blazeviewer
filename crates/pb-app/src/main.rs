@@ -9,6 +9,7 @@
 //! frame until its decode lands, then shows it — fly speed is min(refresh, decode).
 //!
 //!   space       next photo  ·  ⌫  previous photo
+//!   enter       random photo (precomputed shuffle; hold to fly)
 //!   ← ↑ ↓ →     pan around the photo (hold; accelerates)
 //!   = / -       zoom in / out (hold; accelerates; numpad +/- too)
 //!   8 / 9       scaling mode: fit / fill (all prefetched)
@@ -130,6 +131,17 @@ enum InfoMode {
     Help,
 }
 
+/// A navigation step from a held key: sequential forward (`space`), sequential
+/// backward (`backspace`), or a precomputed-random jump (`enter`). All three are
+/// gated + self-paced + prefetchable the same way (random walks a known shuffle
+/// order, so its next targets are knowable — see `pb_core::ShuffleOrder`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Nav {
+    Forward,
+    Backward,
+    Random,
+}
+
 /// Build a photo's info panel data from its path + decoded image.
 fn meta_for_path(path: &Path, root: &Path, img: &DecodedImage) -> PhotoMeta {
     let rel = match path.strip_prefix(root) {
@@ -214,6 +226,16 @@ fn scale_alpha(rgba: &[u8], factor: f32) -> Vec<u8> {
         px[3] = (px[3] as f32 * f).round().clamp(0.0, 255.0) as u8;
     }
     out
+}
+
+/// Whether an Escape press should quit, given an optional "ignore Esc until"
+/// guard set briefly after the file picker closes (to swallow the stray Esc that
+/// dismissed it). Quits when there is no guard, or it has already expired.
+fn esc_quits(guard: Option<Instant>, now: Instant) -> bool {
+    match guard {
+        Some(until) => now >= until,
+        None => true,
+    }
 }
 
 struct App {
@@ -302,6 +324,10 @@ struct App {
     pending_drops: Vec<PathBuf>,
     /// The transient bottom-center status toast (e.g. recursion on/off), or `None`.
     toast: Option<Toast>,
+    /// Briefly set after the file picker closes: ignore Esc-to-quit until this
+    /// instant, so the Esc that dismissed the modal picker doesn't also exit the
+    /// app (the dialog's own message loop can leak that key to our window).
+    esc_guard_until: Option<Instant>,
     /// Hold timers for the zoom/pan acceleration ramps (start = when the hold
     /// began; last = previous step, for time-based deltas).
     zoom_started: Option<Instant>,
@@ -364,6 +390,7 @@ impl App {
             scan_root,
             pending_drops: Vec::new(),
             toast: None,
+            esc_guard_until: None,
             zoom_started: None,
             zoom_last: None,
             pan_started: None,
@@ -938,6 +965,7 @@ impl App {
         let keys: &[(&str, &str)] = &[
             ("Space", "Next photo"),
             ("Backspace", "Previous photo"),
+            ("Enter", "Random photo (shuffle)"),
             ("Hold nav key", "Fly through photos"),
             ("← ↑ ↓ →", "Pan (hold to accelerate)"),
             ("= / -", "Zoom in / out (hold)"),
@@ -1166,19 +1194,50 @@ impl App {
         }
     }
 
-    /// Advance one photo. In Fit mode this is the gated engine path (present on a
-    /// ring hit, else hold + prefetch); Original mode decodes synchronously.
-    fn advance(&mut self, forward: bool, event_loop: &ActiveEventLoop) {
+    /// Esc / window-close: shut down with a perceived-*instant* exit, writing
+    /// nothing to disk (tasks #6 + #2). Order matters:
+    /// 1. Hide the window FIRST, so it vanishes before the heavy frees — the close
+    ///    always feels instant regardless of how long teardown takes.
+    /// 2. Drop the RAM-only, photo-derived session state (no disk flush — the only
+    ///    persistent thing PhotoBlaze touches is the photos it *reads*).
+    /// 3. Exit the loop; `run_app` returns and `Drop` then frees the renderer
+    ///    (VRAM) and joins the decode pool — all while the window is already gone.
+    fn begin_exit(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(a) = self.active.as_ref() {
+            a.window.set_visible(false);
+        }
+        self.clear_session_state();
+        event_loop.exit();
+    }
+
+    /// Drop every RAM-backed, photo-derived cache: decoded-pixel residency, staged
+    /// uploads, per-item metadata, per-image rotation overrides, and the
+    /// failed/transient overlay state. Pure in-memory clears — **never a disk
+    /// write** (privacy task #2). `Drop` would reclaim all of this on its own; doing
+    /// it explicitly at teardown keeps the privacy guarantee auditable in one place.
+    fn clear_session_state(&mut self) {
+        self.ring = ResidentRing::new(0);
+        self.pending_uploads.clear();
+        self.meta_cache.clear();
+        self.rotations.clear();
+        self.failed.clear();
+        self.current = None;
+        self.toast = None;
+    }
+
+    /// Advance one photo (sequential or random). The gated engine path: present on
+    /// a ring hit, else hold the previous frame + prefetch while the decode lands.
+    fn advance(&mut self, nav: Nav, event_loop: &ActiveEventLoop) {
         // Never advance while the previous target is still pending (a miss in
         // flight): a fast second press would overwrite it and skip that photo.
         // Holding still flies — `about_to_wait` re-advances once it's caught up.
         if self.displayed_item != self.target_item {
             return;
         }
-        if forward {
-            self.playlist.next();
-        } else {
-            self.playlist.prev();
+        match nav {
+            Nav::Forward => self.playlist.next(),
+            Nav::Backward => self.playlist.prev(),
+            Nav::Random => self.playlist.random_next(),
         }
         self.target_item = self.playlist.current();
         // Both modes use the async engine: present on a ring hit, else hold the
@@ -1187,16 +1246,25 @@ impl App {
         self.request_prefetch();
     }
 
-    /// Which way we're currently paging, from held keys (both/neither = idle).
-    /// Arrows are pan now, so only space/backspace advance.
-    fn held_direction(&self) -> Option<bool> {
-        let fwd = self.held.contains(&KeyCode::Space);
-        let bwd = self.held.contains(&KeyCode::Backspace);
-        match (fwd, bwd) {
-            (true, false) => Some(true),
-            (false, true) => Some(false),
-            _ => None,
+    /// Which way we're currently paging, from held keys (ambiguous/none = idle).
+    /// Arrows are pan now, so only space (forward), backspace (backward), and
+    /// enter (random) advance; holding more than one is treated as idle.
+    fn held_nav(&self) -> Option<Nav> {
+        let mut nav = None;
+        let mut count = 0u8;
+        if self.held.contains(&KeyCode::Space) {
+            nav = Some(Nav::Forward);
+            count += 1;
         }
+        if self.held.contains(&KeyCode::Backspace) {
+            nav = Some(Nav::Backward);
+            count += 1;
+        }
+        if self.held.contains(&KeyCode::Enter) || self.held.contains(&KeyCode::NumpadEnter) {
+            nav = Some(Nav::Random);
+            count += 1;
+        }
+        (count == 1).then_some(nav).flatten()
     }
 
     /// Zoom direction from held keys: `+1` in (`=`/`+`/numpad+), `-1` out
@@ -1421,7 +1489,7 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => self.begin_exit(event_loop),
 
             WindowEvent::Resized(size) => {
                 let new_fit = FitBox {
@@ -1466,7 +1534,7 @@ impl ApplicationHandler for App {
             } => match state {
                 ElementState::Pressed => {
                     if code == KeyCode::Escape {
-                        event_loop.exit();
+                        self.begin_exit(event_loop);
                     } else if !repeat {
                         // Real press only — OS auto-repeats are ignored so they
                         // can't queue up and delay the release. Holding is driven
@@ -1475,12 +1543,20 @@ impl ApplicationHandler for App {
                             KeyCode::Space => {
                                 self.held.insert(code);
                                 self.hold_start = Some(Instant::now());
-                                self.advance(true, event_loop);
+                                self.advance(Nav::Forward, event_loop);
                             }
                             KeyCode::Backspace => {
                                 self.held.insert(code);
                                 self.hold_start = Some(Instant::now());
-                                self.advance(false, event_loop);
+                                self.advance(Nav::Backward, event_loop);
+                            }
+                            // Enter (and numpad Enter): jump to the next photo in
+                            // the precomputed random order; hold to fly through a
+                            // shuffled deck (each photo once before a reshuffle).
+                            KeyCode::Enter | KeyCode::NumpadEnter => {
+                                self.held.insert(code);
+                                self.hold_start = Some(Instant::now());
+                                self.advance(Nav::Random, event_loop);
                             }
                             // Pan (arrows) and zoom (=/- and numpad) are continuous
                             // while held — tracked here, applied in `about_to_wait`.
@@ -1571,12 +1647,12 @@ impl ApplicationHandler for App {
         // The initial tap delay gates *repeat*, not draining/presenting, so a
         // first-press miss shows the moment it decodes. (plain `match`, not
         // `is_none_or`: that's 1.82+ vs the 1.80 MSRV.)
-        let nav = self.held_direction();
+        let nav = self.held_nav();
         let past_delay = match self.hold_start {
             Some(t) => now >= t + self.initial_delay,
             None => true,
         };
-        if let Some(forward) = nav {
+        if let Some(dir) = nav {
             // Advance only when caught up (target shown) AND a frame elapsed, so
             // every photo is shown and a miss simply holds.
             let caught_up = self.displayed_item == self.target_item;
@@ -1585,7 +1661,7 @@ impl ApplicationHandler for App {
                 None => true,
             };
             if past_delay && caught_up && due {
-                self.advance(forward, event_loop);
+                self.advance(dir, event_loop);
             } else if !caught_up {
                 self.try_present_target(event_loop);
             }
@@ -1887,6 +1963,81 @@ mod tests {
         assert_eq!(scale_alpha(&src, 0.0)[3], 0);
         assert_eq!(scale_alpha(&src, 1.0), src.to_vec());
         assert_eq!(scale_alpha(&src, 5.0)[3], 200); // clamped to 1.0
+    }
+
+    /// Recursively snapshot a directory tree for the no-trace before/after diff:
+    /// every entry's path, plus each file's `(len, mtime)`. Catches a new file or
+    /// directory anywhere under the root, and any change to an existing file.
+    fn snapshot_tree(root: &Path) -> Vec<(PathBuf, Option<(u64, std::time::SystemTime)>)> {
+        fn walk(dir: &Path, out: &mut Vec<(PathBuf, Option<(u64, std::time::SystemTime)>)>) {
+            let Ok(rd) = fs::read_dir(dir) else {
+                return;
+            };
+            for entry in rd.flatten() {
+                let path = entry.path();
+                let Ok(md) = entry.metadata() else {
+                    continue;
+                };
+                if md.is_dir() {
+                    out.push((path.clone(), None));
+                    walk(&path, out);
+                } else {
+                    let mtime = md.modified().unwrap_or(std::time::UNIX_EPOCH);
+                    out.push((path, Some((md.len(), mtime))));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, &mut out);
+        out.sort();
+        out
+    }
+
+    /// Privacy guarantee (task #2): viewing photos leaves **no trace on disk**. A
+    /// full view session over a sandbox — recursive scan, decode-to-fit (what the
+    /// prefetch pool does), and the on-demand EXIF read + file-size stat (the
+    /// `Shift+I` panel) — must not create or modify a single file: no thumbnail DB,
+    /// no decoded-pixel cache, no recent/MRU list of viewed paths. (The app's own
+    /// install footprint — registry associations, config — is explicitly out of
+    /// scope per ADR-018; this guards photo-*derived* data only.)
+    #[test]
+    fn viewing_a_folder_writes_nothing_to_disk() {
+        // An isolated sandbox with real images and a subfolder.
+        let dir = std::env::temp_dir().join(format!("pb_notrace_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("sub")).expect("mkdir sandbox");
+        const IMG: &[u8] = include_bytes!("../icons/photoblaze.png");
+        for rel in ["a.png", "b.png", "sub/c.png"] {
+            fs::write(dir.join(rel), IMG).expect("seed image");
+        }
+
+        let before = snapshot_tree(&dir);
+
+        // The actual disk-touching code the app runs while viewing.
+        let paths = scan_images(&dir, true);
+        assert_eq!(
+            paths.len(),
+            3,
+            "recursive scan should find all three images"
+        );
+        let fit = FitBox {
+            max_width: 64,
+            max_height: 64,
+        };
+        for p in &paths {
+            decode_image_file(p, Some(fit)).expect("decode");
+            let bytes = fs::read(p).expect("read for exif");
+            let _ = read_exif_fields(&bytes);
+            let _ = fs::metadata(p).expect("stat");
+        }
+
+        let after = snapshot_tree(&dir);
+        assert_eq!(
+            before, after,
+            "a view session must create or modify no files"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

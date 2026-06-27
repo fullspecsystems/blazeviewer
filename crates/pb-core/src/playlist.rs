@@ -93,6 +93,15 @@ impl Playlist {
         &self.shuffle
     }
 
+    /// The shuffle deck that [`Playlist::random_next`] will switch to once the
+    /// current cycle is exhausted (deterministic — a pure function of the current
+    /// seed). The prefetcher peeks this to preload *across* the reshuffle boundary,
+    /// so holding [enter] past the end of a cycle still has the next cycle's first
+    /// photos resident rather than the current deck's wrapped-around head.
+    pub fn next_shuffle(&self) -> ShuffleOrder {
+        self.shuffle.reshuffled()
+    }
+
     /// Current position within the random order.
     pub fn shuffle_pos(&self) -> usize {
         self.shuffle_pos

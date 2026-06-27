@@ -66,11 +66,29 @@ fn extend_random(
     count: usize,
 ) {
     let len = pl.len();
+    // Forward random nav reshuffles into a fresh deck at the end of a cycle, so to
+    // prefetch the photos the user will *actually* see next we peek that next deck
+    // for positions past the current deck's end (wrapping within the current deck
+    // would target items already shown this cycle). Computed once, and only when
+    // the window genuinely spills over the boundary.
+    let next = (sign > 0 && pos + count >= len).then(|| pl.next_shuffle());
     for k in 1..=count {
-        if let Some(p) = offset_index(pos, sign * k as isize, len, pl.wraps()) {
-            if let Some(i) = pl.shuffle().at(p) {
-                push(out, seen, i as usize);
-            }
+        let raw = pos as isize + sign * k as isize;
+        let item = if raw >= 0 && (raw as usize) < len {
+            // Inside the current deck (both directions).
+            pl.shuffle().at(raw as usize)
+        } else if sign > 0 {
+            // Past the end of the current deck → the reshuffled next deck.
+            next.as_ref().and_then(|d| d.at(raw as usize - len))
+        } else if pl.wraps() {
+            // Behind, before the start → wrap to the deck's tail, matching
+            // `random_prev` (which wraps within the same deck, not un-shuffling).
+            offset_index(pos, sign * k as isize, len, true).and_then(|p| pl.shuffle().at(p))
+        } else {
+            None
+        };
+        if let Some(i) = item {
+            push(out, seen, i as usize);
         }
     }
 }
@@ -160,15 +178,12 @@ mod tests {
         assert!(prefetch_targets(&pl, 5, 5).is_empty());
     }
 
-    // KNOWN BUG (pinned, not yet fixed): `extend_random` peeks the *current*
-    // shuffle deck, but `Playlist::random_next` swaps in a fresh `reshuffled()`
-    // deck once the cycle is exhausted — so prefetching ahead at the cycle
-    // boundary targets the old cycle's first items, not the next cycle's. This
-    // doesn't bite yet (random/`enter` nav isn't wired into the app); ignored
-    // until random prefetch goes live. Fix: make the next cycle peekable.
-    // See `.taskmaster/docs/phase3-plan.md` §7.
+    // Random `enter` nav is now wired, so the cycle-boundary prefetch is live:
+    // `extend_random` peeks `Playlist::next_shuffle()` (the deck `random_next`
+    // reshuffles into) for positions past the current deck's end, so prefetching
+    // ahead at the boundary targets the *next* cycle's items — exactly what the
+    // user sees next. (Was a pinned `#[ignore]`d bug; fixed with the wiring.)
     #[test]
-    #[ignore = "pb-core cycle-boundary prefetch bug; fix when random nav is wired (plan §7)"]
     fn random_prefetch_spans_the_cycle_boundary() {
         let len = 8;
         let mut pl = Playlist::new(len, 0xABCD);
