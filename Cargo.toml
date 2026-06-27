@@ -1,0 +1,55 @@
+# PhotoBlaze — a photo viewer obsessed with display speed.
+#
+# Workspace layout encodes the architectural seams we want to A/B test:
+#   pb-core    pure navigation/prefetch/cache logic — no I/O, no GPU, 100% testable
+#   pb-decode  image-decode abstraction + swappable backends (decode-to-fit, preview-first)
+#   pb-render  GPU presentation (wgpu) + fit-to-screen math
+#   pb-app     the binary: winit event loop wiring everything together
+#
+# Heavy dependencies (wgpu, winit, zune-jpeg/turbojpeg, ...) are added per-crate as
+# each roadmap phase lands.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/pb-core",
+    "crates/pb-decode",
+    "crates/pb-render",
+    "crates/pb-app",
+]
+# Throwaway measurement spikes have their own heavy deps; keep them out of the
+# clean core workspace.
+exclude = ["spikes"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.80"
+repository = ""
+
+[workspace.dependencies]
+# Internal crates.
+pb-core = { path = "crates/pb-core" }
+pb-decode = { path = "crates/pb-decode" }
+pb-render = { path = "crates/pb-render" }
+
+# Release profile is tuned for the hot path: maximum optimization, fat-ish LTO,
+# single codegen unit, and abort-on-panic (no unwinding tables on the fast path).
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
+
+# A profiling profile: release-grade codegen but keep debug symbols so Tracy /
+# Superluminal can attribute time to source lines.
+[profile.profiling]
+inherits = "release"
+strip = "none"
+debug = "line-tables-only"
+panic = "unwind"
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1

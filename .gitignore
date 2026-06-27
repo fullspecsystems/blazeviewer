@@ -1,0 +1,22 @@
+# Rust build artifacts
+/target
+**/target/
+**/*.rs.bk
+
+# Coverage / profiling output
+*.profraw
+*.profdata
+/coverage
+*.tracy
+
+# Per-run performance logs (keypress->photon traces, A/B benchmark dumps)
+perf-*.jsonl
+/.taskmaster/reports
+/bench-results
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# NOTE: Cargo.lock IS committed — this workspace produces a binary, so we want
+# reproducible builds.

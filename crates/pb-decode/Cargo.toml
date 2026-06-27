@@ -1,0 +1,15 @@
+[package]
+name = "pb-decode"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Image-decode abstraction for PhotoBlaze: decode-to-fit + preview-first, with swappable backends."
+
+# Phase 2: zune-jpeg (pure Rust, no NASM/cmake) is the first real backend behind
+# the ImageDecoder seam; kamadak-exif reads orientation so photos display upright.
+# turbojpeg/dav1d/libheif/etc. slot in behind the same trait later.
+[dependencies]
+zune-jpeg = "0.4"
+kamadak-exif = "0.6"
+
+[dev-dependencies]

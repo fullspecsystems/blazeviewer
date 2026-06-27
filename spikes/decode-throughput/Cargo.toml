@@ -1,0 +1,18 @@
+[package]
+name = "decode-throughput-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Pure-Rust decode path only — no system build deps (no NASM/cmake), so it runs
+# anywhere. turbojpeg (libjpeg-turbo) would be faster and supports finer (1/8)
+# scaled decode; this is the conservative lower bound.
+[dependencies]
+zune-jpeg = "0.4"      # fast pure-Rust full decode
+jpeg-decoder = "0.3"   # pure-Rust DCT scaled (decode-to-fit) via .scale()
+rayon = "1"            # saturate all cores for the pool-throughput number
+walkdir = "2"          # recursive corpus discovery
+
+[profile.release]
+opt-level = 3
+codegen-units = 1

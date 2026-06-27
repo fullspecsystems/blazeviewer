@@ -1,0 +1,4 @@
+[toolchain]
+channel = "stable"
+# rustfmt + clippy for hygiene; llvm-tools-preview backs cargo-llvm-cov coverage.
+components = ["rustfmt", "clippy", "llvm-tools-preview"]

@@ -1,0 +1,380 @@
+{
+  "master": {
+    "metadata": {
+      "created": "2026-06-26",
+      "updated": "2026-06-26",
+      "description": "Post-core feature backlog for PhotoBlaze. These ship AFTER the core viewer is stable (roadmap Phases 0-3: window, decode-to-fit, prefetch ring, hold-to-fly). Every task obeys the prime directive (faster or perf-neutral) and the project's TDD rules: pure logic isolated and unit-tested, GPU work behind the Renderer seam, golden-image tests for visuals. Shared infrastructure is factored out so it is built once: a per-photo ViewTransform (rotation + zoom + scaling mode), a translucent HUD/overlay layer, and a central configurable action/keymap."
+    },
+    "tasks": [
+      {
+        "id": 1,
+        "title": "Photo rotation (r / Shift+R), non-persistent",
+        "description": "Rotate the current photo 90 degrees clockwise (r) and counter-clockwise (Shift+R). Each altered photo's orientation is remembered in RAM only and discarded when the app closes.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [4],
+        "details": "Extend the shared per-photo ViewTransform (Task 4) with a rotation quadrant (0/90/180/270). EXIF auto-orientation is the baseline; r/Shift+R adjust from there. Store per-image overrides in an in-RAM map keyed by image identity (path or playlist index) - never written to disk (see Task 2, privacy). Rotation is applied as part of the render transform on the textured quad: pure GPU, perf-neutral. A 90/270 rotation swaps width/height, so fit-to-screen must be recomputed. Register actions rotate_cw / rotate_ccw in the central keymap (Task 8).",
+        "testStrategy": "Pure unit tests on the rotation state machine (cw wraps 0->1->2->3->0; ccw reverses). Extend pb-render fit tests for the w/h-swapped fit recompute. Property test: four cw rotations return to the original. Golden-image test: a rotated render matches its reference within tolerance.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Add rotation quadrant to ViewTransform",
+            "description": "Pure, unit-tested rotation state (0/90/180/270) with cw/ccw stepping and wraparound.",
+            "status": "pending",
+            "dependencies": [],
+            "details": "Lives with the ViewTransform from Task 4. No GPU, fully testable."
+          },
+          {
+            "id": 2,
+            "title": "In-RAM orientation override map",
+            "description": "Per-image rotation overrides keyed by image id, RAM-only, dropped on exit.",
+            "status": "pending",
+            "dependencies": [],
+            "details": "Must not persist (Task 2). Cleared by the teardown path (Task 6)."
+          },
+          {
+            "id": 3,
+            "title": "Apply rotation + recompute fit on 90/270",
+            "description": "Feed rotation into the render transform; swap w/h for fit when rotated a quarter turn.",
+            "status": "pending",
+            "dependencies": [],
+            "details": "Perf-neutral - a transform on the existing quad."
+          },
+          {
+            "id": 4,
+            "title": "Bind keys + golden/property tests",
+            "description": "Wire r / Shift+R to rotate_cw / rotate_ccw; add golden-image and 4x-cw property tests.",
+            "status": "pending",
+            "dependencies": []
+          }
+        ]
+      },
+      {
+        "id": 2,
+        "title": "Privacy: no persistent caches, no disk traces",
+        "description": "Keep zero persistent caches and no on-disk metadata. Nothing about what was viewed survives the process; once cleared there is no trace of what you were looking at.",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [],
+        "details": "A cross-cutting design constraint, best baked in early rather than retrofitted. No thumbnail DB, no recent-files list, no config writes of viewed paths, no temp files of decoded pixels. Every cache - the compressed-byte LRU, the decoded ring, VRAM textures, rotation/zoom overrides (Tasks 1/3), and on-demand metadata reads (Task 5) - is RAM-backed and dropped on exit (Task 6). If on-disk scratch is ever required it must be opt-in and explicitly cleared. No logging of viewed paths to disk by default. This is partly principle (enforced in review) and partly verifiable (the no-trace test).",
+        "testStrategy": "Integration 'no-trace' test: run a view session pointed at a sandbox and assert (via before/after filesystem diff) that no files are created or modified outside the binary's own directories. Static audit: no disk-write APIs on the view/cache hot paths; all caches are RAM-backed types. Document the guarantee in CLAUDE.md.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Inventory all potentially-persistent state",
+            "description": "Enumerate every cache/state holder and assert each is RAM-only.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 2,
+            "title": "No-trace integration test",
+            "description": "Filesystem before/after diff around a scripted session; assert nothing written outside app dirs.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 3,
+            "title": "Opt-in persistence flag (default off)",
+            "description": "Scaffold a single explicit opt-in for any future on-disk cache; off by default, with explicit clear.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 4,
+            "title": "Document the privacy guarantee",
+            "description": "Write the guarantee and its boundaries into CLAUDE.md.",
+            "status": "pending",
+            "dependencies": []
+          }
+        ]
+      },
+      {
+        "id": 3,
+        "title": "Zoom in/out (+ / -), including below fit",
+        "description": "+ and - zoom the current photo about its center. Zooming out can go smaller than the screen bounds (under-fit), not just larger.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [4],
+        "details": "Add a zoom scalar (and pan offset) to the ViewTransform (Task 4). + increases, - decreases; the zoom factor may go below 1.0 (smaller than the fit size) and above 1.0. Clamp to sane bounds (e.g. 0.05x-32x). Zoom is a transform on the quad - perf-neutral. When zoomed past the decoded fit resolution, optionally request a higher-resolution Tier-2 decode for crispness (later). Zoom is per-photo and non-persistent; reset on photo change. Register actions zoom_in / zoom_out / zoom_reset (Task 8).",
+        "testStrategy": "Pure tests on zoom math: factor stepping, clamping at bounds, center-preserving transform. Property: N zoom_in steps then N zoom_out steps returns to baseline within epsilon. Golden-image tests at representative zoom levels (incl. under-fit).",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Add zoom + pan to ViewTransform with clamping",
+            "description": "Pure, tested zoom scalar and pan offset with min/max clamps; allows under-fit (<1.0).",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 2,
+            "title": "Bind +/- and reset; reset on photo change",
+            "description": "Wire zoom_in/zoom_out/zoom_reset; clear zoom when the current photo changes.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 3,
+            "title": "Tier-2 full-res decode when zoomed past fit (later)",
+            "description": "Trigger a higher-res decode so deep zoom stays crisp; deferred until the zoom UX lands.",
+            "status": "pending",
+            "dependencies": []
+          }
+        ]
+      },
+      {
+        "id": 4,
+        "title": "Scaling modes: 0 original, 8 fit (default), 9 fill",
+        "description": "Number keys choose the scaling mode: 0 = pixel-for-pixel original centered on screen, 8 = fit-to-screen (default, no crop), 9 = fill the screen (crop the overflowing edges).",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "details": "Introduces the shared per-photo ViewTransform that rotation (Task 1) and zoom (Task 3) build on. Three base modes: Original (scale 1.0, centered, may over/underflow the screen), Fit (contain - the existing pb-render::fit_rect), Fill (cover - scale to fill, crop edges that don't fit, aspect preserved). Mode is per-photo state, default Fit, non-persistent. fit_rect already implements Fit; add cover() and original() as pure functions next to it. Register actions mode_original / mode_fit / mode_fill (Task 8).",
+        "testStrategy": "Extend pb-render fit tests: cover() fully covers the screen and crops while preserving aspect; original() is exactly native size, centered (offsets may be negative). Property tests: Fill output covers the whole viewport; Fit output never exceeds it; Original equals native dimensions. Golden-image test per mode.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Define the ViewTransform abstraction",
+            "description": "Per-photo transform composing base scaling mode + rotation slot + zoom/pan slot; pure and tested.",
+            "status": "pending",
+            "dependencies": [],
+            "details": "The shared home for Tasks 1, 3, 4. Lives in pb-render (or pb-core for the pure math)."
+          },
+          {
+            "id": 2,
+            "title": "Implement cover() and original()",
+            "description": "Add Fill (cover) and Original (1:1 centered) alongside the existing fit_rect, with tests.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 3,
+            "title": "Bind 0/8/9; default Fit; per-photo non-persistent",
+            "description": "Wire the mode keys; default to Fit; reset to default on photo change.",
+            "status": "pending",
+            "dependencies": []
+          }
+        ]
+      },
+      {
+        "id": 5,
+        "title": "Metadata HUD panel (I, Shift+I, I-off)",
+        "description": "I toggles a translucent dark-tinted panel on the screen edge showing date / mtime / dimensions / image format. Shift+I shows full EXIF for nerds. Pressing I again hides it.",
+        "status": "pending",
+        "priority": "low",
+        "dependencies": [],
+        "details": "Builds the reusable translucent HUD/overlay layer also used by the help card (Task 7). Render an alpha-blended dark panel anchored to a screen edge with text. Basic view: filename, file mtime, capture date (EXIF DateTimeOriginal), pixel dimensions, format. Full view (Shift+I): all EXIF tags, scrollable. Privacy (Task 2): read EXIF on demand from the in-RAM file bytes; never cache it to disk. Needs text rendering (a small glyph atlas / bitmap font). Three-state toggle: off -> basic -> (Shift+I) full -> off. Register actions info_toggle / info_full (Task 8).",
+        "testStrategy": "Unit-test EXIF extraction (basic field set + full tag map) against fixture images. Unit-test the toggle state machine (off/basic/full transitions). Golden-image test the panel layout + translucency. Privacy test: the metadata read writes nothing to disk.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Reusable translucent HUD overlay layer",
+            "description": "Alpha-blended panel quad + text rendering, reusable by Task 7.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 2,
+            "title": "EXIF extraction (basic + full), on-demand from RAM",
+            "description": "Pull the basic field set and the full tag map from in-memory bytes; no disk cache.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 3,
+            "title": "Three-state toggle (off/basic/full)",
+            "description": "State machine driving the panel; unit-tested.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 4,
+            "title": "Bind I / Shift+I; golden + privacy tests",
+            "description": "Wire info_toggle / info_full; add layout golden-image and no-disk-write tests.",
+            "status": "pending",
+            "dependencies": []
+          }
+        ]
+      },
+      {
+        "id": 6,
+        "title": "Esc: immediate close, then clean teardown",
+        "description": "Pressing Esc immediately closes the photo and the application, cleaning up after itself once it is no longer visible.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [2],
+        "details": "On Esc, hide/close the window FIRST for an instant perceived exit, then run teardown: drop the VRAM ring, the byte LRU, decoded buffers, rotation/zoom overrides, and any metadata - implementing the privacy guarantee (Task 2). No flush-to-disk on exit. Ordering matters: the visual close happens before the heavy frees so quitting always feels instant. Register action quit (Task 8).",
+        "testStrategy": "Integration test: teardown frees/zeroes caches and the process exits 0, creating no files (shares the no-trace assertion with Task 2). Manual/perf check: the window is gone within ~1 frame of Esc.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Esc -> immediate window hide/close",
+            "description": "Close/hide the surface first so exit feels instant.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 2,
+            "title": "Post-hide teardown of all RAM/VRAM state",
+            "description": "Free every cache after the window is gone; no disk flush.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 3,
+            "title": "No-trace assertion on exit",
+            "description": "Verify nothing was written; clean exit code.",
+            "status": "pending",
+            "dependencies": []
+          }
+        ]
+      },
+      {
+        "id": 7,
+        "title": "Keyboard-shortcut help overlay (/ or ?)",
+        "description": "/ or ? shows a translucent overlay card listing the keyboard shortcuts. Pressing it again hides the card.",
+        "status": "pending",
+        "priority": "low",
+        "dependencies": [5],
+        "details": "Reuse the HUD overlay layer from Task 5 to render a centered translucent card listing every bound action and its key(s). Source the list from the central keymap (Task 8) so it stays correct when bindings are remapped. Simple on/off toggle. Register action help_toggle (Task 8).",
+        "testStrategy": "Unit-test that the help list is generated from the active keymap (every bound action appears with its key). Golden-image test the card. Toggle on/off state test.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Generate the shortcut list from the active keymap",
+            "description": "Derive rows from the keymap so help stays accurate after remaps.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 2,
+            "title": "Render the translucent help card (reuse HUD)",
+            "description": "Centered card via the Task 5 overlay layer.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 3,
+            "title": "Bind / and ?; toggle",
+            "description": "Wire help_toggle to both keys.",
+            "status": "pending",
+            "dependencies": []
+          }
+        ]
+      },
+      {
+        "id": 8,
+        "title": "Configurable keybindings (TOML)",
+        "description": "Make keyboard shortcuts configurable via a TOML file, with sensible built-in defaults and a central action dispatch.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "details": "Define a central set of named actions: next, prev, random, rotate_cw, rotate_ccw, zoom_in, zoom_out, zoom_reset, mode_original, mode_fit, mode_fill, info_toggle, info_full, help_toggle, quit (extend as features land). Parse a TOML keybindings file into an action->keys map; embed defaults so it works with no file. TOML is chosen over YAML for simplicity and Rust ecosystem fit (serde + toml). Privacy (Task 2): config is read-only input - never write viewed state to it. Validate bindings (warn on unknown action or duplicate key). The keymap is the single source of truth that the help overlay (Task 7) reads. Decide config discovery (next to the binary, or an explicit --config path) with no implicit writes. All keyboard features (Tasks 1,3,4,5,6,7) register their actions here and become remappable once this lands.",
+        "testStrategy": "Unit-test TOML parsing into the action map: valid config, invalid config (clear error), partial override merges over defaults. Property: defaults + empty config == defaults. Test conflict detection (duplicate key, unknown action). Round-trip the embedded default config.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Central action enum + default binding table",
+            "description": "Pure, tested action set and default key map embedded in the binary.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 2,
+            "title": "TOML schema + parser merging over defaults",
+            "description": "serde + toml; partial configs override defaults; works with no file.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 3,
+            "title": "Validation (unknown actions, duplicate keys)",
+            "description": "Warn (don't crash) on conflicts and unknown actions.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 4,
+            "title": "Wire dispatch; expose keymap to the help overlay",
+            "description": "Route input through the action map; let Task 7 read it for the help card.",
+            "status": "pending",
+            "dependencies": []
+          }
+        ]
+      },
+      {
+        "id": 9,
+        "title": "Recursive directory mode (R)",
+        "description": "R toggles recursive mode: the playlist spans the current directory plus every subfolder, ordered so a folder's own photos show first, then each subfolder in order, recursively - i.e. roughly full-path order.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "details": "When recursive mode is on, the scan walks the whole tree and rebuilds the playlist. ORDERING (confirm with owner): directory-grouped depth-first - within a directory its own images come first (natural/numeric sort so img2 < img10), then descend into each subdirectory in natural order, recursively. This differs subtly from a pure lexicographic full-path sort (where a file 'z.jpg' would sort after a subfolder 'a/'); the grouped traversal matches the owner's 'current dir's photos first, then each subfolder'. REBUILD: the app owns the ordered path list while pb-core Playlist holds count + index, so toggling re-scans, re-sorts, rebuilds Playlist (and its precomputed shuffle for the new length), and keeps the current photo by re-finding its new index. PRIVACY (Task 2): scanning reads directory entries only - no on-disk index is written. Use walkdir; skip unreadable dirs; guard against symlink loops. KEY CONFLICT: 'R' (Shift+R) was assigned to rotate-CCW in Task 1 - recommend recursive=R and moving rotate-CCW to another default (trivial via Task 8); confirm with owner.",
+        "testStrategy": "Pure unit tests on the path-ordering function over a synthetic tree: a folder's files precede its subfolders' files, folders appear in natural order, natural (numeric) sort holds within a folder. Test toggle on/off keeps the current photo (index re-found). Edge cases: empty subdirs, non-image files filtered out, unreadable dirs skipped.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Recursive image scan (walkdir)",
+            "description": "Gather all image paths under the root, filtering by supported extensions; skip unreadable dirs and symlink loops.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 2,
+            "title": "Path-ordering function (folder-grouped, natural sort)",
+            "description": "Pure, tested ordering: a directory's files first, then its subdirectories, natural/numeric sort within each.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 3,
+            "title": "Toggle R: rebuild playlist, keep current photo",
+            "description": "Re-scan/re-sort, rebuild Playlist + precomputed shuffle for the new length, re-find the current photo's index.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 4,
+            "title": "Resolve the R key conflict + privacy check",
+            "description": "Pick the default binding (recommend recursive=R, move rotate-CCW); confirm the scan writes no on-disk index.",
+            "status": "pending",
+            "dependencies": []
+          }
+        ]
+      },
+      {
+        "id": 10,
+        "title": "Transient command-feedback toast (white text, dark shadow)",
+        "description": "When a command is invoked, briefly flash a translucent message on screen for feedback - white text with dark shadows/outline so it stays legible over any photo.",
+        "status": "pending",
+        "priority": "low",
+        "dependencies": [5],
+        "details": "A transient 'toast' overlay that appears on command invocation and fades after a short timeout (~0.8-1.2s). Reuses the HUD/text-rendering layer from Task 5. White text with a dark drop-shadow or outline for legibility over light AND dark images. Each action emits a short message - e.g. 'Rotate CW', 'Fill', 'Recursive: on', 'Zoom 150%', 'Random'. Sourced from the central action dispatch (Task 8) so any action can register a feedback string. Perf-neutral: a small text quad drawn for a few frames, fading via alpha; a new command replaces the current toast. PRIVACY (Task 2): messages are transient and never logged to disk. Pick a default anchor (e.g. bottom-center).",
+        "testStrategy": "Unit-test the toast state/timer logic: show, time-based alpha decay, replace-on-new-command, expire. Golden-image test the rendered toast (white text + dark shadow) on both light and dark backgrounds for legibility. Test that representative actions emit the expected message strings.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Toast state + fade timer",
+            "description": "Pure, testable: show, time-based alpha decay, replace-on-new, expire.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 2,
+            "title": "White-text-with-shadow rendering",
+            "description": "Reuse the Task 5 HUD text layer; add a dark shadow/outline pass for contrast on any background.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 3,
+            "title": "Hook action dispatch to emit messages",
+            "description": "Each action registers a short feedback string that is surfaced as a toast.",
+            "status": "pending",
+            "dependencies": []
+          }
+        ]
+      }
+    ]
+  }
+}

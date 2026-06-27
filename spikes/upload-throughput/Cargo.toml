@@ -1,0 +1,15 @@
+[package]
+name = "upload-throughput-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Headless wgpu (DX12 on Windows) to measure CPU->VRAM texture-upload throughput.
+# Pinned to wgpu 22 for a stable, known API — upload GB/s is version-independent.
+[dependencies]
+wgpu = "22"
+pollster = "0.3"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
