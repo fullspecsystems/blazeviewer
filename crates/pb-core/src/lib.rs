@@ -16,11 +16,13 @@
 pub mod cache;
 pub mod playlist;
 pub mod prefetch;
+pub mod ring;
 pub mod rng;
 pub mod shuffle;
 
 pub use cache::{plan_residency, ResidencyPlan};
 pub use playlist::{Direction, Playlist};
 pub use prefetch::prefetch_targets;
+pub use ring::{Reservation, ResidentRing};
 pub use rng::SplitMix64;
 pub use shuffle::ShuffleOrder;
