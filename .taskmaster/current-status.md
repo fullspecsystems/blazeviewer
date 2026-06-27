@@ -4,14 +4,24 @@ _Last updated: 2026-06-27 (overnight autonomous session)._
 
 Phase 3 — **the prefetch engine ("hold a key and fly")** — is implemented. Decode
 is off the event loop, neighbors are prefetched into a resident GPU texture ring,
-and a keypress is a **rebind, not a decode**. Builds green, **77 tests pass**,
-clippy + fmt clean. **Not yet owner-verified for fly behavior** (see below).
+and a keypress is a **rebind, not a decode**. Builds green, **84 tests pass**,
+clippy (incl. `incompatible_msrv`) + fmt clean. **Not yet owner-verified for fly
+behavior** (see below).
+
+**Codex review: converged clean.** Ran `codex exec review --base main` iteratively;
+it found **15 issues across 6 rounds** (all P1/P2 — nav edge cases, failure/Original
+stalls, a visible-skip in the gated loop, drain ordering, staging buffer limits,
+the 1.80 MSRV) — **all fixed and re-verified**, and round 7 reported "no blocking
+correctness issues." Each fix is its own commit (`git log`). Worth knowing: several
+bugs were in the gated-advance/failure interactions, which are subtle — re-read
+`advance`/`about_to_wait`/`drain_results` in `main.rs` if you change them.
 
 ## Branch / how to review
 - Work is on branch **`feature/phase3-prefetch-engine`** (NOT pushed; `main`
-  untouched). 7 commits this session, one per step — read them in order:
-  - `3.0` measurement + hardening · `3.1` staging upload · `3.3(core)` ResidentRing
-    · `3.2/3.3(render)` renderer ring · `3.2/3.3/3.4` engine wiring · `#4` fit geom.
+  untouched). ~13 commits this session, one per step / per review round — read in
+  order: `3.0` harden · `3.1` staging upload · `3.3(core)` ResidentRing ·
+  `3.2/3.3(render)` renderer ring · `3.2/3.3/3.4` engine wiring · `#4` fit geom ·
+  then 6 codex-review fix commits.
 - Full plan + decisions: **`.taskmaster/docs/phase3-plan.md`** (revised twice after
   two reviews; §5 has the per-step status, §6 the resolved decisions).
 
