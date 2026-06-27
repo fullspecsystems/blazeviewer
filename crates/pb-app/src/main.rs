@@ -17,6 +17,7 @@
 //!   r / Shift+R rotate 90° clockwise / counter-clockwise (per-image, RAM-only)
 //!   Ctrl+R      toggle recursive subfolder scan (keeps the current photo)
 //!   o / Shift+O open file(s) / open a folder (native picker)
+//!   F11 / Alt+Enter  toggle fullscreen <-> windowed
 //!   i / Shift+I info panel (path · WxH · codec) / full-EXIF "nerd" panel
 //!   / or ?      keybindings help overlay
 //!   esc         quit
@@ -313,6 +314,8 @@ struct App {
     shift: bool,
     /// Whether a Ctrl key is held (for `Ctrl+R` = toggle recursive scan).
     ctrl: bool,
+    /// Whether an Alt key is held (for `Alt+Enter` = toggle fullscreen).
+    alt: bool,
     /// Whether the current scan-based playlist is recursive (`Ctrl+R` toggles).
     recursive: bool,
     /// The directory the current playlist was scanned from — enables the `Ctrl+R`
@@ -386,6 +389,7 @@ impl App {
             rotations: HashMap::new(),
             shift: false,
             ctrl: false,
+            alt: false,
             recursive,
             scan_root,
             pending_drops: Vec::new(),
@@ -788,30 +792,53 @@ impl App {
         self.show_toast(msg, event_loop);
     }
 
+    /// Toggle between borderless fullscreen and a 1280x800 window (F11 or
+    /// Alt+Enter). The resulting resize event re-fits and re-decodes the current
+    /// photo; a toast confirms the new mode.
+    fn toggle_fullscreen(&mut self, event_loop: &ActiveEventLoop) {
+        self.windowed = !self.windowed;
+        let windowed = self.windowed;
+        if let Some(a) = self.active.as_ref() {
+            if windowed {
+                a.window.set_fullscreen(None);
+                a.window.set_decorations(true);
+                let _ = a.window.request_inner_size(PhysicalSize::new(1280, 800));
+            } else {
+                a.window.set_decorations(false);
+                a.window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+            }
+        }
+        let msg = if windowed { "Windowed" } else { "Fullscreen" };
+        self.show_toast(msg, event_loop);
+    }
+
     /// Show the native picker (`O` = file(s), `Shift+O` = folder) and open the
     /// result. Modal — it blocks the event loop while open, which is fine: the app
     /// isn't flying through photos with a dialog up.
     fn open_picker(&mut self, folder: bool, event_loop: &ActiveEventLoop) {
         let start_dir = self.scan_root.clone().unwrap_or_else(|| self.root.clone());
         let input = if folder {
-            match rfd::FileDialog::new()
+            rfd::FileDialog::new()
                 .set_directory(&start_dir)
                 .pick_folder()
-            {
-                Some(p) => LaunchInput::Directory(p),
-                None => return,
-            }
+                .map(LaunchInput::Directory)
         } else {
-            match rfd::FileDialog::new()
+            rfd::FileDialog::new()
                 .add_filter("Images", IMAGE_FILTER_EXTS)
                 .set_directory(&start_dir)
                 .pick_files()
-            {
-                Some(ps) if !ps.is_empty() => LaunchInput::Files(ps),
-                _ => return,
-            }
+                .filter(|ps| !ps.is_empty())
+                .map(LaunchInput::Files)
         };
-        self.open_input(input, event_loop);
+        // The modal picker ran its own message loop; the Esc (or Enter) used to
+        // dismiss it can leak to our window as a stray key event. Drop any keys it
+        // left "held", and guard Esc-to-quit briefly so cancelling the picker never
+        // closes PhotoBlaze.
+        self.held.clear();
+        self.esc_guard_until = Some(Instant::now() + Duration::from_millis(300));
+        if let Some(input) = input {
+            self.open_input(input, event_loop);
+        }
     }
 
     /// Replace the playlist with a new path set and re-show at `start`. Every bit
@@ -975,6 +1002,7 @@ impl App {
             ("r / Shift+R", "Rotate 90° cw / ccw"),
             ("Ctrl+R", "Toggle recursive folders"),
             ("o / Shift+O", "Open file(s) / folder"),
+            ("F11 / Alt+Enter", "Toggle fullscreen"),
             ("i / Shift+I", "Info / full-EXIF panel"),
             ("/ or ?", "This help"),
             ("Esc", "Quit"),
@@ -1534,7 +1562,13 @@ impl ApplicationHandler for App {
             } => match state {
                 ElementState::Pressed => {
                     if code == KeyCode::Escape {
-                        self.begin_exit(event_loop);
+                        // Swallow a stray Esc that leaked from dismissing the file
+                        // picker (open_picker); a real Esc a moment later still quits.
+                        let quit = esc_quits(self.esc_guard_until, Instant::now());
+                        self.esc_guard_until = None;
+                        if quit {
+                            self.begin_exit(event_loop);
+                        }
                     } else if !repeat {
                         // Real press only — OS auto-repeats are ignored so they
                         // can't queue up and delay the release. Holding is driven
@@ -1550,13 +1584,18 @@ impl ApplicationHandler for App {
                                 self.hold_start = Some(Instant::now());
                                 self.advance(Nav::Backward, event_loop);
                             }
-                            // Enter (and numpad Enter): jump to the next photo in
-                            // the precomputed random order; hold to fly through a
-                            // shuffled deck (each photo once before a reshuffle).
+                            // Enter (and numpad Enter): Alt+Enter toggles
+                            // fullscreen; otherwise jump to the next photo in the
+                            // precomputed random order (hold to fly through a
+                            // shuffled deck, each photo once before a reshuffle).
                             KeyCode::Enter | KeyCode::NumpadEnter => {
-                                self.held.insert(code);
-                                self.hold_start = Some(Instant::now());
-                                self.advance(Nav::Random, event_loop);
+                                if self.alt {
+                                    self.toggle_fullscreen(event_loop);
+                                } else {
+                                    self.held.insert(code);
+                                    self.hold_start = Some(Instant::now());
+                                    self.advance(Nav::Random, event_loop);
+                                }
                             }
                             // Pan (arrows) and zoom (=/- and numpad) are continuous
                             // while held — tracked here, applied in `about_to_wait`.
@@ -1592,6 +1631,9 @@ impl ApplicationHandler for App {
                             }
                             // Open: o = file picker, Shift+O = folder picker.
                             KeyCode::KeyO => self.open_picker(self.shift, event_loop),
+                            // Fullscreen <-> windowed (F11; Alt+Enter is handled
+                            // with the Enter arm above).
+                            KeyCode::F11 => self.toggle_fullscreen(event_loop),
                             // Info panel: i basic, Shift+I full EXIF.
                             KeyCode::KeyI => self.toggle_info(self.shift, event_loop),
                             // Keybindings help (`/` or `?` — same physical key).
@@ -1609,6 +1651,7 @@ impl ApplicationHandler for App {
             WindowEvent::ModifiersChanged(mods) => {
                 self.shift = mods.state().shift_key();
                 self.ctrl = mods.state().control_key();
+                self.alt = mods.state().alt_key();
             }
 
             // Focus loss can swallow the key-up event; clear held keys so
@@ -1619,6 +1662,7 @@ impl ApplicationHandler for App {
                 self.hold_start = None;
                 self.shift = false;
                 self.ctrl = false;
+                self.alt = false;
                 self.zoom_started = None;
                 self.zoom_last = None;
                 self.pan_started = None;
@@ -1963,6 +2007,14 @@ mod tests {
         assert_eq!(scale_alpha(&src, 0.0)[3], 0);
         assert_eq!(scale_alpha(&src, 1.0), src.to_vec());
         assert_eq!(scale_alpha(&src, 5.0)[3], 200); // clamped to 1.0
+    }
+
+    #[test]
+    fn esc_quits_unless_the_picker_guard_is_active() {
+        let now = Instant::now();
+        assert!(esc_quits(None, now)); // no guard -> quits
+        assert!(!esc_quits(Some(now + Duration::from_millis(100)), now)); // guarded
+        assert!(esc_quits(Some(now), now)); // guard already expired -> quits
     }
 
     /// Recursively snapshot a directory tree for the no-trace before/after diff:
