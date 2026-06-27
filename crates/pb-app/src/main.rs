@@ -386,6 +386,38 @@ impl App {
         self.draw(event_loop);
     }
 
+    /// A target that failed to decode (corrupt/unreadable): count it as "shown"
+    /// so the gated advance isn't stuck on it, but clear the previous frame's
+    /// stale metadata — set a decode-error window title and drop the info panel so
+    /// neither misreports the held-over pixels as the failed photo. The previous
+    /// frame stays up rather than flashing black.
+    fn present_failed(&mut self, item: usize, event_loop: &ActiveEventLoop) {
+        self.displayed_item = Some(item);
+        self.current = None;
+        let name = self.paths[item]
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_string();
+        let total = self.paths.len();
+        if let Some(a) = self.active.as_mut() {
+            a.window.set_title(&format!(
+                "PhotoBlaze — {name} ({}/{total}) · decode error",
+                item + 1
+            ));
+        }
+        // The info panel belonged to the previous photo — drop it (and redraw to
+        // remove it). Only touch the renderer if a panel was actually showing.
+        if self.overlay_shown {
+            if let Some(a) = self.active.as_mut() {
+                a.renderer.set_overlay(None, 0);
+            }
+            self.overlay_shown = false;
+            self.overlay_item = None;
+            self.draw(event_loop);
+        }
+    }
+
     /// Try to show `target_item`: present it on a ring hit, otherwise keep the
     /// previous frame (a miss is a hold, never a skip). Returns whether shown.
     fn try_present_target(&mut self, event_loop: &ActiveEventLoop) -> bool {
@@ -398,7 +430,7 @@ impl App {
         if self.failed.contains(&item) {
             // Known-bad file: count it as shown (the previous frame stays up) so
             // navigation never stalls on a corrupt prefetched JPEG.
-            self.displayed_item = Some(item);
+            self.present_failed(item, event_loop);
             return true;
         }
         if let Some(slot) = self.ring.slot_for(item) {
@@ -422,6 +454,7 @@ impl App {
         while let Ok(o) = self.results.try_recv() {
             ready.push(o);
         }
+        let mut target_failed: Option<usize> = None;
         ready.retain(|o| {
             if o.key.epoch != self.epoch || self.ring.slot_for(o.key.item).is_some() {
                 return false; // stale geometry or already resident
@@ -431,13 +464,17 @@ impl App {
                 eprintln!("decode failed for item {item}: {e}");
                 self.failed.insert(item);
                 // Unstick the gated loop: a corrupt target counts as "shown".
+                // (Deferred out of the closure — `present_failed` needs &mut self.)
                 if self.target_item == Some(item) {
-                    self.displayed_item = Some(item);
+                    target_failed = Some(item);
                 }
                 return false;
             }
             true
         });
+        if let Some(item) = target_failed {
+            self.present_failed(item, event_loop);
+        }
 
         // Current target first, then by prefetch priority, unknowns last.
         let target = self.target_item;
@@ -526,9 +563,9 @@ impl App {
             Err(e) => {
                 eprintln!("decode failed: {}: {e}", self.paths[idx].display());
                 self.failed.insert(idx);
-                // Keep the gate unstuck: count the bad file as "shown" so the next
-                // navigation isn't dropped by the caught-up guard in `advance`.
-                self.displayed_item = Some(idx);
+                // Keep the gate unstuck (count the bad file as "shown") and clear
+                // the stale frame's title/panel so they don't misreport it.
+                self.present_failed(idx, event_loop);
             }
         }
         self.last_present = Some(Instant::now());
