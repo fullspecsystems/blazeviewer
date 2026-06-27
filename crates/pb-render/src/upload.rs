@@ -50,57 +50,13 @@ impl UploadStrategy for StagingUpload {
         w: u32,
         h: u32,
     ) {
-        // `copy_buffer_to_texture` requires each row offset to be 256-aligned, so
-        // the staging buffer holds padded rows even though `rgba` is tight.
-        let unpadded = w * 4;
-        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let padded = unpadded.div_ceil(align) * align;
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("staging-upload"),
-            size: padded as u64 * h as u64,
-            usage: wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: true,
-        });
-        {
-            let mut view = buffer.slice(..).get_mapped_range_mut();
-            if padded == unpadded {
-                view[..rgba.len()].copy_from_slice(rgba);
-            } else {
-                let (u, p) = (unpadded as usize, padded as usize);
-                for row in 0..h as usize {
-                    view[row * p..row * p + u].copy_from_slice(&rgba[row * u..row * u + u]);
-                }
-            }
-        }
-        buffer.unmap();
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("staging-copy"),
-        });
-        encoder.copy_buffer_to_texture(
-            wgpu::ImageCopyBuffer {
-                buffer: &buffer,
-                layout: wgpu::ImageDataLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded),
-                    rows_per_image: Some(h),
-                },
-            },
-            wgpu::ImageCopyTexture {
-                texture: tex,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-        );
-        // The submission keeps `buffer` alive until the copy completes, after
-        // which our handle drops and the GPU buffer is freed.
-        queue.submit(iter::once(encoder.finish()));
+        // Keep each staging buffer within the device's max buffer size by copying
+        // the image in horizontal row-bands. Normal (fit-sized) images are a
+        // single band; only huge Original-mode/panorama images split.
+        let padded = padded_row_bytes(w);
+        let max_rows = (device.limits().max_buffer_size / padded.max(1) as u64).max(1);
+        let rows_per_band = max_rows.min(h.max(1) as u64) as u32;
+        copy_via_staging(device, queue, tex, rgba, w, h, rows_per_band);
     }
 
     fn name(&self) -> &'static str {
@@ -108,20 +64,104 @@ impl UploadStrategy for StagingUpload {
     }
 }
 
+/// The 256-byte-aligned row stride for a `w`-pixel RGBA8 row, as
+/// `copy_buffer_to_texture` requires.
+fn padded_row_bytes(w: u32) -> u32 {
+    let unpadded = w * 4;
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    unpadded.div_ceil(align) * align
+}
+
+/// Stage `rgba` (`w*h*4`, tight) into `tex` in horizontal bands of at most
+/// `rows_per_band` rows — each through its own mapped buffer + a
+/// `copy_buffer_to_texture` at the band's `y` origin. One encoder, one submit.
+/// Banding bounds each staging buffer by the device's buffer-size limit so an
+/// arbitrarily tall image uploads without exceeding it.
+fn copy_via_staging(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    tex: &wgpu::Texture,
+    rgba: &[u8],
+    w: u32,
+    h: u32,
+    rows_per_band: u32,
+) {
+    let unpadded = w as usize * 4;
+    let padded = padded_row_bytes(w);
+    let rows_per_band = rows_per_band.max(1);
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("staging-copy"),
+    });
+    // The band buffers must outlive `encoder.finish()` / the submit.
+    let mut buffers = Vec::new();
+    let mut y = 0u32;
+    while y < h {
+        let band_h = rows_per_band.min(h - y);
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("staging-upload"),
+            size: padded as u64 * band_h as u64,
+            usage: wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: true,
+        });
+        {
+            let mut view = buffer.slice(..).get_mapped_range_mut();
+            let p = padded as usize;
+            for row in 0..band_h as usize {
+                let src = (y as usize + row) * unpadded;
+                view[row * p..row * p + unpadded].copy_from_slice(&rgba[src..src + unpadded]);
+            }
+        }
+        buffer.unmap();
+        encoder.copy_buffer_to_texture(
+            wgpu::ImageCopyBuffer {
+                buffer: &buffer,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(band_h),
+                },
+            },
+            wgpu::ImageCopyTexture {
+                texture: tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: 0, y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: band_h,
+                depth_or_array_layers: 1,
+            },
+        );
+        buffers.push(buffer);
+        y += band_h;
+    }
+    // The submission keeps the band buffers alive until their copies complete.
+    queue.submit(iter::once(encoder.finish()));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// Upload a known pattern through the staging path and read it back; it must
-    /// survive byte-for-byte. Uses a width whose row stride (100*4 = 400) is NOT
-    /// 256-aligned, so the padding path is exercised — the bug the simpler render
-    /// test can't catch (its 1600-wide rows are already aligned).
+    /// survive byte-for-byte. A width whose row stride (100*4 = 400) is NOT
+    /// 256-aligned exercises the padding path the simpler render test can't (its
+    /// 1600-wide rows are already aligned).
     #[test]
-    fn staging_upload_round_trips_unaligned_width() {
-        pollster::block_on(round_trip());
+    fn staging_round_trips_single_band() {
+        // rows_per_band > height -> a single band (the normal fit-sized case).
+        pollster::block_on(round_trip(1000));
     }
 
-    async fn round_trip() {
+    #[test]
+    fn staging_round_trips_multiple_bands() {
+        // A tiny band forces 4 bands over the 10-row image (3+3+3+1), exercising
+        // the y-origin banding used for images larger than max_buffer_size.
+        pollster::block_on(round_trip(3));
+    }
+
+    async fn round_trip(rows_per_band: u32) {
         let (w, h) = (100u32, 10u32);
         let mut src = vec![0u8; (w * h * 4) as usize];
         for (i, px) in src.chunks_exact_mut(4).enumerate() {
@@ -165,7 +205,7 @@ mod tests {
             view_formats: &[],
         });
 
-        StagingUpload::new().upload(&device, &queue, &tex, &src, w, h);
+        copy_via_staging(&device, &queue, &tex, &src, w, h, rows_per_band);
 
         // Read the texture back (padded rows) and reconstruct it tightly packed.
         let unpadded = w * 4;

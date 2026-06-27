@@ -328,11 +328,16 @@ impl App {
         let mut uploads = 0;
         let mut leftover = Vec::new();
         for outcome in ready {
+            let item = outcome.key.item;
             if uploads >= UPLOADS_PER_TICK {
-                leftover.push(outcome); // carried to the next tick, in order
+                // Carry still-wanted leftovers to the next tick (in priority order);
+                // drop now-obsolete ones so they don't pin pool byte-budget while
+                // the loop idles (work_pending wouldn't keep polling for them).
+                if self.targets.contains(&item) && self.ring.slot_for(item).is_none() {
+                    leftover.push(outcome);
+                }
                 continue;
             }
-            let item = outcome.key.item;
             let Ok(ref img) = outcome.result else {
                 continue; // errors were already filtered out above
             };
