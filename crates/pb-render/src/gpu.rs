@@ -611,6 +611,45 @@ fn toast_quad_vertices(
     ]
 }
 
+/// The four corners of the top-right pie quad: `panel_w`×`panel_h` px, placed
+/// `margin` px in from the top and right edges (the "loading" affordance corner).
+fn top_right_quad_vertices(
+    panel_w: u32,
+    panel_h: u32,
+    screen_w: u32,
+    screen_h: u32,
+    margin: u32,
+) -> [Vertex; 4] {
+    let (sw, sh) = (screen_w as f32, screen_h as f32);
+    let m = margin as f32;
+    let x1 = sw - m;
+    let x0 = x1 - panel_w as f32;
+    let y0 = m;
+    let y1 = y0 + panel_h as f32;
+    let x0n = (x0 / sw) * 2.0 - 1.0;
+    let x1n = (x1 / sw) * 2.0 - 1.0;
+    let y_top = 1.0 - (y0 / sh) * 2.0;
+    let y_bot = 1.0 - (y1 / sh) * 2.0;
+    [
+        Vertex {
+            pos: [x0n, y_top],
+            uv: [0.0, 0.0],
+        },
+        Vertex {
+            pos: [x1n, y_top],
+            uv: [1.0, 0.0],
+        },
+        Vertex {
+            pos: [x1n, y_bot],
+            uv: [1.0, 1.0],
+        },
+        Vertex {
+            pos: [x0n, y_bot],
+            uv: [0.0, 1.0],
+        },
+    ]
+}
+
 /// Downscale `image` (RGBA8) so neither dimension exceeds `max`, preserving
 /// aspect with nearest-neighbor sampling. Returns the input borrowed unchanged
 /// when it already fits.
@@ -896,6 +935,9 @@ pub struct WgpuRenderer {
     /// The transient bottom-center status toast, drawn as its own overlay layer
     /// (independent of the info panel) — e.g. "Recursive folders: on".
     toast: Option<OverlayDraw>,
+    /// The top-right "loading" pie, shown while the next photo isn't ready yet
+    /// (its own overlay layer, composited above the photo + panels).
+    pie: Option<OverlayDraw>,
     upload: Box<dyn UploadStrategy>,
     /// Resident texture ring (Phase 3). Empty until `reserve_ring`; each `Some`
     /// slot holds a pre-uploaded photo. `present_slot` selects which one draws.
@@ -1050,6 +1092,7 @@ impl WgpuRenderer {
             view,
             overlay: None,
             toast: None,
+            pie: None,
             upload,
             ring: Vec::new(),
             present_idx: None,
@@ -1140,6 +1183,51 @@ impl WgpuRenderer {
             None => None,
         };
     }
+
+    /// Set or clear the top-right "loading" pie (shown while the next photo isn't
+    /// ready). Its own overlay layer, composited above the photo and the panels;
+    /// the caller animates the fill / fade by re-uploading the rasterized bitmap.
+    /// `margin` is the gap from the top and right edges.
+    pub fn set_pie(&mut self, panel: Option<(&[u8], u32, u32)>, margin: u32) {
+        self.pie = match panel {
+            Some((rgba, w, h)) => {
+                let scale = self.scene_scale(false);
+                let bind_group = upload_image(
+                    &self.device,
+                    &self.queue,
+                    &self.bgl,
+                    self.upload.as_mut(),
+                    rgba,
+                    w,
+                    h,
+                    &ColorTransform::srgb(),
+                    false,
+                    scale,
+                );
+                let vbuf = self
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("pie-vbuf"),
+                        contents: bytemuck::cast_slice(&top_right_quad_vertices(
+                            w,
+                            h,
+                            self.config.width,
+                            self.config.height,
+                            margin,
+                        )),
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    });
+                Some(OverlayDraw {
+                    bind_group,
+                    vbuf,
+                    panel_w: w,
+                    panel_h: h,
+                    margin,
+                })
+            }
+            None => None,
+        };
+    }
 }
 
 impl Renderer for WgpuRenderer {
@@ -1187,6 +1275,15 @@ impl Renderer for WgpuRenderer {
                 0,
                 bytemuck::cast_slice(&toast_quad_vertices(
                     t.panel_w, t.panel_h, width, height, t.margin,
+                )),
+            );
+        }
+        if let Some(p) = &self.pie {
+            self.queue.write_buffer(
+                &p.vbuf,
+                0,
+                bytemuck::cast_slice(&top_right_quad_vertices(
+                    p.panel_w, p.panel_h, width, height, p.margin,
                 )),
             );
         }
@@ -1443,6 +1540,29 @@ impl Renderer for WgpuRenderer {
             rp.set_pipeline(&self.overlay_pipeline);
             rp.set_bind_group(0, &t.bind_group, &[]);
             rp.set_vertex_buffer(0, t.vbuf.slice(..));
+            rp.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint16);
+            rp.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+        }
+        // Pass 2c: the top-right "loading" pie, composited above everything else so
+        // it stays visible while the next photo decodes.
+        if let Some(p) = &self.pie {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("pie"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &intermediate_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rp.set_pipeline(&self.overlay_pipeline);
+            rp.set_bind_group(0, &p.bind_group, &[]);
+            rp.set_vertex_buffer(0, p.vbuf.slice(..));
             rp.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint16);
             rp.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
         }

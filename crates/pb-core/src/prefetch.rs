@@ -34,8 +34,20 @@ pub fn prefetch_targets(pl: &Playlist, ahead: usize, behind: usize) -> Vec<usize
         }
         Direction::Random => {
             let pos = pl.shuffle_pos();
-            extend_random(&mut out, &mut seen, pl, pos, 1, ahead);
+            // Steal a couple of slots from the random look-ahead for the
+            // *sequential* neighbours of the current photo (cur±1), appended at
+            // LOW priority. This makes the first space/backspace after a random
+            // jump an instant ring hit instead of a cold decode; the low priority
+            // means the random fly's look-ahead is filled first (the hedge only
+            // loads once the pool catches up at rest, so holding [enter] still
+            // flies). Total stays within ahead+behind+1 so the hedge is within
+            // the ring's capacity.
+            const HEDGE: usize = 2; // cur+1, cur-1
+            let ahead_random = ahead.saturating_sub(HEDGE);
+            extend_random(&mut out, &mut seen, pl, pos, 1, ahead_random);
             extend_random(&mut out, &mut seen, pl, pos, -1, behind);
+            extend_linear(&mut out, &mut seen, pl, cur, 1, 1);
+            extend_linear(&mut out, &mut seen, pl, cur, -1, 1);
         }
     }
     out
@@ -160,16 +172,30 @@ mod tests {
     }
 
     #[test]
-    fn random_uses_the_shuffle_order() {
+    fn random_uses_the_shuffle_order_then_a_sequential_hedge() {
         let mut pl = Playlist::new(20, 0xC0FFEE);
         pl.random_next();
         let pos = pl.shuffle_pos();
-        let expected_ahead: Vec<usize> = (1..=3)
+        let cur = pl.current().unwrap();
+        // ahead=5, behind=2 → the random look-ahead is ahead-HEDGE = 3 deep
+        // (high priority, for hold-to-fly), then a cur±1 sequential hedge.
+        let t = prefetch_targets(&pl, 5, 2);
+        assert_eq!(t[0], cur);
+        let expected_random_ahead: Vec<usize> = (1..=3)
             .map(|k| pl.shuffle().at(pos + k).unwrap() as usize)
             .collect();
-        let t = prefetch_targets(&pl, 3, 0);
-        assert_eq!(t[0], pl.current().unwrap());
-        assert_eq!(&t[1..], &expected_ahead[..]);
+        assert_eq!(
+            &t[1..=3],
+            &expected_random_ahead[..],
+            "the random look-ahead comes first"
+        );
+        // The current photo's sequential neighbours are also prefetched, so the
+        // first space/backspace after a random jump is an instant hit.
+        let len = pl.len();
+        let next_seq = (cur + 1) % len;
+        let prev_seq = (cur + len - 1) % len;
+        assert!(t.contains(&next_seq), "cur+1 sequential hedge missing");
+        assert!(t.contains(&prev_seq), "cur-1 sequential hedge missing");
     }
 
     #[test]
@@ -191,17 +217,18 @@ mod tests {
         for _ in 0..len {
             pl.random_next();
         }
-        // What the engine would prefetch ahead from here...
-        let predicted = prefetch_targets(&pl, 3, 0);
+        // What the engine would prefetch ahead from here (ahead=5 → 3 random
+        // look-ahead after the HEDGE steal, then the sequential hedge)...
+        let predicted = prefetch_targets(&pl, 5, 0);
         // ...vs. what the user actually sees next, across the reshuffle boundary.
         let mut upcoming = Vec::new();
         for _ in 0..3 {
             pl.random_next();
             upcoming.push(pl.current().unwrap());
         }
-        // The prefetched "ahead" set should equal the upcoming items. It won't,
-        // until the boundary is fixed.
-        assert_eq!(&predicted[1..], &upcoming[..]);
+        // The prefetched random look-ahead spans the reshuffle seam: it equals the
+        // next three photos the user will see, drawn from the *reshuffled* deck.
+        assert_eq!(&predicted[1..=3], &upcoming[..]);
     }
 
     fn assert_no_duplicates(v: &[usize]) {

@@ -142,6 +142,19 @@ gated-advance/failure paths in `main.rs` (`advance`/`about_to_wait`/`drain_resul
   each launch — fine for now (deterministic/testable/privacy-safe); vary the seed later
   if per-launch variety is wanted. The DXGI photon-timing step is the only Phase-3 item
   still deferred.
+- **random→sequential is no longer slow** (polish): the `Direction::Random` prefetch
+  now also keeps the current photo's *sequential* neighbours (cur±1) warm at LOW
+  priority (`prefetch.rs`, HEDGE=2), so the first space/backspace after an `enter`
+  jump is an instant ring hit instead of a cold decode — without slowing random fly
+  (the hedge loads only once the pool catches up at rest).
+- **"Not-ready" loading pie** (polish, #2-style affordance): a translucent top-right
+  pie (`hud::render_pie` → renderer `set_pie` → `App::tick_pie`) shown while the next
+  photo is still decoding (a miss outlasting ~120 ms). No true decode progress exists,
+  so it eases asymptotically toward — never reaching — full on a self-calibrating time
+  constant (`decode_ewma`, a rolling mean of real miss durations), snaps to full +
+  fades when the photo lands, and brightens on a keypress the engine can't yet service.
+  Re-rasterized only on a visible change. **Interactive verification by owner pending**
+  (hold space/enter on a cold folder to see it; GDI capture is broken on the HDR desktop).
 
 ## Environment / gotchas
 - `cargo` at `~/.cargo/bin` (`$env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"`).

@@ -327,6 +327,68 @@ fn corner_coverage(x: i32, y: i32, w: i32, h: i32, r: f32) -> f32 {
     }
 }
 
+/// The loading pie's track (the dark disc behind the wedge) and fill (the bright
+/// wedge + rim), per the translucent-black overlay convention.
+const PIE_TRACK: [u8; 3] = [0, 0, 0];
+const PIE_FILL: [u8; 3] = [255, 255, 255];
+
+/// Rasterize the "not-ready" loading pie: a translucent dark disc with a bright
+/// wedge that fills clockwise from 12 o'clock to `progress` (0..=1), plus a faint
+/// bright rim ring for definition. `glow` (0..=1) brightens the whole thing (the
+/// keypress flash when the UI can't service input yet). Returns straight-alpha
+/// RGBA8 `(pixels, diameter, diameter)` for the overlay quad. No font needed, so
+/// it works even when the text HUD is unavailable.
+pub fn render_pie(diameter: u32, progress: f32, glow: f32) -> (Vec<u8>, u32, u32) {
+    let d = diameter.max(8);
+    let di = d as i32;
+    let mut px = vec![0u8; (d as usize) * (d as usize) * 4];
+    let c = d as f32 / 2.0;
+    let r_outer = c - 1.0; // leave ~1px for the anti-aliased edge
+    let r_fill = r_outer * 0.74; // the pie sits inside a dark rim gap
+    let r_ring_in = r_outer * 0.84; // a thin bright rim band near the edge
+    let g = glow.clamp(0.0, 1.0);
+    let sweep = progress.clamp(0.0, 1.0) * std::f32::consts::TAU;
+    let track_a = 0.45 + 0.18 * g;
+    let fill_a = 0.82 + 0.18 * g;
+    let rim_a = 0.30 + 0.35 * g;
+    for y in 0..di {
+        for x in 0..di {
+            let dx = x as f32 + 0.5 - c;
+            let dy = y as f32 + 0.5 - c;
+            let dist = (dx * dx + dy * dy).sqrt();
+            let disc_cov = (r_outer - dist + 0.5).clamp(0.0, 1.0);
+            if disc_cov <= 0.0 {
+                continue; // outside the disc → transparent
+            }
+            // Base: the translucent dark track over the whole disc.
+            let mut rgb = PIE_TRACK;
+            let mut a = track_a;
+            // The bright rim ring near the edge (always full, like a track outline).
+            if dist >= r_ring_in {
+                rgb = PIE_FILL;
+                a = rim_a;
+            }
+            // The pie wedge, clockwise from the top: angle 0 at 12 o'clock.
+            if dist <= r_fill {
+                let mut ang = dx.atan2(-dy);
+                if ang < 0.0 {
+                    ang += std::f32::consts::TAU;
+                }
+                if ang <= sweep {
+                    rgb = PIE_FILL;
+                    a = fill_a;
+                }
+            }
+            let idx = ((y * di + x) * 4) as usize;
+            px[idx] = rgb[0];
+            px[idx + 1] = rgb[1];
+            px[idx + 2] = rgb[2];
+            px[idx + 3] = (a * disc_cov * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    (px, d, d)
+}
+
 /// Group an integer's digits with thousands separators: `6000123` → `6,000,123`.
 /// Counter-based (no `% 3`) so it stays clear of the 1.87-only `is_multiple_of`
 /// the lint would otherwise push us toward (MSRV is 1.80).
@@ -447,6 +509,26 @@ mod tests {
         assert_eq!(format_thousands(1000), "1,000");
         assert_eq!(format_thousands(6_000_123), "6,000,123");
         assert_eq!(format_thousands(1_000_000_000), "1,000,000,000");
+    }
+
+    #[test]
+    fn pie_fills_with_progress_and_is_round() {
+        let (p0, _, _) = render_pie(48, 0.0, 0.0);
+        let (p1, _, _) = render_pie(48, 1.0, 0.0);
+        // The top-left corner is outside the disc → fully transparent.
+        assert_eq!(p0[3], 0, "corner should be transparent (round, not square)");
+        let bright = |px: &[u8]| {
+            px.chunks_exact(4)
+                .filter(|c| c[3] > 0 && c[0] > 200)
+                .count()
+        };
+        assert!(
+            bright(&p1) > bright(&p0),
+            "a full pie has more bright (wedge) pixels than an empty one"
+        );
+        // The translucent track disc is drawn even at progress 0.
+        let opaque = p0.chunks_exact(4).filter(|c| c[3] > 0).count();
+        assert!(opaque > 0, "the track disc should be present at progress 0");
     }
 
     #[test]

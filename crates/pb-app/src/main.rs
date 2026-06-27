@@ -80,6 +80,20 @@ const PAN_MIN_SPEED: f32 = 450.0;
 const PAN_MAX_SPEED: f32 = 3200.0;
 const PAN_RAMP_SECS: f32 = 0.7;
 
+/// "Not-ready" loading-pie tuning (the top-right affordance shown while the next
+/// photo is still decoding). The fill is a deliberate "honest-ish" fake: there is
+/// no true decode progress, so it eases asymptotically toward — but never reaches
+/// — full, on a time constant self-calibrated to how long misses usually take.
+/// Only appears once a wait outlasts `PIE_SHOW_DELAY`, so fast hits never flash it.
+const PIE_SHOW_DELAY: f32 = 0.12; // s a wait must persist before the pie appears
+const PIE_TAU_MIN: f32 = 0.06; // s floor on the fill time constant
+const PIE_FILL_CAP: f32 = 0.93; // the wedge never quite completes (the "lie")
+const PIE_FINISH_FADE: f32 = 0.18; // s to snap-to-full then fade once ready
+const PIE_GLOW_DUR: f32 = 0.30; // s the keypress brighten-pulse decays over
+const PIE_EWMA_ALPHA: f32 = 0.30; // weight of the latest wait in the time estimate
+const PIE_DIAMETER: f32 = 46.0; // logical px (scaled by the display factor)
+const PIE_MARGIN: f32 = 24.0; // logical px in from the top-right corner
+
 /// Ring capacity from the per-slot byte size and the VRAM budget. Full-res
 /// (Original) slots are several times bigger than fit slots, so the prefetch
 /// window is correspondingly smaller — but still resident and async.
@@ -337,6 +351,19 @@ struct App {
     zoom_last: Option<Instant>,
     pan_started: Option<Instant>,
     pan_last: Option<Instant>,
+    /// "Not-ready" loading-pie state (the top-right affordance). `wait_started` is
+    /// when the current miss began (None when caught up); `pie_finish` plays the
+    /// snap-to-full fade once the photo lands; `pie_glow_started` is the last
+    /// keypress brighten-pulse. `decode_ewma` is the self-calibrating fill time
+    /// constant (a rolling mean of how long misses actually take). `pie_drawn`
+    /// tracks whether a pie bitmap is up, and `pie_pushed` the last
+    /// (progress, glow, alpha) rasterized, so we re-upload only on a visible change.
+    wait_started: Option<Instant>,
+    pie_finish: Option<Instant>,
+    pie_glow_started: Option<Instant>,
+    decode_ewma: f32,
+    pie_drawn: bool,
+    pie_pushed: Option<(f32, f32, f32)>,
 }
 
 impl App {
@@ -399,6 +426,12 @@ impl App {
             zoom_last: None,
             pan_started: None,
             pan_last: None,
+            wait_started: None,
+            pie_finish: None,
+            pie_glow_started: None,
+            decode_ewma: 0.25,
+            pie_drawn: false,
+            pie_pushed: None,
         }
     }
 
@@ -1204,6 +1237,100 @@ impl App {
         true
     }
 
+    /// The current keypress brighten-pulse intensity (0..=1), decaying to 0 over
+    /// `PIE_GLOW_DUR` after the last dropped nav press.
+    fn pie_glow(&self, now: Instant) -> f32 {
+        match self.pie_glow_started {
+            Some(t) => (1.0 - (now - t).as_secs_f32() / PIE_GLOW_DUR).clamp(0.0, 1.0),
+            None => 0.0,
+        }
+    }
+
+    /// Drive the top-right "not-ready" loading pie (#2). While the next photo is
+    /// still decoding (a miss outlasting `PIE_SHOW_DELAY`), show a pie that eases
+    /// asymptotically toward — but never reaches — full, on a time constant
+    /// self-calibrated to how long misses usually take (`decode_ewma`). Once the
+    /// photo lands, learn from the wait, then snap to full and fade. Returns
+    /// whether the pie still needs the loop to keep ticking.
+    fn tick_pie(&mut self, now: Instant, event_loop: &ActiveEventLoop) -> bool {
+        let not_ready = self.target_item.is_some() && self.displayed_item != self.target_item;
+        if not_ready {
+            self.pie_finish = None;
+            let start = *self.wait_started.get_or_insert(now);
+            let elapsed = (now - start).as_secs_f32();
+            if elapsed >= PIE_SHOW_DELAY {
+                let tau = self.decode_ewma.max(PIE_TAU_MIN);
+                // Asymptotic ease: ~half-full at one tau, approaching the cap but
+                // never quite arriving (the deliberate, honest-ish "lie").
+                let progress = (1.0 - 2f32.powf(-elapsed / tau)).min(PIE_FILL_CAP);
+                let glow = self.pie_glow(now);
+                self.push_pie(progress, glow, 1.0, event_loop);
+            } else {
+                self.clear_pie(event_loop);
+            }
+            return true; // keep ticking while we wait
+        }
+        // Caught up. If we were mid-wait, learn how long it took (so the estimate
+        // tracks this machine + folder), and if the pie was up, play the finish.
+        if let Some(start) = self.wait_started.take() {
+            let waited = (now - start).as_secs_f32();
+            self.decode_ewma = (self.decode_ewma * (1.0 - PIE_EWMA_ALPHA)
+                + waited * PIE_EWMA_ALPHA)
+                .clamp(PIE_TAU_MIN, 2.0);
+            if self.pie_drawn {
+                self.pie_finish = Some(now);
+            }
+        }
+        if let Some(fstart) = self.pie_finish {
+            let t = (now - fstart).as_secs_f32();
+            if t < PIE_FINISH_FADE {
+                let glow = self.pie_glow(now);
+                self.push_pie(1.0, glow, 1.0 - t / PIE_FINISH_FADE, event_loop);
+                return true;
+            }
+            self.pie_finish = None;
+        }
+        self.clear_pie(event_loop);
+        false
+    }
+
+    /// Rasterize + upload the pie at `progress`/`glow`, scaled by a global `alpha`
+    /// (the finish fade). Re-uploads + redraws only when the visible result
+    /// changes (quantized), so the slow tail of the asymptote doesn't churn.
+    fn push_pie(&mut self, progress: f32, glow: f32, alpha: f32, event_loop: &ActiveEventLoop) {
+        let want = (progress, glow, alpha);
+        let unchanged = self.pie_pushed.is_some_and(|(p, g, a)| {
+            (p - progress).abs() < 0.01 && (g - glow).abs() < 0.04 && (a - alpha).abs() < 0.02
+        });
+        if unchanged && self.pie_drawn {
+            return;
+        }
+        let diameter = (PIE_DIAMETER * self.scale_factor).round().max(12.0) as u32;
+        let (mut rgba, w, h) = hud::render_pie(diameter, progress, glow);
+        if alpha < 1.0 {
+            rgba = scale_alpha(&rgba, alpha);
+        }
+        let margin = (PIE_MARGIN * self.scale_factor).round().max(4.0) as u32;
+        if let Some(a) = self.active.as_mut() {
+            a.renderer.set_pie(Some((&rgba, w, h)), margin);
+        }
+        self.pie_drawn = true;
+        self.pie_pushed = Some(want);
+        self.draw(event_loop);
+    }
+
+    /// Clear the pie layer if it's up (and redraw to remove it).
+    fn clear_pie(&mut self, event_loop: &ActiveEventLoop) {
+        if self.pie_drawn {
+            if let Some(a) = self.active.as_mut() {
+                a.renderer.set_pie(None, 0);
+            }
+            self.pie_drawn = false;
+            self.pie_pushed = None;
+            self.draw(event_loop);
+        }
+    }
+
     /// Render one frame.
     fn draw(&mut self, event_loop: &ActiveEventLoop) {
         let t0 = Instant::now();
@@ -1251,6 +1378,23 @@ impl App {
         self.failed.clear();
         self.current = None;
         self.toast = None;
+        self.wait_started = None;
+        self.pie_finish = None;
+        self.pie_glow_started = None;
+    }
+
+    /// Handle a nav keypress (space / backspace / enter). Tracks the held key for
+    /// hold-to-fly, then either advances, or — when we're still catching up to the
+    /// previous target, so the press can't be serviced yet — flashes the loading
+    /// pie (brighten-on-keypress) so the input never feels dead.
+    fn nav_press(&mut self, code: KeyCode, nav: Nav, event_loop: &ActiveEventLoop) {
+        self.held.insert(code);
+        self.hold_start = Some(Instant::now());
+        if self.target_item.is_some() && self.displayed_item != self.target_item {
+            self.pie_glow_started = Some(Instant::now());
+        } else {
+            self.advance(nav, event_loop);
+        }
     }
 
     /// Advance one photo (sequential or random). The gated engine path: present on
@@ -1574,16 +1718,8 @@ impl ApplicationHandler for App {
                         // can't queue up and delay the release. Holding is driven
                         // by `about_to_wait`.
                         match code {
-                            KeyCode::Space => {
-                                self.held.insert(code);
-                                self.hold_start = Some(Instant::now());
-                                self.advance(Nav::Forward, event_loop);
-                            }
-                            KeyCode::Backspace => {
-                                self.held.insert(code);
-                                self.hold_start = Some(Instant::now());
-                                self.advance(Nav::Backward, event_loop);
-                            }
+                            KeyCode::Space => self.nav_press(code, Nav::Forward, event_loop),
+                            KeyCode::Backspace => self.nav_press(code, Nav::Backward, event_loop),
                             // Enter (and numpad Enter): Alt+Enter toggles
                             // fullscreen; otherwise jump to the next photo in the
                             // precomputed random order (hold to fly through a
@@ -1592,9 +1728,7 @@ impl ApplicationHandler for App {
                                 if self.alt {
                                     self.toggle_fullscreen(event_loop);
                                 } else {
-                                    self.held.insert(code);
-                                    self.hold_start = Some(Instant::now());
-                                    self.advance(Nav::Random, event_loop);
+                                    self.nav_press(code, Nav::Random, event_loop);
                                 }
                             }
                             // Pan (arrows) and zoom (=/- and numpad) are continuous
@@ -1667,6 +1801,7 @@ impl ApplicationHandler for App {
                 self.zoom_last = None;
                 self.pan_started = None;
                 self.pan_last = None;
+                self.pie_glow_started = None;
             }
 
             _ => {}
@@ -1739,9 +1874,13 @@ impl ApplicationHandler for App {
         // commands (e.g. the recursion toggle) — never per photo.
         let toast_active = self.tick_toast(now, event_loop);
 
+        // 4c. The "not-ready" loading pie: shown while the next photo is still
+        // decoding (a miss that outlasts the show-delay), fading out once it lands.
+        let pie_active = self.tick_pie(now, event_loop);
+
         // 5. Poll at the frame rate while interacting or work is outstanding;
         //    otherwise go fully idle until the next event.
-        if nav.is_some() || transforming || self.work_pending() || toast_active {
+        if nav.is_some() || transforming || self.work_pending() || toast_active || pie_active {
             event_loop.set_control_flow(ControlFlow::WaitUntil(now + self.frame_interval));
         } else {
             event_loop.set_control_flow(ControlFlow::Wait);
