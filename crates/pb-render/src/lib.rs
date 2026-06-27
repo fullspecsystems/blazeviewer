@@ -13,7 +13,7 @@ pub mod fit;
 pub mod gpu;
 pub mod upload;
 
-pub use fit::{fit_rect, FitRect};
+pub use fit::{cover_rect, fit_rect, original_rect, FitRect};
 pub use gpu::{render_offscreen, test_pattern, WgpuRenderer, LETTERBOX};
 pub use upload::{StagingUpload, UploadStrategy};
 

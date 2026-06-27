@@ -53,6 +53,47 @@ pub fn fit_rect(
     }
 }
 
+/// Compute the smallest centered rectangle with the image's aspect ratio that
+/// **fully covers** `screen_w × screen_h` (object-fit: cover). The overflowing
+/// edges hang off-screen (cropped), so offsets can be negative. The basis for the
+/// "fill" scaling mode (tasks.json #4, key `9`).
+pub fn cover_rect(img_w: u32, img_h: u32, screen_w: u32, screen_h: u32) -> FitRect {
+    if img_w == 0 || img_h == 0 || screen_w == 0 || screen_h == 0 {
+        return FitRect {
+            width: 0,
+            height: 0,
+            offset_x: 0,
+            offset_y: 0,
+        };
+    }
+    // Scale to cover both dimensions: take the larger of the two ratios.
+    let sx = screen_w as f64 / img_w as f64;
+    let sy = screen_h as f64 / img_h as f64;
+    let scale = sx.max(sy);
+    let w = (img_w as f64 * scale).round().max(1.0) as u32;
+    let h = (img_h as f64 * scale).round().max(1.0) as u32;
+    let offset_x = ((screen_w as i64 - w as i64) / 2) as i32;
+    let offset_y = ((screen_h as i64 - h as i64) / 2) as i32;
+    FitRect {
+        width: w,
+        height: h,
+        offset_x,
+        offset_y,
+    }
+}
+
+/// The image at native 1:1 pixel size, centered. Larger-than-screen images
+/// overflow (offsets go negative); smaller ones are letter/pillar-boxed. The
+/// basis for the "original" scaling mode (key `0`).
+pub fn original_rect(img_w: u32, img_h: u32, screen_w: u32, screen_h: u32) -> FitRect {
+    FitRect {
+        width: img_w,
+        height: img_h,
+        offset_x: ((screen_w as i64 - img_w as i64) / 2) as i32,
+        offset_y: ((screen_h as i64 - img_h as i64) / 2) as i32,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,5 +138,46 @@ mod tests {
     fn degenerate_inputs_are_empty() {
         assert_eq!(fit_rect(0, 100, 800, 600, true).width, 0);
         assert_eq!(fit_rect(100, 100, 0, 600, true).height, 0);
+        assert_eq!(cover_rect(0, 100, 800, 600).width, 0);
+    }
+
+    #[test]
+    fn cover_fully_covers_and_crops() {
+        // 1920x1080 into 800x600: cover scale = max(0.4167, 0.5556) = 0.5556.
+        let r = cover_rect(1920, 1080, 800, 600);
+        assert!(r.width >= 800 && r.height >= 600, "must cover: {r:?}");
+        // Aspect preserved.
+        let in_aspect = 1920.0 / 1080.0;
+        let out_aspect = r.width as f64 / r.height as f64;
+        assert!((in_aspect - out_aspect).abs() < 0.01);
+        // The overflowing (wider) dimension is cropped symmetrically: x offset < 0.
+        assert!(
+            r.offset_x < 0,
+            "wide overflow should hang off-screen: {r:?}"
+        );
+        assert_eq!(r.offset_y, 0);
+    }
+
+    #[test]
+    fn cover_equals_fit_when_aspect_matches() {
+        // Same aspect as the screen -> cover and fit agree (no cropping needed).
+        let c = cover_rect(1000, 500, 800, 400);
+        assert_eq!((c.width, c.height), (800, 400));
+        assert_eq!((c.offset_x, c.offset_y), (0, 0));
+    }
+
+    #[test]
+    fn original_is_native_size_centered() {
+        // Exactly screen-sized -> full screen at the origin.
+        let r = original_rect(100, 100, 100, 100);
+        assert_eq!((r.width, r.height), (100, 100));
+        assert_eq!((r.offset_x, r.offset_y), (0, 0));
+        // Half size -> centered with positive offsets.
+        let r = original_rect(50, 50, 100, 100);
+        assert_eq!((r.offset_x, r.offset_y), (25, 25));
+        // Larger than screen -> overflows with negative offsets.
+        let r = original_rect(200, 200, 100, 100);
+        assert_eq!((r.width, r.height), (200, 200));
+        assert_eq!((r.offset_x, r.offset_y), (-50, -50));
     }
 }
