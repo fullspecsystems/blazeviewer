@@ -251,6 +251,12 @@ impl App {
         if self.displayed_item == Some(item) {
             return true;
         }
+        if self.failed.contains(&item) {
+            // Known-bad file: count it as shown (the previous frame stays up) so
+            // navigation never stalls on a corrupt prefetched JPEG.
+            self.displayed_item = Some(item);
+            return true;
+        }
         if let Some(slot) = self.ring.slot_for(item) {
             self.present_item(item, slot, event_loop);
             true
@@ -331,7 +337,13 @@ impl App {
                 self.overlay_shown = false;
                 self.displayed_item = Some(idx);
             }
-            Err(e) => eprintln!("decode failed: {}: {e}", self.paths[idx].display()),
+            Err(e) => {
+                eprintln!("decode failed: {}: {e}", self.paths[idx].display());
+                self.failed.insert(idx);
+                // Keep the gate unstuck: count the bad file as "shown" so the next
+                // navigation isn't dropped by the caught-up guard in `advance`.
+                self.displayed_item = Some(idx);
+            }
         }
         self.draw(event_loop);
     }
@@ -354,8 +366,20 @@ impl App {
         self.behind = behind;
     }
 
+    /// After a geometry change: resume prefetch in Fit mode, or — in Original mode
+    /// (which is outside the ring) — cancel prefetch and clear the want-list so the
+    /// event loop can idle instead of polling on stale, never-resident targets.
+    fn resume_prefetch_or_idle(&mut self) {
+        if self.scale_mode == ScaleMode::Fit {
+            self.request_prefetch();
+        } else {
+            self.targets.clear();
+            self.pool.set_targets(self.epoch, &[]);
+        }
+    }
+
     /// Toggle fit-to-screen <-> original 1:1. Re-decodes the current image at the
-    /// new geometry immediately; Fit also resumes prefetch.
+    /// new geometry immediately; Fit resumes prefetch, Original cancels it.
     fn toggle_scale(&mut self, event_loop: &ActiveEventLoop) {
         self.scale_mode = match self.scale_mode {
             ScaleMode::Fit => ScaleMode::Original,
@@ -367,9 +391,7 @@ impl App {
         self.invalidate_geometry();
         self.load_current_sync(event_loop);
         self.target_item = self.playlist.current();
-        if self.scale_mode == ScaleMode::Fit {
-            self.request_prefetch();
-        }
+        self.resume_prefetch_or_idle();
     }
 
     /// Decode the first image at the display size for an instant first frame.
@@ -620,13 +642,11 @@ impl ApplicationHandler for App {
                         a.renderer.resize(size.width, size.height);
                     }
                     // Geometry changed: invalidate the ring, re-show the current
-                    // image at the new size, and refill (Fit).
+                    // image at the new size, and refill (Fit) or idle (Original).
                     self.invalidate_geometry();
                     self.load_current_sync(event_loop);
                     self.target_item = self.playlist.current();
-                    if self.scale_mode == ScaleMode::Fit {
-                        self.request_prefetch();
-                    }
+                    self.resume_prefetch_or_idle();
                 }
             }
 
