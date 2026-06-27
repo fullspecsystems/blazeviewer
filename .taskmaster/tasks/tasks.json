@@ -160,10 +160,10 @@
         "id": 5,
         "title": "Metadata HUD panel (I, Shift+I, I-off)",
         "description": "I toggles a translucent dark-tinted panel on the screen edge showing date / mtime / dimensions / image format. Shift+I shows full EXIF for nerds. Pressing I again hides it.",
-        "status": "pending",
+        "status": "done",
         "priority": "low",
         "dependencies": [],
-        "details": "Builds the reusable translucent HUD/overlay layer also used by the help card (Task 7). Render an alpha-blended dark panel anchored to a screen edge with text. Basic view: filename, file mtime, capture date (EXIF DateTimeOriginal), pixel dimensions, format. Full view (Shift+I): all EXIF tags, scrollable. Privacy (Task 2): read EXIF on demand from the in-RAM file bytes; never cache it to disk. Needs text rendering (a small glyph atlas / bitmap font). Three-state toggle: off -> basic -> (Shift+I) full -> off. Register actions info_toggle / info_full (Task 8).",
+        "details": "DONE. i = one-line basic panel (path/WxH/codec); Shift+I = full-EXIF 'nerd' table (rel path, dimensions, file size, then every EXIF tag via pb_decode::read_exif_fields). Mutually-exclusive InfoMode { Off, Basic, Full }; selecting the showing mode hides it. EXIF read on demand from RAM (privacy task #2 - nothing cached to disk). hud::render_lines does the multi-line panel; lines capped to fit screen height (scroll deferred). NOTES vs spec: panel anchored bottom-right (a tall table up the right side) rather than top-right; mtime not separately formatted (EXIF DateTimeOriginal is in the tag dump). EXIF-against-fixture and golden-image tests deferred (a no-EXIF test + the live render cover the basics).",
         "testStrategy": "Unit-test EXIF extraction (basic field set + full tag map) against fixture images. Unit-test the toggle state machine (off/basic/full transitions). Golden-image test the panel layout + translucency. Privacy test: the metadata read writes nothing to disk.",
         "subtasks": [
           {

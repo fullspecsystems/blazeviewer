@@ -21,50 +21,66 @@ impl Hud {
         Some(Hud { font })
     }
 
-    /// Rasterize `text` into a 40%-black panel with white text, at font size `px`
-    /// and `pad` px of padding around the text. Returns `(rgba, width, height)`.
+    /// Rasterize one line into a 40%-black panel with white text. See [`render_lines`].
     pub fn render_panel(&self, text: &str, px: f32, pad: u32) -> Option<(Vec<u8>, u32, u32)> {
+        self.render_lines(std::slice::from_ref(&text.to_string()), px, pad)
+    }
+
+    /// Rasterize `lines` (stacked top-to-bottom) into a 40%-black panel with white
+    /// text, at font size `px` and `pad` px of padding. Returns `(rgba, w, h)`.
+    /// Used for the multi-line full-EXIF "nerd" panel (tasks.json #5).
+    pub fn render_lines(&self, lines: &[String], px: f32, pad: u32) -> Option<(Vec<u8>, u32, u32)> {
+        if lines.is_empty() {
+            return None;
+        }
         let lm = self.font.horizontal_line_metrics(px)?;
         let ascent = lm.ascent;
-        let line_h = (lm.ascent - lm.descent).ceil().max(1.0) as u32;
+        let line_h = (lm.ascent - lm.descent + lm.line_gap).ceil().max(1.0) as u32;
 
-        // Rasterize each glyph and measure the line width.
-        let mut glyphs = Vec::new();
-        let mut pen = 0.0f32;
-        for ch in text.chars() {
-            let (m, bitmap) = self.font.rasterize(ch, px);
-            glyphs.push((m, bitmap, pen));
-            pen += m.advance_width;
+        // Rasterize each line's glyphs and track the widest line.
+        let mut laid: Vec<Vec<(fontdue::Metrics, Vec<u8>, f32)>> = Vec::with_capacity(lines.len());
+        let mut max_w = 1.0f32;
+        for line in lines {
+            let mut glyphs = Vec::new();
+            let mut pen = 0.0f32;
+            for ch in line.chars() {
+                let (m, bitmap) = self.font.rasterize(ch, px);
+                glyphs.push((m, bitmap, pen));
+                pen += m.advance_width;
+            }
+            max_w = max_w.max(pen);
+            laid.push(glyphs);
         }
-        let text_w = pen.ceil().max(1.0) as u32;
 
-        let pw = text_w + 2 * pad;
-        let ph = line_h + 2 * pad;
+        let pw = max_w.ceil() as u32 + 2 * pad;
+        let ph = lines.len() as u32 * line_h + 2 * pad;
         let mut panel = vec![0u8; (pw as usize) * (ph as usize) * 4];
         for px4 in panel.chunks_exact_mut(4) {
             px4.copy_from_slice(&[0, 0, 0, 102]); // 40% black background
         }
 
-        let baseline = pad as f32 + ascent;
-        for (m, bitmap, gx) in &glyphs {
-            if m.width == 0 || m.height == 0 {
-                continue; // e.g. a space — advance only, no pixels
-            }
-            let x0 = (pad as f32 + gx + m.xmin as f32).round() as i32;
-            let y0 = (baseline - m.ymin as f32 - m.height as f32).round() as i32;
-            for row in 0..m.height {
-                for col in 0..m.width {
-                    let cov = bitmap[row * m.width + col];
-                    if cov == 0 {
-                        continue;
+        for (li, glyphs) in laid.iter().enumerate() {
+            let baseline = pad as f32 + li as f32 * line_h as f32 + ascent;
+            for (m, bitmap, gx) in glyphs {
+                if m.width == 0 || m.height == 0 {
+                    continue; // e.g. a space — advance only, no pixels
+                }
+                let x0 = (pad as f32 + gx + m.xmin as f32).round() as i32;
+                let y0 = (baseline - m.ymin as f32 - m.height as f32).round() as i32;
+                for row in 0..m.height {
+                    for col in 0..m.width {
+                        let cov = bitmap[row * m.width + col];
+                        if cov == 0 {
+                            continue;
+                        }
+                        let x = x0 + col as i32;
+                        let y = y0 + row as i32;
+                        if x < 0 || y < 0 || x >= pw as i32 || y >= ph as i32 {
+                            continue;
+                        }
+                        let idx = ((y as u32 * pw + x as u32) * 4) as usize;
+                        composite_white_over(&mut panel[idx..idx + 4], cov);
                     }
-                    let x = x0 + col as i32;
-                    let y = y0 + row as i32;
-                    if x < 0 || y < 0 || x >= pw as i32 || y >= ph as i32 {
-                        continue;
-                    }
-                    let idx = ((y as u32 * pw + x as u32) * 4) as usize;
-                    composite_white_over(&mut panel[idx..idx + 4], cov);
                 }
             }
         }

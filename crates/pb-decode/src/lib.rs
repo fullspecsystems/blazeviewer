@@ -15,9 +15,11 @@
 //! Backends implement [`ImageDecoder`] and are swappable, so we can A/B (e.g.)
 //! `turbojpeg` vs `zune-jpeg` purely through this seam.
 
+pub mod metadata;
 pub mod orientation;
 mod zune;
 
+pub use metadata::read_exif_fields;
 pub use zune::{decode_image_file, ZuneJpegDecoder};
 
 /// Pixel layout of a decoded buffer. Kept explicit so the uploader can pick the

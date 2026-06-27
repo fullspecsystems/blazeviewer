@@ -2,13 +2,13 @@
 
 _Last updated: 2026-06-27._
 
-## Phase 4 — viewer features (in progress)
+## Phase 4 — viewer features (all 5 requested features done; not owner-verified)
 
-Building a per-photo **`ViewTransform`** (`pb-render::view`, pure + tested) that
+Built a per-photo **`ViewTransform`** (`pb-render::view`, pure + tested) that
 composes scaling mode + rotation + zoom + pan; the renderer draws from it, so
-rotation/zoom/pan are perf-neutral GPU transforms (no re-decode). Keymap is being
-reworked (arrows will become pan; `space`/`backspace` stay next/prev; `0/8/9`
-modes; `r`/`Shift+R` rotate; `=`/`-` zoom; `Shift+I` full EXIF).
+rotation/zoom/pan are perf-neutral GPU transforms (no re-decode). New keymap (see
+`main.rs` module doc): `space`/`⌫` next/prev, **arrows = pan**, `=`/`-` zoom,
+`0/8/9` modes, `r`/`Shift+R` rotate, `i`/`Shift+I` info/EXIF.
 
 - ✅ **Scaling modes 0/8/9** (original / fit / **fill**) — tasks.json #4. Global/sticky;
   Fill & Original decode full-res (byte-budgeted ring bounds VRAM).
@@ -16,10 +16,18 @@ modes; `r`/`Shift+R` rotate; `=`/`-` zoom; `Shift+I` full EXIF).
 - ✅ **Smooth zoom** `=`/`-` + **pan** arrows — tasks.json #3. Hold-to-act with a
   time-based exponential acceleration ramp (gentle start → fast). Arrows are pan
   now (so `space`=next, `⌫`=prev); pan clamped to image bounds.
-- ⏳ **Full-EXIF "nerd" panel** `Shift+I` — next (tasks.json #5).
+- ✅ **Full-EXIF "nerd" panel** `Shift+I` — tasks.json #5. Mutually-exclusive
+  InfoMode; EXIF read on-demand from RAM (privacy). Panel is bottom-right (tall).
 
-See the keymap in `crates/pb-app/src/main.rs` (module doc). Recursive `R` dropped
-(recursion comes from invocation, not a hotkey).
+**⚠ Owner verification needed** (couldn't be driven headless — builds + unit tests
++ startup smoke only): hold arrows to pan / `=`/`-` to zoom (acceleration feel,
+tune the constants in `main.rs` if needed), `0/8/9`/`9`-fill framing, `r`/`Shift+R`
+rotation, `Shift+I` EXIF panel content/placement. **Codex review not yet run** on
+these (usage limit earlier — run `codex exec review --base main` when it resets).
+
+Recursive `R` dropped (recursion comes from invocation, not a hotkey). Deferred
+refinements noted in tasks.json: Tier-2 re-decode on deep zoom, zoom-about-pan-
+focus, carry-view-position-to-next-photo, EXIF scroll, top-right EXIF anchor.
 
 ## Phase 3 — the prefetch engine (done)
 

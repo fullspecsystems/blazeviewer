@@ -13,7 +13,7 @@
 //!   = / -       zoom in / out (hold; accelerates; numpad +/- too)
 //!   0 / 8 / 9   scaling mode: original 1:1 / fit / fill (all prefetched)
 //!   r / Shift+R rotate 90° clockwise / counter-clockwise (per-image, RAM-only)
-//!   i           toggle info panel (path · resolution · codec)
+//!   i / Shift+I info panel (path · WxH · codec) / full-EXIF "nerd" panel
 //!   esc         quit
 //!
 //! Usage:
@@ -35,7 +35,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Fullscreen, Window, WindowId};
 
 use pb_core::{prefetch_targets, Playlist, ResidentRing};
-use pb_decode::{decode_image_file, DecodedImage, FitBox};
+use pb_decode::{decode_image_file, read_exif_fields, DecodedImage, FitBox};
 use pb_render::{
     test_pattern, Renderer, Rotation, ScaleMode, ViewTransform, WgpuRenderer, MAX_ZOOM, MIN_ZOOM,
 };
@@ -95,6 +95,15 @@ struct PhotoMeta {
     codec: &'static str,
 }
 
+/// Which info overlay is showing: nothing, the one-line basic panel (`i`), or the
+/// full-EXIF "nerd" table (`Shift+I`). Mutually exclusive.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InfoMode {
+    Off,
+    Basic,
+    Full,
+}
+
 /// Build a photo's info panel data from its path + decoded image.
 fn meta_for_path(path: &Path, root: &Path, img: &DecodedImage) -> PhotoMeta {
     let rel = match path.strip_prefix(root) {
@@ -143,8 +152,8 @@ struct App {
     root: PathBuf,
     /// Text renderer for the info panel (None if no system font was found).
     hud: Option<Hud>,
-    /// Whether the info panel is enabled (toggled by `I`).
-    info_visible: bool,
+    /// Which info overlay is active (`i` basic / `Shift+I` full EXIF / off).
+    info: InfoMode,
     /// Whether the panel is currently drawn (rebuilt only when the photo changes).
     overlay_shown: bool,
     /// The current photo's info, for the panel.
@@ -217,7 +226,7 @@ impl App {
             view: ViewTransform::default(),
             root,
             hud: Hud::load(),
-            info_visible: false,
+            info: InfoMode::Off,
             overlay_shown: false,
             current: None,
             scale_factor: 1.0,
@@ -565,31 +574,88 @@ impl App {
         }
     }
 
-    /// Toggle the info panel. When turned on it shows immediately (we're idle);
-    /// after navigation it reappears once you stop (see `about_to_wait`).
-    fn toggle_info(&mut self, event_loop: &ActiveEventLoop) {
-        self.info_visible = !self.info_visible;
-        if self.info_visible {
-            self.show_overlay(event_loop);
+    /// Toggle an info panel: the one-line basic panel with `i`, or the full-EXIF
+    /// "nerd" table with `Shift+I`. Selecting the mode that's already showing hides
+    /// it. When shown it appears immediately (idle); after navigation it reappears
+    /// once you stop (see `about_to_wait`).
+    fn toggle_info(&mut self, full: bool, event_loop: &ActiveEventLoop) {
+        let target = if full {
+            InfoMode::Full
         } else {
+            InfoMode::Basic
+        };
+        self.info = if self.info == target {
+            InfoMode::Off
+        } else {
+            target
+        };
+        if self.info == InfoMode::Off {
             if let Some(a) = self.active.as_mut() {
                 a.renderer.set_overlay(None, 0);
             }
             self.overlay_shown = false;
             self.draw(event_loop);
+        } else {
+            self.show_overlay(event_loop);
         }
     }
 
-    /// Rasterize the current photo's info into a corner panel and draw it.
+    /// The full-EXIF panel lines for the displayed photo: identity + dimensions,
+    /// file size, then every EXIF tag. Read on-demand from RAM (privacy task #2:
+    /// nothing cached to disk). Capped to roughly fit the screen height.
+    fn exif_lines(&self) -> Vec<String> {
+        let Some(item) = self.displayed_item else {
+            return Vec::new();
+        };
+        let path = &self.paths[item];
+        let mut lines = Vec::new();
+        if let Some(meta) = &self.current {
+            lines.push(meta.rel.clone());
+            lines.push(format!("{}×{}  ·  {}", meta.w, meta.h, meta.codec));
+        }
+        if let Ok(md) = std::fs::metadata(path) {
+            lines.push(format!("file size  ·  {} KB", md.len() / 1024));
+        }
+        if let Ok(bytes) = std::fs::read(path) {
+            for (tag, val) in read_exif_fields(&bytes) {
+                lines.push(format!("{tag}:  {val}"));
+            }
+        }
+        // Cap to what fits the screen height (~1.5x the font size per line).
+        if let Some(fit) = self.fit {
+            let line_h = ((15.0 * self.scale_factor).max(8.0) * 1.5).max(1.0);
+            let max_lines = (((fit.max_height as f32) - 40.0) / line_h).max(1.0) as usize;
+            if lines.len() > max_lines {
+                lines.truncate(max_lines.saturating_sub(1));
+                lines.push("…".to_string());
+            }
+        }
+        lines
+    }
+
+    /// Rasterize the active info panel for the current photo and draw it.
     fn show_overlay(&mut self, event_loop: &ActiveEventLoop) {
-        let panel = {
-            let (Some(hud), Some(meta)) = (self.hud.as_ref(), self.current.as_ref()) else {
-                return;
-            };
-            let text = format!("{} · {}×{} · {}", meta.rel, meta.w, meta.h, meta.codec);
-            let px = (15.0 * self.scale_factor).max(8.0);
-            let pad = (7.0 * self.scale_factor).round().max(2.0) as u32;
-            hud.render_panel(&text, px, pad)
+        let px = (15.0 * self.scale_factor).max(8.0);
+        let pad = (7.0 * self.scale_factor).round().max(2.0) as u32;
+        let panel = match self.info {
+            InfoMode::Off => return,
+            InfoMode::Basic => {
+                let (Some(hud), Some(meta)) = (self.hud.as_ref(), self.current.as_ref()) else {
+                    return;
+                };
+                let text = format!("{} · {}×{} · {}", meta.rel, meta.w, meta.h, meta.codec);
+                hud.render_panel(&text, px, pad)
+            }
+            InfoMode::Full => {
+                let lines = self.exif_lines();
+                let Some(hud) = self.hud.as_ref() else {
+                    return;
+                };
+                if lines.is_empty() {
+                    return;
+                }
+                hud.render_lines(&lines, px, pad)
+            }
         };
         let Some((bitmap, w, h)) = panel else {
             return;
@@ -931,8 +997,8 @@ impl ApplicationHandler for App {
                             KeyCode::Digit9 => self.set_scale_mode(ScaleMode::Fill, event_loop),
                             // Rotate 90° clockwise, or counter-clockwise with Shift.
                             KeyCode::KeyR => self.rotate(self.shift, event_loop),
-                            // Toggle the corner info panel.
-                            KeyCode::KeyI => self.toggle_info(event_loop),
+                            // Info panel: i basic, Shift+I full EXIF.
+                            KeyCode::KeyI => self.toggle_info(self.shift, event_loop),
                             _ => {}
                         }
                     }
@@ -999,7 +1065,8 @@ impl ApplicationHandler for App {
         }
 
         // 4. Show the info panel once idle (not interacting) past the short delay.
-        let panel_pending = self.info_visible && !self.overlay_shown && self.current.is_some();
+        let panel_pending =
+            self.info != InfoMode::Off && !self.overlay_shown && self.current.is_some();
         if nav.is_none() && !transforming && panel_pending {
             let due = match self.last_present {
                 Some(t) => t + self.idle_delay,
@@ -1012,7 +1079,8 @@ impl ApplicationHandler for App {
 
         // 5. Poll at the frame rate while interacting or work is outstanding;
         //    otherwise go fully idle until the next event.
-        let panel_pending = self.info_visible && !self.overlay_shown && self.current.is_some();
+        let panel_pending =
+            self.info != InfoMode::Off && !self.overlay_shown && self.current.is_some();
         if nav.is_some() || transforming || self.work_pending() || panel_pending {
             event_loop.set_control_flow(ControlFlow::WaitUntil(now + self.frame_interval));
         } else {
