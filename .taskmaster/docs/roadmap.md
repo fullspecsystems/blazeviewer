@@ -16,6 +16,31 @@ textures, never blocking the UI) come *before* any GPU-decode work.
 
 ---
 
+## Progress & learnings (as of 2026-06-27)
+
+**Done:** Phase 0 (foundations, spikes), Phase 1 (wgpu window + render), and
+**Phase 2 (sequential viewer)** — plus polish beyond the plan: decode-to-fit
+downscaling (Lanczos3), linear sampling, fit/original scale-mode toggle (`0`/`o`),
+self-paced auto-repeat with an initial delay, GPU-adaptive texture limits, and an
+info-panel overlay (`i`) with a from-scratch text layer. See
+[`current-status.md`](../current-status.md) for the full handoff.
+
+**Learned this session (informs later phases):**
+- The GPU-stack reversal (wgpu + CPU decode beats native-D3D12/zero-copy for this
+  workload) — already in `decisions.md`; v1 is wgpu.
+- **Decode-to-fit isn't just speed, it's quality:** uploading full-res + GPU
+  minification aliases/grains high-res photos. Downscaling to display size on the
+  CPU (Lanczos3) fixed it *and* shrank textures (helps the Phase-3 ring).
+- **Color space matters:** the surface must be non-sRGB (the JPEG bytes are already
+  sRGB) or the image washes out.
+- **Self-paced advance is the right nav model** — ignore OS key-repeat, drive from
+  the frame loop on held keys; this also killed a resource-churn slowdown. Phase 3
+  generalizes it with the prefetch ring.
+- **Startup window flicker** on Windows needs hidden-until-first-frame.
+
+**Next:** Phase 3 (the prefetch engine) is where the wedding-photo case (4–5 fps,
+decode-bound) becomes instant. See below.
+
 ## Phase 0 — Foundations  *(largely done)*
 - [x] Cargo workspace + 4 crates; `pb-core` (rng, shuffle, playlist, prefetch,
       cache) with **38 passing tests**; `pb-decode` trait; `pb-render::fit_rect`.
