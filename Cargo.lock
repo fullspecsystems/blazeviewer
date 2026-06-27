@@ -1831,6 +1831,7 @@ name = "pb-decode"
 version = "0.1.0"
 dependencies = [
  "fast_image_resize",
+ "flate2",
  "image 0.25.10",
  "imagepipe",
  "jxl-oxide",

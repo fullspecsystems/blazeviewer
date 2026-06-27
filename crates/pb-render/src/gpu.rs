@@ -131,8 +131,9 @@ fn build_pipelines(
         bind_group_layouts: &[&bgl],
         push_constant_ranges: &[],
     });
-    // Two pipelines, same shader: the photo is opaque (REPLACE); the corner
-    // info overlay is alpha-blended over it.
+    // Two pipelines, same shader: images and overlays are alpha-blended over the
+    // letterbox clear color. Opaque photos are unchanged, while transparent PNGs,
+    // WebPs, SVGs, and icons display without black matte artifacts.
     let make = |blend: wgpu::BlendState, label: &str| {
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(label),
@@ -164,7 +165,7 @@ fn build_pipelines(
             cache: None,
         })
     };
-    let photo = make(wgpu::BlendState::REPLACE, "pb-photo-pipeline");
+    let photo = make(wgpu::BlendState::ALPHA_BLENDING, "pb-photo-pipeline");
     let overlay = make(wgpu::BlendState::ALPHA_BLENDING, "pb-overlay-pipeline");
     (photo, overlay, bgl)
 }
@@ -964,13 +965,23 @@ mod tests {
     }
 
     #[test]
+    fn transparent_image_blends_over_letterbox() {
+        let img = [250, 0, 0, 0];
+        let out = render_offscreen(&img, 1, 1, 4, 4);
+        assert!(
+            close(at(&out, 4, 2, 2), LETTERBOX, 2),
+            "transparent image should reveal letterbox, got {:?}",
+            at(&out, 4, 2, 2)
+        );
+    }
+
+    #[test]
     fn test_pattern_is_well_formed() {
         let p = test_pattern(64, 40);
         assert_eq!(p.len(), 64 * 40 * 4);
         // top-left marker is red-ish
         assert_eq!(&p[0..4], &[220, 30, 30, 255]);
     }
-
     #[test]
     fn clamp_leaves_fitting_images_untouched() {
         let img = vec![5u8; 4 * 4 * 4];
