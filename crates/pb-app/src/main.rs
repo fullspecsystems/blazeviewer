@@ -10,7 +10,7 @@
 //!
 //!   space / →   next photo
 //!   ⌫ / ←       previous photo
-//!   0 / o       toggle fit-to-screen <-> original 1:1 (synchronous; outside the ring)
+//!   0 / o       toggle fit-to-screen <-> original 1:1 (full-res, also prefetched)
 //!   i           toggle info panel (path · resolution · codec)
 //!   esc         quit
 //!
@@ -52,9 +52,10 @@ const POOL_BUDGET_BYTES: usize = 512 * 1024 * 1024;
 /// decodes can't blow the frame budget.
 const UPLOADS_PER_TICK: usize = 2;
 
-/// Ring capacity from the per-slot (fit-box) size and the VRAM budget.
-fn ring_capacity(fit: FitBox) -> usize {
-    let slot_bytes = (fit.max_width as u64) * (fit.max_height as u64) * 4;
+/// Ring capacity from the per-slot byte size and the VRAM budget. Full-res
+/// (Original) slots are several times bigger than fit slots, so the prefetch
+/// window is correspondingly smaller — but still resident and async.
+fn ring_capacity(slot_bytes: u64) -> usize {
     ((RING_BUDGET_BYTES / slot_bytes.max(1)) as usize).clamp(4, 64)
 }
 
@@ -218,6 +219,29 @@ impl App {
         }
     }
 
+    /// Estimated bytes for one resident ring slot at the current scale mode: the
+    /// decode-target box for bounded modes (Fit, and Fill later), or the current
+    /// photo's true full-res size for Original. Sizes the ring so VRAM stays in
+    /// budget even though full-res textures are much larger than fit ones.
+    fn slot_bytes_estimate(&self) -> u64 {
+        let fit = self.fit.unwrap_or(FitBox {
+            max_width: 1,
+            max_height: 1,
+        });
+        let fit_bytes = fit.max_width as u64 * fit.max_height as u64 * 4;
+        match self.decode_fit() {
+            // Bounded decode (Fit/Fill): a slot is at most the target box.
+            Some(b) => (b.max_width as u64 * b.max_height as u64 * 4).max(1),
+            // Full-res (Original): estimate from the current photo's true size,
+            // never below a fit slot (and clamp_to_max bounds the real extreme).
+            None => self
+                .current
+                .as_ref()
+                .map(|m| (m.w as u64 * m.h as u64 * 4).max(fit_bytes))
+                .unwrap_or(fit_bytes),
+        }
+    }
+
     /// Recompute the prefetch want-list and hand it to the decode pool. Items
     /// already resident are not re-requested.
     fn request_prefetch(&mut self) {
@@ -363,8 +387,9 @@ impl App {
         self.pending_uploads = leftover;
     }
 
-    /// Synchronous decode + display of the current item (the first frame, geometry
-    /// changes, and all Original-mode navigation — which sits outside the ring).
+    /// Synchronous decode + display of the current item — an instant frame on the
+    /// first paint and on geometry changes (resize / scale-mode toggle), before the
+    /// async ring re-fills neighbors at the new resolution.
     fn load_current_sync(&mut self, event_loop: &ActiveEventLoop) {
         let Some(idx) = self.playlist.current() else {
             return;
@@ -406,7 +431,7 @@ impl App {
             max_width: 1,
             max_height: 1,
         });
-        let cap = ring_capacity(fit);
+        let cap = ring_capacity(self.slot_bytes_estimate());
         self.ring = ResidentRing::new(cap);
         if let Some(a) = self.active.as_mut() {
             a.renderer.reserve_ring(cap, fit.max_width, fit.max_height);
@@ -418,20 +443,9 @@ impl App {
         self.pending_uploads.clear();
     }
 
-    /// After a geometry change: resume prefetch in Fit mode, or — in Original mode
-    /// (which is outside the ring) — cancel prefetch and clear the want-list so the
-    /// event loop can idle instead of polling on stale, never-resident targets.
-    fn resume_prefetch_or_idle(&mut self) {
-        if self.scale_mode == ScaleMode::Fit {
-            self.request_prefetch();
-        } else {
-            self.targets.clear();
-            self.pool.set_targets(self.epoch, &[]);
-        }
-    }
-
-    /// Toggle fit-to-screen <-> original 1:1. Re-decodes the current image at the
-    /// new geometry immediately; Fit resumes prefetch, Original cancels it.
+    /// Toggle fit-to-screen <-> original 1:1. Bumps the geometry epoch (so the ring
+    /// re-buffers neighbors at the new resolution), shows the current image
+    /// immediately, then resumes prefetch. Both modes use the async engine.
     fn toggle_scale(&mut self, event_loop: &ActiveEventLoop) {
         self.scale_mode = match self.scale_mode {
             ScaleMode::Fit => ScaleMode::Original,
@@ -443,7 +457,7 @@ impl App {
         self.invalidate_geometry();
         self.load_current_sync(event_loop);
         self.target_item = self.playlist.current();
-        self.resume_prefetch_or_idle();
+        self.request_prefetch();
     }
 
     /// Decode the first image at the display size for an instant first frame.
@@ -542,15 +556,10 @@ impl App {
             self.playlist.prev();
         }
         self.target_item = self.playlist.current();
-        match self.scale_mode {
-            ScaleMode::Original => {
-                self.load_current_sync(event_loop);
-            }
-            ScaleMode::Fit => {
-                self.try_present_target(event_loop);
-                self.request_prefetch();
-            }
-        }
+        // Both modes use the async engine: present on a ring hit, else hold the
+        // previous frame while the decode (fit-sized or full-res) lands.
+        self.try_present_target(event_loop);
+        self.request_prefetch();
     }
 
     /// Which way we're currently paging, from held keys (both/neither = idle).
@@ -665,7 +674,7 @@ impl ApplicationHandler for App {
             max_width: 1,
             max_height: 1,
         });
-        let cap = ring_capacity(fit);
+        let cap = ring_capacity(self.slot_bytes_estimate());
         self.ring = ResidentRing::new(cap);
         renderer.reserve_ring(cap, fit.max_width, fit.max_height);
         let (ahead, behind) = window_for_capacity(cap);
@@ -694,11 +703,11 @@ impl ApplicationHandler for App {
                         a.renderer.resize(size.width, size.height);
                     }
                     // Geometry changed: invalidate the ring, re-show the current
-                    // image at the new size, and refill (Fit) or idle (Original).
+                    // image at the new size, and refill the ring at that size.
                     self.invalidate_geometry();
                     self.load_current_sync(event_loop);
                     self.target_item = self.playlist.current();
-                    self.resume_prefetch_or_idle();
+                    self.request_prefetch();
                 }
             }
 
