@@ -10,6 +10,7 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
 use crate::fit::fit_rect;
+use crate::upload::{StagingUpload, UploadStrategy};
 use crate::{RenderError, Renderer, ScaleMode};
 
 /// Background (letterbox) color, straight RGBA8.
@@ -249,6 +250,7 @@ fn upload_image(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     bgl: &wgpu::BindGroupLayout,
+    uploader: &mut dyn UploadStrategy,
     image: &[u8],
     img_w: u32,
     img_h: u32,
@@ -274,21 +276,8 @@ fn upload_image(
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    queue.write_texture(
-        wgpu::ImageCopyTexture {
-            texture: &tex,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        image,
-        wgpu::ImageDataLayout {
-            offset: 0,
-            bytes_per_row: Some(img_w * 4),
-            rows_per_image: Some(img_h),
-        },
-        size,
-    );
+    // The staging-ring upload (`copy_buffer_to_texture`), not `write_texture`.
+    uploader.upload(device, queue, &tex, image, img_w, img_h);
     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
     // Linear so large photos scaled down to the screen are smooth, not grainy/
     // aliased. (Crisp high-ratio downscaling via mipmaps/Lanczos is a later
@@ -420,6 +409,7 @@ pub struct WgpuRenderer {
     img_h: u32,
     scale_mode: ScaleMode,
     overlay: Option<OverlayDraw>,
+    upload: Box<dyn UploadStrategy>,
 }
 
 impl WgpuRenderer {
@@ -488,7 +478,8 @@ impl WgpuRenderer {
 
         let scale_mode = ScaleMode::Fit;
         let (pipeline, overlay_pipeline, bgl) = build_pipelines(&device, format);
-        let bind_group = upload_image(&device, &queue, &bgl, image, img_w, img_h);
+        let mut upload: Box<dyn UploadStrategy> = Box::new(StagingUpload::new());
+        let bind_group = upload_image(&device, &queue, &bgl, upload.as_mut(), image, img_w, img_h);
         let vbuf = vertex_buffer(
             &device,
             scale_mode,
@@ -514,6 +505,7 @@ impl WgpuRenderer {
             img_h,
             scale_mode,
             overlay: None,
+            upload,
         }
     }
 
@@ -567,7 +559,15 @@ impl Renderer for WgpuRenderer {
     }
 
     fn set_image(&mut self, rgba: &[u8], width: u32, height: u32) {
-        self.bind_group = upload_image(&self.device, &self.queue, &self.bgl, rgba, width, height);
+        self.bind_group = upload_image(
+            &self.device,
+            &self.queue,
+            &self.bgl,
+            self.upload.as_mut(),
+            rgba,
+            width,
+            height,
+        );
         self.img_w = width;
         self.img_h = height;
         // Re-place the quad for the new image.
@@ -602,7 +602,15 @@ impl Renderer for WgpuRenderer {
     fn set_overlay(&mut self, panel: Option<(&[u8], u32, u32)>, margin: u32) {
         self.overlay = match panel {
             Some((rgba, w, h)) => {
-                let bind_group = upload_image(&self.device, &self.queue, &self.bgl, rgba, w, h);
+                let bind_group = upload_image(
+                    &self.device,
+                    &self.queue,
+                    &self.bgl,
+                    self.upload.as_mut(),
+                    rgba,
+                    w,
+                    h,
+                );
                 let vbuf = self
                     .device
                     .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -719,7 +727,8 @@ async fn render_offscreen_async(
 
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let (pipeline, _overlay_pipeline, bgl) = build_pipelines(&device, format);
-    let bind_group = upload_image(&device, &queue, &bgl, image, img_w, img_h);
+    let mut upload = StagingUpload::new();
+    let bind_group = upload_image(&device, &queue, &bgl, &mut upload, image, img_w, img_h);
     let vbuf = vertex_buffer(&device, ScaleMode::Fit, img_w, img_h, screen_w, screen_h);
     let ibuf = index_buffer(&device);
 

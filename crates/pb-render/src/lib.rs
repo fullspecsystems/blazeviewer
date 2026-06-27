@@ -11,9 +11,11 @@
 
 pub mod fit;
 pub mod gpu;
+pub mod upload;
 
 pub use fit::{fit_rect, FitRect};
 pub use gpu::{render_offscreen, test_pattern, WgpuRenderer, LETTERBOX};
+pub use upload::{StagingUpload, UploadStrategy};
 
 /// How the image is sized to the viewport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
