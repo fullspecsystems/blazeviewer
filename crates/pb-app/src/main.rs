@@ -1,30 +1,27 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-//! PhotoBlaze — the application shell (Phase 2).
+//! PhotoBlaze — the application shell (Phase 3: the prefetch engine).
 //!
-//! A chrome-less, fit-to-screen viewer that pages through a folder of JPEGs.
-//! Every photo is shown — slow ones just take their moment to decode; nothing is
-//! skipped.
+//! A chrome-less, fit-to-screen viewer built to **hold a key and fly**. Decode +
+//! file I/O run on a priority worker pool (`decode_pool`), neighbors are decoded
+//! *ahead* of you and uploaded into a resident GPU texture ring, so a keypress is
+//! a **rebind, never a decode or upload**. Advance is **gated on readiness**:
+//! every photo is shown in order (none skipped); a cache miss holds the previous
+//! frame until its decode lands, then shows it — fly speed is min(refresh, decode).
 //!
 //!   space / →   next photo
 //!   ⌫ / ←       previous photo
-//!   0 / o       toggle fit-to-screen <-> original 1:1 (centered)
+//!   0 / o       toggle fit-to-screen <-> original 1:1 (synchronous; outside the ring)
 //!   i           toggle info panel (path · resolution · codec)
 //!   esc         quit
-//!
-//! Holding a key is **self-paced**: OS auto-repeats are ignored, and advancing is
-//! driven from the frame loop based on which key is currently held, capped at the
-//! display refresh. This means releasing a key stops within one decode — no
-//! backlog of queued repeats. Phase 3 adds the decode pool + prefetch ring so big
-//! photos are decoded *ahead* of you (the per-photo wait disappears); random
-//! navigation (enter) comes later.
 //!
 //! Usage:
 //!   cargo run -p pb-app --release -- "D:\Pictures\2003\Halloween"
 //!   cargo run -p pb-app --release -- "D:\Pictures" -r          # recurse subfolders
-//!   cargo run -p pb-app --release -- "D:\Pictures" -r --windowed
+//!   cargo run -p pb-app --release -- "D:\Pictures" -r --windowed --metrics
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -35,21 +32,67 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Fullscreen, Window, WindowId};
 
-use pb_core::Playlist;
+use pb_core::{prefetch_targets, Playlist, ResidentRing};
 use pb_decode::{decode_image_file, DecodedImage, FitBox};
 use pb_render::{test_pattern, Renderer, ScaleMode, WgpuRenderer};
 
+mod decode_pool;
 mod hud;
 mod metrics;
+use decode_pool::{recommended_workers, DecodeFn, DecodePool, Outcome};
 use hud::Hud;
 use metrics::StageTimes;
 
+/// VRAM budget for the resident texture ring (~1.5 GB → ~16–32 fit-size slots on
+/// a 7680-wide display, far more on smaller ones). Capacity is clamped to [4, 64].
+const RING_BUDGET_BYTES: u64 = 1_500_000_000;
+/// Cap on decoded-but-not-yet-uploaded bytes held by the pool (backpressure).
+const POOL_BUDGET_BYTES: usize = 512 * 1024 * 1024;
+/// Max slot uploads performed per `about_to_wait` tick, so a burst of finished
+/// decodes can't blow the frame budget.
+const UPLOADS_PER_TICK: usize = 2;
+
+/// Ring capacity from the per-slot (fit-box) size and the VRAM budget.
+fn ring_capacity(fit: FitBox) -> usize {
+    let slot_bytes = (fit.max_width as u64) * (fit.max_height as u64) * 4;
+    ((RING_BUDGET_BYTES / slot_bytes.max(1)) as usize).clamp(4, 64)
+}
+
+/// Split the ring into an ahead/behind prefetch window (the current item, always
+/// resident, takes the remaining slot). Biased forward; a few behind so reversing
+/// stays cheap.
+fn window_for_capacity(cap: usize) -> (usize, usize) {
+    let usable = cap.saturating_sub(1);
+    let ahead = (usable * 4 / 5).max(1);
+    let behind = usable.saturating_sub(ahead);
+    (ahead, behind)
+}
+
 /// One photo's info, for the corner overlay panel.
+#[derive(Clone)]
 struct PhotoMeta {
     rel: String,
     w: u32,
     h: u32,
     codec: &'static str,
+}
+
+/// Build a photo's info panel data from its path + decoded image.
+fn meta_for_path(path: &Path, root: &Path, img: &DecodedImage) -> PhotoMeta {
+    let rel = match path.strip_prefix(root) {
+        Ok(r) => r.to_string_lossy().replace('\\', "/"),
+        Err(_) => path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_string(),
+    };
+    PhotoMeta {
+        rel,
+        w: img.orig_width,
+        h: img.orig_height,
+        codec: img.codec,
+    }
 }
 
 struct Active {
@@ -59,7 +102,7 @@ struct Active {
 
 struct App {
     windowed: bool,
-    paths: Vec<PathBuf>,
+    paths: Vec<Arc<Path>>,
     playlist: Playlist,
     active: Option<Active>,
     /// Physical keys currently held (OS auto-repeat ignored).
@@ -70,8 +113,7 @@ struct App {
     frame_interval: Duration,
     /// When the current hold's first press happened (for the initial-delay gate).
     hold_start: Option<Instant>,
-    /// Delay after the first press before auto-repeat begins, so a quick tap is a
-    /// single photo rather than a burst.
+    /// Delay after the first press before auto-repeat begins (tap = one photo).
     initial_delay: Duration,
     /// Decode-to-fit target = the display size; photos are downscaled to it.
     fit: Option<FitBox>,
@@ -91,13 +133,38 @@ struct App {
     scale_factor: f32,
     /// Idle time before the panel appears once you stop navigating.
     idle_delay: Duration,
-    /// Per-stage timing (decode/render/...); disabled unless `--metrics` is passed.
+    /// Per-stage timing (decode/upload/render); disabled unless `--metrics` is passed.
     metrics: StageTimes,
+
+    // --- Phase 3 prefetch engine ---
+    /// Off-thread priority decode pool (decode + I/O never block the event loop).
+    pool: DecodePool,
+    /// Completed decodes, drained + uploaded during `about_to_wait`.
+    results: Receiver<Outcome>,
+    /// Pure item↔slot residency mirror for the renderer's texture ring.
+    ring: ResidentRing,
+    /// Geometry generation; bumped on resize / fit toggle. Stale-epoch decodes are
+    /// discarded so an old-size result can't land on screen.
+    epoch: u64,
+    /// What's currently on screen.
+    displayed_item: Option<usize>,
+    /// The item we're trying to show (== displayed once caught up).
+    target_item: Option<usize>,
+    /// The current prefetch want-list (priority order), used as eviction `keep`.
+    targets: Vec<usize>,
+    /// Per-item info panel data, cached when decoded (RAM-only; privacy task #2).
+    meta_cache: HashMap<usize, PhotoMeta>,
+    /// Prefetch window: items ahead / behind the cursor.
+    ahead: usize,
+    behind: usize,
 }
 
 impl App {
     fn new(windowed: bool, root: PathBuf, paths: Vec<PathBuf>, metrics: StageTimes) -> Self {
+        let paths: Vec<Arc<Path>> = paths.into_iter().map(Arc::from).collect();
         let playlist = Playlist::new(paths.len(), 0);
+        let decode: Arc<DecodeFn> = Arc::new(|p: &Path, fit| decode_image_file(p, fit));
+        let (pool, results) = DecodePool::new(recommended_workers(), POOL_BUDGET_BYTES, decode);
         Self {
             windowed,
             paths,
@@ -118,11 +185,21 @@ impl App {
             scale_factor: 1.0,
             idle_delay: Duration::from_millis(50),
             metrics,
+            pool,
+            results,
+            ring: ResidentRing::new(0),
+            epoch: 1,
+            displayed_item: None,
+            target_item: None,
+            targets: Vec::new(),
+            meta_cache: HashMap::new(),
+            ahead: 8,
+            behind: 2,
         }
     }
 
-    /// The decode-to-fit target for the current mode: the display size in Fit
-    /// mode (downscale large photos), or None in Original mode (decode full-res).
+    /// The decode-to-fit target for the current mode: the display size in Fit mode
+    /// (downscale large photos), or None in Original mode (decode full-res).
     fn decode_fit(&self) -> Option<FitBox> {
         match self.scale_mode {
             ScaleMode::Fit => self.fit,
@@ -130,8 +207,145 @@ impl App {
         }
     }
 
-    /// Toggle between fit-to-screen and original 1:1 (re-decodes at the right
-    /// resolution: full-res for Original, downscaled for Fit).
+    /// Recompute the prefetch want-list and hand it to the decode pool. Items
+    /// already resident are not re-requested.
+    fn request_prefetch(&mut self) {
+        self.targets = prefetch_targets(&self.playlist, self.ahead, self.behind);
+        let fit = self.decode_fit();
+        let jobs: Vec<(usize, Arc<Path>, Option<FitBox>)> = self
+            .targets
+            .iter()
+            .filter(|&&t| self.ring.slot_for(t).is_none())
+            .map(|&t| (t, self.paths[t].clone(), fit))
+            .collect();
+        self.pool.set_targets(self.epoch, &jobs);
+    }
+
+    /// Show ring `slot` (holding `item`): the keypress fast path — a rebind, no
+    /// decode or upload. Updates the pin, title, and info panel.
+    fn present_item(&mut self, item: usize, slot: usize, event_loop: &ActiveEventLoop) {
+        let title = title_for(&self.paths[item], item, self.paths.len());
+        if let Some(a) = self.active.as_mut() {
+            a.renderer.present_slot(slot);
+            // The photo changed — drop the stale panel; it returns once idle.
+            a.renderer.set_overlay(None, 0);
+            a.window.set_title(&title);
+        }
+        self.ring.set_displayed(slot);
+        self.displayed_item = Some(item);
+        self.current = self.meta_cache.get(&item).cloned();
+        self.overlay_shown = false;
+        self.draw(event_loop);
+    }
+
+    /// Try to show `target_item`: present it on a ring hit, otherwise keep the
+    /// previous frame (a miss is a hold, never a skip). Returns whether shown.
+    fn try_present_target(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        let Some(item) = self.target_item else {
+            return false;
+        };
+        if self.displayed_item == Some(item) {
+            return true;
+        }
+        if let Some(slot) = self.ring.slot_for(item) {
+            self.present_item(item, slot, event_loop);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Drain finished decodes (budgeted): discard stale-epoch results, upload the
+    /// rest into ring slots, and present the target if its decode just arrived.
+    fn drain_results(&mut self, event_loop: &ActiveEventLoop) {
+        let mut uploads = 0;
+        while uploads < UPLOADS_PER_TICK {
+            let outcome = match self.results.try_recv() {
+                Ok(o) => o,
+                Err(_) => break,
+            };
+            if outcome.key.epoch != self.epoch {
+                continue; // decoded for an old geometry; its bytes free on drop
+            }
+            let item = outcome.key.item;
+            if self.ring.slot_for(item).is_some() {
+                continue; // already resident (a rare duplicate decode)
+            }
+            let img = match outcome.result {
+                Ok(ref img) => img,
+                Err(ref e) => {
+                    eprintln!("decode failed for item {item}: {e}");
+                    continue;
+                }
+            };
+            if !self.meta_cache.contains_key(&item) {
+                let m = meta_for_path(&self.paths[item], &self.root, img);
+                self.meta_cache.insert(item, m);
+            }
+            if let Some(res) = self.ring.reserve(item, self.epoch, &self.targets) {
+                if let Some(a) = self.active.as_mut() {
+                    let t0 = Instant::now();
+                    a.renderer
+                        .upload_slot(res.slot, &img.pixels, img.width, img.height);
+                    self.metrics.record("upload", t0.elapsed());
+                }
+                self.ring.mark_resident(item, res.slot, self.epoch);
+                uploads += 1;
+                if self.target_item == Some(item) && self.displayed_item != Some(item) {
+                    self.present_item(item, res.slot, event_loop);
+                }
+            }
+        }
+    }
+
+    /// Synchronous decode + display of the current item (the first frame, geometry
+    /// changes, and all Original-mode navigation — which sits outside the ring).
+    fn load_current_sync(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(idx) = self.playlist.current() else {
+            return;
+        };
+        let t0 = Instant::now();
+        let decoded = decode_image_file(&self.paths[idx], self.decode_fit());
+        self.metrics.record("decode", t0.elapsed());
+        match decoded {
+            Ok(img) => {
+                let meta = meta_for_path(&self.paths[idx], &self.root, &img);
+                self.current = Some(meta.clone());
+                self.meta_cache.insert(idx, meta);
+                let title = title_for(&self.paths[idx], idx, self.paths.len());
+                if let Some(a) = self.active.as_mut() {
+                    a.renderer.set_image(&img.pixels, img.width, img.height);
+                    a.renderer.set_overlay(None, 0);
+                    a.window.set_title(&title);
+                }
+                self.overlay_shown = false;
+                self.displayed_item = Some(idx);
+            }
+            Err(e) => eprintln!("decode failed: {}: {e}", self.paths[idx].display()),
+        }
+        self.draw(event_loop);
+    }
+
+    /// Bump the geometry epoch and rebuild the (now-invalid) ring. Called on resize
+    /// and fit/original toggle so in-flight decodes for the old size are discarded.
+    fn invalidate_geometry(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1);
+        let fit = self.fit.unwrap_or(FitBox {
+            max_width: 1,
+            max_height: 1,
+        });
+        let cap = ring_capacity(fit);
+        self.ring = ResidentRing::new(cap);
+        if let Some(a) = self.active.as_mut() {
+            a.renderer.reserve_ring(cap, fit.max_width, fit.max_height);
+        }
+        let (ahead, behind) = window_for_capacity(cap);
+        self.ahead = ahead;
+        self.behind = behind;
+    }
+
+    /// Toggle fit-to-screen <-> original 1:1. Re-decodes the current image at the
+    /// new geometry immediately; Fit also resumes prefetch.
     fn toggle_scale(&mut self, event_loop: &ActiveEventLoop) {
         self.scale_mode = match self.scale_mode {
             ScaleMode::Fit => ScaleMode::Original,
@@ -140,16 +354,22 @@ impl App {
         if let Some(a) = self.active.as_mut() {
             a.renderer.set_scale_mode(self.scale_mode);
         }
-        self.load_current();
-        self.draw(event_loop);
+        self.invalidate_geometry();
+        self.load_current_sync(event_loop);
+        self.target_item = self.playlist.current();
+        if self.scale_mode == ScaleMode::Fit {
+            self.request_prefetch();
+        }
     }
 
-    /// Decode the image at the current cursor (or a fallback) for first display.
+    /// Decode the first image at the display size for an instant first frame.
     fn initial_image(&mut self) -> (Vec<u8>, u32, u32, String) {
         match self.playlist.current() {
             Some(idx) => match decode_image_file(&self.paths[idx], self.decode_fit()) {
                 Ok(img) => {
-                    self.current = Some(self.meta_for(idx, &img));
+                    let meta = meta_for_path(&self.paths[idx], &self.root, &img);
+                    self.current = Some(meta.clone());
+                    self.meta_cache.insert(idx, meta);
                     let title = title_for(&self.paths[idx], idx, self.paths.len());
                     (img.pixels, img.width, img.height, title)
                 }
@@ -165,25 +385,6 @@ impl App {
                 let p = test_pattern(1600, 1000);
                 (p, 1600, 1000, "PhotoBlaze (no images)".to_string())
             }
-        }
-    }
-
-    /// Build the current photo's info from its decoded image + path.
-    fn meta_for(&self, idx: usize, img: &DecodedImage) -> PhotoMeta {
-        let path = &self.paths[idx];
-        let rel = match path.strip_prefix(&self.root) {
-            Ok(r) => r.to_string_lossy().replace('\\', "/"),
-            Err(_) => path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("?")
-                .to_string(),
-        };
-        PhotoMeta {
-            rel,
-            w: img.orig_width,
-            h: img.orig_height,
-            codec: img.codec,
         }
     }
 
@@ -224,33 +425,7 @@ impl App {
         self.draw(event_loop);
     }
 
-    /// Decode the current cursor image into the renderer. On a decode error the
-    /// previous image stays on screen.
-    fn load_current(&mut self) {
-        let Some(idx) = self.playlist.current() else {
-            return;
-        };
-        let t0 = Instant::now();
-        let decoded = decode_image_file(&self.paths[idx], self.decode_fit());
-        self.metrics.record("decode", t0.elapsed());
-        match decoded {
-            Ok(img) => {
-                self.current = Some(self.meta_for(idx, &img));
-                let title = title_for(&self.paths[idx], idx, self.paths.len());
-                if let Some(a) = self.active.as_mut() {
-                    a.renderer.set_image(&img.pixels, img.width, img.height);
-                    // The photo changed — drop the stale panel; it reappears once
-                    // you stop navigating (see `about_to_wait`).
-                    a.renderer.set_overlay(None, 0);
-                    a.window.set_title(&title);
-                }
-                self.overlay_shown = false;
-            }
-            Err(e) => eprintln!("decode failed: {}: {e}", self.paths[idx].display()),
-        }
-    }
-
-    /// Render one frame and reclaim the previous image's GPU texture.
+    /// Render one frame.
     fn draw(&mut self, event_loop: &ActiveEventLoop) {
         let t0 = Instant::now();
         let drew = if let Some(a) = self.active.as_mut() {
@@ -268,17 +443,25 @@ impl App {
         }
     }
 
-    /// Advance one photo (every photo is shown; slow ones just take their moment)
-    /// and draw it.
-    fn navigate(&mut self, forward: bool, event_loop: &ActiveEventLoop) {
+    /// Advance one photo. In Fit mode this is the gated engine path (present on a
+    /// ring hit, else hold + prefetch); Original mode decodes synchronously.
+    fn advance(&mut self, forward: bool, event_loop: &ActiveEventLoop) {
         if forward {
             self.playlist.next();
         } else {
             self.playlist.prev();
         }
-        self.load_current();
-        self.draw(event_loop);
         self.last_advance = Some(Instant::now());
+        self.target_item = self.playlist.current();
+        match self.scale_mode {
+            ScaleMode::Original => {
+                self.load_current_sync(event_loop);
+            }
+            ScaleMode::Fit => {
+                self.try_present_target(event_loop);
+                self.request_prefetch();
+            }
+        }
     }
 
     /// Which way we're currently paging, from held keys (both/neither = idle).
@@ -291,6 +474,15 @@ impl App {
             (false, true) => Some(false),
             _ => None,
         }
+    }
+
+    /// Whether prefetch/upload work is still outstanding (keep polling if so).
+    fn work_pending(&self) -> bool {
+        self.displayed_item != self.target_item
+            || self
+                .targets
+                .iter()
+                .any(|&t| self.ring.slot_for(t).is_none())
     }
 }
 
@@ -364,7 +556,9 @@ impl ApplicationHandler for App {
                 let decoded = decode_image_file(&self.paths[idx], self.decode_fit());
                 self.metrics.record("decode", t0.elapsed());
                 if let Ok(img) = decoded {
-                    self.current = Some(self.meta_for(idx, &img));
+                    let meta = meta_for_path(&self.paths[idx], &self.root, &img);
+                    self.current = Some(meta.clone());
+                    self.meta_cache.insert(idx, meta);
                     renderer.set_image(&img.pixels, img.width, img.height);
                 }
             }
@@ -375,7 +569,24 @@ impl ApplicationHandler for App {
         window.set_visible(true);
         window.request_redraw();
 
+        // Phase 3 engine: size the resident ring to the display and start filling
+        // it. The first frame is already up via the single-image path; navigation
+        // switches to the ring.
+        let fit = self.fit.unwrap_or(FitBox {
+            max_width: 1,
+            max_height: 1,
+        });
+        let cap = ring_capacity(fit);
+        self.ring = ResidentRing::new(cap);
+        renderer.reserve_ring(cap, fit.max_width, fit.max_height);
+        let (ahead, behind) = window_for_capacity(cap);
+        self.ahead = ahead;
+        self.behind = behind;
+        self.displayed_item = self.playlist.current();
+        self.target_item = self.playlist.current();
+
         self.active = Some(Active { window, renderer });
+        self.request_prefetch();
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -383,16 +594,24 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => event_loop.exit(),
 
             WindowEvent::Resized(size) => {
-                // Future decodes target the new size; the current image refits on
-                // the GPU until the next navigation re-decodes at the new size.
-                self.fit = Some(FitBox {
+                let new_fit = FitBox {
                     max_width: size.width.max(1),
                     max_height: size.height.max(1),
-                });
-                if let Some(a) = self.active.as_mut() {
-                    a.renderer.resize(size.width, size.height);
+                };
+                if Some(new_fit) != self.fit {
+                    self.fit = Some(new_fit);
+                    if let Some(a) = self.active.as_mut() {
+                        a.renderer.resize(size.width, size.height);
+                    }
+                    // Geometry changed: invalidate the ring, re-show the current
+                    // image at the new size, and refill (Fit).
+                    self.invalidate_geometry();
+                    self.load_current_sync(event_loop);
+                    self.target_item = self.playlist.current();
+                    if self.scale_mode == ScaleMode::Fit {
+                        self.request_prefetch();
+                    }
                 }
-                self.draw(event_loop);
             }
 
             WindowEvent::RedrawRequested => self.draw(event_loop),
@@ -418,12 +637,12 @@ impl ApplicationHandler for App {
                             KeyCode::Space | KeyCode::ArrowRight => {
                                 self.held.insert(code);
                                 self.hold_start = Some(Instant::now());
-                                self.navigate(true, event_loop);
+                                self.advance(true, event_loop);
                             }
                             KeyCode::Backspace | KeyCode::ArrowLeft => {
                                 self.held.insert(code);
                                 self.hold_start = Some(Instant::now());
-                                self.navigate(false, event_loop);
+                                self.advance(false, event_loop);
                             }
                             // Toggle fit-to-screen <-> original 1:1 (centered).
                             KeyCode::Digit0 | KeyCode::KeyO => self.toggle_scale(event_loop),
@@ -451,32 +670,32 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // Self-paced auto-repeat: one photo on press, then — after an initial delay
-        // so a quick tap is a single photo — repeat at the frame rate while held.
-        // Releasing clears `held` and we go idle immediately.
+        // 1. Absorb finished decodes (uploads; presents the target if it arrived).
+        self.drain_results(event_loop);
+
+        // 2. Gated self-paced advance.
         match self.held_direction() {
             Some(forward) => {
                 let now = Instant::now();
-                let repeat_begin = self.hold_start.map(|t| t + self.initial_delay);
-                match repeat_begin {
-                    // Still within the initial delay — don't repeat yet.
-                    Some(begin) if now < begin => {
+                // Within the initial tap delay: don't repeat yet.
+                if let Some(begin) = self.hold_start.map(|t| t + self.initial_delay) {
+                    if now < begin {
                         event_loop.set_control_flow(ControlFlow::WaitUntil(begin));
+                        return;
                     }
-                    // Repeating: advance at most once per frame interval.
-                    _ => match self.last_advance {
-                        Some(t) if now < t + self.frame_interval => {
-                            event_loop
-                                .set_control_flow(ControlFlow::WaitUntil(t + self.frame_interval));
-                        }
-                        _ => {
-                            self.navigate(forward, event_loop);
-                            event_loop.set_control_flow(ControlFlow::WaitUntil(
-                                Instant::now() + self.frame_interval,
-                            ));
-                        }
-                    },
                 }
+                // Advance only when caught up (target shown) AND a frame elapsed —
+                // so every photo is shown and a miss simply holds.
+                let caught_up = self.displayed_item == self.target_item;
+                let due = self
+                    .last_advance
+                    .is_none_or(|t| now >= t + self.frame_interval);
+                if caught_up && due {
+                    self.advance(forward, event_loop);
+                } else if !caught_up {
+                    self.try_present_target(event_loop);
+                }
+                event_loop.set_control_flow(ControlFlow::WaitUntil(now + self.frame_interval));
             }
             None => {
                 self.hold_start = None;
@@ -493,7 +712,15 @@ impl ApplicationHandler for App {
                     }
                     self.show_overlay(event_loop);
                 }
-                event_loop.set_control_flow(ControlFlow::Wait);
+                // Keep polling while prefetch is still filling or a target isn't
+                // shown yet; otherwise go fully idle until the next event.
+                if self.work_pending() {
+                    event_loop.set_control_flow(ControlFlow::WaitUntil(
+                        Instant::now() + self.frame_interval,
+                    ));
+                } else {
+                    event_loop.set_control_flow(ControlFlow::Wait);
+                }
             }
         }
     }
