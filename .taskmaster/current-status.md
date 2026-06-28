@@ -59,6 +59,14 @@ load (~240 ms each when 8 run) — flying through dense HEIC could still be prev
 Plus the earlier follow-ups: Sony HEIC color (**tasks.json #24**), Fill-mode decode-to-fit,
 sync load paths bypass preview-first, AVIF on libheif.
 
+**Privacy cleanup (flagged 2026-06-28, NOT yet applied):** the `--metrics` `pool decode`
+diagnostic logs viewed photo **filenames** (`main.rs` ~L491, committed in `f346506`) to
+stdout. Low practical exposure — opt-in flag, and release is a GUI subsystem with no console
+— but the strict no-trace guarantee says *"no log of viewed paths,"* and `--metrics` is meant
+to run in **release** (benchmarking), so the code ships. One-line fix: log the **extension
+only** (`prev .arw`, not `prev DSC02715.ARW`) — keeps the format-level diagnostic, drops photo
+identity. Held off because `main.rs` is the parallel session's active file.
+
 ### 🧪 2026-06-28 — parallel thumbnail extraction: TRIED, REVERTED (negative result — don't blind-retry)
 Implemented libheif thumbnail extraction to replace WIC `GetThumbnail` (the ~240 ms
 serializer above). **The capability works**: `heif_image_handle_get_thumbnail` + decode
