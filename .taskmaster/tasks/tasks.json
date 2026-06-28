@@ -742,7 +742,7 @@
           {
             "id": 5,
             "title": "Entry points + dismissal (menu 'Settings...', hotkey, Esc/Save/Cancel)",
-            "description": "Wire the muda menu item + a hotkey; pause hold-to-fly while open; reflect remaps in the help overlay + menu hints.",
+            "description": "DECIDED: Settings lives under File > Settings (not Edit - that is for clipboard ops on Windows), with Ctrl+, (VS Code-style). Ctrl+, is already wired; the remaining bit is the File menu item. Pause hold-to-fly while open; reflect remaps in the help overlay + menu hints.",
             "status": "pending",
             "dependencies": []
           },
@@ -906,6 +906,53 @@
             "status": "done",
             "dependencies": []
           }
+        ]
+      },
+      {
+        "id": 27,
+        "title": "Edit menu + Copy image to clipboard (Ctrl+C)",
+        "description": "Add an Edit menu with Copy (Ctrl+C) that puts the current photo on the Windows clipboard.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "details": "NEW Edit menu (muda) with Copy (Ctrl+C). Copies the FULL-RESOLUTION current image to the clipboard - decode the original at full res on Ctrl+C (NOT our fit-downscaled ring texture) and hand RGBA to arboard's set_image (writes CF_DIB / CF_DIBV5; arboard already rides in transitively via egui-winit - add it as a direct dep for clarity). Wire both the Edit > Copy menu item (new MenuAction::Copy) and the Ctrl+C key in the winit handler to the same App::copy_image. Enable Copy only when an image is loaded. Idiomatic label is just 'Copy' (the image context makes it unambiguous). PRIVACY: the clipboard is a user-initiated action, not a viewing trace, so no conflict with task 2 (note: Windows clipboard history / Win+V may retain it, but that is the user's own OS setting). TDD: extend the pure menu::action_for mapping + test; the clipboard write is an I/O shell (manual: Ctrl+C, then paste into Paint/Word).",
+        "testStrategy": "Unit: menu::action_for maps the Copy id. Manual: Ctrl+C (and Edit > Copy) then paste into another app shows the full-res image; Copy is greyed when no image is loaded.",
+        "subtasks": [
+          { "id": 1, "title": "Edit menu + Copy action/binding", "description": "Add the Edit submenu with Copy; new MenuAction::Copy + Ctrl+C key, both calling App::copy_image; enable only when an image is loaded.", "status": "pending", "dependencies": [] },
+          { "id": 2, "title": "Full-res decode + arboard set_image", "description": "Decode the original at full res on demand and write RGBA to the clipboard via arboard (CF_DIB/DIBV5); add arboard as a direct dep.", "status": "pending", "dependencies": [] },
+          { "id": 3, "title": "Verify paste in another app", "description": "Manual round-trip: copy, paste into Paint/Word; confirm full resolution.", "status": "pending", "dependencies": [] }
+        ]
+      },
+      {
+        "id": 28,
+        "title": "Delete current photo: Recycle Bin (Del) + Delete Permanently (Shift+Del)",
+        "description": "Idiomatic Windows delete for the current photo, mirroring Explorer: Del sends to the Recycle Bin (recoverable); Shift+Del deletes permanently with a confirmation.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "details": "Mirror Explorer. Delete (Del) -> Recycle Bin (recoverable) via the `trash` crate (IFileOperation) - NO confirmation, just a bottom toast 'Moved to Recycle Bin'. Delete Permanently (Shift+Del) -> std::fs::remove_file WITH a confirmation dialog (DECIDED: confirm permanent only). Labels 'Delete' / 'Delete Permanently' under the File menu (deleting a file is a file op; matches IrfanView). New MenuAction::Delete / DeletePermanently + Del / Shift+Del keys. AFTER a delete: remove the path from the in-memory path list + Playlist, fix the cursor, drop the ring slot, and advance to the next photo (or previous if it was the last); handle the now-empty case (empty state). CONFIRMATION: a native MessageBoxW (lightweight, idiomatic Yes/No) is simplest; could also reuse the egui dialog infra. SAFETY/POLICY: this is the FIRST destructive op - PhotoBlaze has been read-only on photos. It is fine because it is explicit/user-initiated, but document the new boundary in CLAUDE.md ('photos are modified or removed only on explicit user command'); the privacy no-trace guarantee (task 2, about not logging viewing) is unaffected. UNDO: Ctrl+Z to restore the last Recycle-Bin delete (trash::os_limited can list/restore) - nice-to-have, can defer. Crate: trash. TDD: the playlist-removal + cursor-advance logic is pure (pb-core or app) - unit-test the index fix, last-item -> previous, and empty cases; the delete + confirm dialog are I/O/UI (manual).",
+        "testStrategy": "Unit: pure playlist-remove/advance (remove middle keeps order + cursor; remove last -> previous; remove only item -> empty). Manual: Del moves to Recycle Bin + toast + advances; Shift+Del prompts, then permanently deletes; the file is gone / in the bin as expected.",
+        "subtasks": [
+          { "id": 1, "title": "Del -> Recycle Bin (trash) + toast", "description": "MenuAction::Delete + Del key -> trash::delete; show 'Moved to Recycle Bin'; no confirm.", "status": "pending", "dependencies": [] },
+          { "id": 2, "title": "Shift+Del -> permanent, with confirmation", "description": "MenuAction::DeletePermanently + Shift+Del -> confirm (MessageBoxW) then fs::remove_file.", "status": "pending", "dependencies": [] },
+          { "id": 3, "title": "Playlist mutation + advance (pure, tested)", "description": "Remove the deleted index, fix cursor, invalidate ring slot, advance (or previous if last; empty state if none left).", "status": "pending", "dependencies": [] },
+          { "id": 4, "title": "Document the write/delete boundary + (defer) Ctrl+Z undo", "description": "Add the 'modify only on explicit command' note to CLAUDE.md; optionally restore the last Recycle-Bin delete via trash (deferred).", "status": "pending", "dependencies": [] }
+        ]
+      },
+      {
+        "id": 29,
+        "title": "Save rotation to EXIF (Ctrl+S), lossless",
+        "description": "Persist the current photo's RAM rotation to the file by updating the EXIF Orientation tag - lossless (no pixel re-encode). JPEG first; disabled for formats without EXIF orientation.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [1],
+        "details": "Persist a rotation LOSSLESSLY by updating the file's EXIF Orientation tag (DECIDED: lossless EXIF tag - no pixel re-encode; the scan data is copied byte-for-byte, only the metadata segment is rewritten). v1 = JPEG; extendable to TIFF / WebP / HEIC / AVIF. DISABLE (grey the File > Save Rotation item + show a toast) for PNG / BMP / GIF / RAW (no standard EXIF orientation; never rewrite RAW). The saved value = compose(original EXIF orientation, the applied quarter-turns) - a PURE lookup over the 8 EXIF orientations (covers the flip cases), unit-tested. ATOMIC write (temp file + rename) so a failure never corrupts the original; preserve other metadata. After saving, drop the RAM rotation override (now baked into the file's EXIF) and refresh from disk so the displayed orientation comes from the file (PhotoBlaze already reads EXIF orientation via common::read_orientation -> clean round-trip). UX: File > Save Rotation (Ctrl+S), enabled ONLY when the current photo has an unsaved rotation. POLICY: this is the first write to a photo's bytes - same explicit-user-command boundary as task 28; document in CLAUDE.md. CAVEAT (accepted): EXIF orientation is advisory - viewers that ignore it show the image un-rotated; baking rotation into the pixels is a possible future option. Crate: little_exif or img-parts (replace the EXIF/APP1 segment without touching pixels); kamadak-exif (current) is read-only.",
+        "testStrategy": "Unit: the orientation-compose fn (base orientation x quarter-turns -> new orientation, incl. flips) and the format-eligibility check. Manual round-trip: rotate -> Ctrl+S -> reopen shows the saved rotation; confirm the JPEG scan bytes are unchanged (lossless) and other metadata is preserved.",
+        "subtasks": [
+          { "id": 1, "title": "Pure orientation-compose + format eligibility (tested)", "description": "compose(orientation 1..8, quarter-turns) -> new orientation; is-eligible(codec) gate; unit-tested.", "status": "pending", "dependencies": [] },
+          { "id": 2, "title": "EXIF Orientation rewrite (atomic, lossless)", "description": "Replace the EXIF/APP1 segment via img-parts/little_exif without touching pixels; temp+rename; preserve other metadata.", "status": "pending", "dependencies": [] },
+          { "id": 3, "title": "File > Save Rotation (Ctrl+S) wiring + enable-state + refresh", "description": "Menu item + Ctrl+S, enabled only with an unsaved rotation; after save drop the RAM override + refresh from disk.", "status": "pending", "dependencies": [] },
+          { "id": 4, "title": "Disable + toast for unsupported formats", "description": "Grey the item and toast for PNG/BMP/GIF/RAW (no EXIF orientation / never rewrite RAW).", "status": "pending", "dependencies": [] }
         ]
       }
     ]
