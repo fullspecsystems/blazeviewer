@@ -864,7 +864,7 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                             "Start speed",
                             Some("Photos per second when you first hold a key"),
                             |ui| {
-                                ui.add(egui::Slider::new(&mut d.start_speed, 1.0..=30.0).suffix("/s"));
+                                pbui::slider(ui, &mut d.start_speed, 1.0..=30.0, "/s");
                             },
                         );
                     });
@@ -877,7 +877,7 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                             "Ramp-up time",
                             Some("Seconds to accelerate from start speed to max"),
                             |ui| {
-                                ui.add(egui::Slider::new(&mut d.ramp_secs, 0.5..=10.0).suffix(" s"));
+                                pbui::slider(ui, &mut d.ramp_secs, 0.5..=10.0, " s");
                             },
                         );
                     });
@@ -890,7 +890,7 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                             "Max speed",
                             Some("Upper limit while holding (capped at the refresh rate)"),
                             |ui| {
-                                ui.add(egui::Slider::new(&mut d.max_fps, 1..=cap).suffix("/s"));
+                                pbui::slider(ui, &mut d.max_fps, 1..=cap, "/s");
                             },
                         );
                     });
@@ -903,7 +903,7 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                             "Hold delay",
                             Some("Pause before a held key starts repeating"),
                             |ui| {
-                                ui.add(egui::Slider::new(&mut d.hold_delay_ms, 0..=1000).suffix(" ms"));
+                                pbui::slider(ui, &mut d.hold_delay_ms, 0..=1000, " ms");
                             },
                         );
                     });

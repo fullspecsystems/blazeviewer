@@ -159,7 +159,7 @@ impl Gallery {
                 "Start speed",
                 Some("Photos per second when you first hold a key"),
                 |ui| {
-                    ui.add(egui::Slider::new(&mut self.start_speed, 1.0..=30.0).suffix("/s"));
+                    pb_ui::slider(ui, &mut self.start_speed, 1.0..=30.0, "/s");
                 },
             );
         });

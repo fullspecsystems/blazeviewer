@@ -41,6 +41,10 @@ pub const CONTROL_H: f32 = 32.0;
 pub const PAGE_MARGIN: f32 = 28.0;
 /// Standard dialog action-button width.
 pub const BUTTON_W: f32 = 96.0;
+/// Stable minimum width for a slider's value box. egui sizes the box to the formatted
+/// number, so it jitters as the digit count changes (3.0 → 11.7 → 400); pinning a
+/// minimum wide enough for the widest value keeps it a fixed width. See [`slider`].
+pub const SLIDER_VALUE_W: f32 = 76.0;
 /// Interior padding of a text field — balanced on all four sides so it reads like the
 /// other 32px controls instead of a cramped single line.
 pub const FIELD_MARGIN: egui::Margin = egui::Margin {
@@ -195,7 +199,8 @@ pub fn style(dark: bool) -> egui::Style {
         button_padding: egui::vec2(SPACE_3, SPACE_2),
         interact_size: egui::vec2(40.0, CONTROL_H),
         indent: SPACE_6,
-        slider_width: 180.0,
+        // Track width; the value box is a separate, fixed-width box (see `slider`).
+        slider_width: 170.0,
         combo_width: 160.0,
         ..Default::default()
     };
@@ -410,6 +415,25 @@ pub fn text_field<'t>(text: &'t mut String, hint: &str) -> egui::TextEdit<'t> {
     egui::TextEdit::singleline(text)
         .hint_text(hint.to_owned())
         .margin(FIELD_MARGIN)
+}
+
+/// A slider with a **stable-width value box**: egui sizes the box to the formatted
+/// number (so it jitters as the digit count changes); we pin its minimum to
+/// [`SLIDER_VALUE_W`] — wide enough for the widest value — so it stays put. `suffix` is
+/// appended to the value, e.g. `"/s"` or `" ms"`.
+pub fn slider<Num: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    value: &mut Num,
+    range: std::ops::RangeInclusive<Num>,
+    suffix: &str,
+) -> egui::Response {
+    // The value box's min width is `interact_size.x`; widen it for this slider only
+    // (a scoped style clone, so other controls keep the normal interact size).
+    ui.scope(|ui| {
+        ui.spacing_mut().interact_size.x = SLIDER_VALUE_W;
+        ui.add(egui::Slider::new(value, range).suffix(suffix.to_owned()))
+    })
+    .inner
 }
 
 /// Draw an icon texture at a fixed `height`, preserving aspect ratio.
