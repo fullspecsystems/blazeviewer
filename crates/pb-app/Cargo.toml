@@ -48,6 +48,11 @@ arboard = "3"
 # Pack/unpack the f16 (Rgba16Float) HDR decode buffer when converting to 8-bit for
 # the clipboard. Matches the version pb-decode already resolves.
 half = "2"
+# Rasterize the vendored Font Awesome duotone SVG icons for the HUD/toast overlays
+# (re-exports usvg + tiny_skia). Same version + default-features-off as pb-decode's
+# SVG backend, so it's already in the lockfile. Runs only when an overlay is rebuilt
+# (off the photo hot path).
+resvg = { version = "0.47", default-features = false }
 
 # Win32 for: pointing the window icon at the exe's multi-size .ico (crisp small
 # title-bar icon, vs winit downscaling one big image), and the native menu later.

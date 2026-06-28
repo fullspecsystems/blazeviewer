@@ -87,13 +87,47 @@ impl Hud {
     /// Rasterize one line into the translucent panel with white, outlined text.
     /// Used for the basic `i` overlay. Returns `(rgba, w, h)`.
     pub fn render_panel(&self, text: &str, px: f32, pad: u32) -> Option<(Vec<u8>, u32, u32)> {
+        self.render_panel_icon(text, px, pad, None)
+    }
+
+    /// Like [`render_panel`] but with an optional leading duotone icon (an SVG source
+    /// from [`crate::icon::assets`]) — used by command toasts (e.g. the clipboard
+    /// icon on Copy). The icon is rasterized at ~the text height, outlined like the
+    /// text, and laid out left of the message and vertically centered. With `None`
+    /// it's identical to the plain text panel.
+    pub fn render_panel_icon(
+        &self,
+        text: &str,
+        px: f32,
+        pad: u32,
+        icon: Option<&str>,
+    ) -> Option<(Vec<u8>, u32, u32)> {
         let line_h = self.line_height(px)?;
         let (glyphs, advance) = self.layout(text, px, Weight::Regular);
-        let pw = advance.ceil() as u32 + 2 * pad;
+
+        // Rasterize the leading icon (if any) at roughly cap height. The icon↔text
+        // gap collapses to 0 for an icon-only toast (empty `text`), giving a tidy
+        // square pill (e.g. the rotate toasts).
+        let icon_h = (px * 0.92).round().max(1.0) as u32;
+        let rasterized = icon.and_then(|svg| crate::icon::rasterize(svg, icon_h, TEXT));
+        let (icon_w, gap) = match &rasterized {
+            Some((_, w, _)) if text.is_empty() => (*w, 0),
+            Some((_, w, _)) => (*w, (px * 0.40).round().max(3.0) as u32),
+            None => (0, 0),
+        };
+
+        let text_x = pad + icon_w + gap;
+        let pw = text_x + advance.ceil() as u32 + pad;
         let ph = line_h + 2 * pad;
         let mut canvas = Canvas::new(pw, ph, BG, (px * 0.5).round());
+
+        if let Some((rgba, iw, ih)) = &rasterized {
+            // Vertically center the icon on the text line.
+            let iy = pad as i32 + (line_h as i32 - *ih as i32) / 2;
+            self.draw_icon(&mut canvas, rgba, *iw, *ih, pad as i32, iy, px);
+        }
         let baseline = pad as f32 + self.ascent(px)?;
-        self.draw_line(&mut canvas, pad as f32, baseline, &glyphs, TEXT, px);
+        self.draw_line(&mut canvas, text_x as f32, baseline, &glyphs, TEXT, px);
         Some((canvas.into_rgba(), pw, ph))
     }
 
@@ -213,6 +247,27 @@ impl Hud {
             canvas.blit_glyph(m, bitmap, origin_x + *gx, baseline, 0, 0, rgb, 1.0);
         }
     }
+
+    /// Composite a rasterized icon at `(x0, y0)`: a soft black outline first (the
+    /// same legibility halo text gets), then the icon on top. `rgba` is straight-
+    /// alpha `iw×ih` (from [`crate::icon::rasterize`]).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_icon(
+        &self,
+        canvas: &mut Canvas,
+        rgba: &[u8],
+        iw: u32,
+        ih: u32,
+        x0: i32,
+        y0: i32,
+        px: f32,
+    ) {
+        let s = (px * 0.06).round().max(1.0) as i32; // outline thickness (matches text)
+        for &(dx, dy) in &[(s, 0), (-s, 0), (0, s), (0, -s)] {
+            canvas.blit_silhouette(rgba, iw, ih, x0 + dx, y0 + dy, SHADOW, SHADOW_ALPHA);
+        }
+        canvas.blit_rgba(rgba, iw, ih, x0, y0);
+    }
 }
 
 /// A straight-alpha RGBA8 software canvas for compositing the panel.
@@ -269,6 +324,48 @@ impl Canvas {
                 .clamp(0.0, 255.0) as u8;
         }
         dst[3] = (ao * 255.0).round().clamp(0.0, 255.0) as u8;
+    }
+
+    /// Composite a straight-alpha RGBA8 image (`iw×ih`) with its top-left at
+    /// `(x0, y0)`, blending each pixel with its own color and alpha.
+    fn blit_rgba(&mut self, rgba: &[u8], iw: u32, ih: u32, x0: i32, y0: i32) {
+        let iw = iw as i32;
+        for ry in 0..ih as i32 {
+            for rx in 0..iw {
+                let si = ((ry * iw + rx) * 4) as usize;
+                let a = rgba[si + 3] as f32 / 255.0;
+                if a <= 0.0 {
+                    continue;
+                }
+                self.over(x0 + rx, y0 + ry, [rgba[si], rgba[si + 1], rgba[si + 2]], a);
+            }
+        }
+    }
+
+    /// Composite an image's *shape* (its alpha channel) as a flat `rgb` halo scaled
+    /// by `a_scale` — the icon equivalent of the per-glyph text outline.
+    #[allow(clippy::too_many_arguments)]
+    fn blit_silhouette(
+        &mut self,
+        rgba: &[u8],
+        iw: u32,
+        ih: u32,
+        x0: i32,
+        y0: i32,
+        rgb: [u8; 3],
+        a_scale: f32,
+    ) {
+        let iw = iw as i32;
+        for ry in 0..ih as i32 {
+            for rx in 0..iw {
+                let si = ((ry * iw + rx) * 4) as usize;
+                let a = rgba[si + 3] as f32 / 255.0 * a_scale;
+                if a <= 0.0 {
+                    continue;
+                }
+                self.over(x0 + rx, y0 + ry, rgb, a);
+            }
+        }
     }
 
     /// Composite a single glyph's coverage at the given pen position, offset by

@@ -58,6 +58,7 @@ mod darkmode;
 mod decode_pool;
 mod dialog;
 mod hud;
+mod icon;
 mod menu;
 mod metrics;
 mod settings;
@@ -751,7 +752,13 @@ impl App {
         }
         self.view.rotation = new;
         self.push_view();
-        self.draw(event_loop);
+        // Flash a directional rotate icon (icon-only pill) as feedback.
+        let ico = if ccw {
+            icon::assets::ROTATE_LEFT
+        } else {
+            icon::assets::ROTATE_RIGHT
+        };
+        self.show_toast_icon("", Some(ico), event_loop);
     }
 
     /// Copy the current photo to the OS clipboard (`Ctrl+C` / Edit ▸ Copy, task #27).
@@ -778,7 +785,7 @@ impl App {
         let rot = self.rotations.get(&item).copied().unwrap_or_default();
         let (rgba, w, h) = clipboard::rotate_rgba8(&rgba, img.width, img.height, rot);
         match clipboard::set_image(w, h, rgba) {
-            Ok(()) => self.show_toast("Copied to clipboard", event_loop),
+            Ok(()) => self.show_toast_icon("Copied", Some(icon::assets::CLIPBOARD), event_loop),
             Err(e) => {
                 eprintln!("copy: clipboard write failed: {e}");
                 self.show_toast("Copy failed", event_loop);
@@ -1693,22 +1700,29 @@ impl App {
     /// commands that otherwise give no visual feedback, e.g. the recursion toggle.
     /// A new toast replaces any current one.
     fn show_toast(&mut self, msg: &str, event_loop: &ActiveEventLoop) {
-        let px = (30.0 * self.scale_factor).max(16.0);
+        self.show_toast_icon(msg, None, event_loop);
+    }
+
+    /// Like [`show_toast`] but with an optional leading duotone icon (an SVG source
+    /// from [`icon::assets`]) — e.g. the clipboard glyph on the Copy toast, or an
+    /// icon-only pill (empty `msg`) for the rotate toasts. Always redraws, so a
+    /// caller that also changed the view (e.g. `rotate`) renders even when there's
+    /// no system font to build a toast from.
+    fn show_toast_icon(&mut self, msg: &str, icon: Option<&str>, event_loop: &ActiveEventLoop) {
+        let px = (26.0 * self.scale_factor).max(16.0);
         let pad = (12.0 * self.scale_factor).round().max(4.0) as u32;
-        let Some(hud) = self.hud.as_ref() else {
-            return; // no system font -> no toast (same as the info panels)
-        };
-        let Some((rgba, w, h)) = hud.render_panel(msg, px, pad) else {
-            return;
-        };
-        self.toast = Some(Toast {
-            rgba,
-            w,
-            h,
-            started: Instant::now(),
-            uploaded_alpha: -1.0,
-        });
-        self.push_toast(1.0);
+        if let Some(hud) = self.hud.as_ref() {
+            if let Some((rgba, w, h)) = hud.render_panel_icon(msg, px, pad, icon) {
+                self.toast = Some(Toast {
+                    rgba,
+                    w,
+                    h,
+                    started: Instant::now(),
+                    uploaded_alpha: -1.0,
+                });
+                self.push_toast(1.0);
+            }
+        }
         self.draw(event_loop);
     }
 
