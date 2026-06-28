@@ -22,6 +22,8 @@ pub mod ids {
     pub const OPEN_FOLDER: &str = "open_folder";
     pub const EXIT: &str = "exit";
 
+    pub const COPY: &str = "copy";
+
     pub const FIT: &str = "fit";
     pub const FILL: &str = "fill";
     pub const ORIGINAL: &str = "original";
@@ -51,6 +53,7 @@ pub enum MenuAction {
     OpenFile,
     OpenFolder,
     Exit,
+    Copy,
     Fit,
     Fill,
     Original,
@@ -78,6 +81,7 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         OPEN_FILE => MenuAction::OpenFile,
         OPEN_FOLDER => MenuAction::OpenFolder,
         EXIT => MenuAction::Exit,
+        COPY => MenuAction::Copy,
         FIT => MenuAction::Fit,
         FILL => MenuAction::Fill,
         ORIGINAL => MenuAction::Original,
@@ -123,6 +127,10 @@ pub fn build_menu() -> Menu {
         &item(ids::EXIT, "Exit\tEsc"),
     ]);
 
+    // Edit: clipboard ops (Windows convention — Copy lives under Edit, not File).
+    let edit = Submenu::new("&Edit", true);
+    let _ = edit.append_items(&[&item(ids::COPY, "Copy\tCtrl+C")]);
+
     let view = Submenu::new("&View", true);
     let _ = view.append_items(&[
         &item(ids::FIT, "Fit\t8"),
@@ -156,7 +164,7 @@ pub fn build_menu() -> Menu {
         &item(ids::ABOUT, "About PhotoBlaze"),
     ]);
 
-    for sub in [&file, &view, &image, &help] {
+    for sub in [&file, &edit, &view, &image, &help] {
         if let Err(e) = menu.append(sub) {
             eprintln!("menu: failed to append submenu: {e}");
         }
@@ -174,6 +182,7 @@ mod tests {
         assert_eq!(action_for(ids::OPEN_FILE), Some(MenuAction::OpenFile));
         assert_eq!(action_for(ids::OPEN_FOLDER), Some(MenuAction::OpenFolder));
         assert_eq!(action_for(ids::EXIT), Some(MenuAction::Exit));
+        assert_eq!(action_for(ids::COPY), Some(MenuAction::Copy));
         assert_eq!(action_for(ids::FIT), Some(MenuAction::Fit));
         assert_eq!(action_for(ids::FILL), Some(MenuAction::Fill));
         assert_eq!(action_for(ids::ORIGINAL), Some(MenuAction::Original));

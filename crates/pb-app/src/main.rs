@@ -52,6 +52,7 @@ use pb_render::{
     test_pattern, Renderer, Rotation, ScaleMode, ViewTransform, WgpuRenderer, MAX_ZOOM, MIN_ZOOM,
 };
 
+mod clipboard;
 #[cfg(windows)]
 mod darkmode;
 mod decode_pool;
@@ -753,6 +754,38 @@ impl App {
         self.draw(event_loop);
     }
 
+    /// Copy the current photo to the OS clipboard (`Ctrl+C` / Edit ▸ Copy, task #27).
+    ///
+    /// Decodes the original at **full resolution** here — not the fit-downscaled ring
+    /// texture — so a paste lands at native size. This is a synchronous decode on the
+    /// event-loop thread, which is fine: Copy is an explicit, infrequent user command
+    /// (like the modal file picker), not the nav hot path. Any in-RAM rotation
+    /// override is baked into the copied pixels so the clipboard is WYSIWYG.
+    fn copy_image(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(item) = self.displayed_item else {
+            return; // empty state — nothing to copy
+        };
+        let path = self.paths[item].clone();
+        let img = match decode_image_file(&path, None, false) {
+            Ok(img) => img,
+            Err(e) => {
+                eprintln!("copy: decode failed: {}: {e}", path.display());
+                self.show_toast("Copy failed", event_loop);
+                return;
+            }
+        };
+        let rgba = clipboard::to_clipboard_rgba8(&img);
+        let rot = self.rotations.get(&item).copied().unwrap_or_default();
+        let (rgba, w, h) = clipboard::rotate_rgba8(&rgba, img.width, img.height, rot);
+        match clipboard::set_image(w, h, rgba) {
+            Ok(()) => self.show_toast("Copied to clipboard", event_loop),
+            Err(e) => {
+                eprintln!("copy: clipboard write failed: {e}");
+                self.show_toast("Copy failed", event_loop);
+            }
+        }
+    }
+
     /// Show ring `slot` (holding `item`): the keypress fast path — a rebind, no
     /// decode or upload. Updates the pin, title, and info panel.
     fn present_item(&mut self, item: usize, slot: usize, event_loop: &ActiveEventLoop) {
@@ -1242,6 +1275,7 @@ impl App {
             MenuAction::OpenFile => self.open_picker(false, event_loop),
             MenuAction::OpenFolder => self.open_picker(true, event_loop),
             MenuAction::Exit => self.begin_exit(event_loop),
+            MenuAction::Copy => self.copy_image(event_loop),
             MenuAction::Fit => self.set_scale_mode(ScaleMode::Fit, event_loop),
             MenuAction::Fill => self.set_scale_mode(ScaleMode::Fill, event_loop),
             MenuAction::Original => self.set_scale_mode(ScaleMode::Original, event_loop),
@@ -2299,6 +2333,8 @@ impl ApplicationHandler for App {
                             }
                             // Open: o = file picker, Shift+O = folder picker.
                             KeyCode::KeyO => self.open_picker(self.shift, event_loop),
+                            // Ctrl+C copies the full-res current photo to the clipboard.
+                            KeyCode::KeyC if self.ctrl => self.copy_image(event_loop),
                             // Ctrl+, opens Settings (mac-like; common on Windows too).
                             KeyCode::Comma if self.ctrl => self.open_settings(event_loop),
                             // Fullscreen <-> windowed (F11; Alt+Enter is handled

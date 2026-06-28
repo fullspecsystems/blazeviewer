@@ -41,6 +41,13 @@ egui-wgpu = "0.29"
 egui-winit = "0.29"
 # Block on wgpu adapter/device init for the dialog window's own GPU surface.
 pollster = "0.3"
+# Clipboard image write (Ctrl+C / Edit ▸ Copy). Already rides in transitively via
+# egui-winit; a direct dep makes the dependency explicit. `image-data` (on by
+# default) gives `set_image` (CF_DIB/DIBV5 on Windows, pasteboard on macOS).
+arboard = "3"
+# Pack/unpack the f16 (Rgba16Float) HDR decode buffer when converting to 8-bit for
+# the clipboard. Matches the version pb-decode already resolves.
+half = "2"
 
 # Win32 for: pointing the window icon at the exe's multi-size .ico (crisp small
 # title-bar icon, vs winit downscaling one big image), and the native menu later.
