@@ -129,22 +129,40 @@ config (the future task #8) are all explicitly in-bounds. What's forbidden is a
 trace of the *viewing*: no thumbnail DB or pixel cache, no recent-files/MRU of
 photo paths, no decoded-pixel temp files, no log of viewed paths.
 
+**Explicit user edits are a separate, allowed category** — not an exception to be
+minimized. Deleting a photo, saving a rotation (an EXIF Orientation write back to
+the file or a sidecar), and similar metadata updates *do* touch disk, but only ever
+on a **user-initiated command** — never as a passive byproduct of viewing. The line
+is *involuntary traces of viewing*, not *the user editing their own files*; nothing
+is persisted unless the user deliberately invokes the action.
+
 - **Every runtime cache is RAM-only and dropped on exit.** Inventory: the resident
   GPU texture ring + its `pb-core::ResidentRing` mirror, the decode pool's in-flight
   buffers + `pending_uploads`, `meta_cache` (per-photo panel data), per-image
   `rotations`, the `failed` set, the transient `toast`, and on-demand EXIF reads
   (`Shift+I`) — all in memory, never serialized. `pb-core` is pure (no `std::fs`).
 - **On-disk I/O is read-only on every view/cache hot path.** The only files
-  PhotoBlaze opens are the photos themselves, and only to *read*: directory scan
-  (`read_dir`), decode (`fs::read`), and the panel's `fs::read`/`fs::metadata`.
+  PhotoBlaze opens *while viewing* are the photos themselves, and only to *read*:
+  directory scan (`read_dir`), decode (`fs::read`), and the panel's
+  `fs::read`/`fs::metadata`.
+- **Writes happen only on an explicit user command, never on the view path.** The
+  Edit-menu file operations — delete a photo, save a rotation (write the EXIF
+  Orientation), future metadata edits — modify disk, but they are deliberate,
+  user-triggered actions on the user's own files: gated behind a command (with
+  confirmation for destructive ones), never automatic, never reached by scrolling or
+  decoding. Per-image `rotations` stay RAM-only until the user chooses *Save*.
 - **Esc teardown writes nothing** (task #6): hide the window, drop the RAM caches
   (`clear_session_state`), exit — no flush-to-disk step exists.
 - **Enforced two ways:** a no-trace integration test
   (`viewing_a_folder_writes_nothing_to_disk`) diffs a sandbox before/after a real
-  scan+decode+EXIF session and asserts zero files created or modified; and a static
-  audit (the only `fs::write`/`File::create` in the tree are in `#[cfg(test)]` code
-  and the `offscreen_png` example — never in app/decode code). Re-run the audit
-  before adding any disk write; any future on-disk scratch must be opt-in + cleared.
+  scan+decode+EXIF session and asserts zero files created or modified — it exercises
+  only *viewing*, so it still holds once the Edit commands land (a scan/decode never
+  triggers them); and a static audit that no `fs::write`/`File::create` sits on the
+  *passive view/decode path* (today the only ones in the tree are `#[cfg(test)]` code
+  and the `offscreen_png` example). The Edit-menu commands (delete, save-rotation) are
+  the one place app code writes — reachable only from an explicit user action. Re-run
+  the audit before adding any *passive* disk write; any on-disk scratch must be opt-in
+  + cleared.
 
 ## Cross-platform discipline (Windows now, Apple Silicon later)
 
