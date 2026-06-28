@@ -789,7 +789,6 @@ impl App {
         } else {
             self.rotations.insert(item, new);
         }
-        dbg_log(&format!("rotate: item={item:?} new={new:?}"));
         self.view.rotation = new;
         self.push_view();
         // Flash a directional rotate icon (icon-only pill) as feedback.
@@ -849,14 +848,9 @@ impl App {
     /// double-rotation).
     fn save_rotation(&mut self, event_loop: &ActiveEventLoop) {
         let Some(item) = self.displayed_item else {
-            dbg_log("save: no displayed_item");
             return;
         };
         let rot = self.rotations.get(&item).copied().unwrap_or_default();
-        dbg_log(&format!(
-            "save: item={item} rot={rot:?} path={:?}",
-            self.source.path(item)
-        ));
         if rot == Rotation::default() {
             self.show_toast("No rotation to save", event_loop);
             return;
@@ -871,8 +865,7 @@ impl App {
             return;
         }
         match save_rotation::write_orientation(&path, rot) {
-            Ok(v) => {
-                dbg_log(&format!("save: wrote orientation {v} to {}", path.display()));
+            Ok(_) => {
                 // The rotation is now baked into the file's EXIF: drop the RAM
                 // override and re-read from disk so the pixels are re-oriented from
                 // the file (else the ring's old-orientation pixels + a reset view
@@ -889,7 +882,7 @@ impl App {
                 self.show_toast_icon("", Some(icon::assets::FLOPPY), event_loop);
             }
             Err(e) => {
-                dbg_log(&format!("save FAILED: {}: {e}", path.display()));
+                eprintln!("save rotation failed: {}: {e}", path.display());
                 self.show_toast("Save failed", event_loop);
             }
         }
@@ -2722,19 +2715,6 @@ fn file_name_of(name: &str) -> String {
         .unwrap_or(name)
         .to_string()
 }
-
-// TEMP debug log to a file (GUI-subsystem app has no stderr). Remove before commit.
-fn dbg_log(msg: &str) {
-    use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(std::env::temp_dir().join("pb_dbg.log"))
-    {
-        let _ = writeln!(f, "{msg}");
-    }
-}
-
 fn title_for(name: &str, idx: usize, n: usize) -> String {
     format!("{} ({}/{n})", file_name_of(name), idx + 1)
 }
