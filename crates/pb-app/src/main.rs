@@ -113,15 +113,6 @@ const PAN_MIN_SPEED: f32 = 450.0;
 const PAN_MAX_SPEED: f32 = 3200.0;
 const PAN_RAMP_SECS: f32 = 0.7;
 
-/// Hold-to-fly advance curve: while a nav key is held past the initial tap delay,
-/// the auto-advance rate ramps from a gentle `ADVANCE_MIN_RATE` (a few photos/sec,
-/// for control) up to the display refresh rate over `ADVANCE_RAMP_SECS`. Same
-/// linear-rate shape as the zoom/pan ramps. The ramp only sets the *attempted*
-/// cadence — decode readiness still caps the real rate (a miss holds, never skips)
-/// and the refresh rate is the hard ceiling (a configurable lower cap is a future
-/// settings option; until then refresh is the max).
-const ADVANCE_MIN_RATE: f32 = 3.0;
-const ADVANCE_RAMP_SECS: f32 = 4.0;
 /// How long the delete icon shows on the just-deleted photo before the playlist
 /// advances to the next one — so the trash/recycle feedback registers first (#28).
 const DELETE_ADVANCE_DELAY: Duration = Duration::from_millis(160);
@@ -129,34 +120,51 @@ const DELETE_ADVANCE_DELAY: Duration = Duration::from_millis(160);
 /// The minimum gap since the last shown photo before the next held-key auto-advance,
 /// given how long auto-repeat has been running (`elapsed`, measured from when the
 /// initial tap delay expired). The advance rate ramps linearly from `min_rate`
-/// (photos/sec) up to the refresh rate (`1 / frame_interval`) over `ramp_secs`, then
-/// holds there; the returned interval is the reciprocal, floored at `frame_interval`
-/// so it's never faster than the refresh ceiling. Pure + time-based (frame-rate
-/// independent), so the curve is unit-testable without the event loop.
+/// (photos/sec) up to the **ceiling** over `ramp_secs`, then holds there. The ceiling
+/// is the configured `max_rate` cap (#20) clamped to the display refresh (`max_rate`
+/// ≤ 0, or ≥ refresh, means "uncapped" → refresh is the hard limit). The returned
+/// interval is the rate's reciprocal, floored at the ceiling's interval so it's never
+/// faster. Pure + time-based (frame-rate independent), so it's unit-testable without
+/// the event loop.
 fn advance_interval(
     elapsed: Duration,
     min_rate: f32,
     ramp_secs: f32,
+    max_rate: f32,
     frame_interval: Duration,
 ) -> Duration {
     let frame_secs = frame_interval.as_secs_f32();
     let refresh_rate = 1.0 / frame_secs.max(f32::MIN_POSITIVE);
-    // No headroom to ramp (floor already at/above refresh, e.g. a very low-Hz
-    // display): just run at the refresh cap.
-    if min_rate >= refresh_rate {
-        return frame_interval;
+    // Effective ceiling: the configured cap, never above refresh; 0/negative or a cap
+    // at/above refresh means uncapped (refresh is the hard limit).
+    let ceiling = if max_rate > 0.0 {
+        max_rate.min(refresh_rate)
+    } else {
+        refresh_rate
+    };
+    // Interval at the ceiling: exactly the refresh frame when uncapped (no float
+    // drift), else the cap's reciprocal (a deliberately slower scan limit).
+    let ceil_interval = if ceiling >= refresh_rate {
+        frame_interval
+    } else {
+        Duration::from_secs_f32(1.0 / ceiling)
+    };
+    let min_rate = min_rate.min(ceiling);
+    // No headroom to ramp (floor already at/above the ceiling): run at the ceiling.
+    if min_rate >= ceiling {
+        return ceil_interval;
     }
     let t = if ramp_secs > 0.0 {
         (elapsed.as_secs_f32() / ramp_secs).clamp(0.0, 1.0)
     } else {
         1.0
     };
-    let rate = min_rate + (refresh_rate - min_rate) * t;
-    // At/above the ceiling, return the refresh interval exactly (no float drift).
-    if rate >= refresh_rate {
-        return frame_interval;
+    let rate = min_rate + (ceiling - min_rate) * t;
+    if rate >= ceiling {
+        return ceil_interval;
     }
-    let secs = (1.0 / rate.max(f32::MIN_POSITIVE)).clamp(frame_secs, 60.0);
+    let min_secs = ceil_interval.as_secs_f32(); // fastest (smallest) interval allowed
+    let secs = (1.0 / rate.max(f32::MIN_POSITIVE)).clamp(min_secs, 60.0);
     Duration::from_secs_f32(secs)
 }
 
@@ -539,6 +547,10 @@ struct App {
     /// dispatch and the help overlay both read. Loaded once at startup (defaults +
     /// optional `keymap.toml`); read-only.
     keymap: Keymap,
+    /// Persisted user preferences (nav feel, defaults, etc.). Loaded at startup;
+    /// the hold-to-fly curve reads `start_speed`/`ramp_secs`/`max_advance_rate` live,
+    /// so a future Settings dialog can apply changes by mutating this in place.
+    settings: settings::Settings,
     /// An in-flight background archive open (a `.7z` eager-decompresses off-thread so
     /// it can't freeze the event loop). `None` when no archive is loading.
     archive_load: Option<ArchiveLoad>,
@@ -582,6 +594,8 @@ impl App {
             r
         });
         let (pool, results) = DecodePool::new(recommended_workers(), POOL_BUDGET_BYTES, decode);
+        // Preferences (nav feel, defaults, …); the hold loop reads them live.
+        let settings = settings::Settings::load();
         Self {
             windowed,
             source,
@@ -591,7 +605,7 @@ impl App {
             last_present: None,
             frame_interval: Duration::from_micros(8_333), // ~120 Hz until we read the real rate
             hold_start: None,
-            initial_delay: Duration::from_millis(400),
+            initial_delay: Duration::from_millis(settings.hold_delay_ms as u64),
             fit: None,
             view: ViewTransform::default(),
             root,
@@ -646,6 +660,7 @@ impl App {
             menu_attached: false,
             dialog: None,
             keymap: Keymap::load(),
+            settings,
             archive_load: None,
             archive_gen: 0,
             pending_launch: None,
@@ -3083,9 +3098,11 @@ impl ApplicationHandler for App {
         if let Some(dir) = nav {
             // Advance only when caught up (target shown) AND the (accelerating)
             // interval elapsed, so every photo is shown and a miss simply holds.
-            // The gap ramps from ~1/ADVANCE_MIN_RATE down to one refresh interval
-            // over ADVANCE_RAMP_SECS of held auto-repeat (measured from when the tap
-            // delay expired), so holding a nav key flies slow -> fast for control.
+            // The gap ramps from ~1/start_speed down to the ceiling's interval over
+            // ramp_secs of held auto-repeat (measured from when the tap delay
+            // expired), so holding a nav key flies slow -> fast for control. The
+            // ceiling is the configured max-photos/sec cap (#20), or the refresh rate
+            // when uncapped. All three are read live from the settings.
             let caught_up = self.displayed_item == self.target_item;
             let repeat_elapsed = match self.hold_start {
                 Some(t) => now.saturating_duration_since(t + self.initial_delay),
@@ -3093,8 +3110,9 @@ impl ApplicationHandler for App {
             };
             let interval = advance_interval(
                 repeat_elapsed,
-                ADVANCE_MIN_RATE,
-                ADVANCE_RAMP_SECS,
+                self.settings.start_speed,
+                self.settings.ramp_secs,
+                self.settings.max_advance_rate as f32,
                 self.frame_interval,
             );
             let due = match self.last_present {
@@ -3975,7 +3993,7 @@ mod tests {
         let frame = Duration::from_micros(8_333); // ~120 Hz
         let (min_rate, ramp) = (3.0, 4.0);
         // At the start of auto-repeat the gap is ~1/min_rate (a few photos/sec).
-        let start = advance_interval(Duration::ZERO, min_rate, ramp, frame);
+        let start = advance_interval(Duration::ZERO, min_rate, ramp, 0.0, frame);
         let expected = 1.0 / min_rate;
         assert!(
             (start.as_secs_f32() - expected).abs() < 1e-3,
@@ -3984,11 +4002,30 @@ mod tests {
         // Once the ramp completes it clamps exactly to the refresh interval, and
         // stays there past the ramp (refresh is the hard ceiling).
         assert_eq!(
-            advance_interval(Duration::from_secs_f32(ramp), min_rate, ramp, frame),
+            advance_interval(Duration::from_secs_f32(ramp), min_rate, ramp, 0.0, frame),
             frame
         );
         assert_eq!(
-            advance_interval(Duration::from_secs(10), min_rate, ramp, frame),
+            advance_interval(Duration::from_secs(10), min_rate, ramp, 0.0, frame),
+            frame
+        );
+    }
+
+    #[test]
+    fn advance_interval_caps_at_max_rate() {
+        let frame = Duration::from_micros(8_333); // ~120 Hz
+        let cap = 10.0; // photos/sec — well below refresh
+        let cap_interval = Duration::from_secs_f32(1.0 / cap);
+        // Once ramped, the gap holds at the cap's interval, never the refresh frame.
+        let ramped = advance_interval(Duration::from_secs(10), 3.0, 4.0, cap, frame);
+        assert!(
+            (ramped.as_secs_f32() - cap_interval.as_secs_f32()).abs() < 1e-4,
+            "should top out at the {cap}/s cap, got {ramped:?}"
+        );
+        assert!(ramped > frame, "the cap is slower than the refresh ceiling");
+        // A cap at/above the refresh rate behaves as uncapped (refresh is the limit).
+        assert_eq!(
+            advance_interval(Duration::from_secs(10), 3.0, 4.0, 1000.0, frame),
             frame
         );
     }
@@ -3996,9 +4033,9 @@ mod tests {
     #[test]
     fn advance_interval_is_monotonic_and_never_below_refresh() {
         let frame = Duration::from_micros(8_333);
-        let mut prev = advance_interval(Duration::ZERO, 3.0, 4.0, frame);
+        let mut prev = advance_interval(Duration::ZERO, 3.0, 4.0, 0.0, frame);
         for ms in [200u64, 500, 1000, 2000, 3000, 4000] {
-            let cur = advance_interval(Duration::from_millis(ms), 3.0, 4.0, frame);
+            let cur = advance_interval(Duration::from_millis(ms), 3.0, 4.0, 0.0, frame);
             assert!(cur <= prev, "interval should shrink as the hold continues");
             assert!(cur >= frame, "never faster than the refresh ceiling");
             prev = cur;
@@ -4009,9 +4046,12 @@ mod tests {
     fn advance_interval_no_ramp_when_floor_meets_refresh() {
         // A low-Hz display where min_rate >= refresh: no ramp, just the refresh cap.
         let frame = Duration::from_millis(500); // 2 Hz, below the 3/s floor
-        assert_eq!(advance_interval(Duration::ZERO, 3.0, 4.0, frame), frame);
         assert_eq!(
-            advance_interval(Duration::from_secs(1), 3.0, 4.0, frame),
+            advance_interval(Duration::ZERO, 3.0, 4.0, 0.0, frame),
+            frame
+        );
+        assert_eq!(
+            advance_interval(Duration::from_secs(1), 3.0, 4.0, 0.0, frame),
             frame
         );
     }
