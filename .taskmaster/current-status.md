@@ -9,6 +9,53 @@ scaling/EXIF/help UI (#1/#3/#4/#5/#7). Privacy no-trace (#2), Esc teardown (#6),
 `enter` random nav (+ `Shift+Enter` prev-random), and the Windows-integration +
 MSI track are all done.
 
+## UI / file-commands stream (2026-06-28) — what just shipped + what's next
+
+Separate from the HEIC/decode stream below. All on `origin/main`, each gated
+(`clippy --all-targets -D warnings` + `fmt` + `cargo test -p pb-app`, 51 tests green).
+
+**Shipped this session:**
+- **Native menu bar** (`menu.rs`, muda; dark-aware via `darkmode.rs`) —
+  File/Edit/View/Image/Help, windowed-only. Pure `action_for` (tested) →
+  `App::dispatch_menu`. Dynamic enable-state for File ▸ Save Rotation.
+- **egui dialog infra** (`dialog.rs`: 2nd winit window + egui-wgpu, OS dark/light):
+  **About** (done), **Settings** (skeleton form), and a themed **Confirm** dialog.
+- **#27 Copy** (`Ctrl+C` / Edit ▸ Copy, `clipboard.rs`): full-res decode → clipboard
+  in BOTH **CF_DIBV5** (pixels) + **CF_HDROP** (file ref) via Win32 (dropped arboard).
+  Pure transforms (fp16→sRGB8, rotate-bake) unit-tested.
+- **#29 Save Rotation** (`Ctrl+S` / File, `save_rotation.rs`): **lossless** EXIF
+  Orientation write via `little_exif` (JPEG only; atomic temp+rename; verified scan
+  byte-identical + ICC preserved). Pure orientation-compose tested; drop RAM override
+  + refresh-from-disk after save.
+- **#28 Delete** (`delete.rs`): `Del` → Recycle Bin (`trash` crate), `Shift+Del` →
+  **themed egui Confirm** (Directory Opus-style: file-✗ icon, ⚠ line, red Delete) →
+  permanent. Pure cursor-after-removal tested; rebuilds source minus the path,
+  advances (prev if last; empty state if none). Icon-only toasts; 160 ms
+  deferred-advance so the icon shows before advancing.
+- **FA icon system** (`icon.rs`): vendored **solid** FA SVGs (`icons/*.svg`) →
+  rasterized (resvg) into HUD/toast pills + dialog chrome. (Tried duotone, switched
+  to solid.) "To add an icon" workflow codified in CLAUDE.md.
+- **#19 hold-to-fly accel ramp** (done).
+
+**Next (UI), recommended order:**
+- **#22 Settings dialog — the big remaining piece** (likely its own session). Skeleton
+  form already in `dialog.rs`; needs a typed `settings.toml` model (load / apply-live /
+  save — atomic, preferences-only), controls wired to live state, a File ▸ Settings
+  menu item, and the keybinding editor. Depends on **#8** (central action/keymap TOML)
+  and **#20** (fly-speed cap; grow `settings.rs`, which already persists fullscreen).
+- **#8** configurable keybindings (TOML), **#20** max photos/sec cap, **#9** recursive
+  ordering, **#10** richer per-action toast strings, **#23** slideshow.
+- **Decided/deferred:** file-open picker stays **native `rfd`** (auto-dark on macOS;
+  the light Windows dialog is an accepted gap — theming the shell dialog isn't worth
+  it). The egui Confirm is the portable keeper (no `NSAlert` needed for the Mac port).
+
+**Key files** (`crates/pb-app/src/`): `main.rs` (App + winit loop + dispatch + delete/
+save/copy wiring + `dialog_event`), `menu.rs`, `dialog.rs`, `clipboard.rs`,
+`save_rotation.rs`, `delete.rs`, `icon.rs`, `hud.rs`, `settings.rs`, `darkmode.rs`.
+**GOTCHA:** the photo window is an uncapturable flip-swapchain (HDR) — verify on-photo
+visuals with the owner; the **egui dialogs + menu DO GDI-capture** (screenshot them).
+The release exe is **GUI-subsystem (no stderr)** — debug via a temp log file, not eprintln.
+
 ## ⏭ ACTIVE NEXT WORK: HEIC decode — Phases 0–3 DONE; only follow-ups remain — see
 [`docs/heic-decode-plan.md`](docs/heic-decode-plan.md) (read the SESSION UPDATE at top)
 
@@ -187,9 +234,14 @@ space            next photo            ⌫              previous photo
 8 / 9            scaling mode: fit / fill        0   toggle original 1:1 ↔ fit
                  (any of 8/9/0 also resets zoom/pan to that mode's framing)
 r / Shift+R      rotate 90° cw / ccw (per-image, RAM-only)
+Ctrl+S           save rotation to file (lossless EXIF; JPEG only)
+Ctrl+C           copy full-res image to clipboard (pixels + file ref)
+Del / Shift+Del  delete → Recycle Bin / permanent (themed confirm)
 i / Shift+I      info panel / full-EXIF "nerd" panel
 / or ?           keybindings help overlay
+Ctrl+,           settings (egui dialog — skeleton)
 esc              quit
+(windowed mode also has a native menu bar: File/Edit/View/Image/Help)
 ```
 
 ## Run it
