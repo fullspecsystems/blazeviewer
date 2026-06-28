@@ -46,6 +46,25 @@ impl ImageDecoder for WicDecoder {
             return common::finalize_hdr_scrgb(floats, w, h, codec, req.fit);
         }
 
+        // Preview-first: HEVC/AV1 full decode is slow (~250 ms for a 12 MP HEIC)
+        // and the OS decoder barely parallelizes, so scrolling outruns it. The
+        // embedded thumbnail decodes in ~ms — show it instantly, refine to the full
+        // decode when the user lands. Falls through to the full decode if there's no
+        // thumbnail (or it fails). The thumbnail is NOT auto-oriented by WIC (unlike
+        // the primary frame), so apply the container's EXIF orientation here.
+        if req.allow_preview {
+            if let Ok((rgba, w, h)) = unsafe { wic_decode_thumbnail(req.bytes) } {
+                // Like the primary frame, WIC's GetThumbnail returns the thumbnail
+                // already display-oriented (the container rotation is applied), so
+                // pass orientation 1 — re-applying it would double-rotate.
+                if let Ok(mut img) = common::finalize_oriented(rgba, w, h, 1, codec, req.fit, true)
+                {
+                    img.color = color_from_colr_box(req.bytes).unwrap_or_else(ColorTransform::srgb);
+                    return Ok(img);
+                }
+            }
+        }
+
         let (rgba, w, h, color) =
             unsafe { wic_decode_rgba(req.bytes) }.map_err(|e| DecodeError::Corrupt(wic_msg(e)))?;
         // The WIC HEIF/AVIF decoder already applies the container's rotation (its
@@ -121,6 +140,37 @@ unsafe fn wic_decode_rgba(
     let mut buf = vec![0u8; stride as usize * h as usize];
     converter.CopyPixels(ptr::null(), stride, &mut buf)?;
     Ok((buf, w, h, color))
+}
+
+/// Decode the embedded thumbnail to RGBA8 via WIC (the fast preview path). Errors
+/// if the file has no thumbnail (the caller then falls back to the full decode).
+/// `unsafe` because it drives COM.
+unsafe fn wic_decode_thumbnail(bytes: &[u8]) -> windows::core::Result<(Vec<u8>, u32, u32)> {
+    let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    let factory: IWICImagingFactory =
+        CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
+    let stream = factory.CreateStream()?;
+    stream.InitializeFromMemory(bytes)?;
+    let decoder =
+        factory.CreateDecoderFromStream(&stream, ptr::null(), WICDecodeMetadataCacheOnDemand)?;
+    let frame = decoder.GetFrame(0)?;
+    let thumb = frame.GetThumbnail()?; // errs (WINCODEC_ERR_CODECNOTHUMBNAIL) if none
+
+    let converter = factory.CreateFormatConverter()?;
+    converter.Initialize(
+        &thumb,
+        &GUID_WICPixelFormat32bppRGBA,
+        WICBitmapDitherTypeNone,
+        None,
+        0.0,
+        WICBitmapPaletteTypeCustom,
+    )?;
+    let (mut w, mut h) = (0u32, 0u32);
+    converter.GetSize(&mut w, &mut h)?;
+    let stride = w.saturating_mul(4);
+    let mut buf = vec![0u8; stride as usize * h as usize];
+    converter.CopyPixels(ptr::null(), stride, &mut buf)?;
+    Ok((buf, w, h))
 }
 
 /// Decode an HDR (PQ/HLG) frame to **scRGB-linear f32** (linear light, BT.709

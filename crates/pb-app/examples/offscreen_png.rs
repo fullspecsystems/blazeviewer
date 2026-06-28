@@ -8,7 +8,7 @@ use pb_render::{render_offscreen_color, ColorTransform};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let img = decode_image_file(Path::new(&args[0]), None).expect("decode");
+    let img = decode_image_file(Path::new(&args[0]), None, false).expect("decode");
     let color = ColorTransform {
         matrix: img.color.matrix,
         trc: img.color.trc,

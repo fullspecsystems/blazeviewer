@@ -19,7 +19,7 @@ fn main() {
     let mut ok = 0;
     let mut fail = 0;
     for arg in &args {
-        match decode_image_file(Path::new(arg), None) {
+        match decode_image_file(Path::new(arg), None, false) {
             Ok(img) => {
                 ok += 1;
                 let color = if img.color.enabled {

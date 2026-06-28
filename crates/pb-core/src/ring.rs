@@ -217,6 +217,21 @@ impl ResidentRing {
         self.slots[slot] = SlotState::Empty;
     }
 
+    /// Adjust the recorded VRAM bytes of `item`'s slot — used to upgrade a preview
+    /// texture to the full-resolution one *in place* (re-uploading the same slot)
+    /// while keeping `committed_bytes` honest. No eviction here: a transient
+    /// over-budget self-corrects on the next `reserve_bytes`. No-op if `item` isn't
+    /// tracked.
+    pub fn set_slot_bytes(&mut self, item: usize, bytes: u64) {
+        if let Some(&slot) = self.by_item.get(&item) {
+            self.committed_bytes = self
+                .committed_bytes
+                .saturating_sub(self.slot_bytes[slot])
+                .saturating_add(bytes);
+            self.slot_bytes[slot] = bytes;
+        }
+    }
+
     /// Commit a completed upload: `Pending(item, epoch)` → `Resident(item)`.
     /// Returns `false` if the reservation is stale (the slot was reused or the
     /// epoch advanced), in which case the caller drops the decoded result.
@@ -399,6 +414,25 @@ mod tests {
             r.slot_for(12).is_some(),
             "the top-priority item stays resident"
         );
+    }
+
+    #[test]
+    fn set_slot_bytes_upgrades_committed_accounting() {
+        // Preview→full upgrade in place must be reflected in the byte budget.
+        let mut r = ResidentRing::new_with_budget(4, 1000);
+        let a = r.reserve_bytes(1, 1, 100, &[1]).unwrap();
+        r.mark_resident(1, a.slot, 1);
+        r.set_slot_bytes(1, 900); // upgrade 100 → 900 (committed now 900)
+                                  // 900 + 200 > 1000, and item 1 is now lower priority → it's evicted.
+        let keep = [2usize, 1];
+        let b = r.reserve_bytes(2, 1, 200, &keep).unwrap();
+        r.mark_resident(2, b.slot, 1);
+        assert_eq!(
+            r.slot_for(1),
+            None,
+            "the upgraded byte count is honored by the budget (item 1 evicted)"
+        );
+        assert!(r.slot_for(2).is_some());
     }
 
     #[test]

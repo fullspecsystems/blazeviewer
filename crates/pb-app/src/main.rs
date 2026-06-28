@@ -373,6 +373,17 @@ struct App {
     decode_ewma: f32,
     pie_drawn: bool,
     pie_pushed: Option<(f32, f32, f32)>,
+    /// Items whose resident ring slot holds a fast *preview* (e.g. a HEIC
+    /// thumbnail) rather than the full decode — candidates to upgrade ("sharpen")
+    /// once the user settles. Pruned to actually-resident items in `request_prefetch`.
+    preview_resident: HashSet<usize>,
+    /// Whether the image currently on screen is a preview (so settling should pull
+    /// the full). Tracked across both display paths (ring `present_item` + the
+    /// single-image `load_current_sync`).
+    displayed_is_preview: bool,
+    /// The item already requested for sharpening (full decode), so the settle
+    /// trigger doesn't re-issue it every tick.
+    sharpen_requested: Option<usize>,
 }
 
 impl App {
@@ -388,7 +399,8 @@ impl App {
     ) -> Self {
         let paths: Vec<Arc<Path>> = paths.into_iter().map(Arc::from).collect();
         let playlist = Playlist::new(paths.len(), 0).with_cursor(start);
-        let decode: Arc<DecodeFn> = Arc::new(|p: &Path, fit| decode_image_file(p, fit));
+        let decode: Arc<DecodeFn> =
+            Arc::new(|p: &Path, fit, allow_preview| decode_image_file(p, fit, allow_preview));
         let (pool, results) = DecodePool::new(recommended_workers(), POOL_BUDGET_BYTES, decode);
         Self {
             windowed,
@@ -442,6 +454,9 @@ impl App {
             decode_ewma: 0.25,
             pie_drawn: false,
             pie_pushed: None,
+            preview_resident: HashSet::new(),
+            displayed_is_preview: false,
+            sharpen_requested: None,
         }
     }
 
@@ -478,25 +493,50 @@ impl App {
         }
     }
 
-    /// Recompute the prefetch want-list and hand it to the decode pool. Items
-    /// already resident are not re-requested.
+    /// Recompute the prefetch want-list and hand it to the decode pool. The window
+    /// is fetched as fast **previews** (HEIC thumbnails etc.) so scrolling never
+    /// outruns decode; the one exception is the on-screen photo once you settle on
+    /// it, which is re-fetched at full resolution to "sharpen" in place (see
+    /// `sharpen_target`). Items already resident at the right tier aren't re-requested.
     fn request_prefetch(&mut self) {
         self.targets = prefetch_targets(&self.playlist, self.ahead, self.behind);
         let fit = self.decode_fit();
-        // Items already decoded and waiting to upload must not be re-requested:
-        // the pool no longer tracks them, so it would decode them a second time.
+        // Drop preview-tier entries for items no longer resident (evicted).
+        self.preview_resident
+            .retain(|i| self.ring.slot_for(*i).is_some());
+        // Items decoded but not yet uploaded must not be re-requested (the pool no
+        // longer tracks them, so it would decode them again).
         let pending: HashSet<usize> = self.pending_uploads.iter().map(|o| o.key.item).collect();
-        let jobs: Vec<(usize, Arc<Path>, Option<FitBox>)> = self
+        let sharpen = self.sharpen_target();
+        let jobs: Vec<(usize, Arc<Path>, Option<FitBox>, bool)> = self
             .targets
             .iter()
-            .filter(|&&t| {
-                self.ring.slot_for(t).is_none()
-                    && !self.failed.contains(&t)
-                    && !pending.contains(&t)
+            .filter_map(|&t| {
+                if self.failed.contains(&t) || pending.contains(&t) {
+                    return None;
+                }
+                let resident = self.ring.slot_for(t).is_some();
+                let is_prev = resident && self.preview_resident.contains(&t);
+                let want_full = sharpen == Some(t) && is_prev;
+                if resident && !want_full {
+                    return None; // resident full, or a preview neighbour we keep
+                }
+                // Not resident → preview (fast); the sharpen target → full.
+                Some((t, self.paths[t].clone(), fit, !want_full))
             })
-            .map(|&t| (t, self.paths[t].clone(), fit))
             .collect();
         self.pool.set_targets(self.epoch, &jobs);
+    }
+
+    /// The item to re-fetch at full resolution ("sharpen"): the on-screen photo,
+    /// but only when settled (no nav key held) and it's currently a preview. `None`
+    /// while flying, so fast scrolling stays entirely on the cheap preview tier and
+    /// the (serialized) full HEVC decode never competes with it.
+    fn sharpen_target(&self) -> Option<usize> {
+        if !self.displayed_is_preview || self.held_nav().is_some() {
+            return None;
+        }
+        self.displayed_item
     }
 
     /// Load the per-photo view state for `item`: rotation from the RAM override
@@ -539,6 +579,8 @@ impl App {
         }
         self.ring.set_displayed(slot);
         self.displayed_item = Some(item);
+        // Track whether the on-screen photo is a preview (so settling sharpens it).
+        self.displayed_is_preview = self.preview_resident.contains(&item);
         self.current = self.meta_cache.get(&item).cloned();
         // The panel (if shown) is now stale for the old photo; `about_to_wait`
         // rebuilds it for `item` next tick (or hides it while flying), so it
@@ -554,6 +596,7 @@ impl App {
     /// frame stays up rather than flashing black.
     fn present_failed(&mut self, item: usize, event_loop: &ActiveEventLoop) {
         self.displayed_item = Some(item);
+        self.displayed_is_preview = false;
         self.current = None;
         let name = self.paths[item]
             .file_name()
@@ -654,23 +697,64 @@ impl App {
         let mut leftover = Vec::new();
         for outcome in ready {
             let item = outcome.key.item;
+            let Ok(ref img) = outcome.result else {
+                continue; // errors were already filtered out above
+            };
+            // The on-screen preview's sharpen decode came back still a *preview*
+            // (some RAW has no higher-res form than its embedded preview): accept it
+            // as final so the settle trigger stops retrying (and the loop idles).
+            if img.is_preview
+                && self.displayed_item == Some(item)
+                && self.preview_resident.contains(&item)
+                && self.ring.slot_for(item).is_some()
+            {
+                self.displayed_is_preview = false;
+                continue;
+            }
+            // A full decode for an item resident as a preview is a "sharpen":
+            // replace the texture in its existing slot, no new reservation.
+            let upgrade = !img.is_preview
+                && self.preview_resident.contains(&item)
+                && self.ring.slot_for(item).is_some();
             if uploads >= UPLOADS_PER_TICK {
                 // Carry still-wanted leftovers to the next tick (in priority order);
                 // drop now-obsolete ones so they don't pin pool byte-budget while
                 // the loop idles (work_pending wouldn't keep polling for them).
-                if self.targets.contains(&item) && self.ring.slot_for(item).is_none() {
+                if self.targets.contains(&item) && (upgrade || self.ring.slot_for(item).is_none()) {
                     leftover.push(outcome);
                 }
                 continue;
             }
-            let Ok(ref img) = outcome.result else {
-                continue; // errors were already filtered out above
-            };
             if !self.meta_cache.contains_key(&item) {
                 let m = meta_for_path(&self.paths[item], &self.root, img);
                 self.meta_cache.insert(item, m);
             }
             let item_bytes = img.pixels.len() as u64;
+            if upgrade {
+                let slot = self.ring.slot_for(item).expect("resident as preview");
+                if let Some(a) = self.active.as_mut() {
+                    let t0 = Instant::now();
+                    a.renderer.upload_slot(
+                        slot,
+                        &img.pixels,
+                        img.width,
+                        img.height,
+                        render_color(&img.color),
+                        is_hdr(img),
+                        img.peak,
+                    );
+                    self.metrics.record("upload", t0.elapsed());
+                }
+                self.ring.set_slot_bytes(item, item_bytes);
+                self.preview_resident.remove(&item);
+                uploads += 1;
+                // It's the same slot already on screen — just redraw it sharp.
+                if self.displayed_item == Some(item) {
+                    self.displayed_is_preview = false;
+                    self.draw(event_loop);
+                }
+                continue;
+            }
             if let Some(res) = self
                 .ring
                 .reserve_bytes(item, self.epoch, item_bytes, &self.targets)
@@ -689,6 +773,11 @@ impl App {
                     self.metrics.record("upload", t0.elapsed());
                 }
                 self.ring.mark_resident(item, res.slot, self.epoch);
+                if img.is_preview {
+                    self.preview_resident.insert(item);
+                } else {
+                    self.preview_resident.remove(&item);
+                }
                 uploads += 1;
                 if self.target_item == Some(item) && self.displayed_item != Some(item) {
                     self.present_item(item, res.slot, event_loop);
@@ -707,7 +796,7 @@ impl App {
             return;
         };
         let t0 = Instant::now();
-        let decoded = decode_image_file(&self.paths[idx], self.decode_fit());
+        let decoded = decode_image_file(&self.paths[idx], self.decode_fit(), false);
         self.metrics.record("decode", t0.elapsed());
         match decoded {
             Ok(img) => {
@@ -732,6 +821,9 @@ impl App {
                 self.overlay_shown = false;
                 self.overlay_item = None;
                 self.displayed_item = Some(idx);
+                // A full (sharp) decode shown via the single-image path — not a
+                // preview, so the settle trigger won't try to sharpen it.
+                self.displayed_is_preview = false;
             }
             Err(e) => {
                 eprintln!("decode failed: {}: {e}", self.paths[idx].display());
@@ -916,6 +1008,8 @@ impl App {
         self.rotations.clear();
         self.meta_cache.clear();
         self.failed.clear();
+        self.preview_resident.clear();
+        self.sharpen_requested = None;
         // Invalidate the ring + bump the epoch (discards in-flight old decodes),
         // then synchronously show the new current photo and refill around it.
         self.invalidate_geometry();
@@ -951,7 +1045,7 @@ impl App {
     ) {
         let srgb = pb_render::ColorTransform::srgb();
         match self.playlist.current() {
-            Some(idx) => match decode_image_file(&self.paths[idx], self.decode_fit()) {
+            Some(idx) => match decode_image_file(&self.paths[idx], self.decode_fit(), false) {
                 Ok(img) => {
                     let meta = meta_for_path(&self.paths[idx], &self.root, &img);
                     self.current = Some(meta.clone());
@@ -1391,6 +1485,7 @@ impl App {
         self.meta_cache.clear();
         self.rotations.clear();
         self.failed.clear();
+        self.preview_resident.clear();
         self.current = None;
         self.toast = None;
         self.wait_started = None;
@@ -1641,7 +1736,7 @@ impl ApplicationHandler for App {
             // the first image at the corrected fit so the first frame isn't soft.
             if let Some(idx) = self.playlist.current() {
                 let t0 = Instant::now();
-                let decoded = decode_image_file(&self.paths[idx], self.decode_fit());
+                let decoded = decode_image_file(&self.paths[idx], self.decode_fit(), false);
                 self.metrics.record("decode", t0.elapsed());
                 if let Ok(img) = decoded {
                     let meta = meta_for_path(&self.paths[idx], &self.root, &img);
@@ -1879,6 +1974,22 @@ impl ApplicationHandler for App {
             self.hold_start = None;
         }
 
+        // 3b. Sharpen-on-settle: parked on a preview (no nav key held) → pull its
+        // full-resolution decode to refine it in place (HEIC/RAW). Requested once
+        // per landed photo (the pool dedups; `drain_results` upgrades the slot).
+        if nav.is_none() {
+            if self.displayed_is_preview && self.sharpen_requested != self.displayed_item {
+                self.sharpen_requested = self.displayed_item;
+                self.request_prefetch();
+            }
+        } else {
+            self.sharpen_requested = None;
+        }
+        // Keep the loop ticking (so `drain_results` runs) while a sharpen is
+        // in-flight; once it lands the slot is upgraded and this clears.
+        let sharpen_pending =
+            self.displayed_is_preview && self.sharpen_requested == self.displayed_item;
+
         // 4. Info panel visibility. "Blaze mode" = actually flying (a nav key held
         // *past* the tap delay): hide the panel so it isn't a strobing distraction
         // while photos fly by. Otherwise — idle, or a single tap inside the delay —
@@ -1934,6 +2045,7 @@ impl ApplicationHandler for App {
             || toast_active
             || pie_active
             || resizing
+            || sharpen_pending
         {
             event_loop.set_control_flow(ControlFlow::WaitUntil(now + self.frame_interval));
         } else {
@@ -2280,7 +2392,7 @@ mod tests {
             max_height: 64,
         };
         for p in &paths {
-            decode_image_file(p, Some(fit)).expect("decode");
+            decode_image_file(p, Some(fit), false).expect("decode");
             let bytes = fs::read(p).expect("read for exif");
             let _ = read_exif_fields(&bytes);
             let _ = fs::metadata(p).expect("stat");

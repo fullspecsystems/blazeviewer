@@ -248,11 +248,19 @@ fn decode_bytes_inner(
 /// reported as a [`DecodeError`] rather than unwinding into the decode pool — the
 /// viewer skips the bad file instead of dying. (A hard stack overflow is still
 /// fatal and is mitigated separately; see the RAW demosaic's big-stack thread.)
-pub fn decode_image_file(path: &Path, fit: Option<FitBox>) -> Result<DecodedImage, DecodeError> {
-    catch_panics(|| decode_image_file_inner(path, fit))
+pub fn decode_image_file(
+    path: &Path,
+    fit: Option<FitBox>,
+    allow_preview: bool,
+) -> Result<DecodedImage, DecodeError> {
+    catch_panics(|| decode_image_file_inner(path, fit, allow_preview))
 }
 
-fn decode_image_file_inner(path: &Path, fit: Option<FitBox>) -> Result<DecodedImage, DecodeError> {
+fn decode_image_file_inner(
+    path: &Path,
+    fit: Option<FitBox>,
+    allow_preview: bool,
+) -> Result<DecodedImage, DecodeError> {
     let bytes =
         std::fs::read(path).map_err(|e| DecodeError::Corrupt(format!("read error: {e}")))?;
     let ext = path
@@ -263,7 +271,7 @@ fn decode_image_file_inner(path: &Path, fit: Option<FitBox>) -> Result<DecodedIm
     let req = DecodeRequest {
         bytes: &bytes,
         fit,
-        allow_preview: true,
+        allow_preview,
     };
     // RAW (TIFF-shaped) and SVG (XML text) can't be told apart from a plain TIFF
     // or arbitrary text by a magic sniff, so route them by extension; everything
@@ -279,7 +287,7 @@ fn decode_image_file_inner(path: &Path, fit: Option<FitBox>) -> Result<DecodedIm
     if ext == "tga" {
         return image_backend::decode_tga(&bytes, fit);
     }
-    decode_bytes_inner(&bytes, fit, false)
+    decode_bytes_inner(&bytes, fit, allow_preview)
 }
 
 /// Run a decode, converting a panic into a `DecodeError::Corrupt` instead of
@@ -395,7 +403,7 @@ mod tests {
         let bytes = encode(image::ImageFormat::Tga);
         let path = std::env::temp_dir().join(format!("pb_tga_test_{}.tga", std::process::id()));
         std::fs::write(&path, &bytes).expect("write temp tga");
-        let decoded = decode_image_file(&path, None);
+        let decoded = decode_image_file(&path, None, false);
         let _ = std::fs::remove_file(&path);
         let img = decoded.expect("tga decode");
         assert_eq!(img.codec, "TGA");

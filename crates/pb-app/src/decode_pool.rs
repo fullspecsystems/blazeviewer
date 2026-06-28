@@ -24,8 +24,10 @@ use std::thread::JoinHandle;
 use pb_decode::{DecodeError, DecodedImage, FitBox};
 
 /// The injected decode step (`decode_image_file` in the app; a fake in tests).
+/// The `bool` is `allow_preview`: true requests a fast embedded preview where one
+/// exists (HEIC thumbnail, RAW preview), false forces the full-resolution decode.
 pub type DecodeFn =
-    dyn Fn(&Path, Option<FitBox>) -> Result<DecodedImage, DecodeError> + Send + Sync;
+    dyn Fn(&Path, Option<FitBox>, bool) -> Result<DecodedImage, DecodeError> + Send + Sync;
 
 /// Identifies a unit of decode work: which item, at which geometry epoch. The
 /// epoch rides back on the [`Outcome`] so the main thread can discard a result
@@ -66,6 +68,8 @@ struct Job {
     key: DecodeKey,
     path: Arc<Path>,
     fit: Option<FitBox>,
+    /// Whether to decode a fast preview (true) or the full resolution (false).
+    preview: bool,
     prio: u32,
     cancel: Arc<AtomicBool>,
 }
@@ -137,7 +141,11 @@ impl DecodePool {
     /// Replace the want-set with `prioritized` (highest priority first), at
     /// `epoch`. Cancels jobs no longer wanted, re-prioritizes queued ones, and
     /// enqueues newly-wanted items. An epoch change cancels everything stale.
-    pub fn set_targets(&self, epoch: u64, prioritized: &[(usize, Arc<Path>, Option<FitBox>)]) {
+    pub fn set_targets(
+        &self,
+        epoch: u64,
+        prioritized: &[(usize, Arc<Path>, Option<FitBox>, bool)],
+    ) {
         let mut inner = self.shared.inner.lock().unwrap();
 
         if epoch != inner.epoch {
@@ -153,7 +161,7 @@ impl DecodePool {
         let wanted: HashMap<usize, u32> = prioritized
             .iter()
             .enumerate()
-            .map(|(i, (item, _, _))| (*item, i as u32))
+            .map(|(i, (item, _, _, _))| (*item, i as u32))
             .collect();
 
         // Cancel anything no longer wanted; drop those still queued.
@@ -177,7 +185,7 @@ impl DecodePool {
         }
 
         // Enqueue newly-wanted items (dedup against queued + in-flight).
-        for (item, path, fit) in prioritized {
+        for (item, path, fit, preview) in prioritized {
             if inner.tracked.contains_key(item) {
                 continue;
             }
@@ -188,6 +196,7 @@ impl DecodePool {
                 key: DecodeKey { item: *item, epoch },
                 path: path.clone(),
                 fit: *fit,
+                preview: *preview,
                 prio,
                 cancel: flag,
             });
@@ -236,7 +245,7 @@ fn worker_loop(shared: Arc<Shared>) {
             continue;
         }
 
-        let result = (shared.decode)(&job.path, job.fit);
+        let result = (shared.decode)(&job.path, job.fit, job.preview);
         let bytes = match &result {
             Ok(img) => img.pixels.len(),
             Err(_) => 0,
@@ -322,8 +331,11 @@ mod tests {
         }
     }
 
-    fn targets(items: &[usize]) -> Vec<(usize, Arc<Path>, Option<FitBox>)> {
-        items.iter().map(|&i| (i, path_for(i), None)).collect()
+    fn targets(items: &[usize]) -> Vec<(usize, Arc<Path>, Option<FitBox>, bool)> {
+        items
+            .iter()
+            .map(|&i| (i, path_for(i), None, false))
+            .collect()
     }
 
     fn drain_n(rx: &Receiver<Outcome>, n: usize) -> Vec<usize> {
@@ -360,7 +372,7 @@ mod tests {
 
     #[test]
     fn delivers_all_wanted_items() {
-        let decode: Arc<DecodeFn> = Arc::new(|p, _| Ok(image(item_of(p), 16)));
+        let decode: Arc<DecodeFn> = Arc::new(|p, _, _| Ok(image(item_of(p), 16)));
         let (pool, rx) = DecodePool::new(3, 1 << 20, decode);
         pool.set_targets(1, &targets(&[0, 1, 2, 3, 4]));
         let mut got = drain_n(&rx, 5);
@@ -372,7 +384,7 @@ mod tests {
     fn decodes_in_priority_order_with_one_worker() {
         let order = Arc::new(StdMutex::new(Vec::<usize>::new()));
         let rec = order.clone();
-        let decode: Arc<DecodeFn> = Arc::new(move |p, _| {
+        let decode: Arc<DecodeFn> = Arc::new(move |p, _, _| {
             rec.lock().unwrap().push(item_of(p));
             Ok(image(item_of(p), 16))
         });
@@ -390,7 +402,7 @@ mod tests {
         let (release_tx, release_rx) = channel::<()>();
         let gate = Arc::new(AtomicBool::new(true)); // true => next decode gates
         let release_rx = StdMutex::new(release_rx);
-        let decode: Arc<DecodeFn> = Arc::new(move |p, _| {
+        let decode: Arc<DecodeFn> = Arc::new(move |p, _, _| {
             if gate.swap(false, Ordering::SeqCst) {
                 started_tx.send(()).unwrap();
                 release_rx.lock().unwrap().recv().unwrap();
@@ -419,7 +431,7 @@ mod tests {
         let gate = Arc::new(AtomicBool::new(true));
         let release_rx = StdMutex::new(release_rx);
         let c = count.clone();
-        let decode: Arc<DecodeFn> = Arc::new(move |p, _| {
+        let decode: Arc<DecodeFn> = Arc::new(move |p, _, _| {
             *c.lock().unwrap() += 1;
             if gate.swap(false, Ordering::SeqCst) {
                 started_tx.send(()).unwrap();
@@ -439,7 +451,7 @@ mod tests {
 
     #[test]
     fn stale_epoch_is_carried_on_the_outcome() {
-        let decode: Arc<DecodeFn> = Arc::new(|p, _| Ok(image(item_of(p), 16)));
+        let decode: Arc<DecodeFn> = Arc::new(|p, _, _| Ok(image(item_of(p), 16)));
         let (pool, rx) = DecodePool::new(2, 1 << 20, decode);
         pool.set_targets(7, &targets(&[0]));
         let o = rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -449,7 +461,7 @@ mod tests {
     #[test]
     fn byte_budget_does_not_stall_delivery() {
         // Budget smaller than the working set; slow draining must still complete.
-        let decode: Arc<DecodeFn> = Arc::new(|p, _| Ok(image(item_of(p), 256)));
+        let decode: Arc<DecodeFn> = Arc::new(|p, _, _| Ok(image(item_of(p), 256)));
         let (pool, rx) = DecodePool::new(3, 300, decode); // ~1 image of headroom
         pool.set_targets(1, &targets(&[0, 1, 2, 3, 4, 5]));
         let mut got = Vec::new();
