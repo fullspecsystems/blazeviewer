@@ -218,13 +218,13 @@ unsafe fn wic_decode_hdr(bytes: &[u8]) -> windows::core::Result<(Vec<f32>, u32, 
 
 /// Whether a CICP transfer characteristic is HDR (needs the float decode path):
 /// 16 = SMPTE-2084 (PQ), 18 = ARIB STD-B67 (HLG).
-fn is_hdr_transfer(transfer: u8) -> bool {
+pub(crate) fn is_hdr_transfer(transfer: u8) -> bool {
     matches!(transfer, 16 | 18)
 }
 
 /// The transfer characteristic from an `nclx` `colr` box, if present. (Embedded-ICC
 /// `prof` HDR is rare and not detected here.) Same byte-scan as the color parse.
-fn colr_transfer(bytes: &[u8]) -> Option<u8> {
+pub(crate) fn colr_transfer(bytes: &[u8]) -> Option<u8> {
     let mut i = 4usize;
     while i + 12 <= bytes.len() {
         if &bytes[i..i + 4] == b"colr" && &bytes[i + 4..i + 8] == b"nclx" {
@@ -294,7 +294,10 @@ unsafe fn wic_color_transform(
 /// full box tree we scan for the `colr` signature and validate the candidate (an
 /// embedded ICC's own size header must match the box) — the same pragmatic
 /// byte-scan style as `isobmff_brand` and the RAW JPEG-span finder.
-fn color_from_colr_box(bytes: &[u8]) -> Option<ColorTransform> {
+///
+/// `pub(crate)` so the libheif backend reuses the exact same (tested) color path
+/// as WIC — both hand back source-native pixels carrying this transform.
+pub(crate) fn color_from_colr_box(bytes: &[u8]) -> Option<ColorTransform> {
     let mut i = 4usize; // a valid box has its 4-byte size *before* the type
     while i + 8 <= bytes.len() {
         if &bytes[i..i + 4] == b"colr" {
@@ -341,10 +344,29 @@ fn parse_colr_at(bytes: &[u8], pos: usize) -> Option<ColorTransform> {
     }
 }
 
+/// Whether the HEIF embeds a **real** thumbnail item (a `thmb` reference in the
+/// `iref` box). When it does, WIC's `GetThumbnail` is a fast (~ms) decode of that
+/// small image. When it does NOT (e.g. macOS-encoded Sony HEICs), WIC *synthesizes*
+/// a thumbnail by decoding the entire HEVC grid — as slow as a full decode — so the
+/// libheif backend should handle those itself rather than pay that twice.
+///
+/// Pragmatic byte-scan (like `color_from_colr_box`), bounded to the file head where
+/// `meta`/`iref` always live; a stray match only costs us the WIC path we'd take
+/// anyway, and a miss only routes a thumbnailed file through libheif (still correct).
+///
+/// Only the libheif backend consults this (for its preview routing), so it's gated
+/// to that feature to stay dead-code-free in the stock WIC-only build.
+#[cfg(feature = "libheif")]
+pub(crate) fn has_thumbnail_ref(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(64 * 1024)];
+    head.windows(4).any(|w| w == b"thmb")
+}
+
 /// If `bytes` is an ISOBMFF (`ftyp`) image this backend handles — AVIF or
 /// HEIC/HEIF — return its display codec label; else `None`. JXL's container opens
-/// with a different box, so it never matches here.
-fn isobmff_brand(bytes: &[u8]) -> Option<&'static str> {
+/// with a different box, so it never matches here. `pub(crate)` so the libheif
+/// backend can share the same brand sniff for its HEIC-only routing.
+pub(crate) fn isobmff_brand(bytes: &[u8]) -> Option<&'static str> {
     if bytes.len() < 16 || &bytes[4..8] != b"ftyp" {
         return None;
     }

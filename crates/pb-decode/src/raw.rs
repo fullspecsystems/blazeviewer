@@ -41,18 +41,32 @@ impl ImageDecoder for RawPreviewDecoder {
         // The largest embedded preview, decoded to sensor-orientation pixels.
         let preview = largest_preview(req.bytes);
         let preview_long = preview.as_ref().map_or(0, |(_, w, h)| (*w).max(*h));
+        let has_full_preview = preview_long >= PREVIEW_FULL_MIN;
 
-        // Fast path: a full-size preview (most cameras, e.g. Nikon). Apply the RAW
-        // container's orientation (the preview JPEG itself usually carries none).
-        if preview_long >= PREVIEW_FULL_MIN {
-            let (rgba, w, h) = preview.unwrap();
-            let orient = common::read_orientation(req.bytes);
-            return common::finalize_oriented(rgba, w, h, orient, "RAW", req.fit, true);
+        // Use the camera-baked embedded JPEG directly (fast, ~tens of ms) when EITHER:
+        //  - this is a **preview** request (the fly-by tier): a small thumbnail is
+        //    exactly the "instant blurry, sharpen on land" placeholder — demosaicing
+        //    here is what jammed scrolling through Sony RAW (~1.4 s each, all workers
+        //    stuck); or
+        //  - the embedded preview is already full-size (Nikon ≈7360) — demosaic adds
+        //    nothing.
+        // The 100×+ demosaic is reserved for the **full** decode of a RAW whose only
+        // embedded image is a small thumbnail (Sony 1616) — see below.
+        if req.allow_preview || has_full_preview {
+            if let Some((rgba, w, h)) = preview {
+                let orient = common::read_orientation(req.bytes);
+                // Refinable (the app will pull the full demosaic on land) only when
+                // it's a small thumbnail shown for a preview request.
+                let is_preview = req.allow_preview && !has_full_preview;
+                return common::finalize_oriented(rgba, w, h, orient, "RAW", req.fit, is_preview);
+            }
+            // No embedded JPEG at all → fall through to demosaic (no faster option).
         }
 
-        // Thumbnail / reduced preview (e.g. Sony) → demosaic for true resolution.
-        // imagepipe applies orientation itself, so pass upright (1). Keep it only
-        // if it actually beats the preview (else the demosaic added nothing).
+        // Full decode, only a small thumbnail embedded (e.g. Sony) → demosaic for true
+        // sensor resolution. imagepipe applies orientation itself, so pass upright (1).
+        // Keep it only if it actually beats the preview (else the demosaic added
+        // nothing).
         if let Some((rgba, w, h)) = demosaic_full(req.bytes) {
             if w.max(h) >= preview_long {
                 return common::finalize_oriented(rgba, w, h, 1, "RAW", req.fit, false);

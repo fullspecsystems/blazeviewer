@@ -30,7 +30,25 @@ flate2 = "1"
 imagepipe = "0.5.0"
 rawloader = "0.37.1"
 
+[features]
+# CPU HEVC decode via libheif (libde265), behind the ImageDecoder seam, A/B-able
+# vs the WIC backend. OFF by default: it links a vcpkg-built static C lib
+# (`libheif[core]:x64-windows-static-md`, see build.rs), so a missing/broken C
+# toolchain must never block the pure-Rust core (ADR-015). Enable with
+# `--features libheif`. The win is parallelism: WIC's HEVC decoder serializes
+# (~1.6-2.4x across 8 threads, measured), libheif is plain CPU so the pool's
+# workers scale ~linearly. Windows-only for now (the lib is built per-triplet).
+libheif = []
+
 [dev-dependencies]
+
+# Throwaway HEIC A/B tools. `heic_compare` calls the feature-gated LibHeifDecoder
+# directly, so it only builds with `--features libheif` (keeps `--all-targets`
+# green without the feature). `heic_bench` uses only public types, so it always
+# builds (it just routes through WIC unless the feature is on).
+[[example]]
+name = "heic_compare"
+required-features = ["libheif"]
 
 [target."cfg(windows)".dependencies]
 # AVIF + HEIC via the Windows Imaging Component (the OS codec extensions);

@@ -43,7 +43,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Icon, Window, WindowId};
 
 use pb_core::open::{self, LaunchInput, Source};
-use pb_core::{prefetch_targets, Playlist, ResidentRing};
+use pb_core::{full_ring, prefetch_targets, Playlist, ResidentRing};
 use pb_decode::{
     decode_bytes, decode_image_file, is_supported_extension, read_exif_fields, DecodedImage,
     FitBox, PixelFormat,
@@ -72,6 +72,22 @@ const POOL_BUDGET_BYTES: usize = 512 * 1024 * 1024;
 /// Max slot uploads performed per `about_to_wait` tick, so a burst of finished
 /// decodes can't blow the frame budget.
 const UPLOADS_PER_TICK: usize = 2;
+/// Per-decode wall time *as the pool sees it* (i.e. under real concurrent load),
+/// printed with the `--metrics` report. Isolated decode is fast; this shows how much
+/// 8-way contention inflates it (it's how the RAW-demosaic-on-preview stall was
+/// found). Only recorded under `--metrics` (the flag below), so it's zero-overhead
+/// and unbounded-growth-free in normal runs.
+static POOL_DECODE_MS: std::sync::Mutex<Vec<(f64, String)>> = std::sync::Mutex::new(Vec::new());
+/// Whether `--metrics` is on (gates the `POOL_DECODE_MS` recording in the off-thread
+/// decode closure, which has no access to the `StageTimes`).
+static METRICS_ON_FLAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Cap on the **full-resolution** "sharp ring" upgraded around the cursor when
+/// parked (`upgrade_set`). The preview window can be much larger (up to the ring's
+/// 64-slot capacity on small windows), but holding more than this many *fulls*
+/// resident is wasted decode — nobody pause-and-steps two dozen photos before
+/// either flying (previews carry that) or stopping. Keeps the on-park decode burst
+/// bounded. On a 7680 fullscreen the byte-budgeted capacity (~12–32) binds first.
+const MAX_FULL_RING: usize = 24;
 
 /// Hold-to-zoom curve: the e-folding zoom rate (per second) ramps from a gentle
 /// start (fine tuning) to a fast max over `ZOOM_RAMP_SECS`. Time-based so it's
@@ -85,6 +101,50 @@ const ZOOM_RAMP_SECS: f32 = 0.7;
 const PAN_MIN_SPEED: f32 = 450.0;
 const PAN_MAX_SPEED: f32 = 3200.0;
 const PAN_RAMP_SECS: f32 = 0.7;
+
+/// Hold-to-fly advance curve: while a nav key is held past the initial tap delay,
+/// the auto-advance rate ramps from a gentle `ADVANCE_MIN_RATE` (a few photos/sec,
+/// for control) up to the display refresh rate over `ADVANCE_RAMP_SECS`. Same
+/// linear-rate shape as the zoom/pan ramps. The ramp only sets the *attempted*
+/// cadence — decode readiness still caps the real rate (a miss holds, never skips)
+/// and the refresh rate is the hard ceiling (a configurable lower cap is a future
+/// settings option; until then refresh is the max).
+const ADVANCE_MIN_RATE: f32 = 3.0;
+const ADVANCE_RAMP_SECS: f32 = 4.0;
+
+/// The minimum gap since the last shown photo before the next held-key auto-advance,
+/// given how long auto-repeat has been running (`elapsed`, measured from when the
+/// initial tap delay expired). The advance rate ramps linearly from `min_rate`
+/// (photos/sec) up to the refresh rate (`1 / frame_interval`) over `ramp_secs`, then
+/// holds there; the returned interval is the reciprocal, floored at `frame_interval`
+/// so it's never faster than the refresh ceiling. Pure + time-based (frame-rate
+/// independent), so the curve is unit-testable without the event loop.
+fn advance_interval(
+    elapsed: Duration,
+    min_rate: f32,
+    ramp_secs: f32,
+    frame_interval: Duration,
+) -> Duration {
+    let frame_secs = frame_interval.as_secs_f32();
+    let refresh_rate = 1.0 / frame_secs.max(f32::MIN_POSITIVE);
+    // No headroom to ramp (floor already at/above refresh, e.g. a very low-Hz
+    // display): just run at the refresh cap.
+    if min_rate >= refresh_rate {
+        return frame_interval;
+    }
+    let t = if ramp_secs > 0.0 {
+        (elapsed.as_secs_f32() / ramp_secs).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let rate = min_rate + (refresh_rate - min_rate) * t;
+    // At/above the ceiling, return the refresh interval exactly (no float drift).
+    if rate >= refresh_rate {
+        return frame_interval;
+    }
+    let secs = (1.0 / rate.max(f32::MIN_POSITIVE)).clamp(frame_secs, 60.0);
+    Duration::from_secs_f32(secs)
+}
 
 /// "Not-ready" loading-pie tuning (the top-right affordance shown while the next
 /// photo is still decoding). The fill is a deliberate "honest-ish" fake: there is
@@ -388,9 +448,13 @@ struct App {
     /// preview (e.g. a RAW whose only embedded image *is* its preview) — so we
     /// don't keep re-requesting their upgrade every idle tick.
     upgrade_done: HashSet<usize>,
-    /// The last `upgrade_item()` we issued a full decode for, so the idle pump
-    /// re-issues only when the target changes (not every tick → no per-frame churn).
-    last_upgrade_item: Option<usize>,
+    /// The last full-upgrade set (the "sharp ring") we issued, so the idle pump
+    /// re-issues only when it changes (not every tick → no per-frame churn).
+    last_upgrade_set: Vec<usize>,
+    /// When each item's full ("sharpen") decode was first requested, to measure the
+    /// real end-to-end sharpen latency (full requested → full on screen) via the
+    /// `sharpen` metric stage. RAM-only, pruned to resident in `request_prefetch`.
+    full_requested_at: HashMap<usize, Instant>,
     /// The native menu bar (windowed mode only). Built once, kept alive here so its
     /// native handle outlives the window. `None` until the first window is created.
     menu: Option<muda::Menu>,
@@ -412,8 +476,21 @@ impl App {
     ) -> Self {
         let paths: Vec<Arc<Path>> = paths.into_iter().map(Arc::from).collect();
         let playlist = Playlist::new(paths.len(), 0).with_cursor(start);
-        let decode: Arc<DecodeFn> =
-            Arc::new(|p: &Path, fit, allow_preview| decode_image_file(p, fit, allow_preview));
+        let decode: Arc<DecodeFn> = Arc::new(|p: &Path, fit, allow_preview| {
+            if !METRICS_ON_FLAG.load(std::sync::atomic::Ordering::Relaxed) {
+                return decode_image_file(p, fit, allow_preview);
+            }
+            let t0 = Instant::now();
+            let r = decode_image_file(p, fit, allow_preview);
+            let ms = t0.elapsed().as_secs_f64() * 1e3;
+            let tag = format!(
+                "{}{}",
+                if allow_preview { "prev " } else { "full " },
+                p.file_name().and_then(|n| n.to_str()).unwrap_or("?")
+            );
+            POOL_DECODE_MS.lock().unwrap().push((ms, tag));
+            r
+        });
         let (pool, results) = DecodePool::new(recommended_workers(), POOL_BUDGET_BYTES, decode);
         Self {
             windowed,
@@ -469,7 +546,8 @@ impl App {
             pie_pushed: None,
             preview_resident: HashSet::new(),
             upgrade_done: HashSet::new(),
-            last_upgrade_item: None,
+            last_upgrade_set: Vec::new(),
+            full_requested_at: HashMap::new(),
             menu: None,
             menu_attached: false,
         }
@@ -510,12 +588,13 @@ impl App {
 
     /// Recompute the prefetch want-list and hand it to the decode pool. Two tiers:
     /// the whole window is fetched as fast **previews** (HEIC thumbnails etc.) so
-    /// scrolling never outruns decode; then, the **on-screen photo only**, once
-    /// settled, is re-fetched at full resolution to upgrade it in place (see
-    /// `upgrade_item`). Only that one full is ever requested, so the serialized HEVC
-    /// decoder isn't tied up decoding full neighbours you've already flown past —
-    /// the other workers stay free for the previews scrolling needs, and at most one
-    /// (uninterruptible) full decode is ever "in the way".
+    /// scrolling never outruns decode; then, once **settled**, a current-first ring
+    /// of the resident window is re-fetched at full resolution and upgraded in place
+    /// (see `upgrade_set`). While a nav key is held the upgrade set is empty, so fast
+    /// scrolling stays entirely on the cheap preview tier — the parallel decoders
+    /// aren't tied up on fulls you fly past. (Pre-libheif this was a single on-screen
+    /// full because WIC's HEVC decoder serialized; libheif decodes in parallel, so we
+    /// now fill a VRAM-bounded ring of fulls around the cursor.)
     fn request_prefetch(&mut self) {
         self.targets = prefetch_targets(&self.playlist, self.ahead, self.behind);
         let fit = self.decode_fit();
@@ -524,44 +603,61 @@ impl App {
             .retain(|i| self.ring.slot_for(*i).is_some());
         self.upgrade_done
             .retain(|i| self.ring.slot_for(*i).is_some());
+        self.full_requested_at
+            .retain(|i, _| self.ring.slot_for(*i).is_some());
         // Items decoded but not yet uploaded must not be re-requested (the pool no
         // longer tracks them, so it would decode them again).
         let pending: HashSet<usize> = self.pending_uploads.iter().map(|o| o.key.item).collect();
-        let upgrade = self.upgrade_item();
-        let jobs: Vec<(usize, Arc<Path>, Option<FitBox>, bool)> = self
-            .targets
-            .iter()
-            .filter_map(|&t| {
-                if self.failed.contains(&t) || pending.contains(&t) {
-                    return None;
-                }
-                let resident = self.ring.slot_for(t).is_some();
-                let is_prev = resident && self.preview_resident.contains(&t);
-                if resident && !is_prev {
-                    return None; // already full
-                }
-                if is_prev {
-                    // Resident preview: upgrade to full only for the on-screen photo
-                    // we've settled on (`upgrade_item`); keep neighbours as previews.
-                    if Some(t) == upgrade {
-                        Some((t, self.paths[t].clone(), fit, false)) // full
-                    } else {
-                        None
-                    }
-                } else {
-                    Some((t, self.paths[t].clone(), fit, true)) // not resident → preview
-                }
-            })
-            .collect();
+        let sharpen = self.sharpen_now();
+        let ring: HashSet<usize> = self.prefetch_fulls().into_iter().collect();
+        // Stamp when each full was first requested, for the `sharpen` latency metric.
+        if let Some(d) = sharpen {
+            self.full_requested_at.entry(d).or_insert_with(Instant::now);
+        }
+        for &t in &ring {
+            self.full_requested_at.entry(t).or_insert_with(Instant::now);
+        }
+
+        // Build the job list in three priority tiers (the pool decodes by position):
+        //   1. `sharpen` — the on-screen photo's full, so what you're looking at goes
+        //      sharp ASAP the moment you park.
+        //   2. previews — the whole window, so flying / re-flying is always instant.
+        //   3. `ring` fulls — the sharp ring prefetched around the cursor, queued
+        //      behind every preview, so a fast fly stays smooth (these decode only in
+        //      the pool's spare capacity) and the fulls land ahead of where you're
+        //      heading — a stop finds the photo already sharp.
+        type Job = (usize, Arc<Path>, Option<FitBox>, bool);
+        let (mut head, mut previews, mut fulls): (Vec<Job>, Vec<Job>, Vec<Job>) =
+            (Vec::new(), Vec::new(), Vec::new());
+        for &t in &self.targets {
+            if self.failed.contains(&t) || pending.contains(&t) {
+                continue;
+            }
+            let resident = self.ring.slot_for(t).is_some();
+            let is_prev = resident && self.preview_resident.contains(&t);
+            if resident && !is_prev {
+                continue; // already full
+            }
+            if !resident {
+                previews.push((t, self.paths[t].clone(), fit, true));
+            } else if Some(t) == sharpen {
+                head.push((t, self.paths[t].clone(), fit, false));
+            } else if ring.contains(&t) {
+                fulls.push((t, self.paths[t].clone(), fit, false));
+            }
+            // else: resident preview not in the ring → leave it as a preview
+        }
+        let mut jobs = head;
+        jobs.append(&mut previews);
+        jobs.append(&mut fulls);
         self.pool.set_targets(self.epoch, &jobs);
     }
 
-    /// The single photo to upgrade to full resolution ("sharpen"): the on-screen
-    /// one, but only when settled (no nav key held) and it's currently a resident
-    /// preview that has a better decode available. `None` while flying — so fast
-    /// scrolling stays entirely on the cheap preview tier and we never tie up the
-    /// (serialized) HEVC decoder on a full neighbour the user is flying past.
-    fn upgrade_item(&self) -> Option<usize> {
+    /// The on-screen photo to sharpen FIRST (top decode priority): the displayed one,
+    /// but only when parked (no nav key held) and currently a resident preview with a
+    /// better decode to pull. `None` while flying (sharpening a frame that's about to
+    /// change is pointless) and `None` once it's already full.
+    fn sharpen_now(&self) -> Option<usize> {
         if self.held_nav().is_some() {
             return None;
         }
@@ -570,6 +666,60 @@ impl App {
             && self.preview_resident.contains(&d)
             && !self.upgrade_done.contains(&d))
         .then_some(d)
+    }
+
+    /// The full-res "sharp ring" to prefetch around the cursor at LOW priority (below
+    /// every preview) — a VRAM-bounded, current-first prefix of the window, filtered
+    /// to resident previews, minus `sharpen_now` (requested at high priority instead).
+    ///
+    /// Unlike `sharpen_now`, this runs EVEN WHILE FLYING: the fulls are queued behind
+    /// all previews (see `request_prefetch`), so a fast fly stays preview-smooth — the
+    /// pool decodes them only in spare capacity. But as you slow down or browse, the
+    /// fulls for where you're heading land *ahead* of you, so a stop finds the photo
+    /// already sharp instead of paying a cold ~115 ms–1 s decode after the fact. The
+    /// workers that decode them would otherwise be idle, so it's near-free.
+    fn prefetch_fulls(&self) -> Vec<usize> {
+        let full_bytes = self.slot_bytes_estimate();
+        let sharpen = self.sharpen_now();
+        full_ring(
+            &self.targets,
+            full_bytes,
+            RING_BUDGET_BYTES,
+            self.ring.capacity().min(MAX_FULL_RING),
+        )
+        .into_iter()
+        .filter(|&i| {
+            Some(i) != sharpen
+                && self.ring.slot_for(i).is_some()
+                && self.preview_resident.contains(&i)
+                && !self.upgrade_done.contains(&i)
+                && !self.is_raw_item(i)
+        })
+        .collect()
+    }
+
+    /// Whether `item`'s full decode is a slow RAW demosaic (seconds, and once started
+    /// it can't be cancelled). Excluded from the speculative ahead-ring so a few RAWs
+    /// in the window can't tie up the decode workers — starving the previews a fly
+    /// needs — for neighbours you may never visit. The displayed RAW still sharpens
+    /// via `sharpen_now`, and a RAW's embedded preview is often near-full-res anyway.
+    fn is_raw_item(&self, item: usize) -> bool {
+        self.paths[item]
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| pb_decode::is_raw_extension(&e.to_ascii_lowercase()))
+            .unwrap_or(false)
+    }
+
+    /// All items we currently want decoded to full (sharpen + ahead-ring), for the
+    /// idle pump's change-detection and "keep ticking while sharpening" gate.
+    fn fulls_wanted(&self) -> Vec<usize> {
+        let mut v = Vec::new();
+        if let Some(d) = self.sharpen_now() {
+            v.push(d);
+        }
+        v.extend(self.prefetch_fulls());
+        v
     }
 
     /// Load the per-photo view state for `item`: rotation from the RAM override
@@ -787,6 +937,16 @@ impl App {
                 }
                 self.ring.set_slot_bytes(item, item_bytes);
                 self.preview_resident.remove(&item);
+                // Real end-to-end sharpen latency for the ON-SCREEN photo (what the
+                // user actually waits on): full requested → full on screen. Ahead-ring
+                // fulls land late by design (low priority), so they'd skew this — only
+                // record the displayed one.
+                let t0 = self.full_requested_at.remove(&item);
+                if self.displayed_item == Some(item) {
+                    if let Some(t0) = t0 {
+                        self.metrics.record("sharpen", t0.elapsed());
+                    }
+                }
                 uploads += 1;
                 // If it's the photo on screen, re-present the slot so the renderer
                 // picks up the full texture's dimensions/peak and re-places the quad
@@ -970,6 +1130,11 @@ impl App {
 
     /// Toggle between borderless "windowed fullscreen" and a 1280x800 window (F11
     /// or Alt+Enter). The resulting resize event re-fits and re-decodes the photo.
+    /// NOTE: there is a brief flip-model resize artifact (the photo stretches for a
+    /// frame as the compositor scales the old buffer to the new size). A DWM-cloak
+    /// fix removed it but regressed the taskbar (shell stopped auto-hiding it on
+    /// fullscreen) and added a blank beat — net worse — so it was reverted; the
+    /// minor flash is accepted (see tasks.json #21 for the proper-fix direction).
     fn toggle_fullscreen(&mut self) {
         self.windowed = !self.windowed;
         settings::save_fullscreen(!self.windowed);
@@ -1153,7 +1318,7 @@ impl App {
         self.failed.clear();
         self.preview_resident.clear();
         self.upgrade_done.clear();
-        self.last_upgrade_item = None;
+        self.last_upgrade_set.clear();
         // Invalidate the ring + bump the epoch (discards in-flight old decodes),
         // then synchronously show the new current photo and refill around it.
         self.invalidate_geometry();
@@ -1683,7 +1848,7 @@ impl App {
         self.failed.clear();
         self.preview_resident.clear();
         self.upgrade_done.clear();
-        self.last_upgrade_item = None;
+        self.last_upgrade_set.clear();
         self.current = None;
         self.toast = None;
         self.wait_started = None;
@@ -2199,11 +2364,24 @@ impl ApplicationHandler for App {
             None => true,
         };
         if let Some(dir) = nav {
-            // Advance only when caught up (target shown) AND a frame elapsed, so
-            // every photo is shown and a miss simply holds.
+            // Advance only when caught up (target shown) AND the (accelerating)
+            // interval elapsed, so every photo is shown and a miss simply holds.
+            // The gap ramps from ~1/ADVANCE_MIN_RATE down to one refresh interval
+            // over ADVANCE_RAMP_SECS of held auto-repeat (measured from when the tap
+            // delay expired), so holding a nav key flies slow -> fast for control.
             let caught_up = self.displayed_item == self.target_item;
+            let repeat_elapsed = match self.hold_start {
+                Some(t) => now.saturating_duration_since(t + self.initial_delay),
+                None => Duration::ZERO,
+            };
+            let interval = advance_interval(
+                repeat_elapsed,
+                ADVANCE_MIN_RATE,
+                ADVANCE_RAMP_SECS,
+                self.frame_interval,
+            );
             let due = match self.last_present {
-                Some(t) => now >= t + self.frame_interval,
+                Some(t) => now >= t + interval,
                 None => true,
             };
             if past_delay && caught_up && due {
@@ -2215,18 +2393,22 @@ impl ApplicationHandler for App {
             self.hold_start = None;
         }
 
-        // 3b. Idle upgrade ("sharpen"): once parked (no nav key) on a preview of the
-        // on-screen photo, pull its full-resolution decode and upgrade the slot in
-        // place. Only the displayed photo — never the neighbours you might fly past.
-        // Re-issue only when the target changes (not every tick → no per-frame
-        // churn); keep the loop ticking while one is in flight so `drain_results`
-        // catches the upgrade.
-        let upgrade = self.upgrade_item();
-        if upgrade != self.last_upgrade_item {
-            self.last_upgrade_item = upgrade;
-            self.request_prefetch();
+        // 3b. Sharpen / prefetch-ahead. When parked, re-issue the prefetch (which
+        // requests the on-screen photo's full at top priority and the ahead-ring
+        // behind the previews) whenever the wanted-fulls set changes — as previews
+        // land and fulls complete, not every tick → no per-frame churn. While flying,
+        // `advance` already re-issues per step, so the idle pump stays out of the way.
+        // Keep the loop ticking while any sharpen is outstanding so `drain_results`
+        // catches it.
+        let mut sharpen_pending = false;
+        if self.held_nav().is_none() {
+            let upgrade = self.fulls_wanted();
+            if upgrade != self.last_upgrade_set {
+                self.last_upgrade_set = upgrade.clone();
+                self.request_prefetch();
+            }
+            sharpen_pending = !upgrade.is_empty();
         }
-        let sharpen_pending = upgrade.is_some();
 
         // 4. Info panel visibility. "Blaze mode" = actually flying (a nav key held
         // *past* the tap delay): hide the panel so it isn't a strobing distraction
@@ -2582,6 +2764,7 @@ fn main() {
     event_loop.set_control_flow(ControlFlow::Wait);
 
     let metrics = if metrics_on {
+        METRICS_ON_FLAG.store(true, std::sync::atomic::Ordering::Relaxed);
         StageTimes::enabled()
     } else {
         StageTimes::disabled()
@@ -2591,6 +2774,21 @@ fn main() {
 
     let report = app.metrics.report();
     if !report.is_empty() {
+        let mut d = POOL_DECODE_MS.lock().unwrap().clone();
+        let times: Vec<f64> = d.iter().map(|(ms, _)| *ms).collect();
+        let p = metrics::percentiles(&times, &[50.0, 95.0, 99.0]);
+        println!(
+            "\npool decode (under load): n={} p50={:.1} p95={:.1} p99={:.1} ms",
+            d.len(),
+            p[0],
+            p[1],
+            p[2]
+        );
+        d.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        println!("slowest decodes:");
+        for (ms, tag) in d.iter().take(8) {
+            println!("  {ms:>7.1} ms  {tag}");
+        }
         print!("\n{report}");
     }
 }
@@ -2768,5 +2966,51 @@ mod tests {
         assert!(lines
             .iter()
             .any(|l| l == "https://github.com/jdlien/photoblaze"));
+    }
+
+    #[test]
+    fn advance_interval_ramps_from_floor_to_refresh() {
+        let frame = Duration::from_micros(8_333); // ~120 Hz
+        let (min_rate, ramp) = (3.0, 4.0);
+        // At the start of auto-repeat the gap is ~1/min_rate (a few photos/sec).
+        let start = advance_interval(Duration::ZERO, min_rate, ramp, frame);
+        let expected = 1.0 / min_rate;
+        assert!(
+            (start.as_secs_f32() - expected).abs() < 1e-3,
+            "start interval {start:?} should be ~1/min_rate ({expected}s)"
+        );
+        // Once the ramp completes it clamps exactly to the refresh interval, and
+        // stays there past the ramp (refresh is the hard ceiling).
+        assert_eq!(
+            advance_interval(Duration::from_secs_f32(ramp), min_rate, ramp, frame),
+            frame
+        );
+        assert_eq!(
+            advance_interval(Duration::from_secs(10), min_rate, ramp, frame),
+            frame
+        );
+    }
+
+    #[test]
+    fn advance_interval_is_monotonic_and_never_below_refresh() {
+        let frame = Duration::from_micros(8_333);
+        let mut prev = advance_interval(Duration::ZERO, 3.0, 4.0, frame);
+        for ms in [200u64, 500, 1000, 2000, 3000, 4000] {
+            let cur = advance_interval(Duration::from_millis(ms), 3.0, 4.0, frame);
+            assert!(cur <= prev, "interval should shrink as the hold continues");
+            assert!(cur >= frame, "never faster than the refresh ceiling");
+            prev = cur;
+        }
+    }
+
+    #[test]
+    fn advance_interval_no_ramp_when_floor_meets_refresh() {
+        // A low-Hz display where min_rate >= refresh: no ramp, just the refresh cap.
+        let frame = Duration::from_millis(500); // 2 Hz, below the 3/s floor
+        assert_eq!(advance_interval(Duration::ZERO, 3.0, 4.0, frame), frame);
+        assert_eq!(
+            advance_interval(Duration::from_secs(1), 3.0, 4.0, frame),
+            frame
+        );
     }
 }

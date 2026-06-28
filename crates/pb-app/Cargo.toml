@@ -10,6 +10,12 @@ description = "PhotoBlaze binary: the winit window + event loop wiring core, dec
 name = "photoblaze"
 path = "src/main.rs"
 
+[features]
+# Pass-through: build with `--features libheif` to route full SDR HEIC decodes
+# through the parallel CPU libheif backend (links the vcpkg static libs; see
+# pb-decode/build.rs). Off by default so the stock build is pure-Rust + WIC.
+libheif = ["pb-decode/libheif"]
+
 [dependencies]
 pb-core = { workspace = true }
 pb-decode = { workspace = true }

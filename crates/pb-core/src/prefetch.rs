@@ -77,6 +77,31 @@ pub fn prefetch_targets(pl: &Playlist, ahead: usize, behind: usize) -> Vec<usize
     out
 }
 
+/// Choose which items to hold at **full resolution** — the "sharp ring" the user
+/// browses within — given the prioritized prefetch `window` (current first, from
+/// [`prefetch_targets`]), the per-slot full-res byte estimate `full_bytes`, the
+/// VRAM `budget`, and the ring's slot `capacity`.
+///
+/// Returns the longest current-first **prefix** of `window` that fits both the byte
+/// budget (`count * full_bytes <= budget`) and the slot `capacity`. A prefix is the
+/// right shape because `window` is already priority-ordered (current, then
+/// direction-biased neighbours), so the cursor and the photos you're most likely to
+/// step to are sharpened first.
+///
+/// The budget bound is load-bearing: the in-place preview→full upgrade
+/// ([`crate::ring::ResidentRing::set_slot_bytes`]) does **not** evict, so a settled
+/// folder of fulls would balloon past the VRAM cap unless the upgrade set is bounded
+/// *before* it is issued. The current item is always included (a `>= 1` floor),
+/// mirroring the ring's "a single over-budget image still shows" rule.
+pub fn full_ring(window: &[usize], full_bytes: u64, budget: u64, capacity: usize) -> Vec<usize> {
+    if window.is_empty() || capacity == 0 {
+        return Vec::new();
+    }
+    let by_budget = (budget / full_bytes.max(1)).max(1) as usize;
+    let take = window.len().min(by_budget).min(capacity);
+    window[..take].to_vec()
+}
+
 fn extend_linear(
     out: &mut Vec<usize>,
     seen: &mut [bool],
@@ -293,5 +318,40 @@ mod tests {
         for &x in v {
             assert!(s.insert(x), "duplicate {x}");
         }
+    }
+
+    #[test]
+    fn full_ring_is_empty_for_no_window_or_no_slots() {
+        assert!(full_ring(&[], 100, 1000, 8).is_empty());
+        assert!(full_ring(&[1, 2, 3], 100, 1000, 0).is_empty());
+    }
+
+    #[test]
+    fn full_ring_takes_the_whole_window_when_it_fits() {
+        // 5 items * 100 bytes = 500 <= 1000 budget, and 5 <= 8 slots.
+        let w = [5, 6, 4, 7, 3];
+        assert_eq!(full_ring(&w, 100, 1000, 8), w);
+    }
+
+    #[test]
+    fn full_ring_is_bounded_by_the_byte_budget_current_first() {
+        // budget 350 / 100 bytes = 3 fulls fit; the prefix keeps the current item
+        // (index 0) and the highest-priority neighbours.
+        let w = [5, 6, 4, 7, 3, 8];
+        assert_eq!(full_ring(&w, 100, 350, 16), vec![5, 6, 4]);
+    }
+
+    #[test]
+    fn full_ring_is_bounded_by_capacity() {
+        // The budget would allow all six, but the ring only has 4 slots.
+        let w = [5, 6, 4, 7, 3, 8];
+        assert_eq!(full_ring(&w, 1, 1_000_000, 4), vec![5, 6, 4, 7]);
+    }
+
+    #[test]
+    fn full_ring_always_keeps_the_current_item() {
+        // One image larger than the entire budget still gets a full slot (>=1 floor),
+        // matching the ring's single-over-budget-still-shows rule.
+        assert_eq!(full_ring(&[9, 1, 2], 10_000, 100, 8), vec![9]);
     }
 }

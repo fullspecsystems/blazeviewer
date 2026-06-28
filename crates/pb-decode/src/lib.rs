@@ -19,6 +19,8 @@ mod color;
 mod common;
 mod image_backend;
 mod jxl;
+#[cfg(all(windows, feature = "libheif"))]
+mod libheif;
 pub mod metadata;
 pub mod orientation;
 mod raw;
@@ -32,8 +34,10 @@ use std::path::Path;
 pub use color::ColorTransform;
 pub use image_backend::ImageCrateDecoder;
 pub use jxl::JxlDecoder;
+#[cfg(all(windows, feature = "libheif"))]
+pub use libheif::LibHeifDecoder;
 pub use metadata::read_exif_fields;
-pub use raw::RawPreviewDecoder;
+pub use raw::{is_raw_extension, RawPreviewDecoder};
 pub use svg::SvgDecoder;
 #[cfg(windows)]
 pub use wic::WicDecoder;
@@ -219,6 +223,13 @@ fn decode_bytes_inner(
         fit,
         allow_preview,
     };
+    // HEIC full decodes (SDR, non-preview) go to the parallel CPU libheif backend
+    // when its feature is built in — WIC's HEVC decoder serializes, libheif scales
+    // across cores. Previews, AVIF, and HDR HEIC fall through to WIC below.
+    #[cfg(all(windows, feature = "libheif"))]
+    if libheif::route_full_heic(bytes, allow_preview) {
+        return libheif::LibHeifDecoder.decode(&req);
+    }
     // Specific magic-sniffable backends first, the broad `image` crate last.
     let jpeg = ZuneJpegDecoder;
     let jxl = JxlDecoder;
