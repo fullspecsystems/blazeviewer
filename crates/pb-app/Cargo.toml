@@ -62,10 +62,13 @@ little_exif = "0.6"
 trash = { version = "5", default-features = false, features = [
     "coinit_apartmentthreaded",
 ] }
-# Parse the optional keymap.toml config (task #8 configurable keybindings). Read-only
-# input (privacy task #2); `default-features = false` drops the unused TOML *writer*
-# + datetime/preserve-order extras. The typed Settings model (Slice 2) will reuse it.
-toml = { version = "0.8", default-features = false, features = ["parse"] }
+# Parse + write the config files: the optional keymap.toml (task #8) and the typed
+# settings.toml (task #20/#22). Read on the view path is privacy-safe (task #2);
+# writes happen only on an explicit user action (Save / fullscreen toggle).
+# `default-features = false` drops the datetime/preserve-order extras we don't use.
+toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
+# Derive (de)serialization for the typed Settings model (settings.toml).
+serde = { version = "1", features = ["derive"] }
 
 # Win32 for: pointing the window icon at the exe's multi-size .ico (crisp small
 # title-bar icon, vs winit downscaling one big image), and the native menu later.

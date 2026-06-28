@@ -240,6 +240,19 @@ enum Nav {
     RandomPrev,
 }
 
+/// The navigation direction for a nav [`Action`], or `None` for any non-nav action.
+/// Bridges the central keymap vocabulary to the engine's `Nav` (used by the press
+/// handler and `held_nav`).
+fn nav_of(action: Action) -> Option<Nav> {
+    match action {
+        Action::Next => Some(Nav::Forward),
+        Action::Prev => Some(Nav::Backward),
+        Action::Random => Some(Nav::Random),
+        Action::RandomPrev => Some(Nav::RandomPrev),
+        _ => None,
+    }
+}
+
 /// Build a photo's info panel data from its path + decoded image.
 /// A path shown relative to the scan root (forward-slashed), or its file name if
 /// it isn't under the root.
@@ -371,8 +384,11 @@ struct App {
     source: Arc<dyn PhotoSource>,
     playlist: Playlist,
     active: Option<Active>,
-    /// Physical keys currently held (OS auto-repeat ignored).
-    held: HashSet<KeyCode>,
+    /// Physical keys currently held → the [`Action`] each resolved to at press time
+    /// (OS auto-repeat ignored). Drives hold-to-fly nav and continuous pan/zoom; the
+    /// action is captured on key-down so it stays stable while held, and is keyed by
+    /// `KeyCode` so the key-up (which carries no modifiers) can remove it.
+    held: HashMap<KeyCode, Action>,
     /// When a frame was last actually presented. Caps the advance rate from the
     /// presentation (not the advance attempt), so a late-arriving miss isn't
     /// replaced in the same tick it finally shows; also delays the idle panel.
@@ -571,7 +587,7 @@ impl App {
             source,
             playlist,
             active: None,
-            held: HashSet::new(),
+            held: HashMap::new(),
             last_present: None,
             frame_interval: Duration::from_micros(8_333), // ~120 Hz until we read the real rate
             hold_start: None,
@@ -1548,7 +1564,8 @@ impl App {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("this archive");
-        let prompt = format!("Enter the password for \u{201c}{name}\u{201d}.");
+        // Two lines: the lead on one, the (possibly long) file name on its own.
+        let prompt = format!("Enter the password for\n\u{201c}{name}\u{201d}");
         let refresh = self.refresh_hz();
         let parent = self.active.as_ref().map(|a| a.window.clone());
         self.dialog = dialog::DialogWindow::open(
@@ -2567,9 +2584,12 @@ impl App {
     /// hold-to-fly, then either advances, or — when we're still catching up to the
     /// previous target, so the press can't be serviced yet — flashes the loading
     /// pie (brighten-on-keypress) so the input never feels dead.
-    fn nav_press(&mut self, code: KeyCode, nav: Nav, event_loop: &ActiveEventLoop) {
-        self.held.insert(code);
+    fn nav_press(&mut self, code: KeyCode, action: Action, event_loop: &ActiveEventLoop) {
+        self.held.insert(code, action);
         self.hold_start = Some(Instant::now());
+        let Some(nav) = nav_of(action) else {
+            return;
+        };
         if self.target_item.is_some() && self.displayed_item != self.target_item {
             self.pie_glow_started = Some(Instant::now());
         } else {
@@ -2602,38 +2622,36 @@ impl App {
         self.request_prefetch();
     }
 
-    /// Which way we're currently paging, from held keys (ambiguous/none = idle).
-    /// Arrows are pan now, so only space (forward), backspace (backward), and
-    /// enter (random; shift+enter steps back through the random walk) advance;
-    /// holding more than one is treated as idle.
+    /// Which way we're currently paging, from the held nav actions (ambiguous/none =
+    /// idle). Next (forward), Prev (backward), and Random / RandomPrev advance; two
+    /// keys bound to the *same* direction (e.g. Enter + NumpadEnter) still count as
+    /// one, but two *different* nav directions held at once is treated as idle.
     fn held_nav(&self) -> Option<Nav> {
-        let mut nav = None;
-        let mut count = 0u8;
-        if self.held.contains(&KeyCode::Space) {
-            nav = Some(Nav::Forward);
-            count += 1;
+        let mut dir: Option<Nav> = None;
+        for &action in self.held.values() {
+            if let Some(n) = nav_of(action) {
+                match dir {
+                    None => dir = Some(n),
+                    Some(d) if d == n => {}
+                    Some(_) => return None, // two different directions → idle
+                }
+            }
         }
-        if self.held.contains(&KeyCode::Backspace) {
-            nav = Some(Nav::Backward);
-            count += 1;
-        }
-        if self.held.contains(&KeyCode::Enter) || self.held.contains(&KeyCode::NumpadEnter) {
-            nav = Some(if self.shift {
-                Nav::RandomPrev
-            } else {
-                Nav::Random
-            });
-            count += 1;
-        }
-        (count == 1).then_some(nav).flatten()
+        dir
     }
 
-    /// Zoom direction from held keys: `+1` in (`=`/`+`/numpad+), `-1` out
-    /// (`-`/numpad-), `None` if neither or both.
+    /// Zoom direction from the held actions: `+1` in ([`Action::ZoomIn`]), `-1` out
+    /// ([`Action::ZoomOut`]), `None` if neither or both.
     fn zoom_held(&self) -> Option<f32> {
-        let zin = self.held.contains(&KeyCode::Equal) || self.held.contains(&KeyCode::NumpadAdd);
-        let zout =
-            self.held.contains(&KeyCode::Minus) || self.held.contains(&KeyCode::NumpadSubtract);
+        let mut zin = false;
+        let mut zout = false;
+        for &action in self.held.values() {
+            match action {
+                Action::ZoomIn => zin = true,
+                Action::ZoomOut => zout = true,
+                _ => {}
+            }
+        }
         match (zin, zout) {
             (true, false) => Some(1.0),
             (false, true) => Some(-1.0),
@@ -2641,22 +2659,19 @@ impl App {
         }
     }
 
-    /// Pan velocity direction from held arrows (image-space; positive pan reveals
-    /// the right/bottom). Diagonals combine. `(0, 0)` if no arrow is held.
+    /// Pan velocity direction from the held pan actions (image-space; positive pan
+    /// reveals the right/bottom). Diagonals combine. `(0, 0)` if none held.
     fn pan_held(&self) -> (f32, f32) {
         let mut x = 0.0;
         let mut y = 0.0;
-        if self.held.contains(&KeyCode::ArrowLeft) {
-            x += 1.0;
-        }
-        if self.held.contains(&KeyCode::ArrowRight) {
-            x -= 1.0;
-        }
-        if self.held.contains(&KeyCode::ArrowUp) {
-            y += 1.0;
-        }
-        if self.held.contains(&KeyCode::ArrowDown) {
-            y -= 1.0;
+        for &action in self.held.values() {
+            match action {
+                Action::PanLeft => x += 1.0,
+                Action::PanRight => x -= 1.0,
+                Action::PanUp => y += 1.0,
+                Action::PanDown => y -= 1.0,
+                _ => {}
+            }
         }
         (x, y)
     }
@@ -2966,50 +2981,23 @@ impl ApplicationHandler for App {
                             self.begin_exit(event_loop);
                         }
                     } else if !repeat {
-                        // Real press only — OS auto-repeats are ignored so they
-                        // can't queue up and delay the release. Holding is driven
-                        // by `about_to_wait`.
-                        //
-                        // Discrete (one-shot) commands go through the configurable
-                        // keymap (task #8) → the shared `dispatch_action`. Held/nav
-                        // keys (space/enter/arrows/zoom) keep their hardcoded handling
-                        // below — the hold loop tracks them by physical key; making
-                        // those remappable too is a follow-up.
+                        // Real press only — OS auto-repeats are ignored so they can't
+                        // queue up and delay the release. Every key is resolved through
+                        // the configurable keymap (task #8) and routed by kind:
+                        //   - one-shot → run the command now (`dispatch_action`);
+                        //   - nav → start hold-to-fly (advance now, repeat in the loop);
+                        //   - held → track by physical key; pan/zoom apply each frame in
+                        //     `about_to_wait`.
+                        // Holding for all of these is driven by `about_to_wait`.
                         let chord = KeyChord::new(code, self.ctrl, self.shift, self.alt);
                         if let Some(act) = self.keymap.action_for(&chord) {
-                            if act.kind() == ActionKind::OneShot {
-                                self.dispatch_action(act, event_loop);
-                                return;
-                            }
-                        }
-                        match code {
-                            KeyCode::Space => self.nav_press(code, Nav::Forward, event_loop),
-                            KeyCode::Backspace => self.nav_press(code, Nav::Backward, event_loop),
-                            // Enter / NumpadEnter: Shift+Enter steps back through the
-                            // random walk (revisit one you flew past); plain Enter
-                            // jumps to the next photo in the precomputed shuffle (hold
-                            // to fly through the deck). Alt+Enter = fullscreen is a
-                            // one-shot dispatched via the keymap above.
-                            KeyCode::Enter | KeyCode::NumpadEnter => {
-                                if self.shift {
-                                    self.nav_press(code, Nav::RandomPrev, event_loop);
-                                } else {
-                                    self.nav_press(code, Nav::Random, event_loop);
+                            match act.kind() {
+                                ActionKind::OneShot => self.dispatch_action(act, event_loop),
+                                ActionKind::Nav => self.nav_press(code, act, event_loop),
+                                ActionKind::Held => {
+                                    self.held.insert(code, act);
                                 }
                             }
-                            // Pan (arrows) and zoom (=/- and numpad) are continuous
-                            // while held — tracked here, applied in `about_to_wait`.
-                            KeyCode::ArrowLeft
-                            | KeyCode::ArrowRight
-                            | KeyCode::ArrowUp
-                            | KeyCode::ArrowDown
-                            | KeyCode::Equal
-                            | KeyCode::Minus
-                            | KeyCode::NumpadAdd
-                            | KeyCode::NumpadSubtract => {
-                                self.held.insert(code);
-                            }
-                            _ => {}
                         }
                     }
                 }

@@ -1,17 +1,126 @@
-//! Persisted user preferences.
+//! Persisted user preferences — a typed model serialized to `settings.toml`.
 //!
-//! **Privacy boundary (task #2):** this writes ONLY app preferences — currently
-//! just the windowed/fullscreen choice — to the OS config dir. It never records
-//! anything photo-*derived* (no viewed paths, no recent list, no thumbnails),
-//! which is the actual privacy guarantee; app config is explicitly in-bounds
-//! (ADR-018, and the no-trace test is scoped to photo data only).
+//! **Privacy boundary (task #2):** this writes ONLY app preferences (navigation
+//! feel, default scale / recursive, the letterbox color, info-panel opacity, the
+//! windowed/fullscreen choice) to the OS config dir. It never records anything
+//! photo-*derived* (no viewed paths, no recent list, no thumbnails) — app config is
+//! explicitly in-bounds (ADR-018; the no-trace test is scoped to photo data only).
+//! Writes happen only on an explicit user action (Settings ▸ Save, or the
+//! fullscreen toggle), never on the view/decode path.
 //!
-//! Format is a minimal `key = value` file (a forward-compatible subset of TOML,
-//! so a future full config — tasks.json #8 — can absorb it). All I/O is
-//! best-effort: a missing/unreadable file just means "use defaults," and a failed
-//! write is silently ignored (a preference not sticking must never break viewing).
+//! All I/O is best-effort: a missing / unreadable / malformed file means "use
+//! defaults," and a failed write is silently ignored (a preference not sticking must
+//! never break viewing). The file is TOML; an older `key = value` `fullscreen` file
+//! is a valid TOML subset, so it still loads (its other fields default).
 
 use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+/// The default scale mode applied to a freshly shown photo.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScaleModePref {
+    #[default]
+    Fit,
+    Fill,
+    Original,
+}
+
+/// All persisted preferences. `#[serde(default)]` makes any missing key fall back to
+/// [`Settings::default`], so partial / older files (e.g. one that only set
+/// `fullscreen`) load cleanly, and unknown keys are ignored — forward/backward
+/// compatible as the schema grows.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    /// Start in borderless fullscreen (vs. a window). Mirrors the runtime toggle.
+    pub fullscreen: bool,
+    /// Open folders recursively by default (picker / drag-drop / association).
+    pub recursive: bool,
+    /// Hold-to-fly: starting advance rate in photos/sec — the ramp's floor (#19).
+    pub start_speed: f32,
+    /// Hold-to-fly: seconds to ramp from `start_speed` up to the ceiling (#19).
+    pub ramp_secs: f32,
+    /// Hold-to-fly ceiling in photos/sec; `0` = uncapped (the display refresh, #20).
+    pub max_advance_rate: u32,
+    /// Initial delay (ms) before a held nav key begins auto-repeating.
+    pub hold_delay_ms: u32,
+    /// Default scale mode for a freshly shown photo.
+    pub scale_mode: ScaleModePref,
+    /// Letterbox / background fill (sRGB) shown behind a non-filling image.
+    pub letterbox: [u8; 3],
+    /// Info-panel background opacity, `0` (transparent) – `100` (opaque).
+    pub info_opacity: u8,
+}
+
+impl Default for Settings {
+    /// The defaults mirror today's in-code constants, so a fresh install behaves
+    /// exactly as before any settings file exists.
+    fn default() -> Self {
+        Self {
+            fullscreen: false,
+            recursive: true,
+            start_speed: 3.0,    // main.rs ADVANCE_MIN_RATE
+            ramp_secs: 4.0,      // main.rs ADVANCE_RAMP_SECS
+            max_advance_rate: 0, // uncapped → display refresh (#20)
+            hold_delay_ms: 400,  // main.rs initial_delay
+            scale_mode: ScaleModePref::Fit,
+            letterbox: [10, 10, 12], // pb_render::LETTERBOX (rgb)
+            info_opacity: 60,        // hud::BG alpha 153/255 ≈ 60%
+        }
+    }
+}
+
+impl Settings {
+    /// Clamp every field into a sane range (defends against a hand-edited or garbage
+    /// file). Non-finite floats reset to their default. Idempotent.
+    pub fn clamp(&mut self) {
+        let d = Settings::default();
+        if !self.start_speed.is_finite() {
+            self.start_speed = d.start_speed;
+        }
+        if !self.ramp_secs.is_finite() {
+            self.ramp_secs = d.ramp_secs;
+        }
+        self.start_speed = self.start_speed.clamp(1.0, 60.0);
+        self.ramp_secs = self.ramp_secs.clamp(0.0, 30.0);
+        self.max_advance_rate = self.max_advance_rate.min(1000);
+        self.hold_delay_ms = self.hold_delay_ms.min(2000);
+        self.info_opacity = self.info_opacity.min(100);
+    }
+
+    /// Load the settings, clamped. A missing / unreadable / malformed file yields the
+    /// defaults (never an error — viewing must work with no config).
+    pub fn load() -> Settings {
+        let mut s = read_settings_text()
+            .and_then(|t| toml::from_str::<Settings>(&t).ok())
+            .unwrap_or_default();
+        s.clamp();
+        s
+    }
+
+    /// Persist the settings to `settings.toml`, atomically (write a temp file then
+    /// rename, so a crash mid-write can't truncate the real file). Best-effort:
+    /// returns whether it was written. An explicit user action only (privacy #2).
+    pub fn save(&self) -> bool {
+        let Some(path) = settings_path() else {
+            return false;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let Ok(toml) = toml::to_string_pretty(self) else {
+            return false;
+        };
+        let body = format!("# PhotoBlaze settings (preferences only, never photo data)\n{toml}");
+        let tmp = path.with_extension("toml.tmp");
+        if std::fs::write(&tmp, body).is_err() {
+            return false;
+        }
+        std::fs::rename(&tmp, &path).is_ok()
+    }
+}
 
 /// Per-user config directory for PhotoBlaze (created on demand), or `None` if the
 /// platform's config location can't be determined. Shared with the keymap loader
@@ -39,48 +148,25 @@ fn settings_path() -> Option<PathBuf> {
     config_dir().map(|d| d.join("settings.toml"))
 }
 
-/// Parse the `fullscreen` preference from a settings file's contents. Pure, so
-/// it's unit-testable without touching disk. `None` if the key is absent or its
-/// value isn't a clear boolean.
-fn parse_fullscreen(contents: &str) -> Option<bool> {
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.starts_with('#') {
-            continue;
-        }
-        if let Some((key, value)) = line.split_once('=') {
-            if key.trim() == "fullscreen" {
-                return match value.trim() {
-                    "true" => Some(true),
-                    "false" => Some(false),
-                    _ => None,
-                };
-            }
-        }
-    }
-    None
+/// The raw `settings.toml` text, if the file exists and is readable.
+fn read_settings_text() -> Option<String> {
+    std::fs::read_to_string(settings_path()?).ok()
 }
 
-/// Load the saved fullscreen preference, or `None` if there's no (readable)
-/// setting yet — the caller then picks its default.
+/// Load just the saved fullscreen preference, or `None` if no settings file exists
+/// yet (so the caller picks its own default). Thin shim over the typed model — kept
+/// so the startup/toggle call sites don't change while the dialog wiring lands.
 pub fn load_fullscreen() -> Option<bool> {
     let path = settings_path()?;
-    let contents = std::fs::read_to_string(path).ok()?;
-    parse_fullscreen(&contents)
+    path.exists().then(|| Settings::load().fullscreen)
 }
 
-/// Persist the fullscreen preference (best-effort; errors are ignored).
+/// Persist the fullscreen preference, preserving every other setting (load, set,
+/// save the whole file). Best-effort; an explicit user action (the toggle).
 pub fn save_fullscreen(fullscreen: bool) {
-    let Some(path) = settings_path() else {
-        return;
-    };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let body = format!(
-        "# PhotoBlaze settings (auto-written; preferences only, never photo data)\nfullscreen = {fullscreen}\n"
-    );
-    let _ = std::fs::write(path, body);
+    let mut s = Settings::load();
+    s.fullscreen = fullscreen;
+    s.save();
 }
 
 #[cfg(test)]
@@ -88,16 +174,81 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_fullscreen_reads_true_false_and_ignores_noise() {
-        assert_eq!(parse_fullscreen("fullscreen = true"), Some(true));
-        assert_eq!(parse_fullscreen("fullscreen = false"), Some(false));
-        assert_eq!(
-            parse_fullscreen("# a comment\n\nfullscreen=true\n"),
-            Some(true)
-        );
-        assert_eq!(parse_fullscreen("# fullscreen = true (commented)"), None);
-        assert_eq!(parse_fullscreen("other = 1"), None);
-        assert_eq!(parse_fullscreen("fullscreen = maybe"), None);
-        assert_eq!(parse_fullscreen(""), None);
+    fn default_round_trips_through_toml() {
+        let s = Settings::default();
+        let text = toml::to_string_pretty(&s).unwrap();
+        let back: Settings = toml::from_str(&text).unwrap();
+        assert_eq!(s, back);
+    }
+
+    #[test]
+    fn missing_keys_fall_back_to_defaults() {
+        // Only `fullscreen` set; everything else defaults.
+        let s: Settings = toml::from_str("fullscreen = true\n").unwrap();
+        assert!(s.fullscreen);
+        assert_eq!(s.start_speed, Settings::default().start_speed);
+        assert_eq!(s.scale_mode, ScaleModePref::Fit);
+        assert_eq!(s.info_opacity, 60);
+    }
+
+    #[test]
+    fn old_key_value_fullscreen_file_still_loads() {
+        // The previous format was a `key = value` subset of TOML.
+        let s = toml::from_str::<Settings>("fullscreen = false\n").unwrap();
+        assert!(!s.fullscreen);
+    }
+
+    #[test]
+    fn unknown_keys_are_ignored() {
+        let s: Settings =
+            toml::from_str("fullscreen = true\nlegacy_option = 42\n").expect("ignore unknown");
+        assert!(s.fullscreen);
+    }
+
+    #[test]
+    fn scale_mode_round_trips_each_variant() {
+        for (text, mode) in [
+            ("scale_mode = \"fit\"", ScaleModePref::Fit),
+            ("scale_mode = \"fill\"", ScaleModePref::Fill),
+            ("scale_mode = \"original\"", ScaleModePref::Original),
+        ] {
+            assert_eq!(toml::from_str::<Settings>(text).unwrap().scale_mode, mode);
+        }
+    }
+
+    #[test]
+    fn clamp_bounds_out_of_range_values() {
+        let mut s = Settings {
+            start_speed: 1000.0,
+            ramp_secs: -5.0,
+            max_advance_rate: 99_999,
+            hold_delay_ms: 60_000,
+            info_opacity: 200,
+            ..Settings::default()
+        };
+        s.clamp();
+        assert_eq!(s.start_speed, 60.0);
+        assert_eq!(s.ramp_secs, 0.0);
+        assert_eq!(s.max_advance_rate, 1000);
+        assert_eq!(s.hold_delay_ms, 2000);
+        assert_eq!(s.info_opacity, 100);
+    }
+
+    #[test]
+    fn clamp_resets_non_finite_floats() {
+        let mut s = Settings {
+            start_speed: f32::NAN,
+            ramp_secs: f32::INFINITY,
+            ..Settings::default()
+        };
+        s.clamp();
+        assert_eq!(s.start_speed, Settings::default().start_speed);
+        assert_eq!(s.ramp_secs, Settings::default().ramp_secs);
+    }
+
+    #[test]
+    fn malformed_toml_is_not_accepted() {
+        // `load()` would fall back to defaults; the parse itself must error.
+        assert!(toml::from_str::<Settings>("this is = = not valid").is_err());
     }
 }

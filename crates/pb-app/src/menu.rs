@@ -25,6 +25,7 @@ pub mod ids {
     pub const SAVE_ROTATION: &str = "save_rotation";
     pub const DELETE: &str = "delete";
     pub const DELETE_PERMANENTLY: &str = "delete_permanently";
+    pub const SETTINGS: &str = "settings";
     pub const EXIT: &str = "exit";
 
     pub const COPY: &str = "copy";
@@ -60,6 +61,7 @@ pub enum MenuAction {
     SaveRotation,
     Delete,
     DeletePermanently,
+    Settings,
     Exit,
     Copy,
     Fit,
@@ -92,6 +94,7 @@ impl MenuAction {
             MenuAction::SaveRotation => Action::SaveRotation,
             MenuAction::Delete => Action::Delete,
             MenuAction::DeletePermanently => Action::DeletePermanent,
+            MenuAction::Settings => Action::Settings,
             MenuAction::Exit => Action::Quit,
             MenuAction::Copy => Action::Copy,
             MenuAction::Fit => Action::ScaleFit,
@@ -125,6 +128,7 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         SAVE_ROTATION => MenuAction::SaveRotation,
         DELETE => MenuAction::Delete,
         DELETE_PERMANENTLY => MenuAction::DeletePermanently,
+        SETTINGS => MenuAction::Settings,
         EXIT => MenuAction::Exit,
         COPY => MenuAction::Copy,
         FIT => MenuAction::Fit,
@@ -180,6 +184,8 @@ pub fn build_menu() -> (Menu, MenuItem) {
         &sep(),
         &item(ids::DELETE, "Delete\tDel"),
         &item(ids::DELETE_PERMANENTLY, "Delete Permanently\tShift+Del"),
+        &sep(),
+        &item(ids::SETTINGS, "Settings…\tCtrl+,"),
         &sep(),
         &item(ids::EXIT, "Exit\tEsc"),
     ]);
@@ -247,6 +253,7 @@ mod tests {
             action_for(ids::DELETE_PERMANENTLY),
             Some(MenuAction::DeletePermanently)
         );
+        assert_eq!(action_for(ids::SETTINGS), Some(MenuAction::Settings));
         assert_eq!(action_for(ids::EXIT), Some(MenuAction::Exit));
         assert_eq!(action_for(ids::COPY), Some(MenuAction::Copy));
         assert_eq!(action_for(ids::FIT), Some(MenuAction::Fit));

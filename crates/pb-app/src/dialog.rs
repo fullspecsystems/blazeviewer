@@ -13,7 +13,7 @@ use egui_wgpu::wgpu;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
-use winit::window::{Window, WindowId};
+use winit::window::{Theme, Window, WindowId};
 
 use pb_decode::{decode_bytes, FitBox};
 
@@ -147,7 +147,7 @@ impl DialogWindow {
             DialogKind::Settings => (560.0, 660.0, true, "PhotoBlaze Settings"),
             DialogKind::Confirm => (450.0, 172.0, false, "Confirm Delete"),
             DialogKind::Message => (470.0, 185.0, false, "PhotoBlaze"),
-            DialogKind::Password => (470.0, 226.0, false, "Password Required"),
+            DialogKind::Password => (500.0, 250.0, false, "Password Required"),
         };
         // Created HIDDEN: we render the first (themed) frame before revealing, so the
         // OS never flashes the default white window before our dark frame lands.
@@ -227,13 +227,15 @@ impl DialogWindow {
         } else {
             None
         };
-        // A friendly blue padlock as the lead icon — reads on both light and dark.
+        // A neutral padlock lead icon, tinted a theme-aware gray (not a from-nowhere
+        // accent color) so it sits quietly and stays legible in light and dark.
+        let dark_ui = window.theme() != Some(Theme::Light);
         let lock_icon = if matches!(kind, DialogKind::Password) {
             svg_texture(
                 &egui_ctx,
                 icon_assets::LOCK,
-                72,
-                [74, 120, 192],
+                48,
+                neutral_icon_tint(dark_ui),
                 "dialog-lock",
             )
         } else {
@@ -511,10 +513,28 @@ fn about_ui(ui: &mut egui::Ui, icon: Option<&egui::TextureHandle>) {
     });
 }
 
-/// Uniform inset for dialog content — the same value drives the text margins, the
-/// gap below the divider, and the gap to the bottom/right edges, so the padding
-/// reads as balanced on every side (Confirm + Message both use it).
+// ── Dialog design tokens ────────────────────────────────────────────────────
+// One place for the shared metrics so every dialog (Confirm / Message / Password)
+// reads as one family rather than each inventing its own spacing. Anatomy of a
+// dialog: a `dialog_frame`-inset content panel on top, then a `button_bar` pinned
+// to the bottom holding `[Primary] [Cancel]` right-aligned. Roles:
+//   * DIALOG_PAD  — uniform content inset; also the gap to every edge + the divider.
+//   * LEAD_ICON   — the status icon beside a message (Message's ⚠, Password's lock).
+//   * INLINE_ICON — a small icon inline with a secondary line (Confirm's ⚠ note).
+//   * BUTTON_*    — the bottom action buttons (size + the gap between them).
+//   * MSG_SIZE    — body/message text size.
+//   * FIELD_MARGIN — interior padding of a text input, so fields aren't cramped.
+// Icon tinting: semantic icons (warning = amber) are theme-independent; neutral
+// icons (the lock) take a theme-aware gray via `neutral_icon_tint` so they stay
+// legible on both light and dark backgrounds.
 const DIALOG_PAD: f32 = 22.0;
+const LEAD_ICON: f32 = 22.0;
+const INLINE_ICON: f32 = 18.0;
+const BUTTON_W: f32 = 100.0;
+const BUTTON_H: f32 = 32.0;
+const BUTTON_GAP: f32 = 12.0;
+const MSG_SIZE: f32 = 15.0;
+const FIELD_MARGIN: egui::Vec2 = egui::vec2(8.0, 7.0);
 
 /// A panel frame filled to match the window background, inset by `DIALOG_PAD` on
 /// all sides. Used for both the content panel and the bottom button bar so their
@@ -523,6 +543,50 @@ fn dialog_frame(ctx: &egui::Context) -> egui::Frame {
     egui::Frame::default()
         .fill(ctx.style().visuals.panel_fill)
         .inner_margin(egui::Margin::same(DIALOG_PAD))
+}
+
+/// The shared bottom action bar: a `dialog_frame`-inset panel whose buttons are laid
+/// out right-to-left (added rightmost-first, so the eye reads them `[Primary]
+/// [Cancel]` left-to-right). Every dialog's buttons go through here so their size,
+/// gap, and alignment match. `add` receives the right-to-left `Ui`.
+fn button_bar(ctx: &egui::Context, id: &'static str, add: impl FnOnce(&mut egui::Ui)) {
+    egui::TopBottomPanel::bottom(id)
+        .frame(dialog_frame(ctx))
+        .show(ctx, |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add);
+        });
+}
+
+/// A fixed-size secondary button (the standard dialog button look).
+fn dialog_button(text: &str) -> egui::Button<'static> {
+    egui::Button::new(text.to_owned()).min_size(egui::vec2(BUTTON_W, BUTTON_H))
+}
+
+/// Draw a vendored status icon at a fixed `height`, **preserving its aspect ratio**.
+/// The FA SVGs aren't all square (the lock is 3:4); forcing one into a square box
+/// stretches it. One rule for every dialog icon so they read consistently.
+fn icon_image(ui: &mut egui::Ui, tex: &egui::TextureHandle, height: f32) {
+    let size = tex.size_vec2();
+    let w = if size.y > 0.0 {
+        height * size.x / size.y
+    } else {
+        height
+    };
+    ui.image(egui::load::SizedTexture::new(
+        tex.id(),
+        egui::vec2(w, height),
+    ));
+}
+
+/// Theme-aware gray for a neutral (non-semantic) dialog icon, so it reads on both
+/// light and dark backgrounds: a dark UI gets a light-gray icon, a light UI a
+/// dark-gray one (roughly matching body-text contrast).
+fn neutral_icon_tint(dark_ui: bool) -> [u8; 3] {
+    if dark_ui {
+        [168, 168, 168]
+    } else {
+        [96, 96, 96]
+    }
 }
 
 /// A themed confirm dialog modelled on Directory Opus's "Confirm File Delete": the
@@ -537,45 +601,35 @@ fn confirm_dialog(
     warn_icon: Option<&egui::TextureHandle>,
 ) -> Option<bool> {
     let mut result = None;
-    // Bottom button bar (auto-height = button + the uniform margin above/below).
-    egui::TopBottomPanel::bottom("confirm_bar")
-        .frame(dialog_frame(ctx))
-        .show(ctx, |ui| {
-            // Right-to-left: Cancel added first (rightmost), Delete to its left — so
-            // the visual order is [Delete] [Cancel], matching Directory Opus.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .add_sized([100.0, 32.0], egui::Button::new("Cancel"))
-                    .clicked()
-                {
-                    result = Some(false);
-                }
-                ui.add_space(12.0);
-                let delete =
-                    egui::Button::new(egui::RichText::new("Delete").color(egui::Color32::WHITE))
-                        .fill(egui::Color32::from_rgb(200, 55, 55));
-                let resp = ui.add_sized([100.0, 32.0], delete);
-                if resp.clicked() {
-                    result = Some(true);
-                }
-                // Default focus on Delete (matches Directory Opus): Enter confirms.
-                if ui.memory(|m| m.focused().is_none()) {
-                    resp.request_focus();
-                }
-            });
-        });
-    // Message + ⚠ line, left-aligned in the area above the button bar.
+    // Right-to-left: Cancel added first (rightmost), Delete to its left — so the
+    // visual order reads [Delete] [Cancel], matching Directory Opus.
+    button_bar(ctx, "confirm_bar", |ui| {
+        if ui.add(dialog_button("Cancel")).clicked() {
+            result = Some(false);
+        }
+        ui.add_space(BUTTON_GAP);
+        let delete = egui::Button::new(egui::RichText::new("Delete").color(egui::Color32::WHITE))
+            .fill(egui::Color32::from_rgb(200, 55, 55))
+            .min_size(egui::vec2(BUTTON_W, BUTTON_H));
+        let resp = ui.add(delete);
+        if resp.clicked() {
+            result = Some(true);
+        }
+        // Default focus on Delete (matches Directory Opus): Enter confirms.
+        if ui.memory(|m| m.focused().is_none()) {
+            resp.request_focus();
+        }
+    });
+    // Message + ⚠ line, left-aligned in the area above the button bar. The prompt
+    // wraps so a long file name can't run off the right edge.
     egui::CentralPanel::default()
         .frame(dialog_frame(ctx))
         .show(ctx, |ui| {
-            ui.label(egui::RichText::new(message).size(16.0));
+            ui.add(egui::Label::new(egui::RichText::new(message).size(16.0)).wrap());
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 if let Some(t) = warn_icon {
-                    ui.image(egui::load::SizedTexture::new(
-                        t.id(),
-                        egui::vec2(18.0, 18.0),
-                    ));
+                    icon_image(ui, t, INLINE_ICON);
                     ui.add_space(8.0);
                 }
                 ui.label("This operation cannot be undone.");
@@ -594,31 +648,26 @@ fn message_dialog(
     icon: Option<&egui::TextureHandle>,
 ) -> Option<bool> {
     let mut ok = None;
-    egui::TopBottomPanel::bottom("message_bar")
-        .frame(dialog_frame(ctx))
-        .show(ctx, |ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let resp = ui.add_sized([100.0, 32.0], egui::Button::new("OK"));
-                if resp.clicked() {
-                    ok = Some(true);
-                }
-                if ui.memory(|m| m.focused().is_none()) {
-                    resp.request_focus();
-                }
-            });
-        });
+    button_bar(ctx, "message_bar", |ui| {
+        let resp = ui.add(dialog_button("OK"));
+        if resp.clicked() {
+            ok = Some(true);
+        }
+        if ui.memory(|m| m.focused().is_none()) {
+            resp.request_focus();
+        }
+    });
     egui::CentralPanel::default()
         .frame(dialog_frame(ctx))
         .show(ctx, |ui| {
-            ui.horizontal(|ui| {
+            // `horizontal_top` + a wrapping label: a long message wraps under itself
+            // (the icon staying at the top) instead of running off the right edge.
+            ui.horizontal_top(|ui| {
                 if let Some(t) = icon {
-                    ui.image(egui::load::SizedTexture::new(
-                        t.id(),
-                        egui::vec2(34.0, 34.0),
-                    ));
-                    ui.add_space(16.0);
+                    icon_image(ui, t, LEAD_ICON);
+                    ui.add_space(14.0);
                 }
-                ui.label(egui::RichText::new(message).size(15.0));
+                ui.add(egui::Label::new(egui::RichText::new(message).size(MSG_SIZE)).wrap());
             });
         });
     ok
@@ -640,64 +689,66 @@ fn password_dialog(
     lock_icon: Option<&egui::TextureHandle>,
 ) -> Option<bool> {
     let mut result = None;
-    egui::TopBottomPanel::bottom("password_bar")
-        .frame(dialog_frame(ctx))
-        .show(ctx, |ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .add_sized([100.0, 32.0], egui::Button::new("Cancel"))
-                    .clicked()
-                {
-                    result = Some(false);
-                }
-                ui.add_space(12.0);
-                let unlock = egui::Button::new("Unlock").min_size(egui::vec2(100.0, 32.0));
-                if ui.add_enabled(!checking, unlock).clicked() {
-                    result = Some(true);
-                }
-            });
-        });
+    button_bar(ctx, "password_bar", |ui| {
+        if ui.add(dialog_button("Cancel")).clicked() {
+            result = Some(false);
+        }
+        ui.add_space(BUTTON_GAP);
+        if ui.add_enabled(!checking, dialog_button("Unlock")).clicked() {
+            result = Some(true);
+        }
+    });
     egui::CentralPanel::default()
         .frame(dialog_frame(ctx))
         .show(ctx, |ui| {
-            ui.horizontal(|ui| {
+            // Lock icon in a left gutter; the prompt + field + status form an aligned
+            // content column to its right, so the file-name line and the field share
+            // one left edge (rather than the prompt floating, indented past the icon).
+            ui.horizontal_top(|ui| {
                 if let Some(t) = lock_icon {
-                    ui.image(egui::load::SizedTexture::new(
-                        t.id(),
-                        egui::vec2(30.0, 30.0),
-                    ));
+                    // Nudge the icon down so it sits centered against the two-line
+                    // prompt instead of hugging the very top edge.
+                    ui.vertical(|ui| {
+                        ui.add_space(6.0);
+                        icon_image(ui, t, LEAD_ICON);
+                    });
                     ui.add_space(14.0);
                 }
-                ui.label(egui::RichText::new(prompt).size(15.0));
-            });
-            ui.add_space(14.0);
-            let field = egui::TextEdit::singleline(input)
-                .password(true)
-                .hint_text("Password")
-                .desired_width(f32::INFINITY);
-            let resp = ui.add_enabled(!checking, field);
-            // Focus the field once when requested (dialog opened / after a wrong
-            // attempt) — not every frame, which would re-grab focus on the same frame
-            // Enter releases it and swallow the `lost_focus` submit signal below.
-            if take_focus && !checking {
-                resp.request_focus();
-            }
-            // egui's singleline surrenders focus on Enter; that's the submit signal.
-            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                result = Some(true);
-            }
-            if let Some(err) = error {
-                ui.add_space(10.0);
-                ui.colored_label(egui::Color32::from_rgb(220, 90, 90), err);
-            }
-            if checking {
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.add_space(6.0);
-                    ui.label("Checking…");
+                ui.vertical(|ui| {
+                    // Two-line prompt: "Enter the password for" / the quoted file name.
+                    ui.label(egui::RichText::new(prompt).size(MSG_SIZE));
+                    ui.add_space(16.0); // breathing room between the prompt and field
+                    let field = egui::TextEdit::singleline(input)
+                        .password(true)
+                        .hint_text("Password")
+                        .margin(FIELD_MARGIN)
+                        .desired_width(f32::INFINITY);
+                    let resp = ui.add_enabled(!checking, field);
+                    // Focus the field once when requested (dialog opened / after a
+                    // wrong attempt) — not every frame, which would re-grab focus on
+                    // the same frame Enter releases it and swallow the `lost_focus`
+                    // submit signal below.
+                    if take_focus && !checking {
+                        resp.request_focus();
+                    }
+                    // egui's singleline surrenders focus on Enter = the submit signal.
+                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        result = Some(true);
+                    }
+                    if let Some(err) = error {
+                        ui.add_space(12.0);
+                        ui.colored_label(egui::Color32::from_rgb(220, 90, 90), err);
+                    }
+                    if checking {
+                        ui.add_space(12.0);
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.add_space(6.0);
+                            ui.label("Checking…");
+                        });
+                    }
                 });
-            }
+            });
         });
     result
 }
