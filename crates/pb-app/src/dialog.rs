@@ -84,7 +84,7 @@ impl DialogWindow {
         refresh_hz: u32,
     ) -> Option<DialogWindow> {
         let (w, h, resizable, title) = match kind {
-            DialogKind::About => (380.0, 460.0, false, "About PhotoBlaze"),
+            DialogKind::About => (254.0, 307.0, false, "About PhotoBlaze"),
             DialogKind::Settings => (560.0, 660.0, true, "PhotoBlaze Settings"),
         };
         let attrs = Window::default_attributes()
@@ -296,7 +296,7 @@ fn about_ui(ui: &mut egui::Ui, icon: Option<&egui::TextureHandle>) {
         if let Some(tex) = icon {
             ui.image(egui::load::SizedTexture::new(
                 tex.id(),
-                egui::vec2(128.0, 128.0),
+                egui::vec2(100.0, 100.0),
             ));
         }
         ui.add_space(12.0);
