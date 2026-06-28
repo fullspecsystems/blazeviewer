@@ -33,6 +33,9 @@ use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use sevenz_rust2::{
+    Archive as SevenZArchive, ArchiveReader as SevenZReader, Password as SevenZPassword,
+};
 use zip::ZipArchive;
 
 /// A uniform, read-only source of encoded image bytes addressed by item index.
@@ -124,15 +127,20 @@ impl PhotoSource for FsSource {
 pub enum OpenError {
     /// The archive file could not be opened or read.
     Io(io::Error),
-    /// The bytes are not a valid ZIP (bad signature, truncated central directory…).
-    NotAZip(String),
+    /// The bytes are not a valid archive, are truncated, or use an unsupported
+    /// compression method (carries the underlying reason).
+    Corrupt(String),
+    /// Decompressing the archive into RAM ran out of memory (the eager 7z load —
+    /// a recoverable `try_reserve` failure, surfaced instead of an abort).
+    OutOfMemory,
 }
 
 impl std::fmt::Display for OpenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OpenError::Io(e) => write!(f, "{e}"),
-            OpenError::NotAZip(why) => write!(f, "not a valid zip archive: {why}"),
+            OpenError::Corrupt(why) => write!(f, "the archive could not be opened: {why}"),
+            OpenError::OutOfMemory => write!(f, "ran out of memory loading the archive"),
         }
     }
 }
@@ -192,7 +200,7 @@ impl ZipSource {
         let path = path.into();
         let file = File::open(&path)?;
         let mut archive =
-            ZipArchive::new(BufReader::new(file)).map_err(|e| OpenError::NotAZip(e.to_string()))?;
+            ZipArchive::new(BufReader::new(file)).map_err(|e| OpenError::Corrupt(e.to_string()))?;
 
         let mut entries = Vec::new();
         for i in 0..archive.len() {
@@ -200,7 +208,7 @@ impl ZipSource {
             // it works for encrypted entries too (we just want names + flags here).
             let entry = archive
                 .by_index_raw(i)
-                .map_err(|e| OpenError::NotAZip(e.to_string()))?;
+                .map_err(|e| OpenError::Corrupt(e.to_string()))?;
             if entry.is_dir() {
                 continue;
             }
@@ -298,6 +306,138 @@ impl Drop for ZipSource {
     }
 }
 
+/// One supported-image entry from a 7z, with its **decompressed** bytes held in
+/// RAM (the eager model — see [`SevenZSource`]).
+struct SevenZEntry {
+    name: String,
+    bytes: Vec<u8>,
+}
+
+/// A 7-Zip archive, **eagerly decompressed into RAM** on open.
+///
+/// Unlike ZIP, a 7z is usually *solid*: many files share one LZMA2 stream, so
+/// there is no cheap per-entry random access — to read any file you must
+/// decompress the block before it. So this decodes every supported-image entry
+/// once on open (a single sequential pass) into an in-RAM `index → bytes` map,
+/// after which [`bytes`](PhotoSource::bytes) is an instant RAM copy and prefetch /
+/// navigation behave normally.
+///
+/// **Cost:** peak RAM ≈ the sum of the decompressed image bytes, held for the
+/// session. The caller is expected to pre-flight with [`seven_z_projected_bytes`]
+/// against a memory budget and refuse oversized archives *before* calling
+/// [`open`](SevenZSource::open) — Rust aborts (uncatchable) on a true allocation
+/// failure, so prediction is the real defense; the `try_reserve` here is a backstop.
+///
+/// **Privacy:** RAM-only. Nothing is extracted to disk.
+pub struct SevenZSource {
+    path: PathBuf,
+    entries: Vec<SevenZEntry>,
+}
+
+/// Sum the **uncompressed** sizes of the supported-image entries in the 7z at
+/// `path`, reading only the header — no decompression. This is the cheap pre-flight
+/// the app compares against a RAM budget before committing to [`SevenZSource::open`]
+/// (which would hold all of it resident).
+pub fn seven_z_projected_bytes(
+    path: &Path,
+    is_supported: impl Fn(&str) -> bool,
+) -> Result<u64, OpenError> {
+    let mut file = File::open(path)?;
+    let archive = SevenZArchive::read(&mut file, &SevenZPassword::empty())
+        .map_err(|e| OpenError::Corrupt(e.to_string()))?;
+    let total = archive
+        .files
+        .iter()
+        .filter(|f| !f.is_directory() && f.has_stream() && is_supported(&ext_of(f.name())))
+        .map(|f| f.size())
+        .sum();
+    Ok(total)
+}
+
+impl SevenZSource {
+    /// Open `path` as a 7z and eagerly decompress its supported-image entries into
+    /// RAM, ordered by name. `is_supported` is the extension predicate (the app
+    /// passes `pb_decode::is_supported_extension`); `password` decrypts an encrypted
+    /// archive (`None` for a plain one).
+    ///
+    /// Output buffers use `try_reserve`, so an allocation shortfall returns
+    /// [`OpenError::OutOfMemory`] instead of aborting the process. Pair this with
+    /// [`seven_z_projected_bytes`] up front — once decompression starts, the
+    /// `try_reserve` backstop can't cover the decoder's own internal allocations.
+    pub fn open(
+        path: impl Into<PathBuf>,
+        password: Option<String>,
+        is_supported: impl Fn(&str) -> bool,
+    ) -> Result<Self, OpenError> {
+        let path = path.into();
+        let pw = match &password {
+            Some(p) => SevenZPassword::from(p.as_str()),
+            None => SevenZPassword::empty(),
+        };
+        let file = File::open(&path)?;
+        let mut reader =
+            SevenZReader::new(file, pw).map_err(|e| OpenError::Corrupt(e.to_string()))?;
+
+        let mut entries: Vec<SevenZEntry> = Vec::new();
+        let mut oom = false;
+        reader
+            .for_each_entries(|entry, rd| {
+                // Once we've hit OOM, short-circuit the remaining blocks cheaply
+                // (the reader keeps iterating blocks regardless of our bool return).
+                if oom {
+                    return Ok(false);
+                }
+                if entry.is_directory() || !entry.has_stream() {
+                    return Ok(true);
+                }
+                if !is_supported(&ext_of(entry.name())) {
+                    // A solid block is one stream: even entries we don't keep must
+                    // be drained so the following entries stay byte-aligned.
+                    io::copy(&mut rd.take(entry.size()), &mut io::sink())?;
+                    return Ok(true);
+                }
+                let mut buf = Vec::new();
+                if buf.try_reserve_exact(entry.size() as usize).is_err() {
+                    oom = true;
+                    return Ok(false);
+                }
+                rd.read_to_end(&mut buf)?;
+                entries.push(SevenZEntry {
+                    name: entry.name().to_string(),
+                    bytes: buf,
+                });
+                Ok(true)
+            })
+            .map_err(|e| OpenError::Corrupt(e.to_string()))?;
+
+        if oom {
+            return Err(OpenError::OutOfMemory);
+        }
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(Self { path, entries })
+    }
+}
+
+impl PhotoSource for SevenZSource {
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn name(&self, i: usize) -> &str {
+        self.entries.get(i).map(|e| e.name.as_str()).unwrap_or("")
+    }
+
+    fn container(&self) -> Option<&Path> {
+        Some(&self.path)
+    }
+
+    fn bytes(&self, i: usize) -> io::Result<Vec<u8>> {
+        // Already decompressed and resident — just hand back a copy.
+        let entry = self.entries.get(i).ok_or_else(out_of_range)?;
+        Ok(entry.bytes.clone())
+    }
+}
+
 /// The display name of a path: its final component, or `"?"` if it has none.
 fn display_name(p: &Path) -> String {
     p.file_name()
@@ -333,6 +473,7 @@ fn zip_to_io(e: zip::result::ZipError) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sevenz_rust2::{ArchiveEntry as SevenZArchiveEntry, ArchiveWriter as SevenZWriter};
     use std::io::Write;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -505,8 +646,8 @@ mod tests {
         // Avoid `unwrap_err` (it needs the Ok type, ZipSource, to be Debug — the
         // handle pool isn't) by matching the error directly.
         match ZipSource::open(&bogus, None, is_img) {
-            Err(OpenError::NotAZip(_)) => {}
-            Err(other) => panic!("expected NotAZip, got {other:?}"),
+            Err(OpenError::Corrupt(_)) => {}
+            Err(other) => panic!("expected Corrupt, got {other:?}"),
             Ok(_) => panic!("expected an error opening a non-zip file"),
         }
         let _ = std::fs::remove_file(&bogus);
@@ -520,5 +661,83 @@ mod tests {
             Err(other) => panic!("expected Io, got {other:?}"),
             Ok(_) => panic!("expected an error opening a missing file"),
         }
+    }
+
+    /// Build a .7z in a temp file from (name, bytes) pairs; return its path.
+    fn write_7z(tag: &str, files: &[(&str, &[u8])]) -> PathBuf {
+        let path = temp_path(tag, "7z");
+        let mut sz = SevenZWriter::create(&path).expect("create 7z");
+        for &(name, bytes) in files {
+            sz.push_archive_entry(SevenZArchiveEntry::new_file(name), Some(bytes))
+                .expect("push entry");
+        }
+        sz.finish().expect("finish 7z");
+        path
+    }
+
+    #[test]
+    fn seven_z_lists_supported_images_sorted_and_reads_bytes() {
+        let z = write_7z(
+            "list",
+            &[
+                ("b.png", b"BBBB"),
+                ("a.jpg", b"AAAA"),
+                ("notes.txt", b"text"),
+                ("sub/c.webp", b"CCCC"),
+            ],
+        );
+        let src = SevenZSource::open(&z, None, is_img).unwrap();
+        assert_eq!(src.len(), 3, "the .txt is excluded");
+        let names: Vec<&str> = (0..src.len()).map(|i| src.name(i)).collect();
+        assert_eq!(names, vec!["a.jpg", "b.png", "sub/c.webp"]);
+        // Eagerly decompressed: bytes match, in sorted order.
+        assert_eq!(src.bytes(0).unwrap(), b"AAAA");
+        assert_eq!(src.bytes(1).unwrap(), b"BBBB");
+        assert_eq!(src.bytes(2).unwrap(), b"CCCC");
+        assert!(src.bytes(99).is_err());
+        assert_eq!(
+            src.container(),
+            Some(z.as_path()),
+            "container is the archive"
+        );
+        let _ = std::fs::remove_file(&z);
+    }
+
+    #[test]
+    fn seven_z_projected_bytes_sums_image_sizes_without_decompressing() {
+        // 4 + 4 + 4 image bytes (the 9-byte .txt is excluded).
+        let z = write_7z(
+            "proj",
+            &[
+                ("a.jpg", b"AAAA"),
+                ("b.png", b"BBBB"),
+                ("c.webp", b"CCCC"),
+                ("readme.md", b"ignore me"),
+            ],
+        );
+        let projected = seven_z_projected_bytes(&z, is_img).unwrap();
+        assert_eq!(projected, 12, "sum of the three 4-byte images");
+        let _ = std::fs::remove_file(&z);
+    }
+
+    #[test]
+    fn seven_z_with_no_images_is_empty() {
+        let z = write_7z("none", &[("readme.txt", b"x"), ("data.bin", b"y")]);
+        let src = SevenZSource::open(&z, None, is_img).unwrap();
+        assert!(src.is_empty());
+        assert_eq!(seven_z_projected_bytes(&z, is_img).unwrap(), 0);
+        let _ = std::fs::remove_file(&z);
+    }
+
+    #[test]
+    fn seven_z_rejects_a_non_archive_file() {
+        let bogus = temp_path("bogus7z", "7z");
+        std::fs::write(&bogus, b"this is not a 7z archive at all").unwrap();
+        match SevenZSource::open(&bogus, None, is_img) {
+            Err(OpenError::Corrupt(_)) => {}
+            Err(other) => panic!("expected Corrupt, got {other:?}"),
+            Ok(_) => panic!("expected an error opening a non-7z file"),
+        }
+        let _ = std::fs::remove_file(&bogus);
     }
 }

@@ -12,3 +12,8 @@ description = "Photo source abstraction for PhotoBlaze: a uniform 'encoded bytes
 # rare for already-compressed photos and would pull C build deps — exactly the
 # Windows build-risk the project avoids (see the libheif notes in CLAUDE.md).
 zip = { version = "2", default-features = false, features = ["deflate", "aes-crypto"] }
+# 7-Zip reading (SevenZSource's eager decode-to-RAM). Pure Rust including its codecs
+# (LZMA/LZMA2 via lzma-rust2, bzip2 via libbz2-rs-sys, PPMd via ppmd-rust), so no C
+# build risk. Default features kept (compress + aes256 + bzip2 + ppmd + util) for
+# codec coverage; all pure Rust.
+sevenz-rust2 = "0.21.1"
