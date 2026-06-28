@@ -34,9 +34,6 @@ pub enum DialogKind {
     /// [`take_confirm_result`] `Some(true)`). Opened via [`crate::App::open_message`].
     ///
     /// [`take_confirm_result`]: DialogWindow::take_confirm_result
-    // Constructed by the archive-open session (Task 30) via `App::open_message`; the
-    // allow keeps the build green until that call site lands. Remove once wired.
-    #[allow(dead_code)]
     Message,
 }
 

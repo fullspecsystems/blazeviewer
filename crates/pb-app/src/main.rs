@@ -1900,9 +1900,6 @@ impl App {
     /// a warning icon + `message` + an OK button, centered over the viewer, closing
     /// on OK / Esc. The archive-open path (`archive::ArchiveOpenError::user_message`)
     /// calls this to surface a too-large / corrupt / password / OOM / empty failure.
-    // Called by the archive-open session (Task 30); the allow keeps the build green
-    // until that call site lands. Remove once wired.
-    #[allow(dead_code)]
     pub fn open_message(&mut self, message: &str, event_loop: &ActiveEventLoop) {
         let refresh = self.refresh_hz();
         let parent = self.active.as_ref().map(|a| a.window.clone());
@@ -1931,6 +1928,12 @@ impl App {
                 }
             );
         if close {
+            // The Esc that dismisses a (focused) dialog also leaks to the main window
+            // as a trailing/synthetic press once focus snaps back — by then `dialog`
+            // is None, so the main-window guard can't catch it. Briefly guard
+            // quit-on-Esc so closing a dialog never also exits the app (the same leak
+            // `open_picker` handles).
+            self.esc_guard_until = Some(Instant::now() + Duration::from_millis(300));
             self.dialog = None;
             self.pending_confirm_delete = None; // Esc / close = cancel the confirm
             return;
@@ -2751,6 +2754,10 @@ impl ApplicationHandler for App {
                         if self.dialog.is_some() {
                             self.dialog = None;
                             self.pending_confirm_delete = None;
+                            // Same leak guard as the dialog path: a held/repeated Esc
+                            // after this close must not fall through to quit.
+                            self.esc_guard_until =
+                                Some(Instant::now() + Duration::from_millis(300));
                             return;
                         }
                         // Swallow a stray Esc that leaked from dismissing the file
