@@ -14,8 +14,9 @@
 use std::path::PathBuf;
 
 /// Per-user config directory for PhotoBlaze (created on demand), or `None` if the
-/// platform's config location can't be determined.
-fn config_dir() -> Option<PathBuf> {
+/// platform's config location can't be determined. Shared with the keymap loader
+/// (`keymap::read_config`), which reads `keymap.toml` from the same directory.
+pub(crate) fn config_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     {
         std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("PhotoBlaze"))

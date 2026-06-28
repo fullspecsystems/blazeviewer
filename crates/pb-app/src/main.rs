@@ -53,6 +53,7 @@ use pb_render::{
 };
 use pb_source::{seven_z_projected_bytes, FsSource, PhotoSource, SevenZSource, ZipSource};
 
+mod action;
 mod archive;
 mod clipboard;
 #[cfg(windows)]
@@ -62,12 +63,15 @@ mod delete;
 mod dialog;
 mod hud;
 mod icon;
+mod keymap;
 mod menu;
 mod metrics;
 mod save_rotation;
 mod settings;
+use action::{Action, ActionKind};
 use decode_pool::{recommended_workers, DecodeFn, DecodePool, Outcome};
 use hud::{Hud, Row};
+use keymap::{KeyChord, Keymap};
 use menu::MenuAction;
 use metrics::StageTimes;
 
@@ -515,12 +519,23 @@ struct App {
     /// The open egui dialog window (Settings / About), or `None`. At most one at a
     /// time; its events are routed by window id in `window_event`.
     dialog: Option<dialog::DialogWindow>,
+    /// Configurable key bindings (task #8): the chord→action map the keyboard
+    /// dispatch and the help overlay both read. Loaded once at startup (defaults +
+    /// optional `keymap.toml`); read-only.
+    keymap: Keymap,
     /// An in-flight background archive open (a `.7z` eager-decompresses off-thread so
     /// it can't freeze the event loop). `None` when no archive is loading.
     archive_load: Option<ArchiveLoad>,
     /// Monotonic id for archive-open requests; a newer open bumps it so a superseded
     /// load's result is discarded when it finally arrives.
     archive_gen: u64,
+    /// A launch input (an archive) deferred until the window exists, so the viewer
+    /// appears immediately and a slow / encrypted / failed open uses the spinner +
+    /// dialogs instead of blocking startup or only logging. Fired once in `resumed`.
+    pending_launch: Option<LaunchInput>,
+    /// The archive currently awaiting a password: set when the password prompt opens,
+    /// re-opened with the entered password on submit, cleared on success / cancel.
+    password_archive: Option<PathBuf>,
 }
 
 impl App {
@@ -614,8 +629,11 @@ impl App {
             pending_confirm_delete: None,
             menu_attached: false,
             dialog: None,
+            keymap: Keymap::load(),
             archive_load: None,
             archive_gen: 0,
+            pending_launch: None,
+            password_archive: None,
         }
     }
 
@@ -1350,6 +1368,13 @@ impl App {
         }
     }
 
+    /// Defer a launch input until the window + engine exist (`resumed` fires it).
+    /// Used for an archive on the command line / double-click so startup shows the
+    /// window first and the open runs behind the spinner + dialogs.
+    fn queue_launch(&mut self, input: LaunchInput) {
+        self.pending_launch = Some(input);
+    }
+
     /// Open a launch input at runtime (the file picker or a drag-drop): plan it,
     /// build the playlist, and jump to the plan's cursor (the dropped/clicked
     /// photo, or the first of a folder). Empty selections are ignored so the
@@ -1359,7 +1384,7 @@ impl App {
         // Archives open via the async-aware path (a .7z decompresses off-thread so it
         // can't freeze the loop). Folders / file lists resolve synchronously (cheap).
         if let Source::Archive(path) = &plan.source {
-            self.begin_archive_open(path.clone(), event_loop);
+            self.begin_archive_open(path.clone(), None, event_loop);
             return;
         }
         let r = resolve_playlist(&plan.source, &plan.cursor);
@@ -1377,50 +1402,58 @@ impl App {
         );
     }
 
-    /// Start opening an archive at runtime (picker / drag-drop). A `.zip` opens
-    /// synchronously (just a directory read). A `.7z` is opened on a background
-    /// thread after a synchronous RAM pre-flight: the current photo stays visible
-    /// and the loop stays responsive until the eager decompress lands (picked up in
-    /// [`poll_archive_load`](App::poll_archive_load)). A second open supersedes the
-    /// first via `archive_gen`.
-    fn begin_archive_open(&mut self, path: PathBuf, event_loop: &ActiveEventLoop) {
+    /// Start opening an archive at runtime (picker / drag-drop / a deferred launch).
+    /// A `.zip` opens synchronously (just a directory read). A `.7z` is opened on a
+    /// background thread after a synchronous RAM pre-flight: the current photo stays
+    /// visible and the loop stays responsive until the eager decompress lands
+    /// (picked up in [`poll_archive_load`](App::poll_archive_load)). A second open
+    /// supersedes the first via `archive_gen`.
+    ///
+    /// `password` decrypts an encrypted archive: `None` on the first open (an
+    /// encrypted archive then reports `PasswordRequired`, which prompts), `Some` when
+    /// re-opening with a password the user entered.
+    fn begin_archive_open(
+        &mut self,
+        path: PathBuf,
+        password: Option<String>,
+        event_loop: &ActiveEventLoop,
+    ) {
         let is_7z = path
             .extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("7z"));
+        let was_password_attempt = password.is_some();
         if !is_7z {
-            match open_archive(&path) {
-                Ok(r) => self.rebuild_playlist(
-                    r.source,
-                    r.root,
-                    r.scan_root,
-                    r.recursive,
-                    r.start,
-                    event_loop,
-                ),
-                Err(e) => self.report_archive_error(&e, event_loop),
-            }
+            let result = open_archive(&path, password);
+            self.finish_archive_open(result, was_password_attempt, path, event_loop);
             return;
         }
-        // 7z: refuse instantly if it won't fit RAM (before any background work), then
-        // decompress off-thread.
-        if let Err(e) = seven_z_preflight(&path) {
-            self.report_archive_error(&e, event_loop);
+        // 7z: refuse instantly if it won't fit RAM (before any background work). A
+        // pre-flight password error (a header-encrypted archive) routes to the prompt
+        // like any other, not the generic error dialog.
+        if let Err(e) = seven_z_preflight(&path, password.as_deref()) {
+            self.finish_archive_open(Err(e), was_password_attempt, path, event_loop);
             return;
         }
         self.archive_gen += 1;
         let generation = self.archive_gen;
         let (tx, rx) = std::sync::mpsc::channel();
+        let worker_path = path.clone();
         std::thread::spawn(move || {
-            let _ = tx.send((generation, load_seven_z(&path)));
+            let _ = tx.send((generation, load_seven_z(&worker_path, password)));
         });
-        self.archive_load = Some(ArchiveLoad { generation, rx });
+        self.archive_load = Some(ArchiveLoad {
+            generation,
+            rx,
+            path,
+            was_password_attempt,
+        });
         self.show_toast("Loading archive…", event_loop);
     }
 
     /// Pick up a finished background archive open (called each tick while one is in
-    /// flight). Rebuilds the playlist on success, surfaces the error otherwise, and
-    /// drops a superseded result (a newer open bumped `archive_gen`).
+    /// flight). Routes the result through [`finish_archive_open`](App::finish_archive_open),
+    /// and drops a superseded result (a newer open bumped `archive_gen`).
     fn poll_archive_load(&mut self, event_loop: &ActiveEventLoop) {
         use std::sync::mpsc::TryRecvError;
         let (load_gen, recv) = match self.archive_load.as_ref() {
@@ -1429,28 +1462,102 @@ impl App {
         };
         match recv {
             Ok((generation, result)) => {
-                self.archive_load = None;
+                let load = self.archive_load.take();
                 if generation != load_gen {
                     return; // superseded by a newer open
                 }
-                match result {
-                    Ok(r) if !r.source.is_empty() => self.rebuild_playlist(
-                        r.source,
-                        r.root,
-                        r.scan_root,
-                        r.recursive,
-                        r.start,
-                        event_loop,
-                    ),
-                    Ok(_) => {
-                        self.report_archive_error(&archive::ArchiveOpenError::Empty, event_loop)
-                    }
-                    Err(e) => self.report_archive_error(&e, event_loop),
-                }
+                let (path, was_attempt) = match load {
+                    Some(l) => (l.path, l.was_password_attempt),
+                    None => return,
+                };
+                self.finish_archive_open(result, was_attempt, path, event_loop);
             }
             Err(TryRecvError::Empty) => {} // still loading
             Err(TryRecvError::Disconnected) => self.archive_load = None, // worker died
         }
+    }
+
+    /// Act on a finished archive open (zip-sync or 7z-async), shared by both paths:
+    /// a non-empty success rebuilds the playlist (closing any password prompt); a
+    /// `PasswordRequired` opens (or re-prompts, after a wrong attempt) the password
+    /// dialog; any other failure shows the error dialog. `was_password_attempt` is
+    /// whether this open carried a user-entered password (so a repeat means it was
+    /// wrong).
+    fn finish_archive_open(
+        &mut self,
+        result: Result<Resolved, archive::ArchiveOpenError>,
+        was_password_attempt: bool,
+        path: PathBuf,
+        event_loop: &ActiveEventLoop,
+    ) {
+        match result {
+            Ok(r) if !r.source.is_empty() => {
+                self.password_archive = None;
+                self.close_dialog();
+                self.rebuild_playlist(
+                    r.source,
+                    r.root,
+                    r.scan_root,
+                    r.recursive,
+                    r.start,
+                    event_loop,
+                );
+            }
+            Ok(_) => self.fail_archive_open(&archive::ArchiveOpenError::Empty, event_loop),
+            Err(archive::ArchiveOpenError::PasswordRequired) => {
+                self.prompt_archive_password(path, was_password_attempt, event_loop)
+            }
+            Err(e) => self.fail_archive_open(&e, event_loop),
+        }
+    }
+
+    /// A terminal archive-open failure (not a password retry): forget the pending
+    /// archive and replace any open dialog with the error notice.
+    fn fail_archive_open(&mut self, e: &archive::ArchiveOpenError, event_loop: &ActiveEventLoop) {
+        self.password_archive = None;
+        self.report_archive_error(e, event_loop);
+    }
+
+    /// Close the egui dialog window (if any). Dropping it scrubs an entered password.
+    fn close_dialog(&mut self) {
+        self.dialog = None;
+    }
+
+    /// Prompt for an archive's password (or re-prompt after a wrong one). Remembers
+    /// `path` so a submitted password re-opens it. On the first prompt a fresh
+    /// Password dialog opens; on a retry (`wrong`) the existing dialog gets an inline
+    /// "Incorrect password" error and a cleared field rather than a jarring re-open.
+    fn prompt_archive_password(
+        &mut self,
+        path: PathBuf,
+        wrong: bool,
+        event_loop: &ActiveEventLoop,
+    ) {
+        self.password_archive = Some(path.clone());
+        let is_password_dialog =
+            self.dialog.as_ref().map(|d| d.kind()) == Some(dialog::DialogKind::Password);
+        if wrong && is_password_dialog {
+            if let Some(d) = self.dialog.as_mut() {
+                d.set_password_error("Incorrect password. Please try again.");
+                d.focus();
+                d.request_redraw();
+            }
+            return;
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("this archive");
+        let prompt = format!("Enter the password for \u{201c}{name}\u{201d}.");
+        let refresh = self.refresh_hz();
+        let parent = self.active.as_ref().map(|a| a.window.clone());
+        self.dialog = dialog::DialogWindow::open(
+            dialog::DialogKind::Password,
+            event_loop,
+            refresh,
+            &prompt,
+            parent.as_deref(),
+        );
     }
 
     /// Surface an archive-open failure to the user via the egui message dialog
@@ -1635,35 +1742,54 @@ impl App {
         self.draw(event_loop);
     }
 
-    /// Run a menu action: dispatch to the **same `App` methods the keyboard calls**,
-    /// so the menu and the keymap never drift. The id→action mapping is the pure,
-    /// unit-tested `menu::action_for`; this is the (impure) effect half.
+    /// Run a menu action by mapping it to the central [`Action`] and dispatching it —
+    /// the menu and the keyboard share one dispatcher, so they can never drift. The
+    /// id→`MenuAction` mapping is the pure, unit-tested `menu::action_for`.
     fn dispatch_menu(&mut self, action: MenuAction, event_loop: &ActiveEventLoop) {
+        self.dispatch_action(action.to_action(), event_loop);
+    }
+
+    /// The single effect-half dispatcher for every [`Action`], shared by the keyboard
+    /// (one-shot keys, via the keymap) and the menu. Navigation here is a single
+    /// step (what the menu wants); the keyboard's held-to-fly nav and continuous
+    /// pan/zoom are driven by the hold loop (`about_to_wait`), not this path.
+    fn dispatch_action(&mut self, action: Action, event_loop: &ActiveEventLoop) {
         match action {
-            MenuAction::OpenFile => self.open_picker(false, event_loop),
-            MenuAction::OpenFolder => self.open_picker(true, event_loop),
-            MenuAction::SaveRotation => self.save_rotation(event_loop),
-            MenuAction::Delete => self.delete_current(false, event_loop),
-            MenuAction::DeletePermanently => self.delete_current(true, event_loop),
-            MenuAction::Exit => self.begin_exit(event_loop),
-            MenuAction::Copy => self.copy_image(event_loop),
-            MenuAction::Fit => self.set_scale_mode(ScaleMode::Fit, event_loop),
-            MenuAction::Fill => self.set_scale_mode(ScaleMode::Fill, event_loop),
-            MenuAction::Original => self.set_scale_mode(ScaleMode::Original, event_loop),
-            MenuAction::ZoomIn => self.zoom_step(1.25, event_loop),
-            MenuAction::ZoomOut => self.zoom_step(0.8, event_loop),
-            MenuAction::Fullscreen => self.toggle_fullscreen(),
-            MenuAction::Recursive => self.toggle_recursive(event_loop),
-            MenuAction::Info => self.toggle_info(false, event_loop),
-            MenuAction::FullExif => self.toggle_info(true, event_loop),
-            MenuAction::Next => self.advance(Nav::Forward, event_loop),
-            MenuAction::Previous => self.advance(Nav::Backward, event_loop),
-            MenuAction::Random => self.advance(Nav::Random, event_loop),
-            MenuAction::RandomPrev => self.advance(Nav::RandomPrev, event_loop),
-            MenuAction::RotateRight => self.rotate(false, event_loop),
-            MenuAction::RotateLeft => self.rotate(true, event_loop),
-            MenuAction::Help => self.toggle_help(event_loop),
-            MenuAction::About => self.open_about(event_loop),
+            Action::Next => self.advance(Nav::Forward, event_loop),
+            Action::Prev => self.advance(Nav::Backward, event_loop),
+            Action::Random => self.advance(Nav::Random, event_loop),
+            Action::RandomPrev => self.advance(Nav::RandomPrev, event_loop),
+            // Pan is continuous-while-held only (the hold loop); never single-dispatched.
+            Action::PanLeft | Action::PanRight | Action::PanUp | Action::PanDown => {}
+            Action::ZoomIn => self.zoom_step(1.25, event_loop),
+            Action::ZoomOut => self.zoom_step(0.8, event_loop),
+            Action::ScaleFit => self.set_scale_mode(ScaleMode::Fit, event_loop),
+            Action::ScaleFill => self.set_scale_mode(ScaleMode::Fill, event_loop),
+            Action::ScaleOriginal => self.set_scale_mode(ScaleMode::Original, event_loop),
+            Action::ToggleOriginal => {
+                let next = if self.view.mode == ScaleMode::Original {
+                    ScaleMode::Fit
+                } else {
+                    ScaleMode::Original
+                };
+                self.set_scale_mode(next, event_loop);
+            }
+            Action::RotateCw => self.rotate(false, event_loop),
+            Action::RotateCcw => self.rotate(true, event_loop),
+            Action::Copy => self.copy_image(event_loop),
+            Action::SaveRotation => self.save_rotation(event_loop),
+            Action::Delete => self.delete_current(false, event_loop),
+            Action::DeletePermanent => self.delete_current(true, event_loop),
+            Action::OpenFile => self.open_picker(false, event_loop),
+            Action::OpenFolder => self.open_picker(true, event_loop),
+            Action::Info => self.toggle_info(false, event_loop),
+            Action::FullExif => self.toggle_info(true, event_loop),
+            Action::Help => self.toggle_help(event_loop),
+            Action::Fullscreen => self.toggle_fullscreen(),
+            Action::Recursive => self.toggle_recursive(event_loop),
+            Action::Settings => self.open_settings(event_loop),
+            Action::About => self.open_about(event_loop),
+            Action::Quit => self.begin_exit(event_loop),
         }
     }
 
@@ -1936,6 +2062,7 @@ impl App {
             self.esc_guard_until = Some(Instant::now() + Duration::from_millis(300));
             self.dialog = None;
             self.pending_confirm_delete = None; // Esc / close = cancel the confirm
+            self.password_archive = None; // Esc / close = abandon the password prompt
             return;
         }
         // Render the dialog and pick up a button answer (if one was clicked).
@@ -1960,14 +2087,46 @@ impl App {
             }
         }
         if let Some(confirmed) = answer {
-            self.dialog = None; // any answered button closes the dialog
-                                // Only the Confirm dialog drives the delete; a Message OK just closes.
-            if kind == Some(dialog::DialogKind::Confirm) {
-                let item = self.pending_confirm_delete.take();
-                if confirmed {
-                    if let Some(item) = item {
-                        if let Some(path) = self.source.path(item).map(Path::to_path_buf) {
-                            self.do_delete(item, &path, true, event_loop);
+            match kind {
+                // The password dialog stays open until the open succeeds or is
+                // cancelled (a wrong password re-prompts in place), so it isn't
+                // closed here like the others.
+                Some(dialog::DialogKind::Password) => {
+                    if confirmed {
+                        let pw = self
+                            .dialog
+                            .as_mut()
+                            .and_then(|d| d.take_submitted_password());
+                        match (pw, self.password_archive.clone()) {
+                            (Some(pw), Some(path)) => {
+                                // Show the "Checking…" state, then validate (zip is
+                                // synchronous; a 7z re-opens off-thread).
+                                if let Some(d) = self.dialog.as_mut() {
+                                    d.set_checking(true);
+                                    d.request_redraw();
+                                }
+                                self.begin_archive_open(path, Some(pw), event_loop);
+                            }
+                            // No archive pending (shouldn't happen): just close.
+                            _ => self.dialog = None,
+                        }
+                    } else {
+                        // Cancel: close and forget the pending archive.
+                        self.dialog = None;
+                        self.password_archive = None;
+                    }
+                }
+                // Confirm drives a delete; Message / others just close.
+                other => {
+                    self.dialog = None;
+                    if other == Some(dialog::DialogKind::Confirm) {
+                        let item = self.pending_confirm_delete.take();
+                        if confirmed {
+                            if let Some(item) = item {
+                                if let Some(path) = self.source.path(item).map(Path::to_path_buf) {
+                                    self.do_delete(item, &path, true, event_loop);
+                                }
+                            }
                         }
                     }
                 }
@@ -1976,33 +2135,64 @@ impl App {
     }
 
     /// The keybindings help table: a title row, then every hotkey → action as a
-    /// shaded-key / description pair. Static (independent of the current photo).
+    /// shaded-key / description pair. The key labels are read from the live keymap
+    /// (task #8 — single source of truth), so rebinding a key updates the help. A
+    /// few rows stay curated: pan (shown as arrow glyphs), help (`/ or ?`), and the
+    /// "hold to fly" hint (no single binding).
     fn help_rows(&self) -> Vec<Row> {
+        // Primary keys for an action, numpad aliases dropped, joined by " / ".
+        let keys = |a: Action| {
+            self.keymap
+                .bindings_for(a)
+                .iter()
+                .filter(|c| !keymap::is_numpad(c.code))
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>()
+                .join(" / ")
+        };
+        // Two actions shown on one row (e.g. rotate cw / ccw).
+        let two = |a: Action, b: Action| format!("{} / {}", keys(a), keys(b));
+
+        let entries: Vec<(String, &str)> = vec![
+            (keys(Action::Next), "Next photo"),
+            (keys(Action::Prev), "Previous photo"),
+            (keys(Action::Random), "Random photo (shuffle)"),
+            (keys(Action::RandomPrev), "Previous random photo"),
+            ("Hold nav key".to_string(), "Fly through photos"),
+            (
+                "\u{2190} \u{2191} \u{2193} \u{2192}".to_string(),
+                "Pan (hold to accelerate)",
+            ),
+            (two(Action::ZoomIn, Action::ZoomOut), "Zoom in / out (hold)"),
+            (keys(Action::ScaleFit), "Fit to screen"),
+            (keys(Action::ScaleFill), "Fill screen (crop)"),
+            (
+                keys(Action::ToggleOriginal),
+                "Toggle original 1:1 \u{2194} fit",
+            ),
+            (
+                two(Action::RotateCw, Action::RotateCcw),
+                "Rotate 90\u{b0} cw / ccw",
+            ),
+            (keys(Action::Recursive), "Toggle recursive folders"),
+            (
+                two(Action::OpenFile, Action::OpenFolder),
+                "Open file(s) / folder",
+            ),
+            (keys(Action::Fullscreen), "Toggle fullscreen"),
+            (
+                two(Action::Info, Action::FullExif),
+                "Info / full-EXIF panel",
+            ),
+            ("/ or ?".to_string(), "This help"),
+            (keys(Action::Quit), "Quit"),
+        ];
         let mut rows = vec![Row::Span {
             text: "PhotoBlaze Help".to_string(),
             bold: true,
         }];
-        let keys: &[(&str, &str)] = &[
-            ("Space", "Next photo"),
-            ("Backspace", "Previous photo"),
-            ("Enter", "Random photo (shuffle)"),
-            ("Shift+Enter", "Previous random photo"),
-            ("Hold nav key", "Fly through photos"),
-            ("← ↑ ↓ →", "Pan (hold to accelerate)"),
-            ("= / -", "Zoom in / out (hold)"),
-            ("8", "Fit to screen"),
-            ("9", "Fill screen (crop)"),
-            ("0", "Toggle original 1:1 ↔ fit"),
-            ("r / Shift+R", "Rotate 90° cw / ccw"),
-            ("Ctrl+R", "Toggle recursive folders"),
-            ("o / Shift+O", "Open file(s) / folder"),
-            ("F11 / Alt+Enter", "Toggle fullscreen"),
-            ("i / Shift+I", "Info / full-EXIF panel"),
-            ("/ or ?", "This help"),
-            ("Esc", "Quit"),
-        ];
-        rows.extend(keys.iter().map(|(k, d)| Row::Pair {
-            label: k.to_string(),
+        rows.extend(entries.into_iter().map(|(k, d)| Row::Pair {
+            label: k,
             value: d.to_string(),
         }));
         rows
@@ -2691,6 +2881,14 @@ impl ApplicationHandler for App {
 
         self.active = Some(Active { window, renderer });
         self.request_prefetch();
+
+        // Now that the window + engine are live, kick off any launch input we
+        // deferred (an archive): a big .7z loads behind the spinner, and an
+        // encrypted / failed open can use the egui dialogs (a synchronous launch
+        // resolve, before the event loop, could do neither).
+        if let Some(input) = self.pending_launch.take() {
+            self.open_input(input, event_loop);
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
@@ -2771,18 +2969,29 @@ impl ApplicationHandler for App {
                         // Real press only — OS auto-repeats are ignored so they
                         // can't queue up and delay the release. Holding is driven
                         // by `about_to_wait`.
+                        //
+                        // Discrete (one-shot) commands go through the configurable
+                        // keymap (task #8) → the shared `dispatch_action`. Held/nav
+                        // keys (space/enter/arrows/zoom) keep their hardcoded handling
+                        // below — the hold loop tracks them by physical key; making
+                        // those remappable too is a follow-up.
+                        let chord = KeyChord::new(code, self.ctrl, self.shift, self.alt);
+                        if let Some(act) = self.keymap.action_for(&chord) {
+                            if act.kind() == ActionKind::OneShot {
+                                self.dispatch_action(act, event_loop);
+                                return;
+                            }
+                        }
                         match code {
                             KeyCode::Space => self.nav_press(code, Nav::Forward, event_loop),
                             KeyCode::Backspace => self.nav_press(code, Nav::Backward, event_loop),
-                            // Enter (and numpad Enter): Alt+Enter toggles
-                            // fullscreen; Shift+Enter steps back through the random
-                            // walk (revisit one you flew past); otherwise jump to the
-                            // next photo in the precomputed random order (hold to fly
-                            // through a shuffled deck, each once before a reshuffle).
+                            // Enter / NumpadEnter: Shift+Enter steps back through the
+                            // random walk (revisit one you flew past); plain Enter
+                            // jumps to the next photo in the precomputed shuffle (hold
+                            // to fly through the deck). Alt+Enter = fullscreen is a
+                            // one-shot dispatched via the keymap above.
                             KeyCode::Enter | KeyCode::NumpadEnter => {
-                                if self.alt {
-                                    self.toggle_fullscreen();
-                                } else if self.shift {
+                                if self.shift {
                                     self.nav_press(code, Nav::RandomPrev, event_loop);
                                 } else {
                                     self.nav_press(code, Nav::Random, event_loop);
@@ -2800,43 +3009,6 @@ impl ApplicationHandler for App {
                             | KeyCode::NumpadSubtract => {
                                 self.held.insert(code);
                             }
-                            // Scaling mode: 8 fit, 9 fill, 0 toggles original ↔ fit.
-                            KeyCode::Digit0 => {
-                                let next = if self.view.mode == ScaleMode::Original {
-                                    ScaleMode::Fit
-                                } else {
-                                    ScaleMode::Original
-                                };
-                                self.set_scale_mode(next, event_loop);
-                            }
-                            KeyCode::Digit8 => self.set_scale_mode(ScaleMode::Fit, event_loop),
-                            KeyCode::Digit9 => self.set_scale_mode(ScaleMode::Fill, event_loop),
-                            // R: rotate (cw, or ccw with Shift). Ctrl+R: toggle the
-                            // recursive subfolder scan, keeping the current photo.
-                            KeyCode::KeyR => {
-                                if self.ctrl {
-                                    self.toggle_recursive(event_loop);
-                                } else {
-                                    self.rotate(self.shift, event_loop);
-                                }
-                            }
-                            // Open: o = file picker, Shift+O = folder picker.
-                            KeyCode::KeyO => self.open_picker(self.shift, event_loop),
-                            // Ctrl+C copies the full-res current photo to the clipboard.
-                            KeyCode::KeyC if self.ctrl => self.copy_image(event_loop),
-                            // Ctrl+S saves the pending rotation to the file (lossless EXIF).
-                            KeyCode::KeyS if self.ctrl => self.save_rotation(event_loop),
-                            // Delete → Recycle Bin; Shift+Delete → permanent (confirmed).
-                            KeyCode::Delete => self.delete_current(self.shift, event_loop),
-                            // Ctrl+, opens Settings (mac-like; common on Windows too).
-                            KeyCode::Comma if self.ctrl => self.open_settings(event_loop),
-                            // Fullscreen <-> windowed (F11; Alt+Enter is handled
-                            // with the Enter arm above).
-                            KeyCode::F11 => self.toggle_fullscreen(),
-                            // Info panel: i basic, Shift+I full EXIF.
-                            KeyCode::KeyI => self.toggle_info(self.shift, event_loop),
-                            // Keybindings help (`/` or `?` — same physical key).
-                            KeyCode::Slash => self.toggle_help(event_loop),
                             _ => {}
                         }
                     }
@@ -3311,10 +3483,11 @@ fn resolve_playlist(source: &Source, cursor: &open::Cursor) -> Resolved {
                 start,
             }
         }
-        Source::Archive(path) => match open_archive(path) {
+        // The launch / picker / drop paths open archives via the async-aware
+        // `App::begin_archive_open` (which surfaces failures through the egui
+        // dialog), so this arm is only a safety net: log and show empty on failure.
+        Source::Archive(path) => match open_archive(path, None) {
             Ok(r) => r,
-            // TODO(Task 30 #3/#4): surface this through the egui error dialog on the
-            // runtime open path (picker/drop). For now it logs and shows empty.
             Err(e) => {
                 eprintln!("PhotoBlaze: {}", e.user_message());
                 Resolved::empty()
@@ -3329,21 +3502,32 @@ fn resolve_playlist(source: &Source, cursor: &open::Cursor) -> Resolved {
 /// so the caller can show the right message; entries are read into RAM, never
 /// extracted to disk.
 ///
-/// NOTE: 7z open is currently **synchronous** (it decompresses on the calling
-/// thread) -- fine for the launch path, but a large within-budget archive briefly
-/// blocks the event loop on a runtime open; Task 30 #3 moves it off-thread behind
-/// the wait spinner.
-fn open_archive(path: &Path) -> Result<Resolved, archive::ArchiveOpenError> {
+/// `password` decrypts an encrypted archive (`None` on the first open; an encrypted
+/// archive then returns [`PasswordRequired`](archive::ArchiveOpenError::PasswordRequired)
+/// so the app can prompt, and a re-open carries the entered password). A ZIP's
+/// directory reads without one, and a *wrong* password still opens — so an actual
+/// entry decrypt ([`ZipSource::password_ok`]) is what catches it.
+fn open_archive(
+    path: &Path,
+    password: Option<String>,
+) -> Result<Resolved, archive::ArchiveOpenError> {
     let is_7z = path
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("7z"));
     if is_7z {
-        seven_z_preflight(path)?;
-        load_seven_z(path)
+        seven_z_preflight(path, password.as_deref())?;
+        load_seven_z(path, password)
     } else {
-        let zs = ZipSource::open(path, None, is_supported_extension)?;
+        let has_password = password.is_some();
+        let zs = ZipSource::open(path, password, is_supported_extension)?;
+        // Encrypted but no password supplied -> prompt for one.
         if zs.needs_password() {
+            return Err(archive::ArchiveOpenError::PasswordRequired);
+        }
+        // A password was supplied but it doesn't decrypt -> prompt again (open
+        // succeeds regardless of the password; the entry read is the real check).
+        if has_password && zs.is_encrypted() && !zs.password_ok() {
             return Err(archive::ArchiveOpenError::PasswordRequired);
         }
         if zs.is_empty() {
@@ -3355,9 +3539,11 @@ fn open_archive(path: &Path) -> Result<Resolved, archive::ArchiveOpenError> {
 
 /// The RAM pre-flight for a 7z: predict-and-refuse before the (uncatchable) eager
 /// decompress, so an archive whose resident image bytes won't fit the budget is
-/// rejected instantly rather than aborting partway in.
-fn seven_z_preflight(path: &Path) -> Result<(), archive::ArchiveOpenError> {
-    let needed = seven_z_projected_bytes(path, is_supported_extension)?;
+/// rejected instantly rather than aborting partway in. `password` is only needed
+/// for a header-encrypted archive (else the header reads without one); a wrong /
+/// missing one surfaces as `PasswordRequired` here, routing to the prompt.
+fn seven_z_preflight(path: &Path, password: Option<&str>) -> Result<(), archive::ArchiveOpenError> {
+    let needed = seven_z_projected_bytes(path, password, is_supported_extension)?;
     let budget = archive::ram_budget();
     if needed > budget {
         return Err(archive::ArchiveOpenError::TooLarge { needed, budget });
@@ -3367,9 +3553,13 @@ fn seven_z_preflight(path: &Path) -> Result<(), archive::ArchiveOpenError> {
 
 /// Eager-decompress a 7z into a [`Resolved`] (no pre-flight here — the caller runs
 /// [`seven_z_preflight`] first). This is the slow step the runtime path runs on a
-/// background thread (see `App::begin_archive_open`).
-fn load_seven_z(path: &Path) -> Result<Resolved, archive::ArchiveOpenError> {
-    let src = SevenZSource::open(path, None, is_supported_extension)?;
+/// background thread (see `App::begin_archive_open`). `password` decrypts an
+/// encrypted archive; a wrong one fails decode and surfaces as `PasswordRequired`.
+fn load_seven_z(
+    path: &Path,
+    password: Option<String>,
+) -> Result<Resolved, archive::ArchiveOpenError> {
+    let src = SevenZSource::open(path, password, is_supported_extension)?;
     if src.is_empty() {
         return Err(archive::ArchiveOpenError::Empty);
     }
@@ -3394,6 +3584,12 @@ fn archive_resolved(path: &Path, source: Arc<dyn PhotoSource>) -> Resolved {
 struct ArchiveLoad {
     generation: u64,
     rx: std::sync::mpsc::Receiver<(u64, Result<Resolved, archive::ArchiveOpenError>)>,
+    /// The archive being opened, so a `PasswordRequired` result can re-prompt and
+    /// re-open the same path with the entered password.
+    path: PathBuf,
+    /// Whether this open carried a user-entered password (a repeat `PasswordRequired`
+    /// then means it was wrong, so the prompt shows the retry error).
+    was_password_attempt: bool,
 }
 
 fn main() {
@@ -3422,7 +3618,8 @@ fn main() {
         .filter(|a| !a.starts_with('-'))
         .map(PathBuf::from)
         .collect();
-    let mut plan = open::plan(classify_inputs(positional));
+    let input = classify_inputs(positional);
+    let mut plan = open::plan(input.clone());
     if let Source::Scan { recursive, .. } = &mut plan.source {
         if force_recursive {
             *recursive = true;
@@ -3431,19 +3628,31 @@ fn main() {
             *recursive = false;
         }
     }
-    let resolved = resolve_playlist(&plan.source, &plan.cursor);
+    // An archive launch (CLI / double-click) is deferred until the window exists, so
+    // the viewer shows immediately and a big / encrypted / failed open uses the
+    // spinner + dialogs instead of blocking startup. Folders / files resolve now.
+    let archive_launch = matches!(plan.source, Source::Archive(_));
+    let resolved = if archive_launch {
+        Resolved::empty()
+    } else {
+        resolve_playlist(&plan.source, &plan.cursor)
+    };
 
-    println!(
-        "PhotoBlaze: {} image(s){}",
-        resolved.source.len(),
-        if resolved.recursive {
-            " (recursive)"
-        } else {
-            ""
+    if archive_launch {
+        println!("PhotoBlaze: opening archive…");
+    } else {
+        println!(
+            "PhotoBlaze: {} image(s){}",
+            resolved.source.len(),
+            if resolved.recursive {
+                " (recursive)"
+            } else {
+                ""
+            }
+        );
+        if resolved.source.is_empty() {
+            eprintln!("(no images - drop a photo or folder on the window, or press O to open)");
         }
-    );
-    if resolved.source.is_empty() {
-        eprintln!("(no images - drop a photo or folder on the window, or press O to open)");
     }
 
     let event_loop = EventLoop::new().expect("create event loop");
@@ -3464,6 +3673,11 @@ fn main() {
         resolved.scan_root,
         metrics,
     );
+    // Hand the deferred archive open to the app; `resumed` fires it once the window
+    // and engine are up.
+    if archive_launch {
+        app.queue_launch(input);
+    }
     event_loop.run_app(&mut app).expect("event loop");
 
     let report = app.metrics.report();

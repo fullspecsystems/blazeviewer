@@ -35,6 +35,15 @@ pub enum DialogKind {
     ///
     /// [`take_confirm_result`]: DialogWindow::take_confirm_result
     Message,
+    /// An archive password prompt: a lock icon + the prompt, a masked text field,
+    /// an optional inline error (after a wrong attempt), and an Unlock/Cancel bar.
+    /// Unlock surfaces as [`take_confirm_result`] `Some(true)` with the entered text
+    /// available via [`take_submitted_password`]; Cancel / Esc surface `Some(false)`
+    /// / close it. Opened via [`crate::App::prompt_archive_password`].
+    ///
+    /// [`take_confirm_result`]: DialogWindow::take_confirm_result
+    /// [`take_submitted_password`]: DialogWindow::take_submitted_password
+    Password,
 }
 
 /// Skeleton state for the Settings form. Not yet wired to persistence or live
@@ -87,14 +96,38 @@ pub struct DialogWindow {
     /// Confirm-dialog warning-triangle icon (sits inline with the "cannot be undone"
     /// line); `None` for other kinds.
     warn_icon: Option<egui::TextureHandle>,
+    /// Padlock lead icon for a [`DialogKind::Password`] dialog; `None` otherwise.
+    lock_icon: Option<egui::TextureHandle>,
     draft: SettingsDraft,
-    /// The prompt for a [`DialogKind::Confirm`] dialog (unused otherwise).
+    /// The prompt for a [`DialogKind::Confirm`]/[`Message`]/[`Password`] dialog.
+    ///
+    /// [`Message`]: DialogKind::Message
+    /// [`Password`]: DialogKind::Password
     confirm_msg: String,
     /// Set when the user answers a Confirm dialog: `Some(true)` = confirmed,
     /// `Some(false)` = cancelled. Polled + cleared by [`take_confirm_result`].
     ///
     /// [`take_confirm_result`]: DialogWindow::take_confirm_result
     confirm_result: Option<bool>,
+    /// The masked password field's text (a [`DialogKind::Password`] dialog).
+    password_input: String,
+    /// An inline error shown under the password field after a wrong attempt
+    /// (e.g. "Incorrect password"); `None` on first prompt.
+    password_error: Option<String>,
+    /// While a submitted password is being validated (the async 7z re-open): the
+    /// field + Unlock are disabled and a "Checking…" spinner shows, so a slow
+    /// archive doesn't look frozen and the user can't double-submit.
+    checking: bool,
+    /// The text the user just submitted (Unlock / Enter on a Password dialog), taken
+    /// by [`take_submitted_password`] right after the answering frame.
+    ///
+    /// [`take_submitted_password`]: DialogWindow::take_submitted_password
+    submitted_password: Option<String>,
+    /// One-shot: request keyboard focus for the password field on the next render
+    /// (set on open and after a wrong attempt). Done once per request rather than
+    /// every frame — re-grabbing focus each frame suppresses the field's Enter-driven
+    /// `lost_focus`, which is how submit is detected.
+    focus_password: bool,
 }
 
 impl DialogWindow {
@@ -114,6 +147,7 @@ impl DialogWindow {
             DialogKind::Settings => (560.0, 660.0, true, "PhotoBlaze Settings"),
             DialogKind::Confirm => (450.0, 172.0, false, "Confirm Delete"),
             DialogKind::Message => (470.0, 185.0, false, "PhotoBlaze"),
+            DialogKind::Password => (470.0, 226.0, false, "Password Required"),
         };
         // Created HIDDEN: we render the first (themed) frame before revealing, so the
         // OS never flashes the default white window before our dark frame lands.
@@ -193,6 +227,18 @@ impl DialogWindow {
         } else {
             None
         };
+        // A friendly blue padlock as the lead icon — reads on both light and dark.
+        let lock_icon = if matches!(kind, DialogKind::Password) {
+            svg_texture(
+                &egui_ctx,
+                icon_assets::LOCK,
+                72,
+                [74, 120, 192],
+                "dialog-lock",
+            )
+        } else {
+            None
+        };
 
         let mut dlg = DialogWindow {
             window,
@@ -207,9 +253,15 @@ impl DialogWindow {
             egui_renderer,
             icon,
             warn_icon,
+            lock_icon,
             draft: SettingsDraft::new(refresh_hz),
             confirm_msg: message.to_string(),
             confirm_result: None,
+            password_input: String::new(),
+            password_error: None,
+            checking: false,
+            submitted_password: None,
+            focus_password: matches!(kind, DialogKind::Password),
         };
         // Paint the first themed frame while hidden, then reveal — no white flash.
         dlg.render();
@@ -234,6 +286,29 @@ impl DialogWindow {
     /// a button is clicked. The caller closes the dialog and acts on the result.
     pub fn take_confirm_result(&mut self) -> Option<bool> {
         self.confirm_result.take()
+    }
+
+    /// Take the password the user just submitted on a [`DialogKind::Password`]
+    /// dialog (Unlock / Enter), set during the answering frame. `None` until then.
+    /// The caller pairs this with a `take_confirm_result()` of `Some(true)`.
+    pub fn take_submitted_password(&mut self) -> Option<String> {
+        self.submitted_password.take()
+    }
+
+    /// Show an inline error under the password field (a wrong attempt), clear the
+    /// field, and leave the dialog open + interactive for another try.
+    pub fn set_password_error(&mut self, msg: impl Into<String>) {
+        // Scrub the rejected attempt rather than just dropping the bytes.
+        scrub(&mut self.password_input);
+        self.password_error = Some(msg.into());
+        self.checking = false;
+        self.focus_password = true; // re-focus the cleared field for the next try
+    }
+
+    /// Toggle the "Checking…" state while a submitted password is validated (the
+    /// field + Unlock are disabled so the slow 7z re-open can't be double-submitted).
+    pub fn set_checking(&mut self, on: bool) {
+        self.checking = on;
     }
 
     pub fn focus(&self) {
@@ -265,8 +340,13 @@ impl DialogWindow {
         let kind = self.kind;
         let icon = self.icon.clone();
         let warn_icon = self.warn_icon.clone();
+        let lock_icon = self.lock_icon.clone();
         let msg = self.confirm_msg.clone();
+        let pw_error = self.password_error.clone();
+        let checking = self.checking;
+        let take_focus = self.focus_password;
         let draft = &mut self.draft;
+        let password_input = &mut self.password_input;
         let mut confirm_click: Option<bool> = None;
         let full_output = ctx.run(raw_input, |ctx| match kind {
             DialogKind::About => {
@@ -281,9 +361,26 @@ impl DialogWindow {
             DialogKind::Message => {
                 confirm_click = message_dialog(ctx, &msg, warn_icon.as_ref());
             }
+            DialogKind::Password => {
+                confirm_click = password_dialog(
+                    ctx,
+                    &msg,
+                    password_input,
+                    pw_error.as_deref(),
+                    checking,
+                    take_focus,
+                    lock_icon.as_ref(),
+                );
+            }
         });
+        // The focus request (if any) was issued this frame; don't repeat it.
+        self.focus_password = false;
         if confirm_click.is_some() {
             self.confirm_result = confirm_click;
+            // On Unlock/Enter, snapshot the entered text for the app to validate.
+            if confirm_click == Some(true) && kind == DialogKind::Password {
+                self.submitted_password = Some(self.password_input.clone());
+            }
         }
 
         self.egui_state
@@ -357,6 +454,18 @@ impl DialogWindow {
         frame.present();
         for id in &full_output.textures_delta.free {
             self.egui_renderer.free_texture(id);
+        }
+    }
+}
+
+impl Drop for DialogWindow {
+    fn drop(&mut self) {
+        // Scrub any entered password from RAM on close (privacy guarantee), covering
+        // every teardown path — Cancel, Esc, the window close button, or replacement
+        // by another dialog.
+        scrub(&mut self.password_input);
+        if let Some(p) = self.submitted_password.as_mut() {
+            scrub(p);
         }
     }
 }
@@ -513,6 +622,97 @@ fn message_dialog(
             });
         });
     ok
+}
+
+/// The archive password-entry dialog: a lead lock icon + prompt, a masked
+/// single-line field (auto-focused), an optional red error line after a wrong
+/// attempt, and an [Unlock] [Cancel] bottom bar. Enter submits, Esc cancels (via
+/// the event router). Returns `Some(true)` on Unlock/Enter, `Some(false)` on Cancel.
+/// The typed text stays in `input`; the caller reads it via `take_submitted_password`.
+/// While `checking`, the field + Unlock are disabled and a spinner shows.
+fn password_dialog(
+    ctx: &egui::Context,
+    prompt: &str,
+    input: &mut String,
+    error: Option<&str>,
+    checking: bool,
+    take_focus: bool,
+    lock_icon: Option<&egui::TextureHandle>,
+) -> Option<bool> {
+    let mut result = None;
+    egui::TopBottomPanel::bottom("password_bar")
+        .frame(dialog_frame(ctx))
+        .show(ctx, |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_sized([100.0, 32.0], egui::Button::new("Cancel"))
+                    .clicked()
+                {
+                    result = Some(false);
+                }
+                ui.add_space(12.0);
+                let unlock = egui::Button::new("Unlock").min_size(egui::vec2(100.0, 32.0));
+                if ui.add_enabled(!checking, unlock).clicked() {
+                    result = Some(true);
+                }
+            });
+        });
+    egui::CentralPanel::default()
+        .frame(dialog_frame(ctx))
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if let Some(t) = lock_icon {
+                    ui.image(egui::load::SizedTexture::new(
+                        t.id(),
+                        egui::vec2(30.0, 30.0),
+                    ));
+                    ui.add_space(14.0);
+                }
+                ui.label(egui::RichText::new(prompt).size(15.0));
+            });
+            ui.add_space(14.0);
+            let field = egui::TextEdit::singleline(input)
+                .password(true)
+                .hint_text("Password")
+                .desired_width(f32::INFINITY);
+            let resp = ui.add_enabled(!checking, field);
+            // Focus the field once when requested (dialog opened / after a wrong
+            // attempt) — not every frame, which would re-grab focus on the same frame
+            // Enter releases it and swallow the `lost_focus` submit signal below.
+            if take_focus && !checking {
+                resp.request_focus();
+            }
+            // egui's singleline surrenders focus on Enter; that's the submit signal.
+            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                result = Some(true);
+            }
+            if let Some(err) = error {
+                ui.add_space(10.0);
+                ui.colored_label(egui::Color32::from_rgb(220, 90, 90), err);
+            }
+            if checking {
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.add_space(6.0);
+                    ui.label("Checking…");
+                });
+            }
+        });
+    result
+}
+
+/// Best-effort scrub of a secret String's bytes in place (overwrite with NUL, which
+/// stays valid UTF-8), then clear it — so an entered password isn't left lying in
+/// the field's buffer. Matches the RAM-only / no-trace stance for secrets.
+fn scrub(s: &mut String) {
+    // SAFETY: writing NUL bytes keeps the buffer valid UTF-8.
+    unsafe {
+        for b in s.as_bytes_mut() {
+            *b = 0;
+        }
+    }
+    s.clear();
 }
 
 /// Rasterize a vendored SVG icon to an egui texture (tinted `rgb`), for dialog

@@ -7,10 +7,11 @@ key and fly") is done, plus broad multi-codec support, full-res RAW, the color
 story (in-shader ICC → wide-gamut → HDR, task #11), and the rotation/zoom/pan/
 scaling/EXIF/help UI (#1/#3/#4/#5/#7). Privacy no-trace (#2), Esc teardown (#6),
 `enter` random nav (+ `Shift+Enter` prev-random), and the Windows-integration +
-MSI track are all done. **Archive viewing (ZIP + 7z) shipped 2026-06-28** — see the
-next section (password entry + polish remain for the next session).
+MSI track are all done. **Archive viewing (ZIP + 7z) shipped 2026-06-28**, now
+including **in-app password entry + launch-path async open** — see the next section
+(only RAM-budget tuning + small polish remain).
 
-## Archive viewing — ZIP + 7z (2026-06-28) — DONE; password entry + polish remain
+## Archive viewing — ZIP + 7z (2026-06-28) — DONE incl. password entry; budget-tune + polish remain
 
 Open a `.zip`/`.7z` and browse the images inside like a folder (CLI arg, double-click
 association, drag-drop, or the Open dialog's "Images & archives" filter). Same fast
@@ -35,24 +36,31 @@ name). All on `origin/main`, gated (clippy `-D warnings` + fmt + tests). **Task 
   (`begin_archive_open` → per-tick `poll_archive_load`, generation-guarded so a newer
   open supersedes the first); the event loop stays live + the current photo stays
   visible; "Loading archive…" toast. `.zip` open is instant (synchronous).
+- **Launch-path async (2026-06-28):** an archive on the CLI / double-click is **deferred
+  into `resumed()`** (`pending_launch` + `queue_launch`, fired once after the window +
+  engine exist) — the window appears immediately and a big `.7z` loads behind the spinner,
+  and a launched encrypted/failed archive can use the egui dialogs instead of only logging.
+  Folders / file lists still resolve synchronously in `main()`.
+- **Password entry (2026-06-28):** `DialogKind::Password` — a dark-aware egui dialog with a
+  blue lock icon, masked auto-focused field, Unlock/Cancel, **Enter submits / Esc cancels**;
+  a **wrong password re-prompts in place** with an inline "Incorrect password" error, and a
+  **"Checking…"** state covers the async 7z re-open. `ZipSource::password_ok()` validates a
+  supplied zip password (a zip `open` succeeds even when *wrong* — an entry decrypt is the
+  real check); `seven_z_projected_bytes` threads the password so a header-encrypted 7z
+  pre-flights. `Option<password>` runs through `begin_archive_open`/`open_archive`/
+  `seven_z_preflight`/`load_seven_z`; `finish_archive_open` routes PasswordRequired→prompt,
+  success→close+rebuild, other→error dialog (`password_archive` holds the pending path).
+  Password is RAM-only + scrubbed on dialog drop. Verified end-to-end on encrypted `.zip`
+  **and** `.7z` (wrong→error, correct→opens); plain archives unaffected.
 - **Structured errors → egui dialog:** `ArchiveOpenError`
-  (too-large / corrupt / password / OOM / empty) → `DialogKind::Message` (dark-aware,
-  via the dialog session's `open_message`).
+  (too-large / corrupt / OOM / empty) → `DialogKind::Message` (dark-aware, via `open_message`).
+  PasswordRequired no longer hits this — it opens the password prompt instead.
 - **Privacy:** RAM-only — `viewing_a_zip_writes_nothing_to_disk` +
   `viewing_a_7z_writes_nothing_to_disk` prove no extraction to a temp dir.
 - Crates: `zip` (deflate + aes-crypto) + `sevenz-rust2` 0.21 (incl. LZMA2/bzip2/ppmd) —
   both **pure Rust, no C build risk**.
 
-**Remaining (handoff — password + polish):**
-- **Password entry** — encrypted archives currently show "This archive is password
-  protected, which is not supported yet." Plumbing is ready: `ZipSource`/`SevenZSource::open`
-  take `Option<String>`; `OpenError::PasswordRequired` + `ZipSource::needs_password`
-  detect it. Needs an **in-app password prompt** — now feasible via the egui dialog (it
-  has text fields; the chrome-less photo window has no text-input mode). Wire it through
-  the same open path (re-open the source with the entered password).
-- **Launch-path 7z is still synchronous** — a big *double-clicked* `.7z` delays startup
-  (the runtime picker/drop path is async). Mirror `begin_archive_open` at launch (show
-  the window first, then load behind the spinner).
+**Remaining (handoff — budget-tune + small polish):**
 - **Tune the RAM budget** — the `0.6` fraction + margin in `archive.rs` are guesses;
   **measure** open time + peak working set on a real solid-LZMA2 photo `.7z` and set them
   from data (per the prime directive). The 96 GB dev box never refuses naturally → drive
@@ -65,10 +73,15 @@ name). All on `origin/main`, gated (clippy `-D warnings` + fmt + tests). **Task 
 - **WiX:** register `.7z`/`.zip` as "Open with" candidates (NOT the default handler).
 - Exotic 7z codecs (zstd/brotli/lz4 features off) and header-encrypted 7z error gracefully.
 
-**Key files:** `crates/pb-source/src/lib.rs`, `crates/pb-app/src/archive.rs`, and the
-`main.rs` open path (`classify_inputs` / `is_archive` / `open_archive` / `open_input` /
-`begin_archive_open` / `poll_archive_load` / `resolve_playlist`). Tests: `pb-source` (13)
-+ `pb-app` archive-budget + `viewing_a_{zip,7z}_writes_nothing_to_disk`.
+**Key files:** `crates/pb-source/src/lib.rs` (incl. `ZipSource::password_ok`,
+password-threaded `seven_z_projected_bytes`), `crates/pb-app/src/archive.rs`,
+`crates/pb-app/src/dialog.rs` (`DialogKind::Password` + `password_dialog`), and the
+`main.rs` open path (`open_input` / `begin_archive_open` / `poll_archive_load` /
+`finish_archive_open` / `prompt_archive_password` / `open_archive` / `seven_z_preflight` /
+`load_seven_z` / `resolve_playlist`; launch defer = `queue_launch` + `resumed`). Tests:
+`pb-source` (14, incl. encrypted-7z round-trip + zip `password_ok`) + `pb-app`
+archive-budget + `viewing_a_{zip,7z}_writes_nothing_to_disk`. Password flow verified
+interactively on encrypted `.zip`/`.7z` (GDI-capturable egui dialog).
 
 ## UI / file-commands stream (2026-06-28) — what just shipped + what's next
 

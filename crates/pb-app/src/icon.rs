@@ -29,6 +29,8 @@ pub mod assets {
     pub const TRASH: &str = include_str!("../icons/trash.svg");
     /// Warning triangle — the "cannot be undone" line on the confirm dialog.
     pub const WARNING: &str = include_str!("../icons/triangle-exclamation.svg");
+    /// Padlock — the lead icon on the archive password-entry dialog.
+    pub const LOCK: &str = include_str!("../icons/lock.svg");
 }
 
 /// Rasterize `svg` at pixel `height` (width follows the icon's aspect ratio),

@@ -15,6 +15,8 @@
 
 use muda::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 
+use crate::action::Action;
+
 /// Stable string ids for the menu items. Kept in one place so the builder and the
 /// dispatcher ([`action_for`]) can never drift apart.
 pub mod ids {
@@ -77,6 +79,40 @@ pub enum MenuAction {
     RotateLeft,
     Help,
     About,
+}
+
+impl MenuAction {
+    /// Map a menu item to the central [`Action`] (task #8), so the menu dispatches
+    /// through the same path as the keyboard. `Original` sets original mode (vs. the
+    /// keyboard's `0`, which toggles); `Exit` is `Quit`.
+    pub fn to_action(self) -> Action {
+        match self {
+            MenuAction::OpenFile => Action::OpenFile,
+            MenuAction::OpenFolder => Action::OpenFolder,
+            MenuAction::SaveRotation => Action::SaveRotation,
+            MenuAction::Delete => Action::Delete,
+            MenuAction::DeletePermanently => Action::DeletePermanent,
+            MenuAction::Exit => Action::Quit,
+            MenuAction::Copy => Action::Copy,
+            MenuAction::Fit => Action::ScaleFit,
+            MenuAction::Fill => Action::ScaleFill,
+            MenuAction::Original => Action::ScaleOriginal,
+            MenuAction::ZoomIn => Action::ZoomIn,
+            MenuAction::ZoomOut => Action::ZoomOut,
+            MenuAction::Fullscreen => Action::Fullscreen,
+            MenuAction::Recursive => Action::Recursive,
+            MenuAction::Info => Action::Info,
+            MenuAction::FullExif => Action::FullExif,
+            MenuAction::Next => Action::Next,
+            MenuAction::Previous => Action::Prev,
+            MenuAction::Random => Action::Random,
+            MenuAction::RandomPrev => Action::RandomPrev,
+            MenuAction::RotateRight => Action::RotateCw,
+            MenuAction::RotateLeft => Action::RotateCcw,
+            MenuAction::Help => Action::Help,
+            MenuAction::About => Action::About,
+        }
+    }
 }
 
 /// Map a clicked item's id to its [`MenuAction`]. `None` for an unknown id (so a

@@ -258,6 +258,20 @@ impl ZipSource {
         self.password.is_none() && self.is_encrypted()
     }
 
+    /// Validate the currently-held password by actually decrypting the first
+    /// encrypted entry. [`open`](ZipSource::open) succeeds even with a **wrong**
+    /// password — the central directory is readable without one — so an entry read
+    /// is the only real check (unlike 7z, whose eager decode fails on open). The
+    /// app calls this after re-opening with a user-entered password to tell a wrong
+    /// password (re-prompt) from a successful unlock. Returns `true` when nothing is
+    /// encrypted, or the first encrypted entry decrypts cleanly; `false` otherwise.
+    pub fn password_ok(&self) -> bool {
+        match self.entries.iter().position(|e| e.encrypted) {
+            Some(idx) => self.bytes(idx).is_ok(),
+            None => true,
+        }
+    }
+
     /// Borrow an archive handle from the pool, or open a fresh one (its own file
     /// descriptor) if the pool is empty.
     fn checkout(&self) -> io::Result<ZipArchive<BufReader<File>>> {
@@ -351,13 +365,23 @@ pub struct SevenZSource {
 /// `path`, reading only the header — no decompression. This is the cheap pre-flight
 /// the app compares against a RAM budget before committing to [`SevenZSource::open`]
 /// (which would hold all of it resident).
+///
+/// `password` is only needed when the archive's *header* is encrypted (the
+/// "encrypt file names" option); a plain or content-only-encrypted 7z reads its
+/// header without one. Pass the same password you'll hand [`SevenZSource::open`] so
+/// the pre-flight succeeds (and reports [`OpenError::PasswordRequired`] for a wrong
+/// or missing one) instead of looping.
 pub fn seven_z_projected_bytes(
     path: &Path,
+    password: Option<&str>,
     is_supported: impl Fn(&str) -> bool,
 ) -> Result<u64, OpenError> {
+    let pw = match password {
+        Some(p) => SevenZPassword::from(p),
+        None => SevenZPassword::empty(),
+    };
     let mut file = File::open(path)?;
-    let archive =
-        SevenZArchive::read(&mut file, &SevenZPassword::empty()).map_err(seven_z_open_err)?;
+    let archive = SevenZArchive::read(&mut file, &pw).map_err(seven_z_open_err)?;
     let total = archive
         .files
         .iter()
@@ -578,6 +602,7 @@ mod tests {
             "container is the archive"
         );
         assert!(!src.needs_password());
+        assert!(src.password_ok(), "a plain archive validates trivially");
         let _ = std::fs::remove_file(&zip);
     }
 
@@ -649,14 +674,17 @@ mod tests {
         assert!(locked.needs_password());
         assert!(locked.bytes(0).is_err(), "no password -> read fails");
 
-        // Correct password: content decrypts.
+        // Correct password: content decrypts, and `password_ok` confirms it.
         let open = ZipSource::open(&zip, Some("hunter2".into()), is_img).unwrap();
         assert!(!open.needs_password());
+        assert!(open.password_ok(), "correct password validates");
         assert_eq!(open.bytes(0).unwrap(), b"secret-A");
         assert_eq!(open.bytes(1).unwrap(), b"secret-B");
 
-        // Wrong password: read fails rather than yielding garbage.
+        // Wrong password: `open` still succeeds (the directory is readable), so
+        // `password_ok` — not the open result — is what catches it; reads fail.
         let wrong = ZipSource::open(&zip, Some("nope".into()), is_img).unwrap();
+        assert!(!wrong.password_ok(), "wrong password fails validation");
         assert!(wrong.bytes(0).is_err(), "wrong password -> read fails");
 
         let _ = std::fs::remove_file(&zip);
@@ -695,6 +723,26 @@ mod tests {
                 .expect("push entry");
         }
         sz.finish().expect("finish 7z");
+        path
+    }
+
+    /// Build an AES-encrypted .7z (solid AES+LZMA2 block) from (name, bytes) pairs;
+    /// return its path. Uses the crate's proven high-level `compress_encrypted`
+    /// helper (the only round-trip-verified write path) rather than hand-driving the
+    /// low-level writer. It encrypts the header too, so even the listing needs the
+    /// key — the strictest case for the open path to handle.
+    fn write_encrypted_7z(tag: &str, files: &[(&str, &[u8])], password: &str) -> PathBuf {
+        use sevenz_rust2::compress_encrypted;
+        let n = NONCE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("pb_src_{tag}_src_{}_{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for &(name, bytes) in files {
+            std::fs::write(dir.join(name), bytes).unwrap();
+        }
+        let path = temp_path(tag, "7z");
+        let dest = File::create(&path).unwrap();
+        compress_encrypted(&dir, dest, SevenZPassword::from(password)).expect("compress encrypted");
+        let _ = std::fs::remove_dir_all(&dir);
         path
     }
 
@@ -738,7 +786,7 @@ mod tests {
                 ("readme.md", b"ignore me"),
             ],
         );
-        let projected = seven_z_projected_bytes(&z, is_img).unwrap();
+        let projected = seven_z_projected_bytes(&z, None, is_img).unwrap();
         assert_eq!(projected, 12, "sum of the three 4-byte images");
         let _ = std::fs::remove_file(&z);
     }
@@ -748,7 +796,7 @@ mod tests {
         let z = write_7z("none", &[("readme.txt", b"x"), ("data.bin", b"y")]);
         let src = SevenZSource::open(&z, None, is_img).unwrap();
         assert!(src.is_empty());
-        assert_eq!(seven_z_projected_bytes(&z, is_img).unwrap(), 0);
+        assert_eq!(seven_z_projected_bytes(&z, None, is_img).unwrap(), 0);
         let _ = std::fs::remove_file(&z);
     }
 
@@ -783,5 +831,51 @@ mod tests {
             Ok(_) => panic!("expected an error opening a non-7z file"),
         }
         let _ = std::fs::remove_file(&bogus);
+    }
+
+    #[test]
+    fn seven_z_encrypted_needs_password_then_decrypts() {
+        let z = write_encrypted_7z(
+            "enc7z",
+            &[("a.jpg", b"secret-A"), ("b.png", b"secret-B")],
+            "hunter2",
+        );
+
+        // No password: unlike ZIP, a 7z is eager, so the missing key surfaces as a
+        // distinct PasswordRequired right at open (not a deferred read failure).
+        match SevenZSource::open(&z, None, is_img) {
+            Err(OpenError::PasswordRequired) => {}
+            other => panic!("expected PasswordRequired, got {:?}", other.err()),
+        }
+
+        // Correct password: content decrypts, in sorted order.
+        let open = SevenZSource::open(&z, Some("hunter2".into()), is_img).unwrap();
+        assert_eq!(open.len(), 2);
+        assert_eq!(open.bytes(0).unwrap(), b"secret-A");
+        assert_eq!(open.bytes(1).unwrap(), b"secret-B");
+
+        // Wrong password: the decode of garbage fails -> MaybeBadPassword ->
+        // PasswordRequired (so the app re-prompts rather than crying "corrupt").
+        match SevenZSource::open(&z, Some("nope".into()), is_img) {
+            Err(OpenError::PasswordRequired) => {}
+            other => panic!(
+                "expected PasswordRequired for wrong pw, got {:?}",
+                other.err()
+            ),
+        }
+
+        // The header is encrypted here, so the RAM pre-flight needs the password too
+        // (proving the threaded-through password): right key sums the image bytes,
+        // no key reports PasswordRequired rather than looping.
+        assert_eq!(
+            seven_z_projected_bytes(&z, Some("hunter2"), is_img).unwrap(),
+            16
+        );
+        assert!(matches!(
+            seven_z_projected_bytes(&z, None, is_img),
+            Err(OpenError::PasswordRequired)
+        ));
+
+        let _ = std::fs::remove_file(&z);
     }
 }

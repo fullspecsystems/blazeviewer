@@ -2922,6 +2922,7 @@ dependencies = [
  "resvg",
  "rfd",
  "sevenz-rust2",
+ "toml 0.8.2",
  "trash",
  "windows 0.62.2",
  "winit",
