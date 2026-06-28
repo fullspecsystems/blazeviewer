@@ -515,6 +515,12 @@ struct App {
     /// The open egui dialog window (Settings / About), or `None`. At most one at a
     /// time; its events are routed by window id in `window_event`.
     dialog: Option<dialog::DialogWindow>,
+    /// An in-flight background archive open (a `.7z` eager-decompresses off-thread so
+    /// it can't freeze the event loop). `None` when no archive is loading.
+    archive_load: Option<ArchiveLoad>,
+    /// Monotonic id for archive-open requests; a newer open bumps it so a superseded
+    /// load's result is discarded when it finally arrives.
+    archive_gen: u64,
 }
 
 impl App {
@@ -608,6 +614,8 @@ impl App {
             pending_confirm_delete: None,
             menu_attached: false,
             dialog: None,
+            archive_load: None,
+            archive_gen: 0,
         }
     }
 
@@ -1348,6 +1356,12 @@ impl App {
     /// current photo isn't blanked.
     fn open_input(&mut self, input: LaunchInput, event_loop: &ActiveEventLoop) {
         let plan = open::plan(input);
+        // Archives open via the async-aware path (a .7z decompresses off-thread so it
+        // can't freeze the loop). Folders / file lists resolve synchronously (cheap).
+        if let Source::Archive(path) = &plan.source {
+            self.begin_archive_open(path.clone(), event_loop);
+            return;
+        }
         let r = resolve_playlist(&plan.source, &plan.cursor);
         if r.source.is_empty() {
             eprintln!("PhotoBlaze: no supported images in that selection");
@@ -1361,6 +1375,94 @@ impl App {
             r.start,
             event_loop,
         );
+    }
+
+    /// Start opening an archive at runtime (picker / drag-drop). A `.zip` opens
+    /// synchronously (just a directory read). A `.7z` is opened on a background
+    /// thread after a synchronous RAM pre-flight: the current photo stays visible
+    /// and the loop stays responsive until the eager decompress lands (picked up in
+    /// [`poll_archive_load`](App::poll_archive_load)). A second open supersedes the
+    /// first via `archive_gen`.
+    fn begin_archive_open(&mut self, path: PathBuf, event_loop: &ActiveEventLoop) {
+        let is_7z = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("7z"));
+        if !is_7z {
+            match open_archive(&path) {
+                Ok(r) => self.rebuild_playlist(
+                    r.source,
+                    r.root,
+                    r.scan_root,
+                    r.recursive,
+                    r.start,
+                    event_loop,
+                ),
+                Err(e) => self.report_archive_error(&e, event_loop),
+            }
+            return;
+        }
+        // 7z: refuse instantly if it won't fit RAM (before any background work), then
+        // decompress off-thread.
+        if let Err(e) = seven_z_preflight(&path) {
+            self.report_archive_error(&e, event_loop);
+            return;
+        }
+        self.archive_gen += 1;
+        let generation = self.archive_gen;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send((generation, load_seven_z(&path)));
+        });
+        self.archive_load = Some(ArchiveLoad { generation, rx });
+        self.show_toast("Loading archive…", event_loop);
+    }
+
+    /// Pick up a finished background archive open (called each tick while one is in
+    /// flight). Rebuilds the playlist on success, surfaces the error otherwise, and
+    /// drops a superseded result (a newer open bumped `archive_gen`).
+    fn poll_archive_load(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::mpsc::TryRecvError;
+        let (load_gen, recv) = match self.archive_load.as_ref() {
+            Some(load) => (load.generation, load.rx.try_recv()),
+            None => return,
+        };
+        match recv {
+            Ok((generation, result)) => {
+                self.archive_load = None;
+                if generation != load_gen {
+                    return; // superseded by a newer open
+                }
+                match result {
+                    Ok(r) if !r.source.is_empty() => self.rebuild_playlist(
+                        r.source,
+                        r.root,
+                        r.scan_root,
+                        r.recursive,
+                        r.start,
+                        event_loop,
+                    ),
+                    Ok(_) => {
+                        self.report_archive_error(&archive::ArchiveOpenError::Empty, event_loop)
+                    }
+                    Err(e) => self.report_archive_error(&e, event_loop),
+                }
+            }
+            Err(TryRecvError::Empty) => {} // still loading
+            Err(TryRecvError::Disconnected) => self.archive_load = None, // worker died
+        }
+    }
+
+    /// Surface an archive-open failure to the user via the egui message dialog
+    /// (too-large / corrupt / password / OOM / empty), and log it.
+    fn report_archive_error(
+        &mut self,
+        e: &archive::ArchiveOpenError,
+        event_loop: &ActiveEventLoop,
+    ) {
+        let msg = e.user_message();
+        eprintln!("PhotoBlaze: {msg}");
+        self.open_message(&msg, event_loop);
     }
 
     /// Toggle recursive scanning of the current folder (`Ctrl+R`), keeping the
@@ -1767,18 +1869,50 @@ impl App {
                 return;
             }
         }
-        let refresh = (1.0 / self.frame_interval.as_secs_f32()).round().max(1.0) as u32;
-        self.dialog = dialog::DialogWindow::open(kind, event_loop, refresh, "");
+        let refresh = self.refresh_hz();
+        let parent = self.active.as_ref().map(|a| a.window.clone());
+        self.dialog = dialog::DialogWindow::open(kind, event_loop, refresh, "", parent.as_deref());
+    }
+
+    /// Refresh rate in Hz (rounded, ≥1) — caps the Settings fly-speed slider and is
+    /// passed to every dialog window.
+    fn refresh_hz(&self) -> u32 {
+        (1.0 / self.frame_interval.as_secs_f32()).round().max(1.0) as u32
     }
 
     /// Open the themed (dark-aware egui) "Delete Permanently" confirmation for `name`.
     /// The actual deletion happens when the dialog answers Yes (see `dialog_event`),
     /// acting on `pending_confirm_delete`.
     fn open_confirm_delete(&mut self, name: &str, event_loop: &ActiveEventLoop) {
-        let refresh = (1.0 / self.frame_interval.as_secs_f32()).round().max(1.0) as u32;
+        let refresh = self.refresh_hz();
         let msg = format!("Permanently delete \u{2018}{name}\u{2019}?");
-        self.dialog =
-            dialog::DialogWindow::open(dialog::DialogKind::Confirm, event_loop, refresh, &msg);
+        let parent = self.active.as_ref().map(|a| a.window.clone());
+        self.dialog = dialog::DialogWindow::open(
+            dialog::DialogKind::Confirm,
+            event_loop,
+            refresh,
+            &msg,
+            parent.as_deref(),
+        );
+    }
+
+    /// Open a one-button informational / error notice (egui `DialogKind::Message`):
+    /// a warning icon + `message` + an OK button, centered over the viewer, closing
+    /// on OK / Esc. The archive-open path (`archive::ArchiveOpenError::user_message`)
+    /// calls this to surface a too-large / corrupt / password / OOM / empty failure.
+    // Called by the archive-open session (Task 30); the allow keeps the build green
+    // until that call site lands. Remove once wired.
+    #[allow(dead_code)]
+    pub fn open_message(&mut self, message: &str, event_loop: &ActiveEventLoop) {
+        let refresh = self.refresh_hz();
+        let parent = self.active.as_ref().map(|a| a.window.clone());
+        self.dialog = dialog::DialogWindow::open(
+            dialog::DialogKind::Message,
+            event_loop,
+            refresh,
+            message,
+            parent.as_deref(),
+        );
     }
 
     /// Route an event for the dialog window (egui owns it). Esc / close button
@@ -1801,7 +1935,8 @@ impl App {
             self.pending_confirm_delete = None; // Esc / close = cancel the confirm
             return;
         }
-        // Render the dialog and pick up a Confirm answer (if one was clicked).
+        // Render the dialog and pick up a button answer (if one was clicked).
+        let kind = self.dialog.as_ref().map(|d| d.kind());
         let mut answer: Option<bool> = None;
         if let Some(d) = self.dialog.as_mut() {
             let repaint = d.on_event(&event);
@@ -1822,12 +1957,15 @@ impl App {
             }
         }
         if let Some(confirmed) = answer {
-            self.dialog = None; // the confirm closes either way
-            let item = self.pending_confirm_delete.take();
-            if confirmed {
-                if let Some(item) = item {
-                    if let Some(path) = self.source.path(item).map(Path::to_path_buf) {
-                        self.do_delete(item, &path, true, event_loop);
+            self.dialog = None; // any answered button closes the dialog
+                                // Only the Confirm dialog drives the delete; a Message OK just closes.
+            if kind == Some(dialog::DialogKind::Confirm) {
+                let item = self.pending_confirm_delete.take();
+                if confirmed {
+                    if let Some(item) = item {
+                        if let Some(path) = self.source.path(item).map(Path::to_path_buf) {
+                            self.do_delete(item, &path, true, event_loop);
+                        }
                     }
                 }
             }
@@ -2392,7 +2530,8 @@ impl App {
 
     /// Whether prefetch/upload work is still outstanding (keep polling if so).
     fn work_pending(&self) -> bool {
-        self.displayed_item != self.target_item
+        self.archive_load.is_some()
+            || self.displayed_item != self.target_item
             || self
                 .targets
                 .iter()
@@ -2605,6 +2744,15 @@ impl ApplicationHandler for App {
             } => match state {
                 ElementState::Pressed => {
                     if code == KeyCode::Escape {
+                        // A dialog is open but the main window kept keyboard focus:
+                        // Esc dismisses the dialog (cancelling any pending confirm),
+                        // never the app. (Normally the focused dialog window swallows
+                        // Esc itself in `dialog_event`.)
+                        if self.dialog.is_some() {
+                            self.dialog = None;
+                            self.pending_confirm_delete = None;
+                            return;
+                        }
                         // Swallow a stray Esc that leaked from dismissing the file
                         // picker (open_picker); a real Esc a moment later still quits.
                         let quit = esc_quits(self.esc_guard_until, Instant::now());
@@ -2747,6 +2895,9 @@ impl ApplicationHandler for App {
             let drops = std::mem::take(&mut self.pending_drops);
             self.open_input(classify_inputs(drops), event_loop);
         }
+        // 0c. Pick up a finished background archive open (.7z eager decompress).
+        self.poll_archive_load(event_loop);
+
         // 1. Absorb finished decodes (uploads; presents the target if it arrived).
         self.drain_results(event_loop);
 
@@ -3176,46 +3327,66 @@ fn resolve_playlist(source: &Source, cursor: &open::Cursor) -> Resolved {
 /// blocks the event loop on a runtime open; Task 30 #3 moves it off-thread behind
 /// the wait spinner.
 fn open_archive(path: &Path) -> Result<Resolved, archive::ArchiveOpenError> {
-    use archive::ArchiveOpenError;
+    let is_7z = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("7z"));
+    if is_7z {
+        seven_z_preflight(path)?;
+        load_seven_z(path)
+    } else {
+        let zs = ZipSource::open(path, None, is_supported_extension)?;
+        if zs.needs_password() {
+            return Err(archive::ArchiveOpenError::PasswordRequired);
+        }
+        if zs.is_empty() {
+            return Err(archive::ArchiveOpenError::Empty);
+        }
+        Ok(archive_resolved(path, Arc::new(zs)))
+    }
+}
 
-    let resolved = |source: Arc<dyn PhotoSource>| Resolved {
-        // The archive path is the display root; entry names are already
-        // archive-relative, so the info panel uses them directly.
+/// The RAM pre-flight for a 7z: predict-and-refuse before the (uncatchable) eager
+/// decompress, so an archive whose resident image bytes won't fit the budget is
+/// rejected instantly rather than aborting partway in.
+fn seven_z_preflight(path: &Path) -> Result<(), archive::ArchiveOpenError> {
+    let needed = seven_z_projected_bytes(path, is_supported_extension)?;
+    let budget = archive::ram_budget();
+    if needed > budget {
+        return Err(archive::ArchiveOpenError::TooLarge { needed, budget });
+    }
+    Ok(())
+}
+
+/// Eager-decompress a 7z into a [`Resolved`] (no pre-flight here — the caller runs
+/// [`seven_z_preflight`] first). This is the slow step the runtime path runs on a
+/// background thread (see `App::begin_archive_open`).
+fn load_seven_z(path: &Path) -> Result<Resolved, archive::ArchiveOpenError> {
+    let src = SevenZSource::open(path, None, is_supported_extension)?;
+    if src.is_empty() {
+        return Err(archive::ArchiveOpenError::Empty);
+    }
+    Ok(archive_resolved(path, Arc::new(src)))
+}
+
+/// A [`Resolved`] for an archive `source`: the archive path is the display root,
+/// and entry names are already archive-relative (so the info panel uses them).
+fn archive_resolved(path: &Path, source: Arc<dyn PhotoSource>) -> Resolved {
+    Resolved {
         root: path.to_path_buf(),
         source,
         scan_root: None,
         recursive: false,
         start: 0,
-    };
-
-    let is_7z = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("7z"));
-
-    if is_7z {
-        // Predict-and-refuse before the (uncatchable) eager decompress: the resident
-        // image bytes must fit the RAM budget.
-        let needed = seven_z_projected_bytes(path, is_supported_extension)?;
-        let budget = archive::ram_budget();
-        if needed > budget {
-            return Err(ArchiveOpenError::TooLarge { needed, budget });
-        }
-        let src = SevenZSource::open(path, None, is_supported_extension)?;
-        if src.is_empty() {
-            return Err(ArchiveOpenError::Empty);
-        }
-        Ok(resolved(Arc::new(src)))
-    } else {
-        let zs = ZipSource::open(path, None, is_supported_extension)?;
-        if zs.needs_password() {
-            return Err(ArchiveOpenError::PasswordRequired);
-        }
-        if zs.is_empty() {
-            return Err(ArchiveOpenError::Empty);
-        }
-        Ok(resolved(Arc::new(zs)))
     }
+}
+
+/// An in-flight background archive open. A `.7z` is eager-decompressed off the event
+/// loop; the [`Resolved`] (or error) rides back over `rx` tagged with `generation`,
+/// so a superseded open (a newer one bumped `App::archive_gen`) is discarded.
+struct ArchiveLoad {
+    generation: u64,
+    rx: std::sync::mpsc::Receiver<(u64, Result<Resolved, archive::ArchiveOpenError>)>,
 }
 
 fn main() {
