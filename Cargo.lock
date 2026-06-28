@@ -2921,6 +2921,7 @@ dependencies = [
  "pollster",
  "resvg",
  "rfd",
+ "sevenz-rust2",
  "trash",
  "windows 0.62.2",
  "winit",

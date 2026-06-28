@@ -80,12 +80,16 @@ windows = { version = "0.62", features = [
     "Win32_System_Memory",
     "Win32_System_Ole",
     "Win32_Graphics_Gdi",
+    # GlobalMemoryStatusEx / MEMORYSTATUSEX: query available physical RAM for the
+    # eager-archive (7z) memory budget (see src/archive.rs).
+    "Win32_System_SystemInformation",
 ] }
 
-# Test-only: build a ZIP fixture for the no-trace integration test. Same lean
-# pure-Rust feature set pb-source uses; the writer comes with the base crate.
+# Test-only: build archive fixtures for the no-trace integration tests. Same crates
+# pb-source uses; their writers come with the base crates (pure Rust).
 [dev-dependencies]
 zip = { version = "2", default-features = false, features = ["deflate"] }
+sevenz-rust2 = "0.21"
 
 # Embeds the .exe icon + version metadata on Windows (build.rs). Best-effort: if
 # the resource compiler is absent the build still succeeds (see build.rs).

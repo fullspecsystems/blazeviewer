@@ -51,8 +51,9 @@ use pb_decode::{
 use pb_render::{
     test_pattern, Renderer, Rotation, ScaleMode, ViewTransform, WgpuRenderer, MAX_ZOOM, MIN_ZOOM,
 };
-use pb_source::{FsSource, PhotoSource, ZipSource};
+use pb_source::{seven_z_projected_bytes, FsSource, PhotoSource, SevenZSource, ZipSource};
 
+mod archive;
 mod clipboard;
 #[cfg(windows)]
 mod darkmode;
@@ -1582,6 +1583,7 @@ impl App {
             // mistaken for one file inside its folder.
             let mut exts: Vec<&str> = IMAGE_FILTER_EXTS.to_vec();
             exts.push("zip");
+            exts.push("7z");
             rfd::FileDialog::new()
                 .add_filter("Images & archives", &exts)
                 .add_filter("All files", &["*"])
@@ -3034,11 +3036,11 @@ fn hwnd_of(window: &Window) -> Option<isize> {
     }
 }
 
-/// Whether a path names an archive we open as a playlist (today: `.zip`).
+/// Whether a path names an archive we open as a playlist (`.zip` or `.7z`).
 fn is_archive(p: &Path) -> bool {
     p.extension()
         .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("zip"))
+        .map(|e| e.eq_ignore_ascii_case("zip") || e.eq_ignore_ascii_case("7z"))
         .unwrap_or(false)
 }
 
@@ -3151,41 +3153,69 @@ fn resolve_playlist(source: &Source, cursor: &open::Cursor) -> Resolved {
                 start,
             }
         }
-        Source::Archive(zip) => open_archive(zip).unwrap_or_else(Resolved::empty),
+        Source::Archive(path) => match open_archive(path) {
+            Ok(r) => r,
+            // TODO(Task 30 #3/#4): surface this through the egui error dialog on the
+            // runtime open path (picker/drop). For now it logs and shows empty.
+            Err(e) => {
+                eprintln!("PhotoBlaze: {}", e.user_message());
+                Resolved::empty()
+            }
+        },
     }
 }
 
-/// Open `zip` as a [`ZipSource`]. Returns `None` (after logging) if it can't be
-/// opened, holds no supported images, or needs a password we don't have yet (the
-/// in-app unlock prompt is a separate task).
-fn open_archive(zip: &Path) -> Option<Resolved> {
-    let zs = match ZipSource::open(zip, None, is_supported_extension) {
-        Ok(zs) => zs,
-        Err(e) => {
-            eprintln!("PhotoBlaze: cannot open archive {}: {e}", zip.display());
-            return None;
-        }
-    };
-    if zs.needs_password() {
-        eprintln!(
-            "PhotoBlaze: {} is password-protected (in-app unlock is not wired up yet)",
-            zip.display()
-        );
-        return None;
-    }
-    if zs.is_empty() {
-        eprintln!("PhotoBlaze: no supported images in {}", zip.display());
-        return None;
-    }
-    Some(Resolved {
+/// Open `path` as an archive playlist, dispatching by extension: `.7z` ->
+/// [`SevenZSource`] (eager, RAM-budget pre-flight), anything else -> [`ZipSource`]
+/// (lazy per-entry). Returns a structured [`ArchiveOpenError`](archive::ArchiveOpenError)
+/// so the caller can show the right message; entries are read into RAM, never
+/// extracted to disk.
+///
+/// NOTE: 7z open is currently **synchronous** (it decompresses on the calling
+/// thread) -- fine for the launch path, but a large within-budget archive briefly
+/// blocks the event loop on a runtime open; Task 30 #3 moves it off-thread behind
+/// the wait spinner.
+fn open_archive(path: &Path) -> Result<Resolved, archive::ArchiveOpenError> {
+    use archive::ArchiveOpenError;
+
+    let resolved = |source: Arc<dyn PhotoSource>| Resolved {
         // The archive path is the display root; entry names are already
         // archive-relative, so the info panel uses them directly.
-        root: zip.to_path_buf(),
-        source: Arc::new(zs),
+        root: path.to_path_buf(),
+        source,
         scan_root: None,
         recursive: false,
         start: 0,
-    })
+    };
+
+    let is_7z = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("7z"));
+
+    if is_7z {
+        // Predict-and-refuse before the (uncatchable) eager decompress: the resident
+        // image bytes must fit the RAM budget.
+        let needed = seven_z_projected_bytes(path, is_supported_extension)?;
+        let budget = archive::ram_budget();
+        if needed > budget {
+            return Err(ArchiveOpenError::TooLarge { needed, budget });
+        }
+        let src = SevenZSource::open(path, None, is_supported_extension)?;
+        if src.is_empty() {
+            return Err(ArchiveOpenError::Empty);
+        }
+        Ok(resolved(Arc::new(src)))
+    } else {
+        let zs = ZipSource::open(path, None, is_supported_extension)?;
+        if zs.needs_password() {
+            return Err(ArchiveOpenError::PasswordRequired);
+        }
+        if zs.is_empty() {
+            return Err(ArchiveOpenError::Empty);
+        }
+        Ok(resolved(Arc::new(zs)))
+    }
 }
 
 fn main() {
@@ -3498,6 +3528,52 @@ mod tests {
         assert_eq!(
             before, after,
             "viewing a zip must create or modify no files (no extraction to disk)"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The privacy guarantee holds for 7z too — and this is the one most at risk,
+    /// since a 7z is *eagerly decompressed*. It must go to RAM only, never extracted
+    /// to a temp directory. Sandbox holds just the `.7z`; a full view session leaves
+    /// the tree byte-for-byte identical.
+    #[test]
+    fn viewing_a_7z_writes_nothing_to_disk() {
+        use sevenz_rust2::{ArchiveEntry, ArchiveWriter};
+
+        let dir = std::env::temp_dir().join(format!("pb_7z_notrace_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("mkdir sandbox");
+        const IMG: &[u8] = include_bytes!("../icons/photoblaze.png");
+        let z_path = dir.join("album.7z");
+        {
+            let mut sz = ArchiveWriter::create(&z_path).expect("create 7z");
+            for name in ["a.png", "b.png", "sub/c.png"] {
+                sz.push_archive_entry(ArchiveEntry::new_file(name), Some(IMG))
+                    .expect("push entry");
+            }
+            sz.finish().expect("finish 7z");
+        }
+
+        let before = snapshot_tree(&dir);
+
+        // Eager-open the 7z and view every entry: must not extract to disk.
+        let resolved = resolve_playlist(&Source::Archive(z_path.clone()), &open::Cursor::First);
+        assert_eq!(resolved.source.len(), 3, "7z should yield three images");
+        let fit = FitBox {
+            max_width: 64,
+            max_height: 64,
+        };
+        for i in 0..resolved.source.len() {
+            decode_item(resolved.source.as_ref(), i, Some(fit), false).expect("decode");
+            let bytes = resolved.source.bytes(i).expect("read for exif");
+            let _ = read_exif_fields(&bytes);
+        }
+
+        let after = snapshot_tree(&dir);
+        assert_eq!(
+            before, after,
+            "viewing a 7z must create or modify no files (no extraction to disk)"
         );
 
         let _ = fs::remove_dir_all(&dir);
