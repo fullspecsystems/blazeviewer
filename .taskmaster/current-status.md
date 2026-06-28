@@ -55,10 +55,43 @@ percentiles + the slowest files). Findings, all measured:
    inject keypresses).
 
 **Still open (smaller):** iPhone HEIC *thumbnails* (WIC `GetThumbnail`) serialize under
-load (~240 ms each when 8 run) — flying through dense HEIC could still be preview-bound;
-candidate fix = libheif thumbnail extraction. Plus the earlier follow-ups: Sony HEIC
-color (**tasks.json #24**), Fill-mode decode-to-fit, sync load paths bypass preview-first,
-AVIF on libheif.
+load (~240 ms each when 8 run) — flying through dense HEIC could still be preview-bound.
+Plus the earlier follow-ups: Sony HEIC color (**tasks.json #24**), Fill-mode decode-to-fit,
+sync load paths bypass preview-first, AVIF on libheif.
+
+### 🧪 2026-06-28 — parallel thumbnail extraction: TRIED, REVERTED (negative result — don't blind-retry)
+Implemented libheif thumbnail extraction to replace WIC `GetThumbnail` (the ~240 ms
+serializer above). **The capability works**: `heif_image_handle_get_thumbnail` + decode
+gives the embedded thumbnail in **~3 ms (vs WIC ~20 ms isolated), correctly oriented**
+(240×320 on a portrait file, matches WIC), fully parallel. **But it made things worse
+overall and I reverted it**, because:
+- Routing previews onto libheif made the *concurrent full* decodes **~4× slower** —
+  windowed bench p95 **235 → 900 ms on the same files**. Mechanism: fast previews freed
+  the workers to run *more* full grid decodes at once, and many concurrent libheif
+  decodes slow each other down badly.
+- **Two obvious fixes did NOT help** (both measured): capping libheif's per-context tile
+  threads (`heif_context_set_max_decoding_threads` 1/2/4), and capping *concurrent full
+  decodes* in the pool (a non-preview semaphore, 2/3/4). p95 stayed ~900 ms either way.
+- So it's **not** thread oversubscription and **not** simple concurrent-full count.
+  Leading hypotheses: (a) a **libheif/libde265 global lock** taken during decode (more
+  concurrent calls → more contention), or (b) a **windowed-only artifact** — the bench
+  uses a 64-photo window + Lanczos downscale-to-fit; the owner runs **fullscreen** with a
+  ~12-photo window and *no* downscale for ≤12 MP, so it may not reproduce there at all.
+
+**Headline learning:** HEIC **full** decodes balloon several-fold under 8-way concurrent
+load (~138 ms isolated → ~900 ms windowed). That under-load latency — not the per-decode
+speed — is the real ceiling on stop-to-sharp; Fix B (prefetch-ahead) dodges it by
+pre-decoding, but understanding/limiting it is the next real lever.
+
+**Kept (committed in `f346506`):** the `--metrics` instrumentation that found all of this
+— `sharpen` (full-requested→on-screen) and `pool decode (under load)` percentiles + the
+slowest-files list. Re-run with `--metrics` to investigate further.
+
+**To resume:** re-apply the thumbnail extraction (it's straightforward — handle→
+`get_number_of_thumbnails`/`get_list_of_thumbnail_IDs`/`get_thumbnail`→decode, orientation
+1) **behind a default-off flag** so it can be A/B'd in fullscreen; OR first test the
+global-lock hypothesis (time decode vs. time-holding-a-lock). Don't re-land it on by
+default without a fullscreen win.
 
 **Phase 3 evolution:** `upgrade_item`→`sharpen_now` (displayed, tier 1) +
 `prefetch_fulls` (ahead-ring, tier 3, ungated); pure `pb_core::full_ring` bounds the

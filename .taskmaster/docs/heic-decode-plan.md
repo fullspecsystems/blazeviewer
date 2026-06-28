@@ -90,8 +90,11 @@ jamming all workers). Fixes landed (all green): **(C)** RAW preview uses the emb
 thumbnail, demosaic is full-only — *the actual fix*, p99 1467→259 ms; **(A)** no-thumbnail
 HEICs route to libheif (WIC fakes the thumbnail by full-decoding the grid); **(B)** fulls
 prefetched *ahead* at low priority (tiered `request_prefetch`; `held_nav` gate replaced).
-Still open: iPhone HEIC *thumbnails* serialize on WIC under load (~240 ms; candidate fix
-= libheif thumbnail extraction). Below follow-ups still apply: Sony color quirk
+Still open: iPhone HEIC *thumbnails* serialize on WIC under load (~240 ms). **Parallel
+libheif thumbnail extraction was tried and REVERTED** — it works (~3 ms, oriented) but
+slowed concurrent *full* decodes ~4× (235→900 ms windowed) for a non-obvious reason that
+thread- and full-concurrency caps didn't fix; full write-up + hypotheses in
+`current-status.md` "🧪 parallel thumbnail extraction". Don't blind-retry. Below follow-ups still apply: Sony color quirk
 (`autocorrect_broken_input`, **tasks.json #24**); Fill-mode decode-to-fit; sync load
 paths bypass preview-first; AVIF on libheif (needs aom/dav1d — HEVC-only). Original phased
 plan (now mostly historical) preserved below.
