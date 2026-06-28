@@ -49,6 +49,9 @@ crates/
   pb-core    pure nav / precomputed-random / prefetch / cache-residency
              — no I/O, no GPU, deterministic, 100% unit-testable
   pb-decode  decode abstraction (decode-to-fit + preview-first) + swappable backends
+  pb-source  PhotoSource seam: "encoded bytes + name for item i" over a filesystem
+             listing (FsSource), a ZIP (ZipSource), or a 7z (SevenZSource) — RAM-only,
+             read-only on the view path; archive viewing lives here
   pb-render  fit-to-screen geometry now; wgpu presenter (swapchain, ring, draw) later
   pb-app     the binary: winit event loop, decode thread pool, wiring
 ```
@@ -292,6 +295,16 @@ pragmatic crate choices differ from the table above and are the current baseline
      fp16 scene-linear via WIC `128bppRGBAFloat` (`PixelFormat::Rgba16F`); brightness is baked
      in the scene pass (SDR×SDR-white-scale, HDR×1.0 absolute). P3 shows wider and HDR gets
      real headroom on a capable panel.
+- **Archive viewing (ZIP + 7z)** (tasks.json #30) is wired in the new `pb-source` crate
+  behind the `PhotoSource` seam, decoded via `pb_decode::decode_named_bytes` (bytes +
+  extension hint). ZIP = lazy per-entry (handle pool for parallel reads); 7z = **eager
+  decode-to-RAM** (solid archives have no cheap random access), opened **off-thread** with
+  a RAM **pre-flight that predict-and-refuses** archives that won't fit (a real OOM aborts
+  uncatchably in Rust). RAM-only — never extracted to disk, so the no-trace guarantee holds
+  (`viewing_a_{zip,7z}_writes_nothing_to_disk`). Errors surface in the egui `Message` dialog.
+  Password-protected archives are *detected* (`OpenError::PasswordRequired` /
+  `ZipSource::needs_password`) but in-app password **entry is a TODO**. Crates: `zip` +
+  `sevenz-rust2` (both pure Rust, no C build risk).
 - **Known v1 limitations** (deliberate): Radiance-HDR / OpenEXR (image-crate, not WIC) still
   clamped to SDR; CMYK JPEG mis-colored; first frame only (GIF/animated-WebP/Live-Photo/
   multipage-TIFF). LUT/CLUT & gray/CMYK ICC profiles → sRGB passthrough (the `lcms2`-behind-a-

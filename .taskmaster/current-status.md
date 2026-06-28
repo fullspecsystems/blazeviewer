@@ -7,7 +7,68 @@ key and fly") is done, plus broad multi-codec support, full-res RAW, the color
 story (in-shader ICC → wide-gamut → HDR, task #11), and the rotation/zoom/pan/
 scaling/EXIF/help UI (#1/#3/#4/#5/#7). Privacy no-trace (#2), Esc teardown (#6),
 `enter` random nav (+ `Shift+Enter` prev-random), and the Windows-integration +
-MSI track are all done.
+MSI track are all done. **Archive viewing (ZIP + 7z) shipped 2026-06-28** — see the
+next section (password entry + polish remain for the next session).
+
+## Archive viewing — ZIP + 7z (2026-06-28) — DONE; password entry + polish remain
+
+Open a `.zip`/`.7z` and browse the images inside like a folder (CLI arg, double-click
+association, drag-drop, or the Open dialog's "Images & archives" filter). Same fast
+prefetch/nav as loose files; in-archive browsing is recursive/flattened (sorted by entry
+name). All on `origin/main`, gated (clippy `-D warnings` + fmt + tests). **Task 30** in
+`tasks.json`.
+
+**How it works:**
+- **`pb-source` crate** — a `PhotoSource` seam (bytes + name + container for item `i`):
+  `FsSource`, `ZipSource` (lazy per-entry, handle-pool for parallel reads),
+  `SevenZSource` (eager — 7z is usually *solid* = no cheap random access, so the whole
+  archive is decompressed into RAM on open). `pb-core` nav is unchanged (index-only), so
+  the prefetch ring / decode pool didn't change.
+- `pb_decode::decode_named_bytes` — decode in-memory bytes with an extension hint (so
+  RAW/SVG/TGA route without a file path). Shift+I panel shows the archive path + in-zip folder.
+- **7z memory safety** (`pb-app/src/archive.rs`): a real OOM *aborts* (uncatchable) in
+  Rust → **predict-and-refuse** rather than try/catch. Sum the 7z header's uncompressed
+  image sizes vs a RAM budget (fraction of `GlobalMemoryStatusEx` available − app
+  reservations − transient margin; `PB_ARCHIVE_RAM_BUDGET` env override). Over budget →
+  instant refusal, no load. `Vec::try_reserve` backstops the buffers.
+- **Async open:** a `.7z` eager-decompresses on a background thread
+  (`begin_archive_open` → per-tick `poll_archive_load`, generation-guarded so a newer
+  open supersedes the first); the event loop stays live + the current photo stays
+  visible; "Loading archive…" toast. `.zip` open is instant (synchronous).
+- **Structured errors → egui dialog:** `ArchiveOpenError`
+  (too-large / corrupt / password / OOM / empty) → `DialogKind::Message` (dark-aware,
+  via the dialog session's `open_message`).
+- **Privacy:** RAM-only — `viewing_a_zip_writes_nothing_to_disk` +
+  `viewing_a_7z_writes_nothing_to_disk` prove no extraction to a temp dir.
+- Crates: `zip` (deflate + aes-crypto) + `sevenz-rust2` 0.21 (incl. LZMA2/bzip2/ppmd) —
+  both **pure Rust, no C build risk**.
+
+**Remaining (handoff — password + polish):**
+- **Password entry** — encrypted archives currently show "This archive is password
+  protected, which is not supported yet." Plumbing is ready: `ZipSource`/`SevenZSource::open`
+  take `Option<String>`; `OpenError::PasswordRequired` + `ZipSource::needs_password`
+  detect it. Needs an **in-app password prompt** — now feasible via the egui dialog (it
+  has text fields; the chrome-less photo window has no text-input mode). Wire it through
+  the same open path (re-open the source with the entered password).
+- **Launch-path 7z is still synchronous** — a big *double-clicked* `.7z` delays startup
+  (the runtime picker/drop path is async). Mirror `begin_archive_open` at launch (show
+  the window first, then load behind the spinner).
+- **Tune the RAM budget** — the `0.6` fraction + margin in `archive.rs` are guesses;
+  **measure** open time + peak working set on a real solid-LZMA2 photo `.7z` and set them
+  from data (per the prime directive). The 96 GB dev box never refuses naturally → drive
+  the refusal path with `PB_ARCHIVE_RAM_BUDGET`.
+- **Deterministic over-budget refusal test** — the no-trace tests exist; the refusal test
+  needs a budget-injection seam (env vars race across parallel tests).
+- **Huge-archive escalations** (behind the same seam, pick later): in-RAM per-block LRU
+  (bounds RAM, keeps no-trace) or opt-in extract-and-delete (disk → opt-in + disclose +
+  clear-on-close + leftover-sweep-on-startup). v1 just refuses + lets the user extract.
+- **WiX:** register `.7z`/`.zip` as "Open with" candidates (NOT the default handler).
+- Exotic 7z codecs (zstd/brotli/lz4 features off) and header-encrypted 7z error gracefully.
+
+**Key files:** `crates/pb-source/src/lib.rs`, `crates/pb-app/src/archive.rs`, and the
+`main.rs` open path (`classify_inputs` / `is_archive` / `open_archive` / `open_input` /
+`begin_archive_open` / `poll_archive_load` / `resolve_playlist`). Tests: `pb-source` (13)
++ `pb-app` archive-budget + `viewing_a_{zip,7z}_writes_nothing_to_disk`.
 
 ## UI / file-commands stream (2026-06-28) — what just shipped + what's next
 
@@ -248,6 +309,7 @@ esc              quit
 ```
 cargo run -p pb-app --release -- "D:\Media\Pictures" -r     # fullscreen, recursive
 cargo run -p pb-app --release -- "<leaf folder>" --windowed # dev window
+cargo run -p pb-app --release -- "album.7z" --windowed      # open a .zip / .7z archive
 cargo run -q --example decode -p pb-decode -- <files...>    # decode + color-transform report
 cargo run -q --example hdr_probe -p pb-render               # display HDR/gamut/nits probe
 ```
@@ -255,9 +317,10 @@ cargo run -q --example hdr_probe -p pb-render               # display HDR/gamut/
 ## Architecture
 ```
 crates/pb-core    pure nav/shuffle/prefetch/cache + ResidentRing + open (launch policy) — no I/O, no GPU
-crates/pb-decode  ImageDecoder backends (zune/image/jxl/svg/raw/wic) + dispatch + decode-to-fit + EXIF + color (ICC→shader transform, fp16 HDR)
+crates/pb-decode  ImageDecoder backends (zune/image/jxl/svg/raw/wic) + dispatch + decode-to-fit + EXIF + color (ICC→shader transform, fp16 HDR) + decode_named_bytes
+crates/pb-source  PhotoSource seam: FsSource / ZipSource / SevenZSource (bytes+name+container for item i; RAM-only, read-only) — zip + 7z archive viewing
 crates/pb-render  wgpu presenter (gpu.rs: scene→fp16 scRGB intermediate→present; WGSL); display (HDR detect); ViewTransform; UploadStrategy
-crates/pb-app     winit loop, decode_pool (priority workers), hud.rs, main.rs (engine wiring)
+crates/pb-app     winit loop, decode_pool (priority workers), hud.rs, archive.rs (RAM budget + errors), main.rs (engine wiring)
 ```
 
 ## The prefetch engine (don't break it)
