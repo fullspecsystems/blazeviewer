@@ -5,7 +5,7 @@
 //! index into the **raw encoded bytes** to hand `pb_decode::decode_named_bytes`,
 //! plus a display name (and, for real files, a path the info panel can stat).
 //!
-//! Two implementations ship today:
+//! Three implementations ship today:
 //! * [`FsSource`] — a plain, already-scanned filesystem listing (today's behavior
 //!   behind the seam): `bytes(i)` is a `std::fs::read`.
 //! * [`ZipSource`] — a ZIP archive read **per entry, on demand, into RAM**. ZIP's
@@ -14,19 +14,25 @@
 //!   decompressed — preserving the random-access, parallel-prefetch model the
 //!   viewer is built around. Optionally decrypts password-protected archives
 //!   (ZipCrypto or WinZip-AES).
+//! * [`SevenZSource`] — a 7-Zip archive **eagerly decompressed into RAM on open**.
+//!   7z is usually *solid* (many files share one LZMA2 stream), so there is no
+//!   cheap per-entry random access; instead every supported-image entry is decoded
+//!   once up front into a resident `index → bytes` map. Pre-flight an open with
+//!   [`seven_z_projected_bytes`] against a memory budget.
 //!
 //! **Privacy.** Every read here is RAM-only; nothing is ever written to disk. This
 //! is the archive analogue of the "on-disk I/O is read-only on the view path"
 //! guarantee — opening a ZIP to view it never extracts it to a temp directory.
 //!
 //! ## Random access vs. eager sources
-//! Both current sources are *random-access*: any item can be fetched cheaply and
-//! independently, which is what the direction-biased prefetch ring assumes. A
-//! future *solid* archive (solid 7z, tar.gz) can't seek to one entry without
-//! decompressing the block before it; such a source would set
-//! [`PhotoSource::random_access`] to `false` and pre-load the whole archive into
-//! RAM on open. The trait is shaped so that's an implementation choice, not a
-//! change to the seam.
+//! [`FsSource`] and [`ZipSource`] are *lazy* random-access: any item is fetched
+//! cheaply and independently, which is what the direction-biased prefetch ring
+//! assumes. A *solid* archive (7z, and later tar.gz) can't seek to one entry
+//! without decompressing the block before it, so [`SevenZSource`] is instead
+//! *eager*: it pays the whole decompression once on open and then serves random
+//! access from RAM. The trait is shaped so this is an implementation choice, not a
+//! change to the seam — the only caller-visible cost is a slower open (which the
+//! app runs off-thread behind a spinner) and the resident memory.
 
 use std::fs::File;
 use std::io::{self, BufReader, Read};
@@ -130,6 +136,12 @@ pub enum OpenError {
     /// The bytes are not a valid archive, are truncated, or use an unsupported
     /// compression method (carries the underlying reason).
     Corrupt(String),
+    /// The archive (or its header) is encrypted and needs a password we don't have.
+    /// Surfaced distinctly so the app can say "password protected" instead of
+    /// misreporting it as corrupt. (ZIP exposes this via
+    /// [`ZipSource::needs_password`] instead, since its directory is readable
+    /// without one.)
+    PasswordRequired,
     /// Decompressing the archive into RAM ran out of memory (the eager 7z load —
     /// a recoverable `try_reserve` failure, surfaced instead of an abort).
     OutOfMemory,
@@ -140,6 +152,7 @@ impl std::fmt::Display for OpenError {
         match self {
             OpenError::Io(e) => write!(f, "{e}"),
             OpenError::Corrupt(why) => write!(f, "the archive could not be opened: {why}"),
+            OpenError::PasswordRequired => write!(f, "the archive is password protected"),
             OpenError::OutOfMemory => write!(f, "ran out of memory loading the archive"),
         }
     }
@@ -343,8 +356,8 @@ pub fn seven_z_projected_bytes(
     is_supported: impl Fn(&str) -> bool,
 ) -> Result<u64, OpenError> {
     let mut file = File::open(path)?;
-    let archive = SevenZArchive::read(&mut file, &SevenZPassword::empty())
-        .map_err(|e| OpenError::Corrupt(e.to_string()))?;
+    let archive =
+        SevenZArchive::read(&mut file, &SevenZPassword::empty()).map_err(seven_z_open_err)?;
     let total = archive
         .files
         .iter()
@@ -375,8 +388,7 @@ impl SevenZSource {
             None => SevenZPassword::empty(),
         };
         let file = File::open(&path)?;
-        let mut reader =
-            SevenZReader::new(file, pw).map_err(|e| OpenError::Corrupt(e.to_string()))?;
+        let mut reader = SevenZReader::new(file, pw).map_err(seven_z_open_err)?;
 
         let mut entries: Vec<SevenZEntry> = Vec::new();
         let mut oom = false;
@@ -408,7 +420,7 @@ impl SevenZSource {
                 });
                 Ok(true)
             })
-            .map_err(|e| OpenError::Corrupt(e.to_string()))?;
+            .map_err(seven_z_open_err)?;
 
         if oom {
             return Err(OpenError::OutOfMemory);
@@ -467,6 +479,17 @@ fn zip_to_io(e: zip::result::ZipError) -> io::Error {
     match e {
         zip::result::ZipError::Io(io) => io,
         other => io::Error::new(io::ErrorKind::InvalidData, other),
+    }
+}
+
+/// Map a 7z error onto [`OpenError`], distinguishing the "needs a password" cases
+/// (an encrypted archive or encrypted header) from a genuinely unreadable one, so
+/// the app shows the right message.
+fn seven_z_open_err(e: sevenz_rust2::Error) -> OpenError {
+    use sevenz_rust2::Error as E;
+    match e {
+        E::PasswordRequired | E::MaybeBadPassword(_) => OpenError::PasswordRequired,
+        other => OpenError::Corrupt(other.to_string()),
     }
 }
 
@@ -727,6 +750,27 @@ mod tests {
         assert!(src.is_empty());
         assert_eq!(seven_z_projected_bytes(&z, is_img).unwrap(), 0);
         let _ = std::fs::remove_file(&z);
+    }
+
+    #[test]
+    fn seven_z_open_err_maps_password_cases() {
+        use sevenz_rust2::Error as E;
+        // Encrypted archive / encrypted header -> a distinct "password" error so the
+        // app can say "password protected" rather than "corrupt".
+        assert!(matches!(
+            seven_z_open_err(E::PasswordRequired),
+            OpenError::PasswordRequired
+        ));
+        let io = std::io::Error::new(std::io::ErrorKind::InvalidData, "bad pw");
+        assert!(matches!(
+            seven_z_open_err(E::MaybeBadPassword(io)),
+            OpenError::PasswordRequired
+        ));
+        // Anything else is a generic unreadable/corrupt archive.
+        assert!(matches!(
+            seven_z_open_err(E::FileNotFound),
+            OpenError::Corrupt(_)
+        ));
     }
 
     #[test]
