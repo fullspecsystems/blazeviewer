@@ -327,63 +327,62 @@ fn corner_coverage(x: i32, y: i32, w: i32, h: i32, r: f32) -> f32 {
     }
 }
 
-/// The loading pie's track (the dark disc behind the wedge) and fill (the bright
-/// wedge + rim), per the translucent-black overlay convention.
-const PIE_TRACK: [u8; 3] = [0, 0, 0];
-const PIE_FILL: [u8; 3] = [255, 255, 255];
-
-/// Rasterize the "not-ready" loading pie: a translucent dark disc with a bright
-/// wedge that fills clockwise from 12 o'clock to `progress` (0..=1), plus a faint
-/// bright rim ring for definition. `glow` (0..=1) brightens the whole thing (the
-/// keypress flash when the UI can't service input yet). Returns straight-alpha
-/// RGBA8 `(pixels, diameter, diameter)` for the overlay quad. No font needed, so
-/// it works even when the text HUD is unavailable.
+/// Rasterize the "not-ready" loading pie: a clean translucent dark disc with a
+/// bright wedge that fills clockwise from 12 o'clock to `progress` (0..=1) — no
+/// outer ring. `glow` (0..=1) brightens it (the keypress flash when the UI can't
+/// service input yet). Edges are anti-aliased by `SS×SS` supersampling, so the
+/// disc rim and the wedge edge read smooth. Returns straight-alpha RGBA8
+/// `(pixels, diameter, diameter)`. No font needed, so it works without the HUD.
 pub fn render_pie(diameter: u32, progress: f32, glow: f32) -> (Vec<u8>, u32, u32) {
     let d = diameter.max(8);
     let di = d as i32;
     let mut px = vec![0u8; (d as usize) * (d as usize) * 4];
     let c = d as f32 / 2.0;
-    let r_outer = c - 1.0; // leave ~1px for the anti-aliased edge
-    let r_fill = r_outer * 0.74; // the pie sits inside a dark rim gap
-    let r_ring_in = r_outer * 0.84; // a thin bright rim band near the edge
+    let r_outer = c - 1.0; // leave ~1px so the disc rim has room to feather
     let g = glow.clamp(0.0, 1.0);
     let sweep = progress.clamp(0.0, 1.0) * std::f32::consts::TAU;
-    let track_a = 0.45 + 0.18 * g;
-    let fill_a = 0.82 + 0.18 * g;
-    let rim_a = 0.30 + 0.35 * g;
+    // The wedge (white) sits on the translucent dark track (black); both fade in
+    // alpha at the edges via supersampling. `glow` lifts both a touch.
+    let track_a = 0.42 + 0.18 * g;
+    let fill_a = 0.85 + 0.15 * g;
+    const SS: i32 = 4; // supersample grid (16 samples/pixel) for smooth edges
+    let step = 1.0 / SS as f32;
+    let inv = 1.0 / (SS * SS) as f32;
     for y in 0..di {
         for x in 0..di {
-            let dx = x as f32 + 0.5 - c;
-            let dy = y as f32 + 0.5 - c;
-            let dist = (dx * dx + dy * dy).sqrt();
-            let disc_cov = (r_outer - dist + 0.5).clamp(0.0, 1.0);
-            if disc_cov <= 0.0 {
-                continue; // outside the disc → transparent
-            }
-            // Base: the translucent dark track over the whole disc.
-            let mut rgb = PIE_TRACK;
-            let mut a = track_a;
-            // The bright rim ring near the edge (always full, like a track outline).
-            if dist >= r_ring_in {
-                rgb = PIE_FILL;
-                a = rim_a;
-            }
-            // The pie wedge, clockwise from the top: angle 0 at 12 o'clock.
-            if dist <= r_fill {
-                let mut ang = dx.atan2(-dy);
-                if ang < 0.0 {
-                    ang += std::f32::consts::TAU;
+            // Accumulate straight-alpha color premultiplied so the white wedge
+            // anti-aliases against the dark track and the transparent outside.
+            let (mut sr, mut sg, mut sb, mut sa) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+            for sy in 0..SS {
+                for sx in 0..SS {
+                    let fx = x as f32 + (sx as f32 + 0.5) * step - c;
+                    let fy = y as f32 + (sy as f32 + 0.5) * step - c;
+                    if fx * fx + fy * fy > r_outer * r_outer {
+                        continue; // outside the disc → transparent
+                    }
+                    let mut ang = fx.atan2(-fy); // 0 at 12 o'clock, +clockwise
+                    if ang < 0.0 {
+                        ang += std::f32::consts::TAU;
+                    }
+                    if ang <= sweep {
+                        sr += fill_a; // white wedge
+                        sg += fill_a;
+                        sb += fill_a;
+                        sa += fill_a;
+                    } else {
+                        sa += track_a; // black track contributes 0 to color
+                    }
                 }
-                if ang <= sweep {
-                    rgb = PIE_FILL;
-                    a = fill_a;
-                }
+            }
+            let a = sa * inv;
+            if a <= 0.0 {
+                continue;
             }
             let idx = ((y * di + x) * 4) as usize;
-            px[idx] = rgb[0];
-            px[idx + 1] = rgb[1];
-            px[idx + 2] = rgb[2];
-            px[idx + 3] = (a * disc_cov * 255.0).round().clamp(0.0, 255.0) as u8;
+            px[idx] = ((sr / sa) * 255.0).round().clamp(0.0, 255.0) as u8;
+            px[idx + 1] = ((sg / sa) * 255.0).round().clamp(0.0, 255.0) as u8;
+            px[idx + 2] = ((sb / sa) * 255.0).round().clamp(0.0, 255.0) as u8;
+            px[idx + 3] = (a * 255.0).round().clamp(0.0, 255.0) as u8;
         }
     }
     (px, d, d)

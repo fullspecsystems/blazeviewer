@@ -102,6 +102,25 @@ impl Playlist {
         self.shuffle.reshuffled()
     }
 
+    /// The item [`Playlist::random_next`] would land on next, *without* advancing.
+    /// Lets the prefetcher keep the photo behind `enter` resident even while the
+    /// user is paging sequentially, so switching into random nav is an instant hit
+    /// (mirrors how random mode hedges the sequential neighbours). Spans the
+    /// reshuffle boundary like `random_next` does.
+    pub fn peek_random_next(&self) -> Option<usize> {
+        if self.len == 0 {
+            return None;
+        }
+        let item = if !self.random_started {
+            self.shuffle.at(0)
+        } else if self.shuffle_pos + 1 >= self.len {
+            self.next_shuffle().at(0)
+        } else {
+            self.shuffle.at(self.shuffle_pos + 1)
+        };
+        item.map(|i| i as usize)
+    }
+
     /// Current position within the random order.
     pub fn shuffle_pos(&self) -> usize {
         self.shuffle_pos
@@ -258,6 +277,28 @@ mod tests {
         pl.random_next();
         pl.random_prev();
         assert_eq!(pl.current().unwrap(), first);
+    }
+
+    #[test]
+    fn peek_random_next_matches_random_next() {
+        // From the not-started state, then mid-deck: peek == what we land on.
+        let mut pl = Playlist::new(10, 1);
+        let peek = pl.peek_random_next();
+        pl.random_next();
+        assert_eq!(peek, pl.current());
+        let peek = pl.peek_random_next();
+        pl.random_next();
+        assert_eq!(peek, pl.current());
+        // Across the reshuffle boundary (exhaust the deck, then peek the next).
+        let mut pl = Playlist::new(5, 7);
+        for _ in 0..5 {
+            pl.random_next();
+        }
+        let peek = pl.peek_random_next();
+        pl.random_next(); // reshuffles into a fresh deck
+        assert_eq!(peek, pl.current());
+        // Empty playlist has nothing to peek.
+        assert_eq!(Playlist::new(0, 1).peek_random_next(), None);
     }
 
     #[test]
