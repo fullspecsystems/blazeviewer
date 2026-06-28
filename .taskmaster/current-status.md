@@ -3,23 +3,30 @@
 _Last updated: 2026-06-27. On `main`._
 
 A fast, chrome-less, keyboard-driven photo viewer. The prefetch engine ("hold a
-key and fly") is done. Earlier sessions added broad multi-codec support, full-res
-RAW, panic-safety, transparent rendering, the HUD/EXIF overhaul, and rotation /
-zoom / pan / scaling-mode / help-overlay UI (tasks #1,#3,#4,#5,#7).
+key and fly") is done, plus broad multi-codec support, full-res RAW, the color
+story (in-shader ICC → wide-gamut → HDR, task #11), and the rotation/zoom/pan/
+scaling/EXIF/help UI (#1/#3/#4/#5/#7). Privacy no-trace (#2), Esc teardown (#6),
+`enter` random nav (+ `Shift+Enter` prev-random), and the Windows-integration +
+MSI track are all done.
 
-**This session shipped the full color story (tasks.json #11): in-shader ICC color
-management → wide-gamut → HDR output.** Display-P3 images render correctly and look
-visibly wider than sRGB, and HDR (PQ/HLG) AVIF/HEIC get real highlight headroom — all
-owner-confirmed on a Display-P3 / HDR / ~1000-nit panel.
+## ⏭ ACTIVE NEXT WORK: make HEIC decode fly — see
+[`docs/heic-decode-plan.md`](docs/heic-decode-plan.md)
 
-**Green bar:** `cargo test --workspace` (**158 passing**, 0 ignored),
+**Recent sessions shipped HEIC preview-first + on-land sharpen** (instant 320×240
+previews while scrolling; the on-screen photo re-decodes to full ~250 ms–1 s after
+you land). It works, but the full decode isn't PhotoBlaze-fast because **WIC's HEVC
+decoder serializes (~1.7× on 8 threads, measured)**. **Decision (owner): pivot
+HEIC/AVIF to CPU `libheif`** (parallel — the pool's 8 workers already run concurrent,
+just bottlenecked on WIC's single session → ~8× and prefetch fulls *ahead*). NVDEC
+deferred (iPhone HEICs are 48-tile HEVC grids; libheif handles that free). The full
+phased plan, the build-toolchain blocker, the "higher-quality preview" spike, and
+the deferred code-review findings are all in **`docs/heic-decode-plan.md`** — read it
+first.
+
+**Green bar:** `cargo test --workspace` (**167 passing**, 0 ignored),
 `cargo clippy --workspace --all-targets -- -D warnings`,
-`cargo fmt --all -- --check` — all clean. Release builds.
-
-> **Also uncommitted in the tree from parallel work (not this session):** the
-> `pb-core::open` launch-policy seam (`open.rs` + `playlist.rs`, task #12 subtask 1,
-> done+tested), `photoblaze-icon.png`, and `decisions.md` edits. Bundled into this
-> session's commit at the owner's request.
+`cargo fmt --all -- --check` — all clean. Working tree clean; preview-first/sharpen
+landed in commits up to `3c74cee`.
 
 ---
 

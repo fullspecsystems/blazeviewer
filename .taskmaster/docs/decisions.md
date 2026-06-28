@@ -153,6 +153,26 @@ and `resolve_cursor` are pure and unit-tested. This is the seam that makes the
 **macOS port a delivery-layer change only** (a different shim builds the same
 `LaunchInput`); it also keeps Task-9's recursive ordering reusable by folder opens.
 
+### ADR-020 — HEIC/AVIF decode: preview-first now; CPU `libheif` next; NVDEC deferred
+*Decided 2026-06-27.* HEIC is the one format that can't keep up with the prefetch
+engine. **Measured root cause:** the Windows WIC HEVC decoder **serializes** —
+~1.7× across 8 threads on a 32-core box (vs JPEG 4.3×); STA-vs-MTA made no
+difference, so it's the decoder/DXVA session, not COM. Shipped now: **preview-first**
+(WIC `GetThumbnail`, 320×240, ~18 ms) for instant scrolling + **on-land sharpen**
+(full decode of only the on-screen photo, upgrade the slot in place). The full
+decode is still WIC-bound (~250 ms–1 s).
+- **Next: route HEIC/AVIF to CPU `libheif`** (behind the `ImageDecoder` seam, A/B
+  vs `WicDecoder`, cargo-feature-gated per ADR-015). The decode pool already runs 8
+  concurrent workers; libheif decodes have no shared GPU session, so they run truly
+  in parallel → ~8× throughput → prefetch full-res *ahead* of the user. Cost: the
+  libheif Windows C-dep (vcpkg + ship DLLs).
+- **NVDEC deferred** (ADR-012 stays the GPU escalation): an iPhone HEIC is a
+  **48-tile 512×512 HEVC grid**, so NVDEC means hand-writing grid demux + 48-decode
+  orchestration + stitch + CUDA↔D3D12 interop — the hard 80% that libheif does for
+  free. Pursue only if libheif can't keep up at 48 MP.
+- Full plan, phasing, toolchain blocker, the higher-res-preview spike, and the
+  code-review follow-ups: [`heic-decode-plan.md`](heic-decode-plan.md).
+
 ---
 
 ## Owner decisions (resolved 2026-06-26)

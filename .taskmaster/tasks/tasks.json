@@ -545,6 +545,41 @@
             "dependencies": []
           }
         ]
+      },
+      {
+        "id": 16,
+        "title": "HEIC/AVIF: parallel CPU libheif decode (break the WIC serialization)",
+        "description": "Route HEIC/AVIF decode to CPU libheif behind the ImageDecoder seam (A/B vs WIC) so the pool's concurrent workers actually parallelize. WIC's HEVC decoder serializes (~1.7x on 8 threads, measured), capping HEIC at ~8/s no matter the worker count; libheif (no shared GPU session) runs truly parallel -> ~8x -> prefetch full-res AHEAD of the user. Preview-first + on-land sharpen already shipped (ADR-020). Full plan, phasing, and the higher-res-preview spike: docs/heic-decode-plan.md.",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [],
+        "details": "See docs/heic-decode-plan.md. Decision: ADR-020 (CPU libheif now; NVDEC deferred — iPhone HEICs are 48-tile HEVC grids that libheif handles free). Phase 0 (OWNER, blocker): install vcpkg + cmake, `vcpkg install libheif` (libde265 + dav1d), set VCPKG_ROOT, decide static/dynamic link (dynamic -> ship DLLs in the MSI, update packaging.md). Phase 1: LibHeifDecoder (libheif-rs/libheif-sys) as an ImageDecoder for HEIC+AVIF, cargo-feature-gated, A/B vs WicDecoder; reuse common::finalize_oriented + the colr/CICP color path; preview via libheif thumbnail. Phase 2: bench concurrent throughput vs WIC over 12 & 48 MP (target >=~50/s). Phase 3 (payoff): widen request_prefetch's `upgrade_item` from displayed-only to the window (current-first) so fulls prefetch AHEAD -> sharp at scroll speed; watch VRAM budget + per-frame churn. Phase 4 (gated): NVDEC (ADR-012) only if 48 MP still lags.",
+        "subtasks": [
+          { "id": 1, "title": "Toolchain: vcpkg + libheif (owner)", "description": "Install vcpkg/cmake; vcpkg install libheif; VCPKG_ROOT; static-vs-dynamic + MSI DLL shipping.", "status": "pending", "dependencies": [] },
+          { "id": 2, "title": "LibHeifDecoder behind the seam (feature-gated, A/B vs WIC)", "description": "ImageDecoder for HEIC+AVIF via libheif-rs; orientation + colr color; thumbnail preview.", "status": "pending", "dependencies": [] },
+          { "id": 3, "title": "Benchmark concurrent throughput vs WIC", "description": "12 & 48 MP; confirm >=~50/s so fulls can be prefetched ahead.", "status": "pending", "dependencies": [] },
+          { "id": 4, "title": "Prefetch fulls ahead (widen upgrade_item to the window)", "description": "Once decode is fast+parallel, fill full-res window current-first; mind VRAM + churn.", "status": "pending", "dependencies": [] }
+        ]
+      },
+      {
+        "id": 17,
+        "title": "Spike: higher-quality HEIC preview than the 320x240 thumbnail",
+        "description": "Owner hunch (likely an easy quality lever): find a better embedded preview than WIC's 320x240 GetThumbnail. From the HEIF dump, an iPhone HEIC has only the 320x240 thumb (item 50) + the full 48-tile grid + a 2016x1512 `auxl/auxC` aux (item 51) believed to be the HDR gain map. Verify item 51 (gain map vs usable preview), and check non-iPhone/Sony HEICs (DSC*.heic) for a true mid-res single-hvc1 preview. If a usable mid-res image exists, decode IT for the preview: ~6x sharper, one fast decode (no grid). Needs libheif or a HEIF item extractor.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [16],
+        "details": "See docs/heic-decode-plan.md 'Preview-quality spike'. Corpus: C:/Users/jdlien/Pictures/iCloud Photos/Photos and D:/Media/Pictures/test-images (Sony DSC*.heic).",
+        "subtasks": []
+      },
+      {
+        "id": 18,
+        "title": "Preview-first code-review follow-ups (Codex + workflow review)",
+        "description": "Deferred findings from the preview-first review. None block v0.1, but track them.",
+        "status": "pending",
+        "priority": "low",
+        "dependencies": [16],
+        "details": "From docs/heic-decode-plan.md 'Deferred review findings': (1) HDR HEICs bypass preview-first (HDR float branch returns before allow_preview; needs SDR-thumb->HDR-full upgrade, slot format change). (2) Fill mode decodes full-res (decode_fit returns None for Fill+Original; give Fill a cover-to-screen target). (3) Decode-pool byte budget is a soft cap (reserve-before-decode; largely moot now). (4) DecodeKind::{Preview,Full} in the pool key (defensive). (5) Sync load paths (startup/resize/mode) bypass preview-first -> ~250ms HEIC freeze. (6) No unit/property tests for the tier state machine (extract pure bits).",
+        "subtasks": []
       }
     ]
   }
