@@ -53,6 +53,9 @@ crates/
              listing (FsSource), a ZIP (ZipSource), or a 7z (SevenZSource) — RAM-only,
              read-only on the view path; archive viewing lives here
   pb-render  fit-to-screen geometry now; wgpu presenter (swapchain, ring, draw) later
+  pb-ui      the chrome design system: egui tokens + components (cards, toggle,
+             buttons, text fields) + a Windows-tracking light/dark theme. egui-only,
+             no app deps; powers the dialogs and the standalone component gallery
   pb-app     the binary: winit event loop, decode thread pool, wiring
 ```
 
@@ -151,6 +154,54 @@ The repo is **private**, so vendoring the SVGs is in-bounds. If it ever goes pub
 git-ignore `icons/` and load from the local FA path at build, or swap to the free-tier
 solid set (most of these icons, including the ones used here, are in FA Free).
 (Privacy task #2 is unaffected — the SVGs are compile-time assets, not a viewing trace.)
+
+## Chrome design system — the `pb-ui` crate (don't reinvent components)
+
+The viewer hot path is custom wgpu (above). The **chrome** — Settings, About, and
+the Confirm / Message / Password dialogs — is **egui**, in a second winit window
+(`pb-app/src/dialog.rs`), and it is **component-based on `crates/pb-ui`**. The rule:
+**when you need a button / field / toggle / card / section, reach for the `pb-ui`
+component — never hand-roll one in a dialog.** That's the whole point of the crate; a
+one-off `egui::Button` in `dialog.rs` is a bug (it will drift in size/color/radius).
+
+`pb-ui` is egui-only (no app deps), so it stays reusable and testable, and it powers
+the **gallery** — the egui equivalent of a Storybook page:
+
+```sh
+cargo run -p pb-ui --example gallery   # every token + component, Light/Dark/Both
+```
+
+The gallery is dev-only (eframe dev-dependency; never shipped) and is the place to
+**preview and A/B the system** — including light vs dark side by side, which a real
+single-theme dialog can't show.
+
+**What's there (`pb-ui/src/lib.rs`):**
+- **Tokens:** `SPACE_1..6` (4px scale), `RADIUS_CONTROL`/`RADIUS_CARD`, `CONTROL_H`
+  (32px — set once, kills "every control a different size"), `FIELD_MARGIN`,
+  `CARD_WRAP_WIDTH`, and `Palette` (named color roles, light + dark).
+- **Theme:** `install_fonts` (native Segoe UI) once per dialog ctx; `apply_style(ctx,
+  dark)` each frame (cheap; survives egui's own theme bookkeeping); `apply_to_ui(ui,
+  dark)` to scope one region (e.g. a gallery column, or a **combo popup** — egui draws
+  popup *contents* with the global ctx style, so re-assert it inside `show_ui`).
+- **Components:** `card`, `card_row` (responsive: control on the right when wide,
+  stacked under the header below `CARD_WRAP_WIDTH`), `toggle` / `toggle_with_label`,
+  `section_label`, `primary_button` / `secondary_button` / `danger_button`,
+  `text_field`, `icon_sized`.
+
+**Conventions:** primary = accent default action (Save/OK/Unlock); secondary = neutral
+(Cancel); danger = red (Delete). `dialog.rs` keeps only the *scaffold* (the second
+window + `button_bar` / `dialog_frame` panels + status-icon helpers) and **composes
+pb-ui atoms** inside it. Theme is locked to the OS-resolved light/dark at open (explicit
+`ThemePreference`, not `System`, so `apply_style` isn't re-clobbered).
+
+**To add a component:** put it in `pb-ui` (drive it from tokens/`Palette`, take a
+`&mut egui::Ui`, return the `Response`), add it to the gallery `catalog`, then use it.
+Don't add UI primitives to `pb-app`.
+
+> **Provisional (2026-06-28):** the theme currently leans *native-Windows*
+> (Segoe UI + an OS-ish accent). An *own-brand* identity (a tuned palette + Inter,
+> Rerun-`re_ui` style) is on the table; it's a one-file token+font swap in `pb-ui`.
+> Accent colors are explicitly flagged for a later revisit.
 
 ## Privacy guarantee (no record of viewed photos) — tasks.json #2
 

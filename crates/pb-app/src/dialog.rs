@@ -537,26 +537,23 @@ fn about_ui(ui: &mut egui::Ui, icon: Option<&egui::TextureHandle>) {
     });
 }
 
-// ── Dialog design tokens ────────────────────────────────────────────────────
-// One place for the shared metrics so every dialog (Confirm / Message / Password)
-// reads as one family rather than each inventing its own spacing. Anatomy of a
-// dialog: a `dialog_frame`-inset content panel on top, then a `button_bar` pinned
-// to the bottom holding `[Primary] [Cancel]` right-aligned. Roles:
+// ── Dialog layout tokens ────────────────────────────────────────────────────
+// Only the dialog *scaffold* (the second-window mechanism) lives here; the buttons
+// and fields are **pb_ui components** (`pbui::{primary,secondary,danger}_button`,
+// `pbui::text_field`) so they match the rest of the app and there's no second button
+// to maintain. Anatomy of a dialog: a `dialog_frame`-inset content panel on top, then
+// a `button_bar` pinned to the bottom holding the pb_ui buttons right-aligned. Roles:
 //   * DIALOG_PAD  — uniform content inset; also the gap to every edge + the divider.
 //   * LEAD_ICON   — the status icon beside a message (Message's ⚠, Password's lock).
 //   * INLINE_ICON — a small icon inline with a secondary line (Confirm's ⚠ note).
-//   * BUTTON_*    — the bottom action buttons (size + the gap between them).
 //   * MSG_SIZE    — body/message text size.
-// (Text-field padding comes from `pbui::FIELD_MARGIN` — the shared design-system token.)
+// Button gaps use `pbui::SPACE_3`; text-field padding `pbui::FIELD_MARGIN`.
 // Icon tinting: semantic icons (warning = amber) are theme-independent; neutral
 // icons (the lock) take a theme-aware gray via `neutral_icon_tint` so they stay
 // legible on both light and dark backgrounds.
 const DIALOG_PAD: f32 = 22.0;
 const LEAD_ICON: f32 = 22.0;
 const INLINE_ICON: f32 = 18.0;
-const BUTTON_W: f32 = 100.0;
-const BUTTON_H: f32 = 32.0;
-const BUTTON_GAP: f32 = 12.0;
 const MSG_SIZE: f32 = 15.0;
 
 /// A panel frame filled to match the window background, inset by `DIALOG_PAD` on
@@ -578,11 +575,6 @@ fn button_bar(ctx: &egui::Context, id: &'static str, add: impl FnOnce(&mut egui:
         .show(ctx, |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add);
         });
-}
-
-/// A fixed-size secondary button (the standard dialog button look).
-fn dialog_button(text: &str) -> egui::Button<'static> {
-    egui::Button::new(text.to_owned()).min_size(egui::vec2(BUTTON_W, BUTTON_H))
 }
 
 /// Draw a vendored status icon at a fixed `height`, **preserving its aspect ratio**.
@@ -627,14 +619,11 @@ fn confirm_dialog(
     // Right-to-left: Cancel added first (rightmost), Delete to its left — so the
     // visual order reads [Delete] [Cancel], matching Directory Opus.
     button_bar(ctx, "confirm_bar", |ui| {
-        if ui.add(dialog_button("Cancel")).clicked() {
+        if pbui::secondary_button(ui, "Cancel").clicked() {
             result = Some(false);
         }
-        ui.add_space(BUTTON_GAP);
-        let delete = egui::Button::new(egui::RichText::new("Delete").color(egui::Color32::WHITE))
-            .fill(egui::Color32::from_rgb(200, 55, 55))
-            .min_size(egui::vec2(BUTTON_W, BUTTON_H));
-        let resp = ui.add(delete);
+        ui.add_space(pbui::SPACE_3);
+        let resp = pbui::danger_button(ui, "Delete");
         if resp.clicked() {
             result = Some(true);
         }
@@ -671,8 +660,9 @@ fn message_dialog(
     icon: Option<&egui::TextureHandle>,
 ) -> Option<bool> {
     let mut ok = None;
+    let p = pbui::Palette::new(ctx.style().visuals.dark_mode);
     button_bar(ctx, "message_bar", |ui| {
-        let resp = ui.add(dialog_button("OK"));
+        let resp = pbui::primary_button(ui, &p, "OK");
         if resp.clicked() {
             ok = Some(true);
         }
@@ -712,12 +702,17 @@ fn password_dialog(
     lock_icon: Option<&egui::TextureHandle>,
 ) -> Option<bool> {
     let mut result = None;
+    let p = pbui::Palette::new(ctx.style().visuals.dark_mode);
     button_bar(ctx, "password_bar", |ui| {
-        if ui.add(dialog_button("Cancel")).clicked() {
+        if pbui::secondary_button(ui, "Cancel").clicked() {
             result = Some(false);
         }
-        ui.add_space(BUTTON_GAP);
-        if ui.add_enabled(!checking, dialog_button("Unlock")).clicked() {
+        ui.add_space(pbui::SPACE_3);
+        // Disabled while the entered password is being validated (the slow 7z re-open).
+        let unlock = ui
+            .add_enabled_ui(!checking, |ui| pbui::primary_button(ui, &p, "Unlock"))
+            .inner;
+        if unlock.clicked() {
             result = Some(true);
         }
     });
