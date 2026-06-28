@@ -25,22 +25,36 @@ pub fn prefetch_targets(pl: &Playlist, ahead: usize, behind: usize) -> Vec<usize
 
     match pl.last_direction() {
         Direction::Forward => {
-            // Steal one slot from the look-ahead for the next *random* photo, so
-            // pressing `enter` while paging sequentially is an instant hit (the
-            // counterpart to the random arm's sequential hedge). Low priority (last),
-            // so it never slows sequential fly.
-            extend_linear(&mut out, &mut seen, pl, cur, 1, ahead.saturating_sub(1));
+            // Cede up to two look-ahead slots to the random hedges — the
+            // next-random (`enter`) and prior-random (`shift+enter`) photos — so
+            // jumping into random nav while paging sequentially is an instant hit.
+            // Appended last (prior-random lowest of all), so sequential fly is
+            // unaffected; keep ≥1 look-ahead even on a tiny ring (a hedge that then
+            // overflows capacity is simply dropped by the ring's rank check). In
+            // random mode these are already covered by the random ahead/behind
+            // windows, so the hedge lives only here.
+            extend_linear(
+                &mut out,
+                &mut seen,
+                pl,
+                cur,
+                1,
+                ahead.saturating_sub(2).max(1),
+            );
             extend_linear(&mut out, &mut seen, pl, cur, -1, behind);
-            if let Some(r) = pl.peek_random_next() {
-                push(&mut out, &mut seen, r);
-            }
+            hedge_random(&mut out, &mut seen, pl);
         }
         Direction::Backward => {
-            extend_linear(&mut out, &mut seen, pl, cur, -1, ahead.saturating_sub(1));
+            extend_linear(
+                &mut out,
+                &mut seen,
+                pl,
+                cur,
+                -1,
+                ahead.saturating_sub(2).max(1),
+            );
             extend_linear(&mut out, &mut seen, pl, cur, 1, behind);
-            if let Some(r) = pl.peek_random_next() {
-                push(&mut out, &mut seen, r);
-            }
+            hedge_random(&mut out, &mut seen, pl);
         }
         Direction::Random => {
             let pos = pl.shuffle_pos();
@@ -115,6 +129,19 @@ fn extend_random(
     }
 }
 
+/// Append the next- and prior-random targets (what `enter` / `shift+enter` would
+/// jump to) as low-priority hedges, so switching from sequential into random nav
+/// is an instant hit. De-duplicated against what's already queued; the two
+/// coincide before any random nav has started, so only one slot is used then.
+fn hedge_random(out: &mut Vec<usize>, seen: &mut [bool], pl: &Playlist) {
+    if let Some(r) = pl.peek_random_next() {
+        push(out, seen, r);
+    }
+    if let Some(r) = pl.peek_random_prev() {
+        push(out, seen, r);
+    }
+}
+
 fn push(out: &mut Vec<usize>, seen: &mut [bool], idx: usize) {
     if !seen[idx] {
         seen[idx] = true;
@@ -146,15 +173,15 @@ mod tests {
     fn forward_window_is_direction_biased() {
         let mut pl = Playlist::new(100, 1);
         pl.next(); // now at 1, Forward
-        let r = pl.peek_random_next().unwrap();
-        let t = prefetch_targets(&pl, 3, 1);
-        // current, 2 ahead (one look-ahead slot ceded to the random hedge), 1
-        // behind, then the next-random target (so `enter` is warm while paging fwd).
-        assert_eq!(&t[..4], &[1, 2, 3, 0]);
-        assert!(
-            t.contains(&r),
-            "the next-random photo should be prefetched too"
-        );
+        let pn = pl.peek_random_next().unwrap();
+        let t = prefetch_targets(&pl, 5, 2);
+        // current, then ahead-2 forward (two slots ceded to the random hedges),
+        // then behind, then the next/prior-random hedges (so enter / shift+enter
+        // are warm while paging sequentially).
+        assert_eq!(t[0], 1);
+        assert_eq!(&t[1..=3], &[2, 3, 4]); // 3 forward look-ahead (ahead 5 − 2)
+        assert!(t.contains(&0), "the immediate previous photo (behind)");
+        assert!(t.contains(&pn), "the next-random photo is hedged in");
     }
 
     #[test]
@@ -164,38 +191,40 @@ mod tests {
             pl.next();
         } // at 5, Forward
         pl.prev(); // at 4, Backward (kept away from index 0 so no wrap)
-        let r = pl.peek_random_next().unwrap();
-        let t = prefetch_targets(&pl, 3, 1);
-        // current, 2 behind (travel dir; one slot ceded to the random hedge), 1
-        // ahead, then the next-random target.
-        assert_eq!(&t[..4], &[4, 3, 2, 5]);
-        assert!(t.contains(&r));
+        let pn = pl.peek_random_next().unwrap();
+        let t = prefetch_targets(&pl, 5, 2);
+        // current, then 3 behind (travel dir), then ahead, then the random hedges.
+        assert_eq!(t[0], 4);
+        assert_eq!(&t[1..=3], &[3, 2, 1]);
+        assert!(t.contains(&5), "one ahead (the reverse direction)");
+        assert!(t.contains(&pn));
     }
 
     #[test]
     fn wraps_at_boundaries() {
-        let pl = Playlist::new(4, 1); // wrap on by default; at 0, Forward
-        let t = prefetch_targets(&pl, 2, 2);
-        // 0, +1 => 1 (one ahead slot ceded to the random hedge), -1,-2 => 3,2; the
-        // random hedge falls within {0..3}, so the window is the whole tiny playlist.
-        let mut sorted = t.clone();
-        sorted.sort();
-        assert_eq!(sorted, vec![0, 1, 2, 3]);
+        let pl = Playlist::new(10, 1); // wrap on by default; at 0, Forward
+        let t = prefetch_targets(&pl, 3, 3);
+        // Behind wraps past index 0 to the tail: -1,-2,-3 => 9,8,7 must be present.
+        for w in [9, 8, 7] {
+            assert!(t.contains(&w), "behind should wrap to {w}");
+        }
+        assert_eq!(t[0], 0);
         assert_no_duplicates(&t);
     }
 
     #[test]
     fn no_wrap_omits_out_of_range() {
-        let pl = Playlist::new(5, 1).with_wrap(false); // at 0, Forward
-        let r = pl.peek_random_next().unwrap();
+        let pl = Playlist::new(10, 1).with_wrap(false); // at 0, Forward
+        let pn = pl.peek_random_next().unwrap();
+        let pp = pl.peek_random_prev().unwrap();
         let t = prefetch_targets(&pl, 3, 3);
-        // No wrap: nothing behind index 0. Two ahead (one slot ceded to the random
-        // hedge), then the random target.
-        assert_eq!(&t[..3], &[0, 1, 2]);
-        assert!(t.contains(&r));
+        assert_eq!(t[0], 0);
+        assert!(t.contains(&1), "one forward look-ahead");
+        // Index 9 would only appear by wrapping -1 past the start, which no-wrap
+        // forbids — though it may legitimately appear as a random hedge.
         assert!(
-            t.iter().all(|&x| x < 5),
-            "no out-of-range / wrapped indices"
+            !t.contains(&9) || pn == 9 || pp == 9,
+            "no wrap-around behind index 0"
         );
     }
 

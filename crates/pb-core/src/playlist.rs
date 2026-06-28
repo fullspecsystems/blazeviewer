@@ -121,6 +121,29 @@ impl Playlist {
         item.map(|i| i as usize)
     }
 
+    /// The item [`Playlist::random_prev`] would land on next, *without* advancing —
+    /// the prior entry in the random walk (for `Shift+Enter`: revisit one you flew
+    /// past). Mirrors `random_prev`'s wrap (at the deck start it wraps to the tail).
+    /// Before any random nav it is the deck's first item (same as `peek_random_next`
+    /// — there is no prior yet, and we don't invent one).
+    pub fn peek_random_prev(&self) -> Option<usize> {
+        if self.len == 0 {
+            return None;
+        }
+        let item = if !self.random_started {
+            self.shuffle.at(0)
+        } else if self.shuffle_pos == 0 {
+            if self.wrap {
+                self.shuffle.at(self.len - 1)
+            } else {
+                self.shuffle.at(0)
+            }
+        } else {
+            self.shuffle.at(self.shuffle_pos - 1)
+        };
+        item.map(|i| i as usize)
+    }
+
     /// Current position within the random order.
     pub fn shuffle_pos(&self) -> usize {
         self.shuffle_pos
@@ -299,6 +322,26 @@ mod tests {
         assert_eq!(peek, pl.current());
         // Empty playlist has nothing to peek.
         assert_eq!(Playlist::new(0, 1).peek_random_next(), None);
+    }
+
+    #[test]
+    fn peek_random_prev_matches_random_prev() {
+        // Mid-deck: peek-prev == stepping back.
+        let mut pl = Playlist::new(10, 1);
+        pl.random_next();
+        pl.random_next();
+        pl.random_next();
+        let peek = pl.peek_random_prev();
+        pl.random_prev();
+        assert_eq!(peek, pl.current());
+        // At the deck start, prev wraps to the tail (same deck).
+        let mut pl = Playlist::new(6, 3);
+        pl.random_next(); // started, at pos 0
+        let peek = pl.peek_random_prev();
+        pl.random_prev(); // pos 0 -> wraps to len-1
+        assert_eq!(peek, pl.current());
+        // Empty playlist has nothing to peek.
+        assert_eq!(Playlist::new(0, 1).peek_random_prev(), None);
     }
 
     #[test]
