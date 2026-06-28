@@ -16,6 +16,7 @@ members = [
     "crates/pb-decode",
     "crates/pb-source",
     "crates/pb-render",
+    "crates/pb-ui",
     "crates/pb-app",
 ]
 # Throwaway measurement spikes have their own heavy deps; keep them out of the
@@ -34,6 +35,7 @@ pb-core = { path = "crates/pb-core" }
 pb-decode = { path = "crates/pb-decode" }
 pb-source = { path = "crates/pb-source" }
 pb-render = { path = "crates/pb-render" }
+pb-ui = { path = "crates/pb-ui" }
 
 # Release profile is tuned for the hot path: maximum optimization, fat-ish LTO,
 # single codegen unit. `panic = "unwind"` (not abort) so the decode layer can

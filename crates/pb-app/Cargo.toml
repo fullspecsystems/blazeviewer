@@ -21,6 +21,8 @@ pb-core = { workspace = true }
 pb-decode = { workspace = true }
 pb-source = { workspace = true }
 pb-render = { workspace = true }
+# The design-system crate (tokens + components) backing our egui dialogs.
+pb-ui = { workspace = true }
 winit = "0.30"
 # Rasterizes the info-panel text using the OS UI font (loaded at runtime).
 fontdue = "0.9"

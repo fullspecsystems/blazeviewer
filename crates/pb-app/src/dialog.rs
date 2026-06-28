@@ -4,8 +4,8 @@
 //! Why ours instead of a native dialog: a native Win32 TaskDialog can't show a
 //! large custom icon or follow the OS dark theme. egui gives both for free (and
 //! ports to macOS later). The dialog only runs while open — off the photo hot path.
-//! egui follows the OS light/dark setting via `ThemePreference::System`, matching
-//! the native menu + title bar.
+//! egui is locked to the OS-resolved light/dark theme at open, and the `pbui`
+//! design-system style (tokens + components) is reasserted each frame on top.
 
 use std::sync::Arc;
 
@@ -18,6 +18,7 @@ use winit::window::{Theme, Window, WindowId};
 use pb_decode::{decode_bytes, FitBox};
 
 use crate::icon::assets as icon_assets;
+use pb_ui as pbui;
 
 /// Which dialog a [`DialogWindow`] is showing.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -92,6 +93,9 @@ pub struct DialogWindow {
     egui_ctx: egui::Context,
     egui_state: egui_winit::State,
     egui_renderer: egui_wgpu::Renderer,
+    /// Whether this dialog renders in dark mode (resolved once from the OS theme at
+    /// open). Reapplied to the design-system style every frame via `pbui::apply_style`.
+    dark_ui: bool,
     icon: Option<egui::TextureHandle>,
     /// Confirm-dialog warning-triangle icon (sits inline with the "cannot be undone"
     /// line); `None` for other kinds.
@@ -170,6 +174,7 @@ impl DialogWindow {
         }
         let window = Arc::new(event_loop.create_window(attrs).ok()?);
         let size = window.inner_size();
+        let dark_ui = window.theme() != Some(Theme::Light);
 
         let instance = wgpu::Instance::default();
         let surface = instance.create_surface(window.clone()).ok()?;
@@ -202,8 +207,16 @@ impl DialogWindow {
         surface.configure(&device, &config);
 
         let egui_ctx = egui::Context::default();
-        // Follow the OS light/dark setting (egui-winit feeds the system theme).
-        egui_ctx.set_theme(egui::ThemePreference::System);
+        // Lock egui to the OS-resolved theme (explicit, not `System`) so our custom
+        // palette in `pbui::apply_style` isn't re-clobbered by egui's own per-frame
+        // light/dark resolution; then install the native UI font + design-system style.
+        egui_ctx.set_theme(if dark_ui {
+            egui::ThemePreference::Dark
+        } else {
+            egui::ThemePreference::Light
+        });
+        pbui::install_fonts(&egui_ctx);
+        pbui::apply_style(&egui_ctx, dark_ui);
         let egui_state = egui_winit::State::new(
             egui_ctx.clone(),
             egui::ViewportId::ROOT,
@@ -229,7 +242,6 @@ impl DialogWindow {
         };
         // A neutral padlock lead icon, tinted a theme-aware gray (not a from-nowhere
         // accent color) so it sits quietly and stays legible in light and dark.
-        let dark_ui = window.theme() != Some(Theme::Light);
         let lock_icon = if matches!(kind, DialogKind::Password) {
             svg_texture(
                 &egui_ctx,
@@ -253,6 +265,7 @@ impl DialogWindow {
             egui_ctx,
             egui_state,
             egui_renderer,
+            dark_ui,
             icon,
             warn_icon,
             lock_icon,
@@ -265,7 +278,10 @@ impl DialogWindow {
             submitted_password: None,
             focus_password: matches!(kind, DialogKind::Password),
         };
-        // Paint the first themed frame while hidden, then reveal — no white flash.
+        // Prime two hidden frames: the first lets egui apply its base theme, the second
+        // paints with our design-system style layered on top — so the window is already
+        // correct when revealed (no default-theme flash).
+        dlg.render();
         dlg.render();
         dlg.window.set_visible(true);
         // Grab keyboard focus so Esc / Enter act on the dialog (not the viewer, which
@@ -337,6 +353,9 @@ impl DialogWindow {
 
     /// Run egui for one frame and present it.
     pub fn render(&mut self) {
+        // Reassert the design-system style each frame (cheap; off the photo hot path)
+        // so it survives egui's own theme bookkeeping.
+        pbui::apply_style(&self.egui_ctx, self.dark_ui);
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let ctx = self.egui_ctx.clone();
         let kind = self.kind;
@@ -355,7 +374,12 @@ impl DialogWindow {
                 egui::CentralPanel::default().show(ctx, |ui| about_ui(ui, icon.as_ref()));
             }
             DialogKind::Settings => {
-                egui::CentralPanel::default().show(ctx, |ui| settings_ui(ui, draft));
+                // Pinned action bar at the bottom, then the scrolling settings page.
+                // Save / Cancel both answer the dialog → the main loop closes it.
+                confirm_click = settings_button_bar(ctx);
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::default().fill(ctx.style().visuals.panel_fill))
+                    .show(ctx, |ui| settings_ui(ui, draft));
             }
             DialogKind::Confirm => {
                 confirm_click = confirm_dialog(ctx, &msg, warn_icon.as_ref());
@@ -523,7 +547,7 @@ fn about_ui(ui: &mut egui::Ui, icon: Option<&egui::TextureHandle>) {
 //   * INLINE_ICON — a small icon inline with a secondary line (Confirm's ⚠ note).
 //   * BUTTON_*    — the bottom action buttons (size + the gap between them).
 //   * MSG_SIZE    — body/message text size.
-//   * FIELD_MARGIN — interior padding of a text input, so fields aren't cramped.
+// (Text-field padding comes from `pbui::FIELD_MARGIN` — the shared design-system token.)
 // Icon tinting: semantic icons (warning = amber) are theme-independent; neutral
 // icons (the lock) take a theme-aware gray via `neutral_icon_tint` so they stay
 // legible on both light and dark backgrounds.
@@ -534,7 +558,6 @@ const BUTTON_W: f32 = 100.0;
 const BUTTON_H: f32 = 32.0;
 const BUTTON_GAP: f32 = 12.0;
 const MSG_SIZE: f32 = 15.0;
-const FIELD_MARGIN: egui::Vec2 = egui::vec2(8.0, 7.0);
 
 /// A panel frame filled to match the window background, inset by `DIALOG_PAD` on
 /// all sides. Used for both the content panel and the bottom button bar so their
@@ -718,10 +741,8 @@ fn password_dialog(
                     // Two-line prompt: "Enter the password for" / the quoted file name.
                     ui.label(egui::RichText::new(prompt).size(MSG_SIZE));
                     ui.add_space(16.0); // breathing room between the prompt and field
-                    let field = egui::TextEdit::singleline(input)
+                    let field = pbui::text_field(input, "Password")
                         .password(true)
-                        .hint_text("Password")
-                        .margin(FIELD_MARGIN)
                         .desired_width(f32::INFINITY);
                     let resp = ui.add_enabled(!checking, field);
                     // Focus the field once when requested (dialog opened / after a
@@ -780,75 +801,238 @@ fn svg_texture(
     Some(ctx.load_texture(name, img, egui::TextureOptions::LINEAR))
 }
 
-/// The Settings form skeleton (controls aren't wired to persistence yet).
-fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
-    let cap = d.refresh_hz;
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        ui.add_space(4.0);
-        ui.heading("Settings");
-        ui.add_space(6.0);
-
-        egui::CollapsingHeader::new("Blaze (navigation feel)")
-            .default_open(true)
-            .show(ui, |ui| {
-                ui.add(
-                    egui::Slider::new(&mut d.start_speed, 1.0..=30.0)
-                        .text("Start speed (photos/sec)"),
-                );
-                ui.add(egui::Slider::new(&mut d.ramp_secs, 0.5..=10.0).text("Ramp-up time (s)"));
-                ui.horizontal(|ui| {
-                    ui.add(egui::Slider::new(&mut d.max_fps, 1..=cap).text("Max photos/sec"));
-                    ui.add(egui::DragValue::new(&mut d.max_fps).range(1..=cap));
-                });
-                ui.add(
-                    egui::Slider::new(&mut d.hold_delay_ms, 0..=1000)
-                        .text("Initial hold delay (ms)"),
-                );
+/// The pinned bottom action bar for the Settings dialog: a right-aligned
+/// `[Save] [Cancel]` pair (Save accent-filled). Wiring to persistence is a follow-up
+/// (the controls drive a skeleton draft today).
+/// Returns `Some(true)` on Save, `Some(false)` on Cancel, else `None`. Both answers
+/// close the dialog (via the main-loop's confirm-result path); persisting the draft on
+/// Save is a follow-up — the controls drive a skeleton today.
+fn settings_button_bar(ctx: &egui::Context) -> Option<bool> {
+    let p = pbui::Palette::new(ctx.style().visuals.dark_mode);
+    let mut result = None;
+    egui::TopBottomPanel::bottom("settings_bar")
+        .frame(
+            egui::Frame::default()
+                .fill(ctx.style().visuals.panel_fill)
+                .inner_margin(egui::Margin::symmetric(pbui::PAGE_MARGIN, pbui::SPACE_3)),
+        )
+        .show(ctx, |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if pbui::secondary_button(ui, "Cancel").clicked() {
+                    result = Some(false);
+                }
+                ui.add_space(pbui::SPACE_2);
+                if pbui::primary_button(ui, &p, "Save").clicked() {
+                    result = Some(true);
+                }
             });
-
-        egui::CollapsingHeader::new("Browsing")
-            .default_open(true)
-            .show(ui, |ui| {
-                ui.checkbox(&mut d.recursive, "Open folders recursively by default");
-            });
-
-        egui::CollapsingHeader::new("Display")
-            .default_open(true)
-            .show(ui, |ui| {
-                egui::ComboBox::from_label("Default scale mode")
-                    .selected_text(["Fit", "Fill", "Original"][d.scale_mode])
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut d.scale_mode, 0, "Fit");
-                        ui.selectable_value(&mut d.scale_mode, 1, "Fill");
-                        ui.selectable_value(&mut d.scale_mode, 2, "Original");
-                    });
-                ui.horizontal(|ui| {
-                    ui.label("Letterbox color");
-                    ui.color_edit_button_rgb(&mut d.letterbox);
-                });
-                ui.checkbox(&mut d.start_fullscreen, "Start in fullscreen");
-            });
-
-        egui::CollapsingHeader::new("Keyboard")
-            .default_open(false)
-            .show(ui, |ui| {
-                ui.label("Keybinding editor — coming soon.");
-            });
-
-        egui::CollapsingHeader::new("System")
-            .default_open(false)
-            .show(ui, |ui| {
-                let _ = ui.button("Set as default photo viewer…");
-                let _ = ui.button("Reset to defaults");
-            });
-
-        ui.add_space(10.0);
-        ui.separator();
-        ui.horizontal(|ui| {
-            let _ = ui.button("Save");
-            let _ = ui.button("Cancel");
         });
-        ui.add_space(4.0);
-        ui.weak("Skeleton — controls aren't wired to settings yet.");
-    });
+    result
+}
+
+/// The Settings form, laid out as Windows-11-style **setting cards** — a section
+/// label over each group, every row a card with `title + dim subtitle` on the left and
+/// a right-aligned control. Built on the `pbui` design system so spacing, radii, and
+/// the control height are consistent. (Controls drive a skeleton draft; persistence is
+/// a follow-up.)
+fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
+    let p = pbui::Palette::new(ui.visuals().dark_mode);
+    let cap = d.refresh_hz;
+
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            egui::Frame::none()
+                .inner_margin(egui::Margin {
+                    left: pbui::PAGE_MARGIN,
+                    right: pbui::PAGE_MARGIN,
+                    top: pbui::SPACE_4,
+                    bottom: pbui::SPACE_6,
+                })
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new("Settings").size(30.0).strong());
+                    ui.add_space(pbui::SPACE_1);
+                    ui.label(
+                        egui::RichText::new(
+                            "Tune how fast you fly through photos and how they\u{2019}re shown.",
+                        )
+                        .color(p.text_secondary),
+                    );
+
+                    // ── Navigation feel ──────────────────────────────────────
+                    pbui::section_label(ui, &p, "Navigation feel");
+                    pbui::card(ui, &p, |ui| {
+                        pbui::card_row(
+                            ui,
+                            &p,
+                            None,
+                            "Start speed",
+                            Some("Photos per second when you first hold a key"),
+                            |ui| {
+                                ui.add(egui::Slider::new(&mut d.start_speed, 1.0..=30.0).suffix("/s"));
+                            },
+                        );
+                    });
+                    ui.add_space(pbui::SPACE_2);
+                    pbui::card(ui, &p, |ui| {
+                        pbui::card_row(
+                            ui,
+                            &p,
+                            None,
+                            "Ramp-up time",
+                            Some("Seconds to accelerate from start speed to max"),
+                            |ui| {
+                                ui.add(egui::Slider::new(&mut d.ramp_secs, 0.5..=10.0).suffix(" s"));
+                            },
+                        );
+                    });
+                    ui.add_space(pbui::SPACE_2);
+                    pbui::card(ui, &p, |ui| {
+                        pbui::card_row(
+                            ui,
+                            &p,
+                            None,
+                            "Max speed",
+                            Some("Upper limit while holding (capped at the refresh rate)"),
+                            |ui| {
+                                ui.add(egui::Slider::new(&mut d.max_fps, 1..=cap).suffix("/s"));
+                            },
+                        );
+                    });
+                    ui.add_space(pbui::SPACE_2);
+                    pbui::card(ui, &p, |ui| {
+                        pbui::card_row(
+                            ui,
+                            &p,
+                            None,
+                            "Hold delay",
+                            Some("Pause before a held key starts repeating"),
+                            |ui| {
+                                ui.add(egui::Slider::new(&mut d.hold_delay_ms, 0..=1000).suffix(" ms"));
+                            },
+                        );
+                    });
+
+                    // ── Browsing ─────────────────────────────────────────────
+                    pbui::section_label(ui, &p, "Browsing");
+                    pbui::card(ui, &p, |ui| {
+                        pbui::card_row(
+                            ui,
+                            &p,
+                            None,
+                            "Open folders recursively",
+                            Some("Include photos in subfolders by default"),
+                            |ui| {
+                                pbui::toggle_with_label(ui, &p, &mut d.recursive);
+                            },
+                        );
+                    });
+
+                    // ── Display ──────────────────────────────────────────────
+                    pbui::section_label(ui, &p, "Display");
+                    pbui::card(ui, &p, |ui| {
+                        pbui::card_row(
+                            ui,
+                            &p,
+                            None,
+                            "Default scale mode",
+                            Some("How a photo fits the window"),
+                            |ui| {
+                                egui::ComboBox::from_id_salt("scale_mode")
+                                    .width(150.0)
+                                    .selected_text(["Fit", "Fill", "Original"][d.scale_mode])
+                                    .show_ui(ui, |ui| {
+                                        // The popup is a top-level Area; re-assert our
+                                        // theme so options match the dialog (defensive —
+                                        // the ctx style already matches here).
+                                        pbui::apply_to_ui(ui, p.dark);
+                                        ui.selectable_value(&mut d.scale_mode, 0, "Fit");
+                                        ui.selectable_value(&mut d.scale_mode, 1, "Fill");
+                                        ui.selectable_value(&mut d.scale_mode, 2, "Original");
+                                    });
+                            },
+                        );
+                    });
+                    ui.add_space(pbui::SPACE_2);
+                    pbui::card(ui, &p, |ui| {
+                        pbui::card_row(
+                            ui,
+                            &p,
+                            None,
+                            "Letterbox color",
+                            Some("Fills the screen around a photo that doesn\u{2019}t cover it"),
+                            |ui| {
+                                ui.color_edit_button_rgb(&mut d.letterbox);
+                            },
+                        );
+                    });
+                    ui.add_space(pbui::SPACE_2);
+                    pbui::card(ui, &p, |ui| {
+                        pbui::card_row(
+                            ui,
+                            &p,
+                            None,
+                            "Start in fullscreen",
+                            Some("Open the viewer fullscreen on launch"),
+                            |ui| {
+                                pbui::toggle_with_label(ui, &p, &mut d.start_fullscreen);
+                            },
+                        );
+                    });
+
+                    // ── Keyboard ─────────────────────────────────────────────
+                    pbui::section_label(ui, &p, "Keyboard");
+                    pbui::card(ui, &p, |ui| {
+                        pbui::card_row(
+                            ui,
+                            &p,
+                            None,
+                            "Keyboard shortcuts",
+                            Some("Customize navigation and command keys"),
+                            |ui| {
+                                ui.label(
+                                    egui::RichText::new("Coming soon").color(p.text_secondary),
+                                );
+                            },
+                        );
+                    });
+
+                    // ── System ───────────────────────────────────────────────
+                    pbui::section_label(ui, &p, "System");
+                    pbui::card(ui, &p, |ui| {
+                        pbui::card_row(
+                            ui,
+                            &p,
+                            None,
+                            "Default photo viewer",
+                            Some("Open photos with PhotoBlaze by default"),
+                            |ui| {
+                                let _ = pbui::secondary_button(ui, "Set default\u{2026}");
+                            },
+                        );
+                    });
+                    ui.add_space(pbui::SPACE_2);
+                    pbui::card(ui, &p, |ui| {
+                        pbui::card_row(
+                            ui,
+                            &p,
+                            None,
+                            "Reset settings",
+                            Some("Restore every setting to its default"),
+                            |ui| {
+                                let _ = pbui::secondary_button(ui, "Reset\u{2026}");
+                            },
+                        );
+                    });
+
+                    ui.add_space(pbui::SPACE_4);
+                    ui.label(
+                        egui::RichText::new(
+                            "Skeleton \u{2014} controls aren\u{2019}t wired to settings yet.",
+                        )
+                        .size(12.5)
+                        .color(p.text_secondary),
+                    );
+                });
+        });
 }

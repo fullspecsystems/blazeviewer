@@ -1,0 +1,17 @@
+[package]
+name = "pb-ui"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors = ["JD Lien <jd@jdlien.com>"]
+description = "PhotoBlaze design system: egui tokens + components (cards, toggles, buttons) and a Windows-tracking light/dark theme."
+
+[dependencies]
+# The chrome toolkit. Pinned to match pb-app's egui (0.29 ↔ wgpu 22 ↔ winit 0.30).
+egui = "0.29"
+
+[dev-dependencies]
+# The component gallery example (`cargo run -p pb-ui --example gallery`) — a dev-only
+# Storybook-style preview of every token + component. eframe supplies the window +
+# egui loop (glow backend by default; no wgpu entanglement). Never shipped in pb-app.
+eframe = "0.29"

@@ -1,0 +1,468 @@
+//! `pb_ui` — the **design-system** crate for PhotoBlaze's egui chrome.
+//!
+//! The web-world instinct, applied to egui: one place for **tokens** (a 4px spacing
+//! scale, corner radii, a uniform 32px control height, a light/dark palette, the
+//! system font) and a handful of composable **components** (section labels, a
+//! settings *card*, a card *row*, a toggle switch, primary/secondary buttons) so
+//! every dialog reads as one family instead of each form inventing its own spacing.
+//!
+//! The visual target is the **Windows 11 settings-card** look (think the new Notepad
+//! settings page): rounded cards holding `title + dim subtitle` on the left and a
+//! right-aligned control, grouped under section labels, tracking the OS light/dark
+//! theme. We can't use the actual WinUI `SettingsCard` control from Rust, but the
+//! look is a layout pattern, not native magic — so we reproduce it here.
+//!
+//! This crate has no app dependencies (just `egui`) so it stays a reusable, testable
+//! unit and powers the standalone gallery (`cargo run -p pb-ui --example gallery`).
+//! It runs only while a dialog is open — **off the photo hot path** — so the per-frame
+//! [`apply_style`] (cheap) and the one-time [`install_fonts`] (a font-file read) cost
+//! nothing the viewer cares about.
+
+use egui::{Color32, FontFamily, FontId, Margin, Rounding, Stroke, TextStyle};
+
+// ── Spacing scale (4px grid, named like a type/space scale) ──────────────────
+pub const SPACE_1: f32 = 4.0;
+pub const SPACE_2: f32 = 8.0;
+pub const SPACE_3: f32 = 12.0;
+pub const SPACE_4: f32 = 16.0;
+pub const SPACE_6: f32 = 24.0;
+
+// ── Corner radii ─────────────────────────────────────────────────────────────
+/// Controls (buttons, fields, combos) — the Fluent control radius.
+pub const RADIUS_CONTROL: f32 = 4.0;
+/// Cards / surfaces — the Fluent card radius.
+pub const RADIUS_CARD: f32 = 8.0;
+
+// ── Sizing ───────────────────────────────────────────────────────────────────
+/// Uniform interactive control height (Fluent's default). Setting this once is the
+/// single biggest fix for "every control is a different size".
+pub const CONTROL_H: f32 = 32.0;
+/// Left/right inset of a settings page's content column.
+pub const PAGE_MARGIN: f32 = 28.0;
+/// Standard dialog action-button width.
+pub const BUTTON_W: f32 = 96.0;
+/// Interior padding of a text field — balanced on all four sides so it reads like the
+/// other 32px controls instead of a cramped single line.
+pub const FIELD_MARGIN: egui::Margin = egui::Margin {
+    left: 8.0,
+    right: 8.0,
+    top: 8.0,
+    bottom: 8.0,
+};
+
+/// Below this content width a [`card_row`] **stacks** (title, description, then the
+/// control on its own line) instead of placing the control on the right — the WinUI
+/// `SettingsCard` adaptive-wrap idiom, so cards don't fall apart at narrow widths.
+pub const CARD_WRAP_WIDTH: f32 = 430.0;
+/// Width reserved for a card row's right-hand control in the wide (side-by-side) layout,
+/// so a long description wraps in the header rather than colliding with the control.
+const CONTROL_RESERVE: f32 = 260.0;
+/// Minimum width the header block keeps in the wide layout before the row would stack.
+const HEADER_MIN: f32 = 150.0;
+
+/// The resolved color roles for one theme. Built from a single `dark` flag so the
+/// whole palette stays internally consistent and tracks the OS setting.
+#[derive(Clone, Copy)]
+pub struct Palette {
+    pub dark: bool,
+    /// Page / window background (the Mica-equivalent base).
+    pub page: Color32,
+    /// A settings card's fill (sits subtly above `page`).
+    pub card: Color32,
+    /// A card's hairline border.
+    pub card_stroke: Color32,
+    /// A resting control (button/combo/field) fill.
+    pub control: Color32,
+    /// A hovered/active control fill.
+    pub control_hover: Color32,
+    /// Primary body text.
+    pub text: Color32,
+    /// Secondary text (a card subtitle, a hint).
+    pub text_secondary: Color32,
+    /// The accent (primary buttons, selection, slider fill, a toggle's "on" track).
+    pub accent: Color32,
+    /// A toggle switch's "off" track.
+    pub toggle_off: Color32,
+}
+
+impl Palette {
+    pub fn new(dark: bool) -> Self {
+        if dark {
+            Palette {
+                dark,
+                page: Color32::from_gray(0x20),
+                card: Color32::from_gray(0x2b),
+                card_stroke: Color32::from_rgba_unmultiplied(255, 255, 255, 14),
+                control: Color32::from_gray(0x35),
+                control_hover: Color32::from_gray(0x3f),
+                text: Color32::from_gray(0xe8),
+                text_secondary: Color32::from_gray(0x9e),
+                // Windows lightens the accent on dark backgrounds for contrast.
+                accent: Color32::from_rgb(0x4c, 0xa0, 0xff),
+                toggle_off: Color32::from_gray(0x5a),
+            }
+        } else {
+            Palette {
+                dark,
+                page: Color32::from_gray(0xf3),
+                card: Color32::from_gray(0xfb),
+                card_stroke: Color32::from_rgba_unmultiplied(0, 0, 0, 18),
+                control: Color32::from_gray(0xff),
+                control_hover: Color32::from_gray(0xf0),
+                text: Color32::from_gray(0x1a),
+                text_secondary: Color32::from_gray(0x5e),
+                accent: Color32::from_rgb(0x00, 0x67, 0xc0),
+                toggle_off: Color32::from_gray(0x8a),
+            }
+        }
+    }
+}
+
+/// The app's type scale, mapped onto egui's named text styles.
+fn text_styles() -> std::collections::BTreeMap<TextStyle, FontId> {
+    [
+        (TextStyle::Heading, FontId::new(26.0, FontFamily::Proportional)),
+        (TextStyle::Body, FontId::new(14.5, FontFamily::Proportional)),
+        (TextStyle::Button, FontId::new(14.5, FontFamily::Proportional)),
+        (TextStyle::Small, FontId::new(12.5, FontFamily::Proportional)),
+        (TextStyle::Monospace, FontId::new(13.0, FontFamily::Monospace)),
+    ]
+    .into()
+}
+
+/// Build the egui [`Visuals`](egui::Visuals) for a palette: card/page fills, control
+/// fills, accent-driven selection + slider fill, and a single control corner radius.
+fn visuals(p: &Palette) -> egui::Visuals {
+    let mut v = if p.dark {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    };
+    v.panel_fill = p.page;
+    v.window_fill = p.page;
+    v.window_rounding = Rounding::same(RADIUS_CARD);
+    v.window_stroke = Stroke::new(1.0, p.card_stroke);
+    // Text-input / "extreme" backgrounds sit at control fill.
+    v.extreme_bg_color = p.control;
+    v.faint_bg_color = if p.dark {
+        Color32::from_gray(0x28)
+    } else {
+        Color32::from_gray(0xee)
+    };
+
+    let radius = Rounding::same(RADIUS_CONTROL);
+    // Resting label text.
+    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, p.text);
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.card_stroke);
+    // Resting interactive control (button/combo/field).
+    v.widgets.inactive.bg_fill = p.control;
+    v.widgets.inactive.weak_bg_fill = p.control;
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0, p.card_stroke);
+    v.widgets.inactive.rounding = radius;
+    v.widgets.inactive.fg_stroke = Stroke::new(1.0, p.text);
+    // Hovered.
+    v.widgets.hovered.bg_fill = p.control_hover;
+    v.widgets.hovered.weak_bg_fill = p.control_hover;
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, p.accent);
+    v.widgets.hovered.rounding = radius;
+    v.widgets.hovered.fg_stroke = Stroke::new(1.0, p.text);
+    // Active (pressed).
+    v.widgets.active.bg_fill = p.control_hover;
+    v.widgets.active.weak_bg_fill = p.control_hover;
+    v.widgets.active.rounding = radius;
+    v.widgets.active.fg_stroke = Stroke::new(1.0, p.text);
+    // Open (e.g. an expanded combo).
+    v.widgets.open.bg_fill = p.control;
+    v.widgets.open.weak_bg_fill = p.control;
+    v.widgets.open.rounding = radius;
+
+    // Accent: text selection, the slider's trailing fill, links.
+    v.selection.bg_fill = p.accent.linear_multiply(0.55);
+    v.selection.stroke = Stroke::new(1.0, p.text);
+    v.slider_trailing_fill = true;
+    v.hyperlink_color = p.accent;
+    v
+}
+
+/// Build the full design-system [`Style`](egui::Style) for a theme: the type scale,
+/// the spacing tokens, and the palette-driven visuals. Used to set the style on a
+/// whole context ([`apply_style`]) or scope it to a single [`Ui`](egui::Ui)
+/// ([`apply_to_ui`] — e.g. a light and a dark gallery column side by side).
+pub fn style(dark: bool) -> egui::Style {
+    let p = Palette::new(dark);
+    let spacing = egui::style::Spacing {
+        item_spacing: egui::vec2(SPACE_2, SPACE_2),
+        button_padding: egui::vec2(SPACE_3, SPACE_2),
+        interact_size: egui::vec2(40.0, CONTROL_H),
+        indent: SPACE_6,
+        slider_width: 180.0,
+        combo_width: 160.0,
+        ..Default::default()
+    };
+    egui::Style {
+        text_styles: text_styles(),
+        spacing,
+        visuals: visuals(&p),
+        ..Default::default()
+    }
+}
+
+/// Apply the design system to an entire [`Context`](egui::Context). Cheap (builds a
+/// `Style`); call at the top of every dialog frame so the look is stable regardless of
+/// egui's own light/dark resolution. Fonts are installed separately ([`install_fonts`]).
+pub fn apply_style(ctx: &egui::Context, dark: bool) {
+    ctx.set_style(style(dark));
+}
+
+/// Scope the design system to a single [`Ui`](egui::Ui) — so two differently-themed
+/// regions (e.g. the gallery's light and dark columns) can render in one window.
+pub fn apply_to_ui(ui: &mut egui::Ui, dark: bool) {
+    *ui.style_mut() = style(dark);
+}
+
+/// Load the OS UI font (Segoe UI on Windows) as the proportional family, once, so the
+/// chrome reads as a native Windows app rather than egui's default face. Falls back to
+/// egui's bundled font silently if the file can't be read (e.g. non-Windows). This is
+/// a read of a system font file — never a photo, never a write — so it's outside the
+/// no-trace view path.
+pub fn install_fonts(ctx: &egui::Context) {
+    // Candidate native UI faces, best first.
+    const CANDIDATES: &[&str] = &[
+        r"C:\Windows\Fonts\segoeui.ttf",
+        r"C:\Windows\Fonts\SegoeUI.ttf",
+    ];
+    for path in CANDIDATES {
+        if let Ok(bytes) = std::fs::read(path) {
+            let mut fonts = egui::FontDefinitions::default();
+            fonts
+                .font_data
+                .insert("system-ui".to_owned(), egui::FontData::from_owned(bytes));
+            fonts
+                .families
+                .entry(FontFamily::Proportional)
+                .or_default()
+                .insert(0, "system-ui".to_owned());
+            ctx.set_fonts(fonts);
+            return;
+        }
+    }
+}
+
+// ── Components ───────────────────────────────────────────────────────────────
+
+/// A section label above a group of cards (e.g. "Navigation feel").
+pub fn section_label(ui: &mut egui::Ui, p: &Palette, text: &str) {
+    ui.add_space(SPACE_4);
+    ui.label(egui::RichText::new(text).size(13.5).strong().color(p.text));
+    ui.add_space(SPACE_2);
+}
+
+/// A rounded settings **card** surface (the WinUI `SettingsCard` look): card fill, a
+/// hairline border, the card radius, and comfortable interior padding. Holds one or
+/// more [`card_row`]s.
+pub fn card<R>(ui: &mut egui::Ui, p: &Palette, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::Frame::none()
+        .fill(p.card)
+        .stroke(Stroke::new(1.0, p.card_stroke))
+        .rounding(Rounding::same(RADIUS_CARD))
+        .inner_margin(Margin::symmetric(SPACE_4, SPACE_3))
+        .show(ui, |ui| {
+            // Fill the parent's width so every card is the same width, rather than
+            // egui's default shrink-to-content (which makes each card a different size).
+            ui.set_min_width(ui.available_width());
+            add(ui)
+        })
+        .inner
+}
+
+/// One row inside a [`card`]: an optional lead icon, a `title` with an optional dim
+/// `desc` subtitle, and a `control`. **Responsive** (a "size class"): when the card is
+/// wide enough the control sits on the right and a long description wraps in the header;
+/// when narrower than [`CARD_WRAP_WIDTH`] the row stacks (title, description, then the
+/// control on its own line) so nothing collides. Returns whatever the control closure
+/// returns (e.g. a [`Response`](egui::Response)).
+pub fn card_row<R>(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    icon: Option<&egui::TextureHandle>,
+    title: &str,
+    desc: Option<&str>,
+    control: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let mut out = None;
+    if ui.available_width() < CARD_WRAP_WIDTH {
+        // Narrow: stack the control beneath the header, full width, left-aligned. The
+        // header gets its own vertical so its tighter line spacing doesn't leak.
+        ui.vertical(|ui| {
+            ui.vertical(|ui| row_header(ui, p, icon, title, desc));
+            ui.add_space(SPACE_2);
+            out = Some(control(ui));
+        });
+    } else {
+        // Wide: a width-capped header column (its description wraps within the cap) with
+        // the control pinned right. Capping the header's width — rather than the earlier
+        // `allocate_ui_with_layout(y=0)`, which centered a zero-height region in the
+        // row's full available height and left a tall empty band — keeps the row only as
+        // tall as its content while still leaving the control room not to collide.
+        ui.horizontal(|ui| {
+            ui.set_min_height(CONTROL_H);
+            let header_w = (ui.available_width() - CONTROL_RESERVE).max(HEADER_MIN);
+            ui.vertical(|ui| {
+                ui.set_max_width(header_w);
+                row_header(ui, p, icon, title, desc);
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                out = Some(control(ui));
+            });
+        });
+    }
+    out.expect("card_row control closure always runs")
+}
+
+/// The left side of a card row: an optional lead icon beside the `title`, with an
+/// optional dim `desc` beneath it (the description wraps to the available width). Sets
+/// tight title↔description spacing on its own `Ui` (callers scope it in a vertical).
+fn row_header(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    icon: Option<&egui::TextureHandle>,
+    title: &str,
+    desc: Option<&str>,
+) {
+    ui.spacing_mut().item_spacing.y = 2.0;
+    ui.horizontal(|ui| {
+        if let Some(t) = icon {
+            icon_sized(ui, t, 20.0);
+            ui.add_space(SPACE_4);
+        }
+        ui.label(egui::RichText::new(title).color(p.text));
+    });
+    if let Some(d) = desc {
+        ui.label(egui::RichText::new(d).size(12.5).color(p.text_secondary));
+    }
+}
+
+/// A Windows/iOS-style **toggle switch** (egui has no built-in one). Animates the knob
+/// and fills the track with the accent when on. Returns a click [`Response`](egui::Response).
+pub fn toggle(ui: &mut egui::Ui, p: &Palette, on: &mut bool) -> egui::Response {
+    let desired = egui::vec2(40.0, 22.0);
+    let (rect, mut resp) = ui.allocate_exact_size(desired, egui::Sense::click());
+    if resp.clicked() {
+        *on = !*on;
+        resp.mark_changed();
+    }
+    if ui.is_rect_visible(rect) {
+        let how = ui.ctx().animate_bool(resp.id, *on);
+        let radius = rect.height() * 0.5;
+        let track = lerp_color(p.toggle_off, p.accent, how);
+        let painter = ui.painter();
+        painter.rect(rect, Rounding::same(radius), track, Stroke::NONE);
+        let knob_x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), how);
+        painter.circle(
+            egui::pos2(knob_x, rect.center().y),
+            radius * 0.72,
+            Color32::WHITE,
+            Stroke::NONE,
+        );
+    }
+    resp
+}
+
+/// A toggle plus its trailing "On"/"Off" text (the Notepad row look), as one
+/// self-contained `[switch] On` unit — so it reads correctly whether a [`card_row`]
+/// places it on the right (wide) or beneath the header (stacked).
+pub fn toggle_with_label(ui: &mut egui::Ui, p: &Palette, on: &mut bool) -> egui::Response {
+    ui.horizontal(|ui| {
+        let resp = toggle(ui, p, on);
+        ui.add_space(SPACE_2);
+        let label = if *on { "On" } else { "Off" };
+        ui.label(egui::RichText::new(label).color(p.text_secondary));
+        resp
+    })
+    .inner
+}
+
+/// The accent-filled **primary** action button (e.g. Save).
+pub fn primary_button(ui: &mut egui::Ui, p: &Palette, text: &str) -> egui::Response {
+    let btn = egui::Button::new(egui::RichText::new(text).color(Color32::WHITE))
+        .fill(p.accent)
+        .min_size(egui::vec2(BUTTON_W, CONTROL_H));
+    ui.add(btn)
+}
+
+/// A neutral **secondary** action button (e.g. Cancel) — inherits the themed control fill.
+pub fn secondary_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    ui.add(egui::Button::new(text).min_size(egui::vec2(BUTTON_W, CONTROL_H)))
+}
+
+/// A **destructive** action button (e.g. Delete) — a red fill with white text.
+pub fn danger_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let btn = egui::Button::new(egui::RichText::new(text).color(Color32::WHITE))
+        .fill(Color32::from_rgb(200, 55, 55))
+        .min_size(egui::vec2(BUTTON_W, CONTROL_H));
+    ui.add(btn)
+}
+
+/// A standard single-line **text field** with balanced [`FIELD_MARGIN`] padding so it
+/// matches the 32px control height (rather than egui's cramped default). Chain
+/// `.desired_width(..)`, `.password(true)`, `.hint_text(..)`, etc. on the result.
+pub fn text_field<'t>(text: &'t mut String, hint: &str) -> egui::TextEdit<'t> {
+    egui::TextEdit::singleline(text)
+        .hint_text(hint.to_owned())
+        .margin(FIELD_MARGIN)
+}
+
+/// Draw an icon texture at a fixed `height`, preserving aspect ratio.
+pub fn icon_sized(ui: &mut egui::Ui, tex: &egui::TextureHandle, height: f32) {
+    let size = tex.size_vec2();
+    let w = if size.y > 0.0 {
+        height * size.x / size.y
+    } else {
+        height
+    };
+    ui.image(egui::load::SizedTexture::new(tex.id(), egui::vec2(w, height)));
+}
+
+/// Linear blend of two colors in sRGB space, `t` in `0.0..=1.0`.
+fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
+    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgba_unmultiplied(
+        l(a.r(), b.r()),
+        l(a.g(), b.g()),
+        l(a.b(), b.b()),
+        l(a.a(), b.a()),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn palette_tracks_theme() {
+        let dark = Palette::new(true);
+        let light = Palette::new(false);
+        assert!(dark.dark && !light.dark);
+        // The page always sits "below" the card: darker than the card on dark, lighter
+        // than the card on light.
+        assert!(dark.page.r() < dark.card.r());
+        assert!(light.page.r() < light.card.r());
+    }
+
+    #[test]
+    fn lerp_color_endpoints() {
+        let a = Color32::from_rgb(0, 0, 0);
+        let b = Color32::from_rgb(100, 200, 50);
+        assert_eq!(lerp_color(a, b, 0.0), a);
+        assert_eq!(lerp_color(a, b, 1.0), b);
+        // Midpoint is the average.
+        assert_eq!(lerp_color(a, b, 0.5), Color32::from_rgb(50, 100, 25));
+    }
+
+    #[test]
+    fn style_sets_control_height() {
+        let s = style(true);
+        assert_eq!(s.spacing.interact_size.y, CONTROL_H);
+        assert!(s.visuals.dark_mode);
+    }
+}
