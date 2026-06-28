@@ -250,6 +250,67 @@ fn decode_bytes_inner(
     Err(DecodeError::Unsupported)
 }
 
+/// Decode in-memory image `bytes` the way [`decode_image_file`] would, but taking
+/// `name` (a file name or path — anything carrying an extension) purely as the
+/// routing hint for the formats a content-sniff can't identify: RAW (TIFF-shaped),
+/// SVG (XML text), and TGA (no magic number). Everything else falls through to the
+/// content-sniffing [`decode_bytes`].
+///
+/// This is the entry point for sources whose bytes don't live in a standalone file
+/// — an image *inside a ZIP archive*, say, where the entry name carries the
+/// extension but `std::fs::read` never runs. It is the in-memory twin of
+/// [`decode_image_file`]; that function is now just `fs::read` + this.
+///
+/// **Panic-safe** in the same way as [`decode_image_file`].
+pub fn decode_named_bytes(
+    name: &str,
+    bytes: &[u8],
+    fit: Option<FitBox>,
+    allow_preview: bool,
+) -> Result<DecodedImage, DecodeError> {
+    catch_panics(|| decode_named_bytes_inner(name, bytes, fit, allow_preview))
+}
+
+fn decode_named_bytes_inner(
+    name: &str,
+    bytes: &[u8],
+    fit: Option<FitBox>,
+    allow_preview: bool,
+) -> Result<DecodedImage, DecodeError> {
+    let ext = ext_of(name);
+    let req = DecodeRequest {
+        bytes,
+        fit,
+        allow_preview,
+    };
+    // RAW (TIFF-shaped) and SVG (XML text) can't be told apart from a plain TIFF
+    // or arbitrary text by a magic sniff, so route them by extension; everything
+    // else sniffs by content.
+    if raw::is_raw_extension(&ext) {
+        return RawPreviewDecoder.decode(&req);
+    }
+    if matches!(ext.as_str(), "svg" | "svgz") {
+        return SvgDecoder.decode(&req);
+    }
+    // TGA is headerless (no magic number), so content-sniffing can't find it —
+    // route by extension with an explicit format hint.
+    if ext == "tga" {
+        return image_backend::decode_tga(bytes, fit);
+    }
+    decode_bytes_inner(bytes, fit, allow_preview)
+}
+
+/// The lowercased extension (no dot) of a file name or path, or `""` if none.
+/// Uses `Path` so only the last path component's extension counts (e.g. a ZIP
+/// entry name like `trip/day1/IMG.TGA` → `tga`).
+fn ext_of(name: &str) -> String {
+    Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
 /// Read a file from disk and decode it to an upright RGBA image, downscaled to
 /// fit `fit` (the display size) when provided. The single entry point the app's
 /// decode pool calls; it picks the backend (by extension for the ambiguous RAW/
@@ -274,31 +335,10 @@ fn decode_image_file_inner(
 ) -> Result<DecodedImage, DecodeError> {
     let bytes =
         std::fs::read(path).map_err(|e| DecodeError::Corrupt(format!("read error: {e}")))?;
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase())
-        .unwrap_or_default();
-    let req = DecodeRequest {
-        bytes: &bytes,
-        fit,
-        allow_preview,
-    };
-    // RAW (TIFF-shaped) and SVG (XML text) can't be told apart from a plain TIFF
-    // or arbitrary text by a magic sniff, so route them by extension; everything
-    // else sniffs by content.
-    if raw::is_raw_extension(&ext) {
-        return RawPreviewDecoder.decode(&req);
-    }
-    if matches!(ext.as_str(), "svg" | "svgz") {
-        return SvgDecoder.decode(&req);
-    }
-    // TGA is headerless (no magic number), so content-sniffing can't find it —
-    // route by extension with an explicit format hint.
-    if ext == "tga" {
-        return image_backend::decode_tga(&bytes, fit);
-    }
-    decode_bytes_inner(&bytes, fit, allow_preview)
+    // The path's file name carries the extension the ambiguous formats route on;
+    // everything else is content-sniffed. Shared with the archive path via
+    // `decode_named_bytes_inner` so the routing has one home.
+    decode_named_bytes_inner(&path.to_string_lossy(), &bytes, fit, allow_preview)
 }
 
 /// Run a decode, converting a panic into a `DecodeError::Corrupt` instead of
@@ -420,6 +460,51 @@ mod tests {
         assert_eq!(img.codec, "TGA");
         assert_eq!((img.orig_width, img.orig_height), (3, 2));
         assert!(img.is_well_formed());
+    }
+
+    #[test]
+    fn named_bytes_routes_tga_by_name_hint() {
+        // TGA can't be content-sniffed; from a bare byte slice it decodes only when
+        // the caller supplies a name carrying the .tga extension — the ZIP-entry
+        // case, where there is no file path to route on.
+        let bytes = encode(image::ImageFormat::Tga);
+        let img = decode_named_bytes("photo.tga", &bytes, None, false).expect("tga decode");
+        assert_eq!(img.codec, "TGA");
+        assert_eq!((img.orig_width, img.orig_height), (3, 2));
+        assert!(img.is_well_formed());
+    }
+
+    #[test]
+    fn named_bytes_uses_only_the_last_component_extension() {
+        // An archive-relative hint may carry directories; only the final
+        // component's extension (case-insensitive) decides routing.
+        let bytes = encode(image::ImageFormat::Tga);
+        let img = decode_named_bytes("trip/day1/IMG.TGA", &bytes, None, false).expect("tga");
+        assert_eq!(img.codec, "TGA");
+    }
+
+    #[test]
+    fn named_bytes_falls_back_to_content_sniff_when_name_is_unhelpful() {
+        // A magic-sniffable format still decodes when the name has no extension.
+        let bytes = encode(image::ImageFormat::Png);
+        let img = decode_named_bytes("noextension", &bytes, None, false).expect("png");
+        assert_eq!(img.codec, "PNG");
+    }
+
+    #[test]
+    fn named_bytes_routes_svg_by_name() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="8"><rect width="10" height="8" fill="red"/></svg>"#;
+        let img = decode_named_bytes("logo.svg", svg, None, false).expect("svg");
+        assert_eq!(img.codec, "SVG");
+        assert_eq!((img.orig_width, img.orig_height), (10, 8));
+    }
+
+    #[test]
+    fn ext_of_extracts_lowercased_last_extension() {
+        assert_eq!(ext_of("a.JPG"), "jpg");
+        assert_eq!(ext_of("trip/day1/IMG.tga"), "tga");
+        assert_eq!(ext_of("noext"), "");
+        assert_eq!(ext_of(".hidden"), "");
     }
 
     #[test]

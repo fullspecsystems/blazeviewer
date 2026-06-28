@@ -1,0 +1,14 @@
+[package]
+name = "pb-source"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Photo source abstraction for PhotoBlaze: a uniform 'encoded bytes + identity for item i' over a filesystem listing or a ZIP archive. RAM-only, read-only on the view path (honors the no-trace privacy guarantee)."
+
+[dependencies]
+# ZIP archive reading. Lean, pure-Rust feature set: `deflate` (miniz_oxide — the
+# only common photo-zip codec besides stored) + `aes-crypto` (pure-Rust AES for
+# WinZip-AES-encrypted archives). bzip2/zstd are intentionally omitted: they're
+# rare for already-compressed photos and would pull C build deps — exactly the
+# Windows build-risk the project avoids (see the libheif notes in CLAUDE.md).
+zip = { version = "2", default-features = false, features = ["deflate", "aes-crypto"] }

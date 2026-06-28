@@ -45,12 +45,13 @@ use winit::window::{Icon, Window, WindowId};
 use pb_core::open::{self, LaunchInput, Source};
 use pb_core::{full_ring, prefetch_targets, Playlist, ResidentRing};
 use pb_decode::{
-    decode_bytes, decode_image_file, is_supported_extension, read_exif_fields, DecodedImage,
-    FitBox, PixelFormat,
+    decode_bytes, decode_named_bytes, is_supported_extension, read_exif_fields, DecodeError,
+    DecodedImage, FitBox, PixelFormat,
 };
 use pb_render::{
     test_pattern, Renderer, Rotation, ScaleMode, ViewTransform, WgpuRenderer, MAX_ZOOM, MIN_ZOOM,
 };
+use pb_source::{FsSource, PhotoSource, ZipSource};
 
 mod clipboard;
 #[cfg(windows)]
@@ -230,14 +231,26 @@ enum Nav {
 }
 
 /// Build a photo's info panel data from its path + decoded image.
-fn meta_for_path(path: &Path, root: &Path, img: &DecodedImage) -> PhotoMeta {
-    let rel = match path.strip_prefix(root) {
+/// A path shown relative to the scan root (forward-slashed), or its file name if
+/// it isn't under the root.
+fn rel_to_root(path: &Path, root: &Path) -> String {
+    match path.strip_prefix(root) {
         Ok(r) => r.to_string_lossy().replace('\\', "/"),
         Err(_) => path
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("?")
             .to_string(),
+    }
+}
+
+/// The info-panel metadata for `item`: its display path (root-relative for a real
+/// file, the archive-relative entry name otherwise) plus the decoded dimensions
+/// and codec.
+fn meta_for(source: &dyn PhotoSource, item: usize, root: &Path, img: &DecodedImage) -> PhotoMeta {
+    let rel = match source.path(item) {
+        Some(p) => rel_to_root(p, root),
+        None => source.name(item).to_string(),
     };
     PhotoMeta {
         rel,
@@ -245,6 +258,22 @@ fn meta_for_path(path: &Path, root: &Path, img: &DecodedImage) -> PhotoMeta {
         h: img.orig_height,
         codec: img.codec,
     }
+}
+
+/// Resolve item `item`'s encoded bytes from `source` and decode them to fit. The
+/// single decode entry point shared by the off-thread pool and the synchronous
+/// (first-frame / resize / copy) paths, so a filesystem photo and a ZIP entry
+/// decode through exactly the same routing. All reads are RAM-only.
+fn decode_item(
+    source: &dyn PhotoSource,
+    item: usize,
+    fit: Option<FitBox>,
+    allow_preview: bool,
+) -> Result<DecodedImage, DecodeError> {
+    let bytes = source
+        .bytes(item)
+        .map_err(|e| DecodeError::Corrupt(format!("read error: {e}")))?;
+    decode_named_bytes(source.name(item), &bytes, fit, allow_preview)
 }
 
 /// Max displayed characters for an EXIF value; longer ones are truncated so a
@@ -327,7 +356,9 @@ fn esc_quits(guard: Option<Instant>, now: Instant) -> bool {
 
 struct App {
     windowed: bool,
-    paths: Vec<Arc<Path>>,
+    /// Where the playlist's images come from — a filesystem listing or an archive.
+    /// `pb-core` navigates by index alone; this resolves an index to bytes + name.
+    source: Arc<dyn PhotoSource>,
     playlist: Playlist,
     active: Option<Active>,
     /// Physical keys currently held (OS auto-repeat ignored).
@@ -472,25 +503,24 @@ impl App {
     fn new(
         windowed: bool,
         root: PathBuf,
-        paths: Vec<PathBuf>,
+        source: Arc<dyn PhotoSource>,
         start: usize,
         recursive: bool,
         scan_root: Option<PathBuf>,
         metrics: StageTimes,
     ) -> Self {
-        let paths: Vec<Arc<Path>> = paths.into_iter().map(Arc::from).collect();
-        let playlist = Playlist::new(paths.len(), 0).with_cursor(start);
-        let decode: Arc<DecodeFn> = Arc::new(|p: &Path, fit, allow_preview| {
+        let playlist = Playlist::new(source.len(), 0).with_cursor(start);
+        let decode: Arc<DecodeFn> = Arc::new(|src: &dyn PhotoSource, item, fit, allow_preview| {
             if !METRICS_ON_FLAG.load(std::sync::atomic::Ordering::Relaxed) {
-                return decode_image_file(p, fit, allow_preview);
+                return decode_item(src, item, fit, allow_preview);
             }
             let t0 = Instant::now();
-            let r = decode_image_file(p, fit, allow_preview);
+            let r = decode_item(src, item, fit, allow_preview);
             let ms = t0.elapsed().as_secs_f64() * 1e3;
             let tag = format!(
                 "{}{}",
                 if allow_preview { "prev " } else { "full " },
-                p.file_name().and_then(|n| n.to_str()).unwrap_or("?")
+                src.name(item)
             );
             POOL_DECODE_MS.lock().unwrap().push((ms, tag));
             r
@@ -498,7 +528,7 @@ impl App {
         let (pool, results) = DecodePool::new(recommended_workers(), POOL_BUDGET_BYTES, decode);
         Self {
             windowed,
-            paths,
+            source,
             playlist,
             active: None,
             held: HashSet::new(),
@@ -631,7 +661,7 @@ impl App {
         //      behind every preview, so a fast fly stays smooth (these decode only in
         //      the pool's spare capacity) and the fulls land ahead of where you're
         //      heading — a stop finds the photo already sharp.
-        type Job = (usize, Arc<Path>, Option<FitBox>, bool);
+        type Job = (usize, Option<FitBox>, bool);
         let (mut head, mut previews, mut fulls): (Vec<Job>, Vec<Job>, Vec<Job>) =
             (Vec::new(), Vec::new(), Vec::new());
         for &t in &self.targets {
@@ -644,18 +674,18 @@ impl App {
                 continue; // already full
             }
             if !resident {
-                previews.push((t, self.paths[t].clone(), fit, true));
+                previews.push((t, fit, true));
             } else if Some(t) == sharpen {
-                head.push((t, self.paths[t].clone(), fit, false));
+                head.push((t, fit, false));
             } else if ring.contains(&t) {
-                fulls.push((t, self.paths[t].clone(), fit, false));
+                fulls.push((t, fit, false));
             }
             // else: resident preview not in the ring → leave it as a preview
         }
         let mut jobs = head;
         jobs.append(&mut previews);
         jobs.append(&mut fulls);
-        self.pool.set_targets(self.epoch, &jobs);
+        self.pool.set_targets(self.epoch, &self.source, &jobs);
     }
 
     /// The on-screen photo to sharpen FIRST (top decode priority): the displayed one,
@@ -709,7 +739,7 @@ impl App {
     /// needs — for neighbours you may never visit. The displayed RAW still sharpens
     /// via `sharpen_now`, and a RAW's embedded preview is often near-full-res anyway.
     fn is_raw_item(&self, item: usize) -> bool {
-        self.paths[item]
+        Path::new(self.source.name(item))
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| pb_decode::is_raw_extension(&e.to_ascii_lowercase()))
@@ -772,11 +802,10 @@ impl App {
         let Some(item) = self.displayed_item else {
             return; // empty state — nothing to copy
         };
-        let path = self.paths[item].clone();
-        let img = match decode_image_file(&path, None, false) {
+        let img = match decode_item(self.source.as_ref(), item, None, false) {
             Ok(img) => img,
             Err(e) => {
-                eprintln!("copy: decode failed: {}: {e}", path.display());
+                eprintln!("copy: decode failed: {}: {e}", self.source.name(item));
                 self.show_toast("Copy failed", event_loop);
                 return;
             }
@@ -784,8 +813,15 @@ impl App {
         let rgba = clipboard::to_clipboard_rgba8(&img);
         let rot = self.rotations.get(&item).copied().unwrap_or_default();
         let (rgba, w, h) = clipboard::rotate_rgba8(&rgba, img.width, img.height, rot);
-        match clipboard::set_image(w, h, rgba) {
-            Ok(()) => self.show_toast_icon("Copied", Some(icon::assets::CLIPBOARD), event_loop),
+        // Offer the source file as CF_HDROP too when there is one; an archive entry
+        // has no file on disk, so it gets an image-only copy (pixels still paste).
+        let wrote = match self.source.path(item) {
+            Some(path) => clipboard::set_image_and_file(w, h, &rgba, path),
+            None => clipboard::set_image(w, h, &rgba),
+        };
+        match wrote {
+            // Icon-only pill (the clipboard glyph says it all).
+            Ok(()) => self.show_toast_icon("", Some(icon::assets::CLIPBOARD), event_loop),
             Err(e) => {
                 eprintln!("copy: clipboard write failed: {e}");
                 self.show_toast("Copy failed", event_loop);
@@ -797,7 +833,7 @@ impl App {
     /// decode or upload. Updates the pin, title, and info panel.
     fn present_item(&mut self, item: usize, slot: usize, event_loop: &ActiveEventLoop) {
         let view = self.view_for(item);
-        let title = title_for(&self.paths[item], item, self.paths.len());
+        let title = title_for(self.source.name(item), item, self.source.len());
         if let Some(a) = self.active.as_mut() {
             a.renderer.set_view(view);
             a.renderer.present_slot(slot);
@@ -821,12 +857,8 @@ impl App {
     fn present_failed(&mut self, item: usize, event_loop: &ActiveEventLoop) {
         self.displayed_item = Some(item);
         self.current = None;
-        let name = self.paths[item]
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("?")
-            .to_string();
-        let total = self.paths.len();
+        let name = file_name_of(self.source.name(item));
+        let total = self.source.len();
         if let Some(a) = self.active.as_mut() {
             a.window
                 .set_title(&format!("{name} ({}/{total}) - decode error", item + 1));
@@ -959,7 +991,7 @@ impl App {
                 continue;
             }
             if !self.meta_cache.contains_key(&item) {
-                let m = meta_for_path(&self.paths[item], &self.root, img);
+                let m = meta_for(self.source.as_ref(), item, &self.root, img);
                 self.meta_cache.insert(item, m);
             }
             let item_bytes = img.pixels.len() as u64;
@@ -1045,15 +1077,15 @@ impl App {
             return;
         };
         let t0 = Instant::now();
-        let decoded = decode_image_file(&self.paths[idx], self.decode_fit(), false);
+        let decoded = decode_item(self.source.as_ref(), idx, self.decode_fit(), false);
         self.metrics.record("decode", t0.elapsed());
         match decoded {
             Ok(img) => {
-                let meta = meta_for_path(&self.paths[idx], &self.root, &img);
+                let meta = meta_for(self.source.as_ref(), idx, &self.root, &img);
                 self.current = Some(meta.clone());
                 self.meta_cache.insert(idx, meta);
                 let view = self.view_for(idx);
-                let title = title_for(&self.paths[idx], idx, self.paths.len());
+                let title = title_for(self.source.name(idx), idx, self.source.len());
                 if let Some(a) = self.active.as_mut() {
                     a.renderer.set_view(view);
                     a.renderer.set_image(
@@ -1072,7 +1104,7 @@ impl App {
                 self.displayed_item = Some(idx);
             }
             Err(e) => {
-                eprintln!("decode failed: {}: {e}", self.paths[idx].display());
+                eprintln!("decode failed: {}: {e}", self.source.name(idx));
                 self.failed.insert(idx);
                 // Keep the gate unstuck (count the bad file as "shown") and clear
                 // the stale frame's title/panel so they don't misreport it.
@@ -1130,13 +1162,19 @@ impl App {
     /// current photo isn't blanked.
     fn open_input(&mut self, input: LaunchInput, event_loop: &ActiveEventLoop) {
         let plan = open::plan(input);
-        let (paths, root, scan_root, recursive) = resolve_source(&plan.source);
-        if paths.is_empty() {
+        let r = resolve_playlist(&plan.source, &plan.cursor);
+        if r.source.is_empty() {
             eprintln!("PhotoBlaze: no supported images in that selection");
             return;
         }
-        let start = open::resolve_cursor(&paths, &plan.cursor);
-        self.rebuild_playlist(paths, root, scan_root, recursive, start, event_loop);
+        self.rebuild_playlist(
+            r.source,
+            r.root,
+            r.scan_root,
+            r.recursive,
+            r.start,
+            event_loop,
+        );
     }
 
     /// Toggle recursive scanning of the current folder (`Ctrl+R`), keeping the
@@ -1148,21 +1186,23 @@ impl App {
         };
         let keep = self
             .displayed_item
-            .and_then(|i| self.paths.get(i))
-            .map(|p| p.to_path_buf());
+            .and_then(|i| self.source.path(i))
+            .map(Path::to_path_buf);
         let source = Source::Scan {
             roots: vec![root],
             recursive: !self.recursive,
         };
-        let (paths, root, scan_root, recursive) = resolve_source(&source);
-        if paths.is_empty() {
+        let r = resolve_playlist(&source, &open::Cursor::First);
+        if r.source.is_empty() {
             return;
         }
+        // Re-find the photo we were viewing in the rebuilt (recursive) listing.
         let start = keep
             .as_ref()
-            .and_then(|k| paths.iter().position(|p| p == k))
+            .and_then(|k| (0..r.source.len()).find(|&i| r.source.path(i) == Some(k.as_path())))
             .unwrap_or(0);
-        self.rebuild_playlist(paths, root, scan_root, recursive, start, event_loop);
+        let recursive = r.recursive;
+        self.rebuild_playlist(r.source, r.root, r.scan_root, recursive, start, event_loop);
         let msg = if recursive {
             "Recursive folders: on"
         } else {
@@ -1332,30 +1372,29 @@ impl App {
         }
     }
 
-    /// Replace the playlist with a new path set and re-show at `start`. Every bit
+    /// Replace the playlist with a new source and re-show at `start`. Every bit
     /// of index-keyed state (per-item rotation overrides, the metadata cache, the
     /// failed set, the resident ring) is dropped because the indices are
     /// reassigned; the geometry-epoch bump discards any in-flight decode for the
     /// old set.
     fn rebuild_playlist(
         &mut self,
-        paths: Vec<PathBuf>,
+        source: Arc<dyn PhotoSource>,
         root: PathBuf,
         scan_root: Option<PathBuf>,
         recursive: bool,
         start: usize,
         event_loop: &ActiveEventLoop,
     ) {
-        if paths.is_empty() {
+        if source.is_empty() {
             return;
         }
-        let paths: Vec<Arc<Path>> = paths.into_iter().map(Arc::from).collect();
-        let start = start.min(paths.len() - 1);
-        self.paths = paths;
+        let start = start.min(source.len() - 1);
+        self.source = source;
         self.root = root;
         self.scan_root = scan_root;
         self.recursive = recursive;
-        self.playlist = Playlist::new(self.paths.len(), 0).with_cursor(start);
+        self.playlist = Playlist::new(self.source.len(), 0).with_cursor(start);
         // Indices are reassigned — drop everything keyed by item index.
         self.rotations.clear();
         self.meta_cache.clear();
@@ -1398,18 +1437,18 @@ impl App {
     ) {
         let srgb = pb_render::ColorTransform::srgb();
         match self.playlist.current() {
-            Some(idx) => match decode_image_file(&self.paths[idx], self.decode_fit(), false) {
+            Some(idx) => match decode_item(self.source.as_ref(), idx, self.decode_fit(), false) {
                 Ok(img) => {
-                    let meta = meta_for_path(&self.paths[idx], &self.root, &img);
+                    let meta = meta_for(self.source.as_ref(), idx, &self.root, &img);
                     self.current = Some(meta.clone());
                     self.meta_cache.insert(idx, meta);
-                    let title = title_for(&self.paths[idx], idx, self.paths.len());
+                    let title = title_for(self.source.name(idx), idx, self.source.len());
                     let (w, h, hdr, peak) = (img.width, img.height, is_hdr(&img), img.peak);
                     let color = render_color(&img.color);
                     (img.pixels, w, h, color, hdr, peak, title)
                 }
                 Err(e) => {
-                    eprintln!("decode failed: {}: {e}", self.paths[idx].display());
+                    eprintln!("decode failed: {}: {e}", self.source.name(idx));
                     self.current = None;
                     let p = test_pattern(1600, 1000);
                     (
@@ -1577,22 +1616,29 @@ impl App {
         let Some(item) = self.displayed_item else {
             return Vec::new();
         };
-        let path = &self.paths[item];
+        let name = self.source.name(item);
         let mut rows = Vec::new();
         // Identity header: filename (bold) over its folder (the filename is already
         // shown above, so the path row is the parent directory only).
-        let filename = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("?")
-            .to_string();
         rows.push(Row::Span {
-            text: filename,
+            text: file_name_of(name),
             bold: true,
         });
-        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        // Parent location: the on-disk folder for a real file, or the
+        // archive-relative directory for an entry inside an archive.
+        let dir = match self.source.path(item) {
+            Some(p) => p
+                .parent()
+                .filter(|d| !d.as_os_str().is_empty())
+                .map(|d| d.display().to_string()),
+            None => Path::new(name)
+                .parent()
+                .filter(|d| !d.as_os_str().is_empty())
+                .map(|d| d.to_string_lossy().replace('\\', "/")),
+        };
+        if let Some(dir) = dir {
             rows.push(Row::Span {
-                text: dir.display().to_string(),
+                text: dir,
                 bold: false,
             });
         }
@@ -1606,13 +1652,13 @@ impl App {
                 value: meta.codec.to_uppercase(),
             });
         }
-        if let Ok(md) = std::fs::metadata(path) {
+        // Read the encoded bytes once (RAM-only, via the source) for both the exact
+        // size and the EXIF fields — works the same for a file or an archive entry.
+        if let Ok(bytes) = self.source.bytes(item) {
             rows.push(Row::Pair {
                 label: "File Size".to_string(),
-                value: format!("{} bytes", hud::format_thousands(md.len())),
+                value: format!("{} bytes", hud::format_thousands(bytes.len() as u64)),
             });
-        }
-        if let Ok(bytes) = std::fs::read(path) {
             for (tag, val) in read_exif_fields(&bytes) {
                 // Skip binary blobs that render as meaningless hex (Apple
                 // MakerNote/Padding are kilobytes long); truncate anything else
@@ -2187,10 +2233,10 @@ impl ApplicationHandler for App {
             // the first image at the corrected fit so the first frame isn't soft.
             if let Some(idx) = self.playlist.current() {
                 let t0 = Instant::now();
-                let decoded = decode_image_file(&self.paths[idx], self.decode_fit(), false);
+                let decoded = decode_item(self.source.as_ref(), idx, self.decode_fit(), false);
                 self.metrics.record("decode", t0.elapsed());
                 if let Ok(img) = decoded {
-                    let meta = meta_for_path(&self.paths[idx], &self.root, &img);
+                    let meta = meta_for(self.source.as_ref(), idx, &self.root, &img);
                     self.current = Some(meta.clone());
                     self.meta_cache.insert(idx, meta);
                     renderer.set_image(
@@ -2542,9 +2588,18 @@ impl ApplicationHandler for App {
     }
 }
 
-fn title_for(path: &Path, idx: usize, n: usize) -> String {
-    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("?");
-    format!("{name} ({}/{n})", idx + 1)
+/// The last path component of a (possibly archive-relative) name, e.g.
+/// `trip/day1/IMG.jpg` → `IMG.jpg`. Falls back to the whole string.
+fn file_name_of(name: &str) -> String {
+    Path::new(name)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(name)
+        .to_string()
+}
+
+fn title_for(name: &str, idx: usize, n: usize) -> String {
+    format!("{} ({}/{n})", file_name_of(name), idx + 1)
 }
 
 /// Whether a path's extension is a supported image format (the decoder's single
@@ -2696,9 +2751,18 @@ fn hwnd_of(window: &Window) -> Option<isize> {
     }
 }
 
+/// Whether a path names an archive we open as a playlist (today: `.zip`).
+fn is_archive(p: &Path) -> bool {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("zip"))
+        .unwrap_or(false)
+}
+
 /// Classify launch / drop / picker paths into a [`LaunchInput`] — the one step
 /// that touches the disk (an `fs::metadata` "file or folder?"). A lone directory
-/// becomes `Directory`; anything else collects the files into `Files`.
+/// becomes `Directory`, a lone `.zip` becomes `Archive`; anything else collects
+/// the files into `Files`.
 fn classify_inputs(paths: Vec<PathBuf>) -> LaunchInput {
     let paths: Vec<PathBuf> = paths
         .into_iter()
@@ -2709,6 +2773,10 @@ fn classify_inputs(paths: Vec<PathBuf>) -> LaunchInput {
     }
     if paths.len() == 1 && fs::metadata(&paths[0]).map(|m| m.is_dir()).unwrap_or(false) {
         return LaunchInput::Directory(paths.into_iter().next().expect("len == 1"));
+    }
+    // A single archive opens to its contents rather than scanning its folder.
+    if paths.len() == 1 && is_archive(&paths[0]) {
+        return LaunchInput::Archive(paths.into_iter().next().expect("len == 1"));
     }
     // One or more files (a directory inside a multi-selection is uncommon and is
     // ignored here). If somehow every path is a directory, open the first.
@@ -2752,7 +2820,89 @@ fn resolve_source(source: &Source) -> (Vec<PathBuf>, PathBuf, Option<PathBuf>, b
                 .unwrap_or_else(|| PathBuf::from("."));
             (paths, root, None, false)
         }
+        // Archives don't resolve to a path list; `resolve_playlist` routes them to
+        // `open_archive` instead. This arm only keeps the match exhaustive.
+        Source::Archive(_) => (Vec::new(), PathBuf::from("."), None, false),
     }
+}
+
+/// A resolved playlist: the concrete [`PhotoSource`] plus the framing the app
+/// needs (display root, the scan root for `Ctrl+R`, recursive flag, start index).
+struct Resolved {
+    source: Arc<dyn PhotoSource>,
+    root: PathBuf,
+    scan_root: Option<PathBuf>,
+    recursive: bool,
+    start: usize,
+}
+
+impl Resolved {
+    /// The "nothing to show" fallback — an empty filesystem source. Callers treat
+    /// `source.is_empty()` uniformly (empty folder, or an archive that failed/needs
+    /// a password), so an open failure never blanks a currently-shown photo.
+    fn empty() -> Self {
+        Resolved {
+            source: Arc::new(FsSource::new(Vec::new())),
+            root: PathBuf::from("."),
+            scan_root: None,
+            recursive: false,
+            start: 0,
+        }
+    }
+}
+
+/// Turn a planned [`Source`] into a concrete [`PhotoSource`] plus playlist framing.
+/// Scans and explicit lists become an [`FsSource`]; an archive opens a
+/// [`ZipSource`] (entries read into RAM on demand, never extracted to disk). On a
+/// hard archive failure it logs and falls back to an empty source.
+fn resolve_playlist(source: &Source, cursor: &open::Cursor) -> Resolved {
+    match source {
+        Source::Scan { .. } | Source::Explicit(_) => {
+            let (paths, root, scan_root, recursive) = resolve_source(source);
+            let start = open::resolve_cursor(&paths, cursor);
+            Resolved {
+                source: Arc::new(FsSource::new(paths)),
+                root,
+                scan_root,
+                recursive,
+                start,
+            }
+        }
+        Source::Archive(zip) => open_archive(zip).unwrap_or_else(Resolved::empty),
+    }
+}
+
+/// Open `zip` as a [`ZipSource`]. Returns `None` (after logging) if it can't be
+/// opened, holds no supported images, or needs a password we don't have yet (the
+/// in-app unlock prompt is a separate task).
+fn open_archive(zip: &Path) -> Option<Resolved> {
+    let zs = match ZipSource::open(zip, None, is_supported_extension) {
+        Ok(zs) => zs,
+        Err(e) => {
+            eprintln!("PhotoBlaze: cannot open archive {}: {e}", zip.display());
+            return None;
+        }
+    };
+    if zs.needs_password() {
+        eprintln!(
+            "PhotoBlaze: {} is password-protected (in-app unlock is not wired up yet)",
+            zip.display()
+        );
+        return None;
+    }
+    if zs.is_empty() {
+        eprintln!("PhotoBlaze: no supported images in {}", zip.display());
+        return None;
+    }
+    Some(Resolved {
+        // The archive path is the display root; entry names are already
+        // archive-relative, so the info panel uses them directly.
+        root: zip.to_path_buf(),
+        source: Arc::new(zs),
+        scan_root: None,
+        recursive: false,
+        start: 0,
+    })
 }
 
 fn main() {
@@ -2790,15 +2940,18 @@ fn main() {
             *recursive = false;
         }
     }
-    let (paths, root, scan_root, recursive) = resolve_source(&plan.source);
-    let start = open::resolve_cursor(&paths, &plan.cursor);
+    let resolved = resolve_playlist(&plan.source, &plan.cursor);
 
     println!(
         "PhotoBlaze: {} image(s){}",
-        paths.len(),
-        if recursive { " (recursive)" } else { "" }
+        resolved.source.len(),
+        if resolved.recursive {
+            " (recursive)"
+        } else {
+            ""
+        }
     );
-    if paths.is_empty() {
+    if resolved.source.is_empty() {
         eprintln!("(no images - drop a photo or folder on the window, or press O to open)");
     }
 
@@ -2811,7 +2964,15 @@ fn main() {
     } else {
         StageTimes::disabled()
     };
-    let mut app = App::new(windowed, root, paths, start, recursive, scan_root, metrics);
+    let mut app = App::new(
+        windowed,
+        resolved.root,
+        resolved.source,
+        resolved.start,
+        resolved.recursive,
+        resolved.scan_root,
+        metrics,
+    );
     event_loop.run_app(&mut app).expect("event loop");
 
     let report = app.metrics.report();
@@ -2960,28 +3121,83 @@ mod tests {
 
         let before = snapshot_tree(&dir);
 
-        // The actual disk-touching code the app runs while viewing.
+        // The actual disk-touching code the app runs while viewing, through the
+        // real source seam: recursive scan → FsSource → decode_item (the pool's
+        // step) + the Shift+I panel's byte read.
         let paths = scan_images(&dir, true);
         assert_eq!(
             paths.len(),
             3,
             "recursive scan should find all three images"
         );
+        let source = FsSource::new(paths);
         let fit = FitBox {
             max_width: 64,
             max_height: 64,
         };
-        for p in &paths {
-            decode_image_file(p, Some(fit), false).expect("decode");
-            let bytes = fs::read(p).expect("read for exif");
+        for i in 0..source.len() {
+            decode_item(&source, i, Some(fit), false).expect("decode");
+            let bytes = source.bytes(i).expect("read for exif");
             let _ = read_exif_fields(&bytes);
-            let _ = fs::metadata(p).expect("stat");
+            if let Some(p) = source.path(i) {
+                let _ = fs::metadata(p).expect("stat");
+            }
         }
 
         let after = snapshot_tree(&dir);
         assert_eq!(
             before, after,
             "a view session must create or modify no files"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The privacy guarantee extends to archives: opening a `.zip` and viewing its
+    /// images must NOT extract it to a temp directory or write anything — entries
+    /// are read into RAM only. The sandbox holds just the `.zip`; a full view
+    /// session (open → decode every entry → the Shift+I byte read) must leave the
+    /// tree byte-for-byte identical.
+    #[test]
+    fn viewing_a_zip_writes_nothing_to_disk() {
+        use std::io::Write as _;
+
+        let dir = std::env::temp_dir().join(format!("pb_zip_notrace_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("mkdir sandbox");
+        const IMG: &[u8] = include_bytes!("../icons/photoblaze.png");
+        let zip_path = dir.join("album.zip");
+        {
+            let f = fs::File::create(&zip_path).expect("create zip");
+            let mut zw = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            for name in ["a.png", "b.png", "sub/c.png"] {
+                zw.start_file(name, opts).expect("start entry");
+                zw.write_all(IMG).expect("write entry");
+            }
+            zw.finish().expect("finish zip");
+        }
+
+        let before = snapshot_tree(&dir);
+
+        // The disk-touching code the app runs while viewing a zip.
+        let resolved = resolve_playlist(&Source::Archive(zip_path.clone()), &open::Cursor::First);
+        assert_eq!(resolved.source.len(), 3, "zip should yield three images");
+        let fit = FitBox {
+            max_width: 64,
+            max_height: 64,
+        };
+        for i in 0..resolved.source.len() {
+            decode_item(resolved.source.as_ref(), i, Some(fit), false).expect("decode");
+            let bytes = resolved.source.bytes(i).expect("read for exif");
+            let _ = read_exif_fields(&bytes);
+        }
+
+        let after = snapshot_tree(&dir);
+        assert_eq!(
+            before, after,
+            "viewing a zip must create or modify no files (no extraction to disk)"
         );
 
         let _ = fs::remove_dir_all(&dir);

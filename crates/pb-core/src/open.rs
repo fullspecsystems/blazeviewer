@@ -28,6 +28,9 @@ pub enum LaunchInput {
     Files(Vec<PathBuf>),
     /// A directory (folder picker, dropped folder, "Open with" on a folder).
     Directory(PathBuf),
+    /// A single archive file (a `.zip`, double-clicked or dropped) to view the
+    /// images inside. The shim classifies this; the bytes never hit disk.
+    Archive(PathBuf),
 }
 
 /// Where a playlist's paths come from.
@@ -40,6 +43,9 @@ pub enum Source {
     },
     /// Use exactly these files, in order -- no scan.
     Explicit(Vec<PathBuf>),
+    /// View the images inside this archive (e.g. a `.zip`), read entry-by-entry
+    /// into RAM — never extracted to disk (the no-trace privacy guarantee).
+    Archive(PathBuf),
 }
 
 /// Which item the cursor should land on once the playlist is built.
@@ -79,6 +85,10 @@ pub fn plan(input: LaunchInput) -> OpenPlan {
                 roots: vec![dir],
                 recursive: true,
             },
+            cursor: Cursor::First,
+        },
+        LaunchInput::Archive(archive) => OpenPlan {
+            source: Source::Archive(archive),
             cursor: Cursor::First,
         },
         LaunchInput::Files(mut files) => {
@@ -159,6 +169,14 @@ mod tests {
             }
         );
         assert_eq!(p.cursor, Cursor::At(file));
+    }
+
+    #[test]
+    fn archive_becomes_an_archive_source_from_first() {
+        let zip = PathBuf::from("/photos/trip.zip");
+        let p = plan(LaunchInput::Archive(zip.clone()));
+        assert_eq!(p.source, Source::Archive(zip));
+        assert_eq!(p.cursor, Cursor::First);
     }
 
     #[test]

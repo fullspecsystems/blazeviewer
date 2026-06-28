@@ -103,15 +103,24 @@ impl Hud {
         icon: Option<&str>,
     ) -> Option<(Vec<u8>, u32, u32)> {
         let line_h = self.line_height(px)?;
-        let (glyphs, advance) = self.layout(text, px, Weight::Regular);
-
-        // Rasterize the leading icon (if any) at roughly cap height. The icon↔text
-        // gap collapses to 0 for an icon-only toast (empty `text`), giving a tidy
-        // square pill (e.g. the rotate toasts).
         let icon_h = (px * 0.92).round().max(1.0) as u32;
         let rasterized = icon.and_then(|svg| crate::icon::rasterize(svg, icon_h, TEXT));
+
+        // Icon-only pill (empty message): a perfectly square rounded rect with the
+        // icon centered on both axes — e.g. the rotate toasts. The side matches a
+        // text pill's height so icon-only and text toasts read at the same scale.
+        if text.is_empty() {
+            let (rgba, iw, ih) = rasterized.as_ref()?;
+            let side = line_h + 2 * pad;
+            let mut canvas = Canvas::new(side, side, BG, (px * 0.5).round());
+            let ix = (side as i32 - *iw as i32) / 2;
+            let iy = (side as i32 - *ih as i32) / 2;
+            self.draw_icon(&mut canvas, rgba, *iw, *ih, ix, iy, px);
+            return Some((canvas.into_rgba(), side, side));
+        }
+
+        let (glyphs, advance) = self.layout(text, px, Weight::Regular);
         let (icon_w, gap) = match &rasterized {
-            Some((_, w, _)) if text.is_empty() => (*w, 0),
             Some((_, w, _)) => (*w, (px * 0.40).round().max(3.0) as u32),
             None => (0, 0),
         };

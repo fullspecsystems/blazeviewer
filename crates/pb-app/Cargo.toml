@@ -19,6 +19,7 @@ libheif = ["pb-decode/libheif"]
 [dependencies]
 pb-core = { workspace = true }
 pb-decode = { workspace = true }
+pb-source = { workspace = true }
 pb-render = { workspace = true }
 winit = "0.30"
 # Rasterizes the info-panel text using the OS UI font (loaded at runtime).
@@ -41,10 +42,6 @@ egui-wgpu = "0.29"
 egui-winit = "0.29"
 # Block on wgpu adapter/device init for the dialog window's own GPU surface.
 pollster = "0.3"
-# Clipboard image write (Ctrl+C / Edit ▸ Copy). Already rides in transitively via
-# egui-winit; a direct dep makes the dependency explicit. `image-data` (on by
-# default) gives `set_image` (CF_DIB/DIBV5 on Windows, pasteboard on macOS).
-arboard = "3"
 # Pack/unpack the f16 (Rgba16Float) HDR decode buffer when converting to 8-bit for
 # the clipboard. Matches the version pb-decode already resolves.
 half = "2"
@@ -65,7 +62,18 @@ windows = { version = "0.62", features = [
     "Win32_System_LibraryLoader",
     # TaskDialog (the native "About" dialog).
     "Win32_UI_Controls",
+    # Clipboard copy (Ctrl+C): open/empty/set, HGLOBAL alloc, CF_DIBV5/CF_HDROP,
+    # BITMAPV5HEADER. CF_* live under System_Ole; the bitmap header under Graphics_Gdi.
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_Graphics_Gdi",
 ] }
+
+# Test-only: build a ZIP fixture for the no-trace integration test. Same lean
+# pure-Rust feature set pb-source uses; the writer comes with the base crate.
+[dev-dependencies]
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Embeds the .exe icon + version metadata on Windows (build.rs). Best-effort: if
 # the resource compiler is absent the build still succeeds (see build.rs).
