@@ -266,7 +266,7 @@
         "id": 8,
         "title": "Configurable keybindings (TOML)",
         "description": "Make keyboard shortcuts configurable via a TOML file, with sensible built-in defaults and a central action dispatch.",
-        "status": "pending",
+        "status": "done",
         "priority": "medium",
         "dependencies": [],
         "details": "Define a central set of named actions: next, prev, random, rotate_cw, rotate_ccw, zoom_in, zoom_out, zoom_reset, mode_original, mode_fit, mode_fill, info_toggle, info_full, help_toggle, quit (extend as features land). Parse a TOML keybindings file into an action->keys map; embed defaults so it works with no file. TOML is chosen over YAML for simplicity and Rust ecosystem fit (serde + toml). Privacy (Task 2): config is read-only input - never write viewed state to it. Validate bindings (warn on unknown action or duplicate key). The keymap is the single source of truth that the help overlay (Task 7) reads. Decide config discovery (next to the binary, or an explicit --config path) with no implicit writes. All keyboard features (Tasks 1,3,4,5,6,7) register their actions here and become remappable once this lands.",
@@ -276,28 +276,28 @@
             "id": 1,
             "title": "Central action enum + default binding table",
             "description": "Pure, tested action set and default key map embedded in the binary.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 2,
             "title": "TOML schema + parser merging over defaults",
             "description": "serde + toml; partial configs override defaults; works with no file.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 3,
             "title": "Validation (unknown actions, duplicate keys)",
             "description": "Warn (don't crash) on conflicts and unknown actions.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 4,
             "title": "Wire dispatch; expose keymap to the help overlay",
             "description": "Route input through the action map; let Task 7 read it for the help card.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           }
         ]
@@ -625,7 +625,7 @@
         "id": 20,
         "title": "Configurable fly-speed cap (max photos/second)",
         "description": "A user-configurable maximum hold-to-fly rate (e.g. 10 photos/second) - the 'scan speed limit' - that caps iteration speed independent of the monitor refresh rate. Read-only from config; defaults to the refresh rate (effectively uncapped).",
-        "status": "pending",
+        "status": "done",
         "priority": "low",
         "dependencies": [19],
         "details": "The cap is the CEILING of the Task 19 acceleration ramp: effective max rate = min(display refresh, configured cap). With no config the default is the refresh rate (today's behavior, uncapped). CONFIG HOME: pb-app already has src/settings.rs - a minimal key=value TOML-subset that currently persists only the windowed/fullscreen preference (privacy Task 2: preferences only, NEVER photo-derived data). Add a max_advance_rate (photos/sec) key there now (a parse_* fn + typed getter, like parse_fullscreen) so it ships without waiting on the fuller config in Task 8; fold it into Task 8's action/config map when that lands. VALIDATION: clamp to a sane range (e.g. 1..=1000) - a missing / zero / negative / garbage value falls back to the default (refresh); a cap >= refresh behaves as uncapped. PRIVACY (Task 2): config is read-only input; reading/clamping writes nothing to disk. Wire the resolved cap into the Task 19 ramp ceiling. (Optional later: a runtime toggle that flashes a toast; not required for v1.)",
@@ -635,21 +635,21 @@
             "id": 1,
             "title": "Parse + clamp max_advance_rate in settings.rs",
             "description": "Add the key with a pure parse + range clamp (default = refresh); unit-tested like parse_fullscreen.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 2,
             "title": "Feed the cap into the ramp ceiling",
             "description": "Resolve min(refresh, cap) and hand it to the Task 19 advance ramp as its ceiling.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 3,
             "title": "Validation, read-only privacy, and docs",
             "description": "Clamp/fallback on bad input; never write config from viewed state; document the setting.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           },
           {
@@ -705,7 +705,7 @@
         "id": 22,
         "title": "In-app settings/preferences UI (options + hotkey remapping)",
         "description": "A settings window - opened with Ctrl+, and a 'Settings...' menu item - that lets users change options (Blaze tuning, max photos/sec cap, recursive-by-default, default scale mode, etc.) and remap hotkeys to actions, applying live and persisting to config. Built as EGUI IN ITS OWN OS WINDOW (decided). This is the GUI FRONT-END over the config backends; it is the first deliberate user-driven disk write (preferences only - privacy Task 2 explicitly allows config).",
-        "status": "pending",
+        "status": "in-progress",
         "priority": "medium",
         "dependencies": [8, 20],
         "details": "SKELETON SHIPPED (2026-06-28): the egui dialog infra (pb-app dialog.rs - a 2nd winit window + egui-wgpu surface, OS dark/light via ThemePreference::System) + a non-wired Settings form skeleton landed and were verified in dark mode; Ctrl+, opens it. REMAINING: a typed settings.toml model + load / apply-live / save (subtask 2 + 6), the keybinding editor (subtask 4, needs Task 8), wiring the controls to live state, and a 'Settings...' menu item. ORIGINAL PLAN: FRONT-END over the config BACKENDS: Task 8 (central action enum + keymap + TOML) for hotkeys, and settings.rs / Task 20 for options. The UI edits an in-memory config, applies it to the running app live, and persists to the config file(s).\n\nRENDERING (DECIDED 2026-06-28, owner): build the settings form as EGUI IN ITS OWN OS WINDOW (a second winit window + an egui-wgpu surface) - a real movable/titled dialog window. egui gives sliders/spinners/combos/checkboxes and key-capture for free, and ports to macOS. Runs only while open, off the photo hot path. THEME: egui must follow the OS dark/light setting - egui doesn't auto-detect it, so drive ctx visuals (egui::Visuals::dark()/light()) from the detected system theme (winit Window::theme() / the registry AppsUseLightTheme we already read in darkmode.rs) and update on WindowEvent::ThemeChanged, matching the native menu + title bar. (Considered + rejected: a native Win32 dialog - pixel-native but heavy + Windows-only; an in-window egui overlay - simplest but not a separate dialog and it covers the photo. About stays a native TaskDialog - see Task 26.)\n\nHOTKEY REMAP: a 'press a key' capture mode that reads the next physical key and assigns it to the selected action via Task 8's action map; surface conflicts (duplicate key / unknown action) using Task 8's validation; offer reset-to-defaults.\n\nOPTIONS (DECIDED, grouped): BLAZE - acceleration as Start speed (photos/sec floor) + Ramp-up time (secs), mapping to Task 19's ADVANCE_MIN_RATE/ADVANCE_RAMP_SECS; Max photos/sec cap (Task 20) as a SLIDER + type-in field, max = detected monitor refresh; Initial hold delay (the ~400ms tap gate). BROWSING - recursive-by-default (Task 12). DISPLAY - default scale mode (Fit/Fill/Original); letterbox/background color; default windowed/fullscreen (settings.rs, already persisted); (SDR-on-HDR brightness later). KEYBOARD - action remapping (Task 8). SYSTEM - 'Set as default viewer' deep-link (Task 14); open config folder; Reset to defaults (always included).\n\nLIVE APPLY + PERSIST: changes take effect immediately on the running app (e.g. update the Task 19 ramp ceiling) and write to the config file on save/close. PRIVACY (Task 2): config writes are explicitly IN-BOUNDS (preferences only, NEVER photo-derived data) - this is the first deliberate user-config write beyond the fullscreen pref; keep it strictly preferences, write atomically (temp + rename), best-effort (a failed write must never break viewing).\n\nENTRY: Ctrl+, (DECIDED - mac-like, common on Windows too) opens the settings window; also a 'Settings...' muda menu item (reuse the dispatch). The window owns input while open so hold-to-fly/Blaze is paused; Esc / Save / Cancel to dismiss. The help overlay (Task 7) and menu hints reflect any remaps.\n\nTDD: the config model + serialize/parse + validation (conflict detection, defaults merge, option clamps) are PURE and unit-tested (largely shared with Task 8 + Task 20); the interactive widget layer is the hard-to-test GPU/input shell (manual + minimal golden where feasible). The action<->key mapping and the 'apply edits to live state' reducer must be pure, tested functions.",
@@ -722,14 +722,14 @@
             "id": 2,
             "title": "Pure settings model over Task 8 + settings.rs",
             "description": "Load -> edit -> apply-live -> serialize config model spanning the keymap (Task 8) and options (settings.rs / Task 20); unit-tested round-trip + validation.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 3,
             "title": "Options panel (scan-speed cap, acceleration, recursive/windowed defaults, ...)",
             "description": "Grouped controls bound to the model with live apply; surfaces Task 19/20/12 and the existing prefs.",
-            "status": "pending",
+            "status": "in-progress",
             "dependencies": []
           },
           {
@@ -743,7 +743,7 @@
             "id": 5,
             "title": "Entry points + dismissal (menu 'Settings...', hotkey, Esc/Save/Cancel)",
             "description": "DECIDED: Settings lives under File > Settings (not Edit - that is for clipboard ops on Windows), with Ctrl+, (VS Code-style). Ctrl+, is already wired; the remaining bit is the File menu item. Pause hold-to-fly while open; reflect remaps in the help overlay + menu hints.",
-            "status": "pending",
+            "status": "in-progress",
             "dependencies": []
           },
           {

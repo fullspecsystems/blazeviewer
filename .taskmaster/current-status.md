@@ -9,7 +9,10 @@ scaling/EXIF/help UI (#1/#3/#4/#5/#7). Privacy no-trace (#2), Esc teardown (#6),
 `enter` random nav (+ `Shift+Enter` prev-random), and the Windows-integration +
 MSI track are all done. **Archive viewing (ZIP + 7z) shipped 2026-06-28**, now
 including **in-app password entry + launch-path async open** — see the next section
-(only RAM-budget tuning + small polish remain).
+(only RAM-budget tuning + small polish remain). **Configurable keybindings (#8) and
+the fly-speed cap (#20) are also done, and the typed Settings model + live backend
+are in (#22)** — only the Settings *dialog form* remains; see "Settings + configurable
+keymap stream" below.
 
 ## Archive viewing — ZIP + 7z (2026-06-28) — DONE incl. password entry; budget-tune + polish remain
 
@@ -83,6 +86,53 @@ password-threaded `seven_z_projected_bytes`), `crates/pb-app/src/archive.rs`,
 archive-budget + `viewing_a_{zip,7z}_writes_nothing_to_disk`. Password flow verified
 interactively on encrypted `.zip`/`.7z` (GDI-capturable egui dialog).
 
+## Settings + configurable keymap stream (2026-06-28) — keymap (#8) + fly-cap (#20) DONE; Settings dialog (#22) backend in, form is next
+
+The keyboard is now fully configurable and the typed settings model is in; the one
+remaining piece is the Settings **dialog form** (controls + the keybinding editor).
+All committed on `main`, gated (clippy `-D warnings` + fmt + `cargo test -p pb-app`, 81 green).
+
+**Shipped (committed `499e3d6`, `c5e5bf5`):**
+- **#8 configurable keybindings — DONE.** New `action.rs` (the central `Action` enum:
+  one-shot / nav / held `kind` + stable snake_case `id`; pure + unit-tested) and
+  `keymap.rs` (`KeyChord` parse/Display like `"Ctrl+S"`, a default binding table = today's
+  keys, optional `keymap.toml` → load / merge-over-defaults / validate with unknown-action,
+  bad-key, and duplicate-key warnings). Every keypress now resolves through the keymap and
+  routes by kind to **one `App::dispatch_action`**; the native menu maps
+  `MenuAction::to_action` into the *same* dispatcher; the help overlay's key labels are
+  generated from the live keymap (single source of truth). `held` is now
+  `HashMap<KeyCode, Action>` (action captured at press) so nav/pan/zoom are remappable too.
+  ~16 action/keymap unit tests.
+- **#20 max photos/sec cap — DONE.** `advance_interval` gained a `max_rate` ceiling (the
+  cap clamped to the display refresh; `0` or `>= refresh` = uncapped), read **live** from
+  `Settings.max_advance_rate`. New `advance_interval_caps_at_max_rate` test.
+- **#22 Settings — typed model + live backend (subtask 2 DONE; 3/5 in progress).**
+  `settings.rs` is now a typed **serde + toml** `Settings { fullscreen, recursive,
+  start_speed, ramp_secs, max_advance_rate, hold_delay_ms, scale_mode, letterbox,
+  info_opacity }` with `#[serde(default)]`, clamped `load`, atomic `save`, + 7 tests;
+  defaults mirror today's constants and an old `key=value` `fullscreen` file still loads.
+  `App` holds it; the nav-feel curve + `initial_delay` + the #20 cap read it live (a
+  `settings.toml` edit applies on next launch; mutating `App.settings` will apply live).
+  **File ▸ Settings…** menu item added + `Ctrl+,` (both open the dialog).
+
+**Remaining for #22 (the dialog form):**
+- Wire the egui `settings_ui` controls to live `App.settings` — Save / Cancel / Esc +
+  live-apply (mirror `take_confirm_result`: the dialog returns the edited `Settings`,
+  `App` applies it live and snapshots on open for Cancel-revert).
+- Two backend setters still to land so the dialog's color/opacity controls do something:
+  **letterbox color** (`WgpuRenderer::set_letterbox`, currently the `pb_render::LETTERBOX`
+  const) and **info-panel opacity** (thread an alpha into `hud`'s info panel, currently
+  the `hud::BG` const); plus applying default scale/recursive at startup.
+- The **keybinding editor** (subtask 4): key-capture → assign via the keymap, conflict
+  display (reuse the keymap's duplicate-key check), reset-to-default, persist `keymap.toml`.
+- **Coordination:** the form work is in `dialog.rs`, which the archive session has been
+  co-editing (`button_bar`, password dialog) — do it once that settles to avoid the churn.
+
+**Key files:** `crates/pb-app/src/` `action.rs`, `keymap.rs`, `settings.rs`, `menu.rs`
+(`to_action` + the Settings item), `main.rs` (`dispatch_action`, `advance_interval` cap,
+`held` map, `App.settings`). Config lives at `%APPDATA%\PhotoBlaze\{settings.toml,
+keymap.toml}` — read-only on the view path (privacy #2; writes only on Save / fullscreen toggle).
+
 ## UI / file-commands stream (2026-06-28) — what just shipped + what's next
 
 Separate from the HEIC/decode stream below. All on `origin/main`, each gated
@@ -112,13 +162,13 @@ Separate from the HEIC/decode stream below. All on `origin/main`, each gated
 - **#19 hold-to-fly accel ramp** (done).
 
 **Next (UI), recommended order:**
-- **#22 Settings dialog — the big remaining piece** (likely its own session). Skeleton
-  form already in `dialog.rs`; needs a typed `settings.toml` model (load / apply-live /
-  save — atomic, preferences-only), controls wired to live state, a File ▸ Settings
-  menu item, and the keybinding editor. Depends on **#8** (central action/keymap TOML)
-  and **#20** (fly-speed cap; grow `settings.rs`, which already persists fullscreen).
-- **#8** configurable keybindings (TOML), **#20** max photos/sec cap, **#9** recursive
-  ordering, **#10** richer per-action toast strings, **#23** slideshow.
+- **#8 keybindings + #20 fly-cap — DONE**, and **#22 Settings** has its typed model +
+  live backend in (see the "Settings + configurable keymap stream" section above). The
+  remaining #22 work is the **dialog form** (wire controls to live `App.settings` with
+  Save/Cancel, + the keybinding editor) plus two small backend setters (letterbox color,
+  info-panel opacity). Do the form once the archive session's `dialog.rs` refactor settles.
+- Then: **#9** recursive ordering, **#10** richer per-action toast strings (now easy —
+  route through `Action`), **#23** slideshow.
 - **Decided/deferred:** file-open picker stays **native `rfd`** (auto-dark on macOS;
   the light Windows dialog is an accepted gap — theming the shell dialog isn't worth
   it). The egui Confirm is the portable keeper (no `NSAlert` needed for the Mac port).
@@ -313,10 +363,14 @@ Ctrl+C           copy full-res image to clipboard (pixels + file ref)
 Del / Shift+Del  delete → Recycle Bin / permanent (themed confirm)
 i / Shift+I      info panel / full-EXIF "nerd" panel
 / or ?           keybindings help overlay
-Ctrl+,           settings (egui dialog — skeleton)
+Ctrl+,           settings (egui dialog — model + backend wired; form WIP)
 esc              quit
-(windowed mode also has a native menu bar: File/Edit/View/Image/Help)
+(windowed mode also has a native menu bar: File/Edit/View/Image/Help, incl. File ▸ Settings…)
 ```
+**These defaults are now the built-in keymap (task #8 done).** All keys resolve through
+`keymap.rs` and are remappable via an optional `%APPDATA%\PhotoBlaze\keymap.toml`
+(`[keys]` table, action-id → chord string/array, e.g. `rotate_cw = "R"`); the in-app
+keybinding editor is the remaining #22 piece.
 
 ## Run it
 ```
@@ -333,7 +387,7 @@ crates/pb-core    pure nav/shuffle/prefetch/cache + ResidentRing + open (launch 
 crates/pb-decode  ImageDecoder backends (zune/image/jxl/svg/raw/wic) + dispatch + decode-to-fit + EXIF + color (ICC→shader transform, fp16 HDR) + decode_named_bytes
 crates/pb-source  PhotoSource seam: FsSource / ZipSource / SevenZSource (bytes+name+container for item i; RAM-only, read-only) — zip + 7z archive viewing
 crates/pb-render  wgpu presenter (gpu.rs: scene→fp16 scRGB intermediate→present; WGSL); display (HDR detect); ViewTransform; UploadStrategy
-crates/pb-app     winit loop, decode_pool (priority workers), hud.rs, archive.rs (RAM budget + errors), main.rs (engine wiring)
+crates/pb-app     winit loop, decode_pool (priority workers), hud.rs, archive.rs (RAM budget + errors), action.rs + keymap.rs (central Action + configurable keymap, #8), settings.rs (typed serde+toml prefs), menu.rs/dialog.rs, main.rs (engine wiring + dispatch_action)
 ```
 
 ## The prefetch engine (don't break it)
@@ -345,7 +399,9 @@ gated-advance/failure paths in `main.rs` (`advance`/`about_to_wait`/`drain_resul
 `present_item`/`present_failed`) are subtle — re-read before changing them.
 
 ## Other backlog (tasks.json)
-- #8 configurable keybindings (TOML), #9 recursive ordering, #10 feedback toast.
+- **#8 configurable keybindings (TOML) — DONE**; **#20 fly-speed cap — DONE**; **#22
+  Settings UI — in progress** (model + backend done; dialog form + keybinding editor left).
+- #9 recursive ordering, #10 feedback toast (now routable via `Action`), #23 slideshow.
 - **#2 privacy/no-trace — DONE** (static audit + `viewing_a_folder_writes_nothing_to_disk`
   no-trace test + CLAUDE.md "Privacy guarantee" section; opt-in-persistence subtask
   deferred — nothing on disk to gate yet). **#6 esc-teardown — DONE** (`begin_exit`:
