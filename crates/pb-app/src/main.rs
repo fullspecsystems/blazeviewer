@@ -55,6 +55,7 @@ use pb_render::{
 mod decode_pool;
 mod hud;
 mod metrics;
+mod settings;
 use decode_pool::{recommended_workers, DecodeFn, DecodePool, Outcome};
 use hud::{Hud, Row};
 use metrics::StageTimes;
@@ -836,6 +837,7 @@ impl App {
     /// or Alt+Enter). The resulting resize event re-fits and re-decodes the photo.
     fn toggle_fullscreen(&mut self) {
         self.windowed = !self.windowed;
+        settings::save_fullscreen(!self.windowed);
         if let Some(a) = self.active.as_ref() {
             if self.windowed {
                 a.window.set_fullscreen(None);
@@ -2079,7 +2081,17 @@ fn resolve_source(source: &Source) -> (Vec<PathBuf>, PathBuf, Option<PathBuf>, b
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let windowed = args.iter().any(|a| a == "--windowed" || a == "-w");
+    let cli_windowed = args.iter().any(|a| a == "--windowed" || a == "-w");
+    let cli_fullscreen = args.iter().any(|a| a == "--fullscreen" || a == "-f");
+    // Default to windowed (more discoverable), but restore the saved preference if
+    // there is one; an explicit CLI flag always wins.
+    let windowed = if cli_windowed {
+        true
+    } else if cli_fullscreen {
+        false
+    } else {
+        settings::load_fullscreen().map(|fs| !fs).unwrap_or(true)
+    };
     let force_recursive = args.iter().any(|a| a == "--recursive" || a == "-r");
     let force_flat = args.iter().any(|a| a == "--no-recursive");
     let metrics_on = args.iter().any(|a| a == "--metrics");
