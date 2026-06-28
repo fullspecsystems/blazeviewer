@@ -879,31 +879,31 @@
         "id": 26,
         "title": "About: native Windows dialog (TaskDialog) - the first native dialog",
         "description": "Replace the custom centered overlay 'About' with a proper native Windows dialog: a Win32 TaskDialog showing the app icon, 'PhotoBlaze', the version, the tagline, copyright, and a clickable GitHub link. Invoked from the Help menu's 'About PhotoBlaze'.",
-        "status": "pending",
+        "status": "done",
         "priority": "medium",
         "dependencies": [],
-        "details": "Owner wants a 'proper Windows dialog' (the app's first). Use TaskDialogIndirect (windows crate, feature Win32_UI_Controls) with TASKDIALOGCONFIG: dwFlags TDF_ALLOW_DIALOG_CANCELLATION | TDF_ENABLE_HYPERLINKS | TDF_USE_HICON_MAIN; pszWindowTitle 'About PhotoBlaze'; hMainIcon = the exe's icon via ExtractIconExW (reuse the apply_native_window_icon pattern); pszMainInstruction 'PhotoBlaze'; pszContent = version (env CARGO_PKG_VERSION) + 'An ultra-fast photo viewer' + (c) JD Lien 2026 + an <a href> GitHub link; TDCBF_OK_BUTTON. pfCallback handles TDN_HYPERLINK_CLICKED -> ShellExecuteW the URL. Wide (UTF-16) null-terminated strings. New module pb-app/src/about_dialog.rs (#[cfg(windows)]); macOS later shows an NSAlert/About panel behind the same call. REMOVE the overlay About: main.rs InfoMode::About + toggle_about + show_about + about_icon (keep about_lines, reuse for the dialog) and its show_overlay/hide_overlay/about_to_wait arms; hud.rs render_about + blit_rgba; pb-render gpu.rs the 'about' centered layer (set_about, center_quad_vertices, field, resize + render pass). Wire MenuAction::About -> about_dialog::show(parent_hwnd). Modal (blocks the event loop briefly, like the file picker) - fine, the app isn't flying with a dialog up. Privacy: reads only the embedded icon + compile-time strings, writes nothing.",
+        "details": "DONE (2026-06-28): about_dialog.rs (#[cfg(windows)]) shows a Win32 TaskDialogIndirect with the exe HICON (ExtractIconExW), 'PhotoBlaze', version, tagline, (c) line, and a clickable github link (TDN_HYPERLINK_CLICKED -> ShellExecuteW), OK button. Wired Help > About (MenuAction::About) -> App::open_about -> about_dialog::show(parent hwnd). Removed the overlay About across main.rs (InfoMode::About + toggle/show_about/about_icon/about_lines + arms), hud.rs (render_about/blit_rgba), pb-render gpu.rs (the centered 'about' layer). GOTCHA fixed: TaskDialogIndirect is only exported by Common-Controls v6, so build.rs's embedded manifest now declares the Microsoft.Windows.Common-Controls 6.0.0.0 <dependency> (without it the call crashed with 'entry point not found'). Added the windows crate Win32_UI_Controls feature. clippy -D warnings + fmt + tests green; verified visually (icon + text + working link). KNOWN: TaskDialog renders light even in OS dark mode (Windows has no supported dark TaskDialog; standard for native About boxes) - accepted. ORIGINAL PLAN: Use TaskDialogIndirect (windows crate, feature Win32_UI_Controls) with TASKDIALOGCONFIG: dwFlags TDF_ALLOW_DIALOG_CANCELLATION | TDF_ENABLE_HYPERLINKS | TDF_USE_HICON_MAIN; pszWindowTitle 'About PhotoBlaze'; hMainIcon = the exe's icon via ExtractIconExW (reuse the apply_native_window_icon pattern); pszMainInstruction 'PhotoBlaze'; pszContent = version (env CARGO_PKG_VERSION) + 'An ultra-fast photo viewer' + (c) JD Lien 2026 + an <a href> GitHub link; TDCBF_OK_BUTTON. pfCallback handles TDN_HYPERLINK_CLICKED -> ShellExecuteW the URL. Wide (UTF-16) null-terminated strings. New module pb-app/src/about_dialog.rs (#[cfg(windows)]); macOS later shows an NSAlert/About panel behind the same call. REMOVE the overlay About: main.rs InfoMode::About + toggle_about + show_about + about_icon (keep about_lines, reuse for the dialog) and its show_overlay/hide_overlay/about_to_wait arms; hud.rs render_about + blit_rgba; pb-render gpu.rs the 'about' centered layer (set_about, center_quad_vertices, field, resize + render pass). Wire MenuAction::About -> about_dialog::show(parent_hwnd). Modal (blocks the event loop briefly, like the file picker) - fine, the app isn't flying with a dialog up. Privacy: reads only the embedded icon + compile-time strings, writes nothing.",
         "testStrategy": "about_lines content stays unit-tested (version/tagline/copyright/URL). The dialog itself is native UI - manual/visual: Help > About shows the icon + text, the GitHub link opens in the browser, OK closes it. Confirm the removed overlay leaves no dead code (clippy -D warnings) and no other InfoMode references dangle.",
         "subtasks": [
           {
             "id": 1,
             "title": "about_dialog.rs: TaskDialog with icon + hyperlink",
             "description": "TaskDialogIndirect with the exe HICON, version/tagline/copyright text, clickable GitHub link (TDN_HYPERLINK_CLICKED -> ShellExecuteW), OK button; Win32_UI_Controls feature.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 2,
             "title": "Remove the custom overlay About",
             "description": "Strip InfoMode::About + toggle_about/show_about/about_icon (keep about_lines) in main.rs, render_about/blit_rgba in hud.rs, and the 'about' centered layer in pb-render gpu.rs; ensure no dead code.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 3,
             "title": "Wire MenuAction::About -> native dialog; verify",
             "description": "Dispatch the Help > About item to about_dialog::show(parent hwnd); manual check icon/link/OK; clippy -D warnings + fmt + tests green.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           }
         ]
