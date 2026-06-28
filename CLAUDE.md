@@ -186,17 +186,33 @@ single-theme dialog can't show.
 - **Components:** `card`, `card_row` (responsive: control on the right when wide,
   stacked under the header below `CARD_WRAP_WIDTH`), `toggle` / `toggle_with_label`,
   `section_label`, `primary_button` / `secondary_button` / `danger_button`,
-  `text_field`, `icon_sized`.
+  `text_field`, `slider` (stable-width value box — no jitter), `icon_sized`.
+- **Icons (`pb-ui/src/icon.rs`):** Font Awesome SVGs **vendored per family**
+  (`icons/<family>/<name>.svg`), rasterized to a **white square sprite** and **tinted at
+  draw time** — one texture serves every tone and theme (cached in the egui ctx). A
+  semantic `Icon` enum (`Lock`, `Warning`, `Trash`, …) names *meaning* not glyph; `Tone`
+  (`Neutral`/`Accent`/`Warning`/`Danger`/`Success`) resolves through the `Palette` so it's
+  light/dark-correct. Placement helpers — `lead_row` (gutter icon centered on the first
+  content line: the dialog body shape) and `inline` — bake the alignment, so there is
+  **no per-call nudging or top-clipping** (the old pain). The square render is our own
+  `fa-fw` — FA glyphs aren't all square (lock is 384×512), so we center every glyph in a
+  square box. **Switch families** by flipping `icon::ACTIVE_FAMILY` (vendor that family
+  first). The HUD toasts keep their own CPU-composite rasterizer (`pb-app/src/icon.rs`);
+  only the egui chrome uses `pb-ui::icon`.
 
 **Conventions:** primary = accent default action (Save/OK/Unlock); secondary = neutral
-(Cancel); danger = red (Delete). `dialog.rs` keeps only the *scaffold* (the second
-window + `button_bar` / `dialog_frame` panels + status-icon helpers) and **composes
+(Cancel); danger = red (Delete). Dialog status icons: Password = `Lock`/`Neutral`,
+Message = `Warning`/`Warning`, Confirm-delete = `Trash`/`Danger`. `dialog.rs` keeps only
+the *scaffold* (the second window + `button_bar` / `dialog_frame` panels) and **composes
 pb-ui atoms** inside it. Theme is locked to the OS-resolved light/dark at open (explicit
 `ThemePreference`, not `System`, so `apply_style` isn't re-clobbered).
 
 **To add a component:** put it in `pb-ui` (drive it from tokens/`Palette`, take a
 `&mut egui::Ui`, return the `Response`), add it to the gallery `catalog`, then use it.
-Don't add UI primitives to `pb-app`.
+Don't add UI primitives to `pb-app`. **To add an icon:** copy the glyph for each vendored
+family from the FA library (`D:\Media\fontawesome-pro-plus-7.3.0-web\svgs\<family>\`) into
+`pb-ui/icons/<family>/`, add a variant to `icon::Icon` + a `glyph!` arm, show it in the
+gallery's Icons row.
 
 > **Provisional (2026-06-28):** the theme currently leans *native-Windows*
 > (Segoe UI + an OS-ish accent). An *own-brand* identity (a tuned palette + Inter,

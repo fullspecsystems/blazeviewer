@@ -9,6 +9,7 @@
 //! Dev-only: `cargo run -p pb-ui --example gallery`. Never compiled into the app.
 
 use eframe::egui;
+use pb_ui::icon::{Icon, Tone};
 use pb_ui::Palette;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -148,6 +149,37 @@ impl Gallery {
             pb_ui::toggle(ui, p, &mut self.recursive);
             ui.add_space(SPACE);
             pb_ui::toggle(ui, p, &mut self.fullscreen);
+        });
+
+        // The icon set (neutral tone), then one icon across every tone — all white
+        // sprites tinted at draw, theme-aware via the palette.
+        pb_ui::section_label(ui, p, &format!("Icons ({})", pb_ui::icon::family_name()));
+        ui.horizontal_wrapped(|ui| {
+            for ic in [
+                Icon::Lock,
+                Icon::Warning,
+                Icon::Error,
+                Icon::Info,
+                Icon::Success,
+                Icon::Help,
+                Icon::Trash,
+            ] {
+                pb_ui::icon::image(ui, ic, 22.0, Tone::Neutral, p);
+                ui.add_space(SPACE);
+            }
+        });
+        ui.add_space(SPACE);
+        ui.horizontal(|ui| {
+            for tone in [
+                Tone::Neutral,
+                Tone::Accent,
+                Tone::Warning,
+                Tone::Danger,
+                Tone::Success,
+            ] {
+                pb_ui::icon::image(ui, Icon::Warning, 22.0, tone, p);
+                ui.add_space(SPACE);
+            }
         });
 
         pb_ui::section_label(ui, p, "Setting cards");

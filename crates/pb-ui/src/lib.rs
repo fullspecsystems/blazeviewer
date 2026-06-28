@@ -20,6 +20,8 @@
 
 use egui::{Color32, FontFamily, FontId, Margin, Rounding, Stroke, TextStyle};
 
+pub mod icon;
+
 // ── Spacing scale (4px grid, named like a type/space scale) ──────────────────
 pub const SPACE_1: f32 = 4.0;
 pub const SPACE_2: f32 = 8.0;

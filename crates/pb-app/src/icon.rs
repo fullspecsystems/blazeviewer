@@ -27,10 +27,8 @@ pub mod assets {
     pub const RECYCLE: &str = include_str!("../icons/bin-recycle.svg");
     /// Trash — the Delete-Permanently (`Shift+Del`) toast.
     pub const TRASH: &str = include_str!("../icons/trash.svg");
-    /// Warning triangle — the "cannot be undone" line on the confirm dialog.
-    pub const WARNING: &str = include_str!("../icons/triangle-exclamation.svg");
-    /// Padlock — the lead icon on the archive password-entry dialog.
-    pub const LOCK: &str = include_str!("../icons/lock.svg");
+    // Status icons for the dialogs (lock/warning/trash) now live in the `pb-ui` icon
+    // system (white-rasterized + tinted), not here — this set is only the HUD toasts.
 }
 
 /// Rasterize `svg` at pixel `height` (width follows the icon's aspect ratio),

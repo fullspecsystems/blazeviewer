@@ -9,6 +9,11 @@ description = "PhotoBlaze design system: egui tokens + components (cards, toggle
 [dependencies]
 # The chrome toolkit. Pinned to match pb-app's egui (0.29 ↔ wgpu 22 ↔ winit 0.30).
 egui = "0.29"
+# Rasterize the vendored Font Awesome SVG icons into white sprites (tinted at draw
+# time). Same version + default-features-off as pb-app/pb-decode, so it's already in
+# the lockfile (re-exports usvg + tiny_skia). Runs only when an icon is first needed
+# (then cached in the egui context), off the photo hot path.
+resvg = { version = "0.47", default-features = false }
 
 [dev-dependencies]
 # The component gallery example (`cargo run -p pb-ui --example gallery`) — a dev-only

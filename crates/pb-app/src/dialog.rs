@@ -17,7 +17,6 @@ use winit::window::{Theme, Window, WindowId};
 
 use pb_decode::{decode_bytes, FitBox};
 
-use crate::icon::assets as icon_assets;
 use pb_ui as pbui;
 
 /// Which dialog a [`DialogWindow`] is showing.
@@ -96,12 +95,9 @@ pub struct DialogWindow {
     /// Whether this dialog renders in dark mode (resolved once from the OS theme at
     /// open). Reapplied to the design-system style every frame via `pbui::apply_style`.
     dark_ui: bool,
+    /// The About card's app icon (a PNG). Status icons (lock/warning/trash) are drawn
+    /// on demand via `pb_ui::icon`, not stored here.
     icon: Option<egui::TextureHandle>,
-    /// Confirm-dialog warning-triangle icon (sits inline with the "cannot be undone"
-    /// line); `None` for other kinds.
-    warn_icon: Option<egui::TextureHandle>,
-    /// Padlock lead icon for a [`DialogKind::Password`] dialog; `None` otherwise.
-    lock_icon: Option<egui::TextureHandle>,
     draft: SettingsDraft,
     /// The prompt for a [`DialogKind::Confirm`]/[`Message`]/[`Password`] dialog.
     ///
@@ -227,32 +223,6 @@ impl DialogWindow {
         );
         let egui_renderer = egui_wgpu::Renderer::new(&device, format, None, 1, false);
         let icon = load_icon_texture(&egui_ctx);
-        // The amber warning triangle (rasterized large for crisp scaling): shown
-        // inline on the Confirm dialog and as the lead icon on a Message notice.
-        let warn_icon = if matches!(kind, DialogKind::Confirm | DialogKind::Message) {
-            svg_texture(
-                &egui_ctx,
-                icon_assets::WARNING,
-                72,
-                [232, 172, 46],
-                "dialog-warn",
-            )
-        } else {
-            None
-        };
-        // A neutral padlock lead icon, tinted a theme-aware gray (not a from-nowhere
-        // accent color) so it sits quietly and stays legible in light and dark.
-        let lock_icon = if matches!(kind, DialogKind::Password) {
-            svg_texture(
-                &egui_ctx,
-                icon_assets::LOCK,
-                48,
-                neutral_icon_tint(dark_ui),
-                "dialog-lock",
-            )
-        } else {
-            None
-        };
 
         let mut dlg = DialogWindow {
             window,
@@ -267,8 +237,6 @@ impl DialogWindow {
             egui_renderer,
             dark_ui,
             icon,
-            warn_icon,
-            lock_icon,
             draft: SettingsDraft::new(refresh_hz),
             confirm_msg: message.to_string(),
             confirm_result: None,
@@ -360,8 +328,6 @@ impl DialogWindow {
         let ctx = self.egui_ctx.clone();
         let kind = self.kind;
         let icon = self.icon.clone();
-        let warn_icon = self.warn_icon.clone();
-        let lock_icon = self.lock_icon.clone();
         let msg = self.confirm_msg.clone();
         let pw_error = self.password_error.clone();
         let checking = self.checking;
@@ -382,10 +348,10 @@ impl DialogWindow {
                     .show(ctx, |ui| settings_ui(ui, draft));
             }
             DialogKind::Confirm => {
-                confirm_click = confirm_dialog(ctx, &msg, warn_icon.as_ref());
+                confirm_click = confirm_dialog(ctx, &msg);
             }
             DialogKind::Message => {
-                confirm_click = message_dialog(ctx, &msg, warn_icon.as_ref());
+                confirm_click = message_dialog(ctx, &msg);
             }
             DialogKind::Password => {
                 confirm_click = password_dialog(
@@ -395,7 +361,6 @@ impl DialogWindow {
                     pw_error.as_deref(),
                     checking,
                     take_focus,
-                    lock_icon.as_ref(),
                 );
             }
         });
@@ -538,22 +503,17 @@ fn about_ui(ui: &mut egui::Ui, icon: Option<&egui::TextureHandle>) {
 }
 
 // ── Dialog layout tokens ────────────────────────────────────────────────────
-// Only the dialog *scaffold* (the second-window mechanism) lives here; the buttons
-// and fields are **pb_ui components** (`pbui::{primary,secondary,danger}_button`,
-// `pbui::text_field`) so they match the rest of the app and there's no second button
-// to maintain. Anatomy of a dialog: a `dialog_frame`-inset content panel on top, then
-// a `button_bar` pinned to the bottom holding the pb_ui buttons right-aligned. Roles:
+// Only the dialog *scaffold* (the second-window mechanism) lives here; the buttons,
+// fields, and icons are **pb_ui components** (`pbui::{primary,secondary,danger}_button`,
+// `pbui::text_field`, `pbui::icon::{lead_row,inline}`) so they match the rest of the app
+// and there's nothing to re-maintain. Anatomy of a dialog: a `dialog_frame`-inset
+// content panel on top, then a `button_bar` pinned to the bottom holding the pb_ui
+// buttons right-aligned. Roles:
 //   * DIALOG_PAD  — uniform content inset; also the gap to every edge + the divider.
-//   * LEAD_ICON   — the status icon beside a message (Message's ⚠, Password's lock).
-//   * INLINE_ICON — a small icon inline with a secondary line (Confirm's ⚠ note).
 //   * MSG_SIZE    — body/message text size.
-// Button gaps use `pbui::SPACE_3`; text-field padding `pbui::FIELD_MARGIN`.
-// Icon tinting: semantic icons (warning = amber) are theme-independent; neutral
-// icons (the lock) take a theme-aware gray via `neutral_icon_tint` so they stay
-// legible on both light and dark backgrounds.
+// Button gaps use `pbui::SPACE_3`; text-field padding `pbui::FIELD_MARGIN`; status
+// icons (lock/warning/trash) come tinted + placed from `pbui::icon`.
 const DIALOG_PAD: f32 = 22.0;
-const LEAD_ICON: f32 = 22.0;
-const INLINE_ICON: f32 = 18.0;
 const MSG_SIZE: f32 = 15.0;
 
 /// A panel frame filled to match the window background, inset by `DIALOG_PAD` on
@@ -577,45 +537,15 @@ fn button_bar(ctx: &egui::Context, id: &'static str, add: impl FnOnce(&mut egui:
         });
 }
 
-/// Draw a vendored status icon at a fixed `height`, **preserving its aspect ratio**.
-/// The FA SVGs aren't all square (the lock is 3:4); forcing one into a square box
-/// stretches it. One rule for every dialog icon so they read consistently.
-fn icon_image(ui: &mut egui::Ui, tex: &egui::TextureHandle, height: f32) {
-    let size = tex.size_vec2();
-    let w = if size.y > 0.0 {
-        height * size.x / size.y
-    } else {
-        height
-    };
-    ui.image(egui::load::SizedTexture::new(
-        tex.id(),
-        egui::vec2(w, height),
-    ));
-}
-
-/// Theme-aware gray for a neutral (non-semantic) dialog icon, so it reads on both
-/// light and dark backgrounds: a dark UI gets a light-gray icon, a light UI a
-/// dark-gray one (roughly matching body-text contrast).
-fn neutral_icon_tint(dark_ui: bool) -> [u8; 3] {
-    if dark_ui {
-        [168, 168, 168]
-    } else {
-        [96, 96, 96]
-    }
-}
-
 /// A themed confirm dialog modelled on Directory Opus's "Confirm File Delete": the
 /// prompt + a ⚠ "cannot be undone" line, and a bottom-right button bar with a
 /// prominent red Delete (default-focused) and Cancel. Returns `Some(true)` on
 /// Delete, `Some(false)` on Cancel, else `None`. (Esc / the window close button also
 /// cancel it, from the event router.) The shared `DIALOG_PAD` margin balances the
 /// spacing around the text and around the buttons (equal to the divider + edges).
-fn confirm_dialog(
-    ctx: &egui::Context,
-    message: &str,
-    warn_icon: Option<&egui::TextureHandle>,
-) -> Option<bool> {
+fn confirm_dialog(ctx: &egui::Context, message: &str) -> Option<bool> {
     let mut result = None;
+    let p = pbui::Palette::new(ctx.style().visuals.dark_mode);
     // Right-to-left: Cancel added first (rightmost), Delete to its left — so the
     // visual order reads [Delete] [Cancel], matching Directory Opus.
     button_bar(ctx, "confirm_bar", |ui| {
@@ -632,20 +562,25 @@ fn confirm_dialog(
             resp.request_focus();
         }
     });
-    // Message + ⚠ line, left-aligned in the area above the button bar. The prompt
+    // A Trash lead icon (danger tone) + the prompt and an "undo" warning. The prompt
     // wraps so a long file name can't run off the right edge.
     egui::CentralPanel::default()
         .frame(dialog_frame(ctx))
         .show(ctx, |ui| {
-            ui.add(egui::Label::new(egui::RichText::new(message).size(16.0)).wrap());
-            ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                if let Some(t) = warn_icon {
-                    icon_image(ui, t, INLINE_ICON);
-                    ui.add_space(8.0);
-                }
-                ui.label("This operation cannot be undone.");
-            });
+            pbui::icon::lead_row(
+                ui,
+                &p,
+                pbui::icon::Icon::Trash,
+                pbui::icon::Tone::Danger,
+                |ui| {
+                    ui.add(egui::Label::new(egui::RichText::new(message).size(16.0)).wrap());
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new("This operation cannot be undone.")
+                            .color(p.text_secondary),
+                    );
+                },
+            );
         });
     result
 }
@@ -654,11 +589,7 @@ fn confirm_dialog(
 /// warning icon + the body text, and a bottom-right OK button (default-focused).
 /// Returns `Some(true)` when OK is clicked; Esc / the close button dismiss it via the
 /// event router. Shares `DIALOG_PAD` with the confirm dialog for matching margins.
-fn message_dialog(
-    ctx: &egui::Context,
-    message: &str,
-    icon: Option<&egui::TextureHandle>,
-) -> Option<bool> {
+fn message_dialog(ctx: &egui::Context, message: &str) -> Option<bool> {
     let mut ok = None;
     let p = pbui::Palette::new(ctx.style().visuals.dark_mode);
     button_bar(ctx, "message_bar", |ui| {
@@ -673,15 +604,17 @@ fn message_dialog(
     egui::CentralPanel::default()
         .frame(dialog_frame(ctx))
         .show(ctx, |ui| {
-            // `horizontal_top` + a wrapping label: a long message wraps under itself
-            // (the icon staying at the top) instead of running off the right edge.
-            ui.horizontal_top(|ui| {
-                if let Some(t) = icon {
-                    icon_image(ui, t, LEAD_ICON);
-                    ui.add_space(14.0);
-                }
-                ui.add(egui::Label::new(egui::RichText::new(message).size(MSG_SIZE)).wrap());
-            });
+            // A warning lead icon + the message (wraps under itself, the icon staying
+            // aligned to the first line — handled by `lead_row`).
+            pbui::icon::lead_row(
+                ui,
+                &p,
+                pbui::icon::Icon::Warning,
+                pbui::icon::Tone::Warning,
+                |ui| {
+                    ui.add(egui::Label::new(egui::RichText::new(message).size(MSG_SIZE)).wrap());
+                },
+            );
         });
     ok
 }
@@ -699,7 +632,6 @@ fn password_dialog(
     error: Option<&str>,
     checking: bool,
     take_focus: bool,
-    lock_icon: Option<&egui::TextureHandle>,
 ) -> Option<bool> {
     let mut result = None;
     let p = pbui::Palette::new(ctx.style().visuals.dark_mode);
@@ -719,20 +651,14 @@ fn password_dialog(
     egui::CentralPanel::default()
         .frame(dialog_frame(ctx))
         .show(ctx, |ui| {
-            // Lock icon in a left gutter; the prompt + field + status form an aligned
-            // content column to its right, so the file-name line and the field share
-            // one left edge (rather than the prompt floating, indented past the icon).
-            ui.horizontal_top(|ui| {
-                if let Some(t) = lock_icon {
-                    // Nudge the icon down so it sits centered against the two-line
-                    // prompt instead of hugging the very top edge.
-                    ui.vertical(|ui| {
-                        ui.add_space(6.0);
-                        icon_image(ui, t, LEAD_ICON);
-                    });
-                    ui.add_space(14.0);
-                }
-                ui.vertical(|ui| {
+            // Lock lead icon in a gutter; the prompt + field + status form the content
+            // column to its right (the gutter + vertical centering handled by `lead_row`).
+            pbui::icon::lead_row(
+                ui,
+                &p,
+                pbui::icon::Icon::Lock,
+                pbui::icon::Tone::Neutral,
+                |ui| {
                     // Two-line prompt: "Enter the password for" / the quoted file name.
                     ui.label(egui::RichText::new(prompt).size(MSG_SIZE));
                     ui.add_space(16.0); // breathing room between the prompt and field
@@ -763,8 +689,8 @@ fn password_dialog(
                             ui.label("Checking…");
                         });
                     }
-                });
-            });
+                },
+            );
         });
     result
 }
@@ -780,20 +706,6 @@ fn scrub(s: &mut String) {
         }
     }
     s.clear();
-}
-
-/// Rasterize a vendored SVG icon to an egui texture (tinted `rgb`), for dialog
-/// chrome. Reuses the app's `icon::rasterize` (resvg). `None` if it can't rasterize.
-fn svg_texture(
-    ctx: &egui::Context,
-    svg: &str,
-    px: u32,
-    rgb: [u8; 3],
-    name: &str,
-) -> Option<egui::TextureHandle> {
-    let (rgba, w, h) = crate::icon::rasterize(svg, px, rgb)?;
-    let img = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
-    Some(ctx.load_texture(name, img, egui::TextureOptions::LINEAR))
 }
 
 /// The pinned bottom action bar for the Settings dialog: a right-aligned
