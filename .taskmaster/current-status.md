@@ -1,6 +1,6 @@
 # PhotoBlaze — Current Status (session handoff)
 
-_Last updated: 2026-06-27. On `main`._
+_Last updated: 2026-06-28. On `main`._
 
 A fast, chrome-less, keyboard-driven photo viewer. The prefetch engine ("hold a
 key and fly") is done, plus broad multi-codec support, full-res RAW, the color
@@ -9,24 +9,68 @@ scaling/EXIF/help UI (#1/#3/#4/#5/#7). Privacy no-trace (#2), Esc teardown (#6),
 `enter` random nav (+ `Shift+Enter` prev-random), and the Windows-integration +
 MSI track are all done.
 
-## ⏭ ACTIVE NEXT WORK: make HEIC decode fly — see
-[`docs/heic-decode-plan.md`](docs/heic-decode-plan.md)
+## ⏭ ACTIVE NEXT WORK: HEIC decode — Phases 0–3 DONE; only follow-ups remain — see
+[`docs/heic-decode-plan.md`](docs/heic-decode-plan.md) (read the SESSION UPDATE at top)
 
-**Recent sessions shipped HEIC preview-first + on-land sharpen** (instant 320×240
-previews while scrolling; the on-screen photo re-decodes to full ~250 ms–1 s after
-you land). It works, but the full decode isn't PhotoBlaze-fast because **WIC's HEVC
-decoder serializes (~1.7× on 8 threads, measured)**. **Decision (owner): pivot
-HEIC/AVIF to CPU `libheif`** (parallel — the pool's 8 workers already run concurrent,
-just bottlenecked on WIC's single session → ~8× and prefetch fulls *ahead*). NVDEC
-deferred (iPhone HEICs are 48-tile HEVC grids; libheif handles that free). The full
-phased plan, the build-toolchain blocker, the "higher-quality preview" spike, and
-the deferred code-review findings are all in **`docs/heic-decode-plan.md`** — read it
-first.
+**The libheif pivot landed end-to-end (Phases 0–3 done, 2026-06-28).** WIC's HEVC
+decoder serializes (1.57×/8 threads, measured); the new **CPU `libheif` backend** is
+parallel (~5×/8 threads) → **~45 full HEIC/s vs WIC's 9.4 (≈4.8×)**, lower single-image
+latency too (115 ms vs 167). Behind the **`libheif` cargo feature** (OFF by default —
+pure-Rust core stays toolchain-free, ADR-015); routed for **full SDR HEIC only**
+(previews/AVIF/HDR stay on WIC); A/B via `PB_HEIC_BACKEND=wic`. iPhone output is
+**pixel-identical to WIC**; orientation perfect. Set up: **`scripts/setup-libheif.ps1`**
+(vcpkg + decode-only static libheif, `-DENABLE_PLUGIN_LOADING=OFF`).
 
-**Green bar:** `cargo test --workspace` (**167 passing**, 0 ignored),
-`cargo clippy --workspace --all-targets -- -D warnings`,
-`cargo fmt --all -- --check` — all clean. Working tree clean; preview-first/sharpen
-landed in commits up to `3c74cee`.
+- **Build/run with it:** `cargo run -p pb-app --release --features libheif -- "<folder>" -r`
+  (needs `VCPKG_ROOT` or vcpkg at `~/vcpkg`; run the setup script once first).
+## 🔬 2026-06-28 (late): the "1 s after flying" hunt — root cause was RAW, not HEIC
+
+Owner reported full-quality still lagging ~1 s after flying + stopping in
+`D:\Media\Pictures\2021` (905 iPhone HEIC + 285 Sony `.arw` + jpg/png). Stopped
+guessing and **instrumented the real pipeline** (`--metrics` now also prints a
+`sharpen` stage = full-requested→on-screen, and `pool decode (under load)`
+percentiles + the slowest files). Findings, all measured:
+- **The villain was RAW, not HEIC.** Pool decode p95 was **1388 ms**; the slowest were
+  all `prev DSC*.ARW` at **~1.4 s each** — the RAW **preview** path was **demosaicing**
+  (`DSC` sorts before `IMG`, so the ARWs sat in the startup window jamming all 8
+  workers; any HEIC you stopped near paid the contention).
+- iPhone HEIC sharpen itself is ~120 ms isolated but stretches under 8-way load
+  (decodes balloon several-fold). No re-decode churn (decode count normal).
+
+**Three fixes landed (all green):**
+1. **Fix C — RAW preview never demosaics** (`pb-decode/raw.rs`): a preview request
+   uses the embedded JPEG thumbnail (fast, ~tens of ms); the 100×+ demosaic is now
+   **full-decode-only**. *This is the actual ~1 s fix.* Result on the 2021 folder:
+   pool decode **p99 1467→259 ms, CPU 58→13 s**, the 1.4 s tail gone.
+2. **Fix A — no-thumbnail HEICs route to libheif** (`route_full_heic` + `has_thumbnail_ref`):
+   WIC fakes a thumbnail by full-decoding the grid (slow) for HEICs lacking a real
+   `thmb` item (macOS-encoded Sony HEICs); those previews now go to libheif (one
+   parallel decode, no WIC double-decode).
+3. **Fix B — prefetch fulls *ahead*** (`pb-app` `sharpen_now`/`prefetch_fulls`/tiered
+   `request_prefetch`): the full-res ring is now requested **even while flying**, but
+   at LOW priority (queued behind every preview), so it fills the cores' spare
+   capacity and the photo you stop on is often already sharp. RAW is **excluded** from
+   the speculative ahead-ring (demosaic is too expensive to do for neighbours).
+   Converges to idle (no churn). **Fly-then-stop feel needs owner verification** (can't
+   inject keypresses).
+
+**Still open (smaller):** iPhone HEIC *thumbnails* (WIC `GetThumbnail`) serialize under
+load (~240 ms each when 8 run) — flying through dense HEIC could still be preview-bound;
+candidate fix = libheif thumbnail extraction. Plus the earlier follow-ups: Sony HEIC
+color (**tasks.json #24**), Fill-mode decode-to-fit, sync load paths bypass preview-first,
+AVIF on libheif.
+
+**Phase 3 evolution:** `upgrade_item`→`sharpen_now` (displayed, tier 1) +
+`prefetch_fulls` (ahead-ring, tier 3, ungated); pure `pb_core::full_ring` bounds the
+ring (budget + `MAX_FULL_RING=24`). The held-nav gate is gone (replaced by the priority
+tiers). Decode **cancellation works** (queued-you-flew-past skipped; in-flight finishes
+but result discarded; no mid-decode abort).
+
+**Green bar:** `cargo test --workspace` (**175**) + `-p pb-decode --features libheif`
+(**58**, +3 routing/thumb tests); `cargo clippy --workspace --all-targets` and
+`--features libheif` (clean); `cargo fmt --all --check`. Converges to idle on every
+folder tested; no stderr spam. Diagnostics (`sharpen`, `pool decode`) are `--metrics`-gated.
+Throwaway A/B tools: `heic_bench`, `heic_compare` in `pb-decode`.
 
 ---
 

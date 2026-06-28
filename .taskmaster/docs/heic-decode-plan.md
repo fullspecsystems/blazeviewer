@@ -3,6 +3,101 @@
 _Written 2026-06-27 at the end of a long session, low on context. This is the
 authoritative plan for the next session on HEIC decode speed._
 
+---
+
+## ✅ SESSION UPDATE 2026-06-28 — Phases 0–2 DONE, libheif backend live
+
+The libheif pivot is **implemented, measured, correct, and green.** It's behind
+the `libheif` cargo feature (OFF by default — pure-Rust core stays buildable with
+no C toolchain, ADR-015). Build with `--features libheif`.
+
+**Phase 0 (toolchain) — DONE, and it was small.** The feared blocker was mostly a
+non-issue: **MSVC (VS 2022 + C++ tools) was already installed** (the expensive
+prerequisite). Only vcpkg + the libheif build remained. Reproducible via
+**`scripts/setup-libheif.ps1`** (bootstraps vcpkg at `~/vcpkg`, builds
+`libheif[core]:x64-windows-static-md`). `core` drops the x265 *encoder*; libde265
+(HEVC *decode*) is a hard dep so it's always present. **static-md** = static libs +
+dynamic CRT (matches Rust MSVC) → no DLLs to ship. **Critical build flag:
+`-DENABLE_PLUGIN_LOADING=OFF`** — the stock build compiles a dynamic-plugin scanner
+that on Windows fires ~1 `LoadLibraryA` *per HEVC grid tile* (~98 per iPhone image,
+all failing → stderr storm + a small tax). Turning it off removes the scanner at
+the source; the static libde265 is unaffected (registered via the static path).
+`pb-decode/build.rs` emits the static link directives (no `vcpkg` crate dep).
+
+**Phase 1 (LibHeifDecoder) — DONE.** `crates/pb-decode/src/libheif.rs`: a small
+hand-rolled `extern "C"` surface (no `libheif-sys` version coupling), every libheif
+object Drop-guarded, `heif_init` once via `OnceLock`. Reuses the WIC `colr`/brand
+parse for identical color. Routed (`route_full_heic`) for **full SDR HEIC only** —
+previews stay on WIC's fast embedded thumbnail, AVIF + HDR (PQ/HLG) stay on WIC.
+A/B switch `PB_HEIC_BACKEND=wic` (one binary). Pass-through `pb-app` feature.
+Boot-smoke: app launches on a HEIC folder, empty stderr, no busy-loop.
+
+**Phase 2 (measure) — DONE.** 12 MP iPhone, fit 7680×3840, 8-worker pool, RTX 5090
+box (32 cores):
+
+| | single | 8-worker aggregate | speedup |
+|---|---|---|---|
+| WIC (was) | 167 ms | 9.4/s | 1.57× |
+| **libheif (now)** | **~115 ms** | **~45/s** | **~5×** |
+
+**~4.8× WIC throughput, lower latency too.** Correctness (`heic_compare` example):
+iPhone files **pixel-identical to WIC** (mean <1 level/channel, ~99% within ±2),
+orientation perfect incl. portrait. Sony 24 MP is **CLOSE** (mean ~9 levels) — a
+**known libheif Sony quirk**: the `colr` nclx box disagrees with the HEVC VUI on the
+YCbCr range flag; libheif follows spec (colr precedence), WIC differs. Follow-up:
+set `autocorrect_broken_input` in decode options (needs the options struct).
+
+**Threading finding (don't re-derive):** leave libheif's per-context tile threading
+at its **default (on)**. On a 32-core box with only 8 pool workers, the internal
+threads productively fill the idle cores — forcing single-threaded
+(`heif_context_set_max_decoding_threads(ctx,0)`) was *worse* on both latency
+(290 ms) and 8-way aggregate (23/s). Revisit only if the pool worker count rises
+toward the core count.
+
+**Preview-quality spike — RESOLVED: no easy lever exists.** Probed real files
+(`heic_bench` example): iPhone embeds **only** a 320×240 thumbnail; the 2016×1512
+item is the **HDR gain map** (`auxl`, grayscale — not a usable preview). **Sony
+HEICs embed NO thumbnail at all** → preview-first currently does *nothing* for Sony
+(every Sony HEIC pays the full ~423 ms decode while scrolling). This is fixed for
+free once Phase 3 prefetches fulls ahead.
+
+**Calibration (reframes Phase 3):** the target is **not** 120 full-res/s. The fly-by
+stays **preview-bound** (18 ms thumbnails, huge headroom); 45/s of fulls makes
+dwell-sharpen feel instant *and* sustains a **fat full-res ring around the cursor**
+for normal browsing. So Phase 3 = **widen the full-res prefetch window around the
+current photo, current-first** — not "keep up with max scroll."
+
+**Phase 3 (prefetch fulls ahead) — DONE 2026-06-28.** `upgrade_item` (single on-screen
+full) is now `upgrade_set` — a VRAM-bounded, **current-first ring** of the resident
+window, upgraded in place when parked; empty while a nav key is held (the fly-by
+stays preview-bound). The decision is a pure, unit-tested `pb_core::full_ring` (a
+budget-bounded prefix of `prefetch_targets`, since `set_slot_bytes` doesn't evict —
+the set must fit VRAM *before* it's issued). Capped at `MAX_FULL_RING = 24` fulls
+(the preview window stays at full ring capacity, up to 64) so the on-park decode
+burst is bounded — nobody pause-steps two dozen photos before flying or stopping.
+The upload path needed no change (`drain_results` already upgrades *any* resident
+preview in place; `UPLOADS_PER_TICK = 2` paces the fill). Verified: pure tests green;
+**converges to fully idle** (0.00 CPU-s over 14 s on the 24 k-HEIC folder — no
+churn/busy-loop); RAM/VRAM bounded; the cap measurably cut decode work (8.4→7.8
+CPU-s). Visual "the ring is sharp as I browse" is owner-interactive (can't inject
+keypresses). The deferred review note "extract the tier state machine to pure bits"
+is partly addressed (the ring-selection logic is now pure `full_ring`).
+
+**➡ UPDATE 2026-06-28 (late) — the real "1 s after flying" was RAW, not HEIC.** See
+`current-status.md` "🔬 the 1 s hunt". Instrumented the real pipeline: the slow tail
+(p95 1388 ms) was the **RAW preview path demosaicing** (`prev DSC*.ARW` ~1.4 s each,
+jamming all workers). Fixes landed (all green): **(C)** RAW preview uses the embedded
+thumbnail, demosaic is full-only — *the actual fix*, p99 1467→259 ms; **(A)** no-thumbnail
+HEICs route to libheif (WIC fakes the thumbnail by full-decoding the grid); **(B)** fulls
+prefetched *ahead* at low priority (tiered `request_prefetch`; `held_nav` gate replaced).
+Still open: iPhone HEIC *thumbnails* serialize on WIC under load (~240 ms; candidate fix
+= libheif thumbnail extraction). Below follow-ups still apply: Sony color quirk
+(`autocorrect_broken_input`, **tasks.json #24**); Fill-mode decode-to-fit; sync load
+paths bypass preview-first; AVIF on libheif (needs aom/dav1d — HEVC-only). Original phased
+plan (now mostly historical) preserved below.
+
+---
+
 ## TL;DR
 
 Scrolling HEIC is already fast (instant blurry **previews** + on-land **sharpen**,

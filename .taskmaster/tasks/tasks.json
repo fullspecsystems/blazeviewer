@@ -2,7 +2,7 @@
   "master": {
     "metadata": {
       "created": "2026-06-26",
-      "updated": "2026-06-27",
+      "updated": "2026-06-28",
       "description": "Post-core feature backlog for PhotoBlaze. These ship AFTER the core viewer is stable (roadmap Phases 0-3: window, decode-to-fit, prefetch ring, hold-to-fly). Every task obeys the prime directive (faster or perf-neutral) and the project's TDD rules: pure logic isolated and unit-tested, GPU work behind the Renderer seam, golden-image tests for visuals. Shared infrastructure is factored out so it is built once: a per-photo ViewTransform (rotation + zoom + scaling mode), a translucent HUD/overlay layer, and a central configurable action/keymap."
     },
     "tasks": [
@@ -580,6 +580,300 @@
         "dependencies": [16],
         "details": "From docs/heic-decode-plan.md 'Deferred review findings': (1) HDR HEICs bypass preview-first (HDR float branch returns before allow_preview; needs SDR-thumb->HDR-full upgrade, slot format change). (2) Fill mode decodes full-res (decode_fit returns None for Fill+Original; give Fill a cover-to-screen target). (3) Decode-pool byte budget is a soft cap (reserve-before-decode; largely moot now). (4) DecodeKind::{Preview,Full} in the pool key (defensive). (5) Sync load paths (startup/resize/mode) bypass preview-first -> ~250ms HEIC freeze. (6) No unit/property tests for the tier state machine (extract pure bits).",
         "subtasks": []
+      },
+      {
+        "id": 19,
+        "title": "Hold-to-fly acceleration ramp (slow start -> refresh-rate)",
+        "description": "While a navigation key is held, accelerate the advance rate over time - starting at a few photos per second for control, ramping up to the display refresh cap over several seconds - instead of jumping straight to full speed after the initial tap delay.",
+        "status": "done",
+        "priority": "medium",
+        "dependencies": [],
+        "details": "DONE (2026-06-28): shipped as a PURE advance_interval(elapsed, min_rate, ramp_secs, frame_interval) -> Duration in pb-app main.rs - a linear rate ramp from ADVANCE_MIN_RATE=3.0/s up to the refresh rate over ADVANCE_RAMP_SECS=4.0s, floored at frame_interval so refresh stays the hard ceiling - wired into the about_to_wait hold-advance gate (replaced the fixed frame_interval due-check). repeat_elapsed is measured from when the tap delay expired (hold_start + initial_delay), so the ramp RESETS naturally on each fresh hold and on a direction change (held_nav is single-key, so reversing = release+press = a new hold_start). All existing gates preserved: tap = one photo, readiness gating (a miss HOLDS, never skips), self-paced to the newest ready frame. The configurable lower cap (Task 20) waits on the settings dialog (Task 22); until then refresh is the max. Unit tests cover the floor (~1/min_rate at t=0), the exact refresh clamp at/after the ramp, monotonic shrink, and the low-Hz no-ramp case; clippy -D warnings + fmt + 31 pb-app tests green; release built + smoke-tested. Feel is owner-verified (hold-to-fly timing is hands-on, per project norm). ORIGINAL PLAN: Today's hold-to-fly (pb-app main.rs about_to_wait, section 3) had NO ramp: after the initial_delay (~400ms) tap gate, advance is gated only by frame_interval (~1/refresh) + decode readiness, so it jumps straight to the refresh-capped MAX cadence. Add a time-based acceleration that mirrors the existing zoom/pan ramps (ZOOM_MIN_RATE->ZOOM_MAX_RATE over ZOOM_RAMP_SECS; PAN_MIN_SPEED->PAN_MAX_SPEED over PAN_RAMP_SECS, applied in apply_view_holds). While a nav key is held, interpolate the advance rate from a gentle floor (ADVANCE_MIN_RATE, a few photos/sec) up to a ceiling over ADVANCE_RAMP_SECS (a few seconds), measured from hold_start (after the initial delay). The ceiling is min(display refresh, the Task 20 configured cap). Convert the rate to a due interval and advance when now >= last_present + interval AND caught_up (displayed == target). PRESERVE every existing gate: tap = one photo (initial_delay); readiness gating (a miss HOLDS the previous frame, never skips); self-paced advance to the newest ready frame each tick. The ramp only sets the ATTEMPTED cadence - decode throughput still caps the real rate (so on slow folders the ramp is moot, on fast ones it controls feel). Reset the ramp clock on a fresh hold and on a direction change (reversing starts slow again), like zoom/pan reset their *_started on release. Make the core a PURE helper (pb-core, or a pure fn in pb-app): advance_interval(elapsed, min_rate, ceiling_rate, ramp_secs) -> Duration, unit-tested. Perf-neutral: pure arithmetic in about_to_wait; no extra allocation; no change to decode/upload.",
+        "testStrategy": "Pure unit tests on the ramp: at elapsed 0 the interval ~= 1/ADVANCE_MIN_RATE; at elapsed >= ramp_secs it clamps to the ceiling interval (never faster than min(refresh, cap)); strictly monotonic (rate rises, interval shrinks) in between; a lower ceiling lowers the cap. Property: the attempted rate never exceeds min(refresh, cap). Manual/perf: hold space / enter / backspace - flies slow then smoothly accelerates to full speed; a tap still advances exactly one photo; reversing restarts slow. Shares the gated-advance invariant: no photo is skipped.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Pure advance-rate ramp function",
+            "description": "Interpolate the advance rate from a floor to a ceiling over a ramp duration and return the due interval. Pure + unit-tested (floor at t=0, ceiling at t>=ramp, monotonic).",
+            "status": "done",
+            "dependencies": []
+          },
+          {
+            "id": 2,
+            "title": "Replace the fixed frame_interval due-gate with the ramp",
+            "description": "In about_to_wait section 3, gate the hold-advance on the ramped interval instead of frame_interval; ceiling = min(refresh, Task 20 cap).",
+            "status": "done",
+            "dependencies": []
+          },
+          {
+            "id": 3,
+            "title": "Reset the ramp on hold start / direction change",
+            "description": "Restart the ramp clock when a new hold begins or the nav direction flips, so reversing starts slow (mirror zoom/pan reset). DONE via repeat_elapsed = now - (hold_start + initial_delay): hold_start resets on each fresh press, and held_nav is single-key so reversing is release+press.",
+            "status": "done",
+            "dependencies": []
+          },
+          {
+            "id": 4,
+            "title": "Preserve tap + readiness + self-paced gates; manual check",
+            "description": "Verify tap = one photo, a miss holds (no skip), self-paced to the newest ready frame; confirm smooth acceleration by hand. Gates preserved in code + tests; smooth-accel feel is owner-verified (hands-on).",
+            "status": "done",
+            "dependencies": []
+          }
+        ]
+      },
+      {
+        "id": 20,
+        "title": "Configurable fly-speed cap (max photos/second)",
+        "description": "A user-configurable maximum hold-to-fly rate (e.g. 10 photos/second) - the 'scan speed limit' - that caps iteration speed independent of the monitor refresh rate. Read-only from config; defaults to the refresh rate (effectively uncapped).",
+        "status": "pending",
+        "priority": "low",
+        "dependencies": [19],
+        "details": "The cap is the CEILING of the Task 19 acceleration ramp: effective max rate = min(display refresh, configured cap). With no config the default is the refresh rate (today's behavior, uncapped). CONFIG HOME: pb-app already has src/settings.rs - a minimal key=value TOML-subset that currently persists only the windowed/fullscreen preference (privacy Task 2: preferences only, NEVER photo-derived data). Add a max_advance_rate (photos/sec) key there now (a parse_* fn + typed getter, like parse_fullscreen) so it ships without waiting on the fuller config in Task 8; fold it into Task 8's action/config map when that lands. VALIDATION: clamp to a sane range (e.g. 1..=1000) - a missing / zero / negative / garbage value falls back to the default (refresh); a cap >= refresh behaves as uncapped. PRIVACY (Task 2): config is read-only input; reading/clamping writes nothing to disk. Wire the resolved cap into the Task 19 ramp ceiling. (Optional later: a runtime toggle that flashes a toast; not required for v1.)",
+        "testStrategy": "Unit-test parse + clamp (like parse_fullscreen): 'max_advance_rate = 10' -> 10; missing -> None/default; 0 / negative / garbage -> default or clamped; absurdly large -> clamped. Property: effective fly rate == min(refresh, cap); a cap >= refresh == uncapped. Integration with Task 19: the ramp ceiling honors the cap. Privacy: parsing writes nothing to disk (shares Task 2's no-trace guarantee).",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Parse + clamp max_advance_rate in settings.rs",
+            "description": "Add the key with a pure parse + range clamp (default = refresh); unit-tested like parse_fullscreen.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 2,
+            "title": "Feed the cap into the ramp ceiling",
+            "description": "Resolve min(refresh, cap) and hand it to the Task 19 advance ramp as its ceiling.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 3,
+            "title": "Validation, read-only privacy, and docs",
+            "description": "Clamp/fallback on bad input; never write config from viewed state; document the setting.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 4,
+            "title": "Migrate into the Task 8 config map (deferred)",
+            "description": "When Task 8's central config lands, move max_advance_rate into it; keep settings.rs back-compat.",
+            "status": "deferred",
+            "dependencies": []
+          }
+        ]
+      },
+      {
+        "id": 21,
+        "title": "Fix: photo briefly stretches (wrong aspect) during fullscreen<->windowed toggle",
+        "description": "When toggling between windowed and borderless-fullscreen (F11 / Alt+Enter / the View menu), the photo momentarily stretches out of aspect ratio for a frame or two before it re-renders correctly. The fit math is right; this is a transition-sequencing artifact and we can do better.",
+        "status": "pending",
+        "priority": "low",
+        "dependencies": [],
+        "details": "ATTEMPTED then FULLY REVERTED (2026-06-28). The bug is a flip-model resize artifact: during the toggle DWM stretches the previous swapchain buffer to the new window size for ~a frame (our own draws are always correctly letterboxed). Tried, in order: (1) PROACTIVE PRESENT (reconfigure + redraw to the new size in toggle_fullscreen instead of waiting for the async Resized) - reduced but did NOT remove the flash. (2) DWM CLOAK across the transition (cloak -> resize -> render correct frame -> uncloak) - this DID remove the stretch, but regressed two things: (a) the Windows shell stopped auto-hiding the taskbar in fullscreen (its fullscreen-detection fires on the resize event, which now happened while the window was cloaked/hidden, so the shell never registered a fullscreen window), and (b) it added a visible blank 'beat' on the transition. A post-uncloak SWP_FRAMECHANGED re-assert did NOT restore taskbar hiding. NET: two worse problems for one minor cosmetic flash, so ALL of it (cloak + reassert + proactive present) was reverted - toggle_fullscreen is back to the plain resize: taskbar auto-hides correctly, no blank, the minor 1-frame stretch is accepted. PROPER FIX (deferred -> now LOW priority): the artifact needs swapchain control wgpu doesn't expose - either DXGI_SCALING_NONE on the flip swapchain (requires native swapchain creation, not via wgpu) or a synchronous WM_SIZE ResizeBuffers via a window subclass. Both are disproportionate to a 1-frame flash; revisit only if it becomes a real annoyance. Follow-up Task 25 (minimize the cloak gap) is now moot and cancelled. ORIGINAL PLAN: REPRO: toggle_fullscreen (pb-app main.rs) flips decorations + window position + inner size (windowed: 1280x800; borderless-fullscreen: monitor size), and now also adds/removes the native menu bar (which itself resizes the client area). Each of these fires one or more intermediate WindowEvent::Resized. The Resized handler reconfigures the swapchain and re-places the quad via quad_vertices (which IS aspect-preserving / letterboxed), then draws; the crisp decode-to-fit is debounced (resize_settle_at, ~180ms). LIKELY CAUSE: with the flip-model swapchain, during the window-size transition the compositor (DWM) STRETCHES the previously-presented frame to the new client size for a frame before our reconfigure + aspect-correct repaint lands - and/or an intermediate Resized size is drawn before the final size settles. So the brief stretch is a stale/early frame being scaled, not wrong fit math. PLAN: (1) Instrument the toggle to confirm the source (compositor stretch of the prior frame vs. a transient intermediate size we draw). (2) Drive the resize from toggle_fullscreen using the KNOWN target size: reconfigure the swapchain + repaint an aspect-correct, letterboxed frame in the SAME step (don't wait for the async Resized), so no stretched intermediate is ever presented. (3) Consider hiding/freezing the surface across the transition (or matching the resumed() 'render-while-hidden then reveal' trick) so the OS never composites a stretched buffer; coalesce the multiple intermediate Resized events. (4) Keep the debounced decode-to-fit for crispness - this fix is purely about the immediate frame's geometry, not the re-decode. Perf-neutral and must not regress the smooth live-drag resize path. Cross-ref: the menu add/remove resize churn was introduced with the windowed-mode menu bar; ensure that path doesn't add its own stretch.",
+        "testStrategy": "The pure fit/quad math (fit_rect / quad_vertices) is already unit-tested and stays aspect-correct at every intermediate size - so add a regression test only where it helps (e.g. assert the drawn quad rect preserves the image aspect at both the windowed and fullscreen sizes, and at a representative intermediate size). The artifact itself is timing/compositor-driven, so the primary check is manual/visual: toggle repeatedly in both directions and confirm NO stretched frame appears; optionally capture frames (offscreen_png render path / PresentMon) to verify. Confirm the live-drag resize and the debounced decode-to-fit are unaffected.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Reproduce + identify the stretched frame's source",
+            "description": "Instrument the toggle/resize sequence; confirm whether it's the compositor stretching the prior swapchain image or a transient intermediate size we draw. CONFIRMED: flip-model compositor stretching the previous frame to the new size mid-transition (our draws are always letterboxed).",
+            "status": "done",
+            "dependencies": []
+          },
+          {
+            "id": 2,
+            "title": "Drive resize from toggle_fullscreen with the known target size",
+            "description": "Reconfigure the swapchain + repaint an aspect-correct letterboxed frame in the same step instead of waiting for the async Resized, so no stretched intermediate is shown. TRIED then REVERTED - reduced the flash but didn't eliminate it.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 3,
+            "title": "Hide/coalesce across the transition",
+            "description": "Optionally hide or freeze the surface across the toggle (like resumed's render-while-hidden) and coalesce the multiple intermediate Resized events (decoration/position/size + menu add/remove). TRIED via DWM cloak then REVERTED - it eliminated the stretch but regressed taskbar auto-hide and added a blank beat.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 4,
+            "title": "Verify both directions; keep debounced decode + smooth drag-resize",
+            "description": "No stretch on either toggle direction; crisp decode-to-fit still debounced; live-drag resize and perf unaffected. (Pending a future proper fix; the cloak attempt was reverted.)",
+            "status": "pending",
+            "dependencies": []
+          }
+        ]
+      },
+      {
+        "id": 22,
+        "title": "In-app settings/preferences UI (options + hotkey remapping)",
+        "description": "A configuration screen - opened from the menu bar (Settings...) and a hotkey - that lets users change options (scan-speed cap, hold-to-fly acceleration, recursive-by-default, windowed/fullscreen default, etc.) and remap hotkeys to actions, applying live and persisting to the config files. This is the GUI FRONT-END over the config backends; it is the first deliberate user-driven disk write (preferences only - privacy Task 2 explicitly allows config).",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [8, 20],
+        "details": "FRONT-END over the config BACKENDS: Task 8 (central action enum + keymap + TOML) for hotkeys, and settings.rs / Task 20 for options. The UI edits an in-memory config, applies it to the running app live, and persists to the config file(s).\n\nRENDERING DECISION (A/B seam, flag for owner): the existing HUD layer (pb-app hud.rs) is a NON-interactive text rasterizer (panels/tables) - it cannot host clickable toggles/sliders or key-capture. Options: (a) RECOMMENDED - integrate egui via egui-wgpu onto the existing wgpu surface: interactive widgets, input handling, and key-capture for free, and perf-neutral because it only runs while the settings view is open (off the keypress->photon photo hot path); (b) build custom interactive widgets on the HUD layer (full control but reinvents a UI toolkit - a lot of work); (c) a native OS dialog (least consistent look, awkward key-capture). Decide behind the established seams; egui-wgpu is the pragmatic pick and stays off the hot path.\n\nHOTKEY REMAP: a 'press a key' capture mode that reads the next physical key and assigns it to the selected action via Task 8's action map; surface conflicts (duplicate key / unknown action) using Task 8's validation; offer reset-to-defaults.\n\nOPTIONS: surface existing + new settings - scan-speed cap (Task 20), hold-to-fly acceleration (Task 19; e.g. min rate + ramp seconds), recursive-by-default (Task 12), windowed/fullscreen default (settings.rs), and future ones. Group sensibly (Navigation / Display / Keybindings / About).\n\nLIVE APPLY + PERSIST: changes take effect immediately on the running app (e.g. update the Task 19 ramp ceiling) and write to the config file on save/close. PRIVACY (Task 2): config writes are explicitly IN-BOUNDS (preferences only, NEVER photo-derived data) - this is the first deliberate user-config write beyond the fullscreen pref; keep it strictly preferences, write atomically (temp + rename), best-effort (a failed write must never break viewing).\n\nENTRY: a 'Settings...' item in the muda menu bar (reuse the menu/action dispatch already wired) + a hotkey (conventional comma, registered via Task 8); openable in windowed (menu) and via hotkey. Esc / Save / Cancel to dismiss; while open, the settings view owns input so hold-to-fly is paused. The help overlay (Task 7) and menu hints should reflect any remaps.\n\nTDD: the config model + serialize/parse + validation (conflict detection, defaults merge, option clamps) are PURE and unit-tested (largely shared with Task 8 + Task 20); the interactive widget layer is the hard-to-test GPU/input shell (manual + minimal golden where feasible). The action<->key mapping and the 'apply edits to live state' reducer must be pure, tested functions.",
+        "testStrategy": "Pure tests on the settings model: edit -> apply -> serialize -> reparse round-trips; remap conflict detection (duplicate key, unknown action); defaults merge over a partial config; option clamps (reuse Task 20). Persistence: saving writes ONLY the config file (preferences) and never any photo-derived data (shares Task 2's no-trace guarantee; the config file itself is explicitly allowed); atomic temp+rename; a simulated write failure leaves viewing unaffected. Manual/visual: open settings from the menu and the hotkey; change the scan-speed cap and confirm it applies live AND persists across a restart; remap a key and confirm the new binding works and the help overlay (Task 7) + menu hints update; reset-to-defaults. If egui is chosen, confirm it renders only while open with zero impact on the photo hot path.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Choose the settings-UI tech (egui-wgpu vs HUD widgets)",
+            "description": "Decide + spike the rendering approach; egui-wgpu recommended, composited on the existing wgpu surface and running only while the settings view is open (off the photo hot path).",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 2,
+            "title": "Pure settings model over Task 8 + settings.rs",
+            "description": "Load -> edit -> apply-live -> serialize config model spanning the keymap (Task 8) and options (settings.rs / Task 20); unit-tested round-trip + validation.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 3,
+            "title": "Options panel (scan-speed cap, acceleration, recursive/windowed defaults, ...)",
+            "description": "Grouped controls bound to the model with live apply; surfaces Task 19/20/12 and the existing prefs.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 4,
+            "title": "Hotkey remap: key-capture + conflict display + reset",
+            "description": "Press-a-key capture assigns the next physical key to an action (Task 8 map); show duplicate/unknown conflicts; reset-to-defaults.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 5,
+            "title": "Entry points + dismissal (menu 'Settings...', hotkey, Esc/Save/Cancel)",
+            "description": "Wire the muda menu item + a hotkey; pause hold-to-fly while open; reflect remaps in the help overlay + menu hints.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 6,
+            "title": "Persist preferences (atomic, best-effort) + privacy check",
+            "description": "Write only preferences (Task 2 allows config) via atomic temp+rename; a failed write never breaks viewing; never persist photo-derived data.",
+            "status": "pending",
+            "dependencies": []
+          }
+        ]
+      },
+      {
+        "id": 23,
+        "title": "Slideshow mode (s to toggle, [ / ] adjust interval)",
+        "description": "Press s to start/stop an automatic slideshow that advances on a timer in the LAST navigation direction. [ and ] change the interval in 0.5s steps, and the change applies to the current slide's remaining time immediately. Manual advance/back still works during a slideshow and resets the timer before the next auto-advance.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [10],
+        "details": "Reuses the existing readiness-gated, self-paced advance engine (pb-app main.rs about_to_wait) - a slideshow is just a timer-driven advance, so a not-ready next slide HOLDS (waits for the decode) rather than skips, exactly like hold-to-fly.\n\nDIRECTION: 'continues in the last navigation direction' needs a new last_nav: Nav field (default Forward), updated on every directional nav (nav_press / advance / the menu dispatch). The slideshow auto-advances via advance(last_nav), so it follows Forward (space), Backward (backspace), Random (enter), or RandomPrev (shift+enter) - manual nav during the show updates last_nav, so e.g. tapping backspace makes it continue backward, enter makes it a random/shuffle slideshow.\n\nTIMER (falls out of existing state): the deadline = last_present + interval (last_present is already set whenever a slide shows). When slideshow_on && caught_up (displayed == target) && now >= last_present + interval, call advance(last_nav). This gives two requested behaviors for free: (1) manual advance/back resets the timer (present updates last_present); (2) adjusting the interval affects the CURRENT slide's remaining time immediately (the deadline is recomputed from last_present, so the remaining time grows/shrinks live; if the new deadline is already past, it advances on the next tick). Readiness gating preserved: a miss waits, then shows and restarts the interval (no skip).\n\nINTERVAL: [ decreases, ] increases by 0.5s; clamp to a floor (0.5s - never 0) and a sane cap (e.g. 60s); default ~4s (confirm with owner). State is RAM-only (slideshow_on: bool, interval: Duration, plus last_nav) - privacy Task 2; a persisted DEFAULT interval would go through the allowed config (settings.rs / Task 22).\n\nINTERACTIONS: while a nav key is HELD, hold-to-fly drives and the slideshow timer is suppressed, resuming (timer reset) on release. The event loop must stay ticking while the show is on - extend the about_to_wait ControlFlow::WaitUntil to include the slideshow deadline so it wakes to auto-advance (today it goes idle to ControlFlow::Wait when nothing is pending). Esc still quits; opening the picker/settings pauses it.\n\nFEEDBACK: reuse the Task 10 toast for 'Slideshow: on/off' and the new interval (e.g. 'Slideshow 3.5s') on toggle and on each [ / ] - the one place a per-step toast is wanted (next/prev/zoom deliberately have none). KEYS s / [ / ] register with the central keymap (Task 8) once it lands; a Slideshow menu item + the settings default interval (Task 22) are natural follow-ons.",
+        "testStrategy": "Pure unit tests on the slideshow state machine: toggle on/off; [ / ] step the interval by 0.5s with floor (0.5s) + cap clamps; due-check (now >= last_present + interval) fires at the deadline; changing the interval recomputes the remaining time immediately (incl. the already-past case -> advance next tick); auto-advance uses last_nav; manual advance resets the timer (last_present moves); readiness gating holds a miss (no skip). Extract the pure bits (interval clamp, is-due, direction pick) and test them; the event-loop wiring + visual are manual. Reuse the Task 10 toast-string test pattern for the feedback messages. Manual: start a slideshow, watch it auto-advance in the last direction; press [ / ] and see the current slide's remaining time change live + a toast; manually advance/back and confirm the timer resets and the direction follows; hold a nav key and confirm hold-to-fly takes over then the show resumes on release.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Pure slideshow timer/state + interval clamp",
+            "description": "RAM-only slideshow state (on/off, interval, due-check) with [ / ] 0.5s stepping and floor/cap clamps; pure + unit-tested.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 2,
+            "title": "Track last_nav; auto-advance follows it",
+            "description": "Add last_nav: Nav (default Forward) updated on every directional nav; the slideshow advances via advance(last_nav) so manual nav steers it.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 3,
+            "title": "Drive auto-advance in about_to_wait (deadline + WaitUntil)",
+            "description": "When on && caught_up && now >= last_present + interval, advance(last_nav); extend ControlFlow::WaitUntil to the deadline; suppress during a key hold; readiness-gated (a miss holds).",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 4,
+            "title": "Live interval adjust + manual-advance timer reset",
+            "description": "Interval changes recompute the current slide's remaining time immediately (deadline = last_present + interval); manual advance/back resets the timer (present moves last_present).",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 5,
+            "title": "Bind s / [ / ]; toast feedback; register actions",
+            "description": "Wire s (toggle), [ (shorten interval) and ] (lengthen interval) in 0.5s steps; show a Task 10 toast for on/off + the new interval; register the actions for Task 8 and a future Slideshow menu item + settings default (Task 22).",
+            "status": "pending",
+            "dependencies": []
+          }
+        ]
+      },
+      {
+        "id": 24,
+        "title": "HEIC color parity (libheif vs WIC): Sony/Apple re-encoded mid-tone difference",
+        "description": "On macOS/Apple-re-encoded HEICs of Sony-originated photos, the libheif decode backend renders ~3.5% darker in the mid-tones than WIC (and Apple/Windows Photos). The shift is uniform across R/G/B (no hue cast) and both backends span the full 0..255 range. Decide the correct rendering and make libheif match it.",
+        "status": "pending",
+        "priority": "low",
+        "dependencies": [],
+        "details": "Found 2026-06-28 while validating the libheif HEIC backend (see .taskmaster/docs/heic-decode-plan.md SESSION UPDATE). The heic_compare example shows iPhone HEICs are pixel-identical between WIC and libheif (mean <1 level/channel), but Sony-originated HEICs differ by mean ~9-11 levels (3.5-4%), uniform across channels, both spanning 0..255 - so NOT a limited/full-range bug and NOT a matrix/color cast, but a transfer-curve (gamma) interpretation difference. PROVENANCE (the files are misleadingly named): EXIF says SONY / ILCE-7M3 (the A7III) + Adobe Lightroom, and the 42-tile 1024x576 HEVC grid is the macOS HEIF encoder's signature - so these are A7III shots, Lightroom-processed, then re-encoded to HEIC by macOS/Apple Photos (the A7III shoots no HEIF). LIKELY CAUSE: the documented libheif quirk where a file's colr (nclx) box disagrees with the HEVC VUI on the transfer/range flag; libheif trusts the bitstream, WIC follows the colr box (which takes precedence per MIAF). SUSPECTED FIX: set heif_decoding_options.autocorrect_broken_input = 1 (and/or output_image_nclx_profile_passthrough) so libheif honors colr. That needs hand-rolling libheif's VERSIONED decoding_options struct (10 versions deep, incl. a nested heif_color_conversion_options) and verifying the target field lands at the correct offset (sanity-check the version byte; confirm the Sony delta collapses to MATCH). LOW PRIORITY: subtle, no clipping/cast, likely imperceptible while browsing, and 'correct' is debatable without a ground-truth render. CORPUS: 10 Sony DSC*.heic in 'C:\\Users\\jdlien\\Pictures\\iCloud Photos\\Photos' (plus the Sony in D:\\Media\\Pictures\\test-images). VERIFY: cargo run -q --release --example heic_compare -p pb-decode --features libheif -- <file> (watch the mean delta + per-channel means).",
+        "testStrategy": "heic_compare mean RGB delta (WIC vs libheif) drops from ~9-11 to MATCH (<3) on the Sony corpus after enabling the option, while iPhone files stay MATCH (no regression). Sanity-check the decoding_options version byte before trusting the struct offset. If a committed fixture is added, use a synthetic/owned image (privacy), not a user photo.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Confirm the cause and pick the target rendering",
+            "description": "Dump the Sony file's nclx (colr) transfer/matrix/range vs the HEVC VUI; decide the spec-correct rendering (likely colr = WIC) and whether the target is WIC-parity or Apple-Photos-parity.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 2,
+            "title": "Replicate heif_decoding_options and set autocorrect_broken_input",
+            "description": "Hand-roll the versioned struct (incl. nested heif_color_conversion_options), alloc via heif_decoding_options_alloc, verify the version byte, set autocorrect_broken_input=1, pass to heif_decode_image, free via heif_decoding_options_free (Drop-guarded).",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 3,
+            "title": "Verify parity and no regression",
+            "description": "heic_compare: Sony delta collapses to MATCH, iPhone files unchanged; spot-check a render via the offscreen_png example.",
+            "status": "pending",
+            "dependencies": []
+          }
+        ]
+      },
+      {
+        "id": 25,
+        "title": "Minimize the fullscreen-toggle blank gap (cloak transition)",
+        "description": "The Task 21 cloak fix removed the stretched flash, but the window now briefly disappears (a blank 'beat') before the new mode shows - most visible entering fullscreen. Investigate where the time goes and shrink that gap so the windowed<->fullscreen transition is imperceptible (or as close as the compositor allows).",
+        "status": "cancelled",
+        "priority": "low",
+        "dependencies": [21],
+        "details": "CANCELLED (2026-06-28): obsolete - the DWM-cloak approach that caused this blank gap was reverted (see Task 21), so there is no cloak transition to optimize. If a future stretch fix reintroduces a hidden/transition step, revisit this. ORIGINAL CONTEXT: toggle_fullscreen (pb-app main.rs) cloaks the window (DWM DWMWA_CLOAK), applies decoration/position/size + menu changes, reconfigures the swapchain + renders a correctly-fit frame, then uncloaks. The blank duration = our synchronous toggle work PLUS DWM's cloak->uncloak composition latency. It's worst entering fullscreen: the window grows from 1280x800 to the full monitor (e.g. 7680x2160), so the swapchain AND the fp16 scRGB intermediate reallocate at the larger size and the scene re-renders at full res.\n\nMEASURE FIRST (prime directive - don't guess): instrument the toggle with QPC/tracing and report the split across (a) the SetWindowPos calls (set_decorations / set_outer_position / request_inner_size), (b) surface.configure, (c) the fp16 intermediate texture recreation, (d) scene render + present, and (e) the DWM cloak->uncloak latency itself. NOTE: DWM cloak/uncloak likely imposes a ~1-2 vsync floor regardless of our speed - measure it; if it dominates, shaving our work won't help and we need a perceptual trick instead.\n\nCANDIDATE OPTIMIZATIONS: (a) Collapse the window change into ONE Win32 SetWindowPos (style + position + size, SWP_FRAMECHANGED) instead of winit's three separate calls - fewer intermediate states, possibly no cloak needed if one atomic change doesn't flash. (b) Pre-size/persist the swapchain + fp16 intermediate at the monitor size always (or keep a max-size intermediate), so a fullscreen toggle is a viewport change, not a GPU realloc - trade a little VRAM for a near-instant resize (measure the realloc cost to confirm it's worth it). (c) Order the menu add/remove so it doesn't add a second client-area resize inside the cloak (apply after uncloak if that itself doesn't flash). (d) If DWM latency is the floor: clear to the LETTERBOX color while cloaked so the unavoidable blank matches the app background (continuity) instead of flashing the desktop; or explore a brief two-surface overlap.\n\nACCEPTANCE: no distortion (already met by Task 21) AND no perceptible blank on either direction (target <= 1 frame, or a background-colored beat rather than a desktop flash). Transition-only code - must stay perf-neutral on the photo hot path and not regress the smooth live-drag resize.",
+        "testStrategy": "Instrument + report the before/after time split (SetWindowPos vs surface.configure vs intermediate realloc vs scene/present vs DWM cloak latency); capture the transition (PresentMon / high-speed capture) and count blank frames, aiming for <= 1. Mostly a measurement + GPU/window-timing task, so visual confirmation is owner-side (per project norm). Verify no regression to the photo hot path or the live-drag resize, and that the Task 21 anti-stretch guarantee still holds.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Instrument the toggle and find the dominant cost",
+            "description": "Time SetWindowPos / surface.configure / fp16 intermediate realloc / scene+present / DWM cloak->uncloak latency; identify what actually owns the blank.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 2,
+            "title": "Single atomic SetWindowPos for style+pos+size",
+            "description": "Collapse decorations + position + size into one Win32 SetWindowPos (SWP_FRAMECHANGED) to cut intermediate window states; check if it alone removes the flash (maybe no cloak needed).",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 3,
+            "title": "Pre-sized / persistent monitor-size swapchain + intermediate",
+            "description": "Keep the surface + fp16 intermediate at monitor size so a fullscreen toggle is a viewport change, not a GPU realloc; measure VRAM vs latency to confirm the trade.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 4,
+            "title": "Perceptual fallback if DWM latency is the floor",
+            "description": "If cloak/uncloak latency dominates, fill the cloaked frame with the letterbox color (background-matched beat, not a desktop flash) and/or try a brief surface overlap; get the visible blank to <= 1 frame.",
+            "status": "pending",
+            "dependencies": []
+          }
+        ]
       }
     ]
   }
