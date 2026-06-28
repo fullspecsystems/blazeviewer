@@ -31,6 +31,16 @@ rfd = { version = "0.14", default-features = false }
 # API). Shown in windowed mode only — fullscreen stays chrome-free. OS-drawn, so
 # it's perf-neutral. On Linux it would need the optional `gtk` feature (off here).
 muda = "0.19"
+# egui for our own dialog windows (Settings, About): a second winit window with an
+# egui-wgpu surface. egui 0.29 matches wgpu 22 + winit 0.30. Only runs while a
+# dialog is open (off the photo hot path); follows the OS dark/light theme.
+egui = "0.29"
+egui-wgpu = "0.29"
+# Default features give clipboard + `links` (so the About hyperlink opens a browser);
+# the Linux wayland/x11 backends are cfg-gated out on Windows.
+egui-winit = "0.29"
+# Block on wgpu adapter/device init for the dialog window's own GPU surface.
+pollster = "0.3"
 
 # Win32 for: pointing the window icon at the exe's multi-size .ico (crisp small
 # title-bar icon, vs winit downscaling one big image), and the native menu later.

@@ -53,10 +53,9 @@ use pb_render::{
 };
 
 #[cfg(windows)]
-mod about_dialog;
-#[cfg(windows)]
 mod darkmode;
 mod decode_pool;
+mod dialog;
 mod hud;
 mod menu;
 mod metrics;
@@ -461,6 +460,9 @@ struct App {
     /// Whether the menu has been attached to the current window (`init_for_hwnd`),
     /// so fullscreen↔windowed toggles can show/hide it instead of re-initializing.
     menu_attached: bool,
+    /// The open egui dialog window (Settings / About), or `None`. At most one at a
+    /// time; its events are routed by window id in `window_event`.
+    dialog: Option<dialog::DialogWindow>,
 }
 
 impl App {
@@ -550,6 +552,7 @@ impl App {
             full_requested_at: HashMap::new(),
             menu: None,
             menu_attached: false,
+            dialog: None,
         }
     }
 
@@ -1255,7 +1258,7 @@ impl App {
             MenuAction::RotateRight => self.rotate(false, event_loop),
             MenuAction::RotateLeft => self.rotate(true, event_loop),
             MenuAction::Help => self.toggle_help(event_loop),
-            MenuAction::About => self.open_about(),
+            MenuAction::About => self.open_about(event_loop),
         }
     }
 
@@ -1432,15 +1435,63 @@ impl App {
         }
     }
 
-    /// Show the native "About PhotoBlaze" dialog (Help menu). On Windows this is a
-    /// modal Win32 TaskDialog (`about_dialog`); it runs its own message loop, so we
-    /// drop any stray held keys afterward (like the file picker does).
-    fn open_about(&mut self) {
-        #[cfg(windows)]
-        {
-            let parent = self.active.as_ref().and_then(|a| hwnd_of(&a.window));
-            about_dialog::show(parent);
-            self.held.clear();
+    /// Open the "About PhotoBlaze" dialog (Help menu) — an egui window with the app
+    /// icon + version, dark-mode-aware (see `dialog`).
+    fn open_about(&mut self, event_loop: &ActiveEventLoop) {
+        self.open_dialog(dialog::DialogKind::About, event_loop);
+    }
+
+    /// Open the Settings dialog (Ctrl+,) — an egui window (skeleton for now).
+    fn open_settings(&mut self, event_loop: &ActiveEventLoop) {
+        self.open_dialog(dialog::DialogKind::Settings, event_loop);
+    }
+
+    /// Open (or focus, if already open) one of our egui dialog windows. Only one
+    /// dialog is shown at a time; requesting a different kind replaces it.
+    fn open_dialog(&mut self, kind: dialog::DialogKind, event_loop: &ActiveEventLoop) {
+        if let Some(d) = self.dialog.as_ref() {
+            if d.kind() == kind {
+                d.focus();
+                return;
+            }
+        }
+        let refresh = (1.0 / self.frame_interval.as_secs_f32()).round().max(1.0) as u32;
+        self.dialog = dialog::DialogWindow::open(kind, event_loop, refresh);
+    }
+
+    /// Route an event for the dialog window (egui owns it). Esc / close button
+    /// dismiss it; everything else feeds egui and triggers repaints.
+    fn dialog_event(&mut self, event: WindowEvent) {
+        let close = matches!(event, WindowEvent::CloseRequested)
+            || matches!(
+                &event,
+                WindowEvent::KeyboardInput {
+                    event: KeyEvent {
+                        physical_key: PhysicalKey::Code(KeyCode::Escape),
+                        state: ElementState::Pressed,
+                        ..
+                    },
+                    ..
+                }
+            );
+        if close {
+            self.dialog = None;
+            return;
+        }
+        if let Some(d) = self.dialog.as_mut() {
+            let repaint = d.on_event(&event);
+            match &event {
+                WindowEvent::Resized(size) => {
+                    d.resize(*size);
+                    d.request_redraw();
+                }
+                WindowEvent::RedrawRequested => d.render(),
+                _ => {
+                    if repaint {
+                        d.request_redraw();
+                    }
+                }
+            }
         }
     }
 
@@ -2132,7 +2183,12 @@ impl ApplicationHandler for App {
         self.request_prefetch();
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // Events for our egui dialog window go to egui, not the photo viewer.
+        if self.dialog.as_ref().map(|d| d.id()) == Some(id) {
+            self.dialog_event(event);
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => self.begin_exit(event_loop),
 
@@ -2243,6 +2299,8 @@ impl ApplicationHandler for App {
                             }
                             // Open: o = file picker, Shift+O = folder picker.
                             KeyCode::KeyO => self.open_picker(self.shift, event_loop),
+                            // Ctrl+, opens Settings (mac-like; common on Windows too).
+                            KeyCode::Comma if self.ctrl => self.open_settings(event_loop),
                             // Fullscreen <-> windowed (F11; Alt+Enter is handled
                             // with the Enter arm above).
                             KeyCode::F11 => self.toggle_fullscreen(),
