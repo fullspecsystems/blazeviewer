@@ -17,11 +17,17 @@ use winit::window::{Window, WindowId};
 
 use pb_decode::{decode_bytes, FitBox};
 
+use crate::icon::assets as icon_assets;
+
 /// Which dialog a [`DialogWindow`] is showing.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum DialogKind {
     About,
     Settings,
+    /// A themed Yes/No confirmation (e.g. permanent delete). The prompt text is
+    /// carried on the [`DialogWindow`]; the answer surfaces via
+    /// [`DialogWindow::take_confirm_result`].
+    Confirm,
 }
 
 /// Skeleton state for the Settings form. Not yet wired to persistence or live
@@ -71,7 +77,17 @@ pub struct DialogWindow {
     egui_state: egui_winit::State,
     egui_renderer: egui_wgpu::Renderer,
     icon: Option<egui::TextureHandle>,
+    /// Confirm-dialog icons (file-with-✗ + warning triangle), `None` for other kinds.
+    del_icon: Option<egui::TextureHandle>,
+    warn_icon: Option<egui::TextureHandle>,
     draft: SettingsDraft,
+    /// The prompt for a [`DialogKind::Confirm`] dialog (unused otherwise).
+    confirm_msg: String,
+    /// Set when the user answers a Confirm dialog: `Some(true)` = confirmed,
+    /// `Some(false)` = cancelled. Polled + cleared by [`take_confirm_result`].
+    ///
+    /// [`take_confirm_result`]: DialogWindow::take_confirm_result
+    confirm_result: Option<bool>,
 }
 
 impl DialogWindow {
@@ -82,10 +98,12 @@ impl DialogWindow {
         kind: DialogKind,
         event_loop: &ActiveEventLoop,
         refresh_hz: u32,
+        message: &str,
     ) -> Option<DialogWindow> {
         let (w, h, resizable, title) = match kind {
             DialogKind::About => (254.0, 307.0, false, "About PhotoBlaze"),
             DialogKind::Settings => (560.0, 660.0, true, "PhotoBlaze Settings"),
+            DialogKind::Confirm => (470.0, 190.0, false, "Confirm Delete"),
         };
         // Created HIDDEN: we render the first (themed) frame before revealing, so the
         // OS never flashes the default white window before our dark frame lands.
@@ -140,6 +158,28 @@ impl DialogWindow {
         );
         let egui_renderer = egui_wgpu::Renderer::new(&device, format, None, 1, false);
         let icon = load_icon_texture(&egui_ctx);
+        // The confirm dialog's icons (rasterized at ~2× for crisp scaling): a light
+        // file-with-✗ and an amber warning triangle. Only built for Confirm.
+        let (del_icon, warn_icon) = if matches!(kind, DialogKind::Confirm) {
+            (
+                svg_texture(
+                    &egui_ctx,
+                    icon_assets::FILE_DELETE,
+                    96,
+                    [206, 206, 212],
+                    "confirm-file",
+                ),
+                svg_texture(
+                    &egui_ctx,
+                    icon_assets::WARNING,
+                    40,
+                    [232, 172, 46],
+                    "confirm-warn",
+                ),
+            )
+        } else {
+            (None, None)
+        };
 
         let mut dlg = DialogWindow {
             window,
@@ -153,7 +193,11 @@ impl DialogWindow {
             egui_state,
             egui_renderer,
             icon,
+            del_icon,
+            warn_icon,
             draft: SettingsDraft::new(refresh_hz),
+            confirm_msg: message.to_string(),
+            confirm_result: None,
         };
         // Paint the first themed frame while hidden, then reveal — no white flash.
         dlg.render();
@@ -168,6 +212,13 @@ impl DialogWindow {
 
     pub fn kind(&self) -> DialogKind {
         self.kind
+    }
+
+    /// Take the answer to a [`DialogKind::Confirm`] dialog, if the user has answered
+    /// this frame: `Some(true)` = confirmed, `Some(false)` = cancelled. `None` until
+    /// a button is clicked. The caller closes the dialog and acts on the result.
+    pub fn take_confirm_result(&mut self) -> Option<bool> {
+        self.confirm_result.take()
     }
 
     pub fn focus(&self) {
@@ -198,13 +249,25 @@ impl DialogWindow {
         let ctx = self.egui_ctx.clone();
         let kind = self.kind;
         let icon = self.icon.clone();
+        let del_icon = self.del_icon.clone();
+        let warn_icon = self.warn_icon.clone();
+        let msg = self.confirm_msg.clone();
         let draft = &mut self.draft;
-        let full_output = ctx.run(raw_input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| match kind {
-                DialogKind::About => about_ui(ui, icon.as_ref()),
-                DialogKind::Settings => settings_ui(ui, draft),
-            });
+        let mut confirm_click: Option<bool> = None;
+        let full_output = ctx.run(raw_input, |ctx| match kind {
+            DialogKind::About => {
+                egui::CentralPanel::default().show(ctx, |ui| about_ui(ui, icon.as_ref()));
+            }
+            DialogKind::Settings => {
+                egui::CentralPanel::default().show(ctx, |ui| settings_ui(ui, draft));
+            }
+            DialogKind::Confirm => {
+                confirm_click = confirm_dialog(ctx, &msg, del_icon.as_ref(), warn_icon.as_ref());
+            }
         });
+        if confirm_click.is_some() {
+            self.confirm_result = confirm_click;
+        }
 
         self.egui_state
             .handle_platform_output(&self.window, full_output.platform_output);
@@ -320,6 +383,93 @@ fn about_ui(ui: &mut egui::Ui, icon: Option<&egui::TextureHandle>) {
             "https://github.com/jdlien/photoblaze",
         );
     });
+}
+
+/// A themed confirm dialog modelled on Directory Opus's "Confirm File Delete": a
+/// left file-with-✗ icon, the prompt + a ⚠ "cannot be undone" line, and a bottom-
+/// right button bar with a prominent red Delete (default-focused) and Cancel.
+/// Returns `Some(true)` on Delete, `Some(false)` on Cancel, else `None`. (Esc / the
+/// window close button also cancel it, from the event router.)
+fn confirm_dialog(
+    ctx: &egui::Context,
+    message: &str,
+    file_icon: Option<&egui::TextureHandle>,
+    warn_icon: Option<&egui::TextureHandle>,
+) -> Option<bool> {
+    let mut result = None;
+    // Bottom-right button bar (added right-to-left: Delete rightmost, then Cancel).
+    egui::TopBottomPanel::bottom("confirm_bar")
+        .exact_height(56.0)
+        .show(ctx, |ui| {
+            ui.add_space(12.0);
+            // Right-to-left: Cancel added first (rightmost), Delete to its left — so
+            // the visual order is [Delete] [Cancel], matching Directory Opus.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(18.0);
+                if ui
+                    .add_sized([104.0, 30.0], egui::Button::new("Cancel"))
+                    .clicked()
+                {
+                    result = Some(false);
+                }
+                ui.add_space(10.0);
+                let delete =
+                    egui::Button::new(egui::RichText::new("Delete").color(egui::Color32::WHITE))
+                        .fill(egui::Color32::from_rgb(200, 55, 55));
+                let resp = ui.add_sized([104.0, 30.0], delete);
+                if resp.clicked() {
+                    result = Some(true);
+                }
+                // Default focus on Delete (matches Directory Opus): Enter confirms.
+                if ui.memory(|m| m.focused().is_none()) {
+                    resp.request_focus();
+                }
+            });
+        });
+    // Icon + message, left-aligned, filling the area above the button bar.
+    egui::CentralPanel::default().show(ctx, |ui| {
+        ui.add_space(24.0);
+        ui.horizontal(|ui| {
+            ui.add_space(24.0);
+            if let Some(t) = file_icon {
+                ui.image(egui::load::SizedTexture::new(
+                    t.id(),
+                    egui::vec2(48.0, 48.0),
+                ));
+            }
+            ui.add_space(18.0);
+            ui.vertical(|ui| {
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new(message).size(15.0));
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if let Some(t) = warn_icon {
+                        ui.image(egui::load::SizedTexture::new(
+                            t.id(),
+                            egui::vec2(18.0, 18.0),
+                        ));
+                        ui.add_space(7.0);
+                    }
+                    ui.label("This operation cannot be undone.");
+                });
+            });
+        });
+    });
+    result
+}
+
+/// Rasterize a vendored SVG icon to an egui texture (tinted `rgb`), for dialog
+/// chrome. Reuses the app's `icon::rasterize` (resvg). `None` if it can't rasterize.
+fn svg_texture(
+    ctx: &egui::Context,
+    svg: &str,
+    px: u32,
+    rgb: [u8; 3],
+    name: &str,
+) -> Option<egui::TextureHandle> {
+    let (rgba, w, h) = crate::icon::rasterize(svg, px, rgb)?;
+    let img = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+    Some(ctx.load_texture(name, img, egui::TextureOptions::LINEAR))
 }
 
 /// The Settings form skeleton (controls aren't wired to persistence yet).

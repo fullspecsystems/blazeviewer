@@ -27,6 +27,10 @@ pub mod assets {
     pub const RECYCLE: &str = include_str!("../icons/bin-recycle.svg");
     /// Trash — the Delete-Permanently (`Shift+Del`) toast.
     pub const TRASH: &str = include_str!("../icons/trash.svg");
+    /// File-with-✗ — the left icon on the permanent-delete confirm dialog.
+    pub const FILE_DELETE: &str = include_str!("../icons/file-circle-xmark.svg");
+    /// Warning triangle — the "cannot be undone" line on the confirm dialog.
+    pub const WARNING: &str = include_str!("../icons/triangle-exclamation.svg");
 }
 
 /// Rasterize `svg` at pixel `height` (width follows the icon's aspect ratio),

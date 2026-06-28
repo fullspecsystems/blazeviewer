@@ -505,6 +505,9 @@ struct App {
     /// deleted photo stays on screen with its icon until `fire_at`, then the playlist
     /// drops the item and advances (see `delete_current` / `flush_pending_delete`).
     pending_delete: Option<(Instant, usize)>,
+    /// The item awaiting a permanent-delete confirmation: set when the (themed egui)
+    /// confirm dialog opens, consumed when it answers Yes (see `dialog_event`).
+    pending_confirm_delete: Option<usize>,
     /// Whether the menu has been attached to the current window (`init_for_hwnd`),
     /// so fullscreen↔windowed toggles can show/hide it instead of re-initializing.
     menu_attached: bool,
@@ -601,6 +604,7 @@ impl App {
             save_rotation_item: None,
             save_enabled: false,
             pending_delete: None,
+            pending_confirm_delete: None,
             menu_attached: false,
             dialog: None,
         }
@@ -914,30 +918,39 @@ impl App {
             return;
         };
         if permanent {
+            // Permanent delete is irreversible — confirm first, via the themed egui
+            // dialog (dark-aware, and cross-platform for the macOS port). The delete
+            // runs when the dialog answers Yes (`dialog_event`), on this item.
             let name = file_name_of(self.source.name(item));
-            let hwnd = self
-                .active
-                .as_ref()
-                .and_then(|a| hwnd_of(&a.window))
-                .unwrap_or(0);
-            if !delete::confirm_permanent_delete(&name, hwnd) {
-                return; // user cancelled
-            }
+            self.pending_confirm_delete = Some(item);
+            self.open_confirm_delete(&name, event_loop);
+            return;
         }
+        self.do_delete(item, &path, false, event_loop);
+    }
+
+    /// Perform the actual deletion of `item` (`path`) — recoverable (Recycle Bin) or
+    /// permanent — then flash an icon-only pill on the still-shown photo and defer the
+    /// playlist advance a beat (`DELETE_ADVANCE_DELAY`) so the feedback registers
+    /// first. The permanent path reaches here only after the confirm dialog's Yes.
+    fn do_delete(
+        &mut self,
+        item: usize,
+        path: &Path,
+        permanent: bool,
+        event_loop: &ActiveEventLoop,
+    ) {
         let res = if permanent {
-            delete::delete_permanently(&path)
+            delete::delete_permanently(path)
         } else {
-            delete::send_to_trash(&path)
+            delete::send_to_trash(path)
         };
         if let Err(e) = res {
             eprintln!("delete failed: {}: {e}", path.display());
             self.show_toast("Delete failed", event_loop);
             return;
         }
-        // Flash an icon-only pill on the (still-displayed) deleted photo — recycle bin
-        // for the recoverable Del, trash for a permanent delete — then defer the
-        // playlist advance a beat so the feedback registers before the next photo
-        // appears (`about_to_wait` fires it at `DELETE_ADVANCE_DELAY`).
+        // Recycle-bin icon for the recoverable delete, trash for a permanent one.
         let icon = if permanent {
             icon::assets::TRASH
         } else {
@@ -1753,12 +1766,22 @@ impl App {
             }
         }
         let refresh = (1.0 / self.frame_interval.as_secs_f32()).round().max(1.0) as u32;
-        self.dialog = dialog::DialogWindow::open(kind, event_loop, refresh);
+        self.dialog = dialog::DialogWindow::open(kind, event_loop, refresh, "");
+    }
+
+    /// Open the themed (dark-aware egui) "Delete Permanently" confirmation for `name`.
+    /// The actual deletion happens when the dialog answers Yes (see `dialog_event`),
+    /// acting on `pending_confirm_delete`.
+    fn open_confirm_delete(&mut self, name: &str, event_loop: &ActiveEventLoop) {
+        let refresh = (1.0 / self.frame_interval.as_secs_f32()).round().max(1.0) as u32;
+        let msg = format!("Permanently delete \u{2018}{name}\u{2019}?");
+        self.dialog =
+            dialog::DialogWindow::open(dialog::DialogKind::Confirm, event_loop, refresh, &msg);
     }
 
     /// Route an event for the dialog window (egui owns it). Esc / close button
     /// dismiss it; everything else feeds egui and triggers repaints.
-    fn dialog_event(&mut self, event: WindowEvent) {
+    fn dialog_event(&mut self, event: WindowEvent, event_loop: &ActiveEventLoop) {
         let close = matches!(event, WindowEvent::CloseRequested)
             || matches!(
                 &event,
@@ -1773,8 +1796,11 @@ impl App {
             );
         if close {
             self.dialog = None;
+            self.pending_confirm_delete = None; // Esc / close = cancel the confirm
             return;
         }
+        // Render the dialog and pick up a Confirm answer (if one was clicked).
+        let mut answer: Option<bool> = None;
         if let Some(d) = self.dialog.as_mut() {
             let repaint = d.on_event(&event);
             match &event {
@@ -1782,10 +1808,24 @@ impl App {
                     d.resize(*size);
                     d.request_redraw();
                 }
-                WindowEvent::RedrawRequested => d.render(),
+                WindowEvent::RedrawRequested => {
+                    d.render();
+                    answer = d.take_confirm_result();
+                }
                 _ => {
                     if repaint {
                         d.request_redraw();
+                    }
+                }
+            }
+        }
+        if let Some(confirmed) = answer {
+            self.dialog = None; // the confirm closes either way
+            let item = self.pending_confirm_delete.take();
+            if confirmed {
+                if let Some(item) = item {
+                    if let Some(path) = self.source.path(item).map(Path::to_path_buf) {
+                        self.do_delete(item, &path, true, event_loop);
                     }
                 }
             }
@@ -2512,7 +2552,7 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         // Events for our egui dialog window go to egui, not the photo viewer.
         if self.dialog.as_ref().map(|d| d.id()) == Some(id) {
-            self.dialog_event(event);
+            self.dialog_event(event, event_loop);
             return;
         }
         match event {

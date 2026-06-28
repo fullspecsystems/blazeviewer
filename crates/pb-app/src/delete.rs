@@ -5,9 +5,10 @@
 //! boundary in CLAUDE.md).
 //!
 //! The pure playlist-cursor math ([`cursor_after_removal`]) is unit-tested here; the
-//! file deletion ([`send_to_trash`] / [`delete_permanently`]) and the confirm dialog
-//! ([`confirm_permanent_delete`]) are the I/O/UI shell. The playlist rebuild + advance
-//! lives in `main.rs` (it needs the `PhotoSource`).
+//! file deletion ([`send_to_trash`] / [`delete_permanently`]) is the I/O shell. The
+//! permanent-delete confirmation is a themed egui dialog (`dialog::DialogKind::Confirm`,
+//! dark-aware + cross-platform), and the playlist rebuild + advance live in `main.rs`
+//! (they need the `PhotoSource`).
 
 use std::path::Path;
 
@@ -30,42 +31,10 @@ pub fn send_to_trash(path: &Path) -> Result<(), String> {
     trash::delete(path).map_err(|e| e.to_string())
 }
 
-/// Permanently delete `path` (irreversible). Gated behind [`confirm_permanent_delete`]
-/// in the UI, mirroring Explorer's `Shift+Del`.
+/// Permanently delete `path` (irreversible). Reached only after the egui confirm
+/// dialog answers Yes, mirroring Explorer's `Shift+Del`.
 pub fn delete_permanently(path: &Path) -> Result<(), String> {
     std::fs::remove_file(path).map_err(|e| e.to_string())
-}
-
-/// Confirm a **permanent** delete with a native Yes/No message box (defaulting to No).
-/// Returns `true` only on Yes. `hwnd` is the owner window handle (from `hwnd_of`).
-#[cfg(windows)]
-pub fn confirm_permanent_delete(file_name: &str, hwnd: isize) -> bool {
-    use windows::core::HSTRING;
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        MessageBoxW, IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_YESNO,
-    };
-    let text = HSTRING::from(format!(
-        "Permanently delete \"{file_name}\"?\n\nThis cannot be undone."
-    ));
-    let caption = HSTRING::from("Delete Permanently");
-    // SAFETY: a standard modal message box owned by our live window handle.
-    let ret = unsafe {
-        MessageBoxW(
-            Some(HWND(hwnd as *mut core::ffi::c_void)),
-            &text,
-            &caption,
-            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
-        )
-    };
-    ret == IDYES
-}
-
-/// Non-Windows stub: until a native confirm is wired for the macOS port, refuse the
-/// unconfirmable permanent delete (the recoverable Recycle Bin path stays available).
-#[cfg(not(windows))]
-pub fn confirm_permanent_delete(_file_name: &str, _hwnd: isize) -> bool {
-    false
 }
 
 #[cfg(test)]
