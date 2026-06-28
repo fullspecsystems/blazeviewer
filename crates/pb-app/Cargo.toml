@@ -50,6 +50,10 @@ half = "2"
 # SVG backend, so it's already in the lockfile. Runs only when an overlay is rebuilt
 # (off the photo hot path).
 resvg = { version = "0.47", default-features = false }
+# Lossless EXIF write for Save Rotation (Ctrl+S): rewrites only the Orientation tag,
+# leaving the compressed JPEG scan untouched (the crate has no image codec, so it
+# physically can't re-encode pixels — it only rewrites metadata segments).
+little_exif = "0.6"
 
 # Win32 for: pointing the window icon at the exe's multi-size .ico (crisp small
 # title-bar icon, vs winit downscaling one big image), and the native menu later.

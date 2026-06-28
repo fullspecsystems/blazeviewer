@@ -20,6 +20,8 @@ pub mod assets {
     pub const ROTATE_RIGHT: &str = include_str!("../icons/rotate-right.svg");
     /// Duotone counter-clockwise rotate — the Rotate Left (`Shift+R`) toast.
     pub const ROTATE_LEFT: &str = include_str!("../icons/rotate-left.svg");
+    /// Duotone floppy disk — the Save Rotation (`Ctrl+S`) success toast.
+    pub const FLOPPY: &str = include_str!("../icons/floppy-disk.svg");
 }
 
 /// Rasterize `svg` at pixel `height` (width follows the icon's aspect ratio),

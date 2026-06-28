@@ -62,6 +62,7 @@ mod hud;
 mod icon;
 mod menu;
 mod metrics;
+mod save_rotation;
 mod settings;
 use decode_pool::{recommended_workers, DecodeFn, DecodePool, Outcome};
 use hud::{Hud, Row};
@@ -490,6 +491,12 @@ struct App {
     /// The native menu bar (windowed mode only). Built once, kept alive here so its
     /// native handle outlives the window. `None` until the first window is created.
     menu: Option<muda::Menu>,
+    /// The "Save Rotation" menu item, kept so its enabled state can be toggled at
+    /// runtime (only enabled when the current photo has an unsaved rotation on an
+    /// EXIF-writable file). `save_enabled` caches the last-pushed state so the
+    /// refresh is a no-op Win32 call when nothing changed.
+    save_rotation_item: Option<muda::MenuItem>,
+    save_enabled: bool,
     /// Whether the menu has been attached to the current window (`init_for_hwnd`),
     /// so fullscreen↔windowed toggles can show/hide it instead of re-initializing.
     menu_attached: bool,
@@ -583,6 +590,8 @@ impl App {
             last_upgrade_set: Vec::new(),
             full_requested_at: HashMap::new(),
             menu: None,
+            save_rotation_item: None,
+            save_enabled: false,
             menu_attached: false,
             dialog: None,
         }
@@ -780,6 +789,7 @@ impl App {
         } else {
             self.rotations.insert(item, new);
         }
+        dbg_log(&format!("rotate: item={item:?} new={new:?}"));
         self.view.rotation = new;
         self.push_view();
         // Flash a directional rotate icon (icon-only pill) as feedback.
@@ -825,6 +835,62 @@ impl App {
             Err(e) => {
                 eprintln!("copy: clipboard write failed: {e}");
                 self.show_toast("Copy failed", event_loop);
+            }
+        }
+    }
+
+    /// Persist the current photo's in-RAM rotation to its file's EXIF Orientation
+    /// tag (`Ctrl+S` / File ▸ Save Rotation, task #29) — lossless (the compressed
+    /// pixels are untouched). The first write to a user's photo bytes, and like
+    /// Copy/Delete it only ever runs on an explicit command. JPEG only for now;
+    /// other formats (and archive entries, which have no file) are greyed out + toast.
+    /// On success the RAM override is dropped and the photo refreshed from disk, so
+    /// the displayed orientation now comes from the file (a clean round-trip with no
+    /// double-rotation).
+    fn save_rotation(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(item) = self.displayed_item else {
+            dbg_log("save: no displayed_item");
+            return;
+        };
+        let rot = self.rotations.get(&item).copied().unwrap_or_default();
+        dbg_log(&format!(
+            "save: item={item} rot={rot:?} path={:?}",
+            self.source.path(item)
+        ));
+        if rot == Rotation::default() {
+            self.show_toast("No rotation to save", event_loop);
+            return;
+        }
+        let Some(path) = self.source.path(item).map(Path::to_path_buf) else {
+            // Archive entry — no file on disk to write back to.
+            self.show_toast("Can't save rotation here", event_loop);
+            return;
+        };
+        if !save_rotation::is_orientation_writable(&path) {
+            self.show_toast("Save rotation: JPEG only", event_loop);
+            return;
+        }
+        match save_rotation::write_orientation(&path, rot) {
+            Ok(v) => {
+                dbg_log(&format!("save: wrote orientation {v} to {}", path.display()));
+                // The rotation is now baked into the file's EXIF: drop the RAM
+                // override and re-read from disk so the pixels are re-oriented from
+                // the file (else the ring's old-orientation pixels + a reset view
+                // would show it un-rotated, or a later re-decode would double-rotate).
+                self.rotations.remove(&item);
+                self.meta_cache.remove(&item);
+                self.failed.remove(&item);
+                self.preview_resident.remove(&item);
+                self.upgrade_done.remove(&item);
+                self.invalidate_geometry();
+                self.load_current_sync(event_loop);
+                self.target_item = self.playlist.current();
+                self.request_prefetch();
+                self.show_toast_icon("", Some(icon::assets::FLOPPY), event_loop);
+            }
+            Err(e) => {
+                dbg_log(&format!("save FAILED: {}: {e}", path.display()));
+                self.show_toast("Save failed", event_loop);
             }
         }
     }
@@ -1249,7 +1315,40 @@ impl App {
     /// Build the native menu bar once (cross-platform; muda owns the OS handle).
     fn ensure_menu(&mut self) {
         if self.menu.is_none() {
-            self.menu = Some(menu::build_menu());
+            let (menu, save_rotation) = menu::build_menu();
+            self.menu = Some(menu);
+            self.save_rotation_item = Some(save_rotation);
+        }
+    }
+
+    /// Whether "Save Rotation" applies right now: the displayed photo has an unsaved
+    /// (non-upright) rotation override, sits on a real file on disk (not an archive
+    /// entry), and that file's format supports a lossless EXIF Orientation rewrite.
+    fn can_save_rotation(&self) -> bool {
+        let Some(item) = self.displayed_item else {
+            return false;
+        };
+        let rotated = self
+            .rotations
+            .get(&item)
+            .is_some_and(|r| *r != Rotation::default());
+        rotated
+            && self
+                .source
+                .path(item)
+                .is_some_and(save_rotation::is_orientation_writable)
+    }
+
+    /// Sync the "Save Rotation" menu item's enabled state to [`can_save_rotation`].
+    /// Cheap + idempotent (skips the Win32 call when unchanged), so it's safe to call
+    /// from the per-tick `about_to_wait`.
+    fn refresh_save_menu_item(&mut self) {
+        let want = self.can_save_rotation();
+        if want != self.save_enabled {
+            if let Some(it) = self.save_rotation_item.as_ref() {
+                it.set_enabled(want);
+            }
+            self.save_enabled = want;
         }
     }
 
@@ -1321,6 +1420,7 @@ impl App {
         match action {
             MenuAction::OpenFile => self.open_picker(false, event_loop),
             MenuAction::OpenFolder => self.open_picker(true, event_loop),
+            MenuAction::SaveRotation => self.save_rotation(event_loop),
             MenuAction::Exit => self.begin_exit(event_loop),
             MenuAction::Copy => self.copy_image(event_loop),
             MenuAction::Fit => self.set_scale_mode(ScaleMode::Fit, event_loop),
@@ -1354,12 +1454,20 @@ impl App {
                 .pick_folder()
                 .map(LaunchInput::Directory)
         } else {
+            // Offer archives alongside images in the default filter (opening a zip
+            // to view its photos is the same use case), plus an All-files escape
+            // hatch. The picked paths go through `classify_inputs` — like drag-drop
+            // — so a single picked `.zip` opens as an archive instead of being
+            // mistaken for one file inside its folder.
+            let mut exts: Vec<&str> = IMAGE_FILTER_EXTS.to_vec();
+            exts.push("zip");
             rfd::FileDialog::new()
-                .add_filter("Images", IMAGE_FILTER_EXTS)
+                .add_filter("Images & archives", &exts)
+                .add_filter("All files", &["*"])
                 .set_directory(&start_dir)
                 .pick_files()
                 .filter(|ps| !ps.is_empty())
-                .map(LaunchInput::Files)
+                .map(classify_inputs)
         };
         // The modal picker ran its own message loop; the Esc (or Enter) used to
         // dismiss it can leak to our window as a stray key event. Drop any keys it
@@ -1624,21 +1732,33 @@ impl App {
             text: file_name_of(name),
             bold: true,
         });
-        // Parent location: the on-disk folder for a real file, or the
-        // archive-relative directory for an entry inside an archive.
-        let dir = match self.source.path(item) {
-            Some(p) => p
+        // Location row. A real file shows its on-disk folder. An archive entry
+        // shows the archive's path, with the in-archive folder appended (after a
+        // `›`) when the entry lives in a subfolder — so a zip's photos report
+        // *where the zip is* plus *where inside it they are*.
+        let location = match (self.source.path(item), self.source.container()) {
+            (Some(p), _) => p
                 .parent()
                 .filter(|d| !d.as_os_str().is_empty())
                 .map(|d| d.display().to_string()),
-            None => Path::new(name)
+            (None, Some(zip)) => {
+                let inner = Path::new(name)
+                    .parent()
+                    .map(|d| d.to_string_lossy().replace('\\', "/"))
+                    .filter(|s| !s.is_empty());
+                Some(match inner {
+                    Some(dir) => format!("{} › {}", zip.display(), dir),
+                    None => zip.display().to_string(),
+                })
+            }
+            (None, None) => Path::new(name)
                 .parent()
                 .filter(|d| !d.as_os_str().is_empty())
                 .map(|d| d.to_string_lossy().replace('\\', "/")),
         };
-        if let Some(dir) = dir {
+        if let Some(location) = location {
             rows.push(Row::Span {
-                text: dir,
+                text: location,
                 bold: false,
             });
         }
@@ -2395,6 +2515,8 @@ impl ApplicationHandler for App {
                             KeyCode::KeyO => self.open_picker(self.shift, event_loop),
                             // Ctrl+C copies the full-res current photo to the clipboard.
                             KeyCode::KeyC if self.ctrl => self.copy_image(event_loop),
+                            // Ctrl+S saves the pending rotation to the file (lossless EXIF).
+                            KeyCode::KeyS if self.ctrl => self.save_rotation(event_loop),
                             // Ctrl+, opens Settings (mac-like; common on Windows too).
                             KeyCode::Comma if self.ctrl => self.open_settings(event_loop),
                             // Fullscreen <-> windowed (F11; Alt+Enter is handled
@@ -2456,6 +2578,9 @@ impl ApplicationHandler for App {
                 self.dispatch_menu(action, event_loop);
             }
         }
+        // Keep "Save Rotation" enabled only when it applies (cheap + cached, so this
+        // per-tick call is a no-op unless the photo/rotation actually changed).
+        self.refresh_save_menu_item();
         // 0b. Apply any files dropped on the window this burst (coalesced — winit
         // delivers one `DroppedFile` per file).
         if !self.pending_drops.is_empty() {
@@ -2596,6 +2721,18 @@ fn file_name_of(name: &str) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or(name)
         .to_string()
+}
+
+// TEMP debug log to a file (GUI-subsystem app has no stderr). Remove before commit.
+fn dbg_log(msg: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(std::env::temp_dir().join("pb_dbg.log"))
+    {
+        let _ = writeln!(f, "{msg}");
+    }
 }
 
 fn title_for(name: &str, idx: usize, n: usize) -> String {
@@ -3020,6 +3157,23 @@ mod tests {
         // Several paths (non-existent here, so treated as files) collect to Files.
         let files = vec![PathBuf::from("a.jpg"), PathBuf::from("b.png")];
         assert_eq!(classify_inputs(files.clone()), LaunchInput::Files(files));
+    }
+
+    #[test]
+    fn classify_single_zip_as_archive() {
+        // A lone .zip (from the picker, a drop, or a double-click) opens as an
+        // archive — case-insensitively — not as one file in its folder.
+        let zip = PathBuf::from("/photos/trip.zip");
+        assert_eq!(
+            classify_inputs(vec![zip.clone()]),
+            LaunchInput::Archive(zip)
+        );
+        let up = PathBuf::from("ALBUM.ZIP");
+        assert_eq!(classify_inputs(vec![up.clone()]), LaunchInput::Archive(up));
+        // A zip among several files is just one of the files (multi-select stays a
+        // file list; the non-image zip is dropped later when the list is resolved).
+        let many = vec![PathBuf::from("a.jpg"), PathBuf::from("b.zip")];
+        assert_eq!(classify_inputs(many.clone()), LaunchInput::Files(many));
     }
 
     #[test]

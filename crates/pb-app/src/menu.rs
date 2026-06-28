@@ -20,6 +20,7 @@ use muda::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 pub mod ids {
     pub const OPEN_FILE: &str = "open_file";
     pub const OPEN_FOLDER: &str = "open_folder";
+    pub const SAVE_ROTATION: &str = "save_rotation";
     pub const EXIT: &str = "exit";
 
     pub const COPY: &str = "copy";
@@ -52,6 +53,7 @@ pub mod ids {
 pub enum MenuAction {
     OpenFile,
     OpenFolder,
+    SaveRotation,
     Exit,
     Copy,
     Fit,
@@ -80,6 +82,7 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
     let action = match id {
         OPEN_FILE => MenuAction::OpenFile,
         OPEN_FOLDER => MenuAction::OpenFolder,
+        SAVE_ROTATION => MenuAction::SaveRotation,
         EXIT => MenuAction::Exit,
         COPY => MenuAction::Copy,
         FIT => MenuAction::Fit,
@@ -115,14 +118,23 @@ fn item(id: &str, label: &str) -> MenuItem {
 
 /// Build the full menu bar. Best-effort: a failed `append` (rare) is logged and the
 /// rest of the menu still builds, so the app never fails to start over a menu glitch.
-pub fn build_menu() -> Menu {
+///
+/// Returns the menu plus the **Save Rotation** item, whose enabled state `main.rs`
+/// toggles at runtime (only enabled when the current photo has an unsaved rotation on
+/// an EXIF-writable file — see `App::refresh_save_menu_item`). It starts disabled.
+pub fn build_menu() -> (Menu, MenuItem) {
     let menu = Menu::new();
     let sep = || PredefinedMenuItem::separator();
+
+    // Disabled until a rotation is pending on an eligible file (toggled at runtime).
+    let save_rotation = MenuItem::with_id(ids::SAVE_ROTATION, "Save Rotation\tCtrl+S", false, None);
 
     let file = Submenu::new("&File", true);
     let _ = file.append_items(&[
         &item(ids::OPEN_FILE, "Open File…\tO"),
         &item(ids::OPEN_FOLDER, "Open Folder…\tShift+O"),
+        &sep(),
+        &save_rotation,
         &sep(),
         &item(ids::EXIT, "Exit\tEsc"),
     ]);
@@ -169,7 +181,7 @@ pub fn build_menu() -> Menu {
             eprintln!("menu: failed to append submenu: {e}");
         }
     }
-    menu
+    (menu, save_rotation)
 }
 
 #[cfg(test)]
@@ -181,6 +193,10 @@ mod tests {
         // Each id resolves to exactly the action the keyboard path triggers.
         assert_eq!(action_for(ids::OPEN_FILE), Some(MenuAction::OpenFile));
         assert_eq!(action_for(ids::OPEN_FOLDER), Some(MenuAction::OpenFolder));
+        assert_eq!(
+            action_for(ids::SAVE_ROTATION),
+            Some(MenuAction::SaveRotation)
+        );
         assert_eq!(action_for(ids::EXIT), Some(MenuAction::Exit));
         assert_eq!(action_for(ids::COPY), Some(MenuAction::Copy));
         assert_eq!(action_for(ids::FIT), Some(MenuAction::Fit));

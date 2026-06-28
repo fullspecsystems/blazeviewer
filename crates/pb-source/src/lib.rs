@@ -64,6 +64,15 @@ pub trait PhotoSource: Send + Sync {
         None
     }
 
+    /// The on-disk archive this source reads from, if it is one (e.g. the `.zip`),
+    /// rather than loose files. `None` for a filesystem listing. The info panel
+    /// shows it as the location for an entry that has no standalone [`path`].
+    ///
+    /// [`path`]: PhotoSource::path
+    fn container(&self) -> Option<&Path> {
+        None
+    }
+
     /// Read the encoded bytes of item `i` into memory. Called off the event loop,
     /// on decode-pool worker threads. Out-of-range `i` is a `NotFound` error.
     fn bytes(&self, i: usize) -> io::Result<Vec<u8>>;
@@ -252,6 +261,10 @@ impl PhotoSource for ZipSource {
         self.entries.get(i).map(|e| e.name.as_str()).unwrap_or("")
     }
 
+    fn container(&self) -> Option<&Path> {
+        Some(&self.path)
+    }
+
     fn bytes(&self, i: usize) -> io::Result<Vec<u8>> {
         let entry = self.entries.get(i).ok_or_else(out_of_range)?;
         let mut archive = self.checkout()?;
@@ -369,6 +382,7 @@ mod tests {
         assert!(!src.is_empty());
         assert!(src.name(0).ends_with(".jpg"));
         assert_eq!(src.path(1), Some(b.as_path()));
+        assert_eq!(src.container(), None, "a filesystem listing has no archive");
         assert_eq!(src.bytes(0).unwrap(), b"alpha");
         assert_eq!(src.bytes(1).unwrap(), b"bravo");
         assert!(src.bytes(2).is_err(), "out-of-range read errors");
@@ -394,6 +408,11 @@ mod tests {
         let names: Vec<&str> = (0..src.len()).map(|i| src.name(i)).collect();
         assert_eq!(names, vec!["a.jpg", "b.png", "sub/c.webp"]);
         assert!(src.path(0).is_none(), "archive entries have no fs path");
+        assert_eq!(
+            src.container(),
+            Some(zip.as_path()),
+            "container is the archive"
+        );
         assert!(!src.needs_password());
         let _ = std::fs::remove_file(&zip);
     }
