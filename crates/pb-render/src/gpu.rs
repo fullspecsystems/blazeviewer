@@ -650,6 +650,39 @@ fn top_right_quad_vertices(
     ]
 }
 
+/// The four corners of a screen-centered quad: `panel_w`×`panel_h` px, centered
+/// both horizontally and vertically (the About card). No margin — it floats in the
+/// middle of the viewport.
+fn center_quad_vertices(panel_w: u32, panel_h: u32, screen_w: u32, screen_h: u32) -> [Vertex; 4] {
+    let (sw, sh) = (screen_w as f32, screen_h as f32);
+    let x0 = ((sw - panel_w as f32) * 0.5).max(0.0);
+    let x1 = x0 + panel_w as f32;
+    let y0 = ((sh - panel_h as f32) * 0.5).max(0.0);
+    let y1 = y0 + panel_h as f32;
+    let x0n = (x0 / sw) * 2.0 - 1.0;
+    let x1n = (x1 / sw) * 2.0 - 1.0;
+    let y_top = 1.0 - (y0 / sh) * 2.0;
+    let y_bot = 1.0 - (y1 / sh) * 2.0;
+    [
+        Vertex {
+            pos: [x0n, y_top],
+            uv: [0.0, 0.0],
+        },
+        Vertex {
+            pos: [x1n, y_top],
+            uv: [1.0, 0.0],
+        },
+        Vertex {
+            pos: [x1n, y_bot],
+            uv: [1.0, 1.0],
+        },
+        Vertex {
+            pos: [x0n, y_bot],
+            uv: [0.0, 1.0],
+        },
+    ]
+}
+
 /// Downscale `image` (RGBA8) so neither dimension exceeds `max`, preserving
 /// aspect with nearest-neighbor sampling. Returns the input borrowed unchanged
 /// when it already fits.
@@ -938,6 +971,9 @@ pub struct WgpuRenderer {
     /// The top-right "loading" pie, shown while the next photo isn't ready yet
     /// (its own overlay layer, composited above the photo + panels).
     pie: Option<OverlayDraw>,
+    /// The centered "About" card (app icon + version), its own overlay layer drawn
+    /// above everything else. Screen-centered rather than corner-anchored.
+    about: Option<OverlayDraw>,
     upload: Box<dyn UploadStrategy>,
     /// Resident texture ring (Phase 3). Empty until `reserve_ring`; each `Some`
     /// slot holds a pre-uploaded photo. `present_slot` selects which one draws.
@@ -1093,6 +1129,7 @@ impl WgpuRenderer {
             overlay: None,
             toast: None,
             pie: None,
+            about: None,
             upload,
             ring: Vec::new(),
             present_idx: None,
@@ -1228,6 +1265,49 @@ impl WgpuRenderer {
             None => None,
         };
     }
+
+    /// Set or clear the centered "About" card (app icon + version text). Its own
+    /// overlay layer, composited above the photo and every other panel, and
+    /// screen-centered (so `margin` is unused). `None` hides it.
+    pub fn set_about(&mut self, panel: Option<(&[u8], u32, u32)>) {
+        self.about = match panel {
+            Some((rgba, w, h)) => {
+                let scale = self.scene_scale(false);
+                let bind_group = upload_image(
+                    &self.device,
+                    &self.queue,
+                    &self.bgl,
+                    self.upload.as_mut(),
+                    rgba,
+                    w,
+                    h,
+                    &ColorTransform::srgb(),
+                    false,
+                    scale,
+                );
+                let vbuf = self
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("about-vbuf"),
+                        contents: bytemuck::cast_slice(&center_quad_vertices(
+                            w,
+                            h,
+                            self.config.width,
+                            self.config.height,
+                        )),
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    });
+                Some(OverlayDraw {
+                    bind_group,
+                    vbuf,
+                    panel_w: w,
+                    panel_h: h,
+                    margin: 0,
+                })
+            }
+            None => None,
+        };
+    }
 }
 
 impl Renderer for WgpuRenderer {
@@ -1285,6 +1365,13 @@ impl Renderer for WgpuRenderer {
                 bytemuck::cast_slice(&top_right_quad_vertices(
                     p.panel_w, p.panel_h, width, height, p.margin,
                 )),
+            );
+        }
+        if let Some(ab) = &self.about {
+            self.queue.write_buffer(
+                &ab.vbuf,
+                0,
+                bytemuck::cast_slice(&center_quad_vertices(ab.panel_w, ab.panel_h, width, height)),
             );
         }
     }
@@ -1563,6 +1650,29 @@ impl Renderer for WgpuRenderer {
             rp.set_pipeline(&self.overlay_pipeline);
             rp.set_bind_group(0, &p.bind_group, &[]);
             rp.set_vertex_buffer(0, p.vbuf.slice(..));
+            rp.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint16);
+            rp.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+        }
+        // Pass 2d: the centered "About" card, composited above everything else (it's
+        // a modal-ish dialog, so it sits on top of the photo and all panels).
+        if let Some(ab) = &self.about {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("about"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &intermediate_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rp.set_pipeline(&self.overlay_pipeline);
+            rp.set_bind_group(0, &ab.bind_group, &[]);
+            rp.set_vertex_buffer(0, ab.vbuf.slice(..));
             rp.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint16);
             rp.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
         }

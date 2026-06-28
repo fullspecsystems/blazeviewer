@@ -54,10 +54,12 @@ use pb_render::{
 
 mod decode_pool;
 mod hud;
+mod menu;
 mod metrics;
 mod settings;
 use decode_pool::{recommended_workers, DecodeFn, DecodePool, Outcome};
 use hud::{Hud, Row};
+use menu::MenuAction;
 use metrics::StageTimes;
 
 /// VRAM budget for the resident texture ring (~1.5 GB → ~16–32 fit-size slots on
@@ -138,14 +140,17 @@ struct PhotoMeta {
 }
 
 /// Which overlay is showing: nothing, the one-line basic panel (`i`), the
-/// full-EXIF "nerd" table (`Shift+I`), or the keybindings help (`/` or `?`). All
-/// share the single overlay quad, so they're mutually exclusive.
+/// full-EXIF "nerd" table (`Shift+I`), the keybindings help (`/` or `?`), or the
+/// centered "About" card (Help menu). All are mutually exclusive (one info mode at
+/// a time); the corner panels share one overlay quad, the About card its own
+/// centered layer.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InfoMode {
     Off,
     Basic,
     Full,
     Help,
+    About,
 }
 
 /// A navigation step from a held key: sequential forward (`space`), sequential
@@ -381,6 +386,12 @@ struct App {
     /// preview (e.g. a RAW whose only embedded image *is* its preview) — so we
     /// don't keep re-requesting their upgrade every idle tick.
     upgrade_done: HashSet<usize>,
+    /// The native menu bar (windowed mode only). Built once, kept alive here so its
+    /// native handle outlives the window. `None` until the first window is created.
+    menu: Option<muda::Menu>,
+    /// Whether the menu has been attached to the current window (`init_for_hwnd`),
+    /// so fullscreen↔windowed toggles can show/hide it instead of re-initializing.
+    menu_attached: bool,
 }
 
 impl App {
@@ -453,6 +464,8 @@ impl App {
             pie_pushed: None,
             preview_resident: HashSet::new(),
             upgrade_done: HashSet::new(),
+            menu: None,
+            menu_attached: false,
         }
     }
 
@@ -950,6 +963,87 @@ impl App {
                 }
             }
         }
+        // Show the menu in windowed mode, hide it in fullscreen (the chrome-free
+        // speed mode). Adding/removing the bar resizes the client area → a `Resized`
+        // event → the debounced re-decode path.
+        self.apply_menu_for_mode();
+    }
+
+    /// Build the native menu bar once (cross-platform; muda owns the OS handle).
+    fn ensure_menu(&mut self) {
+        if self.menu.is_none() {
+            self.menu = Some(menu::build_menu());
+        }
+    }
+
+    /// Attach the menu bar in windowed mode, hide it in fullscreen. The menu is a
+    /// windowed-only discoverability layer — fullscreen stays chrome-free. OS-drawn,
+    /// so it costs nothing on the render hot path. (Windows now; macOS later mirrors
+    /// this behind the same muda API.)
+    #[cfg(windows)]
+    fn apply_menu_for_mode(&mut self) {
+        self.ensure_menu();
+        let Some(hwnd) = self.active.as_ref().and_then(|a| hwnd_of(&a.window)) else {
+            return;
+        };
+        let Some(menu) = self.menu.as_ref() else {
+            return;
+        };
+        // SAFETY: `hwnd` is the live window's handle for as long as `active` is set.
+        unsafe {
+            if self.windowed {
+                if self.menu_attached {
+                    let _ = menu.show_for_hwnd(hwnd);
+                } else {
+                    let _ = menu.init_for_hwnd(hwnd);
+                    self.menu_attached = true;
+                }
+            } else if self.menu_attached {
+                let _ = menu.hide_for_hwnd(hwnd);
+            }
+        }
+    }
+
+    /// On non-Windows platforms the menu isn't wired up yet (macOS uses
+    /// `init_for_nsapp` — a future cheap port), so this is a no-op.
+    #[cfg(not(windows))]
+    fn apply_menu_for_mode(&mut self) {}
+
+    /// Step the zoom by `factor` (menu Zoom In/Out — the keyboard zoom is the
+    /// continuous hold-to-zoom). Multiplies the current zoom, clamps to the allowed
+    /// range, and re-frames. `factor` > 1 zooms in, < 1 zooms out.
+    fn zoom_step(&mut self, factor: f32, event_loop: &ActiveEventLoop) {
+        self.view.zoom = (self.view.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        self.push_view();
+        self.draw(event_loop);
+    }
+
+    /// Run a menu action: dispatch to the **same `App` methods the keyboard calls**,
+    /// so the menu and the keymap never drift. The id→action mapping is the pure,
+    /// unit-tested `menu::action_for`; this is the (impure) effect half.
+    fn dispatch_menu(&mut self, action: MenuAction, event_loop: &ActiveEventLoop) {
+        match action {
+            MenuAction::OpenFile => self.open_picker(false, event_loop),
+            MenuAction::OpenFolder => self.open_picker(true, event_loop),
+            MenuAction::Exit => self.begin_exit(event_loop),
+            MenuAction::Fit => self.set_scale_mode(ScaleMode::Fit, event_loop),
+            MenuAction::Fill => self.set_scale_mode(ScaleMode::Fill, event_loop),
+            MenuAction::Original => self.set_scale_mode(ScaleMode::Original, event_loop),
+            MenuAction::ZoomIn => self.zoom_step(1.25, event_loop),
+            MenuAction::ZoomOut => self.zoom_step(0.8, event_loop),
+            MenuAction::Fullscreen => self.toggle_fullscreen(),
+            MenuAction::Recursive => self.toggle_recursive(event_loop),
+            MenuAction::Info => self.toggle_info(false, event_loop),
+            MenuAction::FullExif => self.toggle_info(true, event_loop),
+            MenuAction::Next => self.advance(Nav::Forward, event_loop),
+            MenuAction::Previous => self.advance(Nav::Backward, event_loop),
+            MenuAction::Random => self.advance(Nav::Random, event_loop),
+            MenuAction::RandomPrev => self.advance(Nav::RandomPrev, event_loop),
+            MenuAction::RotateRight => self.rotate(false, event_loop),
+            MenuAction::RotateLeft => self.rotate(true, event_loop),
+            MenuAction::Help => self.toggle_help(event_loop),
+            MenuAction::About => self.toggle_about(event_loop),
+        }
     }
 
     /// Show the native picker (`O` = file(s), `Shift+O` = folder) and open the
@@ -1124,6 +1218,22 @@ impl App {
         }
     }
 
+    /// Toggle the centered "About PhotoBlaze" card (Help menu). Like the help
+    /// overlay it's static (no photo needed) and mutually exclusive with the other
+    /// info modes — opening it replaces whichever panel was showing.
+    fn toggle_about(&mut self, event_loop: &ActiveEventLoop) {
+        self.info = if self.info == InfoMode::About {
+            InfoMode::Off
+        } else {
+            InfoMode::About
+        };
+        if self.info == InfoMode::Off {
+            self.hide_overlay(event_loop);
+        } else {
+            self.show_overlay(event_loop);
+        }
+    }
+
     /// The keybindings help table: a title row, then every hotkey → action as a
     /// shaded-key / description pair. Static (independent of the current photo).
     fn help_rows(&self) -> Vec<Row> {
@@ -1230,12 +1340,17 @@ impl App {
     }
 
     /// Rasterize the active overlay (info panel or help) and draw it. The help
-    /// overlay uses a larger font than the info panels.
+    /// overlay uses a larger font than the info panels. The About card has its own
+    /// centered layer, so it's handled separately (`show_about`).
     fn show_overlay(&mut self, event_loop: &ActiveEventLoop) {
+        if self.info == InfoMode::About {
+            self.show_about(event_loop);
+            return;
+        }
         let px = (15.0 * self.scale_factor).max(8.0);
         let pad = (7.0 * self.scale_factor).round().max(2.0) as u32;
         let panel = match self.info {
-            InfoMode::Off => return,
+            InfoMode::Off | InfoMode::About => return,
             InfoMode::Basic => {
                 let (Some(hud), Some(meta)) = (self.hud.as_ref(), self.current.as_ref()) else {
                     return;
@@ -1267,6 +1382,8 @@ impl App {
         };
         let margin = (10.0 * self.scale_factor).round().max(1.0) as u32;
         if let Some(a) = self.active.as_mut() {
+            // Clear the centered About card (mutual exclusivity) and show the panel.
+            a.renderer.set_about(None);
             a.renderer.set_overlay(Some((&bitmap, w, h)), margin);
         }
         self.overlay_shown = true;
@@ -1274,10 +1391,39 @@ impl App {
         self.draw(event_loop);
     }
 
-    /// Hide the info panel (clears the overlay quad).
+    /// Build and show the centered "About" card: the app icon, "PhotoBlaze", and the
+    /// version/tagline/copyright/URL lines (`about_lines`). Uses the dedicated
+    /// centered About layer; the corner-panel layer is cleared so they never stack.
+    fn show_about(&mut self, event_loop: &ActiveEventLoop) {
+        let px = (16.0 * self.scale_factor).max(10.0);
+        let pad = (10.0 * self.scale_factor).round().max(3.0) as u32;
+        let icon_size = (96.0 * self.scale_factor).round().max(48.0) as u32;
+        // The icon is best-effort: if it fails to decode, the card is text-only.
+        let (icon, iw, ih) = about_icon(icon_size).unwrap_or((Vec::new(), 0, 0));
+        let lines = about_lines();
+        let card = {
+            let Some(hud) = self.hud.as_ref() else {
+                return; // no system font -> no overlay (same as the info panels)
+            };
+            hud.render_about((&icon, iw, ih), "PhotoBlaze", &lines, px, pad)
+        };
+        let Some((bitmap, w, h)) = card else {
+            return;
+        };
+        if let Some(a) = self.active.as_mut() {
+            a.renderer.set_overlay(None, 0); // hide any corner panel
+            a.renderer.set_about(Some((&bitmap, w, h)));
+        }
+        self.overlay_shown = true;
+        self.overlay_item = self.displayed_item;
+        self.draw(event_loop);
+    }
+
+    /// Hide the info panel (clears both the corner overlay quad and the About card).
     fn hide_overlay(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(a) = self.active.as_mut() {
             a.renderer.set_overlay(None, 0);
+            a.renderer.set_about(None);
         }
         self.overlay_shown = false;
         self.overlay_item = None;
@@ -1710,6 +1856,23 @@ impl ApplicationHandler for App {
         #[cfg(windows)]
         apply_native_window_icon(&window);
 
+        // Attach the windowed-mode menu bar *before* measuring the client size, so
+        // the first decode-to-fit already accounts for the menu's height (no soft
+        // first frame). Fullscreen stays menu-free.
+        #[cfg(windows)]
+        {
+            self.ensure_menu();
+            if self.windowed {
+                if let (Some(menu), Some(hwnd)) = (self.menu.as_ref(), hwnd_of(&window)) {
+                    // SAFETY: `hwnd` is this freshly-created window's valid handle.
+                    unsafe {
+                        let _ = menu.init_for_hwnd(hwnd);
+                    }
+                    self.menu_attached = true;
+                }
+            }
+        }
+
         self.scale_factor = window.scale_factor() as f32;
         let isz = window.inner_size();
         self.fit = Some(FitBox {
@@ -1943,7 +2106,14 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
-        // 0. Apply any files dropped on the window this burst (coalesced — winit
+        // 0. Native menu-bar clicks (windowed mode). Map each id to the same action
+        // the keyboard triggers and dispatch it; an unknown/foreign id is ignored.
+        while let Ok(ev) = muda::MenuEvent::receiver().try_recv() {
+            if let Some(action) = menu::action_for(ev.id.as_ref()) {
+                self.dispatch_menu(action, event_loop);
+            }
+        }
+        // 0b. Apply any files dropped on the window this burst (coalesced — winit
         // delivers one `DroppedFile` per file).
         if !self.pending_drops.is_empty() {
             let drops = std::mem::take(&mut self.pending_drops);
@@ -2004,8 +2174,10 @@ impl ApplicationHandler for App {
                     self.hide_overlay(event_loop);
                 }
             } else if !transforming
-                // Help is static (no photo needed); the info panels need a photo.
-                && (self.info == InfoMode::Help || self.current.is_some())
+                // Help and About are static (no photo needed); the info panels
+                // need a photo.
+                && (matches!(self.info, InfoMode::Help | InfoMode::About)
+                    || self.current.is_some())
                 && (!self.overlay_shown || self.overlay_item != self.displayed_item)
             {
                 self.show_overlay(event_loop);
@@ -2195,6 +2367,42 @@ fn load_window_icon() -> Option<Icon> {
     };
     let img = decode_bytes(PNG, Some(fit), false).ok()?;
     Icon::from_rgba(img.pixels, img.width, img.height).ok()
+}
+
+/// Decode the embedded app icon to straight-alpha RGBA8, fit to `size` px, for the
+/// About card. `None` if decoding fails (the card then renders text-only).
+fn about_icon(size: u32) -> Option<(Vec<u8>, u32, u32)> {
+    const PNG: &[u8] = include_bytes!("../icons/photoblaze.png");
+    let fit = FitBox {
+        max_width: size,
+        max_height: size,
+    };
+    let img = decode_bytes(PNG, Some(fit), false).ok()?;
+    Some((img.pixels, img.width, img.height))
+}
+
+/// The text lines under the title on the About card: version, tagline, copyright,
+/// and project URL. Pure (the version comes from Cargo at compile time), so the
+/// content is unit-testable.
+fn about_lines() -> Vec<String> {
+    vec![
+        format!("Version {}", env!("CARGO_PKG_VERSION")),
+        "An ultra-fast photo viewer".to_string(),
+        "© JD Lien 2026".to_string(),
+        "https://github.com/jdlien/photoblaze".to_string(),
+    ]
+}
+
+/// The window's Win32 `HWND` as an `isize` (what muda's `init_for_hwnd` expects),
+/// via the same `RawWindowHandle::Win32` path as `apply_native_window_icon`.
+#[cfg(windows)]
+fn hwnd_of(window: &Window) -> Option<isize> {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let handle = window.window_handle().ok()?;
+    match handle.as_raw() {
+        RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
+        _ => None,
+    }
 }
 
 /// Classify launch / drop / picker paths into a [`LaunchInput`] — the one step
@@ -2481,5 +2689,17 @@ mod tests {
         // Multibyte values are truncated on char boundaries, not bytes.
         let out = truncate_exif_value(&"é".repeat(100));
         assert_eq!(out.chars().count(), EXIF_VALUE_MAX + 1);
+    }
+
+    #[test]
+    fn about_lines_carry_version_tagline_copyright_and_url() {
+        let lines = about_lines();
+        // The version line reflects the crate version from Cargo at compile time.
+        assert_eq!(lines[0], format!("Version {}", env!("CARGO_PKG_VERSION")));
+        assert!(lines.iter().any(|l| l == "An ultra-fast photo viewer"));
+        assert!(lines.iter().any(|l| l.contains("JD Lien")));
+        assert!(lines
+            .iter()
+            .any(|l| l == "https://github.com/jdlien/photoblaze"));
     }
 }

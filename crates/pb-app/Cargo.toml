@@ -21,6 +21,10 @@ fontdue = "0.9"
 # features pull the Linux xdg-portal/zbus backend we don't need, so disable them —
 # the Windows (and later macOS) native backend is always compiled.
 rfd = { version = "0.14", default-features = false }
+# Native OS menu bar (real Windows HMENU now, NSMenu on macOS later from the same
+# API). Shown in windowed mode only — fullscreen stays chrome-free. OS-drawn, so
+# it's perf-neutral. On Linux it would need the optional `gtk` feature (off here).
+muda = "0.19"
 
 # Win32 for: pointing the window icon at the exe's multi-size .ico (crisp small
 # title-bar icon, vs winit downscaling one big image), and the native menu later.
