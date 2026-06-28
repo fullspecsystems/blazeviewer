@@ -10,6 +10,7 @@
 //!
 //!   space       next photo  ·  ⌫  previous photo
 //!   enter       random photo (precomputed shuffle; hold to fly)
+//!   shift+enter  previous random photo (step back through the random walk)
 //!   ← ↑ ↓ →     pan around the photo (hold; accelerates)
 //!   = / -       zoom in / out (hold; accelerates; numpad +/- too)
 //!   8 / 9       scaling mode: fit / fill (all prefetched)
@@ -39,7 +40,7 @@ use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{Fullscreen, Icon, Window, WindowId};
+use winit::window::{Icon, Window, WindowId};
 
 use pb_core::open::{self, LaunchInput, Source};
 use pb_core::{prefetch_targets, Playlist, ResidentRing};
@@ -147,14 +148,16 @@ enum InfoMode {
 }
 
 /// A navigation step from a held key: sequential forward (`space`), sequential
-/// backward (`backspace`), or a precomputed-random jump (`enter`). All three are
+/// backward (`backspace`), a precomputed-random jump (`enter`), or a step back
+/// through the random walk (`shift+enter`, to revisit one you flew past). All are
 /// gated + self-paced + prefetchable the same way (random walks a known shuffle
-/// order, so its next targets are knowable — see `pb_core::ShuffleOrder`).
+/// order, so its next/prior targets are knowable — see `pb_core::ShuffleOrder`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Nav {
     Forward,
     Backward,
     Random,
+    RandomPrev,
 }
 
 /// Build a photo's info panel data from its path + decoded image.
@@ -345,6 +348,11 @@ struct App {
     /// instant, so the Esc that dismissed the modal picker doesn't also exit the
     /// app (the dialog's own message loop can leak that key to our window).
     esc_guard_until: Option<Instant>,
+    /// When a window resize/toggle has "settled" enough to re-decode at the new
+    /// fit. A drag fires many Resized events; we GPU-scale the resident texture
+    /// instantly per event and defer the expensive decode-to-fit + ring refill
+    /// until this instant (debounced), so resizing stays smooth.
+    resize_settle_at: Option<Instant>,
     /// Hold timers for the zoom/pan acceleration ramps (start = when the hold
     /// began; last = previous step, for time-based deltas).
     zoom_started: Option<Instant>,
@@ -422,6 +430,7 @@ impl App {
             pending_drops: Vec::new(),
             toast: None,
             esc_guard_until: None,
+            resize_settle_at: None,
             zoom_started: None,
             zoom_last: None,
             pan_started: None,
@@ -825,24 +834,29 @@ impl App {
         self.show_toast(msg, event_loop);
     }
 
-    /// Toggle between borderless fullscreen and a 1280x800 window (F11 or
-    /// Alt+Enter). The resulting resize event re-fits and re-decodes the current
-    /// photo; a toast confirms the new mode.
-    fn toggle_fullscreen(&mut self, event_loop: &ActiveEventLoop) {
+    /// Toggle between borderless "windowed fullscreen" and a 1280x800 window (F11
+    /// or Alt+Enter). The resulting resize event re-fits and re-decodes the photo.
+    fn toggle_fullscreen(&mut self) {
         self.windowed = !self.windowed;
-        let windowed = self.windowed;
         if let Some(a) = self.active.as_ref() {
-            if windowed {
+            if self.windowed {
                 a.window.set_fullscreen(None);
                 a.window.set_decorations(true);
                 let _ = a.window.request_inner_size(PhysicalSize::new(1280, 800));
             } else {
+                // Borderless "windowed fullscreen": size a decoration-less window
+                // to the monitor ourselves instead of the OS fullscreen API, which
+                // makes Windows apply fullscreen-optimizations that drop DWM
+                // composition on focus changes / transitions and flash the legacy
+                // basic-theme caption. A plain borderless window stays composited.
+                a.window.set_fullscreen(None);
                 a.window.set_decorations(false);
-                a.window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+                if let Some(mon) = a.window.current_monitor() {
+                    a.window.set_outer_position(mon.position());
+                    let _ = a.window.request_inner_size(mon.size());
+                }
             }
         }
-        let msg = if windowed { "Windowed" } else { "Fullscreen" };
-        self.show_toast(msg, event_loop);
     }
 
     /// Show the native picker (`O` = file(s), `Shift+O` = folder) and open the
@@ -1026,6 +1040,7 @@ impl App {
             ("Space", "Next photo"),
             ("Backspace", "Previous photo"),
             ("Enter", "Random photo (shuffle)"),
+            ("Shift+Enter", "Previous random photo"),
             ("Hold nav key", "Fly through photos"),
             ("← ↑ ↓ →", "Pan (hold to accelerate)"),
             ("= / -", "Zoom in / out (hold)"),
@@ -1410,6 +1425,7 @@ impl App {
             Nav::Forward => self.playlist.next(),
             Nav::Backward => self.playlist.prev(),
             Nav::Random => self.playlist.random_next(),
+            Nav::RandomPrev => self.playlist.random_prev(),
         }
         self.target_item = self.playlist.current();
         // Both modes use the async engine: present on a ring hit, else hold the
@@ -1420,7 +1436,8 @@ impl App {
 
     /// Which way we're currently paging, from held keys (ambiguous/none = idle).
     /// Arrows are pan now, so only space (forward), backspace (backward), and
-    /// enter (random) advance; holding more than one is treated as idle.
+    /// enter (random; shift+enter steps back through the random walk) advance;
+    /// holding more than one is treated as idle.
     fn held_nav(&self) -> Option<Nav> {
         let mut nav = None;
         let mut count = 0u8;
@@ -1433,7 +1450,11 @@ impl App {
             count += 1;
         }
         if self.held.contains(&KeyCode::Enter) || self.held.contains(&KeyCode::NumpadEnter) {
-            nav = Some(Nav::Random);
+            nav = Some(if self.shift {
+                Nav::RandomPrev
+            } else {
+                Nav::Random
+            });
             count += 1;
         }
         (count == 1).then_some(nav).flatten()
@@ -1571,9 +1592,14 @@ impl ApplicationHandler for App {
         attrs = if self.windowed {
             attrs.with_inner_size(PhysicalSize::new(1280, 800))
         } else {
-            attrs
-                .with_decorations(false)
-                .with_fullscreen(Some(Fullscreen::Borderless(None)))
+            // Borderless "windowed fullscreen": a decoration-less window sized to
+            // the monitor — NOT the OS fullscreen API (which triggers Windows
+            // fullscreen-optimizations and the legacy basic-theme caption flash).
+            let mut a = attrs.with_decorations(false);
+            if let Some(mon) = event_loop.primary_monitor() {
+                a = a.with_inner_size(mon.size()).with_position(mon.position());
+            }
+            a
         };
 
         let window = Arc::new(
@@ -1671,14 +1697,16 @@ impl ApplicationHandler for App {
                 if Some(new_fit) != self.fit {
                     self.fit = Some(new_fit);
                     if let Some(a) = self.active.as_mut() {
+                        // Cheap, per-event: reconfigure the swapchain and let the
+                        // renderer GPU-scale the resident texture to the new size.
                         a.renderer.resize(size.width, size.height);
                     }
-                    // Geometry changed: invalidate the ring, re-show the current
-                    // image at the new size, and refill the ring at that size.
-                    self.invalidate_geometry();
-                    self.load_current_sync(event_loop);
-                    self.target_item = self.playlist.current();
-                    self.request_prefetch();
+                    self.draw(event_loop);
+                    // A drag fires Resized many times a second; re-decoding the
+                    // current photo to the new fit on every one (a CPU decode on
+                    // the event-loop thread) is what made resize crawl. Defer the
+                    // crisp decode-to-fit + ring refill until the size settles.
+                    self.resize_settle_at = Some(Instant::now() + Duration::from_millis(180));
                 }
             }
 
@@ -1721,12 +1749,15 @@ impl ApplicationHandler for App {
                             KeyCode::Space => self.nav_press(code, Nav::Forward, event_loop),
                             KeyCode::Backspace => self.nav_press(code, Nav::Backward, event_loop),
                             // Enter (and numpad Enter): Alt+Enter toggles
-                            // fullscreen; otherwise jump to the next photo in the
-                            // precomputed random order (hold to fly through a
-                            // shuffled deck, each photo once before a reshuffle).
+                            // fullscreen; Shift+Enter steps back through the random
+                            // walk (revisit one you flew past); otherwise jump to the
+                            // next photo in the precomputed random order (hold to fly
+                            // through a shuffled deck, each once before a reshuffle).
                             KeyCode::Enter | KeyCode::NumpadEnter => {
                                 if self.alt {
-                                    self.toggle_fullscreen(event_loop);
+                                    self.toggle_fullscreen();
+                                } else if self.shift {
+                                    self.nav_press(code, Nav::RandomPrev, event_loop);
                                 } else {
                                     self.nav_press(code, Nav::Random, event_loop);
                                 }
@@ -1767,7 +1798,7 @@ impl ApplicationHandler for App {
                             KeyCode::KeyO => self.open_picker(self.shift, event_loop),
                             // Fullscreen <-> windowed (F11; Alt+Enter is handled
                             // with the Enter arm above).
-                            KeyCode::F11 => self.toggle_fullscreen(event_loop),
+                            KeyCode::F11 => self.toggle_fullscreen(),
                             // Info panel: i basic, Shift+I full EXIF.
                             KeyCode::KeyI => self.toggle_info(self.shift, event_loop),
                             // Keybindings help (`/` or `?` — same physical key).
@@ -1878,9 +1909,32 @@ impl ApplicationHandler for App {
         // decoding (a miss that outlasts the show-delay), fading out once it lands.
         let pie_active = self.tick_pie(now, event_loop);
 
+        // 4d. Once a resize/toggle has settled, run the deferred decode-to-fit:
+        // rebuild the ring at the new slot size, re-show the current photo crisp,
+        // and refill neighbours. Debounced from the Resized handler so a drag
+        // doesn't re-decode on every intermediate size.
+        let resizing = match self.resize_settle_at {
+            Some(at) if now >= at => {
+                self.resize_settle_at = None;
+                self.invalidate_geometry();
+                self.load_current_sync(event_loop);
+                self.target_item = self.playlist.current();
+                self.request_prefetch();
+                false
+            }
+            Some(_) => true, // still settling — keep ticking so it fires
+            None => false,
+        };
+
         // 5. Poll at the frame rate while interacting or work is outstanding;
         //    otherwise go fully idle until the next event.
-        if nav.is_some() || transforming || self.work_pending() || toast_active || pie_active {
+        if nav.is_some()
+            || transforming
+            || self.work_pending()
+            || toast_active
+            || pie_active
+            || resizing
+        {
             event_loop.set_control_flow(ControlFlow::WaitUntil(now + self.frame_interval));
         } else {
             event_loop.set_control_flow(ControlFlow::Wait);
