@@ -57,6 +57,7 @@ mod clipboard;
 #[cfg(windows)]
 mod darkmode;
 mod decode_pool;
+mod delete;
 mod dialog;
 mod hud;
 mod icon;
@@ -116,6 +117,9 @@ const PAN_RAMP_SECS: f32 = 0.7;
 /// settings option; until then refresh is the max).
 const ADVANCE_MIN_RATE: f32 = 3.0;
 const ADVANCE_RAMP_SECS: f32 = 4.0;
+/// How long the delete icon shows on the just-deleted photo before the playlist
+/// advances to the next one — so the trash/recycle feedback registers first (#28).
+const DELETE_ADVANCE_DELAY: Duration = Duration::from_millis(160);
 
 /// The minimum gap since the last shown photo before the next held-key auto-advance,
 /// given how long auto-repeat has been running (`elapsed`, measured from when the
@@ -497,6 +501,10 @@ struct App {
     /// refresh is a no-op Win32 call when nothing changed.
     save_rotation_item: Option<muda::MenuItem>,
     save_enabled: bool,
+    /// A delete whose playlist-advance is deferred: `(fire_at, removed_index)`. The
+    /// deleted photo stays on screen with its icon until `fire_at`, then the playlist
+    /// drops the item and advances (see `delete_current` / `flush_pending_delete`).
+    pending_delete: Option<(Instant, usize)>,
     /// Whether the menu has been attached to the current window (`init_for_hwnd`),
     /// so fullscreen↔windowed toggles can show/hide it instead of re-initializing.
     menu_attached: bool,
@@ -592,6 +600,7 @@ impl App {
             menu: None,
             save_rotation_item: None,
             save_enabled: false,
+            pending_delete: None,
             menu_attached: false,
             dialog: None,
         }
@@ -886,6 +895,110 @@ impl App {
                 self.show_toast("Save failed", event_loop);
             }
         }
+    }
+
+    /// Delete the current photo (task #28). `permanent` (`Shift+Del`) removes the
+    /// file after a confirmation; otherwise (`Del`) it goes to the Recycle Bin —
+    /// recoverable, no prompt. The first op that *removes* a user's file: explicit
+    /// command only (CLAUDE.md boundary). Only real files (not archive entries) can be
+    /// deleted. After deletion the playlist drops the item and advances to the next
+    /// photo (the previous if it was the last; the empty state if none remain).
+    fn delete_current(&mut self, permanent: bool, event_loop: &ActiveEventLoop) {
+        // Settle any still-pending delete-advance first (e.g. a rapid second Del).
+        self.flush_pending_delete(event_loop);
+        let Some(item) = self.displayed_item else {
+            return;
+        };
+        let Some(path) = self.source.path(item).map(Path::to_path_buf) else {
+            self.show_toast("Can't delete this", event_loop); // archive entry — no file
+            return;
+        };
+        if permanent {
+            let name = file_name_of(self.source.name(item));
+            let hwnd = self
+                .active
+                .as_ref()
+                .and_then(|a| hwnd_of(&a.window))
+                .unwrap_or(0);
+            if !delete::confirm_permanent_delete(&name, hwnd) {
+                return; // user cancelled
+            }
+        }
+        let res = if permanent {
+            delete::delete_permanently(&path)
+        } else {
+            delete::send_to_trash(&path)
+        };
+        if let Err(e) = res {
+            eprintln!("delete failed: {}: {e}", path.display());
+            self.show_toast("Delete failed", event_loop);
+            return;
+        }
+        // Flash an icon-only pill on the (still-displayed) deleted photo — recycle bin
+        // for the recoverable Del, trash for a permanent delete — then defer the
+        // playlist advance a beat so the feedback registers before the next photo
+        // appears (`about_to_wait` fires it at `DELETE_ADVANCE_DELAY`).
+        let icon = if permanent {
+            icon::assets::TRASH
+        } else {
+            icon::assets::RECYCLE
+        };
+        self.show_toast_icon("", Some(icon), event_loop);
+        self.pending_delete = Some((Instant::now() + DELETE_ADVANCE_DELAY, item));
+    }
+
+    /// Perform a deferred delete's playlist advance: drop the removed item, rebuild the
+    /// source from the remaining paths (indices shift, so index-keyed state resets —
+    /// fine for an explicit, infrequent command), and advance to the next photo (the
+    /// previous if it was the last; the empty state if none remain). Idempotent — a
+    /// no-op when nothing is pending.
+    fn flush_pending_delete(&mut self, event_loop: &ActiveEventLoop) {
+        let Some((_, removed)) = self.pending_delete.take() else {
+            return;
+        };
+        let len = self.source.len();
+        match delete::cursor_after_removal(len, removed) {
+            None => self.enter_empty_state(event_loop),
+            Some(start) => {
+                let remaining: Vec<PathBuf> = (0..len)
+                    .filter(|&i| i != removed)
+                    .filter_map(|i| self.source.path(i).map(Path::to_path_buf))
+                    .collect();
+                let src: Arc<dyn PhotoSource> = Arc::new(FsSource::new(remaining));
+                let root = self.root.clone();
+                let scan_root = self.scan_root.clone();
+                let recursive = self.recursive;
+                self.rebuild_playlist(src, root, scan_root, recursive, start, event_loop);
+            }
+        }
+    }
+
+    /// Clear to the "no images" placeholder after the last photo is deleted. Mirrors
+    /// the bare-launch empty state (a test pattern + title; `O`/drag-drop reopen).
+    fn enter_empty_state(&mut self, event_loop: &ActiveEventLoop) {
+        self.pending_delete = None;
+        self.source = Arc::new(FsSource::new(Vec::new()));
+        self.playlist = Playlist::new(0, 0);
+        self.rotations.clear();
+        self.meta_cache.clear();
+        self.failed.clear();
+        self.preview_resident.clear();
+        self.upgrade_done.clear();
+        self.last_upgrade_set.clear();
+        self.invalidate_geometry();
+        self.displayed_item = None;
+        self.target_item = None;
+        self.current = None;
+        let p = test_pattern(1600, 1000);
+        let srgb = pb_render::ColorTransform::srgb();
+        if let Some(a) = self.active.as_mut() {
+            a.renderer.set_image(&p, 1600, 1000, srgb, false, 1.0);
+            a.renderer.set_overlay(None, 0);
+            a.window.set_title("PhotoBlaze (no images)");
+        }
+        self.overlay_shown = false;
+        self.overlay_item = None;
+        self.draw(event_loop);
     }
 
     /// Show ring `slot` (holding `item`): the keypress fast path — a rebind, no
@@ -1414,6 +1527,8 @@ impl App {
             MenuAction::OpenFile => self.open_picker(false, event_loop),
             MenuAction::OpenFolder => self.open_picker(true, event_loop),
             MenuAction::SaveRotation => self.save_rotation(event_loop),
+            MenuAction::Delete => self.delete_current(false, event_loop),
+            MenuAction::DeletePermanently => self.delete_current(true, event_loop),
             MenuAction::Exit => self.begin_exit(event_loop),
             MenuAction::Copy => self.copy_image(event_loop),
             MenuAction::Fit => self.set_scale_mode(ScaleMode::Fit, event_loop),
@@ -1491,6 +1606,7 @@ impl App {
             return;
         }
         let start = start.min(source.len() - 1);
+        self.pending_delete = None; // any rebuild supersedes a deferred delete-advance
         self.source = source;
         self.root = root;
         self.scan_root = scan_root;
@@ -2091,6 +2207,9 @@ impl App {
     /// Advance one photo (sequential or random). The gated engine path: present on
     /// a ring hit, else hold the previous frame + prefetch while the decode lands.
     fn advance(&mut self, nav: Nav, event_loop: &ActiveEventLoop) {
+        // Settle a deferred delete-advance before navigating, so a keypress during the
+        // brief post-delete delay lands cleanly on the rebuilt playlist (no yank-back).
+        self.flush_pending_delete(event_loop);
         // Never advance while the previous target is still pending (a miss in
         // flight): a fast second press would overwrite it and skip that photo.
         // Holding still flies — `about_to_wait` re-advances once it's caught up.
@@ -2510,6 +2629,8 @@ impl ApplicationHandler for App {
                             KeyCode::KeyC if self.ctrl => self.copy_image(event_loop),
                             // Ctrl+S saves the pending rotation to the file (lossless EXIF).
                             KeyCode::KeyS if self.ctrl => self.save_rotation(event_loop),
+                            // Delete → Recycle Bin; Shift+Delete → permanent (confirmed).
+                            KeyCode::Delete => self.delete_current(self.shift, event_loop),
                             // Ctrl+, opens Settings (mac-like; common on Windows too).
                             KeyCode::Comma if self.ctrl => self.open_settings(event_loop),
                             // Fullscreen <-> windowed (F11; Alt+Enter is handled
@@ -2574,6 +2695,10 @@ impl ApplicationHandler for App {
         // Keep "Save Rotation" enabled only when it applies (cheap + cached, so this
         // per-tick call is a no-op unless the photo/rotation actually changed).
         self.refresh_save_menu_item();
+        // Deferred delete-advance: once the icon has shown for a beat, drop the item.
+        if self.pending_delete.is_some_and(|(at, _)| now >= at) {
+            self.flush_pending_delete(event_loop);
+        }
         // 0b. Apply any files dropped on the window this burst (coalesced — winit
         // delivers one `DroppedFile` per file).
         if !self.pending_drops.is_empty() {
@@ -2698,6 +2823,7 @@ impl ApplicationHandler for App {
             || pie_active
             || resizing
             || sharpen_pending
+            || self.pending_delete.is_some()
         {
             event_loop.set_control_flow(ControlFlow::WaitUntil(now + self.frame_interval));
         } else {

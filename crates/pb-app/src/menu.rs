@@ -21,6 +21,8 @@ pub mod ids {
     pub const OPEN_FILE: &str = "open_file";
     pub const OPEN_FOLDER: &str = "open_folder";
     pub const SAVE_ROTATION: &str = "save_rotation";
+    pub const DELETE: &str = "delete";
+    pub const DELETE_PERMANENTLY: &str = "delete_permanently";
     pub const EXIT: &str = "exit";
 
     pub const COPY: &str = "copy";
@@ -54,6 +56,8 @@ pub enum MenuAction {
     OpenFile,
     OpenFolder,
     SaveRotation,
+    Delete,
+    DeletePermanently,
     Exit,
     Copy,
     Fit,
@@ -83,6 +87,8 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         OPEN_FILE => MenuAction::OpenFile,
         OPEN_FOLDER => MenuAction::OpenFolder,
         SAVE_ROTATION => MenuAction::SaveRotation,
+        DELETE => MenuAction::Delete,
+        DELETE_PERMANENTLY => MenuAction::DeletePermanently,
         EXIT => MenuAction::Exit,
         COPY => MenuAction::Copy,
         FIT => MenuAction::Fit,
@@ -135,6 +141,9 @@ pub fn build_menu() -> (Menu, MenuItem) {
         &item(ids::OPEN_FOLDER, "Open Folder…\tShift+O"),
         &sep(),
         &save_rotation,
+        &sep(),
+        &item(ids::DELETE, "Delete\tDel"),
+        &item(ids::DELETE_PERMANENTLY, "Delete Permanently\tShift+Del"),
         &sep(),
         &item(ids::EXIT, "Exit\tEsc"),
     ]);
@@ -196,6 +205,11 @@ mod tests {
         assert_eq!(
             action_for(ids::SAVE_ROTATION),
             Some(MenuAction::SaveRotation)
+        );
+        assert_eq!(action_for(ids::DELETE), Some(MenuAction::Delete));
+        assert_eq!(
+            action_for(ids::DELETE_PERMANENTLY),
+            Some(MenuAction::DeletePermanently)
         );
         assert_eq!(action_for(ids::EXIT), Some(MenuAction::Exit));
         assert_eq!(action_for(ids::COPY), Some(MenuAction::Copy));

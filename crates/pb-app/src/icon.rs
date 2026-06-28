@@ -1,12 +1,13 @@
-//! Rasterize the vendored Font Awesome **duotone** SVG icons into straight-alpha
+//! Rasterize the vendored Font Awesome **solid** SVG icons into straight-alpha
 //! RGBA8 bitmaps for the HUD/toast overlays, reusing the workspace's
 //! `resvg`/`usvg`/`tiny_skia` stack (the same one `pb-decode`'s SVG backend uses).
 //!
-//! A duotone icon is two `<path fill="currentColor">` — a 40%-opacity secondary
-//! layer plus a full-opacity primary. We tint `currentColor` to one color (white,
-//! to match the overlay text) and let the secondary layer's built-in opacity carry
-//! the two-tone depth. Rasterization happens only when an overlay bitmap is rebuilt
-//! (on a command, then cached/faded), never per frame — off the photo hot path.
+//! A solid icon is a single `<path fill="currentColor">`. We tint `currentColor` to
+//! one color (white, to match the overlay text); the outline pass in `hud.rs` gives
+//! legibility over photos. (We started with duotone but switched to solid — boring
+//! but reliable + crisp at toast size; see CLAUDE.md.) Rasterization happens only
+//! when an overlay bitmap is rebuilt (on a command, then cached/faded), never per
+//! frame — off the photo hot path.
 
 use resvg::{tiny_skia, usvg};
 
@@ -14,14 +15,18 @@ use resvg::{tiny_skia, usvg};
 /// file dependency, no privacy trace). Font Awesome Pro is licensed to the owner;
 /// the repo is private (see the discussion in CLAUDE.md / session notes).
 pub mod assets {
-    /// Duotone clipboard — the Copy (`Ctrl+C`) toast.
+    /// Clipboard — the Copy (`Ctrl+C`) toast.
     pub const CLIPBOARD: &str = include_str!("../icons/clipboard.svg");
-    /// Duotone clockwise rotate — the Rotate Right (`r`) toast.
+    /// Clockwise rotate — the Rotate Right (`r`) toast.
     pub const ROTATE_RIGHT: &str = include_str!("../icons/rotate-right.svg");
-    /// Duotone counter-clockwise rotate — the Rotate Left (`Shift+R`) toast.
+    /// Counter-clockwise rotate — the Rotate Left (`Shift+R`) toast.
     pub const ROTATE_LEFT: &str = include_str!("../icons/rotate-left.svg");
-    /// Duotone floppy disk — the Save Rotation (`Ctrl+S`) success toast.
+    /// Floppy disk — the Save Rotation (`Ctrl+S`) success toast.
     pub const FLOPPY: &str = include_str!("../icons/floppy-disk.svg");
+    /// Recycle bin — the Delete-to-Recycle-Bin (`Del`, recoverable) toast.
+    pub const RECYCLE: &str = include_str!("../icons/bin-recycle.svg");
+    /// Trash — the Delete-Permanently (`Shift+Del`) toast.
+    pub const TRASH: &str = include_str!("../icons/trash.svg");
 }
 
 /// Rasterize `svg` at pixel `height` (width follows the icon's aspect ratio),
@@ -58,7 +63,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn clipboard_rasterizes_to_white_with_partial_alpha() {
+    fn clipboard_rasterizes_to_white() {
         let (rgba, w, h) = rasterize(assets::CLIPBOARD, 32, [255, 255, 255])
             .expect("clipboard icon should rasterize");
         assert_eq!(h, 32);
@@ -66,22 +71,18 @@ mod tests {
         assert!(w > 0 && w < 32, "aspect-correct width, got {w}");
         assert_eq!(rgba.len(), (w as usize) * 32 * 4);
 
-        // Some pixels are fully opaque (primary layer) and the painted color is white.
+        // The solid fill produces fully-opaque pixels, all tinted white.
         let opaque = rgba.chunks_exact(4).filter(|p| p[3] == 255).count();
-        assert!(opaque > 0, "primary layer should produce opaque pixels");
+        assert!(opaque > 0, "the solid fill should produce opaque pixels");
         for p in rgba.chunks_exact(4).filter(|p| p[3] > 0) {
             assert_eq!([p[0], p[1], p[2]], [255, 255, 255], "currentColor → white");
         }
-        // The 40%-opacity secondary layer should leave some partially-transparent
-        // pixels, i.e. it isn't a flat silhouette.
+        // Anti-aliased edges leave some partially-transparent pixels (not a hard mask).
         let partial = rgba
             .chunks_exact(4)
             .filter(|p| p[3] > 0 && p[3] < 255)
             .count();
-        assert!(
-            partial > 0,
-            "duotone secondary layer should be semi-transparent"
-        );
+        assert!(partial > 0, "anti-aliased edges should be semi-transparent");
     }
 
     #[test]
