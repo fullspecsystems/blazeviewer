@@ -52,6 +52,8 @@ use pb_render::{
     test_pattern, Renderer, Rotation, ScaleMode, ViewTransform, WgpuRenderer, MAX_ZOOM, MIN_ZOOM,
 };
 
+#[cfg(windows)]
+mod darkmode;
 mod decode_pool;
 mod hud;
 mod menu;
@@ -1009,6 +1011,25 @@ impl App {
     #[cfg(not(windows))]
     fn apply_menu_for_mode(&mut self) {}
 
+    /// React to a runtime OS light↔dark theme change: re-flush the popup menu
+    /// themes and nudge muda to re-evaluate `Auto` and repaint the bar in the new
+    /// theme. (The bar usually repaints on its own; this also covers the popups.)
+    #[cfg(windows)]
+    fn refresh_menu_theme(&self) {
+        darkmode::flush_menu_themes();
+        if !self.menu_attached || !self.windowed {
+            return;
+        }
+        if let Some(a) = self.active.as_ref() {
+            if let (Some(menu), Some(hwnd)) = (self.menu.as_ref(), hwnd_of(&a.window)) {
+                // SAFETY: the menu is attached to this live window's valid handle.
+                unsafe {
+                    let _ = menu.set_theme_for_hwnd(hwnd, muda::MenuTheme::Auto);
+                }
+            }
+        }
+    }
+
     /// Step the zoom by `factor` (menu Zoom In/Out — the keyboard zoom is the
     /// continuous hold-to-zoom). Multiplies the current zoom, clamps to the allowed
     /// range, and re-frames. `factor` > 1 zooms in, < 1 zooms out.
@@ -1861,6 +1882,13 @@ impl ApplicationHandler for App {
         // first frame). Fullscreen stays menu-free.
         #[cfg(windows)]
         {
+            // Opt the app + window into the OS dark/light theme first, so muda's
+            // `Auto` renders the menu (bar + dropdowns) to match the desktop rather
+            // than always-light. Must precede the menu's first paint.
+            darkmode::init_app();
+            if let Some(hwnd) = hwnd_of(&window) {
+                darkmode::allow_for_window(hwnd);
+            }
             self.ensure_menu();
             if self.windowed {
                 if let (Some(menu), Some(hwnd)) = (self.menu.as_ref(), hwnd_of(&window)) {
@@ -2076,6 +2104,13 @@ impl ApplicationHandler for App {
                     self.held.remove(&code);
                 }
             },
+
+            // OS light↔dark theme switched at runtime: re-theme the native menu so
+            // it keeps matching the desktop (the window title bar is winit's).
+            WindowEvent::ThemeChanged(_) => {
+                #[cfg(windows)]
+                self.refresh_menu_theme();
+            }
 
             // Track Shift for Shift+R / Shift+I.
             WindowEvent::ModifiersChanged(mods) => {
