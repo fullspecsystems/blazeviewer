@@ -388,6 +388,9 @@ struct App {
     /// preview (e.g. a RAW whose only embedded image *is* its preview) — so we
     /// don't keep re-requesting their upgrade every idle tick.
     upgrade_done: HashSet<usize>,
+    /// The last `upgrade_item()` we issued a full decode for, so the idle pump
+    /// re-issues only when the target changes (not every tick → no per-frame churn).
+    last_upgrade_item: Option<usize>,
     /// The native menu bar (windowed mode only). Built once, kept alive here so its
     /// native handle outlives the window. `None` until the first window is created.
     menu: Option<muda::Menu>,
@@ -466,6 +469,7 @@ impl App {
             pie_pushed: None,
             preview_resident: HashSet::new(),
             upgrade_done: HashSet::new(),
+            last_upgrade_item: None,
             menu: None,
             menu_attached: false,
         }
@@ -506,11 +510,12 @@ impl App {
 
     /// Recompute the prefetch want-list and hand it to the decode pool. Two tiers:
     /// the whole window is fetched as fast **previews** (HEIC thumbnails etc.) so
-    /// scrolling never outruns decode; then, **while idle** (no nav key held), the
-    /// resident previews are re-fetched at full resolution to upgrade them in place,
-    /// current-first. While flying, only previews are requested (and any in-flight
-    /// full upgrades cancel), so the serialized HEVC decoder never competes with the
-    /// previews the scroll actually needs.
+    /// scrolling never outruns decode; then, the **on-screen photo only**, once
+    /// settled, is re-fetched at full resolution to upgrade it in place (see
+    /// `upgrade_item`). Only that one full is ever requested, so the serialized HEVC
+    /// decoder isn't tied up decoding full neighbours you've already flown past —
+    /// the other workers stay free for the previews scrolling needs, and at most one
+    /// (uninterruptible) full decode is ever "in the way".
     fn request_prefetch(&mut self) {
         self.targets = prefetch_targets(&self.playlist, self.ahead, self.behind);
         let fit = self.decode_fit();
@@ -522,7 +527,7 @@ impl App {
         // Items decoded but not yet uploaded must not be re-requested (the pool no
         // longer tracks them, so it would decode them again).
         let pending: HashSet<usize> = self.pending_uploads.iter().map(|o| o.key.item).collect();
-        let idle = self.held_nav().is_none();
+        let upgrade = self.upgrade_item();
         let jobs: Vec<(usize, Arc<Path>, Option<FitBox>, bool)> = self
             .targets
             .iter()
@@ -536,12 +541,12 @@ impl App {
                     return None; // already full
                 }
                 if is_prev {
-                    // Resident preview: upgrade to full only while idle, and only if
-                    // a better decode exists (not a RAW that's preview-only).
-                    if idle && !self.upgrade_done.contains(&t) {
+                    // Resident preview: upgrade to full only for the on-screen photo
+                    // we've settled on (`upgrade_item`); keep neighbours as previews.
+                    if Some(t) == upgrade {
                         Some((t, self.paths[t].clone(), fit, false)) // full
                     } else {
-                        None // keep the preview (scrolling, or nothing better)
+                        None
                     }
                 } else {
                     Some((t, self.paths[t].clone(), fit, true)) // not resident → preview
@@ -551,15 +556,20 @@ impl App {
         self.pool.set_targets(self.epoch, &jobs);
     }
 
-    /// Whether resident previews remain worth upgrading to full (idle, and a better
-    /// decode might exist). Keeps the loop ticking so the background upgrades drain.
-    fn wants_upgrade(&self) -> bool {
-        self.held_nav().is_none()
-            && self.targets.iter().any(|&t| {
-                self.ring.slot_for(t).is_some()
-                    && self.preview_resident.contains(&t)
-                    && !self.upgrade_done.contains(&t)
-            })
+    /// The single photo to upgrade to full resolution ("sharpen"): the on-screen
+    /// one, but only when settled (no nav key held) and it's currently a resident
+    /// preview that has a better decode available. `None` while flying — so fast
+    /// scrolling stays entirely on the cheap preview tier and we never tie up the
+    /// (serialized) HEVC decoder on a full neighbour the user is flying past.
+    fn upgrade_item(&self) -> Option<usize> {
+        if self.held_nav().is_some() {
+            return None;
+        }
+        let d = self.displayed_item?;
+        (self.ring.slot_for(d).is_some()
+            && self.preview_resident.contains(&d)
+            && !self.upgrade_done.contains(&d))
+        .then_some(d)
     }
 
     /// Load the per-photo view state for `item`: rotation from the RAM override
@@ -678,11 +688,18 @@ impl App {
         }
         let mut target_failed: Option<usize> = None;
         ready.retain(|o| {
-            if o.key.epoch != self.epoch || self.ring.slot_for(o.key.item).is_some() {
-                return false; // stale geometry or already resident
+            if o.key.epoch != self.epoch {
+                return false; // stale geometry
             }
+            let item = o.key.item;
+            let resident = self.ring.slot_for(item).is_some();
             if let Err(ref e) = o.result {
-                let item = o.key.item;
+                if resident {
+                    // A full-upgrade decode failed, but the resident preview is fine
+                    // — keep it and stop retrying the upgrade.
+                    self.upgrade_done.insert(item);
+                    return false;
+                }
                 eprintln!("decode failed for item {item}: {e}");
                 self.failed.insert(item);
                 // Unstick the gated loop: a corrupt target counts as "shown".
@@ -691,6 +708,20 @@ impl App {
                     target_failed = Some(item);
                 }
                 return false;
+            }
+            if resident {
+                // Already resident. The only outcome we still want is a *full*
+                // decode upgrading a resident preview (uploaded in place below). A
+                // preview-only upgrade result (e.g. RAW whose only image is its
+                // preview) is marked done here so the idle pass stops retrying —
+                // otherwise the upgrade loops forever, re-decoding every tick. Any
+                // other already-resident duplicate is dropped.
+                let is_prev = self.preview_resident.contains(&item);
+                let img = o.result.as_ref().expect("Err handled above");
+                if is_prev && img.is_preview {
+                    self.upgrade_done.insert(item);
+                }
+                return is_prev && !img.is_preview;
             }
             true
         });
@@ -720,17 +751,11 @@ impl App {
             let Ok(ref img) = outcome.result else {
                 continue; // errors were already filtered out above
             };
-            // A second decode of an item already resident as a preview is its
-            // full-resolution upgrade. If it actually IS a full, replace the texture
-            // in its slot; if it came back still a preview (some RAW is preview-only),
-            // mark it done so the idle pass stops re-requesting it.
-            let resident_preview =
+            // A full decode for an item already resident as a preview is its
+            // in-place upgrade (the retain above kept only real fulls; preview-only
+            // upgrade results were already marked `upgrade_done` and dropped).
+            let upgrade =
                 self.preview_resident.contains(&item) && self.ring.slot_for(item).is_some();
-            if resident_preview && img.is_preview {
-                self.upgrade_done.insert(item);
-                continue;
-            }
-            let upgrade = resident_preview; // implies !img.is_preview here
             if uploads >= UPLOADS_PER_TICK {
                 // Carry still-wanted leftovers to the next tick (in priority order);
                 // drop now-obsolete ones so they don't pin pool byte-budget while
@@ -762,13 +787,16 @@ impl App {
                 }
                 self.ring.set_slot_bytes(item, item_bytes);
                 self.preview_resident.remove(&item);
-                eprintln!(
-                    "DBG upgraded item {item} to full ({}x{})",
-                    img.width, img.height
-                );
                 uploads += 1;
-                // If it's the photo on screen, redraw it now-sharp (same slot).
+                // If it's the photo on screen, re-present the slot so the renderer
+                // picks up the full texture's dimensions/peak and re-places the quad
+                // (it kept the preview's dims otherwise — visible in Original mode),
+                // then redraw it now-sharp. `present_slot` keeps the current view, so
+                // any zoom/pan is preserved.
                 if self.displayed_item == Some(item) {
+                    if let Some(a) = self.active.as_mut() {
+                        a.renderer.present_slot(slot);
+                    }
                     self.draw(event_loop);
                 }
                 continue;
@@ -792,7 +820,6 @@ impl App {
                 }
                 self.ring.mark_resident(item, res.slot, self.epoch);
                 if img.is_preview {
-                    eprintln!("DBG preview resident {item}");
                     self.preview_resident.insert(item);
                 } else {
                     self.preview_resident.remove(&item);
@@ -1126,6 +1153,7 @@ impl App {
         self.failed.clear();
         self.preview_resident.clear();
         self.upgrade_done.clear();
+        self.last_upgrade_item = None;
         // Invalidate the ring + bump the epoch (discards in-flight old decodes),
         // then synchronously show the new current photo and refill around it.
         self.invalidate_geometry();
@@ -1655,6 +1683,7 @@ impl App {
         self.failed.clear();
         self.preview_resident.clear();
         self.upgrade_done.clear();
+        self.last_upgrade_item = None;
         self.current = None;
         self.toast = None;
         self.wait_started = None;
@@ -2186,15 +2215,18 @@ impl ApplicationHandler for App {
             self.hold_start = None;
         }
 
-        // 3b. Idle upgrade ("sharpen") pass: whenever we're parked (no nav key)
-        // with previews resident, (re)issue their full-resolution decodes so the
-        // buffer fills in with sharp images, current-first. `request_prefetch`
-        // dedups in-flight work; `drain_results` upgrades each slot in place. Keep
-        // the loop ticking while any upgrade remains so the results drain.
-        let sharpen_pending = self.wants_upgrade();
-        if sharpen_pending {
+        // 3b. Idle upgrade ("sharpen"): once parked (no nav key) on a preview of the
+        // on-screen photo, pull its full-resolution decode and upgrade the slot in
+        // place. Only the displayed photo — never the neighbours you might fly past.
+        // Re-issue only when the target changes (not every tick → no per-frame
+        // churn); keep the loop ticking while one is in flight so `drain_results`
+        // catches the upgrade.
+        let upgrade = self.upgrade_item();
+        if upgrade != self.last_upgrade_item {
+            self.last_upgrade_item = upgrade;
             self.request_prefetch();
         }
+        let sharpen_pending = upgrade.is_some();
 
         // 4. Info panel visibility. "Blaze mode" = actually flying (a nav key held
         // *past* the tap delay): hide the panel so it isn't a strobing distraction
