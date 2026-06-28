@@ -87,10 +87,13 @@ impl DialogWindow {
             DialogKind::About => (254.0, 307.0, false, "About PhotoBlaze"),
             DialogKind::Settings => (560.0, 660.0, true, "PhotoBlaze Settings"),
         };
+        // Created HIDDEN: we render the first (themed) frame before revealing, so the
+        // OS never flashes the default white window before our dark frame lands.
         let attrs = Window::default_attributes()
             .with_title(title)
             .with_inner_size(LogicalSize::new(w, h))
-            .with_resizable(resizable);
+            .with_resizable(resizable)
+            .with_visible(false);
         let window = Arc::new(event_loop.create_window(attrs).ok()?);
         let size = window.inner_size();
 
@@ -138,8 +141,7 @@ impl DialogWindow {
         let egui_renderer = egui_wgpu::Renderer::new(&device, format, None, 1, false);
         let icon = load_icon_texture(&egui_ctx);
 
-        window.request_redraw();
-        Some(DialogWindow {
+        let mut dlg = DialogWindow {
             window,
             kind,
             _instance: instance,
@@ -152,7 +154,12 @@ impl DialogWindow {
             egui_renderer,
             icon,
             draft: SettingsDraft::new(refresh_hz),
-        })
+        };
+        // Paint the first themed frame while hidden, then reveal — no white flash.
+        dlg.render();
+        dlg.window.set_visible(true);
+        dlg.window.request_redraw();
+        Some(dlg)
     }
 
     pub fn id(&self) -> WindowId {
