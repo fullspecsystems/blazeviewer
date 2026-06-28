@@ -22,6 +22,15 @@ fontdue = "0.9"
 # the Windows (and later macOS) native backend is always compiled.
 rfd = { version = "0.14", default-features = false }
 
+# Win32 for: pointing the window icon at the exe's multi-size .ico (crisp small
+# title-bar icon, vs winit downscaling one big image), and the native menu later.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+] }
+
 # Embeds the .exe icon + version metadata on Windows (build.rs). Best-effort: if
 # the resource compiler is absent the build still succeeds (see build.rs).
 [target.'cfg(windows)'.build-dependencies]

@@ -374,16 +374,13 @@ struct App {
     pie_drawn: bool,
     pie_pushed: Option<(f32, f32, f32)>,
     /// Items whose resident ring slot holds a fast *preview* (e.g. a HEIC
-    /// thumbnail) rather than the full decode — candidates to upgrade ("sharpen")
-    /// once the user settles. Pruned to actually-resident items in `request_prefetch`.
+    /// thumbnail) rather than the full decode. While idle these are upgraded
+    /// ("sharpened") to full in priority order. Pruned to resident in `request_prefetch`.
     preview_resident: HashSet<usize>,
-    /// Whether the image currently on screen is a preview (so settling should pull
-    /// the full). Tracked across both display paths (ring `present_item` + the
-    /// single-image `load_current_sync`).
-    displayed_is_preview: bool,
-    /// The item already requested for sharpening (full decode), so the settle
-    /// trigger doesn't re-issue it every tick.
-    sharpen_requested: Option<usize>,
+    /// Items whose full-resolution decode turned out to be no better than the
+    /// preview (e.g. a RAW whose only embedded image *is* its preview) — so we
+    /// don't keep re-requesting their upgrade every idle tick.
+    upgrade_done: HashSet<usize>,
 }
 
 impl App {
@@ -455,8 +452,7 @@ impl App {
             pie_drawn: false,
             pie_pushed: None,
             preview_resident: HashSet::new(),
-            displayed_is_preview: false,
-            sharpen_requested: None,
+            upgrade_done: HashSet::new(),
         }
     }
 
@@ -493,21 +489,25 @@ impl App {
         }
     }
 
-    /// Recompute the prefetch want-list and hand it to the decode pool. The window
-    /// is fetched as fast **previews** (HEIC thumbnails etc.) so scrolling never
-    /// outruns decode; the one exception is the on-screen photo once you settle on
-    /// it, which is re-fetched at full resolution to "sharpen" in place (see
-    /// `sharpen_target`). Items already resident at the right tier aren't re-requested.
+    /// Recompute the prefetch want-list and hand it to the decode pool. Two tiers:
+    /// the whole window is fetched as fast **previews** (HEIC thumbnails etc.) so
+    /// scrolling never outruns decode; then, **while idle** (no nav key held), the
+    /// resident previews are re-fetched at full resolution to upgrade them in place,
+    /// current-first. While flying, only previews are requested (and any in-flight
+    /// full upgrades cancel), so the serialized HEVC decoder never competes with the
+    /// previews the scroll actually needs.
     fn request_prefetch(&mut self) {
         self.targets = prefetch_targets(&self.playlist, self.ahead, self.behind);
         let fit = self.decode_fit();
-        // Drop preview-tier entries for items no longer resident (evicted).
+        // Drop tier bookkeeping for items no longer resident (evicted).
         self.preview_resident
+            .retain(|i| self.ring.slot_for(*i).is_some());
+        self.upgrade_done
             .retain(|i| self.ring.slot_for(*i).is_some());
         // Items decoded but not yet uploaded must not be re-requested (the pool no
         // longer tracks them, so it would decode them again).
         let pending: HashSet<usize> = self.pending_uploads.iter().map(|o| o.key.item).collect();
-        let sharpen = self.sharpen_target();
+        let idle = self.held_nav().is_none();
         let jobs: Vec<(usize, Arc<Path>, Option<FitBox>, bool)> = self
             .targets
             .iter()
@@ -517,26 +517,34 @@ impl App {
                 }
                 let resident = self.ring.slot_for(t).is_some();
                 let is_prev = resident && self.preview_resident.contains(&t);
-                let want_full = sharpen == Some(t) && is_prev;
-                if resident && !want_full {
-                    return None; // resident full, or a preview neighbour we keep
+                if resident && !is_prev {
+                    return None; // already full
                 }
-                // Not resident → preview (fast); the sharpen target → full.
-                Some((t, self.paths[t].clone(), fit, !want_full))
+                if is_prev {
+                    // Resident preview: upgrade to full only while idle, and only if
+                    // a better decode exists (not a RAW that's preview-only).
+                    if idle && !self.upgrade_done.contains(&t) {
+                        Some((t, self.paths[t].clone(), fit, false)) // full
+                    } else {
+                        None // keep the preview (scrolling, or nothing better)
+                    }
+                } else {
+                    Some((t, self.paths[t].clone(), fit, true)) // not resident → preview
+                }
             })
             .collect();
         self.pool.set_targets(self.epoch, &jobs);
     }
 
-    /// The item to re-fetch at full resolution ("sharpen"): the on-screen photo,
-    /// but only when settled (no nav key held) and it's currently a preview. `None`
-    /// while flying, so fast scrolling stays entirely on the cheap preview tier and
-    /// the (serialized) full HEVC decode never competes with it.
-    fn sharpen_target(&self) -> Option<usize> {
-        if !self.displayed_is_preview || self.held_nav().is_some() {
-            return None;
-        }
-        self.displayed_item
+    /// Whether resident previews remain worth upgrading to full (idle, and a better
+    /// decode might exist). Keeps the loop ticking so the background upgrades drain.
+    fn wants_upgrade(&self) -> bool {
+        self.held_nav().is_none()
+            && self.targets.iter().any(|&t| {
+                self.ring.slot_for(t).is_some()
+                    && self.preview_resident.contains(&t)
+                    && !self.upgrade_done.contains(&t)
+            })
     }
 
     /// Load the per-photo view state for `item`: rotation from the RAM override
@@ -579,8 +587,6 @@ impl App {
         }
         self.ring.set_displayed(slot);
         self.displayed_item = Some(item);
-        // Track whether the on-screen photo is a preview (so settling sharpens it).
-        self.displayed_is_preview = self.preview_resident.contains(&item);
         self.current = self.meta_cache.get(&item).cloned();
         // The panel (if shown) is now stale for the old photo; `about_to_wait`
         // rebuilds it for `item` next tick (or hides it while flying), so it
@@ -596,7 +602,6 @@ impl App {
     /// frame stays up rather than flashing black.
     fn present_failed(&mut self, item: usize, event_loop: &ActiveEventLoop) {
         self.displayed_item = Some(item);
-        self.displayed_is_preview = false;
         self.current = None;
         let name = self.paths[item]
             .file_name()
@@ -700,22 +705,17 @@ impl App {
             let Ok(ref img) = outcome.result else {
                 continue; // errors were already filtered out above
             };
-            // The on-screen preview's sharpen decode came back still a *preview*
-            // (some RAW has no higher-res form than its embedded preview): accept it
-            // as final so the settle trigger stops retrying (and the loop idles).
-            if img.is_preview
-                && self.displayed_item == Some(item)
-                && self.preview_resident.contains(&item)
-                && self.ring.slot_for(item).is_some()
-            {
-                self.displayed_is_preview = false;
+            // A second decode of an item already resident as a preview is its
+            // full-resolution upgrade. If it actually IS a full, replace the texture
+            // in its slot; if it came back still a preview (some RAW is preview-only),
+            // mark it done so the idle pass stops re-requesting it.
+            let resident_preview =
+                self.preview_resident.contains(&item) && self.ring.slot_for(item).is_some();
+            if resident_preview && img.is_preview {
+                self.upgrade_done.insert(item);
                 continue;
             }
-            // A full decode for an item resident as a preview is a "sharpen":
-            // replace the texture in its existing slot, no new reservation.
-            let upgrade = !img.is_preview
-                && self.preview_resident.contains(&item)
-                && self.ring.slot_for(item).is_some();
+            let upgrade = resident_preview; // implies !img.is_preview here
             if uploads >= UPLOADS_PER_TICK {
                 // Carry still-wanted leftovers to the next tick (in priority order);
                 // drop now-obsolete ones so they don't pin pool byte-budget while
@@ -747,10 +747,13 @@ impl App {
                 }
                 self.ring.set_slot_bytes(item, item_bytes);
                 self.preview_resident.remove(&item);
+                eprintln!(
+                    "DBG upgraded item {item} to full ({}x{})",
+                    img.width, img.height
+                );
                 uploads += 1;
-                // It's the same slot already on screen — just redraw it sharp.
+                // If it's the photo on screen, redraw it now-sharp (same slot).
                 if self.displayed_item == Some(item) {
-                    self.displayed_is_preview = false;
                     self.draw(event_loop);
                 }
                 continue;
@@ -774,6 +777,7 @@ impl App {
                 }
                 self.ring.mark_resident(item, res.slot, self.epoch);
                 if img.is_preview {
+                    eprintln!("DBG preview resident {item}");
                     self.preview_resident.insert(item);
                 } else {
                     self.preview_resident.remove(&item);
@@ -821,9 +825,6 @@ impl App {
                 self.overlay_shown = false;
                 self.overlay_item = None;
                 self.displayed_item = Some(idx);
-                // A full (sharp) decode shown via the single-image path — not a
-                // preview, so the settle trigger won't try to sharpen it.
-                self.displayed_is_preview = false;
             }
             Err(e) => {
                 eprintln!("decode failed: {}: {e}", self.paths[idx].display());
@@ -1009,7 +1010,7 @@ impl App {
         self.meta_cache.clear();
         self.failed.clear();
         self.preview_resident.clear();
-        self.sharpen_requested = None;
+        self.upgrade_done.clear();
         // Invalidate the ring + bump the epoch (discards in-flight old decodes),
         // then synchronously show the new current photo and refill around it.
         self.invalidate_geometry();
@@ -1486,6 +1487,7 @@ impl App {
         self.rotations.clear();
         self.failed.clear();
         self.preview_resident.clear();
+        self.upgrade_done.clear();
         self.current = None;
         self.toast = None;
         self.wait_started = None;
@@ -1702,6 +1704,11 @@ impl ApplicationHandler for App {
                 .create_window(attrs)
                 .expect("failed to create window"),
         );
+        // Point the window icon at the exe's multi-size .ico so the small title-bar
+        // size is its purpose-rendered 16px bitmap, not a crude downscale of one
+        // big image (winit's `Icon` is single-size). See apply_native_window_icon.
+        #[cfg(windows)]
+        apply_native_window_icon(&window);
 
         self.scale_factor = window.scale_factor() as f32;
         let isz = window.inner_size();
@@ -1974,21 +1981,15 @@ impl ApplicationHandler for App {
             self.hold_start = None;
         }
 
-        // 3b. Sharpen-on-settle: parked on a preview (no nav key held) → pull its
-        // full-resolution decode to refine it in place (HEIC/RAW). Requested once
-        // per landed photo (the pool dedups; `drain_results` upgrades the slot).
-        if nav.is_none() {
-            if self.displayed_is_preview && self.sharpen_requested != self.displayed_item {
-                self.sharpen_requested = self.displayed_item;
-                self.request_prefetch();
-            }
-        } else {
-            self.sharpen_requested = None;
+        // 3b. Idle upgrade ("sharpen") pass: whenever we're parked (no nav key)
+        // with previews resident, (re)issue their full-resolution decodes so the
+        // buffer fills in with sharp images, current-first. `request_prefetch`
+        // dedups in-flight work; `drain_results` upgrades each slot in place. Keep
+        // the loop ticking while any upgrade remains so the results drain.
+        let sharpen_pending = self.wants_upgrade();
+        if sharpen_pending {
+            self.request_prefetch();
         }
-        // Keep the loop ticking (so `drain_results` runs) while a sharpen is
-        // in-flight; once it lands the slot is upgraded and this clears.
-        let sharpen_pending =
-            self.displayed_is_preview && self.sharpen_requested == self.displayed_item;
 
         // 4. Info panel visibility. "Blaze mode" = actually flying (a nav key held
         // *past* the tap delay): hide the panel so it isn't a strobing distraction
@@ -2117,6 +2118,70 @@ const IMAGE_FILTER_EXTS: &[&str] = &[
     "svg", "svgz", "heic", "heif", "avif", "hdr", "exr", "arw", "nef", "cr2", "cr3", "dng", "raf",
     "rw2", "orf", "srw", "pef", "raw",
 ];
+
+/// On Windows, point the window's title-bar/taskbar icon at the multi-size icon
+/// embedded in the .exe (`build.rs`), so each size is the purpose-rendered bitmap
+/// from our `.ico` instead of Windows crudely downscaling one big image — which is
+/// what winit's single-size `Icon` forces, and what mangles the 16px title-bar size.
+#[cfg(windows)]
+fn apply_native_window_icon(window: &Window) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::UI::Shell::ExtractIconExW;
+    use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, HICON, WM_SETICON};
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    // ICON_SMALL = 0 (title bar), ICON_BIG = 1 (alt-tab / taskbar).
+    const ICON_SMALL: usize = 0;
+    const ICON_BIG: usize = 1;
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(h) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = HWND(h.hwnd.get() as *mut core::ffi::c_void);
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let wide: Vec<u16> = exe
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut big = HICON::default();
+    let mut small = HICON::default();
+    unsafe {
+        let n = ExtractIconExW(
+            PCWSTR(wide.as_ptr()),
+            0,
+            Some(&mut big as *mut _),
+            Some(&mut small as *mut _),
+            1,
+        );
+        if n == 0 {
+            return;
+        }
+        if !big.0.is_null() {
+            let _ = SendMessageW(
+                hwnd,
+                WM_SETICON,
+                Some(WPARAM(ICON_BIG)),
+                Some(LPARAM(big.0 as isize)),
+            );
+        }
+        if !small.0.is_null() {
+            let _ = SendMessageW(
+                hwnd,
+                WM_SETICON,
+                Some(WPARAM(ICON_SMALL)),
+                Some(LPARAM(small.0 as isize)),
+            );
+        }
+    }
+}
 
 /// The window / taskbar icon, decoded from the PNG embedded in the binary
 /// (downscaled to 256²). `None` if decoding fails — the app just runs with the
