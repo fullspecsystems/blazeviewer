@@ -561,10 +561,8 @@ impl App {
             .to_string();
         let total = self.paths.len();
         if let Some(a) = self.active.as_mut() {
-            a.window.set_title(&format!(
-                "PhotoBlaze — {name} ({}/{total}) · decode error",
-                item + 1
-            ));
+            a.window
+                .set_title(&format!("{name} ({}/{total}) - decode error", item + 1));
         }
         // The info panel belonged to the previous photo — drop it (and redraw to
         // remove it). Only touch the renderer if a panel was actually showing.
@@ -1033,7 +1031,7 @@ impl App {
     /// shaded-key / description pair. Static (independent of the current photo).
     fn help_rows(&self) -> Vec<Row> {
         let mut rows = vec![Row::Span {
-            text: "PhotoBlaze — Keys".to_string(),
+            text: "PhotoBlaze Help".to_string(),
             bold: true,
         }];
         let keys: &[(&str, &str)] = &[
@@ -1944,7 +1942,7 @@ impl ApplicationHandler for App {
 
 fn title_for(path: &Path, idx: usize, n: usize) -> String {
     let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("?");
-    format!("PhotoBlaze — {name} ({}/{n})", idx + 1)
+    format!("{name} ({}/{n})", idx + 1)
 }
 
 /// Whether a path's extension is a supported image format (the decoder's single
@@ -2113,7 +2111,7 @@ fn main() {
         if recursive { " (recursive)" } else { "" }
     );
     if paths.is_empty() {
-        eprintln!("(no images — drop a photo or folder on the window, or press O to open)");
+        eprintln!("(no images - drop a photo or folder on the window, or press O to open)");
     }
 
     let event_loop = EventLoop::new().expect("create event loop");

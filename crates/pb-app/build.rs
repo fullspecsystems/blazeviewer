@@ -47,7 +47,7 @@ fn main() {
         let mut res = winresource::WindowsResource::new();
         res.set_icon(icon)
             .set("ProductName", "PhotoBlaze")
-            .set("FileDescription", "PhotoBlaze — a fast photo viewer")
+            .set("FileDescription", "PhotoBlaze")
             .set("CompanyName", "PhotoBlaze")
             .set("LegalCopyright", "© PhotoBlaze")
             .set_manifest(MANIFEST);

@@ -33,7 +33,7 @@
 
         <Package Id='*'
             Keywords='Installer'
-            Description='PhotoBlaze — a fast, keyboard-driven photo viewer.'
+            Description='A fast, keyboard-driven photo viewer.'
             Manufacturer='JD Lien'
             InstallerVersion='450'
             Languages='1033'
