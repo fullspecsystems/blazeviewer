@@ -13,14 +13,22 @@
 //! machine, we emit a warning and continue — the build still succeeds. The
 //! runtime window icon (set via winit from the embedded PNG) applies regardless.
 
-/// Declares modern-OS support + Per-Monitor-V2 DPI awareness. (winit also sets
-/// DPI awareness programmatically; the manifest value matches, so it's a no-op
-/// there — but the `supportedOS` block is what stops Windows applying legacy
-/// non-client rendering.)
+/// Declares modern-OS support + Per-Monitor-V2 DPI awareness, and the
+/// **Common-Controls v6** dependency. (winit also sets DPI awareness
+/// programmatically; the manifest value matches, so it's a no-op there — but the
+/// `supportedOS` block is what stops Windows applying legacy non-client rendering.)
+/// The Common-Controls v6 `<dependency>` is required for the native About dialog:
+/// `TaskDialogIndirect` is only exported by comctl32 **v6**, so without it the
+/// process loads v5 and the call fails with "entry point not found".
 #[cfg(windows)]
 const MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <assemblyIdentity type="win32" name="com.photoblaze.PhotoBlaze" version="1.0.0.0"/>
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/>
+    </dependentAssembly>
+  </dependency>
   <application xmlns="urn:schemas-microsoft-com:asm.v3">
     <windowsSettings>
       <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>

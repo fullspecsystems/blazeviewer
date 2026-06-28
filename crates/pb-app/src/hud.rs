@@ -160,69 +160,6 @@ impl Hud {
         Some((canvas.into_rgba(), pw, ph))
     }
 
-    /// Rasterize the centered "About" card: the app `icon` (straight-alpha RGBA8 as
-    /// `(pixels, w, h)`) at the top, a bold `title`, then each line of `lines` below
-    /// it — all horizontally centered inside the translucent rounded panel. Returns
-    /// `(rgba, w, h)`. The body text is `px`; the title is larger.
-    pub fn render_about(
-        &self,
-        icon: (&[u8], u32, u32),
-        title: &str,
-        lines: &[String],
-        px: f32,
-        pad: u32,
-    ) -> Option<(Vec<u8>, u32, u32)> {
-        let (icon, icon_w, icon_h) = icon;
-        let title_px = (px * 1.5).round();
-        let line_h = self.line_height(px)?;
-        let title_h = self.line_height(title_px)?;
-        let ascent = self.ascent(px)?;
-        let title_ascent = self.ascent(title_px)?;
-        let gap = (px * 0.7).round().max(2.0) as u32; // between blocks
-
-        // Lay every run out once, measuring the widest so the card fits all of it.
-        let (title_glyphs, title_w) = self.layout(title, title_px, Weight::Bold);
-        let mut body: Vec<(Vec<Glyph>, f32)> = Vec::with_capacity(lines.len());
-        let mut body_w = 0.0f32;
-        for line in lines {
-            let (g, adv) = self.layout(line, px, Weight::Regular);
-            body_w = body_w.max(adv);
-            body.push((g, adv));
-        }
-
-        let content_w = (icon_w as f32).max(title_w).max(body_w);
-        let hpad = ((px * 1.4).round() as u32).max(pad);
-        let vpad = ((px * 1.1).round() as u32).max(pad);
-        let pw = content_w.ceil() as u32 + 2 * hpad;
-        let ph = vpad + icon_h + gap + title_h + gap + lines.len() as u32 * line_h + vpad;
-        let mut canvas = Canvas::new(pw, ph, BG, (px * 0.8).round());
-
-        // Icon, centered at the top.
-        let icon_x = ((pw as f32 - icon_w as f32) * 0.5).round() as i32;
-        canvas.blit_rgba(icon, icon_w, icon_h, icon_x, vpad as i32);
-
-        // Title (bold), centered below the icon.
-        let title_top = vpad + icon_h + gap;
-        let title_x = ((pw as f32 - title_w) * 0.5).max(0.0);
-        self.draw_line(
-            &mut canvas,
-            title_x,
-            title_top as f32 + title_ascent,
-            &title_glyphs,
-            TEXT,
-            title_px,
-        );
-
-        // Body lines, centered.
-        let body_top = title_top + title_h + gap;
-        for (i, (glyphs, adv)) in body.iter().enumerate() {
-            let baseline = body_top as f32 + i as f32 * line_h as f32 + ascent;
-            let x = ((pw as f32 - adv) * 0.5).max(0.0);
-            self.draw_line(&mut canvas, x, baseline, glyphs, TEXT, px);
-        }
-        Some((canvas.into_rgba(), pw, ph))
-    }
-
     fn line_height(&self, px: f32) -> Option<u32> {
         let lm = self.font.horizontal_line_metrics(px)?;
         Some((lm.ascent - lm.descent + lm.line_gap).ceil().max(1.0) as u32)
@@ -332,23 +269,6 @@ impl Canvas {
                 .clamp(0.0, 255.0) as u8;
         }
         dst[3] = (ao * 255.0).round().clamp(0.0, 255.0) as u8;
-    }
-
-    /// Composite a straight-alpha RGBA8 source image over the canvas with its
-    /// top-left at `(dst_x, dst_y)` (out-of-bounds pixels are clipped). Used to
-    /// drop the app icon into the About card.
-    fn blit_rgba(&mut self, src: &[u8], src_w: u32, src_h: u32, dst_x: i32, dst_y: i32) {
-        for row in 0..src_h as i32 {
-            for col in 0..src_w as i32 {
-                let idx = ((row as usize * src_w as usize) + col as usize) * 4;
-                let a = src[idx + 3] as f32 / 255.0;
-                if a <= 0.0 {
-                    continue;
-                }
-                let rgb = [src[idx], src[idx + 1], src[idx + 2]];
-                self.over(dst_x + col, dst_y + row, rgb, a);
-            }
-        }
     }
 
     /// Composite a single glyph's coverage at the given pen position, offset by

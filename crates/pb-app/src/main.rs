@@ -53,6 +53,8 @@ use pb_render::{
 };
 
 #[cfg(windows)]
+mod about_dialog;
+#[cfg(windows)]
 mod darkmode;
 mod decode_pool;
 mod hud;
@@ -202,17 +204,15 @@ struct PhotoMeta {
 }
 
 /// Which overlay is showing: nothing, the one-line basic panel (`i`), the
-/// full-EXIF "nerd" table (`Shift+I`), the keybindings help (`/` or `?`), or the
-/// centered "About" card (Help menu). All are mutually exclusive (one info mode at
-/// a time); the corner panels share one overlay quad, the About card its own
-/// centered layer.
+/// full-EXIF "nerd" table (`Shift+I`), or the keybindings help (`/` or `?`). All
+/// share the single overlay quad, so they're mutually exclusive. (About is a
+/// native dialog now, not an overlay — see `about_dialog`.)
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InfoMode {
     Off,
     Basic,
     Full,
     Help,
-    About,
 }
 
 /// A navigation step from a held key: sequential forward (`space`), sequential
@@ -1255,7 +1255,7 @@ impl App {
             MenuAction::RotateRight => self.rotate(false, event_loop),
             MenuAction::RotateLeft => self.rotate(true, event_loop),
             MenuAction::Help => self.toggle_help(event_loop),
-            MenuAction::About => self.toggle_about(event_loop),
+            MenuAction::About => self.open_about(),
         }
     }
 
@@ -1432,19 +1432,15 @@ impl App {
         }
     }
 
-    /// Toggle the centered "About PhotoBlaze" card (Help menu). Like the help
-    /// overlay it's static (no photo needed) and mutually exclusive with the other
-    /// info modes — opening it replaces whichever panel was showing.
-    fn toggle_about(&mut self, event_loop: &ActiveEventLoop) {
-        self.info = if self.info == InfoMode::About {
-            InfoMode::Off
-        } else {
-            InfoMode::About
-        };
-        if self.info == InfoMode::Off {
-            self.hide_overlay(event_loop);
-        } else {
-            self.show_overlay(event_loop);
+    /// Show the native "About PhotoBlaze" dialog (Help menu). On Windows this is a
+    /// modal Win32 TaskDialog (`about_dialog`); it runs its own message loop, so we
+    /// drop any stray held keys afterward (like the file picker does).
+    fn open_about(&mut self) {
+        #[cfg(windows)]
+        {
+            let parent = self.active.as_ref().and_then(|a| hwnd_of(&a.window));
+            about_dialog::show(parent);
+            self.held.clear();
         }
     }
 
@@ -1554,17 +1550,12 @@ impl App {
     }
 
     /// Rasterize the active overlay (info panel or help) and draw it. The help
-    /// overlay uses a larger font than the info panels. The About card has its own
-    /// centered layer, so it's handled separately (`show_about`).
+    /// overlay uses a larger font than the info panels.
     fn show_overlay(&mut self, event_loop: &ActiveEventLoop) {
-        if self.info == InfoMode::About {
-            self.show_about(event_loop);
-            return;
-        }
         let px = (15.0 * self.scale_factor).max(8.0);
         let pad = (7.0 * self.scale_factor).round().max(2.0) as u32;
         let panel = match self.info {
-            InfoMode::Off | InfoMode::About => return,
+            InfoMode::Off => return,
             InfoMode::Basic => {
                 let (Some(hud), Some(meta)) = (self.hud.as_ref(), self.current.as_ref()) else {
                     return;
@@ -1596,8 +1587,6 @@ impl App {
         };
         let margin = (10.0 * self.scale_factor).round().max(1.0) as u32;
         if let Some(a) = self.active.as_mut() {
-            // Clear the centered About card (mutual exclusivity) and show the panel.
-            a.renderer.set_about(None);
             a.renderer.set_overlay(Some((&bitmap, w, h)), margin);
         }
         self.overlay_shown = true;
@@ -1605,39 +1594,10 @@ impl App {
         self.draw(event_loop);
     }
 
-    /// Build and show the centered "About" card: the app icon, "PhotoBlaze", and the
-    /// version/tagline/copyright/URL lines (`about_lines`). Uses the dedicated
-    /// centered About layer; the corner-panel layer is cleared so they never stack.
-    fn show_about(&mut self, event_loop: &ActiveEventLoop) {
-        let px = (16.0 * self.scale_factor).max(10.0);
-        let pad = (10.0 * self.scale_factor).round().max(3.0) as u32;
-        let icon_size = (96.0 * self.scale_factor).round().max(48.0) as u32;
-        // The icon is best-effort: if it fails to decode, the card is text-only.
-        let (icon, iw, ih) = about_icon(icon_size).unwrap_or((Vec::new(), 0, 0));
-        let lines = about_lines();
-        let card = {
-            let Some(hud) = self.hud.as_ref() else {
-                return; // no system font -> no overlay (same as the info panels)
-            };
-            hud.render_about((&icon, iw, ih), "PhotoBlaze", &lines, px, pad)
-        };
-        let Some((bitmap, w, h)) = card else {
-            return;
-        };
-        if let Some(a) = self.active.as_mut() {
-            a.renderer.set_overlay(None, 0); // hide any corner panel
-            a.renderer.set_about(Some((&bitmap, w, h)));
-        }
-        self.overlay_shown = true;
-        self.overlay_item = self.displayed_item;
-        self.draw(event_loop);
-    }
-
-    /// Hide the info panel (clears both the corner overlay quad and the About card).
+    /// Hide the info panel (clears the overlay quad).
     fn hide_overlay(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(a) = self.active.as_mut() {
             a.renderer.set_overlay(None, 0);
-            a.renderer.set_about(None);
         }
         self.overlay_shown = false;
         self.overlay_item = None;
@@ -2423,10 +2383,8 @@ impl ApplicationHandler for App {
                     self.hide_overlay(event_loop);
                 }
             } else if !transforming
-                // Help and About are static (no photo needed); the info panels
-                // need a photo.
-                && (matches!(self.info, InfoMode::Help | InfoMode::About)
-                    || self.current.is_some())
+                // Help is static (no photo needed); the info panels need a photo.
+                && (self.info == InfoMode::Help || self.current.is_some())
                 && (!self.overlay_shown || self.overlay_item != self.displayed_item)
             {
                 self.show_overlay(event_loop);
@@ -2616,30 +2574,6 @@ fn load_window_icon() -> Option<Icon> {
     };
     let img = decode_bytes(PNG, Some(fit), false).ok()?;
     Icon::from_rgba(img.pixels, img.width, img.height).ok()
-}
-
-/// Decode the embedded app icon to straight-alpha RGBA8, fit to `size` px, for the
-/// About card. `None` if decoding fails (the card then renders text-only).
-fn about_icon(size: u32) -> Option<(Vec<u8>, u32, u32)> {
-    const PNG: &[u8] = include_bytes!("../icons/photoblaze.png");
-    let fit = FitBox {
-        max_width: size,
-        max_height: size,
-    };
-    let img = decode_bytes(PNG, Some(fit), false).ok()?;
-    Some((img.pixels, img.width, img.height))
-}
-
-/// The text lines under the title on the About card: version, tagline, copyright,
-/// and project URL. Pure (the version comes from Cargo at compile time), so the
-/// content is unit-testable.
-fn about_lines() -> Vec<String> {
-    vec![
-        format!("Version {}", env!("CARGO_PKG_VERSION")),
-        "An ultra-fast photo viewer".to_string(),
-        "© JD Lien 2026".to_string(),
-        "https://github.com/jdlien/photoblaze".to_string(),
-    ]
 }
 
 /// The window's Win32 `HWND` as an `isize` (what muda's `init_for_hwnd` expects),
@@ -2954,18 +2888,6 @@ mod tests {
         // Multibyte values are truncated on char boundaries, not bytes.
         let out = truncate_exif_value(&"é".repeat(100));
         assert_eq!(out.chars().count(), EXIF_VALUE_MAX + 1);
-    }
-
-    #[test]
-    fn about_lines_carry_version_tagline_copyright_and_url() {
-        let lines = about_lines();
-        // The version line reflects the crate version from Cargo at compile time.
-        assert_eq!(lines[0], format!("Version {}", env!("CARGO_PKG_VERSION")));
-        assert!(lines.iter().any(|l| l == "An ultra-fast photo viewer"));
-        assert!(lines.iter().any(|l| l.contains("JD Lien")));
-        assert!(lines
-            .iter()
-            .any(|l| l == "https://github.com/jdlien/photoblaze"));
     }
 
     #[test]

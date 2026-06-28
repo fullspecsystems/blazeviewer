@@ -41,6 +41,8 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell",
     # uxtheme.dll dark-mode exports (resolved by ordinal) for the native menu.
     "Win32_System_LibraryLoader",
+    # TaskDialog (the native "About" dialog).
+    "Win32_UI_Controls",
 ] }
 
 # Embeds the .exe icon + version metadata on Windows (build.rs). Best-effort: if
