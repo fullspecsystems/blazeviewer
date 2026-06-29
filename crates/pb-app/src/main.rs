@@ -1733,6 +1733,7 @@ impl App {
                     let _ = menu.show_for_hwnd(hwnd);
                 } else {
                     let _ = menu.init_for_hwnd(hwnd);
+                    darkmode::slim_menu_gutter(hwnd);
                     self.menu_attached = true;
                 }
             } else if self.menu_attached {
@@ -2831,6 +2832,7 @@ impl ApplicationHandler for App {
                     unsafe {
                         let _ = menu.init_for_hwnd(hwnd);
                     }
+                    darkmode::slim_menu_gutter(hwnd);
                     self.menu_attached = true;
                 }
             }

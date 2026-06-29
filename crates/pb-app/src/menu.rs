@@ -197,7 +197,7 @@ pub fn build_menu() -> (Menu, MenuItem) {
     let view = Submenu::new("&View", true);
     let _ = view.append_items(&[
         &item(ids::FIT, "Fit\t8"),
-        &item(ids::FILL, "Fill\t9"),
+        &item(ids::FILL, "Crop to Fill\t9"),
         &item(ids::ORIGINAL, "Original 1:1\t0"),
         &sep(),
         &item(ids::ZOOM_IN, "Zoom In\t="),

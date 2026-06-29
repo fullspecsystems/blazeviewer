@@ -48,7 +48,7 @@ pub const BUTTON_W: f32 = 96.0;
 /// minimum wide enough for the widest value keeps it a fixed width. See [`slider`].
 pub const SLIDER_VALUE_W: f32 = 76.0;
 /// How far to drop a slider so its center rail aligns with adjacent text baselines.
-const SLIDER_DROP: f32 = 2.0;
+const SLIDER_DROP: f32 = 3.0;
 /// Section-header text size — a clear tier above the 14.5px card title, in the semibold
 /// face. See [`section_label`].
 pub const SECTION_SIZE: f32 = 17.0;
@@ -571,16 +571,16 @@ pub fn slider<Num: egui::emath::Numeric>(
         // selection stays translucent (good for text), which otherwise made the light-mode
         // fill read washed-out / like the dark-mode blue.
         ui.visuals_mut().selection.bg_fill = accent;
-        // The rail sits at the slider's geometric center, which reads ~a pixel high next
-        // to text baselines; drop it to align. Equal-and-opposite margins (top +N,
-        // bottom -N) shift the slider down N px while keeping the frame's height neutral —
-        // so it doesn't compete with the header for the row height or move the layout.
+        // The rail sits at the slider's geometric center, which reads high next to text
+        // baselines. A height-neutral nudge gets cancelled by the row's centering (the
+        // slider is ~as tall as the header, so everything re-centers together), so use a
+        // real top margin — it grows the row a hair but genuinely drops the rail.
         egui::Frame::none()
             .inner_margin(Margin {
                 left: 0.0,
                 right: 0.0,
                 top: SLIDER_DROP,
-                bottom: -SLIDER_DROP,
+                bottom: 0.0,
             })
             .show(ui, |ui| ui.add(egui::Slider::new(value, range).suffix(suffix.to_owned())))
             .inner
