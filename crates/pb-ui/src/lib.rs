@@ -43,6 +43,15 @@ pub const CONTROL_H: f32 = 32.0;
 pub const PAGE_MARGIN: f32 = 28.0;
 /// Standard dialog action-button width.
 pub const BUTTON_W: f32 = 96.0;
+/// Gap between [`tab_bar`] labels. Deliberately roomy (a full [`SPACE_6`]) so a pivot
+/// reads as section navigation rather than a packed button group.
+pub const TAB_GAP: f32 = SPACE_6;
+/// The selected/hovered [`tab_bar`] underline thickness — a thin accent indicator, never
+/// a filled pill, so it can't be mistaken for a [`primary_button`].
+pub const TAB_INDICATOR_H: f32 = 2.0;
+/// How far the [`tab_bar`] underline extends past each edge of its label, so the indicator
+/// reads as a deliberate marker rather than a too-tight rule clipped to the glyphs.
+pub const TAB_INDICATOR_OVERHANG: f32 = SPACE_1;
 /// Stable minimum width for a slider's value box. egui sizes the box to the formatted
 /// number, so it jitters as the digit count changes (3.0 → 11.7 → 400); pinning a
 /// minimum wide enough for the widest value keeps it a fixed width. See [`slider`].
@@ -264,8 +273,17 @@ pub fn install_fonts(ctx: &egui::Context) {
 
     // Regular native UI face → front of the proportional family (preferred over egui's
     // bundled default; the default's fallbacks, e.g. emoji, stay behind it).
+    //
+    // Prefer the *static* "SF Pro Text" optical cut over the variable `SFNS.ttf`. epaint's
+    // layout (ab_glyph) applies neither kerning pairs nor SF's size-dependent `trak`
+    // tracking, and the variable face's default optical size is tuned for large/display
+    // sizes — so at 14.5px its spacing reads loose and uneven. The "Text" cut is metrically
+    // spaced for body sizes (≤19pt) *without* needing kerning, which is exactly what we get.
+    // Pairs with the SF Pro Text semibold below for one consistent family. Falls back to the
+    // always-present variable face, then Segoe, then egui's bundled font.
     if let Some(bytes) = read_first(&[
-        "/System/Library/Fonts/SFNS.ttf", // macOS: SF Pro (variable; default = Regular)
+        "/Library/Fonts/SF-Pro-Text-Regular.otf", // macOS: static SF Pro Text (best small-size spacing)
+        "/System/Library/Fonts/SFNS.ttf", // macOS fallback: SF Pro (variable; default = Regular)
         r"C:\Windows\Fonts\segoeui.ttf",  // Windows: Segoe UI
     ]) {
         fonts
@@ -628,6 +646,104 @@ pub fn slider_stepped<Num: egui::emath::Numeric>(
 /// height. Purely visual — no interaction; the caller draws any caption (a percentage,
 /// byte counts) around it. Mirrors the slider's accent fill so it reads as one family.
 /// Used by the archive-loading dialog.
+/// A **pivot-style tab strip** for top-level section navigation (the Settings pages).
+/// Unlike a button group it draws **no background fills**: the selected tab is the
+/// semibold, full-strength label carrying a 2px accent underline that rides on a
+/// full-width hairline; the rest are quiet [`text_secondary`](Palette::text_secondary)
+/// labels that brighten on hover. Holding the accent to a thin indicator (never a filled
+/// pill) is the whole point — it stops the active tab reading as a second
+/// [`primary_button`]. `left_inset` insets the labels to the page margin while the
+/// hairline still spans the strip's full width, so the active tab connects to the content
+/// column below it. Returns `true` if the selection changed this frame.
+pub fn tab_bar<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    current: &mut T,
+    left_inset: f32,
+    tabs: &[(T, &str)],
+) -> bool {
+    let mut changed = false;
+    // Lay the labels out first, remembering each one's rect + state, so the indicators can
+    // be painted *after* the hairline — they need to sit on top of it (connecting the tab
+    // to its content), and egui paints in call order.
+    let mut marks: Vec<(egui::Rect, bool, bool)> = Vec::with_capacity(tabs.len());
+    let row = ui
+        .horizontal(|ui| {
+            ui.add_space(left_inset);
+            ui.spacing_mut().item_spacing.x = TAB_GAP;
+            for &(value, label) in tabs {
+                let selected = *current == value;
+                let resp = tab_label(ui, p, selected, label);
+                marks.push((resp.rect, selected, resp.hovered()));
+                if resp.clicked() && !selected {
+                    *current = value;
+                    changed = true;
+                }
+            }
+        })
+        .response
+        .rect;
+
+    // Full-width hairline along the strip's baseline, then the indicators on top of it.
+    let baseline = row.bottom();
+    let painter = ui.painter();
+    painter.hline(
+        ui.max_rect().x_range(),
+        baseline - 0.5,
+        Stroke::new(1.0, p.card_stroke),
+    );
+    for (rect, selected, hovered) in marks {
+        let color = if selected {
+            p.accent
+        } else if hovered {
+            p.text_secondary
+        } else {
+            continue;
+        };
+        // Extend the bar a touch past each text edge so it reads as a deliberate marker.
+        let bar = egui::Rect::from_min_max(
+            egui::pos2(
+                rect.left() - TAB_INDICATOR_OVERHANG,
+                baseline - TAB_INDICATOR_H,
+            ),
+            egui::pos2(rect.right() + TAB_INDICATOR_OVERHANG, baseline),
+        );
+        painter.rect(bar, Rounding::same(1.0), color, Stroke::NONE);
+    }
+    changed
+}
+
+/// One [`tab_bar`] label: a click-sensing text cell with **no fill** that reserves room
+/// beneath the text for the underline the strip paints. Sized at [`SECTION_SIZE`] (the
+/// card-group heading tier) in the semibold face — section nav reads as a peer of the
+/// section headings below it. The face is **always semibold**; only the *color*
+/// distinguishes states (selected → full text color, hover → full text color, otherwise
+/// the quiet secondary tone) — so switching tabs never reflows the strip.
+fn tab_label(ui: &mut egui::Ui, p: &Palette, selected: bool, label: &str) -> egui::Response {
+    let font = FontId::new(SECTION_SIZE, FontFamily::Name(SEMIBOLD.into()));
+    // Lay out with a placeholder color so the real tint can be chosen after we know the
+    // hover state (which needs the response, which needs the size — hence layout first).
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font, Color32::PLACEHOLDER);
+    let text_size = galley.size();
+    let pad_top = SPACE_2;
+    let gap_below = 3.0; // the text sits close to its underline (a tight pivot, not a tab box)
+    let height = pad_top + text_size.y + gap_below + TAB_INDICATOR_H;
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(text_size.x, height), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let color = if selected || resp.hovered() {
+            p.text
+        } else {
+            p.text_secondary
+        };
+        ui.painter()
+            .galley(egui::pos2(rect.left(), rect.top() + pad_top), galley, color);
+    }
+    resp
+}
+
 pub fn progress_bar(ui: &mut egui::Ui, p: &Palette, fraction: f32) -> egui::Response {
     let frac = fraction.clamp(0.0, 1.0);
     let (rect, resp) =

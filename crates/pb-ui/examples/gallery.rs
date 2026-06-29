@@ -27,6 +27,7 @@ struct Gallery {
     recursive: bool,
     fullscreen: bool,
     scale_mode: usize,
+    tab: usize,
     letterbox: [f32; 3],
     text: String,
     password: String,
@@ -41,6 +42,7 @@ impl Default for Gallery {
             recursive: true,
             fullscreen: false,
             scale_mode: 0,
+            tab: 0,
             letterbox: [0.05, 0.05, 0.06],
             text: String::new(),
             password: String::new(),
@@ -149,6 +151,15 @@ impl Gallery {
             let _ = pb_ui::primary_button(ui, p, "Primary");
             let _ = pb_ui::secondary_button(ui, "Secondary");
         });
+
+        pb_ui::section_label(ui, p, "Tab bar (pivot)");
+        pb_ui::tab_bar(
+            ui,
+            p,
+            &mut self.tab,
+            0.0,
+            &[(0, "General"), (1, "Display"), (2, "Shortcuts")],
+        );
 
         pb_ui::section_label(ui, p, "Toggle");
         ui.horizontal(|ui| {

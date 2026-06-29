@@ -32,6 +32,10 @@ with any pre-release suffix carried only by the tag.
   Messages to move or attach the file, just like a native document window.
 
 ### Changed
+- The **Settings** dialog's section tabs (General / Display / Shortcuts) are now a clean
+  underlined pivot — the active section is marked by a slim accent underline instead of a
+  filled blue button, so it no longer competes with the Save button, and the labels have
+  room to breathe.
 - The View menu's info items are now clearer: **Info Panel** → **Show Image Info**
   and **Full EXIF** → **Show All EXIF Info**.
 - macOS: the **Enter Full Screen** menu item (⌃⌘F) now flips to **Exit Full Screen**

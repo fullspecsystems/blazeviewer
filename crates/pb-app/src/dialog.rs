@@ -1267,30 +1267,22 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft, kb: &mut KbEdit, tab: &
         });
 }
 
-/// The pinned tab strip atop the Settings dialog. Left-aligned to the page margin so it
-/// lines up with the cards below; a hairline separates it from the content.
+/// The pinned tab strip atop the Settings dialog. A [`pbui::tab_bar`] pivot: the labels
+/// are inset to the page margin so they line up with the cards below, while its hairline
+/// (and the active tab's accent underline) span the full width.
 fn settings_tab_bar(ui: &mut egui::Ui, current: &mut SettingsTab) {
     ui.add_space(pbui::SPACE_3);
-    ui.horizontal(|ui| {
-        ui.add_space(pbui::PAGE_MARGIN);
-        ui.spacing_mut().item_spacing.x = pbui::SPACE_3;
-        for (tab, label) in [
+    pbui::tab_bar(
+        ui,
+        &pbui::Palette::new(ui.visuals().dark_mode),
+        current,
+        pbui::PAGE_MARGIN,
+        &[
             (SettingsTab::General, "General"),
             (SettingsTab::Display, "Display"),
             (SettingsTab::Shortcuts, "Shortcuts"),
-        ] {
-            let selected = *current == tab;
-            let mut text = egui::RichText::new(label).size(14.5);
-            if selected {
-                text = text.strong();
-            }
-            if ui.selectable_label(selected, text).clicked() {
-                *current = tab;
-            }
-        }
-    });
-    ui.add_space(pbui::SPACE_2);
-    ui.separator();
+        ],
+    );
 }
 
 /// The **General** tab: hold-to-fly tuning, startup defaults, and system actions.
@@ -1359,8 +1351,8 @@ fn general_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
             ui,
             p,
             None,
-            "Start in",
-            Some("Window mode when PhotoBlaze launches"),
+            "Window mode",
+            Some("How the window opens at launch"),
             |ui| {
                 egui::ComboBox::from_id_salt("startup_mode")
                     .width(150.0)
