@@ -27,26 +27,11 @@ permissions:
   contents: write # create releases and upload assets
 
 jobs:
-  # Gate the release on the same checks CI runs, so a tag can never ship code
-  # that doesn't build, lint, or test. `windows-msi` waits on this job.
-  test:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust (stable + rustfmt + clippy)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: Format check
-        run: cargo fmt --all -- --check
-      - name: Clippy (deny warnings)
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Test
-        run: cargo test --workspace
-
+  # Releases are cut from `main`, which `ci.yml` already builds, lints, and tests
+  # on every push — so re-running the suite here just doubled the wall-clock for
+  # no added safety. This job only builds, signs, and publishes. Cut tags from a
+  # green `main` (CI status is visible on the commit before you tag).
   windows-msi:
-    needs: test
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -57,7 +42,16 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
+      # Cache the compiled cargo-wix binary so it isn't rebuilt from source (~2 min)
+      # on every run. Bump the key suffix to force a refresh.
+      - name: Cache cargo-wix
+        id: cache-wix
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-wix.exe
+          key: cargo-wix-${{ runner.os }}-v1
       - name: Install cargo-wix
+        if: steps.cache-wix.outputs.cache-hit != 'true'
         run: cargo install cargo-wix --locked
 
       # Don't rely on the runner preinstalling WiX 3 — GitHub has been removing
