@@ -272,7 +272,16 @@ pub fn card<R>(ui: &mut egui::Ui, p: &Palette, add: impl FnOnce(&mut egui::Ui) -
         .fill(p.card)
         .stroke(Stroke::new(1.0, p.card_stroke))
         .rounding(Rounding::same(RADIUS_CARD))
-        .inner_margin(Margin::symmetric(SPACE_4, SPACE_3))
+        // Vertically asymmetric on purpose: a text line box reserves more leading above
+        // the cap height than below the baseline, so equal top/bottom padding reads
+        // top-heavy. Trim the top a hair and add it to the bottom to optically center
+        // the title/description block (total height unchanged).
+        .inner_margin(Margin {
+            left: SPACE_4,
+            right: SPACE_4,
+            top: SPACE_3 - 2.0,
+            bottom: SPACE_3 + 2.0,
+        })
         .show(ui, |ui| {
             // Fill the parent's width so every card is the same width, rather than
             // egui's default shrink-to-content (which makes each card a different size).
@@ -429,10 +438,17 @@ pub fn slider<Num: egui::emath::Numeric>(
     range: std::ops::RangeInclusive<Num>,
     suffix: &str,
 ) -> egui::Response {
-    // The value box's min width is `interact_size.x`; widen it for this slider only
-    // (a scoped style clone, so other controls keep the normal interact size).
+    let accent = Palette::new(ui.visuals().dark_mode).accent;
+    // Both overrides are scoped to this slider (a cloned style), so other controls keep
+    // the normal interact size and the global translucent text-selection color.
     ui.scope(|ui| {
+        // The value box's min width is `interact_size.x`; widen it so it doesn't jitter.
         ui.spacing_mut().interact_size.x = SLIDER_VALUE_W;
+        // The slider's trailing (filled) portion uses `selection.bg_fill`. Pin it to the
+        // *solid* theme accent so the fill is the right shade per theme — the global
+        // selection stays translucent (good for text), which otherwise made the light-mode
+        // fill read washed-out / like the dark-mode blue.
+        ui.visuals_mut().selection.bg_fill = accent;
         ui.add(egui::Slider::new(value, range).suffix(suffix.to_owned()))
     })
     .inner
