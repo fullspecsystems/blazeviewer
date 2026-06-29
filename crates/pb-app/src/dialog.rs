@@ -518,8 +518,9 @@ const MSG_SIZE: f32 = 15.0;
 /// Uniform inset of a dialog's bottom action bar — applied equally to the top (the
 /// divider), right, and bottom, **and** used as the gap between buttons. This is the one
 /// place dialog-button spacing is defined, so buttons always land balanced and no caller
-/// hand-spaces them.
-const BTN_BAR_PAD: f32 = 14.0;
+/// hand-spaces them. Sourced from `pbui::GAP` so the button gap, button-bar inset, and
+/// the gaps between cards are all the one standard value.
+const BTN_BAR_PAD: f32 = pbui::GAP;
 
 /// A panel frame filled to match the window background, inset by `DIALOG_PAD` on
 /// all sides. Used for both the content panel and the bottom button bar so their
@@ -782,9 +783,7 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                             |ui| {
                                 pbui::slider(ui, &mut d.start_speed, 1.0..=30.0, "/s");
                             },
-                        );
-                        pbui::row_divider(ui, &p);
-                        pbui::card_row(
+                        );                        pbui::card_row(
                             ui,
                             &p,
                             None,
@@ -793,9 +792,7 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                             |ui| {
                                 pbui::slider(ui, &mut d.ramp_secs, 0.5..=10.0, " s");
                             },
-                        );
-                        pbui::row_divider(ui, &p);
-                        pbui::card_row(
+                        );                        pbui::card_row(
                             ui,
                             &p,
                             None,
@@ -804,9 +801,7 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                             |ui| {
                                 pbui::slider(ui, &mut d.max_fps, 1..=cap, "/s");
                             },
-                        );
-                        pbui::row_divider(ui, &p);
-                        pbui::card_row(
+                        );                        pbui::card_row(
                             ui,
                             &p,
                             None,
@@ -817,7 +812,7 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                             },
                         );
                     });
-                    ui.add_space(pbui::SPACE_3);
+                    ui.add_space(pbui::GAP);
 
                     pbui::group_card(ui, &p, Some("Browsing"), |ui| {
                         pbui::card_row(
@@ -831,7 +826,7 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                             },
                         );
                     });
-                    ui.add_space(pbui::SPACE_3);
+                    ui.add_space(pbui::GAP);
 
                     pbui::group_card(ui, &p, Some("Display"), |ui| {
                         pbui::card_row(
@@ -854,9 +849,7 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                                         ui.selectable_value(&mut d.scale_mode, 2, "Original");
                                     });
                             },
-                        );
-                        pbui::row_divider(ui, &p);
-                        pbui::card_row(
+                        );                        pbui::card_row(
                             ui,
                             &p,
                             None,
@@ -865,9 +858,7 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                             |ui| {
                                 ui.color_edit_button_rgb(&mut d.letterbox);
                             },
-                        );
-                        pbui::row_divider(ui, &p);
-                        pbui::card_row(
+                        );                        pbui::card_row(
                             ui,
                             &p,
                             None,
@@ -878,7 +869,7 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                             },
                         );
                     });
-                    ui.add_space(pbui::SPACE_3);
+                    ui.add_space(pbui::GAP);
 
                     pbui::group_card(ui, &p, Some("Keyboard"), |ui| {
                         pbui::card_row(
@@ -894,7 +885,7 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                             },
                         );
                     });
-                    ui.add_space(pbui::SPACE_3);
+                    ui.add_space(pbui::GAP);
 
                     pbui::group_card(ui, &p, Some("System"), |ui| {
                         pbui::card_row(
@@ -906,9 +897,7 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                             |ui| {
                                 let _ = pbui::secondary_button(ui, "Set default\u{2026}");
                             },
-                        );
-                        pbui::row_divider(ui, &p);
-                        pbui::card_row(
+                        );                        pbui::card_row(
                             ui,
                             &p,
                             None,

@@ -74,9 +74,11 @@ const HEADER_MIN: f32 = 150.0;
 /// Top inner padding of a [`group_card`] — tighter than the bottom so the semibold header
 /// (which reserves more cap-height leading) doesn't look like it's floating.
 const GROUP_PAD_TOP: f32 = 6.0;
-/// Vertical gap above and below a [`row_divider`] inside a [`group_card`] — the main knob
-/// for how dense the grouped rows feel.
-pub const ROW_GAP: f32 = 10.0;
+/// **The standard gap** between sibling blocks: between rows inside a [`group_card`],
+/// between cards on a page, and (via the dialog button bar) between buttons. One value so
+/// spacing reads consistent everywhere — the card's fill + border do the grouping, so no
+/// gap contrast or dividers are needed. The one knob to tune density.
+pub const GAP: f32 = 14.0;
 
 /// The resolved color roles for one theme. Built from a single `dark` flag so the
 /// whole palette stays internally consistent and tracks the OS setting.
@@ -357,34 +359,18 @@ pub fn group_card(
         })
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            // Explicit spacing only, so ROW_GAP / dividers fully control the rhythm.
-            ui.spacing_mut().item_spacing.y = 0.0;
+            // One standard GAP between the header and every row — no dividers needed; the
+            // caller just lists `card_row`s and they auto-space.
+            ui.spacing_mut().item_spacing.y = GAP;
             if let Some(h) = header {
                 ui.label(
                     egui::RichText::new(h)
                         .font(FontId::new(SECTION_SIZE, FontFamily::Name(SEMIBOLD.into())))
                         .color(p.text),
                 );
-                ui.add_space(SPACE_3);
             }
             body(ui);
         });
-}
-
-/// A subtle full-width hairline between rows inside a [`group_card`], with [`ROW_GAP`]
-/// above and below. A touch stronger than the card border so rows read as separated.
-pub fn row_divider(ui: &mut egui::Ui, p: &Palette) {
-    ui.add_space(ROW_GAP);
-    let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 1.0), egui::Sense::hover());
-    let color = if p.dark {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 24)
-    } else {
-        Color32::from_rgba_unmultiplied(0, 0, 0, 26)
-    };
-    ui.painter()
-        .hline(rect.x_range(), rect.center().y, Stroke::new(1.0, color));
-    ui.add_space(ROW_GAP);
 }
 
 /// The shared card surface — fill + hairline border + radius. `card` and `group_card`
@@ -413,8 +399,10 @@ pub fn card_row<R>(
     let mut out = None;
     if ui.available_width() < CARD_WRAP_WIDTH {
         // Narrow: stack the control beneath the header, full width, left-aligned. The
-        // header gets its own vertical so its tighter line spacing doesn't leak.
+        // header gets its own vertical so its tighter line spacing doesn't leak; the
+        // outer vertical zeroes item spacing so a group's GAP doesn't widen the internals.
         ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
             ui.vertical(|ui| row_header(ui, p, icon, title, desc));
             ui.add_space(SPACE_2);
             out = Some(control(ui));
@@ -450,7 +438,9 @@ fn row_header(
     title: &str,
     desc: Option<&str>,
 ) {
-    ui.spacing_mut().item_spacing.y = 2.0;
+    // Pull the description tight under the title so they read as one unit. Negative
+    // because each label's line box already reserves descent + leading between them.
+    ui.spacing_mut().item_spacing.y = -2.0;
     ui.horizontal(|ui| {
         if let Some(t) = icon {
             icon_sized(ui, t, 20.0);

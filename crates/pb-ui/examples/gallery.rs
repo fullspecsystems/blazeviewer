@@ -182,7 +182,7 @@ impl Gallery {
             }
         });
 
-        // A grouped settings card: a heading inside the card, rows separated by dividers.
+        // A grouped settings card: a heading inside the card, rows auto-spaced by GAP.
         pb_ui::group_card(ui, p, Some("Grouped Settings"), |ui| {
             pb_ui::card_row(
                 ui,
@@ -193,9 +193,7 @@ impl Gallery {
                 |ui| {
                     pb_ui::slider(ui, &mut self.start_speed, 1.0..=30.0, "/s");
                 },
-            );
-            pb_ui::row_divider(ui, p);
-            pb_ui::card_row(
+            );            pb_ui::card_row(
                 ui,
                 p,
                 None,
@@ -204,9 +202,7 @@ impl Gallery {
                 |ui| {
                     pb_ui::toggle_with_label(ui, p, &mut self.recursive);
                 },
-            );
-            pb_ui::row_divider(ui, p);
-            pb_ui::card_row(
+            );            pb_ui::card_row(
                 ui,
                 p,
                 None,
@@ -226,9 +222,7 @@ impl Gallery {
                             ui.selectable_value(&mut self.scale_mode, 2, "Original");
                         });
                 },
-            );
-            pb_ui::row_divider(ui, p);
-            pb_ui::card_row(
+            );            pb_ui::card_row(
                 ui,
                 p,
                 None,

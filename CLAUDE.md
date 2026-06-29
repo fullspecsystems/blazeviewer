@@ -176,18 +176,19 @@ The gallery is dev-only (eframe dev-dependency; never shipped) and is the place 
 single-theme dialog can't show.
 
 **What's there (`pb-ui/src/lib.rs`):**
-- **Tokens:** `SPACE_1..6` (4px scale), `RADIUS_CONTROL`/`RADIUS_CARD`, `CONTROL_H`
-  (32px — set once, kills "every control a different size"), `FIELD_MARGIN`,
+- **Tokens:** `SPACE_1..6` (4px scale), `GAP` (**the** standard gap — between rows, between
+  cards, and the dialog button gap/inset; one knob), `RADIUS_CONTROL`/`RADIUS_CARD`,
+  `CONTROL_H` (32px — set once, kills "every control a different size"), `FIELD_MARGIN`,
   `CARD_WRAP_WIDTH`, and `Palette` (named color roles, light + dark).
 - **Theme:** `install_fonts` (native Segoe UI) once per dialog ctx; `apply_style(ctx,
   dark)` each frame (cheap; survives egui's own theme bookkeeping); `apply_to_ui(ui,
   dark)` to scope one region (e.g. a gallery column, or a **combo popup** — egui draws
   popup *contents* with the global ctx style, so re-assert it inside `show_ui`).
 - **Components:** `group_card` (the **grouped-settings** card: a semibold heading inside
-  the card + rows split by `row_divider`s — related settings share one card, so a page is
-  a few cards not one-per-setting), `card` (single), `card_row` (responsive: control on
-  the right when wide, stacked under the header below `CARD_WRAP_WIDTH`), `row_divider`,
-  `toggle` / `toggle_with_label`, `page_title` / `section_label` (type ramp: page title
+  the card + `card_row`s that **auto-space by `GAP`** — no dividers; related settings share
+  one card, so a page is a few cards not one-per-setting), `card` (single), `card_row`
+  (responsive: control on the right when wide, stacked under the header below
+  `CARD_WRAP_WIDTH`), `toggle` / `toggle_with_label`, `page_title` / `section_label` (type ramp: page title
   30 / section 17 — both semibold via the bundled Segoe UI Semibold face / card title 14.5
   / description 12.5), `primary_button` / `secondary_button` / `danger_button`,
   `text_field`, `slider` (stable-width value box + solid-accent fill — no jitter),
