@@ -68,9 +68,9 @@ pub const FIELD_MARGIN: egui::Margin = egui::Margin {
 pub const CARD_WRAP_WIDTH: f32 = 430.0;
 /// Width reserved for a card row's right-hand control in the wide (side-by-side) layout,
 /// so a long description wraps in the header rather than colliding with the control.
-const CONTROL_RESERVE: f32 = 260.0;
+const CONTROL_RESERVE: f32 = 290.0;
 /// Minimum width the header block keeps in the wide layout before the row would stack.
-const HEADER_MIN: f32 = 150.0;
+const HEADER_MIN: f32 = 140.0;
 /// Top inner padding of a [`group_card`] — tighter than the bottom so the semibold header
 /// (which reserves more cap-height leading) doesn't look like it's floating.
 const GROUP_PAD_TOP: f32 = 6.0;
@@ -228,7 +228,7 @@ pub fn style(dark: bool) -> egui::Style {
         interact_size: egui::vec2(40.0, CONTROL_H),
         indent: SPACE_6,
         // Track width; the value box is a separate, fixed-width box (see `slider`).
-        slider_width: 170.0,
+        slider_width: 200.0,
         combo_width: 160.0,
         ..Default::default()
     };

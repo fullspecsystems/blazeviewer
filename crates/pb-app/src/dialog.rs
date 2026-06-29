@@ -515,12 +515,6 @@ fn about_ui(ui: &mut egui::Ui, icon: Option<&egui::TextureHandle>) {
 // icons (lock/warning/trash) come tinted + placed from `pbui::icon`.
 const DIALOG_PAD: f32 = 22.0;
 const MSG_SIZE: f32 = 15.0;
-/// Uniform inset of a dialog's bottom action bar — applied equally to the top (the
-/// divider), right, and bottom, **and** used as the gap between buttons. This is the one
-/// place dialog-button spacing is defined, so buttons always land balanced and no caller
-/// hand-spaces them. Sourced from `pbui::GAP` so the button gap, button-bar inset, and
-/// the gaps between cards are all the one standard value.
-const BTN_BAR_PAD: f32 = pbui::GAP;
 
 /// A panel frame filled to match the window background, inset by `DIALOG_PAD` on
 /// all sides. Used for both the content panel and the bottom button bar so their
@@ -531,21 +525,21 @@ fn dialog_frame(ctx: &egui::Context) -> egui::Frame {
         .inner_margin(egui::Margin::same(DIALOG_PAD))
 }
 
-/// The shared bottom action bar — the single place dialog buttons get their spacing, so
-/// they always land balanced. Buttons are laid out right-to-left (added rightmost-first,
-/// so they read `[Primary] [Cancel]` left-to-right) with a uniform [`BTN_BAR_PAD`] inset
-/// on the top (the divider), right, and bottom, **and** the same value as the gap between
-/// buttons (set via `item_spacing.x`). Callers just add buttons — no manual spacing.
-fn button_bar(ctx: &egui::Context, id: &'static str, add: impl FnOnce(&mut egui::Ui)) {
+/// The shared bottom action bar. Buttons are laid out right-to-left (added
+/// rightmost-first, so they read `[Primary] [Cancel]` left-to-right). `edge` is the
+/// dialog's content inset — the bar uses it horizontally so the buttons **line up with
+/// the content above** (the cards / message), with `pbui::GAP` of vertical breathing and
+/// the same `GAP` between buttons. Callers just add buttons — no manual spacing.
+fn button_bar(ctx: &egui::Context, id: &'static str, edge: f32, add: impl FnOnce(&mut egui::Ui)) {
     egui::TopBottomPanel::bottom(id)
         .frame(
             egui::Frame::default()
                 .fill(ctx.style().visuals.panel_fill)
-                .inner_margin(egui::Margin::same(BTN_BAR_PAD)),
+                .inner_margin(egui::Margin::symmetric(edge, pbui::GAP)),
         )
         .show(ctx, |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = BTN_BAR_PAD;
+                ui.spacing_mut().item_spacing.x = pbui::GAP;
                 add(ui);
             });
         });
@@ -562,7 +556,7 @@ fn confirm_dialog(ctx: &egui::Context, message: &str) -> Option<bool> {
     let p = pbui::Palette::new(ctx.style().visuals.dark_mode);
     // Right-to-left: Cancel added first (rightmost), Delete to its left — so the
     // visual order reads [Delete] [Cancel], matching Directory Opus.
-    button_bar(ctx, "confirm_bar", |ui| {
+    button_bar(ctx, "confirm_bar", DIALOG_PAD, |ui| {
         if pbui::secondary_button(ui, "Cancel").clicked() {
             result = Some(false);
         }
@@ -605,7 +599,7 @@ fn confirm_dialog(ctx: &egui::Context, message: &str) -> Option<bool> {
 fn message_dialog(ctx: &egui::Context, message: &str) -> Option<bool> {
     let mut ok = None;
     let p = pbui::Palette::new(ctx.style().visuals.dark_mode);
-    button_bar(ctx, "message_bar", |ui| {
+    button_bar(ctx, "message_bar", DIALOG_PAD, |ui| {
         let resp = pbui::primary_button(ui, &p, "OK");
         if resp.clicked() {
             ok = Some(true);
@@ -648,7 +642,7 @@ fn password_dialog(
 ) -> Option<bool> {
     let mut result = None;
     let p = pbui::Palette::new(ctx.style().visuals.dark_mode);
-    button_bar(ctx, "password_bar", |ui| {
+    button_bar(ctx, "password_bar", DIALOG_PAD, |ui| {
         if pbui::secondary_button(ui, "Cancel").clicked() {
             result = Some(false);
         }
@@ -730,7 +724,8 @@ fn settings_button_bar(ctx: &egui::Context) -> Option<bool> {
     let p = pbui::Palette::new(ctx.style().visuals.dark_mode);
     let mut result = None;
     // Same shared bar as every other dialog — uniform inset + button gap, no hand-spacing.
-    button_bar(ctx, "settings_bar", |ui| {
+    // Settings content insets by PAGE_MARGIN; match it so the buttons line up with the cards.
+    button_bar(ctx, "settings_bar", pbui::PAGE_MARGIN, |ui| {
         if pbui::secondary_button(ui, "Cancel").clicked() {
             result = Some(false);
         }
