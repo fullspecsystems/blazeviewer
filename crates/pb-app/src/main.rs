@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
-use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Icon, Window, WindowId};
@@ -68,6 +68,8 @@ mod icon;
 mod keymap;
 mod menu;
 mod metrics;
+#[cfg(target_os = "macos")]
+mod proxy_icon;
 mod save_rotation;
 mod settings;
 mod slideshow;
@@ -115,6 +117,15 @@ const ZOOM_RAMP_SECS: f32 = 0.7;
 const PAN_MIN_SPEED: f32 = 450.0;
 const PAN_MAX_SPEED: f32 = 3200.0;
 const PAN_RAMP_SECS: f32 = 0.7;
+
+/// Trackpad gesture tuning. `PINCH_GAIN` scales macOS's incremental magnification
+/// (`WindowEvent::PinchGesture` delta) into a zoom factor (`1 + delta·gain`).
+/// `WHEEL_ZOOM_STEP` is the per-notch factor for a real mouse wheel (LineDelta).
+const PINCH_GAIN: f32 = 1.0;
+const WHEEL_ZOOM_STEP: f32 = 0.1;
+/// Sign of two-finger trackpad panning (PixelDelta scroll). `+1.0` makes the
+/// image follow the fingers (grab-and-drag); flip to `-1.0` to invert.
+const GESTURE_PAN_DIR: f32 = 1.0;
 
 /// How long the delete icon shows on the just-deleted photo before the playlist
 /// advances to the next one — so the trash/recycle feedback registers first (#28).
@@ -236,6 +247,33 @@ enum InfoMode {
     Basic,
     Full,
     Help,
+}
+
+/// A reversible user edit, recorded on the undo stack (Edit ▸ Undo / `Ctrl+Z`). RAM-only,
+/// dropped on exit — no on-disk undo journal (privacy #2). The stack is cleared whenever
+/// the playlist/source changes (open, delete-rebuild, empty state — see
+/// [`App::rebuild_playlist`]/[`App::enter_empty_state`]), so a recorded `item` index
+/// always indexes the current source. Only a saved rotation is reversible today; deletes
+/// (recoverable / permanent) are a future / never extension of the same stack.
+enum UndoAction {
+    /// Undo a saved EXIF rotation: restore `path`'s Orientation tag to `prev` — the value
+    /// it held *before* the save. `item` is the playlist index it was saved at, used to
+    /// refresh that photo's cached decode after the restore.
+    SaveRotation {
+        item: usize,
+        path: PathBuf,
+        prev: u8,
+    },
+}
+
+impl UndoAction {
+    /// The dynamic Edit-menu title for this action (e.g. "Undo Save Rotation"), so the
+    /// menu shows *what* the next undo will reverse (see `App::refresh_undo_menu_item`).
+    fn menu_label(&self) -> &'static str {
+        match self {
+            UndoAction::SaveRotation { .. } => "Undo Save Rotation",
+        }
+    }
 }
 
 /// A navigation step from a held key: sequential forward (`space`), sequential
@@ -429,6 +467,10 @@ struct App {
     fit: Option<FitBox>,
     /// Per-photo view transform (scaling mode + rotation + zoom + pan).
     view: ViewTransform,
+    /// Last cursor position in physical pixels — the anchor for pinch/wheel zoom.
+    /// `None` until the pointer first moves over the window (then we zoom about
+    /// the screen center).
+    last_cursor: Option<[f32; 2]>,
     /// Scan root, for showing paths relative to it.
     root: PathBuf,
     /// Text renderer for the info panel (None if no system font was found).
@@ -562,18 +604,48 @@ struct App {
     /// The native menu bar (windowed mode only). Built once, kept alive here so its
     /// native handle outlives the window. `None` until the first window is created.
     menu: Option<muda::Menu>,
+    /// macOS-only: the **Window** submenu, kept so [`apply_menu_for_mode`] can mark it
+    /// as the NSApp Window menu (`set_as_windows_menu_for_nsapp`) right after
+    /// `init_for_nsapp` — the order muda requires — which makes macOS append the live
+    /// window list under Minimize / Zoom / Bring All to Front.
+    #[cfg(target_os = "macos")]
+    window_menu: Option<muda::Submenu>,
+    /// macOS-only: the native (Spaces) fullscreen menu item, kept so its title can flip
+    /// between "Enter Full Screen" and "Exit Full Screen" to mirror the live state (the
+    /// Mac convention — no checkmark). `native_fullscreen_on` caches the last-pushed
+    /// state so the per-tick refresh is a no-op when nothing changed.
+    #[cfg(target_os = "macos")]
+    native_fullscreen_item: Option<muda::MenuItem>,
+    #[cfg(target_os = "macos")]
+    native_fullscreen_on: bool,
+    /// macOS-only: the file currently shown as the title-bar proxy icon (the window's
+    /// represented file). Caches the last-pushed value so the per-tick refresh is a
+    /// no-op `setRepresentedURL:` call when the displayed photo hasn't changed. `None`
+    /// = no proxy (fullscreen, an archive entry, or the empty state). See
+    /// [`proxy_icon::set_represented_url`] / [`App::refresh_proxy_icon`].
+    #[cfg(target_os = "macos")]
+    proxy_icon_path: Option<PathBuf>,
     /// The "Save Rotation" menu item, kept so its enabled state can be toggled at
     /// runtime (only enabled when the current photo has an unsaved rotation on an
     /// EXIF-writable file). `save_enabled` caches the last-pushed state so the
     /// refresh is a no-op Win32 call when nothing changed.
     save_rotation_item: Option<muda::MenuItem>,
     save_enabled: bool,
-    /// The View-menu checkable items (scale mode / recursive / fullscreen), kept so
-    /// their checked state can mirror the live app state at runtime. `view_checks_state`
-    /// caches the last-pushed `(scale mode, recursive, fullscreen, slideshow)` so the
+    /// The undo stack (Edit ▸ Undo / `Ctrl+Z`) — RAM-only, cleared on any source/playlist
+    /// change (see [`UndoAction`]). The most recent reversible edit is on top.
+    undo_stack: Vec<UndoAction>,
+    /// The Edit ▸ Undo menu item, kept so its title + enabled state can mirror the top of
+    /// the undo stack at runtime. `undo_menu_state` caches the last-pushed label so the
+    /// per-tick refresh is a no-op when unchanged: `None` = never pushed; `Some(None)` =
+    /// disabled ("Undo"); `Some(Some(label))` = enabled showing `label`.
+    undo_item: Option<muda::MenuItem>,
+    undo_menu_state: Option<Option<&'static str>>,
+    /// The View-menu checkable items (scale mode / recursive / fullscreen / info), kept
+    /// so their checked state can mirror the live app state at runtime. `view_checks_state`
+    /// caches the last-pushed `(scale mode, recursive, fullscreen, slideshow, info)` so the
     /// per-tick refresh is a no-op Win32 call when nothing changed.
     view_checks: Option<menu::ViewChecks>,
-    view_checks_state: Option<(ScaleMode, bool, bool, bool)>,
+    view_checks_state: Option<(ScaleMode, bool, bool, bool, InfoMode)>,
     /// A delete whose playlist-advance is deferred: `(fire_at, removed_index)`. The
     /// deleted photo stays on screen with its icon until `fire_at`, then the playlist
     /// drops the item and advances (see `delete_current` / `flush_pending_delete`).
@@ -656,6 +728,7 @@ impl App {
                 mode: scale_mode_of(settings.scale_mode),
                 ..ViewTransform::default()
             },
+            last_cursor: None,
             root,
             hud: Hud::load(),
             info: InfoMode::Off,
@@ -712,8 +785,19 @@ impl App {
             last_upgrade_set: Vec::new(),
             full_requested_at: HashMap::new(),
             menu: None,
+            #[cfg(target_os = "macos")]
+            window_menu: None,
+            #[cfg(target_os = "macos")]
+            native_fullscreen_item: None,
+            #[cfg(target_os = "macos")]
+            native_fullscreen_on: false,
+            #[cfg(target_os = "macos")]
+            proxy_icon_path: None,
             save_rotation_item: None,
             save_enabled: false,
+            undo_stack: Vec::new(),
+            undo_item: None,
+            undo_menu_state: None,
             view_checks: None,
             view_checks_state: None,
             pending_delete: None,
@@ -1022,6 +1106,9 @@ impl App {
             self.show_toast("Save rotation: JPEG only", event_loop);
             return;
         }
+        // Capture the file's orientation *before* the write so the save can be reversed
+        // (Edit ▸ Undo) by restoring this exact value.
+        let prev = save_rotation::read_orientation(&path);
         match save_rotation::write_orientation(&path, rot) {
             Ok(_) => {
                 // The rotation is now baked into the file's EXIF: drop the RAM
@@ -1037,11 +1124,59 @@ impl App {
                 self.load_current_sync(event_loop);
                 self.target_item = self.playlist.current();
                 self.request_prefetch();
+                self.undo_stack.push(UndoAction::SaveRotation {
+                    item,
+                    path: path.clone(),
+                    prev,
+                });
                 self.show_toast_icon("", Some(icon::assets::FLOPPY), event_loop);
             }
             Err(e) => {
                 eprintln!("save rotation failed: {}: {e}", path.display());
                 self.show_toast("Save failed", event_loop);
+            }
+        }
+    }
+
+    /// Reverse the most recent reversible edit (Edit ▸ Undo / `Ctrl+Z`). Today the only
+    /// entry kind is a saved rotation: rewrite the file's EXIF Orientation back to the
+    /// value it held before the save, then refresh so the reverted file is re-read
+    /// (`invalidate_geometry` rebuilds the ring, so neighbors re-decode from disk too —
+    /// the undone photo shows correctly whether or not it's the one on screen). On a
+    /// write failure the file is untouched, so the entry is pushed back to retry.
+    fn undo(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(action) = self.undo_stack.pop() else {
+            self.show_toast("Nothing to undo", event_loop);
+            return;
+        };
+        match action {
+            UndoAction::SaveRotation { item, path, prev } => {
+                match save_rotation::set_orientation(&path, prev) {
+                    Ok(()) => {
+                        self.rotations.remove(&item);
+                        self.meta_cache.remove(&item);
+                        self.failed.remove(&item);
+                        self.preview_resident.remove(&item);
+                        self.upgrade_done.remove(&item);
+                        self.invalidate_geometry();
+                        self.load_current_sync(event_loop);
+                        self.target_item = self.playlist.current();
+                        self.request_prefetch();
+                        self.show_toast_icon(
+                            "Rotation undone",
+                            Some(icon::assets::UNDO),
+                            event_loop,
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("undo rotation failed: {}: {e}", path.display());
+                        self.show_toast("Undo failed", event_loop);
+                        // The file wasn't changed, so the edit is still reversible —
+                        // keep it on the stack for a retry.
+                        self.undo_stack
+                            .push(UndoAction::SaveRotation { item, path, prev });
+                    }
+                }
             }
         }
     }
@@ -1143,6 +1278,7 @@ impl App {
         self.preview_resident.clear();
         self.upgrade_done.clear();
         self.last_upgrade_set.clear();
+        self.undo_stack.clear();
         self.invalidate_geometry();
         self.displayed_item = None;
         self.target_item = None;
@@ -1807,12 +1943,12 @@ impl App {
         self.show_toast(&slideshow::format_interval(interval), event_loop);
     }
 
-    /// Toggle macOS **native (Spaces) fullscreen** — the green-button / ⌃⌘F / Globe+F
-    /// behavior — as a deliberate alternative to our borderless speed mode (F / ⌥⏎ /
-    /// F11). winit's `Fullscreen::Borderless(None)` maps to AppKit's `toggleFullScreen:`
-    /// on macOS. Driven only from the "Enter Full Screen" menu item (and its ⌃⌘F
-    /// equivalent); keeping our `windowed` flag in sync with externally-triggered
-    /// native fullscreen is a separate follow-up (tasks.json #8 of the macOS port).
+    /// Toggle macOS **native (Spaces) fullscreen** — the green-button / ⌃⌘F behavior —
+    /// as a deliberate alternative to our borderless speed mode (F / ⌥⏎ / F11). winit's
+    /// `Fullscreen::Borderless(None)` maps to AppKit's `toggleFullScreen:` on macOS.
+    /// Driven from our "Enter Full Screen" menu item (⌃⌘F). The Enter/Exit label is kept
+    /// in sync separately (`refresh_native_fullscreen_label`), reading the real window
+    /// state — so it stays correct even for the green-button / gesture toggles.
     #[cfg(target_os = "macos")]
     fn toggle_native_fullscreen(&mut self) {
         let Some(window) = self.active.as_ref().map(|a| a.window.clone()) else {
@@ -1982,7 +2118,13 @@ impl App {
             let built = menu::build_menu();
             self.menu = Some(built.menu);
             self.save_rotation_item = Some(built.save_rotation);
+            self.undo_item = Some(built.undo);
             self.view_checks = Some(built.checks);
+            #[cfg(target_os = "macos")]
+            {
+                self.window_menu = Some(built.window);
+                self.native_fullscreen_item = Some(built.native_fullscreen);
+            }
         }
     }
 
@@ -2017,6 +2159,28 @@ impl App {
         }
     }
 
+    /// Mirror the top of the undo stack onto the Edit ▸ Undo item: disabled + plain
+    /// "Undo" when empty, otherwise enabled with a title naming the next undo (e.g.
+    /// "Undo Save Rotation"). On Windows the `\tCtrl+Z` accelerator hint is appended to
+    /// the label (macOS shows the real ⌘Z key-equivalent the item already carries).
+    /// Cheap + cached, so it's safe to call from the per-tick `about_to_wait`.
+    fn refresh_undo_menu_item(&mut self) {
+        // `None` = nothing to undo (disabled); `Some(label)` = enabled with that label.
+        let top = self.undo_stack.last().map(UndoAction::menu_label);
+        if self.undo_menu_state == Some(top) {
+            return;
+        }
+        if let Some(it) = self.undo_item.as_ref() {
+            let base = top.unwrap_or("Undo");
+            #[cfg(target_os = "macos")]
+            it.set_text(base);
+            #[cfg(not(target_os = "macos"))]
+            it.set_text(format!("{base}\tCtrl+Z"));
+            it.set_enabled(top.is_some());
+        }
+        self.undo_menu_state = Some(top);
+    }
+
     /// Mirror the live view state onto the View-menu checkmarks: scale mode (one of
     /// Fit / Crop to Fill / Original checked), Recursive Folders, and Fullscreen.
     /// Cheap + cached (skips the Win32 calls when nothing changed), so it's safe to
@@ -2031,18 +2195,75 @@ impl App {
             self.recursive,
             !self.windowed,
             self.slideshow.on,
+            self.info,
         );
         if self.view_checks_state == Some(state) {
             return;
         }
-        let (mode, recursive, fullscreen, slideshow) = state;
+        let (mode, recursive, fullscreen, slideshow, info) = state;
         c.fit.set_checked(mode == ScaleMode::Fit);
         c.fill.set_checked(mode == ScaleMode::Fill);
         c.original.set_checked(mode == ScaleMode::Original);
         c.recursive.set_checked(recursive);
         c.fullscreen.set_checked(fullscreen);
         c.slideshow.set_checked(slideshow);
+        c.info.set_checked(info == InfoMode::Basic);
+        c.full_exif.set_checked(info == InfoMode::Full);
         self.view_checks_state = Some(state);
+    }
+
+    /// macOS: flip the native (Spaces) fullscreen menu item's title between "Enter Full
+    /// Screen" and "Exit Full Screen" to mirror the live state — the Mac-standard
+    /// behavior (a title toggle, never a checkmark). Driven off the real
+    /// `NSWindow.styleMask` ([`hdr_surface::window_is_fullscreen`]), not winit's
+    /// `Window::fullscreen()` — the latter tracks the *requested* borderless mode and
+    /// reads `None` even while `toggleFullScreen:` has us fullscreen, so it never flips.
+    /// The styleMask is the OS truth however fullscreen was entered (our menu, ⌃⌘F, the
+    /// green button, a Mission Control gesture). Cached, so the per-tick call is a no-op
+    /// until it actually changes. (macOS's own auto-injected Globe/Fn+F fullscreen item
+    /// won't update its label for us, which is why we manage our own.)
+    #[cfg(target_os = "macos")]
+    fn refresh_native_fullscreen_label(&mut self) {
+        let Some(item) = self.native_fullscreen_item.as_ref() else {
+            return;
+        };
+        let on = self
+            .active
+            .as_ref()
+            .is_some_and(|a| hdr_surface::window_is_fullscreen(&a.window));
+        if self.native_fullscreen_on == on {
+            return;
+        }
+        item.set_text(if on {
+            "Exit Full Screen"
+        } else {
+            "Enter Full Screen"
+        });
+        self.native_fullscreen_on = on;
+    }
+
+    /// macOS: keep the title-bar **proxy icon** (the window's represented file) pointed
+    /// at the displayed photo, so it shows the file's Finder icon and can be dragged out.
+    /// Only in windowed mode (the borderless speed mode has no title bar), and only for a
+    /// real on-disk file — an archive entry or the empty state clears it. Cached so the
+    /// per-tick call is a no-op `setRepresentedURL:` until the displayed photo changes,
+    /// keeping it off the hold-to-fly hot path. RAM-only, never persisted (privacy #2).
+    #[cfg(target_os = "macos")]
+    fn refresh_proxy_icon(&mut self) {
+        let want = if self.windowed {
+            self.displayed_item
+                .and_then(|i| self.source.path(i))
+                .map(Path::to_path_buf)
+        } else {
+            None
+        };
+        if self.proxy_icon_path == want {
+            return;
+        }
+        if let Some(a) = self.active.as_ref() {
+            proxy_icon::set_represented_url(&a.window, want.as_deref());
+        }
+        self.proxy_icon_path = want;
     }
 
     /// Attach the menu bar in windowed mode, hide it in fullscreen. The menu is a
@@ -2085,6 +2306,12 @@ impl App {
         if !self.menu_attached {
             if let Some(menu) = self.menu.as_ref() {
                 menu.init_for_nsapp();
+                // Must run *after* `init_for_nsapp` (muda requirement): hand the Window
+                // submenu to AppKit as the app's Window menu, so macOS appends the live
+                // window list under our Minimize / Zoom / Bring All to Front items.
+                if let Some(window) = self.window_menu.as_ref() {
+                    window.set_as_windows_menu_for_nsapp();
+                }
                 self.menu_attached = true;
             }
         }
@@ -2161,6 +2388,7 @@ impl App {
             Action::SaveRotation => self.save_rotation(event_loop),
             Action::Delete => self.delete_current(false, event_loop),
             Action::DeletePermanent => self.delete_current(true, event_loop),
+            Action::Undo => self.undo(event_loop),
             Action::OpenFile => self.open_picker(false, event_loop),
             Action::OpenFolder => self.open_picker(true, event_loop),
             Action::Info => self.toggle_info(false, event_loop),
@@ -2259,6 +2487,8 @@ impl App {
         self.preview_resident.clear();
         self.upgrade_done.clear();
         self.last_upgrade_set.clear();
+        // Undo entries reference the old source's indices/paths — drop them too.
+        self.undo_stack.clear();
         // Invalidate the ring + bump the epoch (discards in-flight old decodes),
         // then synchronously show the new current photo and refill around it.
         self.invalidate_geometry();
@@ -3105,6 +3335,7 @@ impl App {
         self.preview_resident.clear();
         self.upgrade_done.clear();
         self.last_upgrade_set.clear();
+        self.undo_stack.clear();
         self.current = None;
         self.toast = None;
         self.wait_started = None;
@@ -3217,6 +3448,38 @@ impl App {
         let fit = self.fit?;
         let (iw, ih) = self.active.as_ref()?.renderer.image_size();
         Some((iw, ih, fit.max_width, fit.max_height))
+    }
+
+    /// Zoom by `factor` (>1 in, <1 out) about the cursor — the shared effect for
+    /// trackpad pinch and mouse-wheel zoom. Anchors on the last cursor position,
+    /// falling back to the screen center before the pointer has moved.
+    fn zoom_about_cursor(&mut self, factor: f32, event_loop: &ActiveEventLoop) {
+        let Some((iw, ih, sw, sh)) = self.screen_and_image() else {
+            return;
+        };
+        let anchor = self
+            .last_cursor
+            .unwrap_or([sw as f32 / 2.0, sh as f32 / 2.0]);
+        self.view.zoom_about(factor, anchor, iw, ih, sw, sh);
+        self.push_view();
+        self.draw(event_loop);
+    }
+
+    /// Pan by a raw pixel delta (trackpad two-finger swipe), clamped to the image
+    /// bounds. No effect when the image fits within the screen (nothing to pan).
+    fn pan_by_pixels(&mut self, dx: f32, dy: f32, event_loop: &ActiveEventLoop) {
+        if dx == 0.0 && dy == 0.0 {
+            return;
+        }
+        self.view.pan[0] += dx;
+        self.view.pan[1] += dy;
+        if let Some((iw, ih, sw, sh)) = self.screen_and_image() {
+            let mp = self.view.max_pan(iw, ih, sw, sh);
+            self.view.pan[0] = self.view.pan[0].clamp(-mp[0], mp[0]);
+            self.view.pan[1] = self.view.pan[1].clamp(-mp[1], mp[1]);
+        }
+        self.push_view();
+        self.draw(event_loop);
     }
 
     /// Apply continuous zoom/pan while their keys are held, with a time-based
@@ -3648,6 +3911,38 @@ impl ApplicationHandler for App {
                 self.pie_glow_started = None;
             }
 
+            // Track the pointer so pinch / wheel zoom can anchor on it.
+            WindowEvent::CursorMoved { position, .. } => {
+                self.last_cursor = Some([position.x as f32, position.y as f32]);
+            }
+
+            // Trackpad pinch (macOS): magnify about the cursor. `delta` is the
+            // incremental magnification (+ spread to zoom in, − pinch to zoom out).
+            WindowEvent::PinchGesture { delta, .. } => {
+                let factor = 1.0 + delta as f32 * PINCH_GAIN;
+                self.zoom_about_cursor(factor, event_loop);
+            }
+
+            // Trackpad two-finger double-tap (macOS "smart magnify"): toggle 100%,
+            // sharing the keyboard's `0` / menu toggle so they can't drift.
+            WindowEvent::DoubleTapGesture { .. } => {
+                self.dispatch_action(Action::ToggleOriginal, event_loop);
+            }
+
+            // Scroll: a trackpad two-finger swipe (PixelDelta) pans the image; a
+            // real mouse wheel (LineDelta) zooms about the cursor.
+            WindowEvent::MouseWheel { delta, .. } => match delta {
+                MouseScrollDelta::PixelDelta(p) => self.pan_by_pixels(
+                    p.x as f32 * GESTURE_PAN_DIR,
+                    p.y as f32 * GESTURE_PAN_DIR,
+                    event_loop,
+                ),
+                MouseScrollDelta::LineDelta(_, y) => {
+                    let factor = (1.0 + y * WHEEL_ZOOM_STEP).max(0.05);
+                    self.zoom_about_cursor(factor, event_loop);
+                }
+            },
+
             _ => {}
         }
     }
@@ -3676,9 +3971,19 @@ impl ApplicationHandler for App {
         // Keep "Save Rotation" enabled only when it applies (cheap + cached, so this
         // per-tick call is a no-op unless the photo/rotation actually changed).
         self.refresh_save_menu_item();
-        // Keep the View-menu checkmarks (scale mode / recursive / fullscreen) in sync
-        // with the live state — likewise cached, so it's a no-op until state changes.
+        // Keep Edit ▸ Undo's label + enabled state mirroring the top of the undo stack
+        // (cached, so it's a no-op until the stack changes).
+        self.refresh_undo_menu_item();
+        // Keep the View-menu checkmarks (scale mode / recursive / fullscreen / info) in
+        // sync with the live state — likewise cached, so it's a no-op until state changes.
         self.refresh_view_menu_checks();
+        // macOS: keep the native fullscreen item's title ("Enter"/"Exit Full Screen") in
+        // sync — cached, and catches green-button / gesture toggles, not just our menu.
+        #[cfg(target_os = "macos")]
+        self.refresh_native_fullscreen_label();
+        // macOS: keep the title-bar proxy icon pointed at the displayed photo (cached).
+        #[cfg(target_os = "macos")]
+        self.refresh_proxy_icon();
         // Deferred delete-advance: once the icon has shown for a beat, drop the item.
         if self.pending_delete.is_some_and(|(at, _)| now >= at) {
             self.flush_pending_delete(event_loop);

@@ -66,17 +66,51 @@ The session task list (`#1–#11`) maps to that plan.
   borderless speed-mode stays F / ⌥⏎ / F11 (bare **`F`** added on *both* platforms).
 - **Copy File Path** (Shift+Ctrl+C / ⇧⌘C, Edit menu) — cross-platform, via `arboard`.
 
-**LEFT (session tasks #5–#11; same in `macos-port-plan.md`):** #5 macOS theme source
-(`NSApp.effectiveAppearance`) + SF Pro for pb-ui dialogs & HUD (currently Arial/Segoe — the
-HUD fonts *do* load on Mac, this is a polish swap; `fonts_dir` is now Windows-gated).
-#6 file associations (Info.plist `CFBundleDocumentTypes`/UTIs). #7 `.icns` Tahoe squircle.
-#8 native-fullscreen state sync (our `windowed` flag/checkmark can desync if the user hits
-the green button/⌃⌘F). #9 macOS Window menu (Minimize ⌘M). #10 real
-`archive::available_physical_ram()` (mach `vm_statistics`; currently a stub → ASSUMED_RAM,
-so the 7z budget is approximate on Mac). #11 codesign → notarize → staple → DMG + a
-`macos-14` arm64 CI job (JD has the workflow). **Follow-up:** toggling a display's HDR
-*while the window sits on it* (no move) isn't caught live — needs an
-`NSApplicationDidChangeScreenParametersNotification` observer (adapts on next move/navigate now).
+**DONE 2026-06-29 (second pass — the "native-feel bundle," gated: 298 workspace tests,
+clippy `-D warnings`, fmt; smoke-launched windowed + gallery, no panic):**
+- **#9 macOS Window menu — DONE.** `menu.rs` macOS `build_menu` gained a standard
+  **Window** submenu (Minimize ⌘M / Zoom / Bring All to Front, via muda
+  `PredefinedMenuItem`s — native labels + selectors + ⌘M for free), placed App·File·Edit·
+  View·Image·**Window**·Help. `BuiltMenu` returns the submenu (macOS-gated field) so
+  `apply_menu_for_mode` can call `set_as_windows_menu_for_nsapp()` **after**
+  `init_for_nsapp` (muda's required order) → macOS appends the live window list.
+- **#5 SF Pro fonts — DONE (HUD + dialogs).** The theme *source* was already cross-platform
+  (dialogs read winit `window.theme()`), so #5 was only the font swap. **HUD** (`hud.rs`):
+  Arial → **SF Pro** (`/System/Library/Fonts/SFNS.ttf`). Tahoe ships SF Pro only as a
+  *variable* font with no static semibold/bold, and **fontdue 0.9 can't instance the weight
+  axis** (verified empirically) — so semibold/bold are **faux-bolded** by horizontal coverage
+  dilation (`embolden_glyph`, baked at layout time before the outline pass; gated to only
+  fire when no real heavier face exists, so Windows/Segoe is untouched). 4 new unit tests.
+  **Dialogs** (`pb-ui::install_fonts`): Segoe → SF Pro too (egui/ab_glyph parses SFNS.ttf
+  fine — gallery launches clean); kept pb-ui `cfg`-free by listing both platforms' paths.
+- **#10 real `available_physical_ram()` — DONE.** macOS impl via Mach
+  `host_statistics64(HOST_VM_INFO64)` (free+inactive+speculative × page size — the analog of
+  Windows' `ullAvailPhys`), through **`libc`** (already in the lock graph; added as a macOS
+  target dep — no new build cost). `#[allow(deprecated)]`-scoped on `mach_host_self` (libc
+  moved mach to the `mach2` crate; not worth a dep for one call). Sanity test runs on the Mac.
+  The stub is now `cfg(not(any(windows, macos)))`; the 7z budget is exact on Mac.
+- **#12 title-bar proxy icon — DONE.** New `proxy_icon.rs` (mirrors `hdr_surface.rs`'s
+  objc2 reach: raw-window-handle → `[NSView window]` → `setRepresentedURL:` an `NSURL`/nil).
+  Cached `App::refresh_proxy_icon` runs per-tick in `about_to_wait`, gated on windowed-mode +
+  `displayed_item` change (off the fly hot path); clears for archive entries / empty state /
+  fullscreen (`source.path` is `None`). Gives the draggable doc-proxy + ⌘-click folder popup.
+  RAM-only, never calls `noteNewRecentDocumentURL:` (no Recents → privacy #2 holds). The
+  `stringWithUTF8String:` objc2 debug arg-encoding gotcha was tested clear in a windowed launch.
+  **Visual confirm pending (owner):** hover the title bar in windowed mode to reveal/drag it
+  (hover-to-reveal is standard since macOS 11).
+
+**LEFT (session tasks #6/#7/#8/#11; same in `macos-port-plan.md`):**
+#6 file associations (Info.plist `CFBundleDocumentTypes`/UTIs). **#7 `.icns` →
+now scoped to Icon Composer** (owner Q answered 2026-06-29): author a layered `.icon`
+in Apple's Icon Composer (squircle + Liquid Glass; covers both Tahoe 26 *and* the new
+macOS 27 "Golden Gate" — same icon pipeline), wire **`actool`** into
+`scripts/bundle-macos.sh` (→ `Assets.car` + `CFBundleIconName`, the no-Xcode path) once JD
+hands over the `.icon`, keep an `.icns` fallback for pre-Tahoe. #8 native-fullscreen state
+sync (our `windowed` flag/checkmark can desync if the user hits the green button/⌃⌘F).
+#11 codesign → notarize → staple → DMG + a `macos-14` arm64 CI job (JD has the workflow).
+**Follow-up:** toggling a display's HDR *while the window sits on it* (no move) isn't caught
+live — needs an `NSApplicationDidChangeScreenParametersNotification` observer (adapts on next
+move/navigate now).
 
 **Build/run/test on Mac:**
 - `./scripts/bundle-macos.sh` → `open target/release/bundle/PhotoBlaze.app --args <folder>`

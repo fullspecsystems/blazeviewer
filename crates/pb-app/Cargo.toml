@@ -82,6 +82,10 @@ arboard = { version = "3", default-features = false }
 # comes through winit's re-export.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+# Mach VM statistics (host_statistics64) for the eager-archive (7z) RAM budget — the
+# macOS analog of Windows' GlobalMemoryStatusEx (see src/archive.rs). Already in the
+# lock graph transitively, so this adds no new build cost.
+libc = "0.2"
 
 # Win32 for: pointing the window icon at the exe's multi-size .ico (crisp small
 # title-bar icon, vs winit downscaling one big image), and the native menu later.

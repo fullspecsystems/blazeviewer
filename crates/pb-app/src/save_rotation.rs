@@ -77,21 +77,28 @@ fn base_orientation(md: &Metadata) -> u8 {
         .unwrap_or(1) as u8
 }
 
-/// Persist the in-RAM rotation `rot` to `path`'s EXIF **Orientation** tag, losslessly
-/// and atomically. Reads the file's current orientation, composes the new one, writes
-/// it to a sibling temp copy (so the compressed scan + other segments — ICC, etc. —
-/// ride along untouched), then renames the temp over the original (atomic on the same
-/// volume, so a crash mid-write can't corrupt the photo). Returns the orientation
-/// value written. Caller must gate on [`is_orientation_writable`] (JPEG only).
-pub fn write_orientation(path: &Path, rot: Rotation) -> std::io::Result<u8> {
+/// Read `path`'s current EXIF Orientation (1 if absent/unreadable). Captured *before*
+/// a save so the change can be reversed (Edit ▸ Undo) by writing this value back via
+/// [`set_orientation`].
+pub fn read_orientation(path: &Path) -> u8 {
+    Metadata::new_from_path(path)
+        .map(|md| base_orientation(&md))
+        .unwrap_or(1)
+}
+
+/// Write an absolute EXIF **Orientation** value to `path`, losslessly and atomically —
+/// the shared core of [`write_orientation`] (save) and the Edit ▸ Undo restore. Copies
+/// the file to a sibling temp, rewrites only the Orientation tag (so the compressed
+/// scan + other segments — ICC, etc. — ride along untouched), then renames the temp
+/// over the original (atomic on the same volume, so a crash mid-write can't corrupt the
+/// photo). Caller must gate on [`is_orientation_writable`] (JPEG only).
+pub fn set_orientation(path: &Path, orientation: u8) -> std::io::Result<()> {
     // Read existing metadata. little_exif errors ("No EXIF data found!") on a JPEG
-    // with no EXIF segment — that's not a failure for us, just base orientation 1; we
-    // start fresh and write_to_file inserts a new APP1/EXIF segment. A genuinely
-    // missing/unreadable file surfaces at the copy step below.
+    // with no EXIF segment — that's not a failure for us; we start fresh and
+    // write_to_file inserts a new APP1/EXIF segment. A genuinely missing/unreadable
+    // file surfaces at the copy step below.
     let mut md = Metadata::new_from_path(path).unwrap_or_else(|_| Metadata::new());
-    let base = base_orientation(&md);
-    let new = compose_orientation(base, rot);
-    md.set_tag(ExifTag::Orientation(vec![new as u16]));
+    md.set_tag(ExifTag::Orientation(vec![orientation as u16]));
 
     // Operate on a temp copy in the same directory, then rename over the original.
     let tmp = temp_sibling(path);
@@ -104,6 +111,16 @@ pub fn write_orientation(path: &Path, rot: Rotation) -> std::io::Result<u8> {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
+    Ok(())
+}
+
+/// Persist the in-RAM rotation `rot` to `path`'s EXIF Orientation tag, losslessly.
+/// Composes the file's current orientation with the applied quarter-turns and writes
+/// the result via [`set_orientation`]. Returns the orientation value written. Caller
+/// must gate on [`is_orientation_writable`] (JPEG only).
+pub fn write_orientation(path: &Path, rot: Rotation) -> std::io::Result<u8> {
+    let new = compose_orientation(read_orientation(path), rot);
+    set_orientation(path, new)?;
     Ok(new)
 }
 
@@ -185,6 +202,38 @@ mod tests {
             jpeg_scan(&orig),
             jpeg_scan(&std::fs::read(&tmp).unwrap()),
             "scan still identical after a second save"
+        );
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// The Edit ▸ Undo round-trip: capture the orientation before a save, save a
+    /// rotation, then restore the captured value with `set_orientation` — the file lands
+    /// back on its prior orientation, losslessly (the compressed scan stays identical).
+    #[test]
+    fn set_orientation_restores_the_pre_save_value() {
+        const FIXTURE: &[u8] = include_bytes!("../tests/fixtures/orient6.jpg");
+        let tmp = std::env::temp_dir().join(format!("pb_undo_test_{}.jpg", std::process::id()));
+        std::fs::write(&tmp, FIXTURE).unwrap();
+        let orig_scan = jpeg_scan(&std::fs::read(&tmp).unwrap()).to_vec();
+
+        // Capture what undo will restore, then save a rotation (changes the tag).
+        let prev = read_orientation(&tmp);
+        let saved = write_orientation(&tmp, Rotation::R90).unwrap();
+        assert_ne!(saved, prev, "the save must change the orientation");
+        assert_eq!(read_orientation(&tmp), saved);
+
+        // Undo: write the captured value straight back.
+        set_orientation(&tmp, prev).unwrap();
+        assert_eq!(
+            read_orientation(&tmp),
+            prev,
+            "undo restores the pre-save orientation"
+        );
+        assert_eq!(
+            jpeg_scan(&std::fs::read(&tmp).unwrap()),
+            orig_scan.as_slice(),
+            "undo stays lossless (scan byte-identical)"
         );
 
         let _ = std::fs::remove_file(&tmp);

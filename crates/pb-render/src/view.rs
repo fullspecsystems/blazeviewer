@@ -132,6 +132,53 @@ impl ViewTransform {
         ]
     }
 
+    /// Multiply the zoom by `factor` (clamped to `[MIN_ZOOM, MAX_ZOOM]`) while
+    /// keeping the image point currently under the screen-space `anchor` pinned
+    /// to that anchor — the "pinch/scroll toward the pointer" behavior. Adjusts
+    /// `pan` to compensate, then re-clamps it to the image bounds. A no-op if the
+    /// image/screen is degenerate or the zoom is already at the requested bound.
+    ///
+    /// `anchor` is in screen pixels (same space as `pan`). When the image is
+    /// smaller than the screen on an axis, `max_pan` is zero there, so it simply
+    /// zooms about the screen center on that axis (there is nothing to pan to).
+    pub fn zoom_about(
+        &mut self,
+        factor: f32,
+        anchor: [f32; 2],
+        img_w: u32,
+        img_h: u32,
+        screen_w: u32,
+        screen_h: u32,
+    ) {
+        // Fraction of the *displayed* image under the anchor before the zoom.
+        // Use the real placement so any existing pan-clamp is accounted for.
+        let before = self.placement(img_w, img_h, screen_w, screen_h);
+        if before.w <= 0.0 || before.h <= 0.0 {
+            return;
+        }
+        let u = (anchor[0] - before.x) / before.w;
+        let v = (anchor[1] - before.y) / before.h;
+
+        let new_zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        if new_zoom == self.zoom {
+            return; // already pinned at a clamp bound — nothing to re-anchor
+        }
+        self.zoom = new_zoom;
+
+        // Choose pan so the same (u, v) lands back under the anchor:
+        // anchor = top_left + (u, v) * new_size, and pan = center − screen_center.
+        let (dw, dh) = self.displayed_size(img_w, img_h, screen_w, screen_h);
+        let new_x = anchor[0] - u * dw;
+        let new_y = anchor[1] - v * dh;
+        self.pan = [
+            new_x + dw / 2.0 - screen_w as f32 / 2.0,
+            new_y + dh / 2.0 - screen_h as f32 / 2.0,
+        ];
+        let mp = self.max_pan(img_w, img_h, screen_w, screen_h);
+        self.pan[0] = self.pan[0].clamp(-mp[0], mp[0]);
+        self.pan[1] = self.pan[1].clamp(-mp[1], mp[1]);
+    }
+
     /// Compute the on-screen placement + UVs. Pan is clamped to the image bounds.
     pub fn placement(&self, img_w: u32, img_h: u32, screen_w: u32, screen_h: u32) -> Placement {
         let (sw, sh) = (screen_w as f32, screen_h as f32);
@@ -247,6 +294,77 @@ mod tests {
         let v = ViewTransform::default();
         let mp = v.max_pan(400, 300, 800, 800);
         assert_eq!(mp, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn zoom_about_keeps_anchor_point_fixed() {
+        // A large image that overflows the screen on both axes (Original mode),
+        // so pan is free and the anchored point can be held exactly.
+        let mut v = ViewTransform {
+            mode: ScaleMode::Original,
+            ..Default::default()
+        };
+        let (iw, ih, sw, sh) = (2000, 2000, 800, 800);
+        let anchor = [600.0, 300.0];
+
+        let p0 = v.placement(iw, ih, sw, sh);
+        let (u0, w0) = ((anchor[0] - p0.x) / p0.w, (anchor[1] - p0.y) / p0.h);
+
+        v.zoom_about(2.0, anchor, iw, ih, sw, sh);
+        assert!(approx(v.zoom, 2.0), "zoom applied: {}", v.zoom);
+
+        let p1 = v.placement(iw, ih, sw, sh);
+        let (u1, w1) = ((anchor[0] - p1.x) / p1.w, (anchor[1] - p1.y) / p1.h);
+        assert!(
+            approx(u0, u1) && approx(w0, w1),
+            "anchor drifted: ({u0},{w0}) -> ({u1},{w1})"
+        );
+    }
+
+    #[test]
+    fn zoom_about_center_stays_centered() {
+        let mut v = ViewTransform {
+            mode: ScaleMode::Original,
+            ..Default::default()
+        };
+        let (iw, ih, sw, sh) = (2000, 2000, 800, 800);
+        v.zoom_about(2.0, [400.0, 400.0], iw, ih, sw, sh); // exact screen center
+        assert!(
+            approx(v.pan[0], 0.0) && approx(v.pan[1], 0.0),
+            "centered zoom should not pan: {:?}",
+            v.pan
+        );
+    }
+
+    #[test]
+    fn zoom_about_corner_respects_pan_clamp() {
+        // Fit a square image to a square screen (fills exactly), then zoom 4x
+        // about the top-left corner. The resulting pan must stay within bounds
+        // and the image must still cover the screen (no letterbox gap).
+        let mut v = ViewTransform::default();
+        let (iw, ih, sw, sh) = (1000, 1000, 800, 800);
+        v.zoom_about(4.0, [0.0, 0.0], iw, ih, sw, sh);
+        let mp = v.max_pan(iw, ih, sw, sh);
+        assert!(
+            v.pan[0].abs() <= mp[0] + 1e-3 && v.pan[1].abs() <= mp[1] + 1e-3,
+            "pan {:?} exceeds max {mp:?}",
+            v.pan
+        );
+        let p = v.placement(iw, ih, sw, sh);
+        assert!(
+            p.x <= 0.0 && p.x + p.w >= sw as f32 && p.y <= 0.0 && p.y + p.h >= sh as f32,
+            "must still cover the screen: {p:?}"
+        );
+    }
+
+    #[test]
+    fn zoom_about_is_clamped_to_max() {
+        let mut v = ViewTransform {
+            mode: ScaleMode::Original,
+            ..Default::default()
+        };
+        v.zoom_about(1000.0, [400.0, 400.0], 100, 100, 800, 800);
+        assert!(approx(v.zoom, MAX_ZOOM), "clamped to MAX: {}", v.zoom);
     }
 
     #[test]

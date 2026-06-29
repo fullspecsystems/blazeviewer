@@ -28,6 +28,7 @@ pub mod ids {
     pub const SETTINGS: &str = "settings";
     pub const EXIT: &str = "exit";
 
+    pub const UNDO: &str = "undo";
     pub const COPY: &str = "copy";
     pub const COPY_PATH: &str = "copy_path";
 
@@ -71,6 +72,7 @@ pub enum MenuAction {
     DeletePermanently,
     Settings,
     Exit,
+    Undo,
     Copy,
     CopyPath,
     Fit,
@@ -108,6 +110,7 @@ impl MenuAction {
             MenuAction::DeletePermanently => Action::DeletePermanent,
             MenuAction::Settings => Action::Settings,
             MenuAction::Exit => Action::Quit,
+            MenuAction::Undo => Action::Undo,
             MenuAction::Copy => Action::Copy,
             MenuAction::CopyPath => Action::CopyPath,
             MenuAction::Fit => Action::ScaleFit,
@@ -146,6 +149,7 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         DELETE_PERMANENTLY => MenuAction::DeletePermanently,
         SETTINGS => MenuAction::Settings,
         EXIT => MenuAction::Exit,
+        UNDO => MenuAction::Undo,
         COPY => MenuAction::Copy,
         COPY_PATH => MenuAction::CopyPath,
         FIT => MenuAction::Fit,
@@ -201,6 +205,10 @@ pub struct ViewChecks {
     pub recursive: CheckMenuItem,
     pub fullscreen: CheckMenuItem,
     pub slideshow: CheckMenuItem,
+    /// The two info overlays are mutually exclusive toggles (basic vs. full EXIF);
+    /// exactly one — or neither — is checked, mirroring `App::info`.
+    pub info: CheckMenuItem,
+    pub full_exif: CheckMenuItem,
 }
 
 /// Everything [`build_menu`] hands back: the menu itself plus the item handles whose
@@ -208,7 +216,26 @@ pub struct ViewChecks {
 pub struct BuiltMenu {
     pub menu: Menu,
     pub save_rotation: MenuItem,
+    /// The Edit ▸ Undo item. Returned so the app can flip its enabled state + title
+    /// ("Undo" → "Undo Save Rotation") to mirror the top of the undo stack (see
+    /// `App::refresh_undo_menu_item`). Starts disabled (nothing to undo at launch).
+    pub undo: MenuItem,
     pub checks: ViewChecks,
+    /// macOS-only: the **Window** submenu (Minimize ⌘M / Zoom / Bring All to Front).
+    /// Returned so the app can call [`Submenu::set_as_windows_menu_for_nsapp`] on it —
+    /// which muda requires be done *after* `Menu::init_for_nsapp` — to make macOS
+    /// auto-populate the standard window list. There's no Window menu on Windows.
+    #[cfg(target_os = "macos")]
+    pub window: Submenu,
+    /// macOS-only: the native (Spaces) fullscreen item. Returned so the app can flip
+    /// its title between "Enter Full Screen" and "Exit Full Screen" to mirror the live
+    /// native-fullscreen state (the Mac-standard behavior — no checkmark; see
+    /// `App::refresh_native_fullscreen_label`). macOS also auto-injects its own
+    /// Globe/Fn+F fullscreen item, which we can't suppress (muda gives no access to the
+    /// raw `NSMenuItem` to wire the native `toggleFullScreen:` action), so this carries
+    /// the ⌃⌘F shortcut + the label management the auto item won't do for us.
+    #[cfg(target_os = "macos")]
+    pub native_fullscreen: MenuItem,
 }
 
 /// Build the full menu bar. Best-effort: a failed `append` (rare) is logged and the
@@ -242,9 +269,14 @@ pub fn build_menu() -> BuiltMenu {
         &item(ids::EXIT, "Exit\tEsc"),
     ]);
 
-    // Edit: clipboard ops (Windows convention — Copy lives under Edit, not File).
+    // Edit: undo (top, the convention) + clipboard ops (Windows convention — Copy lives
+    // under Edit, not File). Undo starts disabled; the app toggles its label + enabled
+    // state to mirror the undo stack (see `App::refresh_undo_menu_item`).
+    let undo = MenuItem::with_id(ids::UNDO, "Undo\tCtrl+Z", false, None);
     let edit = Submenu::new("&Edit", true);
     let _ = edit.append_items(&[
+        &undo,
+        &PredefinedMenuItem::separator(),
         &item(ids::COPY, "Copy\tCtrl+C"),
         &item(ids::COPY_PATH, "Copy File Path\tShift+Ctrl+C"),
     ]);
@@ -257,6 +289,8 @@ pub fn build_menu() -> BuiltMenu {
     let recursive = check_item(ids::RECURSIVE, "Recursive (This Folder)\tCtrl+R");
     let fullscreen = check_item(ids::FULLSCREEN, "Fullscreen\tF11");
     let slideshow = check_item(ids::SLIDESHOW, "Slideshow\tS");
+    let info = check_item(ids::INFO, "Show Image Info\tI");
+    let full_exif = check_item(ids::FULL_EXIF, "Show All EXIF Info\tShift+I");
 
     let view = Submenu::new("&View", true);
     let _ = view.append_items(&[
@@ -273,8 +307,8 @@ pub fn build_menu() -> BuiltMenu {
         &item(ids::SLIDESHOW_FASTER, "Slideshow Faster\t["),
         &item(ids::SLIDESHOW_SLOWER, "Slideshow Slower\t]"),
         &sep(),
-        &item(ids::INFO, "Info Panel\tI"),
-        &item(ids::FULL_EXIF, "Full EXIF\tShift+I"),
+        &info,
+        &full_exif,
     ]);
 
     let image = Submenu::new("&Image", true);
@@ -302,6 +336,7 @@ pub fn build_menu() -> BuiltMenu {
     BuiltMenu {
         menu,
         save_rotation,
+        undo,
         checks: ViewChecks {
             fit,
             fill,
@@ -309,6 +344,8 @@ pub fn build_menu() -> BuiltMenu {
             recursive,
             fullscreen,
             slideshow,
+            info,
+            full_exif,
         },
     }
 }
@@ -371,12 +408,31 @@ pub fn build_menu() -> BuiltMenu {
         &sep(),
         &save_rotation,
         &sep(),
-        &item(ids::DELETE, "Delete"),
-        &item(ids::DELETE_PERMANENTLY, "Delete Permanently"),
+        // macOS Finder idioms: Move to Trash = ⌘⌫, Delete Immediately = ⌥⌘⌫ (NOT ⇧⌘⌫,
+        // which Finder maps to *Empty Trash*). These are ⌘-chords, so NSMenu owns them
+        // with no double-fire against the keymap's bare Del / Shift+Del (`KeyChord.logo`).
+        // `Code::Backspace` renders as the ⌫ glyph (muda → key-equivalent `\u{0008}`).
+        &cmd_item(ids::DELETE, "Move to Trash", CMD, Code::Backspace),
+        &cmd_item(
+            ids::DELETE_PERMANENTLY,
+            "Delete Immediately…",
+            CMD.union(Modifiers::ALT),
+            Code::Backspace,
+        ),
     ]);
 
+    // Undo (⌘Z) at the top of Edit, per macOS convention. Starts disabled; the app
+    // flips its label + enabled state to mirror the undo stack.
+    let undo = MenuItem::with_id(
+        ids::UNDO,
+        "Undo",
+        false,
+        Some(Accelerator::new(Some(CMD), Code::KeyZ)),
+    );
     let edit = Submenu::new("Edit", true);
     let _ = edit.append_items(&[
+        &undo,
+        &sep(),
         &cmd_item(ids::COPY, "Copy", CMD, Code::KeyC),
         &cmd_item(
             ids::COPY_PATH,
@@ -392,6 +448,16 @@ pub fn build_menu() -> BuiltMenu {
     let recursive = check_item(ids::RECURSIVE, "Recursive (This Folder)");
     let fullscreen = check_item(ids::FULLSCREEN, "Fullscreen");
     let slideshow = check_item(ids::SLIDESHOW, "Slideshow");
+    let info = check_item(ids::INFO, "Show Image Info");
+    let full_exif = check_item(ids::FULL_EXIF, "Show All EXIF Info");
+    // Native (Spaces) fullscreen. Its title flips to "Exit Full Screen" while engaged
+    // (Mac convention — no checkmark), driven by `App::refresh_native_fullscreen_label`.
+    let native_fullscreen = cmd_item(
+        ids::NATIVE_FULLSCREEN,
+        "Enter Full Screen",
+        CMD.union(Modifiers::CONTROL),
+        Code::KeyF,
+    );
 
     let view = Submenu::new("View", true);
     let _ = view.append_items(&[
@@ -404,22 +470,19 @@ pub fn build_menu() -> BuiltMenu {
         &sep(),
         // Two fullscreen modes (owner decision): our borderless speed mode (checkable,
         // bound to F / ⌥⏎ / F11 in the keymap), and the macOS-native Spaces fullscreen
-        // (⌃⌘F / Globe+F) for those who want it. `SUPER` maps to ⌘ (muda's `META` does
-        // not — see modifier_mask), so this is a real ⌃⌘F.
+        // (⌃⌘F) for those who want it. `SUPER` maps to ⌘ (muda's `META` does not — see
+        // modifier_mask), so this is a real ⌃⌘F. macOS *also* auto-injects its own
+        // Globe/Fn+F fullscreen item at the menu's end (a duplicate we can't suppress
+        // via muda); ours is the one carrying ⌃⌘F + the Enter/Exit label management.
         &fullscreen,
-        &cmd_item(
-            ids::NATIVE_FULLSCREEN,
-            "Enter Full Screen",
-            CMD.union(Modifiers::CONTROL),
-            Code::KeyF,
-        ),
+        &native_fullscreen,
         &recursive,
         &slideshow,
         &item(ids::SLIDESHOW_FASTER, "Slideshow Faster"),
         &item(ids::SLIDESHOW_SLOWER, "Slideshow Slower"),
         &sep(),
-        &item(ids::INFO, "Info Panel"),
-        &item(ids::FULL_EXIF, "Full EXIF"),
+        &info,
+        &full_exif,
     ]);
 
     let image = Submenu::new("Image", true);
@@ -433,10 +496,25 @@ pub fn build_menu() -> BuiltMenu {
         &item(ids::ROTATE_LEFT, "Rotate Left"),
     ]);
 
+    // Standard macOS Window menu. The predefined items carry their native labels,
+    // selectors and ⌘-equivalents for free: Minimize = ⌘M (`performMiniaturize:`),
+    // Zoom (`performZoom:`), Bring All to Front (`arrangeInFront:`). Marking it the
+    // app's Window menu (`set_as_windows_menu_for_nsapp`, done in `apply_menu_for_mode`
+    // after `init_for_nsapp`) lets macOS append the live window list below these.
+    let window = Submenu::new("Window", true);
+    let _ = window.append_items(&[
+        &PredefinedMenuItem::minimize(None),
+        &PredefinedMenuItem::maximize(None),
+        &sep(),
+        &PredefinedMenuItem::bring_all_to_front(None),
+    ]);
+
     let help = Submenu::new("Help", true);
     let _ = help.append_items(&[&item(ids::HELP, "Keyboard Shortcuts")]);
 
-    for sub in [&app, &file, &edit, &view, &image, &help] {
+    // App, File, Edit, View, Image, Window, Help — the conventional macOS order
+    // (Window directly before Help).
+    for sub in [&app, &file, &edit, &view, &image, &window, &help] {
         if let Err(e) = menu.append(sub) {
             eprintln!("menu: failed to append submenu: {e}");
         }
@@ -444,6 +522,7 @@ pub fn build_menu() -> BuiltMenu {
     BuiltMenu {
         menu,
         save_rotation,
+        undo,
         checks: ViewChecks {
             fit,
             fill,
@@ -451,7 +530,11 @@ pub fn build_menu() -> BuiltMenu {
             recursive,
             fullscreen,
             slideshow,
+            info,
+            full_exif,
         },
+        window,
+        native_fullscreen,
     }
 }
 
@@ -475,6 +558,7 @@ mod tests {
         );
         assert_eq!(action_for(ids::SETTINGS), Some(MenuAction::Settings));
         assert_eq!(action_for(ids::EXIT), Some(MenuAction::Exit));
+        assert_eq!(action_for(ids::UNDO), Some(MenuAction::Undo));
         assert_eq!(action_for(ids::COPY), Some(MenuAction::Copy));
         assert_eq!(action_for(ids::FIT), Some(MenuAction::Fit));
         assert_eq!(action_for(ids::FILL), Some(MenuAction::Fill));

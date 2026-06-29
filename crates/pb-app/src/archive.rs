@@ -38,7 +38,8 @@ const APP_RESERVATIONS: u64 = 1_500_000_000 + 512 * 1024 * 1024;
 /// live-viewing per-decode `bytes()` clones (decode concurrency × the largest entry).
 /// 512 MB comfortably covers the measured overhead.
 const TRANSIENT_MARGIN: u64 = 512 * 1024 * 1024;
-/// Fallback when physical RAM can't be queried (non-Windows, or the query fails).
+/// Fallback when physical RAM can't be queried (an unsupported platform, or the query
+/// fails). Windows + macOS both query it for real; this covers everything else.
 const ASSUMED_RAM: u64 = 8 * 1024 * 1024 * 1024;
 
 /// Available physical RAM in bytes, queried now. `None` if it can't be determined.
@@ -52,8 +53,51 @@ pub fn available_physical_ram() -> Option<u64> {
     Some(status.ullAvailPhys)
 }
 
-/// Available physical RAM in bytes (non-Windows stub until the macOS port).
-#[cfg(not(windows))]
+/// Available physical RAM in bytes — the macOS analog of Windows' `ullAvailPhys`:
+/// pages the kernel can hand out without swapping (free + inactive + speculative),
+/// times the page size, via the Mach `host_statistics64(HOST_VM_INFO64)`. `None` on an
+/// unexpected Mach failure (then [`ram_budget`] falls back to `ASSUMED_RAM`).
+#[cfg(target_os = "macos")]
+// `mach_host_self` is deprecated in libc 0.2 in favor of the `mach2` crate; we keep the
+// (still-functional) libc binding rather than add a whole dependency for one host-port
+// call. Scoped to this fn so real deprecations elsewhere still surface under `-D warnings`.
+#[allow(deprecated)]
+pub fn available_physical_ram() -> Option<u64> {
+    // SAFETY: `host_statistics64` fills the zeroed `vm_statistics64` and returns
+    // `KERN_SUCCESS` only when it wrote `count` `integer_t`s — we pass exactly the
+    // struct's size in those units, the count the kernel expects for this flavor.
+    // The host-port send right from `mach_host_self()` is a special, process-lifetime
+    // port; libc 0.2 doesn't expose `mach_port_deallocate`, and not balancing one
+    // reference per (rare) archive open is a negligible, process-bounded non-leak.
+    unsafe {
+        let mut stats: libc::vm_statistics64 = std::mem::zeroed();
+        let mut count = (std::mem::size_of::<libc::vm_statistics64>()
+            / std::mem::size_of::<libc::integer_t>())
+            as libc::mach_msg_type_number_t;
+        let kr = libc::host_statistics64(
+            libc::mach_host_self(),
+            libc::HOST_VM_INFO64,
+            &mut stats as *mut libc::vm_statistics64 as libc::host_info64_t,
+            &mut count,
+        );
+        if kr != libc::KERN_SUCCESS {
+            return None;
+        }
+        let page = libc::sysconf(libc::_SC_PAGESIZE);
+        if page <= 0 {
+            return None;
+        }
+        // Reclaimable without swap. Skip `purgeable_count` (it can overlap the
+        // active/inactive tallies) to avoid over-counting → an over-generous budget.
+        let reclaimable = u64::from(stats.free_count)
+            + u64::from(stats.inactive_count)
+            + u64::from(stats.speculative_count);
+        Some(reclaimable.saturating_mul(page as u64))
+    }
+}
+
+/// Available physical RAM in bytes (stub on platforms without a query wired up).
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn available_physical_ram() -> Option<u64> {
     None
 }
@@ -216,6 +260,26 @@ mod tests {
     fn human_gb_is_one_decimal() {
         assert_eq!(human_gb(6_200_000_000), "6.2 GB");
         assert_eq!(human_gb(50_000_000), "50 MB");
+    }
+
+    // Exercises the real Mach FFI on macOS: it must not crash and must return a sane,
+    // page-aligned figure (the failure mode of hand-wired `host_statistics64` is a bad
+    // count/flavor → `None` or garbage, not a specific value, so the bounds are loose).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn available_physical_ram_is_sane_on_macos() {
+        let avail = available_physical_ram().expect("Mach host_statistics64 should succeed");
+        assert!(avail >= 16 * 1024 * 1024, "implausibly low: {avail}");
+        assert!(
+            avail < 100 * 1024 * 1024 * 1024 * 1024,
+            "implausibly high: {avail}"
+        );
+        // Page-aligned: the count is multiplied by the page size (16 KiB on Apple Silicon).
+        assert_eq!(
+            avail % 4096,
+            0,
+            "should be a whole number of pages: {avail}"
+        );
     }
 
     #[test]

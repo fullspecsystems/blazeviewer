@@ -348,6 +348,9 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         one(Action::SaveRotation, "Ctrl+S"),
         one(Action::Delete, "Delete"),
         one(Action::DeletePermanent, "Shift+Delete"),
+        // Undo the last reversible edit (currently a saved rotation). Ctrl+Z on Windows;
+        // on macOS the menu's ⌘Z accelerator drives it (this real-Control chord also works).
+        one(Action::Undo, "Ctrl+Z"),
         one(Action::OpenFile, "O"),
         one(Action::OpenFolder, "Shift+O"),
         one(Action::Info, "I"),

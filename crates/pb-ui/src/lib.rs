@@ -253,17 +253,21 @@ pub fn apply_to_ui(ui: &mut egui::Ui, dark: bool) {
     *ui.style_mut() = style(dark);
 }
 
-/// Load the OS UI font (Segoe UI on Windows) as the proportional family, once, so the
-/// chrome reads as a native Windows app rather than egui's default face. Falls back to
-/// egui's bundled font silently if the file can't be read (e.g. non-Windows). This is
-/// a read of a system font file — never a photo, never a write — so it's outside the
-/// no-trace view path.
+/// Load the OS UI font (Segoe UI on Windows, SF Pro on macOS) as the proportional
+/// family, once, so the chrome reads as a native app rather than egui's default face.
+/// Falls back to egui's bundled font silently if no file can be read. This is a read of
+/// a system font file — never a photo, never a write — so it's outside the no-trace
+/// view path. The lists carry both platforms' paths (the absent one is just skipped),
+/// keeping this crate free of platform `cfg`s.
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
     // Regular native UI face → front of the proportional family (preferred over egui's
     // bundled default; the default's fallbacks, e.g. emoji, stay behind it).
-    if let Some(bytes) = read_first(&[r"C:\Windows\Fonts\segoeui.ttf"]) {
+    if let Some(bytes) = read_first(&[
+        "/System/Library/Fonts/SFNS.ttf", // macOS: SF Pro (variable; default = Regular)
+        r"C:\Windows\Fonts\segoeui.ttf",  // Windows: Segoe UI
+    ]) {
         fonts
             .font_data
             .insert("system-ui".to_owned(), egui::FontData::from_owned(bytes));
@@ -277,12 +281,18 @@ pub fn install_fonts(ctx: &egui::Context) {
     // Semibold face for headers (see `section_label`). Register the `SEMIBOLD` family
     // pointing at it, with the proportional stack behind as fallback — so if the file is
     // missing, headers still render (in the regular face) rather than failing to resolve.
+    // macOS ships no static SF semibold, so unless Apple's SF Pro family is installed the
+    // headers fall back to SF Pro Regular (one native typeface, just no extra weight).
     let proportional = fonts
         .families
         .get(&FontFamily::Proportional)
         .cloned()
         .unwrap_or_default();
-    let semibold_stack = if let Some(bytes) = read_first(&[r"C:\Windows\Fonts\seguisb.ttf"]) {
+    let semibold_stack = if let Some(bytes) = read_first(&[
+        "/Library/Fonts/SF-Pro-Text-Semibold.otf", // macOS: real SF semibold if installed
+        r"C:\Windows\Fonts\seguisb.ttf",           // Windows: Segoe UI Semibold
+        "/System/Library/Fonts/SFNS.ttf",          // macOS fallback: SF Pro (Regular)
+    ]) {
         fonts.font_data.insert(
             "system-ui-semibold".to_owned(),
             egui::FontData::from_owned(bytes),

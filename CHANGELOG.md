@@ -8,11 +8,45 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
+- **Trackpad gestures** (macOS): pinch to zoom and two-finger swipe to pan, both
+  centered on the pointer — a pinch zooms toward wherever the cursor is. A two-finger
+  double-tap toggles 100% (the same as pressing `0`), and a mouse wheel zooms about the
+  cursor. These drive the same zoom/pan as the keyboard, so they share its limits and
+  reset framing on each new photo.
+- **Undo** (Ctrl+Z, ⌘Z on macOS, or Edit ▸ Undo) reverses a saved rotation, restoring
+  the file's previous EXIF orientation. The Edit menu names what will be undone (e.g.
+  "Undo Save Rotation") and is greyed out when there's nothing to undo. Multiple saves
+  can be undone in turn.
 - Fullscreen now also toggles with the **F** key, alongside F11 and Alt+Enter — a
   memorable, discoverable shortcut for the app's most-used view toggle.
 - **Copy File Path** (Shift+Ctrl+C, or Edit ▸ Copy File Path) copies the current
   photo's full path to the clipboard as text — handy for pasting a filename into a
   message or terminal. (Archive entries copy their entry name.)
+- macOS: a native **Window menu** — Minimize (⌘M), Zoom, and Bring All to Front,
+  with the standard live window list — so the menu bar feels like a real Mac app.
+- macOS: the title bar now shows the current photo's **proxy icon** (in windowed
+  mode) — ⌘-click it for the enclosing-folder path, or drag it into Finder, Mail, or
+  Messages to move or attach the file, just like a native document window.
+
+### Changed
+- The View menu's info items are now clearer: **Info Panel** → **Show Image Info**
+  and **Full EXIF** → **Show All EXIF Info**.
+- macOS: the **Enter Full Screen** menu item (⌃⌘F) now flips to **Exit Full Screen**
+  while in full screen, matching standard Mac apps — and stays correct whether you
+  toggle from the menu, ⌃⌘F, the green window button, or a Mission Control gesture.
+- macOS: the File menu's delete items now use Finder's idioms — **Move to Trash (⌘⌫)**
+  and **Delete Immediately… (⌥⌘⌫)** — with the shortcuts shown in the menu. (The Del /
+  Shift+Del keys still work too.) ⌥⌘⌫ is used rather than ⇧⌘⌫, which Finder reserves for
+  Empty Trash.
+- macOS: on-screen text overlays (the toasts and the info / EXIF panels) now render
+  in **SF Pro**, the macOS system font, instead of Arial — a cleaner, native look.
+- macOS: the 7z-archive memory check now reads the machine's actual available RAM
+  instead of assuming a fixed 8 GB, so the "archive too large to open safely" guard
+  is accurate on every Mac.
+
+### Fixed
+- The View menu's **Show Image Info** and **Show All EXIF Info** items now show a
+  checkmark when their panel is on, so the menu reflects what's actually displayed.
 
 ## [0.1.0-beta.3] - 2026-06-29
 

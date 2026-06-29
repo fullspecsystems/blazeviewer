@@ -67,6 +67,30 @@ unsafe fn screen_max_edr(ns_view: *mut AnyObject) -> f32 {
     (v as f32).max(1.0)
 }
 
+/// Whether the window is currently in macOS **native (Spaces) fullscreen**, read from
+/// the live `NSWindow.styleMask` (`NSWindowStyleMaskFullScreen`). This reflects the OS
+/// truth however fullscreen was entered — our menu item, ⌃⌘F, the green title-bar
+/// button, or a Mission Control gesture. We can't use winit's `Window::fullscreen()`
+/// for this: in our borderless setup it tracks the *requested* mode and reads `None`
+/// even while `toggleFullScreen:` has us fullscreen, so polling it never flips the
+/// Enter/Exit label. `false` if the NSWindow can't be reached. Co-located here to reuse
+/// [`ns_view_of`] + the objc2 plumbing; must run on the main thread.
+pub fn window_is_fullscreen(window: &Window) -> bool {
+    let Some(ns_view) = ns_view_of(window) else {
+        return false;
+    };
+    // SAFETY: live NSView from the window handle; read NSWindow.styleMask, main thread.
+    unsafe {
+        let win: *mut AnyObject = msg_send![ns_view, window];
+        if win.is_null() {
+            return false;
+        }
+        let mask: usize = msg_send![win, styleMask];
+        // NSWindowStyleMaskFullScreen = 1 << 14.
+        mask & (1 << 14) != 0
+    }
+}
+
 /// The window's current display EDR headroom — cheap (no layer poke). Used to notice
 /// when the window has moved to a display with different HDR capability.
 pub fn window_max_edr(window: &Window) -> f32 {

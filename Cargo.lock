@@ -3473,6 +3473,7 @@ dependencies = [
  "egui-winit",
  "fontdue",
  "half",
+ "libc",
  "little_exif",
  "muda",
  "objc2 0.6.4",

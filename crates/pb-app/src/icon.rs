@@ -27,6 +27,8 @@ pub mod assets {
     pub const RECYCLE: &str = include_str!("../icons/bin-recycle.svg");
     /// Trash — the Delete-Permanently (`Shift+Del`) toast.
     pub const TRASH: &str = include_str!("../icons/trash.svg");
+    /// U-turn arrow — the Undo (`Ctrl+Z` / Edit ▸ Undo) toast.
+    pub const UNDO: &str = include_str!("../icons/arrow-u-turn-up-left.svg");
     // Status icons for the dialogs (lock/warning/trash) now live in the `pb-ui` icon
     // system (white-rasterized + tinted), not here — this set is only the HUD toasts.
 }

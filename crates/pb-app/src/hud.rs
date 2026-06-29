@@ -1,8 +1,9 @@
 //! The info-panel text layer.
 //!
 //! Rasterizes overlay text into a translucent panel using the OS UI font (Segoe
-//! UI on Windows, loaded at runtime — not bundled), plus its bold face for
-//! emphasis. The result is an RGBA8 bitmap the renderer draws as a single
+//! UI on Windows, SF Pro on macOS — loaded at runtime, not bundled), plus a bolder
+//! face for emphasis (synthesized from SF Pro on macOS; see [`embolden_glyph`]).
+//! The result is an RGBA8 bitmap the renderer draws as a single
 //! alpha-blended quad, so it's rebuilt only when the content changes, never per
 //! frame. Two layouts: a one-line panel ([`Hud::render_panel`], the basic `i`
 //! overlay) and a two-column table ([`Hud::render_table`], the full-EXIF "nerd"
@@ -47,12 +48,28 @@ enum Weight {
     Bold,
 }
 
+/// Faux-bold smear (horizontal dilation) as a fraction of the text px height, applied
+/// only when no *real* heavier face is available: modern macOS ships SF Pro purely as a
+/// variable font and fontdue can't instance its weight axis, so we synthesize emphasis
+/// from SF Pro to keep the HUD one typeface. Mirrors the outline-thickness scale
+/// (`px * 0.06`); 0 on Windows/Linux where real Segoe/DejaVu semibold+bold load.
+const SEMIBOLD_SMEAR: f32 = 0.030;
+const BOLD_SMEAR: f32 = 0.060;
+
+/// A loaded heavier face plus how much faux-bold to add on top of it: `0.0` for a real
+/// semibold/bold file (Segoe, DejaVu, an installed static SF Pro weight), `> 0` when the
+/// face is actually the *regular* typeface standing in for a missing heavier weight.
+struct Face {
+    font: fontdue::Font,
+    embolden: f32,
+}
+
 pub struct Hud {
     font: fontdue::Font,
     /// The semibold face (label column emphasis); falls back to bold then regular.
-    semibold: Option<fontdue::Font>,
+    semibold: Option<Face>,
     /// The bold face (filename / titles); falls back to semibold then regular.
-    bold: Option<fontdue::Font>,
+    bold: Option<Face>,
 }
 
 /// One laid-out glyph: its metrics, coverage bitmap, and pen x-offset on the line.
@@ -62,13 +79,32 @@ impl Hud {
     /// Load the system UI font (and its semibold/bold faces if present). Returns
     /// `None` if no regular font is found, in which case the overlay is disabled.
     pub fn load() -> Option<Hud> {
-        let load_face = |paths: &[PathBuf]| {
-            first_readable(paths)
-                .and_then(|b| fontdue::Font::from_bytes(b, fontdue::FontSettings::default()).ok())
+        // First readable + parseable candidate wins. Each heavier candidate carries the
+        // faux-bold amount to apply if *it* is the one that loads (0 for a real heavier
+        // face, > 0 when SF Pro stands in for a missing static weight — see `Face`).
+        let load_font = |faces: &[(PathBuf, f32)]| -> Option<fontdue::Font> {
+            faces.iter().find_map(|(p, _)| {
+                std::fs::read(p).ok().and_then(|b| {
+                    fontdue::Font::from_bytes(b, fontdue::FontSettings::default()).ok()
+                })
+            })
         };
-        let font = load_face(&regular_font_paths())?;
-        let semibold = load_face(&semibold_font_paths());
-        let bold = load_face(&bold_font_paths());
+        let load_face = |faces: &[(PathBuf, f32)]| -> Option<Face> {
+            faces.iter().find_map(|(p, embolden)| {
+                std::fs::read(p)
+                    .ok()
+                    .and_then(|b| {
+                        fontdue::Font::from_bytes(b, fontdue::FontSettings::default()).ok()
+                    })
+                    .map(|font| Face {
+                        font,
+                        embolden: *embolden,
+                    })
+            })
+        };
+        let font = load_font(&regular_font_faces())?;
+        let semibold = load_face(&semibold_font_faces());
+        let bold = load_face(&bold_font_faces());
         Some(Hud {
             font,
             semibold,
@@ -76,20 +112,24 @@ impl Hud {
         })
     }
 
-    /// The face for a given weight, falling back gracefully when a face is absent.
-    fn font_for(&self, weight: Weight) -> &fontdue::Font {
+    /// The face for a given weight plus the faux-bold smear to apply, falling back
+    /// gracefully when a heavier face is absent (→ the regular face with a synthetic
+    /// smear, so emphasis survives even on a system with only one weight).
+    fn font_for(&self, weight: Weight) -> (&fontdue::Font, f32) {
         match weight {
-            Weight::Regular => &self.font,
+            Weight::Regular => (&self.font, 0.0),
             Weight::Semibold => self
                 .semibold
                 .as_ref()
                 .or(self.bold.as_ref())
-                .unwrap_or(&self.font),
+                .map(|f| (&f.font, f.embolden))
+                .unwrap_or((&self.font, SEMIBOLD_SMEAR)),
             Weight::Bold => self
                 .bold
                 .as_ref()
                 .or(self.semibold.as_ref())
-                .unwrap_or(&self.font),
+                .map(|f| (&f.font, f.embolden))
+                .unwrap_or((&self.font, BOLD_SMEAR)),
         }
     }
 
@@ -271,11 +311,22 @@ impl Hud {
     /// Rasterize `text` into glyphs with their pen offsets; returns them plus the
     /// total advance width.
     fn layout(&self, text: &str, px: f32, weight: Weight) -> (Vec<Glyph>, f32) {
-        let font = self.font_for(weight);
+        let (font, embolden) = self.font_for(weight);
+        // Faux-bold width in whole px (≥1 when synthesizing), 0 for a real heavier face.
+        let extra = if embolden > 0.0 {
+            (px * embolden).round().max(1.0) as usize
+        } else {
+            0
+        };
         let mut glyphs = Vec::new();
         let mut pen = 0.0f32;
         for ch in text.chars() {
             let (m, bitmap) = font.rasterize(ch, px);
+            let (m, bitmap) = if extra > 0 {
+                embolden_glyph(&m, &bitmap, extra)
+            } else {
+                (m, bitmap)
+            };
             glyphs.push((m, bitmap, pen));
             pen += m.advance_width;
         }
@@ -569,12 +620,39 @@ pub fn format_thousands(n: u64) -> String {
     String::from_utf8(out).expect("digits and commas are ASCII")
 }
 
-fn first_readable(paths: &[PathBuf]) -> Option<Vec<u8>> {
-    paths.iter().find_map(|p| std::fs::read(p).ok())
+/// Faux-bold a coverage bitmap by horizontal dilation — `out[x] = max(src[x-extra..=x])`
+/// — widening the glyph `extra` px to the right (advance bumped to match, so spacing
+/// holds). Done at layout time, before the outline pass, so the legibility halo wraps
+/// the bolder shape. Used only when synthesizing a heavier weight from the regular face
+/// (see [`Face`] / [`SEMIBOLD_SMEAR`]). A real semibold/bold face passes `extra == 0`.
+fn embolden_glyph(
+    m: &fontdue::Metrics,
+    bitmap: &[u8],
+    extra: usize,
+) -> (fontdue::Metrics, Vec<u8>) {
+    if extra == 0 || m.width == 0 || m.height == 0 {
+        return (*m, bitmap.to_vec());
+    }
+    let new_w = m.width + extra;
+    let mut out = vec![0u8; new_w * m.height];
+    for y in 0..m.height {
+        let src = &bitmap[y * m.width..(y + 1) * m.width];
+        let dst = &mut out[y * new_w..(y + 1) * new_w];
+        for (x, d) in dst.iter_mut().enumerate() {
+            // Max of the source over the window [x-extra, x], clamped to the source row.
+            let lo = x.saturating_sub(extra);
+            let hi = x.min(m.width - 1);
+            *d = src[lo..=hi].iter().copied().max().unwrap_or(0);
+        }
+    }
+    let mut nm = *m;
+    nm.width = new_w;
+    nm.advance_width += extra as f32;
+    (nm, out)
 }
 
 /// The Windows fonts directory (from `WINDIR`/`SystemRoot`). Windows-only: macOS and
-/// Linux use absolute font paths directly in the `*_font_paths()` helpers below, so
+/// Linux use absolute font paths directly in the `*_font_faces()` helpers below, so
 /// this would be dead code there.
 #[cfg(windows)]
 fn fonts_dir() -> PathBuf {
@@ -584,73 +662,93 @@ fn fonts_dir() -> PathBuf {
     PathBuf::from(windir).join("Fonts")
 }
 
-fn regular_font_paths() -> Vec<PathBuf> {
+/// Regular-face candidates as `(path, faux-bold)` — always `0.0` for the body weight.
+fn regular_font_faces() -> Vec<(PathBuf, f32)> {
     let mut v = Vec::new();
     #[cfg(windows)]
     {
         let f = fonts_dir();
-        v.push(f.join("segoeui.ttf"));
-        v.push(f.join("arial.ttf"));
+        v.push((f.join("segoeui.ttf"), 0.0));
+        v.push((f.join("arial.ttf"), 0.0));
     }
     #[cfg(target_os = "macos")]
     {
-        v.push(PathBuf::from("/Library/Fonts/Arial.ttf"));
-        v.push(PathBuf::from(
-            "/System/Library/Fonts/Supplemental/Arial.ttf",
+        // SF Pro — the macOS system UI font (variable; ships on every modern macOS).
+        v.push((PathBuf::from("/System/Library/Fonts/SFNS.ttf"), 0.0));
+        v.push((
+            PathBuf::from("/System/Library/Fonts/Supplemental/Arial.ttf"),
+            0.0,
         ));
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        v.push(PathBuf::from(
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        v.push((
+            PathBuf::from("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+            0.0,
         ));
-        v.push(PathBuf::from("/usr/share/fonts/TTF/DejaVuSans.ttf"));
+        v.push((PathBuf::from("/usr/share/fonts/TTF/DejaVuSans.ttf"), 0.0));
     }
     v
 }
 
-fn semibold_font_paths() -> Vec<PathBuf> {
+/// Semibold candidates as `(path, faux-bold)`: a real face carries `0.0`; SF Pro stands
+/// in with [`SEMIBOLD_SMEAR`] because modern macOS ships no static SF semibold.
+fn semibold_font_faces() -> Vec<(PathBuf, f32)> {
     let mut v = Vec::new();
     #[cfg(windows)]
     {
         let f = fonts_dir();
-        v.push(f.join("seguisb.ttf")); // Segoe UI Semibold
-        v.push(f.join("segoeuib.ttf")); // fall back to bold
+        v.push((f.join("seguisb.ttf"), 0.0)); // Segoe UI Semibold (real)
+        v.push((f.join("segoeuib.ttf"), 0.0)); // fall back to real Bold
     }
     #[cfg(target_os = "macos")]
     {
-        v.push(PathBuf::from("/System/Library/Fonts/SFNSText-Semibold.otf"));
+        // Prefer a real static SF Pro Text Semibold if a dev/user installed Apple's SF
+        // Pro family; otherwise synthesize semibold from the variable SF Pro.
+        v.push((
+            PathBuf::from("/Library/Fonts/SF-Pro-Text-Semibold.otf"),
+            0.0,
+        ));
+        v.push((
+            PathBuf::from("/System/Library/Fonts/SFNS.ttf"),
+            SEMIBOLD_SMEAR,
+        ));
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        v.push(PathBuf::from(
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        v.push((
+            PathBuf::from("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+            0.0,
         ));
     }
     v
 }
 
-fn bold_font_paths() -> Vec<PathBuf> {
+/// Bold candidates as `(path, faux-bold)`: a real face carries `0.0`; SF Pro stands in
+/// with [`BOLD_SMEAR`] because modern macOS ships no static SF bold.
+fn bold_font_faces() -> Vec<(PathBuf, f32)> {
     let mut v = Vec::new();
     #[cfg(windows)]
     {
         let f = fonts_dir();
-        v.push(f.join("segoeuib.ttf"));
-        v.push(f.join("arialbd.ttf"));
+        v.push((f.join("segoeuib.ttf"), 0.0));
+        v.push((f.join("arialbd.ttf"), 0.0));
     }
     #[cfg(target_os = "macos")]
     {
-        v.push(PathBuf::from("/Library/Fonts/Arial Bold.ttf"));
-        v.push(PathBuf::from(
-            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-        ));
+        v.push((PathBuf::from("/Library/Fonts/SF-Pro-Text-Bold.otf"), 0.0));
+        v.push((PathBuf::from("/System/Library/Fonts/SFNS.ttf"), BOLD_SMEAR));
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        v.push(PathBuf::from(
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        v.push((
+            PathBuf::from("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+            0.0,
         ));
-        v.push(PathBuf::from("/usr/share/fonts/TTF/DejaVuSans-Bold.ttf"));
+        v.push((
+            PathBuf::from("/usr/share/fonts/TTF/DejaVuSans-Bold.ttf"),
+            0.0,
+        ));
     }
     v
 }
@@ -658,6 +756,67 @@ fn bold_font_paths() -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embolden_widens_glyph_and_advance() {
+        // A 1px-wide, 2-row vertical stroke at full coverage.
+        let m = fontdue::Metrics {
+            width: 1,
+            height: 2,
+            advance_width: 5.0,
+            ..Default::default()
+        };
+        let bitmap = vec![255u8, 255];
+        let (nm, out) = embolden_glyph(&m, &bitmap, 1);
+        assert_eq!(nm.width, 2, "grew 1px to the right");
+        assert_eq!(nm.advance_width, 6.0, "advance bumped to keep spacing");
+        // The source pixel smears into the new column → both columns now covered.
+        assert_eq!(out, vec![255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn embolden_zero_extra_is_identity() {
+        let m = fontdue::Metrics {
+            width: 2,
+            height: 1,
+            advance_width: 4.0,
+            ..Default::default()
+        };
+        let bitmap = vec![10u8, 20];
+        let (nm, out) = embolden_glyph(&m, &bitmap, 0);
+        assert_eq!(nm.width, 2);
+        assert_eq!(nm.advance_width, 4.0);
+        assert_eq!(out, bitmap);
+    }
+
+    #[test]
+    fn embolden_empty_glyph_is_safe() {
+        // A space-like glyph (no pixels): emboldening must not panic or allocate pixels.
+        let m = fontdue::Metrics {
+            width: 0,
+            height: 0,
+            advance_width: 7.0,
+            ..Default::default()
+        };
+        let (nm, out) = embolden_glyph(&m, &[], 2);
+        assert_eq!(nm.width, 0);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn embolden_takes_window_max_not_sum() {
+        // Coverage is a max over the window (no overflow/brightening past 255).
+        let m = fontdue::Metrics {
+            width: 3,
+            height: 1,
+            advance_width: 3.0,
+            ..Default::default()
+        };
+        let bitmap = vec![200u8, 0, 100];
+        let (_, out) = embolden_glyph(&m, &bitmap, 1);
+        // out[x] = max(src[x-1], src[x]); trailing col picks the last source pixel.
+        assert_eq!(out, vec![200, 200, 100, 100]);
+    }
 
     #[test]
     fn thousands_separates_every_three_digits() {
