@@ -47,6 +47,12 @@ pub const BUTTON_W: f32 = 96.0;
 /// number, so it jitters as the digit count changes (3.0 → 11.7 → 400); pinning a
 /// minimum wide enough for the widest value keeps it a fixed width. See [`slider`].
 pub const SLIDER_VALUE_W: f32 = 76.0;
+/// Section-header text size — a clear tier above the 14.5px card title, in the semibold
+/// face. See [`section_label`].
+pub const SECTION_SIZE: f32 = 17.0;
+/// The custom font family for semibold headers, registered by [`install_fonts`] (falls
+/// back to the regular face if Segoe UI Semibold is absent, so it always resolves).
+pub const SEMIBOLD: &str = "semibold";
 /// Interior padding of a text field — balanced on all four sides so it reads like the
 /// other 32px controls instead of a cramped single line.
 pub const FIELD_MARGIN: egui::Margin = egui::Margin {
@@ -233,26 +239,49 @@ pub fn apply_to_ui(ui: &mut egui::Ui, dark: bool) {
 /// a read of a system font file — never a photo, never a write — so it's outside the
 /// no-trace view path.
 pub fn install_fonts(ctx: &egui::Context) {
-    // Candidate native UI faces, best first.
-    const CANDIDATES: &[&str] = &[
-        r"C:\Windows\Fonts\segoeui.ttf",
-        r"C:\Windows\Fonts\SegoeUI.ttf",
-    ];
-    for path in CANDIDATES {
-        if let Ok(bytes) = std::fs::read(path) {
-            let mut fonts = egui::FontDefinitions::default();
-            fonts
-                .font_data
-                .insert("system-ui".to_owned(), egui::FontData::from_owned(bytes));
-            fonts
-                .families
-                .entry(FontFamily::Proportional)
-                .or_default()
-                .insert(0, "system-ui".to_owned());
-            ctx.set_fonts(fonts);
-            return;
-        }
+    let mut fonts = egui::FontDefinitions::default();
+
+    // Regular native UI face → front of the proportional family (preferred over egui's
+    // bundled default; the default's fallbacks, e.g. emoji, stay behind it).
+    if let Some(bytes) = read_first(&[r"C:\Windows\Fonts\segoeui.ttf"]) {
+        fonts
+            .font_data
+            .insert("system-ui".to_owned(), egui::FontData::from_owned(bytes));
+        fonts
+            .families
+            .entry(FontFamily::Proportional)
+            .or_default()
+            .insert(0, "system-ui".to_owned());
     }
+
+    // Semibold face for headers (see `section_label`). Register the `SEMIBOLD` family
+    // pointing at it, with the proportional stack behind as fallback — so if the file is
+    // missing, headers still render (in the regular face) rather than failing to resolve.
+    let proportional = fonts
+        .families
+        .get(&FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    let semibold_stack = if let Some(bytes) = read_first(&[r"C:\Windows\Fonts\seguisb.ttf"]) {
+        fonts
+            .font_data
+            .insert("system-ui-semibold".to_owned(), egui::FontData::from_owned(bytes));
+        let mut stack = vec!["system-ui-semibold".to_owned()];
+        stack.extend(proportional);
+        stack
+    } else {
+        proportional
+    };
+    fonts
+        .families
+        .insert(FontFamily::Name(SEMIBOLD.into()), semibold_stack);
+
+    ctx.set_fonts(fonts);
+}
+
+/// Read the first readable file from `paths` (a system font), if any.
+fn read_first(paths: &[&str]) -> Option<Vec<u8>> {
+    paths.iter().find_map(|p| std::fs::read(p).ok())
 }
 
 // ── Components ───────────────────────────────────────────────────────────────
@@ -260,7 +289,11 @@ pub fn install_fonts(ctx: &egui::Context) {
 /// A section label above a group of cards (e.g. "Navigation feel").
 pub fn section_label(ui: &mut egui::Ui, p: &Palette, text: &str) {
     ui.add_space(SPACE_4);
-    ui.label(egui::RichText::new(text).size(13.5).strong().color(p.text));
+    ui.label(
+        egui::RichText::new(text)
+            .font(FontId::new(SECTION_SIZE, FontFamily::Name(SEMIBOLD.into())))
+            .color(p.text),
+    );
     ui.add_space(SPACE_2);
 }
 
