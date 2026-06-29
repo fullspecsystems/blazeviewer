@@ -37,10 +37,10 @@ use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
-use winit::event::{ElementState, KeyEvent, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{Icon, Window, WindowId};
+use winit::window::{CursorIcon, Icon, Window, WindowId};
 
 use pb_core::open::{self, LaunchInput, Source};
 use pb_core::{full_ring, prefetch_targets, Playlist, ResidentRing};
@@ -467,10 +467,13 @@ struct App {
     fit: Option<FitBox>,
     /// Per-photo view transform (scaling mode + rotation + zoom + pan).
     view: ViewTransform,
-    /// Last cursor position in physical pixels — the anchor for pinch/wheel zoom.
-    /// `None` until the pointer first moves over the window (then we zoom about
-    /// the screen center).
+    /// Last cursor position in physical pixels — the anchor for pinch/wheel zoom
+    /// and the reference point for drag-to-pan. `None` until the pointer first
+    /// moves over the window (then we zoom about the screen center).
     last_cursor: Option<[f32; 2]>,
+    /// Whether the left mouse button is held — drives drag-to-pan (cross-platform,
+    /// the primary pan gesture on Windows where trackpad pinch/swipe aren't emitted).
+    dragging: bool,
     /// Scan root, for showing paths relative to it.
     root: PathBuf,
     /// Text renderer for the info panel (None if no system font was found).
@@ -729,6 +732,7 @@ impl App {
                 ..ViewTransform::default()
             },
             last_cursor: None,
+            dragging: false,
             root,
             hud: Hud::load(),
             info: InfoMode::Off,
@@ -3450,6 +3454,32 @@ impl App {
         Some((iw, ih, fit.max_width, fit.max_height))
     }
 
+    /// Whether the image currently overflows the viewport (so panning does
+    /// something). Drives the grab-hand cursor affordance.
+    fn pannable(&self) -> bool {
+        self.screen_and_image()
+            .map(|(iw, ih, sw, sh)| {
+                let mp = self.view.max_pan(iw, ih, sw, sh);
+                mp[0] > 0.0 || mp[1] > 0.0
+            })
+            .unwrap_or(false)
+    }
+
+    /// Reflect the pan affordance in the pointer: a closed hand while dragging, an
+    /// open hand when the image is pannable, the default arrow otherwise.
+    fn refresh_cursor(&self) {
+        if let Some(a) = self.active.as_ref() {
+            let icon = if self.dragging {
+                CursorIcon::Grabbing
+            } else if self.pannable() {
+                CursorIcon::Grab
+            } else {
+                CursorIcon::Default
+            };
+            a.window.set_cursor(icon);
+        }
+    }
+
     /// Zoom by `factor` (>1 in, <1 out) about the cursor — the shared effect for
     /// trackpad pinch and mouse-wheel zoom. Anchors on the last cursor position,
     /// falling back to the screen center before the pointer has moved.
@@ -3463,6 +3493,9 @@ impl App {
         self.view.zoom_about(factor, anchor, iw, ih, sw, sh);
         self.push_view();
         self.draw(event_loop);
+        // Zooming changes whether the image overflows — update the grab affordance
+        // immediately (the pointer may not move after a wheel notch / pinch).
+        self.refresh_cursor();
     }
 
     /// Pan by a raw pixel delta (trackpad two-finger swipe), clamped to the image
@@ -3909,11 +3942,31 @@ impl ApplicationHandler for App {
                 self.pan_started = None;
                 self.pan_last = None;
                 self.pie_glow_started = None;
+                // Focus loss can swallow the button-up — never leave a drag stuck.
+                self.dragging = false;
             }
 
-            // Track the pointer so pinch / wheel zoom can anchor on it.
+            // Track the pointer (anchor for pinch/wheel zoom) and, while the left
+            // button is held, drag-to-pan: move the image by the cursor delta.
             WindowEvent::CursorMoved { position, .. } => {
-                self.last_cursor = Some([position.x as f32, position.y as f32]);
+                let p = [position.x as f32, position.y as f32];
+                if self.dragging {
+                    if let Some(prev) = self.last_cursor {
+                        self.pan_by_pixels(p[0] - prev[0], p[1] - prev[1], event_loop);
+                    }
+                }
+                self.last_cursor = Some(p);
+                self.refresh_cursor();
+            }
+
+            // Left button toggles drag-to-pan (the cross-platform pan gesture).
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => {
+                self.dragging = state == ElementState::Pressed;
+                self.refresh_cursor();
             }
 
             // Trackpad pinch (macOS): magnify about the cursor. `delta` is the

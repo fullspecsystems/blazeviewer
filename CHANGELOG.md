@@ -8,10 +8,13 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
+- **Mouse zoom & pan** (Windows + macOS): the scroll wheel zooms toward the cursor, and
+  click-and-drag pans the image when it's zoomed in (the pointer shows an open hand when
+  panning is available, a closed hand while dragging).
 - **Trackpad gestures** (macOS): pinch to zoom and two-finger swipe to pan, both
   centered on the pointer — a pinch zooms toward wherever the cursor is. A two-finger
-  double-tap toggles 100% (the same as pressing `0`), and a mouse wheel zooms about the
-  cursor. These drive the same zoom/pan as the keyboard, so they share its limits and
+  double-tap toggles 100% (the same as pressing `0`).
+- All of the above drive the same zoom/pan as the keyboard, so they share its limits and
   reset framing on each new photo.
 - **Undo** (Ctrl+Z, ⌘Z on macOS, or Edit ▸ Undo) reverses a saved rotation, restoring
   the file's previous EXIF orientation. The Edit menu names what will be undone (e.g.
