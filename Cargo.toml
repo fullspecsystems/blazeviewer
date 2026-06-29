@@ -25,7 +25,10 @@ exclude = ["spikes"]
 
 [workspace.package]
 edition = "2021"
-license = "MIT OR Apache-2.0"
+# Proprietary / closed-source: free to use, source not licensed. SPDX `LicenseRef-`
+# marks a custom (non-OSI) license; the terms live in the root LICENSE file. Not
+# published to crates.io (private), so this string is informational only.
+license = "LicenseRef-Proprietary"
 rust-version = "1.80"
 repository = ""
 
