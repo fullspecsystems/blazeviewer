@@ -6,16 +6,15 @@
 # runnable manually (workflow_dispatch) to produce an MSI artifact without a release.
 #
 # Code signing uses **Azure Trusted Signing** (see decisions.md ADR-018 and the
-# step-by-step in .taskmaster/docs/release-signing.md). It is skipped automatically
-# when the signing secrets aren't configured, so forks / early builds still produce
-# an (unsigned) MSI. To enable signing, set:
-#   secrets:  AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET
-#   vars:     AZURE_SIGNING_ENDPOINT (e.g. https://eus.codesigning.azure.net/)
-#             AZURE_SIGNING_ACCOUNT  (Trusted Signing account name)
-#             AZURE_SIGNING_PROFILE  (certificate profile name)
-# The service principal needs the "Trusted Signing Certificate Profile Signer"
-# role on the account. The .exe is signed before packaging so the installed
-# binary is trusted too, then the MSI is signed.
+# step-by-step in .taskmaster/docs/release-signing.md). The endpoint / account /
+# profile below are the owner's existing public-trust setup, shared with the
+# `secrt` project — code-signing certs aren't app-specific, so one profile signs
+# every app. Enabling signing here therefore only needs the three repo secrets:
+#   secrets: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET
+# Signing is skipped automatically when AZURE_CLIENT_SECRET is unset, so forks /
+# early builds still produce an (unsigned) MSI. The service principal needs the
+# "Trusted Signing Certificate Profile Signer" role on the account. The .exe is
+# signed before packaging so the installed binary is trusted too, then the MSI.
 
 name: release
 
@@ -113,9 +112,9 @@ jobs:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
           azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
-          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
-          trusted-signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
-          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
+          endpoint: https://wus.codesigning.azure.net/
+          trusted-signing-account-name: jdlien-signing
+          certificate-profile-name: jdlien-public-trust
           files-folder: ${{ github.workspace }}/target/release
           files-folder-filter: exe
           files-folder-recurse: false
@@ -133,9 +132,9 @@ jobs:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
           azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
-          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
-          trusted-signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
-          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
+          endpoint: https://wus.codesigning.azure.net/
+          trusted-signing-account-name: jdlien-signing
+          certificate-profile-name: jdlien-public-trust
           files-folder: ${{ github.workspace }}/target/wix
           files-folder-filter: msi
           files-folder-recurse: false

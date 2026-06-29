@@ -20,7 +20,26 @@ Signing **auto-skips** when the secrets below are absent — you still get an
 (unsigned) MSI artifact, with a warning. So you can dry-run the whole build path
 before any Azure setup.
 
-## One-time setup: enable Azure Trusted Signing
+## Fast path: reuse the existing setup (already done)
+
+The owner already runs Azure Trusted Signing for the **secrt** project, and a
+code-signing certificate profile is **not app-specific** — one profile signs
+every app. PhotoBlaze's workflow is already pointed at that setup:
+
+- endpoint `https://wus.codesigning.azure.net/` · account `jdlien-signing` ·
+  profile `jdlien-public-trust` (hardcoded in `release.yml` — not secret).
+- The Trusted Signing account, the public-trust profile, the identity validation
+  (the slow part), and a working signer service principal **all already exist**.
+
+So enabling signing for PhotoBlaze is just: **add the same three secrets this
+repo's `secrt` sibling uses** — `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`,
+`AZURE_CLIENT_SECRET` — under Settings → Secrets and variables → Actions. (If the
+existing client secret has expired, mint a new one on the same app registration;
+see step 2 below.) Then jump to **Verify**.
+
+The full setup below is kept for reference / reproducing from scratch.
+
+## One-time setup: enable Azure Trusted Signing (reference)
 
 > Trusted Signing (formerly Azure Code Signing) signs via Microsoft-managed
 > certificates — there are no cert files to store. You authenticate from CI with
@@ -50,11 +69,9 @@ before any Azure setup.
   → **Add role assignment** → role **"Trusted Signing Certificate Profile Signer"**
   → assign to the `photoblaze-signing` service principal.
 
-### 4. GitHub repo secrets + variables
+### 4. GitHub repo secrets
 
-Repo → **Settings → Secrets and variables → Actions**.
-
-**Secrets:**
+Repo → **Settings → Secrets and variables → Actions → Secrets**:
 
 | Name                  | Value                              |
 | --------------------- | ---------------------------------- |
@@ -62,13 +79,8 @@ Repo → **Settings → Secrets and variables → Actions**.
 | `AZURE_CLIENT_ID`     | Application (client) ID            |
 | `AZURE_CLIENT_SECRET` | the client secret **value**        |
 
-**Variables:**
-
-| Name                     | Value                                            |
-| ------------------------ | ------------------------------------------------ |
-| `AZURE_SIGNING_ENDPOINT` | region URL, e.g. `https://eus.codesigning.azure.net/` |
-| `AZURE_SIGNING_ACCOUNT`  | Trusted Signing account name                     |
-| `AZURE_SIGNING_PROFILE`  | certificate profile name                         |
+(No variables needed — the endpoint / account / profile are hardcoded in
+`release.yml`, since they aren't secret.)
 
 ### 5. Verify
 
