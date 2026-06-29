@@ -47,6 +47,8 @@ pub const BUTTON_W: f32 = 96.0;
 /// number, so it jitters as the digit count changes (3.0 → 11.7 → 400); pinning a
 /// minimum wide enough for the widest value keeps it a fixed width. See [`slider`].
 pub const SLIDER_VALUE_W: f32 = 76.0;
+/// How far to drop a slider so its center rail aligns with adjacent text baselines.
+const SLIDER_DROP: f32 = 2.0;
 /// Section-header text size — a clear tier above the 14.5px card title, in the semibold
 /// face. See [`section_label`].
 pub const SECTION_SIZE: f32 = 17.0;
@@ -493,25 +495,50 @@ pub fn toggle_with_label(ui: &mut egui::Ui, p: &Palette, on: &mut bool) -> egui:
     .inner
 }
 
-/// The accent-filled **primary** action button (e.g. Save).
+/// The accent-filled **primary** action button (e.g. Save). Lightens on hover, darkens
+/// when pressed — see [`filled_button`].
 pub fn primary_button(ui: &mut egui::Ui, p: &Palette, text: &str) -> egui::Response {
-    let btn = egui::Button::new(egui::RichText::new(text).color(Color32::WHITE))
-        .fill(p.accent)
-        .min_size(egui::vec2(BUTTON_W, CONTROL_H));
-    ui.add(btn)
+    filled_button(ui, p.accent, text)
 }
 
-/// A neutral **secondary** action button (e.g. Cancel) — inherits the themed control fill.
+/// A neutral **secondary** action button (e.g. Cancel) — inherits the themed control fill,
+/// which already provides the hover/press states.
 pub fn secondary_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.add(egui::Button::new(text).min_size(egui::vec2(BUTTON_W, CONTROL_H)))
 }
 
 /// A **destructive** action button (e.g. Delete) — a red fill with white text.
 pub fn danger_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    let btn = egui::Button::new(egui::RichText::new(text).color(Color32::WHITE))
-        .fill(Color32::from_rgb(200, 55, 55))
-        .min_size(egui::vec2(BUTTON_W, CONTROL_H));
-    ui.add(btn)
+    filled_button(ui, Color32::from_rgb(200, 55, 55), text)
+}
+
+/// A solid-`base`-filled, white-text button with proper **hover/press feedback**.
+/// egui's `Button::fill()` would override the on-hover effect, so instead we set the fill
+/// *per interaction state* (lighter on hover, darker pressed — matching how the neutral
+/// buttons respond) via scoped widget visuals, then add a plain themed button.
+fn filled_button(ui: &mut egui::Ui, base: Color32, text: &str) -> egui::Response {
+    let hover = lerp_color(base, Color32::WHITE, 0.10);
+    let active = lerp_color(base, Color32::BLACK, 0.12);
+    ui.scope(|ui| {
+        let v = ui.visuals_mut();
+        v.widgets.inactive.weak_bg_fill = base;
+        v.widgets.hovered.weak_bg_fill = hover;
+        v.widgets.active.weak_bg_fill = active;
+        // No border; white text in every state (a filled button).
+        for w in [
+            &mut v.widgets.inactive,
+            &mut v.widgets.hovered,
+            &mut v.widgets.active,
+        ] {
+            w.bg_stroke = Stroke::NONE;
+            w.fg_stroke = Stroke::new(1.0, Color32::WHITE);
+        }
+        ui.add(
+            egui::Button::new(egui::RichText::new(text).color(Color32::WHITE))
+                .min_size(egui::vec2(BUTTON_W, CONTROL_H)),
+        )
+    })
+    .inner
 }
 
 /// A standard single-line **text field** with balanced [`FIELD_MARGIN`] padding so it
@@ -544,7 +571,19 @@ pub fn slider<Num: egui::emath::Numeric>(
         // selection stays translucent (good for text), which otherwise made the light-mode
         // fill read washed-out / like the dark-mode blue.
         ui.visuals_mut().selection.bg_fill = accent;
-        ui.add(egui::Slider::new(value, range).suffix(suffix.to_owned()))
+        // The rail sits at the slider's geometric center, which reads ~a pixel high next
+        // to text baselines; drop it to align. Equal-and-opposite margins (top +N,
+        // bottom -N) shift the slider down N px while keeping the frame's height neutral —
+        // so it doesn't compete with the header for the row height or move the layout.
+        egui::Frame::none()
+            .inner_margin(Margin {
+                left: 0.0,
+                right: 0.0,
+                top: SLIDER_DROP,
+                bottom: -SLIDER_DROP,
+            })
+            .show(ui, |ui| ui.add(egui::Slider::new(value, range).suffix(suffix.to_owned())))
+            .inner
     })
     .inner
 }

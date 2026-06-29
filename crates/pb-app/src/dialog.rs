@@ -763,16 +763,9 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                     // Explicit vertical spacing only (the gap between groups is uniform).
                     ui.spacing_mut().item_spacing.y = 0.0;
 
-                    pbui::page_title(ui, &p, "Settings");
-                    ui.add_space(pbui::SPACE_1);
-                    ui.label(
-                        egui::RichText::new(
-                            "Tune how fast you fly through photos and how they\u{2019}re shown.",
-                        )
-                        .color(p.text_secondary),
-                    );
-                    ui.add_space(pbui::SPACE_6);
-
+                    // No in-content title/subtitle: the OS title bar already reads
+                    // "PhotoBlaze Settings", and the page scrolls (no tab bar needed) — so
+                    // we start straight at the first card.
                     pbui::group_card(ui, &p, Some("Navigation Feel"), |ui| {
                         pbui::card_row(
                             ui,
@@ -838,14 +831,16 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                             |ui| {
                                 egui::ComboBox::from_id_salt("scale_mode")
                                     .width(150.0)
-                                    .selected_text(["Fit", "Fill", "Original"][d.scale_mode])
+                                    .selected_text(
+                                        ["Fit", "Crop to Fill", "Original"][d.scale_mode],
+                                    )
                                     .show_ui(ui, |ui| {
                                         // The popup is a top-level Area; re-assert our
                                         // theme so options match the dialog (defensive —
                                         // the ctx style already matches here).
                                         pbui::apply_to_ui(ui, p.dark);
                                         ui.selectable_value(&mut d.scale_mode, 0, "Fit");
-                                        ui.selectable_value(&mut d.scale_mode, 1, "Fill");
+                                        ui.selectable_value(&mut d.scale_mode, 1, "Crop to Fill");
                                         ui.selectable_value(&mut d.scale_mode, 2, "Original");
                                     });
                             },
