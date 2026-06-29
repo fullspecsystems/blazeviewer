@@ -473,14 +473,15 @@ fn srgb_to_linear(u: u8) -> f64 {
     }
 }
 
-/// The letterbox clear color in the intermediate's linear space (so it round-trips
-/// back to `LETTERBOX` through the tone-map pass's sRGB encode).
-fn letterbox_linear() -> wgpu::Color {
+/// The letterbox clear color (sRGB `rgb`) in the intermediate's linear space (so it
+/// round-trips back to `rgb` through the tone-map pass's sRGB encode). The background
+/// is always opaque (alpha 1).
+fn letterbox_linear(rgb: [u8; 3]) -> wgpu::Color {
     wgpu::Color {
-        r: srgb_to_linear(LETTERBOX[0]),
-        g: srgb_to_linear(LETTERBOX[1]),
-        b: srgb_to_linear(LETTERBOX[2]),
-        a: LETTERBOX[3] as f64 / 255.0,
+        r: srgb_to_linear(rgb[0]),
+        g: srgb_to_linear(rgb[1]),
+        b: srgb_to_linear(rgb[2]),
+        a: 1.0,
     }
 }
 
@@ -797,6 +798,7 @@ fn draw_scene(
     bind_group: &wgpu::BindGroup,
     vbuf: &wgpu::Buffer,
     ibuf: &wgpu::Buffer,
+    clear: wgpu::Color,
 ) {
     let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("scene"),
@@ -804,7 +806,7 @@ fn draw_scene(
             view,
             resolve_target: None,
             ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(letterbox_linear()),
+                load: wgpu::LoadOp::Clear(clear),
                 store: wgpu::StoreOp::Store,
             },
         })],
@@ -944,6 +946,9 @@ pub struct WgpuRenderer {
     ring: Vec<Option<RingSlot>>,
     /// When `Some(i)`, `render` draws ring slot `i` instead of `bind_group`.
     present_idx: Option<usize>,
+    /// Background (letterbox) fill, sRGB, shown around a non-covering photo.
+    /// Defaults to [`LETTERBOX`]; the app overrides it from user settings.
+    letterbox: [u8; 3],
 }
 
 impl WgpuRenderer {
@@ -1096,6 +1101,7 @@ impl WgpuRenderer {
             upload,
             ring: Vec::new(),
             present_idx: None,
+            letterbox: [LETTERBOX[0], LETTERBOX[1], LETTERBOX[2]],
         }
     }
 
@@ -1139,6 +1145,13 @@ impl WgpuRenderer {
 }
 
 impl WgpuRenderer {
+    /// Override the letterbox / background fill color (sRGB), shown around a photo
+    /// that doesn't cover the screen. Takes effect on the next `render`. Off the
+    /// photo hot path — set from user settings, not per frame.
+    pub fn set_letterbox(&mut self, rgb: [u8; 3]) {
+        self.letterbox = rgb;
+    }
+
     /// Set or clear the transient bottom-center status toast (tasks.json #10). It
     /// is an independent overlay layer, so it composites *over* the info panel
     /// rather than replacing it; the caller fades it by re-uploading with scaled
@@ -1496,6 +1509,7 @@ impl Renderer for WgpuRenderer {
             bind_group,
             &self.vbuf,
             &self.ibuf,
+            letterbox_linear(self.letterbox),
         );
         // Pass 2: alpha-blend the info panel into the intermediate (in linear), so
         // the single present pass below serves both the SDR and HDR output paths.
@@ -1714,6 +1728,7 @@ async fn render_offscreen_async(
         &bind_group,
         &vbuf,
         &ibuf,
+        letterbox_linear([LETTERBOX[0], LETTERBOX[1], LETTERBOX[2]]),
     );
     draw_tonemap(&mut encoder, &view, &pipelines.tonemap, &tonemap_bind_group);
     encoder.copy_texture_to_buffer(

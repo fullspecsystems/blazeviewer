@@ -27,6 +27,21 @@ pub enum ScaleModePref {
     Original,
 }
 
+/// How the viewer chooses windowed vs. fullscreen at launch.
+///
+/// `Remember` (the default) restores whatever the window was last in — which is
+/// exactly the old behavior, since the runtime fullscreen toggle persists
+/// [`Settings::fullscreen`] on every change. `Fullscreen` / `Windowed` pin it.
+/// A CLI `--fullscreen` / `--windowed` flag still overrides whatever this says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StartupMode {
+    Fullscreen,
+    Windowed,
+    #[default]
+    Remember,
+}
+
 /// All persisted preferences. `#[serde(default)]` makes any missing key fall back to
 /// [`Settings::default`], so partial / older files (e.g. one that only set
 /// `fullscreen`) load cleanly, and unknown keys are ignored — forward/backward
@@ -34,8 +49,11 @@ pub enum ScaleModePref {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    /// Start in borderless fullscreen (vs. a window). Mirrors the runtime toggle.
+    /// The last window mode the user was in (borderless fullscreen vs. a window),
+    /// updated on every runtime toggle. Backs [`StartupMode::Remember`].
     pub fullscreen: bool,
+    /// Whether to start fullscreen, windowed, or restore the last mode (#22).
+    pub startup_mode: StartupMode,
     /// Open folders recursively by default (picker / drag-drop / association).
     pub recursive: bool,
     /// Hold-to-fly: starting advance rate in photos/sec — the ramp's floor (#19).
@@ -60,6 +78,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             fullscreen: false,
+            startup_mode: StartupMode::Remember,
             recursive: true,
             start_speed: 3.0,    // main.rs ADVANCE_MIN_RATE
             ramp_secs: 4.0,      // main.rs ADVANCE_RAMP_SECS
@@ -88,6 +107,16 @@ impl Settings {
         self.max_advance_rate = self.max_advance_rate.min(1000);
         self.hold_delay_ms = self.hold_delay_ms.min(2000);
         self.info_opacity = self.info_opacity.min(100);
+    }
+
+    /// The effective "start fullscreen?" decision for this launch, resolving
+    /// [`StartupMode::Remember`] against the saved last mode.
+    pub fn start_fullscreen(&self) -> bool {
+        match self.startup_mode {
+            StartupMode::Fullscreen => true,
+            StartupMode::Windowed => false,
+            StartupMode::Remember => self.fullscreen,
+        }
     }
 
     /// Load the settings, clamped. A missing / unreadable / malformed file yields the
@@ -151,14 +180,6 @@ fn settings_path() -> Option<PathBuf> {
 /// The raw `settings.toml` text, if the file exists and is readable.
 fn read_settings_text() -> Option<String> {
     std::fs::read_to_string(settings_path()?).ok()
-}
-
-/// Load just the saved fullscreen preference, or `None` if no settings file exists
-/// yet (so the caller picks its own default). Thin shim over the typed model — kept
-/// so the startup/toggle call sites don't change while the dialog wiring lands.
-pub fn load_fullscreen() -> Option<bool> {
-    let path = settings_path()?;
-    path.exists().then(|| Settings::load().fullscreen)
 }
 
 /// Persist the fullscreen preference, preserving every other setting (load, set,
@@ -244,6 +265,50 @@ mod tests {
         s.clamp();
         assert_eq!(s.start_speed, Settings::default().start_speed);
         assert_eq!(s.ramp_secs, Settings::default().ramp_secs);
+    }
+
+    #[test]
+    fn startup_mode_defaults_to_remember_and_resolves_to_last() {
+        // An old file with only `fullscreen` (no startup_mode) keeps the old
+        // "remember the last mode" behavior.
+        let s = toml::from_str::<Settings>("fullscreen = true\n").unwrap();
+        assert_eq!(s.startup_mode, StartupMode::Remember);
+        assert!(
+            s.start_fullscreen(),
+            "Remember resolves to the saved fullscreen"
+        );
+
+        let s = toml::from_str::<Settings>("fullscreen = false\n").unwrap();
+        assert!(!s.start_fullscreen());
+    }
+
+    #[test]
+    fn startup_mode_pins_override_the_saved_last_mode() {
+        // Fullscreen / Windowed ignore the remembered `fullscreen` bool entirely.
+        let s = Settings {
+            startup_mode: StartupMode::Fullscreen,
+            fullscreen: false,
+            ..Settings::default()
+        };
+        assert!(s.start_fullscreen());
+
+        let s = Settings {
+            startup_mode: StartupMode::Windowed,
+            fullscreen: true,
+            ..Settings::default()
+        };
+        assert!(!s.start_fullscreen());
+    }
+
+    #[test]
+    fn startup_mode_round_trips_each_variant() {
+        for (text, mode) in [
+            ("startup_mode = \"fullscreen\"", StartupMode::Fullscreen),
+            ("startup_mode = \"windowed\"", StartupMode::Windowed),
+            ("startup_mode = \"remember\"", StartupMode::Remember),
+        ] {
+            assert_eq!(toml::from_str::<Settings>(text).unwrap().startup_mode, mode);
+        }
     }
 
     #[test]

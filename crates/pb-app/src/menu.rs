@@ -13,7 +13,7 @@
 //! File…\tO"`); no real muda accelerators are registered, because the winit key
 //! handler already owns those keys — a registered accelerator would double-fire.
 
-use muda::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+use muda::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
 use crate::action::Action;
 
@@ -37,6 +37,7 @@ pub mod ids {
     pub const ZOOM_OUT: &str = "zoom_out";
     pub const FULLSCREEN: &str = "fullscreen";
     pub const RECURSIVE: &str = "recursive";
+    pub const SLIDESHOW: &str = "slideshow";
     pub const INFO: &str = "info";
     pub const FULL_EXIF: &str = "full_exif";
 
@@ -71,6 +72,7 @@ pub enum MenuAction {
     ZoomOut,
     Fullscreen,
     Recursive,
+    Slideshow,
     Info,
     FullExif,
     Next,
@@ -104,6 +106,7 @@ impl MenuAction {
             MenuAction::ZoomOut => Action::ZoomOut,
             MenuAction::Fullscreen => Action::Fullscreen,
             MenuAction::Recursive => Action::Recursive,
+            MenuAction::Slideshow => Action::SlideshowToggle,
             MenuAction::Info => Action::Info,
             MenuAction::FullExif => Action::FullExif,
             MenuAction::Next => Action::Next,
@@ -138,6 +141,7 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         ZOOM_OUT => MenuAction::ZoomOut,
         FULLSCREEN => MenuAction::Fullscreen,
         RECURSIVE => MenuAction::Recursive,
+        SLIDESHOW => MenuAction::Slideshow,
         INFO => MenuAction::Info,
         FULL_EXIF => MenuAction::FullExif,
         NEXT => MenuAction::Next,
@@ -162,13 +166,44 @@ fn item(id: &str, label: &str) -> MenuItem {
     MenuItem::with_id(id, label, true, None)
 }
 
+/// A checkable item (View menu: scale mode, recursive, fullscreen). Same "label may
+/// carry a `\t` hint, no real accelerator" rule as [`item`]. Starts unchecked; the
+/// app pushes the live state via [`ViewChecks`] right after the menu attaches, so the
+/// initial value here doesn't matter.
+fn check_item(id: &str, label: &str) -> CheckMenuItem {
+    CheckMenuItem::with_id(id, label, true, false, None)
+}
+
+/// Handles to the View-menu checkable items, returned from [`build_menu`] so the app
+/// can mirror its live state onto them (see `App::refresh_view_menu_checks`). Scale
+/// mode is a one-of-three group (exactly one checked); `recursive`/`fullscreen` are
+/// independent toggles.
+pub struct ViewChecks {
+    pub fit: CheckMenuItem,
+    pub fill: CheckMenuItem,
+    pub original: CheckMenuItem,
+    pub recursive: CheckMenuItem,
+    pub fullscreen: CheckMenuItem,
+    pub slideshow: CheckMenuItem,
+}
+
+/// Everything [`build_menu`] hands back: the menu itself plus the item handles whose
+/// state the app toggles at runtime (Save Rotation's enabled flag; the View checks).
+pub struct BuiltMenu {
+    pub menu: Menu,
+    pub save_rotation: MenuItem,
+    pub checks: ViewChecks,
+}
+
 /// Build the full menu bar. Best-effort: a failed `append` (rare) is logged and the
 /// rest of the menu still builds, so the app never fails to start over a menu glitch.
 ///
-/// Returns the menu plus the **Save Rotation** item, whose enabled state `main.rs`
-/// toggles at runtime (only enabled when the current photo has an unsaved rotation on
-/// an EXIF-writable file — see `App::refresh_save_menu_item`). It starts disabled.
-pub fn build_menu() -> (Menu, MenuItem) {
+/// Returns the menu plus the item handles `main.rs` toggles at runtime: the **Save
+/// Rotation** item (enabled only when the current photo has an unsaved rotation on an
+/// EXIF-writable file — see `App::refresh_save_menu_item`; starts disabled), and the
+/// **View checks** (scale mode / recursive / fullscreen — see
+/// `App::refresh_view_menu_checks`).
+pub fn build_menu() -> BuiltMenu {
     let menu = Menu::new();
     let sep = || PredefinedMenuItem::separator();
 
@@ -194,17 +229,27 @@ pub fn build_menu() -> (Menu, MenuItem) {
     let edit = Submenu::new("&Edit", true);
     let _ = edit.append_items(&[&item(ids::COPY, "Copy\tCtrl+C")]);
 
+    // Scale mode is a one-of-three group; recursive/fullscreen are toggles. All five
+    // are checkable so the View menu shows the current state (handles returned below).
+    let fit = check_item(ids::FIT, "Fit\t8");
+    let fill = check_item(ids::FILL, "Crop to Fill\t9");
+    let original = check_item(ids::ORIGINAL, "Original 1:1\t0");
+    let recursive = check_item(ids::RECURSIVE, "Recursive (This Folder)\tCtrl+R");
+    let fullscreen = check_item(ids::FULLSCREEN, "Fullscreen\tF11");
+    let slideshow = check_item(ids::SLIDESHOW, "Slideshow\tS");
+
     let view = Submenu::new("&View", true);
     let _ = view.append_items(&[
-        &item(ids::FIT, "Fit\t8"),
-        &item(ids::FILL, "Crop to Fill\t9"),
-        &item(ids::ORIGINAL, "Original 1:1\t0"),
+        &fit,
+        &fill,
+        &original,
         &sep(),
         &item(ids::ZOOM_IN, "Zoom In\t="),
         &item(ids::ZOOM_OUT, "Zoom Out\t-"),
         &sep(),
-        &item(ids::FULLSCREEN, "Fullscreen\tF11"),
-        &item(ids::RECURSIVE, "Recursive Folders\tCtrl+R"),
+        &fullscreen,
+        &recursive,
+        &slideshow,
         &sep(),
         &item(ids::INFO, "Info Panel\tI"),
         &item(ids::FULL_EXIF, "Full EXIF\tShift+I"),
@@ -232,7 +277,18 @@ pub fn build_menu() -> (Menu, MenuItem) {
             eprintln!("menu: failed to append submenu: {e}");
         }
     }
-    (menu, save_rotation)
+    BuiltMenu {
+        menu,
+        save_rotation,
+        checks: ViewChecks {
+            fit,
+            fill,
+            original,
+            recursive,
+            fullscreen,
+            slideshow,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -263,6 +319,7 @@ mod tests {
         assert_eq!(action_for(ids::ZOOM_OUT), Some(MenuAction::ZoomOut));
         assert_eq!(action_for(ids::FULLSCREEN), Some(MenuAction::Fullscreen));
         assert_eq!(action_for(ids::RECURSIVE), Some(MenuAction::Recursive));
+        assert_eq!(action_for(ids::SLIDESHOW), Some(MenuAction::Slideshow));
         assert_eq!(action_for(ids::INFO), Some(MenuAction::Info));
         assert_eq!(action_for(ids::FULL_EXIF), Some(MenuAction::FullExif));
         assert_eq!(action_for(ids::NEXT), Some(MenuAction::Next));

@@ -14,7 +14,7 @@ the fly-speed cap (#20) are also done, and the typed Settings model + live backe
 are in (#22)** — only the Settings *dialog form* remains; see "Settings + configurable
 keymap stream" below.
 
-## Archive viewing — ZIP + 7z (2026-06-28) — DONE incl. password entry; budget-tune + polish remain
+## Archive viewing — ZIP + 7z (2026-06-28) — DONE (Task 30 complete)
 
 Open a `.zip`/`.7z` and browse the images inside like a folder (CLI arg, double-click
 association, drag-drop, or the Open dialog's "Images & archives" filter). Same fast
@@ -63,17 +63,33 @@ name). All on `origin/main`, gated (clippy `-D warnings` + fmt + tests). **Task 
 - Crates: `zip` (deflate + aes-crypto) + `sevenz-rust2` 0.21 (incl. LZMA2/bzip2/ppmd) —
   both **pure Rust, no C build risk**.
 
-**Remaining (handoff — budget-tune + small polish):**
-- **Tune the RAM budget** — the `0.6` fraction + margin in `archive.rs` are guesses;
-  **measure** open time + peak working set on a real solid-LZMA2 photo `.7z` and set them
-  from data (per the prime directive). The 96 GB dev box never refuses naturally → drive
-  the refusal path with `PB_ARCHIVE_RAM_BUDGET`.
-- **Deterministic over-budget refusal test** — the no-trace tests exist; the refusal test
-  needs a budget-injection seam (env vars race across parallel tests).
-- **Huge-archive escalations** (behind the same seam, pick later): in-RAM per-block LRU
-  (bounds RAM, keeps no-trace) or opt-in extract-and-delete (disk → opt-in + disclose +
-  clear-on-close + leftover-sweep-on-startup). v1 just refuses + lets the user extract.
-- **WiX:** register `.7z`/`.zip` as "Open with" candidates (NOT the default handler).
+**Task 30 finished (2026-06-28) — the last three subtasks landed:**
+- **RAM budget measured + validated (#5).** New `crates/pb-source/examples/archive_probe.rs`
+  (projected resident bytes + eager-open time/throughput + process peak working set via a
+  tiny `K32GetProcessMemoryInfo` FFI). Measured solid-LZMA2 JPEG archives from the real
+  corpus: 3.3 GB → open 3.3 s (~1 GB/s), peak/resident **1.02×**, transient **+60 MB**;
+  0.7 GB → open 0.9 s, peak/resident **1.26×**, transient **+201 MB**. So the projection
+  closely predicts real RAM (gate is trustworthy), the eager-open transient is a flat
+  ~60–200 MB (fixed decoder cost, not proportional → a flat `TRANSIENT_MARGIN` is correct,
+  512 MB covers it), and ~1 GB/s open confirms async is needed. The `archive.rs` constants
+  (0.6 / reservations / 512 MB) are validated; their comments rewritten from guesses to data.
+- **Deterministic over-budget refusal test (#6).** `seven_z_preflight` now delegates to
+  `seven_z_preflight_within(path, password, budget)` — a budget-injection seam (no
+  `PB_ARCHIVE_RAM_BUDGET` env-var race). `over_budget_7z_is_refused_with_structured_error`
+  pre-flights a real 7z against a 1-byte budget → `ArchiveOpenError::TooLarge` (never an
+  abort), then passes under `u64::MAX`. All 10 pb-app archive tests green.
+- **WiX archive registration (#7).** `wix/main.wxs` adds a `PhotoBlaze.Archive` ProgId +
+  `.zip`/`.7z` `OpenWithProgids` (candidate-only, never the default handler). The Open
+  dialog already filtered `.zip`/`.7z`. XML validated (well-formed, all refs resolve).
+
+**Owner/CI-side manual checks (can't automate here):** install the MSI → `.zip`/`.7z` show
+PhotoBlaze in the "Open with" menu; on a real low-RAM machine the over-budget *dialog*
+appears (the 96 GB dev box never refuses naturally — drive it with `PB_ARCHIVE_RAM_BUDGET`).
+
+**Deferred (behind the same seam, not needed for v1):**
+- **Huge-archive escalations:** in-RAM per-block LRU (bounds RAM, keeps no-trace) or opt-in
+  extract-and-delete (disk → opt-in + disclose + clear-on-close + leftover-sweep-on-startup).
+  v1 just refuses + lets the user extract.
 - Exotic 7z codecs (zstd/brotli/lz4 features off) and header-encrypted 7z error gracefully.
 
 **Key files:** `crates/pb-source/src/lib.rs` (incl. `ZipSource::password_ok`,
@@ -81,10 +97,12 @@ password-threaded `seven_z_projected_bytes`), `crates/pb-app/src/archive.rs`,
 `crates/pb-app/src/dialog.rs` (`DialogKind::Password` + `password_dialog`), and the
 `main.rs` open path (`open_input` / `begin_archive_open` / `poll_archive_load` /
 `finish_archive_open` / `prompt_archive_password` / `open_archive` / `seven_z_preflight` /
-`load_seven_z` / `resolve_playlist`; launch defer = `queue_launch` + `resumed`). Tests:
+`load_seven_z` / `seven_z_preflight` → `seven_z_preflight_within` / `resolve_playlist`;
+launch defer = `queue_launch` + `resumed`), `crates/pb-app/wix/main.wxs` (archive ProgId),
+`crates/pb-source/examples/archive_probe.rs` (the #5 RAM-measurement tool). Tests:
 `pb-source` (14, incl. encrypted-7z round-trip + zip `password_ok`) + `pb-app`
-archive-budget + `viewing_a_{zip,7z}_writes_nothing_to_disk`. Password flow verified
-interactively on encrypted `.zip`/`.7z` (GDI-capturable egui dialog).
+archive-budget + `viewing_a_{zip,7z}_writes_nothing_to_disk` + `over_budget_7z_is_refused_with_structured_error`.
+Password flow verified interactively on encrypted `.zip`/`.7z` (GDI-capturable egui dialog).
 
 ## Settings + configurable keymap stream (2026-06-28) — keymap (#8) + fly-cap (#20) DONE; Settings dialog (#22) backend in, form is next
 

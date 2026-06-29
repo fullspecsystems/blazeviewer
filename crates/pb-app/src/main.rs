@@ -68,6 +68,7 @@ mod menu;
 mod metrics;
 mod save_rotation;
 mod settings;
+mod slideshow;
 use action::{Action, ActionKind};
 use decode_pool::{recommended_workers, DecodeFn, DecodePool, Outcome};
 use hud::{Hud, Row};
@@ -444,6 +445,13 @@ struct App {
     displayed_item: Option<usize>,
     /// The item we're trying to show (== displayed once caught up).
     target_item: Option<usize>,
+    /// Slideshow timer state (task #23): on/off + the per-slide interval. RAM-only,
+    /// dropped on exit (privacy #2).
+    slideshow: slideshow::Slideshow,
+    /// The last navigation direction, so the slideshow auto-advances the way the user
+    /// last moved (space → forward, backspace → back, enter → random). Updated on
+    /// every `advance`, so manual nav during a slideshow steers it.
+    last_nav: Nav,
     /// The current prefetch want-list (priority order), used as eviction `keep`.
     targets: Vec<usize>,
     /// Per-item info panel data, cached when decoded (RAM-only; privacy task #2).
@@ -530,6 +538,12 @@ struct App {
     /// refresh is a no-op Win32 call when nothing changed.
     save_rotation_item: Option<muda::MenuItem>,
     save_enabled: bool,
+    /// The View-menu checkable items (scale mode / recursive / fullscreen), kept so
+    /// their checked state can mirror the live app state at runtime. `view_checks_state`
+    /// caches the last-pushed `(scale mode, recursive, fullscreen, slideshow)` so the
+    /// per-tick refresh is a no-op Win32 call when nothing changed.
+    view_checks: Option<menu::ViewChecks>,
+    view_checks_state: Option<(ScaleMode, bool, bool, bool)>,
     /// A delete whose playlist-advance is deferred: `(fire_at, removed_index)`. The
     /// deleted photo stays on screen with its icon until `fire_at`, then the playlist
     /// drops the item and advances (see `delete_current` / `flush_pending_delete`).
@@ -607,7 +621,11 @@ impl App {
             hold_start: None,
             initial_delay: Duration::from_millis(settings.hold_delay_ms as u64),
             fit: None,
-            view: ViewTransform::default(),
+            // Start in the user's default scale mode (8/9/0 still switch it live).
+            view: ViewTransform {
+                mode: scale_mode_of(settings.scale_mode),
+                ..ViewTransform::default()
+            },
             root,
             hud: Hud::load(),
             info: InfoMode::Off,
@@ -622,6 +640,8 @@ impl App {
             epoch: 1,
             displayed_item: None,
             target_item: None,
+            slideshow: slideshow::Slideshow::default(),
+            last_nav: Nav::Forward,
             targets: Vec::new(),
             meta_cache: HashMap::new(),
             ahead: 8,
@@ -655,6 +675,8 @@ impl App {
             menu: None,
             save_rotation_item: None,
             save_enabled: false,
+            view_checks: None,
+            view_checks_state: None,
             pending_delete: None,
             pending_confirm_delete: None,
             menu_attached: false,
@@ -1588,6 +1610,8 @@ impl App {
             event_loop,
             refresh,
             &prompt,
+            &self.settings,
+            &self.keymap,
             parent.as_deref(),
         );
     }
@@ -1638,6 +1662,29 @@ impl App {
         self.show_toast(msg, event_loop);
     }
 
+    /// Start / stop the slideshow (task #23, the `S` key + View ▸ Slideshow). Starting
+    /// resets the timer (`last_present = now`) so the first slide shows for a full
+    /// interval before advancing; `about_to_wait` drives the auto-advance from there.
+    fn toggle_slideshow(&mut self, event_loop: &ActiveEventLoop) {
+        let on = self.slideshow.toggle();
+        if on {
+            self.last_present = Some(Instant::now());
+        }
+        self.show_toast(
+            if on { "Slideshow" } else { "Slideshow Stopped" },
+            event_loop,
+        );
+    }
+
+    /// Change the slideshow interval by `steps` × 0.5s (the `[` / `]` keys: `-1`
+    /// shortens, `+1` lengthens), clamped, and flash the new value (e.g. `2.0s`). The
+    /// change applies live: the deadline is `last_present + interval`, so a running
+    /// slideshow's current slide gets more / less remaining time immediately.
+    fn adjust_slideshow(&mut self, steps: i32, event_loop: &ActiveEventLoop) {
+        let interval = self.slideshow.adjust(steps);
+        self.show_toast(&slideshow::format_interval(interval), event_loop);
+    }
+
     /// Toggle between borderless "windowed fullscreen" and a 1280x800 window (F11
     /// or Alt+Enter). The resulting resize event re-fits and re-decodes the photo.
     /// NOTE: there is a brief flip-model resize artifact (the photo stretches for a
@@ -1647,6 +1694,9 @@ impl App {
     /// minor flash is accepted (see tasks.json #21 for the proper-fix direction).
     fn toggle_fullscreen(&mut self) {
         self.windowed = !self.windowed;
+        // Record the new mode as the remembered last state, in memory and on disk, so
+        // `StartupMode::Remember` restores it and the Settings dialog stays in sync.
+        self.settings.fullscreen = !self.windowed;
         settings::save_fullscreen(!self.windowed);
         if let Some(a) = self.active.as_ref() {
             if self.windowed {
@@ -1676,9 +1726,10 @@ impl App {
     /// Build the native menu bar once (cross-platform; muda owns the OS handle).
     fn ensure_menu(&mut self) {
         if self.menu.is_none() {
-            let (menu, save_rotation) = menu::build_menu();
-            self.menu = Some(menu);
-            self.save_rotation_item = Some(save_rotation);
+            let built = menu::build_menu();
+            self.menu = Some(built.menu);
+            self.save_rotation_item = Some(built.save_rotation);
+            self.view_checks = Some(built.checks);
         }
     }
 
@@ -1713,6 +1764,34 @@ impl App {
         }
     }
 
+    /// Mirror the live view state onto the View-menu checkmarks: scale mode (one of
+    /// Fit / Crop to Fill / Original checked), Recursive Folders, and Fullscreen.
+    /// Cheap + cached (skips the Win32 calls when nothing changed), so it's safe to
+    /// call from the per-tick `about_to_wait` alongside [`refresh_save_menu_item`].
+    fn refresh_view_menu_checks(&mut self) {
+        let Some(c) = self.view_checks.as_ref() else {
+            return;
+        };
+        // `windowed` is the inverse of fullscreen.
+        let state = (
+            self.view.mode,
+            self.recursive,
+            !self.windowed,
+            self.slideshow.on,
+        );
+        if self.view_checks_state == Some(state) {
+            return;
+        }
+        let (mode, recursive, fullscreen, slideshow) = state;
+        c.fit.set_checked(mode == ScaleMode::Fit);
+        c.fill.set_checked(mode == ScaleMode::Fill);
+        c.original.set_checked(mode == ScaleMode::Original);
+        c.recursive.set_checked(recursive);
+        c.fullscreen.set_checked(fullscreen);
+        c.slideshow.set_checked(slideshow);
+        self.view_checks_state = Some(state);
+    }
+
     /// Attach the menu bar in windowed mode, hide it in fullscreen. The menu is a
     /// windowed-only discoverability layer — fullscreen stays chrome-free. OS-drawn,
     /// so it costs nothing on the render hot path. (Windows now; macOS later mirrors
@@ -1733,7 +1812,6 @@ impl App {
                     let _ = menu.show_for_hwnd(hwnd);
                 } else {
                     let _ = menu.init_for_hwnd(hwnd);
-                    darkmode::slim_menu_gutter(hwnd);
                     self.menu_attached = true;
                 }
             } else if self.menu_attached {
@@ -1820,6 +1898,9 @@ impl App {
             Action::Help => self.toggle_help(event_loop),
             Action::Fullscreen => self.toggle_fullscreen(),
             Action::Recursive => self.toggle_recursive(event_loop),
+            Action::SlideshowToggle => self.toggle_slideshow(event_loop),
+            Action::SlideshowFaster => self.adjust_slideshow(-1, event_loop),
+            Action::SlideshowSlower => self.adjust_slideshow(1, event_loop),
             Action::Settings => self.open_settings(event_loop),
             Action::About => self.open_about(event_loop),
             Action::Quit => self.begin_exit(event_loop),
@@ -2014,9 +2095,59 @@ impl App {
         self.open_dialog(dialog::DialogKind::About, event_loop);
     }
 
-    /// Open the Settings dialog (Ctrl+,) — an egui window (skeleton for now).
+    /// Open the Settings dialog (Ctrl+,) — an egui window seeded from the live
+    /// settings; **Save** routes back to [`apply_settings`](Self::apply_settings).
     fn open_settings(&mut self, event_loop: &ActiveEventLoop) {
         self.open_dialog(dialog::DialogKind::Settings, event_loop);
+    }
+
+    /// Apply the settings the user saved in the dialog: swap in the new model, apply
+    /// the parts that aren't read live (hold delay, letterbox color, default scale
+    /// mode), then persist to disk (an explicit user action — privacy #2). The nav-feel
+    /// rates (start speed / ramp / max) and the info-panel opacity are read live, so
+    /// swapping `self.settings` is enough for those.
+    fn apply_settings(&mut self, new: settings::Settings, event_loop: &ActiveEventLoop) {
+        let old = std::mem::replace(&mut self.settings, new);
+        let s = &self.settings;
+
+        // Held-key repeat delay is cached on the struct (the curve below reads the
+        // rates live, but this one is a Duration captured at construction).
+        self.initial_delay = Duration::from_millis(s.hold_delay_ms as u64);
+
+        // Letterbox / background fill → renderer (takes effect on the next draw).
+        if let Some(a) = self.active.as_mut() {
+            a.renderer.set_letterbox(s.letterbox);
+        }
+
+        // Default scale mode: apply live if it changed (re-frames + reloads at the new
+        // fit). `set_scale_mode` redraws for us.
+        let scale_changed = old.scale_mode != s.scale_mode;
+        if scale_changed {
+            self.set_scale_mode(scale_mode_of(s.scale_mode), event_loop);
+        }
+
+        // Persist the whole model (atomic write; best-effort).
+        self.settings.save();
+
+        // Redraw so the new letterbox shows even when the scale mode didn't change,
+        // and rebuild the info panel so a new opacity takes effect immediately.
+        if self.overlay_shown {
+            self.show_overlay(event_loop);
+        } else if !scale_changed {
+            self.draw(event_loop);
+        }
+    }
+
+    /// Apply the keymap edited in the Settings dialog: swap it in live (every keypress
+    /// resolves through `self.keymap`, so future input uses it immediately) and persist
+    /// `keymap.toml`. If the help overlay is open, rebuild it so its key labels — read
+    /// from the live keymap — reflect the new bindings.
+    fn apply_keymap(&mut self, keymap: Keymap, event_loop: &ActiveEventLoop) {
+        self.keymap = keymap;
+        self.keymap.save();
+        if self.overlay_shown && self.info == InfoMode::Help {
+            self.show_overlay(event_loop);
+        }
     }
 
     /// Open (or focus, if already open) one of our egui dialog windows. Only one
@@ -2030,7 +2161,15 @@ impl App {
         }
         let refresh = self.refresh_hz();
         let parent = self.active.as_ref().map(|a| a.window.clone());
-        self.dialog = dialog::DialogWindow::open(kind, event_loop, refresh, "", parent.as_deref());
+        self.dialog = dialog::DialogWindow::open(
+            kind,
+            event_loop,
+            refresh,
+            "",
+            &self.settings,
+            &self.keymap,
+            parent.as_deref(),
+        );
     }
 
     /// Refresh rate in Hz (rounded, ≥1) — caps the Settings fly-speed slider and is
@@ -2051,6 +2190,8 @@ impl App {
             event_loop,
             refresh,
             &msg,
+            &self.settings,
+            &self.keymap,
             parent.as_deref(),
         );
     }
@@ -2067,6 +2208,8 @@ impl App {
             event_loop,
             refresh,
             message,
+            &self.settings,
+            &self.keymap,
             parent.as_deref(),
         );
     }
@@ -2074,6 +2217,17 @@ impl App {
     /// Route an event for the dialog window (egui owns it). Esc / close button
     /// dismiss it; everything else feeds egui and triggers repaints.
     fn dialog_event(&mut self, event: WindowEvent, event_loop: &ActiveEventLoop) {
+        // While the keybinding editor is capturing, route key events to it (so they
+        // rebind a slot instead of closing the dialog or driving egui). Modifier state
+        // is tracked always so the captured chord matches the viewer's. Non-key events
+        // fall through to the normal handling below.
+        if let Some(d) = self.dialog.as_mut() {
+            d.note_modifiers(&event);
+            if d.capturing_active() && d.handle_capture_event(&event) {
+                d.request_redraw();
+                return;
+            }
+        }
         let close = matches!(event, WindowEvent::CloseRequested)
             || matches!(
                 &event,
@@ -2149,6 +2303,26 @@ impl App {
                         self.password_archive = None;
                     }
                 }
+                // Settings: Save applies + persists the edited model; Cancel/Esc
+                // discard (Esc is handled by the `close` path above).
+                Some(dialog::DialogKind::Settings) => {
+                    let (new, new_keymap) = if confirmed {
+                        let d = self.dialog.as_mut();
+                        match d {
+                            Some(d) => (d.take_settings_result(), d.take_keymap_result()),
+                            None => (None, None),
+                        }
+                    } else {
+                        (None, None)
+                    };
+                    self.dialog = None;
+                    if let Some(new) = new {
+                        self.apply_settings(new, event_loop);
+                    }
+                    if let Some(km) = new_keymap {
+                        self.apply_keymap(km, event_loop);
+                    }
+                }
                 // Confirm drives a delete; Message / others just close.
                 other => {
                     self.dialog = None;
@@ -2207,7 +2381,7 @@ impl App {
                 two(Action::RotateCw, Action::RotateCcw),
                 "Rotate 90\u{b0} cw / ccw",
             ),
-            (keys(Action::Recursive), "Toggle recursive folders"),
+            (keys(Action::Recursive), "Recursive scan (current folder)"),
             (
                 two(Action::OpenFile, Action::OpenFolder),
                 "Open file(s) / folder",
@@ -2327,6 +2501,9 @@ impl App {
     fn show_overlay(&mut self, event_loop: &ActiveEventLoop) {
         let px = (15.0 * self.scale_factor).max(8.0);
         let pad = (7.0 * self.scale_factor).round().max(2.0) as u32;
+        // The info / EXIF panels honor the user's opacity setting; the help overlay
+        // keeps the standard translucency.
+        let info_bg = hud::bg_for_opacity(self.settings.info_opacity);
         let panel = match self.info {
             InfoMode::Off => return,
             InfoMode::Basic => {
@@ -2334,7 +2511,7 @@ impl App {
                     return;
                 };
                 let text = format!("{} · {}×{} · {}", meta.rel, meta.w, meta.h, meta.codec);
-                hud.render_panel(&text, px, pad)
+                hud.render_panel(&text, px, pad, info_bg)
             }
             InfoMode::Full => {
                 let rows = self.exif_rows();
@@ -2344,7 +2521,7 @@ impl App {
                 if rows.is_empty() {
                     return;
                 }
-                hud.render_table(&rows, px, pad)
+                hud.render_table(&rows, px, pad, info_bg)
             }
             InfoMode::Help => {
                 let help_px = (20.0 * self.scale_factor).max(12.0);
@@ -2352,7 +2529,7 @@ impl App {
                 let Some(hud) = self.hud.as_ref() else {
                     return;
                 };
-                hud.render_table(&rows, help_px, pad)
+                hud.render_table(&rows, help_px, pad, hud::BG)
             }
         };
         let Some((bitmap, w, h)) = panel else {
@@ -2393,7 +2570,7 @@ impl App {
         let px = (26.0 * self.scale_factor).max(16.0);
         let pad = (12.0 * self.scale_factor).round().max(4.0) as u32;
         if let Some(hud) = self.hud.as_ref() {
-            if let Some((rgba, w, h)) = hud.render_panel_icon(msg, px, pad, icon) {
+            if let Some((rgba, w, h)) = hud.render_panel_icon(msg, px, pad, icon, hud::BG) {
                 self.toast = Some(Toast {
                     rgba,
                     w,
@@ -2625,6 +2802,10 @@ impl App {
         if self.displayed_item != self.target_item {
             return;
         }
+        // Remember the direction so the slideshow auto-advances the way the user last
+        // moved (manual nav during a slideshow steers it). The slideshow's own
+        // `advance(self.last_nav)` calls are then idempotent here.
+        self.last_nav = nav;
         match nav {
             Nav::Forward => self.playlist.next(),
             Nav::Backward => self.playlist.prev(),
@@ -2832,7 +3013,6 @@ impl ApplicationHandler for App {
                     unsafe {
                         let _ = menu.init_for_hwnd(hwnd);
                     }
-                    darkmode::slim_menu_gutter(hwnd);
                     self.menu_attached = true;
                 }
             }
@@ -2860,6 +3040,8 @@ impl ApplicationHandler for App {
             hdr,
             peak,
         );
+        // Apply the user's saved letterbox color before the first frame paints.
+        renderer.set_letterbox(self.settings.letterbox);
         let now = window.inner_size();
         if now != isz {
             self.fit = Some(FitBox {
@@ -3064,11 +3246,19 @@ impl ApplicationHandler for App {
         while let Ok(ev) = muda::MenuEvent::receiver().try_recv() {
             if let Some(action) = menu::action_for(ev.id.as_ref()) {
                 self.dispatch_menu(action, event_loop);
+                // muda auto-flips a clicked CheckMenuItem's native checkmark, which can
+                // desync from the real state (e.g. clicking the already-active scale mode
+                // unchecks it though nothing changed). Invalidate the cache so the refresh
+                // below re-asserts the true state unconditionally.
+                self.view_checks_state = None;
             }
         }
         // Keep "Save Rotation" enabled only when it applies (cheap + cached, so this
         // per-tick call is a no-op unless the photo/rotation actually changed).
         self.refresh_save_menu_item();
+        // Keep the View-menu checkmarks (scale mode / recursive / fullscreen) in sync
+        // with the live state — likewise cached, so it's a no-op until state changes.
+        self.refresh_view_menu_checks();
         // Deferred delete-advance: once the icon has shown for a beat, drop the item.
         if self.pending_delete.is_some_and(|(at, _)| now >= at) {
             self.flush_pending_delete(event_loop);
@@ -3128,6 +3318,26 @@ impl ApplicationHandler for App {
             }
         } else {
             self.hold_start = None;
+        }
+
+        // 3c. Slideshow auto-advance (task #23). When on and not overridden by a held
+        // nav key (hold-to-fly takes precedence) or an open dialog (Settings/About pause
+        // it; the picker is modal so it pauses on its own), advance in the last direction
+        // once the interval has elapsed since the current slide was shown. Readiness-
+        // gated like hold-to-fly: a not-ready next slide isn't caught up yet, so it holds
+        // (never skips). Manual nav resets the timer (it moves `last_present`); a live
+        // `[`/`]` interval change applies immediately (deadline is `last_present + interval`).
+        let slideshow_running =
+            self.slideshow.on && self.held_nav().is_none() && self.dialog.is_none();
+        if slideshow_running {
+            let caught_up = self.displayed_item == self.target_item;
+            let since_shown = self
+                .last_present
+                .map(|t| now.saturating_duration_since(t))
+                .unwrap_or(Duration::ZERO);
+            if caught_up && self.slideshow.is_due(since_shown) {
+                self.advance(self.last_nav, event_loop);
+            }
         }
 
         // 3b. Sharpen / prefetch-ahead. When parked, re-issue the prefetch (which
@@ -3194,7 +3404,8 @@ impl ApplicationHandler for App {
             None => false,
         };
 
-        // 5. Poll at the frame rate while interacting or work is outstanding;
+        // 5. Poll at the frame rate while interacting or work is outstanding; sleep to
+        //    the slideshow's next-slide deadline when it's the only thing pending;
         //    otherwise go fully idle until the next event.
         if nav.is_some()
             || transforming
@@ -3206,6 +3417,17 @@ impl ApplicationHandler for App {
             || self.pending_delete.is_some()
         {
             event_loop.set_control_flow(ControlFlow::WaitUntil(now + self.frame_interval));
+        } else if slideshow_running {
+            // Sleep until the next slide is due rather than spinning — when caught up and
+            // waiting, only the deadline wakes us. Fall back to a frame poll if no slide
+            // has shown yet; clamp into the future so a just-passed deadline still
+            // schedules a wake (we advance on the following tick).
+            let wake = self
+                .last_present
+                .map(|t| t + self.slideshow.interval)
+                .unwrap_or(now + self.frame_interval)
+                .max(now + Duration::from_millis(1));
+            event_loop.set_control_flow(ControlFlow::WaitUntil(wake));
         } else {
             event_loop.set_control_flow(ControlFlow::Wait);
         }
@@ -3289,7 +3511,7 @@ const IMAGE_FILTER_EXTS: &[&str] = &[
 /// from our `.ico` instead of Windows crudely downscaling one big image — which is
 /// what winit's single-size `Icon` forces, and what mangles the 16px title-bar size.
 #[cfg(windows)]
-fn apply_native_window_icon(window: &Window) {
+pub(crate) fn apply_native_window_icon(window: &Window) {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
@@ -3352,7 +3574,7 @@ fn apply_native_window_icon(window: &Window) {
 /// (downscaled to 256²). `None` if decoding fails — the app just runs with the
 /// default icon. (The .exe file icon for Explorer is embedded separately by
 /// `build.rs`.)
-fn load_window_icon() -> Option<Icon> {
+pub(crate) fn load_window_icon() -> Option<Icon> {
     const PNG: &[u8] = include_bytes!("../icons/photoblaze.png");
     let fit = FitBox {
         max_width: 256,
@@ -3612,18 +3834,28 @@ struct ArchiveLoad {
     was_password_attempt: bool,
 }
 
+/// Map the persisted default scale mode to the renderer's [`ScaleMode`].
+fn scale_mode_of(p: settings::ScaleModePref) -> ScaleMode {
+    match p {
+        settings::ScaleModePref::Fit => ScaleMode::Fit,
+        settings::ScaleModePref::Fill => ScaleMode::Fill,
+        settings::ScaleModePref::Original => ScaleMode::Original,
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cli_windowed = args.iter().any(|a| a == "--windowed" || a == "-w");
     let cli_fullscreen = args.iter().any(|a| a == "--fullscreen" || a == "-f");
-    // Default to windowed (more discoverable), but restore the saved preference if
-    // there is one; an explicit CLI flag always wins.
+    // Saved preferences drive the launch defaults (window mode + recursive scan); an
+    // explicit CLI flag always wins. A fresh install (defaults) starts windowed.
+    let startup_settings = settings::Settings::load();
     let windowed = if cli_windowed {
         true
     } else if cli_fullscreen {
         false
     } else {
-        settings::load_fullscreen().map(|fs| !fs).unwrap_or(true)
+        !startup_settings.start_fullscreen()
     };
     let force_recursive = args.iter().any(|a| a == "--recursive" || a == "-r");
     let force_flat = args.iter().any(|a| a == "--no-recursive");
@@ -3641,6 +3873,8 @@ fn main() {
     let input = classify_inputs(positional);
     let mut plan = open::plan(input.clone());
     if let Source::Scan { recursive, .. } = &mut plan.source {
+        // Default from the saved preference; an explicit CLI flag overrides it.
+        *recursive = startup_settings.recursive;
         if force_recursive {
             *recursive = true;
         }

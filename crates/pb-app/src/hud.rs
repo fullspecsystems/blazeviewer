@@ -11,8 +11,17 @@
 
 use std::path::PathBuf;
 
-/// Panel background: translucent black (≈60%).
-const BG: [u8; 4] = [0, 0, 0, 153];
+/// Default panel background: translucent black (≈60%). Toasts and the help overlay
+/// use this directly; the info / EXIF panels take a user-configurable alpha via
+/// [`bg_for_opacity`].
+pub const BG: [u8; 4] = [0, 0, 0, 153];
+
+/// A panel background at `opacity_pct` (0–100) percent — black at the given alpha.
+/// Drives the "info panel opacity" setting for the info / EXIF panels.
+pub fn bg_for_opacity(opacity_pct: u8) -> [u8; 4] {
+    let a = ((opacity_pct.min(100) as f32 / 100.0) * 255.0).round() as u8;
+    [0, 0, 0, a]
+}
 /// All overlay text is white; the label column is distinguished by weight
 /// (semibold) rather than color, which reads far better over busy photos than a
 /// dim gray. Legibility comes from the per-glyph outline (`SHADOW`).
@@ -86,8 +95,14 @@ impl Hud {
 
     /// Rasterize one line into the translucent panel with white, outlined text.
     /// Used for the basic `i` overlay. Returns `(rgba, w, h)`.
-    pub fn render_panel(&self, text: &str, px: f32, pad: u32) -> Option<(Vec<u8>, u32, u32)> {
-        self.render_panel_icon(text, px, pad, None)
+    pub fn render_panel(
+        &self,
+        text: &str,
+        px: f32,
+        pad: u32,
+        bg: [u8; 4],
+    ) -> Option<(Vec<u8>, u32, u32)> {
+        self.render_panel_icon(text, px, pad, None, bg)
     }
 
     /// Like [`render_panel`] but with an optional leading duotone icon (an SVG source
@@ -101,6 +116,7 @@ impl Hud {
         px: f32,
         pad: u32,
         icon: Option<&str>,
+        bg: [u8; 4],
     ) -> Option<(Vec<u8>, u32, u32)> {
         let line_h = self.line_height(px)?;
         let icon_h = (px * 0.92).round().max(1.0) as u32;
@@ -112,7 +128,7 @@ impl Hud {
         if text.is_empty() {
             let (rgba, iw, ih) = rasterized.as_ref()?;
             let side = line_h + 2 * pad;
-            let mut canvas = Canvas::new(side, side, BG, (px * 0.5).round());
+            let mut canvas = Canvas::new(side, side, bg, (px * 0.5).round());
             let ix = (side as i32 - *iw as i32) / 2;
             let iy = (side as i32 - *ih as i32) / 2;
             self.draw_icon(&mut canvas, rgba, *iw, *ih, ix, iy, px);
@@ -128,7 +144,7 @@ impl Hud {
         let text_x = pad + icon_w + gap;
         let pw = text_x + advance.ceil() as u32 + pad;
         let ph = line_h + 2 * pad;
-        let mut canvas = Canvas::new(pw, ph, BG, (px * 0.5).round());
+        let mut canvas = Canvas::new(pw, ph, bg, (px * 0.5).round());
 
         if let Some((rgba, iw, ih)) = &rasterized {
             // Vertically center the icon on the text line.
@@ -143,7 +159,13 @@ impl Hud {
     /// Rasterize `rows` into a two-column table inside the translucent panel: a
     /// semibold label column + a regular value column, with full-width `Span` rows
     /// on top. Used for the full-EXIF "nerd" panel (tasks.json #5) and help overlay.
-    pub fn render_table(&self, rows: &[Row], px: f32, pad: u32) -> Option<(Vec<u8>, u32, u32)> {
+    pub fn render_table(
+        &self,
+        rows: &[Row],
+        px: f32,
+        pad: u32,
+        bg: [u8; 4],
+    ) -> Option<(Vec<u8>, u32, u32)> {
         if rows.is_empty() {
             return None;
         }
@@ -185,7 +207,7 @@ impl Hud {
         let content_w = (value_x - pad as f32 + value_w).max(span_w);
         let pw = content_w.ceil() as u32 + 2 * pad;
         let ph = rows.len() as u32 * line_h + 2 * pad;
-        let mut canvas = Canvas::new(pw, ph, BG, (px * 0.5).round());
+        let mut canvas = Canvas::new(pw, ph, bg, (px * 0.5).round());
 
         for (i, item) in laid.iter().enumerate() {
             let row_top = pad as f32 + i as f32 * line_h as f32;

@@ -87,7 +87,9 @@ pub fn is_numpad(code: KeyCode) -> bool {
 }
 
 /// The configurable key→action table. Holds both directions: chord→action for the
-/// input dispatch, and action→chords for the help overlay / editor.
+/// input dispatch, and action→chords for the help overlay / editor. `Clone` so the
+/// Settings editor can edit a draft and commit it on Save (or discard on Cancel).
+#[derive(Clone)]
 pub struct Keymap {
     by_chord: HashMap<KeyChord, Action>,
     by_action: HashMap<Action, Vec<KeyChord>>,
@@ -130,6 +132,86 @@ impl Keymap {
         self.by_action.get(&action).map_or(&[], Vec::as_slice)
     }
 
+    /// The chord in positional `slot` (0 = primary, 1 = secondary) of `action`, if
+    /// any — what the two-slot editor displays.
+    pub fn slot(&self, action: Action, slot: usize) -> Option<KeyChord> {
+        self.bindings_for(action).get(slot).copied()
+    }
+
+    /// Assign `chord` to `action`'s positional `slot` (0 = primary, 1 = secondary),
+    /// stealing it from any other action so every chord has exactly one owner (the
+    /// standard rebind behavior). Returns the action it was taken from, if it had been
+    /// bound elsewhere, so the editor can note "moved from …". Rebuilds the index.
+    pub fn set_slot(&mut self, action: Action, slot: usize, chord: KeyChord) -> Option<Action> {
+        let stolen_from = self.action_for(&chord).filter(|&a| a != action);
+        // Remove this chord wherever it currently lives (incl. the target), so it can't
+        // end up bound to two actions.
+        for chords in self.by_action.values_mut() {
+            chords.retain(|c| *c != chord);
+        }
+        // Place it in the requested slot of the target's (now ≤2) list.
+        let cur = self.by_action.get(&action).cloned().unwrap_or_default();
+        let mut slots: [Option<KeyChord>; 2] = [cur.first().copied(), cur.get(1).copied()];
+        if slot < slots.len() {
+            slots[slot] = Some(chord);
+        }
+        self.by_action
+            .insert(action, slots.into_iter().flatten().collect());
+        self.rebuild_index();
+        stolen_from
+    }
+
+    /// Clear the chord in positional `slot` of `action` (removing the binding; a
+    /// cleared primary promotes the secondary). Rebuilds the index.
+    pub fn clear_slot(&mut self, action: Action, slot: usize) {
+        if let Some(chords) = self.by_action.get_mut(&action) {
+            if slot < chords.len() {
+                chords.remove(slot);
+            }
+        }
+        self.rebuild_index();
+    }
+
+    /// Restore every binding to the built-in defaults (the editor's "reset").
+    pub fn reset_to_defaults(&mut self) {
+        *self = Keymap::defaults();
+    }
+
+    /// Serialize to the `keymap.toml` schema (`[keys]` = id → array of chord strings),
+    /// writing **every** action — including ones the user cleared (as `[]`) — so a
+    /// reload reproduces the exact map (a cleared default stays cleared). Stable
+    /// [`Action::ALL`] order for a clean, reviewable diff.
+    pub fn to_toml(&self) -> String {
+        let mut keys = toml::map::Map::new();
+        for &action in Action::ALL {
+            let arr: Vec<toml::Value> = self
+                .bindings_for(action)
+                .iter()
+                .map(|c| toml::Value::String(c.to_string()))
+                .collect();
+            keys.insert(action.id().to_string(), toml::Value::Array(arr));
+        }
+        let mut root = toml::map::Map::new();
+        root.insert("keys".to_string(), toml::Value::Table(keys));
+        let body = toml::to_string_pretty(&toml::Value::Table(root)).unwrap_or_default();
+        format!("# PhotoBlaze keymap (preferences only, never photo data)\n{body}")
+    }
+
+    /// Persist to `keymap.toml`, atomically (temp + rename). Best-effort; an explicit
+    /// user action only (Settings ▸ Save) — privacy #2 (config, never photo data).
+    pub fn save(&self) -> bool {
+        let Some(dir) = crate::settings::config_dir() else {
+            return false;
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("keymap.toml");
+        let tmp = path.with_extension("toml.tmp");
+        if std::fs::write(&tmp, self.to_toml()).is_err() {
+            return false;
+        }
+        std::fs::rename(&tmp, &path).is_ok()
+    }
+
     /// Merge a `keymap.toml` over the current bindings. Schema: a `[keys]` table
     /// mapping action ids to a chord string or an array of chord strings, e.g.
     /// ```toml
@@ -158,11 +240,12 @@ impl Keymap {
                 warnings.push(format!("unknown action {id:?} ignored"));
                 continue;
             };
-            let raw = chord_strings(value);
-            if raw.is_empty() {
+            let Some(raw) = chord_strings(value) else {
                 warnings.push(format!("{id}: expected a key string or array of strings"));
                 continue;
-            }
+            };
+            // An explicit empty array clears the action (it overrides the default with
+            // "no binding") — that's how a cleared binding round-trips through `to_toml`.
             let mut chords = Vec::new();
             for s in raw {
                 match KeyChord::parse(&s) {
@@ -203,16 +286,19 @@ impl Keymap {
     }
 }
 
-/// Extract chord strings from a TOML value: a bare string, or an array of strings.
-/// Anything else yields an empty list (the caller warns).
-fn chord_strings(value: &toml::Value) -> Vec<String> {
+/// Extract chord strings from a TOML value: a bare string → one, or an array of
+/// strings → that list (possibly empty = "clear this action"). `None` for any other
+/// type (the caller warns); an empty array is `Some(vec![])`, distinct from `None`.
+fn chord_strings(value: &toml::Value) -> Option<Vec<String>> {
     match value {
-        toml::Value::String(s) => vec![s.clone()],
-        toml::Value::Array(items) => items
-            .iter()
-            .filter_map(|v| v.as_str().map(str::to_string))
-            .collect(),
-        _ => Vec::new(),
+        toml::Value::String(s) => Some(vec![s.clone()]),
+        toml::Value::Array(items) => Some(
+            items
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect(),
+        ),
+        _ => None,
     }
 }
 
@@ -253,6 +339,10 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         (Action::Help, vec![p("/"), p("Shift+/")]),
         (Action::Fullscreen, vec![p("F11"), p("Alt+Enter")]),
         one(Action::Recursive, "Ctrl+R"),
+        one(Action::SlideshowToggle, "S"),
+        // `[` shortens the interval (faster), `]` lengthens it (slower).
+        one(Action::SlideshowFaster, "["),
+        one(Action::SlideshowSlower, "]"),
         one(Action::Settings, "Ctrl+,"),
         // About is menu-only (no default key).
         (Action::About, vec![]),
@@ -549,6 +639,69 @@ mod tests {
         // Defaults survive intact.
         let chord = KeyChord::parse("Ctrl+C").unwrap();
         assert_eq!(km.action_for(&chord), Some(Action::Copy));
+    }
+
+    #[test]
+    fn set_slot_steals_from_a_previous_owner() {
+        let mut km = Keymap::defaults();
+        let chord = |s: &str| KeyChord::parse(s).unwrap();
+        // Assign Copy's key (Ctrl+C) to Info's primary slot → stolen from Copy.
+        let stolen = km.set_slot(Action::Info, 0, chord("Ctrl+C"));
+        assert_eq!(stolen, Some(Action::Copy));
+        assert_eq!(km.action_for(&chord("Ctrl+C")), Some(Action::Info));
+        // Copy no longer owns it (single-owner invariant), and no duplicate warning.
+        assert!(!km.bindings_for(Action::Copy).contains(&chord("Ctrl+C")));
+        assert!(km.clone().rebuild_index().is_empty());
+    }
+
+    #[test]
+    fn set_slot_sets_primary_and_secondary_independently() {
+        let mut km = Keymap::defaults();
+        let chord = |s: &str| KeyChord::parse(s).unwrap();
+        assert_eq!(km.set_slot(Action::RotateCw, 0, chord("F6")), None);
+        assert_eq!(km.set_slot(Action::RotateCw, 1, chord("F7")), None);
+        assert_eq!(km.slot(Action::RotateCw, 0), Some(chord("F6")));
+        assert_eq!(km.slot(Action::RotateCw, 1), Some(chord("F7")));
+        assert_eq!(km.action_for(&chord("F6")), Some(Action::RotateCw));
+        assert_eq!(km.action_for(&chord("F7")), Some(Action::RotateCw));
+    }
+
+    #[test]
+    fn clear_slot_removes_a_binding_and_promotes() {
+        let mut km = Keymap::defaults();
+        let chord = |s: &str| KeyChord::parse(s).unwrap();
+        // Random defaults to [Enter, NumpadEnter]; clearing the primary promotes it.
+        km.clear_slot(Action::Random, 0);
+        assert_eq!(km.slot(Action::Random, 0), Some(chord("NumpadEnter")));
+        assert_eq!(km.action_for(&chord("Enter")), None);
+    }
+
+    #[test]
+    fn to_toml_round_trips_including_a_cleared_action() {
+        let mut km = Keymap::defaults();
+        let chord = |s: &str| KeyChord::parse(s).unwrap();
+        km.set_slot(Action::RotateCw, 0, chord("F6"));
+        km.clear_slot(Action::Help, 0); // drop "/"
+        km.clear_slot(Action::Help, 0); // drop "Shift+/" → Help now unbound
+                                        // Serialize, then load fresh defaults and merge the serialized text over them.
+        let text = km.to_toml();
+        let mut reloaded = Keymap::defaults();
+        let warnings = reloaded.merge_toml(&text);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(reloaded.action_for(&chord("F6")), Some(Action::RotateCw));
+        // The cleared Help binding stays cleared (explicit `[]` in the file).
+        assert_eq!(reloaded.action_for(&chord("/")), None);
+        assert!(reloaded.bindings_for(Action::Help).is_empty());
+    }
+
+    #[test]
+    fn reset_to_defaults_restores_bindings() {
+        let mut km = Keymap::defaults();
+        let chord = |s: &str| KeyChord::parse(s).unwrap();
+        km.set_slot(Action::RotateCw, 0, chord("F6"));
+        km.reset_to_defaults();
+        assert_eq!(km.action_for(&chord("R")), Some(Action::RotateCw));
+        assert_eq!(km.action_for(&chord("F6")), None);
     }
 
     #[test]

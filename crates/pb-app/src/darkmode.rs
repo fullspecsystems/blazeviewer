@@ -16,9 +16,6 @@
 use windows::core::PCSTR;
 use windows::Win32::Foundation::{FARPROC, HMODULE, HWND};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetMenu, SetMenuInfo, MENUINFO, MIM_APPLYTOSUBMENUS, MIM_STYLE, MNS_NOCHECK,
-};
 
 // uxtheme.dll ordinals (stable across Win10 1903+ and Win11).
 const ORD_ALLOW_DARK_MODE_FOR_WINDOW: usize = 133;
@@ -72,30 +69,6 @@ pub fn allow_for_window(hwnd: isize) {
         let allow_dark_mode_for_window: unsafe extern "system" fn(HWND, bool) -> bool =
             unsafe { std::mem::transmute(p) };
         unsafe { allow_dark_mode_for_window(HWND(hwnd as *mut core::ffi::c_void), true) };
-    }
-}
-
-/// Slim the popup-menu left gutter. Win32 reserves a wide (DPI-scaled) check-mark column
-/// on every popup menu item; we use no check marks or icons, so `MNS_NOCHECK` drops that
-/// column and the items start much closer to the left edge. `MIM_APPLYTOSUBMENUS`
-/// propagates the style to every dropdown. Best-effort — a failure just leaves the wider
-/// native gutter. Re-apply after each `init_for_hwnd` (muda rebuilds the menu on theme
-/// changes). Trade-off: with no check column we can't show check/radio marks on the
-/// toggle items — acceptable since we don't, and the tighter gutter is the goal.
-pub fn slim_menu_gutter(hwnd: isize) {
-    // SAFETY: a valid live HWND; GetMenu returns the bar (or null if none, which we skip).
-    unsafe {
-        let hmenu = GetMenu(HWND(hwnd as *mut core::ffi::c_void));
-        if hmenu.0.is_null() {
-            return;
-        }
-        let info = MENUINFO {
-            cbSize: core::mem::size_of::<MENUINFO>() as u32,
-            fMask: MIM_STYLE | MIM_APPLYTOSUBMENUS,
-            dwStyle: MNS_NOCHECK,
-            ..Default::default()
-        };
-        let _ = SetMenuInfo(hmenu, &info);
     }
 }
 

@@ -11,12 +11,16 @@ use std::sync::Arc;
 
 use egui_wgpu::wgpu;
 use winit::dpi::{LogicalSize, PhysicalPosition};
-use winit::event::WindowEvent;
+use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Theme, Window, WindowId};
 
 use pb_decode::{decode_bytes, FitBox};
 
+use crate::action::Action;
+use crate::keymap::{KeyChord, Keymap};
+use crate::settings;
 use pb_ui as pbui;
 
 /// Which dialog a [`DialogWindow`] is showing.
@@ -46,36 +50,176 @@ pub enum DialogKind {
     Password,
 }
 
-/// Skeleton state for the Settings form. Not yet wired to persistence or live
-/// apply — it just drives the controls so we can see the layout. Defaults mirror
-/// the current in-code values (Task 19/20 etc.).
+/// The egui-facing edit state for the Settings form — the same fields as
+/// [`settings::Settings`] but in shapes the egui widgets want (a combo index, an
+/// `f32` color). Built from the live settings on open ([`SettingsDraft::from_settings`])
+/// and folded back on Save ([`SettingsDraft::to_settings`]).
 struct SettingsDraft {
+    /// Display refresh in Hz — caps the max-speed slider (not persisted).
     refresh_hz: u32,
     start_speed: f32,
     ramp_secs: f32,
     max_fps: u32,
     hold_delay_ms: u32,
     recursive: bool,
-    scale_mode: usize, // 0 = Fit, 1 = Fill, 2 = Original
-    letterbox: [f32; 3],
-    start_fullscreen: bool,
+    scale_mode: usize,   // 0 = Fit, 1 = Fill, 2 = Original
+    letterbox: [f32; 3], // 0..1 per channel (egui color picker)
+    info_opacity: u8,    // 0..100
+    startup_mode: usize, // 0 = Fullscreen, 1 = Windowed, 2 = Remember
 }
 
 impl SettingsDraft {
-    fn new(refresh_hz: u32) -> Self {
+    /// Build the draft from the persisted model. `refresh_hz` caps the max-speed
+    /// slider; an uncapped (`0`) or ≥refresh saved rate shows pinned at the ceiling.
+    fn from_settings(s: &settings::Settings, refresh_hz: u32) -> Self {
         let hz = refresh_hz.max(1);
+        let max_fps = if s.max_advance_rate == 0 || s.max_advance_rate >= hz {
+            hz
+        } else {
+            s.max_advance_rate
+        };
         Self {
             refresh_hz: hz,
-            start_speed: 3.0,
-            ramp_secs: 4.0,
-            max_fps: hz,
-            hold_delay_ms: 400,
-            recursive: true,
-            scale_mode: 0,
-            letterbox: [0.05, 0.05, 0.06],
-            start_fullscreen: false,
+            start_speed: s.start_speed,
+            ramp_secs: s.ramp_secs,
+            max_fps,
+            hold_delay_ms: s.hold_delay_ms,
+            recursive: s.recursive,
+            scale_mode: match s.scale_mode {
+                settings::ScaleModePref::Fit => 0,
+                settings::ScaleModePref::Fill => 1,
+                settings::ScaleModePref::Original => 2,
+            },
+            letterbox: [
+                s.letterbox[0] as f32 / 255.0,
+                s.letterbox[1] as f32 / 255.0,
+                s.letterbox[2] as f32 / 255.0,
+            ],
+            info_opacity: s.info_opacity,
+            startup_mode: match s.startup_mode {
+                settings::StartupMode::Fullscreen => 0,
+                settings::StartupMode::Windowed => 1,
+                settings::StartupMode::Remember => 2,
+            },
         }
     }
+
+    /// Fold the edited draft back onto `base`, preserving fields the form doesn't
+    /// expose (notably the remembered last fullscreen state). Clamped to valid ranges.
+    fn to_settings(&self, base: &settings::Settings) -> settings::Settings {
+        let mut s = base.clone();
+        s.start_speed = self.start_speed;
+        s.ramp_secs = self.ramp_secs;
+        // The slider tops out at the refresh rate; that ceiling means "uncapped" (0).
+        s.max_advance_rate = if self.max_fps >= self.refresh_hz {
+            0
+        } else {
+            self.max_fps
+        };
+        s.hold_delay_ms = self.hold_delay_ms;
+        s.recursive = self.recursive;
+        s.scale_mode = match self.scale_mode {
+            1 => settings::ScaleModePref::Fill,
+            2 => settings::ScaleModePref::Original,
+            _ => settings::ScaleModePref::Fit,
+        };
+        s.letterbox = [
+            (self.letterbox[0] * 255.0).round().clamp(0.0, 255.0) as u8,
+            (self.letterbox[1] * 255.0).round().clamp(0.0, 255.0) as u8,
+            (self.letterbox[2] * 255.0).round().clamp(0.0, 255.0) as u8,
+        ];
+        s.info_opacity = self.info_opacity;
+        s.startup_mode = match self.startup_mode {
+            0 => settings::StartupMode::Fullscreen,
+            1 => settings::StartupMode::Windowed,
+            _ => settings::StartupMode::Remember,
+        };
+        s.clamp();
+        s
+    }
+}
+
+/// The keybinding editor's mutable state, lent to [`settings_ui`] so the inline
+/// editor can read/rebind the draft keymap. The actual key *capture* happens in
+/// [`DialogWindow::handle_capture_event`] (raw winit events), not in egui — egui only
+/// arms a slot and renders the result.
+struct KbEdit<'a> {
+    /// The draft keymap being edited (a clone of the live one; committed on Save).
+    keymap: &'a mut Keymap,
+    /// The slot awaiting a keypress (`Some((action, slot))`), or `None` when idle.
+    capturing: &'a mut Option<(Action, usize)>,
+    /// Whether any binding changed (so Save knows to persist + apply the keymap).
+    dirty: &'a mut bool,
+    /// A transient note shown atop the section, e.g. "Moved Ctrl+C from Copy".
+    note: &'a mut Option<String>,
+}
+
+/// The keyboard-shortcut editor, grouped into cards by area (matching the menu).
+/// Every [`Action`] appears so any command is rebindable, including ones with no
+/// default key (their slots read "Set…"/"Add…").
+const KB_GROUPS: &[(&str, &[Action])] = &[
+    (
+        "Navigation",
+        &[
+            Action::Next,
+            Action::Prev,
+            Action::Random,
+            Action::RandomPrev,
+            Action::PanLeft,
+            Action::PanRight,
+            Action::PanUp,
+            Action::PanDown,
+            Action::ZoomIn,
+            Action::ZoomOut,
+        ],
+    ),
+    (
+        "View",
+        &[
+            Action::ScaleFit,
+            Action::ScaleFill,
+            Action::ScaleOriginal,
+            Action::ToggleOriginal,
+            Action::Info,
+            Action::FullExif,
+            Action::Help,
+            Action::Fullscreen,
+            Action::Recursive,
+        ],
+    ),
+    (
+        "Image & File",
+        &[
+            Action::RotateCw,
+            Action::RotateCcw,
+            Action::Copy,
+            Action::SaveRotation,
+            Action::Delete,
+            Action::DeletePermanent,
+            Action::OpenFile,
+            Action::OpenFolder,
+        ],
+    ),
+    (
+        "Application",
+        &[Action::Settings, Action::About, Action::Quit],
+    ),
+];
+
+/// Is this physical key a bare modifier? (Capture waits for a "real" key to combine
+/// with the held modifiers, rather than committing on the modifier press itself.)
+fn is_modifier_key(code: KeyCode) -> bool {
+    matches!(
+        code,
+        KeyCode::ControlLeft
+            | KeyCode::ControlRight
+            | KeyCode::ShiftLeft
+            | KeyCode::ShiftRight
+            | KeyCode::AltLeft
+            | KeyCode::AltRight
+            | KeyCode::SuperLeft
+            | KeyCode::SuperRight
+    )
 }
 
 /// A second OS window rendering an egui dialog (its own wgpu device/surface).
@@ -99,6 +243,33 @@ pub struct DialogWindow {
     /// on demand via `pb_ui::icon`, not stored here.
     icon: Option<egui::TextureHandle>,
     draft: SettingsDraft,
+    /// The settings as they were when the dialog opened — the base the edited draft
+    /// is folded onto on Save (so unexposed fields survive) and the Cancel baseline.
+    settings_base: settings::Settings,
+    /// The edited settings the user committed with **Save** (a [`DialogKind::Settings`]
+    /// dialog), taken by [`take_settings_result`] right after the answering frame.
+    ///
+    /// [`take_settings_result`]: DialogWindow::take_settings_result
+    submitted_settings: Option<settings::Settings>,
+    /// The draft keymap edited by the inline keybinding editor (a clone of the live
+    /// one, seeded at open). Committed on Save, discarded on Cancel.
+    keymap_draft: Keymap,
+    /// Whether any binding was changed (so Save only persists/applies if it was).
+    keymap_dirty: bool,
+    /// The slot awaiting a keypress for rebinding (`Some((action, slot))`), else idle.
+    capturing: Option<(Action, usize)>,
+    /// Live modifier state for key capture, tracked from `ModifiersChanged` so a
+    /// captured chord matches what the viewer would build.
+    cap_ctrl: bool,
+    cap_shift: bool,
+    cap_alt: bool,
+    /// A transient note for the keybinding editor (e.g. a "moved from …" message).
+    keymap_note: Option<String>,
+    /// The edited keymap committed with **Save** (only set when it actually changed),
+    /// taken by [`take_keymap_result`].
+    ///
+    /// [`take_keymap_result`]: DialogWindow::take_keymap_result
+    submitted_keymap: Option<Keymap>,
     /// The prompt for a [`DialogKind::Confirm`]/[`Message`]/[`Password`] dialog.
     ///
     /// [`Message`]: DialogKind::Message
@@ -132,14 +303,18 @@ pub struct DialogWindow {
 
 impl DialogWindow {
     /// Create and show the dialog window, centered over `parent` (the main viewer
-    /// window) when given. `refresh_hz` caps the Settings "max photos/sec" slider.
-    /// Returns `None` if window/GPU setup fails (best-effort — a failed dialog must
-    /// never take down the viewer).
+    /// window) when given. `refresh_hz` caps the Settings "max photos/sec" slider;
+    /// `settings` + `keymap` seed the Settings form + keybinding editor (ignored by the
+    /// other kinds). Returns `None` if window/GPU setup fails (best-effort — a failed
+    /// dialog must never take down the viewer).
+    #[allow(clippy::too_many_arguments)]
     pub fn open(
         kind: DialogKind,
         event_loop: &ActiveEventLoop,
         refresh_hz: u32,
         message: &str,
+        settings: &settings::Settings,
+        keymap: &Keymap,
         parent: Option<&Window>,
     ) -> Option<DialogWindow> {
         let (w, h, resizable, title) = match kind {
@@ -155,6 +330,9 @@ impl DialogWindow {
             .with_title(title)
             .with_inner_size(LogicalSize::new(w, h))
             .with_resizable(resizable)
+            // Use the PhotoBlaze icon, not the generic default (the Win32 call below
+            // then upgrades it to the .exe's crisp multi-size .ico on Windows).
+            .with_window_icon(crate::load_window_icon())
             .with_visible(false);
         // Center over the parent's outer rect (so it lands on the viewer, not the OS
         // cascade position). Falls back to the default position if it can't be read.
@@ -169,6 +347,10 @@ impl DialogWindow {
             }
         }
         let window = Arc::new(event_loop.create_window(attrs).ok()?);
+        // Match the viewer: point the title-bar / taskbar icon at the exe's multi-size
+        // .ico so the small size is its purpose-rendered bitmap, not a crude downscale.
+        #[cfg(windows)]
+        crate::apply_native_window_icon(&window);
         let size = window.inner_size();
         let dark_ui = window.theme() != Some(Theme::Light);
 
@@ -237,7 +419,17 @@ impl DialogWindow {
             egui_renderer,
             dark_ui,
             icon,
-            draft: SettingsDraft::new(refresh_hz),
+            draft: SettingsDraft::from_settings(settings, refresh_hz),
+            settings_base: settings.clone(),
+            submitted_settings: None,
+            keymap_draft: keymap.clone(),
+            keymap_dirty: false,
+            capturing: None,
+            cap_ctrl: false,
+            cap_shift: false,
+            cap_alt: false,
+            keymap_note: None,
+            submitted_keymap: None,
             confirm_msg: message.to_string(),
             confirm_result: None,
             password_input: String::new(),
@@ -279,6 +471,81 @@ impl DialogWindow {
     /// The caller pairs this with a `take_confirm_result()` of `Some(true)`.
     pub fn take_submitted_password(&mut self) -> Option<String> {
         self.submitted_password.take()
+    }
+
+    /// Take the edited settings the user committed with **Save** on a
+    /// [`DialogKind::Settings`] dialog, set during the answering frame. `None` until
+    /// then. The caller pairs this with a `take_confirm_result()` of `Some(true)`.
+    pub fn take_settings_result(&mut self) -> Option<settings::Settings> {
+        self.submitted_settings.take()
+    }
+
+    /// Take the edited keymap committed with **Save**, set during the answering frame
+    /// *only if a binding actually changed*. `None` otherwise. Paired with a
+    /// `take_confirm_result()` of `Some(true)`.
+    pub fn take_keymap_result(&mut self) -> Option<Keymap> {
+        self.submitted_keymap.take()
+    }
+
+    /// Whether the keybinding editor is waiting for a keypress to bind. While true the
+    /// event router feeds key events to [`handle_capture_event`] instead of egui.
+    ///
+    /// [`handle_capture_event`]: DialogWindow::handle_capture_event
+    pub fn capturing_active(&self) -> bool {
+        self.capturing.is_some()
+    }
+
+    /// Keep the capture modifier state fresh from `ModifiersChanged` (always — even
+    /// when not capturing — so an armed slot sees the true modifier state). A no-op
+    /// for every other event.
+    pub fn note_modifiers(&mut self, event: &WindowEvent) {
+        if let WindowEvent::ModifiersChanged(mods) = event {
+            self.cap_ctrl = mods.state().control_key();
+            self.cap_shift = mods.state().shift_key();
+            self.cap_alt = mods.state().alt_key();
+        }
+    }
+
+    /// Consume a key event while the keybinding editor is capturing: a non-modifier
+    /// key binds the armed slot (stealing the chord from any prior owner), Esc cancels,
+    /// a bare modifier or a key release is swallowed (wait for the real key). Returns
+    /// whether the event was consumed (so the router skips egui / the Esc-closes path);
+    /// non-key events return `false` and fall through to normal handling.
+    pub fn handle_capture_event(&mut self, event: &WindowEvent) -> bool {
+        let Some((action, slot)) = self.capturing else {
+            return false;
+        };
+        match event {
+            WindowEvent::ModifiersChanged(_) => true, // tracked in `note_modifiers`
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(code),
+                        state: ElementState::Pressed,
+                        ..
+                    },
+                ..
+            } => {
+                let code = *code;
+                if code == KeyCode::Escape {
+                    self.capturing = None; // cancel, leave the binding unchanged
+                    return true;
+                }
+                if is_modifier_key(code) {
+                    return true; // wait for a real key to combine with held modifiers
+                }
+                let chord = KeyChord::new(code, self.cap_ctrl, self.cap_shift, self.cap_alt);
+                let stolen = self.keymap_draft.set_slot(action, slot, chord);
+                self.keymap_dirty = true;
+                self.capturing = None;
+                self.keymap_note =
+                    stolen.map(|a| format!("Moved {chord} from \u{201c}{}\u{201d}", a.label()));
+                true
+            }
+            // Swallow key releases while armed so they don't leak to egui.
+            WindowEvent::KeyboardInput { .. } => true,
+            _ => false,
+        }
     }
 
     /// Show an inline error under the password field (a wrong attempt), clear the
@@ -334,6 +601,12 @@ impl DialogWindow {
         let take_focus = self.focus_password;
         let draft = &mut self.draft;
         let password_input = &mut self.password_input;
+        let mut kb = KbEdit {
+            keymap: &mut self.keymap_draft,
+            capturing: &mut self.capturing,
+            dirty: &mut self.keymap_dirty,
+            note: &mut self.keymap_note,
+        };
         let mut confirm_click: Option<bool> = None;
         let full_output = ctx.run(raw_input, |ctx| match kind {
             DialogKind::About => {
@@ -345,7 +618,7 @@ impl DialogWindow {
                 confirm_click = settings_button_bar(ctx);
                 egui::CentralPanel::default()
                     .frame(egui::Frame::default().fill(ctx.style().visuals.panel_fill))
-                    .show(ctx, |ui| settings_ui(ui, draft));
+                    .show(ctx, |ui| settings_ui(ui, draft, &mut kb));
             }
             DialogKind::Confirm => {
                 confirm_click = confirm_dialog(ctx, &msg);
@@ -371,6 +644,14 @@ impl DialogWindow {
             // On Unlock/Enter, snapshot the entered text for the app to validate.
             if confirm_click == Some(true) && kind == DialogKind::Password {
                 self.submitted_password = Some(self.password_input.clone());
+            }
+            // On Save, fold the edited draft onto the open-time base for the app to apply.
+            if confirm_click == Some(true) && kind == DialogKind::Settings {
+                self.submitted_settings = Some(self.draft.to_settings(&self.settings_base));
+                // Hand back the edited keymap only if a binding actually changed.
+                if self.keymap_dirty {
+                    self.submitted_keymap = Some(self.keymap_draft.clone());
+                }
             }
         }
 
@@ -515,6 +796,12 @@ fn about_ui(ui: &mut egui::Ui, icon: Option<&egui::TextureHandle>) {
 // icons (lock/warning/trash) come tinted + placed from `pbui::icon`.
 const DIALOG_PAD: f32 = 22.0;
 const MSG_SIZE: f32 = 15.0;
+/// Uniform inset of a dialog's bottom action bar — applied equally to the top (the
+/// divider), right, and bottom, **and** used as the gap between buttons. This is the one
+/// place dialog-button spacing is defined, so buttons always land balanced and no caller
+/// hand-spaces them. Sourced from `pbui::GAP` so the button gap, button-bar inset, and
+/// the gaps between cards are all the one standard value.
+const BTN_BAR_PAD: f32 = pbui::GAP;
 
 /// A panel frame filled to match the window background, inset by `DIALOG_PAD` on
 /// all sides. Used for both the content panel and the bottom button bar so their
@@ -525,21 +812,21 @@ fn dialog_frame(ctx: &egui::Context) -> egui::Frame {
         .inner_margin(egui::Margin::same(DIALOG_PAD))
 }
 
-/// The shared bottom action bar. Buttons are laid out right-to-left (added
-/// rightmost-first, so they read `[Primary] [Cancel]` left-to-right). `edge` is the
-/// dialog's content inset — the bar uses it horizontally so the buttons **line up with
-/// the content above** (the cards / message), with `pbui::GAP` of vertical breathing and
-/// the same `GAP` between buttons. Callers just add buttons — no manual spacing.
-fn button_bar(ctx: &egui::Context, id: &'static str, edge: f32, add: impl FnOnce(&mut egui::Ui)) {
+/// The shared bottom action bar — the single place dialog buttons get their spacing, so
+/// they always land balanced. Buttons are laid out right-to-left (added rightmost-first,
+/// so they read `[Primary] [Cancel]` left-to-right) with a uniform [`BTN_BAR_PAD`] inset
+/// on the top (the divider), right, and bottom, **and** the same value as the gap between
+/// buttons (set via `item_spacing.x`). Callers just add buttons — no manual spacing.
+fn button_bar(ctx: &egui::Context, id: &'static str, add: impl FnOnce(&mut egui::Ui)) {
     egui::TopBottomPanel::bottom(id)
         .frame(
             egui::Frame::default()
                 .fill(ctx.style().visuals.panel_fill)
-                .inner_margin(egui::Margin::symmetric(edge, pbui::GAP)),
+                .inner_margin(egui::Margin::same(BTN_BAR_PAD)),
         )
         .show(ctx, |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = pbui::GAP;
+                ui.spacing_mut().item_spacing.x = BTN_BAR_PAD;
                 add(ui);
             });
         });
@@ -556,7 +843,7 @@ fn confirm_dialog(ctx: &egui::Context, message: &str) -> Option<bool> {
     let p = pbui::Palette::new(ctx.style().visuals.dark_mode);
     // Right-to-left: Cancel added first (rightmost), Delete to its left — so the
     // visual order reads [Delete] [Cancel], matching Directory Opus.
-    button_bar(ctx, "confirm_bar", DIALOG_PAD, |ui| {
+    button_bar(ctx, "confirm_bar", |ui| {
         if pbui::secondary_button(ui, "Cancel").clicked() {
             result = Some(false);
         }
@@ -599,7 +886,7 @@ fn confirm_dialog(ctx: &egui::Context, message: &str) -> Option<bool> {
 fn message_dialog(ctx: &egui::Context, message: &str) -> Option<bool> {
     let mut ok = None;
     let p = pbui::Palette::new(ctx.style().visuals.dark_mode);
-    button_bar(ctx, "message_bar", DIALOG_PAD, |ui| {
+    button_bar(ctx, "message_bar", |ui| {
         let resp = pbui::primary_button(ui, &p, "OK");
         if resp.clicked() {
             ok = Some(true);
@@ -642,7 +929,7 @@ fn password_dialog(
 ) -> Option<bool> {
     let mut result = None;
     let p = pbui::Palette::new(ctx.style().visuals.dark_mode);
-    button_bar(ctx, "password_bar", DIALOG_PAD, |ui| {
+    button_bar(ctx, "password_bar", |ui| {
         if pbui::secondary_button(ui, "Cancel").clicked() {
             result = Some(false);
         }
@@ -701,6 +988,20 @@ fn password_dialog(
     result
 }
 
+/// Open the OS "default apps" settings so the user can make PhotoBlaze the default
+/// photo viewer. Windows doesn't let an app set itself as default programmatically
+/// (the user must confirm in Settings), so we deep-link to the right page. Best-effort,
+/// and a no-op on other platforms for now.
+fn open_default_apps() {
+    #[cfg(windows)]
+    {
+        // `explorer.exe` resolves the `ms-settings:` protocol → the Default apps page.
+        let _ = std::process::Command::new("explorer.exe")
+            .arg("ms-settings:defaultapps")
+            .spawn();
+    }
+}
+
 /// Best-effort scrub of a secret String's bytes in place (overwrite with NUL, which
 /// stays valid UTF-8), then clear it — so an entered password isn't left lying in
 /// the field's buffer. Matches the RAM-only / no-trace stance for secrets.
@@ -715,17 +1016,15 @@ fn scrub(s: &mut String) {
 }
 
 /// The pinned bottom action bar for the Settings dialog: a right-aligned
-/// `[Save] [Cancel]` pair (Save accent-filled). Wiring to persistence is a follow-up
-/// (the controls drive a skeleton draft today).
-/// Returns `Some(true)` on Save, `Some(false)` on Cancel, else `None`. Both answers
-/// close the dialog (via the main-loop's confirm-result path); persisting the draft on
-/// Save is a follow-up — the controls drive a skeleton today.
+/// `[Save] [Cancel]` pair (Save accent-filled). Returns `Some(true)` on Save,
+/// `Some(false)` on Cancel, else `None`. On Save the main loop takes the edited
+/// settings ([`DialogWindow::take_settings_result`]) and applies + persists them;
+/// Cancel / Esc just close, discarding the draft.
 fn settings_button_bar(ctx: &egui::Context) -> Option<bool> {
     let p = pbui::Palette::new(ctx.style().visuals.dark_mode);
     let mut result = None;
     // Same shared bar as every other dialog — uniform inset + button gap, no hand-spacing.
-    // Settings content insets by PAGE_MARGIN; match it so the buttons line up with the cards.
-    button_bar(ctx, "settings_bar", pbui::PAGE_MARGIN, |ui| {
+    button_bar(ctx, "settings_bar", |ui| {
         if pbui::secondary_button(ui, "Cancel").clicked() {
             result = Some(false);
         }
@@ -737,10 +1036,10 @@ fn settings_button_bar(ctx: &egui::Context) -> Option<bool> {
 }
 
 /// The Settings form, laid out as Windows-11-style **grouped setting cards** — related
-/// settings share one card under a semibold heading, rows separated by hairline dividers
-/// (far less scrolling than a card per setting). Built on the `pbui` design system.
-/// (Controls drive a skeleton draft; persistence is a follow-up.)
-fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
+/// settings share one card under a semibold heading (far less scrolling than a card per
+/// setting). Built on the `pbui` design system. The controls edit `d`, a draft built
+/// from the live settings on open; Save folds it back via [`SettingsDraft::to_settings`].
+fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft, kb: &mut KbEdit) {
     let p = pbui::Palette::new(ui.visuals().dark_mode);
     let cap = d.refresh_hz;
 
@@ -771,7 +1070,8 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                             |ui| {
                                 pbui::slider(ui, &mut d.start_speed, 1.0..=30.0, "/s");
                             },
-                        );                        pbui::card_row(
+                        );
+                        pbui::card_row(
                             ui,
                             &p,
                             None,
@@ -780,7 +1080,8 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                             |ui| {
                                 pbui::slider(ui, &mut d.ramp_secs, 0.5..=10.0, " s");
                             },
-                        );                        pbui::card_row(
+                        );
+                        pbui::card_row(
                             ui,
                             &p,
                             None,
@@ -789,7 +1090,8 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                             |ui| {
                                 pbui::slider(ui, &mut d.max_fps, 1..=cap, "/s");
                             },
-                        );                        pbui::card_row(
+                        );
+                        pbui::card_row(
                             ui,
                             &p,
                             None,
@@ -807,8 +1109,8 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                             ui,
                             &p,
                             None,
-                            "Open folders recursively",
-                            Some("Include photos in subfolders by default"),
+                            "Open new folders recursively",
+                            Some("Default for newly opened folders. The View menu toggles the current one."),
                             |ui| {
                                 pbui::toggle_with_label(ui, &p, &mut d.recursive);
                             },
@@ -839,7 +1141,8 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                                         ui.selectable_value(&mut d.scale_mode, 2, "Original");
                                     });
                             },
-                        );                        pbui::card_row(
+                        );
+                        pbui::card_row(
                             ui,
                             &p,
                             None,
@@ -848,33 +1151,45 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                             |ui| {
                                 ui.color_edit_button_rgb(&mut d.letterbox);
                             },
-                        );                        pbui::card_row(
+                        );
+                        pbui::card_row(
                             ui,
                             &p,
                             None,
-                            "Start in fullscreen",
-                            Some("Open the viewer fullscreen on launch"),
+                            "Info panel opacity",
+                            Some("How solid the info and EXIF panels look over a photo"),
                             |ui| {
-                                pbui::toggle_with_label(ui, &p, &mut d.start_fullscreen);
+                                pbui::slider(ui, &mut d.info_opacity, 0..=100, "%");
+                            },
+                        );
+                        pbui::card_row(
+                            ui,
+                            &p,
+                            None,
+                            "Start in",
+                            Some("Window mode when PhotoBlaze launches"),
+                            |ui| {
+                                egui::ComboBox::from_id_salt("startup_mode")
+                                    .width(150.0)
+                                    .selected_text(
+                                        ["Fullscreen", "Windowed", "Remember last"][d.startup_mode],
+                                    )
+                                    .show_ui(ui, |ui| {
+                                        pbui::apply_to_ui(ui, p.dark);
+                                        ui.selectable_value(&mut d.startup_mode, 0, "Fullscreen");
+                                        ui.selectable_value(&mut d.startup_mode, 1, "Windowed");
+                                        ui.selectable_value(
+                                            &mut d.startup_mode,
+                                            2,
+                                            "Remember last",
+                                        );
+                                    });
                             },
                         );
                     });
                     ui.add_space(pbui::GAP);
 
-                    pbui::group_card(ui, &p, Some("Keyboard"), |ui| {
-                        pbui::card_row(
-                            ui,
-                            &p,
-                            None,
-                            "Keyboard shortcuts",
-                            Some("Customize navigation and command keys"),
-                            |ui| {
-                                ui.label(
-                                    egui::RichText::new("Coming soon").color(p.text_secondary),
-                                );
-                            },
-                        );
-                    });
+                    keybindings_ui(ui, &p, kb);
                     ui.add_space(pbui::GAP);
 
                     pbui::group_card(ui, &p, Some("System"), |ui| {
@@ -883,30 +1198,94 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                             &p,
                             None,
                             "Default photo viewer",
-                            Some("Open photos with PhotoBlaze by default"),
+                            Some("Opens Windows Default apps to set PhotoBlaze"),
                             |ui| {
-                                let _ = pbui::secondary_button(ui, "Set default\u{2026}");
+                                if pbui::secondary_button(ui, "Set default\u{2026}").clicked() {
+                                    open_default_apps();
+                                }
                             },
-                        );                        pbui::card_row(
+                        );
+                        pbui::card_row(
                             ui,
                             &p,
                             None,
                             "Reset settings",
-                            Some("Restore every setting to its default"),
+                            Some("Restore every setting to its default (applies on Save)"),
                             |ui| {
-                                let _ = pbui::secondary_button(ui, "Reset\u{2026}");
+                                if pbui::secondary_button(ui, "Reset").clicked() {
+                                    // Repopulate the form with the defaults; Save commits,
+                                    // Cancel still reverts (nothing is written yet).
+                                    let hz = d.refresh_hz;
+                                    *d = SettingsDraft::from_settings(
+                                        &settings::Settings::default(),
+                                        hz,
+                                    );
+                                }
                             },
                         );
                     });
-
-                    ui.add_space(pbui::SPACE_4);
-                    ui.label(
-                        egui::RichText::new(
-                            "Skeleton \u{2014} controls aren\u{2019}t wired to settings yet.",
-                        )
-                        .size(12.5)
-                        .color(p.text_secondary),
-                    );
                 });
         });
+}
+
+/// The inline keyboard-shortcut editor: grouped cards (matching the menu), each
+/// command with a Primary and Secondary chord slot. Clicking a slot arms key capture
+/// (handled outside egui in [`DialogWindow::handle_capture_event`]); the actual edits
+/// land on the draft keymap in `kb`, committed on the dialog's Save.
+fn keybindings_ui(ui: &mut egui::Ui, p: &pbui::Palette, kb: &mut KbEdit) {
+    // A capture prompt while a slot is armed, else a transient "moved from …" note.
+    if kb.capturing.is_some() {
+        ui.label(egui::RichText::new("Press a key to bind it. Esc cancels.").color(p.accent));
+        ui.add_space(pbui::SPACE_2);
+    } else if let Some(note) = kb.note.clone() {
+        ui.label(egui::RichText::new(note).color(p.text_secondary));
+        ui.add_space(pbui::SPACE_2);
+    }
+
+    for &(title, actions) in KB_GROUPS {
+        pbui::group_card(ui, p, Some(title), |ui| {
+            for &action in actions {
+                pbui::card_row(ui, p, None, action.label(), None, |ui| {
+                    ui.horizontal(|ui| {
+                        chord_slot(ui, p, kb, action, 0);
+                        ui.add_space(pbui::SPACE_2);
+                        chord_slot(ui, p, kb, action, 1);
+                    });
+                });
+            }
+        });
+        ui.add_space(pbui::GAP);
+    }
+
+    if pbui::secondary_button(ui, "Reset shortcuts to defaults").clicked() {
+        kb.keymap.reset_to_defaults();
+        *kb.dirty = true;
+        *kb.capturing = None;
+        *kb.note = None;
+    }
+}
+
+/// One chord slot (primary or secondary) for a command. Idle: a button showing the
+/// bound chord, or "Set…"/"Add…" when empty — clicking it arms capture. Armed: a
+/// "Press a key…" prompt plus a Clear button that removes the binding.
+fn chord_slot(ui: &mut egui::Ui, p: &pbui::Palette, kb: &mut KbEdit, action: Action, slot: usize) {
+    if *kb.capturing == Some((action, slot)) {
+        ui.label(egui::RichText::new("Press a key\u{2026}").color(p.accent));
+        if pbui::secondary_button(ui, "Clear").clicked() {
+            kb.keymap.clear_slot(action, slot);
+            *kb.dirty = true;
+            *kb.capturing = None;
+            *kb.note = None;
+        }
+        return;
+    }
+    let label = match kb.keymap.slot(action, slot) {
+        Some(c) => c.to_string(),
+        None if slot == 0 => "Set\u{2026}".to_string(),
+        None => "Add\u{2026}".to_string(),
+    };
+    if pbui::secondary_button(ui, &label).clicked() {
+        *kb.capturing = Some((action, slot));
+        *kb.note = None;
+    }
 }

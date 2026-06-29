@@ -57,6 +57,10 @@ pub enum Action {
     Help,
     Fullscreen,
     Recursive,
+    // Slideshow (timer-driven advance).
+    SlideshowToggle,
+    SlideshowFaster,
+    SlideshowSlower,
     // Application.
     Settings,
     About,
@@ -94,6 +98,9 @@ impl Action {
         Action::Help,
         Action::Fullscreen,
         Action::Recursive,
+        Action::SlideshowToggle,
+        Action::SlideshowFaster,
+        Action::SlideshowSlower,
         Action::Settings,
         Action::About,
         Action::Quit,
@@ -129,6 +136,9 @@ impl Action {
             Action::Help => "help",
             Action::Fullscreen => "fullscreen",
             Action::Recursive => "recursive",
+            Action::SlideshowToggle => "slideshow",
+            Action::SlideshowFaster => "slideshow_faster",
+            Action::SlideshowSlower => "slideshow_slower",
             Action::Settings => "settings",
             Action::About => "about",
             Action::Quit => "quit",
@@ -139,6 +149,47 @@ impl Action {
     /// loader warns and skips it). Inverse of [`Action::id`].
     pub fn from_id(s: &str) -> Option<Action> {
         Action::ALL.iter().copied().find(|a| a.id() == s)
+    }
+
+    /// Human-readable name for the keybindings editor and (eventually) the help
+    /// overlay — the one place these strings live, so the editor and help can't
+    /// drift. Sentence-case, plain wording (no em-dashes).
+    pub fn label(self) -> &'static str {
+        match self {
+            Action::Next => "Next photo",
+            Action::Prev => "Previous photo",
+            Action::Random => "Random photo",
+            Action::RandomPrev => "Previous random photo",
+            Action::PanLeft => "Pan left",
+            Action::PanRight => "Pan right",
+            Action::PanUp => "Pan up",
+            Action::PanDown => "Pan down",
+            Action::ZoomIn => "Zoom in",
+            Action::ZoomOut => "Zoom out",
+            Action::ScaleFit => "Fit to screen",
+            Action::ScaleFill => "Crop to fill",
+            Action::ScaleOriginal => "Original size",
+            Action::ToggleOriginal => "Toggle 1:1 and fit",
+            Action::RotateCw => "Rotate clockwise",
+            Action::RotateCcw => "Rotate counter-clockwise",
+            Action::Copy => "Copy image",
+            Action::SaveRotation => "Save rotation",
+            Action::Delete => "Delete to Recycle Bin",
+            Action::DeletePermanent => "Delete permanently",
+            Action::OpenFile => "Open file",
+            Action::OpenFolder => "Open folder",
+            Action::Info => "Info panel",
+            Action::FullExif => "Full EXIF panel",
+            Action::Help => "Keyboard help",
+            Action::Fullscreen => "Toggle fullscreen",
+            Action::Recursive => "Recursive (current folder)",
+            Action::SlideshowToggle => "Slideshow",
+            Action::SlideshowFaster => "Slideshow faster",
+            Action::SlideshowSlower => "Slideshow slower",
+            Action::Settings => "Settings",
+            Action::About => "About",
+            Action::Quit => "Quit",
+        }
     }
 
     /// How the input layer drives this action.
@@ -186,6 +237,13 @@ mod tests {
         assert_eq!(Action::from_id("not_an_action"), None);
         assert_eq!(Action::from_id(""), None);
         assert_eq!(Action::from_id("NEXT"), None); // case-sensitive
+    }
+
+    #[test]
+    fn every_action_has_a_nonempty_label() {
+        for &a in Action::ALL {
+            assert!(!a.label().is_empty(), "{a:?} has an empty label");
+        }
     }
 
     #[test]

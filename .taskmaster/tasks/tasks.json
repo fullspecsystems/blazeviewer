@@ -758,8 +758,8 @@
       {
         "id": 23,
         "title": "Slideshow mode (s to toggle, [ / ] adjust interval)",
-        "description": "Press s to start/stop an automatic slideshow that advances on a timer in the LAST navigation direction. [ and ] change the interval in 0.5s steps, and the change applies to the current slide's remaining time immediately. Manual advance/back still works during a slideshow and resets the timer before the next auto-advance.",
-        "status": "pending",
+        "description": "Press s to start/stop an automatic slideshow that advances on a timer in the LAST navigation direction. [ and ] change the interval in 0.5s steps, and the change applies to the current slide's remaining time immediately. Manual advance/back still works during a slideshow and resets the timer before the next auto-advance. DONE (2026-06-28): shipped end-to-end. Pure slideshow.rs (Slideshow { on, interval } + toggle/adjust/is_due/format_interval, 6 unit tests). A last_nav: Nav field updated in advance() steers direction (space/backspace/enter/shift+enter). about_to_wait section 3c auto-advances when on && caught_up && due (deadline = last_present + interval), readiness-gated (a miss holds), suppressed while a nav key is held OR a dialog is open (picker is modal so pauses on its own); ControlFlow::WaitUntil sleeps to the deadline instead of spinning. [ / ] adjust live (-1/+1 x 0.5s, clamp 0.5..60s); manual nav resets the timer (moves last_present). Keys s / [ / ] are central Actions (SlideshowToggle/SlideshowFaster/SlideshowSlower) with default bindings; toasts 'Slideshow' / 'Slideshow Stopped' on toggle and a '2.0s'-style interval toast on [ / ]; a View-menu 'Slideshow' checkable item mirrors the on-state. Boots clean (windowed smoke test); all tests + clippy -D warnings + fmt green. Interactive timing/feel is owner-verified (keypresses can't be injected here).",
+        "status": "done",
         "priority": "medium",
         "dependencies": [10],
         "details": "Reuses the existing readiness-gated, self-paced advance engine (pb-app main.rs about_to_wait) - a slideshow is just a timer-driven advance, so a not-ready next slide HOLDS (waits for the decode) rather than skips, exactly like hold-to-fly.\n\nDIRECTION: 'continues in the last navigation direction' needs a new last_nav: Nav field (default Forward), updated on every directional nav (nav_press / advance / the menu dispatch). The slideshow auto-advances via advance(last_nav), so it follows Forward (space), Backward (backspace), Random (enter), or RandomPrev (shift+enter) - manual nav during the show updates last_nav, so e.g. tapping backspace makes it continue backward, enter makes it a random/shuffle slideshow.\n\nTIMER (falls out of existing state): the deadline = last_present + interval (last_present is already set whenever a slide shows). When slideshow_on && caught_up (displayed == target) && now >= last_present + interval, call advance(last_nav). This gives two requested behaviors for free: (1) manual advance/back resets the timer (present updates last_present); (2) adjusting the interval affects the CURRENT slide's remaining time immediately (the deadline is recomputed from last_present, so the remaining time grows/shrinks live; if the new deadline is already past, it advances on the next tick). Readiness gating preserved: a miss waits, then shows and restarts the interval (no skip).\n\nINTERVAL: [ decreases, ] increases by 0.5s; clamp to a floor (0.5s - never 0) and a sane cap (e.g. 60s); default ~4s (confirm with owner). State is RAM-only (slideshow_on: bool, interval: Duration, plus last_nav) - privacy Task 2; a persisted DEFAULT interval would go through the allowed config (settings.rs / Task 22).\n\nINTERACTIONS: while a nav key is HELD, hold-to-fly drives and the slideshow timer is suppressed, resuming (timer reset) on release. The event loop must stay ticking while the show is on - extend the about_to_wait ControlFlow::WaitUntil to include the slideshow deadline so it wakes to auto-advance (today it goes idle to ControlFlow::Wait when nothing is pending). Esc still quits; opening the picker/settings pauses it.\n\nFEEDBACK: reuse the Task 10 toast for 'Slideshow: on/off' and the new interval (e.g. 'Slideshow 3.5s') on toggle and on each [ / ] - the one place a per-step toast is wanted (next/prev/zoom deliberately have none). KEYS s / [ / ] register with the central keymap (Task 8) once it lands; a Slideshow menu item + the settings default interval (Task 22) are natural follow-ons.",
@@ -768,36 +768,36 @@
           {
             "id": 1,
             "title": "Pure slideshow timer/state + interval clamp",
-            "description": "RAM-only slideshow state (on/off, interval, due-check) with [ / ] 0.5s stepping and floor/cap clamps; pure + unit-tested.",
-            "status": "pending",
+            "description": "DONE. slideshow.rs: Slideshow { on, interval } + toggle(), adjust(steps) (0.5s step, clamp 0.5..60s), is_due(since_shown), format_interval. 6 unit tests (default 4s off, toggle, step, clamp floor/ceiling, is_due, format).",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 2,
             "title": "Track last_nav; auto-advance follows it",
-            "description": "Add last_nav: Nav (default Forward) updated on every directional nav; the slideshow advances via advance(last_nav) so manual nav steers it.",
-            "status": "pending",
+            "description": "DONE. last_nav: Nav field (default Forward) set in advance(); the slideshow calls advance(self.last_nav), so manual nav (space/backspace/enter/shift+enter) steers the direction.",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 3,
             "title": "Drive auto-advance in about_to_wait (deadline + WaitUntil)",
-            "description": "When on && caught_up && now >= last_present + interval, advance(last_nav); extend ControlFlow::WaitUntil to the deadline; suppress during a key hold; readiness-gated (a miss holds).",
-            "status": "pending",
+            "description": "DONE. about_to_wait section 3c: when on && caught_up && is_due(now - last_present), advance(last_nav). Suppressed while a nav key is held or a dialog is open. ControlFlow::WaitUntil sleeps to the deadline (last_present + interval) when the slideshow is the only thing pending. Readiness-gated (a miss holds, never skips).",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 4,
             "title": "Live interval adjust + manual-advance timer reset",
-            "description": "Interval changes recompute the current slide's remaining time immediately (deadline = last_present + interval); manual advance/back resets the timer (present moves last_present).",
-            "status": "pending",
+            "description": "DONE. The deadline is computed live from last_present + interval, so a [ / ] change grows/shrinks the current slide's remaining time immediately (a now-past deadline advances next tick); manual advance/back moves last_present, resetting the timer.",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 5,
             "title": "Bind s / [ / ]; toast feedback; register actions",
-            "description": "Wire s (toggle), [ (shorten interval) and ] (lengthen interval) in 0.5s steps; show a Task 10 toast for on/off + the new interval; register the actions for Task 8 and a future Slideshow menu item + settings default (Task 22).",
-            "status": "pending",
+            "description": "DONE. Central Actions SlideshowToggle (S), SlideshowFaster ([), SlideshowSlower (]) with default keymap bindings + dispatch arms. Toasts 'Slideshow' / 'Slideshow Stopped' on toggle and a '2.0s'-style interval toast on [ / ]. A View-menu 'Slideshow' checkable item (MenuAction::Slideshow -> Action::SlideshowToggle) mirrors the on-state via refresh_view_menu_checks.",
+            "status": "done",
             "dependencies": []
           }
         ]
