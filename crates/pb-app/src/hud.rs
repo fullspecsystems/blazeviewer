@@ -225,6 +225,40 @@ impl Hud {
         Some((canvas.into_rgba(), pw, ph))
     }
 
+    /// Rasterize `lines` as **centered** text inside the translucent panel — each
+    /// line horizontally centered within the panel (which is itself centered on
+    /// screen). Used for the empty-state "Press O to open…" hint, where a left-aligned
+    /// block looks off-center. Returns `(rgba, w, h)`; `None` if no font / empty.
+    pub fn render_centered(
+        &self,
+        lines: &[&str],
+        px: f32,
+        pad: u32,
+        bg: [u8; 4],
+    ) -> Option<(Vec<u8>, u32, u32)> {
+        if lines.is_empty() {
+            return None;
+        }
+        let line_h = self.line_height(px)?;
+        let ascent = self.ascent(px)?;
+        // Lay every line out once; the widest sets the panel's content width.
+        let laid: Vec<(Vec<Glyph>, f32)> = lines
+            .iter()
+            .map(|t| self.layout(t, px, Weight::Regular))
+            .collect();
+        let content_w = laid.iter().map(|(_, adv)| *adv).fold(0.0f32, f32::max);
+        let pw = content_w.ceil() as u32 + 2 * pad;
+        let ph = lines.len() as u32 * line_h + 2 * pad;
+        let mut canvas = Canvas::new(pw, ph, bg, (px * 0.5).round());
+        for (i, (glyphs, adv)) in laid.iter().enumerate() {
+            let baseline = pad as f32 + i as f32 * line_h as f32 + ascent;
+            // Center this line within the content box.
+            let x = pad as f32 + (content_w - adv) * 0.5;
+            self.draw_line(&mut canvas, x, baseline, glyphs, TEXT, px);
+        }
+        Some((canvas.into_rgba(), pw, ph))
+    }
+
     fn line_height(&self, px: f32) -> Option<u32> {
         let lm = self.font.horizontal_line_metrics(px)?;
         Some((lm.ascent - lm.descent + lm.line_gap).ceil().max(1.0) as u32)

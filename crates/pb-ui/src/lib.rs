@@ -613,6 +613,31 @@ pub fn slider_stepped<Num: egui::emath::Numeric>(
     .inner
 }
 
+/// A determinate **progress bar**: a rounded inset groove filled with the accent up to
+/// `fraction` (clamped to `0.0..=1.0`), spanning the available width at a slim fixed
+/// height. Purely visual — no interaction; the caller draws any caption (a percentage,
+/// byte counts) around it. Mirrors the slider's accent fill so it reads as one family.
+/// Used by the archive-loading dialog.
+pub fn progress_bar(ui: &mut egui::Ui, p: &Palette, fraction: f32) -> egui::Response {
+    let frac = fraction.clamp(0.0, 1.0);
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 12.0), egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        let radius = Rounding::same(rect.height() * 0.5);
+        let painter = ui.painter();
+        // Track: control fill + the card hairline, so it reads like an inset groove.
+        painter.rect(rect, radius, p.control, Stroke::new(1.0, p.card_stroke));
+        if frac > 0.0 {
+            // Clamp the fill to at least its own height so even tiny progress shows as a
+            // visible rounded nub rather than nothing.
+            let w = (rect.width() * frac).clamp(rect.height(), rect.width());
+            let fill = egui::Rect::from_min_size(rect.min, egui::vec2(w, rect.height()));
+            painter.rect(fill, radius, p.accent, Stroke::NONE);
+        }
+    }
+    resp
+}
+
 /// Draw an icon texture at a fixed `height`, preserving aspect ratio.
 pub fn icon_sized(ui: &mut egui::Ui, tex: &egui::TextureHandle, height: f32) {
     let size = tex.size_vec2();

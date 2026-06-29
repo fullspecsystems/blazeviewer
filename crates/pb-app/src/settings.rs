@@ -95,6 +95,12 @@ pub struct Settings {
     /// Last windowed position + size (#1); `None` until the user has been windowed at
     /// least once. Only restored when still on a connected monitor (`geometry_on_screen`).
     pub window: Option<WindowGeometry>,
+    /// Where the Open dialog starts. `None` (default) = the current photo's folder;
+    /// `Some(dir)` = always start in this folder. This is a **user-chosen preference**
+    /// (set deliberately in Settings), not a record of viewed paths — so it stays within
+    /// the no-trace boundary. Pinning a folder also stops the OS dialog from surfacing its
+    /// own last-folder memory on the next launch.
+    pub picker_dir: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -116,6 +122,7 @@ impl Default for Settings {
             info_opacity: 60,        // hud::BG alpha 153/255 ≈ 60%
             slideshow_interval_secs: slideshow::DEFAULT_INTERVAL.as_secs_f64(), // 4.0
             window: None,
+            picker_dir: None, // start in the current photo's folder
         }
     }
 }
@@ -415,6 +422,21 @@ mod tests {
     fn malformed_toml_is_not_accepted() {
         // `load()` would fall back to defaults; the parse itself must error.
         assert!(toml::from_str::<Settings>("this is = = not valid").is_err());
+    }
+
+    #[test]
+    fn picker_dir_round_trips_and_defaults_to_none() {
+        // Absent in old files → None (start in the current photo's folder).
+        let s: Settings = toml::from_str("fullscreen = true\n").unwrap();
+        assert_eq!(s.picker_dir, None);
+
+        // A pinned folder round-trips through TOML.
+        let s = Settings {
+            picker_dir: Some(PathBuf::from("/home/jd/Pictures")),
+            ..Settings::default()
+        };
+        let back: Settings = toml::from_str(&toml::to_string_pretty(&s).unwrap()).unwrap();
+        assert_eq!(s.picker_dir, back.picker_dir);
     }
 
     #[test]

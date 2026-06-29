@@ -37,11 +37,10 @@
 use std::fs::File;
 use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
-use sevenz_rust2::{
-    Archive as SevenZArchive, ArchiveReader as SevenZReader, Password as SevenZPassword,
-};
+use sevenz_rust2::{Archive as SevenZArchive, BlockDecoder, Password as SevenZPassword};
 use zip::ZipArchive;
 
 /// A uniform, read-only source of encoded image bytes addressed by item index.
@@ -145,6 +144,10 @@ pub enum OpenError {
     /// Decompressing the archive into RAM ran out of memory (the eager 7z load —
     /// a recoverable `try_reserve` failure, surfaced instead of an abort).
     OutOfMemory,
+    /// The open was cancelled (via [`OpenProgress::request_cancel`]) before it
+    /// finished. Distinct from an error so the app can quietly drop it rather than
+    /// show a failure dialog.
+    Cancelled,
 }
 
 impl std::fmt::Display for OpenError {
@@ -154,7 +157,80 @@ impl std::fmt::Display for OpenError {
             OpenError::Corrupt(why) => write!(f, "the archive could not be opened: {why}"),
             OpenError::PasswordRequired => write!(f, "the archive is password protected"),
             OpenError::OutOfMemory => write!(f, "ran out of memory loading the archive"),
+            OpenError::Cancelled => write!(f, "the archive open was cancelled"),
         }
+    }
+}
+
+/// A shared, thread-safe progress + cancellation handle for an eager archive open
+/// ([`SevenZSource::open_with_progress`]).
+///
+/// The eager 7z open runs on a background thread; this is how the UI thread talks to
+/// it without locking the decode. The opener publishes the total decompressed size
+/// once it's known, bumps `done` as each entry streams in, and polls
+/// [`is_cancelled`](OpenProgress::is_cancelled) between entries; the UI thread reads
+/// [`fraction`](OpenProgress::fraction) each frame to draw the bar and calls
+/// [`request_cancel`](OpenProgress::request_cancel) for the Cancel button / `Esc`.
+/// Cheap to [`clone`](Clone) — it's an `Arc` — so both threads hold one.
+#[derive(Clone, Default)]
+pub struct OpenProgress {
+    inner: Arc<ProgressInner>,
+}
+
+#[derive(Default)]
+struct ProgressInner {
+    /// Decompressed bytes streamed so far.
+    done: AtomicU64,
+    /// Total decompressed bytes the open will stream (0 until the opener sets it).
+    total: AtomicU64,
+    /// Set by the UI to ask the opener to stop at the next entry boundary.
+    cancel: AtomicBool,
+}
+
+impl OpenProgress {
+    /// A fresh handle (nothing done, no total yet, not cancelled).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Publish the total decompressed bytes this open will stream. Called once by the
+    /// opener after it reads the archive header.
+    pub fn set_total(&self, total: u64) {
+        self.inner.total.store(total, Ordering::Relaxed);
+    }
+
+    /// Total decompressed bytes to stream (0 until [`set_total`](OpenProgress::set_total)).
+    pub fn total(&self) -> u64 {
+        self.inner.total.load(Ordering::Relaxed)
+    }
+
+    /// Decompressed bytes streamed so far.
+    pub fn done(&self) -> u64 {
+        self.inner.done.load(Ordering::Relaxed)
+    }
+
+    /// Progress in `[0.0, 1.0]`; `0.0` until a non-zero total is known.
+    pub fn fraction(&self) -> f32 {
+        let total = self.total();
+        if total == 0 {
+            return 0.0;
+        }
+        (self.done() as f64 / total as f64).clamp(0.0, 1.0) as f32
+    }
+
+    /// Ask the opener to stop at the next entry boundary (the Cancel button / `Esc`).
+    pub fn request_cancel(&self) {
+        self.inner.cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether cancellation has been requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.inner.cancel.load(Ordering::Relaxed)
+    }
+
+    /// Opener-side: record `n` more decompressed bytes streamed.
+    fn add_done(&self, n: u64) {
+        self.inner.done.fetch_add(n, Ordering::Relaxed);
     }
 }
 
@@ -306,14 +382,31 @@ impl PhotoSource for ZipSource {
         let mut buf = Vec::new();
         {
             // Scope the entry borrow so the handle is free to return to the pool.
-            let mut file = match &self.password {
+            let file = match &self.password {
                 Some(pw) => archive
                     .by_index_decrypt(entry.zip_index, pw)
                     .map_err(zip_to_io)?,
                 None => archive.by_index(entry.zip_index).map_err(zip_to_io)?,
             };
-            buf.reserve(file.size() as usize);
-            file.read_to_end(&mut buf)?;
+            // Bound the allocation + read so a decompression bomb (or a bogus huge entry,
+            // including one hit by encrypted-ZIP password validation) can't OOM us:
+            // refuse an absurd declared size, reserve *recoverably* (`try_reserve`, not an
+            // aborting `reserve`), and cap the read to the declared size so a lying entry
+            // can't inflate past its claim.
+            let size = file.size();
+            if size > MAX_ENTRY_BYTES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "archive entry too large",
+                ));
+            }
+            buf.try_reserve_exact(size as usize).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::OutOfMemory,
+                    "archive entry too large to allocate",
+                )
+            })?;
+            file.take(size).read_to_end(&mut buf)?;
         }
         self.checkin(archive);
         Ok(buf)
@@ -380,7 +473,9 @@ pub fn seven_z_projected_bytes(
         Some(p) => SevenZPassword::from(p),
         None => SevenZPassword::empty(),
     };
-    let mut file = File::open(path)?;
+    // Buffer the file: header parsing (and, for an encrypted header, AES decryption)
+    // issues many small reads; see the throughput note in `SevenZSource::open`.
+    let mut file = BufReader::new(File::open(path)?);
     let archive = SevenZArchive::read(&mut file, &pw).map_err(seven_z_open_err)?;
     let total = archive
         .files
@@ -404,51 +499,191 @@ impl SevenZSource {
     pub fn open(
         path: impl Into<PathBuf>,
         password: Option<String>,
-        is_supported: impl Fn(&str) -> bool,
+        is_supported: impl Fn(&str) -> bool + Sync,
+    ) -> Result<Self, OpenError> {
+        Self::open_with_progress(path, password, is_supported, None)
+    }
+
+    /// Like [`open`](SevenZSource::open), but reports streaming progress and honors
+    /// cancellation through a shared [`OpenProgress`] handle.
+    ///
+    /// The opener publishes the archive's total decompressed size up front (so the UI
+    /// can draw a determinate bar), bumps the byte counter as each block decodes, and
+    /// checks for cancellation between blocks — returning [`OpenError::Cancelled`] if the
+    /// UI asked to stop. Cancel latency is at most one block per worker thread (a single
+    /// image for a non-solid archive). Pass `None` for a plain, non-cancellable open.
+    ///
+    /// **Parallel.** A 7z block is self-contained and seekable, so independent blocks are
+    /// decoded concurrently across the cores (each worker with its own file handle) — the
+    /// way 7-Zip stays fast. This is decisive for a *non-solid* archive (one block per
+    /// image), where every block also pays a full AES key derivation: ~28 ms × N images
+    /// serially (minutes to an hour) collapses to seconds fanned across the cores
+    /// (measured ~19× on a 3036-image encrypted archive). A *solid* archive is one big
+    /// block — a single task, decoded on one thread (fastest for already-compressed
+    /// photos, and memory-bounded).
+    pub fn open_with_progress(
+        path: impl Into<PathBuf>,
+        password: Option<String>,
+        is_supported: impl Fn(&str) -> bool + Sync,
+        progress: Option<&OpenProgress>,
     ) -> Result<Self, OpenError> {
         let path = path.into();
         let pw = match &password {
             Some(p) => SevenZPassword::from(p.as_str()),
             None => SevenZPassword::empty(),
         };
-        let file = File::open(&path)?;
-        let mut reader = SevenZReader::new(file, pw).map_err(seven_z_open_err)?;
 
-        let mut entries: Vec<SevenZEntry> = Vec::new();
-        let mut oom = false;
-        reader
-            .for_each_entries(|entry, rd| {
-                // Once we've hit OOM, short-circuit the remaining blocks cheaply
-                // (the reader keeps iterating blocks regardless of our bool return).
-                if oom {
-                    return Ok(false);
-                }
-                if entry.is_directory() || !entry.has_stream() {
-                    return Ok(true);
-                }
-                if !is_supported(&ext_of(entry.name())) {
-                    // A solid block is one stream: even entries we don't keep must
-                    // be drained so the following entries stay byte-aligned.
-                    io::copy(&mut rd.take(entry.size()), &mut io::sink())?;
-                    return Ok(true);
-                }
-                let mut buf = Vec::new();
-                if buf.try_reserve_exact(entry.size() as usize).is_err() {
-                    oom = true;
-                    return Ok(false);
-                }
-                rd.read_to_end(&mut buf)?;
-                entries.push(SevenZEntry {
-                    name: entry.name().to_string(),
-                    bytes: buf,
-                });
-                Ok(true)
-            })
-            .map_err(seven_z_open_err)?;
+        // Read the header once (block layout + file metadata). Buffered, because
+        // `sevenz_rust2`'s AES decoder reads its input in 512-byte chunks straight off the
+        // file — unbuffered that's millions of tiny syscalls on an encrypted stream
+        // (measured ~3.7x slower even from cache; catastrophic uncached on a multi-GB
+        // archive). See `examples/aes_throughput.rs`.
+        let archive = {
+            let mut header = BufReader::with_capacity(1 << 20, File::open(&path)?);
+            SevenZArchive::read(&mut header, &pw).map_err(seven_z_open_err)?
+        };
+        let block_count = archive.blocks.len();
 
-        if oom {
+        // Pre-scan (metadata only — no decode): which blocks hold a supported image, and
+        // the total decompressed work in just those blocks. We skip decoding *and
+        // decrypting* a block with no images (e.g. a mixed archive's video/doc blocks),
+        // and the progress total counts only the work we'll actually do. `entries()`
+        // reads the archive's stream map, not the file, so this stays cheap.
+        let mut image_block = vec![false; block_count];
+        let mut total = 0u64;
+        {
+            let mut probe = BufReader::with_capacity(1 << 20, File::open(&path)?);
+            for (bi, has) in image_block.iter_mut().enumerate() {
+                let dec = BlockDecoder::new(1, bi, &archive, &pw, &mut probe);
+                let entries = dec.entries();
+                let streamed = || {
+                    entries
+                        .iter()
+                        .filter(|e| !e.is_directory() && e.has_stream())
+                };
+                if streamed().any(|e| is_supported(&ext_of(e.name()))) {
+                    *has = true;
+                    total += streamed().map(|e| e.size()).sum::<u64>();
+                }
+            }
+        }
+        if let Some(p) = progress {
+            p.set_total(total);
+        }
+
+        // Decode blocks in parallel: a shared atomic cursor hands each worker the next
+        // block; each worker has its own buffered file handle (the `BlockDecoder` seeks
+        // per block and needs `&mut`). The within-block thread count is 1 — already
+        // measured fastest for incompressible photos, and it keeps per-block memory small.
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(block_count.max(1));
+        let next = AtomicUsize::new(0);
+        let oom = AtomicBool::new(false);
+        let cancel_hit = AtomicBool::new(false);
+        let first_err: Mutex<Option<OpenError>> = Mutex::new(None);
+
+        let collected: Vec<Vec<SevenZEntry>> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..threads)
+                .map(|_| {
+                    s.spawn(|| {
+                        let mut local: Vec<SevenZEntry> = Vec::new();
+                        let mut f = match File::open(&path) {
+                            Ok(f) => BufReader::with_capacity(1 << 20, f),
+                            Err(e) => {
+                                first_err.lock().unwrap().get_or_insert(OpenError::Io(e));
+                                return local;
+                            }
+                        };
+                        loop {
+                            if oom.load(Ordering::Relaxed) || cancel_hit.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            if progress.is_some_and(|p| p.is_cancelled()) {
+                                cancel_hit.store(true, Ordering::Relaxed);
+                                break;
+                            }
+                            let bi = next.fetch_add(1, Ordering::Relaxed);
+                            if bi >= block_count {
+                                break;
+                            }
+                            // Skip a block with no supported images — never decode or
+                            // decrypt it (the pre-scan already excluded its bytes from the
+                            // progress total).
+                            if !image_block[bi] {
+                                continue;
+                            }
+                            let cancel = || progress.is_some_and(|p| p.is_cancelled());
+                            let res = BlockDecoder::new(1, bi, &archive, &pw, &mut f)
+                                .for_each_entries(&mut |entry, rd| {
+                                    if entry.is_directory() || !entry.has_stream() {
+                                        return Ok(true);
+                                    }
+                                    let size = entry.size();
+                                    if !is_supported(&ext_of(entry.name())) {
+                                        // Drain a non-image entry (in cancellable chunks) so
+                                        // the rest of a solid block stays byte-aligned.
+                                        if !read_cancellable(rd, size, &mut io::sink(), &cancel)? {
+                                            cancel_hit.store(true, Ordering::Relaxed);
+                                            return Ok(false);
+                                        }
+                                        if let Some(p) = progress {
+                                            p.add_done(size);
+                                        }
+                                        return Ok(true);
+                                    }
+                                    // Refuse an absurd declared size (a decompression bomb),
+                                    // reserve recoverably, and read in cancellable chunks so a
+                                    // large entry can be aborted mid-stream (not only between
+                                    // blocks — which for a solid archive could mean "never").
+                                    if size > MAX_ENTRY_BYTES {
+                                        oom.store(true, Ordering::Relaxed);
+                                        return Ok(false);
+                                    }
+                                    let mut buf = Vec::new();
+                                    if buf.try_reserve_exact(size as usize).is_err() {
+                                        oom.store(true, Ordering::Relaxed);
+                                        return Ok(false);
+                                    }
+                                    if !read_cancellable(rd, size, &mut buf, &cancel)? {
+                                        cancel_hit.store(true, Ordering::Relaxed);
+                                        return Ok(false);
+                                    }
+                                    local.push(SevenZEntry {
+                                        name: entry.name().to_string(),
+                                        bytes: buf,
+                                    });
+                                    if let Some(p) = progress {
+                                        p.add_done(size);
+                                    }
+                                    Ok(true)
+                                });
+                            if let Err(e) = res {
+                                first_err.lock().unwrap().get_or_insert(seven_z_open_err(e));
+                                break;
+                            }
+                        }
+                        local
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_default())
+                .collect()
+        });
+
+        if let Some(e) = first_err.into_inner().unwrap() {
+            return Err(e);
+        }
+        if cancel_hit.load(Ordering::Relaxed) {
+            return Err(OpenError::Cancelled);
+        }
+        if oom.load(Ordering::Relaxed) {
             return Err(OpenError::OutOfMemory);
         }
+        let mut entries: Vec<SevenZEntry> = collected.into_iter().flatten().collect();
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(Self { path, entries })
     }
@@ -472,6 +707,40 @@ impl PhotoSource for SevenZSource {
         let entry = self.entries.get(i).ok_or_else(out_of_range)?;
         Ok(entry.bytes.clone())
     }
+}
+
+/// Refuse a single archived image larger than this — a sanity ceiling against a
+/// decompression bomb or a bogus entry that would otherwise reserve/read gigabytes
+/// before the decoder ever sees it. Generous: real encoded photos are far smaller
+/// (RAW ~100 MB; even a huge TIFF/PSD rarely approaches this). A genuinely larger file
+/// can be extracted and opened directly.
+const MAX_ENTRY_BYTES: u64 = 1 << 30; // 1 GiB
+
+/// Read up to `size` bytes from `rd` into `out` in chunks, checking `cancel` between
+/// chunks so a large entry aborts within one chunk's latency rather than only at the
+/// next block boundary (which, for a solid archive, can mean after the whole thing).
+/// `Ok(true)` = read to `size` (or a short EOF); `Ok(false)` = cancelled mid-stream.
+fn read_cancellable(
+    rd: &mut dyn Read,
+    size: u64,
+    out: &mut dyn io::Write,
+    cancel: &dyn Fn() -> bool,
+) -> io::Result<bool> {
+    let mut staging = [0u8; 64 * 1024];
+    let mut remaining = size;
+    while remaining > 0 {
+        if cancel() {
+            return Ok(false);
+        }
+        let want = remaining.min(staging.len() as u64) as usize;
+        let n = rd.read(&mut staging[..want])?;
+        if n == 0 {
+            break; // short stream (EOF before `size`)
+        }
+        out.write_all(&staging[..n])?;
+        remaining -= n as u64;
+    }
+    Ok(true)
 }
 
 /// The display name of a path: its final component, or `"?"` if it has none.
@@ -577,6 +846,36 @@ mod tests {
 
         let _ = std::fs::remove_file(&a);
         let _ = std::fs::remove_file(&b);
+    }
+
+    #[test]
+    fn read_cancellable_completes_and_aborts_promptly() {
+        let data = vec![7u8; 5000];
+
+        // Never cancelled → reads exactly `size`.
+        let mut out = Vec::new();
+        assert!(read_cancellable(&mut &data[..], data.len() as u64, &mut out, &|| false).unwrap());
+        assert_eq!(out, data);
+
+        // Always cancelled → returns false before reading anything.
+        let mut out = Vec::new();
+        assert!(!read_cancellable(&mut &data[..], data.len() as u64, &mut out, &|| true).unwrap());
+        assert!(out.is_empty());
+
+        // Cancel after the first 64 KiB chunk → stops mid-stream, not at the end.
+        let big = vec![1u8; 200 * 1024];
+        let mut out = Vec::new();
+        let calls = AtomicUsize::new(0);
+        let done = read_cancellable(&mut &big[..], big.len() as u64, &mut out, &|| {
+            calls.fetch_add(1, Ordering::Relaxed) >= 1
+        })
+        .unwrap();
+        assert!(!done, "cancelled mid-stream");
+        assert_eq!(
+            out.len(),
+            64 * 1024,
+            "exactly one chunk read before the cancel"
+        );
     }
 
     #[test]
@@ -771,6 +1070,45 @@ mod tests {
             Some(z.as_path()),
             "container is the archive"
         );
+        let _ = std::fs::remove_file(&z);
+    }
+
+    #[test]
+    fn seven_z_open_reports_progress_to_completion() {
+        let z = write_7z(
+            "prog",
+            &[("a.jpg", b"AAAA"), ("b.png", b"BBBBBB"), ("c.webp", b"CC")],
+        );
+        let progress = OpenProgress::new();
+        let src = SevenZSource::open_with_progress(&z, None, is_img, Some(&progress)).unwrap();
+        assert_eq!(src.len(), 3);
+        // Total = sum of every streamed entry; done reached it; fraction is full.
+        assert_eq!(
+            progress.total(),
+            4 + 6 + 2,
+            "total counts all streamed entries"
+        );
+        assert_eq!(
+            progress.done(),
+            progress.total(),
+            "done reaches total on success"
+        );
+        assert_eq!(progress.fraction(), 1.0);
+        let _ = std::fs::remove_file(&z);
+    }
+
+    #[test]
+    fn seven_z_open_cancels_before_decoding() {
+        let z = write_7z("cancel", &[("a.jpg", b"AAAA"), ("b.png", b"BBBB")]);
+        // Cancel up front: the very first entry boundary sees it and bails out, so
+        // nothing is decoded and the open reports Cancelled (not a corrupt/IO error).
+        let progress = OpenProgress::new();
+        progress.request_cancel();
+        match SevenZSource::open_with_progress(&z, None, is_img, Some(&progress)) {
+            Err(OpenError::Cancelled) => {}
+            other => panic!("expected Cancelled, got {:?}", other.err()),
+        }
+        assert_eq!(progress.done(), 0, "cancelled before any entry decoded");
         let _ = std::fs::remove_file(&z);
     }
 

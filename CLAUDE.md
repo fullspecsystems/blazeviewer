@@ -410,6 +410,12 @@ cargo bench                # criterion microbenchmarks over the corpus
 - **Quarantine platform-specific code** behind the established helper seams.
 - When a decision touches the hot path and the answer isn't obvious, **put it
   behind a seam and benchmark both** rather than arguing.
+- **Update `CHANGELOG.md`.** When you land a user-facing bug fix or feature, add a
+  line under `## [Unreleased]` (Keep a Changelog format — group under `Added` /
+  `Changed` / `Fixed` / `Removed`; write for users, not commits). Skip purely
+  internal churn (refactors, test-only changes, CI/workflow tweaks, formatting).
+  On release, the `[Unreleased]` block moves under the new version's heading + date
+  and a fresh empty `[Unreleased]` is left at the top.
 
 
 ## Project Task Tracking

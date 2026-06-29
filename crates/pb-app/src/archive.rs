@@ -136,6 +136,9 @@ pub enum ArchiveOpenError {
     Empty,
     /// An I/O error opening or reading the file.
     Io(String),
+    /// The user cancelled the open before it finished. Not really an error — the app
+    /// drops it quietly (no failure dialog), keeping whatever was on screen.
+    Cancelled,
 }
 
 impl ArchiveOpenError {
@@ -157,6 +160,7 @@ impl ArchiveOpenError {
             }
             ArchiveOpenError::Empty => "This archive has no images to show.".into(),
             ArchiveOpenError::Io(e) => format!("This archive could not be opened. {e}"),
+            ArchiveOpenError::Cancelled => "Archive open cancelled.".into(),
         }
     }
 }
@@ -169,6 +173,7 @@ impl From<pb_source::OpenError> for ArchiveOpenError {
             E::Corrupt(_) => ArchiveOpenError::Corrupt,
             E::PasswordRequired => ArchiveOpenError::PasswordRequired,
             E::OutOfMemory => ArchiveOpenError::OutOfMemory,
+            E::Cancelled => ArchiveOpenError::Cancelled,
         }
     }
 }

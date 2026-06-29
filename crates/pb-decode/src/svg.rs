@@ -68,12 +68,24 @@ impl ImageDecoder for SvgDecoder {
     }
 }
 
+/// Cap on an SVGZ's inflated size. SVGZ is gzip, so a tiny file can claim to expand to
+/// gigabytes (a decompression bomb); a real SVG is vector text, far smaller than this.
+const MAX_SVG_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
+
 fn svg_bytes(bytes: &[u8]) -> Result<Cow<'_, [u8]>, DecodeError> {
     if bytes.starts_with(&[0x1F, 0x8B]) {
         let mut out = Vec::new();
+        // Bound the inflate: read at most one byte past the cap, then reject if we hit it,
+        // so a bomb can't exhaust memory before resvg ever parses it.
         GzDecoder::new(bytes)
+            .take(MAX_SVG_BYTES + 1)
             .read_to_end(&mut out)
             .map_err(|e| DecodeError::Corrupt(format!("svgz inflate failed: {e}")))?;
+        if out.len() as u64 > MAX_SVG_BYTES {
+            return Err(DecodeError::Corrupt(
+                "svgz inflates beyond the size limit".into(),
+            ));
+        }
         Ok(Cow::Owned(out))
     } else {
         Ok(Cow::Borrowed(bytes))
@@ -104,6 +116,30 @@ mod tests {
         let img = SvgDecoder.decode(&req(&bytes)).expect("svgz decode");
         assert_eq!((img.orig_width, img.orig_height), (9, 7));
         assert!(img.is_well_formed());
+    }
+
+    #[test]
+    fn svgz_inflation_is_bounded_against_a_bomb() {
+        use std::io::Write;
+
+        // ~70 MiB of zeros compresses to a few KB but exceeds the 64 MiB inflate cap.
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let chunk = vec![0u8; 1 << 20];
+        for _ in 0..70 {
+            gz.write_all(&chunk).unwrap();
+        }
+        let bomb = gz.finish().unwrap();
+        assert!(bomb.len() < 1 << 20, "the bomb is tiny compressed");
+        match svg_bytes(&bomb) {
+            Err(DecodeError::Corrupt(_)) => {}
+            other => panic!("expected a Corrupt rejection, got {other:?}"),
+        }
+
+        // A normal small SVGZ still inflates fine (regression guard).
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(b"<svg/>").unwrap();
+        let ok = gz.finish().unwrap();
+        assert!(matches!(svg_bytes(&ok), Ok(Cow::Owned(_))));
     }
 
     #[test]

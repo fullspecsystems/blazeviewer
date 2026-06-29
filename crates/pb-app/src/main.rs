@@ -1501,6 +1501,14 @@ impl App {
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("7z"));
         let was_password_attempt = password.is_some();
+        // Anti-stacking: cancel any open already in flight before starting another, so
+        // two eager 7z decompresses never run (and pile up RAM) at once — the original
+        // hang's worst case was the user re-triggering a "never-finishing" open and
+        // stacking full-archive workers. The superseded worker stops at its next entry
+        // boundary and frees its partial buffers; its result is dropped (rx replaced).
+        if let Some(prev) = self.archive_load.as_ref() {
+            prev.progress.request_cancel();
+        }
         if !is_7z {
             let result = open_archive(&path, password);
             self.finish_archive_open(result, was_password_attempt, path, event_loop);
@@ -1515,18 +1523,51 @@ impl App {
         }
         self.archive_gen += 1;
         let generation = self.archive_gen;
+        let progress = pb_source::OpenProgress::new();
         let (tx, rx) = std::sync::mpsc::channel();
         let worker_path = path.clone();
+        let worker_progress = progress.clone();
         std::thread::spawn(move || {
-            let _ = tx.send((generation, load_seven_z(&worker_path, password)));
+            let result = load_seven_z(&worker_path, password, &worker_progress);
+            let _ = tx.send((generation, result));
         });
+        // Show the determinate progress + Cancel dialog. If the password prompt is still
+        // open (a just-verified password), promote it in place — same window, no flicker;
+        // otherwise (drag-drop / picker / launch) open a fresh loading dialog.
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("archive");
+        let msg = format!("Opening \u{201c}{name}\u{201d}\u{2026}");
+        if self.dialog.as_ref().map(|d| d.kind()) == Some(dialog::DialogKind::Password) {
+            if let Some(d) = self.dialog.as_mut() {
+                d.become_loading(&msg, progress.clone());
+            }
+        } else {
+            let refresh = self.refresh_hz();
+            let parent = self.active.as_ref().map(|a| a.window.clone());
+            let mut dlg = dialog::DialogWindow::open(
+                dialog::DialogKind::Loading,
+                event_loop,
+                refresh,
+                &msg,
+                &self.settings,
+                &self.keymap,
+                parent.as_deref(),
+            );
+            if let Some(d) = dlg.as_mut() {
+                d.set_progress(Some(progress.clone()));
+                d.request_redraw();
+            }
+            self.dialog = dlg;
+        }
         self.archive_load = Some(ArchiveLoad {
             generation,
             rx,
             path,
             was_password_attempt,
+            progress,
         });
-        self.show_toast("Loading archive…", event_loop);
     }
 
     /// Pick up a finished background archive open (called each tick while one is in
@@ -1585,7 +1626,23 @@ impl App {
             Err(archive::ArchiveOpenError::PasswordRequired) => {
                 self.prompt_archive_password(path, was_password_attempt, event_loop)
             }
+            // User cancelled: drop quietly, keeping whatever was on screen — no error
+            // dialog. The loading dialog is already closed (or closes here as a backstop).
+            Err(archive::ArchiveOpenError::Cancelled) => {
+                self.password_archive = None;
+                self.close_dialog();
+            }
             Err(e) => self.fail_archive_open(&e, event_loop),
+        }
+    }
+
+    /// Ask the in-flight archive open (if any) to stop. The worker returns
+    /// [`Cancelled`](archive::ArchiveOpenError::Cancelled) at its next entry boundary,
+    /// freeing its partial buffers; [`poll_archive_load`](App::poll_archive_load) then
+    /// drops it quietly. Used by the loading dialog's Cancel button and the Esc/close path.
+    fn cancel_archive_load(&mut self) {
+        if let Some(load) = self.archive_load.as_ref() {
+            load.progress.request_cancel();
         }
     }
 
@@ -2019,7 +2076,20 @@ impl App {
     /// result. Modal — it blocks the event loop while open, which is fine: the app
     /// isn't flying through photos with a dialog up.
     fn open_picker(&mut self, folder: bool, event_loop: &ActiveEventLoop) {
-        let start_dir = self.scan_root.clone().unwrap_or_else(|| self.root.clone());
+        let fallback = default_picker_dir();
+        let mut start_dir = picker_start_dir(
+            self.settings.picker_dir.as_deref(),
+            self.source.container(),
+            self.scan_root.as_deref(),
+            &self.root,
+            &fallback,
+        );
+        // If the chosen folder no longer exists (e.g. a pinned folder was deleted or
+        // unmounted), use the safe default rather than letting the OS dialog surface its
+        // own remembered last folder.
+        if !start_dir.is_dir() {
+            start_dir = fallback;
+        }
         let input = if folder {
             rfd::FileDialog::new()
                 .set_directory(&start_dir)
@@ -2361,6 +2431,9 @@ impl App {
             // quit-on-Esc so closing a dialog never also exits the app (the same leak
             // `open_picker` handles).
             self.esc_guard_until = Some(Instant::now() + Duration::from_millis(300));
+            // Esc / close on the loading view cancels the in-flight open (the worker
+            // stops and frees its partial RAM); harmless for the other kinds.
+            self.cancel_archive_load();
             self.dialog = None;
             self.pending_confirm_delete = None; // Esc / close = cancel the confirm
             self.password_archive = None; // Esc / close = abandon the password prompt
@@ -2436,6 +2509,14 @@ impl App {
                     if let Some(km) = new_keymap {
                         self.apply_keymap(km, event_loop);
                     }
+                }
+                // Loading: the only button is Cancel (which already requested
+                // cancellation); make sure the in-flight open stops, then close. The
+                // worker returns Cancelled and `poll_archive_load` tidies up.
+                Some(dialog::DialogKind::Loading) => {
+                    self.cancel_archive_load();
+                    self.dialog = None;
+                    self.password_archive = None;
                 }
                 // Confirm drives a delete; Message / others just close.
                 other => {
@@ -2687,17 +2768,12 @@ impl App {
     fn open_hint_panel(&self) -> Option<(Vec<u8>, u32, u32)> {
         let px = (20.0 * self.scale_factor).max(12.0);
         let pad = (10.0 * self.scale_factor).round().max(3.0) as u32;
-        let rows = [
-            Row::Span {
-                text: "Press O to open a file".to_string(),
-                bold: false,
-            },
-            Row::Span {
-                text: "or Shift+O to open a folder".to_string(),
-                bold: false,
-            },
-        ];
-        self.hud.as_ref()?.render_table(&rows, px, pad, hud::BG)
+        self.hud.as_ref()?.render_centered(
+            &["Press O to open a file", "or Shift+O to open a folder"],
+            px,
+            pad,
+            hud::BG,
+        )
     }
 
     /// Show the empty-state hint over the (blank) viewer — used when there are no
@@ -3618,10 +3694,26 @@ impl ApplicationHandler for App {
             }
         }
 
-        // 5. Poll at the frame rate while interacting or work is outstanding; sleep to
-        //    the slideshow's next-slide deadline when it's the only thing pending;
-        //    otherwise go fully idle until the next event.
-        if nav.is_some()
+        // 4f. Pump an open dialog's egui animation clock. egui is immediate-mode, so a
+        // combo popup opening, the Checking… spinner, or a hover fade only advances when
+        // a frame is requested — without this the dialog freezes between OS events (the
+        // "a clicked dropdown doesn't open until you move the mouse" jank). A zero-delay
+        // request already re-armed a redraw inside the dialog's `render`; here we fire a
+        // *timed* refresh that's now due and surface its deadline so the loop wakes for it.
+        let dialog_repaint = self.dialog.as_ref().and_then(|d| d.repaint_at());
+        if let Some(at) = dialog_repaint {
+            if now >= at {
+                if let Some(d) = self.dialog.as_ref() {
+                    d.request_redraw();
+                }
+            }
+        }
+        let dialog_wake = dialog_repaint.filter(|&at| at > now);
+
+        // 5. Poll at the frame rate while interacting or work is outstanding; else sleep
+        //    to the slideshow's next-slide deadline when it's the only thing pending;
+        //    honor an open dialog's timed repaint; otherwise go fully idle until an event.
+        let base_wake = if nav.is_some()
             || transforming
             || self.work_pending()
             || toast_active
@@ -3633,20 +3725,29 @@ impl ApplicationHandler for App {
             // window move/resize is persisted even when nothing else wakes the loop.
             || self.geometry_save_at.is_some()
         {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(now + self.frame_interval));
+            Some(now + self.frame_interval)
         } else if slideshow_running {
             // Sleep until the next slide is due rather than spinning — when caught up and
             // waiting, only the deadline wakes us. Fall back to a frame poll if no slide
             // has shown yet; clamp into the future so a just-passed deadline still
             // schedules a wake (we advance on the following tick).
-            let wake = self
-                .last_present
-                .map(|t| t + self.slideshow.interval)
-                .unwrap_or(now + self.frame_interval)
-                .max(now + Duration::from_millis(1));
-            event_loop.set_control_flow(ControlFlow::WaitUntil(wake));
+            Some(
+                self.last_present
+                    .map(|t| t + self.slideshow.interval)
+                    .unwrap_or(now + self.frame_interval)
+                    .max(now + Duration::from_millis(1)),
+            )
         } else {
-            event_loop.set_control_flow(ControlFlow::Wait);
+            None
+        };
+        // The earliest pending wake across the viewer and an open dialog; `None` = idle.
+        let wake = match (base_wake, dialog_wake) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        match wake {
+            Some(at) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
+            None => event_loop.set_control_flow(ControlFlow::Wait),
         }
     }
 }
@@ -3964,7 +4065,9 @@ fn open_archive(
         .is_some_and(|e| e.eq_ignore_ascii_case("7z"));
     if is_7z {
         seven_z_preflight(path, password.as_deref())?;
-        load_seven_z(path, password)
+        // Synchronous safety-net path (the interactive paths use the async, cancellable
+        // `begin_archive_open`): a throwaway progress handle no UI reads.
+        load_seven_z(path, password, &pb_source::OpenProgress::new())
     } else {
         let has_password = password.is_some();
         let zs = ZipSource::open(path, password, is_supported_extension)?;
@@ -4017,12 +4120,64 @@ fn seven_z_preflight_within(
 fn load_seven_z(
     path: &Path,
     password: Option<String>,
+    progress: &pb_source::OpenProgress,
 ) -> Result<Resolved, archive::ArchiveOpenError> {
-    let src = SevenZSource::open(path, password, is_supported_extension)?;
+    let src =
+        SevenZSource::open_with_progress(path, password, is_supported_extension, Some(progress))?;
     if src.is_empty() {
         return Err(archive::ArchiveOpenError::Empty);
     }
     Ok(archive_resolved(path, Arc::new(src)))
+}
+
+/// The folder the Open dialog should start in.
+///
+/// Priority: a user-pinned `fixed` folder (the Settings preference) wins outright. Else,
+/// for an **archive** source, the folder that *contains* the archive — never the archive
+/// itself: the OS file dialog can't browse inside a `.zip`/`.7z`, and an *encrypted* one
+/// errors outright ("Windows cannot open the folder…"). Else the current photo's folder
+/// (the scanned folder, then the display root). When all of those are empty — a bare
+/// launch with nothing open — fall back to `fallback` (the user's Pictures/home), so the
+/// dialog never falls back to *Windows'* own last-folder memory (a privacy trace).
+fn picker_start_dir(
+    fixed: Option<&Path>,
+    container: Option<&Path>,
+    scan_root: Option<&Path>,
+    root: &Path,
+    fallback: &Path,
+) -> PathBuf {
+    let non_empty = |p: Option<&Path>| {
+        p.filter(|p| !p.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+    };
+    if let Some(dir) = non_empty(fixed) {
+        return dir;
+    }
+    if let Some(archive) = container {
+        return non_empty(archive.parent()).unwrap_or_else(|| fallback.to_path_buf());
+    }
+    non_empty(scan_root)
+        .or_else(|| non_empty(Some(root)))
+        .unwrap_or_else(|| fallback.to_path_buf())
+}
+
+/// A safe default folder for the Open dialog when nothing else applies (a bare launch):
+/// the user's Pictures folder if it exists, else their home, else the current directory.
+/// Used so the dialog always opens somewhere real instead of letting Windows fall back to
+/// its remembered last folder.
+fn default_picker_dir() -> PathBuf {
+    let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    if let Some(home) = std::env::var_os(home_var) {
+        let home = PathBuf::from(home);
+        let pics = home.join("Pictures");
+        if pics.is_dir() {
+            return pics;
+        }
+        if home.is_dir() {
+            return home;
+        }
+    }
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 /// A [`Resolved`] for an archive `source`: the archive path is the display root,
@@ -4049,6 +4204,10 @@ struct ArchiveLoad {
     /// Whether this open carried a user-entered password (a repeat `PasswordRequired`
     /// then means it was wrong, so the prompt shows the retry error).
     was_password_attempt: bool,
+    /// Shared progress + cancel handle for this open. The loading dialog reads it to
+    /// draw its bar; the Cancel button / Esc / a superseding open flips its cancel flag
+    /// so the worker stops at the next entry boundary (freeing its partial RAM).
+    progress: pb_source::OpenProgress,
 }
 
 /// Map the persisted default scale mode to the renderer's [`ScaleMode`].
@@ -4567,5 +4726,68 @@ mod tests {
             advance_interval(Duration::from_secs(1), 3.0, 4.0, 0.0, frame),
             frame
         );
+    }
+
+    #[test]
+    fn picker_starts_in_the_folder_containing_an_archive() {
+        // Archive source: container is the .7z file; the Open dialog must start in its
+        // parent folder, never the archive itself (the OS dialog can't browse inside it,
+        // and an encrypted one errors). Holds for zip + 7z, encrypted or not.
+        let fb = Path::new("fallback");
+        let archive = Path::new("photos/trips/spain.7z");
+        let got = picker_start_dir(None, Some(archive), None, archive, fb);
+        assert_eq!(got, Path::new("photos/trips"));
+
+        let zip = Path::new("albums/2015.zip");
+        assert_eq!(
+            picker_start_dir(None, Some(zip), None, zip, fb),
+            Path::new("albums")
+        );
+    }
+
+    #[test]
+    fn picker_uses_the_scanned_folder_for_a_normal_source() {
+        // No archive, no pin: prefer the scanned folder, else the display root.
+        let fb = Path::new("fallback");
+        let folder = Path::new("photos/trips");
+        assert_eq!(
+            picker_start_dir(None, None, Some(folder), folder, fb),
+            folder
+        );
+
+        let root = Path::new("photos");
+        assert_eq!(picker_start_dir(None, None, None, root, fb), root);
+    }
+
+    #[test]
+    fn picker_pinned_folder_wins_over_everything() {
+        // A user-pinned folder is used regardless of the current source (incl. archives).
+        let fb = Path::new("fallback");
+        let pinned = Path::new("D:/AlwaysHere");
+        let archive = Path::new("photos/trips/spain.7z");
+        assert_eq!(
+            picker_start_dir(Some(pinned), Some(archive), None, archive, fb),
+            pinned
+        );
+        assert_eq!(
+            picker_start_dir(
+                Some(pinned),
+                None,
+                Some(Path::new("photos")),
+                Path::new("photos"),
+                fb
+            ),
+            pinned
+        );
+    }
+
+    #[test]
+    fn picker_falls_back_when_there_is_no_current_folder() {
+        // Bare launch: empty scan_root + empty root → the safe fallback, NOT an empty
+        // path (which would let Windows surface its own remembered last folder).
+        let fb = Path::new("fallback");
+        let empty = Path::new("");
+        assert_eq!(picker_start_dir(None, None, None, empty, fb), fb);
+        assert_eq!(picker_start_dir(None, None, Some(empty), empty, fb), fb);
     }
 }

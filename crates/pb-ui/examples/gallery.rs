@@ -263,6 +263,22 @@ impl Gallery {
         pb_ui::section_label(ui, p, "Text field");
         ui.add(pb_ui::text_field(&mut self.text, "Type here").desired_width(240.0));
 
+        pb_ui::section_label(ui, p, "Progress bar");
+        // A few representative fills (empty, partial, full) — the determinate bar the
+        // archive-loading dialog draws from a live OpenProgress fraction.
+        for frac in [0.0_f32, 0.35, 0.62, 1.0] {
+            ui.horizontal(|ui| {
+                ui.set_width(260.0);
+                pb_ui::progress_bar(ui, p, frac);
+            });
+            ui.label(
+                egui::RichText::new(format!("{}%", (frac * 100.0) as u32))
+                    .size(12.5)
+                    .color(p.text_secondary),
+            );
+            ui.add_space(pb_ui::SPACE_2);
+        }
+
         // Dialog patterns — composed from the same pb_ui buttons/fields as the real app,
         // so editing a button here updates every dialog and they can't drift apart.
         pb_ui::section_label(ui, p, "Dialogs");

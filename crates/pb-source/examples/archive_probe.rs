@@ -71,23 +71,24 @@ fn mb(bytes: u64) -> f64 {
 
 fn main() {
     let arg = std::env::args().nth(1).unwrap_or_else(|| {
-        eprintln!("usage: archive_probe <archive.7z>");
+        eprintln!("usage: archive_probe <archive.7z> [password]");
         std::process::exit(2);
     });
+    let password = std::env::args().nth(2);
     let path = Path::new(&arg);
     let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 
     // 1) Pre-flight projection: header read only, no decompression.
     let t = Instant::now();
-    let projected =
-        seven_z_projected_bytes(path, None, is_supported).expect("header read / projection failed");
+    let projected = seven_z_projected_bytes(path, password.as_deref(), is_supported)
+        .expect("header read / projection failed");
     let project_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     let peak_before = peak_working_set();
 
     // 2) Eager open: decompress every supported image into RAM (the slow step).
     let t = Instant::now();
-    let src = SevenZSource::open(path, None, is_supported).expect("eager open failed");
+    let src = SevenZSource::open(path, password.clone(), is_supported).expect("eager open failed");
     let open_s = t.elapsed().as_secs_f64();
     let peak_after = peak_working_set(); // sample before any bytes() clone inflates it
     let count = src.len();

@@ -7,7 +7,9 @@
 //! egui is locked to the OS-resolved light/dark theme at open, and the `pbui`
 //! design-system style (tokens + components) is reasserted each frame on top.
 
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use egui_wgpu::wgpu;
 use winit::dpi::{LogicalSize, PhysicalPosition};
@@ -17,6 +19,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Theme, Window, WindowId};
 
 use pb_decode::{decode_bytes, FitBox};
+use pb_source::OpenProgress;
 
 use crate::action::Action;
 use crate::keymap::{KeyChord, Keymap};
@@ -48,6 +51,13 @@ pub enum DialogKind {
     /// [`take_confirm_result`]: DialogWindow::take_confirm_result
     /// [`take_submitted_password`]: DialogWindow::take_submitted_password
     Password,
+    /// An archive-loading progress view: a message, a determinate progress bar driven
+    /// by a [`pb_source::OpenProgress`] handle, the bytes/percent done, and a single
+    /// **Cancel** button. Cancel (or Esc) requests cancellation of the in-flight eager
+    /// 7z decode. A `Password` dialog turns into this in place once the password is
+    /// verified (see [`become_loading`](DialogWindow::become_loading)); the non-password
+    /// paths open it fresh.
+    Loading,
 }
 
 /// Which section of the Settings dialog is showing. The bottom Save/Cancel bar is
@@ -77,6 +87,10 @@ struct SettingsDraft {
     info_opacity: u8,        // 0..100
     startup_mode: usize,     // 0 = Fullscreen, 1 = Windowed, 2 = Remember
     slideshow_interval: f64, // seconds (default slideshow dwell)
+    /// File-picker start: `false` = the current photo's folder, `true` = a pinned folder.
+    picker_fixed: bool,
+    /// The pinned folder (when `picker_fixed`); `None` until the user chooses one.
+    picker_dir: Option<PathBuf>,
 }
 
 impl SettingsDraft {
@@ -113,6 +127,8 @@ impl SettingsDraft {
                 settings::StartupMode::Remember => 2,
             },
             slideshow_interval: s.slideshow_interval_secs,
+            picker_fixed: s.picker_dir.is_some(),
+            picker_dir: s.picker_dir.clone(),
         }
     }
 
@@ -147,6 +163,13 @@ impl SettingsDraft {
             _ => settings::StartupMode::Remember,
         };
         s.slideshow_interval_secs = self.slideshow_interval;
+        // Pin a folder only when "a specific folder" is selected *and* one was chosen;
+        // otherwise fall back to the current-photo's-folder default.
+        s.picker_dir = if self.picker_fixed {
+            self.picker_dir.clone()
+        } else {
+            None
+        };
         s.clamp();
         s
     }
@@ -314,6 +337,17 @@ pub struct DialogWindow {
     /// every frame — re-grabbing focus each frame suppresses the field's Enter-driven
     /// `lost_focus`, which is how submit is detected.
     focus_password: bool,
+    /// When egui next wants to be repainted (animations, a combo popup opening, the
+    /// "Checking…" spinner). egui is immediate-mode, so a frame only happens when
+    /// something asks for it; without honoring this the dialog would freeze between
+    /// OS events (a clicked dropdown wouldn't open until you moved the mouse). A
+    /// zero-delay request is re-armed immediately in `render`; a timed one is woken
+    /// by the main loop via [`repaint_at`](DialogWindow::repaint_at).
+    next_repaint: Option<Instant>,
+    /// The shared progress + cancel handle for a [`DialogKind::Loading`] view (the eager
+    /// 7z decode runs on a worker thread; this dialog reads its `fraction`/bytes to draw
+    /// the bar and calls `request_cancel` from the Cancel button / Esc). `None` otherwise.
+    progress: Option<OpenProgress>,
 }
 
 impl DialogWindow {
@@ -338,6 +372,7 @@ impl DialogWindow {
             DialogKind::Confirm => (450.0, 172.0, false, "Confirm Delete"),
             DialogKind::Message => (470.0, 185.0, false, "PhotoBlaze"),
             DialogKind::Password => (500.0, 250.0, false, "Password Required"),
+            DialogKind::Loading => (500.0, 210.0, false, "Opening Archive"),
         };
         // Created HIDDEN: we render the first (themed) frame before revealing, so the
         // OS never flashes the default white window before our dark frame lands.
@@ -466,6 +501,8 @@ impl DialogWindow {
             checking: false,
             submitted_password: None,
             focus_password: matches!(kind, DialogKind::Password),
+            next_repaint: None,
+            progress: None,
         };
         // Prime two hidden frames: the first lets egui apply its base theme, the second
         // paints with our design-system style layered on top — so the window is already
@@ -593,6 +630,26 @@ impl DialogWindow {
         self.checking = on;
     }
 
+    /// Attach (or clear) the [`OpenProgress`] handle a [`DialogKind::Loading`] view reads
+    /// to draw its bar and cancel from. A cheap `Arc` clone shared with the load worker.
+    pub fn set_progress(&mut self, progress: Option<OpenProgress>) {
+        self.progress = progress;
+    }
+
+    /// Turn an open dialog into the loading view **in place** — same OS window and wgpu
+    /// surface, no swap/flicker. Used when a verified password promotes the `Password`
+    /// dialog to the decode-progress view: it switches the kind, retitles the window,
+    /// scrubs the now-finished password field, and attaches the progress handle.
+    pub fn become_loading(&mut self, message: &str, progress: OpenProgress) {
+        self.kind = DialogKind::Loading;
+        self.confirm_msg = message.to_string();
+        self.progress = Some(progress);
+        self.checking = false;
+        scrub(&mut self.password_input);
+        self.window.set_title("Opening Archive");
+        self.request_redraw();
+    }
+
     pub fn focus(&self) {
         self.window.focus_window();
     }
@@ -628,6 +685,7 @@ impl DialogWindow {
         let pw_error = self.password_error.clone();
         let checking = self.checking;
         let take_focus = self.focus_password;
+        let progress = self.progress.clone();
         let draft = &mut self.draft;
         let password_input = &mut self.password_input;
         let mut kb = KbEdit {
@@ -666,7 +724,19 @@ impl DialogWindow {
                     take_focus,
                 );
             }
+            DialogKind::Loading => {
+                confirm_click = loading_dialog(ctx, &msg, progress.as_ref());
+            }
         });
+        // How soon egui wants the next frame: 0 = "again now" (a popup opening, the
+        // Checking… spinner, an in-progress animation), a finite delay = a timed
+        // refresh (a blinking text cursor), MAX = idle. Honored below so the dialog
+        // keeps animating without an OS event nudging it.
+        let repaint_delay = full_output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map(|v| v.repaint_delay)
+            .unwrap_or(Duration::MAX);
         // The focus request (if any) was issued this frame; don't repeat it.
         self.focus_password = false;
         if confirm_click.is_some() {
@@ -757,6 +827,25 @@ impl DialogWindow {
         for id in &full_output.textures_delta.free {
             self.egui_renderer.free_texture(id);
         }
+
+        // Honor egui's repaint request so the dialog animates without an OS event:
+        // a zero delay re-arms a redraw immediately (popups, the spinner); a finite
+        // delay is parked on `next_repaint` for the main loop to wake on; MAX = idle.
+        if repaint_delay.is_zero() {
+            self.next_repaint = None;
+            self.window.request_redraw();
+        } else if repaint_delay < Duration::MAX {
+            self.next_repaint = Some(Instant::now() + repaint_delay);
+        } else {
+            self.next_repaint = None;
+        }
+    }
+
+    /// When the open dialog next wants to be repainted for a *timed* egui refresh
+    /// (e.g. a blinking cursor), so the main loop can schedule a wake. `None` when
+    /// idle or when an immediate redraw was already re-armed in [`render`](Self::render).
+    pub fn repaint_at(&self) -> Option<Instant> {
+        self.next_repaint
     }
 }
 
@@ -1018,6 +1107,73 @@ fn password_dialog(
     result
 }
 
+/// The archive-loading view: a message (the file being opened), a determinate progress
+/// bar with a `NN%  X / Y` caption, and a single bottom-right **Cancel** button. Cancel
+/// requests cancellation of the in-flight eager 7z decode and answers `Some(false)` so
+/// the main loop tidies up; Esc does the same via the event router. The dialog repaints
+/// itself each frame (`progress_row`) so the bar tracks the worker without an OS nudge.
+fn loading_dialog(
+    ctx: &egui::Context,
+    message: &str,
+    progress: Option<&OpenProgress>,
+) -> Option<bool> {
+    let mut result = None;
+    let p = pbui::Palette::new(ctx.style().visuals.dark_mode);
+    button_bar(ctx, "loading_bar", |ui| {
+        if pbui::secondary_button(ui, "Cancel").clicked() {
+            if let Some(pr) = progress {
+                pr.request_cancel();
+            }
+            result = Some(false);
+        }
+    });
+    egui::CentralPanel::default()
+        .frame(dialog_frame(ctx))
+        .show(ctx, |ui| {
+            ui.label(egui::RichText::new(message).size(MSG_SIZE));
+            ui.add_space(18.0);
+            match progress {
+                Some(pr) => progress_row(ui, &p, pr),
+                // No handle yet (the first priming frames before the worker is attached):
+                // a plain spinner stand-in.
+                None => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.add_space(6.0);
+                        ui.label("Preparing\u{2026}");
+                    });
+                }
+            }
+        });
+    result
+}
+
+/// The progress bar plus its `NN%  done / total` caption, requesting a repaint each
+/// frame so the bar advances as the worker thread bumps the shared counter (egui is
+/// immediate-mode — without this the bar would only move on an OS event).
+fn progress_row(ui: &mut egui::Ui, p: &pbui::Palette, progress: &OpenProgress) {
+    ui.ctx().request_repaint();
+    let frac = progress.fraction();
+    pbui::progress_bar(ui, p, frac);
+    ui.add_space(8.0);
+    let (done, total) = (progress.done(), progress.total());
+    let caption = if total > 0 {
+        format!(
+            "{}%   {} / {}",
+            (frac * 100.0).round() as u32,
+            crate::archive::human_gb(done),
+            crate::archive::human_gb(total)
+        )
+    } else {
+        "Preparing\u{2026}".to_string()
+    };
+    ui.label(
+        egui::RichText::new(caption)
+            .size(12.5)
+            .color(p.text_secondary),
+    );
+}
+
 /// Open the OS "default apps" settings so the user can make PhotoBlaze the default
 /// photo viewer. Windows doesn't let an app set itself as default programmatically
 /// (the user must confirm in Settings), so we deep-link to the right page. Best-effort,
@@ -1218,6 +1374,54 @@ fn general_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
                 pbui::toggle_with_label(ui, p, &mut d.recursive);
             },
         );
+    });
+    ui.add_space(pbui::GAP);
+
+    pbui::group_card(ui, p, Some("File Picker"), |ui| {
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Open in",
+            Some("Where the Open dialog starts. A specific folder also keeps it from remembering where you last browsed."),
+            |ui| {
+                egui::ComboBox::from_id_salt("picker_mode")
+                    .width(190.0)
+                    .selected_text(if d.picker_fixed {
+                        "A specific folder"
+                    } else {
+                        "Current photo\u{2019}s folder"
+                    })
+                    .show_ui(ui, |ui| {
+                        pbui::apply_to_ui(ui, p.dark);
+                        ui.selectable_value(
+                            &mut d.picker_fixed,
+                            false,
+                            "Current photo\u{2019}s folder",
+                        );
+                        ui.selectable_value(&mut d.picker_fixed, true, "A specific folder");
+                    });
+            },
+        );
+        if d.picker_fixed {
+            let path_label = d
+                .picker_dir
+                .as_deref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "No folder chosen yet".to_string());
+            pbui::card_row(ui, p, None, "Folder", Some(path_label.as_str()), |ui| {
+                if pbui::secondary_button(ui, "Choose\u{2026}").clicked() {
+                    let start = d.picker_dir.clone();
+                    let mut dlg = rfd::FileDialog::new();
+                    if let Some(cur) = &start {
+                        dlg = dlg.set_directory(cur);
+                    }
+                    if let Some(dir) = dlg.pick_folder() {
+                        d.picker_dir = Some(dir);
+                    }
+                }
+            });
+        }
     });
     ui.add_space(pbui::GAP);
 
