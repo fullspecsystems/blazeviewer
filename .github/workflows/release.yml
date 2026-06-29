@@ -84,14 +84,17 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         run: |
-          $tagVer = "${{ github.ref_name }}".TrimStart('v')
+          # Compare only the numeric core: a tag may carry a SemVer pre-release
+          # suffix (v0.1.0-beta.1), but the MSI ProductVersion is numeric and can't,
+          # so the crate version stays 0.1.0 and we match against that.
+          $tagCore = ("${{ github.ref_name }}".TrimStart('v') -split '-')[0]
           $crateVer = ((cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
             Where-Object { $_.name -eq 'pb-app' }).version
-          if ($tagVer -ne $crateVer) {
-            Write-Error "Tag '${{ github.ref_name }}' ($tagVer) != pb-app crate version $crateVer. Bump Cargo.toml or retag."
+          if ($tagCore -ne $crateVer) {
+            Write-Error "Tag '${{ github.ref_name }}' (core $tagCore) != pb-app crate version $crateVer. Bump Cargo.toml or retag."
             exit 1
           }
-          Write-Host "Tag matches crate version: $crateVer"
+          Write-Host "Tag core matches crate version: $crateVer"
 
       - name: Build release binary
         run: cargo build --release -p pb-app
@@ -169,3 +172,6 @@ jobs:
             target/wix/*.msi
             target/wix/*.msi.sha256
           generate_release_notes: true
+          # SemVer pre-release tags (anything with a hyphen, e.g. v0.1.0-beta.1)
+          # publish as a GitHub pre-release; clean tags (v0.1.0) are full releases.
+          prerelease: ${{ contains(github.ref_name, '-') }}
