@@ -24,7 +24,7 @@ use std::os::raw::{c_char, c_int};
 use std::ptr;
 use std::sync::OnceLock;
 
-use crate::wic::{
+use crate::isobmff::{
     color_from_colr_box, colr_transfer, has_thumbnail_ref, is_hdr_transfer, isobmff_brand,
 };
 use crate::{common, ColorTransform, DecodeError, DecodeRequest, DecodedImage, ImageDecoder};

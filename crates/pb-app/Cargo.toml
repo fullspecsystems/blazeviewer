@@ -71,6 +71,17 @@ trash = { version = "5", default-features = false, features = [
 toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
 # Derive (de)serialization for the typed Settings model (settings.toml).
 serde = { version = "1", features = ["derive"] }
+# Cross-platform **text** clipboard for Copy File Path (Shift+Ctrl+C / ⇧⌘C). The
+# image clipboard keeps its Win32 path in clipboard.rs; this is text-only and portable
+# (already in the tree via egui-winit). `default-features = false` drops the Linux
+# wayland backend + image-data support we don't need here.
+arboard = { version = "3", default-features = false }
+
+# macOS: poke the wgpu CAMetalLayer for wide-gamut/EDR output (hdr_surface.rs) via
+# raw `msg_send!`. objc2 0.6 is already in the tree (winit/muda); raw-window-handle
+# comes through winit's re-export.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
 
 # Win32 for: pointing the window icon at the exe's multi-size .ico (crisp small
 # title-bar icon, vs winit downscaling one big image), and the native menu later.

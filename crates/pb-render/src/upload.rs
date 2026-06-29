@@ -178,7 +178,8 @@ mod tests {
         }
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::DX12 | wgpu::Backends::VULKAN,
+            // Per-OS primary backend (DX12/Metal/Vulkan); see `gpu::instance`.
+            backends: wgpu::Backends::PRIMARY,
             ..Default::default()
         });
         let adapter = instance

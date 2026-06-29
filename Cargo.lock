@@ -3467,6 +3467,7 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 name = "pb-app"
 version = "0.1.0"
 dependencies = [
+ "arboard",
  "egui",
  "egui-wgpu",
  "egui-winit",
@@ -3474,6 +3475,7 @@ dependencies = [
  "half",
  "little_exif",
  "muda",
+ "objc2 0.6.4",
  "pb-core",
  "pb-decode",
  "pb-render",
@@ -3520,6 +3522,7 @@ name = "pb-render"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "objc2 0.6.4",
  "pollster",
  "wgpu",
  "windows 0.62.2",

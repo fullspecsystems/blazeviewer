@@ -22,4 +22,10 @@ windows = { version = "0.62.2", features = [
     "Win32_Foundation",
 ] }
 
+# macOS EDR / P3 detection (`display::primary_hdr`) via NSScreen, and the EDR
+# CAMetalLayer surface poke. Raw `msg_send!` (no objc2-app-kit) keeps the surface
+# minimal and version-robust. objc2 0.6 is already in the tree (muda/winit).
+[target."cfg(target_os = \"macos\")".dependencies]
+objc2 = "0.6"
+
 [dev-dependencies]

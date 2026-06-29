@@ -299,6 +299,7 @@ pub struct DialogWindow {
     cap_ctrl: bool,
     cap_shift: bool,
     cap_alt: bool,
+    cap_logo: bool,
     /// A transient note for the keybinding editor (e.g. a "moved from …" message).
     keymap_note: Option<String>,
     /// Which Settings tab (General / Display / Shortcuts) is showing.
@@ -491,6 +492,7 @@ impl DialogWindow {
             cap_ctrl: false,
             cap_shift: false,
             cap_alt: false,
+            cap_logo: false,
             keymap_note: None,
             settings_tab: SettingsTab::default(),
             submitted_keymap: None,
@@ -569,6 +571,7 @@ impl DialogWindow {
             self.cap_ctrl = mods.state().control_key();
             self.cap_shift = mods.state().shift_key();
             self.cap_alt = mods.state().alt_key();
+            self.cap_logo = mods.state().super_key();
         }
     }
 
@@ -600,7 +603,13 @@ impl DialogWindow {
                 if is_modifier_key(code) {
                     return true; // wait for a real key to combine with held modifiers
                 }
-                let chord = KeyChord::new(code, self.cap_ctrl, self.cap_shift, self.cap_alt);
+                let chord = KeyChord::new(
+                    code,
+                    self.cap_ctrl,
+                    self.cap_shift,
+                    self.cap_alt,
+                    self.cap_logo,
+                );
                 let stolen = self.keymap_draft.set_slot(action, slot, chord);
                 self.keymap_dirty = true;
                 self.capturing = None;

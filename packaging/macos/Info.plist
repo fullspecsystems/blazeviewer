@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  macOS bundle metadata for PhotoBlaze. Assembled into PhotoBlaze.app by
+  scripts/bundle-macos.sh, which substitutes __SHORT_VERSION__ / __VERSION__ from
+  the pb-app crate version. File associations (CFBundleDocumentTypes / UTI
+  declarations) are added by task #6; this base plist makes the app launch as a
+  normal, frontmost, menu-bar app.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>PhotoBlaze</string>
+	<key>CFBundleDisplayName</key>
+	<string>PhotoBlaze</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.jdlien.PhotoBlaze</string>
+	<key>CFBundleExecutable</key>
+	<string>photoblaze</string>
+	<key>CFBundleIconFile</key>
+	<string>PhotoBlaze</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>__SHORT_VERSION__</string>
+	<key>CFBundleVersion</key>
+	<string>__VERSION__</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.photography</string>
+	<!-- A normal foreground app (Dock icon + global menu bar), not an agent. -->
+	<key>LSUIElement</key>
+	<false/>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>© JD Lien</string>
+</dict>
+</plist>

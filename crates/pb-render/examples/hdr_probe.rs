@@ -87,7 +87,60 @@ fn main() -> windows::core::Result<()> {
     Ok(())
 }
 
-#[cfg(not(windows))]
+/// macOS: enumerate every `NSScreen` and report its EDR headroom + P3 gamut, then
+/// show what `display::primary_hdr()` (the value the renderer actually uses) decides.
+#[cfg(target_os = "macos")]
 fn main() {
-    println!("hdr_probe is Windows-only (DXGI). On macOS the equivalent is CAMetalLayer EDR.");
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyObject, Bool};
+    use objc2::{class, msg_send};
+    use std::ffi::{c_char, CStr};
+
+    unsafe {
+        let screens: Retained<AnyObject> = msg_send![class!(NSScreen), screens];
+        let count: usize = msg_send![&*screens, count];
+        println!("{count} display(s):\n");
+        for i in 0..count {
+            let screen: Retained<AnyObject> = msg_send![&*screens, objectAtIndex: i];
+            let s = &*screen;
+            let max_edr: f64 =
+                msg_send![s, maximumPotentialExtendedDynamicRangeColorComponentValue];
+            let cur_edr: f64 = msg_send![s, maximumExtendedDynamicRangeColorComponentValue];
+            let p3: Bool = msg_send![s, canRepresentDisplayGamut: 1isize];
+            let name_obj: Retained<AnyObject> = msg_send![s, localizedName];
+            let utf8: *const c_char = msg_send![&*name_obj, UTF8String];
+            let name = CStr::from_ptr(utf8).to_string_lossy();
+
+            let gamut = if p3.as_bool() { "P3 (wide)" } else { "sRGB" };
+            let hdr = if max_edr > 1.01 {
+                format!(
+                    "EDR ×{max_edr:.1} (≈{:.0} nits, currently ×{cur_edr:.1})",
+                    max_edr * 100.0
+                )
+            } else {
+                "SDR (no EDR headroom)".to_string()
+            };
+            println!("  [{i}] {name}\n      gamut: {gamut}\n      hdr:   {hdr}\n");
+        }
+    }
+
+    let d = pb_render::display::primary_hdr();
+    println!("primary_hdr() → the renderer will use:");
+    println!(
+        "  hdr_on={}  wide_gamut={}  max_nits={:.0}  sdr_white_nits={:.0}",
+        d.hdr_on, d.wide_gamut, d.max_nits, d.sdr_white_nits
+    );
+    println!(
+        "  → {} surface",
+        if d.hdr_on || d.wide_gamut {
+            "fp16 wide-gamut/EDR"
+        } else {
+            "SDR 8-bit"
+        }
+    );
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn main() {
+    println!("hdr_probe needs DXGI (Windows) or NSScreen (macOS).");
 }

@@ -573,18 +573,15 @@ fn first_readable(paths: &[PathBuf]) -> Option<Vec<u8>> {
     paths.iter().find_map(|p| std::fs::read(p).ok())
 }
 
+/// The Windows fonts directory (from `WINDIR`/`SystemRoot`). Windows-only: macOS and
+/// Linux use absolute font paths directly in the `*_font_paths()` helpers below, so
+/// this would be dead code there.
+#[cfg(windows)]
 fn fonts_dir() -> PathBuf {
-    #[cfg(windows)]
-    {
-        let windir = std::env::var("WINDIR")
-            .or_else(|_| std::env::var("SystemRoot"))
-            .unwrap_or_else(|_| "C:\\Windows".to_string());
-        PathBuf::from(windir).join("Fonts")
-    }
-    #[cfg(not(windows))]
-    {
-        PathBuf::from("/")
-    }
+    let windir = std::env::var("WINDIR")
+        .or_else(|_| std::env::var("SystemRoot"))
+        .unwrap_or_else(|_| "C:\\Windows".to_string());
+    PathBuf::from(windir).join("Fonts")
 }
 
 fn regular_font_paths() -> Vec<PathBuf> {

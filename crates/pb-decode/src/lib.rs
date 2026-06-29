@@ -18,6 +18,13 @@
 mod color;
 mod common;
 mod image_backend;
+#[cfg(target_os = "macos")]
+mod imageio;
+// Shared ISOBMFF/`colr` parsing for the HEVC/AV1 container backends (WIC, Image I/O,
+// libheif). Only compiled where one of them is — keeps non-HEIC targets (e.g. the
+// Linux bench build) dead-code-free.
+#[cfg(any(windows, target_os = "macos"))]
+mod isobmff;
 mod jxl;
 #[cfg(all(windows, feature = "libheif"))]
 mod libheif;
@@ -33,6 +40,8 @@ use std::path::Path;
 
 pub use color::ColorTransform;
 pub use image_backend::ImageCrateDecoder;
+#[cfg(target_os = "macos")]
+pub use imageio::ImageIoDecoder;
 pub use jxl::JxlDecoder;
 #[cfg(all(windows, feature = "libheif"))]
 pub use libheif::LibHeifDecoder;
@@ -235,12 +244,17 @@ fn decode_bytes_inner(
     let jxl = JxlDecoder;
     let images = ImageCrateDecoder;
     let mut backends: Vec<&dyn ImageDecoder> = vec![&jpeg, &jxl];
-    // AVIF + HEIC via the OS imaging codecs on Windows (pure-Rust elsewhere can't
-    // do AV1/HEVC). Tried before the `image` crate, which doesn't handle them here.
+    // AVIF + HEIC via the OS imaging codecs (pure-Rust elsewhere can't do AV1/HEVC):
+    // WIC on Windows, Image I/O on macOS. Tried before the `image` crate, which
+    // doesn't handle them here.
     #[cfg(windows)]
     let wic = WicDecoder;
     #[cfg(windows)]
     backends.push(&wic);
+    #[cfg(target_os = "macos")]
+    let imageio = ImageIoDecoder;
+    #[cfg(target_os = "macos")]
+    backends.push(&imageio);
     backends.push(&images);
     for backend in backends {
         if backend.can_decode(bytes) {
@@ -391,8 +405,8 @@ pub fn is_supported_extension(ext: &str) -> bool {
     if BASE.contains(&e.as_str()) {
         return true;
     }
-    // AVIF/HEIC are decoded via WIC on Windows (OS codec extensions).
-    #[cfg(windows)]
+    // AVIF/HEIC are decoded via the OS codecs: WIC on Windows, Image I/O on macOS.
+    #[cfg(any(windows, target_os = "macos"))]
     if matches!(e.as_str(), "avif" | "heic" | "heif" | "hif") {
         return true;
     }

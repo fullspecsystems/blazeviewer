@@ -7,6 +7,13 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Added
+- Fullscreen now also toggles with the **F** key, alongside F11 and Alt+Enter — a
+  memorable, discoverable shortcut for the app's most-used view toggle.
+- **Copy File Path** (Shift+Ctrl+C, or Edit ▸ Copy File Path) copies the current
+  photo's full path to the clipboard as text — handy for pasting a filename into a
+  message or terminal. (Archive entries copy their entry name.)
+
 ## [0.1.0-beta.3] - 2026-06-29
 
 ### Added

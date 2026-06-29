@@ -110,7 +110,7 @@ fn vs_fullscreen(@builtin(vertex_index) vi: u32) -> VsOut {
 
 @group(0) @binding(0) var tex: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
-struct Present { params: vec4<f32> };   // x = peak (SDR white point), z = hdr flag
+struct Present { params: vec4<f32> };   // x = peak (SDR white pt), y = EDR roll-off headroom (0 = straight), z = hdr flag
 @group(0) @binding(2) var<uniform> pr: Present;
 
 fn srgb_oetf(c: f32) -> f32 {
@@ -126,13 +126,29 @@ fn reinhard(v: f32, lw: f32) -> f32 {
     return x * (1.0 + x / (lw * lw)) / (1.0 + x);
 }
 
+// Highlight roll-off for the macOS EDR surface: identity at/below SDR white (1.0),
+// smoothly compressing values above 1 so they asymptote to `headroom` rather than
+// hard-clipping at the panel's EDR limit. SDR/diffuse and wide-gamut (negative)
+// values pass through unchanged. `headroom` <= 1 clamps highlights to SDR white.
+fn rolloff(v: f32, headroom: f32) -> f32 {
+    if (v <= 1.0) { return v; }
+    let t = v - 1.0;
+    let m = max(headroom - 1.0, 0.0);
+    return 1.0 + m * t / (t + m + 1e-6);
+}
+
 @fragment
 fn fs_present(in: VsOut) -> @location(0) vec4<f32> {
     let s = textureSample(tex, samp, in.uv);
     if (pr.params.z > 0.5) {
-        // HDR scRGB surface: the intermediate is already final scene-linear scRGB
-        // (the scene/overlay baked the SDR-white scale) — pass it straight through,
-        // keeping wide-gamut (negative) and HDR (>1) values for the panel.
+        // HDR/wide-gamut scRGB surface: the intermediate is already final scene-linear
+        // scRGB. On Windows (headroom 0) the DWM compositor tone-maps, so pass straight
+        // through. On macOS, EDR hard-clips above the panel headroom, so roll highlights
+        // off toward it — keeping SDR/diffuse and wide-gamut (negative) values intact.
+        let hr = pr.params.y;
+        if (hr > 0.0) {
+            return vec4<f32>(rolloff(s.r, hr), rolloff(s.g, hr), rolloff(s.b, hr), 1.0);
+        }
         return vec4<f32>(s.rgb, 1.0);
     }
     let lw = pr.params.x;
@@ -242,10 +258,17 @@ struct PresentUniform {
 
 impl PresentUniform {
     /// `peak` = SDR tone-map white point (the displayed image's peak; 1.0 for SDR).
-    /// `hdr` = true on an fp16 scRGB surface (the present pass copies through).
-    fn new(peak: f32, hdr: bool) -> Self {
+    /// `hdr` = true on an fp16 scRGB surface. `edr_headroom` = the macOS EDR roll-off
+    /// target (>1 rolls highlights off toward it; 0 = pass straight through, the
+    /// Windows/DWM path) — see `display::DisplayHdr::edr_headroom`.
+    fn new(peak: f32, hdr: bool, edr_headroom: f32) -> Self {
         Self {
-            params: [peak.max(1.0), 0.0, if hdr { 1.0 } else { 0.0 }, 0.0],
+            params: [
+                peak.max(1.0),
+                edr_headroom,
+                if hdr { 1.0 } else { 0.0 },
+                0.0,
+            ],
         }
     }
 }
@@ -900,7 +923,10 @@ fn draw_tonemap(
 
 fn instance() -> wgpu::Instance {
     wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::DX12 | wgpu::Backends::VULKAN,
+        // `PRIMARY` = the per-OS primary backend: DX12 on Windows, Metal on macOS,
+        // Vulkan on Linux (ADR-002). Excludes the GL secondary backend, so the
+        // "no GL fallback" posture is unchanged — this just adds Metal for the port.
+        backends: wgpu::Backends::PRIMARY,
         ..Default::default()
     })
 }
@@ -980,6 +1006,11 @@ pub struct WgpuRenderer {
     peak_buf: wgpu::Buffer,
     /// True when the surface is fp16 scRGB (HDR/wide-gamut display).
     hdr_surface: bool,
+    /// True when the display has EDR headroom (macOS) / desktop HDR is on (Windows) —
+    /// drives `wantsExtendedDynamicRangeContent` on the macOS CAMetalLayer.
+    hdr_on: bool,
+    /// EDR roll-off target for the present pass (macOS); 0 = pass straight through.
+    edr_headroom: f32,
     /// SDR-content output scale in scRGB units (used only on an HDR surface).
     sdr_scale: f32,
     /// Per-photo view transform (scaling mode + rotation + zoom + pan).
@@ -1064,7 +1095,13 @@ impl WgpuRenderer {
         // the panel. Otherwise pick an **8-bit non-sRGB** surface (the present pass
         // sRGB-encodes; an sRGB surface would double-encode and washes out).
         let disp = crate::display::primary_hdr();
-        let want_fp16 = disp.hdr_on && caps.formats.contains(&wgpu::TextureFormat::Rgba16Float);
+        // Use the fp16 scRGB surface whenever the panel benefits: HDR-on (extended
+        // range), OR wide-gamut (P3+). On macOS `wide_gamut` is set even for an SDR P3
+        // panel, so P3 photos light up there without needing EDR (the surface's
+        // CAMetalLayer is configured to extended-linear-sRGB in pb-app); on Windows
+        // `wide_gamut` tracks `hdr_on`, so behavior is unchanged.
+        let want_fp16 = (disp.hdr_on || disp.wide_gamut)
+            && caps.formats.contains(&wgpu::TextureFormat::Rgba16Float);
         let format = if want_fp16 {
             wgpu::TextureFormat::Rgba16Float
         } else {
@@ -1122,7 +1159,7 @@ impl WgpuRenderer {
         // intermediate the scene renders into.
         let peak_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("present-uniform"),
-            contents: bytemuck::bytes_of(&PresentUniform::new(peak, want_fp16)),
+            contents: bytemuck::bytes_of(&PresentUniform::new(peak, want_fp16, disp.edr_headroom)),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let (intermediate, tonemap_bind_group) = make_intermediate(
@@ -1152,6 +1189,8 @@ impl WgpuRenderer {
             tonemap_bind_group,
             peak_buf,
             hdr_surface: want_fp16,
+            hdr_on: disp.hdr_on,
+            edr_headroom: disp.edr_headroom,
             sdr_scale,
             view,
             overlay: None,
@@ -1182,7 +1221,30 @@ impl WgpuRenderer {
         self.queue.write_buffer(
             &self.peak_buf,
             0,
-            bytemuck::bytes_of(&PresentUniform::new(peak, self.hdr_surface)),
+            bytemuck::bytes_of(&PresentUniform::new(
+                peak,
+                self.hdr_surface,
+                self.edr_headroom,
+            )),
+        );
+    }
+
+    /// Set the EDR highlight roll-off target (macOS) — the headroom of the screen the
+    /// **window** is on, supplied by `pb-app` (the renderer can only see `mainScreen`,
+    /// which may be a different/SDR panel in a multi-display setup). Re-writes the
+    /// present uniform so it takes effect immediately. `1.0` = clamp HDR to SDR white.
+    pub fn set_edr_headroom(&mut self, headroom: f32) {
+        self.edr_headroom = headroom.max(1.0);
+        // Peak is unused on the HDR surface (the present pass keys off the headroom),
+        // so any value is fine here; the next per-image `set_present_peak` refreshes it.
+        self.queue.write_buffer(
+            &self.peak_buf,
+            0,
+            bytemuck::bytes_of(&PresentUniform::new(
+                1.0,
+                self.hdr_surface,
+                self.edr_headroom,
+            )),
         );
     }
 
@@ -1190,6 +1252,15 @@ impl WgpuRenderer {
     /// reads it from winit directly.
     pub fn present_mode(&self) -> wgpu::PresentMode {
         self.config.present_mode
+    }
+
+    /// macOS: how to configure the window's `CAMetalLayer` for this surface. `Some`
+    /// when the surface is fp16 scRGB (wide-gamut/HDR) — the layer should be set to
+    /// extended-linear-sRGB; the bool is whether to also request EDR headroom
+    /// (`wantsExtendedDynamicRangeContent`). `None` for a plain SDR 8-bit surface
+    /// (no layer poke needed). See `pb-app/src/hdr_surface.rs`.
+    pub fn hdr_surface_wants_edr(&self) -> Option<bool> {
+        self.hdr_surface.then_some(self.hdr_on)
     }
 
     /// The currently displayed image's texture dimensions (for pan-clamp math).
@@ -1833,7 +1904,7 @@ async fn render_offscreen_async(
     // the golden tests exercise the real pipeline. SDR peak = 1.0 (identity tone-map).
     let peak_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("present-uniform"),
-        contents: bytemuck::bytes_of(&PresentUniform::new(1.0, false)),
+        contents: bytemuck::bytes_of(&PresentUniform::new(1.0, false, 0.0)),
         usage: wgpu::BufferUsages::UNIFORM,
     });
     let (intermediate, tonemap_bind_group) = make_intermediate(

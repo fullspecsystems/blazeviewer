@@ -61,6 +61,8 @@ mod darkmode;
 mod decode_pool;
 mod delete;
 mod dialog;
+#[cfg(target_os = "macos")]
+mod hdr_surface;
 mod hud;
 mod icon;
 mod keymap;
@@ -490,6 +492,10 @@ struct App {
     ctrl: bool,
     /// Whether an Alt key is held (for `Alt+Enter` = toggle fullscreen).
     alt: bool,
+    /// Whether the "super" key is held — **Cmd (⌘) on macOS**, the Windows key
+    /// elsewhere. Lets Mac's OS-standard ⌘-shortcuts (⌘C/⌘S/…) be distinct chords
+    /// from the bare keys, so holding Cmd doesn't fire a bare-key action.
+    logo: bool,
     /// Whether the current scan-based playlist is recursive (`Ctrl+R` toggles).
     recursive: bool,
     /// The directory the current playlist was scanned from — enables the `Ctrl+R`
@@ -514,6 +520,11 @@ struct App {
     /// window fires a flurry of events; we update the in-memory geometry per event but
     /// only write `settings.toml` once the user stops, so a drag isn't a write storm.
     geometry_save_at: Option<Instant>,
+    /// macOS: the EDR headroom last applied to the renderer (the window's display).
+    /// On a window move we re-query the new screen and only reconfigure when it
+    /// changes — so dragging across a display with different HDR capability adapts.
+    #[cfg(target_os = "macos")]
+    last_edr_headroom: f32,
     /// Hold timers for the zoom/pan acceleration ramps (start = when the hold
     /// began; last = previous step, for time-based deltas).
     zoom_started: Option<Instant>,
@@ -676,6 +687,7 @@ impl App {
             shift: false,
             ctrl: false,
             alt: false,
+            logo: false,
             recursive,
             scan_root,
             pending_drops: Vec::new(),
@@ -683,6 +695,8 @@ impl App {
             esc_guard_until: None,
             resize_settle_at: None,
             geometry_save_at: None,
+            #[cfg(target_os = "macos")]
+            last_edr_headroom: 1.0,
             zoom_started: None,
             zoom_last: None,
             pan_started: None,
@@ -952,6 +966,32 @@ impl App {
             Err(e) => {
                 eprintln!("copy: clipboard write failed: {e}");
                 self.show_toast("Copy failed", event_loop);
+            }
+        }
+    }
+
+    /// Copy the current photo's **file path** to the clipboard as text (Shift+Ctrl+C /
+    /// Edit ▸ Copy File Path; ⇧⌘C on macOS). The full path for a filesystem source, or
+    /// the entry name for an archive (which has no path on disk). An explicit user
+    /// command — never the view path. Uses the cross-platform text clipboard (arboard),
+    /// separate from the image clipboard (`clipboard.rs`).
+    fn copy_path(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(item) = self.displayed_item else {
+            return; // empty state — nothing to copy
+        };
+        let text = match self.source.path(item) {
+            Some(p) => p.to_string_lossy().into_owned(),
+            None => self.source.name(item).to_string(),
+        };
+        let fname = file_name_of(&text).to_string();
+        match arboard::Clipboard::new().and_then(|mut c| c.set_text(text)) {
+            Ok(()) => {
+                let msg = format!("Copied {fname}");
+                self.show_toast(&msg, event_loop);
+            }
+            Err(e) => {
+                eprintln!("copy path: clipboard write failed: {e}");
+                self.show_toast("Copy path failed", event_loop);
             }
         }
     }
@@ -1767,6 +1807,54 @@ impl App {
         self.show_toast(&slideshow::format_interval(interval), event_loop);
     }
 
+    /// Toggle macOS **native (Spaces) fullscreen** — the green-button / ⌃⌘F / Globe+F
+    /// behavior — as a deliberate alternative to our borderless speed mode (F / ⌥⏎ /
+    /// F11). winit's `Fullscreen::Borderless(None)` maps to AppKit's `toggleFullScreen:`
+    /// on macOS. Driven only from the "Enter Full Screen" menu item (and its ⌃⌘F
+    /// equivalent); keeping our `windowed` flag in sync with externally-triggered
+    /// native fullscreen is a separate follow-up (tasks.json #8 of the macOS port).
+    #[cfg(target_os = "macos")]
+    fn toggle_native_fullscreen(&mut self) {
+        let Some(window) = self.active.as_ref().map(|a| a.window.clone()) else {
+            return;
+        };
+        if window.fullscreen().is_some() {
+            window.set_fullscreen(None);
+        } else {
+            window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+        }
+    }
+
+    /// macOS: when the window has moved to a display with different EDR headroom (a
+    /// multi-monitor setup where one panel is HDR and another isn't), reconfigure the
+    /// CAMetalLayer + the renderer's highlight roll-off for the new screen and repaint.
+    /// Cheap when nothing changed (one `NSScreen` query, no re-poke). Driven from
+    /// `WindowEvent::Moved`, which fires throughout a drag.
+    #[cfg(target_os = "macos")]
+    fn reconfigure_edr_for_display(&mut self, event_loop: &ActiveEventLoop) {
+        let changed = match self.active.as_ref() {
+            Some(a) if a.renderer.hdr_surface_wants_edr().is_some() => {
+                let hr = hdr_surface::window_max_edr(&a.window);
+                if (hr - self.last_edr_headroom).abs() > 0.01 {
+                    // Different display HDR capability — re-poke the layer (colorspace
+                    // + wantsEDR) for the new screen, then update the roll-off below.
+                    hdr_surface::configure(&a.window);
+                    Some(hr)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some(hr) = changed {
+            if let Some(a) = self.active.as_mut() {
+                a.renderer.set_edr_headroom(hr);
+            }
+            self.last_edr_headroom = hr;
+            self.draw(event_loop);
+        }
+    }
+
     /// Toggle between borderless "windowed fullscreen" and a 1280x800 window (F11
     /// or Alt+Enter). The resulting resize event re-fits and re-decodes the photo.
     /// NOTE: there is a brief flip-model resize artifact (the photo stretches for a
@@ -1987,7 +2075,23 @@ impl App {
 
     /// On non-Windows platforms the menu isn't wired up yet (macOS uses
     /// `init_for_nsapp` — a future cheap port), so this is a no-op.
-    #[cfg(not(windows))]
+    /// macOS: the menu bar is the app-global `NSMenu` (one `init_for_nsapp`), not a
+    /// per-window `HMENU`. Attach it once and leave it — macOS auto-hides the bar in
+    /// fullscreen while keeping the ⌘ key-equivalents live, so there's no per-mode
+    /// show/hide and nothing to do once attached.
+    #[cfg(target_os = "macos")]
+    fn apply_menu_for_mode(&mut self) {
+        self.ensure_menu();
+        if !self.menu_attached {
+            if let Some(menu) = self.menu.as_ref() {
+                menu.init_for_nsapp();
+                self.menu_attached = true;
+            }
+        }
+    }
+
+    /// Other platforms (Linux/X11/Wayland): no native menu wired yet.
+    #[cfg(not(any(windows, target_os = "macos")))]
     fn apply_menu_for_mode(&mut self) {}
 
     /// React to a runtime OS light↔dark theme change: re-flush the popup menu
@@ -2053,6 +2157,7 @@ impl App {
             Action::RotateCw => self.rotate(false, event_loop),
             Action::RotateCcw => self.rotate(true, event_loop),
             Action::Copy => self.copy_image(event_loop),
+            Action::CopyPath => self.copy_path(event_loop),
             Action::SaveRotation => self.save_rotation(event_loop),
             Action::Delete => self.delete_current(false, event_loop),
             Action::DeletePermanent => self.delete_current(true, event_loop),
@@ -3266,6 +3371,12 @@ impl ApplicationHandler for App {
             }
         }
 
+        // macOS: attach the app-global menu bar once, regardless of windowed/fullscreen
+        // (the bar auto-hides in fullscreen but its ⌘-shortcuts stay live). `NSMenu`
+        // has no per-window handle, so there's no `init_for_hwnd` equivalent.
+        #[cfg(target_os = "macos")]
+        self.apply_menu_for_mode();
+
         // Now that the menu bar is attached, re-apply the saved client size + position
         // so the restored window matches what was saved exactly — attaching the menu
         // shrinks the client area, so sizing only pre-attach would lose its height
@@ -3326,6 +3437,17 @@ impl ApplicationHandler for App {
                     );
                 }
             }
+        }
+
+        // macOS: configure the CAMetalLayer (scRGB colorspace + EDR) from the screen
+        // the *window* is on, and give the renderer that screen's roll-off headroom.
+        // After the initial resize (a surface reconfigure can reset the layer) and
+        // before the first present, so the first HDR frame is already correct.
+        #[cfg(target_os = "macos")]
+        if renderer.hdr_surface_wants_edr().is_some() {
+            let headroom = hdr_surface::configure(&window);
+            renderer.set_edr_headroom(headroom);
+            self.last_edr_headroom = headroom;
         }
 
         // Empty launch (no folder/file given): show a blank background with the
@@ -3391,6 +3513,16 @@ impl ApplicationHandler for App {
                         // Cheap, per-event: reconfigure the swapchain and let the
                         // renderer GPU-scale the resident texture to the new size.
                         a.renderer.resize(size.width, size.height);
+                        // macOS: a surface reconfigure can reset the CAMetalLayer's
+                        // colorspace/EDR, so re-assert them — keeps P3/HDR alive across
+                        // a resize, fullscreen toggle, or a move to another display
+                        // (which may have different EDR headroom).
+                        #[cfg(target_os = "macos")]
+                        if a.renderer.hdr_surface_wants_edr().is_some() {
+                            let headroom = hdr_surface::configure(&a.window);
+                            a.renderer.set_edr_headroom(headroom);
+                            self.last_edr_headroom = headroom;
+                        }
                     }
                     self.draw(event_loop);
                     // A drag fires Resized many times a second; re-decoding the
@@ -3406,7 +3538,12 @@ impl ApplicationHandler for App {
             // Track the windowed position so toggling back / relaunching restores it
             // (#1). A fullscreen window's position is the monitor, not a user choice,
             // so `track_windowed_geometry` ignores it there.
-            WindowEvent::Moved(_) => self.track_windowed_geometry(),
+            WindowEvent::Moved(_) => {
+                self.track_windowed_geometry();
+                // macOS: adapt HDR/EDR if the window crossed onto a different display.
+                #[cfg(target_os = "macos")]
+                self.reconfigure_edr_for_display(event_loop);
+            }
 
             WindowEvent::RedrawRequested => self.draw(event_loop),
 
@@ -3461,7 +3598,7 @@ impl ApplicationHandler for App {
                         //   - held → track by physical key; pan/zoom apply each frame in
                         //     `about_to_wait`.
                         // Holding for all of these is driven by `about_to_wait`.
-                        let chord = KeyChord::new(code, self.ctrl, self.shift, self.alt);
+                        let chord = KeyChord::new(code, self.ctrl, self.shift, self.alt, self.logo);
                         if let Some(act) = self.keymap.action_for(&chord) {
                             match act.kind() {
                                 ActionKind::OneShot => self.dispatch_action(act, event_loop),
@@ -3490,6 +3627,8 @@ impl ApplicationHandler for App {
                 self.shift = mods.state().shift_key();
                 self.ctrl = mods.state().control_key();
                 self.alt = mods.state().alt_key();
+                // `super_key()` is Cmd (⌘) on macOS, the Windows key elsewhere.
+                self.logo = mods.state().super_key();
             }
 
             // Focus loss can swallow the key-up event; clear held keys so
@@ -3501,6 +3640,7 @@ impl ApplicationHandler for App {
                 self.shift = false;
                 self.ctrl = false;
                 self.alt = false;
+                self.logo = false;
                 self.zoom_started = None;
                 self.zoom_last = None;
                 self.pan_started = None;
@@ -3517,6 +3657,13 @@ impl ApplicationHandler for App {
         // 0. Native menu-bar clicks (windowed mode). Map each id to the same action
         // the keyboard triggers and dispatch it; an unknown/foreign id is ignored.
         while let Ok(ev) = muda::MenuEvent::receiver().try_recv() {
+            // macOS native (Spaces) fullscreen is handled directly, not via `Action`
+            // (it's a platform-specific window command, not a portable app action).
+            #[cfg(target_os = "macos")]
+            if ev.id.as_ref() == menu::ids::NATIVE_FULLSCREEN {
+                self.toggle_native_fullscreen();
+                continue;
+            }
             if let Some(action) = menu::action_for(ev.id.as_ref()) {
                 self.dispatch_menu(action, event_loop);
                 // muda auto-flips a clicked CheckMenuItem's native checkmark, which can

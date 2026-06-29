@@ -17,39 +17,48 @@ use crate::action::Action;
 /// A single key combination: a physical key plus the modifier flags that must be
 /// held with it. Modifier order doesn't matter (equality is by the bool flags), so
 /// `"Ctrl+Shift+R"` and `"Shift+Ctrl+R"` are the same chord.
+///
+/// `logo` is the platform "super" key — **Cmd (⌘) on macOS**, the Windows key
+/// elsewhere. It's tracked separately from `ctrl` so a Mac binding like `Cmd+S` is
+/// a distinct chord from bare `S` (otherwise the OS-standard ⌘-shortcuts would fall
+/// through to the bare-key actions — ⌘S → Slideshow, ⌘R → Rotate — when Cmd is held).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct KeyChord {
     pub code: KeyCode,
     pub ctrl: bool,
     pub shift: bool,
     pub alt: bool,
+    pub logo: bool,
 }
 
 impl KeyChord {
     /// Build a chord from a physical key + the current modifier state (what the
-    /// press handler does on each key-down).
-    pub fn new(code: KeyCode, ctrl: bool, shift: bool, alt: bool) -> Self {
+    /// press handler does on each key-down). `logo` = the Cmd/Win "super" key.
+    pub fn new(code: KeyCode, ctrl: bool, shift: bool, alt: bool, logo: bool) -> Self {
         Self {
             code,
             ctrl,
             shift,
             alt,
+            logo,
         }
     }
 
-    /// Parse `"Ctrl+Shift+R"` / `"Alt+Enter"` / `"="` into a chord. Modifier tokens
-    /// are case-insensitive (`ctrl`/`control`/`ctl`, `shift`, `alt`/`opt`/`option`);
-    /// the final `+`-separated token is the key. `None` if a modifier token is
-    /// unrecognized or the key name is unknown.
+    /// Parse `"Ctrl+Shift+R"` / `"Alt+Enter"` / `"Cmd+S"` / `"="` into a chord.
+    /// Modifier tokens are case-insensitive (`ctrl`/`control`/`ctl`, `shift`,
+    /// `alt`/`opt`/`option`, `cmd`/`command`/`super`/`win`/`meta`/`logo`); the final
+    /// `+`-separated token is the key. `None` if a modifier token is unrecognized or
+    /// the key name is unknown.
     pub fn parse(s: &str) -> Option<KeyChord> {
         let tokens: Vec<&str> = s.split('+').map(str::trim).collect();
         let (key_tok, mod_toks) = tokens.split_last()?;
-        let (mut ctrl, mut shift, mut alt) = (false, false, false);
+        let (mut ctrl, mut shift, mut alt, mut logo) = (false, false, false, false);
         for m in mod_toks {
             match m.to_ascii_lowercase().as_str() {
                 "ctrl" | "control" | "ctl" => ctrl = true,
                 "shift" => shift = true,
                 "alt" | "opt" | "option" => alt = true,
+                "cmd" | "command" | "super" | "win" | "windows" | "meta" | "logo" => logo = true,
                 _ => return None,
             }
         }
@@ -59,16 +68,20 @@ impl KeyChord {
             ctrl,
             shift,
             alt,
+            logo,
         })
     }
 }
 
 impl fmt::Display for KeyChord {
-    /// Canonical `Ctrl+Alt+Shift+Key` order (modifiers alphabetical-ish by
-    /// convention), e.g. `"Ctrl+S"`, `"Shift+R"`, `"="`.
+    /// Canonical `Ctrl+Cmd+Alt+Shift+Key` order (so `Ctrl+Cmd+F` reads as written),
+    /// e.g. `"Ctrl+S"`, `"Cmd+S"`, `"Shift+R"`, `"="`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.ctrl {
             write!(f, "Ctrl+")?;
+        }
+        if self.logo {
+            write!(f, "Cmd+")?;
         }
         if self.alt {
             write!(f, "Alt+")?;
@@ -329,6 +342,9 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         one(Action::RotateCw, "R"),
         one(Action::RotateCcw, "Shift+R"),
         one(Action::Copy, "Ctrl+C"),
+        // Copy the current file's path to the clipboard. Shift+Ctrl+C on Windows; on
+        // macOS the menu's ⇧⌘C accelerator drives it (this real-Control chord also works).
+        one(Action::CopyPath, "Shift+Ctrl+C"),
         one(Action::SaveRotation, "Ctrl+S"),
         one(Action::Delete, "Delete"),
         one(Action::DeletePermanent, "Shift+Delete"),
@@ -337,7 +353,10 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         one(Action::Info, "I"),
         one(Action::FullExif, "Shift+I"),
         (Action::Help, vec![p("/"), p("Shift+/")]),
-        (Action::Fullscreen, vec![p("F11"), p("Alt+Enter")]),
+        // Fullscreen is a core action, so it's worth a few bindings: F11 (Windows
+        // convention), Alt+Enter / Option+Enter (the discoverable-by-habit one), and
+        // bare `F` (the most memorable — and the only one that's discoverable at all).
+        (Action::Fullscreen, vec![p("F11"), p("Alt+Enter"), p("F")]),
         one(Action::Recursive, "Ctrl+R"),
         one(Action::SlideshowToggle, "S"),
         // `[` shortens the interval (faster), `]` lengthens it (slower).
@@ -555,10 +574,54 @@ mod tests {
 
     #[test]
     fn chord_parse_and_display_round_trip() {
-        for s in ["Ctrl+S", "Shift+R", "Ctrl+,", "Alt+Enter", "=", "F11", "/"] {
+        for s in [
+            "Ctrl+S",
+            "Shift+R",
+            "Ctrl+,",
+            "Alt+Enter",
+            "=",
+            "F11",
+            "/",
+            "Cmd+S",
+            "Ctrl+Cmd+F",
+        ] {
             let c = KeyChord::parse(s).unwrap_or_else(|| panic!("parse {s:?}"));
             assert_eq!(c.to_string(), s, "round-trip {s:?}");
         }
+    }
+
+    #[test]
+    fn cmd_aliases_parse_to_logo() {
+        for s in ["Cmd+S", "Command+S", "Super+S", "Win+S", "Meta+S", "Logo+S"] {
+            let c = KeyChord::parse(s).unwrap_or_else(|| panic!("parse {s:?}"));
+            assert!(c.logo && !c.ctrl, "{s:?} should set logo, not ctrl");
+            assert_eq!(c.code, KeyCode::KeyS);
+        }
+    }
+
+    #[test]
+    fn cmd_is_distinct_from_bare_key_so_it_cannot_misfire() {
+        // The whole point of the `logo` field: on macOS, holding Cmd must NOT fall
+        // through to the bare-key action. `S` is Slideshow, but `Cmd+S` is a separate
+        // chord (Save lives on the menu's ⌘S there) and resolves to nothing here.
+        let km = Keymap::defaults();
+        let chord = |s: &str| KeyChord::parse(s).unwrap();
+        assert_ne!(chord("S"), chord("Cmd+S"));
+        assert_eq!(km.action_for(&chord("S")), Some(Action::SlideshowToggle));
+        assert_eq!(km.action_for(&chord("Cmd+S")), None);
+        // Likewise ⌘R / ⌘O don't trigger the bare Rotate / Open actions.
+        assert_eq!(km.action_for(&chord("Cmd+R")), None);
+        assert_eq!(km.action_for(&chord("Cmd+O")), None);
+    }
+
+    #[test]
+    fn bare_f_toggles_fullscreen() {
+        // Discoverable fullscreen: F joins F11 and Alt+Enter (see `default_bindings`).
+        let km = Keymap::defaults();
+        let chord = |s: &str| KeyChord::parse(s).unwrap();
+        assert_eq!(km.action_for(&chord("F")), Some(Action::Fullscreen));
+        assert_eq!(km.action_for(&chord("F11")), Some(Action::Fullscreen));
+        assert_eq!(km.action_for(&chord("Alt+Enter")), Some(Action::Fullscreen));
     }
 
     #[test]

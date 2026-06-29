@@ -9,7 +9,20 @@
 /// Apply EXIF `orientation` (1..=8) to an RGBA8 image, returning `(pixels, w, h)`.
 /// Orientation 1 — or any out-of-range value — is identity.
 pub fn apply_orientation(pixels: &[u8], w: u32, h: u32, orientation: u32) -> (Vec<u8>, u32, u32) {
-    debug_assert_eq!(pixels.len(), (w as usize) * (h as usize) * 4);
+    apply_orientation_bytes(pixels, w, h, orientation, 4)
+}
+
+/// Like [`apply_orientation`] but for an arbitrary pixel byte-width `bpp` (4 for
+/// RGBA8, 16 for the HDR `Rgba32Float` scratch buffer). The remap is pure index
+/// math, so it's identical regardless of channel layout — only the block size differs.
+pub(crate) fn apply_orientation_bytes(
+    pixels: &[u8],
+    w: u32,
+    h: u32,
+    orientation: u32,
+    bpp: usize,
+) -> (Vec<u8>, u32, u32) {
+    debug_assert_eq!(pixels.len(), (w as usize) * (h as usize) * bpp);
     if orientation <= 1 || orientation > 8 {
         return (pixels.to_vec(), w, h);
     }
@@ -21,7 +34,7 @@ pub fn apply_orientation(pixels: &[u8], w: u32, h: u32, orientation: u32) -> (Ve
         (w, h)
     };
 
-    let mut out = vec![0u8; (ow as usize) * (oh as usize) * 4];
+    let mut out = vec![0u8; (ow as usize) * (oh as usize) * bpp];
     for oy in 0..oh {
         for ox in 0..ow {
             // Map each output pixel back to its source pixel.
@@ -35,9 +48,9 @@ pub fn apply_orientation(pixels: &[u8], w: u32, h: u32, orientation: u32) -> (Ve
                 8 => (w - 1 - oy, ox),         // rotate 90 CCW
                 _ => (ox, oy),
             };
-            let s = ((sy * w + sx) * 4) as usize;
-            let d = ((oy * ow + ox) * 4) as usize;
-            out[d..d + 4].copy_from_slice(&pixels[s..s + 4]);
+            let s = (sy as usize * w as usize + sx as usize) * bpp;
+            let d = (oy as usize * ow as usize + ox as usize) * bpp;
+            out[d..d + bpp].copy_from_slice(&pixels[s..s + bpp]);
         }
     }
     (out, ow, oh)

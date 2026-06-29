@@ -1,6 +1,7 @@
 # PhotoBlaze — Current Status (session handoff)
 
-_Last updated: 2026-06-28. On `main`._
+_Last updated: 2026-06-29. On `main`. **Active work: the macOS (Apple Silicon) port** —
+see the next section; the Windows tracks below it are all shipped._
 
 A fast, chrome-less, keyboard-driven photo viewer. The prefetch engine ("hold a
 key and fly") is done, plus broad multi-codec support, full-res RAW, the color
@@ -13,6 +14,84 @@ including **in-app password entry + launch-path async open** — see the next se
 the fly-speed cap (#20) are also done, and the typed Settings model + live backend
 are in (#22)** — only the Settings *dialog form* remains; see "Settings + configurable
 keymap stream" below.
+
+## 🍎 macOS (Apple Silicon) port — IN PROGRESS (2026-06-29) — see `.taskmaster/docs/macos-port-plan.md`
+
+A **cfg-gated monorepo** port (NOT a fork): one codebase, `#[cfg(target_os="macos")]`
+siblings beside the `#[cfg(windows)]` arms; `cargo build` picks Metal / NSMenu / Image I/O
+per-OS (the `windows` crate is target-gated so it never compiles on Mac). Validated
+end-to-end on an **M2 Max** — HEIC/AVIF decode, P3 wide-gamut, and HDR all **confirmed
+working on the built-in XDR**. Full plan + milestone/task table: `.taskmaster/docs/macos-port-plan.md`.
+The session task list (`#1–#11`) maps to that plan.
+
+**DONE this session (all on `main`; gated: 293 workspace tests, clippy `-D warnings`, fmt):**
+- **M0 — compiles + runs on Metal.** The one real fix: the wgpu instance excluded Metal
+  (`Backends::DX12 | VULKAN` → `Backends::PRIMARY`, in `gpu.rs` + `upload.rs`). Everything
+  else (winit, egui, muda, rfd, trash) was already cross-platform.
+- **HEIC/AVIF via Apple Image I/O** (`pb-decode/src/imageio.rs`, hand-rolled CGImageSource
+  FFI, no new deps) — Mac mirror of `wic.rs`, same dispatch seam. SDR → Display-P3 RGBA8 +
+  fixed P3→709 transform; HDR (PQ/HLG) → extended-linear-sRGB fp16. Shared ISOBMFF/`colr`
+  parsers extracted to **`pb-decode/src/isobmff.rs`** (tests now run cross-platform).
+  **Orientation gotchas (was the #1 bug report), both fixed:** (a) **NO CTM flip** —
+  `CGContextDrawImage` lands the buffer top-down already; a flip vertically mirrors
+  everything (was masked on symmetric photos). (b) Read **`kCGImagePropertyOrientation`**
+  (combines `irot`+EXIF), NOT kamadak-EXIF — HEIC/AVIF often store rotation in the ISOBMFF
+  `irot` transform, so kamadak returns 1 and the photo shows sideways. `apply_orientation`
+  generalized to a byte-stride variant (`orientation.rs`) so the HDR fp16 path orients too.
+- **EDR/P3 detection + wide-gamut/HDR Metal surface (the big one, fully working).**
+  `display.rs` got a macOS `primary_hdr()` (raw `objc2` NSScreen) + `wide_gamut` +
+  `edr_headroom` fields on `DisplayHdr`. Gate is now `want_fp16 = (hdr_on || wide_gamut)`
+  → fp16 scRGB surface on **any P3 panel** (P3 lights up even on SDR panels). **wgpu sets
+  the format but not the layer colorspace/EDR**, so `pb-app/src/hdr_surface.rs` pokes the
+  `CAMetalLayer`: `colorspace = extendedLinearSRGB` + `wantsExtendedDynamicRangeContent`.
+  **Critical platform difference: macOS EDR HARD-CLIPS above the panel headroom** (Windows
+  DWM tone-maps for you) → the present pass got a **highlight roll-off** (`gpu.rs`
+  PRESENT_WGSL `rolloff()`: ≤1.0 identity, `[1,peak]` asymptotes to the headroom). **Detect
+  EDR from the WINDOW's screen, not `mainScreen`** — this was the bug that made HDR look
+  totally broken on a multi-display setup (mainScreen was an SDR-mode monitor). And it
+  **adapts on window move** (`WindowEvent::Moved` → re-query `[NSView window].screen`,
+  re-poke only when the headroom changed). ⚠️ **objc2 gotcha:** `-[CAMetalLayer
+  setColorspace:]` needs a *typed* `*const CGColorSpace` (`^{CGColorSpace=}`); a bare
+  `*const c_void` panics objc2's debug msg_send verification → **abort at launch** (the
+  panic can't unwind through AppKit's `app_did_finish_launching`).
+- **`.app` bundle** — `scripts/bundle-macos.sh` + `packaging/macos/Info.plist` →
+  `target/<profile>/bundle/PhotoBlaze.app`. Launches frontmost via LaunchServices; menu +
+  ⌘-shortcuts work. Placeholder `.icns` from the 1024 master (real squircle = #7).
+- **Menu wired on macOS** — `menu.rs` has a `#[cfg(target_os="macos")] build_menu`: proper
+  App menu (About / Settings ⌘, / Quit ⌘Q), **real ⌘ accelerators** (Copy ⌘C …, via
+  `Modifiers::SUPER`), `init_for_nsapp()` attach. `KeyChord` gained a **`logo` (⌘)** field
+  so ⌘-chords don't fall through to bare-key actions (⌘S→Slideshow etc.). **Native
+  fullscreen** (⌃⌘F / Globe+F) via an "Enter Full Screen" item → winit native fullscreen
+  (muda's predefined Fullscreen item is buggy — maps `META` not `SUPER`, so it'd be ⌃F);
+  borderless speed-mode stays F / ⌥⏎ / F11 (bare **`F`** added on *both* platforms).
+- **Copy File Path** (Shift+Ctrl+C / ⇧⌘C, Edit menu) — cross-platform, via `arboard`.
+
+**LEFT (session tasks #5–#11; same in `macos-port-plan.md`):** #5 macOS theme source
+(`NSApp.effectiveAppearance`) + SF Pro for pb-ui dialogs & HUD (currently Arial/Segoe — the
+HUD fonts *do* load on Mac, this is a polish swap; `fonts_dir` is now Windows-gated).
+#6 file associations (Info.plist `CFBundleDocumentTypes`/UTIs). #7 `.icns` Tahoe squircle.
+#8 native-fullscreen state sync (our `windowed` flag/checkmark can desync if the user hits
+the green button/⌃⌘F). #9 macOS Window menu (Minimize ⌘M). #10 real
+`archive::available_physical_ram()` (mach `vm_statistics`; currently a stub → ASSUMED_RAM,
+so the 7z budget is approximate on Mac). #11 codesign → notarize → staple → DMG + a
+`macos-14` arm64 CI job (JD has the workflow). **Follow-up:** toggling a display's HDR
+*while the window sits on it* (no move) isn't caught live — needs an
+`NSApplicationDidChangeScreenParametersNotification` observer (adapts on next move/navigate now).
+
+**Build/run/test on Mac:**
+- `./scripts/bundle-macos.sh` → `open target/release/bundle/PhotoBlaze.app --args <folder>`
+- `cargo run -p pb-render --example hdr_probe` — per-display EDR/P3 + what `primary_hdr` picks.
+- `cargo run -p pb-decode --example decode -- <heic/avif>` — decode + color report.
+- **HDR check:** window on the built-in XDR (or any HDR-*enabled* panel) → flick
+  `~/Downloads/test-images/WideGamut-*-HDR.avif`. **Screenshots clip EDR to SDR** (look
+  blown even when the panel is correct) — trust the panel, not a grab. **Quit cleanly via
+  ⌘Q / the menu** — force-killing the frontmost app can wedge the Dock's auto-hide.
+
+**Key macОС files:** `crates/pb-decode/src/{imageio.rs,isobmff.rs,orientation.rs}`,
+`crates/pb-render/src/{display.rs,gpu.rs}`, `crates/pb-app/src/{hdr_surface.rs,menu.rs,
+keymap.rs,main.rs,action.rs}`, `scripts/bundle-macos.sh`, `packaging/macos/Info.plist`.
+
+---
 
 ## Archive viewing — ZIP + 7z (2026-06-28) — DONE (Task 30 complete)
 

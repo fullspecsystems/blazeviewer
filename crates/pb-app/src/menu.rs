@@ -29,6 +29,7 @@ pub mod ids {
     pub const EXIT: &str = "exit";
 
     pub const COPY: &str = "copy";
+    pub const COPY_PATH: &str = "copy_path";
 
     pub const FIT: &str = "fit";
     pub const FILL: &str = "fill";
@@ -36,6 +37,10 @@ pub mod ids {
     pub const ZOOM_IN: &str = "zoom_in";
     pub const ZOOM_OUT: &str = "zoom_out";
     pub const FULLSCREEN: &str = "fullscreen";
+    /// macOS-only: the native (Spaces) fullscreen toggle (`toggleFullScreen:` on
+    /// ⌃⌘F / Globe+F), distinct from the borderless `FULLSCREEN` speed mode.
+    /// Intercepted directly in the menu-event loop, not routed through `Action`.
+    pub const NATIVE_FULLSCREEN: &str = "native_fullscreen";
     pub const RECURSIVE: &str = "recursive";
     pub const SLIDESHOW: &str = "slideshow";
     pub const SLIDESHOW_FASTER: &str = "slideshow_faster";
@@ -67,6 +72,7 @@ pub enum MenuAction {
     Settings,
     Exit,
     Copy,
+    CopyPath,
     Fit,
     Fill,
     Original,
@@ -103,6 +109,7 @@ impl MenuAction {
             MenuAction::Settings => Action::Settings,
             MenuAction::Exit => Action::Quit,
             MenuAction::Copy => Action::Copy,
+            MenuAction::CopyPath => Action::CopyPath,
             MenuAction::Fit => Action::ScaleFit,
             MenuAction::Fill => Action::ScaleFill,
             MenuAction::Original => Action::ScaleOriginal,
@@ -140,6 +147,7 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         SETTINGS => MenuAction::Settings,
         EXIT => MenuAction::Exit,
         COPY => MenuAction::Copy,
+        COPY_PATH => MenuAction::CopyPath,
         FIT => MenuAction::Fit,
         FILL => MenuAction::Fill,
         ORIGINAL => MenuAction::Original,
@@ -211,6 +219,7 @@ pub struct BuiltMenu {
 /// EXIF-writable file — see `App::refresh_save_menu_item`; starts disabled), and the
 /// **View checks** (scale mode / recursive / fullscreen — see
 /// `App::refresh_view_menu_checks`).
+#[cfg(not(target_os = "macos"))]
 pub fn build_menu() -> BuiltMenu {
     let menu = Menu::new();
     let sep = || PredefinedMenuItem::separator();
@@ -235,7 +244,10 @@ pub fn build_menu() -> BuiltMenu {
 
     // Edit: clipboard ops (Windows convention — Copy lives under Edit, not File).
     let edit = Submenu::new("&Edit", true);
-    let _ = edit.append_items(&[&item(ids::COPY, "Copy\tCtrl+C")]);
+    let _ = edit.append_items(&[
+        &item(ids::COPY, "Copy\tCtrl+C"),
+        &item(ids::COPY_PATH, "Copy File Path\tShift+Ctrl+C"),
+    ]);
 
     // Scale mode is a one-of-three group; recursive/fullscreen are toggles. All five
     // are checkable so the View menu shows the current state (handles returned below).
@@ -283,6 +295,148 @@ pub fn build_menu() -> BuiltMenu {
     ]);
 
     for sub in [&file, &edit, &view, &image, &help] {
+        if let Err(e) = menu.append(sub) {
+            eprintln!("menu: failed to append submenu: {e}");
+        }
+    }
+    BuiltMenu {
+        menu,
+        save_rotation,
+        checks: ViewChecks {
+            fit,
+            fill,
+            original,
+            recursive,
+            fullscreen,
+            slideshow,
+        },
+    }
+}
+
+/// The macOS menu bar — same item ids (so [`action_for`] / dispatch are shared), but
+/// built to Apple conventions: a leading **application menu** (the first submenu
+/// becomes the bold app menu under `init_for_nsapp`), with About / Settings / Quit
+/// there rather than in File, and **real ⌘ accelerators** instead of the Windows
+/// hint-text. The accelerators are safe to register here (unlike Windows) because the
+/// winit keymap never binds ⌘-chords (`KeyChord.logo`), so NSMenu owns them with no
+/// double-fire. Bare-key fast-nav (Space / R / 8-9-0 / …) and the fullscreen toggles
+/// (F / ⌥⏎ / F11) stay keymap-owned, so those items carry no accelerator.
+#[cfg(target_os = "macos")]
+pub fn build_menu() -> BuiltMenu {
+    use muda::accelerator::{Accelerator, Code, Modifiers};
+    /// The ⌘ (Command) key — `Modifiers::SUPER` maps to NSEventModifierFlags::Command.
+    const CMD: Modifiers = Modifiers::SUPER;
+    /// A normal item carrying a real key-equivalent (NSMenu dispatches it → MenuEvent).
+    fn cmd_item(id: &str, label: &str, mods: Modifiers, code: Code) -> MenuItem {
+        MenuItem::with_id(id, label, true, Some(Accelerator::new(Some(mods), code)))
+    }
+
+    let menu = Menu::new();
+    let sep = || PredefinedMenuItem::separator();
+
+    // 1) Application menu. The FIRST submenu is rendered as the macOS app menu (bold,
+    //    app-named). About / Settings / Quit live here per convention — not in File.
+    //    Quit routes through our own id (→ Action::Quit → clean teardown, privacy #6)
+    //    rather than PredefinedMenuItem::quit, which would bypass it.
+    let app = Submenu::new("PhotoBlaze", true);
+    let _ = app.append_items(&[
+        &item(ids::ABOUT, "About PhotoBlaze"),
+        &sep(),
+        &cmd_item(ids::SETTINGS, "Settings…", CMD, Code::Comma),
+        &sep(),
+        &PredefinedMenuItem::hide(None),
+        &PredefinedMenuItem::hide_others(None),
+        &PredefinedMenuItem::show_all(None),
+        &sep(),
+        &cmd_item(ids::EXIT, "Quit PhotoBlaze", CMD, Code::KeyQ),
+    ]);
+
+    // Disabled until a rotation is pending on an eligible file (toggled at runtime).
+    let save_rotation = MenuItem::with_id(
+        ids::SAVE_ROTATION,
+        "Save Rotation",
+        false,
+        Some(Accelerator::new(Some(CMD), Code::KeyS)),
+    );
+
+    let file = Submenu::new("File", true);
+    let _ = file.append_items(&[
+        &cmd_item(ids::OPEN_FILE, "Open File…", CMD, Code::KeyO),
+        &cmd_item(
+            ids::OPEN_FOLDER,
+            "Open Folder…",
+            CMD.union(Modifiers::SHIFT),
+            Code::KeyO,
+        ),
+        &sep(),
+        &save_rotation,
+        &sep(),
+        &item(ids::DELETE, "Delete"),
+        &item(ids::DELETE_PERMANENTLY, "Delete Permanently"),
+    ]);
+
+    let edit = Submenu::new("Edit", true);
+    let _ = edit.append_items(&[
+        &cmd_item(ids::COPY, "Copy", CMD, Code::KeyC),
+        &cmd_item(
+            ids::COPY_PATH,
+            "Copy File Path",
+            CMD.union(Modifiers::SHIFT),
+            Code::KeyC,
+        ),
+    ]);
+
+    let fit = check_item(ids::FIT, "Fit");
+    let fill = check_item(ids::FILL, "Crop to Fill");
+    let original = check_item(ids::ORIGINAL, "Original 1:1");
+    let recursive = check_item(ids::RECURSIVE, "Recursive (This Folder)");
+    let fullscreen = check_item(ids::FULLSCREEN, "Fullscreen");
+    let slideshow = check_item(ids::SLIDESHOW, "Slideshow");
+
+    let view = Submenu::new("View", true);
+    let _ = view.append_items(&[
+        &fit,
+        &fill,
+        &original,
+        &sep(),
+        &item(ids::ZOOM_IN, "Zoom In"),
+        &item(ids::ZOOM_OUT, "Zoom Out"),
+        &sep(),
+        // Two fullscreen modes (owner decision): our borderless speed mode (checkable,
+        // bound to F / ⌥⏎ / F11 in the keymap), and the macOS-native Spaces fullscreen
+        // (⌃⌘F / Globe+F) for those who want it. `SUPER` maps to ⌘ (muda's `META` does
+        // not — see modifier_mask), so this is a real ⌃⌘F.
+        &fullscreen,
+        &cmd_item(
+            ids::NATIVE_FULLSCREEN,
+            "Enter Full Screen",
+            CMD.union(Modifiers::CONTROL),
+            Code::KeyF,
+        ),
+        &recursive,
+        &slideshow,
+        &item(ids::SLIDESHOW_FASTER, "Slideshow Faster"),
+        &item(ids::SLIDESHOW_SLOWER, "Slideshow Slower"),
+        &sep(),
+        &item(ids::INFO, "Info Panel"),
+        &item(ids::FULL_EXIF, "Full EXIF"),
+    ]);
+
+    let image = Submenu::new("Image", true);
+    let _ = image.append_items(&[
+        &item(ids::NEXT, "Next"),
+        &item(ids::PREVIOUS, "Previous"),
+        &item(ids::RANDOM, "Random"),
+        &item(ids::RANDOM_PREV, "Previous Random"),
+        &sep(),
+        &item(ids::ROTATE_RIGHT, "Rotate Right"),
+        &item(ids::ROTATE_LEFT, "Rotate Left"),
+    ]);
+
+    let help = Submenu::new("Help", true);
+    let _ = help.append_items(&[&item(ids::HELP, "Keyboard Shortcuts")]);
+
+    for sub in [&app, &file, &edit, &view, &image, &help] {
         if let Err(e) = menu.append(sub) {
             eprintln!("menu: failed to append submenu: {e}");
         }
