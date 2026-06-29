@@ -515,6 +515,11 @@ fn about_ui(ui: &mut egui::Ui, icon: Option<&egui::TextureHandle>) {
 // icons (lock/warning/trash) come tinted + placed from `pbui::icon`.
 const DIALOG_PAD: f32 = 22.0;
 const MSG_SIZE: f32 = 15.0;
+/// Uniform inset of a dialog's bottom action bar — applied equally to the top (the
+/// divider), right, and bottom, **and** used as the gap between buttons. This is the one
+/// place dialog-button spacing is defined, so buttons always land balanced and no caller
+/// hand-spaces them.
+const BTN_BAR_PAD: f32 = 14.0;
 
 /// A panel frame filled to match the window background, inset by `DIALOG_PAD` on
 /// all sides. Used for both the content panel and the bottom button bar so their
@@ -525,15 +530,23 @@ fn dialog_frame(ctx: &egui::Context) -> egui::Frame {
         .inner_margin(egui::Margin::same(DIALOG_PAD))
 }
 
-/// The shared bottom action bar: a `dialog_frame`-inset panel whose buttons are laid
-/// out right-to-left (added rightmost-first, so the eye reads them `[Primary]
-/// [Cancel]` left-to-right). Every dialog's buttons go through here so their size,
-/// gap, and alignment match. `add` receives the right-to-left `Ui`.
+/// The shared bottom action bar — the single place dialog buttons get their spacing, so
+/// they always land balanced. Buttons are laid out right-to-left (added rightmost-first,
+/// so they read `[Primary] [Cancel]` left-to-right) with a uniform [`BTN_BAR_PAD`] inset
+/// on the top (the divider), right, and bottom, **and** the same value as the gap between
+/// buttons (set via `item_spacing.x`). Callers just add buttons — no manual spacing.
 fn button_bar(ctx: &egui::Context, id: &'static str, add: impl FnOnce(&mut egui::Ui)) {
     egui::TopBottomPanel::bottom(id)
-        .frame(dialog_frame(ctx))
+        .frame(
+            egui::Frame::default()
+                .fill(ctx.style().visuals.panel_fill)
+                .inner_margin(egui::Margin::same(BTN_BAR_PAD)),
+        )
         .show(ctx, |ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = BTN_BAR_PAD;
+                add(ui);
+            });
         });
 }
 
@@ -552,7 +565,6 @@ fn confirm_dialog(ctx: &egui::Context, message: &str) -> Option<bool> {
         if pbui::secondary_button(ui, "Cancel").clicked() {
             result = Some(false);
         }
-        ui.add_space(pbui::SPACE_3);
         let resp = pbui::danger_button(ui, "Delete");
         if resp.clicked() {
             result = Some(true);
@@ -639,7 +651,6 @@ fn password_dialog(
         if pbui::secondary_button(ui, "Cancel").clicked() {
             result = Some(false);
         }
-        ui.add_space(pbui::SPACE_3);
         // Disabled while the entered password is being validated (the slow 7z re-open).
         let unlock = ui
             .add_enabled_ui(!checking, |ui| pbui::primary_button(ui, &p, "Unlock"))
@@ -717,23 +728,15 @@ fn scrub(s: &mut String) {
 fn settings_button_bar(ctx: &egui::Context) -> Option<bool> {
     let p = pbui::Palette::new(ctx.style().visuals.dark_mode);
     let mut result = None;
-    egui::TopBottomPanel::bottom("settings_bar")
-        .frame(
-            egui::Frame::default()
-                .fill(ctx.style().visuals.panel_fill)
-                .inner_margin(egui::Margin::symmetric(pbui::PAGE_MARGIN, pbui::SPACE_3)),
-        )
-        .show(ctx, |ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if pbui::secondary_button(ui, "Cancel").clicked() {
-                    result = Some(false);
-                }
-                ui.add_space(pbui::SPACE_2);
-                if pbui::primary_button(ui, &p, "Save").clicked() {
-                    result = Some(true);
-                }
-            });
-        });
+    // Same shared bar as every other dialog — uniform inset + button gap, no hand-spacing.
+    button_bar(ctx, "settings_bar", |ui| {
+        if pbui::secondary_button(ui, "Cancel").clicked() {
+            result = Some(false);
+        }
+        if pbui::primary_button(ui, &p, "Save").clicked() {
+            result = Some(true);
+        }
+    });
     result
 }
 
