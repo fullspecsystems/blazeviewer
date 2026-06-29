@@ -587,6 +587,32 @@ pub fn slider<Num: egui::emath::Numeric>(
     .inner
 }
 
+/// Like [`slider`] but with an explicit `step` (the value snaps to multiples of it)
+/// and a fixed number of `decimals` in the value box — for settings that should land
+/// on clean increments and read consistently, e.g. a 0.5s-step interval shown as
+/// `"2.0s"`. The value box stays type-in editable (egui's slider behavior).
+pub fn slider_stepped<Num: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    value: &mut Num,
+    range: std::ops::RangeInclusive<Num>,
+    step: f64,
+    decimals: usize,
+    suffix: &str,
+) -> egui::Response {
+    let accent = Palette::new(ui.visuals().dark_mode).accent;
+    ui.scope(|ui| {
+        ui.spacing_mut().interact_size.x = SLIDER_VALUE_W;
+        ui.visuals_mut().selection.bg_fill = accent;
+        ui.add(
+            egui::Slider::new(value, range)
+                .step_by(step)
+                .fixed_decimals(decimals)
+                .suffix(suffix.to_owned()),
+        )
+    })
+    .inner
+}
+
 /// Draw an icon texture at a fixed `height`, preserving aspect ratio.
 pub fn icon_sized(ui: &mut egui::Ui, tex: &egui::TextureHandle, height: f32) {
     let size = tex.size_vec2();
@@ -643,5 +669,4 @@ mod tests {
         assert_eq!(s.spacing.interact_size.y, CONTROL_H);
         assert!(s.visuals.dark_mode);
     }
-
 }

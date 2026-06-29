@@ -640,7 +640,12 @@ impl App {
             epoch: 1,
             displayed_item: None,
             target_item: None,
-            slideshow: slideshow::Slideshow::default(),
+            // Seed the per-slide dwell from the saved default (#31); `[`/`]` still
+            // adjust it live for the session without rewriting the setting.
+            slideshow: slideshow::Slideshow {
+                interval: Duration::from_secs_f64(settings.slideshow_interval_secs),
+                ..slideshow::Slideshow::default()
+            },
             last_nav: Nav::Forward,
             targets: Vec::new(),
             meta_cache: HashMap::new(),
@@ -2113,6 +2118,11 @@ impl App {
         // Held-key repeat delay is cached on the struct (the curve below reads the
         // rates live, but this one is a Duration captured at construction).
         self.initial_delay = Duration::from_millis(s.hold_delay_ms as u64);
+
+        // Default slideshow interval → the live timer. A running slideshow's deadline is
+        // `last_present + interval`, recomputed each tick, so this takes effect at once
+        // (the `[`/`]` live override is just a different write to the same field).
+        self.slideshow.interval = Duration::from_secs_f64(s.slideshow_interval_secs);
 
         // Letterbox / background fill → renderer (takes effect on the next draw).
         if let Some(a) = self.active.as_mut() {

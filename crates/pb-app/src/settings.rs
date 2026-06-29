@@ -14,8 +14,11 @@
 //! is a valid TOML subset, so it still loads (its other fields default).
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+
+use crate::slideshow;
 
 /// The default scale mode applied to a freshly shown photo.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -70,6 +73,10 @@ pub struct Settings {
     pub letterbox: [u8; 3],
     /// Info-panel background opacity, `0` (transparent) – `100` (opaque).
     pub info_opacity: u8,
+    /// Default slideshow interval in seconds — the per-slide dwell a fresh session
+    /// starts at (#31). Clamped to the slideshow's own `[MIN, MAX]_INTERVAL`; the
+    /// `[` / `]` keys still adjust it live for the session without rewriting this.
+    pub slideshow_interval_secs: f64,
 }
 
 impl Default for Settings {
@@ -87,6 +94,7 @@ impl Default for Settings {
             scale_mode: ScaleModePref::Fit,
             letterbox: [10, 10, 12], // pb_render::LETTERBOX (rgb)
             info_opacity: 60,        // hud::BG alpha 153/255 ≈ 60%
+            slideshow_interval_secs: slideshow::DEFAULT_INTERVAL.as_secs_f64(), // 4.0
         }
     }
 }
@@ -107,6 +115,15 @@ impl Settings {
         self.max_advance_rate = self.max_advance_rate.min(1000);
         self.hold_delay_ms = self.hold_delay_ms.min(2000);
         self.info_opacity = self.info_opacity.min(100);
+        if !self.slideshow_interval_secs.is_finite() {
+            self.slideshow_interval_secs = d.slideshow_interval_secs;
+        }
+        // Reuse the slideshow's own bounds so this default and the `[`/`]` live adjust
+        // share one clamp (`max(0.0)` guards `from_secs_f64` against a negative panic).
+        self.slideshow_interval_secs = slideshow::clamp_interval(Duration::from_secs_f64(
+            self.slideshow_interval_secs.max(0.0),
+        ))
+        .as_secs_f64();
     }
 
     /// The effective "start fullscreen?" decision for this launch, resolving
@@ -265,6 +282,47 @@ mod tests {
         s.clamp();
         assert_eq!(s.start_speed, Settings::default().start_speed);
         assert_eq!(s.ramp_secs, Settings::default().ramp_secs);
+    }
+
+    #[test]
+    fn slideshow_interval_defaults_when_missing() {
+        // A file that doesn't mention slideshow gets the shared default (4.0s).
+        let s: Settings = toml::from_str("fullscreen = true\n").unwrap();
+        assert_eq!(
+            s.slideshow_interval_secs,
+            slideshow::DEFAULT_INTERVAL.as_secs_f64()
+        );
+    }
+
+    #[test]
+    fn slideshow_interval_clamps_to_the_shared_bounds() {
+        let lo = slideshow::MIN_INTERVAL.as_secs_f64();
+        let hi = slideshow::MAX_INTERVAL.as_secs_f64();
+
+        let mut s = Settings {
+            slideshow_interval_secs: 9999.0,
+            ..Settings::default()
+        };
+        s.clamp();
+        assert_eq!(s.slideshow_interval_secs, hi);
+
+        let mut s = Settings {
+            slideshow_interval_secs: -5.0,
+            ..Settings::default()
+        };
+        s.clamp();
+        assert_eq!(s.slideshow_interval_secs, lo);
+
+        // Non-finite resets to the default rather than panicking in `from_secs_f64`.
+        let mut s = Settings {
+            slideshow_interval_secs: f64::NAN,
+            ..Settings::default()
+        };
+        s.clamp();
+        assert_eq!(
+            s.slideshow_interval_secs,
+            slideshow::DEFAULT_INTERVAL.as_secs_f64()
+        );
     }
 
     #[test]

@@ -66,8 +66,10 @@ impl Slideshow {
     }
 }
 
-/// Clamp an interval into the allowed `[MIN_INTERVAL, MAX_INTERVAL]` range.
-fn clamp_interval(d: Duration) -> Duration {
+/// Clamp an interval into the allowed `[MIN_INTERVAL, MAX_INTERVAL]` range. Shared by
+/// the `[` / `]` live adjust ([`Slideshow::adjust`]) and the persisted-default clamp in
+/// `settings.rs`, so the two can't drift — single source of truth for the bounds.
+pub fn clamp_interval(d: Duration) -> Duration {
     d.clamp(MIN_INTERVAL, MAX_INTERVAL)
 }
 

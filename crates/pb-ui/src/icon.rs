@@ -218,8 +218,7 @@ mod tests {
             Icon::Trash,
         ] {
             for family in [Family::Solid, Family::Regular] {
-                let img = rasterize_white(svg(icon, family), 32)
-                    .expect("icon should rasterize");
+                let img = rasterize_white(svg(icon, family), 32).expect("icon should rasterize");
                 assert_eq!(img.size, [32, 32], "sprite is square");
                 // The glyph paints some opaque white pixels (tinted later at draw).
                 let opaque_white = img
@@ -255,6 +254,9 @@ mod tests {
         let light = Palette::new(false);
         // Neutral follows the palette's secondary text (theme-aware).
         assert_eq!(tone_color(Tone::Neutral, &dark), dark.text_secondary);
-        assert_ne!(tone_color(Tone::Warning, &dark), tone_color(Tone::Warning, &light));
+        assert_ne!(
+            tone_color(Tone::Warning, &dark),
+            tone_color(Tone::Warning, &light)
+        );
     }
 }

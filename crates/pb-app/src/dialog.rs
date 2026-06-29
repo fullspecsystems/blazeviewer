@@ -50,6 +50,16 @@ pub enum DialogKind {
     Password,
 }
 
+/// Which section of the Settings dialog is showing. The bottom Save/Cancel bar is
+/// global (it commits every tab's edits at once); tabs only switch what's visible.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum SettingsTab {
+    #[default]
+    General,
+    Display,
+    Shortcuts,
+}
+
 /// The egui-facing edit state for the Settings form — the same fields as
 /// [`settings::Settings`] but in shapes the egui widgets want (a combo index, an
 /// `f32` color). Built from the live settings on open ([`SettingsDraft::from_settings`])
@@ -62,10 +72,11 @@ struct SettingsDraft {
     max_fps: u32,
     hold_delay_ms: u32,
     recursive: bool,
-    scale_mode: usize,   // 0 = Fit, 1 = Fill, 2 = Original
-    letterbox: [f32; 3], // 0..1 per channel (egui color picker)
-    info_opacity: u8,    // 0..100
-    startup_mode: usize, // 0 = Fullscreen, 1 = Windowed, 2 = Remember
+    scale_mode: usize,       // 0 = Fit, 1 = Fill, 2 = Original
+    letterbox: [f32; 3],     // 0..1 per channel (egui color picker)
+    info_opacity: u8,        // 0..100
+    startup_mode: usize,     // 0 = Fullscreen, 1 = Windowed, 2 = Remember
+    slideshow_interval: f64, // seconds (default slideshow dwell)
 }
 
 impl SettingsDraft {
@@ -101,6 +112,7 @@ impl SettingsDraft {
                 settings::StartupMode::Windowed => 1,
                 settings::StartupMode::Remember => 2,
             },
+            slideshow_interval: s.slideshow_interval_secs,
         }
     }
 
@@ -134,6 +146,7 @@ impl SettingsDraft {
             1 => settings::StartupMode::Windowed,
             _ => settings::StartupMode::Remember,
         };
+        s.slideshow_interval_secs = self.slideshow_interval;
         s.clamp();
         s
     }
@@ -265,6 +278,8 @@ pub struct DialogWindow {
     cap_alt: bool,
     /// A transient note for the keybinding editor (e.g. a "moved from …" message).
     keymap_note: Option<String>,
+    /// Which Settings tab (General / Display / Shortcuts) is showing.
+    settings_tab: SettingsTab,
     /// The edited keymap committed with **Save** (only set when it actually changed),
     /// taken by [`take_keymap_result`].
     ///
@@ -429,6 +444,7 @@ impl DialogWindow {
             cap_shift: false,
             cap_alt: false,
             keymap_note: None,
+            settings_tab: SettingsTab::default(),
             submitted_keymap: None,
             confirm_msg: message.to_string(),
             confirm_result: None,
@@ -607,6 +623,7 @@ impl DialogWindow {
             dirty: &mut self.keymap_dirty,
             note: &mut self.keymap_note,
         };
+        let settings_tab = &mut self.settings_tab;
         let mut confirm_click: Option<bool> = None;
         let full_output = ctx.run(raw_input, |ctx| match kind {
             DialogKind::About => {
@@ -618,7 +635,7 @@ impl DialogWindow {
                 confirm_click = settings_button_bar(ctx);
                 egui::CentralPanel::default()
                     .frame(egui::Frame::default().fill(ctx.style().visuals.panel_fill))
-                    .show(ctx, |ui| settings_ui(ui, draft, &mut kb));
+                    .show(ctx, |ui| settings_ui(ui, draft, &mut kb, settings_tab));
             }
             DialogKind::Confirm => {
                 confirm_click = confirm_dialog(ctx, &msg);
@@ -1039,10 +1056,17 @@ fn settings_button_bar(ctx: &egui::Context) -> Option<bool> {
 /// settings share one card under a semibold heading (far less scrolling than a card per
 /// setting). Built on the `pbui` design system. The controls edit `d`, a draft built
 /// from the live settings on open; Save folds it back via [`SettingsDraft::to_settings`].
-fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft, kb: &mut KbEdit) {
+fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft, kb: &mut KbEdit, tab: &mut SettingsTab) {
     let p = pbui::Palette::new(ui.visuals().dark_mode);
-    let cap = d.refresh_hz;
 
+    // Key capture belongs to the Shortcuts tab only; leaving it cancels any armed slot.
+    if *tab != SettingsTab::Shortcuts {
+        *kb.capturing = None;
+    }
+
+    // Pinned tab strip, then the scrolling content for the active tab. Save/Cancel
+    // (the bottom bar) is global — it commits every tab's edits at once.
+    settings_tab_bar(ui, tab);
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -1054,178 +1078,211 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft, kb: &mut KbEdit) {
                     bottom: pbui::SPACE_6,
                 })
                 .show(ui, |ui| {
-                    // Explicit vertical spacing only (the gap between groups is uniform).
+                    // Explicit vertical spacing only (the gap between cards is uniform).
                     ui.spacing_mut().item_spacing.y = 0.0;
-
-                    // No in-content title/subtitle: the OS title bar already reads
-                    // "PhotoBlaze Settings", and the page scrolls (no tab bar needed) — so
-                    // we start straight at the first card.
-                    pbui::group_card(ui, &p, Some("Navigation Feel"), |ui| {
-                        pbui::card_row(
-                            ui,
-                            &p,
-                            None,
-                            "Start speed",
-                            Some("Photos per second when you first hold a key"),
-                            |ui| {
-                                pbui::slider(ui, &mut d.start_speed, 1.0..=30.0, "/s");
-                            },
-                        );
-                        pbui::card_row(
-                            ui,
-                            &p,
-                            None,
-                            "Ramp-up time",
-                            Some("Seconds to accelerate from start speed to max"),
-                            |ui| {
-                                pbui::slider(ui, &mut d.ramp_secs, 0.5..=10.0, " s");
-                            },
-                        );
-                        pbui::card_row(
-                            ui,
-                            &p,
-                            None,
-                            "Max speed",
-                            Some("Upper limit while holding (capped at the refresh rate)"),
-                            |ui| {
-                                pbui::slider(ui, &mut d.max_fps, 1..=cap, "/s");
-                            },
-                        );
-                        pbui::card_row(
-                            ui,
-                            &p,
-                            None,
-                            "Hold delay",
-                            Some("Pause before a held key starts repeating"),
-                            |ui| {
-                                pbui::slider(ui, &mut d.hold_delay_ms, 0..=1000, " ms");
-                            },
-                        );
-                    });
-                    ui.add_space(pbui::GAP);
-
-                    pbui::group_card(ui, &p, Some("Browsing"), |ui| {
-                        pbui::card_row(
-                            ui,
-                            &p,
-                            None,
-                            "Open new folders recursively",
-                            Some("Default for newly opened folders. The View menu toggles the current one."),
-                            |ui| {
-                                pbui::toggle_with_label(ui, &p, &mut d.recursive);
-                            },
-                        );
-                    });
-                    ui.add_space(pbui::GAP);
-
-                    pbui::group_card(ui, &p, Some("Display"), |ui| {
-                        pbui::card_row(
-                            ui,
-                            &p,
-                            None,
-                            "Default scale mode",
-                            Some("How a photo fits the window"),
-                            |ui| {
-                                egui::ComboBox::from_id_salt("scale_mode")
-                                    .width(150.0)
-                                    .selected_text(
-                                        ["Fit", "Crop to Fill", "Original"][d.scale_mode],
-                                    )
-                                    .show_ui(ui, |ui| {
-                                        // The popup is a top-level Area; re-assert our
-                                        // theme so options match the dialog (defensive —
-                                        // the ctx style already matches here).
-                                        pbui::apply_to_ui(ui, p.dark);
-                                        ui.selectable_value(&mut d.scale_mode, 0, "Fit");
-                                        ui.selectable_value(&mut d.scale_mode, 1, "Crop to Fill");
-                                        ui.selectable_value(&mut d.scale_mode, 2, "Original");
-                                    });
-                            },
-                        );
-                        pbui::card_row(
-                            ui,
-                            &p,
-                            None,
-                            "Letterbox color",
-                            Some("Fills the screen around a photo that doesn\u{2019}t cover it"),
-                            |ui| {
-                                ui.color_edit_button_rgb(&mut d.letterbox);
-                            },
-                        );
-                        pbui::card_row(
-                            ui,
-                            &p,
-                            None,
-                            "Info panel opacity",
-                            Some("How solid the info and EXIF panels look over a photo"),
-                            |ui| {
-                                pbui::slider(ui, &mut d.info_opacity, 0..=100, "%");
-                            },
-                        );
-                        pbui::card_row(
-                            ui,
-                            &p,
-                            None,
-                            "Start in",
-                            Some("Window mode when PhotoBlaze launches"),
-                            |ui| {
-                                egui::ComboBox::from_id_salt("startup_mode")
-                                    .width(150.0)
-                                    .selected_text(
-                                        ["Fullscreen", "Windowed", "Remember last"][d.startup_mode],
-                                    )
-                                    .show_ui(ui, |ui| {
-                                        pbui::apply_to_ui(ui, p.dark);
-                                        ui.selectable_value(&mut d.startup_mode, 0, "Fullscreen");
-                                        ui.selectable_value(&mut d.startup_mode, 1, "Windowed");
-                                        ui.selectable_value(
-                                            &mut d.startup_mode,
-                                            2,
-                                            "Remember last",
-                                        );
-                                    });
-                            },
-                        );
-                    });
-                    ui.add_space(pbui::GAP);
-
-                    keybindings_ui(ui, &p, kb);
-                    ui.add_space(pbui::GAP);
-
-                    pbui::group_card(ui, &p, Some("System"), |ui| {
-                        pbui::card_row(
-                            ui,
-                            &p,
-                            None,
-                            "Default photo viewer",
-                            Some("Opens Windows Default apps to set PhotoBlaze"),
-                            |ui| {
-                                if pbui::secondary_button(ui, "Set default\u{2026}").clicked() {
-                                    open_default_apps();
-                                }
-                            },
-                        );
-                        pbui::card_row(
-                            ui,
-                            &p,
-                            None,
-                            "Reset settings",
-                            Some("Restore every setting to its default (applies on Save)"),
-                            |ui| {
-                                if pbui::secondary_button(ui, "Reset").clicked() {
-                                    // Repopulate the form with the defaults; Save commits,
-                                    // Cancel still reverts (nothing is written yet).
-                                    let hz = d.refresh_hz;
-                                    *d = SettingsDraft::from_settings(
-                                        &settings::Settings::default(),
-                                        hz,
-                                    );
-                                }
-                            },
-                        );
-                    });
+                    match *tab {
+                        SettingsTab::General => general_tab(ui, &p, d),
+                        SettingsTab::Display => display_tab(ui, &p, d),
+                        SettingsTab::Shortcuts => keybindings_ui(ui, &p, kb),
+                    }
                 });
         });
+}
+
+/// The pinned tab strip atop the Settings dialog. Left-aligned to the page margin so it
+/// lines up with the cards below; a hairline separates it from the content.
+fn settings_tab_bar(ui: &mut egui::Ui, current: &mut SettingsTab) {
+    ui.add_space(pbui::SPACE_3);
+    ui.horizontal(|ui| {
+        ui.add_space(pbui::PAGE_MARGIN);
+        ui.spacing_mut().item_spacing.x = pbui::SPACE_3;
+        for (tab, label) in [
+            (SettingsTab::General, "General"),
+            (SettingsTab::Display, "Display"),
+            (SettingsTab::Shortcuts, "Shortcuts"),
+        ] {
+            let selected = *current == tab;
+            let mut text = egui::RichText::new(label).size(14.5);
+            if selected {
+                text = text.strong();
+            }
+            if ui.selectable_label(selected, text).clicked() {
+                *current = tab;
+            }
+        }
+    });
+    ui.add_space(pbui::SPACE_2);
+    ui.separator();
+}
+
+/// The **General** tab: hold-to-fly tuning, startup defaults, and system actions.
+fn general_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
+    let cap = d.refresh_hz;
+    pbui::group_card(ui, p, Some("Navigation Feel"), |ui| {
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Start speed",
+            Some("Photos per second when you first hold a key"),
+            |ui| {
+                pbui::slider(ui, &mut d.start_speed, 1.0..=30.0, "/s");
+            },
+        );
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Ramp-up time",
+            Some("Seconds to accelerate from start speed to max"),
+            |ui| {
+                pbui::slider(ui, &mut d.ramp_secs, 0.5..=10.0, " s");
+            },
+        );
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Max speed",
+            Some("Upper limit while holding (capped at the refresh rate)"),
+            |ui| {
+                pbui::slider(ui, &mut d.max_fps, 1..=cap, "/s");
+            },
+        );
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Hold delay",
+            Some("Pause before a held key starts repeating"),
+            |ui| {
+                pbui::slider(ui, &mut d.hold_delay_ms, 0..=1000, " ms");
+            },
+        );
+    });
+    ui.add_space(pbui::GAP);
+
+    pbui::group_card(ui, p, Some("Slideshow"), |ui| {
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Slideshow interval",
+            Some("Seconds each photo shows. The [ and ] keys adjust it live."),
+            |ui| {
+                pbui::slider_stepped(ui, &mut d.slideshow_interval, 0.5..=60.0, 0.5, 1, "s");
+            },
+        );
+    });
+    ui.add_space(pbui::GAP);
+
+    pbui::group_card(ui, p, Some("Startup"), |ui| {
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Start in",
+            Some("Window mode when PhotoBlaze launches"),
+            |ui| {
+                egui::ComboBox::from_id_salt("startup_mode")
+                    .width(150.0)
+                    .selected_text(["Fullscreen", "Windowed", "Remember last"][d.startup_mode])
+                    .show_ui(ui, |ui| {
+                        pbui::apply_to_ui(ui, p.dark);
+                        ui.selectable_value(&mut d.startup_mode, 0, "Fullscreen");
+                        ui.selectable_value(&mut d.startup_mode, 1, "Windowed");
+                        ui.selectable_value(&mut d.startup_mode, 2, "Remember last");
+                    });
+            },
+        );
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Open new folders recursively",
+            Some("Default for newly opened folders. The View menu toggles the current one."),
+            |ui| {
+                pbui::toggle_with_label(ui, p, &mut d.recursive);
+            },
+        );
+    });
+    ui.add_space(pbui::GAP);
+
+    pbui::group_card(ui, p, Some("System"), |ui| {
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Default photo viewer",
+            Some("Opens Windows Default apps to set PhotoBlaze"),
+            |ui| {
+                if pbui::secondary_button(ui, "Set default\u{2026}").clicked() {
+                    open_default_apps();
+                }
+            },
+        );
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Reset settings",
+            Some("Restore every setting to its default (applies on Save)"),
+            |ui| {
+                if pbui::secondary_button(ui, "Reset").clicked() {
+                    // Repopulate the form with the defaults; Save commits, Cancel still
+                    // reverts (nothing is written yet).
+                    let hz = d.refresh_hz;
+                    *d = SettingsDraft::from_settings(&settings::Settings::default(), hz);
+                }
+            },
+        );
+    });
+}
+
+/// The **Display** tab: how a photo is framed and how the overlays look.
+fn display_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
+    pbui::group_card(ui, p, Some("Appearance"), |ui| {
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Default scale mode",
+            Some("How a photo fits the window"),
+            |ui| {
+                egui::ComboBox::from_id_salt("scale_mode")
+                    .width(150.0)
+                    .selected_text(["Fit", "Crop to Fill", "Original"][d.scale_mode])
+                    .show_ui(ui, |ui| {
+                        // The popup is a top-level Area; re-assert our theme so options
+                        // match the dialog (defensive — the ctx style already matches here).
+                        pbui::apply_to_ui(ui, p.dark);
+                        ui.selectable_value(&mut d.scale_mode, 0, "Fit");
+                        ui.selectable_value(&mut d.scale_mode, 1, "Crop to Fill");
+                        ui.selectable_value(&mut d.scale_mode, 2, "Original");
+                    });
+            },
+        );
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Letterbox color",
+            Some("Fills the screen around a photo that doesn\u{2019}t cover it"),
+            |ui| {
+                ui.color_edit_button_rgb(&mut d.letterbox);
+            },
+        );
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Info panel opacity",
+            Some("How solid the info and EXIF panels look over a photo"),
+            |ui| {
+                pbui::slider(ui, &mut d.info_opacity, 0..=100, "%");
+            },
+        );
+    });
 }
 
 /// The inline keyboard-shortcut editor: grouped cards (matching the menu), each

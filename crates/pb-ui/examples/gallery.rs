@@ -23,6 +23,7 @@ enum Mode {
 struct Gallery {
     mode: Mode,
     start_speed: f32,
+    slideshow_interval: f64,
     recursive: bool,
     fullscreen: bool,
     scale_mode: usize,
@@ -36,6 +37,7 @@ impl Default for Gallery {
         Self {
             mode: Mode::Both,
             start_speed: 8.0,
+            slideshow_interval: 4.0,
             recursive: true,
             fullscreen: false,
             scale_mode: 0,
@@ -131,7 +133,11 @@ impl Gallery {
 
         pb_ui::section_label(ui, p, "Type scale");
         ui.label(egui::RichText::new("Heading").size(26.0).color(p.text));
-        ui.label(egui::RichText::new("Body — the quick brown fox").size(14.5).color(p.text));
+        ui.label(
+            egui::RichText::new("Body — the quick brown fox")
+                .size(14.5)
+                .color(p.text),
+        );
         ui.label(
             egui::RichText::new("Small / secondary text")
                 .size(12.5)
@@ -193,7 +199,25 @@ impl Gallery {
                 |ui| {
                     pb_ui::slider(ui, &mut self.start_speed, 1.0..=30.0, "/s");
                 },
-            );            pb_ui::card_row(
+            );
+            pb_ui::card_row(
+                ui,
+                p,
+                None,
+                "Slideshow interval",
+                Some("Stepped slider (0.5s steps, one decimal)"),
+                |ui| {
+                    pb_ui::slider_stepped(
+                        ui,
+                        &mut self.slideshow_interval,
+                        0.5..=60.0,
+                        0.5,
+                        1,
+                        "s",
+                    );
+                },
+            );
+            pb_ui::card_row(
                 ui,
                 p,
                 None,
@@ -202,7 +226,8 @@ impl Gallery {
                 |ui| {
                     pb_ui::toggle_with_label(ui, p, &mut self.recursive);
                 },
-            );            pb_ui::card_row(
+            );
+            pb_ui::card_row(
                 ui,
                 p,
                 None,
@@ -222,7 +247,8 @@ impl Gallery {
                             ui.selectable_value(&mut self.scale_mode, 2, "Original");
                         });
                 },
-            );            pb_ui::card_row(
+            );
+            pb_ui::card_row(
                 ui,
                 p,
                 None,
@@ -243,7 +269,11 @@ impl Gallery {
 
         // Confirm (destructive): a message + note, then [Delete] [Cancel].
         mini_dialog(ui, p, |ui| {
-            ui.label(egui::RichText::new("Delete this photo?").size(16.0).color(p.text));
+            ui.label(
+                egui::RichText::new("Delete this photo?")
+                    .size(16.0)
+                    .color(p.text),
+            );
             ui.add_space(8.0);
             ui.label(
                 egui::RichText::new("This operation cannot be undone.").color(p.text_secondary),
@@ -268,7 +298,8 @@ impl Gallery {
         // Password entry: a prompt, a masked field, then [Unlock] [Cancel].
         mini_dialog(ui, p, |ui| {
             ui.label(
-                egui::RichText::new("Enter the password for \u{201c}photos.7z\u{201d}").color(p.text),
+                egui::RichText::new("Enter the password for \u{201c}photos.7z\u{201d}")
+                    .color(p.text),
             );
             ui.add_space(10.0);
             ui.add(
