@@ -182,8 +182,8 @@ impl Gallery {
             }
         });
 
-        pb_ui::section_label(ui, p, "Setting cards");
-        pb_ui::card(ui, p, |ui| {
+        // A grouped settings card: a heading inside the card, rows separated by dividers.
+        pb_ui::group_card(ui, p, Some("Grouped Settings"), |ui| {
             pb_ui::card_row(
                 ui,
                 p,
@@ -194,9 +194,7 @@ impl Gallery {
                     pb_ui::slider(ui, &mut self.start_speed, 1.0..=30.0, "/s");
                 },
             );
-        });
-        ui.add_space(SPACE);
-        pb_ui::card(ui, p, |ui| {
+            pb_ui::row_divider(ui, p);
             pb_ui::card_row(
                 ui,
                 p,
@@ -207,9 +205,7 @@ impl Gallery {
                     pb_ui::toggle_with_label(ui, p, &mut self.recursive);
                 },
             );
-        });
-        ui.add_space(SPACE);
-        pb_ui::card(ui, p, |ui| {
+            pb_ui::row_divider(ui, p);
             pb_ui::card_row(
                 ui,
                 p,
@@ -231,9 +227,7 @@ impl Gallery {
                         });
                 },
             );
-        });
-        ui.add_space(SPACE);
-        pb_ui::card(ui, p, |ui| {
+            pb_ui::row_divider(ui, p);
             pb_ui::card_row(
                 ui,
                 p,

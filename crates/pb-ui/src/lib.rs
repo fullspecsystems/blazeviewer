@@ -71,6 +71,12 @@ pub const CARD_WRAP_WIDTH: f32 = 430.0;
 const CONTROL_RESERVE: f32 = 260.0;
 /// Minimum width the header block keeps in the wide layout before the row would stack.
 const HEADER_MIN: f32 = 150.0;
+/// Top inner padding of a [`group_card`] — tighter than the bottom so the semibold header
+/// (which reserves more cap-height leading) doesn't look like it's floating.
+const GROUP_PAD_TOP: f32 = 6.0;
+/// Vertical gap above and below a [`row_divider`] inside a [`group_card`] — the main knob
+/// for how dense the grouped rows feel.
+pub const ROW_GAP: f32 = 10.0;
 
 /// The resolved color roles for one theme. Built from a single `dark` flag so the
 /// whole palette stays internally consistent and tracks the OS setting.
@@ -286,7 +292,18 @@ fn read_first(paths: &[&str]) -> Option<Vec<u8>> {
 
 // ── Components ───────────────────────────────────────────────────────────────
 
-/// A section label above a group of cards (e.g. "Navigation feel").
+/// The page title (H1) — the largest tier, in the semibold face.
+pub fn page_title(ui: &mut egui::Ui, p: &Palette, text: &str) {
+    ui.label(
+        egui::RichText::new(text)
+            .font(FontId::new(30.0, FontFamily::Name(SEMIBOLD.into())))
+            .color(p.text),
+    );
+}
+
+/// A standalone section label above a group of cards. The grouped-settings pattern puts
+/// the heading *inside* a [`group_card`] instead; this stays for catalog-style sections
+/// (e.g. the gallery's component groups).
 pub fn section_label(ui: &mut egui::Ui, p: &Palette, text: &str) {
     ui.add_space(SPACE_4);
     ui.label(
@@ -301,10 +318,7 @@ pub fn section_label(ui: &mut egui::Ui, p: &Palette, text: &str) {
 /// hairline border, the card radius, and comfortable interior padding. Holds one or
 /// more [`card_row`]s.
 pub fn card<R>(ui: &mut egui::Ui, p: &Palette, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    egui::Frame::none()
-        .fill(p.card)
-        .stroke(Stroke::new(1.0, p.card_stroke))
-        .rounding(Rounding::same(RADIUS_CARD))
+    card_frame(p)
         // Vertically asymmetric on purpose: a text line box reserves more leading above
         // the cap height than below the baseline, so equal top/bottom padding reads
         // top-heavy. Trim the top a hair and add it to the bottom to optically center
@@ -322,6 +336,64 @@ pub fn card<R>(ui: &mut egui::Ui, p: &Palette, add: impl FnOnce(&mut egui::Ui) -
             add(ui)
         })
         .inner
+}
+
+/// A **grouped settings card**: an optional semibold `header` inside the card, then a
+/// `body` of [`card_row`]s separated by [`row_divider`]s. The macOS/Windows grouped-
+/// settings pattern — related settings share one card under a heading, so a page is a
+/// few cards instead of one-per-setting (far less scrolling). Inter-row gap = [`ROW_GAP`].
+pub fn group_card(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    header: Option<&str>,
+    body: impl FnOnce(&mut egui::Ui),
+) {
+    card_frame(p)
+        .inner_margin(Margin {
+            left: SPACE_4,
+            right: SPACE_4,
+            top: GROUP_PAD_TOP,
+            bottom: SPACE_3,
+        })
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            // Explicit spacing only, so ROW_GAP / dividers fully control the rhythm.
+            ui.spacing_mut().item_spacing.y = 0.0;
+            if let Some(h) = header {
+                ui.label(
+                    egui::RichText::new(h)
+                        .font(FontId::new(SECTION_SIZE, FontFamily::Name(SEMIBOLD.into())))
+                        .color(p.text),
+                );
+                ui.add_space(SPACE_3);
+            }
+            body(ui);
+        });
+}
+
+/// A subtle full-width hairline between rows inside a [`group_card`], with [`ROW_GAP`]
+/// above and below. A touch stronger than the card border so rows read as separated.
+pub fn row_divider(ui: &mut egui::Ui, p: &Palette) {
+    ui.add_space(ROW_GAP);
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 1.0), egui::Sense::hover());
+    let color = if p.dark {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 24)
+    } else {
+        Color32::from_rgba_unmultiplied(0, 0, 0, 26)
+    };
+    ui.painter()
+        .hline(rect.x_range(), rect.center().y, Stroke::new(1.0, color));
+    ui.add_space(ROW_GAP);
+}
+
+/// The shared card surface — fill + hairline border + radius. `card` and `group_card`
+/// add their own inner margins on top.
+fn card_frame(p: &Palette) -> egui::Frame {
+    egui::Frame::none()
+        .fill(p.card)
+        .stroke(Stroke::new(1.0, p.card_stroke))
+        .rounding(Rounding::same(RADIUS_CARD))
 }
 
 /// One row inside a [`card`]: an optional lead icon, a `title` with an optional dim

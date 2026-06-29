@@ -183,10 +183,15 @@ single-theme dialog can't show.
   dark)` each frame (cheap; survives egui's own theme bookkeeping); `apply_to_ui(ui,
   dark)` to scope one region (e.g. a gallery column, or a **combo popup** — egui draws
   popup *contents* with the global ctx style, so re-assert it inside `show_ui`).
-- **Components:** `card`, `card_row` (responsive: control on the right when wide,
-  stacked under the header below `CARD_WRAP_WIDTH`), `toggle` / `toggle_with_label`,
-  `section_label`, `primary_button` / `secondary_button` / `danger_button`,
-  `text_field`, `slider` (stable-width value box — no jitter), `icon_sized`.
+- **Components:** `group_card` (the **grouped-settings** card: a semibold heading inside
+  the card + rows split by `row_divider`s — related settings share one card, so a page is
+  a few cards not one-per-setting), `card` (single), `card_row` (responsive: control on
+  the right when wide, stacked under the header below `CARD_WRAP_WIDTH`), `row_divider`,
+  `toggle` / `toggle_with_label`, `page_title` / `section_label` (type ramp: page title
+  30 / section 17 — both semibold via the bundled Segoe UI Semibold face / card title 14.5
+  / description 12.5), `primary_button` / `secondary_button` / `danger_button`,
+  `text_field`, `slider` (stable-width value box + solid-accent fill — no jitter),
+  `icon_sized`. Section headings are Title Case; setting labels stay sentence case.
 - **Icons (`pb-ui/src/icon.rs`):** Font Awesome SVGs **vendored per family**
   (`icons/<family>/<name>.svg`), rasterized to a **white square sprite** and **tinted at
   draw time** — one texture serves every tone and theme (cached in the egui ctx). A

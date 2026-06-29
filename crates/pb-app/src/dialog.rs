@@ -737,11 +737,10 @@ fn settings_button_bar(ctx: &egui::Context) -> Option<bool> {
     result
 }
 
-/// The Settings form, laid out as Windows-11-style **setting cards** — a section
-/// label over each group, every row a card with `title + dim subtitle` on the left and
-/// a right-aligned control. Built on the `pbui` design system so spacing, radii, and
-/// the control height are consistent. (Controls drive a skeleton draft; persistence is
-/// a follow-up.)
+/// The Settings form, laid out as Windows-11-style **grouped setting cards** — related
+/// settings share one card under a semibold heading, rows separated by hairline dividers
+/// (far less scrolling than a card per setting). Built on the `pbui` design system.
+/// (Controls drive a skeleton draft; persistence is a follow-up.)
 fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
     let p = pbui::Palette::new(ui.visuals().dark_mode);
     let cap = d.refresh_hz;
@@ -757,7 +756,10 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                     bottom: pbui::SPACE_6,
                 })
                 .show(ui, |ui| {
-                    ui.label(egui::RichText::new("Settings").size(30.0).strong());
+                    // Explicit vertical spacing only (the gap between groups is uniform).
+                    ui.spacing_mut().item_spacing.y = 0.0;
+
+                    pbui::page_title(ui, &p, "Settings");
                     ui.add_space(pbui::SPACE_1);
                     ui.label(
                         egui::RichText::new(
@@ -765,10 +767,9 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                         )
                         .color(p.text_secondary),
                     );
+                    ui.add_space(pbui::SPACE_6);
 
-                    // ── Navigation feel ──────────────────────────────────────
-                    pbui::section_label(ui, &p, "Navigation feel");
-                    pbui::card(ui, &p, |ui| {
+                    pbui::group_card(ui, &p, Some("Navigation Feel"), |ui| {
                         pbui::card_row(
                             ui,
                             &p,
@@ -779,9 +780,7 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                                 pbui::slider(ui, &mut d.start_speed, 1.0..=30.0, "/s");
                             },
                         );
-                    });
-                    ui.add_space(pbui::SPACE_2);
-                    pbui::card(ui, &p, |ui| {
+                        pbui::row_divider(ui, &p);
                         pbui::card_row(
                             ui,
                             &p,
@@ -792,9 +791,7 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                                 pbui::slider(ui, &mut d.ramp_secs, 0.5..=10.0, " s");
                             },
                         );
-                    });
-                    ui.add_space(pbui::SPACE_2);
-                    pbui::card(ui, &p, |ui| {
+                        pbui::row_divider(ui, &p);
                         pbui::card_row(
                             ui,
                             &p,
@@ -805,9 +802,7 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                                 pbui::slider(ui, &mut d.max_fps, 1..=cap, "/s");
                             },
                         );
-                    });
-                    ui.add_space(pbui::SPACE_2);
-                    pbui::card(ui, &p, |ui| {
+                        pbui::row_divider(ui, &p);
                         pbui::card_row(
                             ui,
                             &p,
@@ -819,10 +814,9 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                             },
                         );
                     });
+                    ui.add_space(pbui::SPACE_3);
 
-                    // ── Browsing ─────────────────────────────────────────────
-                    pbui::section_label(ui, &p, "Browsing");
-                    pbui::card(ui, &p, |ui| {
+                    pbui::group_card(ui, &p, Some("Browsing"), |ui| {
                         pbui::card_row(
                             ui,
                             &p,
@@ -834,10 +828,9 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                             },
                         );
                     });
+                    ui.add_space(pbui::SPACE_3);
 
-                    // ── Display ──────────────────────────────────────────────
-                    pbui::section_label(ui, &p, "Display");
-                    pbui::card(ui, &p, |ui| {
+                    pbui::group_card(ui, &p, Some("Display"), |ui| {
                         pbui::card_row(
                             ui,
                             &p,
@@ -859,9 +852,7 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                                     });
                             },
                         );
-                    });
-                    ui.add_space(pbui::SPACE_2);
-                    pbui::card(ui, &p, |ui| {
+                        pbui::row_divider(ui, &p);
                         pbui::card_row(
                             ui,
                             &p,
@@ -872,9 +863,7 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                                 ui.color_edit_button_rgb(&mut d.letterbox);
                             },
                         );
-                    });
-                    ui.add_space(pbui::SPACE_2);
-                    pbui::card(ui, &p, |ui| {
+                        pbui::row_divider(ui, &p);
                         pbui::card_row(
                             ui,
                             &p,
@@ -886,10 +875,9 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                             },
                         );
                     });
+                    ui.add_space(pbui::SPACE_3);
 
-                    // ── Keyboard ─────────────────────────────────────────────
-                    pbui::section_label(ui, &p, "Keyboard");
-                    pbui::card(ui, &p, |ui| {
+                    pbui::group_card(ui, &p, Some("Keyboard"), |ui| {
                         pbui::card_row(
                             ui,
                             &p,
@@ -903,10 +891,9 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                             },
                         );
                     });
+                    ui.add_space(pbui::SPACE_3);
 
-                    // ── System ───────────────────────────────────────────────
-                    pbui::section_label(ui, &p, "System");
-                    pbui::card(ui, &p, |ui| {
+                    pbui::group_card(ui, &p, Some("System"), |ui| {
                         pbui::card_row(
                             ui,
                             &p,
@@ -917,9 +904,7 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft) {
                                 let _ = pbui::secondary_button(ui, "Set default\u{2026}");
                             },
                         );
-                    });
-                    ui.add_space(pbui::SPACE_2);
-                    pbui::card(ui, &p, |ui| {
+                        pbui::row_divider(ui, &p);
                         pbui::card_row(
                             ui,
                             &p,
