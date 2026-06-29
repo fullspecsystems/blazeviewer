@@ -72,8 +72,10 @@ pub fn tone_color(tone: Tone, p: &Palette) -> Color32 {
     match tone {
         Tone::Neutral => p.text_secondary,
         Tone::Accent => p.accent,
-        Tone::Warning if p.dark => Color32::from_rgb(0xe8, 0xb3, 0x39),
-        Tone::Warning => Color32::from_rgb(0x9a, 0x6a, 0x00),
+        // Vivid bright yellow on dark; a saturated amber on light (a deeper amber reads
+        // brown, a pure yellow has no contrast on white — this stays clearly amber).
+        Tone::Warning if p.dark => Color32::from_rgb(0xff, 0xd2, 0x3f),
+        Tone::Warning => Color32::from_rgb(0xf0, 0xa5, 0x00),
         Tone::Danger if p.dark => Color32::from_rgb(0xff, 0x6b, 0x6b),
         Tone::Danger => Color32::from_rgb(0xc0, 0x33, 0x33),
         Tone::Success if p.dark => Color32::from_rgb(0x4e, 0xc7, 0x7a),
@@ -106,19 +108,33 @@ fn svg(icon: Icon, family: Family) -> &'static str {
 
 /// Rasterize an SVG to a **white**, straight-alpha `px`×`px` sprite, the glyph scaled to
 /// fit and **centered** (so any source aspect ratio yields the same square box).
+///
+/// We fit the **union of the viewBox and the ink bounding box**, not just the viewBox:
+/// FA glyphs can spill past their viewBox (the lock's shackle reaches `y=-32` above its
+/// `0..512` box), and a viewBox-only fit clips that overflow at the top. The union keeps
+/// normal icons sized exactly as FA intends (their ink stays inside the viewBox, so the
+/// union *is* the viewBox) and shrinks an overflowing glyph just enough to show whole.
 fn rasterize_white(svg_src: &str, px: u32) -> Option<egui::ColorImage> {
     let px = px.max(1);
     // White fill so the texture can be tinted to any tone at draw time.
     let src = svg_src.replace("currentColor", "#ffffff");
     let tree = usvg::Tree::from_data(src.as_bytes(), &usvg::Options::default()).ok()?;
     let size = tree.size();
-    let (sw, sh) = (size.width(), size.height());
-    if sw <= 0.0 || sh <= 0.0 {
+    let (vw, vh) = (size.width(), size.height());
+    let bbox = tree.root().abs_bounding_box();
+    let min_x = bbox.left().min(0.0);
+    let min_y = bbox.top().min(0.0);
+    let max_x = bbox.right().max(vw);
+    let max_y = bbox.bottom().max(vh);
+    let (rw, rh) = (max_x - min_x, max_y - min_y);
+    if rw <= 0.0 || rh <= 0.0 {
         return None;
     }
-    let scale = px as f32 / sw.max(sh);
-    let (tw, th) = (sw * scale, sh * scale);
-    let (dx, dy) = ((px as f32 - tw) / 2.0, (px as f32 - th) / 2.0);
+    let scale = px as f32 / rw.max(rh);
+    let (tw, th) = (rw * scale, rh * scale);
+    // Center the region in the square, offset so its top-left maps to the centered box.
+    let dx = (px as f32 - tw) / 2.0 - min_x * scale;
+    let dy = (px as f32 - th) / 2.0 - min_y * scale;
     let mut pixmap = tiny_skia::Pixmap::new(px, px)?;
     let transform = tiny_skia::Transform::from_scale(scale, scale).post_translate(dx, dy);
     resvg::render(&tree, transform, &mut pixmap.as_mut());
@@ -216,6 +232,21 @@ mod tests {
                 assert!(opaque_white, "sprite is white (tint happens at draw)");
             }
         }
+    }
+
+    #[test]
+    fn lock_shackle_top_not_clipped() {
+        // The lock glyph overflows its viewBox at the top (shackle tip at y=-32). With
+        // the union fit, that tip lands in the very top rows of the sprite — so if it's
+        // present, the overflow rendered and nothing was cropped. (A viewBox-only fit, or
+        // resvg clipping to the viewBox, would leave the top rows empty.)
+        let px = 64usize;
+        let img = rasterize_white(svg(Icon::Lock, Family::Solid), px as u32).unwrap();
+        let row_has_ink = |y: usize| (0..px).any(|x| img.pixels[y * px + x].a() > 0);
+        assert!(
+            row_has_ink(0) || row_has_ink(1),
+            "lock shackle tip should reach the top rows (not clipped)"
+        );
     }
 
     #[test]
