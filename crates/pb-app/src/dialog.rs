@@ -356,8 +356,21 @@ impl DialogWindow {
                 let psize = p.outer_size();
                 let scale = p.scale_factor();
                 let (dw, dh) = (w * scale, h * scale);
-                let x = ppos.x as f64 + (psize.width as f64 - dw) / 2.0;
-                let y = ppos.y as f64 + (psize.height as f64 - dh) / 2.0;
+                let mut x = ppos.x as f64 + (psize.width as f64 - dw) / 2.0;
+                let mut y = ppos.y as f64 + (psize.height as f64 - dh) / 2.0;
+                // Keep the dialog fully on-screen: centering over a parent that sits at
+                // a screen corner would otherwise push it half off the monitor (#4).
+                if let Some(mon) = p.current_monitor() {
+                    let mp = mon.position();
+                    let ms = mon.size();
+                    let (cx, cy) = clamp_to_monitor(
+                        (x, y),
+                        (dw, dh),
+                        (mp.x as f64, mp.y as f64, ms.width as f64, ms.height as f64),
+                    );
+                    x = cx;
+                    y = cy;
+                }
                 attrs = attrs.with_position(PhysicalPosition::new(x, y));
             }
         }
@@ -1170,7 +1183,7 @@ fn general_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
             "Slideshow interval",
             Some("Seconds each photo shows. The [ and ] keys adjust it live."),
             |ui| {
-                pbui::slider_stepped(ui, &mut d.slideshow_interval, 0.5..=60.0, 0.5, 1, "s");
+                pbui::slider_stepped(ui, &mut d.slideshow_interval, 0.1..=60.0, 0.1, 1, "s");
             },
         );
     });
@@ -1344,5 +1357,69 @@ fn chord_slot(ui: &mut egui::Ui, p: &pbui::Palette, kb: &mut KbEdit, action: Act
     if pbui::secondary_button(ui, &label).clicked() {
         *kb.capturing = Some((action, slot));
         *kb.note = None;
+    }
+}
+
+/// Clamp a dialog's top-left `pos` so its `size` (`w`,`h`) rect stays fully inside the
+/// monitor rect `mon` (`x`,`y`,`w`,`h`), all physical px. A dialog centered over a
+/// parent window at a screen corner would otherwise spill off the monitor edge (#4).
+/// If the dialog is larger than the monitor it's pinned to the monitor's top-left.
+fn clamp_to_monitor(pos: (f64, f64), size: (f64, f64), mon: (f64, f64, f64, f64)) -> (f64, f64) {
+    let (x, y) = pos;
+    let (w, h) = size;
+    let (mx, my, mw, mh) = mon;
+    let cx = if w >= mw {
+        mx
+    } else {
+        x.clamp(mx, mx + mw - w)
+    };
+    let cy = if h >= mh {
+        my
+    } else {
+        y.clamp(my, my + mh - h)
+    };
+    (cx, cy)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clamp_to_monitor;
+
+    // A 1920×1080 monitor at the origin.
+    const MON: (f64, f64, f64, f64) = (0.0, 0.0, 1920.0, 1080.0);
+
+    #[test]
+    fn already_on_screen_is_unchanged() {
+        let (x, y) = clamp_to_monitor((100.0, 100.0), (560.0, 660.0), MON);
+        assert_eq!((x, y), (100.0, 100.0));
+    }
+
+    #[test]
+    fn off_the_right_and_bottom_is_pulled_back_fully_on() {
+        // Centered over a parent at the bottom-right corner pushes it past both edges.
+        let (x, y) = clamp_to_monitor((1800.0, 900.0), (560.0, 660.0), MON);
+        assert_eq!(x, 1920.0 - 560.0); // flush to the right edge, fully visible
+        assert_eq!(y, 1080.0 - 660.0); // flush to the bottom edge, fully visible
+    }
+
+    #[test]
+    fn off_the_top_left_is_pushed_in() {
+        let (x, y) = clamp_to_monitor((-300.0, -200.0), (560.0, 660.0), MON);
+        assert_eq!((x, y), (0.0, 0.0));
+    }
+
+    #[test]
+    fn respects_a_monitor_at_a_negative_origin() {
+        // A left-hand second monitor at negative x: clamping must use its own bounds.
+        let mon = (-1920.0, 0.0, 1920.0, 1080.0);
+        let (x, y) = clamp_to_monitor((-100.0, 50.0), (560.0, 660.0), mon);
+        assert_eq!(x, -560.0); // flush to that monitor's right edge (x = 0 - 560)
+        assert_eq!(y, 50.0);
+    }
+
+    #[test]
+    fn dialog_larger_than_monitor_pins_to_top_left() {
+        let (x, y) = clamp_to_monitor((50.0, 50.0), (4000.0, 4000.0), MON);
+        assert_eq!((x, y), (0.0, 0.0));
     }
 }

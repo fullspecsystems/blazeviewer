@@ -2,11 +2,12 @@
 //!
 //! **Privacy boundary (task #2):** this writes ONLY app preferences (navigation
 //! feel, default scale / recursive, the letterbox color, info-panel opacity, the
-//! windowed/fullscreen choice) to the OS config dir. It never records anything
-//! photo-*derived* (no viewed paths, no recent list, no thumbnails) — app config is
-//! explicitly in-bounds (ADR-018; the no-trace test is scoped to photo data only).
-//! Writes happen only on an explicit user action (Settings ▸ Save, or the
-//! fullscreen toggle), never on the view/decode path.
+//! windowed/fullscreen choice, and the last windowed position + size) to the OS
+//! config dir. It never records anything photo-*derived* (no viewed paths, no recent
+//! list, no thumbnails) — app config is explicitly in-bounds (ADR-018; the no-trace
+//! test is scoped to photo data only). Writes happen only on an explicit user action
+//! (Settings ▸ Save, the fullscreen toggle, or moving/resizing the window), never on
+//! the view/decode path.
 //!
 //! All I/O is best-effort: a missing / unreadable / malformed file means "use
 //! defaults," and a failed write is silently ignored (a preference not sticking must
@@ -45,6 +46,20 @@ pub enum StartupMode {
     Remember,
 }
 
+/// The last windowed-mode geometry: the window's outer (decorated) top-left and its
+/// inner (client) size, in physical pixels, in the virtual-desktop coordinate space.
+/// Persisted so toggling back to windowed — and the next launch — restore where the
+/// user left the window rather than snapping to the OS default corner (#1). Restored
+/// only when [`geometry_on_screen`] confirms enough of it still lands on a connected
+/// monitor (guards against a saved spot going off-screen after a monitor change).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowGeometry {
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+}
+
 /// All persisted preferences. `#[serde(default)]` makes any missing key fall back to
 /// [`Settings::default`], so partial / older files (e.g. one that only set
 /// `fullscreen`) load cleanly, and unknown keys are ignored — forward/backward
@@ -77,6 +92,9 @@ pub struct Settings {
     /// starts at (#31). Clamped to the slideshow's own `[MIN, MAX]_INTERVAL`; the
     /// `[` / `]` keys still adjust it live for the session without rewriting this.
     pub slideshow_interval_secs: f64,
+    /// Last windowed position + size (#1); `None` until the user has been windowed at
+    /// least once. Only restored when still on a connected monitor (`geometry_on_screen`).
+    pub window: Option<WindowGeometry>,
 }
 
 impl Default for Settings {
@@ -87,14 +105,17 @@ impl Default for Settings {
             fullscreen: false,
             startup_mode: StartupMode::Remember,
             recursive: true,
-            start_speed: 3.0,    // main.rs ADVANCE_MIN_RATE
-            ramp_secs: 4.0,      // main.rs ADVANCE_RAMP_SECS
-            max_advance_rate: 0, // uncapped → display refresh (#20)
-            hold_delay_ms: 400,  // main.rs initial_delay
+            // A gentle floor that ramps up to the refresh ceiling, so hold-to-fly
+            // shows off its acceleration by default rather than starting at full tilt.
+            start_speed: 2.0,    // photos/sec the ramp starts from (#19)
+            ramp_secs: 5.0,      // seconds to reach the ceiling (#19)
+            max_advance_rate: 0, // uncapped → display refresh is the ceiling (#20)
+            hold_delay_ms: 200,  // snappy tap→repeat handoff (main.rs initial_delay)
             scale_mode: ScaleModePref::Fit,
             letterbox: [10, 10, 12], // pb_render::LETTERBOX (rgb)
             info_opacity: 60,        // hud::BG alpha 153/255 ≈ 60%
             slideshow_interval_secs: slideshow::DEFAULT_INTERVAL.as_secs_f64(), // 4.0
+            window: None,
         }
     }
 }
@@ -199,12 +220,33 @@ fn read_settings_text() -> Option<String> {
     std::fs::read_to_string(settings_path()?).ok()
 }
 
-/// Persist the fullscreen preference, preserving every other setting (load, set,
-/// save the whole file). Best-effort; an explicit user action (the toggle).
-pub fn save_fullscreen(fullscreen: bool) {
-    let mut s = Settings::load();
-    s.fullscreen = fullscreen;
-    s.save();
+/// Minimum overlap (physical px) a restored window must share with a single monitor
+/// to count as visible — enough of the window, including its title bar, to see and
+/// grab. Below this the saved spot is treated as off-screen and the default is used.
+pub const MIN_VISIBLE_W: u32 = 200;
+pub const MIN_VISIBLE_H: u32 = 80;
+
+/// Whether `geom` overlaps some monitor by at least `min_w`×`min_h` physical px, so a
+/// restored window lands where the user can actually see and drag it. Each monitor is
+/// `(x, y, w, h)` in the same physical-pixel virtual-desktop space as `geom`. Pure (no
+/// winit types) so the off-screen guard is unit-testable. Requiring the overlap with a
+/// *single* monitor (not the union) keeps a grabbable chunk on one screen rather than
+/// scattered slivers across several.
+pub fn geometry_on_screen(
+    geom: WindowGeometry,
+    monitors: &[(i32, i32, u32, u32)],
+    min_w: u32,
+    min_h: u32,
+) -> bool {
+    let gx1 = geom.x.saturating_add(geom.w as i32);
+    let gy1 = geom.y.saturating_add(geom.h as i32);
+    monitors.iter().any(|&(mx, my, mw, mh)| {
+        let mx1 = mx.saturating_add(mw as i32);
+        let my1 = my.saturating_add(mh as i32);
+        let ox = (gx1.min(mx1) - geom.x.max(mx)).max(0);
+        let oy = (gy1.min(my1) - geom.y.max(my)).max(0);
+        ox as u32 >= min_w && oy as u32 >= min_h
+    })
 }
 
 #[cfg(test)]
@@ -373,5 +415,111 @@ mod tests {
     fn malformed_toml_is_not_accepted() {
         // `load()` would fall back to defaults; the parse itself must error.
         assert!(toml::from_str::<Settings>("this is = = not valid").is_err());
+    }
+
+    #[test]
+    fn window_geometry_round_trips_and_defaults_to_none() {
+        // Absent in old files → None (no window restore, falls back to the default spot).
+        let s: Settings = toml::from_str("fullscreen = true\n").unwrap();
+        assert_eq!(s.window, None);
+
+        // Present → restored exactly.
+        let s = Settings {
+            window: Some(WindowGeometry {
+                x: -100,
+                y: 40,
+                w: 1280,
+                h: 800,
+            }),
+            ..Settings::default()
+        };
+        let back: Settings = toml::from_str(&toml::to_string_pretty(&s).unwrap()).unwrap();
+        assert_eq!(s.window, back.window);
+    }
+
+    /// A primary monitor at the origin plus a second one to its left (negative x), the
+    /// classic dual-monitor layout the off-screen guard has to get right.
+    const MONS: &[(i32, i32, u32, u32)] = &[(0, 0, 1920, 1080), (-1920, 0, 1920, 1080)];
+
+    fn geom(x: i32, y: i32) -> WindowGeometry {
+        WindowGeometry {
+            x,
+            y,
+            w: 1280,
+            h: 800,
+        }
+    }
+
+    #[test]
+    fn geometry_on_screen_accepts_a_fully_visible_window() {
+        assert!(geometry_on_screen(
+            geom(100, 100),
+            MONS,
+            MIN_VISIBLE_W,
+            MIN_VISIBLE_H
+        ));
+        // Fully on the left (negative-x) monitor counts too.
+        assert!(geometry_on_screen(
+            geom(-1800, 100),
+            MONS,
+            MIN_VISIBLE_W,
+            MIN_VISIBLE_H
+        ));
+    }
+
+    #[test]
+    fn geometry_on_screen_rejects_a_fully_off_screen_window() {
+        // Far to the right of every monitor (e.g. the second display was unplugged).
+        assert!(!geometry_on_screen(
+            geom(10_000, 100),
+            MONS,
+            MIN_VISIBLE_W,
+            MIN_VISIBLE_H
+        ));
+        // Above every monitor.
+        assert!(!geometry_on_screen(
+            geom(100, -5_000),
+            MONS,
+            MIN_VISIBLE_W,
+            MIN_VISIBLE_H
+        ));
+        // No monitors at all → never visible.
+        assert!(!geometry_on_screen(
+            geom(0, 0),
+            &[],
+            MIN_VISIBLE_W,
+            MIN_VISIBLE_H
+        ));
+    }
+
+    #[test]
+    fn geometry_on_screen_thresholds_a_sliver() {
+        // Window pushed right so only 150px overlap the primary monitor — below the
+        // 200px minimum, so it's treated as off-screen (not enough to grab).
+        assert!(!geometry_on_screen(
+            geom(1920 - 150, 100),
+            MONS,
+            MIN_VISIBLE_W,
+            MIN_VISIBLE_H
+        ));
+        // Pull it back so 300px overlap — comfortably grabbable.
+        assert!(geometry_on_screen(
+            geom(1920 - 300, 100),
+            MONS,
+            MIN_VISIBLE_W,
+            MIN_VISIBLE_H
+        ));
+    }
+
+    #[test]
+    fn geometry_on_screen_requires_a_visible_title_bar_strip() {
+        // Dropped almost entirely below the monitor: only 40px of height remain on
+        // screen, under the 80px minimum, so the title bar isn't reachable → rejected.
+        assert!(!geometry_on_screen(
+            geom(100, 1080 - 40),
+            MONS,
+            MIN_VISIBLE_W,
+            MIN_VISIBLE_H
+        ));
     }
 }

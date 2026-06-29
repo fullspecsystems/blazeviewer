@@ -38,6 +38,8 @@ pub mod ids {
     pub const FULLSCREEN: &str = "fullscreen";
     pub const RECURSIVE: &str = "recursive";
     pub const SLIDESHOW: &str = "slideshow";
+    pub const SLIDESHOW_FASTER: &str = "slideshow_faster";
+    pub const SLIDESHOW_SLOWER: &str = "slideshow_slower";
     pub const INFO: &str = "info";
     pub const FULL_EXIF: &str = "full_exif";
 
@@ -73,6 +75,8 @@ pub enum MenuAction {
     Fullscreen,
     Recursive,
     Slideshow,
+    SlideshowFaster,
+    SlideshowSlower,
     Info,
     FullExif,
     Next,
@@ -107,6 +111,8 @@ impl MenuAction {
             MenuAction::Fullscreen => Action::Fullscreen,
             MenuAction::Recursive => Action::Recursive,
             MenuAction::Slideshow => Action::SlideshowToggle,
+            MenuAction::SlideshowFaster => Action::SlideshowFaster,
+            MenuAction::SlideshowSlower => Action::SlideshowSlower,
             MenuAction::Info => Action::Info,
             MenuAction::FullExif => Action::FullExif,
             MenuAction::Next => Action::Next,
@@ -142,6 +148,8 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         FULLSCREEN => MenuAction::Fullscreen,
         RECURSIVE => MenuAction::Recursive,
         SLIDESHOW => MenuAction::Slideshow,
+        SLIDESHOW_FASTER => MenuAction::SlideshowFaster,
+        SLIDESHOW_SLOWER => MenuAction::SlideshowSlower,
         INFO => MenuAction::Info,
         FULL_EXIF => MenuAction::FullExif,
         NEXT => MenuAction::Next,
@@ -250,6 +258,8 @@ pub fn build_menu() -> BuiltMenu {
         &fullscreen,
         &recursive,
         &slideshow,
+        &item(ids::SLIDESHOW_FASTER, "Slideshow Faster\t["),
+        &item(ids::SLIDESHOW_SLOWER, "Slideshow Slower\t]"),
         &sep(),
         &item(ids::INFO, "Info Panel\tI"),
         &item(ids::FULL_EXIF, "Full EXIF\tShift+I"),
@@ -320,6 +330,14 @@ mod tests {
         assert_eq!(action_for(ids::FULLSCREEN), Some(MenuAction::Fullscreen));
         assert_eq!(action_for(ids::RECURSIVE), Some(MenuAction::Recursive));
         assert_eq!(action_for(ids::SLIDESHOW), Some(MenuAction::Slideshow));
+        assert_eq!(
+            action_for(ids::SLIDESHOW_FASTER),
+            Some(MenuAction::SlideshowFaster)
+        );
+        assert_eq!(
+            action_for(ids::SLIDESHOW_SLOWER),
+            Some(MenuAction::SlideshowSlower)
+        );
         assert_eq!(action_for(ids::INFO), Some(MenuAction::Info));
         assert_eq!(action_for(ids::FULL_EXIF), Some(MenuAction::FullExif));
         assert_eq!(action_for(ids::NEXT), Some(MenuAction::Next));

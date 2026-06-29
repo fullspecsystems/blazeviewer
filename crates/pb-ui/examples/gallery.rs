@@ -205,13 +205,13 @@ impl Gallery {
                 p,
                 None,
                 "Slideshow interval",
-                Some("Stepped slider (0.5s steps, one decimal)"),
+                Some("Stepped slider (0.1s steps, one decimal)"),
                 |ui| {
                     pb_ui::slider_stepped(
                         ui,
                         &mut self.slideshow_interval,
-                        0.5..=60.0,
-                        0.5,
+                        0.1..=60.0,
+                        0.1,
                         1,
                         "s",
                     );

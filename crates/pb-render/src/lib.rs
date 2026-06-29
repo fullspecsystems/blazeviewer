@@ -79,6 +79,11 @@ pub trait Renderer {
         hdr: bool,
         peak: f32,
     );
+    /// Drop the displayed image and show a blank background (the letterbox fill)
+    /// instead — the bare-launch / no-images / last-photo-deleted empty state. The
+    /// next [`set_image`](Renderer::set_image) / [`present_slot`](Renderer::present_slot)
+    /// restores a photo.
+    fn clear_image(&mut self);
     /// Set the per-photo view transform (scaling mode + rotation + zoom + pan).
     fn set_view(&mut self, view: ViewTransform);
     /// Set or clear the corner info-panel overlay: an RGBA8 bitmap (`w*h*4`)

@@ -36,7 +36,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
-use winit::dpi::PhysicalSize;
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -386,6 +386,21 @@ fn esc_quits(guard: Option<Instant>, now: Instant) -> bool {
     }
 }
 
+/// Collect monitor bounds as `(x, y, w, h)` physical-pixel rects in virtual-desktop
+/// space — the shape [`settings::geometry_on_screen`] checks a saved window against
+/// to decide if restoring it would land off-screen (#1).
+fn collect_monitor_rects(
+    monitors: impl Iterator<Item = winit::monitor::MonitorHandle>,
+) -> Vec<(i32, i32, u32, u32)> {
+    monitors
+        .map(|m| {
+            let p = m.position();
+            let s = m.size();
+            (p.x, p.y, s.width, s.height)
+        })
+        .collect()
+}
+
 struct App {
     windowed: bool,
     /// Where the playlist's images come from — a filesystem listing or an archive.
@@ -495,6 +510,10 @@ struct App {
     /// instantly per event and defer the expensive decode-to-fit + ring refill
     /// until this instant (debounced), so resizing stays smooth.
     resize_settle_at: Option<Instant>,
+    /// Debounced "persist the windowed geometry" deadline (#1). Moving/resizing a
+    /// window fires a flurry of events; we update the in-memory geometry per event but
+    /// only write `settings.toml` once the user stops, so a drag isn't a write storm.
+    geometry_save_at: Option<Instant>,
     /// Hold timers for the zoom/pan acceleration ramps (start = when the hold
     /// began; last = previous step, for time-based deltas).
     zoom_started: Option<Instant>,
@@ -663,6 +682,7 @@ impl App {
             toast: None,
             esc_guard_until: None,
             resize_settle_at: None,
+            geometry_save_at: None,
             zoom_started: None,
             zoom_last: None,
             pan_started: None,
@@ -1087,13 +1107,13 @@ impl App {
         self.displayed_item = None;
         self.target_item = None;
         self.current = None;
-        let p = test_pattern(1600, 1000);
-        let srgb = pb_render::ColorTransform::srgb();
         if let Some(a) = self.active.as_mut() {
-            a.renderer.set_image(&p, 1600, 1000, srgb, false, 1.0);
+            a.renderer.clear_image();
             a.renderer.set_overlay(None, 0);
-            a.window.set_title("PhotoBlaze (no images)");
+            a.window.set_title("PhotoBlaze");
         }
+        // Blank background + the centered "Press O to open…" hint (mirrors a bare launch).
+        self.show_open_hint();
         self.overlay_shown = false;
         self.overlay_item = None;
         self.draw(event_loop);
@@ -1702,30 +1722,113 @@ impl App {
         // Record the new mode as the remembered last state, in memory and on disk, so
         // `StartupMode::Remember` restores it and the Settings dialog stays in sync.
         self.settings.fullscreen = !self.windowed;
-        settings::save_fullscreen(!self.windowed);
-        if let Some(a) = self.active.as_ref() {
-            if self.windowed {
-                a.window.set_fullscreen(None);
-                a.window.set_decorations(true);
-                let _ = a.window.request_inner_size(PhysicalSize::new(1280, 800));
-            } else {
-                // Borderless "windowed fullscreen": size a decoration-less window
-                // to the monitor ourselves instead of the OS fullscreen API, which
-                // makes Windows apply fullscreen-optimizations that drop DWM
-                // composition on focus changes / transitions and flash the legacy
-                // basic-theme caption. A plain borderless window stays composited.
-                a.window.set_fullscreen(None);
-                a.window.set_decorations(false);
-                if let Some(mon) = a.window.current_monitor() {
-                    a.window.set_outer_position(mon.position());
-                    let _ = a.window.request_inner_size(mon.size());
-                }
+        // Leaving windowed mode: snapshot where the window is now, so toggling back
+        // (and the next launch) restore this spot rather than the OS default corner (#1).
+        if !self.windowed {
+            self.capture_windowed_geometry();
+        }
+        // Persist the new mode + remembered geometry together (one atomic write). An
+        // explicit user action (the toggle), never the view path — privacy #2.
+        self.geometry_save_at = None;
+        self.settings.save();
+
+        // Clone the window handle (an Arc) so the window can be driven while `self` is
+        // still borrowed mutably below (the menu attach needs `&mut self`).
+        let Some(window) = self.active.as_ref().map(|a| a.window.clone()) else {
+            return;
+        };
+        if self.windowed {
+            window.set_fullscreen(None);
+            window.set_decorations(true);
+        } else {
+            // Borderless "windowed fullscreen": size a decoration-less window
+            // to the monitor ourselves instead of the OS fullscreen API, which
+            // makes Windows apply fullscreen-optimizations that drop DWM
+            // composition on focus changes / transitions and flash the legacy
+            // basic-theme caption. A plain borderless window stays composited.
+            window.set_fullscreen(None);
+            window.set_decorations(false);
+            if let Some(mon) = window.current_monitor() {
+                window.set_outer_position(mon.position());
+                let _ = window.request_inner_size(mon.size());
             }
         }
         // Show the menu in windowed mode, hide it in fullscreen (the chrome-free
         // speed mode). Adding/removing the bar resizes the client area → a `Resized`
-        // event → the debounced re-decode path.
+        // event → the debounced re-decode path. Done *before* the windowed sizing
+        // below so a restored client size already accounts for the menu bar's height
+        // (sizing pre-menu would lose that height on every toggle — a slow drift).
         self.apply_menu_for_mode();
+
+        if self.windowed {
+            // Restore the saved windowed geometry when enough of it still lands on a
+            // connected monitor; otherwise fall back to the default size at the
+            // OS-chosen spot (so a stale off-screen position can't strand the window).
+            let rects = collect_monitor_rects(window.available_monitors());
+            match self.windowed_restore(&rects) {
+                Some(g) => {
+                    let _ = window.request_inner_size(PhysicalSize::new(g.w, g.h));
+                    window.set_outer_position(PhysicalPosition::new(g.x, g.y));
+                }
+                None => {
+                    let _ = window.request_inner_size(PhysicalSize::new(1280, 800));
+                }
+            }
+        }
+    }
+
+    /// Snapshot the live window's outer (decorated) top-left + inner (client) size
+    /// into `settings.window`, so the windowed spot can be restored later (#1). A
+    /// failed `outer_position` query (rare) or a zero size leaves the old value.
+    fn capture_windowed_geometry(&mut self) {
+        let Some(a) = self.active.as_ref() else {
+            return;
+        };
+        let Ok(pos) = a.window.outer_position() else {
+            return;
+        };
+        let size = a.window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return;
+        }
+        self.settings.window = Some(settings::WindowGeometry {
+            x: pos.x,
+            y: pos.y,
+            w: size.width,
+            h: size.height,
+        });
+    }
+
+    /// While windowed, refresh the remembered geometry from the live window and arm
+    /// the debounced save (#1). Called on every Moved/Resized; the disk write itself
+    /// waits until the user stops (`about_to_wait`), so a drag isn't a write storm.
+    /// No-op in fullscreen — that geometry is the monitor, not a user-chosen spot.
+    fn track_windowed_geometry(&mut self) {
+        if !self.windowed {
+            return;
+        }
+        let before = self.settings.window;
+        self.capture_windowed_geometry();
+        if self.settings.window != before {
+            self.geometry_save_at = Some(Instant::now() + Duration::from_millis(500));
+        }
+    }
+
+    /// The saved windowed geometry to restore, but only when enough of it still lands
+    /// on one of `monitors` — else `None`, so a window saved on a now-disconnected or
+    /// rearranged monitor opens at the default spot instead of off-screen (#1).
+    fn windowed_restore(
+        &self,
+        monitors: &[(i32, i32, u32, u32)],
+    ) -> Option<settings::WindowGeometry> {
+        let g = self.settings.window?;
+        settings::geometry_on_screen(
+            g,
+            monitors,
+            settings::MIN_VISIBLE_W,
+            settings::MIN_VISIBLE_H,
+        )
+        .then_some(g)
     }
 
     /// Build the native menu bar once (cross-platform; muda owns the OS handle).
@@ -2042,16 +2145,17 @@ impl App {
                 }
             },
             None => {
+                // No images: hand the renderer a 1×1 dummy just to construct, then the
+                // caller blanks it (`clear_image`) and shows the "Press O to open" hint.
                 self.current = None;
-                let p = test_pattern(1600, 1000);
                 (
-                    p,
-                    1600,
-                    1000,
+                    vec![0, 0, 0, 255],
+                    1,
+                    1,
                     srgb,
                     false,
                     1.0,
-                    "PhotoBlaze (no images)".to_string(),
+                    "PhotoBlaze".to_string(),
                 )
             }
         }
@@ -2506,6 +2610,19 @@ impl App {
         rows
     }
 
+    /// Corner inset (physical px) for the info/EXIF/help panel. Scales with the
+    /// surface's short edge so a fixed gap doesn't look jammed against the corner on a
+    /// huge fullscreen display (#3), with a DPI-scaled floor for small windows. Read
+    /// fresh on every (re)show, so toggling between window sizes always re-spaces it.
+    fn overlay_margin(&self) -> u32 {
+        let short_edge = self
+            .fit
+            .map(|f| f.max_width.min(f.max_height))
+            .unwrap_or(800) as f32;
+        let floor = 10.0 * self.scale_factor;
+        (short_edge * 0.015).max(floor).round().max(1.0) as u32
+    }
+
     /// Rasterize the active overlay (info panel or help) and draw it. The help
     /// overlay uses a larger font than the info panels.
     fn show_overlay(&mut self, event_loop: &ActiveEventLoop) {
@@ -2545,7 +2662,7 @@ impl App {
         let Some((bitmap, w, h)) = panel else {
             return;
         };
-        let margin = (10.0 * self.scale_factor).round().max(1.0) as u32;
+        let margin = self.overlay_margin();
         if let Some(a) = self.active.as_mut() {
             a.renderer.set_overlay(Some((&bitmap, w, h)), margin);
         }
@@ -2562,6 +2679,37 @@ impl App {
         self.overlay_shown = false;
         self.overlay_item = None;
         self.draw(event_loop);
+    }
+
+    /// Build the centered empty-state hint panel ("Press O to open a file / or
+    /// Shift+O to open a folder"). `None` if no system font loaded. Returns an owned
+    /// bitmap so callers can apply it to a renderer they still own (e.g. mid-setup).
+    fn open_hint_panel(&self) -> Option<(Vec<u8>, u32, u32)> {
+        let px = (20.0 * self.scale_factor).max(12.0);
+        let pad = (10.0 * self.scale_factor).round().max(3.0) as u32;
+        let rows = [
+            Row::Span {
+                text: "Press O to open a file".to_string(),
+                bold: false,
+            },
+            Row::Span {
+                text: "or Shift+O to open a folder".to_string(),
+                bold: false,
+            },
+        ];
+        self.hud.as_ref()?.render_table(&rows, px, pad, hud::BG)
+    }
+
+    /// Show the empty-state hint over the (blank) viewer — used when there are no
+    /// images to display. Rebuilt against the current scale; the renderer re-centers
+    /// it on resize and drops it the moment a photo is shown.
+    fn show_open_hint(&mut self) {
+        let Some((bitmap, w, h)) = self.open_hint_panel() else {
+            return;
+        };
+        if let Some(a) = self.active.as_mut() {
+            a.renderer.set_message(Some((&bitmap, w, h)));
+        }
     }
 
     /// Flash a transient status message at the bottom-center (tasks.json #10) — for
@@ -2980,8 +3128,22 @@ impl ApplicationHandler for App {
         if let Some(icon) = load_window_icon() {
             attrs = attrs.with_window_icon(Some(icon));
         }
+        // The saved windowed geometry to restore on launch, if it still lands on a
+        // connected monitor (#1) — used as the creation hint and re-applied after the
+        // menu attaches below (so the client size accounts for the menu bar).
+        let restore = if self.windowed {
+            let rects = collect_monitor_rects(event_loop.available_monitors());
+            self.windowed_restore(&rects)
+        } else {
+            None
+        };
         attrs = if self.windowed {
-            attrs.with_inner_size(PhysicalSize::new(1280, 800))
+            match restore {
+                Some(g) => attrs
+                    .with_inner_size(PhysicalSize::new(g.w, g.h))
+                    .with_position(PhysicalPosition::new(g.x, g.y)),
+                None => attrs.with_inner_size(PhysicalSize::new(1280, 800)),
+            }
         } else {
             // Borderless "windowed fullscreen": a decoration-less window sized to
             // the monitor — NOT the OS fullscreen API (which triggers Windows
@@ -3026,6 +3188,15 @@ impl ApplicationHandler for App {
                     self.menu_attached = true;
                 }
             }
+        }
+
+        // Now that the menu bar is attached, re-apply the saved client size + position
+        // so the restored window matches what was saved exactly — attaching the menu
+        // shrinks the client area, so sizing only pre-attach would lose its height
+        // each launch (#1). No-op when there's nothing to restore.
+        if let Some(g) = restore {
+            let _ = window.request_inner_size(PhysicalSize::new(g.w, g.h));
+            window.set_outer_position(PhysicalPosition::new(g.x, g.y));
         }
 
         self.scale_factor = window.scale_factor() as f32;
@@ -3078,6 +3249,15 @@ impl ApplicationHandler for App {
                         img.peak,
                     );
                 }
+            }
+        }
+
+        // Empty launch (no folder/file given): show a blank background with the
+        // centered "Press O to open…" hint instead of an image.
+        if self.playlist.current().is_none() {
+            renderer.clear_image();
+            if let Some((bitmap, w, h)) = self.open_hint_panel() {
+                renderer.set_message(Some((&bitmap, w, h)));
             }
         }
 
@@ -3143,7 +3323,14 @@ impl ApplicationHandler for App {
                     // crisp decode-to-fit + ring refill until the size settles.
                     self.resize_settle_at = Some(Instant::now() + Duration::from_millis(180));
                 }
+                // Remember the new windowed size so it can be restored later (#1).
+                self.track_windowed_geometry();
             }
+
+            // Track the windowed position so toggling back / relaunching restores it
+            // (#1). A fullscreen window's position is the monitor, not a user choice,
+            // so `track_windowed_geometry` ignores it there.
+            WindowEvent::Moved(_) => self.track_windowed_geometry(),
 
             WindowEvent::RedrawRequested => self.draw(event_loop),
 
@@ -3408,11 +3595,28 @@ impl ApplicationHandler for App {
                 self.load_current_sync(event_loop);
                 self.target_item = self.playlist.current();
                 self.request_prefetch();
+                // Re-place a visible info/EXIF/help panel against the settled surface
+                // size, with a freshly sized corner margin. A fullscreen toggle resizes
+                // the surface but leaves the panel's quad placed for the old one, so
+                // after toggling it can end up jammed in the corner — re-show fixes it (#3).
+                if self.overlay_shown {
+                    self.show_overlay(event_loop);
+                }
                 false
             }
             Some(_) => true, // still settling — keep ticking so it fires
             None => false,
         };
+
+        // 4e. Persist the windowed geometry once the user stops moving/resizing (#1).
+        // Debounced from the Moved/Resized handlers so a drag isn't a write storm; an
+        // explicit user action (positioning the window), never the view path.
+        if let Some(at) = self.geometry_save_at {
+            if now >= at {
+                self.geometry_save_at = None;
+                self.settings.save();
+            }
+        }
 
         // 5. Poll at the frame rate while interacting or work is outstanding; sleep to
         //    the slideshow's next-slide deadline when it's the only thing pending;
@@ -3425,6 +3629,9 @@ impl ApplicationHandler for App {
             || resizing
             || sharpen_pending
             || self.pending_delete.is_some()
+            // Keep ticking until the debounced windowed-geometry save fires (#1), so a
+            // window move/resize is persisted even when nothing else wakes the loop.
+            || self.geometry_save_at.is_some()
         {
             event_loop.set_control_flow(ControlFlow::WaitUntil(now + self.frame_interval));
         } else if slideshow_running {

@@ -612,6 +612,38 @@ fn toast_quad_vertices(
     ]
 }
 
+/// The four corners of a panel quad centered on both axes of the screen — the
+/// empty-state message placement.
+fn center_quad_vertices(panel_w: u32, panel_h: u32, screen_w: u32, screen_h: u32) -> [Vertex; 4] {
+    let (sw, sh) = (screen_w as f32, screen_h as f32);
+    let x0 = ((sw - panel_w as f32) * 0.5).max(0.0);
+    let y0 = ((sh - panel_h as f32) * 0.5).max(0.0);
+    let x1 = x0 + panel_w as f32;
+    let y1 = y0 + panel_h as f32;
+    let x0n = (x0 / sw) * 2.0 - 1.0;
+    let x1n = (x1 / sw) * 2.0 - 1.0;
+    let y_top = 1.0 - (y0 / sh) * 2.0;
+    let y_bot = 1.0 - (y1 / sh) * 2.0;
+    [
+        Vertex {
+            pos: [x0n, y_top],
+            uv: [0.0, 0.0],
+        },
+        Vertex {
+            pos: [x1n, y_top],
+            uv: [1.0, 0.0],
+        },
+        Vertex {
+            pos: [x1n, y_bot],
+            uv: [1.0, 1.0],
+        },
+        Vertex {
+            pos: [x0n, y_bot],
+            uv: [0.0, 1.0],
+        },
+    ]
+}
+
 /// The four corners of the top-right pie quad: `panel_w`×`panel_h` px, placed
 /// `margin` px in from the top and right edges (the "loading" affordance corner).
 fn top_right_quad_vertices(
@@ -821,6 +853,25 @@ fn draw_scene(
     rp.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
 }
 
+/// Clear-only scene pass: fill the intermediate with `clear` (the letterbox
+/// background) and draw nothing. Used for the blank, image-free state.
+fn clear_scene(encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, clear: wgpu::Color) {
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("scene-blank"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(clear),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    });
+}
+
 /// Tone-map pass: fullscreen-sample the intermediate into `view` (the surface).
 fn draw_tonemap(
     encoder: &mut wgpu::CommandEncoder,
@@ -940,6 +991,10 @@ pub struct WgpuRenderer {
     /// The top-right "loading" pie, shown while the next photo isn't ready yet
     /// (its own overlay layer, composited above the photo + panels).
     pie: Option<OverlayDraw>,
+    /// A centered, persistent message panel — the empty-state "Press O to open…"
+    /// hint shown over the blank background. Its own layer; cleared the moment a
+    /// photo is shown (`set_image` / `present_slot`).
+    message: Option<OverlayDraw>,
     upload: Box<dyn UploadStrategy>,
     /// Resident texture ring (Phase 3). Empty until `reserve_ring`; each `Some`
     /// slot holds a pre-uploaded photo. `present_slot` selects which one draws.
@@ -949,6 +1004,10 @@ pub struct WgpuRenderer {
     /// Background (letterbox) fill, sRGB, shown around a non-covering photo.
     /// Defaults to [`LETTERBOX`]; the app overrides it from user settings.
     letterbox: [u8; 3],
+    /// No image loaded (bare launch with no folder, or the last photo deleted):
+    /// draw just the letterbox background, no photo quad. Cleared by `set_image` /
+    /// `present_slot`, set by `clear_image`.
+    blank: bool,
 }
 
 impl WgpuRenderer {
@@ -1102,6 +1161,8 @@ impl WgpuRenderer {
             ring: Vec::new(),
             present_idx: None,
             letterbox: [LETTERBOX[0], LETTERBOX[1], LETTERBOX[2]],
+            blank: false,
+            message: None,
         }
     }
 
@@ -1241,6 +1302,49 @@ impl WgpuRenderer {
             None => None,
         };
     }
+
+    /// Set or clear the centered message panel (the empty-state "Press O to open…"
+    /// hint). Its own overlay layer, centered on both axes; persists until a photo is
+    /// shown (`set_image` / `present_slot` clear it).
+    pub fn set_message(&mut self, panel: Option<(&[u8], u32, u32)>) {
+        self.message = match panel {
+            Some((rgba, w, h)) => {
+                let scale = self.scene_scale(false);
+                let bind_group = upload_image(
+                    &self.device,
+                    &self.queue,
+                    &self.bgl,
+                    self.upload.as_mut(),
+                    rgba,
+                    w,
+                    h,
+                    &ColorTransform::srgb(),
+                    false,
+                    scale,
+                );
+                let vbuf = self
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("message-vbuf"),
+                        contents: bytemuck::cast_slice(&center_quad_vertices(
+                            w,
+                            h,
+                            self.config.width,
+                            self.config.height,
+                        )),
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    });
+                Some(OverlayDraw {
+                    bind_group,
+                    vbuf,
+                    panel_w: w,
+                    panel_h: h,
+                    margin: 0,
+                })
+            }
+            None => None,
+        };
+    }
 }
 
 impl Renderer for WgpuRenderer {
@@ -1300,6 +1404,20 @@ impl Renderer for WgpuRenderer {
                 )),
             );
         }
+        if let Some(m) = &self.message {
+            self.queue.write_buffer(
+                &m.vbuf,
+                0,
+                bytemuck::cast_slice(&center_quad_vertices(m.panel_w, m.panel_h, width, height)),
+            );
+        }
+    }
+
+    fn clear_image(&mut self) {
+        // Show the letterbox background only; the kept bind group/ring is simply not
+        // drawn until the next set_image / present_slot (see `render`).
+        self.blank = true;
+        self.present_idx = None;
     }
 
     fn set_image(
@@ -1324,6 +1442,8 @@ impl Renderer for WgpuRenderer {
             hdr,
             scale,
         );
+        self.blank = false; // an image is showing again
+        self.message = None; // hide the empty-state hint
         self.set_present_peak(peak);
         // Revert to the single-image path; a later present_slot re-selects a slot.
         self.present_idx = None;
@@ -1452,6 +1572,8 @@ impl Renderer for WgpuRenderer {
         else {
             return; // unknown / not-yet-uploaded slot: keep the current frame
         };
+        self.blank = false; // a photo is showing again
+        self.message = None; // hide the empty-state hint
         self.set_present_peak(peak);
         self.present_idx = Some(slot);
         self.img_w = w;
@@ -1492,25 +1614,34 @@ impl Renderer for WgpuRenderer {
             });
         // Pass 1: scene → fp16 intermediate. The selected resident-ring slot if one
         // is presented, else the single image — a keypress rebinds via `present_idx`,
-        // no upload here.
-        let bind_group = match self.present_idx {
-            Some(i) => self
-                .ring
-                .get(i)
-                .and_then(|s| s.as_ref())
-                .map(|s| &s.bind_group)
-                .unwrap_or(&self.bind_group),
-            None => &self.bind_group,
-        };
-        draw_scene(
-            &mut encoder,
-            &intermediate_view,
-            &self.scene_pipeline,
-            bind_group,
-            &self.vbuf,
-            &self.ibuf,
-            letterbox_linear(self.letterbox),
-        );
+        // no upload here. When blank (no image loaded), clear to the letterbox
+        // background and draw no photo quad — a plain, image-free screen.
+        if self.blank {
+            clear_scene(
+                &mut encoder,
+                &intermediate_view,
+                letterbox_linear(self.letterbox),
+            );
+        } else {
+            let bind_group = match self.present_idx {
+                Some(i) => self
+                    .ring
+                    .get(i)
+                    .and_then(|s| s.as_ref())
+                    .map(|s| &s.bind_group)
+                    .unwrap_or(&self.bind_group),
+                None => &self.bind_group,
+            };
+            draw_scene(
+                &mut encoder,
+                &intermediate_view,
+                &self.scene_pipeline,
+                bind_group,
+                &self.vbuf,
+                &self.ibuf,
+                letterbox_linear(self.letterbox),
+            );
+        }
         // Pass 2: alpha-blend the info panel into the intermediate (in linear), so
         // the single present pass below serves both the SDR and HDR output paths.
         if let Some(ov) = &self.overlay {
@@ -1577,6 +1708,29 @@ impl Renderer for WgpuRenderer {
             rp.set_pipeline(&self.overlay_pipeline);
             rp.set_bind_group(0, &p.bind_group, &[]);
             rp.set_vertex_buffer(0, p.vbuf.slice(..));
+            rp.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint16);
+            rp.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+        }
+        // Pass 2d: the centered empty-state message ("Press O to open…"), composited
+        // over the blank background.
+        if let Some(m) = &self.message {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("message"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &intermediate_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rp.set_pipeline(&self.overlay_pipeline);
+            rp.set_bind_group(0, &m.bind_group, &[]);
+            rp.set_vertex_buffer(0, m.vbuf.slice(..));
             rp.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint16);
             rp.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
         }
