@@ -3551,8 +3551,20 @@ fn open_archive(
 /// for a header-encrypted archive (else the header reads without one); a wrong /
 /// missing one surfaces as `PasswordRequired` here, routing to the prompt.
 fn seven_z_preflight(path: &Path, password: Option<&str>) -> Result<(), archive::ArchiveOpenError> {
+    seven_z_preflight_within(path, password, archive::ram_budget())
+}
+
+/// The pre-flight comparison against an explicit `budget`, split out from
+/// [`seven_z_preflight`] so tests can drive the over-budget refusal path
+/// *deterministically* with an injected ceiling — rather than racing on the
+/// process-global `PB_ARCHIVE_RAM_BUDGET` env var (Rust runs tests in parallel
+/// threads, so mutating the environment from one test corrupts the others).
+fn seven_z_preflight_within(
+    path: &Path,
+    password: Option<&str>,
+    budget: u64,
+) -> Result<(), archive::ArchiveOpenError> {
     let needed = seven_z_projected_bytes(path, password, is_supported_extension)?;
-    let budget = archive::ram_budget();
     if needed > budget {
         return Err(archive::ArchiveOpenError::TooLarge { needed, budget });
     }
@@ -3975,6 +3987,54 @@ mod tests {
             before, after,
             "viewing a 7z must create or modify no files (no extraction to disk)"
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// An over-budget 7z must be refused with a *structured* [`ArchiveOpenError::TooLarge`],
+    /// never a (uncatchable) allocation abort. A real allocation failure can't be
+    /// safely injected, and the `PB_ARCHIVE_RAM_BUDGET` env var races parallel tests —
+    /// so we drive the refusal deterministically by pre-flighting a real archive
+    /// against an injected 1-byte budget ([`seven_z_preflight_within`]). The same
+    /// archive must pass under a generous budget, proving the budget is the only gate.
+    #[test]
+    fn over_budget_7z_is_refused_with_structured_error() {
+        use sevenz_rust2::{ArchiveEntry, ArchiveWriter};
+
+        let dir = std::env::temp_dir().join(format!("pb_7z_budget_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("mkdir sandbox");
+        const IMG: &[u8] = include_bytes!("../icons/photoblaze.png");
+        let z_path = dir.join("album.7z");
+        {
+            let mut sz = ArchiveWriter::create(&z_path).expect("create 7z");
+            sz.push_archive_entry(ArchiveEntry::new_file("a.png"), Some(IMG))
+                .expect("push entry");
+            sz.finish().expect("finish 7z");
+        }
+
+        // The projection is the resident decompressed image bytes the eager open
+        // would hold — at least the one image we put in.
+        let needed =
+            seven_z_projected_bytes(&z_path, None, is_supported_extension).expect("project");
+        assert!(
+            needed >= IMG.len() as u64,
+            "projection ({needed}) covers the image ({})",
+            IMG.len()
+        );
+
+        // A 1-byte budget is below the projection -> instant, structured refusal
+        // (not a load attempt, not an abort).
+        match seven_z_preflight_within(&z_path, None, 1) {
+            Err(archive::ArchiveOpenError::TooLarge { needed: n, budget }) => {
+                assert_eq!(budget, 1);
+                assert_eq!(n, needed);
+            }
+            other => panic!("expected TooLarge, got {other:?}"),
+        }
+
+        // The same archive fits under a generous budget: the pre-flight is the only gate.
+        seven_z_preflight_within(&z_path, None, u64::MAX).expect("fits under a huge budget");
 
         let _ = fs::remove_dir_all(&dir);
     }

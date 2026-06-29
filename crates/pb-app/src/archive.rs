@@ -11,18 +11,32 @@
 //! The budget is a *fraction* of the machine's currently-available physical RAM
 //! (queried at open time, never a hardcoded number), minus what PhotoBlaze already
 //! reserves and a margin for transient copies. `PB_ARCHIVE_RAM_BUDGET` overrides it
-//! (for testing the refusal path on a big-RAM box, and for power users). The
-//! fraction/margin are starting guesses to be tuned by measurement (Task 30 #5).
+//! (for testing the refusal path on a big-RAM box, and for power users).
+//!
+//! Measured (Task 30 #5, `cargo run --release -p pb-source --example archive_probe`)
+//! on solid-LZMA2 photo archives (already-compressed JPEGs — the pathological case):
+//! the projection predicts real RAM closely (process peak working set was 1.02–1.26x
+//! the resident projection), the eager-open transient stayed ~60–200 MB *regardless
+//! of archive size* (a fixed decoder cost, not proportional — the 3.3 GB archive
+//! actually overshot less than the 0.7 GB one), and decompression ran ~1 GB/s (so a
+//! multi-GB open takes seconds, which is why it runs async, off the event loop). The
+//! fraction + margin below are set conservatively from that data.
 
-/// Fraction of available physical RAM an eager archive's *resident* bytes may use.
-/// Conservative: transient copies (the per-decode `bytes()` clone, decode-pool RGBA
-/// outputs, pending uploads, the GPU ring) ride on top of the resident projection.
+/// Fraction of *available* physical RAM an eager archive's resident bytes may use,
+/// leaving the rest for the OS and other apps. The pre-flight projection is a close
+/// predictor of real RAM (measured peak/resident 1.02–1.26x), so the gate is
+/// trustworthy; 0.6 keeps a comfortable margin against that small overshoot plus the
+/// transient copies (the per-decode `bytes()` clone, decode-pool RGBA, the GPU ring)
+/// that ride on top of the resident projection.
 const BUDGET_FRACTION: f64 = 0.6;
 /// What PhotoBlaze itself already reserves, subtracted from the archive budget:
 /// the GPU texture ring (~1.5 GB) + the decode pool (512 MB). Mirrors
 /// `RING_BUDGET_BYTES` + `POOL_BUDGET_BYTES` in `main.rs`.
 const APP_RESERVATIONS: u64 = 1_500_000_000 + 512 * 1024 * 1024;
-/// Headroom for transient decode-time copies not counted in the resident projection.
+/// Headroom for transient copies not counted in the resident projection: the eager
+/// open's own decoder scratch (measured 60–200 MB, flat across archive size) plus the
+/// live-viewing per-decode `bytes()` clones (decode concurrency × the largest entry).
+/// 512 MB comfortably covers the measured overhead.
 const TRANSIENT_MARGIN: u64 = 512 * 1024 * 1024;
 /// Fallback when physical RAM can't be queried (non-Windows, or the query fails).
 const ASSUMED_RAM: u64 = 8 * 1024 * 1024 * 1024;

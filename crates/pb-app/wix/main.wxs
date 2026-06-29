@@ -3,8 +3,9 @@
   PhotoBlaze MSI installer (WiX v3, built via cargo-wix).
 
   Registers PhotoBlaze as an "Open with" *candidate* (a ProgId + per-extension
-  OpenWithProgids) for the common raster formats, plus a folder right-click verb
-  ("Open with PhotoBlaze") that browses recursively. It deliberately does NOT
+  OpenWithProgids) for the common raster formats and the .zip/.7z archives it can
+  browse, plus a folder right-click verb ("Open with PhotoBlaze") that browses
+  recursively. It deliberately does NOT
   seize any default file association — Windows 10/11 forbid that (the SID-salted
   UserChoice hash); the user confirms the default via the Open-with dialog or
   Settings. See decisions.md ADR-018.
@@ -91,6 +92,27 @@
                         <RegistryValue Root='HKCR' Key='.jxl\OpenWithProgids'  Name='PhotoBlaze.Image' Value='' Type='string'/>
                     </Component>
 
+                    <!-- Archive ProgId: PhotoBlaze.Archive. Opening a .zip/.7z
+                         browses the images inside it like a folder (the app reads
+                         entries into RAM, never extracting to disk). Separate from
+                         PhotoBlaze.Image so the file type reads "PhotoBlaze Archive". -->
+                    <Component Id='ArchiveProgId' Guid='*'>
+                        <RegistryValue Root='HKCR' Key='PhotoBlaze.Archive' Value='PhotoBlaze Archive' Type='string' KeyPath='yes'/>
+                        <RegistryValue Root='HKCR' Key='PhotoBlaze.Archive' Name='FriendlyTypeName' Value='PhotoBlaze Archive' Type='string'/>
+                        <RegistryValue Root='HKCR' Key='PhotoBlaze.Archive\DefaultIcon' Value='"[Bin]photoblaze.exe",0' Type='string'/>
+                        <RegistryValue Root='HKCR' Key='PhotoBlaze.Archive\shell\open\command' Value='"[Bin]photoblaze.exe" "%1"' Type='string'/>
+                    </Component>
+
+                    <!-- Candidate associations for archives: add PhotoBlaze.Archive
+                         to .zip/.7z OpenWithProgids. Like the image set, this only
+                         makes PhotoBlaze an "Open with" candidate — it does NOT seize
+                         the default handler (.zip stays Compressed Folders; .7z stays
+                         whatever the user has installed). -->
+                    <Component Id='ArchiveAssociations' Guid='*'>
+                        <RegistryValue Root='HKCR' Key='.zip\OpenWithProgids' Name='PhotoBlaze.Archive' Value='' Type='string' KeyPath='yes'/>
+                        <RegistryValue Root='HKCR' Key='.7z\OpenWithProgids'  Name='PhotoBlaze.Archive' Value='' Type='string'/>
+                    </Component>
+
                     <!-- Folder verb: right-click a folder (or its background) ->
                          "Open with PhotoBlaze". Opening a folder browses it
                          recursively (the app's default). %V is the folder path. -->
@@ -134,6 +156,8 @@
             <ComponentRef Id='binary0'/>
             <ComponentRef Id='ProgId'/>
             <ComponentRef Id='Associations'/>
+            <ComponentRef Id='ArchiveProgId'/>
+            <ComponentRef Id='ArchiveAssociations'/>
             <ComponentRef Id='FolderVerb'/>
             <ComponentRef Id='StartMenuShortcut'/>
         </Feature>
