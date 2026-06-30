@@ -616,6 +616,10 @@ struct App {
     decode_ewma: f32,
     pie_drawn: bool,
     pie_pushed: Option<(f32, f32, f32)>,
+    /// The text currently shown in the top-right scan-count chip ("12 / 1234…"), or `None`
+    /// when the chip is hidden. Cached so it's only re-rasterized when the count changes
+    /// (off the photo hot path), mirroring the pie/toast.
+    chip_text: Option<String>,
     /// Items whose resident ring slot holds a fast *preview* (e.g. a HEIC
     /// thumbnail) rather than the full decode. While idle these are upgraded
     /// ("sharpened") to full in priority order. Pruned to resident in `request_prefetch`.
@@ -823,6 +827,7 @@ impl App {
             decode_ewma: 0.25,
             pie_drawn: false,
             pie_pushed: None,
+            chip_text: None,
             preview_resident: HashSet::new(),
             upgrade_done: HashSet::new(),
             last_upgrade_set: Vec::new(),
@@ -3661,6 +3666,60 @@ impl App {
         }
     }
 
+    /// The ambient scan-count chip: while a folder scan is streaming in (and the first photo
+    /// is up), show "<pos> / <total>…" in the top-right, just below the pie — the growing
+    /// total *is* the progress (Codex P3: the denominator is the **browsable** count,
+    /// `source.len()`, not the worker's look-ahead `found`). Rebuilt only when the text
+    /// changes (off the photo hot path, like the pie/toast); cleared when the scan ends.
+    fn tick_chip(&mut self, event_loop: &ActiveEventLoop) {
+        let want = match (self.dir_scan.as_ref(), self.displayed_item) {
+            (Some(scan), Some(idx)) if scan.bootstrapped => {
+                Some(format!("{} / {}\u{2026}", idx + 1, self.source.len()))
+            }
+            _ => None,
+        };
+        if want == self.chip_text {
+            return;
+        }
+        match &want {
+            Some(text) => self.push_chip(text, event_loop),
+            None => self.clear_chip(event_loop),
+        }
+        self.chip_text = want;
+    }
+
+    /// Rasterize the chip pill and place it below the pie (right edge aligned with the pie).
+    fn push_chip(&mut self, text: &str, event_loop: &ActiveEventLoop) {
+        let Some((rgba, w, h)) = self.hud.as_ref().and_then(|hud| {
+            let px = (16.0 * self.scale_factor).max(10.0);
+            let pad = (7.0 * self.scale_factor).round().max(2.0) as u32;
+            hud.render_panel(text, px, pad, hud::BG)
+        }) else {
+            return;
+        };
+        // Right edge aligns with the pie (same inset); top sits below the pie's reserved
+        // area (pie inset + diameter + a gap), held stable whether or not the pie is visible.
+        let right_margin = (PIE_MARGIN * self.scale_factor).round().max(4.0) as u32;
+        let pie_d = (PIE_DIAMETER * self.scale_factor).round().max(12.0) as u32;
+        let gap = (8.0 * self.scale_factor).round().max(2.0) as u32;
+        let top_margin = right_margin + pie_d + gap;
+        if let Some(a) = self.active.as_mut() {
+            a.renderer
+                .set_chip(Some((&rgba, w, h)), right_margin, top_margin);
+        }
+        self.draw(event_loop);
+    }
+
+    /// Clear the chip layer if it's up (and redraw to remove it).
+    fn clear_chip(&mut self, event_loop: &ActiveEventLoop) {
+        if self.chip_text.is_some() {
+            if let Some(a) = self.active.as_mut() {
+                a.renderer.set_chip(None, 0, 0);
+            }
+            self.draw(event_loop);
+        }
+    }
+
     /// Render one frame.
     fn draw(&mut self, event_loop: &ActiveEventLoop) {
         let t0 = Instant::now();
@@ -4570,6 +4629,9 @@ impl ApplicationHandler for App {
         // 4c. The "not-ready" loading pie: shown while the next photo is still
         // decoding (a miss that outlasts the show-delay), fading out once it lands.
         let pie_active = self.tick_pie(now, event_loop);
+
+        // 4c′. The ambient scan-count chip (below the pie) while a folder scan streams in.
+        self.tick_chip(event_loop);
 
         // 4d. Once a resize/toggle has settled, run the deferred decode-to-fit:
         // rebuild the ring at the new slot size, re-show the current photo crisp,

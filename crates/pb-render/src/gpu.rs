@@ -676,11 +676,25 @@ fn top_right_quad_vertices(
     screen_h: u32,
     margin: u32,
 ) -> [Vertex; 4] {
+    // Same inset on both axes (the pie).
+    top_right_quad_xy(panel_w, panel_h, screen_w, screen_h, margin, margin)
+}
+
+/// Top-right anchored quad with **independent** right + top insets — lets the scan-count
+/// chip align its right edge with the pie (`right_margin`) while sitting below it
+/// (`top_margin`).
+fn top_right_quad_xy(
+    panel_w: u32,
+    panel_h: u32,
+    screen_w: u32,
+    screen_h: u32,
+    right_margin: u32,
+    top_margin: u32,
+) -> [Vertex; 4] {
     let (sw, sh) = (screen_w as f32, screen_h as f32);
-    let m = margin as f32;
-    let x1 = sw - m;
+    let x1 = sw - right_margin as f32;
     let x0 = x1 - panel_w as f32;
-    let y0 = m;
+    let y0 = top_margin as f32;
     let y1 = y0 + panel_h as f32;
     let x0n = (x0 / sw) * 2.0 - 1.0;
     let x1n = (x1 / sw) * 2.0 - 1.0;
@@ -963,6 +977,10 @@ struct OverlayDraw {
     panel_w: u32,
     panel_h: u32,
     margin: u32,
+    /// Secondary inset, used only by the top-right **chip** (the scan count): `margin` is
+    /// its right inset, `margin_top` its top inset (so it can sit *below* the pie). `0` and
+    /// ignored for every other layer.
+    margin_top: u32,
 }
 
 /// One resident ring slot: a pre-uploaded image texture reused across photos, so
@@ -1022,6 +1040,9 @@ pub struct WgpuRenderer {
     /// The top-right "loading" pie, shown while the next photo isn't ready yet
     /// (its own overlay layer, composited above the photo + panels).
     pie: Option<OverlayDraw>,
+    /// The top-right scan-count chip ("12 / 1234…"), shown while a folder scan streams in,
+    /// sitting just below the pie. Its own layer; cleared when the scan ends.
+    chip: Option<OverlayDraw>,
     /// A centered, persistent message panel — the empty-state "Press O to open…"
     /// hint shown over the blank background. Its own layer; cleared the moment a
     /// photo is shown (`set_image` / `present_slot`).
@@ -1196,6 +1217,7 @@ impl WgpuRenderer {
             overlay: None,
             toast: None,
             pie: None,
+            chip: None,
             upload,
             ring: Vec::new(),
             present_idx: None,
@@ -1323,6 +1345,7 @@ impl WgpuRenderer {
                     panel_w: w,
                     panel_h: h,
                     margin: bottom_margin,
+                    margin_top: 0,
                 })
             }
             None => None,
@@ -1368,6 +1391,59 @@ impl WgpuRenderer {
                     panel_w: w,
                     panel_h: h,
                     margin,
+                    margin_top: 0,
+                })
+            }
+            None => None,
+        };
+    }
+
+    /// Set or clear the top-right **scan-count chip** ("12 / 1234…"). `right_margin` aligns
+    /// its right edge with the pie; `top_margin` is its top inset (the app passes
+    /// pie-bottom + gap, so the chip sits just below the pie). Its own overlay layer, drawn
+    /// like the pie.
+    pub fn set_chip(
+        &mut self,
+        panel: Option<(&[u8], u32, u32)>,
+        right_margin: u32,
+        top_margin: u32,
+    ) {
+        self.chip = match panel {
+            Some((rgba, w, h)) => {
+                let scale = self.scene_scale(false);
+                let bind_group = upload_image(
+                    &self.device,
+                    &self.queue,
+                    &self.bgl,
+                    self.upload.as_mut(),
+                    rgba,
+                    w,
+                    h,
+                    &ColorTransform::srgb(),
+                    false,
+                    scale,
+                );
+                let vbuf = self
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("chip-vbuf"),
+                        contents: bytemuck::cast_slice(&top_right_quad_xy(
+                            w,
+                            h,
+                            self.config.width,
+                            self.config.height,
+                            right_margin,
+                            top_margin,
+                        )),
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    });
+                Some(OverlayDraw {
+                    bind_group,
+                    vbuf,
+                    panel_w: w,
+                    panel_h: h,
+                    margin: right_margin,
+                    margin_top: top_margin,
                 })
             }
             None => None,
@@ -1411,6 +1487,7 @@ impl WgpuRenderer {
                     panel_w: w,
                     panel_h: h,
                     margin: 0,
+                    margin_top: 0,
                 })
             }
             None => None,
@@ -1472,6 +1549,20 @@ impl Renderer for WgpuRenderer {
                 0,
                 bytemuck::cast_slice(&top_right_quad_vertices(
                     p.panel_w, p.panel_h, width, height, p.margin,
+                )),
+            );
+        }
+        if let Some(c) = &self.chip {
+            self.queue.write_buffer(
+                &c.vbuf,
+                0,
+                bytemuck::cast_slice(&top_right_quad_xy(
+                    c.panel_w,
+                    c.panel_h,
+                    width,
+                    height,
+                    c.margin,
+                    c.margin_top,
                 )),
             );
         }
@@ -1586,6 +1677,7 @@ impl Renderer for WgpuRenderer {
                     panel_w: w,
                     panel_h: h,
                     margin,
+                    margin_top: 0,
                 })
             }
             None => None,
@@ -1779,6 +1871,28 @@ impl Renderer for WgpuRenderer {
             rp.set_pipeline(&self.overlay_pipeline);
             rp.set_bind_group(0, &p.bind_group, &[]);
             rp.set_vertex_buffer(0, p.vbuf.slice(..));
+            rp.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint16);
+            rp.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+        }
+        // Pass 2c′: the top-right scan-count chip, just below the pie.
+        if let Some(c) = &self.chip {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("chip"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &intermediate_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rp.set_pipeline(&self.overlay_pipeline);
+            rp.set_bind_group(0, &c.bind_group, &[]);
+            rp.set_vertex_buffer(0, c.vbuf.slice(..));
             rp.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint16);
             rp.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
         }
