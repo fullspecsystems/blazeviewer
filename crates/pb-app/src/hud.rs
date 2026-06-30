@@ -12,10 +12,81 @@
 
 use std::path::PathBuf;
 
-/// Default panel background: translucent black (≈60%). Toasts and the help overlay
-/// use this directly; the info / EXIF panels take a user-configurable alpha via
-/// [`bg_for_opacity`].
-pub const BG: [u8; 4] = [0, 0, 0, 153];
+/// **HUD design tokens** — the single source of truth for the proportions, colors, and
+/// rhythm every on-image overlay shares (the CPU-compositor analogue of `pb_ui`'s
+/// `SPACE_*` / `RADIUS_*` / `Palette`). Sizes are **fractions of a context's base text
+/// height `px`**, so one knob scales a whole component and everything stays crisp across
+/// DPI. Re-express any new overlay in these rather than reaching for a fresh magic number,
+/// so cards / toasts / panels can't drift apart.
+pub mod tokens {
+    // ── Color roles ─────────────────────────────────────────────────────────────────
+    /// Default panel background: translucent black (≈60%). Toasts and the help overlay use
+    /// this directly; the info / EXIF panels take a user-configurable alpha via
+    /// [`super::bg_for_opacity`].
+    pub const BG: [u8; 4] = [0, 0, 0, 153];
+    /// All overlay text is white; the label column is distinguished by weight (semibold)
+    /// rather than color, which reads far better over busy photos than a dim gray.
+    /// Legibility comes from the per-glyph outline ([`SHADOW`]).
+    pub const TEXT: [u8; 3] = [255, 255, 255];
+    /// A dimmer white for secondary lines on a *card* (e.g. the scan card's count line).
+    /// Only used where there's a panel background behind it — over a bare photo we still
+    /// distinguish by weight, not color (see the note above).
+    pub const TEXT_DIM: [u8; 3] = [188, 191, 198];
+    /// Text/icon outline color — the soft black halo that keeps white glyphs legible over
+    /// bright photos — and its peak alpha.
+    pub const SHADOW: [u8; 3] = [0, 0, 0];
+    pub const SHADOW_ALPHA: f32 = 0.65;
+
+    // ── Proportions (fractions of the base text height `px`) ─────────────────────────
+    /// Outline/halo thickness for text and icons.
+    pub const OUTLINE: f32 = 0.06;
+    /// Corner radius of a pill / panel (info pill, toast, EXIF table, hint).
+    pub const RADIUS_PANEL: f32 = 0.5;
+    /// Corner radius of the scan status card.
+    pub const RADIUS_CARD: f32 = 0.6;
+
+    // ── Pill / toast leading icon ────────────────────────────────────────────────────
+    /// Height of a toast's leading icon, relative to the text.
+    pub const PILL_ICON: f32 = 0.92;
+    /// Gap between a toast's leading icon and its text (floored at 3px).
+    pub const PILL_ICON_GAP: f32 = 0.40;
+
+    // ── Two-column table (info / EXIF / help) ────────────────────────────────────────
+    /// Gap between the label and value columns (floored at 6px).
+    pub const TABLE_COL_GAP: f32 = 0.7;
+
+    // ── Scan status card ─────────────────────────────────────────────────────────────
+    /// Secondary (dim) line size — the path + count lines — relative to the heading.
+    pub const CARD_SUB: f32 = 0.82;
+    /// Card inner padding (floored at 6px).
+    pub const CARD_PAD: f32 = 0.85;
+    /// Vertical gap between the card's text lines.
+    pub const CARD_GAP_LINES: f32 = 0.14;
+    /// Vertical gap between the last text line and the button (floored at 4px).
+    pub const CARD_GAP_BUTTON: f32 = 0.6;
+
+    // ── Button (fractions of the *button's own* text px) ─────────────────────────────
+    /// Button inner padding (floored at 3px).
+    pub const BUTTON_PAD: f32 = 0.6;
+    /// Button icon height (floored at 1px).
+    pub const BUTTON_ICON: f32 = 0.95;
+    /// Gap between the button's icon and label (floored at 2px).
+    pub const BUTTON_ICON_GAP: f32 = 0.38;
+    /// Button corner radius.
+    pub const BUTTON_RADIUS: f32 = 0.45;
+    /// Button border thickness (floored at 1px).
+    pub const BUTTON_BORDER: f32 = 0.1;
+    /// Button background fill alpha (a barely-there wash).
+    pub const BUTTON_FILL_ALPHA: f32 = 0.07;
+    /// Button border alpha — genuinely 50% so the photo shows through. Drawn with
+    /// `set_toward` (sets, not composites-over), or it would read near-solid over the card.
+    pub const BUTTON_BORDER_ALPHA: f32 = 0.5;
+}
+
+use tokens::{SHADOW, SHADOW_ALPHA, TEXT, TEXT_DIM};
+
+/// Re-exported at the HUD root so existing `hud::BG` call sites keep resolving.
+pub use tokens::BG;
 
 /// A panel background at `opacity_pct` (0–100) percent — black at the given alpha.
 /// Drives the "info panel opacity" setting for the info / EXIF panels.
@@ -23,17 +94,6 @@ pub fn bg_for_opacity(opacity_pct: u8) -> [u8; 4] {
     let a = ((opacity_pct.min(100) as f32 / 100.0) * 255.0).round() as u8;
     [0, 0, 0, a]
 }
-/// All overlay text is white; the label column is distinguished by weight
-/// (semibold) rather than color, which reads far better over busy photos than a
-/// dim gray. Legibility comes from the per-glyph outline (`SHADOW`).
-const TEXT: [u8; 3] = [255, 255, 255];
-/// A dimmer white for secondary lines on a *card* (e.g. the scan card's "N images found"
-/// under the heading). Only used where there's a panel background behind it — over a bare
-/// photo we still distinguish by weight, not color (see the note above).
-const TEXT_DIM: [u8; 3] = [188, 191, 198];
-/// Text outline/shadow color and its peak alpha (a soft black halo).
-const SHADOW: [u8; 3] = [0, 0, 0];
-const SHADOW_ALPHA: f32 = 0.65;
 
 /// A row of the table layout ([`Hud::render_table`]).
 pub enum Row {
@@ -87,6 +147,22 @@ pub struct Hud {
 
 /// One laid-out glyph: its metrics, coverage bitmap, and pen x-offset on the line.
 type Glyph = (fontdue::Metrics, Vec<u8>, f32);
+
+/// A laid-out button (from [`Hud::layout_button`]): everything [`Hud::button_size`] and
+/// [`Hud::draw_button`] need, computed once so measure and draw agree exactly.
+struct ButtonLayout {
+    /// The label's glyphs (regular weight).
+    glyphs: Vec<Glyph>,
+    /// The rasterized leading icon, if any: `(rgba, w, h)`.
+    icon: Option<(Vec<u8>, u32, u32)>,
+    /// Gap between the icon and the label (0 when there's no icon).
+    icon_gap: i32,
+    /// Inner padding on every side.
+    pad: i32,
+    /// Total button width / height in px.
+    w: i32,
+    h: i32,
+}
 
 impl Hud {
     /// Load the system UI font (and its semibold/bold faces if present). Returns
@@ -172,7 +248,7 @@ impl Hud {
         bg: [u8; 4],
     ) -> Option<(Vec<u8>, u32, u32)> {
         let line_h = self.line_height(px)?;
-        let icon_h = (px * 0.92).round().max(1.0) as u32;
+        let icon_h = (px * tokens::PILL_ICON).round().max(1.0) as u32;
         let rasterized = icon.and_then(|svg| crate::icon::rasterize(svg, icon_h, TEXT));
 
         // Icon-only pill (empty message): a perfectly square rounded rect with the
@@ -181,7 +257,7 @@ impl Hud {
         if text.is_empty() {
             let (rgba, iw, ih) = rasterized.as_ref()?;
             let side = line_h + 2 * pad;
-            let mut canvas = Canvas::new(side, side, bg, (px * 0.5).round());
+            let mut canvas = Canvas::new(side, side, bg, (px * tokens::RADIUS_PANEL).round());
             let ix = (side as i32 - *iw as i32) / 2;
             let iy = (side as i32 - *ih as i32) / 2;
             self.draw_icon(&mut canvas, rgba, *iw, *ih, ix, iy, px);
@@ -190,14 +266,14 @@ impl Hud {
 
         let (glyphs, advance) = self.layout(text, px, Weight::Regular);
         let (icon_w, gap) = match &rasterized {
-            Some((_, w, _)) => (*w, (px * 0.40).round().max(3.0) as u32),
+            Some((_, w, _)) => (*w, (px * tokens::PILL_ICON_GAP).round().max(3.0) as u32),
             None => (0, 0),
         };
 
         let text_x = pad + icon_w + gap;
         let pw = text_x + advance.ceil() as u32 + pad;
         let ph = line_h + 2 * pad;
-        let mut canvas = Canvas::new(pw, ph, bg, (px * 0.5).round());
+        let mut canvas = Canvas::new(pw, ph, bg, (px * tokens::RADIUS_PANEL).round());
 
         if let Some((rgba, iw, ih)) = &rasterized {
             // Vertically center the icon on the text line.
@@ -225,7 +301,7 @@ impl Hud {
         let line_h = self.line_height(px)?;
         let ascent = self.ascent(px)?;
         // Gap between the label column and the value column.
-        let col_gap = (px * 0.7).round().max(6.0);
+        let col_gap = (px * tokens::TABLE_COL_GAP).round().max(6.0);
 
         // Lay every row out once, measuring column widths as we go. Labels are
         // semibold, values regular, spans bold (filename) or regular (path).
@@ -260,7 +336,7 @@ impl Hud {
         let content_w = (value_x - pad as f32 + value_w).max(span_w);
         let pw = content_w.ceil() as u32 + 2 * pad;
         let ph = rows.len() as u32 * line_h + 2 * pad;
-        let mut canvas = Canvas::new(pw, ph, bg, (px * 0.5).round());
+        let mut canvas = Canvas::new(pw, ph, bg, (px * tokens::RADIUS_PANEL).round());
 
         for (i, item) in laid.iter().enumerate() {
             let row_top = pad as f32 + i as f32 * line_h as f32;
@@ -302,7 +378,7 @@ impl Hud {
         let content_w = laid.iter().map(|(_, adv)| *adv).fold(0.0f32, f32::max);
         let pw = content_w.ceil() as u32 + 2 * pad;
         let ph = lines.len() as u32 * line_h + 2 * pad;
-        let mut canvas = Canvas::new(pw, ph, bg, (px * 0.5).round());
+        let mut canvas = Canvas::new(pw, ph, bg, (px * tokens::RADIUS_PANEL).round());
         for (i, (glyphs, adv)) in laid.iter().enumerate() {
             let baseline = pad as f32 + i as f32 * line_h as f32 + ascent;
             // Center this line within the content box.
@@ -332,11 +408,11 @@ impl Hud {
         width: u32,
         bg: [u8; 4],
     ) -> Option<(Vec<u8>, u32, u32, [u32; 4])> {
-        let px_sub = (px * 0.82).max(1.0);
-        let pad = (px * 0.85).round().max(6.0) as i32;
+        let px_sub = (px * tokens::CARD_SUB).max(1.0);
+        let pad = (px * tokens::CARD_PAD).round().max(6.0) as i32;
         let cw = width.max(1) as i32;
         let avail = (cw - 2 * pad).max(1) as f32;
-        let card_r = (px * 0.6).round();
+        let card_r = (px * tokens::RADIUS_CARD).round();
 
         // Text runs, each elided to the fixed width: the heading keeps its start; the live
         // path keeps its *tail* (the leaf folder is the useful bit).
@@ -346,26 +422,19 @@ impl Hud {
         let path = self.fit_text(path_line, px_sub, Weight::Regular, avail, Keep::End);
         let (path_g, path_adv) = self.layout(&path, px_sub, Weight::Regular);
         let (count_g, count_adv) = self.layout(count_line, px_sub, Weight::Regular);
-        let (btn_g, btn_adv) = self.layout(button_label, px_sub, Weight::Regular);
         let head_lh = self.line_height(px)? as i32;
         let sub_lh = self.line_height(px_sub)? as i32;
         let head_asc = self.ascent(px)?;
         let sub_asc = self.ascent(px_sub)?;
 
-        // Button geometry.
-        let icon_h = (px_sub * 0.95).round().max(1.0) as u32;
-        let icon = crate::icon::rasterize(button_icon, icon_h, TEXT);
-        let (icon_w, icon_gap) = match &icon {
-            Some((_, w, _)) => (*w as i32, (px_sub * 0.38).round().max(2.0) as i32),
-            None => (0, 0),
-        };
-        let bpad = (px_sub * 0.6).round().max(3.0) as i32;
-        let bw = icon_w + icon_gap + btn_adv.ceil() as i32 + 2 * bpad;
-        let bh = sub_lh + 2 * bpad;
+        // The Cancel button is a shared HUD primitive ([`draw_button`]); measure it now so we
+        // can size the card's height and horizontally center it.
+        let (bw, bh) = self.button_size(button_label, Some(button_icon), px_sub)?;
+        let (bw, bh) = (bw as i32, bh as i32);
 
         // Vertical rhythm.
-        let gap_lines = (px * 0.14).round() as i32;
-        let gap_button = (px * 0.6).round().max(4.0) as i32;
+        let gap_lines = (px * tokens::CARD_GAP_LINES).round() as i32;
+        let gap_button = (px * tokens::CARD_GAP_BUTTON).round().max(4.0) as i32;
         let path_block = if has_path { sub_lh + gap_lines } else { 0 };
         let ch = (pad + head_lh + gap_lines + path_block + sub_lh + gap_button + bh + pad).max(1);
 
@@ -404,36 +473,97 @@ impl Hud {
         );
         y += sub_lh + gap_button;
 
-        // Centered button: faint fill + thin gray border (radius tighter than the card), then
-        // the stop icon + label.
+        // Centered button (stop icon + label, faint fill, 50%-translucent border).
         let bx = (cw - bw) / 2;
-        let by = y;
-        let btn_r = (card_r * 0.62).round();
-        canvas.fill_round_rect(bx, by, bw, bh, btn_r, TEXT, 0.07);
-        let bt = (px * 0.08).round().max(1.0) as i32;
-        canvas.stroke_round_rect(bx, by, bw, bh, btn_r, bt, TEXT, 0.5);
-        let mut cx = bx + bpad;
-        if let Some((rgba, iw, ih)) = &icon {
-            let iy = by + (bh - *ih as i32) / 2;
-            self.draw_icon(&mut canvas, rgba, *iw, *ih, cx, iy, px_sub);
-            cx += icon_w + icon_gap;
+        let button_rect =
+            self.draw_button(&mut canvas, bx, y, button_label, Some(button_icon), px_sub)?;
+        Some((canvas.into_rgba(), cw as u32, ch as u32, button_rect))
+    }
+
+    /// Measure the reusable HUD **button**: the `(w, h)` a button with `label` (plus an
+    /// optional leading `icon`) occupies at text size `px`. Pair with [`draw_button`] —
+    /// measure to *place* (e.g. the scan card centers it with this width), then draw.
+    pub fn button_size(&self, label: &str, icon: Option<&str>, px: f32) -> Option<(u32, u32)> {
+        let b = self.layout_button(label, icon, px)?;
+        Some((b.w.max(0) as u32, b.h.max(0) as u32))
+    }
+
+    /// Draw the reusable HUD **button** into `canvas` at `(x, y)` — a faint fill, a
+    /// genuinely-50%-translucent rounded border, then the optional leading icon and the
+    /// `label`, all at text size `px`. Returns its `[x, y, w, h]` rect (the click target).
+    ///
+    /// Draws **directly into the destination** canvas on purpose: the border is *set* to 50%
+    /// opacity via [`Canvas::stroke_round_rect`], so the background shows through it. Render
+    /// the button to a standalone bitmap and blit it over a card instead and that 50% border
+    /// re-composites over the card and reads ~80% — use [`render_button`] (its own canvas) for
+    /// a freestanding swatch, this for compositing onto an existing panel.
+    fn draw_button(
+        &self,
+        canvas: &mut Canvas,
+        x: i32,
+        y: i32,
+        label: &str,
+        icon: Option<&str>,
+        px: f32,
+    ) -> Option<[u32; 4]> {
+        let b = self.layout_button(label, icon, px)?;
+        let asc = self.ascent(px)?;
+        let r = (px * tokens::BUTTON_RADIUS).round();
+        canvas.fill_round_rect(x, y, b.w, b.h, r, TEXT, tokens::BUTTON_FILL_ALPHA);
+        let t = (px * tokens::BUTTON_BORDER).round().max(1.0) as i32;
+        canvas.stroke_round_rect(x, y, b.w, b.h, r, t, TEXT, tokens::BUTTON_BORDER_ALPHA);
+        let mut cx = x + b.pad;
+        if let Some((rgba, iw, ih)) = &b.icon {
+            let iy = y + (b.h - *ih as i32) / 2;
+            self.draw_icon(canvas, rgba, *iw, *ih, cx, iy, px);
+            cx += *iw as i32 + b.icon_gap;
         }
         self.draw_line(
-            &mut canvas,
+            canvas,
             cx as f32,
-            (by + bpad) as f32 + sub_asc,
-            &btn_g,
+            (y + b.pad) as f32 + asc,
+            &b.glyphs,
             TEXT,
-            px_sub,
+            px,
         );
+        Some([
+            x.max(0) as u32,
+            y.max(0) as u32,
+            b.w.max(0) as u32,
+            b.h.max(0) as u32,
+        ])
+    }
 
-        let button_rect = [
-            bx.max(0) as u32,
-            by.max(0) as u32,
-            bw.max(0) as u32,
-            bh.max(0) as u32,
-        ];
-        Some((canvas.into_rgba(), cw as u32, ch as u32, button_rect))
+    /// Lay out a button once — its label glyphs, rasterized icon, paddings, and resulting
+    /// `(w, h)` — shared by [`button_size`] and [`draw_button`] so measure and draw can never
+    /// disagree. All sizing flows from the button's own text height `px` via the `BUTTON_*`
+    /// [`tokens`], so a button is self-contained: the same call reads identically on a card,
+    /// in a toast, or as a gallery swatch.
+    fn layout_button(&self, label: &str, icon: Option<&str>, px: f32) -> Option<ButtonLayout> {
+        let (glyphs, label_adv) = self.layout(label, px, Weight::Regular);
+        let line_h = self.line_height(px)? as i32;
+        let pad = (px * tokens::BUTTON_PAD).round().max(3.0) as i32;
+        let icon = icon.and_then(|svg| {
+            let h = (px * tokens::BUTTON_ICON).round().max(1.0) as u32;
+            crate::icon::rasterize(svg, h, TEXT)
+        });
+        let (icon_w, icon_gap) = match &icon {
+            Some((_, w, _)) => (
+                *w as i32,
+                (px * tokens::BUTTON_ICON_GAP).round().max(2.0) as i32,
+            ),
+            None => (0, 0),
+        };
+        let w = icon_w + icon_gap + label_adv.ceil() as i32 + 2 * pad;
+        let h = line_h + 2 * pad;
+        Some(ButtonLayout {
+            glyphs,
+            icon,
+            icon_gap,
+            pad,
+            w,
+            h,
+        })
     }
 
     /// Shorten `text` so it lays out within `max_w` px, inserting an ellipsis on the dropped
@@ -513,7 +643,7 @@ impl Hud {
         rgb: [u8; 3],
         px: f32,
     ) {
-        let s = (px * 0.06).round().max(1.0) as i32; // outline thickness
+        let s = (px * tokens::OUTLINE).round().max(1.0) as i32; // outline thickness
         for &(dx, dy) in &[(s, 0), (-s, 0), (0, s), (0, -s)] {
             for (m, bitmap, gx) in glyphs {
                 canvas.blit_glyph(
@@ -547,7 +677,7 @@ impl Hud {
         y0: i32,
         px: f32,
     ) {
-        let s = (px * 0.06).round().max(1.0) as i32; // outline thickness (matches text)
+        let s = (px * tokens::OUTLINE).round().max(1.0) as i32; // outline thickness (matches text)
         for &(dx, dy) in &[(s, 0), (-s, 0), (0, s), (0, -s)] {
             canvas.blit_silhouette(rgba, iw, ih, x0 + dx, y0 + dy, SHADOW, SHADOW_ALPHA);
         }
