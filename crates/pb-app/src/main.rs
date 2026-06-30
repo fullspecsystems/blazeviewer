@@ -44,7 +44,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorIcon, Icon, Window, WindowId};
 
 use pb_core::open::{self, LaunchInput, Source};
-use pb_core::{full_ring, prefetch_targets, Playlist, ResidentRing};
+use pb_core::{full_ring, prefetch_targets, prefetch_targets_scanning, Playlist, ResidentRing};
 use pb_decode::{
     decode_bytes, decode_named_bytes, is_supported_extension, read_exif_fields, DecodeError,
     DecodedImage, FitBox, PixelFormat,
@@ -149,6 +149,14 @@ const DELETE_ADVANCE_DELAY: Duration = Duration::from_millis(160);
 /// flashes a dialog (and never pays for the extra window); only a genuinely large/nested
 /// tree (the `~/Library` case) reveals it — with a live count, current folder, and Cancel.
 const SCAN_DIALOG_DELAY: Duration = Duration::from_millis(250);
+
+/// How often the streaming scan worker publishes a growing playlist snapshot. Time-bounded
+/// (not per-count) so the number of snapshots — and thus the per-snapshot O(N) `FsSource`
+/// rebuild — stays small (≈ scan_duration / this) regardless of folder size. The first
+/// batch lands at the first interval boundary (or at scan end for a fast folder, which is
+/// then the only batch), bootstrapping the view well under [`SCAN_DIALOG_DELAY`]; this just
+/// governs how often the rest refills.
+const SCAN_BATCH_INTERVAL: Duration = Duration::from_millis(150);
 
 /// The minimum gap since the last shown photo before the next held-key auto-advance,
 /// given how long auto-repeat has been running (`elapsed`, measured from when the
@@ -888,7 +896,15 @@ impl App {
     /// full because WIC's HEVC decoder serialized; libheif decodes in parallel, so we
     /// now fill a VRAM-bounded ring of fulls around the cursor.)
     fn request_prefetch(&mut self) {
-        self.targets = prefetch_targets(&self.playlist, self.ahead, self.behind);
+        // While a folder scan is streaming in, the random deck regenerates on every batch,
+        // so prefetching the random look-ahead would decode-then-evict photos the user never
+        // sees (thrash). Use the sequential-only, no-wrap variant until the scan completes,
+        // then normal prefetch (with its random hedges) resumes (`poll_dir_scan` Done arm).
+        self.targets = if self.dir_scan.is_some() {
+            prefetch_targets_scanning(&self.playlist, self.ahead, self.behind)
+        } else {
+            prefetch_targets(&self.playlist, self.ahead, self.behind)
+        };
         let fit = self.decode_fit();
         // Drop tier bookkeeping for items no longer resident (evicted).
         self.preview_resident
@@ -1879,11 +1895,27 @@ impl App {
         let generation = self.scan_gen;
         let progress = ScanProgress::new();
         let name = scan_display_name(&source);
+        // `begin_dir_scan` is only reached for a folder scan (`open_input` routes explicit
+        // lists and archives elsewhere); pull the roots + recursive flag for the walk.
+        let (roots, recursive) = match source {
+            Source::Scan { roots, recursive } => (roots, recursive),
+            _ => return,
+        };
+        let root = roots.first().cloned().unwrap_or_else(|| PathBuf::from("."));
+        let scan_root = roots.first().cloned();
         let worker_progress = progress.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let resolved = resolve_scan(&source, &cursor, Some(&worker_progress));
-            let _ = tx.send((generation, resolved));
+            stream_scan(
+                roots,
+                recursive,
+                cursor,
+                root,
+                scan_root,
+                generation,
+                worker_progress,
+                tx,
+            );
         });
         // If a Scanning dialog is already up (a previous slow scan the user then re-opened
         // over), re-point it at this new walk in place — same window, no flicker — so it
@@ -1900,6 +1932,7 @@ impl App {
             progress,
             name,
             started: Instant::now(),
+            bootstrapped: false,
         });
     }
 
@@ -1913,50 +1946,84 @@ impl App {
     /// [`poll_archive_load`](App::poll_archive_load).
     fn poll_dir_scan(&mut self, event_loop: &ActiveEventLoop) {
         use std::sync::mpsc::TryRecvError;
-        let (scan_gen, recv) = match self.dir_scan.as_ref() {
-            Some(scan) => (scan.generation, scan.rx.try_recv()),
-            None => return,
-        };
-        match recv {
-            Ok((generation, resolved)) => {
-                self.dir_scan = None;
-                self.close_scanning_dialog(); // the walk is done — drop its progress dialog
-                if generation != scan_gen {
-                    return; // superseded by a newer open
+        // Drain every snapshot queued this tick (several batches may have piled up), applying
+        // each as it comes: the first non-empty one bootstraps the view, the rest extend it.
+        loop {
+            let (cur_gen, recv) = match self.dir_scan.as_ref() {
+                Some(scan) => (scan.generation, scan.rx.try_recv()),
+                None => return,
+            };
+            match recv {
+                Ok((generation, ScanUpdate::Batch(resolved))) => {
+                    if generation != cur_gen {
+                        continue; // superseded by a newer open (defensive; rx is per-scan)
+                    }
+                    let bootstrapped = self
+                        .dir_scan
+                        .as_ref()
+                        .map(|s| s.bootstrapped)
+                        .unwrap_or(true);
+                    if resolved.source.is_empty() {
+                        continue; // nothing to show yet (shouldn't happen — worker skips empties)
+                    }
+                    if !bootstrapped {
+                        // First non-empty batch: show a photo now (display + decode). The
+                        // Scanning dialog (if it had been revealed) stays until Done so a
+                        // genuinely slow walk keeps its progress + Cancel; once the chip
+                        // lands it'll demote to ambient at this point instead.
+                        if let Some(s) = self.dir_scan.as_mut() {
+                            s.bootstrapped = true;
+                        }
+                        self.rebuild_playlist(
+                            resolved.source,
+                            resolved.root,
+                            resolved.scan_root,
+                            resolved.recursive,
+                            resolved.start,
+                            event_loop,
+                        );
+                    } else {
+                        // Later batch: grow the playlist in place, keeping the displayed
+                        // photo and every per-image cache (indices are append-only).
+                        self.extend_playlist(resolved.source);
+                    }
                 }
-                if resolved.source.is_empty() {
-                    eprintln!("PhotoBlaze: no supported images in that selection");
-                    return; // keep whatever is on screen
+                Ok((generation, ScanUpdate::Done)) => {
+                    if generation != cur_gen {
+                        continue; // superseded
+                    }
+                    let scan = self.dir_scan.take();
+                    self.close_scanning_dialog(); // walk finished — drop the progress dialog
+                    if scan.is_some_and(|s| !s.bootstrapped) {
+                        eprintln!("PhotoBlaze: no supported images in that selection");
+                    }
+                    // Deck is final now: resume normal prefetch (random-ahead warm again).
+                    self.request_prefetch();
+                    return;
                 }
-                self.rebuild_playlist(
-                    resolved.source,
-                    resolved.root,
-                    resolved.scan_root,
-                    resolved.recursive,
-                    resolved.start,
-                    event_loop,
-                );
-            }
-            Err(TryRecvError::Empty) => {
-                // Still scanning: once the walk is slow enough to notice, reveal the
-                // Scanning dialog (count + current folder + Cancel). Deferred so a normal
-                // folder never flashes a window, and only when no other dialog is up (don't
-                // steal a Settings/Message window the user opened over a background scan).
-                let reveal = self
-                    .dir_scan
-                    .as_ref()
-                    .is_some_and(|s| s.started.elapsed() >= SCAN_DIALOG_DELAY);
-                if reveal && self.dialog.is_none() {
-                    let (name, progress) = match self.dir_scan.as_ref() {
-                        Some(s) => (s.name.clone(), s.progress.clone()),
-                        None => return,
-                    };
-                    self.open_scanning_dialog(&name, progress, event_loop);
+                Err(TryRecvError::Empty) => {
+                    // Still scanning and nothing on screen yet: once the walk is slow enough
+                    // to notice, reveal the Scanning dialog (count + current folder + Cancel).
+                    // Gated on `!bootstrapped` so it never pops over an already-shown photo,
+                    // and only when no other dialog is up (don't steal a Settings/Message
+                    // window the user opened over a background scan).
+                    let reveal = self.dir_scan.as_ref().is_some_and(|s| {
+                        !s.bootstrapped && s.started.elapsed() >= SCAN_DIALOG_DELAY
+                    });
+                    if reveal && self.dialog.is_none() {
+                        let (name, progress) = match self.dir_scan.as_ref() {
+                            Some(s) => (s.name.clone(), s.progress.clone()),
+                            None => return,
+                        };
+                        self.open_scanning_dialog(&name, progress, event_loop);
+                    }
+                    return;
                 }
-            }
-            Err(TryRecvError::Disconnected) => {
-                self.dir_scan = None;
-                self.close_scanning_dialog(); // worker died — don't strand its dialog
+                Err(TryRecvError::Disconnected) => {
+                    self.dir_scan = None;
+                    self.close_scanning_dialog(); // worker died — don't strand its dialog
+                    return;
+                }
             }
         }
     }
@@ -2688,6 +2755,40 @@ impl App {
         self.request_prefetch();
         if let Some(a) = self.active.as_ref() {
             a.window.request_redraw();
+        }
+    }
+
+    /// Grow the playlist in place as a streaming scan delivers more images: swap in the
+    /// larger snapshot and extend the cursor's universe **without** resetting the displayed
+    /// photo, the cursor, the resident ring, or any per-image cache. The contrast with
+    /// [`rebuild_playlist`](App::rebuild_playlist) is the whole point — a fresh open nukes
+    /// everything; a *grow* keeps it, because indices are append-only (index `i` is still
+    /// the same photo). New neighbours become decodable, so we re-issue prefetch (still the
+    /// scanning, anti-thrash variant — the scan isn't done yet), and the title's "X / N"
+    /// total ticks up. A no-op if the snapshot isn't actually larger.
+    fn extend_playlist(&mut self, source: Arc<dyn PhotoSource>) {
+        let new_len = source.len();
+        if new_len <= self.source.len() {
+            return;
+        }
+        self.source = source;
+        self.playlist.extend(new_len);
+        self.request_prefetch();
+        self.refresh_title();
+    }
+
+    /// Re-set the window title for the currently displayed photo (e.g. after a streaming
+    /// grow bumps the "X / N" total). No-op if nothing is displayed.
+    fn refresh_title(&mut self) {
+        let Some(item) = self.displayed_item else {
+            return;
+        };
+        if item >= self.source.len() {
+            return;
+        }
+        let title = title_for(self.source.name(item), item, self.source.len());
+        if let Some(a) = self.active.as_ref() {
+            a.window.set_title(&title);
         }
     }
 
@@ -4836,6 +4937,127 @@ fn resolve_scan(
     }
 }
 
+/// The configured directory walker shared by the streaming scan and its tests: depth-first,
+/// each directory's entries **sorted by file name** — which reproduces `Vec<PathBuf>::sort()`
+/// order exactly (`Path`'s `Ord` is component-wise, not byte-string — verified), so streaming
+/// changes nothing about the order today's walk-then-`paths.sort()` produces. Symlinks are
+/// yielded but never followed, so the walk can't cycle. `recursive` sets the depth.
+fn image_walker(root: &Path, recursive: bool) -> walkdir::WalkDir {
+    walkdir::WalkDir::new(root)
+        .max_depth(if recursive { usize::MAX } else { 1 })
+        .sort_by_file_name()
+        .follow_links(false)
+}
+
+/// All supported images under `root` in playlist order — the sorted image sequence the
+/// streaming scan emits, collected eagerly. Used by the order-guarantee tests.
+#[cfg(test)]
+fn sorted_image_walk(root: &Path, recursive: bool) -> Vec<PathBuf> {
+    image_walker(root, recursive)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file() && is_supported_image(e.path()))
+        .map(walkdir::DirEntry::into_path)
+        .collect()
+}
+
+/// Build a playlist snapshot from the paths gathered so far. Runs on the **scan worker
+/// thread** so constructing the `FsSource` (which rebuilds the display-name list, O(N)) never
+/// touches the event loop — the UI just swaps the resulting `Arc`. `start` is resolved
+/// against this snapshot; it's only used by the bootstrap (first) batch (later batches keep
+/// the app's own cursor via [`extend_playlist`](App::extend_playlist)).
+fn build_resolved(
+    paths: Vec<PathBuf>,
+    cursor: &open::Cursor,
+    root: PathBuf,
+    scan_root: Option<PathBuf>,
+    recursive: bool,
+) -> Resolved {
+    let start = open::resolve_cursor(&paths, cursor);
+    Resolved {
+        source: Arc::new(FsSource::new(paths)),
+        root,
+        scan_root,
+        recursive,
+        start,
+    }
+}
+
+/// Walk `roots` off the event loop, **streaming** the playlist in: emit a growing snapshot
+/// every [`SCAN_BATCH_INTERVAL`] (and a final one), then [`ScanUpdate::Done`]. The first
+/// non-empty batch lets the app show a photo almost immediately; later batches extend the
+/// playlist in place, so the user browses while the rest of a big tree is still being walked.
+/// Drives `progress` (image count + current folder) and bails at the next entry once its
+/// cancel flag is set. Each snapshot is built here (off-thread) so the UI swap is O(1).
+/// Sending stops early if the receiver is gone (a superseding open dropped it).
+#[allow(clippy::too_many_arguments)]
+fn stream_scan(
+    roots: Vec<PathBuf>,
+    recursive: bool,
+    cursor: open::Cursor,
+    root: PathBuf,
+    scan_root: Option<PathBuf>,
+    generation: u64,
+    progress: ScanProgress,
+    tx: std::sync::mpsc::Sender<(u64, ScanUpdate)>,
+) {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut last_emit = Instant::now();
+    let mut sent_len = 0usize;
+    // For a single-file open (`Cursor::At`) we must not bootstrap until the opened file is
+    // in the snapshot — otherwise `resolve_cursor` falls back to index 0 and we'd show the
+    // wrong photo. So hold interval emits until the target is found (it always will be: it's
+    // in the flat parent dir being scanned). `Cursor::First` never gates. The *final* emit
+    // below is unconditional, so a target that's since been deleted still shows the folder.
+    let target = match &cursor {
+        open::Cursor::At(p) => Some(p.clone()),
+        open::Cursor::First => None,
+    };
+    let mut gated = target.is_some();
+    'outer: for r in &roots {
+        for entry in image_walker(r, recursive) {
+            if progress.is_cancelled() {
+                break 'outer;
+            }
+            let Ok(entry) = entry else {
+                continue; // skip unreadable entries (permissions, races) — don't abort
+            };
+            let ft = entry.file_type();
+            if ft.is_dir() {
+                // Publish the directory now being walked (relative to its root) for the chip.
+                progress.set_current(rel_display(entry.path(), r));
+            } else if ft.is_file() && is_supported_image(entry.path()) {
+                let p = entry.into_path();
+                progress.incr_found();
+                if gated && target.as_ref() == Some(&p) {
+                    gated = false; // the opened file is now in the snapshot — emits may start
+                }
+                paths.push(p);
+                if !gated && last_emit.elapsed() >= SCAN_BATCH_INTERVAL {
+                    let snap = build_resolved(
+                        paths.clone(),
+                        &cursor,
+                        root.clone(),
+                        scan_root.clone(),
+                        recursive,
+                    );
+                    if tx.send((generation, ScanUpdate::Batch(snap))).is_err() {
+                        return; // receiver dropped — superseded; stop and free our buffers
+                    }
+                    sent_len = paths.len();
+                    last_emit = Instant::now();
+                }
+            }
+        }
+    }
+    // Final batch: the un-emitted remainder, or the only batch for a fast folder.
+    if !paths.is_empty() && (paths.len() > sent_len || sent_len == 0) {
+        let snap = build_resolved(paths, &cursor, root, scan_root, recursive);
+        let _ = tx.send((generation, ScanUpdate::Batch(snap)));
+    }
+    let _ = tx.send((generation, ScanUpdate::Done));
+}
+
 /// Turn a planned [`Source`] into a concrete [`PhotoSource`] plus playlist framing.
 /// Scans and explicit lists become an [`FsSource`]; an archive opens a
 /// [`ZipSource`] (entries read into RAM on demand, never extracted to disk). On a
@@ -5070,16 +5292,27 @@ impl ScanProgress {
     }
 }
 
+/// A message from the streaming scan worker ([`stream_scan`]). The walk runs off the event
+/// loop and **streams** the playlist in: each `Batch` carries a growing [`Resolved`] snapshot
+/// (the cumulative `FsSource` so far, built off-thread so the UI swap is O(1)); `Done` ends
+/// the walk. The app bootstraps the playlist on the first non-empty batch (showing a photo
+/// almost immediately) and extends it in place on the rest — so browsing starts before the
+/// whole tree is scanned.
+enum ScanUpdate {
+    Batch(Resolved),
+    Done,
+}
+
 /// An in-flight background **directory scan**. A large/recursive folder is walked off
 /// the event loop — the synchronous walk used to block winit for seconds (macOS
 /// beachball) and then crash when the unresponsive window/GPU surface was torn down
-/// (opening `~/Library` was the report). The resolved playlist rides back over `rx`
-/// tagged with `generation`, so a superseded scan (a newer open bumped `App::scan_gen`)
-/// is discarded; `cancel` lets that newer open — or quit — stop a giant walk early.
-/// Mirrors [`ArchiveLoad`].
+/// (opening `~/Library` was the report). It now **streams**: snapshots ride back over `rx`
+/// as the walk descends (see [`ScanUpdate`]), tagged with `generation` so a superseded scan
+/// (a newer open bumped `App::scan_gen`) is discarded; `progress.cancel` lets that newer
+/// open — or quit, or the Cancel button — stop a giant walk early. Mirrors [`ArchiveLoad`].
 struct DirScan {
     generation: u64,
-    rx: std::sync::mpsc::Receiver<(u64, Resolved)>,
+    rx: std::sync::mpsc::Receiver<(u64, ScanUpdate)>,
     /// Shared count + current-folder progress and the cancel flag for the walk. The
     /// Scanning dialog reads it; Cancel / Esc / a superseding open / teardown flip its
     /// cancel flag so the walk bails at its next entry.
@@ -5089,6 +5322,10 @@ struct DirScan {
     /// When the scan was dispatched, so the Scanning dialog is deferred to slow scans
     /// only (a normal folder resolves in milliseconds and never flashes it).
     started: Instant,
+    /// Whether the first non-empty batch has been applied (the first image shown). Until
+    /// then the Scanning dialog may reveal and there's nothing on screen yet; the first
+    /// batch *bootstraps* the playlist (display + decode), later batches *extend* it.
+    bootstrapped: bool,
 }
 
 /// An in-flight background archive open. A `.7z` is eager-decompressed off the event
@@ -5333,6 +5570,57 @@ mod tests {
                 dir.join("top.jpg"),
             ],
             "a recursive scan finds every image (sorted), ignoring the .txt"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The streaming walk (`sort_by_file_name`) must yield images in the **exact** order
+    /// today's full-walk-then-`paths.sort()` produces — so showing photos before the scan
+    /// finishes never reorders the playlist. Pins the boundary cases that motivated the
+    /// design discussion: `a/b.jpg` vs `a.jpg` (a subdir vs a same-stem file), a subdir vs a
+    /// later-named sibling file, and `img2` vs `img10` (stays byte-lexicographic, not natural).
+    #[test]
+    fn streaming_walk_order_matches_paths_sort() {
+        let dir = std::env::temp_dir().join(format!("pb_stream_order_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("a")).expect("mkdir a");
+        fs::create_dir_all(dir.join("a_subdir")).expect("mkdir a_subdir");
+        let images = [
+            "z.jpg",
+            "a.jpg",
+            "img2.jpg",
+            "img10.jpg",
+            "a/b.jpg",
+            "a_subdir/x.jpg",
+        ];
+        for rel in images {
+            fs::write(dir.join(rel), b"x").expect("seed");
+        }
+        fs::write(dir.join("notes.txt"), b"x").expect("seed"); // non-image, must be skipped
+
+        let got = sorted_image_walk(&dir, true);
+
+        // Expected = exactly the images, in `Vec<PathBuf>::sort()` order (component-wise).
+        let mut expected: Vec<PathBuf> = images.iter().map(|r| dir.join(r)).collect();
+        expected.sort();
+        assert_eq!(
+            got, expected,
+            "streaming walk order must equal paths.sort() (and skip the .txt)"
+        );
+        // Spell out the load-bearing boundary so a regression reads clearly: the subdir's
+        // `a/b.jpg` sorts before the file `a.jpg` (component-wise: \"a\" < \"a.jpg\").
+        let pos = |rel: &str| got.iter().position(|p| p == &dir.join(rel)).unwrap();
+        assert!(pos("a/b.jpg") < pos("a.jpg"), "a/b.jpg before a.jpg");
+        assert!(
+            pos("a_subdir/x.jpg") < pos("z.jpg"),
+            "a_subdir before z.jpg"
+        );
+        // Lexicographic, NOT natural: "img10" < "img2" because '1' < '2'. (Natural sort
+        // would flip these; it's a deferred opt-in, so we pin today's behavior.)
+        assert!(
+            pos("img10.jpg") < pos("img2.jpg"),
+            "img10 before img2 (lexicographic)"
         );
 
         let _ = fs::remove_dir_all(&dir);
