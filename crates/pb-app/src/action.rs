@@ -59,6 +59,10 @@ pub enum Action {
     Help,
     Fullscreen,
     Recursive,
+    /// Stop an in-flight folder scan, keeping whatever has streamed in so far. Only
+    /// meaningful while a scan is running (the menu item disables otherwise); unbound by
+    /// default — Esc stays Quit.
+    CancelScan,
     // Slideshow (timer-driven advance).
     SlideshowToggle,
     SlideshowFaster,
@@ -102,6 +106,7 @@ impl Action {
         Action::Help,
         Action::Fullscreen,
         Action::Recursive,
+        Action::CancelScan,
         Action::SlideshowToggle,
         Action::SlideshowFaster,
         Action::SlideshowSlower,
@@ -142,6 +147,7 @@ impl Action {
             Action::Help => "help",
             Action::Fullscreen => "fullscreen",
             Action::Recursive => "recursive",
+            Action::CancelScan => "cancel_scan",
             Action::SlideshowToggle => "slideshow",
             Action::SlideshowFaster => "slideshow_faster",
             Action::SlideshowSlower => "slideshow_slower",
@@ -191,6 +197,7 @@ impl Action {
             Action::Help => "Keyboard help",
             Action::Fullscreen => "Toggle fullscreen",
             Action::Recursive => "Recursive (current folder)",
+            Action::CancelScan => "Stop scanning",
             Action::SlideshowToggle => "Slideshow",
             Action::SlideshowFaster => "Slideshow faster",
             Action::SlideshowSlower => "Slideshow slower",

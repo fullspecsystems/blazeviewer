@@ -361,6 +361,9 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         // bare `F` (the most memorable — and the only one that's discoverable at all).
         (Action::Fullscreen, vec![p("F11"), p("Alt+Enter"), p("F")]),
         one(Action::Recursive, "Ctrl+R"),
+        // Stop an in-flight folder scan — menu-only by default (Esc stays Quit); a user can
+        // bind a key in Settings if they want one.
+        (Action::CancelScan, vec![]),
         one(Action::SlideshowToggle, "S"),
         // `[` shortens the interval (faster), `]` lengthens it (slower).
         one(Action::SlideshowFaster, "["),

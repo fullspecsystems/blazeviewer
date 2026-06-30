@@ -661,6 +661,11 @@ struct App {
     /// refresh is a no-op Win32 call when nothing changed.
     save_rotation_item: Option<muda::MenuItem>,
     save_enabled: bool,
+    /// The File ▸ Stop Scanning menu item, enabled only while a folder scan is streaming in.
+    /// `cancel_scan_enabled` caches the last-pushed state so the per-tick refresh is a no-op
+    /// when unchanged.
+    cancel_scan_item: Option<muda::MenuItem>,
+    cancel_scan_enabled: bool,
     /// The undo stack (Edit ▸ Undo / `Ctrl+Z`) — RAM-only, cleared on any source/playlist
     /// change (see [`UndoAction`]). The most recent reversible edit is on top.
     undo_stack: Vec<UndoAction>,
@@ -833,6 +838,8 @@ impl App {
             proxy_icon_path: None,
             save_rotation_item: None,
             save_enabled: false,
+            cancel_scan_item: None,
+            cancel_scan_enabled: false,
             undo_stack: Vec::new(),
             undo_item: None,
             undo_menu_state: None,
@@ -2092,6 +2099,21 @@ impl App {
         }
     }
 
+    /// User command (File ▸ Stop Scanning, or a bound key): stop an in-flight folder scan,
+    /// **keeping whatever has streamed in so far** (cancel-keeps-partial — the partial
+    /// playlist is already live). Resumes normal prefetch (the deck is final now) and flashes
+    /// a confirmation. A no-op when no scan is running (the menu item is disabled then).
+    fn cancel_scan_command(&mut self, event_loop: &ActiveEventLoop) {
+        if self.dir_scan.is_none() {
+            return;
+        }
+        self.cancel_dir_scan();
+        self.dir_scan = None;
+        self.close_scanning_dialog();
+        self.request_prefetch();
+        self.show_toast("Scan stopped", event_loop);
+    }
+
     /// A terminal archive-open failure (not a password retry): forget the pending
     /// archive and replace any open dialog with the error notice.
     fn fail_archive_open(&mut self, e: &archive::ArchiveOpenError, event_loop: &ActiveEventLoop) {
@@ -2398,6 +2420,7 @@ impl App {
             let built = menu::build_menu();
             self.menu = Some(built.menu);
             self.save_rotation_item = Some(built.save_rotation);
+            self.cancel_scan_item = Some(built.cancel_scan);
             self.undo_item = Some(built.undo);
             self.view_checks = Some(built.checks);
             #[cfg(target_os = "macos")]
@@ -2436,6 +2459,19 @@ impl App {
                 it.set_enabled(want);
             }
             self.save_enabled = want;
+        }
+    }
+
+    /// Enable File ▸ Stop Scanning only while a folder scan is streaming in. Cheap + cached
+    /// (skips the OS call when unchanged), so it's safe to call from the per-tick
+    /// `about_to_wait` alongside [`refresh_save_menu_item`](App::refresh_save_menu_item).
+    fn refresh_cancel_scan_menu_item(&mut self) {
+        let want = self.dir_scan.is_some();
+        if want != self.cancel_scan_enabled {
+            if let Some(it) = self.cancel_scan_item.as_ref() {
+                it.set_enabled(want);
+            }
+            self.cancel_scan_enabled = want;
         }
     }
 
@@ -2676,6 +2712,7 @@ impl App {
             Action::Help => self.toggle_help(event_loop),
             Action::Fullscreen => self.toggle_fullscreen(),
             Action::Recursive => self.toggle_recursive(event_loop),
+            Action::CancelScan => self.cancel_scan_command(event_loop),
             Action::SlideshowToggle => self.toggle_slideshow(event_loop),
             Action::SlideshowFaster => self.adjust_slideshow(-1, event_loop),
             Action::SlideshowSlower => self.adjust_slideshow(1, event_loop),
@@ -4382,6 +4419,8 @@ impl ApplicationHandler for App {
         // Keep Edit ▸ Undo's label + enabled state mirroring the top of the undo stack
         // (cached, so it's a no-op until the stack changes).
         self.refresh_undo_menu_item();
+        // Enable File ▸ Stop Scanning only while a scan streams in (cached no-op otherwise).
+        self.refresh_cancel_scan_menu_item();
         // Keep the View-menu checkmarks (scale mode / recursive / fullscreen / info) in
         // sync with the live state — likewise cached, so it's a no-op until state changes.
         self.refresh_view_menu_checks();

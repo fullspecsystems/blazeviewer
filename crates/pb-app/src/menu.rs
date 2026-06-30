@@ -22,6 +22,7 @@ use crate::action::Action;
 pub mod ids {
     pub const OPEN_FILE: &str = "open_file";
     pub const OPEN_FOLDER: &str = "open_folder";
+    pub const CANCEL_SCAN: &str = "cancel_scan";
     pub const SAVE_ROTATION: &str = "save_rotation";
     pub const DELETE: &str = "delete";
     pub const DELETE_PERMANENTLY: &str = "delete_permanently";
@@ -70,6 +71,7 @@ pub mod ids {
 pub enum MenuAction {
     OpenFile,
     OpenFolder,
+    CancelScan,
     SaveRotation,
     Delete,
     DeletePermanently,
@@ -108,6 +110,7 @@ impl MenuAction {
         match self {
             MenuAction::OpenFile => Action::OpenFile,
             MenuAction::OpenFolder => Action::OpenFolder,
+            MenuAction::CancelScan => Action::CancelScan,
             MenuAction::SaveRotation => Action::SaveRotation,
             MenuAction::Delete => Action::Delete,
             MenuAction::DeletePermanently => Action::DeletePermanent,
@@ -147,6 +150,7 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
     let action = match id {
         OPEN_FILE => MenuAction::OpenFile,
         OPEN_FOLDER => MenuAction::OpenFolder,
+        CANCEL_SCAN => MenuAction::CancelScan,
         SAVE_ROTATION => MenuAction::SaveRotation,
         DELETE => MenuAction::Delete,
         DELETE_PERMANENTLY => MenuAction::DeletePermanently,
@@ -219,6 +223,9 @@ pub struct ViewChecks {
 pub struct BuiltMenu {
     pub menu: Menu,
     pub save_rotation: MenuItem,
+    /// File ▸ Stop Scanning. Returned so the app can enable it only while a folder scan is
+    /// streaming in (see `App::refresh_cancel_scan_menu_item`). Starts disabled.
+    pub cancel_scan: MenuItem,
     /// The Edit ▸ Undo item. Returned so the app can flip its enabled state + title
     /// ("Undo" → "Undo Save Rotation") to mirror the top of the undo stack (see
     /// `App::refresh_undo_menu_item`). Starts disabled (nothing to undo at launch).
@@ -256,11 +263,14 @@ pub fn build_menu() -> BuiltMenu {
 
     // Disabled until a rotation is pending on an eligible file (toggled at runtime).
     let save_rotation = MenuItem::with_id(ids::SAVE_ROTATION, "Save Rotation\tCtrl+S", false, None);
+    // Disabled until a folder scan is actually streaming in (toggled at runtime).
+    let cancel_scan = MenuItem::with_id(ids::CANCEL_SCAN, "Stop Scanning", false, None);
 
     let file = Submenu::new("&File", true);
     let _ = file.append_items(&[
         &item(ids::OPEN_FILE, "Open File…\tO"),
         &item(ids::OPEN_FOLDER, "Open Folder…\tShift+O"),
+        &cancel_scan,
         &sep(),
         &save_rotation,
         &sep(),
@@ -339,6 +349,7 @@ pub fn build_menu() -> BuiltMenu {
     BuiltMenu {
         menu,
         save_rotation,
+        cancel_scan,
         undo,
         checks: ViewChecks {
             fit,
@@ -399,6 +410,10 @@ pub fn build_menu() -> BuiltMenu {
         Some(Accelerator::new(Some(CMD), Code::KeyS)),
     );
 
+    // Disabled until a folder scan is actually streaming in (toggled at runtime). No
+    // accelerator — it's a contextual command, menu-only.
+    let cancel_scan = MenuItem::with_id(ids::CANCEL_SCAN, "Stop Scanning", false, None);
+
     let file = Submenu::new("File", true);
     let _ = file.append_items(&[
         &cmd_item(ids::OPEN_FILE, "Open File…", CMD, Code::KeyO),
@@ -408,6 +423,7 @@ pub fn build_menu() -> BuiltMenu {
             CMD.union(Modifiers::SHIFT),
             Code::KeyO,
         ),
+        &cancel_scan,
         &sep(),
         &save_rotation,
         &sep(),
@@ -525,6 +541,7 @@ pub fn build_menu() -> BuiltMenu {
     BuiltMenu {
         menu,
         save_rotation,
+        cancel_scan,
         undo,
         checks: ViewChecks {
             fit,
@@ -550,6 +567,7 @@ mod tests {
         // Each id resolves to exactly the action the keyboard path triggers.
         assert_eq!(action_for(ids::OPEN_FILE), Some(MenuAction::OpenFile));
         assert_eq!(action_for(ids::OPEN_FOLDER), Some(MenuAction::OpenFolder));
+        assert_eq!(action_for(ids::CANCEL_SCAN), Some(MenuAction::CancelScan));
         assert_eq!(
             action_for(ids::SAVE_ROTATION),
             Some(MenuAction::SaveRotation)
