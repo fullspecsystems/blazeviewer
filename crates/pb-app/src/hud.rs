@@ -534,6 +534,24 @@ impl Hud {
         ])
     }
 
+    /// Render a freestanding HUD **button swatch** to its own translucent pill bitmap — for
+    /// the HUD gallery, which previews button variants in isolation. Because the swatch *is*
+    /// its own canvas (filled with `bg`), the 50%-translucent border composites correctly here
+    /// — the caveat on [`draw_button`] (don't blit a pre-rendered button over a panel) doesn't
+    /// apply. Returns `(rgba, w, h)`.
+    pub fn render_button(
+        &self,
+        label: &str,
+        icon: Option<&str>,
+        px: f32,
+        bg: [u8; 4],
+    ) -> Option<(Vec<u8>, u32, u32)> {
+        let (w, h) = self.button_size(label, icon, px)?;
+        let mut canvas = Canvas::new(w, h, bg, (px * tokens::BUTTON_RADIUS).round());
+        self.draw_button(&mut canvas, 0, 0, label, icon, px)?;
+        Some((canvas.into_rgba(), w, h))
+    }
+
     /// Lay out a button once — its label glyphs, rasterized icon, paddings, and resulting
     /// `(w, h)` — shared by [`button_size`] and [`draw_button`] so measure and draw can never
     /// disagree. All sizing flows from the button's own text height `px` via the `BUTTON_*`

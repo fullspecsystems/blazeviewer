@@ -65,6 +65,7 @@ mod dialog;
 #[cfg(target_os = "macos")]
 mod hdr_surface;
 mod hud;
+mod hud_gallery;
 mod icon;
 mod keymap;
 #[cfg(target_os = "macos")]
@@ -5661,6 +5662,27 @@ fn scale_mode_of(p: settings::ScaleModePref) -> ScaleMode {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Hidden dev command: render the HUD component gallery to a PNG and exit before the event
+    // loop ever starts (no window, no GPU). `--hud-gallery [out.png]` — the path is optional
+    // (defaults next to the cwd). The companion of `cargo run -p pb-ui --example gallery`, but
+    // for the on-image overlay layer; see `hud_gallery.rs`.
+    if let Some(i) = args
+        .iter()
+        .position(|a| a == "--hud-gallery" || a.starts_with("--hud-gallery="))
+    {
+        let out = args[i]
+            .split_once('=')
+            .map(|(_, v)| v.to_string())
+            .or_else(|| args.get(i + 1).filter(|a| !a.starts_with('-')).cloned())
+            .unwrap_or_else(|| "hud-gallery.png".to_string());
+        match hud_gallery::write_sheet(Path::new(&out)) {
+            Ok(()) => println!("PhotoBlaze: wrote HUD gallery \u{2192} {out}"),
+            Err(e) => eprintln!("PhotoBlaze: HUD gallery failed: {e}"),
+        }
+        return;
+    }
+
     let cli_windowed = args.iter().any(|a| a == "--windowed" || a == "-w");
     let cli_fullscreen = args.iter().any(|a| a == "--fullscreen" || a == "-f");
     // Saved preferences drive the launch defaults (window mode + recursive scan); an
