@@ -17,6 +17,9 @@ pub enum ActionKind {
     Nav,
     /// Continuous while the key is held, applied each frame: pan and zoom.
     Held,
+    /// Animation frame-step — steps one frame on press, then repeats while held to
+    /// scrub through an animation's frames (`about_to_wait`): `,` / `.`.
+    FrameStep,
 }
 
 /// Every user-invokable action. The `id` strings (stable snake_case) are the
@@ -67,6 +70,10 @@ pub enum Action {
     SlideshowToggle,
     SlideshowFaster,
     SlideshowSlower,
+    // Animation playback (on-demand; never autoplay).
+    PlayPause,
+    FrameNext,
+    FramePrev,
     // Application.
     Settings,
     About,
@@ -110,6 +117,9 @@ impl Action {
         Action::SlideshowToggle,
         Action::SlideshowFaster,
         Action::SlideshowSlower,
+        Action::PlayPause,
+        Action::FrameNext,
+        Action::FramePrev,
         Action::Settings,
         Action::About,
         Action::Quit,
@@ -151,6 +161,9 @@ impl Action {
             Action::SlideshowToggle => "slideshow",
             Action::SlideshowFaster => "slideshow_faster",
             Action::SlideshowSlower => "slideshow_slower",
+            Action::PlayPause => "play_pause",
+            Action::FrameNext => "frame_next",
+            Action::FramePrev => "frame_prev",
             Action::Settings => "settings",
             Action::About => "about",
             Action::Quit => "quit",
@@ -201,6 +214,9 @@ impl Action {
             Action::SlideshowToggle => "Slideshow",
             Action::SlideshowFaster => "Slideshow faster",
             Action::SlideshowSlower => "Slideshow slower",
+            Action::PlayPause => "Play/pause animation",
+            Action::FrameNext => "Next frame",
+            Action::FramePrev => "Previous frame",
             Action::Settings => "Settings",
             Action::About => "About",
             Action::Quit => "Quit",
@@ -217,6 +233,7 @@ impl Action {
             | Action::PanDown
             | Action::ZoomIn
             | Action::ZoomOut => ActionKind::Held,
+            Action::FrameNext | Action::FramePrev => ActionKind::FrameStep,
             _ => ActionKind::OneShot,
         }
     }
@@ -270,5 +287,8 @@ mod tests {
         assert_eq!(Action::Copy.kind(), ActionKind::OneShot);
         assert_eq!(Action::ToggleOriginal.kind(), ActionKind::OneShot);
         assert_eq!(Action::Quit.kind(), ActionKind::OneShot);
+        assert_eq!(Action::PlayPause.kind(), ActionKind::OneShot);
+        assert_eq!(Action::FrameNext.kind(), ActionKind::FrameStep);
+        assert_eq!(Action::FramePrev.kind(), ActionKind::FrameStep);
     }
 }

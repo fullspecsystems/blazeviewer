@@ -95,6 +95,12 @@ pub mod tokens {
     /// fades from invisible (0) through a faint hairline (~0.2) to a solid white outline (1).
     /// Tune to taste; low reads subtle.
     pub const BUTTON_BORDER_ALPHA: f32 = 0.20;
+    /// Button fill alpha when the pointer is **over** it — a stronger wash than
+    /// [`BUTTON_FILL_ALPHA`] so the button visibly lights up on hover.
+    pub const BUTTON_FILL_ALPHA_HOVER: f32 = 0.15;
+    /// Button border alpha on hover — lifted from [`BUTTON_BORDER_ALPHA`] to match the brighter
+    /// fill.
+    pub const BUTTON_BORDER_ALPHA_HOVER: f32 = 0.25;
 }
 
 use tokens::{SHADOW, SHADOW_ALPHA, TEXT, TEXT_DIM};
@@ -431,6 +437,7 @@ impl Hud {
         px: f32,
         width: u32,
         bg: [u8; 4],
+        button_hovered: bool,
     ) -> Option<(Vec<u8>, u32, u32, [u32; 4])> {
         let px_sub = (px * tokens::CARD_SUB).max(1.0);
         let pad = (px * tokens::CARD_PAD).round().max(6.0) as i32;
@@ -497,10 +504,17 @@ impl Hud {
         );
         y += sub_lh + gap_button;
 
-        // Centered button (stop icon + label, faint fill, subtle border).
+        // Centered button (stop icon + label, faint fill, subtle border; lifts on hover).
         let bx = (cw - bw) / 2;
-        let button_rect =
-            self.draw_button(&mut canvas, bx, y, button_label, Some(button_icon), px_sub)?;
+        let button_rect = self.draw_button(
+            &mut canvas,
+            bx,
+            y,
+            button_label,
+            Some(button_icon),
+            px_sub,
+            button_hovered,
+        )?;
         Some((canvas.into_rgba(), cw as u32, ch as u32, button_rect))
     }
 
@@ -514,12 +528,14 @@ impl Hud {
 
     /// Draw the reusable HUD **button** into `canvas` at `(x, y)` — a faint fill, a subtle
     /// rounded border, then the optional leading icon and the `label`, all at text size `px`.
-    /// Returns its `[x, y, w, h]` rect (the click target).
+    /// When `hovered`, the fill + border lift to their `*_HOVER` alphas so the button lights up
+    /// under the pointer. Returns its `[x, y, w, h]` rect (the click target).
     ///
     /// Draws **directly into the destination** canvas — the fill and the border ([`tokens`]
     /// `BUTTON_FILL_ALPHA` / `BUTTON_BORDER_ALPHA`) composite *over* the panel it lands on, so
     /// they read consistently on the scan card or a `BG` swatch. (For a freestanding swatch use
     /// [`render_button`], which supplies that backing canvas.)
+    #[allow(clippy::too_many_arguments)]
     fn draw_button(
         &self,
         canvas: &mut Canvas,
@@ -528,13 +544,22 @@ impl Hud {
         label: &str,
         icon: Option<&str>,
         px: f32,
+        hovered: bool,
     ) -> Option<[u32; 4]> {
         let b = self.layout_button(label, icon, px)?;
         let asc = self.ascent(px)?;
         let r = (px * tokens::BUTTON_RADIUS).round();
-        canvas.fill_round_rect(x, y, b.w, b.h, r, TEXT, tokens::BUTTON_FILL_ALPHA);
+        let (fill_a, border_a) = if hovered {
+            (
+                tokens::BUTTON_FILL_ALPHA_HOVER,
+                tokens::BUTTON_BORDER_ALPHA_HOVER,
+            )
+        } else {
+            (tokens::BUTTON_FILL_ALPHA, tokens::BUTTON_BORDER_ALPHA)
+        };
+        canvas.fill_round_rect(x, y, b.w, b.h, r, TEXT, fill_a);
         let t = (px * tokens::BUTTON_BORDER).round().max(1.0) as i32;
-        canvas.stroke_round_rect(x, y, b.w, b.h, r, t, TEXT, tokens::BUTTON_BORDER_ALPHA);
+        canvas.stroke_round_rect(x, y, b.w, b.h, r, t, TEXT, border_a);
         let mut cx = x + b.pad_x;
         if let Some((rgba, iw, ih)) = &b.icon {
             let iy = y + (b.h - *ih as i32) / 2;
@@ -567,10 +592,11 @@ impl Hud {
         icon: Option<&str>,
         px: f32,
         bg: [u8; 4],
+        hovered: bool,
     ) -> Option<(Vec<u8>, u32, u32)> {
         let (w, h) = self.button_size(label, icon, px)?;
         let mut canvas = Canvas::new(w, h, bg, (px * tokens::BUTTON_RADIUS).round());
-        self.draw_button(&mut canvas, 0, 0, label, icon, px)?;
+        self.draw_button(&mut canvas, 0, 0, label, icon, px, hovered)?;
         Some((canvas.into_rgba(), w, h))
     }
 

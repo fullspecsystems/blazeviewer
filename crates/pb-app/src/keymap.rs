@@ -368,6 +368,11 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         // `[` shortens the interval (faster), `]` lengthens it (slower).
         one(Action::SlideshowFaster, "["),
         one(Action::SlideshowSlower, "]"),
+        // Animation playback (on-demand; `P` toggles play/pause). `.`/`,` step a
+        // frame forward/back (hold to scrub); they pause playback first.
+        one(Action::PlayPause, "P"),
+        one(Action::FrameNext, "."),
+        one(Action::FramePrev, ","),
         one(Action::Settings, "Ctrl+,"),
         // About is menu-only (no default key).
         (Action::About, vec![]),

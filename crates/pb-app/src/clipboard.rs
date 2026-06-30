@@ -291,6 +291,7 @@ mod tests {
             is_preview: false,
             color: ColorTransform::srgb(),
             peak: 1.0,
+            animated: None,
         }
     }
 

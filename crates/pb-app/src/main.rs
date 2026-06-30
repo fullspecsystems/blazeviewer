@@ -55,6 +55,7 @@ use pb_render::{
 use pb_source::{seven_z_projected_bytes, FsSource, PhotoSource, SevenZSource, ZipSource};
 
 mod action;
+mod animation;
 mod archive;
 mod clipboard;
 #[cfg(windows)]
@@ -80,6 +81,7 @@ mod save_rotation;
 mod settings;
 mod slideshow;
 use action::{Action, ActionKind};
+use animation::Playback;
 use decode_pool::{recommended_workers, DecodeFn, DecodePool, Outcome};
 use hud::{Hud, Row};
 use keymap::{KeyChord, Keymap};
@@ -144,6 +146,20 @@ const GESTURE_PAN_DIR: f32 = 1.0;
 /// How long the delete icon shows on the just-deleted photo before the playlist
 /// advances to the next one — so the trash/recycle feedback registers first (#28).
 const DELETE_ADVANCE_DELAY: Duration = Duration::from_millis(160);
+
+/// Repeat interval for the held frame-step scrub (`,`/`.`), after the initial tap
+/// delay (`initial_delay`). ~14 fps — quick enough to scrub, slow enough to read (#37).
+const FRAME_STEP_REPEAT: Duration = Duration::from_millis(70);
+
+/// The frame-step direction encoded by an action: `+1` next / `-1` previous / `0`
+/// for anything else.
+fn frame_step_dir(action: Action) -> i32 {
+    match action {
+        Action::FrameNext => 1,
+        Action::FramePrev => -1,
+        _ => 0,
+    }
+}
 
 /// How long an off-thread directory scan must run before the "Scanning Folder" progress
 /// dialog appears. A normal folder resolves in well under this, so the common case never
@@ -273,6 +289,10 @@ struct PhotoMeta {
     w: u32,
     h: u32,
     codec: &'static str,
+    /// If this photo is an animated container (GIF/APNG/WebP, or an AVIF/HEIC
+    /// sequence on macOS), which kind — so the viewer can offer on-demand playback
+    /// (the ▶ P hint, task #37). `None` for a still. Sniffed during decode.
+    animated: Option<pb_decode::AnimationKind>,
 }
 
 /// Which overlay is showing: nothing, the one-line basic panel (`i`), the
@@ -367,6 +387,7 @@ fn meta_for(source: &dyn PhotoSource, item: usize, root: &Path, img: &DecodedIma
         w: img.orig_width,
         h: img.orig_height,
         codec: img.codec,
+        animated: img.animated,
     }
 }
 
@@ -383,7 +404,13 @@ fn decode_item(
     let bytes = source
         .bytes(item)
         .map_err(|e| DecodeError::Corrupt(format!("read error: {e}")))?;
-    decode_named_bytes(source.name(item), &bytes, fit, allow_preview)
+    let mut img = decode_named_bytes(source.name(item), &bytes, fit, allow_preview)?;
+    // Cheap header sniff so the viewer knows an on-demand animation is available
+    // (the ▶ P hint / `P` to play). Off the keypress path — this runs in the decode
+    // worker (or the sync first-paint), never on the event loop. The pixels stay the
+    // still first frame; only `decode_animation` (on `P`) decodes the whole sequence.
+    img.animated = pb_decode::detect_animation(&bytes);
+    Ok(img)
 }
 
 /// Max displayed characters for an EXIF value; longer ones are truncated so a
@@ -646,6 +673,10 @@ struct App {
     /// hit-region: the first interactive on-image control; future EXIF copy buttons register
     /// rects the same way. `None` when the card is hidden.
     chip_rect: Option<[f32; 4]>,
+    /// Whether the pointer is currently over the Cancel Scan button — drives its hover "lit"
+    /// state. Flipped only on a hover **enter/leave transition** (see [`App::update_chip_hover`]),
+    /// which re-rasterizes the card once; never per cursor-move or per frame.
+    chip_hovered: bool,
     /// Items whose resident ring slot holds a fast *preview* (e.g. a HEIC
     /// thumbnail) rather than the full decode. While idle these are upgraded
     /// ("sharpened") to full in priority order. Pruned to resident in `request_prefetch`.
@@ -752,6 +783,42 @@ struct App {
     /// The archive currently awaiting a password: set when the password prompt opens,
     /// re-opened with the entered password on submit, cleared on success / cancel.
     password_archive: Option<PathBuf>,
+
+    // --- Animated images (task #37) — all RAM-only, dropped on navigate (privacy #2) ---
+    /// On-demand playback for the currently displayed animated image, once the user
+    /// pressed `P` (or stepped a frame). `None` when the current image is a still or
+    /// nothing is playing/paused. Presented via `set_image`, never the prefetch ring.
+    playback: Option<Playback>,
+    /// When the current animation frame was shown — the deadline anchor for advancing
+    /// to the next frame.
+    anim_frame_shown_at: Option<Instant>,
+    /// An off-thread animation decode in flight (a `P`/frame-step kicked it), so a
+    /// large sequence never blocks the event loop. `None` when idle.
+    anim_decode: Option<AnimDecode>,
+    /// Monotonic id for animation-decode requests; a newer one supersedes a stale
+    /// result that finally arrives after the user moved on.
+    anim_gen: u64,
+    /// The displayed item the "▶ P to play" hint was last shown for, so it flashes
+    /// once per settle on an animated still (not every tick, and not while flying).
+    anim_hint_shown_for: Option<usize>,
+    /// Held-key frame-step (`,`/`.` scrub) timing: when the hold began (for the
+    /// initial tap delay) and when the last repeat fired.
+    framestep_started: Option<Instant>,
+    framestep_last: Option<Instant>,
+}
+
+/// An in-flight off-thread animation decode (the whole sequence for `item`), kicked
+/// by `P` / frame-step so a big GIF/WebP never stalls the event loop. The still first
+/// frame stays on screen until it lands.
+struct AnimDecode {
+    gen: u64,
+    item: usize,
+    /// The geometry epoch at kick time; a resize in between invalidates the fit, so a
+    /// late result for the old size is discarded.
+    epoch: u64,
+    /// Start playing on arrival (`P`) vs. land paused for frame-stepping (`,`/`.`).
+    autoplay: bool,
+    rx: std::sync::mpsc::Receiver<Result<pb_decode::Animation, DecodeError>>,
 }
 
 impl App {
@@ -857,6 +924,7 @@ impl App {
             chip_sig: None,
             chip_built: Instant::now(),
             chip_rect: None,
+            chip_hovered: false,
             preview_resident: HashSet::new(),
             upgrade_done: HashSet::new(),
             last_upgrade_set: Vec::new(),
@@ -891,6 +959,13 @@ impl App {
             scan_gen: 0,
             pending_launch: None,
             password_archive: None,
+            playback: None,
+            anim_frame_shown_at: None,
+            anim_decode: None,
+            anim_gen: 0,
+            anim_hint_shown_for: None,
+            framestep_started: None,
+            framestep_last: None,
         }
     }
 
@@ -1319,6 +1394,9 @@ impl App {
             self.show_toast("Delete failed", event_loop);
             return;
         }
+        // Deleting a playing animation stops playback so the doomed photo freezes on
+        // its current frame under the trash icon (rather than animating until removal).
+        self.stop_playback();
         // Recycle-bin icon for the recoverable delete, trash for a permanent one.
         let icon = if permanent {
             icon::assets::TRASH
@@ -2773,6 +2851,11 @@ impl App {
             Action::SlideshowToggle => self.toggle_slideshow(event_loop),
             Action::SlideshowFaster => self.adjust_slideshow(-1, event_loop),
             Action::SlideshowSlower => self.adjust_slideshow(1, event_loop),
+            Action::PlayPause => self.toggle_play_pause(event_loop),
+            // A menu click is a single step; the keyboard's hold-to-scrub goes through
+            // `frame_step_press` (the FrameStep press arm) instead.
+            Action::FrameNext => self.frame_step(1, event_loop),
+            Action::FramePrev => self.frame_step(-1, event_loop),
             Action::Settings => self.open_settings(event_loop),
             Action::About => self.open_about(event_loop),
             Action::Quit => self.begin_exit(event_loop),
@@ -2849,6 +2932,7 @@ impl App {
         }
         let start = start.min(source.len() - 1);
         self.pending_delete = None; // any rebuild supersedes a deferred delete-advance
+        self.stop_playback(); // a new source drops any playback of the old one (#2)
         self.source = source;
         self.root = root;
         self.scan_root = scan_root;
@@ -3811,6 +3895,7 @@ impl App {
                 px,
                 width,
                 hud::BG,
+                self.chip_hovered,
             )
         });
         let Some((rgba, w, h, btn)) = card else {
@@ -3866,6 +3951,7 @@ impl App {
                 a.renderer.set_chip(None, 0, 0);
             }
             self.chip_rect = None;
+            self.chip_hovered = false;
             self.draw(event_loop);
         }
     }
@@ -3876,6 +3962,23 @@ impl App {
     /// buttons will register their own rects the same way.)
     fn chip_hit(&self, x: f32, y: f32) -> bool {
         self.chip_rect.is_some_and(|rect| point_in_rect(rect, x, y))
+    }
+
+    /// Update the Cancel Scan button's hover "lit" state from the latest cursor position, and —
+    /// only when hover **changes** — re-rasterize the card so the button lights up / dims. This
+    /// runs on every cursor-move, but the rebuild fires just on the enter/leave transition (one
+    /// ~320px CPU composite), never per move or per frame, so it stays off the photo hot path.
+    fn update_chip_hover(&mut self, event_loop: &ActiveEventLoop) {
+        let hovered = self.last_cursor.is_some_and(|[x, y]| self.chip_hit(x, y));
+        if hovered == self.chip_hovered {
+            return;
+        }
+        self.chip_hovered = hovered;
+        // Re-render the card in the new hover state; its content (name/path/count) is unchanged,
+        // so this bypasses the content throttle and feels instant.
+        if let Some((name, path, count)) = self.chip_sig.clone() {
+            self.push_chip(&name, &path, count, event_loop);
+        }
     }
 
     /// Render one frame.
@@ -3934,6 +4037,8 @@ impl App {
         self.wait_started = None;
         self.pie_finish = None;
         self.pie_glow_started = None;
+        // Drop any on-demand animation playback + in-flight decode (RAM-only — #2).
+        self.stop_playback();
     }
 
     /// Handle a nav keypress (space / backspace / enter). Tracks the held key for
@@ -3965,6 +4070,9 @@ impl App {
         if self.displayed_item != self.target_item {
             return;
         }
+        // Navigating away from an animated image stops playback and reverts to the
+        // still (the frames are RAM-only — privacy #2). A no-op on a still.
+        self.stop_playback();
         // Remember the direction so the slideshow auto-advances the way the user last
         // moved (manual nav during a slideshow steers it). The slideshow's own
         // `advance(self.last_nav)` calls are then idempotent here.
@@ -4054,12 +4162,16 @@ impl App {
             .unwrap_or(false)
     }
 
-    /// Reflect the pan affordance in the pointer: a closed hand while dragging, an
-    /// open hand when the image is pannable, the default arrow otherwise.
+    /// Reflect the pan affordance in the pointer: a pointing hand over the Cancel Scan button,
+    /// a closed hand while dragging, an open hand when the image is pannable, the default arrow
+    /// otherwise.
     fn refresh_cursor(&self) {
         if let Some(a) = self.active.as_ref() {
+            let over_button = self.last_cursor.is_some_and(|[x, y]| self.chip_hit(x, y));
             let icon = if self.dragging {
                 CursorIcon::Grabbing
+            } else if over_button {
+                CursorIcon::Pointer
             } else if self.pannable() {
                 CursorIcon::Grab
             } else {
@@ -4160,11 +4272,262 @@ impl App {
     /// Whether prefetch/upload work is still outstanding (keep polling if so).
     fn work_pending(&self) -> bool {
         self.archive_load.is_some()
+            // An off-thread animation decode in flight keeps the loop polling so
+            // `poll_anim_decode` picks it up promptly (active playback drives its own
+            // precise next-frame wake via `tick_playback`, not this frame poll).
+            || self.anim_decode.is_some()
             || self.displayed_item != self.target_item
             || self
                 .targets
                 .iter()
                 .any(|&t| self.ring.slot_for(t).is_none() && !self.failed.contains(&t))
+    }
+
+    // --- Animation playback (task #37) -------------------------------------------------
+
+    /// `P`: play/pause the current animation. If it isn't decoded yet (and the photo
+    /// is animated), kick the off-thread decode and start playing when it lands. On a
+    /// still, `P` does nothing.
+    fn toggle_play_pause(&mut self, event_loop: &ActiveEventLoop) {
+        if self.playback.is_some() {
+            let playing = self.playback.as_mut().unwrap().toggle_play();
+            if playing {
+                // (Re)started — present the current frame (frame 0 when replaying a
+                // finished loop, so the stale last frame doesn't linger) + anchor timing.
+                self.present_anim_frame(event_loop);
+            } else {
+                self.draw(event_loop); // paused — just redraw the held frame
+            }
+            return;
+        }
+        if self.anim_decode.is_some() {
+            return; // a decode is already on its way (it'll autoplay)
+        }
+        let Some(item) = self.displayed_item else {
+            return;
+        };
+        if self.current_is_animated(item) {
+            self.start_animation_decode(item, true);
+        }
+    }
+
+    /// Step the current animation one frame (`delta`: `+1` next, `-1` previous),
+    /// pausing playback. If not decoded yet (and animated), kick a paused decode so
+    /// the held-key scrub can step once frames are ready. A no-op on a still.
+    fn frame_step(&mut self, delta: i32, event_loop: &ActiveEventLoop) {
+        if self.playback.is_some() {
+            self.playback.as_mut().unwrap().step(delta);
+            self.present_anim_frame(event_loop);
+            return;
+        }
+        if self.anim_decode.is_some() {
+            return;
+        }
+        let Some(item) = self.displayed_item else {
+            return;
+        };
+        if self.current_is_animated(item) {
+            self.start_animation_decode(item, false);
+        }
+    }
+
+    /// Keyboard frame-step press: track the key for hold-to-scrub, then step once now.
+    fn frame_step_press(&mut self, code: KeyCode, action: Action, event_loop: &ActiveEventLoop) {
+        self.held.insert(code, action);
+        let now = Instant::now();
+        self.framestep_started = Some(now);
+        self.framestep_last = Some(now);
+        self.frame_step(frame_step_dir(action), event_loop);
+    }
+
+    /// Whether item `item` is an animated container (from the cached header sniff).
+    fn current_is_animated(&self, item: usize) -> bool {
+        self.meta_cache
+            .get(&item)
+            .and_then(|m| m.animated)
+            .is_some()
+    }
+
+    /// Kick the whole-sequence decode for `item` on a worker thread so a big GIF/WebP
+    /// never stalls the event loop; the still first frame stays on screen until it
+    /// lands (picked up by `poll_anim_decode`). `autoplay` starts it playing (`P`) vs.
+    /// paused (frame-step).
+    fn start_animation_decode(&mut self, item: usize, autoplay: bool) {
+        self.anim_gen += 1;
+        let gen = self.anim_gen;
+        let epoch = self.epoch;
+        let source = Arc::clone(&self.source);
+        let fit = self.decode_fit();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = match source.bytes(item) {
+                Ok(bytes) => pb_decode::decode_animation(&bytes, fit),
+                Err(e) => Err(DecodeError::Corrupt(format!("read error: {e}"))),
+            };
+            let _ = tx.send(result);
+        });
+        self.anim_decode = Some(AnimDecode {
+            gen,
+            item,
+            epoch,
+            autoplay,
+            rx,
+        });
+        // The user has engaged — don't also nag with the "▶ P" hint.
+        self.anim_hint_shown_for = self.displayed_item;
+    }
+
+    /// Pick up a finished off-thread animation decode (called each `about_to_wait`).
+    /// Discards a stale result (superseded request, geometry change, or the user
+    /// navigated away) and otherwise installs the [`Playback`] and shows frame 0.
+    fn poll_anim_decode(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::mpsc::TryRecvError;
+        // Receive (and copy out what we need) in a scope so the `anim_decode` borrow
+        // ends before we mutate it / install the playback.
+        let outcome = {
+            let Some(d) = self.anim_decode.as_ref() else {
+                return;
+            };
+            match d.rx.try_recv() {
+                Ok(result) => Some((d.gen, d.epoch, d.item, d.autoplay, result)),
+                Err(TryRecvError::Empty) => return, // still decoding
+                Err(TryRecvError::Disconnected) => None, // worker died
+            }
+        };
+        self.anim_decode = None;
+        let Some((gen, epoch, item, autoplay, result)) = outcome else {
+            return;
+        };
+        // Stale: a newer request superseded it, the fit changed, or we moved on.
+        if gen != self.anim_gen || epoch != self.epoch || self.displayed_item != Some(item) {
+            return;
+        }
+        match result {
+            Ok(anim) => {
+                let truncated = anim.truncated;
+                self.playback = Some(Playback::new(anim, autoplay));
+                self.present_anim_frame(event_loop);
+                if truncated {
+                    self.show_toast("Animation truncated", event_loop);
+                }
+            }
+            Err(e) => {
+                eprintln!("animation decode failed for item {item}: {e}");
+                self.show_toast("Can't play this animation", event_loop);
+            }
+        }
+    }
+
+    /// Upload the current animation frame and redraw (the playback present path —
+    /// `set_image`, never the prefetch ring). Resets the per-frame deadline anchor.
+    fn present_anim_frame(&mut self, event_loop: &ActiveEventLoop) {
+        {
+            let Some(pb) = self.playback.as_ref() else {
+                return;
+            };
+            let color = render_color(&pb.color());
+            let frame = pb.current_frame();
+            if let Some(a) = self.active.as_mut() {
+                a.renderer
+                    .set_image(&frame.rgba, frame.width, frame.height, color, false, 1.0);
+            }
+        }
+        self.anim_frame_shown_at = Some(Instant::now());
+        self.draw(event_loop);
+    }
+
+    /// Advance playback to the due frame and return the next frame's wake deadline
+    /// (None when not actively playing), so the loop sleeps exactly until then.
+    fn tick_playback(&mut self, now: Instant, event_loop: &ActiveEventLoop) -> Option<Instant> {
+        let shown = self.anim_frame_shown_at;
+        let due = self.playback.as_ref().is_some_and(|pb| {
+            let since = shown
+                .map(|t| now.saturating_duration_since(t))
+                .unwrap_or(Duration::ZERO);
+            pb.is_due(since)
+        });
+        if due {
+            self.playback.as_mut().unwrap().advance();
+            self.present_anim_frame(event_loop); // updates anim_frame_shown_at + draws
+        }
+        let shown = self.anim_frame_shown_at;
+        self.playback
+            .as_ref()
+            .filter(|pb| pb.is_playing())
+            .map(|pb| shown.unwrap_or(now) + pb.current_delay())
+    }
+
+    /// Drive the held-key frame-step scrub (`,`/`.`). Returns whether a frame-step key
+    /// is held (so the loop keeps polling). One step on press, then repeats at
+    /// [`FRAME_STEP_REPEAT`] after the initial tap delay.
+    fn tick_frame_step(&mut self, now: Instant, event_loop: &ActiveEventLoop) -> bool {
+        let dir = self.held_frame_step();
+        if dir == 0 {
+            self.framestep_started = None;
+            self.framestep_last = None;
+            return false;
+        }
+        // Need a decoded sequence to scrub; while it's still decoding, keep ticking.
+        if self.playback.is_none() {
+            return true;
+        }
+        let past_delay = match self.framestep_started {
+            Some(t) => now >= t + self.initial_delay,
+            None => true,
+        };
+        let due = match self.framestep_last {
+            Some(t) => now >= t + FRAME_STEP_REPEAT,
+            None => true,
+        };
+        if past_delay && due {
+            self.playback.as_mut().unwrap().step(dir);
+            self.present_anim_frame(event_loop);
+            self.framestep_last = Some(now);
+        }
+        true
+    }
+
+    /// The held frame-step direction: `+1` ([`Action::FrameNext`]) / `-1`
+    /// ([`Action::FramePrev`]) / `0` if neither or both.
+    fn held_frame_step(&self) -> i32 {
+        let mut dir = 0i32;
+        for &action in self.held.values() {
+            match action {
+                Action::FrameNext => dir += 1,
+                Action::FramePrev => dir -= 1,
+                _ => {}
+            }
+        }
+        dir.signum()
+    }
+
+    /// Flash the "▶ Press P to play" hint once when settling on an animated still —
+    /// suppressed while flying (the nag the owner flagged) and once playback/stepping
+    /// has engaged.
+    fn maybe_show_anim_hint(&mut self, flying: bool, event_loop: &ActiveEventLoop) {
+        if flying || self.playback.is_some() || self.anim_decode.is_some() {
+            return;
+        }
+        let Some(item) = self.displayed_item else {
+            return;
+        };
+        if self.anim_hint_shown_for == Some(item) {
+            return;
+        }
+        if self.current_is_animated(item) {
+            self.anim_hint_shown_for = Some(item);
+            self.show_toast_icon("Press P to play", Some(icon::assets::PLAY), event_loop);
+        }
+    }
+
+    /// Stop and drop any playback / in-flight decode, reverting to the still. Called
+    /// when navigating away or changing source (the frames are RAM-only — privacy #2).
+    fn stop_playback(&mut self) {
+        self.playback = None;
+        self.anim_frame_shown_at = None;
+        self.anim_decode = None;
+        self.framestep_started = None;
+        self.framestep_last = None;
     }
 }
 
@@ -4512,6 +4875,9 @@ impl ApplicationHandler for App {
                                 ActionKind::Held => {
                                     self.held.insert(code, act);
                                 }
+                                ActionKind::FrameStep => {
+                                    self.frame_step_press(code, act, event_loop)
+                                }
                             }
                         }
                     }
@@ -4566,7 +4932,14 @@ impl ApplicationHandler for App {
                     }
                 }
                 self.last_cursor = Some(p);
+                self.update_chip_hover(event_loop);
                 self.refresh_cursor();
+            }
+
+            // Pointer left the window: drop any Cancel Scan hover so the button doesn't stay lit.
+            WindowEvent::CursorLeft { .. } => {
+                self.last_cursor = None;
+                self.update_chip_hover(event_loop);
             }
 
             // Left button toggles drag-to-pan (the cross-platform pan gesture).
@@ -4701,6 +5074,10 @@ impl ApplicationHandler for App {
         // 1. Absorb finished decodes (uploads; presents the target if it arrived).
         self.drain_results(event_loop);
 
+        // 1b. Pick up a finished off-thread animation decode (kicked by `P` /
+        // frame-step) and install playback — never on the still/keypress hot path (#37).
+        self.poll_anim_decode(event_loop);
+
         // 2. Continuous zoom/pan while their keys are held (accelerating ramp).
         let transforming = self.apply_view_holds(now, event_loop);
 
@@ -4790,6 +5167,9 @@ impl ApplicationHandler for App {
         // changes, so single-stepping never blanks/flashes it). No timed delay:
         // the blaze gate alone keeps it off the fly. Left untouched mid zoom/pan.
         let flying = nav.is_some() && past_delay;
+        // 4a′. Flash the "Press P to play" hint once on settling on an animated still —
+        // suppressed while flying (no nag mid-fly) and once playback has engaged (#37).
+        self.maybe_show_anim_hint(flying, event_loop);
         if self.info != InfoMode::Off {
             if flying {
                 if self.overlay_shown {
@@ -4866,6 +5246,13 @@ impl ApplicationHandler for App {
         }
         let dialog_wake = dialog_repaint.filter(|&at| at > now);
 
+        // 4g. On-demand animation (task #37), off the photo hot path. `tick_playback`
+        // advances to the due frame and returns the next frame's precise deadline (None
+        // when not actively playing) so we sleep exactly until then; `tick_frame_step`
+        // drives the held `,`/`.` scrub (polls at frame rate, like a held nav key).
+        let anim_wake = self.tick_playback(now, event_loop);
+        let framestep_active = self.tick_frame_step(now, event_loop);
+
         // 5. Poll at the frame rate while interacting or work is outstanding; else sleep
         //    to the slideshow's next-slide deadline when it's the only thing pending;
         //    honor an open dialog's timed repaint; otherwise go fully idle until an event.
@@ -4876,6 +5263,7 @@ impl ApplicationHandler for App {
             || pie_active
             || resizing
             || sharpen_pending
+            || framestep_active
             || self.pending_delete.is_some()
             // Keep ticking until the debounced windowed-geometry save fires (#1), so a
             // window move/resize is persisted even when nothing else wakes the loop.
@@ -4896,11 +5284,12 @@ impl ApplicationHandler for App {
         } else {
             None
         };
-        // The earliest pending wake across the viewer and an open dialog; `None` = idle.
-        let wake = match (base_wake, dialog_wake) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
+        // The earliest pending wake across the viewer, an open dialog, and the
+        // animation's next-frame deadline; `None` = idle.
+        let wake = [base_wake, dialog_wake, anim_wake]
+            .into_iter()
+            .flatten()
+            .min();
         match wake {
             Some(at) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
             None => event_loop.set_control_flow(ControlFlow::Wait),
