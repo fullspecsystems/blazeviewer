@@ -91,9 +91,10 @@ pub mod tokens {
     pub const BUTTON_BORDER: f32 = 0.1;
     /// Button background fill alpha (a barely-there wash).
     pub const BUTTON_FILL_ALPHA: f32 = 0.07;
-    /// Button border alpha — genuinely 50% so the photo shows through. Drawn with
-    /// `set_toward` (sets, not composites-over), or it would read near-solid over the card.
-    pub const BUTTON_BORDER_ALPHA: f32 = 0.5;
+    /// Button border alpha — white layered *over* the card (via [`super::Canvas::over`]), so it
+    /// fades from invisible (0) through a faint hairline (~0.2) to a solid white outline (1).
+    /// Tune to taste; low reads subtle.
+    pub const BUTTON_BORDER_ALPHA: f32 = 0.2;
 }
 
 use tokens::{SHADOW, SHADOW_ALPHA, TEXT, TEXT_DIM};
@@ -496,7 +497,7 @@ impl Hud {
         );
         y += sub_lh + gap_button;
 
-        // Centered button (stop icon + label, faint fill, 50%-translucent border).
+        // Centered button (stop icon + label, faint fill, subtle border).
         let bx = (cw - bw) / 2;
         let button_rect =
             self.draw_button(&mut canvas, bx, y, button_label, Some(button_icon), px_sub)?;
@@ -511,15 +512,14 @@ impl Hud {
         Some((b.w.max(0) as u32, b.h.max(0) as u32))
     }
 
-    /// Draw the reusable HUD **button** into `canvas` at `(x, y)` — a faint fill, a
-    /// genuinely-50%-translucent rounded border, then the optional leading icon and the
-    /// `label`, all at text size `px`. Returns its `[x, y, w, h]` rect (the click target).
+    /// Draw the reusable HUD **button** into `canvas` at `(x, y)` — a faint fill, a subtle
+    /// rounded border, then the optional leading icon and the `label`, all at text size `px`.
+    /// Returns its `[x, y, w, h]` rect (the click target).
     ///
-    /// Draws **directly into the destination** canvas on purpose: the border is *set* to 50%
-    /// opacity via [`Canvas::stroke_round_rect`], so the background shows through it. Render
-    /// the button to a standalone bitmap and blit it over a card instead and that 50% border
-    /// re-composites over the card and reads ~80% — use [`render_button`] (its own canvas) for
-    /// a freestanding swatch, this for compositing onto an existing panel.
+    /// Draws **directly into the destination** canvas — the fill and the border ([`tokens`]
+    /// `BUTTON_FILL_ALPHA` / `BUTTON_BORDER_ALPHA`) composite *over* the panel it lands on, so
+    /// they read consistently on the scan card or a `BG` swatch. (For a freestanding swatch use
+    /// [`render_button`], which supplies that backing canvas.)
     fn draw_button(
         &self,
         canvas: &mut Canvas,
@@ -558,10 +558,9 @@ impl Hud {
     }
 
     /// Render a freestanding HUD **button swatch** to its own translucent pill bitmap — for
-    /// the HUD gallery, which previews button variants in isolation. Because the swatch *is*
-    /// its own canvas (filled with `bg`), the 50%-translucent border composites correctly here
-    /// — the caveat on [`draw_button`] (don't blit a pre-rendered button over a panel) doesn't
-    /// apply. Returns `(rgba, w, h)`.
+    /// the HUD gallery, which previews button variants in isolation. The swatch *is* its own
+    /// canvas (filled with `bg`), so the fill and border land on the same backing they'd have
+    /// on a card. Returns `(rgba, w, h)`.
     pub fn render_button(
         &self,
         label: &str,
@@ -786,12 +785,13 @@ impl Canvas {
         }
     }
 
-    /// Draw a rounded-rect **outline** of `t`-px thickness (the scan card's button border):
-    /// the ring between the box `[x0, y0, w, h]` (radius `r`) and the same box inset by `t`
-    /// (radius `r - t`). The ring is **set** to a translucent `(rgb, alpha)` — not composited
-    /// over what's behind it — so a 50%-alpha border is genuinely 50% opaque and the photo
-    /// shows through it (compositing over the card's already-opaque bg would read near-solid).
-    /// Coverage = outer − inner, so the corners stay anti-aliased.
+    /// Draw a rounded-rect **outline** of `t`-px thickness (the button border): the ring between
+    /// the box `[x0, y0, w, h]` (radius `r`) and the same box inset by `t` (radius `r - t`),
+    /// composited **over** the destination in `(rgb, alpha)`, anti-aliased at the corners
+    /// (coverage = outer − inner). Layering over the panel — rather than *setting* the ring's
+    /// alpha — keeps `alpha` intuitive: it fades the border from invisible (0) to a solid line
+    /// (1) against the card. (Setting the alpha instead carved a translucent hole that showed
+    /// the brighter background through the border, so it never read subtle no matter how low.)
     #[allow(clippy::too_many_arguments)]
     fn stroke_round_rect(
         &mut self,
@@ -819,35 +819,10 @@ impl Canvas {
                 };
                 let ring = (outer - inner).clamp(0.0, 1.0);
                 if ring > 0.0 {
-                    self.set_toward(x0 + px_, y0 + py, rgb, alpha, ring);
+                    self.over(x0 + px_, y0 + py, rgb, alpha * ring);
                 }
             }
         }
-    }
-
-    /// Blend the pixel at `(x, y)` **toward** the straight-alpha target `(rgb, alpha)` by
-    /// coverage `c` (∈ [0,1]): `c = 1` sets it to the target, `c = 0` leaves it. Unlike
-    /// [`over`](Canvas::over) this can *reduce* the destination's alpha, so it paints a
-    /// translucent shape the background shows through (the button's 50%-opacity outline).
-    /// Premultiplied lerp so colors stay correct where alpha is partial.
-    fn set_toward(&mut self, x: i32, y: i32, rgb: [u8; 3], alpha: f32, c: f32) {
-        if c <= 0.0 || x < 0 || y < 0 || x >= self.w || y >= self.h {
-            return;
-        }
-        let idx = ((y * self.w + x) * 4) as usize;
-        let dst = &mut self.px[idx..idx + 4];
-        let da = dst[3] as f32 / 255.0;
-        let na = da * (1.0 - c) + alpha * c;
-        if na <= 0.0 {
-            dst.fill(0);
-            return;
-        }
-        for (d, &t) in dst[..3].iter_mut().zip(rgb.iter()) {
-            let dp = (*d as f32) * da; // dst premultiplied
-            let tp = (t as f32) * alpha; // target premultiplied
-            *d = (((dp * (1.0 - c) + tp * c) / na).round()).clamp(0.0, 255.0) as u8;
-        }
-        dst[3] = (na * 255.0).round().clamp(0.0, 255.0) as u8;
     }
 
     /// Composite `rgba` (straight-alpha) over the pixel at `(x, y)`, if in bounds.
