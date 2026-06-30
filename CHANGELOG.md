@@ -21,6 +21,10 @@ with any pre-release suffix carried only by the tag.
   very first photo is slow to find.
 
 ### Fixed
+- Overlay text (the scan card, info/EXIF panel, loading spinner, "Press O to open" hint) now
+  stays crisp when you drag the window between monitors of different pixel density (e.g. a
+  regular display and a Retina one) — previously it was baked at the starting monitor's DPI
+  and looked soft or wrong-sized on the other. The viewer photo itself was already correct.
 - macOS app icon: the Clear/Tinted (monochrome) appearance now reads high-contrast
   instead of washed-out, using dedicated white artwork shown only in that mode.
 

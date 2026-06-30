@@ -3821,6 +3821,29 @@ impl App {
         self.draw(event_loop);
     }
 
+    /// A monitor/DPI change re-scaled the window (e.g. dragging from a 1× display to a 2×
+    /// Retina one): every CPU-rasterized overlay was baked at the old [`scale_factor`] and is
+    /// cached by *content* (which didn't change), so force each to rebuild at the new DPI —
+    /// otherwise the overlay text looks soft / wrong-sized on the new monitor. The photo and
+    /// the info/EXIF panel are re-decoded / re-shown by the `Resized` → settle path that
+    /// follows this event (using the now-updated scale); here we invalidate the per-tick
+    /// overlays (the loading pie and the scan card) and the empty-state hint.
+    ///
+    /// [`scale_factor`]: App::scale_factor
+    fn rescale_overlays(&mut self) {
+        self.pie_pushed = None; // re-rasterize the loading pie at the new scale next tick
+        self.chip_sig = None; // re-rasterize the scan card next tick
+        if self.overlay_shown {
+            self.overlay_item = None; // force the info/EXIF/help panel to re-show next tick
+        }
+        if self.source.is_empty() {
+            self.show_open_hint(); // re-rasterize the "Press O to open" hint
+        }
+        if let Some(a) = self.active.as_ref() {
+            a.window.request_redraw();
+        }
+    }
+
     /// Clear the scan card layer if it's up (and redraw to remove it).
     fn clear_chip(&mut self, event_loop: &ActiveEventLoop) {
         if self.chip_sig.is_some() {
@@ -4387,6 +4410,19 @@ impl ApplicationHandler for App {
                 }
                 // Remember the new windowed size so it can be restored later (#1).
                 self.track_windowed_geometry();
+            }
+
+            // The window's backing scale factor changed — a move to a monitor with a
+            // different DPI (a 1× display ↔ a 2× Retina one), or a live OS DPI change. Update
+            // the factor every CPU-rasterized overlay is sized by, then rebuild them so the
+            // overlay text stays crisp at the new DPI. The `Resized` that winit sends right
+            // after this reconfigures the swapchain + re-decodes the photo to the new size.
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                let sf = scale_factor as f32;
+                if (sf - self.scale_factor).abs() > f32::EPSILON {
+                    self.scale_factor = sf;
+                    self.rescale_overlays();
+                }
             }
 
             // Track the windowed position so toggling back / relaunching restores it
