@@ -56,6 +56,10 @@ with any pre-release suffix carried only by the tag.
 - macOS: the **Enter Full Screen** menu item (⌃⌘F) now flips to **Exit Full Screen**
   while in full screen, matching standard Mac apps — and stays correct whether you
   toggle from the menu, ⌃⌘F, the green window button, or a Mission Control gesture.
+- macOS: the borderless fullscreen (F / ⌥⏎) is now truly **chromeless** — it auto-hides
+  the menu bar and Dock, reclaiming that screen space for the photo (and no longer
+  clipping the photo's top edge behind the menu bar), while staying in the current Space
+  (no full-screen animation). The menu bar and Dock still slide down/up on hover.
 - macOS: the File menu's delete items now use Finder's idioms — **Move to Trash (⌘⌫)**
   and **Delete Immediately… (⌥⌘⌫)** — with the shortcuts shown in the menu. (The Del /
   Shift+Del keys still work too.) ⌥⌘⌫ is used rather than ⇧⌘⌫, which Finder reserves for
@@ -69,6 +73,11 @@ with any pre-release suffix carried only by the tag.
 ### Fixed
 - The View menu's **Show Image Info** and **Show All EXIF Info** items now show a
   checkmark when their panel is on, so the menu reflects what's actually displayed.
+- Opening a **large or deeply nested folder** (e.g. your whole Pictures library, or
+  macOS's `~/Library`) no longer freezes the window — or crashes — while it's scanned.
+  The folder is now walked off the main thread (the current photo stays interactive,
+  and a slow scan shows a brief "Scanning folder…" note), and the scan can no longer
+  loop forever on a folder symlink/alias that points back at itself.
 
 ## [0.1.0-beta.3] - 2026-06-29
 

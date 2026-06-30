@@ -31,6 +31,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -66,6 +67,8 @@ mod hdr_surface;
 mod hud;
 mod icon;
 mod keymap;
+#[cfg(target_os = "macos")]
+mod macos_chrome;
 #[cfg(target_os = "macos")]
 mod macos_open;
 mod menu;
@@ -140,6 +143,11 @@ const GESTURE_PAN_DIR: f32 = 1.0;
 /// How long the delete icon shows on the just-deleted photo before the playlist
 /// advances to the next one — so the trash/recycle feedback registers first (#28).
 const DELETE_ADVANCE_DELAY: Duration = Duration::from_millis(160);
+
+/// How long an off-thread directory scan must run before the "Scanning folder…" toast
+/// appears. A normal folder resolves in well under this, so the common case never flashes
+/// it; only a genuinely large/nested tree (the `~/Library` case) shows the indicator.
+const SCAN_TOAST_DELAY: Duration = Duration::from_millis(250);
 
 /// The minimum gap since the last shown photo before the next held-key auto-advance,
 /// given how long auto-repeat has been running (`elapsed`, measured from when the
@@ -686,6 +694,13 @@ struct App {
     /// Monotonic id for archive-open requests; a newer open bumps it so a superseded
     /// load's result is discarded when it finally arrives.
     archive_gen: u64,
+    /// An in-flight background **directory scan** (a large/recursive folder is walked
+    /// off the event loop so it can't beachball — then crash — the way opening a huge
+    /// tree like `~/Library` did). `None` when no scan is running.
+    dir_scan: Option<DirScan>,
+    /// Monotonic id for directory-scan requests; a newer open bumps it so a superseded
+    /// scan's result is discarded when it finally arrives.
+    scan_gen: u64,
     /// A launch input (an archive) deferred until the window exists, so the viewer
     /// appears immediately and a slow / encrypted / failed open uses the spinner +
     /// dialogs instead of blocking startup or only logging. Fired once in `resumed`.
@@ -822,6 +837,8 @@ impl App {
             settings,
             archive_load: None,
             archive_gen: 0,
+            dir_scan: None,
+            scan_gen: 0,
             pending_launch: None,
             password_archive: None,
         }
@@ -1650,11 +1667,20 @@ impl App {
     fn open_input(&mut self, input: LaunchInput, event_loop: &ActiveEventLoop) {
         let plan = open::plan(input);
         // Archives open via the async-aware path (a .7z decompresses off-thread so it
-        // can't freeze the loop). Folders / file lists resolve synchronously (cheap).
+        // can't freeze the loop).
         if let Source::Archive(path) = &plan.source {
             self.begin_archive_open(path.clone(), None, event_loop);
             return;
         }
+        // Folder scans also run OFF the event loop: walking a large/nested tree (the
+        // worst case is opening `~/Library`) can take seconds, and doing it synchronously
+        // beachballed the run loop and then crashed the app. The current view stays put
+        // until the scan lands (`poll_dir_scan`).
+        if matches!(plan.source, Source::Scan { .. }) {
+            self.begin_dir_scan(plan.source, plan.cursor);
+            return;
+        }
+        // An explicit file list is finite (no directory walk), so resolve it inline.
         let r = resolve_playlist(&plan.source, &plan.cursor);
         if r.source.is_empty() {
             eprintln!("PhotoBlaze: no supported images in that selection");
@@ -1833,6 +1859,91 @@ impl App {
     fn cancel_archive_load(&mut self) {
         if let Some(load) = self.archive_load.as_ref() {
             load.progress.request_cancel();
+        }
+    }
+
+    /// Start scanning a folder source off the event loop. Walking a large or deeply
+    /// nested tree (the worst case: someone opens `~/Library`) can take many seconds;
+    /// doing it synchronously froze the run loop (beachball) and could then get the
+    /// unresponsive app killed. So the walk runs on a worker thread and the resolved
+    /// playlist is picked up in [`poll_dir_scan`](App::poll_dir_scan) — the current view
+    /// stays until it lands. A second open supersedes the first via `scan_gen` + the
+    /// shared cancel flag, so a giant in-flight scan is abandoned rather than left to
+    /// finish. Mirrors the async archive path ([`begin_archive_open`](App::begin_archive_open)).
+    fn begin_dir_scan(&mut self, source: Source, cursor: open::Cursor) {
+        // Abandon any scan already running — its result would be stale, and it may be a
+        // huge walk we don't want competing for I/O with the new one.
+        self.cancel_dir_scan();
+        self.scan_gen += 1;
+        let generation = self.scan_gen;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let resolved = resolve_scan(&source, &cursor, Some(&worker_cancel));
+            let _ = tx.send((generation, resolved));
+        });
+        self.dir_scan = Some(DirScan {
+            generation,
+            rx,
+            cancel,
+            started: Instant::now(),
+        });
+    }
+
+    /// Pick up a finished background directory scan (called each `about_to_wait` tick).
+    /// On a result for the current generation: rebuild the playlist, or — if the folder
+    /// held no supported images — log and keep whatever is on screen (an open failure
+    /// never blanks the current photo). While a scan is still running and has outlasted
+    /// [`SCAN_TOAST_DELAY`], keep a "Scanning folder…" toast up so a genuinely slow walk
+    /// shows it's working; it's only re-shown once the prior toast has faded, so it never
+    /// re-rasterizes per frame. Mirrors [`poll_archive_load`](App::poll_archive_load).
+    fn poll_dir_scan(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::mpsc::TryRecvError;
+        let (scan_gen, recv) = match self.dir_scan.as_ref() {
+            Some(scan) => (scan.generation, scan.rx.try_recv()),
+            None => return,
+        };
+        match recv {
+            Ok((generation, resolved)) => {
+                self.dir_scan = None;
+                if generation != scan_gen {
+                    return; // superseded by a newer open
+                }
+                if resolved.source.is_empty() {
+                    eprintln!("PhotoBlaze: no supported images in that selection");
+                    return; // keep whatever is on screen
+                }
+                self.rebuild_playlist(
+                    resolved.source,
+                    resolved.root,
+                    resolved.scan_root,
+                    resolved.recursive,
+                    resolved.start,
+                    event_loop,
+                );
+            }
+            Err(TryRecvError::Empty) => {
+                // Still scanning: show "Scanning folder…" once the walk is slow enough to
+                // notice, and keep it visible (re-show only after the prior toast faded).
+                let slow = self
+                    .dir_scan
+                    .as_ref()
+                    .is_some_and(|s| s.started.elapsed() >= SCAN_TOAST_DELAY);
+                if slow && self.toast.is_none() {
+                    self.show_toast("Scanning folder\u{2026}", event_loop);
+                }
+            }
+            Err(TryRecvError::Disconnected) => self.dir_scan = None, // worker died
+        }
+    }
+
+    /// Ask the in-flight directory scan (if any) to stop. The worker bails at its next
+    /// entry; [`poll_dir_scan`](App::poll_dir_scan) (or the superseding open) then drops
+    /// it. Used when a newer open arrives and on teardown.
+    fn cancel_dir_scan(&mut self) {
+        if let Some(scan) = self.dir_scan.as_ref() {
+            scan.cancel.store(true, Ordering::Relaxed);
         }
     }
 
@@ -2048,6 +2159,11 @@ impl App {
                 let _ = window.request_inner_size(mon.size());
             }
         }
+        // macOS: auto-hide the menu bar + Dock in borderless fullscreen so it reclaims
+        // that strip (chromeless) while staying in the current Space; restore them when
+        // returning to windowed mode.
+        #[cfg(target_os = "macos")]
+        macos_chrome::set_chromeless(!self.windowed);
         // Show the menu in windowed mode, hide it in fullscreen (the chrome-free
         // speed mode). Adding/removing the bar resizes the client area → a `Resized`
         // event → the debounced re-decode path. Done *before* the windowed sizing
@@ -3341,6 +3457,8 @@ impl App {
     /// write** (privacy task #2). `Drop` would reclaim all of this on its own; doing
     /// it explicitly at teardown keeps the privacy guarantee auditable in one place.
     fn clear_session_state(&mut self) {
+        // Abandon a still-running background scan so it stops walking on teardown.
+        self.cancel_dir_scan();
         self.ring = ResidentRing::new(0);
         self.pending_uploads.clear();
         self.meta_cache.clear();
@@ -3770,6 +3888,13 @@ impl ApplicationHandler for App {
         window.set_visible(true);
         window.request_redraw();
 
+        // macOS: a fullscreen launch *is* the borderless mode — auto-hide the menu bar +
+        // Dock from the first frame so it's chromeless (toggle_fullscreen handles changes).
+        #[cfg(target_os = "macos")]
+        if !self.windowed {
+            macos_chrome::set_chromeless(true);
+        }
+
         // Phase 3 engine: size the resident ring to the display and start filling
         // it. The first frame is already up via the single-image path; navigation
         // switches to the ring.
@@ -4080,8 +4205,10 @@ impl ApplicationHandler for App {
                 self.open_input(classify_inputs(opened), event_loop);
             }
         }
-        // 0c. Pick up a finished background archive open (.7z eager decompress).
+        // 0c. Pick up a finished background archive open (.7z eager decompress) or
+        // directory scan (large/nested folder walked off the event loop).
         self.poll_archive_load(event_loop);
+        self.poll_dir_scan(event_loop);
 
         // 1. Absorb finished decodes (uploads; presents the target if it arrived).
         self.drain_results(event_loop);
@@ -4312,44 +4439,58 @@ fn is_supported_image(p: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in rd.flatten() {
-        let Ok(ft) = entry.file_type() else {
+/// Walk `dir` for supported images, appending them to `out` (unsorted — the caller
+/// sorts once across all roots). `recursive` descends every subfolder; otherwise only
+/// the immediate children are listed.
+///
+/// This is deliberately **crash-proof on hostile trees**, the bug that made opening a
+/// large nested folder (e.g. macOS's `~/Library`) beachball then die:
+/// * **iterative** (walkdir, not recursion) — a tree thousands of levels deep can't
+///   overflow the stack the old recursive walk did, and open directory handles stay
+///   bounded instead of one-per-level;
+/// * **never follows symlinks** (walkdir's default) — a directory symlink/alias that
+///   points back at an ancestor can't send it into an infinite loop;
+/// * **error-tolerant** — a permission-denied folder (macOS TCC guards much of
+///   `~/Library`) or a file that vanished mid-walk is skipped, not fatal.
+///
+/// `cancel`, if set, stops the walk at the next entry so a superseding open can abandon
+/// a huge in-flight scan; whatever was gathered so far is left in `out`.
+fn collect_images(
+    dir: &Path,
+    recursive: bool,
+    cancel: Option<&AtomicBool>,
+    out: &mut Vec<PathBuf>,
+) {
+    let max_depth = if recursive { usize::MAX } else { 1 };
+    // follow_links(false) is the default, but state it: symlinked dirs are yielded yet
+    // never descended, so the walk stays inside the intended tree and can't cycle.
+    let walker = walkdir::WalkDir::new(dir)
+        .max_depth(max_depth)
+        .follow_links(false);
+    for entry in walker {
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            return;
+        }
+        // Skip unreadable entries (permissions, races) rather than aborting the scan.
+        let Ok(entry) = entry else {
             continue;
         };
-        let path = entry.path();
-        if ft.is_dir() {
-            collect_recursive(&path, out);
-        } else if ft.is_file() && is_supported_image(&path) {
-            out.push(path);
+        // file_type() here does not traverse symlinks (matches follow_links(false)), so
+        // a symlinked file/dir is not mistaken for a real one.
+        if entry.file_type().is_file() && is_supported_image(entry.path()) {
+            out.push(entry.into_path());
         }
     }
 }
 
-/// Scan `dir` for supported images, sorted by full path. `recursive` also walks
-/// subfolders (a `-r` convenience now; the R-key toggle with folder-grouped
-/// ordering is tasks.json #9). Non-recursive is the default, matching that design.
+/// Scan `dir` for supported images, sorted by full path — a thin synchronous wrapper
+/// over [`collect_images`] used by the tests. Production callers go through
+/// [`resolve_source`] (which calls `collect_images` directly with a cancel flag, on the
+/// off-thread scan worker).
+#[cfg(test)]
 fn scan_images(dir: &Path, recursive: bool) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if recursive {
-        collect_recursive(dir, &mut paths);
-    } else {
-        match std::fs::read_dir(dir) {
-            Ok(rd) => {
-                for entry in rd.flatten() {
-                    let is_file = entry.file_type().map(|ft| ft.is_file()).unwrap_or(false);
-                    let path = entry.path();
-                    if is_file && is_supported_image(&path) {
-                        paths.push(path);
-                    }
-                }
-            }
-            Err(e) => eprintln!("cannot read directory {}: {e}", dir.display()),
-        }
-    }
+    collect_images(dir, recursive, None, &mut paths);
     paths.sort();
     paths
 }
@@ -4496,12 +4637,15 @@ fn classify_inputs(paths: Vec<PathBuf>) -> LaunchInput {
 /// explicit list) into the ordered image paths to play. Returns the paths, the
 /// root for relative-path display, the scan root (for `Ctrl+R`; `None` for an
 /// explicit list), and whether the scan was recursive.
-fn resolve_source(source: &Source) -> (Vec<PathBuf>, PathBuf, Option<PathBuf>, bool) {
+fn resolve_source(
+    source: &Source,
+    cancel: Option<&AtomicBool>,
+) -> (Vec<PathBuf>, PathBuf, Option<PathBuf>, bool) {
     match source {
         Source::Scan { roots, recursive } => {
             let mut paths = Vec::new();
             for r in roots {
-                paths.extend(scan_images(r, *recursive));
+                collect_images(r, *recursive, cancel, &mut paths);
             }
             paths.sort();
             let root = roots.first().cloned().unwrap_or_else(|| PathBuf::from("."));
@@ -4552,23 +4696,29 @@ impl Resolved {
     }
 }
 
+/// Resolve a filesystem [`Source`] (folder scan or explicit list) into a playlist,
+/// honoring `cancel` so a superseding open can abandon a huge in-flight scan. The
+/// cursor math + `FsSource` build is shared with [`resolve_playlist`]; this carries the
+/// (cancellable) directory I/O, so it's what the off-thread scan worker runs.
+fn resolve_scan(source: &Source, cursor: &open::Cursor, cancel: Option<&AtomicBool>) -> Resolved {
+    let (paths, root, scan_root, recursive) = resolve_source(source, cancel);
+    let start = open::resolve_cursor(&paths, cursor);
+    Resolved {
+        source: Arc::new(FsSource::new(paths)),
+        root,
+        scan_root,
+        recursive,
+        start,
+    }
+}
+
 /// Turn a planned [`Source`] into a concrete [`PhotoSource`] plus playlist framing.
 /// Scans and explicit lists become an [`FsSource`]; an archive opens a
 /// [`ZipSource`] (entries read into RAM on demand, never extracted to disk). On a
 /// hard archive failure it logs and falls back to an empty source.
 fn resolve_playlist(source: &Source, cursor: &open::Cursor) -> Resolved {
     match source {
-        Source::Scan { .. } | Source::Explicit(_) => {
-            let (paths, root, scan_root, recursive) = resolve_source(source);
-            let start = open::resolve_cursor(&paths, cursor);
-            Resolved {
-                source: Arc::new(FsSource::new(paths)),
-                root,
-                scan_root,
-                recursive,
-                start,
-            }
-        }
+        Source::Scan { .. } | Source::Explicit(_) => resolve_scan(source, cursor, None),
         // The launch / picker / drop paths open archives via the async-aware
         // `App::begin_archive_open` (which surfaces failures through the egui
         // dialog), so this arm is only a safety net: log and show empty on failure.
@@ -4728,6 +4878,23 @@ fn archive_resolved(path: &Path, source: Arc<dyn PhotoSource>) -> Resolved {
         recursive: false,
         start: 0,
     }
+}
+
+/// An in-flight background **directory scan**. A large/recursive folder is walked off
+/// the event loop — the synchronous walk used to block winit for seconds (macOS
+/// beachball) and then crash when the unresponsive window/GPU surface was torn down
+/// (opening `~/Library` was the report). The resolved playlist rides back over `rx`
+/// tagged with `generation`, so a superseded scan (a newer open bumped `App::scan_gen`)
+/// is discarded; `cancel` lets that newer open — or quit — stop a giant walk early.
+/// Mirrors [`ArchiveLoad`].
+struct DirScan {
+    generation: u64,
+    rx: std::sync::mpsc::Receiver<(u64, Resolved)>,
+    /// Flipped to stop the walk at its next entry (a superseding open / teardown).
+    cancel: Arc<AtomicBool>,
+    /// When the scan was dispatched, so the "Scanning…" toast is deferred to slow scans
+    /// only (a normal folder resolves in milliseconds and never flashes it).
+    started: Instant,
 }
 
 /// An in-flight background archive open. A `.7z` is eager-decompressed off the event
@@ -4927,7 +5094,7 @@ mod tests {
             PathBuf::from("/p/notes.txt"),
             PathBuf::from("/p/b.png"),
         ]);
-        let (paths, root, scan_root, recursive) = resolve_source(&src);
+        let (paths, root, scan_root, recursive) = resolve_source(&src, None);
         assert_eq!(
             paths,
             vec![PathBuf::from("/p/a.jpg"), PathBuf::from("/p/b.png")]
@@ -4935,6 +5102,92 @@ mod tests {
         assert_eq!(root, PathBuf::from("/p"));
         assert_eq!(scan_root, None);
         assert!(!recursive);
+    }
+
+    /// A recursive scan descends nested subfolders and collects every supported image
+    /// (sorted), skipping non-images; a flat scan stops at the immediate children. The
+    /// basic contract the off-thread walker must keep.
+    #[test]
+    fn recursive_scan_walks_nested_subfolders() {
+        let dir = std::env::temp_dir().join(format!("pb_scan_nested_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("a/b/c")).expect("mkdir tree");
+        for rel in [
+            "top.jpg",
+            "a/one.png",
+            "a/b/two.webp",
+            "a/b/c/three.gif",
+            "a/notes.txt",
+        ] {
+            fs::write(dir.join(rel), b"x").expect("seed");
+        }
+
+        let flat = scan_images(&dir, false);
+        assert_eq!(
+            flat,
+            vec![dir.join("top.jpg")],
+            "a flat scan lists only the immediate children"
+        );
+
+        let deep = scan_images(&dir, true);
+        assert_eq!(
+            deep,
+            vec![
+                dir.join("a/b/c/three.gif"),
+                dir.join("a/b/two.webp"),
+                dir.join("a/one.png"),
+                dir.join("top.jpg"),
+            ],
+            "a recursive scan finds every image (sorted), ignoring the .txt"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// THE regression for the reported crash: a directory symlink pointing back at an
+    /// ancestor (the kind that riddles macOS's `~/Library`) must NOT send the recursive
+    /// walk into an infinite loop. The old hand-rolled recursion would have looped →
+    /// stack overflow → uncatchable abort; walkdir doesn't follow symlinks, so the walk
+    /// terminates and returns only the real images.
+    #[cfg(unix)]
+    #[test]
+    fn recursive_scan_does_not_follow_symlink_cycle() {
+        use std::os::unix::fs::symlink;
+        let dir = std::env::temp_dir().join(format!("pb_scan_cycle_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("sub")).expect("mkdir");
+        fs::write(dir.join("real.jpg"), b"x").expect("seed");
+        fs::write(dir.join("sub/inner.png"), b"x").expect("seed");
+        // A self-referential cycle: dir/sub/loop -> dir. Following it would recurse forever.
+        symlink(&dir, dir.join("sub/loop")).expect("symlink");
+
+        let images = scan_images(&dir, true);
+        assert_eq!(
+            images,
+            vec![dir.join("real.jpg"), dir.join("sub/inner.png")],
+            "the walk terminates and returns the real images, never the symlinked re-entry"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A pre-cancelled scan stops immediately and gathers nothing — proving the cancel
+    /// flag a superseding open relies on actually short-circuits the walk.
+    #[test]
+    fn scan_honors_cancel_flag() {
+        let dir = std::env::temp_dir().join(format!("pb_scan_cancel_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("a")).expect("mkdir");
+        for rel in ["a.jpg", "a/b.png"] {
+            fs::write(dir.join(rel), b"x").expect("seed");
+        }
+
+        let cancel = AtomicBool::new(true);
+        let mut out = Vec::new();
+        collect_images(&dir, true, Some(&cancel), &mut out);
+        assert!(out.is_empty(), "a pre-cancelled scan collects nothing");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
