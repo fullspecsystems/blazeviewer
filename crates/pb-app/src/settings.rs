@@ -31,6 +31,19 @@ pub enum ScaleModePref {
     Original,
 }
 
+/// What a plain (no-modifier) scroll does — a mouse wheel or a precision-trackpad
+/// two-finger swipe. The *other* action is always reachable by holding Ctrl, so
+/// this only swaps which one is the unmodified default. (macOS trackpad swipes
+/// arrive as pixel-precise pan events and always pan; this governs wheel/line
+/// scrolling, which is all Windows surfaces.)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScrollAction {
+    #[default]
+    Pan,
+    Zoom,
+}
+
 /// How the viewer chooses windowed vs. fullscreen at launch.
 ///
 /// `Remember` (the default) restores whatever the window was last in — which is
@@ -82,6 +95,9 @@ pub struct Settings {
     pub max_advance_rate: u32,
     /// Initial delay (ms) before a held nav key begins auto-repeating.
     pub hold_delay_ms: u32,
+    /// What a plain scroll (mouse wheel or precision-trackpad two-finger swipe)
+    /// does; the other action is always reachable with Ctrl held. Default `Pan`.
+    pub scroll_action: ScrollAction,
     /// Default scale mode for a freshly shown photo.
     pub scale_mode: ScaleModePref,
     /// Letterbox / background fill (sRGB) shown behind a non-filling image.
@@ -117,6 +133,7 @@ impl Default for Settings {
             ramp_secs: 5.0,      // seconds to reach the ceiling (#19)
             max_advance_rate: 0, // uncapped → display refresh is the ceiling (#20)
             hold_delay_ms: 200,  // snappy tap→repeat handoff (main.rs initial_delay)
+            scroll_action: ScrollAction::Pan, // scroll pans; Ctrl+scroll zooms
             scale_mode: ScaleModePref::Fit,
             letterbox: [10, 10, 12], // pb_render::LETTERBOX (rgb)
             info_opacity: 60,        // hud::BG alpha 153/255 ≈ 60%

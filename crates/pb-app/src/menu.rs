@@ -41,6 +41,9 @@ pub mod ids {
     /// macOS-only: the native (Spaces) fullscreen toggle (`toggleFullScreen:` on
     /// ⌃⌘F / Globe+F), distinct from the borderless `FULLSCREEN` speed mode.
     /// Intercepted directly in the menu-event loop, not routed through `Action`.
+    /// macOS-only (both its menu item and its handler are `cfg`'d to macOS), so the
+    /// constant is too — otherwise it reads as dead code on Windows/Linux.
+    #[cfg(target_os = "macos")]
     pub const NATIVE_FULLSCREEN: &str = "native_fullscreen";
     pub const RECURSIVE: &str = "recursive";
     pub const SLIDESHOW: &str = "slideshow";

@@ -308,7 +308,7 @@ impl Gallery {
             dialog_buttons(ui, |ui| {
                 let _ = pb_ui::secondary_button(ui, "Cancel");
                 ui.add_space(8.0);
-                let _ = pb_ui::danger_button(ui, "Delete");
+                let _ = pb_ui::danger_button(ui, p, "Delete");
             });
         });
         ui.add_space(12.0);
@@ -376,6 +376,7 @@ fn swatches(ui: &mut egui::Ui, p: &Palette) {
         ("text", p.text),
         ("secondary", p.text_secondary),
         ("accent", p.accent),
+        ("danger", p.danger),
         ("toggle off", p.toggle_off),
     ];
     ui.horizontal_wrapped(|ui| {

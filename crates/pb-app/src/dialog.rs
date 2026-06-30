@@ -81,6 +81,7 @@ struct SettingsDraft {
     ramp_secs: f32,
     max_fps: u32,
     hold_delay_ms: u32,
+    scroll_action: usize, // 0 = Pan, 1 = Zoom (what a plain scroll does)
     recursive: bool,
     scale_mode: usize,       // 0 = Fit, 1 = Fill, 2 = Original
     letterbox: [f32; 3],     // 0..1 per channel (egui color picker)
@@ -107,6 +108,10 @@ impl SettingsDraft {
             refresh_hz: hz,
             start_speed: s.start_speed,
             ramp_secs: s.ramp_secs,
+            scroll_action: match s.scroll_action {
+                settings::ScrollAction::Pan => 0,
+                settings::ScrollAction::Zoom => 1,
+            },
             max_fps,
             hold_delay_ms: s.hold_delay_ms,
             recursive: s.recursive,
@@ -145,6 +150,10 @@ impl SettingsDraft {
             self.max_fps
         };
         s.hold_delay_ms = self.hold_delay_ms;
+        s.scroll_action = match self.scroll_action {
+            1 => settings::ScrollAction::Zoom,
+            _ => settings::ScrollAction::Pan,
+        };
         s.recursive = self.recursive;
         s.scale_mode = match self.scale_mode {
             1 => settings::ScaleModePref::Fill,
@@ -975,7 +984,7 @@ fn confirm_dialog(ctx: &egui::Context, message: &str) -> Option<bool> {
         if pbui::secondary_button(ui, "Cancel").clicked() {
             result = Some(false);
         }
-        let resp = pbui::danger_button(ui, "Delete");
+        let resp = pbui::danger_button(ui, &p, "Delete");
         if resp.clicked() {
             result = Some(true);
         }
@@ -1327,6 +1336,23 @@ fn general_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
             Some("Pause before a held key starts repeating"),
             |ui| {
                 pbui::slider(ui, &mut d.hold_delay_ms, 0..=1000, " ms");
+            },
+        );
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Scroll wheel",
+            Some("Scroll & two-finger swipe mode. Hold Ctrl to switch modes."),
+            |ui| {
+                egui::ComboBox::from_id_salt("scroll_action")
+                    .width(150.0)
+                    .selected_text(["Pan", "Zoom"][d.scroll_action.min(1)])
+                    .show_ui(ui, |ui| {
+                        pbui::apply_to_ui(ui, p.dark);
+                        ui.selectable_value(&mut d.scroll_action, 0, "Pan");
+                        ui.selectable_value(&mut d.scroll_action, 1, "Zoom");
+                    });
             },
         );
     });

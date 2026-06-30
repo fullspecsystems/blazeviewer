@@ -8,12 +8,17 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
-- **Mouse zoom & pan** (Windows + macOS): the scroll wheel zooms toward the cursor, and
-  click-and-drag pans the image when it's zoomed in (the pointer shows an open hand when
-  panning is available, a closed hand while dragging).
-- **Trackpad gestures** (macOS): pinch to zoom and two-finger swipe to pan, both
+- **Mouse & trackpad zoom & pan** (Windows + macOS): plain scroll pans the image — a
+  mouse wheel or a precision-trackpad two-finger swipe, both axes — and **Ctrl+scroll**
+  zooms toward the cursor. Prefer the reverse? Settings ▸ General ▸ Navigation Feel ▸
+  **Scroll wheel** switches the default to zoom (then Ctrl+scroll pans). Click-and-drag
+  also pans when zoomed in (the pointer shows an open hand when panning is available, a
+  closed hand while dragging).
+- **Trackpad gestures** (macOS): native pinch to zoom and two-finger swipe to pan, both
   centered on the pointer — a pinch zooms toward wherever the cursor is. A two-finger
-  double-tap toggles 100% (the same as pressing `0`).
+  double-tap toggles 100% (the same as pressing `0`). On Windows these arrive as scroll
+  events, so two-finger swipe pans and zoom is Ctrl+scroll (native pinch isn't available
+  there).
 - All of the above drive the same zoom/pan as the keyboard, so they share its limits and
   reset framing on each new photo.
 - **Undo** (Ctrl+Z, ⌘Z on macOS, or Edit ▸ Undo) reverses a saved rotation, restoring
@@ -32,6 +37,11 @@ with any pre-release suffix carried only by the tag.
   Messages to move or attach the file, just like a native document window.
 
 ### Changed
+- New **brand accent color**: the chrome's accent is now PhotoBlaze orange (`#FF4915`,
+  matching the logo) instead of the old Windows blue — it colors primary buttons, the
+  active settings tab underline, selection, slider and toggle fills, and accent icons.
+  Destructive actions (the Delete button, danger icons) use a darker red sibling so they
+  stay clearly distinct from the primary action.
 - The **Settings** dialog's section tabs (General / Display / Shortcuts) are now a clean
   underlined pivot — the active section is marked by a slim accent underline instead of a
   filled blue button, so it no longer competes with the Save button, and the labels have

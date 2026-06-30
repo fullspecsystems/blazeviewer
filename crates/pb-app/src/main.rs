@@ -120,11 +120,19 @@ const PAN_RAMP_SECS: f32 = 0.7;
 
 /// Trackpad gesture tuning. `PINCH_GAIN` scales macOS's incremental magnification
 /// (`WindowEvent::PinchGesture` delta) into a zoom factor (`1 + delta·gain`).
-/// `WHEEL_ZOOM_STEP` is the per-notch factor for a real mouse wheel (LineDelta).
+/// `WHEEL_ZOOM_STEP` is the per-line zoom factor for **Ctrl+scroll** (the explicit
+/// zoom gesture; plain scroll pans instead — see the `MouseWheel` handler).
 const PINCH_GAIN: f32 = 1.0;
 const WHEEL_ZOOM_STEP: f32 = 0.1;
-/// Sign of two-finger trackpad panning (PixelDelta scroll). `+1.0` makes the
-/// image follow the fingers (grab-and-drag); flip to `-1.0` to invert.
+/// Pixels panned per scroll *line* (`LineDelta`). On Windows winit reports both a
+/// real mouse wheel and a precision-trackpad two-finger swipe as `LineDelta` (it
+/// never emits `PixelDelta` there), so plain scroll pans by this much per line:
+/// the fractional high-res lines from a trackpad pan smoothly, while a 1.0 mouse
+/// notch makes one comfortable step.
+const WHEEL_PAN_STEP: f32 = 80.0;
+/// Sign of two-finger trackpad panning (`PixelDelta` on macOS, `LineDelta` scroll
+/// on Windows). `+1.0` makes the image follow the fingers (grab-and-drag); flip to
+/// `-1.0` to invert.
 const GESTURE_PAN_DIR: f32 = 1.0;
 
 /// How long the delete icon shows on the just-deleted photo before the playlist
@@ -3982,17 +3990,30 @@ impl ApplicationHandler for App {
                 self.dispatch_action(Action::ToggleOriginal, event_loop);
             }
 
-            // Scroll: a trackpad two-finger swipe (PixelDelta) pans the image; a
-            // real mouse wheel (LineDelta) zooms about the cursor.
+            // Scroll. macOS sends pixel-precise `PixelDelta` (always pan — pinch is the
+            // Mac zoom gesture); Windows reports both a real mouse wheel and a precision-
+            // trackpad two-finger swipe as `LineDelta`. The `Scroll wheel` setting picks
+            // what a plain `LineDelta` does (pan by default, or zoom); Ctrl always flips
+            // to the other action — so a two-finger swipe pans like on the Mac, and zoom
+            // stays reachable with Ctrl held (or as the default if the user prefers it).
             WindowEvent::MouseWheel { delta, .. } => match delta {
                 MouseScrollDelta::PixelDelta(p) => self.pan_by_pixels(
                     p.x as f32 * GESTURE_PAN_DIR,
                     p.y as f32 * GESTURE_PAN_DIR,
                     event_loop,
                 ),
-                MouseScrollDelta::LineDelta(_, y) => {
-                    let factor = (1.0 + y * WHEEL_ZOOM_STEP).max(0.05);
-                    self.zoom_about_cursor(factor, event_loop);
+                MouseScrollDelta::LineDelta(x, y) => {
+                    let zooms = self.settings.scroll_action == settings::ScrollAction::Zoom;
+                    if zooms != self.ctrl {
+                        let factor = (1.0 + y * WHEEL_ZOOM_STEP).max(0.05);
+                        self.zoom_about_cursor(factor, event_loop);
+                    } else {
+                        self.pan_by_pixels(
+                            x * WHEEL_PAN_STEP * GESTURE_PAN_DIR,
+                            y * WHEEL_PAN_STEP * GESTURE_PAN_DIR,
+                            event_loop,
+                        );
+                    }
                 }
             },
 

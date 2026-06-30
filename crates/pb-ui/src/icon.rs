@@ -76,8 +76,9 @@ pub fn tone_color(tone: Tone, p: &Palette) -> Color32 {
         // brown, a pure yellow has no contrast on white — this stays clearly amber).
         Tone::Warning if p.dark => Color32::from_rgb(0xff, 0xd2, 0x3f),
         Tone::Warning => Color32::from_rgb(0xf0, 0xa5, 0x00),
-        Tone::Danger if p.dark => Color32::from_rgb(0xff, 0x6b, 0x6b),
-        Tone::Danger => Color32::from_rgb(0xc0, 0x33, 0x33),
+        // The destructive tone tracks the palette's themed `danger` (single source of truth
+        // shared with `danger_button`).
+        Tone::Danger => p.danger,
         Tone::Success if p.dark => Color32::from_rgb(0x4e, 0xc7, 0x7a),
         Tone::Success => Color32::from_rgb(0x2f, 0x9e, 0x54),
     }

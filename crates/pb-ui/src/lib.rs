@@ -109,7 +109,12 @@ pub struct Palette {
     /// Secondary text (a card subtitle, a hint).
     pub text_secondary: Color32,
     /// The accent (primary buttons, selection, slider fill, a toggle's "on" track).
+    /// PhotoBlaze brand orange, centered on `#FF4614`.
     pub accent: Color32,
+    /// The destructive action color (Delete fills, danger-tone icons) — a darker, redder
+    /// sibling of [`accent`](Palette::accent), kept distinct so a destructive action never
+    /// reads as the primary one.
+    pub danger: Color32,
     /// A toggle switch's "off" track.
     pub toggle_off: Color32,
 }
@@ -126,8 +131,13 @@ impl Palette {
                 control_hover: Color32::from_gray(0x3f),
                 text: Color32::from_gray(0xe8),
                 text_secondary: Color32::from_gray(0x9e),
-                // Windows lightens the accent on dark backgrounds for contrast.
-                accent: Color32::from_rgb(0x4c, 0xa0, 0xff),
+                // The brand orange — same `#FF4915` as light mode (white button text reads
+                // on it either way), kept identical across themes per the owner's call.
+                accent: Color32::from_rgb(0xff, 0x49, 0x15),
+                // The darker-red destructive sibling. Same deep red as light mode (white
+                // text reads on it either way) — a lighter dark-mode red looked too close
+                // to the orange accent.
+                danger: Color32::from_rgb(0xc4, 0x24, 0x12),
                 toggle_off: Color32::from_gray(0x5a),
             }
         } else {
@@ -140,7 +150,11 @@ impl Palette {
                 control_hover: Color32::from_gray(0xf0),
                 text: Color32::from_gray(0x1a),
                 text_secondary: Color32::from_gray(0x5e),
-                accent: Color32::from_rgb(0x00, 0x67, 0xc0),
+                // The PhotoBlaze brand orange (the logo color) at full strength.
+                accent: Color32::from_rgb(0xff, 0x49, 0x15),
+                // A darker, redder version of the brand for destructive actions — deep
+                // enough that white text clears WCAG AA.
+                danger: Color32::from_rgb(0xc4, 0x24, 0x12),
                 toggle_off: Color32::from_gray(0x8a),
             }
         }
@@ -268,8 +282,22 @@ pub fn apply_to_ui(ui: &mut egui::Ui, dark: bool) {
 /// a system font file — never a photo, never a write — so it's outside the no-trace
 /// view path. The lists carry both platforms' paths (the absent one is just skipped),
 /// keeping this crate free of platform `cfg`s.
+/// Vertical-centering correction for the loaded system UI fonts. egui positions a font's
+/// glyphs from its ascent/descent metrics, and both Segoe UI and SF Pro report enough top
+/// leading that text drifts a hair *low* inside any vertically-centered region — buttons,
+/// toggles, fields (the same quirk the card padding used to fight by hand). A small
+/// negative `y_offset_factor` lifts every glyph by this fraction of its font size, fixing
+/// the centering at the source. It's proportional, so it holds across the whole type ramp,
+/// and it doesn't change row height (so control auto-sizing is untouched). Tune by eye in
+/// the gallery.
+pub const TEXT_Y_NUDGE: f32 = -0.10;
+
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
+    let tweak = egui::FontTweak {
+        y_offset_factor: TEXT_Y_NUDGE,
+        ..Default::default()
+    };
 
     // Regular native UI face → front of the proportional family (preferred over egui's
     // bundled default; the default's fallbacks, e.g. emoji, stay behind it).
@@ -286,9 +314,10 @@ pub fn install_fonts(ctx: &egui::Context) {
         "/System/Library/Fonts/SFNS.ttf", // macOS fallback: SF Pro (variable; default = Regular)
         r"C:\Windows\Fonts\segoeui.ttf",  // Windows: Segoe UI
     ]) {
-        fonts
-            .font_data
-            .insert("system-ui".to_owned(), egui::FontData::from_owned(bytes));
+        fonts.font_data.insert(
+            "system-ui".to_owned(),
+            egui::FontData::from_owned(bytes).tweak(tweak),
+        );
         fonts
             .families
             .entry(FontFamily::Proportional)
@@ -313,7 +342,7 @@ pub fn install_fonts(ctx: &egui::Context) {
     ]) {
         fonts.font_data.insert(
             "system-ui-semibold".to_owned(),
-            egui::FontData::from_owned(bytes),
+            egui::FontData::from_owned(bytes).tweak(tweak),
         );
         let mut stack = vec!["system-ui-semibold".to_owned()];
         stack.extend(proportional);
@@ -362,15 +391,14 @@ pub fn section_label(ui: &mut egui::Ui, p: &Palette, text: &str) {
 /// more [`card_row`]s.
 pub fn card<R>(ui: &mut egui::Ui, p: &Palette, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     card_frame(p)
-        // Vertically asymmetric on purpose: a text line box reserves more leading above
-        // the cap height than below the baseline, so equal top/bottom padding reads
-        // top-heavy. Trim the top a hair and add it to the bottom to optically center
-        // the title/description block (total height unchanged).
+        // Symmetric padding: the line-box-too-low quirk that used to force an asymmetric
+        // top/bottom split is now corrected at the source by `TEXT_Y_NUDGE` (see
+        // `install_fonts`), so equal padding optically centers the title/description block.
         .inner_margin(Margin {
             left: SPACE_4,
             right: SPACE_4,
-            top: SPACE_3 - 2.0,
-            bottom: SPACE_3 + 2.0,
+            top: SPACE_3,
+            bottom: SPACE_3,
         })
         .show(ui, |ui| {
             // Fill the parent's width so every card is the same width, rather than
@@ -546,9 +574,10 @@ pub fn secondary_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.add(egui::Button::new(text).min_size(egui::vec2(BUTTON_W, CONTROL_H)))
 }
 
-/// A **destructive** action button (e.g. Delete) — a red fill with white text.
-pub fn danger_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    filled_button(ui, Color32::from_rgb(200, 55, 55), text)
+/// A **destructive** action button (e.g. Delete) — the themed [`danger`](Palette::danger)
+/// fill (a darker red than the brand accent) with white text.
+pub fn danger_button(ui: &mut egui::Ui, p: &Palette, text: &str) -> egui::Response {
+    filled_button(ui, p.danger, text)
 }
 
 /// A solid-`base`-filled, white-text button with proper **hover/press feedback**.
