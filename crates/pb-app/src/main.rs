@@ -1639,7 +1639,18 @@ impl App {
             return;
         };
         let t0 = Instant::now();
-        let decoded = decode_item(self.source.as_ref(), idx, self.decode_fit(), false);
+        // Preview-first (`allow_preview = true`): this decode runs **synchronously on
+        // the event-loop thread**, so it must be fast. For RAW/HEIC that means the
+        // embedded preview (tens of ms) instead of a full sensor demosaic — which on a
+        // 40 MB NEF is ~20 s and froze the loop into a beachball on a Finder open. The
+        // full-resolution decode lands off-thread: `request_prefetch` (called by every
+        // caller right after this) re-decodes this item into the ring and `sharpen_now`
+        // upgrades the on-screen preview to full in place (`drain_results`). This is the
+        // documented "preview-first, then refine" model, now applied to the first frame
+        // too. (JPEG/PNG/etc. have no cheaper preview, so this is a full decode anyway —
+        // fast enough not to beachball, and faster still once dev builds optimize the
+        // decoders; see the `[profile.dev]` note in the workspace Cargo.toml.)
+        let decoded = decode_item(self.source.as_ref(), idx, self.decode_fit(), true);
         self.metrics.record("decode", t0.elapsed());
         match decoded {
             Ok(img) => {
@@ -2946,7 +2957,10 @@ impl App {
     ) {
         let srgb = pb_render::ColorTransform::srgb();
         match self.playlist.current() {
-            Some(idx) => match decode_item(self.source.as_ref(), idx, self.decode_fit(), false) {
+            // Preview-first (see `load_current_sync`): this runs synchronously while the
+            // window is hidden during setup, so it grabs the fast embedded preview for
+            // RAW/HEIC; the pool upgrades it to full once `resumed` kicks off prefetch.
+            Some(idx) => match decode_item(self.source.as_ref(), idx, self.decode_fit(), true) {
                 Ok(img) => {
                     let meta = meta_for(self.source.as_ref(), idx, &self.root, &img);
                     self.current = Some(meta.clone());
@@ -4292,7 +4306,8 @@ impl ApplicationHandler for App {
             // the first image at the corrected fit so the first frame isn't soft.
             if let Some(idx) = self.playlist.current() {
                 let t0 = Instant::now();
-                let decoded = decode_item(self.source.as_ref(), idx, self.decode_fit(), false);
+                // Preview-first (see `load_current_sync`): the full decode lands off-thread.
+                let decoded = decode_item(self.source.as_ref(), idx, self.decode_fit(), true);
                 self.metrics.record("decode", t0.elapsed());
                 if let Ok(img) = decoded {
                     let meta = meta_for(self.source.as_ref(), idx, &self.root, &img);

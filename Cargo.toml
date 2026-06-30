@@ -40,6 +40,24 @@ pb-source = { path = "crates/pb-source" }
 pb-render = { path = "crates/pb-render" }
 pb-ui = { path = "crates/pb-ui" }
 
+# Dev profile: keep OUR crates at a light opt-level (fast incremental compiles,
+# debuggable) but build every *dependency* with full optimization. The image
+# decoders (zune-jpeg, image, jxl-oxide, imagepipe/rawloader, fast_image_resize)
+# do the heavy lifting, and at the default `opt-level = 0` they run 30–84× slower
+# — a 24 MP JPEG decodes in ~12 s instead of ~0.4 s, a 40 MB RAW in ~20 s instead
+# of ~0.25 s — which made a debug-build "Open With" feel broken (measured). The
+# deps rarely change, so paying their optimization once keeps debug builds genuinely
+# fast without slowing our own edit-compile loop. (`build-override` keeps proc-macro
+# / build-script crates light so this doesn't bloat build time.)
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev.build-override]
+opt-level = 0
+
 # Release profile is tuned for the hot path: maximum optimization, fat-ish LTO,
 # single codegen unit. `panic = "unwind"` (not abort) so the decode layer can
 # `catch_unwind` a panicking third-party decoder and skip the bad file instead of

@@ -24,6 +24,12 @@ with any pre-release suffix carried only by the tag.
   against the left and right edges.
 
 ### Fixed
+- **Opening a photo is instant again — no more multi-second freeze on RAW or large images.**
+  The first frame is now decoded **preview-first**: for RAW and HEIC the embedded preview shows
+  immediately (and refines to full resolution in the background a moment later), instead of
+  running a full sensor demosaic on the UI thread — which could beachball the app for many
+  seconds when opening a large RAW from Finder. Plain photos (JPEG/PNG/…) open the same as
+  before, just without ever blocking the window.
 - Overlay text (the scan card, info/EXIF panel, loading spinner, "Press O to open" hint) now
   stays crisp when you drag the window between monitors of different pixel density (e.g. a
   regular display and a Retina one) — previously it was baked at the starting monitor's DPI
