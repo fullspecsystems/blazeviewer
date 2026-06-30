@@ -19,6 +19,9 @@ with any pre-release suffix carried only by the tag.
   recursion **off** mid-scan instantly drops to just the current folder. Quick folders still
   open instantly with no chrome; a "Scanning Folder" dialog only appears in the rare case the
   very first photo is slow to find.
+- The on-image overlays (the info pill, toasts, the EXIF/help panel, and the "Press O to
+  open" hint) now have wider, balanced side margins, so their text no longer sits tight
+  against the left and right edges.
 
 ### Fixed
 - Overlay text (the scan card, info/EXIF panel, loading spinner, "Press O to open" hint) now

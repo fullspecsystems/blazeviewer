@@ -45,6 +45,14 @@ pub mod tokens {
     /// Corner radius of the scan status card.
     pub const RADIUS_CARD: f32 = 0.6;
 
+    /// Horizontal padding as a multiple of the caller's (vertical) `pad`, for the left-aligned
+    /// panels — the info pill, toasts, the info/EXIF/help table, and the centered hint. The
+    /// text's line box carries ascent/descent whitespace above and below the ink that a single
+    /// `pad` can't see, so equal pads read as *tight sides*; `> 1` widens the left/right inset
+    /// to visually match the top/bottom. (The square icon-only pill stays square; the
+    /// center-aligned scan card already has generous side space and is exempt.)
+    pub const PAD_X: f32 = 1.7;
+
     // ── Pill / toast leading icon ────────────────────────────────────────────────────
     /// Height of a toast's leading icon, relative to the text.
     pub const PILL_ICON: f32 = 0.92;
@@ -270,15 +278,18 @@ impl Hud {
             None => (0, 0),
         };
 
-        let text_x = pad + icon_w + gap;
-        let pw = text_x + advance.ceil() as u32 + pad;
+        // Wider left/right inset than the vertical `pad` so the sides don't read tight against
+        // the text (the line box pads the top/bottom for free; the sides don't). See `PAD_X`.
+        let pad_x = ((pad as f32) * tokens::PAD_X).round() as u32;
+        let text_x = pad_x + icon_w + gap;
+        let pw = text_x + advance.ceil() as u32 + pad_x;
         let ph = line_h + 2 * pad;
         let mut canvas = Canvas::new(pw, ph, bg, (px * tokens::RADIUS_PANEL).round());
 
         if let Some((rgba, iw, ih)) = &rasterized {
             // Vertically center the icon on the text line.
             let iy = pad as i32 + (line_h as i32 - *ih as i32) / 2;
-            self.draw_icon(&mut canvas, rgba, *iw, *ih, pad as i32, iy, px);
+            self.draw_icon(&mut canvas, rgba, *iw, *ih, pad_x as i32, iy, px);
         }
         let baseline = pad as f32 + self.ascent(px)?;
         self.draw_line(&mut canvas, text_x as f32, baseline, &glyphs, TEXT, px);
@@ -331,10 +342,13 @@ impl Hud {
             }
         }
 
+        // Wider left/right inset than the vertical `pad` (the line box already pads the
+        // top/bottom); the columns start at `pad_x`. See `PAD_X`.
+        let pad_x = ((pad as f32) * tokens::PAD_X).round();
         let has_pairs = label_w > 0.0;
-        let value_x = pad as f32 + label_w + if has_pairs { col_gap } else { 0.0 };
-        let content_w = (value_x - pad as f32 + value_w).max(span_w);
-        let pw = content_w.ceil() as u32 + 2 * pad;
+        let value_x = pad_x + label_w + if has_pairs { col_gap } else { 0.0 };
+        let content_w = (value_x - pad_x + value_w).max(span_w);
+        let pw = content_w.ceil() as u32 + 2 * pad_x as u32;
         let ph = rows.len() as u32 * line_h + 2 * pad;
         let mut canvas = Canvas::new(pw, ph, bg, (px * tokens::RADIUS_PANEL).round());
 
@@ -343,10 +357,10 @@ impl Hud {
             let baseline = row_top + ascent;
             match item {
                 Laid::Span(g) => {
-                    self.draw_line(&mut canvas, pad as f32, baseline, g, TEXT, px);
+                    self.draw_line(&mut canvas, pad_x, baseline, g, TEXT, px);
                 }
                 Laid::Pair(lg, vg) => {
-                    self.draw_line(&mut canvas, pad as f32, baseline, lg, TEXT, px);
+                    self.draw_line(&mut canvas, pad_x, baseline, lg, TEXT, px);
                     self.draw_line(&mut canvas, value_x, baseline, vg, TEXT, px);
                 }
             }
@@ -376,13 +390,16 @@ impl Hud {
             .map(|t| self.layout(t, px, Weight::Regular))
             .collect();
         let content_w = laid.iter().map(|(_, adv)| *adv).fold(0.0f32, f32::max);
-        let pw = content_w.ceil() as u32 + 2 * pad;
+        // Wider left/right inset than the vertical `pad` (the line box pads top/bottom). See
+        // `PAD_X`.
+        let pad_x = ((pad as f32) * tokens::PAD_X).round();
+        let pw = content_w.ceil() as u32 + 2 * pad_x as u32;
         let ph = lines.len() as u32 * line_h + 2 * pad;
         let mut canvas = Canvas::new(pw, ph, bg, (px * tokens::RADIUS_PANEL).round());
         for (i, (glyphs, adv)) in laid.iter().enumerate() {
             let baseline = pad as f32 + i as f32 * line_h as f32 + ascent;
             // Center this line within the content box.
-            let x = pad as f32 + (content_w - adv) * 0.5;
+            let x = pad_x + (content_w - adv) * 0.5;
             self.draw_line(&mut canvas, x, baseline, glyphs, TEXT, px);
         }
         Some((canvas.into_rgba(), pw, ph))
