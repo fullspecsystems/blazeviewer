@@ -1,7 +1,10 @@
 # PhotoBlaze — Current Status (session handoff)
 
-_Last updated: 2026-06-29. On `main`. **Active work: the macOS (Apple Silicon) port** —
-see the next section; the Windows tracks below it are all shipped._
+_Last updated: 2026-06-30. On `main`. **The macOS (Apple Silicon) port is essentially
+complete and SHIPPED in `v0.1.0-beta.4` (2026-06-30) — the first signed + notarized macOS
+DMG alongside the signed Windows MSI (the project's first dual release).** The DMG verified
+notarized + stapled + Gatekeeper-accepted (`source=Notarized Developer ID`). Only small
+follow-ups remain (below)._
 
 A fast, chrome-less, keyboard-driven photo viewer. The prefetch engine ("hold a
 key and fly") is done, plus broad multi-codec support, full-res RAW, the color
@@ -118,14 +121,22 @@ selects newest Xcode, `brew install imagemagick`), `packaging/macos/entitlements
 then tag a release. CI gets the glass icon only on a runner with Xcode 26 (else flat fallback)
 — cut locally for guaranteed glass.
 
-**LEFT (session tasks #6/#8; same in `macos-port-plan.md`):**
-#6 file associations (Info.plist `CFBundleDocumentTypes`/UTIs). #8 native-fullscreen state
-sync (our `windowed` flag/checkmark can desync if the user hits the green button/⌃⌘F) — note
-the Enter/Exit Full Screen *label* sync already landed; the remaining bit is the borderless
-checkmark + JD finds the native item's UX "annoying" (a design revisit, his call).
+**#6 file associations — DONE (2026-06-30).** Info.plist `CFBundleDocumentTypes` for images
++ archives (role Viewer / rank Alternate). winit drops `application:openURLs:`, so
+`macos_open.rs` grafts that method onto winit's delegate via `class_addMethod` (installed in
+`main()` before `run_app` so even a cold double-click is caught) → queue → `open_input`.
+Verified cold + running via `open -a`.
+**#8 chromeless borderless fullscreen — DONE (2026-06-30).** `macos_chrome::set_chromeless`
+sets `NSApplicationPresentationOptions` to auto-hide menu bar + Dock in the borderless mode
+(reclaims the strip + un-clips the photo top, stays in the current Space; hover reveals).
+Smoke-tested (launch/quit clean, no Dock wedge).
+
+**LEFT (small follow-ups only):**
 **Follow-up:** toggling a display's HDR *while the window sits on it* (no move) isn't caught
 live — needs an `NSApplicationDidChangeScreenParametersNotification` observer (adapts on next
-move/navigate now).
+move/navigate now). Optional: proxy-icon thumbnail (Option 3) if a recognizable mini-photo is
+wanted in the title bar. CI ships the glass icon from prebuilt `packaging/macos/Assets.car`
+(no Xcode 26 on the runner); regenerate via `scripts/build-macos-icons.sh` when the icon changes.
 
 **Build/run/test on Mac:**
 - `./scripts/bundle-macos.sh` → `open target/release/bundle/PhotoBlaze.app --args <folder>`
