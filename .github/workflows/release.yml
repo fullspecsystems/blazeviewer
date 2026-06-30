@@ -203,18 +203,10 @@ jobs:
           fi
           echo "Tag core matches crate version: $crate_ver"
 
-      # The Liquid Glass icon (icons/AppIcon.icon → Assets.car) needs Xcode 26+'s actool;
-      # pick the newest Xcode on the runner. If 26 isn't present, bundle-macos.sh falls back
-      # to the flat .icns (graceful) — cut the release locally for guaranteed glass.
-      - name: Select newest Xcode
-        run: |
-          newest="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1 || true)"
-          if [ -n "$newest" ]; then sudo xcode-select -s "$newest"; fi
-          xcodebuild -version || true
-
-      # The legacy .icns interior fill (transparent → white) uses ImageMagick.
-      - name: Install ImageMagick
-        run: brew install imagemagick
+      # No Xcode 26 / ImageMagick step: the icons (packaging/macos/{Assets.car,
+      # PhotoBlaze.icns}) are prebuilt + committed (scripts/build-macos-icons.sh), so
+      # bundle-macos.sh just copies them. The runner's default Xcode supplies codesign +
+      # notarytool, which is all the release script needs.
 
       - name: Detect signing configuration
         run: |

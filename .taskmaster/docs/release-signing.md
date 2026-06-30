@@ -107,10 +107,10 @@ Repo → **Settings → Secrets and variables → Actions → Secrets**:
 
 ## macOS DMG (Apple Developer ID + notarization)
 
-The `macos-dmg` job builds `PhotoBlaze.app` (`scripts/bundle-macos.sh` — Liquid Glass
-icon via `actool` + the flat `.icns`), then `scripts/release-macos.sh` **Developer ID
-codesigns** it under the hardened runtime, packages a **DMG**, **notarizes** it
-(`notarytool`), and **staples** the ticket. Like Windows, it **auto-skips** signing +
+The `macos-dmg` job builds `PhotoBlaze.app` (`scripts/bundle-macos.sh` — copies the
+prebuilt Liquid Glass `Assets.car` + flat `.icns`), then `scripts/release-macos.sh`
+**Developer ID codesigns** it under the hardened runtime, packages a **DMG**, **notarizes**
+it (`notarytool`), and **staples** the ticket. Like Windows, it **auto-skips** signing +
 notarization when the secrets are absent (you still get an unsigned DMG, with a warning).
 
 ### Fast path: reuse your existing Apple setup
@@ -144,10 +144,11 @@ sets the secrets via `gh`.
 
 ### Runner / toolchain
 
-`runs-on: macos-15` (arm64). The Liquid Glass icon needs **Xcode 26+**'s `actool`; the job
-selects the newest Xcode on the runner. If 26 isn't present yet, `bundle-macos.sh` falls
-back to the flat `.icns` (graceful) — **cut the release locally** (your machine has Xcode 26
-+ the cert) for a guaranteed-glass DMG: `./scripts/release-macos.sh`.
+`runs-on: macos-15` (arm64). The icons are **prebuilt + committed**
+(`packaging/macos/{Assets.car,PhotoBlaze.icns}`), so the runner needs **no Xcode 26 and no
+ImageMagick** — `bundle-macos.sh` just copies them, and the runner's default Xcode supplies
+`codesign` + `notarytool`. When you change the icon design, regenerate them on your Mac with
+`scripts/build-macos-icons.sh` (needs Xcode 26 + ImageMagick) and commit the result.
 
 ### Verify (macOS)
 

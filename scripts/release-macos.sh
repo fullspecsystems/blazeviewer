@@ -29,7 +29,6 @@ cd "$REPO_ROOT"
 
 APP_NAME="PhotoBlaze"
 BIN_NAME="photoblaze"
-ENTITLEMENTS="packaging/macos/entitlements.plist"
 APP="target/$PROFILE/bundle/$APP_NAME.app"
 DIST="dist"
 SHORT_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/pb-app/Cargo.toml | head -1)"
@@ -85,11 +84,11 @@ SIGNED=0
 if [[ -n "$IDENTITY" ]]; then
 	echo "==> Signing $APP ($IDENTITY)"
 	# Sign the executable, then the bundle (inside-out; the app holds only the one binary
-	# plus non-code resources — Assets.car / .icns).
-	codesign --force --options runtime --timestamp \
-		--entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$APP/Contents/MacOS/$BIN_NAME"
-	codesign --force --options runtime --timestamp \
-		--entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$APP"
+	# plus non-code resources — Assets.car / .icns). No `--entitlements`: a non-sandboxed
+	# Rust app needs no hardened-runtime exceptions, so `--options runtime` alone is correct
+	# (an empty entitlements file is a no-op and AMFI's XML parser is fussy about it).
+	codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP/Contents/MacOS/$BIN_NAME"
+	codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
 	codesign --verify --deep --strict --verbose=2 "$APP"
 	SIGNED=1
 else

@@ -56,16 +56,18 @@ cp "$BIN_PATH" "$APP_DIR/Contents/MacOS/$BIN_NAME"
 chmod +x "$APP_DIR/Contents/MacOS/$BIN_NAME"
 
 # Icon — two icons, two eras (see Info.plist CFBundleIconName / CFBundleIconFile):
-#   • Modern (macOS 26 Tahoe / 27 Golden Gate): the Liquid Glass icon. actool compiles
-#     icons/AppIcon.icon into Assets.car, which the system renders with the glass look.
-#   • Legacy (pre-26): a flat PhotoBlaze.icns from the legacy PNG. Its "photo" interior is
-#     exported transparent (goes dark on a dark Dock), so we flood-fill it white — the
-#     intended look — before building the icns. The opaque frame blocks the fill, so the
-#     outer corners stay transparent (free-form icon, flame breaks the bounds).
+#   • Modern (macOS 26 Tahoe / 27 Golden Gate): the Liquid Glass Assets.car.
+#   • Legacy (pre-26): the flat PhotoBlaze.icns (frame interior filled white).
+# Both are **prebuilt + committed** under packaging/macos/ (run scripts/build-macos-icons.sh
+# to regenerate — it needs Xcode 26 + ImageMagick, which you have and CI doesn't). So CI
+# just copies them. The actool / ImageMagick fallbacks below only run if a prebuilt file is
+# missing (a fork, or before the first regen).
 
-# Modern: Liquid Glass via actool → Assets.car. Best-effort: needs full Xcode 26+ (the
-# .icon format is new); on an older toolchain it's skipped and the legacy .icns carries.
-if [[ -d "$ICON_BUNDLE" ]] && xcrun --find actool >/dev/null 2>&1; then
+# Modern: prefer the prebuilt Assets.car; else compile it with actool (Xcode 26+ only).
+if [[ -f "packaging/macos/Assets.car" ]]; then
+	cp "packaging/macos/Assets.car" "$APP_DIR/Contents/Resources/Assets.car"
+	echo "==> Icon (modern): packaging/macos/Assets.car (prebuilt Liquid Glass)"
+elif [[ -d "$ICON_BUNDLE" ]] && xcrun --find actool >/dev/null 2>&1; then
 	ACTOOL_TMP="$(mktemp -d)"
 	if xcrun actool "$ICON_BUNDLE" \
 		--compile "$ACTOOL_TMP" \
@@ -76,13 +78,13 @@ if [[ -d "$ICON_BUNDLE" ]] && xcrun --find actool >/dev/null 2>&1; then
 		--errors --warnings \
 		--output-format human-readable-text >/dev/null 2>&1 && [[ -f "$ACTOOL_TMP/Assets.car" ]]; then
 		cp "$ACTOOL_TMP/Assets.car" "$APP_DIR/Contents/Resources/Assets.car"
-		echo "==> Icon (modern): Assets.car (Liquid Glass) compiled from $ICON_BUNDLE"
+		echo "==> Icon (modern): Assets.car compiled from $ICON_BUNDLE (no prebuilt found)"
 	else
 		echo "==> Icon (modern): SKIPPED — actool couldn't compile $ICON_BUNDLE (needs Xcode 26+)"
 	fi
 	rm -rf "$ACTOOL_TMP"
 else
-	echo "==> Icon (modern): SKIPPED — no 'xcrun actool' or missing $ICON_BUNDLE"
+	echo "==> Icon (modern): SKIPPED — no prebuilt Assets.car and no actool (run scripts/build-macos-icons.sh)"
 fi
 
 # Legacy: flat PhotoBlaze.icns. A prebuilt packaging/macos/PhotoBlaze.icns wins; else
