@@ -7,6 +7,8 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+## [0.1.0-beta.4] - 2026-06-30
+
 ### Added
 - **Mouse & trackpad zoom & pan** (Windows + macOS): plain scroll pans the image — a
   mouse wheel or a precision-trackpad two-finger swipe, both axes — and **Ctrl+scroll**
@@ -152,7 +154,8 @@ Initial beta — a fast, keyboard-driven Windows photo viewer.
 - Signed WiX/MSI installer with file associations and an "Open with PhotoBlaze"
   folder verb.
 
-[Unreleased]: https://github.com/jdlien/photoblaze/compare/v0.1.0-beta.3...HEAD
+[Unreleased]: https://github.com/jdlien/photoblaze/compare/v0.1.0-beta.4...HEAD
+[0.1.0-beta.4]: https://github.com/jdlien/photoblaze/compare/v0.1.0-beta.3...v0.1.0-beta.4
 [0.1.0-beta.3]: https://github.com/jdlien/photoblaze/compare/v0.1.0-beta.2...v0.1.0-beta.3
 [0.1.0-beta.2]: https://github.com/jdlien/photoblaze/compare/v0.1.0-beta.1...v0.1.0-beta.2
 [0.1.0-beta.1]: https://github.com/jdlien/photoblaze/releases/tag/v0.1.0-beta.1
