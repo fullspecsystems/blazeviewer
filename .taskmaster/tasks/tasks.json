@@ -1322,6 +1322,52 @@
         "details": "WHERE: icons/AppIcon.icon/icon.json (Icon Composer source). The Clear/Tinted (ISAppearanceTintable) appearance flattens the icon to a monochrome tint by luminance, so the orange source art (flames/sun) sits at mid-luminance and reads as low-contrast/washed-out — even though Aqua/DarkAqua look great. Raising translucency/opacity alone does not fix it because the underlying art is not high-contrast. FIX DIRECTION (owner, 2026-06-30): do an appearance-driven LAYER SWAP, not an opacity tweak. Author alternate high-contrast SVG variants (solid white, possibly a black/white pair) of the flame/sun/mountain shapes, add them as extra layers, and use opacity-specializations so the white variants render at opacity 1 ONLY in the tinted appearance while the original orange layers render at 0 there (and vice-versa in Light/Dark) — same specialization mechanism already used for dark on the mountains-sun layer (opacity-specializations [{appearance: dark, value: 1}]). New SVGs go in icons/AppIcon.icon/Assets/ alongside photoblaze-icon-{flames,border,mountains-sun}.svg. Easiest to wire interactively in Icon Composer. REGENERATE + COMMIT: run scripts/build-macos-icons.sh (Xcode 26 actool + ImageMagick) to rebuild packaging/macos/Assets.car, then commit it (CI just copies the prebuilt car). PRIORITY: minor/cosmetic — owner finds clear/tinted icons underwhelming in general; this one is worse because the brand color is orange (mid-luminance), not a high-contrast hue. Consider whether it is worth doing at all vs. accepting the system default tint. VERIFY ON DEVICE (not headless): System Settings > Appearance > Icon & widget style > Clear/Tinted shows a legible high-contrast icon; Light and Dark unchanged.",
         "testStrategy": "Manual/on-device only — icon appearances are rendered by the system from Assets.car, not unit-testable. After regenerating, set Icon & widget style to Clear and to Tinted and confirm the Dock/Finder icon is appreciably more opaque/legible than before; re-check Default (Light) and Dark to confirm no regression. Optionally diff assetutil --info output before/after to confirm the ISAppearanceTintable IconGroups changed.",
         "subtasks": []
+      },
+      {
+        "id": 37,
+        "title": "Animated images (on-demand ▶ P playback)",
+        "description": "Play GIF / APNG / animated WebP on demand (press P), never autoplay. Stills stay the hot path: flicking still decodes only the first frame; multi-frame decode + playback spin up only on P and never touch the prefetch ring or keypress→photon path. Frame-step with , / . (pauses if playing). See .taskmaster handoff + CLAUDE.md prime directive.",
+        "status": "in-progress",
+        "priority": "medium",
+        "dependencies": [],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "pb-decode::animation — detection + timing + multi-frame decode",
+            "description": "DONE. New crates/pb-decode/src/animation.rs: detect_animation() cheap header sniff (GIF >1 image, PNG acTL-before-IDAT, WebP VP8X anim flag); normalize_delay + gif_delay/apng_delay/webp_delay timing layer (GIF sub-20ms→100ms clamp, APNG delay_den==0→100, WebP ms) with unit tests; decode_animation() returns composited RGBA8 frames + loop_count via image-crate AnimationDecoder (frames/loop_count/dispose-blend all from the crate, never hand-rolled), decode-to-fit + MAX_FRAMES/MAX_DECODED_BYTES caps + truncated flag; panic-guarded. 14 tests pass; verified against real corpus via examples/anim_info.rs.",
+            "status": "done"
+          },
+          {
+            "id": 2,
+            "title": "Playback state struct (pb-app, pure + tested)",
+            "description": "Self-contained Animation/Playback sub-struct in pb-app (mirrors slideshow.rs: pure, no winit, unit-tested) holding the decoded frames + cursor: playing/paused, current frame index, loop-iteration counter, advance(elapsed)->frame honoring loop_count (0=infinite; stop on last frame when finite loops exhausted), next_frame()/prev_frame() (wrap), play_pause(). Kept shallow in the App god-struct so it lifts cleanly into AppCore (NS0).",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "Actions: PlayPause (P), FrameNext (.), FramePrev (,)",
+            "description": "Add to action.rs (ALL/id/label/kind), keymap defaults (P, ., ,), menu (Image submenu + ids + MenuAction), dialog.rs KB_GROUPS, and main.rs dispatch_action arms. Frame-step pauses playback then steps one frame.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "Off-thread decode + play/pause + about_to_wait frame pump",
+            "description": "P on an animated image kicks an off-thread decode (never block the event loop; show pie while decoding), then plays via the existing set_image path — NOT the ring. about_to_wait advances to the due frame each tick and schedules a WaitUntil at the next frame deadline (reuse the slideshow continuous-repaint pattern); idle stays event-driven. P again pauses.",
+            "status": "pending"
+          },
+          {
+            "id": 5,
+            "title": "▶ P affordance + stop/reset on navigate",
+            "description": "Show a small ▶ P hint (overlay/HUD) while an animated still is displayed (hidden while flying). Navigating to another image / any source change stops playback and resets. Detection cached per item (e.g. on PhotoMeta).",
+            "status": "pending"
+          },
+          {
+            "id": 6,
+            "title": "macOS Image I/O animation backend (preferred on Mac; deferred)",
+            "description": "Multi-frame CGImageSource backend (per-frame delays via the GIF/PNG/WebP property dictionaries, loop count via kCGImageProperty*LoopCount), preferred on macOS per the spec. Also unlocks animated AVIF sequences on Mac (e.g. corpus 3.avif), which the pure-Rust image-crate path can't do. Gated on owner decision.",
+            "status": "pending"
+          }
+        ]
       }
     ]
   }

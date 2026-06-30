@@ -15,6 +15,7 @@
 //! Backends implement [`ImageDecoder`] and are swappable, so we can A/B (e.g.)
 //! `turbojpeg` vs `zune-jpeg` purely through this seam.
 
+pub mod animation;
 mod color;
 mod common;
 mod image_backend;
@@ -38,6 +39,7 @@ mod zune;
 
 use std::path::Path;
 
+pub use animation::{decode_animation, detect_animation, AnimFrame, Animation, AnimationKind};
 pub use color::ColorTransform;
 pub use image_backend::ImageCrateDecoder;
 #[cfg(target_os = "macos")]
