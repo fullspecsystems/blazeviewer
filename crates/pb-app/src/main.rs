@@ -551,6 +551,12 @@ struct App {
     /// Items whose decode failed (corrupt/unreadable): skipped, never retried, so
     /// a bad JPEG can't stall hold-to-fly or spin the event loop forever.
     failed: HashSet<usize>,
+    /// Paths the user deleted **while a folder scan was still streaming in** — tombstones,
+    /// so a later batch (built from the worker's cumulative list, which still contains the
+    /// deleted path) can't reintroduce it. Filtered out of each incoming snapshot; RAM-only,
+    /// reset at the start of every scan. Empty in the common case (no delete mid-scan), so
+    /// it costs nothing then.
+    deleted: HashSet<PathBuf>,
     /// Decoded images that arrived faster than the per-tick upload budget; carried
     /// (in priority order) to the next tick so no decode work is wasted. They hold
     /// their pool byte-budget reservation, which is the intended backpressure.
@@ -802,6 +808,7 @@ impl App {
             ahead: 8,
             behind: 2,
             failed: HashSet::new(),
+            deleted: HashSet::new(),
             pending_uploads: Vec::new(),
             rotations: HashMap::new(),
             shift: false,
@@ -1310,6 +1317,13 @@ impl App {
             return;
         };
         let len = self.source.len();
+        // If a scan is still streaming in, tombstone the deleted path so a later batch (whose
+        // cumulative list still has it) can't bring it back. (No-op once the scan finishes.)
+        if self.dir_scan.is_some() {
+            if let Some(p) = self.source.path(removed).map(Path::to_path_buf) {
+                self.deleted.insert(p);
+            }
+        }
         match delete::cursor_after_removal(len, removed) {
             None => self.enter_empty_state(event_loop),
             Some(start) => {
@@ -1915,6 +1929,7 @@ impl App {
         // Abandon any scan already running — its result would be stale, and it may be a
         // huge walk we don't want competing for I/O with the new one.
         self.cancel_dir_scan();
+        self.deleted.clear(); // fresh scan → fresh universe, no stale tombstones
         self.scan_gen += 1;
         let generation = self.scan_gen;
         let progress = ScanProgress::new();
@@ -1982,6 +1997,10 @@ impl App {
                     if generation != cur_gen {
                         continue; // superseded by a newer open (defensive; rx is per-scan)
                     }
+                    // Drop any photos the user deleted mid-scan (the worker's cumulative list
+                    // still has them). A no-op — returns the snapshot untouched — when nothing
+                    // was deleted, which is the common case.
+                    let resolved = self.filter_deleted(resolved);
                     let bootstrapped = self
                         .dir_scan
                         .as_ref()
@@ -2840,6 +2859,31 @@ impl App {
         self.playlist.extend(new_len);
         self.request_prefetch();
         self.refresh_title();
+    }
+
+    /// Filter a streamed snapshot through the delete-tombstone set, rebuilding its `FsSource`
+    /// without the deleted paths. Returns the snapshot **unchanged** (no allocation) in the
+    /// common case where nothing was deleted mid-scan. Because the walk is append-only and we
+    /// remove the *same* paths from every snapshot, the filtered result stays a prefix-superset
+    /// of the current playlist — so the in-place [`extend_playlist`](App::extend_playlist) is
+    /// still valid (the displayed photo's index doesn't shift). O(N) only when tombstones
+    /// exist (rare).
+    fn filter_deleted(&self, r: Resolved) -> Resolved {
+        if self.deleted.is_empty() {
+            return r;
+        }
+        let paths: Vec<PathBuf> = (0..r.source.len())
+            .filter_map(|i| r.source.path(i).map(Path::to_path_buf))
+            .filter(|p| !self.deleted.contains(p))
+            .collect();
+        let start = r.start.min(paths.len().saturating_sub(1));
+        Resolved {
+            source: Arc::new(FsSource::new(paths)),
+            root: r.root,
+            scan_root: r.scan_root,
+            recursive: r.recursive,
+            start,
+        }
     }
 
     /// Re-set the window title for the currently displayed photo (e.g. after a streaming
