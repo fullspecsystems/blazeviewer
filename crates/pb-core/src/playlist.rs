@@ -149,6 +149,30 @@ impl Playlist {
         self.shuffle_pos
     }
 
+    /// Grow the playlist to `new_len`, preserving the current cursor — the streaming
+    /// scan's "more images arrived" path. Because indices are **append-only** (a grow
+    /// never reorders existing items), the displayed photo never moves: index *i*
+    /// still means the same photo. A no-op when `new_len` isn't larger (snapshots only
+    /// grow; we never shrink under the user).
+    ///
+    /// The random deck is regenerated to cover the larger universe (a cheap integer
+    /// shuffle — the expensive random-*ahead* prefetch is suppressed separately while a
+    /// scan is live, so this doesn't thrash the decode ring). If a random walk is
+    /// already in progress, `shuffle_pos` is reseated onto the current item in the new
+    /// deck, so the next [`random_next`](Playlist::random_next) advances to a fresh item
+    /// and the on-screen photo stays put. (Already-visited history is not preserved
+    /// across a grow — the accepted relaxation during a live scan.)
+    pub fn extend(&mut self, new_len: usize) {
+        if new_len <= self.len {
+            return;
+        }
+        self.len = new_len;
+        self.shuffle = self.shuffle.resized(new_len);
+        if self.random_started {
+            self.shuffle_pos = self.shuffle.position_of(self.cursor as u32).unwrap_or(0);
+        }
+    }
+
     /// Advance one item (space / right-arrow).
     pub fn next(&mut self) {
         if self.len == 0 {
@@ -351,5 +375,71 @@ mod tests {
         assert_eq!(Playlist::new(5, 1).with_cursor(99).current(), Some(4));
         // Empty playlist stays empty.
         assert_eq!(Playlist::new(0, 1).with_cursor(2).current(), None);
+    }
+
+    // --- streaming grow (`extend`) ---------------------------------------------
+
+    #[test]
+    fn extend_grows_len_and_keeps_the_displayed_photo() {
+        // A streaming scan appends images; the photo on screen must not move (indices
+        // are append-only, so index i is still the same photo).
+        let mut pl = Playlist::new(3, 1).with_cursor(2);
+        pl.extend(10);
+        assert_eq!(pl.len(), 10);
+        assert_eq!(pl.current(), Some(2));
+        // The newly appended range is now navigable.
+        pl.next();
+        assert_eq!(pl.current(), Some(3));
+    }
+
+    #[test]
+    fn extend_is_a_noop_when_not_larger() {
+        // Snapshots only ever grow; a same/smaller len is ignored (never shrinks under
+        // the user).
+        let mut pl = Playlist::new(5, 1).with_cursor(2);
+        pl.extend(5);
+        assert_eq!(pl.len(), 5);
+        pl.extend(3);
+        assert_eq!(pl.len(), 5);
+        assert_eq!(pl.current(), Some(2));
+    }
+
+    #[test]
+    fn extend_updates_sequential_wrap_to_the_new_len() {
+        let mut pl = Playlist::new(3, 1); // wrap = true, cursor 0
+        pl.extend(5);
+        pl.prev(); // wraps to the NEW last index (4), not the old (2)
+        assert_eq!(pl.current(), Some(4));
+    }
+
+    #[test]
+    fn extend_before_random_started_covers_the_full_grown_universe() {
+        let mut pl = Playlist::new(3, 9);
+        pl.extend(20);
+        // A full random cycle now visits every one of the 20 items exactly once.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..20 {
+            pl.random_next();
+            seen.insert(pl.current().unwrap());
+        }
+        assert_eq!(seen.len(), 20);
+    }
+
+    #[test]
+    fn extend_after_random_started_keeps_current_and_continues_the_walk() {
+        let mut pl = Playlist::new(5, 4);
+        pl.random_next();
+        pl.random_next();
+        let here = pl.current().unwrap();
+        pl.extend(40);
+        // The displayed photo is unchanged by the grow (cursor preserved)...
+        assert_eq!(pl.current(), Some(here));
+        // ...and the walk continues from here: the next random lands on a different,
+        // in-range item (shuffle_pos was reseated onto `here` in the regenerated deck).
+        let next = pl.peek_random_next();
+        assert_ne!(next, Some(here));
+        pl.random_next();
+        assert_eq!(pl.current(), next);
+        assert!(pl.current().unwrap() < 40);
     }
 }

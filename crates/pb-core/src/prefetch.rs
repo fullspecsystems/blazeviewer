@@ -14,6 +14,22 @@ use crate::playlist::{Direction, Playlist};
 /// `ahead` is the window size in the current direction of travel; `behind` is a
 /// smaller trailing window so reversing direction is still cheap.
 pub fn prefetch_targets(pl: &Playlist, ahead: usize, behind: usize) -> Vec<usize> {
+    prefetch_targets_impl(pl, ahead, behind, false)
+}
+
+/// Like [`prefetch_targets`], but for use **while a directory scan is still streaming in**.
+/// The random deck regenerates on every batch, so prefetching the random look-ahead would
+/// decode-then-evict photos the user never sees (thrash). This variant prefetches only the
+/// **stable sequential** neighbours of the current photo and does **not wrap** past the last
+/// loaded item (the tail is still growing; wrapping to index 0 would skip the un-loaded
+/// remainder). A random keypress mid-scan is served on-demand (preview-first) rather than
+/// prefetched; once the scan completes, callers switch back to [`prefetch_targets`] and
+/// random-ahead prefetch resumes.
+pub fn prefetch_targets_scanning(pl: &Playlist, ahead: usize, behind: usize) -> Vec<usize> {
+    prefetch_targets_impl(pl, ahead, behind, true)
+}
+
+fn prefetch_targets_impl(pl: &Playlist, ahead: usize, behind: usize, scanning: bool) -> Vec<usize> {
     let len = pl.len();
     let mut out = Vec::with_capacity(ahead + behind + 1);
     if len == 0 {
@@ -22,6 +38,20 @@ pub fn prefetch_targets(pl: &Playlist, ahead: usize, behind: usize) -> Vec<usize
     let mut seen = vec![false; len];
     let cur = pl.current().unwrap();
     push(&mut out, &mut seen, cur);
+
+    if scanning {
+        // Anti-thrash: stable sequential neighbours only, no wrap (the tail is still
+        // growing), biased by travel direction (Random defaults to forward). No random
+        // look-ahead and no random hedges — the unstable deck is left alone until the
+        // scan completes. See [`prefetch_targets_scanning`].
+        let (ahead_sign, behind_sign) = match pl.last_direction() {
+            Direction::Backward => (-1, 1),
+            _ => (1, -1),
+        };
+        extend_linear(&mut out, &mut seen, pl, cur, ahead_sign, ahead, false);
+        extend_linear(&mut out, &mut seen, pl, cur, behind_sign, behind, false);
+        return out;
+    }
 
     match pl.last_direction() {
         Direction::Forward => {
@@ -40,8 +70,9 @@ pub fn prefetch_targets(pl: &Playlist, ahead: usize, behind: usize) -> Vec<usize
                 cur,
                 1,
                 ahead.saturating_sub(2).max(1),
+                pl.wraps(),
             );
-            extend_linear(&mut out, &mut seen, pl, cur, -1, behind);
+            extend_linear(&mut out, &mut seen, pl, cur, -1, behind, pl.wraps());
             hedge_random(&mut out, &mut seen, pl);
         }
         Direction::Backward => {
@@ -52,8 +83,9 @@ pub fn prefetch_targets(pl: &Playlist, ahead: usize, behind: usize) -> Vec<usize
                 cur,
                 -1,
                 ahead.saturating_sub(2).max(1),
+                pl.wraps(),
             );
-            extend_linear(&mut out, &mut seen, pl, cur, 1, behind);
+            extend_linear(&mut out, &mut seen, pl, cur, 1, behind, pl.wraps());
             hedge_random(&mut out, &mut seen, pl);
         }
         Direction::Random => {
@@ -70,8 +102,8 @@ pub fn prefetch_targets(pl: &Playlist, ahead: usize, behind: usize) -> Vec<usize
             let ahead_random = ahead.saturating_sub(HEDGE);
             extend_random(&mut out, &mut seen, pl, pos, 1, ahead_random);
             extend_random(&mut out, &mut seen, pl, pos, -1, behind);
-            extend_linear(&mut out, &mut seen, pl, cur, 1, 1);
-            extend_linear(&mut out, &mut seen, pl, cur, -1, 1);
+            extend_linear(&mut out, &mut seen, pl, cur, 1, 1, pl.wraps());
+            extend_linear(&mut out, &mut seen, pl, cur, -1, 1, pl.wraps());
         }
     }
     out
@@ -109,10 +141,11 @@ fn extend_linear(
     cur: usize,
     sign: isize,
     count: usize,
+    wrap: bool,
 ) {
     let len = pl.len();
     for k in 1..=count {
-        if let Some(i) = offset_index(cur, sign * k as isize, len, pl.wraps()) {
+        if let Some(i) = offset_index(cur, sign * k as isize, len, wrap) {
             push(out, seen, i);
         }
     }
@@ -318,6 +351,83 @@ mod tests {
         for &x in v {
             assert!(s.insert(x), "duplicate {x}");
         }
+    }
+
+    // --- scanning variant (anti-thrash while a scan streams in) ----------------
+
+    #[test]
+    fn scanning_suppresses_the_random_ahead_window() {
+        use std::collections::HashSet;
+        // In random mode a normal prefetch peeks the shuffle deck ahead. During a scan
+        // that deck regenerates every batch, so prefetching it would decode-then-evict
+        // photos the user never sees. The scanning variant prefetches ONLY the stable
+        // sequential neighbours of the current photo — nothing from the random deck.
+        let mut pl = Playlist::new(50, 0xC0FFEE);
+        pl.random_next();
+        let cur = pl.current().unwrap() as isize;
+        let len = pl.len() as isize;
+        let t = prefetch_targets_scanning(&pl, 5, 2);
+        assert_eq!(t[0], cur as usize);
+        // Exactly: current + forward `ahead` + backward `behind`, in range, no wrap
+        // (Random defaults to forward bias).
+        let mut expected: HashSet<usize> = HashSet::from([cur as usize]);
+        for k in 1..=5 {
+            if cur + k < len {
+                expected.insert((cur + k) as usize);
+            }
+        }
+        for k in 1..=2 {
+            if cur - k >= 0 {
+                expected.insert((cur - k) as usize);
+            }
+        }
+        let got: HashSet<usize> = t.iter().copied().collect();
+        assert_eq!(
+            got, expected,
+            "scanning prefetch is sequential-only, no random deck"
+        );
+    }
+
+    #[test]
+    fn scanning_does_not_wrap_past_the_growing_tail() {
+        // At index 0, a normal wrap-on prefetch pulls the tail (9, 8, 7) behind. During a
+        // scan the tail is still growing, so wrapping back to it would skip the un-loaded
+        // remainder — the scanning variant must not wrap.
+        let pl = Playlist::new(10, 1); // wrap on, at 0, Forward
+        let t = prefetch_targets_scanning(&pl, 3, 3);
+        assert_eq!(t[0], 0);
+        for w in [9, 8, 7] {
+            assert!(
+                !t.contains(&w),
+                "scanning must not wrap behind 0 to the tail ({w})"
+            );
+        }
+        // Forward neighbours (loaded, in range) are still prefetched.
+        assert!(t.contains(&1) && t.contains(&2) && t.contains(&3));
+        assert_no_duplicates(&t);
+    }
+
+    #[test]
+    fn scanning_is_direction_biased() {
+        let mut pl = Playlist::new(100, 1);
+        for _ in 0..10 {
+            pl.next();
+        } // at 10, Forward
+        let t = prefetch_targets_scanning(&pl, 4, 1);
+        assert_eq!(t[0], 10);
+        assert!(
+            t.contains(&11) && t.contains(&12),
+            "forward bias looks ahead"
+        );
+        pl.prev(); // at 9, Backward
+        let t = prefetch_targets_scanning(&pl, 4, 1);
+        assert_eq!(t[0], 9);
+        assert!(t.contains(&8) && t.contains(&7), "backward bias looks back");
+    }
+
+    #[test]
+    fn scanning_empty_playlist_has_no_targets() {
+        assert!(prefetch_targets_scanning(&Playlist::new(0, 1), 5, 5).is_empty());
     }
 
     #[test]

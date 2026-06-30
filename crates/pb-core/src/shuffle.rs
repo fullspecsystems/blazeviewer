@@ -43,6 +43,27 @@ impl ShuffleOrder {
         self.order.get(pos).copied()
     }
 
+    /// The position of `item` within the order (the inverse of [`at`]), or `None`
+    /// if it isn't in this universe. Used when a streaming grow reseats the random
+    /// cursor onto the currently displayed item in the regenerated deck. O(len) —
+    /// called once per grow, off the hot path.
+    ///
+    /// [`at`]: ShuffleOrder::at
+    pub fn position_of(&self, item: u32) -> Option<usize> {
+        self.order.iter().position(|&v| v == item)
+    }
+
+    /// A fresh permutation of `0..new_len` from the **same seed** — used when a
+    /// streaming scan grows the universe and the deck must cover the newly found
+    /// items. Deterministic for a given (seed, len), so it stays reproducible/testable.
+    /// (Distinct from [`reshuffled`], which advances the seed for the *next cycle* at
+    /// the same length.)
+    ///
+    /// [`reshuffled`]: ShuffleOrder::reshuffled
+    pub fn resized(&self, new_len: usize) -> Self {
+        ShuffleOrder::new(new_len, self.seed)
+    }
+
     /// Produce the next permutation for when the current order is exhausted.
     ///
     /// The seed is advanced deterministically, and for `len > 1` we guarantee
@@ -118,5 +139,34 @@ mod tests {
             // No visible repeat across the cycle boundary.
             assert_ne!(a.at(len - 1), b.at(0));
         }
+    }
+
+    #[test]
+    fn resized_is_a_permutation_of_the_new_len() {
+        // Growing the universe (a streaming scan finds more images) yields a fresh,
+        // valid permutation that covers every new index.
+        let o = ShuffleOrder::new(5, 42);
+        for new_len in [5usize, 6, 30, 1000] {
+            let bigger = o.resized(new_len);
+            assert_eq!(bigger.len(), new_len);
+            assert!(is_permutation(&bigger, new_len));
+        }
+    }
+
+    #[test]
+    fn resized_is_deterministic_from_the_same_seed() {
+        let o = ShuffleOrder::new(5, 42);
+        assert_eq!(o.resized(30), o.resized(30));
+    }
+
+    #[test]
+    fn position_of_inverts_at() {
+        let o = ShuffleOrder::new(20, 7);
+        for pos in 0..20 {
+            let item = o.at(pos).unwrap();
+            assert_eq!(o.position_of(item), Some(pos));
+        }
+        // An item outside the universe isn't present.
+        assert_eq!(o.position_of(999), None);
     }
 }
