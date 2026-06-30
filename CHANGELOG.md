@@ -8,12 +8,16 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Changed
-- **Opening a large folder now shows a real progress dialog** instead of a brief corner
-  toast. When a folder takes more than a moment to scan, a "Scanning Folder" window
-  appears naming the folder, with a live count of images found, the subfolder currently
-  being scanned, and a **Cancel** button — so a huge or deeply nested tree (e.g. opening
-  a whole home folder) is no longer an indefinite, unexplained wait. Quick folders still
-  open instantly with no dialog.
+- **Open a folder and start browsing immediately — even huge, deeply nested ones.** Folders
+  now **stream in**: the first photo appears almost at once and the rest of the library loads
+  in the background while you flick through what's already there, instead of waiting for the
+  whole tree to be scanned. Applies everywhere a folder opens — the picker, drag-and-drop,
+  double-click / file association at launch (the window shows right away now), and the
+  recursive toggle (**Ctrl+R**). A small count chip in the top-right shows the total climbing
+  as it loads; click its **✕** (or **File ▸ Stop Scanning**) to stop early and keep whatever
+  has loaded so far. Toggling recursion **off** mid-scan instantly drops to just the current
+  folder. Quick folders still open instantly with no chrome; a "Scanning Folder" dialog only
+  appears in the rare case the very first photo is slow to find.
 
 ### Fixed
 - macOS app icon: the Clear/Tinted (monochrome) appearance now reads high-contrast
