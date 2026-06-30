@@ -94,7 +94,7 @@ pub mod tokens {
     /// Button border alpha — white layered *over* the card (via [`super::Canvas::over`]), so it
     /// fades from invisible (0) through a faint hairline (~0.2) to a solid white outline (1).
     /// Tune to taste; low reads subtle.
-    pub const BUTTON_BORDER_ALPHA: f32 = 0.25;
+    pub const BUTTON_BORDER_ALPHA: f32 = 0.20;
 }
 
 use tokens::{SHADOW, SHADOW_ALPHA, TEXT, TEXT_DIM};
