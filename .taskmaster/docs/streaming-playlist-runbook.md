@@ -53,21 +53,20 @@ cp ~/Pictures/some-photo.jpg ./root_aaa.jpg   # a couple of photos in the root i
 1. Launch the viewer (`cargo run --release -p pb-app`), press **Shift+O**, pick `/tmp/pb-deep`.
    - ✅ A photo appears **almost immediately** (the root's first image) — you do NOT wait for
      all 50 subfolders to be walked.
-   - ✅ The window title and the top-right **chip** show a count like `1 / 7…` that **climbs**
-     (`/ 200`, `/ 1400`, … `/ 10002`) as subfolders stream in. The trailing `…` means "still
-     scanning."
+   - ✅ The window title and the top-right **status card** show a count that **climbs** (`7`,
+     `200`, `1,400`, … `10,002 images found`) as subfolders stream in.
 2. While the count is still climbing, press **→ / Space** repeatedly.
    - ✅ You can browse the photos already loaded. Holding the key flies through them.
    - ✅ New photos keep appending at the end; the photo you're looking at never jumps or
      changes underneath you (indices are append-only).
 3. Let it finish.
-   - ✅ The chip disappears when the scan completes; the title shows the final `X / 10002`.
+   - ✅ The card disappears when the scan completes; the title shows the final `X / 10002`.
 
 **Flat folder (folder B):** open `/tmp/pb-big`.
    - ✅ Same behavior, single flat readdir — first photo fast, count climbs to `5000`.
 
 **Normal folder (folder A):** open a small/typical folder.
-   - ✅ Feels instant, no chip flash, no dialog (the scan finishes before any of that shows).
+   - ✅ Feels instant, no card flash, no dialog (the scan finishes before any of that shows).
 
 ---
 
@@ -109,19 +108,26 @@ only when even the root directory read is slow, e.g. a cold network drive).
 
 ---
 
-## 4. The ambient count chip + click-to-cancel
+## 4. The scan status card + Cancel Scan button
 
-While a scan streams in (after the first photo, step 1):
-1. ✅ A small chip sits in the **top-right, just below the loading pie**, showing
-   `✕  <pos> / <total>…`.
-2. ✅ The total is the **browsable** count (what you can actually navigate to right now), and
-   it climbs as batches land.
-3. **Click the chip** (the ✕ affordance).
+While a scan streams in (after the first photo, step 1) and once it's lasted past ~250 ms:
+1. ✅ A small **status card** sits in the **top-right, just below the loading pie**:
+   ```
+   Scanning "Iceland 2024"     (semibold heading — the folder you opened)
+   8,230 images found          (dimmer count line)
+   ( ■ Cancel Scan )           (subtle rounded-border button)
+   ```
+2. ✅ The count is the **browsable** total (what you can actually navigate to right now), and
+   it climbs as batches land. The card hugs the right edge and doesn't jitter as the number
+   widens.
+3. **Click the Cancel Scan button** (only the button is the click target, not the whole card).
    - ✅ The scan **stops**, a "Scan stopped" toast flashes, and **whatever streamed in so far
      stays browsable** (it does not revert to a previous view or blank).
-   - ✅ Clicking the chip does **not** start a drag-to-pan (the click is consumed).
-4. In **borderless fullscreen** (press **F**), the title bar is hidden — ✅ the chip is then
-   the only place the count is visible. Good to confirm it's legible there.
+   - ✅ Clicking does **not** start a drag-to-pan (the click is consumed). Clicking elsewhere
+     on the card (not the button) does nothing special.
+4. ✅ A quick folder (finishes in <250 ms) never flashes the card.
+5. In **borderless fullscreen** (press **F**), the title bar is hidden — ✅ the card is then
+   the only place the folder + count are visible. Confirm it's legible over a bright photo.
 
 ---
 
@@ -130,7 +136,7 @@ While a scan streams in (after the first photo, step 1):
 1. Start a big scan (folder C). Open the **File** menu (windowed mode).
    - ✅ **Stop Scanning** is **enabled** while the scan runs, **greyed out** otherwise.
 2. Click **File ▸ Stop Scanning**.
-   - ✅ Same as the chip click: scan stops, "Scan stopped" toast, partial playlist kept.
+   - ✅ Same as the card's Cancel Scan button: scan stops, "Scan stopped" toast, partial kept.
 3. (Optional) Bind a key: **Settings ▸ Shortcuts**, find **Stop scanning**, assign a key, Save.
    - ✅ The key now cancels a running scan. (Esc is unchanged — it still Quits.)
 
@@ -138,7 +144,7 @@ While a scan streams in (after the first photo, step 1):
 
 ## 6. Cancel-keeps-partial & supersession
 
-1. **Keeps partial:** cancel a half-finished scan (chip click, menu, or recursive-off). Browse.
+1. **Keeps partial:** cancel a half-finished scan (Cancel Scan button, menu, or recursive-off).
    - ✅ You can still flick through everything that had streamed in before the cancel.
 2. **Supersede:** while folder C is streaming, press **Shift+O** and open a *different* folder.
    - ✅ The old scan is abandoned; the new folder starts streaming from its first photo. No
@@ -198,7 +204,7 @@ walk-then-`paths.sort()` order (verified by `streaming_walk_order_matches_paths_
 
 The streaming scan is still read-only. The automated test
 (`viewing_a_folder_writes_nothing_to_disk`) asserts this, but to eyeball it:
-- ✅ Open and browse a folder; the chip/count/current-folder are all on-screen only. Nothing
+- ✅ Open and browse a folder; the card/count/folder name are all on-screen only. Nothing
   is written to disk by *viewing* (only the explicit Delete / Save-rotation commands write,
   unchanged).
 
@@ -221,11 +227,11 @@ cargo run --release -p pb-source --example fssource_bench
 - [ ] Big recursive folder: first photo appears fast, count climbs, browse while it streams.
 - [ ] Double-click / CLI launch a folder: window appears immediately.
 - [ ] `Ctrl+R` on → subfolders stream; `Ctrl+R` off mid-scan → instantly just the root.
-- [ ] Chip shows in the top-right; clicking ✕ stops the scan and keeps the partial.
+- [ ] Status card shows in the top-right; clicking Cancel Scan stops the scan and keeps the partial.
 - [ ] File ▸ Stop Scanning enabled only during a scan; cancels.
 - [ ] Delete during a scan → the photo never comes back.
 - [ ] Random during a scan works and doesn't thrash; flies after completion.
-- [ ] Normal small folder: instant, no chip/dialog flash.
+- [ ] Normal small folder: instant, no card/dialog flash.
 - [ ] Archives (.7z): progress-bar dialog unchanged.
 - [ ] Order of a known folder is unchanged.
 - [ ] `cargo test -p pb-core -p pb-app` green; `cargo clippy --all-targets -- -D warnings` clean.
@@ -237,8 +243,9 @@ cargo run --release -p pb-source --example fssource_bench
 - **Sequential wrap during a scan:** if you race to the *last loaded* photo and press → while
   more are still streaming, it wraps to the first (rather than waiting for the next batch).
   Minor; the prefetch already avoids wasting work on this. Deferred.
-- **Chip hover cursor:** the chip is clickable (✕) but the pointer doesn't yet change to a
-  hand on hover. The ✕ icon + the menu item are the discoverable affordances. Deferred polish.
+- **Cancel button hover cursor:** the Cancel Scan button is clickable but the pointer doesn't
+  yet change to a hand on hover. The bordered button + the menu item are the discoverable
+  affordances. Deferred polish.
 - **Provisional instant decode for single-file opens:** opening one file in a *huge* flat
   folder waits for that file to be reached in the (fast) readdir before showing it; we don't
   yet decode the known path before the scan. Fine in practice (flat readdir is quick).

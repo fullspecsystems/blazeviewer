@@ -13,11 +13,12 @@ with any pre-release suffix carried only by the tag.
   in the background while you flick through what's already there, instead of waiting for the
   whole tree to be scanned. Applies everywhere a folder opens — the picker, drag-and-drop,
   double-click / file association at launch (the window shows right away now), and the
-  recursive toggle (**Ctrl+R**). A small count chip in the top-right shows the total climbing
-  as it loads; click its **✕** (or **File ▸ Stop Scanning**) to stop early and keep whatever
-  has loaded so far. Toggling recursion **off** mid-scan instantly drops to just the current
-  folder. Quick folders still open instantly with no chrome; a "Scanning Folder" dialog only
-  appears in the rare case the very first photo is slow to find.
+  recursive toggle (**Ctrl+R**). A small status card in the top-right names the folder and
+  shows the image count climbing as it loads, with a **Cancel Scan** button (or
+  **File ▸ Stop Scanning**) to stop early and keep whatever has loaded so far. Toggling
+  recursion **off** mid-scan instantly drops to just the current folder. Quick folders still
+  open instantly with no chrome; a "Scanning Folder" dialog only appears in the rare case the
+  very first photo is slow to find.
 
 ### Fixed
 - macOS app icon: the Clear/Tinted (monochrome) appearance now reads high-contrast
