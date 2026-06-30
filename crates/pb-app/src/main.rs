@@ -622,14 +622,14 @@ struct App {
     decode_ewma: f32,
     pie_drawn: bool,
     pie_pushed: Option<(f32, f32, f32)>,
-    /// The text currently shown in the top-right scan-count chip ("12 / 1234…"), or `None`
-    /// when the chip is hidden. Cached so it's only re-rasterized when the count changes
-    /// (off the photo hot path), mirroring the pie/toast.
-    chip_text: Option<String>,
-    /// The chip's on-screen rect in **physical px** `[x0, y0, x1, y1]` while it's shown, so a
-    /// click on it cancels the scan (the reusable overlay hit-region — the first interactive
-    /// on-image control; future EXIF copy buttons will register rects the same way). `None`
-    /// when the chip is hidden.
+    /// The scan status card's content signature `(folder name, browsable count)` while it's
+    /// shown, or `None` when hidden. Cached so the card is only re-rasterized when the count
+    /// ticks up (off the photo hot path), mirroring the pie/toast.
+    chip_sig: Option<(String, usize)>,
+    /// The **Cancel Scan button's** on-screen rect in physical px `[x0, y0, x1, y1]` while the
+    /// card is shown — only the button is clickable (not the whole card). The reusable overlay
+    /// hit-region: the first interactive on-image control; future EXIF copy buttons register
+    /// rects the same way. `None` when the card is hidden.
     chip_rect: Option<[f32; 4]>,
     /// Items whose resident ring slot holds a fast *preview* (e.g. a HEIC
     /// thumbnail) rather than the full decode. While idle these are upgraded
@@ -839,7 +839,7 @@ impl App {
             decode_ewma: 0.25,
             pie_drawn: false,
             pie_pushed: None,
-            chip_text: None,
+            chip_sig: None,
             chip_rect: None,
             preview_resident: HashSet::new(),
             upgrade_done: HashSet::new(),
@@ -3716,53 +3716,72 @@ impl App {
         }
     }
 
-    /// The ambient scan-count chip: while a folder scan is streaming in (and the first photo
-    /// is up), show "<pos> / <total>…" in the top-right, just below the pie — the growing
-    /// total *is* the progress (Codex P3: the denominator is the **browsable** count,
-    /// `source.len()`, not the worker's look-ahead `found`). Rebuilt only when the text
-    /// changes (off the photo hot path, like the pie/toast); cleared when the scan ends.
+    /// The ambient **scan status card**: while a folder scan is streaming in (and the first
+    /// photo is already up), show a small card in the top-right just below the pie —
+    /// `Scanning "Folder"`, the browsable count (`8,230 images found`), and a subtle
+    /// **Cancel Scan** button. The count *is* the progress (Codex P3: the **browsable**
+    /// `source.len()`, not the worker's look-ahead `found`). Deferred past
+    /// [`SCAN_DIALOG_DELAY`] so a quick folder never flashes it; rebuilt only when the count
+    /// ticks up (off the photo hot path, like the pie/toast); cleared when the scan ends.
     fn tick_chip(&mut self, event_loop: &ActiveEventLoop) {
         let want = match (self.dir_scan.as_ref(), self.displayed_item) {
-            (Some(scan), Some(idx)) if scan.bootstrapped => {
-                Some(format!("{} / {}\u{2026}", idx + 1, self.source.len()))
+            (Some(scan), Some(_))
+                if scan.bootstrapped && scan.started.elapsed() >= SCAN_DIALOG_DELAY =>
+            {
+                Some((scan.name.clone(), self.source.len()))
             }
             _ => None,
         };
-        if want == self.chip_text {
+        if want == self.chip_sig {
             return;
         }
         match &want {
-            Some(text) => self.push_chip(text, event_loop),
+            Some((name, count)) => self.push_chip(name, *count, event_loop),
             None => self.clear_chip(event_loop),
         }
-        self.chip_text = want;
+        self.chip_sig = want;
     }
 
-    /// Rasterize the chip pill (a leading ✕ "click to stop" affordance + the count) and place
-    /// it below the pie, right edge aligned with the pie. Records its physical-px rect so a
-    /// click cancels the scan.
-    fn push_chip(&mut self, text: &str, event_loop: &ActiveEventLoop) {
-        let Some((rgba, w, h)) = self.hud.as_ref().and_then(|hud| {
-            let px = (16.0 * self.scale_factor).max(10.0);
-            let pad = (7.0 * self.scale_factor).round().max(2.0) as u32;
-            hud.render_panel_icon(text, px, pad, Some(icon::assets::XMARK), hud::BG)
-        }) else {
+    /// Rasterize the scan status card and place it below the pie (right edge aligned with the
+    /// pie). Records the **Cancel Scan button's** physical-px rect (only the button is
+    /// clickable, not the whole card).
+    fn push_chip(&mut self, name: &str, count: usize, event_loop: &ActiveEventLoop) {
+        let heading = format!("Scanning \u{201c}{name}\u{201d}");
+        let noun = if count == 1 { "image" } else { "images" };
+        let count_line = format!("{} {noun} found", hud::format_thousands(count as u64));
+        let card = self.hud.as_ref().and_then(|hud| {
+            let px = (15.0 * self.scale_factor).max(10.0);
+            hud.render_scan_card(
+                &heading,
+                &count_line,
+                "Cancel Scan",
+                icon::assets::STOP,
+                px,
+                hud::BG,
+            )
+        });
+        let Some((rgba, w, h, btn)) = card else {
+            self.chip_rect = None;
             return;
         };
-        // Right edge aligns with the pie (same inset); top sits below the pie's reserved
-        // area (pie inset + diameter + a gap), held stable whether or not the pie is visible.
+        // Right edge aligns with the pie (same inset); top sits below the pie's reserved area
+        // (pie inset + diameter + a gap), held stable whether or not the pie is visible.
         let right_margin = (PIE_MARGIN * self.scale_factor).round().max(4.0) as u32;
         let pie_d = (PIE_DIAMETER * self.scale_factor).round().max(12.0) as u32;
         let gap = (8.0 * self.scale_factor).round().max(2.0) as u32;
         let top_margin = right_margin + pie_d + gap;
         if let Some(a) = self.active.as_ref() {
-            // The physical-px rect (mirrors `top_right_quad_xy`) for click hit-testing.
-            let size = a.window.inner_size();
-            let x1 = size.width as f32 - right_margin as f32;
-            let x0 = x1 - w as f32;
-            let y0 = top_margin as f32;
-            let y1 = y0 + h as f32;
-            self.chip_rect = Some([x0, y0, x1, y1]);
+            // The card's top-left in physical px (mirrors `top_right_quad_xy`), then the
+            // button rect offset within it → the click hit-target.
+            let card_x0 = a.window.inner_size().width as f32 - right_margin as f32 - w as f32;
+            let card_y0 = top_margin as f32;
+            let [bx, by, bw, bh] = btn.map(|v| v as f32);
+            self.chip_rect = Some([
+                card_x0 + bx,
+                card_y0 + by,
+                card_x0 + bx + bw,
+                card_y0 + by + bh,
+            ]);
         }
         if let Some(a) = self.active.as_mut() {
             a.renderer
@@ -3771,9 +3790,9 @@ impl App {
         self.draw(event_loop);
     }
 
-    /// Clear the chip layer if it's up (and redraw to remove it).
+    /// Clear the scan card layer if it's up (and redraw to remove it).
     fn clear_chip(&mut self, event_loop: &ActiveEventLoop) {
-        if self.chip_text.is_some() {
+        if self.chip_sig.is_some() {
             if let Some(a) = self.active.as_mut() {
                 a.renderer.set_chip(None, 0, 0);
             }
@@ -3782,10 +3801,10 @@ impl App {
         }
     }
 
-    /// Hit-test a physical-px cursor position against the scan-count chip's rect (the click
-    /// target that cancels the scan). The reusable overlay-click primitive: store a rect when
-    /// you draw an interactive overlay, test it here before the click falls through to
-    /// drag-to-pan. (Future EXIF copy buttons will register their own rects the same way.)
+    /// Hit-test a physical-px cursor position against the scan card's **Cancel Scan button**
+    /// rect. The reusable overlay-click primitive: store a rect when you draw an interactive
+    /// overlay, test it here before the click falls through to drag-to-pan. (Future EXIF copy
+    /// buttons will register their own rects the same way.)
     fn chip_hit(&self, x: f32, y: f32) -> bool {
         self.chip_rect.is_some_and(|rect| point_in_rect(rect, x, y))
     }

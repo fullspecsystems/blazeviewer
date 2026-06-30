@@ -27,6 +27,10 @@ pub fn bg_for_opacity(opacity_pct: u8) -> [u8; 4] {
 /// (semibold) rather than color, which reads far better over busy photos than a
 /// dim gray. Legibility comes from the per-glyph outline (`SHADOW`).
 const TEXT: [u8; 3] = [255, 255, 255];
+/// A dimmer white for secondary lines on a *card* (e.g. the scan card's "N images found"
+/// under the heading). Only used where there's a panel background behind it — over a bare
+/// photo we still distinguish by weight, not color (see the note above).
+const TEXT_DIM: [u8; 3] = [188, 191, 198];
 /// Text outline/shadow color and its peak alpha (a soft black halo).
 const SHADOW: [u8; 3] = [0, 0, 0];
 const SHADOW_ALPHA: f32 = 0.65;
@@ -299,6 +303,107 @@ impl Hud {
         Some((canvas.into_rgba(), pw, ph))
     }
 
+    /// Rasterize the **scan status card** — the ambient overlay shown while a folder streams
+    /// in: a semibold heading (`Scanning "Folder"`), a dimmer count line below it
+    /// (`8,230 images found`), and a subtle bordered **button** (a stop icon + `button_label`)
+    /// that reads as clickable without shouting. Everything is **right-aligned** so the card
+    /// hugs the top-right corner and doesn't jitter as the count widens (it's anchored by its
+    /// right edge). Returns `(rgba, w, h, button_rect)` where `button_rect` is the button's
+    /// `[x, y, w, h]` **within the card** — the caller offsets it to screen px for click
+    /// hit-testing (only the button is clickable, not the whole card).
+    pub fn render_scan_card(
+        &self,
+        heading: &str,
+        count_line: &str,
+        button_label: &str,
+        button_icon: &str,
+        px: f32,
+        bg: [u8; 4],
+    ) -> Option<(Vec<u8>, u32, u32, [u32; 4])> {
+        let px_sub = (px * 0.82).max(1.0);
+        let pad = (px * 0.72).round().max(4.0) as i32;
+
+        // Text runs.
+        let (head_g, head_adv) = self.layout(heading, px, Weight::Semibold);
+        let (count_g, count_adv) = self.layout(count_line, px_sub, Weight::Regular);
+        let (btn_g, btn_adv) = self.layout(button_label, px_sub, Weight::Regular);
+        let head_lh = self.line_height(px)? as i32;
+        let sub_lh = self.line_height(px_sub)? as i32;
+        let head_asc = self.ascent(px)?;
+        let sub_asc = self.ascent(px_sub)?;
+
+        // Button geometry: a stop icon + the label, with inner padding, a faint fill, and a
+        // thin gray border.
+        let icon_h = (px_sub * 0.95).round().max(1.0) as u32;
+        let icon = crate::icon::rasterize(button_icon, icon_h, TEXT);
+        let (icon_w, icon_gap) = match &icon {
+            Some((_, w, _)) => (*w as i32, (px_sub * 0.38).round().max(2.0) as i32),
+            None => (0, 0),
+        };
+        let bpad = (px_sub * 0.55).round().max(3.0) as i32;
+        let bw = icon_w + icon_gap + btn_adv.ceil() as i32 + 2 * bpad;
+        let bh = sub_lh + 2 * bpad;
+
+        // Vertical rhythm.
+        let gap_lines = (px * 0.12).round() as i32;
+        let gap_button = (px * 0.55).round().max(4.0) as i32;
+
+        // Card box (content right-aligned, so width = widest run + 2·pad).
+        let content_w = (head_adv.ceil() as i32)
+            .max(count_adv.ceil() as i32)
+            .max(bw);
+        let cw = (content_w + 2 * pad).max(1) as u32;
+        let ch = (pad + head_lh + gap_lines + sub_lh + gap_button + bh + pad).max(1) as u32;
+        let right = cw as i32 - pad; // content right edge
+
+        let mut canvas = Canvas::new(cw, ch, bg, (px * 0.55).round());
+
+        // Heading + count, right-aligned.
+        let head_base = pad as f32 + head_asc;
+        self.draw_line(
+            &mut canvas,
+            (right - head_adv.ceil() as i32) as f32,
+            head_base,
+            &head_g,
+            TEXT,
+            px,
+        );
+        let count_top = pad + head_lh + gap_lines;
+        let count_base = count_top as f32 + sub_asc;
+        self.draw_line(
+            &mut canvas,
+            (right - count_adv.ceil() as i32) as f32,
+            count_base,
+            &count_g,
+            TEXT_DIM,
+            px_sub,
+        );
+
+        // Button: right-aligned; faint fill + gray border, then the stop icon + label.
+        let bx = right - bw;
+        let by = pad + head_lh + gap_lines + sub_lh + gap_button;
+        let br = bh as f32 * 0.5; // pill ends read as a button
+        canvas.fill_round_rect(bx, by, bw, bh, br, TEXT, 0.07);
+        let bt = (px * 0.08).round().max(1.0) as i32;
+        canvas.stroke_round_rect(bx, by, bw, bh, br, bt, TEXT, 0.5);
+        let mut cx = bx + bpad;
+        if let Some((rgba, iw, ih)) = &icon {
+            let iy = by + (bh - *ih as i32) / 2;
+            self.draw_icon(&mut canvas, rgba, *iw, *ih, cx, iy, px_sub);
+            cx += icon_w + icon_gap;
+        }
+        let btn_base = (by + bpad) as f32 + sub_asc;
+        self.draw_line(&mut canvas, cx as f32, btn_base, &btn_g, TEXT, px_sub);
+
+        let button_rect = [
+            bx.max(0) as u32,
+            by.max(0) as u32,
+            bw.max(0) as u32,
+            bh.max(0) as u32,
+        ];
+        Some((canvas.into_rgba(), cw, ch, button_rect))
+    }
+
     fn line_height(&self, px: f32) -> Option<u32> {
         let lm = self.font.horizontal_line_metrics(px)?;
         Some((lm.ascent - lm.descent + lm.line_gap).ceil().max(1.0) as u32)
@@ -419,6 +524,66 @@ impl Canvas {
 
     fn into_rgba(self) -> Vec<u8> {
         self.px
+    }
+
+    /// Composite a filled rounded rect (the scan card's subtle button fill): the box
+    /// `[x0, y0, w, h]` with `r`-px rounded corners, in `rgb` at `alpha`, AA at the corners.
+    #[allow(clippy::too_many_arguments)]
+    fn fill_round_rect(
+        &mut self,
+        x0: i32,
+        y0: i32,
+        w: i32,
+        h: i32,
+        r: f32,
+        rgb: [u8; 3],
+        alpha: f32,
+    ) {
+        for py in 0..h {
+            for px_ in 0..w {
+                let cov = corner_coverage(px_, py, w, h, r);
+                if cov > 0.0 {
+                    self.over(x0 + px_, y0 + py, rgb, cov * alpha);
+                }
+            }
+        }
+    }
+
+    /// Composite a rounded-rect **outline** of `t`-px thickness (the scan card's button
+    /// border): the ring between the box `[x0, y0, w, h]` (radius `r`) and the same box inset
+    /// by `t` (radius `r - t`), in `rgb` at `alpha`. Coverage = outer − inner, so the corners
+    /// stay anti-aliased.
+    #[allow(clippy::too_many_arguments)]
+    fn stroke_round_rect(
+        &mut self,
+        x0: i32,
+        y0: i32,
+        w: i32,
+        h: i32,
+        r: f32,
+        t: i32,
+        rgb: [u8; 3],
+        alpha: f32,
+    ) {
+        let (iw, ih) = (w - 2 * t, h - 2 * t);
+        let inner_r = (r - t as f32).max(0.0);
+        for py in 0..h {
+            for px_ in 0..w {
+                let outer = corner_coverage(px_, py, w, h, r);
+                if outer <= 0.0 {
+                    continue;
+                }
+                let inner = if iw > 0 && ih > 0 {
+                    corner_coverage(px_ - t, py - t, iw, ih, inner_r)
+                } else {
+                    0.0
+                };
+                let ring = (outer - inner).clamp(0.0, 1.0);
+                if ring > 0.0 {
+                    self.over(x0 + px_, y0 + py, rgb, ring * alpha);
+                }
+            }
+        }
     }
 
     /// Composite `rgba` (straight-alpha) over the pixel at `(x, y)`, if in bounds.
