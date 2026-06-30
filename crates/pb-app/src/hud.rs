@@ -74,8 +74,13 @@ pub mod tokens {
     pub const CARD_GAP_BUTTON: f32 = 0.6;
 
     // ── Button (fractions of the *button's own* text px) ─────────────────────────────
-    /// Button inner padding (floored at 3px).
-    pub const BUTTON_PAD: f32 = 0.6;
+    /// Button inner padding, left/right (floored at 3px). Separate from [`BUTTON_PAD_Y`] so the
+    /// horizontal and vertical insets tune independently — the label's line box already pads
+    /// the top/bottom, so the two axes want different values to read balanced.
+    pub const BUTTON_PAD_X: f32 = 0.5;
+    /// Button inner padding, top/bottom (floored at 2px). Smaller than [`BUTTON_PAD_X`]: the
+    /// line box adds its own vertical whitespace, so a little goes a long way.
+    pub const BUTTON_PAD_Y: f32 = 0.36;
     /// Button icon height (floored at 1px).
     pub const BUTTON_ICON: f32 = 0.95;
     /// Gap between the button's icon and label (floored at 2px).
@@ -165,8 +170,9 @@ struct ButtonLayout {
     icon: Option<(Vec<u8>, u32, u32)>,
     /// Gap between the icon and the label (0 when there's no icon).
     icon_gap: i32,
-    /// Inner padding on every side.
-    pad: i32,
+    /// Inner padding: left/right and top/bottom (tuned separately, see [`tokens::BUTTON_PAD_X`]).
+    pad_x: i32,
+    pad_y: i32,
     /// Total button width / height in px.
     w: i32,
     h: i32,
@@ -529,7 +535,7 @@ impl Hud {
         canvas.fill_round_rect(x, y, b.w, b.h, r, TEXT, tokens::BUTTON_FILL_ALPHA);
         let t = (px * tokens::BUTTON_BORDER).round().max(1.0) as i32;
         canvas.stroke_round_rect(x, y, b.w, b.h, r, t, TEXT, tokens::BUTTON_BORDER_ALPHA);
-        let mut cx = x + b.pad;
+        let mut cx = x + b.pad_x;
         if let Some((rgba, iw, ih)) = &b.icon {
             let iy = y + (b.h - *ih as i32) / 2;
             self.draw_icon(canvas, rgba, *iw, *ih, cx, iy, px);
@@ -538,7 +544,7 @@ impl Hud {
         self.draw_line(
             canvas,
             cx as f32,
-            (y + b.pad) as f32 + asc,
+            (y + b.pad_y) as f32 + asc,
             &b.glyphs,
             TEXT,
             px,
@@ -577,7 +583,8 @@ impl Hud {
     fn layout_button(&self, label: &str, icon: Option<&str>, px: f32) -> Option<ButtonLayout> {
         let (glyphs, label_adv) = self.layout(label, px, Weight::Regular);
         let line_h = self.line_height(px)? as i32;
-        let pad = (px * tokens::BUTTON_PAD).round().max(3.0) as i32;
+        let pad_x = (px * tokens::BUTTON_PAD_X).round().max(3.0) as i32;
+        let pad_y = (px * tokens::BUTTON_PAD_Y).round().max(2.0) as i32;
         let icon = icon.and_then(|svg| {
             let h = (px * tokens::BUTTON_ICON).round().max(1.0) as u32;
             crate::icon::rasterize(svg, h, TEXT)
@@ -589,13 +596,14 @@ impl Hud {
             ),
             None => (0, 0),
         };
-        let w = icon_w + icon_gap + label_adv.ceil() as i32 + 2 * pad;
-        let h = line_h + 2 * pad;
+        let w = icon_w + icon_gap + label_adv.ceil() as i32 + 2 * pad_x;
+        let h = line_h + 2 * pad_y;
         Some(ButtonLayout {
             glyphs,
             icon,
             icon_gap,
-            pad,
+            pad_x,
+            pad_y,
             w,
             h,
         })
