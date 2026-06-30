@@ -47,5 +47,59 @@
 	<string>NSApplication</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>© JD Lien</string>
+
+	<!-- File associations (task #6). Declared with role Viewer and LSHandlerRank
+	     Alternate: PhotoBlaze becomes a *candidate* "Open With" handler and can be set as
+	     default by the user, but never silently seizes a default (mirrors the Windows
+	     stance). The system already declares all these UTIs. Double-click / Dock-drop
+	     delivers the files via `application:openURLs:`, which the app handles in
+	     `macos_open.rs` (winit doesn't forward it). All these UTIs decode through
+	     pb-decode; archives open via pb-source. -->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Image</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>CFBundleTypeIconFile</key>
+			<string>PhotoBlaze</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.jpeg</string>
+				<string>public.png</string>
+				<string>public.heic</string>
+				<string>public.heif</string>
+				<string>public.avif</string>
+				<string>com.compuserve.gif</string>
+				<string>public.tiff</string>
+				<string>com.microsoft.bmp</string>
+				<string>com.microsoft.ico</string>
+				<string>org.webmproject.webp</string>
+				<string>public.jpeg-xl</string>
+				<string>public.svg-image</string>
+				<string>public.jpeg-2000</string>
+				<string>com.truevision.tga-image</string>
+				<string>public.camera-raw-image</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Image Archive</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>CFBundleTypeIconFile</key>
+			<string>PhotoBlaze</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.zip-archive</string>
+				<string>org.7-zip.7-zip-archive</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

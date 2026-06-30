@@ -35,6 +35,11 @@ with any pre-release suffix carried only by the tag.
 - macOS: the title bar now shows the current photo's **proxy icon** (in windowed
   mode) — ⌘-click it for the enclosing-folder path, or drag it into Finder, Mail, or
   Messages to move or attach the file, just like a native document window.
+- macOS: **file associations** — PhotoBlaze now registers for images (JPEG, PNG, HEIC,
+  AVIF, GIF, TIFF, BMP, WebP, JXL, SVG, ICO, JP2, TGA, camera RAW) and image archives
+  (ZIP, 7z). Double-click one in Finder, drag it onto the Dock icon, or use "Open With ▸
+  PhotoBlaze" and it opens — whether or not the app is already running. It registers as a
+  candidate handler (never silently seizes a file type's default).
 
 ### Changed
 - New **brand accent color**: the chrome's accent is now PhotoBlaze orange (`#FF4915`,

@@ -66,6 +66,8 @@ mod hdr_surface;
 mod hud;
 mod icon;
 mod keymap;
+#[cfg(target_os = "macos")]
+mod macos_open;
 mod menu;
 mod metrics;
 #[cfg(target_os = "macos")]
@@ -4068,6 +4070,16 @@ impl ApplicationHandler for App {
             let drops = std::mem::take(&mut self.pending_drops);
             self.open_input(classify_inputs(drops), event_loop);
         }
+        // 0b'. macOS: files opened from Finder / the Dock / `open -a` arrive via
+        // `application:openURLs:` (winit drops them — see `macos_open`); route them
+        // through the same open path as drag-and-drop.
+        #[cfg(target_os = "macos")]
+        {
+            let opened = macos_open::take_opened();
+            if !opened.is_empty() {
+                self.open_input(classify_inputs(opened), event_loop);
+            }
+        }
         // 0c. Pick up a finished background archive open (.7z eager decompress).
         self.poll_archive_load(event_loop);
 
@@ -4813,6 +4825,14 @@ fn main() {
 
     let event_loop = EventLoop::new().expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
+
+    // macOS: graft `application:openURLs:` onto winit's app delegate NOW. winit sets the
+    // delegate during `EventLoop::new()` above, and the run loop — which dispatches a cold
+    // double-click's `openURLs` right after `applicationDidFinishLaunching` — hasn't started
+    // yet. This is the only point early enough to catch the *launch* file; installing in
+    // `resumed()` is too late for a cold open (the event has already been dispatched).
+    #[cfg(target_os = "macos")]
+    macos_open::install();
 
     let metrics = if metrics_on {
         METRICS_ON_FLAG.store(true, std::sync::atomic::Ordering::Relaxed);
