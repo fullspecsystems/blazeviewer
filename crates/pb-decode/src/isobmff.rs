@@ -50,6 +50,88 @@ pub(crate) fn isobmff_brand(bytes: &[u8]) -> Option<&'static str> {
     heif.then_some("HEIF")
 }
 
+/// Whether `bytes` is an ISOBMFF image **sequence** (animated): major or compatible
+/// brand `avis` (AVIF image sequence) or `msf1` (HEVC/HEIC image sequence). A still
+/// AVIF/HEIC (`avif`/`heic`/`mif1`) is *not* a sequence, so it stays on the still
+/// path. Only the macOS Image I/O animation backend consumes this (the only decoder
+/// that can play AV1/HEVC sequences), so it's gated to its real consumer (plus
+/// `test`, so the brand test runs everywhere).
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn isobmff_is_sequence(bytes: &[u8]) -> bool {
+    if bytes.len() < 16 || &bytes[4..8] != b"ftyp" {
+        return false;
+    }
+    let is_seq = |b: &[u8]| matches!(b, b"avis" | b"msf1");
+    if is_seq(&bytes[8..12]) {
+        return true;
+    }
+    // Compatible-brands list (offset 16, after the 4-byte minor version), bounded by
+    // the ftyp box length.
+    let box_len = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+    let end = box_len.min(bytes.len());
+    let mut i = 16;
+    while i + 4 <= end {
+        if is_seq(&bytes[i..i + 4]) {
+            return true;
+        }
+        i += 4;
+    }
+    false
+}
+
+/// Best-effort per-frame duration (seconds) of an ISOBMFF image **sequence**, from
+/// its movie-track timing: the `mdhd` media timescale and the first `stts`
+/// sample-delta. AVIF/HEIC sequences carry frame timing in the track (not the
+/// still-image property dictionaries Image I/O surfaces), so this recovers the real
+/// frame rate. Assumes constant frame rate (one `stts` entry — the overwhelmingly
+/// common case); `None` if the boxes aren't found, and the caller falls back to a
+/// default. Pragmatic byte-scan, the same style as the other parsers here.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn isobmff_sequence_frame_delay(bytes: &[u8]) -> Option<f64> {
+    let timescale = find_box_u32(bytes, b"mdhd", |b, p| {
+        // payload: version(1) flags(3), then v0: creation(4) modification(4)
+        // timescale(4); v1: creation(8) modification(8) timescale(4).
+        let ts_off = if *b.get(p)? == 1 { p + 20 } else { p + 12 };
+        read_u32(b, ts_off)
+    })?;
+    let delta = find_box_u32(bytes, b"stts", |b, p| {
+        // payload: version(1) flags(3) entry_count(4), then [sample_count(4)
+        // sample_delta(4)]…; require ≥1 entry, take the first delta.
+        if read_u32(b, p + 4)? == 0 {
+            return None;
+        }
+        read_u32(b, p + 12)
+    })?;
+    (timescale != 0 && delta != 0).then(|| delta as f64 / timescale as f64)
+}
+
+/// Scan for the first `box_type` and apply `read` to it (`p` = the offset just past
+/// the 4-byte type, i.e. the box payload start). `None` if the box isn't found or
+/// `read` declines.
+#[cfg(any(target_os = "macos", test))]
+fn find_box_u32(
+    b: &[u8],
+    box_type: &[u8; 4],
+    read: impl Fn(&[u8], usize) -> Option<u32>,
+) -> Option<u32> {
+    let mut i = 4usize;
+    while i + 4 <= b.len() {
+        if &b[i..i + 4] == box_type {
+            if let Some(v) = read(b, i + 4) {
+                return Some(v);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Read a big-endian `u32` at `off`, or `None` if out of bounds.
+#[cfg(any(target_os = "macos", test))]
+fn read_u32(b: &[u8], off: usize) -> Option<u32> {
+    Some(u32::from_be_bytes(b.get(off..off + 4)?.try_into().ok()?))
+}
+
 /// Whether a CICP transfer characteristic is HDR (needs the float decode path):
 /// 16 = SMPTE-2084 (PQ), 18 = ARIB STD-B67 (HLG).
 pub(crate) fn is_hdr_transfer(transfer: u8) -> bool {
@@ -173,6 +255,45 @@ mod tests {
         assert_eq!(isobmff_brand(&ftyp(b"mif1", &[b"miaf"])), Some("HEIF"));
         assert_eq!(isobmff_brand(b"\x89PNG\r\n\x1a\n____"), None);
         assert_eq!(isobmff_brand(&[0u8; 4]), None);
+    }
+
+    #[test]
+    fn sequence_frame_delay_from_mdhd_timescale_and_stts_delta() {
+        // Craft an `mdhd` (timescale 600) + `stts` (one entry, sample_delta 30) so
+        // the per-frame duration is 30/600 = 0.05 s = 50 ms (20 fps).
+        let mut v = vec![0u8; 8]; // padding so the boxes don't start at offset 0
+        v.extend_from_slice(b"mdhd");
+        v.push(0); // version 0
+        v.extend_from_slice(&[0, 0, 0]); // flags
+        v.extend_from_slice(&0u32.to_be_bytes()); // creation
+        v.extend_from_slice(&0u32.to_be_bytes()); // modification
+        v.extend_from_slice(&600u32.to_be_bytes()); // timescale
+        v.extend_from_slice(&0u32.to_be_bytes()); // duration
+        v.extend_from_slice(b"stts");
+        v.push(0);
+        v.extend_from_slice(&[0, 0, 0]); // version + flags
+        v.extend_from_slice(&1u32.to_be_bytes()); // entry_count
+        v.extend_from_slice(&26u32.to_be_bytes()); // sample_count
+        v.extend_from_slice(&30u32.to_be_bytes()); // sample_delta
+
+        let d = isobmff_sequence_frame_delay(&v).expect("should parse a frame delay");
+        assert!((d - 0.05).abs() < 1e-9, "got {d}");
+
+        // Missing boxes → None (the caller then falls back to a default).
+        assert!(isobmff_sequence_frame_delay(b"not an isobmff file at all").is_none());
+    }
+
+    #[test]
+    fn detects_image_sequences_by_brand() {
+        // Sequence brands, in the major slot or the compatible list, are animated.
+        assert!(isobmff_is_sequence(&ftyp(b"avis", &[])));
+        assert!(isobmff_is_sequence(&ftyp(b"msf1", &[])));
+        assert!(isobmff_is_sequence(&ftyp(b"avif", &[b"avis"])));
+        // Stills are not sequences (so they keep the fast still path, no ▶ hint).
+        assert!(!isobmff_is_sequence(&ftyp(b"avif", &[])));
+        assert!(!isobmff_is_sequence(&ftyp(b"heic", &[])));
+        assert!(!isobmff_is_sequence(&ftyp(b"mif1", &[b"heic"])));
+        assert!(!isobmff_is_sequence(b"\x89PNG\r\n\x1a\n____"));
     }
 
     /// Wrap `colour_type` + `payload` in a `colr` box, prefixed by 8 bytes of

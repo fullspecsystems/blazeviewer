@@ -108,6 +108,9 @@ const BYTE_ORDER_32_LITTLE: u32 = 2 << 12; // kCGBitmapByteOrder32Little (host o
 
 /// `kCFNumberIntType` — read a CFNumber into a C `int` (i32).
 const CF_NUMBER_INT_TYPE: isize = 9;
+/// `kCFNumberFloat64Type` — read a CFNumber into a C `double` (f64). Used for the
+/// per-frame delay times, which Image I/O reports in seconds.
+const CF_NUMBER_FLOAT64_TYPE: isize = 6;
 
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
@@ -120,12 +123,36 @@ extern "C" {
 #[link(name = "ImageIO", kind = "framework")]
 extern "C" {
     static kCGImagePropertyOrientation: CFStringRef;
+    // Per-container format dictionaries + their per-frame delay / loop-count keys.
+    // Image I/O reports delays in seconds (the Unclamped variant is the true value;
+    // the plain one is floored to 0.1 s) and loop counts as ints (0 = infinite).
+    static kCGImagePropertyGIFDictionary: CFStringRef;
+    static kCGImagePropertyGIFUnclampedDelayTime: CFStringRef;
+    static kCGImagePropertyGIFDelayTime: CFStringRef;
+    static kCGImagePropertyGIFLoopCount: CFStringRef;
+    static kCGImagePropertyPNGDictionary: CFStringRef;
+    static kCGImagePropertyAPNGUnclampedDelayTime: CFStringRef;
+    static kCGImagePropertyAPNGDelayTime: CFStringRef;
+    static kCGImagePropertyAPNGLoopCount: CFStringRef;
+    static kCGImagePropertyWebPDictionary: CFStringRef;
+    static kCGImagePropertyWebPUnclampedDelayTime: CFStringRef;
+    static kCGImagePropertyWebPDelayTime: CFStringRef;
+    static kCGImagePropertyWebPLoopCount: CFStringRef;
+    static kCGImagePropertyHEICSDictionary: CFStringRef;
+    static kCGImagePropertyHEICSUnclampedDelayTime: CFStringRef;
+    static kCGImagePropertyHEICSDelayTime: CFStringRef;
+    static kCGImagePropertyHEICSLoopCount: CFStringRef;
     fn CGImageSourceCreateWithData(data: CFDataRef, options: CFDictionaryRef) -> CGImageSourceRef;
+    fn CGImageSourceGetCount(isrc: CGImageSourceRef) -> usize;
     fn CGImageSourceCreateImageAtIndex(
         isrc: CGImageSourceRef,
         index: usize,
         options: CFDictionaryRef,
     ) -> CGImageRef;
+    fn CGImageSourceCopyProperties(
+        isrc: CGImageSourceRef,
+        options: CFDictionaryRef,
+    ) -> CFDictionaryRef;
     fn CGImageSourceCopyPropertiesAtIndex(
         isrc: CGImageSourceRef,
         index: usize,
@@ -230,52 +257,58 @@ fn orient_f32(floats: Vec<f32>, w: u32, h: u32, orientation: u32) -> (Vec<f32>, 
 /// Sanity bound on a decoded dimension — rejects absurd sizes before allocating.
 const MAX_DIM: usize = 100_000;
 
-/// Decode to **Display-P3 8-bit RGBA** (top-down, straight bytes R,G,B,A). The CTM
-/// flip makes memory row 0 the top of the image (Quartz draws lower-left-origin).
+/// Draw a `CGImage` into a fresh **Display-P3 8-bit RGBA** bitmap (top-down, row 0 =
+/// top). Returns the buffer + dimensions, or `None` on any failure. The bytes are
+/// **premultiplied** (Quartz contexts require it); callers that need straight alpha
+/// (the animation path) un-premultiply afterward — the still path's HEIC sources are
+/// opaque, so it leaves them as-is. `unsafe` because it drives CoreGraphics.
+unsafe fn draw_cgimage_p3(img: CGImageRef) -> Option<(Vec<u8>, u32, u32)> {
+    let w = CGImageGetWidth(img);
+    let h = CGImageGetHeight(img);
+    if w == 0 || h == 0 || w > MAX_DIM || h > MAX_DIM {
+        return None;
+    }
+    let stride = w.checked_mul(4)?;
+    let len = stride.checked_mul(h)?;
+    let space = CGColorSpaceCreateWithName(kCGColorSpaceDisplayP3);
+    if space.is_null() {
+        return None;
+    }
+    let mut buf = vec![0u8; len];
+    let ctx = CGBitmapContextCreate(
+        buf.as_mut_ptr() as *mut c_void,
+        w,
+        h,
+        8,
+        stride,
+        space,
+        ALPHA_PREMULTIPLIED_LAST,
+    );
+    CGColorSpaceRelease(space);
+    if ctx.is_null() {
+        return None;
+    }
+    // No CTM flip: `CGContextDrawImage` into a freshly-created `CGBitmapContext`
+    // already lands the image top-down (row 0 = top) in the buffer. (A flip here
+    // vertically mirrors the result — verified against Quick Look.) Rotation is
+    // applied separately via `kCGImagePropertyOrientation`.
+    let rect = CGRect {
+        origin: CGPoint { x: 0.0, y: 0.0 },
+        size: CGSize {
+            width: w as f64,
+            height: h as f64,
+        },
+    };
+    CGContextDrawImage(ctx, rect, img);
+    CGContextRelease(ctx);
+    Some((buf, w as u32, h as u32))
+}
+
+/// Decode to **Display-P3 8-bit RGBA** (top-down), plus the source orientation.
 /// Returns `None` on any failure. `unsafe` because it drives CoreGraphics.
 unsafe fn imageio_decode_rgba8_p3(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32, u32)> {
     let (img, orientation) = create_cgimage(bytes)?;
-    let result = (|| {
-        let w = CGImageGetWidth(img);
-        let h = CGImageGetHeight(img);
-        if w == 0 || h == 0 || w > MAX_DIM || h > MAX_DIM {
-            return None;
-        }
-        let stride = w.checked_mul(4)?;
-        let len = stride.checked_mul(h)?;
-        let space = CGColorSpaceCreateWithName(kCGColorSpaceDisplayP3);
-        if space.is_null() {
-            return None;
-        }
-        let mut buf = vec![0u8; len];
-        let ctx = CGBitmapContextCreate(
-            buf.as_mut_ptr() as *mut c_void,
-            w,
-            h,
-            8,
-            stride,
-            space,
-            ALPHA_PREMULTIPLIED_LAST,
-        );
-        CGColorSpaceRelease(space);
-        if ctx.is_null() {
-            return None;
-        }
-        // No CTM flip: `CGContextDrawImage` into a freshly-created `CGBitmapContext`
-        // already lands the image top-down (row 0 = top) in the buffer. (A flip here
-        // vertically mirrors the result — verified against Quick Look.) Rotation is
-        // applied separately via `kCGImagePropertyOrientation`.
-        let rect = CGRect {
-            origin: CGPoint { x: 0.0, y: 0.0 },
-            size: CGSize {
-                width: w as f64,
-                height: h as f64,
-            },
-        };
-        CGContextDrawImage(ctx, rect, img);
-        CGContextRelease(ctx);
-        Some((buf, w as u32, h as u32, orientation))
-    })();
+    let result = draw_cgimage_p3(img).map(|(buf, w, h)| (buf, w, h, orientation));
     CGImageRelease(img);
     result
 }
@@ -327,4 +360,235 @@ unsafe fn imageio_decode_hdr(bytes: &[u8]) -> Option<(Vec<f32>, u32, u32, u32)> 
     })();
     CGImageRelease(img);
     result
+}
+
+// --- Multi-frame (animation) decode ------------------------------------------------
+//
+// `CGImageSource` decodes an animated GIF/APNG/WebP — *and* an AVIF/HEIC image
+// sequence — as N fully-composited frames (it does the dispose/blend), with per-frame
+// delays and a loop count in the format property dictionaries. This is the macOS
+// backend `pb_decode::animation` prefers (the only one that can do AV1/HEVC
+// sequences). Frames come back **Display-P3, straight-alpha** RGBA8; the caller
+// downscales-to-fit and carries the P3→BT.709 transform, like the still HEIC path.
+
+/// One composited animation frame from Image I/O: P3, straight-alpha RGBA8, plus the
+/// frame's display duration in seconds (the caller normalizes/clamps it).
+pub(crate) struct ImageIoFrame {
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub delay_secs: f64,
+}
+
+/// A decoded image sequence from Image I/O: its frames and the loop count
+/// (`0` = infinite, matching every container's convention).
+pub(crate) struct ImageIoAnimation {
+    pub frames: Vec<ImageIoFrame>,
+    pub loop_count: u32,
+}
+
+/// Decode up to `max_frames` composited frames of an animated image via Image I/O.
+/// `None` if Image I/O can't open it or it has no frames. Panics never escape (no
+/// Rust panics here; the FFI either succeeds or returns null, which we handle).
+pub(crate) fn decode_animation_frames(bytes: &[u8], max_frames: usize) -> Option<ImageIoAnimation> {
+    unsafe { decode_animation_frames_inner(bytes, max_frames) }
+}
+
+unsafe fn decode_animation_frames_inner(
+    bytes: &[u8],
+    max_frames: usize,
+) -> Option<ImageIoAnimation> {
+    if bytes.is_empty() || max_frames == 0 {
+        return None;
+    }
+    let data = CFDataCreate(std::ptr::null(), bytes.as_ptr(), bytes.len() as isize);
+    if data.is_null() {
+        return None;
+    }
+    let src = CGImageSourceCreateWithData(data, std::ptr::null());
+    if src.is_null() {
+        CFRelease(data);
+        return None;
+    }
+    let result = (|| {
+        let count = CGImageSourceGetCount(src);
+        if count == 0 {
+            return None;
+        }
+        // Orientation is read once from the container and applied to every frame
+        // (sequences are uniformly oriented); usually 1 (a no-op) for GIF/APNG/WebP.
+        let orientation = source_orientation(src);
+        let loop_count = {
+            let cprops = CGImageSourceCopyProperties(src, std::ptr::null());
+            let lc = if cprops.is_null() {
+                0
+            } else {
+                container_loop_count(cprops)
+            };
+            if !cprops.is_null() {
+                CFRelease(cprops);
+            }
+            lc
+        };
+
+        let mut frames = Vec::new();
+        for i in 0..count.min(max_frames) {
+            let img = CGImageSourceCreateImageAtIndex(src, i, std::ptr::null());
+            if img.is_null() {
+                continue;
+            }
+            let drawn = draw_cgimage_p3(img);
+            CGImageRelease(img);
+            let Some((mut buf, w, h)) = drawn else {
+                continue;
+            };
+            // Quartz drew premultiplied; the renderer wants straight alpha (and these
+            // formats routinely carry transparency, unlike the opaque still HEICs).
+            unpremultiply(&mut buf);
+            let (rgba, fw, fh) = if orientation > 1 {
+                crate::orientation::apply_orientation_bytes(&buf, w, h, orientation, 4)
+            } else {
+                (buf, w, h)
+            };
+            // Per-frame delay (seconds) from whichever format dictionary applies.
+            let pprops = CGImageSourceCopyPropertiesAtIndex(src, i, std::ptr::null());
+            let delay_secs = if pprops.is_null() {
+                0.0
+            } else {
+                frame_delay_seconds(pprops).unwrap_or(0.0)
+            };
+            if !pprops.is_null() {
+                CFRelease(pprops);
+            }
+            frames.push(ImageIoFrame {
+                rgba,
+                width: fw,
+                height: fh,
+                delay_secs,
+            });
+        }
+        if frames.is_empty() {
+            return None;
+        }
+        Some(ImageIoAnimation { frames, loop_count })
+    })();
+    CFRelease(src);
+    CFRelease(data);
+    result
+}
+
+/// Convert premultiplied RGBA bytes (what Quartz produces) back to straight alpha.
+/// Opaque pixels (`a == 255`) are untouched; fully transparent ones are zeroed.
+fn unpremultiply(buf: &mut [u8]) {
+    for px in buf.chunks_exact_mut(4) {
+        let a = px[3];
+        if a == 0 {
+            px[0] = 0;
+            px[1] = 0;
+            px[2] = 0;
+        } else if a < 255 {
+            let a = a as u16;
+            for c in &mut px[0..3] {
+                *c = ((*c as u16 * 255 + a / 2) / a).min(255) as u8;
+            }
+        }
+    }
+}
+
+/// The known animated-container property dictionaries, each paired with its
+/// per-frame Unclamped/clamped delay keys and its loop-count key. We try them in
+/// turn since a given file populates exactly one.
+unsafe fn format_dicts() -> [(CFStringRef, CFStringRef, CFStringRef, CFStringRef); 4] {
+    [
+        (
+            kCGImagePropertyGIFDictionary,
+            kCGImagePropertyGIFUnclampedDelayTime,
+            kCGImagePropertyGIFDelayTime,
+            kCGImagePropertyGIFLoopCount,
+        ),
+        (
+            kCGImagePropertyPNGDictionary,
+            kCGImagePropertyAPNGUnclampedDelayTime,
+            kCGImagePropertyAPNGDelayTime,
+            kCGImagePropertyAPNGLoopCount,
+        ),
+        (
+            kCGImagePropertyWebPDictionary,
+            kCGImagePropertyWebPUnclampedDelayTime,
+            kCGImagePropertyWebPDelayTime,
+            kCGImagePropertyWebPLoopCount,
+        ),
+        (
+            kCGImagePropertyHEICSDictionary,
+            kCGImagePropertyHEICSUnclampedDelayTime,
+            kCGImagePropertyHEICSDelayTime,
+            kCGImagePropertyHEICSLoopCount,
+        ),
+    ]
+}
+
+/// A frame's delay (seconds) from its per-index properties — the Unclamped value
+/// (the encoder's true intent) when present, else the floored one. `None` if no
+/// known animated dictionary carries a delay (e.g. an AVIF sequence with none).
+unsafe fn frame_delay_seconds(props: CFDictionaryRef) -> Option<f64> {
+    for (dict_key, unclamped, clamped, _loop) in format_dicts() {
+        let sub = CFDictionaryGetValue(props, dict_key);
+        if sub.is_null() {
+            continue;
+        }
+        if let Some(d) =
+            cf_dict_get_double(sub, unclamped).or_else(|| cf_dict_get_double(sub, clamped))
+        {
+            return Some(d);
+        }
+    }
+    None
+}
+
+/// The container loop count (`0` = infinite) from whichever animated dictionary the
+/// container-level properties carry; `0` if none (treat as loop forever).
+unsafe fn container_loop_count(props: CFDictionaryRef) -> u32 {
+    for (dict_key, _u, _c, loop_key) in format_dicts() {
+        let sub = CFDictionaryGetValue(props, dict_key);
+        if sub.is_null() {
+            continue;
+        }
+        if let Some(n) = cf_dict_get_int(sub, loop_key) {
+            return n.max(0) as u32;
+        }
+    }
+    0
+}
+
+/// Read a CFNumber value out of a CFDictionary as `f64`. `None` if the key is absent
+/// or the value isn't a number.
+unsafe fn cf_dict_get_double(dict: CFDictionaryRef, key: CFStringRef) -> Option<f64> {
+    if dict.is_null() || key.is_null() {
+        return None;
+    }
+    let v = CFDictionaryGetValue(dict, key);
+    if v.is_null() {
+        return None;
+    }
+    let mut out: f64 = 0.0;
+    CFNumberGetValue(
+        v,
+        CF_NUMBER_FLOAT64_TYPE,
+        &mut out as *mut f64 as *mut c_void,
+    )
+    .then_some(out)
+}
+
+/// Read a CFNumber value out of a CFDictionary as `i32`. `None` if the key is absent
+/// or the value isn't a number.
+unsafe fn cf_dict_get_int(dict: CFDictionaryRef, key: CFStringRef) -> Option<i32> {
+    if dict.is_null() || key.is_null() {
+        return None;
+    }
+    let v = CFDictionaryGetValue(dict, key);
+    if v.is_null() {
+        return None;
+    }
+    let mut out: i32 = 0;
+    CFNumberGetValue(v, CF_NUMBER_INT_TYPE, &mut out as *mut i32 as *mut c_void).then_some(out)
 }

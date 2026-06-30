@@ -1364,8 +1364,8 @@
           {
             "id": 6,
             "title": "macOS Image I/O animation backend (preferred on Mac; deferred)",
-            "description": "Multi-frame CGImageSource backend (per-frame delays via the GIF/PNG/WebP property dictionaries, loop count via kCGImageProperty*LoopCount), preferred on macOS per the spec. Also unlocks animated AVIF sequences on Mac (e.g. corpus 3.avif), which the pure-Rust image-crate path can't do. Gated on owner decision.",
-            "status": "pending"
+            "description": "DONE. crates/pb-decode/src/imageio.rs multi-frame CGImageSource backend: decodes all frames (Image I/O composites dispose/blend), per-frame delays + loop count from the GIF/PNG/WebP/HEICS property dictionaries, Display-P3 draw + un-premultiply to straight alpha, P3->BT.709 transform carried like the still HEIC path. detect_animation gains avis/msf1 ISOBMFF sequence detection; decode_animation prefers Image I/O on macOS for every kind. Animated AVIF/HEIC play, with true frame timing recovered from the movie track (mdhd timescale + stts delta) since Image I/O exposes no per-frame dict delay for sequences. Verified against the corpus incl. 3.avif (26 frames @ 50ms, matching the WebP twin). 77 tests pass.",
+            "status": "done"
           }
         ]
       }

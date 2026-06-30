@@ -24,7 +24,7 @@
 
 use std::time::Duration;
 
-use crate::{common, DecodeError, FitBox};
+use crate::{common, ColorTransform, DecodeError, FitBox};
 
 /// Which animated container a file is. The cheap sniff returns this; the decoder
 /// routes on it (and the timing layer keys its quirk-handling off it).
@@ -35,15 +35,22 @@ pub enum AnimationKind {
     Apng,
     /// Animated WebP (a `VP8X` chunk with the animation flag).
     Webp,
+    /// An ISOBMFF image **sequence** — animated AVIF (`avis`) or HEIC (`msf1`).
+    /// Only decodable via the macOS Image I/O backend (no pure-Rust AV1/HEVC
+    /// sequence decoder), so it's only ever produced on macOS.
+    Heif,
 }
 
 impl AnimationKind {
-    /// Stable, content-derived codec label for the info panel / logs.
+    /// Stable, content-derived codec label for the info panel / logs. (For `Heif`
+    /// the precise brand — AVIF vs HEIC — is resolved by the decoder and overrides
+    /// this generic label.)
     pub fn codec(self) -> &'static str {
         match self {
             AnimationKind::Gif => "GIF",
             AnimationKind::Apng => "APNG",
             AnimationKind::Webp => "WebP",
+            AnimationKind::Heif => "HEIF",
         }
     }
 }
@@ -73,6 +80,11 @@ pub struct Animation {
     /// Times to play the whole sequence; `0` = infinite.
     pub loop_count: u32,
     pub codec: &'static str,
+    /// Source→sRGB color transform the renderer applies per texel (every frame
+    /// shares the container's profile). sRGB passthrough for the pure-Rust path;
+    /// the macOS Image I/O path draws into Display-P3 and carries the P3→BT.709
+    /// transform, like the still HEIC path.
+    pub color: ColorTransform,
     /// True if the sequence was cut short by [`MAX_FRAMES`] / [`MAX_DECODED_BYTES`]
     /// — we play the bounded prefix rather than exhaust RAM on a pathological file.
     pub truncated: bool,
@@ -102,14 +114,22 @@ pub const MAX_DECODED_BYTES: u64 = 1536 * 1024 * 1024;
 /// which is the overwhelmingly common case and stays on the normal still path.
 pub fn detect_animation(bytes: &[u8]) -> Option<AnimationKind> {
     if is_animated_gif(bytes) {
-        Some(AnimationKind::Gif)
-    } else if is_apng(bytes) {
-        Some(AnimationKind::Apng)
-    } else if is_animated_webp(bytes) {
-        Some(AnimationKind::Webp)
-    } else {
-        None
+        return Some(AnimationKind::Gif);
     }
+    if is_apng(bytes) {
+        return Some(AnimationKind::Apng);
+    }
+    if is_animated_webp(bytes) {
+        return Some(AnimationKind::Webp);
+    }
+    // ISOBMFF image sequences (animated AVIF / HEIC) decode only through the macOS
+    // Image I/O backend, so they're only worth flagging there. A still AVIF/HEIC
+    // (brand `avif`/`heic`/`mif1`) is NOT a sequence and stays on the still path.
+    #[cfg(target_os = "macos")]
+    if crate::isobmff::isobmff_is_sequence(bytes) {
+        return Some(AnimationKind::Heif);
+    }
+    None
 }
 
 /// A GIF with **more than one image descriptor**. Walks the block stream just far
@@ -236,7 +256,11 @@ pub fn normalize_delay(kind: AnimationKind, raw: Duration) -> Duration {
     let ms = raw.as_millis();
     match kind {
         AnimationKind::Gif if ms < 20 => Duration::from_millis(100),
-        AnimationKind::Apng | AnimationKind::Webp if ms == 0 => Duration::from_millis(100),
+        // APNG / WebP / HEIF sequences: honor a genuine fast frame; only clamp a
+        // nonsensical zero-length one (e.g. an AVIF sequence with no delay metadata).
+        AnimationKind::Apng | AnimationKind::Webp | AnimationKind::Heif if ms == 0 => {
+            Duration::from_millis(100)
+        }
         _ => raw,
     }
 }
@@ -293,17 +317,33 @@ pub fn decode_animation(bytes: &[u8], fit: Option<FitBox>) -> Result<Animation, 
     }
 }
 
+// The `return` is load-bearing on non-macOS (a second cfg block follows), but reads
+// as "needless" on macOS where that block is compiled out — allow it for both.
+#[allow(clippy::needless_return)]
 fn decode_animation_inner(bytes: &[u8], fit: Option<FitBox>) -> Result<Animation, DecodeError> {
     let Some(kind) = detect_animation(bytes) else {
         return Err(DecodeError::Unsupported);
     };
-    decode_with_image_crate(kind, bytes, fit)
+    // macOS prefers the OS Image I/O backend (hardware-assisted, and the only path
+    // that can decode AVIF/HEIC sequences) for every animated kind; the pure-Rust
+    // `image`-crate path is the universal baseline everywhere else.
+    #[cfg(target_os = "macos")]
+    {
+        return imageio_animation::decode(kind, bytes, fit);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        decode_with_image_crate(kind, bytes, fit)
+    }
 }
 
 /// The pure-Rust `image`-crate backend (GIF/APNG/WebP). It composites dispose/blend
 /// and exposes the NETSCAPE/`num_plays`/loop-count via `AnimationDecoder`, so we
-/// never parse those ourselves. (macOS will gain an Image I/O backend that's
-/// preferred there; this stays the universal baseline.)
+/// never parse those ourselves. This is the universal baseline (every non-macOS
+/// target); macOS routes to the Image I/O backend instead, so here it's compiled in
+/// only off-macOS — plus in `test` builds, where the unit tests exercise it directly
+/// for deterministic, backend-pinned assertions on every platform.
+#[cfg(any(not(target_os = "macos"), test))]
 fn decode_with_image_crate(
     kind: AnimationKind,
     bytes: &[u8],
@@ -330,10 +370,14 @@ fn decode_with_image_crate(
             let loops = loop_count_to_u32(dec.loop_count());
             collect_frames(kind, dec.into_frames(), loops, fit)
         }
+        // ISOBMFF sequences never reach this backend (the pure-Rust path can't decode
+        // AV1/HEVC) — they're only ever detected on macOS, which routes to Image I/O.
+        AnimationKind::Heif => Err(DecodeError::Unsupported),
     }
 }
 
 /// `image`'s `LoopCount` → our `u32` convention (`0` = infinite).
+#[cfg(any(not(target_os = "macos"), test))]
 fn loop_count_to_u32(lc: image::metadata::LoopCount) -> u32 {
     match lc {
         image::metadata::LoopCount::Infinite => 0,
@@ -343,6 +387,7 @@ fn loop_count_to_u32(lc: image::metadata::LoopCount) -> u32 {
 
 /// Drain an `image::Frames` iterator into composited, fit-downscaled [`AnimFrame`]s,
 /// applying the timing normalization and the resident-frame caps.
+#[cfg(any(not(target_os = "macos"), test))]
 fn collect_frames(
     kind: AnimationKind,
     frames: image::Frames<'_>,
@@ -400,8 +445,99 @@ fn collect_frames(
         frames: out,
         loop_count,
         codec: kind.codec(),
+        // The `image` crate hands back sRGB-encoded frames (it drops any ICC for
+        // these formats); pass through. The macOS Image I/O path carries a real
+        // P3 transform instead.
+        color: ColorTransform::srgb(),
         truncated,
     })
+}
+
+/// The macOS Image I/O animation backend: the OS decodes every frame (compositing
+/// dispose/blend itself) and exposes per-frame delays + loop count in the format
+/// property dictionaries. Preferred on macOS for every kind, and the only path that
+/// can decode AVIF/HEIC sequences. Frames arrive Display-P3 straight-alpha; we
+/// downscale-to-fit, normalize timing, apply the caps, and carry the P3→BT.709
+/// transform (exactly like the still HEIC path).
+#[cfg(target_os = "macos")]
+mod imageio_animation {
+    use super::*;
+
+    pub(super) fn decode(
+        kind: AnimationKind,
+        bytes: &[u8],
+        fit: Option<FitBox>,
+    ) -> Result<Animation, DecodeError> {
+        let raw = crate::imageio::decode_animation_frames(bytes, MAX_FRAMES).ok_or_else(|| {
+            DecodeError::Corrupt("Image I/O could not decode the animation".into())
+        })?;
+
+        let mut out: Vec<AnimFrame> = Vec::new();
+        let mut total_bytes: u64 = 0;
+        let mut truncated = raw.frames.len() >= MAX_FRAMES;
+        let (mut canvas_w, mut canvas_h) = (0u32, 0u32);
+
+        // AVIF/HEIC sequences carry no per-frame delay in Image I/O's still-image
+        // property dictionaries — their timing lives in the movie track. Recover the
+        // constant frame duration from `mdhd`/`stts` so the sequence plays at its true
+        // rate instead of a guessed default. (GIF/APNG/WebP delays come per-frame.)
+        let heif_fallback_secs = (kind == AnimationKind::Heif)
+            .then(|| crate::isobmff::isobmff_sequence_frame_delay(bytes))
+            .flatten();
+
+        for rf in raw.frames {
+            if out.len() >= MAX_FRAMES {
+                truncated = true;
+                break;
+            }
+            let secs = if rf.delay_secs > 0.0 {
+                rf.delay_secs
+            } else {
+                heif_fallback_secs.unwrap_or(0.0)
+            };
+            let delay = normalize_delay(kind, Duration::from_secs_f64(secs.max(0.0)));
+            let (rgba, w, h) = match fit {
+                Some(fit) => common::downscale_to_fit(rf.rgba, rf.width, rf.height, fit)?,
+                None => (rf.rgba, rf.width, rf.height),
+            };
+            if out.is_empty() {
+                canvas_w = w;
+                canvas_h = h;
+            }
+            total_bytes = total_bytes.saturating_add(rgba.len() as u64);
+            out.push(AnimFrame {
+                rgba,
+                width: w,
+                height: h,
+                delay,
+            });
+            if total_bytes > MAX_DECODED_BYTES {
+                truncated = true;
+                break;
+            }
+        }
+        if out.is_empty() {
+            return Err(DecodeError::Corrupt("no frames decoded".into()));
+        }
+
+        // For an AVIF/HEIC sequence the precise brand is the codec label; the others
+        // keep their kind label. Every Image I/O frame was drawn into Display-P3, so
+        // they all carry the P3(SMPTE-432)→BT.709 + sRGB-TRC transform.
+        let codec = match kind {
+            AnimationKind::Heif => crate::isobmff::isobmff_brand(bytes).unwrap_or("HEIF"),
+            other => other.codec(),
+        };
+        Ok(Animation {
+            kind,
+            width: canvas_w,
+            height: canvas_h,
+            frames: out,
+            loop_count: raw.loop_count,
+            codec,
+            color: ColorTransform::from_cicp(12, 13, 0, true),
+            truncated,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -556,12 +692,18 @@ mod tests {
         assert_eq!(detect_animation(b"not an image at all"), None);
     }
 
-    // --- decode: real round-trips through the image-crate backend ------------------
+    // --- decode: round-trips through the image-crate backend -----------------------
+    //
+    // These call `decode_with_image_crate` directly (not `decode_animation`) so they
+    // pin the pure-Rust backend's exact frame/timing/loop output on every platform —
+    // on macOS `decode_animation` routes to Image I/O, which is covered by the corpus
+    // smoke test instead.
 
     #[test]
     fn decodes_every_gif_frame_with_normalized_timing_and_loop_count() {
         let gif = encode_gif(3, Repeat::Infinite, Delay::from_numer_denom_ms(100, 1));
-        let anim = decode_animation(&gif, None).expect("decode animated gif");
+        let anim =
+            decode_with_image_crate(AnimationKind::Gif, &gif, None).expect("decode animated gif");
         assert_eq!(anim.kind, AnimationKind::Gif);
         assert_eq!(anim.frame_count(), 3);
         assert_eq!(anim.loop_count, 0, "NETSCAPE infinite → 0");
@@ -577,7 +719,7 @@ mod tests {
     fn decode_clamps_a_zero_delay_gif_to_100ms() {
         // delay 0 → the GIF sub-threshold clamp kicks in end-to-end.
         let gif = encode_gif(2, Repeat::Infinite, Delay::from_numer_denom_ms(0, 1));
-        let anim = decode_animation(&gif, None).expect("decode");
+        let anim = decode_with_image_crate(AnimationKind::Gif, &gif, None).expect("decode");
         assert!(anim
             .frames
             .iter()
@@ -587,7 +729,7 @@ mod tests {
     #[test]
     fn decode_honors_a_finite_loop_count() {
         let gif = encode_gif(2, Repeat::Finite(3), Delay::from_numer_denom_ms(100, 1));
-        let anim = decode_animation(&gif, None).expect("decode");
+        let anim = decode_with_image_crate(AnimationKind::Gif, &gif, None).expect("decode");
         assert_eq!(anim.loop_count, 3);
     }
 
@@ -595,7 +737,8 @@ mod tests {
     fn decode_downscales_frames_to_fit() {
         // Each frame is 8x8; fit to 4x4 → frames come back 4x4.
         let gif = encode_gif(2, Repeat::Infinite, Delay::from_numer_denom_ms(100, 1));
-        let anim = decode_animation(
+        let anim = decode_with_image_crate(
+            AnimationKind::Gif,
             &gif,
             Some(FitBox {
                 max_width: 4,
@@ -645,6 +788,23 @@ mod tests {
                     .all(|f| f.delay >= Duration::from_millis(20)),
                 "{name} frame delays should be clamped sane"
             );
+        }
+
+        // Animated AVIF is an ISOBMFF sequence — only the macOS Image I/O backend
+        // decodes it. Confirm the sequence sniff + decode work there.
+        #[cfg(target_os = "macos")]
+        {
+            let avif = dir.join("3.avif");
+            if avif.exists() {
+                let bytes = std::fs::read(&avif).unwrap();
+                assert_eq!(
+                    detect_animation(&bytes),
+                    Some(AnimationKind::Heif),
+                    "3.avif kind"
+                );
+                let anim = decode_animation(&bytes, None).expect("3.avif decode");
+                assert!(anim.frame_count() > 1, "3.avif should have >1 frame");
+            }
         }
     }
 }
