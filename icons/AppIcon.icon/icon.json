@@ -10,10 +10,22 @@
         {
           "glass" : true,
           "image-name" : "photoblaze-icon-flames.svg",
-          "name" : "photoblaze-icon-flames"
+          "name" : "photoblaze-icon-flames",
+          "opacity-specializations" : [
+            {
+              "appearance" : "tinted",
+              "value" : 0
+            }
+          ]
         }
       ],
       "lighting" : "individual",
+      "opacity-specializations" : [
+        {
+          "appearance" : "tinted",
+          "value" : 0
+        }
+      ],
       "shadow" : {
         "kind" : "neutral",
         "opacity" : 0
@@ -24,11 +36,64 @@
       }
     },
     {
+      "layers" : [
+        {
+          "image-name" : "photoblaze-icon-flames-white.svg",
+          "name" : "photoblaze-icon-flames-white",
+          "opacity-specializations" : [
+            {
+              "value" : 0
+            },
+            {
+              "appearance" : "tinted",
+              "value" : 1
+            }
+          ]
+        }
+      ],
+      "opacity-specializations" : [
+        {
+          "value" : 0
+        },
+        {
+          "appearance" : "tinted",
+          "value" : 1
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0
+      }
+    },
+    {
       "blur-material" : 0,
       "layers" : [
         {
           "image-name" : "photoblaze-icon-border.svg",
-          "name" : "photoblaze-icon-border"
+          "name" : "photoblaze-icon-border",
+          "opacity-specializations" : [
+            {
+              "appearance" : "tinted",
+              "value" : 0
+            }
+          ]
+        },
+        {
+          "image-name" : "photoblaze-icon-border-white.svg",
+          "name" : "photoblaze-icon-border-white",
+          "opacity-specializations" : [
+            {
+              "value" : 0
+            },
+            {
+              "appearance" : "tinted",
+              "value" : 1
+            }
+          ]
         }
       ],
       "shadow" : {
@@ -45,12 +110,17 @@
       "blur-material" : 0.63,
       "layers" : [
         {
+          "hidden" : false,
           "image-name" : "photoblaze-icon-mountains-sun.svg",
           "name" : "photoblaze-icon-mountains-sun",
           "opacity-specializations" : [
             {
               "appearance" : "dark",
               "value" : 1
+            },
+            {
+              "appearance" : "tinted",
+              "value" : 0
             }
           ],
           "position" : {
@@ -60,6 +130,21 @@
               1
             ]
           }
+        },
+        {
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "photoblaze-icon-mountains-sun-white.svg",
+          "name" : "photoblaze-icon-mountains-sun-white",
+          "opacity-specializations" : [
+            {
+              "value" : 0
+            },
+            {
+              "appearance" : "tinted",
+              "value" : 1
+            }
+          ]
         }
       ],
       "shadow" : {

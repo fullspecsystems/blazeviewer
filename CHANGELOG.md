@@ -7,6 +7,10 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Fixed
+- macOS app icon: the Clear/Tinted (monochrome) appearance now reads high-contrast
+  instead of washed-out, using dedicated white artwork shown only in that mode.
+
 ## [0.1.0-beta.4] - 2026-06-30
 
 ### Added
