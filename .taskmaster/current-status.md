@@ -99,15 +99,30 @@ clippy `-D warnings`, fmt; smoke-launched windowed + gallery, no panic):**
   **Visual confirm pending (owner):** hover the title bar in windowed mode to reveal/drag it
   (hover-to-reveal is standard since macOS 11).
 
-**LEFT (session tasks #6/#7/#8/#11; same in `macos-port-plan.md`):**
-#6 file associations (Info.plist `CFBundleDocumentTypes`/UTIs). **#7 `.icns` →
-now scoped to Icon Composer** (owner Q answered 2026-06-29): author a layered `.icon`
-in Apple's Icon Composer (squircle + Liquid Glass; covers both Tahoe 26 *and* the new
-macOS 27 "Golden Gate" — same icon pipeline), wire **`actool`** into
-`scripts/bundle-macos.sh` (→ `Assets.car` + `CFBundleIconName`, the no-Xcode path) once JD
-hands over the `.icon`, keep an `.icns` fallback for pre-Tahoe. #8 native-fullscreen state
-sync (our `windowed` flag/checkmark can desync if the user hits the green button/⌃⌘F).
-#11 codesign → notarize → staple → DMG + a `macos-14` arm64 CI job (JD has the workflow).
+**#7 app icon — DONE (2026-06-29).** JD authored the Liquid Glass icon in Icon Composer
+(`icons/AppIcon.icon` — 3 SVG layers: flame/border/mountains-sun) + a flat legacy PNG.
+`bundle-macos.sh` now: **modern** = `actool` compiles the `.icon` → `Assets.car`
+(`CFBundleIconName=AppIcon`, the no-Xcode path; needs Xcode 26+, skips gracefully); **legacy**
+= the flat PNG → `PhotoBlaze.icns` (`CFBundleIconFile=PhotoBlaze`) with its transparent photo
+interior **flood-filled white** (ImageMagick) so it reads on a dark *and* light Dock. Covers
+Tahoe 26 + Golden Gate 27 (same pipeline). Verified: bundle assembles both, `assetutil` shows
+the AppIcon appearances, the rendered `.icns` is correct on dark/light.
+
+**#11 release pipeline — WIRED (2026-06-29), pending JD's secrets + a first tagged release.**
+`scripts/release-macos.sh` (codesign hardened-runtime → DMG → `notarytool` → `stapler`,
+gated on secrets like the Windows job), a `macos-dmg` job in `release.yml` (`macos-15` arm64,
+selects newest Xcode, `brew install imagemagick`), `packaging/macos/entitlements.plist`
+(empty — a Rust app needs no hardened-runtime exceptions), and `scripts/setup-signing-secrets.sh`
+(securely sets the 5 repo secrets from a `.p12`). Doc: `.taskmaster/docs/release-signing.md`
+(macОС section). **TODO (JD):** run `setup-signing-secrets.sh` with the Developer ID `.p12`,
+then tag a release. CI gets the glass icon only on a runner with Xcode 26 (else flat fallback)
+— cut locally for guaranteed glass.
+
+**LEFT (session tasks #6/#8; same in `macos-port-plan.md`):**
+#6 file associations (Info.plist `CFBundleDocumentTypes`/UTIs). #8 native-fullscreen state
+sync (our `windowed` flag/checkmark can desync if the user hits the green button/⌃⌘F) — note
+the Enter/Exit Full Screen *label* sync already landed; the remaining bit is the borderless
+checkmark + JD finds the native item's UX "annoying" (a design revisit, his call).
 **Follow-up:** toggling a display's HDR *while the window sits on it* (no move) isn't caught
 live — needs an `NSApplicationDidChangeScreenParametersNotification` observer (adapts on next
 move/navigate now).

@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# Sign, package (DMG), notarize, and staple PhotoBlaze.app for distribution.
+#
+# Pipeline: build .app (scripts/bundle-macos.sh) → codesign with the Developer ID
+# Application cert under the hardened runtime → hdiutil DMG (drag-to-/Applications) →
+# codesign the DMG → notarytool submit --wait → stapler staple → SHA256 sidecar.
+# Output: dist/PhotoBlaze-<version>.dmg (+ .sha256).
+#
+# Gated like the Windows job: each stage skips cleanly when its inputs are absent, so a
+# fork or a local dry-run still produces an (unsigned) DMG.
+#
+# Credentials (env / GitHub secrets — never hardcode; notarytool reads them at run time):
+#   CSC_LINK                     base64 of the Developer ID Application .p12  (codesign)
+#   CSC_KEY_PASSWORD             that .p12's password
+#   APPLE_ID                     Apple ID e-mail                              (notarize)
+#   APPLE_APP_SPECIFIC_PASSWORD  app-specific password
+#   APPLE_TEAM_ID                Developer Team ID
+# Locally you can skip CSC_LINK: if a "Developer ID Application" identity is already in
+# your login keychain it's used directly (no base64 dance).
+#
+# Usage: scripts/release-macos.sh [--release|--debug]   (default: --release)
+set -euo pipefail
+
+PROFILE="release"
+[[ "${1:-}" == "--debug" ]] && PROFILE="debug"
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+
+APP_NAME="PhotoBlaze"
+BIN_NAME="photoblaze"
+ENTITLEMENTS="packaging/macos/entitlements.plist"
+APP="target/$PROFILE/bundle/$APP_NAME.app"
+DIST="dist"
+SHORT_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/pb-app/Cargo.toml | head -1)"
+DMG="$DIST/$APP_NAME-$SHORT_VERSION.dmg"
+
+: "${CSC_LINK:=}"; : "${CSC_KEY_PASSWORD:=}"
+: "${APPLE_ID:=}"; : "${APPLE_APP_SPECIFIC_PASSWORD:=}"; : "${APPLE_TEAM_ID:=}"
+
+TMP="$(mktemp -d)"
+KEYCHAIN=""
+cleanup() {
+	[[ -n "$KEYCHAIN" && -f "$KEYCHAIN" ]] && security delete-keychain "$KEYCHAIN" 2>/dev/null || true
+	rm -rf "$TMP"
+}
+trap cleanup EXIT
+
+# The hash of the Developer ID Application identity in keychain $1 (default: search list).
+find_identity() {
+	security find-identity -v -p codesigning ${1:+"$1"} 2>/dev/null \
+		| grep "Developer ID Application" | head -1 | awk '{print $2}'
+}
+
+# 1) Build the bundle if needed (actool glass icon + flat .icns — see bundle-macos.sh).
+[[ -d "$APP" ]] || ./scripts/bundle-macos.sh "--$PROFILE"
+[[ -d "$APP" ]] || { echo "error: $APP not found" >&2; exit 1; }
+
+mkdir -p "$DIST"
+rm -f "$DMG" "$DMG.sha256"
+
+# 2) Code-sign (hardened runtime). Import the .p12 into a throwaway keychain in CI; fall
+#    back to an identity already in the login keychain when running locally.
+IDENTITY=""
+if [[ -n "$CSC_LINK" ]]; then
+	echo "==> Importing Developer ID certificate into a temporary keychain"
+	KEYCHAIN="${RUNNER_TEMP:-$TMP}/pb-signing.keychain-db"
+	KPW="pb-$(date +%s)-$$"
+	security create-keychain -p "$KPW" "$KEYCHAIN"
+	security set-keychain-settings -lut 21600 "$KEYCHAIN"
+	security unlock-keychain -p "$KPW" "$KEYCHAIN"
+	printf '%s' "$CSC_LINK" | base64 --decode > "$TMP/cert.p12"
+	security import "$TMP/cert.p12" -k "$KEYCHAIN" -P "$CSC_KEY_PASSWORD" \
+		-T /usr/bin/codesign -T /usr/bin/security
+	security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KPW" "$KEYCHAIN" >/dev/null
+	# Put our keychain at the front of the search list so codesign resolves the identity.
+	security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed 's/["[:space:]]//g')
+	IDENTITY="$(find_identity "$KEYCHAIN")"
+else
+	IDENTITY="$(find_identity)"
+	[[ -n "$IDENTITY" ]] && echo "==> Using Developer ID identity from the login keychain"
+fi
+
+SIGNED=0
+if [[ -n "$IDENTITY" ]]; then
+	echo "==> Signing $APP ($IDENTITY)"
+	# Sign the executable, then the bundle (inside-out; the app holds only the one binary
+	# plus non-code resources — Assets.car / .icns).
+	codesign --force --options runtime --timestamp \
+		--entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$APP/Contents/MacOS/$BIN_NAME"
+	codesign --force --options runtime --timestamp \
+		--entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$APP"
+	codesign --verify --deep --strict --verbose=2 "$APP"
+	SIGNED=1
+else
+	echo "==> Code signing SKIPPED — no Developer ID identity (set CSC_LINK / CSC_KEY_PASSWORD)"
+fi
+
+# 3) Build the DMG (app + /Applications drop target), then sign the DMG too.
+echo "==> Building $DMG"
+STAGING="$TMP/dmg"
+mkdir -p "$STAGING"
+cp -R "$APP" "$STAGING/"
+ln -s /Applications "$STAGING/Applications"
+hdiutil create -volname "$APP_NAME" -srcfolder "$STAGING" -ov -format UDZO "$DMG" >/dev/null
+[[ $SIGNED == 1 ]] && codesign --force --timestamp --sign "$IDENTITY" "$DMG"
+
+# 4) Notarize + staple (needs a signed DMG + the Apple credentials).
+if [[ $SIGNED == 1 && -n "$APPLE_ID" && -n "$APPLE_APP_SPECIFIC_PASSWORD" && -n "$APPLE_TEAM_ID" ]]; then
+	echo "==> Notarizing $DMG (notarytool submit --wait; this can take a few minutes)"
+	xcrun notarytool submit "$DMG" \
+		--apple-id "$APPLE_ID" \
+		--password "$APPLE_APP_SPECIFIC_PASSWORD" \
+		--team-id "$APPLE_TEAM_ID" \
+		--wait
+	xcrun stapler staple "$DMG"
+	xcrun stapler validate "$DMG"
+	# Gatekeeper assessment of the stapled DMG (informational).
+	spctl -a -t open --context context:primary-signature -vv "$DMG" 2>&1 || true
+	echo "==> Notarized + stapled."
+else
+	echo "==> Notarization SKIPPED (need a signed app + APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID)"
+fi
+
+# 5) Checksum sidecar (integrity independent of the signature).
+( cd "$DIST" && shasum -a 256 "$(basename "$DMG")" | tee "$(basename "$DMG").sha256" )
+
+echo "==> Done: $DMG"
+[[ $SIGNED == 1 ]] || echo "    (UNSIGNED — for distribution, set the signing/notarization secrets)"

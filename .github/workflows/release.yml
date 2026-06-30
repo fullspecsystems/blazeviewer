@@ -1,9 +1,11 @@
-# Build, test, sign, and publish the PhotoBlaze Windows MSI.
+# Build, sign, and publish PhotoBlaze release artifacts: a Windows MSI and a macOS DMG.
 #
-# Triggers on a version tag (e.g. `v0.1.0`) — runs the test gate, builds the
-# release binary, embeds the icon (build.rs), packages a signed MSI with
-# cargo-wix, and attaches it (plus a SHA256 sidecar) to the GitHub Release. Also
-# runnable manually (workflow_dispatch) to produce an MSI artifact without a release.
+# Triggers on a version tag (e.g. `v0.1.0`) — each platform job builds the release
+# binary, packages + signs its installer, and attaches it (plus a SHA256 sidecar) to the
+# GitHub Release. Also runnable manually (workflow_dispatch) to produce the artifacts
+# without a release. The two jobs are independent; each signs only if its secrets are set.
+#   • windows-msi: cargo-wix MSI, signed via Azure Trusted Signing.
+#   • macos-dmg:   .app → Developer ID codesign → DMG → notarize + staple (scripts/release-macos.sh).
 #
 # Code signing uses **Azure Trusted Signing** (see decisions.md ADR-018 and the
 # step-by-step in .taskmaster/docs/release-signing.md). The endpoint / account /
@@ -168,4 +170,83 @@ jobs:
           generate_release_notes: true
           # SemVer pre-release tags (anything with a hyphen, e.g. v0.1.0-beta.1)
           # publish as a GitHub pre-release; clean tags (v0.1.0) are full releases.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
+  # macOS: build the .app (Liquid Glass icon via actool + flat .icns), Developer ID
+  # codesign under the hardened runtime, package a DMG, notarize + staple, attach to the
+  # Release. All the codesign/DMG/notarize logic lives in scripts/release-macos.sh so it
+  # runs identically on a dev machine. Signing+notarization are gated on the secrets — an
+  # unset CSC_LINK still produces an (unsigned) DMG (forks / early builds). Add these repo
+  # secrets to enable it (same values you use elsewhere; see
+  # .taskmaster/docs/release-signing.md, and scripts/setup-signing-secrets.sh to set them):
+  #   CSC_LINK, CSC_KEY_PASSWORD, APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID
+  macos-dmg:
+    runs-on: macos-15 # arm64 (Apple Silicon); can host Xcode 26 for the .icon → Assets.car
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      # cargo-wix stamps the MSI from Cargo metadata; the DMG is named from it too — so a
+      # tag that disagrees with the crate version would ship a mislabeled file. Fail fast.
+      - name: Check tag matches crate version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag_core="${GITHUB_REF_NAME#v}"; tag_core="${tag_core%%-*}"
+          crate_ver="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/pb-app/Cargo.toml | head -1)"
+          if [ "$tag_core" != "$crate_ver" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME (core $tag_core) != pb-app crate version $crate_ver"
+            exit 1
+          fi
+          echo "Tag core matches crate version: $crate_ver"
+
+      # The Liquid Glass icon (icons/AppIcon.icon → Assets.car) needs Xcode 26+'s actool;
+      # pick the newest Xcode on the runner. If 26 isn't present, bundle-macos.sh falls back
+      # to the flat .icns (graceful) — cut the release locally for guaranteed glass.
+      - name: Select newest Xcode
+        run: |
+          newest="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1 || true)"
+          if [ -n "$newest" ]; then sudo xcode-select -s "$newest"; fi
+          xcodebuild -version || true
+
+      # The legacy .icns interior fill (transparent → white) uses ImageMagick.
+      - name: Install ImageMagick
+        run: brew install imagemagick
+
+      - name: Detect signing configuration
+        run: |
+          if [ -z "${{ secrets.CSC_LINK }}" ]; then
+            echo "::warning::Apple Developer ID secrets not set — producing an UNSIGNED DMG."
+          fi
+
+      # bundle (.app) → codesign → DMG → notarize → staple → SHA256. One script, gated on
+      # the secrets below (each stage skips cleanly when its inputs are absent).
+      - name: Sign, package, notarize, staple (scripts/release-macos.sh)
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: ./scripts/release-macos.sh --release
+
+      - name: Upload DMG as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: photoblaze-dmg
+          path: |
+            dist/*.dmg
+            dist/*.dmg.sha256
+
+      - name: Attach DMG to the GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.dmg
+            dist/*.dmg.sha256
+          generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}

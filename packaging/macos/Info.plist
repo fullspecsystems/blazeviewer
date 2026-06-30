@@ -17,6 +17,13 @@
 	<string>com.jdlien.PhotoBlaze</string>
 	<key>CFBundleExecutable</key>
 	<string>photoblaze</string>
+	<!-- Modern (macOS 26 Tahoe / 27 Golden Gate): the Liquid Glass icon, compiled from
+	     icons/AppIcon.icon into Assets.car by actool (see scripts/bundle-macos.sh).
+	     CFBundleIconName resolves to the "AppIcon" entry in Assets.car. -->
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
+	<!-- Legacy (pre-Tahoe): the flat PhotoBlaze.icns, used where Assets.car's layered
+	     AppIcon isn't understood. -->
 	<key>CFBundleIconFile</key>
 	<string>PhotoBlaze</string>
 	<key>CFBundlePackageType</key>

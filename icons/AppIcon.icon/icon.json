@@ -1,0 +1,82 @@
+{
+  "fill" : {
+    "automatic-gradient" : "extended-gray:1.00000,1.00000"
+  },
+  "groups" : [
+    {
+      "blend-mode" : "normal",
+      "hidden" : false,
+      "layers" : [
+        {
+          "glass" : true,
+          "image-name" : "photoblaze-icon-flames.svg",
+          "name" : "photoblaze-icon-flames"
+        }
+      ],
+      "lighting" : "individual",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.65
+      }
+    },
+    {
+      "blur-material" : 0,
+      "layers" : [
+        {
+          "image-name" : "photoblaze-icon-border.svg",
+          "name" : "photoblaze-icon-border"
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.83
+      },
+      "specular" : true,
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.04
+      }
+    },
+    {
+      "blur-material" : 0.63,
+      "layers" : [
+        {
+          "image-name" : "photoblaze-icon-mountains-sun.svg",
+          "name" : "photoblaze-icon-mountains-sun",
+          "opacity-specializations" : [
+            {
+              "appearance" : "dark",
+              "value" : 1
+            }
+          ],
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              0,
+              1
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "specular" : true,
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.22
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

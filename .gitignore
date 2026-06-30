@@ -3,6 +3,9 @@
 **/target/
 **/*.rs.bk
 
+# Release packaging output (DMGs, checksums) from scripts/release-macos.sh
+/dist/
+
 # Coverage / profiling output
 *.profraw
 *.profdata

@@ -1,8 +1,10 @@
-# Release signing & publishing (Windows MSI)
+# Release signing & publishing (Windows MSI + macOS DMG)
 
-How the signed PhotoBlaze MSI gets built, and the one-time setup to turn on
-**Azure Trusted Signing**. The pipeline itself lives in
-`.github/workflows/release.yml`.
+How the signed PhotoBlaze installers get built, and the one-time setup to turn on
+signing on each platform — **Azure Trusted Signing** (Windows) and **Apple
+Developer ID + notarization** (macOS). The pipeline lives in
+`.github/workflows/release.yml`; the macOS codesign/DMG/notarize steps are in
+`scripts/release-macos.sh` (so they run identically on a dev machine).
 
 ## Pipeline (already wired)
 
@@ -102,6 +104,63 @@ Repo → **Settings → Secrets and variables → Actions → Secrets**:
    `.jpg`; the folder right-click "Open with PhotoBlaze" verb; the Start-menu
    shortcut + Add/Remove Programs icon; clean uninstall; and an upgrade
    (install `0.1.0`, then `0.1.1` over it).
+
+## macOS DMG (Apple Developer ID + notarization)
+
+The `macos-dmg` job builds `PhotoBlaze.app` (`scripts/bundle-macos.sh` — Liquid Glass
+icon via `actool` + the flat `.icns`), then `scripts/release-macos.sh` **Developer ID
+codesigns** it under the hardened runtime, packages a **DMG**, **notarizes** it
+(`notarytool`), and **staples** the ticket. Like Windows, it **auto-skips** signing +
+notarization when the secrets are absent (you still get an unsigned DMG, with a warning).
+
+### Fast path: reuse your existing Apple setup
+
+You already notarize `unifi-protect-viewer`, so the slow parts — the **Developer ID
+Application** certificate, the Apple Developer membership, the app-specific password — all
+exist. GitHub secrets are **per-repo**, so just add the **same values** to this repo. The
+helper sets all five securely (reads the `.p12` + app-specific passwords with `read -rs` —
+never echoed, never in argv/history):
+
+```sh
+./scripts/setup-signing-secrets.sh ~/Downloads/certs/<developer-id-application>.p12
+```
+
+It verifies the `.p12` is a *Developer ID Application* cert (not Installer / Apple
+Distribution), checks it isn't expired, auto-detects the **Team ID** from the cert, and
+sets the secrets via `gh`.
+
+### GitHub repo secrets (macOS)
+
+| Name                          | Value                                                    |
+| ----------------------------- | -------------------------------------------------------- |
+| `CSC_LINK`                    | base64 of the **Developer ID Application** `.p12`        |
+| `CSC_KEY_PASSWORD`            | that `.p12`'s export password                            |
+| `APPLE_ID`                    | Apple ID e-mail (notarization)                           |
+| `APPLE_APP_SPECIFIC_PASSWORD` | app-specific password (appleid.apple.com → Sign-In)      |
+| `APPLE_TEAM_ID`               | Developer Team ID (the `OU` in the cert)                 |
+
+> Use a **fresh** app-specific password and don't commit it anywhere (an exposed one
+> should be revoked + reissued). `notarytool` reads it from the env at run time only.
+
+### Runner / toolchain
+
+`runs-on: macos-15` (arm64). The Liquid Glass icon needs **Xcode 26+**'s `actool`; the job
+selects the newest Xcode on the runner. If 26 isn't present yet, `bundle-macos.sh` falls
+back to the flat `.icns` (graceful) — **cut the release locally** (your machine has Xcode 26
++ the cert) for a guaranteed-glass DMG: `./scripts/release-macos.sh`.
+
+### Verify (macOS)
+
+1. **Unsigned dry run** locally: `./scripts/release-macos.sh` → `dist/PhotoBlaze-<v>.dmg`
+   (logs "UNSIGNED"). Confirms the bundle + DMG path.
+2. After setting the secrets, a `v*` tag (or **Run workflow**) produces a signed, notarized
+   DMG. Verify on a **clean** Mac:
+   ```sh
+   spctl -a -vvv -t open --context context:primary-signature PhotoBlaze-0.1.0.dmg  # → accepted, source=Notarized Developer ID
+   xcrun stapler validate PhotoBlaze-0.1.0.dmg                                       # → The validate action worked!
+   codesign --verify --deep --strict --verbose=2 /Applications/PhotoBlaze.app
+   ```
+   Mount, drag to Applications, launch — **zero Gatekeeper warnings**, no right-click-Open needed.
 
 ## Notes
 

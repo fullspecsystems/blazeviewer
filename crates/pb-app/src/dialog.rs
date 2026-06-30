@@ -377,6 +377,11 @@ impl DialogWindow {
         parent: Option<&Window>,
     ) -> Option<DialogWindow> {
         let (w, h, resizable, title) = match kind {
+            // macOS renders the body in SF Pro, whose taller line metrics need ~30px more
+            // height than Segoe so the GitHub link at the bottom isn't clipped.
+            #[cfg(target_os = "macos")]
+            DialogKind::About => (254.0, 337.0, false, "About PhotoBlaze"),
+            #[cfg(not(target_os = "macos"))]
             DialogKind::About => (254.0, 307.0, false, "About PhotoBlaze"),
             DialogKind::Settings => (560.0, 660.0, true, "PhotoBlaze Settings"),
             DialogKind::Confirm => (450.0, 172.0, false, "Confirm Delete"),

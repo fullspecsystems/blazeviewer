@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Hardened-runtime entitlements for the notarized PhotoBlaze.app.
+
+  Intentionally EMPTY: PhotoBlaze is a non-sandboxed Developer ID app that needs no
+  hardened-runtime exceptions. Unlike an Electron app (V8 JIT), a Rust binary is AOT —
+  no `allow-jit` / `allow-unsigned-executable-memory`. It loads only Apple-signed system
+  frameworks (Metal, AppKit, ImageIO), so no `disable-library-validation`. It makes no
+  in-process network calls (the About link opens in the user's browser via the OS), so no
+  `network.client`. The hardened runtime itself is enabled by `codesign --options runtime`
+  in scripts/release-macos.sh; adding needless exceptions would only weaken it.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict/>
+</plist>
