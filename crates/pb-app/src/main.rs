@@ -626,6 +626,11 @@ struct App {
     /// when the chip is hidden. Cached so it's only re-rasterized when the count changes
     /// (off the photo hot path), mirroring the pie/toast.
     chip_text: Option<String>,
+    /// The chip's on-screen rect in **physical px** `[x0, y0, x1, y1]` while it's shown, so a
+    /// click on it cancels the scan (the reusable overlay hit-region — the first interactive
+    /// on-image control; future EXIF copy buttons will register rects the same way). `None`
+    /// when the chip is hidden.
+    chip_rect: Option<[f32; 4]>,
     /// Items whose resident ring slot holds a fast *preview* (e.g. a HEIC
     /// thumbnail) rather than the full decode. While idle these are upgraded
     /// ("sharpened") to full in priority order. Pruned to resident in `request_prefetch`.
@@ -835,6 +840,7 @@ impl App {
             pie_drawn: false,
             pie_pushed: None,
             chip_text: None,
+            chip_rect: None,
             preview_resident: HashSet::new(),
             upgrade_done: HashSet::new(),
             last_upgrade_set: Vec::new(),
@@ -3732,12 +3738,14 @@ impl App {
         self.chip_text = want;
     }
 
-    /// Rasterize the chip pill and place it below the pie (right edge aligned with the pie).
+    /// Rasterize the chip pill (a leading ✕ "click to stop" affordance + the count) and place
+    /// it below the pie, right edge aligned with the pie. Records its physical-px rect so a
+    /// click cancels the scan.
     fn push_chip(&mut self, text: &str, event_loop: &ActiveEventLoop) {
         let Some((rgba, w, h)) = self.hud.as_ref().and_then(|hud| {
             let px = (16.0 * self.scale_factor).max(10.0);
             let pad = (7.0 * self.scale_factor).round().max(2.0) as u32;
-            hud.render_panel(text, px, pad, hud::BG)
+            hud.render_panel_icon(text, px, pad, Some(icon::assets::XMARK), hud::BG)
         }) else {
             return;
         };
@@ -3747,6 +3755,15 @@ impl App {
         let pie_d = (PIE_DIAMETER * self.scale_factor).round().max(12.0) as u32;
         let gap = (8.0 * self.scale_factor).round().max(2.0) as u32;
         let top_margin = right_margin + pie_d + gap;
+        if let Some(a) = self.active.as_ref() {
+            // The physical-px rect (mirrors `top_right_quad_xy`) for click hit-testing.
+            let size = a.window.inner_size();
+            let x1 = size.width as f32 - right_margin as f32;
+            let x0 = x1 - w as f32;
+            let y0 = top_margin as f32;
+            let y1 = y0 + h as f32;
+            self.chip_rect = Some([x0, y0, x1, y1]);
+        }
         if let Some(a) = self.active.as_mut() {
             a.renderer
                 .set_chip(Some((&rgba, w, h)), right_margin, top_margin);
@@ -3760,8 +3777,17 @@ impl App {
             if let Some(a) = self.active.as_mut() {
                 a.renderer.set_chip(None, 0, 0);
             }
+            self.chip_rect = None;
             self.draw(event_loop);
         }
+    }
+
+    /// Hit-test a physical-px cursor position against the scan-count chip's rect (the click
+    /// target that cancels the scan). The reusable overlay-click primitive: store a rect when
+    /// you draw an interactive overlay, test it here before the click falls through to
+    /// drag-to-pan. (Future EXIF copy buttons will register their own rects the same way.)
+    fn chip_hit(&self, x: f32, y: f32) -> bool {
+        self.chip_rect.is_some_and(|rect| point_in_rect(rect, x, y))
     }
 
     /// Render one frame.
@@ -4447,8 +4473,19 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } => {
-                self.dragging = state == ElementState::Pressed;
-                self.refresh_cursor();
+                let pressed = state == ElementState::Pressed;
+                // A press on the scan-count chip cancels the scan (the one interactive
+                // on-image control) — and must NOT also start a drag-to-pan.
+                if pressed
+                    && self
+                        .last_cursor
+                        .is_some_and(|[cx, cy]| self.chip_hit(cx, cy))
+                {
+                    self.cancel_scan_command(event_loop);
+                } else {
+                    self.dragging = pressed;
+                    self.refresh_cursor();
+                }
             }
 
             // Trackpad pinch (macOS): magnify about the cursor. `delta` is the
@@ -4778,6 +4815,12 @@ fn file_name_of(name: &str) -> String {
         .unwrap_or(name)
         .to_string()
 }
+/// Whether physical-px point `(x, y)` lies within `[x0, y0, x1, y1]` (inclusive) — the
+/// overlay click hit-test (the scan-count chip today; EXIF copy buttons later).
+fn point_in_rect([x0, y0, x1, y1]: [f32; 4], x: f32, y: f32) -> bool {
+    x >= x0 && x <= x1 && y >= y0 && y <= y1
+}
+
 fn title_for(name: &str, idx: usize, n: usize) -> String {
     format!("{} ({}/{n})", file_name_of(name), idx + 1)
 }
@@ -5883,6 +5926,23 @@ mod tests {
         );
         // The root itself (empty relative) falls back to the root's own folder name.
         assert_eq!(rel_display(root, root), "Library");
+    }
+
+    #[test]
+    fn point_in_rect_hit_tests_the_chip() {
+        let rect = [100.0, 50.0, 200.0, 80.0]; // x0,y0,x1,y1
+        assert!(point_in_rect(rect, 150.0, 65.0), "inside");
+        assert!(
+            point_in_rect(rect, 100.0, 50.0),
+            "top-left corner is inclusive"
+        );
+        assert!(
+            point_in_rect(rect, 200.0, 80.0),
+            "bottom-right corner is inclusive"
+        );
+        assert!(!point_in_rect(rect, 99.0, 65.0), "left of the rect");
+        assert!(!point_in_rect(rect, 150.0, 81.0), "below the rect");
+        assert!(!point_in_rect(rect, 250.0, 65.0), "right of the rect");
     }
 
     #[test]
