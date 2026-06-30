@@ -173,6 +173,40 @@ decode is still WIC-bound (~250 ms–1 s).
 - Full plan, phasing, toolchain blocker, the higher-res-preview spike, and the
   code-review follow-ups: [`heic-decode-plan.md`](heic-decode-plan.md).
 
+### ADR-021 — macOS chrome: native AppKit/SwiftUI shell over an extracted `AppCore`; egui retained on Windows
+*Decided 2026-06-30. Execution plan: [`macos-native-ui-plan.md`](macos-native-ui-plan.md).*
+On the **macOS target only**, the egui `DialogWindow` chrome is replaced by a native
+AppKit/SwiftUI shell that owns the `NSWindow` + run loop and hosts the wgpu/Metal
+canvas in an `MTKView`. This requires extracting a platform-neutral **`AppCore`**
+(commands-in / effects-out) from the winit `ApplicationHandler` in
+`pb-app/src/main.rs`; winit stays the Windows/Linux driver. The renderer remains
+wgpu/Metal, but a native `MTKView.layer` is not the current safe winit-window surface
+path: NS1 must add/prove a macOS-only `CAMetalLayer` surface adapter with explicit
+main-thread and lifetime rules. Rationale: the Mac market expects and pays for
+native polish ("Mac-assed"); egui's immediate mode has a hard ceiling (no native
+controls, text editing, or accessibility); the engine seams (ADR-002/007/019) already
+make the chrome swappable. Windows keeps egui (lower native bar + willingness-to-pay;
+native WinUI would be the worst effort/return quadrant). Sequenced strangler-fig
+(NS0–NS3) with a shippable build at every step; the egui-on-Mac beta stays the
+default Mac artifact until the NS3 cutover. Risk posture: feasible and worthwhile,
+but not low-risk polish — NS0 (`AppCore` extraction) and NS1 (`CAMetalLayer`/FFI/frame
+pump) are proof gates, and cutover happens only after both are stable. Supersedes the
+implicit "egui everywhere" of `macos-port-plan` for the Mac chrome only. **Parameters
+(owner, 2026-06-30):**
+- **arm64-only** (no universal2). Intel Mac is sunsetting (last Intel Mac discontinued
+  2023; Tahoe/macOS 26 the final Intel-supporting release; Rosetta 2 winding down);
+  PhotoBlaze's value prop is Apple-Silicon-shaped (UMA upload short-circuit, EDR/P3,
+  Image I/O HEVC); and a universal binary would ship an arch that can't be validated
+  without Intel hardware. Reversible — add `x86_64` on demand if a real Intel user
+  ever asks.
+- **Min macOS 14 (Sonoma).** Gated by the Observation framework (`@Observable`) for the
+  Rust↔SwiftUI state bridge; excludes zero Apple Silicon hardware (every M1+ Mac runs
+  Sonoma+). The egui-on-Mac beta keeps its 11.0 floor; the floor rises to 14 only at
+  the NS3 cutover.
+- **About:** standard `NSApplication` about panel + a `credits` attributed string
+  (tagline + GitHub link) — maps the current egui About 1:1, native, ~no custom UI.
+  A bespoke SwiftUI About is a deferred NS3 nicety.
+
 ---
 
 ## Owner decisions (resolved 2026-06-26)
