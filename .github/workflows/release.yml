@@ -152,6 +152,8 @@ jobs:
             Write-Host "$hash  $($_.Name)"
           }
 
+      # The `release` job (below) attaches this to the GitHub Release — one job publishes
+      # both installers + the notes, so the release notes aren't generated twice.
       - name: Upload MSI as a build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -159,18 +161,6 @@ jobs:
           path: |
             target/wix/*.msi
             target/wix/*.msi.sha256
-
-      - name: Attach MSI to the GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            target/wix/*.msi
-            target/wix/*.msi.sha256
-          generate_release_notes: true
-          # SemVer pre-release tags (anything with a hyphen, e.g. v0.1.0-beta.1)
-          # publish as a GitHub pre-release; clean tags (v0.1.0) are full releases.
-          prerelease: ${{ contains(github.ref_name, '-') }}
 
   # macOS: build the .app (Liquid Glass icon via actool + flat .icns), Developer ID
   # codesign under the hardened runtime, package a DMG, notarize + staple, attach to the
@@ -233,12 +223,42 @@ jobs:
             dist/*.dmg
             dist/*.dmg.sha256
 
-      - name: Attach DMG to the GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
+  # Publish ONE GitHub Release with both installers and real notes synthesized from the
+  # CHANGELOG (no duplicated GitHub auto-notes — see CLAUDE.md → "Cutting a release").
+  # Runs only on a tag, after both build jobs have uploaded their artifacts.
+  release:
+    needs: [windows-msi, macos-dmg]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4 # for CHANGELOG.md + scripts/changelog-section.sh
+
+      - name: Download both installers
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true # flatten photoblaze-msi + photoblaze-dmg into artifacts/
+
+      # Release body = the CHANGELOG section for this version (fails loudly if it's missing,
+      # so [Unreleased] must be rolled into the version before tagging). NOT
+      # generate_release_notes — that appends GitHub's auto-notes and, with two jobs, did it
+      # twice. An agent can still curate the body afterward with `gh release edit`.
+      - name: Release notes from CHANGELOG
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          bash scripts/changelog-section.sh "$version" > "$RUNNER_TEMP/notes.md"
+          echo "----- release notes ($version) -----"
+          cat "$RUNNER_TEMP/notes.md"
+
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/*.dmg
-            dist/*.dmg.sha256
-          generate_release_notes: true
+            artifacts/**/*.msi
+            artifacts/**/*.msi.sha256
+            artifacts/**/*.dmg
+            artifacts/**/*.dmg.sha256
+          body_path: ${{ runner.temp }}/notes.md
+          # SemVer pre-release tags (anything with a hyphen, e.g. v0.1.0-beta.1) publish as
+          # a GitHub pre-release; clean tags (v0.1.0) are full releases.
           prerelease: ${{ contains(github.ref_name, '-') }}

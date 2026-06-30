@@ -417,6 +417,32 @@ cargo bench                # criterion microbenchmarks over the corpus
   On release, the `[Unreleased]` block moves under the new version's heading + date
   and a fresh empty `[Unreleased]` is left at the top.
 
+## Cutting a release
+
+Releases are tag-driven: push a `v*` tag from a green `main` and
+`.github/workflows/release.yml` builds + signs both installers (Windows **MSI** via Azure
+Trusted Signing, macOS **DMG** via Developer ID + notarization), then **one** `release` job
+publishes a single GitHub Release with both attached. The step-by-step + signing setup is in
+`.taskmaster/docs/release-signing.md`. To cut one:
+
+1. **Roll the `CHANGELOG.md`.** Move `## [Unreleased]` into `## [<version>] - <YYYY-MM-DD>`,
+   leave a fresh empty `[Unreleased]`, and update the compare links at the bottom. The crate
+   version (`crates/pb-app/Cargo.toml`) must match the tag's numeric core — the workflow fails
+   the build if they disagree (a `-beta.N` suffix lives only on the tag).
+2. **Tag + push:** `git tag -a v<version> -m "…" && git push origin v<version>`.
+3. **Synthesize real release notes — the notes ARE the CHANGELOG.** The `release` job sets the
+   GitHub Release body to the CHANGELOG section for that version (via
+   `scripts/changelog-section.sh`), so write a **real, curated, user-facing** set of notes in
+   the CHANGELOG *before* tagging — that's what users read, not a bare "Full Changelog" compare
+   link. **Never** enable `generate_release_notes` (with two build jobs it appended GitHub's
+   auto-notes twice — the bug this process fixes). After publishing you may still curate the
+   body — a short highlights/intro line is nice for a milestone — with
+   `gh release edit <tag> --notes-file <file>`.
+4. **Verify the published release:** both installers + their `.sha256` are attached, and the
+   macOS DMG is genuinely notarized — `xcrun stapler validate <dmg>` and
+   `spctl -a -t open --context context:primary-signature -vv <dmg>` → `source=Notarized
+   Developer ID`. A `-` in the tag publishes a pre-release; a clean `vX.Y.Z` is a full release.
+
 
 ## Project Task Tracking
 
