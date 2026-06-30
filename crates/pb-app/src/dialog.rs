@@ -24,6 +24,7 @@ use pb_source::OpenProgress;
 use crate::action::Action;
 use crate::keymap::{KeyChord, Keymap};
 use crate::settings;
+use crate::ScanProgress;
 use pb_ui as pbui;
 
 /// Which dialog a [`DialogWindow`] is showing.
@@ -58,6 +59,15 @@ pub enum DialogKind {
     /// verified (see [`become_loading`](DialogWindow::become_loading)); the non-password
     /// paths open it fresh.
     Loading,
+    /// A folder-scanning progress view: a message (the folder being opened), an
+    /// *indeterminate* spinner with a live "N images found" count and the subfolder
+    /// currently being walked, and a single **Cancel** button. A directory walk has no
+    /// knowable total (a pre-count would walk the tree twice), so — unlike
+    /// [`Loading`](DialogKind::Loading) — there's no determinate bar; the count + folder
+    /// are the progress. Driven by a [`crate::ScanProgress`] handle the off-thread walk
+    /// updates; Cancel / Esc request cancellation of the in-flight scan. Opened (deferred
+    /// to slow scans) by [`crate::App::poll_dir_scan`].
+    Scanning,
 }
 
 /// Which section of the Settings dialog is showing. The bottom Save/Cancel bar is
@@ -358,6 +368,11 @@ pub struct DialogWindow {
     /// 7z decode runs on a worker thread; this dialog reads its `fraction`/bytes to draw
     /// the bar and calls `request_cancel` from the Cancel button / Esc). `None` otherwise.
     progress: Option<OpenProgress>,
+    /// The shared progress + cancel handle for a [`DialogKind::Scanning`] view (the folder
+    /// walk runs on a worker thread; this dialog reads its image count + current folder to
+    /// draw the indeterminate progress and calls `request_cancel` from Cancel / Esc).
+    /// `None` otherwise.
+    scan_progress: Option<ScanProgress>,
 }
 
 impl DialogWindow {
@@ -388,6 +403,8 @@ impl DialogWindow {
             DialogKind::Message => (470.0, 185.0, false, "PhotoBlaze"),
             DialogKind::Password => (500.0, 250.0, false, "Password Required"),
             DialogKind::Loading => (500.0, 210.0, false, "Opening Archive"),
+            // A touch taller than Loading for the extra current-folder line under the count.
+            DialogKind::Scanning => (500.0, 220.0, false, "Scanning Folder"),
         };
         // Created HIDDEN: we render the first (themed) frame before revealing, so the
         // OS never flashes the default white window before our dark frame lands.
@@ -519,6 +536,7 @@ impl DialogWindow {
             focus_password: matches!(kind, DialogKind::Password),
             next_repaint: None,
             progress: None,
+            scan_progress: None,
         };
         // Prime two hidden frames: the first lets egui apply its base theme, the second
         // paints with our design-system style layered on top — so the window is already
@@ -673,6 +691,19 @@ impl DialogWindow {
         self.request_redraw();
     }
 
+    /// Point a [`DialogKind::Scanning`] view at a folder scan: its message + the shared
+    /// [`ScanProgress`] the walk worker updates. Used on the deferred first reveal and to
+    /// re-point an already-open scanning dialog at a newer scan in place (a second folder
+    /// opened while the first was still walking), so it tracks the new folder instead of a
+    /// frozen old count rather than flickering a fresh window.
+    pub(crate) fn set_scan(&mut self, message: &str, progress: ScanProgress) {
+        self.kind = DialogKind::Scanning;
+        self.confirm_msg = message.to_string();
+        self.scan_progress = Some(progress);
+        self.window.set_title("Scanning Folder");
+        self.request_redraw();
+    }
+
     pub fn focus(&self) {
         self.window.focus_window();
     }
@@ -709,6 +740,7 @@ impl DialogWindow {
         let checking = self.checking;
         let take_focus = self.focus_password;
         let progress = self.progress.clone();
+        let scan_progress = self.scan_progress.clone();
         let draft = &mut self.draft;
         let password_input = &mut self.password_input;
         let mut kb = KbEdit {
@@ -749,6 +781,9 @@ impl DialogWindow {
             }
             DialogKind::Loading => {
                 confirm_click = loading_dialog(ctx, &msg, progress.as_ref());
+            }
+            DialogKind::Scanning => {
+                confirm_click = scanning_dialog(ctx, &msg, scan_progress.as_ref());
             }
         });
         // How soon egui wants the next frame: 0 = "again now" (a popup opening, the
@@ -1197,6 +1232,94 @@ fn progress_row(ui: &mut egui::Ui, p: &pbui::Palette, progress: &OpenProgress) {
     );
 }
 
+/// The folder-scanning view: the folder being opened, an **indeterminate** spinner with a
+/// live "N images found" count and the subfolder currently being walked, and a single
+/// bottom-right **Cancel** button. A directory walk has no knowable total, so — unlike
+/// [`loading_dialog`] — there is no determinate bar; the live count + current folder are
+/// the progress. Cancel requests cancellation of the in-flight walk and answers
+/// `Some(false)` so the main loop tidies up; Esc does the same via the event router. The
+/// dialog repaints each frame so the count + folder track the worker without an OS nudge.
+fn scanning_dialog(
+    ctx: &egui::Context,
+    message: &str,
+    progress: Option<&ScanProgress>,
+) -> Option<bool> {
+    let mut result = None;
+    let p = pbui::Palette::new(ctx.style().visuals.dark_mode);
+    button_bar(ctx, "scanning_bar", |ui| {
+        if pbui::secondary_button(ui, "Cancel").clicked() {
+            if let Some(pr) = progress {
+                pr.request_cancel();
+            }
+            result = Some(false);
+        }
+    });
+    egui::CentralPanel::default()
+        .frame(dialog_frame(ctx))
+        .show(ctx, |ui| {
+            // Immediate-mode: without a repaint request the spinner + count would only move
+            // on an OS event (matches `progress_row`).
+            ui.ctx().request_repaint();
+            ui.label(egui::RichText::new(message).size(MSG_SIZE));
+            ui.add_space(16.0);
+            let found = progress.map(ScanProgress::found).unwrap_or(0);
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.add_space(8.0);
+                // Before the first match, the count would read "0 images" — say "Searching…"
+                // instead so a deep-but-sparse tree doesn't look like it found nothing.
+                let label = if found == 0 {
+                    "Searching\u{2026}".to_string()
+                } else {
+                    let noun = if found == 1 { "image" } else { "images" };
+                    format!("{} {noun} found", fmt_count(found))
+                };
+                ui.label(egui::RichText::new(label).size(14.0));
+            });
+            // The current subfolder (elided to its last few components), quiet under the count.
+            let current = progress.map(ScanProgress::current).unwrap_or_default();
+            if !current.is_empty() {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(elide_path(&current))
+                        .size(12.5)
+                        .color(p.text_secondary),
+                );
+            }
+        });
+    result
+}
+
+/// Group a non-negative integer with thousands separators ("1,234") for the scanning
+/// count caption — `usize::to_string` has no grouping and a big recursive folder can
+/// reach five or six digits.
+fn fmt_count(n: usize) -> String {
+    let s = n.to_string();
+    let len = s.len();
+    let mut out = String::with_capacity(len + len / 3);
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (len - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Shorten a relative directory path to its last few components for the scanning view's
+/// one-line "current folder" caption (`…/2024/Iceland`), so a deep path can't overflow.
+/// Component-based (not pixel-width), so it never half-clips a name. Accepts either path
+/// separator since the walk worker formats with the platform's.
+fn elide_path(path: &str) -> String {
+    let parts: Vec<&str> = path.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
+    const KEEP: usize = 3;
+    if parts.len() <= KEEP {
+        parts.join("/")
+    } else {
+        format!("\u{2026}/{}", parts[parts.len() - KEEP..].join("/"))
+    }
+}
+
 /// Open the OS "default apps" settings so the user can make PhotoBlaze the default
 /// photo viewer. Windows doesn't let an app set itself as default programmatically
 /// (the user must confirm in Settings), so we deep-link to the right page. Best-effort,
@@ -1619,7 +1742,35 @@ fn clamp_to_monitor(pos: (f64, f64), size: (f64, f64), mon: (f64, f64, f64, f64)
 
 #[cfg(test)]
 mod tests {
-    use super::clamp_to_monitor;
+    use super::{clamp_to_monitor, elide_path, fmt_count};
+
+    #[test]
+    fn fmt_count_groups_thousands() {
+        assert_eq!(fmt_count(0), "0");
+        assert_eq!(fmt_count(7), "7");
+        assert_eq!(fmt_count(999), "999");
+        assert_eq!(fmt_count(1_000), "1,000");
+        assert_eq!(fmt_count(1_234), "1,234");
+        assert_eq!(fmt_count(12_345), "12,345");
+        assert_eq!(fmt_count(1_000_000), "1,000,000");
+    }
+
+    #[test]
+    fn elide_path_keeps_last_components() {
+        // Short paths pass through (normalized to forward slashes).
+        assert_eq!(elide_path("Iceland"), "Iceland");
+        assert_eq!(elide_path("2024/Iceland"), "2024/Iceland");
+        assert_eq!(elide_path("Photos/2024/Iceland"), "Photos/2024/Iceland");
+        // Deep paths keep only the last few, prefixed with an ellipsis.
+        assert_eq!(
+            elide_path("Pictures/Photos/2024/Iceland"),
+            "\u{2026}/Photos/2024/Iceland"
+        );
+        // Either separator is accepted (the worker formats with the platform's).
+        assert_eq!(elide_path("a\\b\\c\\d\\e"), "\u{2026}/c/d/e");
+        // Empty stays empty (the dialog hides the caption then).
+        assert_eq!(elide_path(""), "");
+    }
 
     // A 1920×1080 monitor at the origin.
     const MON: (f64, f64, f64, f64) = (0.0, 0.0, 1920.0, 1080.0);

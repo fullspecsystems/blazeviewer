@@ -31,7 +31,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -144,10 +144,11 @@ const GESTURE_PAN_DIR: f32 = 1.0;
 /// advances to the next one — so the trash/recycle feedback registers first (#28).
 const DELETE_ADVANCE_DELAY: Duration = Duration::from_millis(160);
 
-/// How long an off-thread directory scan must run before the "Scanning folder…" toast
-/// appears. A normal folder resolves in well under this, so the common case never flashes
-/// it; only a genuinely large/nested tree (the `~/Library` case) shows the indicator.
-const SCAN_TOAST_DELAY: Duration = Duration::from_millis(250);
+/// How long an off-thread directory scan must run before the "Scanning Folder" progress
+/// dialog appears. A normal folder resolves in well under this, so the common case never
+/// flashes a dialog (and never pays for the extra window); only a genuinely large/nested
+/// tree (the `~/Library` case) reveals it — with a live count, current folder, and Cancel.
+const SCAN_DIALOG_DELAY: Duration = Duration::from_millis(250);
 
 /// The minimum gap since the last shown photo before the next held-key auto-advance,
 /// given how long auto-repeat has been running (`elapsed`, measured from when the
@@ -1876,17 +1877,28 @@ impl App {
         self.cancel_dir_scan();
         self.scan_gen += 1;
         let generation = self.scan_gen;
-        let cancel = Arc::new(AtomicBool::new(false));
-        let worker_cancel = cancel.clone();
+        let progress = ScanProgress::new();
+        let name = scan_display_name(&source);
+        let worker_progress = progress.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let resolved = resolve_scan(&source, &cursor, Some(&worker_cancel));
+            let resolved = resolve_scan(&source, &cursor, Some(&worker_progress));
             let _ = tx.send((generation, resolved));
         });
+        // If a Scanning dialog is already up (a previous slow scan the user then re-opened
+        // over), re-point it at this new walk in place — same window, no flicker — so it
+        // tracks the new folder instead of showing a now-frozen old count.
+        if self.dialog.as_ref().map(|d| d.kind()) == Some(dialog::DialogKind::Scanning) {
+            let msg = scan_message(&name);
+            if let Some(d) = self.dialog.as_mut() {
+                d.set_scan(&msg, progress.clone());
+            }
+        }
         self.dir_scan = Some(DirScan {
             generation,
             rx,
-            cancel,
+            progress,
+            name,
             started: Instant::now(),
         });
     }
@@ -1894,10 +1906,11 @@ impl App {
     /// Pick up a finished background directory scan (called each `about_to_wait` tick).
     /// On a result for the current generation: rebuild the playlist, or — if the folder
     /// held no supported images — log and keep whatever is on screen (an open failure
-    /// never blanks the current photo). While a scan is still running and has outlasted
-    /// [`SCAN_TOAST_DELAY`], keep a "Scanning folder…" toast up so a genuinely slow walk
-    /// shows it's working; it's only re-shown once the prior toast has faded, so it never
-    /// re-rasterizes per frame. Mirrors [`poll_archive_load`](App::poll_archive_load).
+    /// never blanks the current photo); either way the Scanning dialog (if up) closes.
+    /// While a scan is still running and has outlasted [`SCAN_DIALOG_DELAY`], reveal the
+    /// "Scanning Folder" progress dialog (live image count + current folder + Cancel) so a
+    /// genuinely slow walk shows it's working and is cancellable. Mirrors
+    /// [`poll_archive_load`](App::poll_archive_load).
     fn poll_dir_scan(&mut self, event_loop: &ActiveEventLoop) {
         use std::sync::mpsc::TryRecvError;
         let (scan_gen, recv) = match self.dir_scan.as_ref() {
@@ -1907,6 +1920,7 @@ impl App {
         match recv {
             Ok((generation, resolved)) => {
                 self.dir_scan = None;
+                self.close_scanning_dialog(); // the walk is done — drop its progress dialog
                 if generation != scan_gen {
                     return; // superseded by a newer open
                 }
@@ -1924,17 +1938,63 @@ impl App {
                 );
             }
             Err(TryRecvError::Empty) => {
-                // Still scanning: show "Scanning folder…" once the walk is slow enough to
-                // notice, and keep it visible (re-show only after the prior toast faded).
-                let slow = self
+                // Still scanning: once the walk is slow enough to notice, reveal the
+                // Scanning dialog (count + current folder + Cancel). Deferred so a normal
+                // folder never flashes a window, and only when no other dialog is up (don't
+                // steal a Settings/Message window the user opened over a background scan).
+                let reveal = self
                     .dir_scan
                     .as_ref()
-                    .is_some_and(|s| s.started.elapsed() >= SCAN_TOAST_DELAY);
-                if slow && self.toast.is_none() {
-                    self.show_toast("Scanning folder\u{2026}", event_loop);
+                    .is_some_and(|s| s.started.elapsed() >= SCAN_DIALOG_DELAY);
+                if reveal && self.dialog.is_none() {
+                    let (name, progress) = match self.dir_scan.as_ref() {
+                        Some(s) => (s.name.clone(), s.progress.clone()),
+                        None => return,
+                    };
+                    self.open_scanning_dialog(&name, progress, event_loop);
                 }
             }
-            Err(TryRecvError::Disconnected) => self.dir_scan = None, // worker died
+            Err(TryRecvError::Disconnected) => {
+                self.dir_scan = None;
+                self.close_scanning_dialog(); // worker died — don't strand its dialog
+            }
+        }
+    }
+
+    /// Open the deferred "Scanning Folder" progress dialog for an in-flight folder walk
+    /// (a live image count, the current subfolder, and a Cancel button). Mirrors the 7z
+    /// loading dialog in [`begin_archive_open`](App::begin_archive_open); only called once
+    /// the scan has outlasted [`SCAN_DIALOG_DELAY`] and no other dialog is showing.
+    fn open_scanning_dialog(
+        &mut self,
+        name: &str,
+        progress: ScanProgress,
+        event_loop: &ActiveEventLoop,
+    ) {
+        let msg = scan_message(name);
+        let refresh = self.refresh_hz();
+        let parent = self.active.as_ref().map(|a| a.window.clone());
+        let mut dlg = dialog::DialogWindow::open(
+            dialog::DialogKind::Scanning,
+            event_loop,
+            refresh,
+            &msg,
+            &self.settings,
+            &self.keymap,
+            parent.as_deref(),
+        );
+        if let Some(d) = dlg.as_mut() {
+            d.set_scan(&msg, progress);
+        }
+        self.dialog = dlg;
+    }
+
+    /// Close the dialog window only if it's the Scanning progress view (a folder scan
+    /// finished, was cancelled, or its worker died). Leaves any other dialog
+    /// (Settings, Message, …) untouched.
+    fn close_scanning_dialog(&mut self) {
+        if self.dialog.as_ref().map(|d| d.kind()) == Some(dialog::DialogKind::Scanning) {
+            self.dialog = None;
         }
     }
 
@@ -1943,7 +2003,7 @@ impl App {
     /// it. Used when a newer open arrives and on teardown.
     fn cancel_dir_scan(&mut self) {
         if let Some(scan) = self.dir_scan.as_ref() {
-            scan.cancel.store(true, Ordering::Relaxed);
+            scan.progress.request_cancel();
         }
     }
 
@@ -2899,6 +2959,14 @@ impl App {
             // Esc / close on the loading view cancels the in-flight open (the worker
             // stops and frees its partial RAM); harmless for the other kinds.
             self.cancel_archive_load();
+            // Esc / close on the scanning view cancels the in-flight folder walk and
+            // discards its partial result. Guarded to the Scanning kind so closing a
+            // *different* dialog doesn't kill a fast scan still running quietly in the
+            // background (one dispatched <SCAN_DIALOG_DELAY ago, before any dialog).
+            if self.dialog.as_ref().map(|d| d.kind()) == Some(dialog::DialogKind::Scanning) {
+                self.cancel_dir_scan();
+                self.dir_scan = None;
+            }
             self.dialog = None;
             self.pending_confirm_delete = None; // Esc / close = cancel the confirm
             self.password_archive = None; // Esc / close = abandon the password prompt
@@ -2982,6 +3050,14 @@ impl App {
                     self.cancel_archive_load();
                     self.dialog = None;
                     self.password_archive = None;
+                }
+                // Scanning: the only button is Cancel (which already requested
+                // cancellation); stop the walk, discard its partial result, and close —
+                // a cancelled scan must keep the current view, not load a half-walked tree.
+                Some(dialog::DialogKind::Scanning) => {
+                    self.cancel_dir_scan();
+                    self.dir_scan = None;
+                    self.dialog = None;
                 }
                 // Confirm drives a delete; Message / others just close.
                 other => {
@@ -4458,7 +4534,7 @@ fn is_supported_image(p: &Path) -> bool {
 fn collect_images(
     dir: &Path,
     recursive: bool,
-    cancel: Option<&AtomicBool>,
+    progress: Option<&ScanProgress>,
     out: &mut Vec<PathBuf>,
 ) {
     let max_depth = if recursive { usize::MAX } else { 1 };
@@ -4468,7 +4544,7 @@ fn collect_images(
         .max_depth(max_depth)
         .follow_links(false);
     for entry in walker {
-        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+        if progress.is_some_and(|p| p.is_cancelled()) {
             return;
         }
         // Skip unreadable entries (permissions, races) rather than aborting the scan.
@@ -4477,16 +4553,59 @@ fn collect_images(
         };
         // file_type() here does not traverse symlinks (matches follow_links(false)), so
         // a symlinked file/dir is not mistaken for a real one.
-        if entry.file_type().is_file() && is_supported_image(entry.path()) {
+        let ft = entry.file_type();
+        if ft.is_dir() {
+            // Publish the directory now being walked so the Scanning dialog shows real
+            // motion. Cheap: once per directory (a mutex write), not per file.
+            if let Some(p) = progress {
+                p.set_current(rel_display(entry.path(), dir));
+            }
+        } else if ft.is_file() && is_supported_image(entry.path()) {
+            if let Some(p) = progress {
+                p.incr_found();
+            }
             out.push(entry.into_path());
         }
     }
 }
 
+/// A scanned directory's path relative to the scan root, as a display string for the
+/// Scanning dialog's "current folder" caption. The root itself (empty relative path)
+/// shows as its own folder name so the caption is never blank.
+fn rel_display(path: &Path, root: &Path) -> String {
+    match path.strip_prefix(root) {
+        Ok(rel) if !rel.as_os_str().is_empty() => rel.display().to_string(),
+        _ => root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| root.display().to_string()),
+    }
+}
+
+/// The folder name shown in the Scanning dialog ("Scanning "name"…") — the first scan
+/// root's own name, falling back to its full path for a root with no file name (e.g. `/`).
+fn scan_display_name(source: &Source) -> String {
+    if let Source::Scan { roots, .. } = source {
+        if let Some(first) = roots.first() {
+            return first
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| first.display().to_string());
+        }
+    }
+    "folder".to_string()
+}
+
+/// The Scanning dialog's headline ("Scanning "name"…"), with typographic quotes/ellipsis
+/// to match the loading dialog's "Opening "name"…".
+fn scan_message(name: &str) -> String {
+    format!("Scanning \u{201c}{name}\u{201d}\u{2026}")
+}
+
 /// Scan `dir` for supported images, sorted by full path — a thin synchronous wrapper
 /// over [`collect_images`] used by the tests. Production callers go through
-/// [`resolve_source`] (which calls `collect_images` directly with a cancel flag, on the
-/// off-thread scan worker).
+/// [`resolve_source`] (which calls `collect_images` directly with a [`ScanProgress`]
+/// handle, on the off-thread scan worker).
 #[cfg(test)]
 fn scan_images(dir: &Path, recursive: bool) -> Vec<PathBuf> {
     let mut paths = Vec::new();
@@ -4639,13 +4758,13 @@ fn classify_inputs(paths: Vec<PathBuf>) -> LaunchInput {
 /// explicit list), and whether the scan was recursive.
 fn resolve_source(
     source: &Source,
-    cancel: Option<&AtomicBool>,
+    progress: Option<&ScanProgress>,
 ) -> (Vec<PathBuf>, PathBuf, Option<PathBuf>, bool) {
     match source {
         Source::Scan { roots, recursive } => {
             let mut paths = Vec::new();
             for r in roots {
-                collect_images(r, *recursive, cancel, &mut paths);
+                collect_images(r, *recursive, progress, &mut paths);
             }
             paths.sort();
             let root = roots.first().cloned().unwrap_or_else(|| PathBuf::from("."));
@@ -4697,11 +4816,16 @@ impl Resolved {
 }
 
 /// Resolve a filesystem [`Source`] (folder scan or explicit list) into a playlist,
-/// honoring `cancel` so a superseding open can abandon a huge in-flight scan. The
-/// cursor math + `FsSource` build is shared with [`resolve_playlist`]; this carries the
+/// driving `progress` (image count + current folder) and honoring its cancel flag so a
+/// superseding open / the Scanning dialog can abandon a huge in-flight scan. The cursor
+/// math + `FsSource` build is shared with [`resolve_playlist`]; this carries the
 /// (cancellable) directory I/O, so it's what the off-thread scan worker runs.
-fn resolve_scan(source: &Source, cursor: &open::Cursor, cancel: Option<&AtomicBool>) -> Resolved {
-    let (paths, root, scan_root, recursive) = resolve_source(source, cancel);
+fn resolve_scan(
+    source: &Source,
+    cursor: &open::Cursor,
+    progress: Option<&ScanProgress>,
+) -> Resolved {
+    let (paths, root, scan_root, recursive) = resolve_source(source, progress);
     let start = open::resolve_cursor(&paths, cursor);
     Resolved {
         source: Arc::new(FsSource::new(paths)),
@@ -4880,6 +5004,72 @@ fn archive_resolved(path: &Path, source: Arc<dyn PhotoSource>) -> Resolved {
     }
 }
 
+/// Shared, thread-safe progress + cancellation for an off-thread directory scan — the
+/// folder-walk analogue of [`pb_source::OpenProgress`]. A folder walk has no knowable
+/// total (you'd have to walk the tree twice), so this carries *indeterminate* progress:
+/// a running count of images found and the directory currently being walked, plus the
+/// cancel flag the Scanning dialog's Cancel / Esc (and a superseding open / teardown)
+/// set. Cheap to [`clone`](Clone) — it's an `Arc` — so the walk worker and the UI thread
+/// each hold one.
+#[derive(Clone, Default)]
+pub(crate) struct ScanProgress {
+    inner: Arc<ScanProgressInner>,
+}
+
+#[derive(Default)]
+struct ScanProgressInner {
+    /// Supported images found so far (bumped per match by the walk worker).
+    found: AtomicUsize,
+    /// Set by the UI to stop the walk at its next entry (Cancel / Esc / a superseding open).
+    cancel: AtomicBool,
+    /// The directory currently being walked, relative to the scan root (display string).
+    current: std::sync::Mutex<String>,
+}
+
+impl ScanProgress {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Supported images found so far (read by the Scanning dialog each frame).
+    pub(crate) fn found(&self) -> usize {
+        self.inner.found.load(Ordering::Relaxed)
+    }
+
+    /// Worker-side: record one more supported image.
+    fn incr_found(&self) {
+        self.inner.found.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Ask the walk to stop at its next entry (the Cancel button / Esc / a superseding open).
+    pub(crate) fn request_cancel(&self) {
+        self.inner.cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether cancellation has been requested (polled by the walk loop).
+    fn is_cancelled(&self) -> bool {
+        self.inner.cancel.load(Ordering::Relaxed)
+    }
+
+    /// Worker-side: publish the directory now being walked (relative to the scan root).
+    /// A poisoned lock just means a prior writer panicked mid-update — drop the value
+    /// rather than propagate; a stale caption is harmless.
+    fn set_current(&self, dir: String) {
+        if let Ok(mut g) = self.inner.current.lock() {
+            *g = dir;
+        }
+    }
+
+    /// The directory currently being walked (empty until the worker sets one).
+    pub(crate) fn current(&self) -> String {
+        self.inner
+            .current
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+}
+
 /// An in-flight background **directory scan**. A large/recursive folder is walked off
 /// the event loop — the synchronous walk used to block winit for seconds (macOS
 /// beachball) and then crash when the unresponsive window/GPU surface was torn down
@@ -4890,9 +5080,13 @@ fn archive_resolved(path: &Path, source: Arc<dyn PhotoSource>) -> Resolved {
 struct DirScan {
     generation: u64,
     rx: std::sync::mpsc::Receiver<(u64, Resolved)>,
-    /// Flipped to stop the walk at its next entry (a superseding open / teardown).
-    cancel: Arc<AtomicBool>,
-    /// When the scan was dispatched, so the "Scanning…" toast is deferred to slow scans
+    /// Shared count + current-folder progress and the cancel flag for the walk. The
+    /// Scanning dialog reads it; Cancel / Esc / a superseding open / teardown flip its
+    /// cancel flag so the walk bails at its next entry.
+    progress: ScanProgress,
+    /// The folder name shown in the Scanning dialog ("Scanning "name"…").
+    name: String,
+    /// When the scan was dispatched, so the Scanning dialog is deferred to slow scans
     /// only (a normal folder resolves in milliseconds and never flashes it).
     started: Instant,
 }
@@ -5172,7 +5366,8 @@ mod tests {
     }
 
     /// A pre-cancelled scan stops immediately and gathers nothing — proving the cancel
-    /// flag a superseding open relies on actually short-circuits the walk.
+    /// flag a superseding open (and the Scanning dialog's Cancel) relies on actually
+    /// short-circuits the walk.
     #[test]
     fn scan_honors_cancel_flag() {
         let dir = std::env::temp_dir().join(format!("pb_scan_cancel_{}", std::process::id()));
@@ -5182,12 +5377,63 @@ mod tests {
             fs::write(dir.join(rel), b"x").expect("seed");
         }
 
-        let cancel = AtomicBool::new(true);
+        let progress = ScanProgress::new();
+        progress.request_cancel();
         let mut out = Vec::new();
-        collect_images(&dir, true, Some(&cancel), &mut out);
+        collect_images(&dir, true, Some(&progress), &mut out);
         assert!(out.is_empty(), "a pre-cancelled scan collects nothing");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A live scan publishes its progress: the count matches the images gathered and the
+    /// current folder gets set — what the Scanning dialog reads to show real motion.
+    #[test]
+    fn scan_reports_progress_count_and_current_folder() {
+        let dir = std::env::temp_dir().join(format!("pb_scan_progress_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("sub")).expect("mkdir");
+        for rel in ["a.jpg", "b.png", "sub/c.webp", "notes.txt"] {
+            fs::write(dir.join(rel), b"x").expect("seed");
+        }
+
+        let progress = ScanProgress::new();
+        let mut out = Vec::new();
+        collect_images(&dir, true, Some(&progress), &mut out);
+
+        assert_eq!(out.len(), 3, "three supported images (the .txt is skipped)");
+        assert_eq!(
+            progress.found(),
+            out.len(),
+            "the published count matches the images gathered"
+        );
+        assert!(
+            !progress.current().is_empty(),
+            "the current folder is published during the walk"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rel_display_strips_root_then_falls_back_to_name() {
+        let root = Path::new("/photos/Library");
+        // A descendant shows its path relative to the root.
+        assert_eq!(
+            rel_display(Path::new("/photos/Library/2024/Iceland"), root),
+            Path::new("2024/Iceland").display().to_string()
+        );
+        // The root itself (empty relative) falls back to the root's own folder name.
+        assert_eq!(rel_display(root, root), "Library");
+    }
+
+    #[test]
+    fn scan_display_name_uses_the_first_root_folder_name() {
+        let source = Source::Scan {
+            roots: vec![PathBuf::from("/photos/Vacation Pics")],
+            recursive: true,
+        };
+        assert_eq!(scan_display_name(&source), "Vacation Pics");
     }
 
     #[test]

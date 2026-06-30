@@ -7,6 +7,14 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Changed
+- **Opening a large folder now shows a real progress dialog** instead of a brief corner
+  toast. When a folder takes more than a moment to scan, a "Scanning Folder" window
+  appears naming the folder, with a live count of images found, the subfolder currently
+  being scanned, and a **Cancel** button — so a huge or deeply nested tree (e.g. opening
+  a whole home folder) is no longer an indefinite, unexplained wait. Quick folders still
+  open instantly with no dialog.
+
 ### Fixed
 - macOS app icon: the Clear/Tinted (monochrome) appearance now reads high-contrast
   instead of washed-out, using dedicated white artwork shown only in that mode.
