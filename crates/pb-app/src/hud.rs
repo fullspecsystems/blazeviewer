@@ -52,6 +52,15 @@ enum Weight {
     Bold,
 }
 
+/// Which end of a string to keep when eliding it to fit a width ([`Hud::fit_text`]).
+#[derive(Clone, Copy)]
+enum Keep {
+    /// Keep the head, ellipsize the tail: `"Long Name…"` (a heading).
+    Start,
+    /// Keep the tail, ellipsize the head: `"…/leaf"` (a path — the leaf is the useful part).
+    End,
+}
+
 /// Faux-bold smear (horizontal dilation) as a fraction of the text px height, applied
 /// only when no *real* heavier face is available: modern macOS ships SF Pro purely as a
 /// variable font and fontdue can't instance its weight axis, so we synthesize emphasis
@@ -304,27 +313,38 @@ impl Hud {
     }
 
     /// Rasterize the **scan status card** — the ambient overlay shown while a folder streams
-    /// in: a semibold heading (`Scanning "Folder"`), a dimmer count line below it
-    /// (`8,230 images found`), and a subtle bordered **button** (a stop icon + `button_label`)
-    /// that reads as clickable without shouting. Everything is **right-aligned** so the card
-    /// hugs the top-right corner and doesn't jitter as the count widens (it's anchored by its
-    /// right edge). Returns `(rgba, w, h, button_rect)` where `button_rect` is the button's
-    /// `[x, y, w, h]` **within the card** — the caller offsets it to screen px for click
-    /// hit-testing (only the button is clickable, not the whole card).
+    /// in. A **fixed-width** card (so it doesn't jitter as the count or the live path change),
+    /// **center-aligned**, with: a semibold heading (`Scanning "Folder"`), the folder currently
+    /// being walked (`path_line`, dim — empty to omit it; **left-elided** to fit), the count
+    /// (`8,230 images found`, dim), and a centered, subtly-bordered **button** (a stop icon +
+    /// `button_label`) whose corner radius is a touch tighter than the card's. Returns
+    /// `(rgba, w, h, button_rect)` where `button_rect` is the **button's** `[x, y, w, h]` within
+    /// the card (the only click target — the caller offsets it to screen px).
+    #[allow(clippy::too_many_arguments)]
     pub fn render_scan_card(
         &self,
         heading: &str,
+        path_line: &str,
         count_line: &str,
         button_label: &str,
         button_icon: &str,
         px: f32,
+        width: u32,
         bg: [u8; 4],
     ) -> Option<(Vec<u8>, u32, u32, [u32; 4])> {
         let px_sub = (px * 0.82).max(1.0);
-        let pad = (px * 0.72).round().max(4.0) as i32;
+        let pad = (px * 0.85).round().max(6.0) as i32;
+        let cw = width.max(1) as i32;
+        let avail = (cw - 2 * pad).max(1) as f32;
+        let card_r = (px * 0.6).round();
 
-        // Text runs.
-        let (head_g, head_adv) = self.layout(heading, px, Weight::Semibold);
+        // Text runs, each elided to the fixed width: the heading keeps its start; the live
+        // path keeps its *tail* (the leaf folder is the useful bit).
+        let heading = self.fit_text(heading, px, Weight::Semibold, avail, Keep::Start);
+        let (head_g, head_adv) = self.layout(&heading, px, Weight::Semibold);
+        let has_path = !path_line.is_empty();
+        let path = self.fit_text(path_line, px_sub, Weight::Regular, avail, Keep::End);
+        let (path_g, path_adv) = self.layout(&path, px_sub, Weight::Regular);
         let (count_g, count_adv) = self.layout(count_line, px_sub, Weight::Regular);
         let (btn_g, btn_adv) = self.layout(button_label, px_sub, Weight::Regular);
         let head_lh = self.line_height(px)? as i32;
@@ -332,68 +352,80 @@ impl Hud {
         let head_asc = self.ascent(px)?;
         let sub_asc = self.ascent(px_sub)?;
 
-        // Button geometry: a stop icon + the label, with inner padding, a faint fill, and a
-        // thin gray border.
+        // Button geometry.
         let icon_h = (px_sub * 0.95).round().max(1.0) as u32;
         let icon = crate::icon::rasterize(button_icon, icon_h, TEXT);
         let (icon_w, icon_gap) = match &icon {
             Some((_, w, _)) => (*w as i32, (px_sub * 0.38).round().max(2.0) as i32),
             None => (0, 0),
         };
-        let bpad = (px_sub * 0.55).round().max(3.0) as i32;
+        let bpad = (px_sub * 0.6).round().max(3.0) as i32;
         let bw = icon_w + icon_gap + btn_adv.ceil() as i32 + 2 * bpad;
         let bh = sub_lh + 2 * bpad;
 
         // Vertical rhythm.
-        let gap_lines = (px * 0.12).round() as i32;
-        let gap_button = (px * 0.55).round().max(4.0) as i32;
+        let gap_lines = (px * 0.14).round() as i32;
+        let gap_button = (px * 0.6).round().max(4.0) as i32;
+        let path_block = if has_path { sub_lh + gap_lines } else { 0 };
+        let ch = (pad + head_lh + gap_lines + path_block + sub_lh + gap_button + bh + pad).max(1);
 
-        // Card box (content right-aligned, so width = widest run + 2·pad).
-        let content_w = (head_adv.ceil() as i32)
-            .max(count_adv.ceil() as i32)
-            .max(bw);
-        let cw = (content_w + 2 * pad).max(1) as u32;
-        let ch = (pad + head_lh + gap_lines + sub_lh + gap_button + bh + pad).max(1) as u32;
-        let right = cw as i32 - pad; // content right edge
+        let mut canvas = Canvas::new(cw as u32, ch as u32, bg, card_r);
+        let center = |adv: f32| (cw as f32 - adv) * 0.5;
 
-        let mut canvas = Canvas::new(cw, ch, bg, (px * 0.55).round());
-
-        // Heading + count, right-aligned.
-        let head_base = pad as f32 + head_asc;
+        // Heading, (optional) path, count — all centered.
+        let mut y = pad;
         self.draw_line(
             &mut canvas,
-            (right - head_adv.ceil() as i32) as f32,
-            head_base,
+            center(head_adv),
+            y as f32 + head_asc,
             &head_g,
             TEXT,
             px,
         );
-        let count_top = pad + head_lh + gap_lines;
-        let count_base = count_top as f32 + sub_asc;
+        y += head_lh + gap_lines;
+        if has_path {
+            self.draw_line(
+                &mut canvas,
+                center(path_adv),
+                y as f32 + sub_asc,
+                &path_g,
+                TEXT_DIM,
+                px_sub,
+            );
+            y += sub_lh + gap_lines;
+        }
         self.draw_line(
             &mut canvas,
-            (right - count_adv.ceil() as i32) as f32,
-            count_base,
+            center(count_adv),
+            y as f32 + sub_asc,
             &count_g,
             TEXT_DIM,
             px_sub,
         );
+        y += sub_lh + gap_button;
 
-        // Button: right-aligned; faint fill + gray border, then the stop icon + label.
-        let bx = right - bw;
-        let by = pad + head_lh + gap_lines + sub_lh + gap_button;
-        let br = bh as f32 * 0.5; // pill ends read as a button
-        canvas.fill_round_rect(bx, by, bw, bh, br, TEXT, 0.07);
+        // Centered button: faint fill + thin gray border (radius tighter than the card), then
+        // the stop icon + label.
+        let bx = (cw - bw) / 2;
+        let by = y;
+        let btn_r = (card_r * 0.62).round();
+        canvas.fill_round_rect(bx, by, bw, bh, btn_r, TEXT, 0.07);
         let bt = (px * 0.08).round().max(1.0) as i32;
-        canvas.stroke_round_rect(bx, by, bw, bh, br, bt, TEXT, 0.5);
+        canvas.stroke_round_rect(bx, by, bw, bh, btn_r, bt, TEXT, 0.5);
         let mut cx = bx + bpad;
         if let Some((rgba, iw, ih)) = &icon {
             let iy = by + (bh - *ih as i32) / 2;
             self.draw_icon(&mut canvas, rgba, *iw, *ih, cx, iy, px_sub);
             cx += icon_w + icon_gap;
         }
-        let btn_base = (by + bpad) as f32 + sub_asc;
-        self.draw_line(&mut canvas, cx as f32, btn_base, &btn_g, TEXT, px_sub);
+        self.draw_line(
+            &mut canvas,
+            cx as f32,
+            (by + bpad) as f32 + sub_asc,
+            &btn_g,
+            TEXT,
+            px_sub,
+        );
 
         let button_rect = [
             bx.max(0) as u32,
@@ -401,7 +433,39 @@ impl Hud {
             bw.max(0) as u32,
             bh.max(0) as u32,
         ];
-        Some((canvas.into_rgba(), cw, ch, button_rect))
+        Some((canvas.into_rgba(), cw as u32, ch as u32, button_rect))
+    }
+
+    /// Shorten `text` so it lays out within `max_w` px, inserting an ellipsis on the dropped
+    /// end ([`Keep::Start`] keeps the head — `"Long Name…"`; [`Keep::End`] keeps the tail —
+    /// `"…/leaf"`, right for a path). Returns the original when it already fits.
+    fn fit_text(&self, text: &str, px: f32, weight: Weight, max_w: f32, keep: Keep) -> String {
+        let (_, full) = self.layout(text, px, weight);
+        if full <= max_w {
+            return text.to_string();
+        }
+        let chars: Vec<char> = text.chars().collect();
+        let ell = '\u{2026}';
+        let fits = |s: &str| self.layout(s, px, weight).1 <= max_w;
+        match keep {
+            Keep::Start => {
+                for end in (1..chars.len()).rev() {
+                    let cand: String = chars[..end].iter().collect::<String>() + &ell.to_string();
+                    if fits(&cand) {
+                        return cand;
+                    }
+                }
+            }
+            Keep::End => {
+                for start in 1..chars.len() {
+                    let cand: String = ell.to_string() + &chars[start..].iter().collect::<String>();
+                    if fits(&cand) {
+                        return cand;
+                    }
+                }
+            }
+        }
+        ell.to_string()
     }
 
     fn line_height(&self, px: f32) -> Option<u32> {

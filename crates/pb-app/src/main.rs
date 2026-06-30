@@ -158,6 +158,16 @@ const SCAN_DIALOG_DELAY: Duration = Duration::from_millis(250);
 /// governs how often the rest refills.
 const SCAN_BATCH_INTERVAL: Duration = Duration::from_millis(150);
 
+/// Fixed width of the scan status card, in logical px (scaled by the display factor, then
+/// clamped to the window). Wide enough for a reasonable current-folder path; longer paths are
+/// truncated. Fixed so the card doesn't jitter as the count / live path change width.
+const SCAN_CARD_WIDTH: f32 = 320.0;
+
+/// How often the scan card is re-rasterized at most. The live current-folder line changes per
+/// directory (fast); throttling the rebuild keeps the software composite off the hot path
+/// while the displayed path/count lag by at most this. Show/hide is immediate.
+const SCAN_CARD_REFRESH: Duration = Duration::from_millis(120);
+
 /// The minimum gap since the last shown photo before the next held-key auto-advance,
 /// given how long auto-repeat has been running (`elapsed`, measured from when the
 /// initial tap delay expired). The advance rate ramps linearly from `min_rate`
@@ -622,10 +632,14 @@ struct App {
     decode_ewma: f32,
     pie_drawn: bool,
     pie_pushed: Option<(f32, f32, f32)>,
-    /// The scan status card's content signature `(folder name, browsable count)` while it's
-    /// shown, or `None` when hidden. Cached so the card is only re-rasterized when the count
-    /// ticks up (off the photo hot path), mirroring the pie/toast.
-    chip_sig: Option<(String, usize)>,
+    /// The scan status card's content signature `(folder name, current folder, browsable
+    /// count)` while it's shown, or `None` when hidden. Cached so the card is only
+    /// re-rasterized when its content actually changes (and then no faster than
+    /// [`SCAN_CARD_REFRESH`]), off the photo hot path.
+    chip_sig: Option<(String, String, usize)>,
+    /// When the scan card was last (re)built — throttles the rebuild (the current-folder line
+    /// changes fast; see [`SCAN_CARD_REFRESH`]).
+    chip_built: Instant,
     /// The **Cancel Scan button's** on-screen rect in physical px `[x0, y0, x1, y1]` while the
     /// card is shown — only the button is clickable (not the whole card). The reusable overlay
     /// hit-region: the first interactive on-image control; future EXIF copy buttons register
@@ -840,6 +854,7 @@ impl App {
             pie_drawn: false,
             pie_pushed: None,
             chip_sig: None,
+            chip_built: Instant::now(),
             chip_rect: None,
             preview_resident: HashSet::new(),
             upgrade_done: HashSet::new(),
@@ -3717,46 +3732,69 @@ impl App {
     }
 
     /// The ambient **scan status card**: while a folder scan is streaming in (and the first
-    /// photo is already up), show a small card in the top-right just below the pie —
-    /// `Scanning "Folder"`, the browsable count (`8,230 images found`), and a subtle
-    /// **Cancel Scan** button. The count *is* the progress (Codex P3: the **browsable**
-    /// `source.len()`, not the worker's look-ahead `found`). Deferred past
-    /// [`SCAN_DIALOG_DELAY`] so a quick folder never flashes it; rebuilt only when the count
-    /// ticks up (off the photo hot path, like the pie/toast); cleared when the scan ends.
+    /// photo is already up), show a fixed-width card in the top-right (equal inset from the top
+    /// and right edges) — `Scanning "Folder"`, the folder currently being walked, the browsable
+    /// count (`8,230 images found`), and a centered **Cancel Scan** button. The count *is* the
+    /// progress (Codex P3: the **browsable** `source.len()`, not the worker's look-ahead
+    /// `found`). Deferred past [`SCAN_DIALOG_DELAY`] so a quick folder never flashes it;
+    /// rebuilt only when its content changes and no faster than [`SCAN_CARD_REFRESH`] (the
+    /// current-folder line changes per directory); cleared when the scan ends.
     fn tick_chip(&mut self, event_loop: &ActiveEventLoop) {
         let want = match (self.dir_scan.as_ref(), self.displayed_item) {
             (Some(scan), Some(_))
                 if scan.bootstrapped && scan.started.elapsed() >= SCAN_DIALOG_DELAY =>
             {
-                Some((scan.name.clone(), self.source.len()))
+                // Current folder being walked; hide it while it's just the root (it would
+                // duplicate the heading).
+                let cur = scan.progress.current();
+                let path = if cur == scan.name { String::new() } else { cur };
+                Some((scan.name.clone(), path, self.source.len()))
             }
             _ => None,
         };
         if want == self.chip_sig {
             return;
         }
+        // Show/hide is immediate; a content tick (folder/count) is throttled so the software
+        // composite stays off the hot path.
+        let toggling = want.is_some() != self.chip_sig.is_some();
+        if !toggling && self.chip_built.elapsed() < SCAN_CARD_REFRESH {
+            return;
+        }
         match &want {
-            Some((name, count)) => self.push_chip(name, *count, event_loop),
+            Some((name, path, count)) => self.push_chip(name, path, *count, event_loop),
             None => self.clear_chip(event_loop),
         }
         self.chip_sig = want;
+        self.chip_built = Instant::now();
     }
 
-    /// Rasterize the scan status card and place it below the pie (right edge aligned with the
-    /// pie). Records the **Cancel Scan button's** physical-px rect (only the button is
-    /// clickable, not the whole card).
-    fn push_chip(&mut self, name: &str, count: usize, event_loop: &ActiveEventLoop) {
+    /// Rasterize the scan status card and place it at the top-right with equal top/right insets.
+    /// Records the centered **Cancel Scan button's** physical-px rect (the only click target).
+    fn push_chip(&mut self, name: &str, path: &str, count: usize, event_loop: &ActiveEventLoop) {
         let heading = format!("Scanning \u{201c}{name}\u{201d}");
         let noun = if count == 1 { "image" } else { "images" };
         let count_line = format!("{} {noun} found", hud::format_thousands(count as u64));
+        // Equal inset from the top and right edges; fixed card width, clamped to the window.
+        let margin = (PIE_MARGIN * self.scale_factor).round().max(4.0) as u32;
+        let win_w = self
+            .active
+            .as_ref()
+            .map(|a| a.window.inner_size().width)
+            .unwrap_or(0);
+        let width = ((SCAN_CARD_WIDTH * self.scale_factor).round())
+            .min((win_w as f32 - 2.0 * margin as f32).max(1.0))
+            .max(1.0) as u32;
         let card = self.hud.as_ref().and_then(|hud| {
             let px = (15.0 * self.scale_factor).max(10.0);
             hud.render_scan_card(
                 &heading,
+                path,
                 &count_line,
                 "Cancel Scan",
                 icon::assets::STOP,
                 px,
+                width,
                 hud::BG,
             )
         });
@@ -3764,17 +3802,11 @@ impl App {
             self.chip_rect = None;
             return;
         };
-        // Right edge aligns with the pie (same inset); top sits below the pie's reserved area
-        // (pie inset + diameter + a gap), held stable whether or not the pie is visible.
-        let right_margin = (PIE_MARGIN * self.scale_factor).round().max(4.0) as u32;
-        let pie_d = (PIE_DIAMETER * self.scale_factor).round().max(12.0) as u32;
-        let gap = (8.0 * self.scale_factor).round().max(2.0) as u32;
-        let top_margin = right_margin + pie_d + gap;
         if let Some(a) = self.active.as_ref() {
-            // The card's top-left in physical px (mirrors `top_right_quad_xy`), then the
-            // button rect offset within it → the click hit-target.
-            let card_x0 = a.window.inner_size().width as f32 - right_margin as f32 - w as f32;
-            let card_y0 = top_margin as f32;
+            // Card top-left in physical px (right edge inset by `margin`, top inset by `margin`),
+            // then the button rect offset within it → the click hit-target.
+            let card_x0 = a.window.inner_size().width as f32 - margin as f32 - w as f32;
+            let card_y0 = margin as f32;
             let [bx, by, bw, bh] = btn.map(|v| v as f32);
             self.chip_rect = Some([
                 card_x0 + bx,
@@ -3784,8 +3816,7 @@ impl App {
             ]);
         }
         if let Some(a) = self.active.as_mut() {
-            a.renderer
-                .set_chip(Some((&rgba, w, h)), right_margin, top_margin);
+            a.renderer.set_chip(Some((&rgba, w, h)), margin, margin);
         }
         self.draw(event_loop);
     }
