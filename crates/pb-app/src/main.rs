@@ -713,7 +713,7 @@ struct App {
     /// A launch input (an archive) deferred until the window exists, so the viewer
     /// appears immediately and a slow / encrypted / failed open uses the spinner +
     /// dialogs instead of blocking startup or only logging. Fired once in `resumed`.
-    pending_launch: Option<LaunchInput>,
+    pending_launch: Option<open::OpenPlan>,
     /// The archive currently awaiting a password: set when the password prompt opens,
     /// re-opened with the entered password on submit, cleared on success / cancel.
     password_archive: Option<PathBuf>,
@@ -1670,11 +1670,14 @@ impl App {
         }
     }
 
-    /// Defer a launch input until the window + engine exist (`resumed` fires it).
-    /// Used for an archive on the command line / double-click so startup shows the
-    /// window first and the open runs behind the spinner + dialogs.
-    fn queue_launch(&mut self, input: LaunchInput) {
-        self.pending_launch = Some(input);
+    /// Defer a launch **plan** until the window + engine exist (`resumed` fires it).
+    /// Used for an archive *and* a folder scan on the command line / double-click so startup
+    /// shows the window first and the open runs behind the spinner / dialog / streaming scan
+    /// (a synchronous launch resolve, before the event loop, blocked the window on a big
+    /// tree). The plan — not the raw input — is deferred so the startup recursive override is
+    /// preserved (re-planning in `resumed` would drop it).
+    fn queue_launch(&mut self, plan: open::OpenPlan) {
+        self.pending_launch = Some(plan);
     }
 
     /// Open a launch input at runtime (the file picker or a drag-drop): plan it,
@@ -1683,22 +1686,31 @@ impl App {
     /// current photo isn't blanked.
     fn open_input(&mut self, input: LaunchInput, event_loop: &ActiveEventLoop) {
         let plan = open::plan(input);
+        self.open_plan(plan.source, plan.cursor, event_loop);
+    }
+
+    /// Route a planned open to the right path — archives async, folder scans stream, an
+    /// explicit list resolves inline. Shared by runtime opens ([`open_input`](App::open_input))
+    /// and the deferred startup launch ([`resumed`](App::resumed)), so the startup recursive
+    /// override (carried on the plan) is honored on both paths.
+    fn open_plan(&mut self, source: Source, cursor: open::Cursor, event_loop: &ActiveEventLoop) {
         // Archives open via the async-aware path (a .7z decompresses off-thread so it
         // can't freeze the loop).
-        if let Source::Archive(path) = &plan.source {
+        if let Source::Archive(path) = &source {
             self.begin_archive_open(path.clone(), None, event_loop);
             return;
         }
-        // Folder scans also run OFF the event loop: walking a large/nested tree (the
-        // worst case is opening `~/Library`) can take seconds, and doing it synchronously
-        // beachballed the run loop and then crashed the app. The current view stays put
-        // until the scan lands (`poll_dir_scan`).
-        if matches!(plan.source, Source::Scan { .. }) {
-            self.begin_dir_scan(plan.source, plan.cursor);
+        // Folder scans also run OFF the event loop and **stream** in: walking a large/nested
+        // tree (the worst case is opening `~/Library`) can take seconds, and doing it
+        // synchronously beachballed the run loop and then crashed the app. The first batch
+        // shows a photo almost immediately; the current view stays put until it lands
+        // (`poll_dir_scan`).
+        if matches!(source, Source::Scan { .. }) {
+            self.begin_dir_scan(source, cursor);
             return;
         }
         // An explicit file list is finite (no directory walk), so resolve it inline.
-        let r = resolve_playlist(&plan.source, &plan.cursor);
+        let r = resolve_playlist(&source, &cursor);
         if r.source.is_empty() {
             eprintln!("PhotoBlaze: no supported images in that selection");
             return;
@@ -1996,6 +2008,12 @@ impl App {
                     self.close_scanning_dialog(); // walk finished — drop the progress dialog
                     if scan.is_some_and(|s| !s.bootstrapped) {
                         eprintln!("PhotoBlaze: no supported images in that selection");
+                        // Nothing was ever shown and the scan found nothing: restore the
+                        // "Press O to open" hint the scan had suppressed (a bare-folder launch
+                        // onto an empty folder), but never blank an existing photo.
+                        if self.source.is_empty() {
+                            self.show_open_hint();
+                        }
                     }
                     // Deck is final now: resume normal prefetch (random-ahead warm again).
                     self.request_prefetch();
@@ -2138,32 +2156,37 @@ impl App {
         self.open_message(&msg, event_loop);
     }
 
-    /// Toggle recursive scanning of the current folder (`Ctrl+R`), keeping the
-    /// current photo in view. A no-op for an explicit file list (multi-select /
-    /// dropped photos): there is no single root to walk.
+    /// Toggle recursive scanning of the current folder (`Ctrl+R`), keeping the current photo
+    /// in view. A no-op for an explicit file list (multi-select / dropped photos): there is
+    /// no single root to walk.
+    ///
+    /// The re-scan **streams** like any folder open, so a large tree doesn't freeze the loop.
+    /// Two nice properties fall out: turning recursion **on** streams the subfolders in behind
+    /// the current photo; turning it **off** *mid-scan* is an escape hatch — `begin_dir_scan`
+    /// supersedes the in-flight recursive walk and re-scans just the flat root (fast), i.e.
+    /// "stop, I only wanted this folder". The current photo is preserved by path
+    /// (`Cursor::At`), falling back to the first image if it isn't in the new listing (e.g.
+    /// turning recursion off while viewing a subfolder photo).
     fn toggle_recursive(&mut self, event_loop: &ActiveEventLoop) {
         let Some(root) = self.scan_root.clone() else {
             return;
         };
-        let keep = self
+        let recursive = !self.recursive;
+        let cursor = self
             .displayed_item
             .and_then(|i| self.source.path(i))
-            .map(Path::to_path_buf);
-        let source = Source::Scan {
-            roots: vec![root],
-            recursive: !self.recursive,
-        };
-        let r = resolve_playlist(&source, &open::Cursor::First);
-        if r.source.is_empty() {
-            return;
-        }
-        // Re-find the photo we were viewing in the rebuilt (recursive) listing.
-        let start = keep
-            .as_ref()
-            .and_then(|k| (0..r.source.len()).find(|&i| r.source.path(i) == Some(k.as_path())))
-            .unwrap_or(0);
-        let recursive = r.recursive;
-        self.rebuild_playlist(r.source, r.root, r.scan_root, recursive, start, event_loop);
+            .map(Path::to_path_buf)
+            .map(open::Cursor::At)
+            .unwrap_or(open::Cursor::First);
+        self.begin_dir_scan(
+            Source::Scan {
+                roots: vec![root],
+                recursive,
+            },
+            cursor,
+        );
+        // Acknowledge the toggle now; the new listing streams in via `poll_dir_scan` (and
+        // `self.recursive` updates when the first batch bootstraps).
         let msg = if recursive {
             "Recursive folders: on"
         } else {
@@ -3422,6 +3445,13 @@ impl App {
     /// images to display. Rebuilt against the current scale; the renderer re-centers
     /// it on resize and drops it the moment a photo is shown.
     fn show_open_hint(&mut self) {
+        // Suppress the hint while a folder scan is pending (deferred startup launch) or
+        // streaming in — the first photo is about to bootstrap, so "Press O to open" would
+        // flash briefly and misleads (it implies nothing is loading). If the scan turns out
+        // empty, `poll_dir_scan`'s Done arm restores the hint.
+        if self.dir_scan.is_some() || self.pending_launch.is_some() {
+            return;
+        }
         let Some((bitmap, w, h)) = self.open_hint_panel() else {
             return;
         };
@@ -4092,12 +4122,12 @@ impl ApplicationHandler for App {
         self.active = Some(Active { window, renderer });
         self.request_prefetch();
 
-        // Now that the window + engine are live, kick off any launch input we
-        // deferred (an archive): a big .7z loads behind the spinner, and an
-        // encrypted / failed open can use the egui dialogs (a synchronous launch
-        // resolve, before the event loop, could do neither).
-        if let Some(input) = self.pending_launch.take() {
-            self.open_input(input, event_loop);
+        // Now that the window + engine are live, kick off any launch we deferred (an archive
+        // or a folder scan): a big .7z loads behind the spinner, a folder streams in (window
+        // shows first), and an encrypted / failed open can use the egui dialogs (a synchronous
+        // launch resolve, before the event loop, could do none of these).
+        if let Some(plan) = self.pending_launch.take() {
+            self.open_plan(plan.source, plan.cursor, event_loop);
         }
     }
 
@@ -5382,8 +5412,7 @@ fn main() {
         .filter(|a| !a.starts_with('-'))
         .map(PathBuf::from)
         .collect();
-    let input = classify_inputs(positional);
-    let mut plan = open::plan(input.clone());
+    let mut plan = open::plan(classify_inputs(positional));
     if let Source::Scan { recursive, .. } = &mut plan.source {
         // Default from the saved preference; an explicit CLI flag overrides it.
         *recursive = startup_settings.recursive;
@@ -5394,30 +5423,26 @@ fn main() {
             *recursive = false;
         }
     }
-    // An archive launch (CLI / double-click) is deferred until the window exists, so
-    // the viewer shows immediately and a big / encrypted / failed open uses the
-    // spinner + dialogs instead of blocking startup. Folders / files resolve now.
-    let archive_launch = matches!(plan.source, Source::Archive(_));
-    let resolved = if archive_launch {
+    // An archive **or folder** launch (CLI / double-click) is deferred until the window
+    // exists, so the viewer shows immediately: an archive loads behind the spinner / dialogs,
+    // and a folder *streams* in (the first photo appears almost at once) instead of blocking
+    // startup on a big tree's full walk + sort. Only an explicit file list resolves now (it's
+    // a finite, no-walk operation).
+    let deferred = matches!(plan.source, Source::Archive(_) | Source::Scan { .. });
+    let resolved = if deferred {
         Resolved::empty()
     } else {
         resolve_playlist(&plan.source, &plan.cursor)
     };
 
-    if archive_launch {
-        println!("PhotoBlaze: opening archive…");
-    } else {
-        println!(
-            "PhotoBlaze: {} image(s){}",
-            resolved.source.len(),
-            if resolved.recursive {
-                " (recursive)"
-            } else {
-                ""
+    match &plan.source {
+        Source::Archive(_) => println!("PhotoBlaze: opening archive…"),
+        Source::Scan { .. } => println!("PhotoBlaze: scanning folder…"),
+        _ => {
+            println!("PhotoBlaze: {} image(s)", resolved.source.len());
+            if resolved.source.is_empty() {
+                eprintln!("(no images - drop a photo or folder on the window, or press O to open)");
             }
-        );
-        if resolved.source.is_empty() {
-            eprintln!("(no images - drop a photo or folder on the window, or press O to open)");
         }
     }
 
@@ -5447,10 +5472,10 @@ fn main() {
         resolved.scan_root,
         metrics,
     );
-    // Hand the deferred archive open to the app; `resumed` fires it once the window
-    // and engine are up.
-    if archive_launch {
-        app.queue_launch(input);
+    // Hand the deferred open (archive or folder scan) to the app; `resumed` fires it once
+    // the window and engine are up. The plan carries the startup recursive override.
+    if deferred {
+        app.queue_launch(plan);
     }
     event_loop.run_app(&mut app).expect("event loop");
 
