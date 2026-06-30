@@ -613,10 +613,12 @@ impl Canvas {
         }
     }
 
-    /// Composite a rounded-rect **outline** of `t`-px thickness (the scan card's button
-    /// border): the ring between the box `[x0, y0, w, h]` (radius `r`) and the same box inset
-    /// by `t` (radius `r - t`), in `rgb` at `alpha`. Coverage = outer − inner, so the corners
-    /// stay anti-aliased.
+    /// Draw a rounded-rect **outline** of `t`-px thickness (the scan card's button border):
+    /// the ring between the box `[x0, y0, w, h]` (radius `r`) and the same box inset by `t`
+    /// (radius `r - t`). The ring is **set** to a translucent `(rgb, alpha)` — not composited
+    /// over what's behind it — so a 50%-alpha border is genuinely 50% opaque and the photo
+    /// shows through it (compositing over the card's already-opaque bg would read near-solid).
+    /// Coverage = outer − inner, so the corners stay anti-aliased.
     #[allow(clippy::too_many_arguments)]
     fn stroke_round_rect(
         &mut self,
@@ -644,10 +646,35 @@ impl Canvas {
                 };
                 let ring = (outer - inner).clamp(0.0, 1.0);
                 if ring > 0.0 {
-                    self.over(x0 + px_, y0 + py, rgb, ring * alpha);
+                    self.set_toward(x0 + px_, y0 + py, rgb, alpha, ring);
                 }
             }
         }
+    }
+
+    /// Blend the pixel at `(x, y)` **toward** the straight-alpha target `(rgb, alpha)` by
+    /// coverage `c` (∈ [0,1]): `c = 1` sets it to the target, `c = 0` leaves it. Unlike
+    /// [`over`](Canvas::over) this can *reduce* the destination's alpha, so it paints a
+    /// translucent shape the background shows through (the button's 50%-opacity outline).
+    /// Premultiplied lerp so colors stay correct where alpha is partial.
+    fn set_toward(&mut self, x: i32, y: i32, rgb: [u8; 3], alpha: f32, c: f32) {
+        if c <= 0.0 || x < 0 || y < 0 || x >= self.w || y >= self.h {
+            return;
+        }
+        let idx = ((y * self.w + x) * 4) as usize;
+        let dst = &mut self.px[idx..idx + 4];
+        let da = dst[3] as f32 / 255.0;
+        let na = da * (1.0 - c) + alpha * c;
+        if na <= 0.0 {
+            dst.fill(0);
+            return;
+        }
+        for (d, &t) in dst[..3].iter_mut().zip(rgb.iter()) {
+            let dp = (*d as f32) * da; // dst premultiplied
+            let tp = (t as f32) * alpha; // target premultiplied
+            *d = (((dp * (1.0 - c) + tp * c) / na).round()).clamp(0.0, 255.0) as u8;
+        }
+        dst[3] = (na * 255.0).round().clamp(0.0, 255.0) as u8;
     }
 
     /// Composite `rgba` (straight-alpha) over the pixel at `(x, y)`, if in bounds.
