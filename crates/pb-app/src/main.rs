@@ -2515,37 +2515,22 @@ impl ApplicationHandler for App {
                             self.begin_exit();
                         }
                     } else if let Some(key) = pb_key_winit::from_winit(code) {
-                        // Map the winit key to the shell-neutral `PbKey` (keys the keymap
-                        // can't name → ignored), then resolve it through the pure input
-                        // seam and execute the routing decision:
-                        //   - one-shot → run the command now (`dispatch_action`);
-                        //   - nav → start hold-to-fly (advance now, repeat in the loop);
-                        //   - held → track by physical key; pan/zoom apply each frame in
-                        //     `about_to_wait`.
-                        //   - frame-step → step one animation frame now, repeat while held.
-                        // `resolve_key_down` folds in the repeat gate (OS auto-repeats
-                        // resolve to `Ignore`) and the ⌘-doesn't-fall-through rule.
-                        match contract::resolve_key_down(
-                            &self.core.keymap,
+                        // Translate to a shell-neutral `CoreEvent` and let the core resolve +
+                        // route it (`handle`: repeat-gate + ⌘-no-fall-through, then one-shot →
+                        // `dispatch_action`, nav → hold-to-fly, held → track, frame-step). This is
+                        // the SAME entry point the macOS Swift host drives (NS0 Phase C2). Keys the
+                        // keymap can't name map to `None` and are ignored. `mods` is the tracked
+                        // modifier state (updated by `ModifiersChanged`).
+                        self.core.handle(contract::CoreEvent::KeyDown {
                             key,
-                            self.core.mods,
+                            mods: self.core.mods,
                             repeat,
-                        ) {
-                            contract::KeyResolution::Ignore => {}
-                            contract::KeyResolution::OneShot(act) => self.core.dispatch_action(act),
-                            contract::KeyResolution::NavStart(act) => self.core.nav_press(key, act),
-                            contract::KeyResolution::HeldStart(act) => {
-                                self.core.held.insert(key, act);
-                            }
-                            contract::KeyResolution::FrameStepStart(act) => {
-                                self.core.frame_step_press(key, act)
-                            }
-                        }
+                        });
                     }
                 }
                 ElementState::Released => {
                     if let Some(key) = pb_key_winit::from_winit(code) {
-                        self.core.held.remove(&key);
+                        self.core.handle(contract::CoreEvent::KeyUp { key });
                     }
                 }
             },
@@ -2573,16 +2558,9 @@ impl ApplicationHandler for App {
             // navigation never gets stuck auto-advancing (a known winit repeat /
             // lost-key-up hazard, called out in CLAUDE.md).
             WindowEvent::Focused(false) => {
-                self.core.held.clear();
-                self.core.hold_start = None;
-                self.core.mods = contract::Modifiers::NONE;
-                self.core.zoom_started = None;
-                self.core.zoom_last = None;
-                self.core.pan_started = None;
-                self.core.pan_last = None;
-                self.core.pie_glow_started = None;
-                // Focus loss can swallow the button-up — never leave a drag stuck.
-                self.core.dragging = false;
+                // The core clears the held set + gesture accumulators + any stuck drag (the
+                // focus-loss release net) — same entry point the Swift host uses (NS0 Phase C2).
+                self.core.handle(contract::CoreEvent::FocusLost);
             }
 
             // Track the pointer (anchor for pinch/wheel zoom) and, while the left
