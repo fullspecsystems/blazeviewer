@@ -1251,58 +1251,18 @@ impl WgpuRenderer {
         );
     }
 
-    /// Set the EDR highlight roll-off target (macOS) — the headroom of the screen the
-    /// **window** is on, supplied by `pb-app` (the renderer can only see `mainScreen`,
-    /// which may be a different/SDR panel in a multi-display setup). Re-writes the
-    /// present uniform so it takes effect immediately. `1.0` = clamp HDR to SDR white.
-    pub fn set_edr_headroom(&mut self, headroom: f32) {
-        self.edr_headroom = headroom.max(1.0);
-        // Peak is unused on the HDR surface (the present pass keys off the headroom),
-        // so any value is fine here; the next per-image `set_present_peak` refreshes it.
-        self.queue.write_buffer(
-            &self.peak_buf,
-            0,
-            bytemuck::bytes_of(&PresentUniform::new(
-                1.0,
-                self.hdr_surface,
-                self.edr_headroom,
-            )),
-        );
-    }
-
     /// The display refresh cap helper will live here in Phase 3; for now the app
     /// reads it from winit directly.
     pub fn present_mode(&self) -> wgpu::PresentMode {
         self.config.present_mode
     }
-
-    /// macOS: how to configure the window's `CAMetalLayer` for this surface. `Some`
-    /// when the surface is fp16 scRGB (wide-gamut/HDR) — the layer should be set to
-    /// extended-linear-sRGB; the bool is whether to also request EDR headroom
-    /// (`wantsExtendedDynamicRangeContent`). `None` for a plain SDR 8-bit surface
-    /// (no layer poke needed). See `pb-app/src/hdr_surface.rs`.
-    pub fn hdr_surface_wants_edr(&self) -> Option<bool> {
-        self.hdr_surface.then_some(self.hdr_on)
-    }
-
-    /// The currently displayed image's texture dimensions (for pan-clamp math).
-    pub fn image_size(&self) -> (u32, u32) {
-        (self.img_w, self.img_h)
-    }
-
-    /// Process completed GPU work and free dropped resources (the previous
-    /// image's texture). Call once per frame so rapid navigation doesn't let GPU
-    /// memory pile up. (Phase 3 replaces per-image textures with a reused ring.)
-    pub fn poll(&self) {
-        self.device.poll(wgpu::Maintain::Poll);
-    }
 }
 
-impl WgpuRenderer {
+impl Renderer for WgpuRenderer {
     /// Override the letterbox / background fill color (sRGB), shown around a photo
     /// that doesn't cover the screen. Takes effect on the next `render`. Off the
     /// photo hot path — set from user settings, not per frame.
-    pub fn set_letterbox(&mut self, rgb: [u8; 3]) {
+    fn set_letterbox(&mut self, rgb: [u8; 3]) {
         self.letterbox = rgb;
     }
 
@@ -1310,7 +1270,7 @@ impl WgpuRenderer {
     /// is an independent overlay layer, so it composites *over* the info panel
     /// rather than replacing it; the caller fades it by re-uploading with scaled
     /// alpha. `bottom_margin` is the gap from the bottom edge.
-    pub fn set_toast(&mut self, panel: Option<(&[u8], u32, u32)>, bottom_margin: u32) {
+    fn set_toast(&mut self, panel: Option<(&[u8], u32, u32)>, bottom_margin: u32) {
         self.toast = match panel {
             Some((rgba, w, h)) => {
                 let scale = self.scene_scale(false);
@@ -1356,7 +1316,7 @@ impl WgpuRenderer {
     /// ready). Its own overlay layer, composited above the photo and the panels;
     /// the caller animates the fill / fade by re-uploading the rasterized bitmap.
     /// `margin` is the gap from the top and right edges.
-    pub fn set_pie(&mut self, panel: Option<(&[u8], u32, u32)>, margin: u32) {
+    fn set_pie(&mut self, panel: Option<(&[u8], u32, u32)>, margin: u32) {
         self.pie = match panel {
             Some((rgba, w, h)) => {
                 let scale = self.scene_scale(false);
@@ -1402,12 +1362,7 @@ impl WgpuRenderer {
     /// its right edge with the pie; `top_margin` is its top inset (the app passes
     /// pie-bottom + gap, so the chip sits just below the pie). Its own overlay layer, drawn
     /// like the pie.
-    pub fn set_chip(
-        &mut self,
-        panel: Option<(&[u8], u32, u32)>,
-        right_margin: u32,
-        top_margin: u32,
-    ) {
+    fn set_chip(&mut self, panel: Option<(&[u8], u32, u32)>, right_margin: u32, top_margin: u32) {
         self.chip = match panel {
             Some((rgba, w, h)) => {
                 let scale = self.scene_scale(false);
@@ -1453,7 +1408,7 @@ impl WgpuRenderer {
     /// Set or clear the centered message panel (the empty-state "Press O to open…"
     /// hint). Its own overlay layer, centered on both axes; persists until a photo is
     /// shown (`set_image` / `present_slot` clear it).
-    pub fn set_message(&mut self, panel: Option<(&[u8], u32, u32)>) {
+    fn set_message(&mut self, panel: Option<(&[u8], u32, u32)>) {
         self.message = match panel {
             Some((rgba, w, h)) => {
                 let scale = self.scene_scale(false);
@@ -1493,9 +1448,34 @@ impl WgpuRenderer {
             None => None,
         };
     }
-}
 
-impl Renderer for WgpuRenderer {
+    fn set_edr_headroom(&mut self, headroom: f32) {
+        self.edr_headroom = headroom.max(1.0);
+        // Peak is unused on the HDR surface (the present pass keys off the headroom),
+        // so any value is fine here; the next per-image `set_present_peak` refreshes it.
+        self.queue.write_buffer(
+            &self.peak_buf,
+            0,
+            bytemuck::bytes_of(&PresentUniform::new(
+                1.0,
+                self.hdr_surface,
+                self.edr_headroom,
+            )),
+        );
+    }
+
+    fn hdr_surface_wants_edr(&self) -> Option<bool> {
+        self.hdr_surface.then_some(self.hdr_on)
+    }
+
+    fn image_size(&self) -> (u32, u32) {
+        (self.img_w, self.img_h)
+    }
+
+    fn poll(&self) {
+        self.device.poll(wgpu::Maintain::Poll);
+    }
+
     fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;

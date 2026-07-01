@@ -8,9 +8,9 @@
 
 ## STATUS — for the fresh session (updated 2026-06-30, branch `swiftui`)
 
-All work below is **committed, green (workspace suite ~376 tests, clippy/fmt clean), and
+All work below is **committed, green (workspace suite 376 tests, clippy/fmt clean), and
 manually smoke-verified** by the owner. `main` (Live Photo support) is merged in. Nothing is
-half-done. Resume at **step 3** below.
+half-done. Resume at **step 4** below.
 
 ### Landed — inversion seams + de-thread (the `event_loop` half)
 - **Ckpt 1** (`3d7c42d`): `CoreEffect` queue + `drain_effects`; `begin_exit` → `Quit`.
@@ -22,7 +22,7 @@ half-done. Resume at **step 3** below.
   routes its fatal exit through `Quit`; the archive-flow circular knot (`begin_archive_open ↔
   finish_archive_open`) was cut in one global strip. Orchestration is now winit-event-loop-free.
 
-### Landed — keystone steps 1–2 (the ownership half), each measured flat
+### Landed — keystone steps 1–3 (the ownership half)
 - **Step 1** (`98e85cc`): **`Active` split** into separate `window: Option<Arc<Window>>` +
   `renderer: Option<WgpuRenderer>` fields (42 sites; the 5 "uses both" blocks split into two
   disjoint-field borrows). Concrete types — no vtable, perf-neutral. **Measured flat.**
@@ -31,6 +31,18 @@ half-done. Resume at **step 3** below.
   Grab/Grabbing/Pointer; shell maps via `cursor_icon`). `drain_effects` grew a real match +
   a `drain` `--metrics` stage. **Measured flat** — `set_title` (~0.13 ms) relocated from
   `present_item` to the drain (present p50 0.32 → 0.16, drain absorbed it, total flat).
+- **Step 3**: **`renderer` → `Box<dyn Renderer>`** (the vtable). Extended `pb_render::Renderer`
+  with the 9 methods `App` used that weren't on it yet (`set_letterbox`/`set_toast`/`set_pie`/
+  `set_chip`/`set_message`/`image_size`/`set_edr_headroom`/`hdr_surface_wants_edr`/`poll`) —
+  moved verbatim from the two inherent `impl WgpuRenderer` blocks into `impl Renderer for
+  WgpuRenderer`, dropping `pub`; `new`/`new_async`/`scene_scale`/`set_present_peak`/
+  `present_mode` stay inherent. `App.renderer: Option<WgpuRenderer>` → `Option<Box<dyn
+  Renderer>>` (construction stays a concrete `WgpuRenderer`, boxed on store; the ~23 `r.method()`
+  call sites unchanged — `Box` auto-derefs). No pb-render-internal / example callers needed
+  fixing (clean build). Suite green (376), clippy/fmt clean. **Measured flat** (owner smoke,
+  same corpus/60 Hz): `present` p50 0.177 ms (vs step-2's ~0.16), `drain` p95 0.135 ms (vs
+  ~0.13) — the ~17 µs `present` delta is run-to-run jitter, not the ~1 ns vtable dispatch
+  (decode is the bottleneck at p50 99.5 ms under load, so the sub-ms event-loop stages jitter).
 
 ## Measurement methodology (keep using it)
 
@@ -54,21 +66,9 @@ imperceptible.
 
 ## Remaining steps (resume here)
 
-**Step 3 — `renderer` → `Box<dyn Renderer>` (the vtable).** The last renderer-abstraction
-piece and cleanly measurable (calls stay in `present_item`, just indirect → `present` p50
-should stay ~0.16 ms; a vtable dispatch is ~1 ns). Requires extending `pb_render::Renderer`
-(in `pb-render/src/lib.rs`) with the **9 methods `App` uses that aren't on it yet**, then
-`renderer: Option<WgpuRenderer>` → `Option<Box<dyn Renderer>>` (construction `Box::new`; the
-23 `r.method()` call sites are unchanged — `Box` auto-derefs). The 9 methods are currently
-**inherent** `pub fn`s in `gpu.rs` — **move them into `impl Renderer for WgpuRenderer`**
-(~line 1498) and drop `pub`; their signatures are all wgpu-free (primitives / `Option<(&[u8],
-u32,u32)>` / `[u8;3]`), so they abstract cleanly:
-- from the `impl WgpuRenderer` block ~1065–1300: `set_edr_headroom`, `hdr_surface_wants_edr`,
-  `image_size`, `poll` (leave `new`, `scene_scale`, `set_present_peak`, `present_mode` inherent);
-- from the `impl WgpuRenderer` block ~1301–1497 (exactly these 5): `set_letterbox`, `set_toast`,
-  `set_pie`, `set_chip`, `set_message`.
-Fix any pb-render-internal / example callers the compiler flags (they need `use
-pb_render::Renderer` in scope). Then re-measure `present` (expect flat).
+**Step 3 — `renderer` → `Box<dyn Renderer>` (the vtable). ✅ DONE & measured flat** (see STATUS
+above). The `Renderer` trait now carries all 18 methods `App` uses; the field is
+`Option<Box<dyn Renderer>>`. `present` p50 0.177 ms / `drain` p95 0.135 ms — flat vs step 2.
 
 **Step 4 — remaining winit/native touches → effects/shell.** Now that `event_loop` and the
 renderer are handled, sever the rest so orchestration is winit/muda/egui/rfd-free:

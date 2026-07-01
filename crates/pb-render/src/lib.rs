@@ -113,6 +113,43 @@ pub trait Renderer {
     /// rebind, no decode or upload). A no-op if the slot isn't uploaded yet.
     fn present_slot(&mut self, slot: usize);
 
+    /// Override the letterbox / background fill color (sRGB), shown around a photo
+    /// that doesn't cover the screen. Takes effect on the next `render`. Off the
+    /// photo hot path — set from user settings, not per frame.
+    fn set_letterbox(&mut self, rgb: [u8; 3]);
+    /// Set or clear the transient bottom-center status toast. Its own overlay layer,
+    /// so it composites *over* the info panel rather than replacing it; the caller
+    /// fades it by re-uploading with scaled alpha. `bottom_margin` is the gap from
+    /// the bottom edge.
+    fn set_toast(&mut self, panel: Option<(&[u8], u32, u32)>, bottom_margin: u32);
+    /// Set or clear the top-right "loading" pie (shown while the next photo isn't
+    /// ready). Its own overlay layer, composited above the photo and the panels;
+    /// the caller animates the fill / fade by re-uploading. `margin` is the gap from
+    /// the top and right edges.
+    fn set_pie(&mut self, panel: Option<(&[u8], u32, u32)>, margin: u32);
+    /// Set or clear the top-right **scan-count chip** ("12 / 1234…"). `right_margin`
+    /// aligns its right edge with the pie; `top_margin` is its top inset. Its own
+    /// overlay layer, drawn like the pie.
+    fn set_chip(&mut self, panel: Option<(&[u8], u32, u32)>, right_margin: u32, top_margin: u32);
+    /// Set or clear the centered message panel (the empty-state "Press O to open…"
+    /// hint). Its own overlay layer, centered on both axes; persists until a photo is
+    /// shown (`set_image` / `present_slot` clear it).
+    fn set_message(&mut self, panel: Option<(&[u8], u32, u32)>);
+
+    /// The currently displayed image's texture dimensions (for pan-clamp math).
+    fn image_size(&self) -> (u32, u32);
+    /// Set the EDR highlight roll-off target (macOS) — the headroom of the screen the
+    /// **window** is on. `1.0` = clamp HDR to SDR white. Re-writes the present uniform
+    /// so it takes effect immediately.
+    fn set_edr_headroom(&mut self, headroom: f32);
+    /// macOS: how to configure the window's `CAMetalLayer` for this surface. `Some`
+    /// when the surface is fp16 scRGB (wide-gamut/HDR); the bool is whether to also
+    /// request EDR headroom. `None` for a plain SDR 8-bit surface.
+    fn hdr_surface_wants_edr(&self) -> Option<bool>;
+    /// Process completed GPU work and free dropped resources (the previous image's
+    /// texture). Call once per frame so rapid navigation doesn't let GPU memory pile up.
+    fn poll(&self);
+
     /// Draw and present one frame.
     fn render(&mut self) -> Result<(), RenderError>;
 }

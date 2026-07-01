@@ -230,11 +230,13 @@ green + owner-smoke-verified:
   seam; **dialog opens deferred** through the shell (ckpts 1–3).
 - Keystone **step 1**: `Active` split into `window` + `renderer` fields (perf-neutral,
   *measured flat*). **Step 2**: window ops (`set_title`/`request_redraw`/cursor) → effects
-  (*measured flat*; work relocated to the drain).
+  (*measured flat*; work relocated to the drain). **Step 3**: `renderer` → `Box<dyn
+  Renderer>` — the `Renderer` trait extended with the 9 previously-inherent methods; field is
+  now `Option<Box<dyn Renderer>>` (*measured flat*: `present` p50 0.177 ms / `drain` p95
+  0.135 ms, vs step-2's ~0.16 / ~0.13; the vtable dispatch is ~1 ns).
 - **Instrumentation added** (`present` + `drain` `--metrics` stages) so every step is
   before/after measured against a pinned corpus — the prime directive, applied to the refactor.
-- **Remaining:** step 3 `renderer` → `Box<dyn Renderer>` (extend the `Renderer` trait with 9
-  methods); step 4 menu/dialog/clipboard/rfd → effects; step 5 the physical move into
+- **Remaining:** step 4 menu/dialog/clipboard/rfd → effects; step 5 the physical move into
   `pb-app-core` + thin `WinitShell`. The single `AppCore` object is the remaining gate.
 
 ## NS1 — Minimal SwiftUI/AppKit host: canvas only (proves the inversion)

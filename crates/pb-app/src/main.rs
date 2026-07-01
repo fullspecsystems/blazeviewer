@@ -512,10 +512,12 @@ struct App {
     /// The winit window (NS0: shell-owned — `WinitShell` in the eventual crate split).
     /// `None` until `resumed` creates it; always in lockstep with `renderer`.
     window: Option<Arc<Window>>,
-    /// The GPU renderer (NS0: AppCore-owned). Split out from the old `Active { window,
-    /// renderer }` so window ownership can move to the shell and rendering to the core.
-    /// `None` until `resumed`; created on the window's surface, so it shares its lifecycle.
-    renderer: Option<WgpuRenderer>,
+    /// The GPU renderer (NS0: AppCore-owned), behind the [`Renderer`] trait object so
+    /// backends are swappable and the core never names a concrete GPU type. Split out
+    /// from the old `Active { window, renderer }` so window ownership can move to the
+    /// shell and rendering to the core. `None` until `resumed`; created on the window's
+    /// surface (a concrete [`WgpuRenderer`], then boxed), so it shares its lifecycle.
+    renderer: Option<Box<dyn Renderer>>,
     /// Physical keys currently held → the [`Action`] each resolved to at press time
     /// (OS auto-repeat ignored). Drives hold-to-fly nav and continuous pan/zoom; the
     /// action is captured on key-down so it stays stable while held, and is keyed by
@@ -5185,7 +5187,7 @@ impl ApplicationHandler for App {
         self.last_present = Some(Instant::now());
 
         self.window = Some(window);
-        self.renderer = Some(renderer);
+        self.renderer = Some(Box::new(renderer));
         self.request_prefetch();
 
         // Now that the window + engine are live, kick off any launch we deferred (an archive
