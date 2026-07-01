@@ -268,6 +268,17 @@ pub fn title_for(name: &str, idx: usize, n: usize) -> String {
     format!("{} ({}/{n})", file_name_of(name), idx + 1)
 }
 
+/// The playlist cursor after removing item `removed` from a list of `len`, or `None` when the
+/// list becomes empty. Stays on the *next* photo (same index) except when the **last** item was
+/// removed, where it falls back to the new last index (the **previous** photo). Pure.
+pub fn cursor_after_removal(len: usize, removed: usize) -> Option<usize> {
+    if len <= 1 {
+        return None;
+    }
+    let new_len = len - 1;
+    Some(removed.min(new_len - 1))
+}
+
 /// The frame-step direction encoded by an action: `+1` next / `-1` previous / `0`
 /// for anything else.
 pub fn frame_step_dir(action: Action) -> i32 {
@@ -472,6 +483,41 @@ mod tests {
         let out = scale_alpha(&rgba, 0.5);
         assert_eq!(&out[..3], &[10, 20, 30]);
         assert_eq!(out[3], 100);
+    }
+
+    #[test]
+    fn remove_middle_keeps_cursor_on_the_next_photo() {
+        // [0 1 2 3 4], remove 2 → [0 1 3 4]; cursor stays at 2 (was photo 3, the next).
+        assert_eq!(cursor_after_removal(5, 2), Some(2));
+        assert_eq!(cursor_after_removal(5, 0), Some(0));
+    }
+
+    #[test]
+    fn remove_last_falls_back_to_the_previous() {
+        // [0 1 2], remove 2 (the last) → [0 1]; cursor → 1 (the new last = previous).
+        assert_eq!(cursor_after_removal(3, 2), Some(1));
+        assert_eq!(cursor_after_removal(2, 1), Some(0));
+    }
+
+    #[test]
+    fn remove_only_item_empties_the_playlist() {
+        assert_eq!(cursor_after_removal(1, 0), None);
+        assert_eq!(cursor_after_removal(0, 0), None);
+    }
+
+    #[test]
+    fn cursor_stays_in_bounds_of_the_shrunk_list() {
+        for len in 1..=10 {
+            for removed in 0..len {
+                if let Some(c) = cursor_after_removal(len, removed) {
+                    assert!(
+                        c < len - 1,
+                        "cursor {c} must index the shrunk list (len {})",
+                        len - 1
+                    );
+                }
+            }
+        }
     }
 
     #[test]

@@ -74,7 +74,7 @@ mod save_rotation;
 // resolving unchanged.
 use pb_app_core::{
     action, contract, keymap, pb_key, slideshow, timing, AppCore, InfoMode, Nav, OpenButton,
-    OpenPanel, PlayHint, UndoAction, Viewport,
+    OpenPanel, UndoAction, Viewport,
 };
 // The HUD CPU compositor (info panel / toasts / pie / chip) and its Font Awesome icon
 // rasterizer now live in the shell-neutral `pb-hud` crate (NS0). Re-export them at the
@@ -97,11 +97,10 @@ use pb_app_core::decode_pool::{recommended_workers, DecodeFn, DecodePool};
 // Engine tuning constants + pure helpers migrated to pb-app-core (NS0 5.5 / Phase B) so the
 // orchestration methods that use them can live on `AppCore`. The shell still shares several.
 use pb_app_core::engine::{
-    decode_item, file_name_of, is_hdr, meta_for, nav_of, point_in_rect, render_color,
-    ring_capacity, scale_mode_of, window_for_capacity, RING_BUDGET_BYTES,
+    decode_item, file_name_of, is_hdr, meta_for, render_color, ring_capacity, scale_mode_of,
+    window_for_capacity, RING_BUDGET_BYTES,
 };
 use pb_app_core::metrics::StageTimes;
-use pb_key::PbKey;
 
 /// Cap on decoded-but-not-yet-uploaded bytes held by the pool (backpressure).
 const POOL_BUDGET_BYTES: usize = 512 * 1024 * 1024;
@@ -247,13 +246,6 @@ struct App {
     /// refresh only touches the OS for items that actually changed. `None` = nothing
     /// pushed yet (re-assert everything).
     menu_state: Option<contract::MenuState>,
-    /// A delete whose playlist-advance is deferred: `(fire_at, removed_index)`. The
-    /// deleted photo stays on screen with its icon until `fire_at`, then the playlist
-    /// drops the item and advances (see `delete_current` / `flush_pending_delete`).
-    pending_delete: Option<(Instant, usize)>,
-    /// The item awaiting a permanent-delete confirmation: set when the (themed egui)
-    /// confirm dialog opens, consumed when it answers Yes (see `dialog_event`).
-    pending_confirm_delete: Option<usize>,
     /// Whether the menu has been attached to the current window (`init_for_hwnd`),
     /// so fullscreen↔windowed toggles can show/hide it instead of re-initializing.
     menu_attached: bool,
@@ -444,6 +436,9 @@ impl App {
                 scan_root,
                 recursive,
                 scanning: false,
+                launching: false,
+                pending_delete: None,
+                pending_confirm_delete: None,
                 info: InfoMode::Off,
                 overlay_shown: false,
                 overlay_item: None,
@@ -492,8 +487,6 @@ impl App {
             undo_item: None,
             view_checks: None,
             menu_state: None,
-            pending_delete: None,
-            pending_confirm_delete: None,
             menu_attached: false,
             dialog: None,
             archive_load: None,
@@ -616,7 +609,7 @@ impl App {
     /// photo (the previous if it was the last; the empty state if none remain).
     fn delete_current(&mut self, permanent: bool) {
         // Settle any still-pending delete-advance first (e.g. a rapid second Del).
-        self.flush_pending_delete();
+        self.core.flush_pending_delete();
         let Some(item) = self.core.displayed_item else {
             return;
         };
@@ -629,7 +622,7 @@ impl App {
             // dialog (dark-aware, and cross-platform for the macOS port). The delete
             // runs when the dialog answers Yes (`dialog_event`), on this item.
             let name = file_name_of(self.core.source.name(item));
-            self.pending_confirm_delete = Some(item);
+            self.core.pending_confirm_delete = Some(item);
             self.open_confirm_delete(&name);
             return;
         }
@@ -661,74 +654,7 @@ impl App {
             icon::assets::RECYCLE
         };
         self.core.show_toast_icon("", Some(icon));
-        self.pending_delete = Some((Instant::now() + DELETE_ADVANCE_DELAY, item));
-    }
-
-    /// Perform a deferred delete's playlist advance: drop the removed item, rebuild the
-    /// source from the remaining paths (indices shift, so index-keyed state resets —
-    /// fine for an explicit, infrequent command), and advance to the next photo (the
-    /// previous if it was the last; the empty state if none remain). Idempotent — a
-    /// no-op when nothing is pending.
-    fn flush_pending_delete(&mut self) {
-        let Some((_, removed)) = self.pending_delete.take() else {
-            return;
-        };
-        let len = self.core.source.len();
-        // If a scan is still streaming in, tombstone the deleted path so a later batch (whose
-        // cumulative list still has it) can't bring it back. (No-op once the scan finishes.)
-        if self.dir_scan.is_some() {
-            if let Some(p) = self.core.source.path(removed).map(Path::to_path_buf) {
-                self.core.deleted.insert(p);
-            }
-        }
-        match delete::cursor_after_removal(len, removed) {
-            None => self.enter_empty_state(),
-            Some(start) => {
-                let remaining: Vec<PathBuf> = (0..len)
-                    .filter(|&i| i != removed)
-                    .filter_map(|i| self.core.source.path(i).map(Path::to_path_buf))
-                    .collect();
-                let src: Arc<dyn PhotoSource> = Arc::new(FsSource::new(remaining));
-                let root = self.core.root.clone();
-                let scan_root = self.core.scan_root.clone();
-                let recursive = self.core.recursive;
-                self.rebuild_playlist(src, root, scan_root, recursive, start);
-            }
-        }
-    }
-
-    /// Clear to the "no images" placeholder after the last photo is deleted. Mirrors
-    /// the bare-launch empty state (a test pattern + title; `O`/drag-drop reopen).
-    fn enter_empty_state(&mut self) {
-        self.pending_delete = None;
-        self.core.stop_playback(); // the deleted photo may have been playing (#37)
-        self.core.source = Arc::new(FsSource::new(Vec::new()));
-        self.core.playlist = Playlist::new(0, 0);
-        self.core.rotations.clear();
-        self.core.meta_cache.clear();
-        self.core.exif_cache.clear();
-        self.core.live_motion_cache.clear();
-        self.core.failed.clear();
-        self.core.preview_resident.clear();
-        self.core.upgrade_done.clear();
-        self.core.last_upgrade_set.clear();
-        self.core.undo_stack.clear();
-        self.core.invalidate_geometry();
-        self.core.displayed_item = None;
-        self.core.target_item = None;
-        self.core.current = None;
-        if let Some(r) = self.core.renderer.as_mut() {
-            r.clear_image();
-            r.set_overlay(None, 0);
-        }
-        self.core
-            .effects
-            .push(contract::CoreEffect::SetTitle("PhotoBlaze".to_string()));
-        // Blank background + the centered "Press O to open…" hint (mirrors a bare launch).
-        self.show_open_hint();
-        self.core.overlay_shown = false;
-        self.core.overlay_item = None;
-        self.core.draw();
+        self.core.pending_delete = Some((Instant::now() + DELETE_ADVANCE_DELAY, item));
     }
 
     /// Defer a launch **plan** until the window + engine exist (`resumed` fires it).
@@ -739,6 +665,7 @@ impl App {
     /// preserved (re-planning in `resumed` would drop it).
     fn queue_launch(&mut self, plan: open::OpenPlan) {
         self.pending_launch = Some(plan);
+        self.core.launching = true; // core mirror: suppress the open hint until it resolves
     }
 
     /// Open a launch input at runtime (the file picker or a drag-drop): plan it,
@@ -776,7 +703,8 @@ impl App {
             eprintln!("PhotoBlaze: no supported images in that selection");
             return;
         }
-        self.rebuild_playlist(r.source, r.root, r.scan_root, r.recursive, r.start);
+        self.core
+            .rebuild_playlist(r.source, r.root, r.scan_root, r.recursive, r.start);
     }
 
     /// Start opening an archive at runtime (picker / drag-drop / a deferred launch).
@@ -894,7 +822,8 @@ impl App {
             Ok(r) if !r.source.is_empty() => {
                 self.password_archive = None;
                 self.close_dialog();
-                self.rebuild_playlist(r.source, r.root, r.scan_root, r.recursive, r.start);
+                self.core
+                    .rebuild_playlist(r.source, r.root, r.scan_root, r.recursive, r.start);
             }
             Ok(_) => self.fail_archive_open(&archive::ArchiveOpenError::Empty),
             Err(archive::ArchiveOpenError::PasswordRequired) => {
@@ -1021,7 +950,7 @@ impl App {
                         if let Some(s) = self.dir_scan.as_mut() {
                             s.bootstrapped = true;
                         }
-                        self.rebuild_playlist(
+                        self.core.rebuild_playlist(
                             resolved.source,
                             resolved.root,
                             resolved.scan_root,
@@ -1047,7 +976,7 @@ impl App {
                         // "Press O to open" hint the scan had suppressed (a bare-folder launch
                         // onto an empty folder), but never blank an existing photo.
                         if self.core.source.is_empty() {
-                            self.show_open_hint();
+                            self.core.show_open_hint();
                         }
                     }
                     // Deck is final now: resume normal prefetch (random-ahead warm again).
@@ -1716,10 +1645,10 @@ impl App {
     /// pan/zoom are driven by the hold loop (`about_to_wait`), not this path.
     fn dispatch_action(&mut self, action: Action) {
         match action {
-            Action::Next => self.advance(Nav::Forward),
-            Action::Prev => self.advance(Nav::Backward),
-            Action::Random => self.advance(Nav::Random),
-            Action::RandomPrev => self.advance(Nav::RandomPrev),
+            Action::Next => self.core.advance(Nav::Forward),
+            Action::Prev => self.core.advance(Nav::Backward),
+            Action::Random => self.core.advance(Nav::Random),
+            Action::RandomPrev => self.core.advance(Nav::RandomPrev),
             // Pan is continuous-while-held only (the hold loop); never single-dispatched.
             Action::PanLeft | Action::PanRight | Action::PanUp | Action::PanDown => {}
             Action::ZoomIn => self.zoom_step(1.25),
@@ -1777,51 +1706,6 @@ impl App {
         if let Some(input) = input {
             self.open_input(input);
         }
-    }
-
-    /// Replace the playlist with a new source and re-show at `start`. Every bit
-    /// of index-keyed state (per-item rotation overrides, the metadata cache, the
-    /// failed set, the resident ring) is dropped because the indices are
-    /// reassigned; the geometry-epoch bump discards any in-flight decode for the
-    /// old set.
-    fn rebuild_playlist(
-        &mut self,
-        source: Arc<dyn PhotoSource>,
-        root: PathBuf,
-        scan_root: Option<PathBuf>,
-        recursive: bool,
-        start: usize,
-    ) {
-        if source.is_empty() {
-            return;
-        }
-        let start = start.min(source.len() - 1);
-        self.pending_delete = None; // any rebuild supersedes a deferred delete-advance
-        self.core.stop_playback(); // a new source drops any playback of the old one (#2)
-        self.core.source = source;
-        self.core.root = root;
-        self.core.scan_root = scan_root;
-        self.core.recursive = recursive;
-        self.core.playlist = Playlist::new(self.core.source.len(), 0).with_cursor(start);
-        // Indices are reassigned — drop everything keyed by item index.
-        self.core.rotations.clear();
-        self.core.meta_cache.clear();
-        self.core.exif_cache.clear();
-        self.core.live_motion_cache.clear();
-        self.core.failed.clear();
-        self.core.preview_resident.clear();
-        self.core.upgrade_done.clear();
-        self.core.last_upgrade_set.clear();
-        // Undo entries reference the old source's indices/paths — drop them too.
-        self.core.undo_stack.clear();
-        // Invalidate the ring + bump the epoch (discards in-flight old decodes),
-        // then synchronously show the new current photo and refill around it.
-        self.core.invalidate_geometry();
-        self.core.displayed_item = self.core.playlist.current();
-        self.core.target_item = self.core.playlist.current();
-        self.core.load_current_sync();
-        self.core.request_prefetch();
-        self.core.effects.push(contract::CoreEffect::RequestRender);
     }
 
     /// Filter a streamed snapshot through the delete-tombstone set, rebuilding its `FsSource`
@@ -2040,7 +1924,7 @@ impl App {
                     self.dir_scan = None;
                 }
                 self.dialog = None;
-                self.pending_confirm_delete = None; // Esc / close = cancel the confirm
+                self.core.pending_confirm_delete = None; // Esc / close = cancel the confirm
                 self.password_archive = None; // Esc / close = abandon the password prompt
             }
             // The password dialog stays open until the open succeeds or is cancelled (a wrong
@@ -2093,7 +1977,7 @@ impl App {
             // Confirm drives a delete.
             DialogOutcome::ConfirmAnswered(confirmed) => {
                 self.dialog = None;
-                let item = self.pending_confirm_delete.take();
+                let item = self.core.pending_confirm_delete.take();
                 if confirmed {
                     if let Some(item) = item {
                         if let Some(path) = self.core.source.path(item).map(Path::to_path_buf) {
@@ -2104,27 +1988,6 @@ impl App {
             }
             // Message / others just close.
             DialogOutcome::Closed => self.dialog = None,
-        }
-    }
-
-    /// Show the empty-state open panel over the (blank) viewer — used when there are no images
-    /// to display. Rebuilt against the current scale + hover; the renderer re-centers it on
-    /// resize and drops it the moment a photo is shown. Records the button rects for hit-testing.
-    fn show_open_hint(&mut self) {
-        // Suppress the panel while a folder scan is pending (deferred startup launch) or
-        // streaming in — the first photo is about to bootstrap, so the call to action would
-        // flash briefly and mislead (it implies nothing is loading). If the scan turns out
-        // empty, `poll_dir_scan`'s Done arm restores it.
-        if self.dir_scan.is_some() || self.pending_launch.is_some() {
-            return;
-        }
-        let Some((bitmap, w, h, file, folder)) = self.core.open_panel_bitmap() else {
-            self.core.open_panel = None;
-            return;
-        };
-        self.core.open_panel = Some(OpenPanel { w, h, file, folder });
-        if let Some(a) = self.core.renderer.as_mut() {
-            a.set_message(Some((&bitmap, w, h)));
         }
     }
 
@@ -2164,91 +2027,6 @@ impl App {
         }
         self.core.chip_sig = want;
         self.core.chip_built = Instant::now();
-    }
-
-    /// A monitor/DPI change re-scaled the window (e.g. dragging from a 1× display to a 2×
-    /// Retina one): every CPU-rasterized overlay was baked at the old [`scale_factor`] and is
-    /// cached by *content* (which didn't change), so force each to rebuild at the new DPI —
-    /// otherwise the overlay text looks soft / wrong-sized on the new monitor. The photo and
-    /// the info/EXIF panel are re-decoded / re-shown by the `Resized` → settle path that
-    /// follows this event (using the now-updated scale); here we invalidate the per-tick
-    /// overlays (the loading pie and the scan card) and the empty-state hint.
-    ///
-    /// [`scale_factor`]: App::scale_factor
-    fn rescale_overlays(&mut self) {
-        self.core.pie_pushed = None; // re-rasterize the loading pie at the new scale next tick
-        self.core.chip_sig = None; // re-rasterize the scan card next tick
-        if self.core.overlay_shown {
-            self.core.overlay_item = None; // force the info/EXIF/help panel to re-show next tick
-        }
-        if self.core.source.is_empty() {
-            self.show_open_hint(); // re-rasterize the "Press O to open" hint
-        }
-        self.core.effects.push(contract::CoreEffect::RequestRender);
-    }
-
-    /// Whether the empty-state open panel is the active overlay, so its buttons are
-    /// hit-testable: the panel is built, no photo is loaded, and no scan is pending/streaming
-    /// (which would suppress it). Mirrors [`show_open_hint`]'s show condition.
-    ///
-    /// [`show_open_hint`]: App::show_open_hint
-    fn open_hint_active(&self) -> bool {
-        self.core.open_panel.is_some()
-            && self.core.source.is_empty()
-            && self.dir_scan.is_none()
-            && self.pending_launch.is_none()
-    }
-
-    /// The on-screen `[x0, y0, x1, y1]` rect (physical px) of an open-panel button, derived
-    /// from the live window size — the renderer centers the message layer, so this stays
-    /// correct across resizes and DPI changes without re-storing absolute coordinates. `None`
-    /// unless the open panel is the active overlay.
-    fn open_button_rect(&self, which: OpenButton) -> Option<[f32; 4]> {
-        if !self.open_hint_active() {
-            return None;
-        }
-        let panel = self.core.open_panel?;
-        let sz = self.core.viewport;
-        // Same centering the renderer applies (see `center_quad_vertices`): clamped to ≥ 0.
-        let x0 = ((sz.width as f32 - panel.w as f32) * 0.5).max(0.0);
-        let y0 = ((sz.height as f32 - panel.h as f32) * 0.5).max(0.0);
-        let [bx, by, bw, bh] = match which {
-            OpenButton::File => panel.file,
-            OpenButton::Folder => panel.folder,
-        }
-        .map(|v| v as f32);
-        Some([x0 + bx, y0 + by, x0 + bx + bw, y0 + by + bh])
-    }
-
-    /// Which open-panel button (if any) the pointer is currently over.
-    fn open_hovered_button(&self) -> Option<OpenButton> {
-        let [x, y] = self.core.last_cursor?;
-        [OpenButton::File, OpenButton::Folder]
-            .into_iter()
-            .find(|&b| {
-                self.open_button_rect(b)
-                    .is_some_and(|r| point_in_rect(r, x, y))
-            })
-    }
-
-    /// Update the open panel's hover "lit" state from the latest cursor position, re-rendering
-    /// the panel only when hover **changes** (one CPU composite on the enter/leave transition,
-    /// never per move). Mirrors [`update_chip_hover`] for the empty-state call to action.
-    ///
-    /// [`update_chip_hover`]: App::update_chip_hover
-    fn update_open_hover(&mut self) {
-        if !self.open_hint_active() {
-            return;
-        }
-        let hovered = self.open_hovered_button();
-        if hovered == self.core.open_hover {
-            return;
-        }
-        self.core.open_hover = hovered;
-        // Rebuild the panel with the new lit button (content is otherwise unchanged), re-upload
-        // it, and present so the change shows immediately.
-        self.show_open_hint();
-        self.core.draw();
     }
 
     /// Esc / window-close: shut down with a perceived-*instant* exit, writing
@@ -2469,98 +2247,6 @@ impl App {
         self.core.stop_playback();
     }
 
-    /// Handle a nav keypress (space / backspace / enter). Tracks the held key for
-    /// hold-to-fly, then either advances, or — when we're still catching up to the
-    /// previous target, so the press can't be serviced yet — flashes the loading
-    /// pie (brighten-on-keypress) so the input never feels dead.
-    fn nav_press(&mut self, key: PbKey, action: Action) {
-        self.core.held.insert(key, action);
-        self.core.hold_start = Some(Instant::now());
-        let Some(nav) = nav_of(action) else {
-            return;
-        };
-        if self.core.target_item.is_some() && self.core.displayed_item != self.core.target_item {
-            self.core.pie_glow_started = Some(Instant::now());
-        } else {
-            self.advance(nav);
-        }
-    }
-
-    /// Advance one photo (sequential or random). The gated engine path: present on
-    /// a ring hit, else hold the previous frame + prefetch while the decode lands.
-    fn advance(&mut self, nav: Nav) {
-        // Settle a deferred delete-advance before navigating, so a keypress during the
-        // brief post-delete delay lands cleanly on the rebuilt playlist (no yank-back).
-        self.flush_pending_delete();
-        // Never advance while the previous target is still pending (a miss in
-        // flight): a fast second press would overwrite it and skip that photo.
-        // Holding still flies — `about_to_wait` re-advances once it's caught up.
-        if self.core.displayed_item != self.core.target_item {
-            return;
-        }
-        // Navigating away from an animated image stops playback and reverts to the
-        // still (the frames are RAM-only — privacy #2). A no-op on a still.
-        self.core.stop_playback();
-        // Remember the direction so the slideshow auto-advances the way the user last
-        // moved (manual nav during a slideshow steers it). The slideshow's own
-        // `advance(self.core.last_nav)` calls are then idempotent here.
-        self.core.last_nav = nav;
-        match nav {
-            Nav::Forward => self.core.playlist.next(),
-            Nav::Backward => self.core.playlist.prev(),
-            Nav::Random => self.core.playlist.random_next(),
-            Nav::RandomPrev => self.core.playlist.random_prev(),
-        }
-        self.core.target_item = self.core.playlist.current();
-        // Both modes use the async engine: present on a ring hit, else hold the
-        // previous frame while the decode (fit-sized or full-res) lands.
-        self.core.try_present_target();
-        self.core.request_prefetch();
-    }
-
-    /// Reflect the pan affordance in the pointer: a pointing hand over the Cancel Scan button,
-    /// a closed hand while dragging, an open hand when the image is pannable, the default arrow
-    /// otherwise.
-    fn refresh_cursor(&mut self) {
-        let over_button = self
-            .core
-            .last_cursor
-            .is_some_and(|[x, y]| self.core.chip_hit(x, y))
-            || self.open_hovered_button().is_some()
-            || self.core.play_hint_hit();
-        let kind = if self.core.dragging {
-            contract::CursorKind::Grabbing
-        } else if over_button {
-            contract::CursorKind::Pointer
-        } else if self.core.pannable() {
-            contract::CursorKind::Grab
-        } else {
-            contract::CursorKind::Default
-        };
-        self.core
-            .effects
-            .push(contract::CoreEffect::SetCursor(kind));
-    }
-
-    /// Zoom by `factor` (>1 in, <1 out) about the cursor — the shared effect for
-    /// trackpad pinch and mouse-wheel zoom. Anchors on the last cursor position,
-    /// falling back to the screen center before the pointer has moved.
-    fn zoom_about_cursor(&mut self, factor: f32) {
-        let Some((iw, ih, sw, sh)) = self.core.screen_and_image() else {
-            return;
-        };
-        let anchor = self
-            .core
-            .last_cursor
-            .unwrap_or([sw as f32 / 2.0, sh as f32 / 2.0]);
-        self.core.view.zoom_about(factor, anchor, iw, ih, sw, sh);
-        self.core.push_view();
-        self.core.draw();
-        // Zooming changes whether the image overflows — update the grab affordance
-        // immediately (the pointer may not move after a wheel notch / pinch).
-        self.refresh_cursor();
-    }
-
     /// Whether prefetch/upload work is still outstanding (keep polling if so).
     fn work_pending(&self) -> bool {
         self.archive_load.is_some()
@@ -2577,47 +2263,6 @@ impl App {
     }
 
     // --- Animation playback (task #37) -------------------------------------------------
-
-    /// Flash the "▶ Press P to play" hint once when settling on an animated still —
-    /// suppressed while flying (the nag the owner flagged) and once the user has engaged
-    /// (P / step, tracked via `anim_hint_shown_for`). An eager prep decoding in the
-    /// background does *not* suppress it — that's invisible work, and the hint is what
-    /// invites the user to press P in the first place.
-    fn maybe_show_anim_hint(&mut self, flying: bool) {
-        if flying || self.core.playback.is_some() {
-            return;
-        }
-        let Some(item) = self.core.displayed_item else {
-            return;
-        };
-        if self.core.anim_hint_shown_for == Some(item) {
-            return;
-        }
-        if self.core.has_motion(item) {
-            self.core.anim_hint_shown_for = Some(item);
-            // A Live Photo gets the livephoto mark; an animated still gets the play ▶. Styled
-            // like the open-screen buttons: `▶ Play  P` with the shortcut dimmed at the right —
-            // and it's a real button: hovering holds it open, a click plays (see the click /
-            // hover wiring). Starts unhovered.
-            let icon = if self.core.is_live_photo(item) {
-                icon::assets::LIVE_PHOTO
-            } else {
-                icon::assets::PLAY
-            };
-            if let Some((w, h)) = self.core.build_play_hint(icon, false) {
-                self.core.play_hint = Some(PlayHint {
-                    w,
-                    h,
-                    icon,
-                    hovered: false,
-                });
-            }
-            self.core.draw();
-            // If the pointer already happens to sit over it, light it up (and hold it) at once.
-            self.core.update_play_hint_hover();
-            self.refresh_cursor();
-        }
-    }
 
     /// Toggle Live Photo audio mute (`M` / Image menu). Persists the choice, updates the
     /// menu check + a toast, and takes effect immediately: muting silences a playing clip;
@@ -2874,6 +2519,7 @@ impl ApplicationHandler for App {
         // shows first), and an encrypted / failed open can use the egui dialogs (a synchronous
         // launch resolve, before the event loop, could do none of these).
         if let Some(plan) = self.pending_launch.take() {
+            self.core.launching = false; // the deferred launch is firing now
             self.open_plan(plan.source, plan.cursor);
         }
     }
@@ -2936,7 +2582,7 @@ impl ApplicationHandler for App {
                 let sf = scale_factor as f32;
                 if (sf - self.core.viewport.scale_factor).abs() > f32::EPSILON {
                     self.core.viewport.scale_factor = sf;
-                    self.rescale_overlays();
+                    self.core.rescale_overlays();
                 }
             }
 
@@ -2978,7 +2624,7 @@ impl ApplicationHandler for App {
                         // Esc itself in `dialog_event`.)
                         if self.dialog.is_some() {
                             self.dialog = None;
-                            self.pending_confirm_delete = None;
+                            self.core.pending_confirm_delete = None;
                             // Same leak guard as the dialog path: a held/repeated Esc
                             // after this close must not fall through to quit.
                             self.core.esc_guard_until =
@@ -3011,7 +2657,7 @@ impl ApplicationHandler for App {
                         ) {
                             contract::KeyResolution::Ignore => {}
                             contract::KeyResolution::OneShot(act) => self.dispatch_action(act),
-                            contract::KeyResolution::NavStart(act) => self.nav_press(key, act),
+                            contract::KeyResolution::NavStart(act) => self.core.nav_press(key, act),
                             contract::KeyResolution::HeldStart(act) => {
                                 self.core.held.insert(key, act);
                             }
@@ -3074,9 +2720,9 @@ impl ApplicationHandler for App {
                 }
                 self.core.last_cursor = Some(p);
                 self.core.update_chip_hover();
-                self.update_open_hover();
+                self.core.update_open_hover();
                 self.core.update_play_hint_hover();
-                self.refresh_cursor();
+                self.core.refresh_cursor();
             }
 
             // Pointer left the window: drop any Cancel Scan / open-button / play-hint hover so
@@ -3084,7 +2730,7 @@ impl ApplicationHandler for App {
             WindowEvent::CursorLeft { .. } => {
                 self.core.last_cursor = None;
                 self.core.update_chip_hover();
-                self.update_open_hover();
+                self.core.update_open_hover();
                 self.core.update_play_hint_hover();
             }
 
@@ -3098,7 +2744,7 @@ impl ApplicationHandler for App {
                 // A press on an interactive on-image control (an open-panel button, the play
                 // hint, or the scan-count chip's Cancel button) fires that control and must NOT
                 // also start a drag-to-pan.
-                let open_hit = pressed.then(|| self.open_hovered_button()).flatten();
+                let open_hit = pressed.then(|| self.core.open_hovered_button()).flatten();
                 if let Some(button) = open_hit {
                     match button {
                         OpenButton::File => self.dispatch_action(Action::OpenFile),
@@ -3117,7 +2763,7 @@ impl ApplicationHandler for App {
                     self.cancel_scan_command();
                 } else {
                     self.core.dragging = pressed;
-                    self.refresh_cursor();
+                    self.core.refresh_cursor();
                 }
             }
 
@@ -3125,7 +2771,7 @@ impl ApplicationHandler for App {
             // incremental magnification (+ spread to zoom in, − pinch to zoom out).
             WindowEvent::PinchGesture { delta, .. } => {
                 let factor = 1.0 + delta as f32 * PINCH_GAIN;
-                self.zoom_about_cursor(factor);
+                self.core.zoom_about_cursor(factor);
             }
 
             // Trackpad two-finger double-tap (macOS "smart magnify"): toggle 100%,
@@ -3147,7 +2793,7 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::PixelDelta(p) => {
                         if zoom {
                             let factor = (1.0 + p.y as f32 * PIXEL_ZOOM_STEP).max(0.05);
-                            self.zoom_about_cursor(factor);
+                            self.core.zoom_about_cursor(factor);
                         } else {
                             self.core.pan_by_pixels(
                                 p.x as f32 * GESTURE_PAN_DIR,
@@ -3158,7 +2804,7 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::LineDelta(x, y) => {
                         if zoom {
                             let factor = (1.0 + y * WHEEL_ZOOM_STEP).max(0.05);
-                            self.zoom_about_cursor(factor);
+                            self.core.zoom_about_cursor(factor);
                         } else {
                             self.core.pan_by_pixels(
                                 x * WHEEL_PAN_STEP * GESTURE_PAN_DIR,
@@ -3207,8 +2853,8 @@ impl ApplicationHandler for App {
         #[cfg(target_os = "macos")]
         self.refresh_proxy_icon();
         // Deferred delete-advance: once the icon has shown for a beat, drop the item.
-        if self.pending_delete.is_some_and(|(at, _)| now >= at) {
-            self.flush_pending_delete();
+        if self.core.pending_delete.is_some_and(|(at, _)| now >= at) {
+            self.core.flush_pending_delete();
         }
         // 0b. Apply any files dropped on the window this burst (coalesced — winit
         // delivers one `DroppedFile` per file).
@@ -3269,7 +2915,7 @@ impl ApplicationHandler for App {
             );
             let due = timing::elapsed_since(self.core.last_present, now, interval);
             if past_delay && caught_up && due {
-                self.advance(dir);
+                self.core.advance(dir);
             } else if !caught_up {
                 self.core.try_present_target();
             }
@@ -3294,7 +2940,7 @@ impl ApplicationHandler for App {
                 .map(|t| now.saturating_duration_since(t))
                 .unwrap_or(Duration::ZERO);
             if caught_up && self.core.slideshow.is_due(since_shown) {
-                self.advance(self.core.last_nav);
+                self.core.advance(self.core.last_nav);
             }
         }
 
@@ -3324,7 +2970,7 @@ impl ApplicationHandler for App {
         let flying = nav.is_some() && past_delay;
         // 4a′. Flash the "Press P to play" hint once on settling on an animated still —
         // suppressed while flying (no nag mid-fly) and once playback has engaged (#37).
-        self.maybe_show_anim_hint(flying);
+        self.core.maybe_show_anim_hint(flying);
         if self.core.info != InfoMode::Off {
             if flying {
                 if self.core.overlay_shown {
@@ -3447,7 +3093,7 @@ impl ApplicationHandler for App {
             || resizing
             || sharpen_pending
             || framestep_active
-            || self.pending_delete.is_some()
+            || self.core.pending_delete.is_some()
             // Keep ticking until the debounced windowed-geometry save fires (#1), so a
             // window move/resize is persisted even when nothing else wakes the loop.
             || self.core.geometry_save_at.is_some()
@@ -4324,7 +3970,7 @@ mod tests {
     use super::*;
     // Pure helpers now live in pb-app-core::engine / pb-decode; imported here (not at the
     // crate root) so the bin build doesn't see them as unused after the NS0 Phase B move.
-    use pb_app_core::engine::{is_exif_blob, scale_alpha};
+    use pb_app_core::engine::{is_exif_blob, point_in_rect, scale_alpha};
     use pb_app_core::Toast;
     use pb_decode::read_exif_fields;
 

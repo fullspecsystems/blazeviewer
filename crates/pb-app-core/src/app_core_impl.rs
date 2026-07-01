@@ -14,10 +14,10 @@ use std::time::{Duration, Instant};
 
 use std::collections::HashSet;
 
-use pb_core::{full_ring, prefetch_targets, prefetch_targets_scanning, ResidentRing};
+use pb_core::{full_ring, prefetch_targets, prefetch_targets_scanning, Playlist, ResidentRing};
 use pb_decode::{read_exif_fields, FitBox};
 use pb_render::{test_pattern, Rotation, ScaleMode, ViewTransform, MAX_ZOOM, MIN_ZOOM};
-use pb_source::PhotoSource;
+use pb_source::{FsSource, PhotoSource};
 
 use hud::Row;
 use pb_hud::{hud, icon};
@@ -28,11 +28,352 @@ use crate::decode_pool::Outcome;
 use crate::engine::*;
 use crate::pb_key::PbKey;
 use crate::{
-    keymap, settings, slideshow, timing, Action, AppCore, InfoMode, Nav, OpenButton, PlayHint,
-    Toast,
+    keymap, settings, slideshow, timing, Action, AppCore, InfoMode, Nav, OpenButton, OpenPanel,
+    PlayHint, Toast,
 };
 
 impl AppCore {
+    /// Perform a deferred delete's playlist advance: drop the removed item, rebuild the
+    /// source from the remaining paths (indices shift, so index-keyed state resets —
+    /// fine for an explicit, infrequent command), and advance to the next photo (the
+    /// previous if it was the last; the empty state if none remain). Idempotent — a
+    /// no-op when nothing is pending.
+    pub fn flush_pending_delete(&mut self) {
+        let Some((_, removed)) = self.pending_delete.take() else {
+            return;
+        };
+        let len = self.source.len();
+        // If a scan is still streaming in, tombstone the deleted path so a later batch (whose
+        // cumulative list still has it) can't bring it back. (No-op once the scan finishes.)
+        if self.scanning {
+            if let Some(p) = self.source.path(removed).map(Path::to_path_buf) {
+                self.deleted.insert(p);
+            }
+        }
+        match cursor_after_removal(len, removed) {
+            None => self.enter_empty_state(),
+            Some(start) => {
+                let remaining: Vec<PathBuf> = (0..len)
+                    .filter(|&i| i != removed)
+                    .filter_map(|i| self.source.path(i).map(Path::to_path_buf))
+                    .collect();
+                let src: Arc<dyn PhotoSource> = Arc::new(FsSource::new(remaining));
+                let root = self.root.clone();
+                let scan_root = self.scan_root.clone();
+                let recursive = self.recursive;
+                self.rebuild_playlist(src, root, scan_root, recursive, start);
+            }
+        }
+    }
+
+    /// Clear to the "no images" placeholder after the last photo is deleted. Mirrors
+    /// the bare-launch empty state (a test pattern + title; `O`/drag-drop reopen).
+    pub fn enter_empty_state(&mut self) {
+        self.pending_delete = None;
+        self.stop_playback(); // the deleted photo may have been playing (#37)
+        self.source = Arc::new(FsSource::new(Vec::new()));
+        self.playlist = Playlist::new(0, 0);
+        self.rotations.clear();
+        self.meta_cache.clear();
+        self.exif_cache.clear();
+        self.live_motion_cache.clear();
+        self.failed.clear();
+        self.preview_resident.clear();
+        self.upgrade_done.clear();
+        self.last_upgrade_set.clear();
+        self.undo_stack.clear();
+        self.invalidate_geometry();
+        self.displayed_item = None;
+        self.target_item = None;
+        self.current = None;
+        if let Some(r) = self.renderer.as_mut() {
+            r.clear_image();
+            r.set_overlay(None, 0);
+        }
+        self.effects
+            .push(contract::CoreEffect::SetTitle("PhotoBlaze".to_string()));
+        // Blank background + the centered "Press O to open…" hint (mirrors a bare launch).
+        self.show_open_hint();
+        self.overlay_shown = false;
+        self.overlay_item = None;
+        self.draw();
+    }
+
+    /// Replace the playlist with a new source and re-show at `start`. Every bit
+    /// of index-keyed state (per-item rotation overrides, the metadata cache, the
+    /// failed set, the resident ring) is dropped because the indices are
+    /// reassigned; the geometry-epoch bump discards any in-flight decode for the
+    /// old set.
+    pub fn rebuild_playlist(
+        &mut self,
+        source: Arc<dyn PhotoSource>,
+        root: PathBuf,
+        scan_root: Option<PathBuf>,
+        recursive: bool,
+        start: usize,
+    ) {
+        if source.is_empty() {
+            return;
+        }
+        let start = start.min(source.len() - 1);
+        self.pending_delete = None; // any rebuild supersedes a deferred delete-advance
+        self.stop_playback(); // a new source drops any playback of the old one (#2)
+        self.source = source;
+        self.root = root;
+        self.scan_root = scan_root;
+        self.recursive = recursive;
+        self.playlist = Playlist::new(self.source.len(), 0).with_cursor(start);
+        // Indices are reassigned — drop everything keyed by item index.
+        self.rotations.clear();
+        self.meta_cache.clear();
+        self.exif_cache.clear();
+        self.live_motion_cache.clear();
+        self.failed.clear();
+        self.preview_resident.clear();
+        self.upgrade_done.clear();
+        self.last_upgrade_set.clear();
+        // Undo entries reference the old source's indices/paths — drop them too.
+        self.undo_stack.clear();
+        // Invalidate the ring + bump the epoch (discards in-flight old decodes),
+        // then synchronously show the new current photo and refill around it.
+        self.invalidate_geometry();
+        self.displayed_item = self.playlist.current();
+        self.target_item = self.playlist.current();
+        self.load_current_sync();
+        self.request_prefetch();
+        self.effects.push(contract::CoreEffect::RequestRender);
+    }
+
+    /// Show the empty-state open panel over the (blank) viewer — used when there are no images
+    /// to display. Rebuilt against the current scale + hover; the renderer re-centers it on
+    /// resize and drops it the moment a photo is shown. Records the button rects for hit-testing.
+    pub fn show_open_hint(&mut self) {
+        // Suppress the panel while a folder scan is pending (deferred startup launch) or
+        // streaming in — the first photo is about to bootstrap, so the call to action would
+        // flash briefly and mislead (it implies nothing is loading). If the scan turns out
+        // empty, `poll_dir_scan`'s Done arm restores it.
+        if self.scanning || self.launching {
+            return;
+        }
+        let Some((bitmap, w, h, file, folder)) = self.open_panel_bitmap() else {
+            self.open_panel = None;
+            return;
+        };
+        self.open_panel = Some(OpenPanel { w, h, file, folder });
+        if let Some(a) = self.renderer.as_mut() {
+            a.set_message(Some((&bitmap, w, h)));
+        }
+    }
+
+    /// A monitor/DPI change re-scaled the window (e.g. dragging from a 1× display to a 2×
+    /// Retina one): every CPU-rasterized overlay was baked at the old [`scale_factor`] and is
+    /// cached by *content* (which didn't change), so force each to rebuild at the new DPI —
+    /// otherwise the overlay text looks soft / wrong-sized on the new monitor. The photo and
+    /// the info/EXIF panel are re-decoded / re-shown by the `Resized` → settle path that
+    /// follows this event (using the now-updated scale); here we invalidate the per-tick
+    /// overlays (the loading pie and the scan card) and the empty-state hint.
+    ///
+    /// [`scale_factor`]: App::scale_factor
+    pub fn rescale_overlays(&mut self) {
+        self.pie_pushed = None; // re-rasterize the loading pie at the new scale next tick
+        self.chip_sig = None; // re-rasterize the scan card next tick
+        if self.overlay_shown {
+            self.overlay_item = None; // force the info/EXIF/help panel to re-show next tick
+        }
+        if self.source.is_empty() {
+            self.show_open_hint(); // re-rasterize the "Press O to open" hint
+        }
+        self.effects.push(contract::CoreEffect::RequestRender);
+    }
+
+    /// Whether the empty-state open panel is the active overlay, so its buttons are
+    /// hit-testable: the panel is built, no photo is loaded, and no scan is pending/streaming
+    /// (which would suppress it). Mirrors [`show_open_hint`]'s show condition.
+    ///
+    /// [`show_open_hint`]: App::show_open_hint
+    pub fn open_hint_active(&self) -> bool {
+        self.open_panel.is_some() && self.source.is_empty() && !self.scanning && !self.launching
+    }
+
+    /// The on-screen `[x0, y0, x1, y1]` rect (physical px) of an open-panel button, derived
+    /// from the live window size — the renderer centers the message layer, so this stays
+    /// correct across resizes and DPI changes without re-storing absolute coordinates. `None`
+    /// unless the open panel is the active overlay.
+    pub fn open_button_rect(&self, which: OpenButton) -> Option<[f32; 4]> {
+        if !self.open_hint_active() {
+            return None;
+        }
+        let panel = self.open_panel?;
+        let sz = self.viewport;
+        // Same centering the renderer applies (see `center_quad_vertices`): clamped to ≥ 0.
+        let x0 = ((sz.width as f32 - panel.w as f32) * 0.5).max(0.0);
+        let y0 = ((sz.height as f32 - panel.h as f32) * 0.5).max(0.0);
+        let [bx, by, bw, bh] = match which {
+            OpenButton::File => panel.file,
+            OpenButton::Folder => panel.folder,
+        }
+        .map(|v| v as f32);
+        Some([x0 + bx, y0 + by, x0 + bx + bw, y0 + by + bh])
+    }
+
+    /// Which open-panel button (if any) the pointer is currently over.
+    pub fn open_hovered_button(&self) -> Option<OpenButton> {
+        let [x, y] = self.last_cursor?;
+        [OpenButton::File, OpenButton::Folder]
+            .into_iter()
+            .find(|&b| {
+                self.open_button_rect(b)
+                    .is_some_and(|r| point_in_rect(r, x, y))
+            })
+    }
+
+    /// Update the open panel's hover "lit" state from the latest cursor position, re-rendering
+    /// the panel only when hover **changes** (one CPU composite on the enter/leave transition,
+    /// never per move). Mirrors [`update_chip_hover`] for the empty-state call to action.
+    ///
+    /// [`update_chip_hover`]: App::update_chip_hover
+    pub fn update_open_hover(&mut self) {
+        if !self.open_hint_active() {
+            return;
+        }
+        let hovered = self.open_hovered_button();
+        if hovered == self.open_hover {
+            return;
+        }
+        self.open_hover = hovered;
+        // Rebuild the panel with the new lit button (content is otherwise unchanged), re-upload
+        // it, and present so the change shows immediately.
+        self.show_open_hint();
+        self.draw();
+    }
+
+    /// Handle a nav keypress (space / backspace / enter). Tracks the held key for
+    /// hold-to-fly, then either advances, or — when we're still catching up to the
+    /// previous target, so the press can't be serviced yet — flashes the loading
+    /// pie (brighten-on-keypress) so the input never feels dead.
+    pub fn nav_press(&mut self, key: PbKey, action: Action) {
+        self.held.insert(key, action);
+        self.hold_start = Some(Instant::now());
+        let Some(nav) = nav_of(action) else {
+            return;
+        };
+        if self.target_item.is_some() && self.displayed_item != self.target_item {
+            self.pie_glow_started = Some(Instant::now());
+        } else {
+            self.advance(nav);
+        }
+    }
+
+    /// Advance one photo (sequential or random). The gated engine path: present on
+    /// a ring hit, else hold the previous frame + prefetch while the decode lands.
+    pub fn advance(&mut self, nav: Nav) {
+        // Settle a deferred delete-advance before navigating, so a keypress during the
+        // brief post-delete delay lands cleanly on the rebuilt playlist (no yank-back).
+        self.flush_pending_delete();
+        // Never advance while the previous target is still pending (a miss in
+        // flight): a fast second press would overwrite it and skip that photo.
+        // Holding still flies — `about_to_wait` re-advances once it's caught up.
+        if self.displayed_item != self.target_item {
+            return;
+        }
+        // Navigating away from an animated image stops playback and reverts to the
+        // still (the frames are RAM-only — privacy #2). A no-op on a still.
+        self.stop_playback();
+        // Remember the direction so the slideshow auto-advances the way the user last
+        // moved (manual nav during a slideshow steers it). The slideshow's own
+        // `advance(self.last_nav)` calls are then idempotent here.
+        self.last_nav = nav;
+        match nav {
+            Nav::Forward => self.playlist.next(),
+            Nav::Backward => self.playlist.prev(),
+            Nav::Random => self.playlist.random_next(),
+            Nav::RandomPrev => self.playlist.random_prev(),
+        }
+        self.target_item = self.playlist.current();
+        // Both modes use the async engine: present on a ring hit, else hold the
+        // previous frame while the decode (fit-sized or full-res) lands.
+        self.try_present_target();
+        self.request_prefetch();
+    }
+
+    /// Reflect the pan affordance in the pointer: a pointing hand over the Cancel Scan button,
+    /// a closed hand while dragging, an open hand when the image is pannable, the default arrow
+    /// otherwise.
+    pub fn refresh_cursor(&mut self) {
+        let over_button = self.last_cursor.is_some_and(|[x, y]| self.chip_hit(x, y))
+            || self.open_hovered_button().is_some()
+            || self.play_hint_hit();
+        let kind = if self.dragging {
+            contract::CursorKind::Grabbing
+        } else if over_button {
+            contract::CursorKind::Pointer
+        } else if self.pannable() {
+            contract::CursorKind::Grab
+        } else {
+            contract::CursorKind::Default
+        };
+        self.effects.push(contract::CoreEffect::SetCursor(kind));
+    }
+
+    /// Zoom by `factor` (>1 in, <1 out) about the cursor — the shared effect for
+    /// trackpad pinch and mouse-wheel zoom. Anchors on the last cursor position,
+    /// falling back to the screen center before the pointer has moved.
+    pub fn zoom_about_cursor(&mut self, factor: f32) {
+        let Some((iw, ih, sw, sh)) = self.screen_and_image() else {
+            return;
+        };
+        let anchor = self
+            .last_cursor
+            .unwrap_or([sw as f32 / 2.0, sh as f32 / 2.0]);
+        self.view.zoom_about(factor, anchor, iw, ih, sw, sh);
+        self.push_view();
+        self.draw();
+        // Zooming changes whether the image overflows — update the grab affordance
+        // immediately (the pointer may not move after a wheel notch / pinch).
+        self.refresh_cursor();
+    }
+
+    /// Flash the "▶ Press P to play" hint once when settling on an animated still —
+    /// suppressed while flying (the nag the owner flagged) and once the user has engaged
+    /// (P / step, tracked via `anim_hint_shown_for`). An eager prep decoding in the
+    /// background does *not* suppress it — that's invisible work, and the hint is what
+    /// invites the user to press P in the first place.
+    pub fn maybe_show_anim_hint(&mut self, flying: bool) {
+        if flying || self.playback.is_some() {
+            return;
+        }
+        let Some(item) = self.displayed_item else {
+            return;
+        };
+        if self.anim_hint_shown_for == Some(item) {
+            return;
+        }
+        if self.has_motion(item) {
+            self.anim_hint_shown_for = Some(item);
+            // A Live Photo gets the livephoto mark; an animated still gets the play ▶. Styled
+            // like the open-screen buttons: `▶ Play  P` with the shortcut dimmed at the right —
+            // and it's a real button: hovering holds it open, a click plays (see the click /
+            // hover wiring). Starts unhovered.
+            let icon = if self.is_live_photo(item) {
+                icon::assets::LIVE_PHOTO
+            } else {
+                icon::assets::PLAY
+            };
+            if let Some((w, h)) = self.build_play_hint(icon, false) {
+                self.play_hint = Some(PlayHint {
+                    w,
+                    h,
+                    icon,
+                    hovered: false,
+                });
+            }
+            self.draw();
+            // If the pointer already happens to sit over it, light it up (and hold it) at once.
+            self.update_play_hint_hover();
+            self.refresh_cursor();
+        }
+    }
+
     /// `P`: play/pause the current animation. Uses the eagerly-prepped sequence for
     /// instant playback when it's ready; otherwise (upgrading an in-flight eager prep,
     /// or kicking a fresh decode) it starts playing the moment frames land. On a still,

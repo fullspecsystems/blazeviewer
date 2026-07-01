@@ -187,6 +187,17 @@ pub struct AppCore {
     /// While set, `request_prefetch` uses the sequential-only, no-wrap prefetch so the random
     /// look-ahead doesn't thrash against the deck regenerating on each batch (NS0 5.5 Phase B).
     pub scanning: bool,
+    /// Whether a launch input (an archive) is still deferred, waiting for the window to exist
+    /// (the core-owned mirror of the shell's `pending_launch.is_some()`, kept in sync at its
+    /// mutations). Suppresses the "Press O to open" empty-state hint until the launch resolves.
+    pub launching: bool,
+    /// A delete whose playlist-advance is deferred: `(fire_at, removed_index)`. The deleted
+    /// photo stays on screen with its icon until `fire_at`, then the playlist drops the item and
+    /// advances (`do_delete` sets it; `flush_pending_delete` fires it). RAM-only (privacy #2).
+    pub pending_delete: Option<(Instant, usize)>,
+    /// The item awaiting a permanent-delete confirmation: set when the (themed egui) confirm
+    /// dialog opens, consumed when it answers Yes. The dialog itself stays shell-owned.
+    pub pending_confirm_delete: Option<usize>,
 
     // --- HUD / overlay state (NS0 5.3e; the Hud rasterizer stays shell-side for 5.4) ---
     /// Which info overlay is active (`i` basic / `Shift+I` full EXIF / `?` help / off).
