@@ -81,7 +81,7 @@ mod settings;
 // the existing `crate::action` / `crate::keymap` / `crate::pb_key` / `crate::slideshow`
 // paths in the winit shell modules (and the `use action::…` lines below) keep
 // resolving unchanged.
-use pb_app_core::{action, contract, keymap, pb_key, slideshow, timing, AppCore, PhotoMeta};
+use pb_app_core::{action, contract, keymap, pb_key, slideshow, timing, AppCore, Nav, PhotoMeta};
 
 use action::Action;
 use animation::Playback;
@@ -294,19 +294,6 @@ impl UndoAction {
             UndoAction::SaveRotation { .. } => "Undo Save Rotation",
         }
     }
-}
-
-/// A navigation step from a held key: sequential forward (`space`), sequential
-/// backward (`backspace`), a precomputed-random jump (`enter`), or a step back
-/// through the random walk (`shift+enter`, to revisit one you flew past). All are
-/// gated + self-paced + prefetchable the same way (random walks a known shuffle
-/// order, so its next/prior targets are knowable — see `pb_core::ShuffleOrder`).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Nav {
-    Forward,
-    Backward,
-    Random,
-    RandomPrev,
 }
 
 /// The navigation direction for a nav [`Action`], or `None` for any non-nav action.
@@ -531,10 +518,6 @@ struct OpenPanel {
 
 struct App {
     windowed: bool,
-    /// Where the playlist's images come from — a filesystem listing or an archive.
-    /// `pb-core` navigates by index alone; this resolves an index to bytes + name.
-    source: Arc<dyn PhotoSource>,
-    playlist: Playlist,
     /// The winit window (NS0: shell-owned — `WinitShell` in the eventual crate split).
     /// `None` until `resumed` creates it; always in lockstep with `renderer`.
     window: Option<Arc<Window>>,
@@ -545,14 +528,11 @@ struct App {
     /// surface (a concrete [`WgpuRenderer`], then boxed), so it shares its lifecycle.
     renderer: Option<Box<dyn Renderer>>,
     /// The platform-neutral orchestration state (NS0 step 5, ADR-021), reached as
-    /// `self.core.*`. Grows as each step-5 increment relocates a field group off this
-    /// shell; first in is the held-key set, input modifiers, and the self-paced-advance
-    /// timing (held / last_present / frame_interval / hold_start / initial_delay /
-    /// slideshow / mods / esc_guard_until). Nav/prefetch/decode, the renderer, and the
-    /// `handle(CoreEvent)` dispatch follow.
+    /// `self.core.*`. Grown incrementally off this shell; it now owns the held-key /
+    /// input / self-paced-advance timing, the view + geometry transform, the metadata
+    /// caches, the whole prefetch/decode/residency engine, the metrics, and the
+    /// nav/playlist state. The renderer and the `handle(CoreEvent)` dispatch follow.
     core: AppCore,
-    /// Scan root, for showing paths relative to it.
-    root: PathBuf,
     /// Text renderer for the info panel (None if no system font was found).
     hud: Option<Hud>,
     /// Which info overlay is active (`i` basic / `Shift+I` full EXIF / off).
@@ -566,31 +546,11 @@ struct App {
     /// Display scale factor, for sizing the panel.
     scale_factor: f32,
 
-    // --- Phase 3 prefetch engine ---
-    /// Geometry generation; bumped on resize / fit toggle. Stale-epoch decodes are
-    /// discarded so an old-size result can't land on screen.
-    epoch: u64,
-    /// What's currently on screen.
-    displayed_item: Option<usize>,
-    /// The item we're trying to show (== displayed once caught up).
-    target_item: Option<usize>,
-    /// The last navigation direction, so the slideshow auto-advances the way the user
-    /// last moved (space → forward, backspace → back, enter → random). Updated on
-    /// every `advance`, so manual nav during a slideshow steers it.
-    last_nav: Nav,
-    /// The current prefetch want-list (priority order), used as eviction `keep`.
-    targets: Vec<usize>,
     /// Live Photo pairing, memoized per item: `Some(path)` = the companion motion
     /// `.mov`, `None` = not a Live Photo. Filled lazily (one `stat`) only when settled
     /// on a photo — never on the fly-through path. RAM-only, index-keyed, cleared on a
     /// playlist rebuild. Always `None` off macOS (Windows Live Photos = task #39).
     live_motion_cache: HashMap<usize, Option<PathBuf>>,
-    /// Whether the current scan-based playlist is recursive (`Ctrl+R` toggles).
-    recursive: bool,
-    /// The directory the current playlist was scanned from — enables the `Ctrl+R`
-    /// recursive toggle and re-scans. `None` for an explicit file list (a
-    /// multi-select or dropped photos), where recursion has no folder to walk.
-    scan_root: Option<PathBuf>,
     /// Files dropped on the window this burst; winit delivers one event per file,
     /// so they're coalesced here and applied once in `about_to_wait`.
     pending_drops: Vec<PathBuf>,
@@ -907,32 +867,64 @@ impl App {
         let settings = settings::Settings::load();
         Self {
             windowed,
-            source,
-            playlist,
             window: None,
             renderer: None,
-            core: AppCore::new(
-                Duration::from_millis(settings.hold_delay_ms as u64),
-                Duration::from_secs_f64(settings.slideshow_interval_secs),
+            core: AppCore {
+                held: HashMap::new(),
+                last_present: None,
+                frame_interval: Duration::from_micros(8_333),
+                hold_start: None,
+                initial_delay: Duration::from_millis(settings.hold_delay_ms as u64),
+                slideshow: slideshow::Slideshow {
+                    interval: Duration::from_secs_f64(settings.slideshow_interval_secs),
+                    ..slideshow::Slideshow::default()
+                },
+                mods: contract::Modifiers::NONE,
+                esc_guard_until: None,
+                fit: None,
                 // Start in the user's default scale mode (8/9/0 still switch it live).
-                scale_mode_of(settings.scale_mode),
+                view: ViewTransform {
+                    mode: scale_mode_of(settings.scale_mode),
+                    ..ViewTransform::default()
+                },
+                last_cursor: None,
+                dragging: false,
+                rotations: HashMap::new(),
+                zoom_started: None,
+                zoom_last: None,
+                pan_started: None,
+                pan_last: None,
+                resize_settle_at: None,
+                geometry_save_at: None,
+                meta_cache: HashMap::new(),
+                current: None,
+                exif_cache: HashMap::new(),
                 pool,
                 results,
+                ring: ResidentRing::new(0),
+                ahead: 8,
+                behind: 2,
+                failed: HashSet::new(),
+                deleted: HashSet::new(),
+                preview_resident: HashSet::new(),
+                pending_uploads: Vec::new(),
                 metrics,
-            ),
-            root,
+                source,
+                playlist,
+                targets: Vec::new(),
+                last_nav: Nav::Forward,
+                displayed_item: None,
+                target_item: None,
+                epoch: 1,
+                root,
+                scan_root,
+                recursive,
+            },
             hud: Hud::load(),
             info: InfoMode::Off,
             overlay_shown: false,
             overlay_item: None,
             scale_factor: 1.0,
-            epoch: 1,
-            displayed_item: None,
-            target_item: None,
-            last_nav: Nav::Forward,
-            targets: Vec::new(),
-            recursive,
-            scan_root,
             pending_drops: Vec::new(),
             toast: None,
             #[cfg(target_os = "macos")]
@@ -1042,10 +1034,10 @@ impl App {
         // so prefetching the random look-ahead would decode-then-evict photos the user never
         // sees (thrash). Use the sequential-only, no-wrap variant until the scan completes,
         // then normal prefetch (with its random hedges) resumes (`poll_dir_scan` Done arm).
-        self.targets = if self.dir_scan.is_some() {
-            prefetch_targets_scanning(&self.playlist, self.core.ahead, self.core.behind)
+        self.core.targets = if self.dir_scan.is_some() {
+            prefetch_targets_scanning(&self.core.playlist, self.core.ahead, self.core.behind)
         } else {
-            prefetch_targets(&self.playlist, self.core.ahead, self.core.behind)
+            prefetch_targets(&self.core.playlist, self.core.ahead, self.core.behind)
         };
         let fit = self.decode_fit();
         // Drop tier bookkeeping for items no longer resident (evicted).
@@ -1085,7 +1077,7 @@ impl App {
         type Job = (usize, Option<FitBox>, bool);
         let (mut head, mut previews, mut fulls): (Vec<Job>, Vec<Job>, Vec<Job>) =
             (Vec::new(), Vec::new(), Vec::new());
-        for &t in &self.targets {
+        for &t in &self.core.targets {
             if self.core.failed.contains(&t) || pending.contains(&t) {
                 continue;
             }
@@ -1106,7 +1098,9 @@ impl App {
         let mut jobs = head;
         jobs.append(&mut previews);
         jobs.append(&mut fulls);
-        self.core.pool.set_targets(self.epoch, &self.source, &jobs);
+        self.core
+            .pool
+            .set_targets(self.core.epoch, &self.core.source, &jobs);
     }
 
     /// The on-screen photo to sharpen FIRST (top decode priority): the displayed one,
@@ -1117,7 +1111,7 @@ impl App {
         if self.held_nav().is_some() {
             return None;
         }
-        let d = self.displayed_item?;
+        let d = self.core.displayed_item?;
         (self.core.ring.slot_for(d).is_some()
             && self.core.preview_resident.contains(&d)
             && !self.upgrade_done.contains(&d))
@@ -1138,7 +1132,7 @@ impl App {
         let full_bytes = self.slot_bytes_estimate();
         let sharpen = self.sharpen_now();
         full_ring(
-            &self.targets,
+            &self.core.targets,
             full_bytes,
             RING_BUDGET_BYTES,
             self.core.ring.capacity().min(MAX_FULL_RING),
@@ -1160,7 +1154,7 @@ impl App {
     /// needs — for neighbours you may never visit. The displayed RAW still sharpens
     /// via `sharpen_now`, and a RAW's embedded preview is often near-full-res anyway.
     fn is_raw_item(&self, item: usize) -> bool {
-        Path::new(self.source.name(item))
+        Path::new(self.core.source.name(item))
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| pb_decode::is_raw_extension(&e.to_ascii_lowercase()))
@@ -1191,7 +1185,7 @@ impl App {
     /// Rotate the on-screen photo 90° clockwise (counter-clockwise on `Shift+R`).
     /// Per-image and RAM-only; returning to upright drops the override entry.
     fn rotate(&mut self, ccw: bool) {
-        let Some(item) = self.displayed_item else {
+        let Some(item) = self.core.displayed_item else {
             return;
         };
         let cur = self.core.rotations.get(&item).copied().unwrap_or_default();
@@ -1220,13 +1214,13 @@ impl App {
     /// (like the modal file picker), not the nav hot path. Any in-RAM rotation
     /// override is baked into the copied pixels so the clipboard is WYSIWYG.
     fn copy_image(&mut self) {
-        let Some(item) = self.displayed_item else {
+        let Some(item) = self.core.displayed_item else {
             return; // empty state — nothing to copy
         };
-        let img = match decode_item(self.source.as_ref(), item, None, false) {
+        let img = match decode_item(self.core.source.as_ref(), item, None, false) {
             Ok(img) => img,
             Err(e) => {
-                eprintln!("copy: decode failed: {}: {e}", self.source.name(item));
+                eprintln!("copy: decode failed: {}: {e}", self.core.source.name(item));
                 self.show_toast("Copy failed");
                 return;
             }
@@ -1237,7 +1231,7 @@ impl App {
         // Offer the source file as CF_HDROP too when there is one; an archive entry
         // has no file on disk, so it gets an image-only copy (pixels still paste). The
         // pure decode + rotate prep stays here; the platform write is the shell's job.
-        let file = self.source.path(item).map(|p| p.to_path_buf());
+        let file = self.core.source.path(item).map(|p| p.to_path_buf());
         self.effects.push(contract::CoreEffect::WriteClipboard(
             contract::ClipboardPayload::Image { rgba, w, h, file },
         ));
@@ -1249,12 +1243,12 @@ impl App {
     /// command — never the view path. Uses the cross-platform text clipboard (arboard),
     /// separate from the image clipboard (`clipboard.rs`).
     fn copy_path(&mut self) {
-        let Some(item) = self.displayed_item else {
+        let Some(item) = self.core.displayed_item else {
             return; // empty state — nothing to copy
         };
-        let text = match self.source.path(item) {
+        let text = match self.core.source.path(item) {
             Some(p) => p.to_string_lossy().into_owned(),
-            None => self.source.name(item).to_string(),
+            None => self.core.source.name(item).to_string(),
         };
         // The shell writes the text and reports the success/failure toast (it can recover
         // the file name from `text` for the "Copied …" message).
@@ -1307,7 +1301,7 @@ impl App {
     /// the displayed orientation now comes from the file (a clean round-trip with no
     /// double-rotation).
     fn save_rotation(&mut self) {
-        let Some(item) = self.displayed_item else {
+        let Some(item) = self.core.displayed_item else {
             return;
         };
         let rot = self.core.rotations.get(&item).copied().unwrap_or_default();
@@ -1315,7 +1309,7 @@ impl App {
             self.show_toast("No rotation to save");
             return;
         }
-        let Some(path) = self.source.path(item).map(Path::to_path_buf) else {
+        let Some(path) = self.core.source.path(item).map(Path::to_path_buf) else {
             // Archive entry — no file on disk to write back to.
             self.show_toast("Can't save rotation here");
             return;
@@ -1341,7 +1335,7 @@ impl App {
                 self.upgrade_done.remove(&item);
                 self.invalidate_geometry();
                 self.load_current_sync();
-                self.target_item = self.playlist.current();
+                self.core.target_item = self.core.playlist.current();
                 self.request_prefetch();
                 self.undo_stack.push(UndoAction::SaveRotation {
                     item,
@@ -1380,7 +1374,7 @@ impl App {
                         self.upgrade_done.remove(&item);
                         self.invalidate_geometry();
                         self.load_current_sync();
-                        self.target_item = self.playlist.current();
+                        self.core.target_item = self.core.playlist.current();
                         self.request_prefetch();
                         self.show_toast_icon("Rotation undone", Some(icon::assets::UNDO));
                     }
@@ -1406,10 +1400,10 @@ impl App {
     fn delete_current(&mut self, permanent: bool) {
         // Settle any still-pending delete-advance first (e.g. a rapid second Del).
         self.flush_pending_delete();
-        let Some(item) = self.displayed_item else {
+        let Some(item) = self.core.displayed_item else {
             return;
         };
-        let Some(path) = self.source.path(item).map(Path::to_path_buf) else {
+        let Some(path) = self.core.source.path(item).map(Path::to_path_buf) else {
             self.show_toast("Can't delete this"); // archive entry — no file
             return;
         };
@@ -1417,7 +1411,7 @@ impl App {
             // Permanent delete is irreversible — confirm first, via the themed egui
             // dialog (dark-aware, and cross-platform for the macOS port). The delete
             // runs when the dialog answers Yes (`dialog_event`), on this item.
-            let name = file_name_of(self.source.name(item));
+            let name = file_name_of(self.core.source.name(item));
             self.pending_confirm_delete = Some(item);
             self.open_confirm_delete(&name);
             return;
@@ -1462,11 +1456,11 @@ impl App {
         let Some((_, removed)) = self.pending_delete.take() else {
             return;
         };
-        let len = self.source.len();
+        let len = self.core.source.len();
         // If a scan is still streaming in, tombstone the deleted path so a later batch (whose
         // cumulative list still has it) can't bring it back. (No-op once the scan finishes.)
         if self.dir_scan.is_some() {
-            if let Some(p) = self.source.path(removed).map(Path::to_path_buf) {
+            if let Some(p) = self.core.source.path(removed).map(Path::to_path_buf) {
                 self.core.deleted.insert(p);
             }
         }
@@ -1475,12 +1469,12 @@ impl App {
             Some(start) => {
                 let remaining: Vec<PathBuf> = (0..len)
                     .filter(|&i| i != removed)
-                    .filter_map(|i| self.source.path(i).map(Path::to_path_buf))
+                    .filter_map(|i| self.core.source.path(i).map(Path::to_path_buf))
                     .collect();
                 let src: Arc<dyn PhotoSource> = Arc::new(FsSource::new(remaining));
-                let root = self.root.clone();
-                let scan_root = self.scan_root.clone();
-                let recursive = self.recursive;
+                let root = self.core.root.clone();
+                let scan_root = self.core.scan_root.clone();
+                let recursive = self.core.recursive;
                 self.rebuild_playlist(src, root, scan_root, recursive, start);
             }
         }
@@ -1491,8 +1485,8 @@ impl App {
     fn enter_empty_state(&mut self) {
         self.pending_delete = None;
         self.stop_playback(); // the deleted photo may have been playing (#37)
-        self.source = Arc::new(FsSource::new(Vec::new()));
-        self.playlist = Playlist::new(0, 0);
+        self.core.source = Arc::new(FsSource::new(Vec::new()));
+        self.core.playlist = Playlist::new(0, 0);
         self.core.rotations.clear();
         self.core.meta_cache.clear();
         self.core.exif_cache.clear();
@@ -1503,8 +1497,8 @@ impl App {
         self.last_upgrade_set.clear();
         self.undo_stack.clear();
         self.invalidate_geometry();
-        self.displayed_item = None;
-        self.target_item = None;
+        self.core.displayed_item = None;
+        self.core.target_item = None;
         self.core.current = None;
         if let Some(r) = self.renderer.as_mut() {
             r.clear_image();
@@ -1528,7 +1522,7 @@ impl App {
         // effects) must leave this flat. `--metrics` only; a no-op branch otherwise.
         let t0 = Instant::now();
         let view = self.view_for(item);
-        let title = title_for(self.source.name(item), item, self.source.len());
+        let title = title_for(self.core.source.name(item), item, self.core.source.len());
         if let Some(r) = self.renderer.as_mut() {
             r.set_view(view);
             r.present_slot(slot);
@@ -1541,10 +1535,10 @@ impl App {
         // to an animated photo (or arriving from a non-animated one) wouldn't re-show the hint.
         // Guarded on the item actually changing, so a re-present of the same photo (e.g. a play
         // reverting to its still) doesn't re-arm it.
-        if self.displayed_item != Some(item) {
+        if self.core.displayed_item != Some(item) {
             self.anim_hint_shown_for = None;
         }
-        self.displayed_item = Some(item);
+        self.core.displayed_item = Some(item);
         self.core.current = self.core.meta_cache.get(&item).cloned();
         // The panel (if shown) is now stale for the old photo; `about_to_wait`
         // rebuilds it for `item` next tick (or hides it while flying), so it
@@ -1560,10 +1554,10 @@ impl App {
     /// neither misreports the held-over pixels as the failed photo. The previous
     /// frame stays up rather than flashing black.
     fn present_failed(&mut self, item: usize) {
-        self.displayed_item = Some(item);
+        self.core.displayed_item = Some(item);
         self.core.current = None;
-        let name = file_name_of(self.source.name(item));
-        let total = self.source.len();
+        let name = file_name_of(self.core.source.name(item));
+        let total = self.core.source.len();
         self.effects.push(contract::CoreEffect::SetTitle(format!(
             "{name} ({}/{total}) - decode error",
             item + 1
@@ -1583,10 +1577,10 @@ impl App {
     /// Try to show `target_item`: present it on a ring hit, otherwise keep the
     /// previous frame (a miss is a hold, never a skip). Returns whether shown.
     fn try_present_target(&mut self) -> bool {
-        let Some(item) = self.target_item else {
+        let Some(item) = self.core.target_item else {
             return false;
         };
-        if self.displayed_item == Some(item) {
+        if self.core.displayed_item == Some(item) {
             return true;
         }
         if self.core.failed.contains(&item) {
@@ -1618,7 +1612,7 @@ impl App {
         }
         let mut target_failed: Option<usize> = None;
         ready.retain(|o| {
-            if o.key.epoch != self.epoch {
+            if o.key.epoch != self.core.epoch {
                 return false; // stale geometry
             }
             let item = o.key.item;
@@ -1634,7 +1628,7 @@ impl App {
                 self.core.failed.insert(item);
                 // Unstick the gated loop: a corrupt target counts as "shown".
                 // (Deferred out of the closure — `present_failed` needs &mut self.)
-                if self.target_item == Some(item) {
+                if self.core.target_item == Some(item) {
                     target_failed = Some(item);
                 }
                 return false;
@@ -1660,13 +1654,14 @@ impl App {
         }
 
         // Current target first, then by prefetch priority, unknowns last.
-        let target = self.target_item;
+        let target = self.core.target_item;
         ready.sort_by_key(|o| {
             let item = o.key.item;
             if target == Some(item) {
                 0usize
             } else {
-                self.targets
+                self.core
+                    .targets
                     .iter()
                     .position(|&t| t == item)
                     .map(|p| p + 1)
@@ -1690,7 +1685,7 @@ impl App {
                 // Carry still-wanted leftovers to the next tick (in priority order);
                 // drop now-obsolete ones so they don't pin pool byte-budget while
                 // the loop idles (work_pending wouldn't keep polling for them).
-                if self.targets.contains(&item)
+                if self.core.targets.contains(&item)
                     && (upgrade || self.core.ring.slot_for(item).is_none())
                 {
                     leftover.push(outcome);
@@ -1698,7 +1693,7 @@ impl App {
                 continue;
             }
             if !self.core.meta_cache.contains_key(&item) {
-                let m = meta_for(self.source.as_ref(), item, &self.root, img);
+                let m = meta_for(self.core.source.as_ref(), item, &self.core.root, img);
                 self.core.meta_cache.insert(item, m);
             }
             let item_bytes = img.pixels.len() as u64;
@@ -1724,7 +1719,7 @@ impl App {
                 // fulls land late by design (low priority), so they'd skew this — only
                 // record the displayed one.
                 let t0 = self.full_requested_at.remove(&item);
-                if self.displayed_item == Some(item) {
+                if self.core.displayed_item == Some(item) {
                     if let Some(t0) = t0 {
                         self.core.metrics.record("sharpen", t0.elapsed());
                     }
@@ -1735,7 +1730,7 @@ impl App {
                 // (it kept the preview's dims otherwise — visible in Original mode),
                 // then redraw it now-sharp. `present_slot` keeps the current view, so
                 // any zoom/pan is preserved.
-                if self.displayed_item == Some(item) {
+                if self.core.displayed_item == Some(item) {
                     if let Some(a) = self.renderer.as_mut() {
                         a.present_slot(slot);
                     }
@@ -1746,7 +1741,7 @@ impl App {
             if let Some(res) =
                 self.core
                     .ring
-                    .reserve_bytes(item, self.epoch, item_bytes, &self.targets)
+                    .reserve_bytes(item, self.core.epoch, item_bytes, &self.core.targets)
             {
                 if let Some(a) = self.renderer.as_mut() {
                     let t0 = Instant::now();
@@ -1761,14 +1756,16 @@ impl App {
                     );
                     self.core.metrics.record("upload", t0.elapsed());
                 }
-                self.core.ring.mark_resident(item, res.slot, self.epoch);
+                self.core
+                    .ring
+                    .mark_resident(item, res.slot, self.core.epoch);
                 if img.is_preview {
                     self.core.preview_resident.insert(item);
                 } else {
                     self.core.preview_resident.remove(&item);
                 }
                 uploads += 1;
-                if self.target_item == Some(item) && self.displayed_item != Some(item) {
+                if self.core.target_item == Some(item) && self.core.displayed_item != Some(item) {
                     self.present_item(item, res.slot);
                 }
             }
@@ -1781,7 +1778,7 @@ impl App {
     /// first paint and on geometry changes (resize / scale-mode toggle), before the
     /// async ring re-fills neighbors at the new resolution.
     fn load_current_sync(&mut self) {
-        let Some(idx) = self.playlist.current() else {
+        let Some(idx) = self.core.playlist.current() else {
             return;
         };
         let t0 = Instant::now();
@@ -1796,15 +1793,15 @@ impl App {
         // too. (JPEG/PNG/etc. have no cheaper preview, so this is a full decode anyway —
         // fast enough not to beachball, and faster still once dev builds optimize the
         // decoders; see the `[profile.dev]` note in the workspace Cargo.toml.)
-        let decoded = decode_item(self.source.as_ref(), idx, self.decode_fit(), true);
+        let decoded = decode_item(self.core.source.as_ref(), idx, self.decode_fit(), true);
         self.core.metrics.record("decode", t0.elapsed());
         match decoded {
             Ok(img) => {
-                let meta = meta_for(self.source.as_ref(), idx, &self.root, &img);
+                let meta = meta_for(self.core.source.as_ref(), idx, &self.core.root, &img);
                 self.core.current = Some(meta.clone());
                 self.core.meta_cache.insert(idx, meta);
                 let view = self.view_for(idx);
-                let title = title_for(self.source.name(idx), idx, self.source.len());
+                let title = title_for(self.core.source.name(idx), idx, self.core.source.len());
                 if let Some(r) = self.renderer.as_mut() {
                     r.set_view(view);
                     r.set_image(
@@ -1820,10 +1817,10 @@ impl App {
                 self.effects.push(contract::CoreEffect::SetTitle(title));
                 self.overlay_shown = false;
                 self.overlay_item = None;
-                self.displayed_item = Some(idx);
+                self.core.displayed_item = Some(idx);
             }
             Err(e) => {
-                eprintln!("decode failed: {}: {e}", self.source.name(idx));
+                eprintln!("decode failed: {}: {e}", self.core.source.name(idx));
                 self.core.failed.insert(idx);
                 // Keep the gate unstuck (count the bad file as "shown") and clear
                 // the stale frame's title/panel so they don't misreport it.
@@ -1837,7 +1834,7 @@ impl App {
     /// Bump the geometry epoch and rebuild the (now-invalid) ring. Called on resize
     /// and fit/original toggle so in-flight decodes for the old size are discarded.
     fn invalidate_geometry(&mut self) {
-        self.epoch = self.epoch.wrapping_add(1);
+        self.core.epoch = self.core.epoch.wrapping_add(1);
         let fit = self.core.fit.unwrap_or(FitBox {
             max_width: 1,
             max_height: 1,
@@ -1868,7 +1865,7 @@ impl App {
         if changed {
             self.invalidate_geometry();
             self.load_current_sync();
-            self.target_item = self.playlist.current();
+            self.core.target_item = self.core.playlist.current();
             self.request_prefetch();
         } else {
             self.draw();
@@ -2188,7 +2185,7 @@ impl App {
                         // Nothing was ever shown and the scan found nothing: restore the
                         // "Press O to open" hint the scan had suppressed (a bare-folder launch
                         // onto an empty folder), but never blank an existing photo.
-                        if self.source.is_empty() {
+                        if self.core.source.is_empty() {
                             self.show_open_hint();
                         }
                     }
@@ -2328,13 +2325,14 @@ impl App {
     /// (`Cursor::At`), falling back to the first image if it isn't in the new listing (e.g.
     /// turning recursion off while viewing a subfolder photo).
     fn toggle_recursive(&mut self) {
-        let Some(root) = self.scan_root.clone() else {
+        let Some(root) = self.core.scan_root.clone() else {
             return;
         };
-        let recursive = !self.recursive;
+        let recursive = !self.core.recursive;
         let cursor = self
+            .core
             .displayed_item
-            .and_then(|i| self.source.path(i))
+            .and_then(|i| self.core.source.path(i))
             .map(Path::to_path_buf)
             .map(open::Cursor::At)
             .unwrap_or(open::Cursor::First);
@@ -2346,7 +2344,7 @@ impl App {
             cursor,
         );
         // Acknowledge the toggle now; the new listing streams in via `poll_dir_scan` (and
-        // `self.recursive` updates when the first batch bootstraps).
+        // `self.core.recursive` updates when the first batch bootstraps).
         let msg = if recursive {
             "Recursive folders: on"
         } else {
@@ -2588,7 +2586,7 @@ impl App {
     /// (non-upright) rotation override, sits on a real file on disk (not an archive
     /// entry), and that file's format supports a lossless EXIF Orientation rewrite.
     fn can_save_rotation(&self) -> bool {
-        let Some(item) = self.displayed_item else {
+        let Some(item) = self.core.displayed_item else {
             return false;
         };
         let rotated = self
@@ -2598,6 +2596,7 @@ impl App {
             .is_some_and(|r| *r != Rotation::default());
         rotated
             && self
+                .core
                 .source
                 .path(item)
                 .is_some_and(save_rotation::is_orientation_writable)
@@ -2675,7 +2674,7 @@ impl App {
         let next = Self::menu_state_from(
             self.core.view.mode,
             self.info,
-            self.recursive,
+            self.core.recursive,
             !self.windowed, // `windowed` is the inverse of the fullscreen checkbox
             self.core.slideshow.on,
             self.settings.mute_live_audio,
@@ -2757,8 +2756,9 @@ impl App {
     #[cfg(target_os = "macos")]
     fn refresh_proxy_icon(&mut self) {
         let want = if self.windowed {
-            self.displayed_item
-                .and_then(|i| self.source.path(i))
+            self.core
+                .displayed_item
+                .and_then(|i| self.core.source.path(i))
                 .map(Path::to_path_buf)
         } else {
             None
@@ -2927,9 +2927,9 @@ impl App {
         let fallback = default_picker_dir();
         let mut start_dir = picker_start_dir(
             self.settings.picker_dir.as_deref(),
-            self.source.container(),
-            self.scan_root.as_deref(),
-            &self.root,
+            self.core.source.container(),
+            self.core.scan_root.as_deref(),
+            &self.core.root,
             &fallback,
         );
         // If the chosen folder no longer exists (e.g. a pinned folder was deleted or
@@ -2977,11 +2977,11 @@ impl App {
         let start = start.min(source.len() - 1);
         self.pending_delete = None; // any rebuild supersedes a deferred delete-advance
         self.stop_playback(); // a new source drops any playback of the old one (#2)
-        self.source = source;
-        self.root = root;
-        self.scan_root = scan_root;
-        self.recursive = recursive;
-        self.playlist = Playlist::new(self.source.len(), 0).with_cursor(start);
+        self.core.source = source;
+        self.core.root = root;
+        self.core.scan_root = scan_root;
+        self.core.recursive = recursive;
+        self.core.playlist = Playlist::new(self.core.source.len(), 0).with_cursor(start);
         // Indices are reassigned — drop everything keyed by item index.
         self.core.rotations.clear();
         self.core.meta_cache.clear();
@@ -2996,8 +2996,8 @@ impl App {
         // Invalidate the ring + bump the epoch (discards in-flight old decodes),
         // then synchronously show the new current photo and refill around it.
         self.invalidate_geometry();
-        self.displayed_item = self.playlist.current();
-        self.target_item = self.playlist.current();
+        self.core.displayed_item = self.core.playlist.current();
+        self.core.target_item = self.core.playlist.current();
         self.load_current_sync();
         self.request_prefetch();
         self.effects.push(contract::CoreEffect::RequestRender);
@@ -3013,11 +3013,11 @@ impl App {
     /// total ticks up. A no-op if the snapshot isn't actually larger.
     fn extend_playlist(&mut self, source: Arc<dyn PhotoSource>) {
         let new_len = source.len();
-        if new_len <= self.source.len() {
+        if new_len <= self.core.source.len() {
             return;
         }
-        self.source = source;
-        self.playlist.extend(new_len);
+        self.core.source = source;
+        self.core.playlist.extend(new_len);
         self.request_prefetch();
         self.refresh_title();
     }
@@ -3050,13 +3050,13 @@ impl App {
     /// Re-set the window title for the currently displayed photo (e.g. after a streaming
     /// grow bumps the "X / N" total). No-op if nothing is displayed.
     fn refresh_title(&mut self) {
-        let Some(item) = self.displayed_item else {
+        let Some(item) = self.core.displayed_item else {
             return;
         };
-        if item >= self.source.len() {
+        if item >= self.core.source.len() {
             return;
         }
-        let title = title_for(self.source.name(item), item, self.source.len());
+        let title = title_for(self.core.source.name(item), item, self.core.source.len());
         self.effects.push(contract::CoreEffect::SetTitle(title));
     }
 
@@ -3082,22 +3082,23 @@ impl App {
         String,
     ) {
         let srgb = pb_render::ColorTransform::srgb();
-        match self.playlist.current() {
+        match self.core.playlist.current() {
             // Preview-first (see `load_current_sync`): this runs synchronously while the
             // window is hidden during setup, so it grabs the fast embedded preview for
             // RAW/HEIC; the pool upgrades it to full once `resumed` kicks off prefetch.
-            Some(idx) => match decode_item(self.source.as_ref(), idx, self.decode_fit(), true) {
+            Some(idx) => match decode_item(self.core.source.as_ref(), idx, self.decode_fit(), true)
+            {
                 Ok(img) => {
-                    let meta = meta_for(self.source.as_ref(), idx, &self.root, &img);
+                    let meta = meta_for(self.core.source.as_ref(), idx, &self.core.root, &img);
                     self.core.current = Some(meta.clone());
                     self.core.meta_cache.insert(idx, meta);
-                    let title = title_for(self.source.name(idx), idx, self.source.len());
+                    let title = title_for(self.core.source.name(idx), idx, self.core.source.len());
                     let (w, h, hdr, peak) = (img.width, img.height, is_hdr(&img), img.peak);
                     let color = render_color(&img.color);
                     (img.pixels, w, h, color, hdr, peak, title)
                 }
                 Err(e) => {
-                    eprintln!("decode failed: {}: {e}", self.source.name(idx));
+                    eprintln!("decode failed: {}: {e}", self.core.source.name(idx));
                     self.core.current = None;
                     let p = test_pattern(1600, 1000);
                     (
@@ -3439,7 +3440,7 @@ impl App {
                 let item = self.pending_confirm_delete.take();
                 if confirmed {
                     if let Some(item) = item {
-                        if let Some(path) = self.source.path(item).map(Path::to_path_buf) {
+                        if let Some(path) = self.core.source.path(item).map(Path::to_path_buf) {
                             self.do_delete(item, &path, true);
                         }
                     }
@@ -3558,10 +3559,10 @@ impl App {
     /// codec, exact byte size, and every EXIF tag. Read on-demand from RAM
     /// (privacy task #2: nothing cached to disk). Capped to fit the screen height.
     fn exif_rows(&self) -> Vec<Row> {
-        let Some(item) = self.displayed_item else {
+        let Some(item) = self.core.displayed_item else {
             return Vec::new();
         };
-        let name = self.source.name(item);
+        let name = self.core.source.name(item);
         let mut rows = Vec::new();
         // Identity header: filename (bold) over its folder (the filename is already
         // shown above, so the path row is the parent directory only).
@@ -3573,7 +3574,7 @@ impl App {
         // shows the archive's path, with the in-archive folder appended (after a
         // `›`) when the entry lives in a subfolder — so a zip's photos report
         // *where the zip is* plus *where inside it they are*.
-        let location = match (self.source.path(item), self.source.container()) {
+        let location = match (self.core.source.path(item), self.core.source.container()) {
             (Some(p), _) => p
                 .parent()
                 .filter(|d| !d.as_os_str().is_empty())
@@ -3654,7 +3655,7 @@ impl App {
         if self.core.exif_cache.contains_key(&item) {
             return;
         }
-        if let Ok(bytes) = self.source.bytes(item) {
+        if let Ok(bytes) = self.core.source.bytes(item) {
             let fields = read_exif_fields(&bytes);
             self.core
                 .exif_cache
@@ -3786,10 +3787,13 @@ impl App {
         let info_bg = hud::bg_for_opacity(self.settings.info_opacity);
         // Resolve the Live Photo pairing (cached; one stat) up front so either panel can
         // label it — the basic line and the detailed table both read `is_live_photo`.
-        if let Some(item) = self.displayed_item {
+        if let Some(item) = self.core.displayed_item {
             self.live_motion_path(item);
         }
-        let is_live = self.displayed_item.is_some_and(|i| self.is_live_photo(i));
+        let is_live = self
+            .core
+            .displayed_item
+            .is_some_and(|i| self.is_live_photo(i));
         let panel = match self.info {
             InfoMode::Off => return,
             InfoMode::Basic => {
@@ -3806,7 +3810,7 @@ impl App {
             InfoMode::Full => {
                 // Warm the EXIF read once so the table build (and its per-frame rebuilds
                 // during playback) never re-read the file.
-                if let Some(item) = self.displayed_item {
+                if let Some(item) = self.core.displayed_item {
                     self.ensure_exif_cached(item);
                 }
                 let rows = self.exif_rows();
@@ -3842,7 +3846,7 @@ impl App {
             a.set_overlay(Some((&bitmap, w, h)), margin);
         }
         self.overlay_shown = true;
-        self.overlay_item = self.displayed_item;
+        self.overlay_item = self.core.displayed_item;
         self.draw();
     }
 
@@ -4041,7 +4045,8 @@ impl App {
     /// photo lands, learn from the wait, then snap to full and fade. Returns
     /// whether the pie still needs the loop to keep ticking.
     fn tick_pie(&mut self, now: Instant) -> bool {
-        let not_ready = self.target_item.is_some() && self.displayed_item != self.target_item;
+        let not_ready =
+            self.core.target_item.is_some() && self.core.displayed_item != self.core.target_item;
         if not_ready {
             self.pie_finish = None;
             let start = *self.wait_started.get_or_insert(now);
@@ -4128,7 +4133,7 @@ impl App {
     /// rebuilt only when its content changes and no faster than [`SCAN_CARD_REFRESH`] (the
     /// current-folder line changes per directory); cleared when the scan ends.
     fn tick_chip(&mut self) {
-        let want = match (self.dir_scan.as_ref(), self.displayed_item) {
+        let want = match (self.dir_scan.as_ref(), self.core.displayed_item) {
             (Some(scan), Some(_))
                 if scan.bootstrapped && scan.started.elapsed() >= SCAN_DIALOG_DELAY =>
             {
@@ -4136,7 +4141,7 @@ impl App {
                 // duplicate the heading).
                 let cur = scan.progress.current();
                 let path = if cur == scan.name { String::new() } else { cur };
-                Some((scan.name.clone(), path, self.source.len()))
+                Some((scan.name.clone(), path, self.core.source.len()))
             }
             _ => None,
         };
@@ -4225,7 +4230,7 @@ impl App {
         if self.overlay_shown {
             self.overlay_item = None; // force the info/EXIF/help panel to re-show next tick
         }
-        if self.source.is_empty() {
+        if self.core.source.is_empty() {
             self.show_open_hint(); // re-rasterize the "Press O to open" hint
         }
         self.effects.push(contract::CoreEffect::RequestRender);
@@ -4278,7 +4283,7 @@ impl App {
     /// [`show_open_hint`]: App::show_open_hint
     fn open_hint_active(&self) -> bool {
         self.open_panel.is_some()
-            && self.source.is_empty()
+            && self.core.source.is_empty()
             && self.dir_scan.is_none()
             && self.pending_launch.is_none()
     }
@@ -4579,7 +4584,7 @@ impl App {
         let Some(nav) = nav_of(action) else {
             return;
         };
-        if self.target_item.is_some() && self.displayed_item != self.target_item {
+        if self.core.target_item.is_some() && self.core.displayed_item != self.core.target_item {
             self.pie_glow_started = Some(Instant::now());
         } else {
             self.advance(nav);
@@ -4595,7 +4600,7 @@ impl App {
         // Never advance while the previous target is still pending (a miss in
         // flight): a fast second press would overwrite it and skip that photo.
         // Holding still flies — `about_to_wait` re-advances once it's caught up.
-        if self.displayed_item != self.target_item {
+        if self.core.displayed_item != self.core.target_item {
             return;
         }
         // Navigating away from an animated image stops playback and reverts to the
@@ -4603,15 +4608,15 @@ impl App {
         self.stop_playback();
         // Remember the direction so the slideshow auto-advances the way the user last
         // moved (manual nav during a slideshow steers it). The slideshow's own
-        // `advance(self.last_nav)` calls are then idempotent here.
-        self.last_nav = nav;
+        // `advance(self.core.last_nav)` calls are then idempotent here.
+        self.core.last_nav = nav;
         match nav {
-            Nav::Forward => self.playlist.next(),
-            Nav::Backward => self.playlist.prev(),
-            Nav::Random => self.playlist.random_next(),
-            Nav::RandomPrev => self.playlist.random_prev(),
+            Nav::Forward => self.core.playlist.next(),
+            Nav::Backward => self.core.playlist.prev(),
+            Nav::Random => self.core.playlist.random_next(),
+            Nav::RandomPrev => self.core.playlist.random_prev(),
         }
-        self.target_item = self.playlist.current();
+        self.core.target_item = self.core.playlist.current();
         // Both modes use the async engine: present on a ring hit, else hold the
         // previous frame while the decode (fit-sized or full-res) lands.
         self.try_present_target();
@@ -4808,8 +4813,9 @@ impl App {
             // `poll_anim_decode` picks it up promptly (active playback drives its own
             // precise next-frame wake via `tick_playback`, not this frame poll).
             || self.anim_decode.is_some()
-            || self.displayed_item != self.target_item
+            || self.core.displayed_item != self.core.target_item
             || self
+                .core
                 .targets
                 .iter()
                 .any(|&t| self.core.ring.slot_for(t).is_none() && !self.core.failed.contains(&t))
@@ -4832,7 +4838,7 @@ impl App {
                 // finished loop, so the stale last frame doesn't linger) + anchor timing.
                 self.present_anim_frame();
                 if was_finished {
-                    if let Some(item) = self.displayed_item {
+                    if let Some(item) = self.core.displayed_item {
                         self.start_live_audio(item); // replay from the top
                     }
                 } else if let Some(a) = &self.live_audio {
@@ -4846,7 +4852,7 @@ impl App {
             }
             return;
         }
-        let Some(item) = self.displayed_item else {
+        let Some(item) = self.core.displayed_item else {
             return;
         };
         // Eagerly prepared on dwell → play instantly (no decode wait).
@@ -4879,7 +4885,7 @@ impl App {
             self.present_anim_frame();
             return;
         }
-        let Some(item) = self.displayed_item else {
+        let Some(item) = self.core.displayed_item else {
             return;
         };
         if self.prepared.as_ref().is_some_and(|p| p.item == item) {
@@ -4948,7 +4954,7 @@ impl App {
         }
         #[cfg(target_os = "macos")]
         {
-            let paired = self.source.path(item).and_then(companion_motion);
+            let paired = self.core.source.path(item).and_then(companion_motion);
             self.live_motion_cache.insert(item, paired.clone());
             paired
         }
@@ -4967,8 +4973,8 @@ impl App {
     fn start_animation_decode(&mut self, item: usize, want: AnimWant) {
         self.anim_gen += 1;
         let gen = self.anim_gen;
-        let epoch = self.epoch;
-        let source = Arc::clone(&self.source);
+        let epoch = self.core.epoch;
+        let source = Arc::clone(&self.core.source);
         let fit = self.decode_fit();
         // A Live Photo decodes its companion `.mov` via AVFoundation; everything else
         // decodes the still's own bytes as a multi-frame animation.
@@ -4988,7 +4994,7 @@ impl App {
         // A user-initiated decode (P / step) means they've engaged — suppress the "▶ P"
         // hint. An eager prep is invisible background work, so leave the hint alone.
         if want != AnimWant::Eager {
-            self.anim_hint_shown_for = self.displayed_item;
+            self.anim_hint_shown_for = self.core.displayed_item;
         }
     }
 
@@ -5001,8 +5007,8 @@ impl App {
         if self.playback.is_some() || self.anim_decode.is_some() {
             return None; // already playing, or a decode is already in flight
         }
-        let item = self.displayed_item?;
-        if self.displayed_item != self.target_item {
+        let item = self.core.displayed_item?;
+        if self.core.displayed_item != self.core.target_item {
             return None; // still catching up to the target — not settled yet
         }
         if self.prepared.as_ref().is_some_and(|p| p.item == item) {
@@ -5043,7 +5049,10 @@ impl App {
             return;
         };
         // Stale: a newer request superseded it, the fit changed, or we moved on.
-        if gen != self.anim_gen || epoch != self.epoch || self.displayed_item != Some(item) {
+        if gen != self.anim_gen
+            || epoch != self.core.epoch
+            || self.core.displayed_item != Some(item)
+        {
             return;
         }
         match result {
@@ -5132,7 +5141,7 @@ impl App {
     /// still texture (it was never evicted — playback draws via `set_image`, not the
     /// ring), re-decoding only in the rare case it's no longer resident.
     fn restore_still(&mut self) {
-        let Some(item) = self.displayed_item else {
+        let Some(item) = self.core.displayed_item else {
             return;
         };
         if let Some(slot) = self.core.ring.slot_for(item) {
@@ -5190,7 +5199,7 @@ impl App {
         if flying || self.playback.is_some() {
             return;
         }
-        let Some(item) = self.displayed_item else {
+        let Some(item) = self.core.displayed_item else {
             return;
         };
         if self.anim_hint_shown_for == Some(item) {
@@ -5277,7 +5286,7 @@ impl App {
             self.show_toast_icon("", Some(icon::assets::VOLUME_SLASH));
         } else {
             // Unmuting mid-playback: resume audio at the motion's current position.
-            if let (Some(pb), Some(item)) = (self.playback.as_ref(), self.displayed_item) {
+            if let (Some(pb), Some(item)) = (self.playback.as_ref(), self.core.displayed_item) {
                 if pb.is_playing() {
                     let secs = pb.index() as f64 * pb.total_duration().as_secs_f64()
                         / pb.frame_count().max(1) as f64;
@@ -5428,13 +5437,13 @@ impl ApplicationHandler for App {
             renderer.resize(now.width, now.height);
             // The real window size differs from what we decoded for — re-decode
             // the first image at the corrected fit so the first frame isn't soft.
-            if let Some(idx) = self.playlist.current() {
+            if let Some(idx) = self.core.playlist.current() {
                 let t0 = Instant::now();
                 // Preview-first (see `load_current_sync`): the full decode lands off-thread.
-                let decoded = decode_item(self.source.as_ref(), idx, self.decode_fit(), true);
+                let decoded = decode_item(self.core.source.as_ref(), idx, self.decode_fit(), true);
                 self.core.metrics.record("decode", t0.elapsed());
                 if let Ok(img) = decoded {
-                    let meta = meta_for(self.source.as_ref(), idx, &self.root, &img);
+                    let meta = meta_for(self.core.source.as_ref(), idx, &self.core.root, &img);
                     self.core.current = Some(meta.clone());
                     self.core.meta_cache.insert(idx, meta);
                     renderer.set_image(
@@ -5462,7 +5471,7 @@ impl ApplicationHandler for App {
 
         // Empty launch (no folder/file given): show a blank background with the centered
         // Open File / Open Folder call to action instead of an image.
-        if self.playlist.current().is_none() {
+        if self.core.playlist.current().is_none() {
             renderer.clear_image();
             if let Some((bitmap, w, h, file, folder)) = self.open_panel_bitmap() {
                 renderer.set_message(Some((&bitmap, w, h)));
@@ -5495,8 +5504,8 @@ impl ApplicationHandler for App {
         let (ahead, behind) = window_for_capacity(cap);
         self.core.ahead = ahead;
         self.core.behind = behind;
-        self.displayed_item = self.playlist.current();
-        self.target_item = self.playlist.current();
+        self.core.displayed_item = self.core.playlist.current();
+        self.core.target_item = self.core.playlist.current();
         self.core.last_present = Some(Instant::now());
 
         self.window = Some(window);
@@ -5878,7 +5887,7 @@ impl ApplicationHandler for App {
             // expired), so holding a nav key flies slow -> fast for control. The
             // ceiling is the configured max-photos/sec cap (#20), or the refresh rate
             // when uncapped. All three are read live from the settings.
-            let caught_up = self.displayed_item == self.target_item;
+            let caught_up = self.core.displayed_item == self.core.target_item;
             let repeat_elapsed = match self.core.hold_start {
                 Some(t) => now.saturating_duration_since(t + self.core.initial_delay),
                 None => Duration::ZERO,
@@ -5910,14 +5919,14 @@ impl ApplicationHandler for App {
         let slideshow_running =
             self.core.slideshow.on && self.held_nav().is_none() && self.dialog.is_none();
         if slideshow_running {
-            let caught_up = self.displayed_item == self.target_item;
+            let caught_up = self.core.displayed_item == self.core.target_item;
             let since_shown = self
                 .core
                 .last_present
                 .map(|t| now.saturating_duration_since(t))
                 .unwrap_or(Duration::ZERO);
             if caught_up && self.core.slideshow.is_due(since_shown) {
-                self.advance(self.last_nav);
+                self.advance(self.core.last_nav);
             }
         }
 
@@ -5956,7 +5965,7 @@ impl ApplicationHandler for App {
             } else if !transforming
                 // Help is static (no photo needed); the info panels need a photo.
                 && (self.info == InfoMode::Help || self.core.current.is_some())
-                && (!self.overlay_shown || self.overlay_item != self.displayed_item)
+                && (!self.overlay_shown || self.overlay_item != self.core.displayed_item)
             {
                 self.show_overlay();
             }
@@ -5983,7 +5992,7 @@ impl ApplicationHandler for App {
                 self.core.resize_settle_at = None;
                 self.invalidate_geometry();
                 self.load_current_sync();
-                self.target_item = self.playlist.current();
+                self.core.target_item = self.core.playlist.current();
                 self.request_prefetch();
                 // Re-place a visible info/EXIF/help panel against the settled surface
                 // size, with a freshly sized corner margin. A fullscreen toggle resizes

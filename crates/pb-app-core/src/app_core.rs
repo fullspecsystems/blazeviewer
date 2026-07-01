@@ -15,15 +15,30 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use pb_core::ResidentRing;
+use pb_core::{Playlist, ResidentRing};
 use pb_decode::FitBox;
-use pb_render::{Rotation, ScaleMode, ViewTransform};
+use pb_render::{Rotation, ViewTransform};
+use pb_source::PhotoSource;
 
 use crate::decode_pool::{DecodePool, Outcome};
 use crate::metrics::StageTimes;
 use crate::{Action, Modifiers, PbKey, PhotoMeta, Slideshow};
+
+/// A navigation move: forward (`space`/`→`), backward (`backspace`/`←`), a
+/// precomputed-random jump (`enter`), or a step back through the random walk
+/// (`shift+enter`). All are gated + self-paced + prefetchable the same way (random
+/// walks a known shuffle order, so its next/prior targets are knowable — see
+/// `pb_core::ShuffleOrder`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Nav {
+    Forward,
+    Backward,
+    Random,
+    RandomPrev,
+}
 
 /// The platform-neutral orchestration state the shell drives. Grows as step 5 relocates
 /// field groups off the winit shell; the shell holds one `AppCore` and reaches its state
@@ -105,60 +120,29 @@ pub struct AppCore {
 
     /// Per-stage timing (decode/upload/render); disabled unless `--metrics` is passed.
     pub metrics: StageTimes,
-}
 
-impl AppCore {
-    /// Build the initial core. `initial_delay`, `slideshow_interval`, and `default_scale`
-    /// come from user settings; the rest start at their launch defaults — nothing held, a
-    /// ~120 Hz cadence until the real refresh rate is read, slideshow off, no modifiers,
-    /// upright at the default scale, no gesture/geometry timers pending.
-    pub fn new(
-        initial_delay: Duration,
-        slideshow_interval: Duration,
-        default_scale: ScaleMode,
-        pool: DecodePool,
-        results: Receiver<Outcome>,
-        metrics: StageTimes,
-    ) -> Self {
-        Self {
-            held: HashMap::new(),
-            last_present: None,
-            frame_interval: Duration::from_micros(8_333),
-            hold_start: None,
-            initial_delay,
-            slideshow: Slideshow {
-                interval: slideshow_interval,
-                ..Slideshow::default()
-            },
-            mods: Modifiers::NONE,
-            esc_guard_until: None,
-            fit: None,
-            view: ViewTransform {
-                mode: default_scale,
-                ..ViewTransform::default()
-            },
-            last_cursor: None,
-            dragging: false,
-            rotations: HashMap::new(),
-            zoom_started: None,
-            zoom_last: None,
-            pan_started: None,
-            pan_last: None,
-            resize_settle_at: None,
-            geometry_save_at: None,
-            meta_cache: HashMap::new(),
-            current: None,
-            exif_cache: HashMap::new(),
-            pool,
-            results,
-            ring: ResidentRing::new(0),
-            ahead: 8,
-            behind: 2,
-            failed: HashSet::new(),
-            deleted: HashSet::new(),
-            preview_resident: HashSet::new(),
-            pending_uploads: Vec::new(),
-            metrics,
-        }
-    }
+    // --- Nav / playlist (NS0 5.3) ---
+    /// The photo source (filesystem / ZIP / 7z) behind the current playlist.
+    pub source: Arc<dyn PhotoSource>,
+    /// Pure navigation state: cursor + precomputed shuffle order.
+    pub playlist: Playlist,
+    /// The current prefetch want-list (priority order), used as eviction `keep`.
+    pub targets: Vec<usize>,
+    /// The last navigation direction, so the slideshow auto-advances the way the user last
+    /// moved (space → forward, backspace → back, enter → random). Updated on every advance.
+    pub last_nav: Nav,
+    /// What's currently on screen.
+    pub displayed_item: Option<usize>,
+    /// The item we're trying to show (== `displayed_item` once caught up).
+    pub target_item: Option<usize>,
+    /// Geometry generation; bumped on resize / fit toggle. Stale-epoch decodes are discarded
+    /// so an old-size result can't land on screen.
+    pub epoch: u64,
+    /// The root the playlist was opened from — for showing paths relative to it.
+    pub root: PathBuf,
+    /// The directory the current playlist was scanned from (enables the `Ctrl+R` recursive
+    /// toggle + re-scan). `None` for an explicit file list.
+    pub scan_root: Option<PathBuf>,
+    /// Whether the current scan-based playlist is recursive (`Ctrl+R` toggles).
+    pub recursive: bool,
 }
