@@ -771,6 +771,36 @@ struct App {
     /// executes them at the end of each `ApplicationHandler` entry — the seam an AppKit
     /// shell will re-implement. (Being filled in incrementally: today it carries `Quit`.)
     effects: Vec<contract::CoreEffect>,
+
+    /// A dialog the orchestration layer asked the shell to open, deferred so the opener
+    /// methods don't need the `ActiveEventLoop` (window creation lives in the shell's
+    /// `drain_effects`, not scattered through orchestration). Only one dialog shows at a
+    /// time, so it's an `Option`. Opened at the same boundary as `effects`. (NS0 dialog
+    /// inversion; the shell owns `DialogWindow` outright in NS2.)
+    pending_dialog: Option<DialogRequest>,
+}
+
+/// A deferred dialog open (see [`App::pending_dialog`]). Carries only what the opener
+/// computed; `settings`/`keymap`/the parent window are read from `self` when the shell
+/// actually opens it, so no borrows are captured here.
+enum DialogRequest {
+    /// A plain themed dialog — About / Settings / Confirm / Message / Password — with a
+    /// body message (empty for About/Settings).
+    Simple {
+        kind: dialog::DialogKind,
+        message: String,
+    },
+    /// The archive "Opening…" determinate-progress dialog (a progress handle + redraw are
+    /// wired after it opens).
+    Loading {
+        message: String,
+        progress: pb_source::OpenProgress,
+    },
+    /// The folder "Scanning…" determinate-progress dialog.
+    Scanning {
+        message: String,
+        progress: ScanProgress,
+    },
 }
 
 /// What to do with an animation decode once it lands.
@@ -945,6 +975,7 @@ impl App {
             framestep_started: None,
             framestep_last: None,
             effects: Vec::new(),
+            pending_dialog: None,
             exif_cache: HashMap::new(),
         }
     }
@@ -1349,7 +1380,7 @@ impl App {
             // runs when the dialog answers Yes (`dialog_event`), on this item.
             let name = file_name_of(self.source.name(item));
             self.pending_confirm_delete = Some(item);
-            self.open_confirm_delete(&name, event_loop);
+            self.open_confirm_delete(&name);
             return;
         }
         self.do_delete(item, &path, false, event_loop);
@@ -1910,22 +1941,10 @@ impl App {
                 d.become_loading(&msg, progress.clone());
             }
         } else {
-            let refresh = self.refresh_hz();
-            let parent = self.active.as_ref().map(|a| a.window.clone());
-            let mut dlg = dialog::DialogWindow::open(
-                dialog::DialogKind::Loading,
-                event_loop,
-                refresh,
-                &msg,
-                &self.settings,
-                &self.keymap,
-                parent.as_deref(),
-            );
-            if let Some(d) = dlg.as_mut() {
-                d.set_progress(Some(progress.clone()));
-                d.request_redraw();
-            }
-            self.dialog = dlg;
+            self.pending_dialog = Some(DialogRequest::Loading {
+                message: msg,
+                progress: progress.clone(),
+            });
         }
         self.archive_load = Some(ArchiveLoad {
             generation,
@@ -1988,9 +2007,9 @@ impl App {
                     event_loop,
                 );
             }
-            Ok(_) => self.fail_archive_open(&archive::ArchiveOpenError::Empty, event_loop),
+            Ok(_) => self.fail_archive_open(&archive::ArchiveOpenError::Empty),
             Err(archive::ArchiveOpenError::PasswordRequired) => {
-                self.prompt_archive_password(path, was_password_attempt, event_loop)
+                self.prompt_archive_password(path, was_password_attempt)
             }
             // User cancelled: drop quietly, keeping whatever was on screen — no error
             // dialog. The loading dialog is already closed (or closes here as a backstop).
@@ -1998,7 +2017,7 @@ impl App {
                 self.password_archive = None;
                 self.close_dialog();
             }
-            Err(e) => self.fail_archive_open(&e, event_loop),
+            Err(e) => self.fail_archive_open(&e),
         }
     }
 
@@ -2159,7 +2178,7 @@ impl App {
                             Some(s) => (s.name.clone(), s.progress.clone()),
                             None => return,
                         };
-                        self.open_scanning_dialog(&name, progress, event_loop);
+                        self.open_scanning_dialog(&name, progress);
                     }
                     return;
                 }
@@ -2176,28 +2195,12 @@ impl App {
     /// (a live image count, the current subfolder, and a Cancel button). Mirrors the 7z
     /// loading dialog in [`begin_archive_open`](App::begin_archive_open); only called once
     /// the scan has outlasted [`SCAN_DIALOG_DELAY`] and no other dialog is showing.
-    fn open_scanning_dialog(
-        &mut self,
-        name: &str,
-        progress: ScanProgress,
-        event_loop: &ActiveEventLoop,
-    ) {
+    fn open_scanning_dialog(&mut self, name: &str, progress: ScanProgress) {
         let msg = scan_message(name);
-        let refresh = self.refresh_hz();
-        let parent = self.active.as_ref().map(|a| a.window.clone());
-        let mut dlg = dialog::DialogWindow::open(
-            dialog::DialogKind::Scanning,
-            event_loop,
-            refresh,
-            &msg,
-            &self.settings,
-            &self.keymap,
-            parent.as_deref(),
-        );
-        if let Some(d) = dlg.as_mut() {
-            d.set_scan(&msg, progress);
-        }
-        self.dialog = dlg;
+        self.pending_dialog = Some(DialogRequest::Scanning {
+            message: msg,
+            progress,
+        });
     }
 
     /// Close the dialog window only if it's the Scanning progress view (a folder scan
@@ -2235,9 +2238,9 @@ impl App {
 
     /// A terminal archive-open failure (not a password retry): forget the pending
     /// archive and replace any open dialog with the error notice.
-    fn fail_archive_open(&mut self, e: &archive::ArchiveOpenError, event_loop: &ActiveEventLoop) {
+    fn fail_archive_open(&mut self, e: &archive::ArchiveOpenError) {
         self.password_archive = None;
-        self.report_archive_error(e, event_loop);
+        self.report_archive_error(e);
     }
 
     /// Close the egui dialog window (if any). Dropping it scrubs an entered password.
@@ -2249,12 +2252,7 @@ impl App {
     /// `path` so a submitted password re-opens it. On the first prompt a fresh
     /// Password dialog opens; on a retry (`wrong`) the existing dialog gets an inline
     /// "Incorrect password" error and a cleared field rather than a jarring re-open.
-    fn prompt_archive_password(
-        &mut self,
-        path: PathBuf,
-        wrong: bool,
-        event_loop: &ActiveEventLoop,
-    ) {
+    fn prompt_archive_password(&mut self, path: PathBuf, wrong: bool) {
         self.password_archive = Some(path.clone());
         let is_password_dialog =
             self.dialog.as_ref().map(|d| d.kind()) == Some(dialog::DialogKind::Password);
@@ -2272,29 +2270,18 @@ impl App {
             .unwrap_or("this archive");
         // Two lines: the lead on one, the (possibly long) file name on its own.
         let prompt = format!("Enter the password for\n\u{201c}{name}\u{201d}");
-        let refresh = self.refresh_hz();
-        let parent = self.active.as_ref().map(|a| a.window.clone());
-        self.dialog = dialog::DialogWindow::open(
-            dialog::DialogKind::Password,
-            event_loop,
-            refresh,
-            &prompt,
-            &self.settings,
-            &self.keymap,
-            parent.as_deref(),
-        );
+        self.pending_dialog = Some(DialogRequest::Simple {
+            kind: dialog::DialogKind::Password,
+            message: prompt,
+        });
     }
 
     /// Surface an archive-open failure to the user via the egui message dialog
     /// (too-large / corrupt / password / OOM / empty), and log it.
-    fn report_archive_error(
-        &mut self,
-        e: &archive::ArchiveOpenError,
-        event_loop: &ActiveEventLoop,
-    ) {
+    fn report_archive_error(&mut self, e: &archive::ArchiveOpenError) {
         let msg = e.user_message();
         eprintln!("PhotoBlaze: {msg}");
-        self.open_message(&msg, event_loop);
+        self.open_message(&msg);
     }
 
     /// Toggle recursive scanning of the current folder (`Ctrl+R`), keeping the current photo
@@ -2881,8 +2868,8 @@ impl App {
             // `frame_step_press` (the FrameStep press arm) instead.
             Action::FrameNext => self.frame_step(1, event_loop),
             Action::FramePrev => self.frame_step(-1, event_loop),
-            Action::Settings => self.open_settings(event_loop),
-            Action::About => self.open_about(event_loop),
+            Action::Settings => self.open_settings(),
+            Action::About => self.open_about(),
             Action::Quit => self.begin_exit(),
         }
     }
@@ -3151,14 +3138,14 @@ impl App {
 
     /// Open the "About PhotoBlaze" dialog (Help menu) — an egui window with the app
     /// icon + version, dark-mode-aware (see `dialog`).
-    fn open_about(&mut self, event_loop: &ActiveEventLoop) {
-        self.open_dialog(dialog::DialogKind::About, event_loop);
+    fn open_about(&mut self) {
+        self.open_dialog(dialog::DialogKind::About);
     }
 
     /// Open the Settings dialog (Ctrl+,) — an egui window seeded from the live
     /// settings; **Save** routes back to [`apply_settings`](Self::apply_settings).
-    fn open_settings(&mut self, event_loop: &ActiveEventLoop) {
-        self.open_dialog(dialog::DialogKind::Settings, event_loop);
+    fn open_settings(&mut self) {
+        self.open_dialog(dialog::DialogKind::Settings);
     }
 
     /// Apply the settings the user saved in the dialog: swap in the new model, apply
@@ -3217,24 +3204,17 @@ impl App {
 
     /// Open (or focus, if already open) one of our egui dialog windows. Only one
     /// dialog is shown at a time; requesting a different kind replaces it.
-    fn open_dialog(&mut self, kind: dialog::DialogKind, event_loop: &ActiveEventLoop) {
+    fn open_dialog(&mut self, kind: dialog::DialogKind) {
         if let Some(d) = self.dialog.as_ref() {
             if d.kind() == kind {
                 d.focus();
                 return;
             }
         }
-        let refresh = self.refresh_hz();
-        let parent = self.active.as_ref().map(|a| a.window.clone());
-        self.dialog = dialog::DialogWindow::open(
+        self.pending_dialog = Some(DialogRequest::Simple {
             kind,
-            event_loop,
-            refresh,
-            "",
-            &self.settings,
-            &self.keymap,
-            parent.as_deref(),
-        );
+            message: String::new(),
+        });
     }
 
     /// Refresh rate in Hz (rounded, ≥1) — caps the Settings fly-speed slider and is
@@ -3246,37 +3226,23 @@ impl App {
     /// Open the themed (dark-aware egui) "Delete Permanently" confirmation for `name`.
     /// The actual deletion happens when the dialog answers Yes (see `dialog_event`),
     /// acting on `pending_confirm_delete`.
-    fn open_confirm_delete(&mut self, name: &str, event_loop: &ActiveEventLoop) {
-        let refresh = self.refresh_hz();
+    fn open_confirm_delete(&mut self, name: &str) {
         let msg = format!("Permanently delete \u{2018}{name}\u{2019}?");
-        let parent = self.active.as_ref().map(|a| a.window.clone());
-        self.dialog = dialog::DialogWindow::open(
-            dialog::DialogKind::Confirm,
-            event_loop,
-            refresh,
-            &msg,
-            &self.settings,
-            &self.keymap,
-            parent.as_deref(),
-        );
+        self.pending_dialog = Some(DialogRequest::Simple {
+            kind: dialog::DialogKind::Confirm,
+            message: msg,
+        });
     }
 
     /// Open a one-button informational / error notice (egui `DialogKind::Message`):
     /// a warning icon + `message` + an OK button, centered over the viewer, closing
     /// on OK / Esc. The archive-open path (`archive::ArchiveOpenError::user_message`)
     /// calls this to surface a too-large / corrupt / password / OOM / empty failure.
-    pub fn open_message(&mut self, message: &str, event_loop: &ActiveEventLoop) {
-        let refresh = self.refresh_hz();
-        let parent = self.active.as_ref().map(|a| a.window.clone());
-        self.dialog = dialog::DialogWindow::open(
-            dialog::DialogKind::Message,
-            event_loop,
-            refresh,
-            message,
-            &self.settings,
-            &self.keymap,
-            parent.as_deref(),
-        );
+    pub fn open_message(&mut self, message: &str) {
+        self.pending_dialog = Some(DialogRequest::Simple {
+            kind: dialog::DialogKind::Message,
+            message: message.to_string(),
+        });
     }
 
     /// Route an event for the dialog window (egui owns it). Esc / close button
@@ -4128,6 +4094,62 @@ impl App {
             // Expands to a `match` in later NS0 checkpoints as more variants are routed.
             if let contract::CoreEffect::Quit = effect {
                 event_loop.exit();
+            }
+        }
+        self.open_pending_dialog(event_loop);
+    }
+
+    /// Open the dialog an opener method deferred (see [`App::pending_dialog`]). The one
+    /// place a `DialogWindow` is created — where the shell owns the `ActiveEventLoop` — so
+    /// orchestration only records *what* to open. Mirrors the old inline opens exactly.
+    fn open_pending_dialog(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(req) = self.pending_dialog.take() else {
+            return;
+        };
+        let refresh = self.refresh_hz();
+        let parent = self.active.as_ref().map(|a| a.window.clone());
+        match req {
+            DialogRequest::Simple { kind, message } => {
+                self.dialog = dialog::DialogWindow::open(
+                    kind,
+                    event_loop,
+                    refresh,
+                    &message,
+                    &self.settings,
+                    &self.keymap,
+                    parent.as_deref(),
+                );
+            }
+            DialogRequest::Loading { message, progress } => {
+                let mut dlg = dialog::DialogWindow::open(
+                    dialog::DialogKind::Loading,
+                    event_loop,
+                    refresh,
+                    &message,
+                    &self.settings,
+                    &self.keymap,
+                    parent.as_deref(),
+                );
+                if let Some(d) = dlg.as_mut() {
+                    d.set_progress(Some(progress));
+                    d.request_redraw();
+                }
+                self.dialog = dlg;
+            }
+            DialogRequest::Scanning { message, progress } => {
+                let mut dlg = dialog::DialogWindow::open(
+                    dialog::DialogKind::Scanning,
+                    event_loop,
+                    refresh,
+                    &message,
+                    &self.settings,
+                    &self.keymap,
+                    parent.as_deref(),
+                );
+                if let Some(d) = dlg.as_mut() {
+                    d.set_scan(&message, progress);
+                }
+                self.dialog = dlg;
             }
         }
     }
