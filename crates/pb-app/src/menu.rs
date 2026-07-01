@@ -63,6 +63,7 @@ pub mod ids {
     pub const PLAY_PAUSE: &str = "play_pause";
     pub const FRAME_NEXT: &str = "frame_next";
     pub const FRAME_PREV: &str = "frame_prev";
+    pub const MUTE_LIVE_AUDIO: &str = "mute_live_audio";
 
     pub const HELP: &str = "help";
     pub const ABOUT: &str = "about";
@@ -105,6 +106,7 @@ pub enum MenuAction {
     PlayPause,
     FrameNext,
     FramePrev,
+    MuteLiveAudio,
     Help,
     About,
 }
@@ -147,6 +149,7 @@ impl MenuAction {
             MenuAction::PlayPause => Action::PlayPause,
             MenuAction::FrameNext => Action::FrameNext,
             MenuAction::FramePrev => Action::FramePrev,
+            MenuAction::MuteLiveAudio => Action::MuteLiveAudio,
             MenuAction::Help => Action::Help,
             MenuAction::About => Action::About,
         }
@@ -190,6 +193,7 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         PLAY_PAUSE => MenuAction::PlayPause,
         FRAME_NEXT => MenuAction::FrameNext,
         FRAME_PREV => MenuAction::FramePrev,
+        MUTE_LIVE_AUDIO => MenuAction::MuteLiveAudio,
         HELP => MenuAction::Help,
         ABOUT => MenuAction::About,
         _ => return None,
@@ -256,6 +260,8 @@ pub struct ViewChecks {
     /// exactly one — or neither — is checked, mirroring `App::info`.
     pub info: CheckMenuItem,
     pub full_exif: CheckMenuItem,
+    /// Checked when Live Photo audio is muted (#38), mirroring `settings.mute_live_audio`.
+    pub mute_live_audio: CheckMenuItem,
 }
 
 /// Everything [`build_menu`] hands back: the menu itself plus the item handles whose
@@ -344,6 +350,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
     let slideshow = check_item(ids::SLIDESHOW, "Slideshow\tS");
     let info = check_item(ids::INFO, "Show Image Info\tI");
     let full_exif = check_item(ids::FULL_EXIF, "Show All EXIF Info\tShift+I");
+    let mute_live_audio = check_item(ids::MUTE_LIVE_AUDIO, "Mute Live Photo Audio\tM");
 
     let view = Submenu::new("&View", true);
     let _ = view.append_items(&[
@@ -395,6 +402,8 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
             ids::FRAME_PREV,
             &labeled(keymap, "Previous Frame", Action::FramePrev),
         ),
+        &sep(),
+        &mute_live_audio,
     ]);
 
     let help = Submenu::new("&Help", true);
@@ -422,6 +431,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
             slideshow,
             info,
             full_exif,
+            mute_live_audio,
         },
     }
 }
@@ -531,6 +541,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
     let slideshow = check_item(ids::SLIDESHOW, "Slideshow");
     let info = check_item(ids::INFO, "Show Image Info");
     let full_exif = check_item(ids::FULL_EXIF, "Show All EXIF Info");
+    let mute_live_audio = check_item(ids::MUTE_LIVE_AUDIO, "Mute Live Photo Audio");
     // Native (Spaces) fullscreen. Its title flips to "Exit Full Screen" while engaged
     // (Mac convention — no checkmark), driven by `App::refresh_native_fullscreen_label`.
     let native_fullscreen = cmd_item(
@@ -597,6 +608,8 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
             ids::FRAME_PREV,
             &labeled(keymap, "Previous Frame", Action::FramePrev),
         ),
+        &sep(),
+        &mute_live_audio,
     ]);
 
     // Standard macOS Window menu. The predefined items carry their native labels,
@@ -636,6 +649,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
             slideshow,
             info,
             full_exif,
+            mute_live_audio,
         },
         window,
         native_fullscreen,

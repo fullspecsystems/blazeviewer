@@ -69,6 +69,7 @@ mod hud;
 mod hud_gallery;
 mod icon;
 mod keymap;
+mod live_audio;
 #[cfg(target_os = "macos")]
 mod macos_chrome;
 #[cfg(target_os = "macos")]
@@ -85,6 +86,7 @@ use animation::Playback;
 use decode_pool::{recommended_workers, DecodeFn, DecodePool, Outcome};
 use hud::{Hud, Row};
 use keymap::{KeyChord, Keymap};
+use live_audio::LiveAudio;
 use menu::MenuAction;
 use metrics::StageTimes;
 
@@ -795,7 +797,7 @@ struct App {
     /// caches the last-pushed `(scale mode, recursive, fullscreen, slideshow, info)` so the
     /// per-tick refresh is a no-op Win32 call when nothing changed.
     view_checks: Option<menu::ViewChecks>,
-    view_checks_state: Option<(ScaleMode, bool, bool, bool, InfoMode)>,
+    view_checks_state: Option<(ScaleMode, bool, bool, bool, InfoMode, bool)>,
     /// A delete whose playlist-advance is deferred: `(fire_at, removed_index)`. The
     /// deleted photo stays on screen with its icon until `fire_at`, then the playlist
     /// drops the item and advances (see `delete_current` / `flush_pending_delete`).
@@ -868,6 +870,10 @@ struct App {
     /// the moment the motion finishes; firing swaps the low-res last motion frame back
     /// for the full-res still — Apple's "play, then back to the photo" behavior.
     live_revert_at: Option<Instant>,
+    /// The Live Photo's audio (its `.mov` track), playing while the motion plays — the
+    /// "cheap path" (task #38). `None` when nothing is playing / it's a silent clip / not
+    /// a Live Photo. Dropped (which stops it) on pause-to-step, finish, or navigate.
+    live_audio: Option<LiveAudio>,
 }
 
 /// What to do with an animation decode once it lands.
@@ -1050,6 +1056,7 @@ impl App {
             framestep_started: None,
             framestep_last: None,
             live_revert_at: None,
+            live_audio: None,
             exif_cache: HashMap::new(),
             live_motion_cache: HashMap::new(),
         }
@@ -2738,11 +2745,12 @@ impl App {
             !self.windowed,
             self.slideshow.on,
             self.info,
+            self.settings.mute_live_audio,
         );
         if self.view_checks_state == Some(state) {
             return;
         }
-        let (mode, recursive, fullscreen, slideshow, info) = state;
+        let (mode, recursive, fullscreen, slideshow, info, muted) = state;
         c.fit.set_checked(mode == ScaleMode::Fit);
         c.fill.set_checked(mode == ScaleMode::Fill);
         c.original.set_checked(mode == ScaleMode::Original);
@@ -2751,6 +2759,7 @@ impl App {
         c.slideshow.set_checked(slideshow);
         c.info.set_checked(info == InfoMode::Basic);
         c.full_exif.set_checked(info == InfoMode::Full);
+        c.mute_live_audio.set_checked(muted);
         self.view_checks_state = Some(state);
     }
 
@@ -2947,6 +2956,7 @@ impl App {
             // `frame_step_press` (the FrameStep press arm) instead.
             Action::FrameNext => self.frame_step(1, event_loop),
             Action::FramePrev => self.frame_step(-1, event_loop),
+            Action::MuteLiveAudio => self.toggle_mute_audio(event_loop),
             Action::Settings => self.open_settings(event_loop),
             Action::About => self.open_about(event_loop),
             Action::Quit => self.begin_exit(event_loop),
@@ -4511,13 +4521,26 @@ impl App {
     /// `P` does nothing.
     fn toggle_play_pause(&mut self, event_loop: &ActiveEventLoop) {
         if self.playback.is_some() {
+            // Was it parked at the end of a finite loop? Then toggling *restarts* from
+            // frame 0 (so the audio must restart too, not resume mid-track).
+            let was_finished = self.playback.as_ref().unwrap().is_finished();
             let playing = self.playback.as_mut().unwrap().toggle_play();
             if playing {
                 // (Re)started — present the current frame (frame 0 when replaying a
                 // finished loop, so the stale last frame doesn't linger) + anchor timing.
                 self.present_anim_frame(event_loop);
+                if was_finished {
+                    if let Some(item) = self.displayed_item {
+                        self.start_live_audio(item); // replay from the top
+                    }
+                } else if let Some(a) = &self.live_audio {
+                    a.resume();
+                }
             } else {
                 self.draw(event_loop); // paused — just redraw the held frame
+                if let Some(a) = &self.live_audio {
+                    a.pause();
+                }
             }
             return;
         }
@@ -4529,6 +4552,7 @@ impl App {
             let anim = self.prepared.take().unwrap().anim;
             self.anim_hint_shown_for = Some(item); // engaged
             self.install_animation(anim, true, 0, event_loop);
+            self.start_live_audio(item);
             return;
         }
         // An eager prep is already decoding → upgrade it to play on arrival.
@@ -4546,6 +4570,8 @@ impl App {
     /// pausing playback. Uses the eager prep when ready; otherwise upgrades an in-flight
     /// prep (or kicks one) so the held-key scrub steps once frames land. No-op on a still.
     fn frame_step(&mut self, delta: i32, event_loop: &ActiveEventLoop) {
+        // Scrubbing is not continuous playback — silence any Live Photo audio.
+        self.live_audio = None;
         if self.playback.is_some() {
             self.playback.as_mut().unwrap().step(delta);
             self.present_anim_frame(event_loop);
@@ -4734,7 +4760,10 @@ impl App {
                         self.show_overlay(event_loop);
                     }
                 }
-                AnimWant::Play => self.install_animation(anim, true, 0, event_loop),
+                AnimWant::Play => {
+                    self.install_animation(anim, true, 0, event_loop);
+                    self.start_live_audio(item); // in sync with the first frame
+                }
                 AnimWant::Step(delta) => self.install_animation(anim, false, delta, event_loop),
             },
             Err(e) => {
@@ -4899,6 +4928,49 @@ impl App {
         self.framestep_started = None;
         self.framestep_last = None;
         self.live_revert_at = None;
+        self.live_audio = None; // dropping the player stops it
+    }
+
+    /// Start the Live Photo's audio from the top (its `.mov` track), if `item` is a Live
+    /// Photo with audio and audio isn't muted — the "cheap path" (task #38). A no-op for
+    /// an animation (no audio track), a silent clip, or when muted. Called when the motion
+    /// starts playing from frame 0.
+    fn start_live_audio(&mut self, item: usize) {
+        if self.settings.mute_live_audio {
+            self.live_audio = None;
+            return;
+        }
+        self.live_audio = self
+            .live_motion_path(item)
+            .and_then(|p| LiveAudio::play(&p, 0.0));
+    }
+
+    /// Toggle Live Photo audio mute (`M` / Image menu). Persists the choice, updates the
+    /// menu check + a toast, and takes effect immediately: muting silences a playing clip;
+    /// unmuting a currently-playing Live Photo starts its audio at the current position so
+    /// it stays in sync.
+    fn toggle_mute_audio(&mut self, event_loop: &ActiveEventLoop) {
+        let muted = !self.settings.mute_live_audio;
+        self.settings.mute_live_audio = muted;
+        self.settings.save();
+        self.view_checks_state = None; // force the menu check to re-assert
+        self.refresh_view_menu_checks();
+        if muted {
+            self.live_audio = None; // silence any playing clip now
+            self.show_toast("Live Photo audio muted", event_loop);
+        } else {
+            // Unmuting mid-playback: resume audio at the motion's current position.
+            if let (Some(pb), Some(item)) = (self.playback.as_ref(), self.displayed_item) {
+                if pb.is_playing() {
+                    let secs = pb.index() as f64 * pb.total_duration().as_secs_f64()
+                        / pb.frame_count().max(1) as f64;
+                    self.live_audio = self
+                        .live_motion_path(item)
+                        .and_then(|p| LiveAudio::play(&p, secs));
+                }
+            }
+            self.show_toast("Live Photo audio on", event_loop);
+        }
     }
 }
 
@@ -5635,6 +5707,7 @@ impl ApplicationHandler for App {
                 self.live_revert_at = None;
                 self.playback = None;
                 self.anim_frame_shown_at = None;
+                self.live_audio = None; // the motion (and its audio) is done
                 self.restore_still(event_loop);
                 None
             }

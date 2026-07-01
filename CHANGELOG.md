@@ -26,8 +26,9 @@ with any pre-release suffix carried only by the tag.
   hint; pressing **P** plays the motion using the same controls as animations (play/pause,
   frame-step with **.** / **,**). The motion is prepared in the background while you look at the
   still, so playback starts promptly, and it snaps back to the crisp full-res photo a beat after
-  it finishes. The detailed info panel shows it's a Live Photo (with frame count / rate /
-  duration), and the basic info line marks it **· Live**. Audio isn't played yet.
+  it finishes. The Live Photo's **audio** plays with the motion; mute it with **M** (or Image ▸
+  Mute Live Photo Audio — the choice is remembered). The detailed info panel shows it's a Live
+  Photo (with frame count / rate / duration), and the basic info line marks it **· Live**.
 
 ### Changed
 - The **Image** menu now shows each command's keyboard shortcut — Next, Previous, Random,

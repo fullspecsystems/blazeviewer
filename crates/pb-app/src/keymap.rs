@@ -373,6 +373,7 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         one(Action::PlayPause, "P"),
         one(Action::FrameNext, "."),
         one(Action::FramePrev, ","),
+        one(Action::MuteLiveAudio, "M"),
         one(Action::Settings, "Ctrl+,"),
         // About is menu-only (no default key).
         (Action::About, vec![]),
