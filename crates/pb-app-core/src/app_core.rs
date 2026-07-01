@@ -24,6 +24,7 @@ use pb_hud::hud::Hud;
 use pb_render::{Renderer, Rotation, ViewTransform};
 use pb_source::PhotoSource;
 
+use crate::animation::{AnimDecode, Playback, Prepared};
 use crate::contract::CoreEffect;
 use crate::decode_pool::{DecodePool, Outcome};
 use crate::keymap::Keymap;
@@ -235,6 +236,25 @@ pub struct AppCore {
     /// a playlist/source change. The native "Undo" menu item stays shell-owned (a muda handle,
     /// enabled/disabled from this state).
     pub undo_stack: Vec<UndoAction>,
+
+    // --- Animation / Live Photo playback (NS0 5.5 / Phase A4) ---
+    /// Active animation playback (the frame cursor + timing), or `None` when showing a still.
+    pub playback: Option<Playback>,
+    /// When the current animation frame was shown (the per-frame dwell anchor).
+    pub anim_frame_shown_at: Option<Instant>,
+    /// An in-flight off-thread animation decode, or `None`.
+    pub anim_decode: Option<AnimDecode>,
+    /// An animation decoded ahead (eager prep) and held ready for instant playback.
+    pub prepared: Option<Prepared>,
+    /// Animation generation; bumped on navigate so a late decode for a past item is discarded.
+    pub anim_gen: u64,
+    /// The item the `▶ P` play hint was last shown for, so it isn't re-shown while parked.
+    pub anim_hint_shown_for: Option<usize>,
+    /// Frame-step hold timing (the `,`/`.` keys): when the hold started / last stepped.
+    pub framestep_started: Option<Instant>,
+    pub framestep_last: Option<Instant>,
+    /// When to auto-revert a Live Photo's motion back to its still (after the clip plays once).
+    pub live_revert_at: Option<Instant>,
 
     // --- Config (NS0 5.5 / Phase 0.5) ---
     /// The active keybindings (loaded from `keymap.toml`; editable via the shortcut editor).

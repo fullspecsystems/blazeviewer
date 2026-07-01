@@ -53,7 +53,6 @@ use pb_render::{
 };
 use pb_source::{seven_z_projected_bytes, FsSource, PhotoSource, SevenZSource, ZipSource};
 
-mod animation;
 mod archive;
 mod clipboard;
 #[cfg(windows)]
@@ -90,9 +89,12 @@ pub use pb_hud::{hud, icon};
 // Persisted preferences model now lives in pb-app-core (NS0 5.5). Re-export at the crate
 // root so `crate::settings` / bare `settings::…` across main.rs + dialog.rs stay unchanged.
 pub use pb_app_core::settings;
+// The animation model (Playback + the decode/prep state types) now lives in pb-app-core (NS0
+// 5.5); re-export so `crate::animation` / bare `animation::…` stay unchanged.
+pub use pb_app_core::animation;
 
 use action::Action;
-use animation::Playback;
+use animation::{AnimDecode, AnimWant, Playback, Prepared};
 use hud::{Hud, Row};
 use keymap::Keymap;
 use live_audio::LiveAudio;
@@ -515,36 +517,8 @@ struct App {
     /// re-opened with the entered password on submit, cleared on success / cancel.
     password_archive: Option<PathBuf>,
 
-    // --- Animated images (task #37) — all RAM-only, dropped on navigate (privacy #2) ---
-    /// On-demand playback for the currently displayed animated image, once the user
-    /// pressed `P` (or stepped a frame). `None` when the current image is a still or
-    /// nothing is playing/paused. Presented via `set_image`, never the prefetch ring.
-    playback: Option<Playback>,
-    /// When the current animation frame was shown — the deadline anchor for advancing
-    /// to the next frame.
-    anim_frame_shown_at: Option<Instant>,
-    /// An off-thread animation decode in flight (a `P`/frame-step kicked it, or an
-    /// eager prep on dwell), so a large sequence never blocks the event loop. `None`
-    /// when idle.
-    anim_decode: Option<AnimDecode>,
-    /// A whole animation decoded *ahead* of the user (eager prep on dwell) and held
-    /// ready, so pressing `P` on a slow-to-decode WebP/AVIF is instant. RAM-only,
-    /// dropped on navigate (privacy #2); at most one at a time.
-    prepared: Option<Prepared>,
-    /// Monotonic id for animation-decode requests; a newer one supersedes a stale
-    /// result that finally arrives after the user moved on.
-    anim_gen: u64,
-    /// The displayed item the "▶ P to play" hint was last shown for, so it flashes
-    /// once per settle on an animated still (not every tick, and not while flying).
-    anim_hint_shown_for: Option<usize>,
-    /// Held-key frame-step (`,`/`.` scrub) timing: when the hold began (for the
-    /// initial tap delay) and when the last repeat fired.
-    framestep_started: Option<Instant>,
-    framestep_last: Option<Instant>,
-    /// When a finished **Live Photo** should revert to the crisp still (task #38). Armed
-    /// the moment the motion finishes; firing swaps the low-res last motion frame back
-    /// for the full-res still — Apple's "play, then back to the photo" behavior.
-    live_revert_at: Option<Instant>,
+    // --- Live Photo audio (the animation playback *state* moved to AppCore in NS0 5.5; this
+    // ObjC `AVAudioPlayer` handle stays shell-owned, driven from `self.core.playback`) ---
     /// The Live Photo's audio (its `.mov` track), playing while the motion plays — the
     /// "cheap path" (task #38). `None` when nothing is playing / it's a silent clip / not
     /// a Live Photo. Dropped (which stops it) on pause-to-step, finish, or navigate.
@@ -610,39 +584,6 @@ enum DialogOutcome {
     ConfirmAnswered(bool),
     /// A Message (or any other) dialog's OK / close.
     Closed,
-}
-
-/// What to do with an animation decode once it lands.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum AnimWant {
-    /// Eager prep on dwell: stash it ready (no visible change; `P` is then instant).
-    Eager,
-    /// `P` was pressed: start playing on arrival.
-    Play,
-    /// A frame-step key was pressed: land paused and step by this delta.
-    Step(i32),
-}
-
-/// An in-flight off-thread animation decode (the whole sequence for `item`), kicked by
-/// `P` / frame-step, or eagerly on dwell, so a big GIF/WebP never stalls the event
-/// loop. The still first frame stays on screen until it lands.
-struct AnimDecode {
-    gen: u64,
-    item: usize,
-    /// The geometry epoch at kick time; a resize in between invalidates the fit, so a
-    /// late result for the old size is discarded.
-    epoch: u64,
-    /// What to do when it lands — can be upgraded in flight (an eager prep becomes
-    /// `Play` if the user presses `P` before it finishes).
-    want: AnimWant,
-    rx: std::sync::mpsc::Receiver<Result<pb_decode::Animation, DecodeError>>,
-}
-
-/// A whole animation decoded ahead of the user (eager prep) and held ready for instant
-/// playback. RAM-only; dropped on navigate.
-struct Prepared {
-    item: usize,
-    anim: pb_decode::Animation,
 }
 
 impl App {
@@ -758,6 +699,15 @@ impl App {
                 hud: Hud::load(),
                 renderer: None,
                 undo_stack: Vec::new(),
+                playback: None,
+                anim_frame_shown_at: None,
+                anim_decode: None,
+                prepared: None,
+                anim_gen: 0,
+                anim_hint_shown_for: None,
+                framestep_started: None,
+                framestep_last: None,
+                live_revert_at: None,
                 keymap: Keymap::load(),
                 settings,
                 effects: Vec::new(),
@@ -787,15 +737,6 @@ impl App {
             scan_gen: 0,
             pending_launch: None,
             password_archive: None,
-            playback: None,
-            anim_frame_shown_at: None,
-            anim_decode: None,
-            prepared: None,
-            anim_gen: 0,
-            anim_hint_shown_for: None,
-            framestep_started: None,
-            framestep_last: None,
-            live_revert_at: None,
             live_audio: None,
             pending_dialog: None,
         }
@@ -1363,7 +1304,7 @@ impl App {
         // Guarded on the item actually changing, so a re-present of the same photo (e.g. a play
         // reverting to its still) doesn't re-arm it.
         if self.core.displayed_item != Some(item) {
-            self.anim_hint_shown_for = None;
+            self.core.anim_hint_shown_for = None;
         }
         self.core.displayed_item = Some(item);
         self.core.current = self.core.meta_cache.get(&item).cloned();
@@ -3516,14 +3457,14 @@ impl App {
             .is_some();
         // Frame/timing detail needs a decoded sequence — the live playback, or the one
         // eagerly prepped for this item.
-        let detail: Option<(usize, usize, Duration, u32)> = if let Some(pb) = &self.playback {
+        let detail: Option<(usize, usize, Duration, u32)> = if let Some(pb) = &self.core.playback {
             Some((
                 pb.index(),
                 pb.frame_count(),
                 pb.total_duration(),
                 pb.loop_count(),
             ))
-        } else if let Some(p) = self.prepared.as_ref().filter(|p| p.item == item) {
+        } else if let Some(p) = self.core.prepared.as_ref().filter(|p| p.item == item) {
             let count = p.anim.frames.len();
             let total: Duration = p.anim.frames.iter().map(|f| f.delay).sum();
             Some((0, count, total, p.anim.loop_count))
@@ -4652,7 +4593,7 @@ impl App {
             // An off-thread animation decode in flight keeps the loop polling so
             // `poll_anim_decode` picks it up promptly (active playback drives its own
             // precise next-frame wake via `tick_playback`, not this frame poll).
-            || self.anim_decode.is_some()
+            || self.core.anim_decode.is_some()
             || self.core.displayed_item != self.core.target_item
             || self
                 .core
@@ -4668,11 +4609,11 @@ impl App {
     /// or kicking a fresh decode) it starts playing the moment frames land. On a still,
     /// `P` does nothing.
     fn toggle_play_pause(&mut self) {
-        if self.playback.is_some() {
+        if self.core.playback.is_some() {
             // Was it parked at the end of a finite loop? Then toggling *restarts* from
             // frame 0 (so the audio must restart too, not resume mid-track).
-            let was_finished = self.playback.as_ref().unwrap().is_finished();
-            let playing = self.playback.as_mut().unwrap().toggle_play();
+            let was_finished = self.core.playback.as_ref().unwrap().is_finished();
+            let playing = self.core.playback.as_mut().unwrap().toggle_play();
             if playing {
                 // (Re)started — present the current frame (frame 0 when replaying a
                 // finished loop, so the stale last frame doesn't linger) + anchor timing.
@@ -4696,17 +4637,17 @@ impl App {
             return;
         };
         // Eagerly prepared on dwell → play instantly (no decode wait).
-        if self.prepared.as_ref().is_some_and(|p| p.item == item) {
-            let anim = self.prepared.take().unwrap().anim;
-            self.anim_hint_shown_for = Some(item); // engaged
+        if self.core.prepared.as_ref().is_some_and(|p| p.item == item) {
+            let anim = self.core.prepared.take().unwrap().anim;
+            self.core.anim_hint_shown_for = Some(item); // engaged
             self.install_animation(anim, true, 0);
             self.start_live_audio(item);
             return;
         }
         // An eager prep is already decoding → upgrade it to play on arrival.
-        if let Some(d) = self.anim_decode.as_mut() {
+        if let Some(d) = self.core.anim_decode.as_mut() {
             d.want = AnimWant::Play;
-            self.anim_hint_shown_for = Some(item);
+            self.core.anim_hint_shown_for = Some(item);
             return;
         }
         if self.has_motion(item) {
@@ -4720,23 +4661,23 @@ impl App {
     fn frame_step(&mut self, delta: i32) {
         // Scrubbing is not continuous playback — silence any Live Photo audio.
         self.live_audio = None;
-        if self.playback.is_some() {
-            self.playback.as_mut().unwrap().step(delta);
+        if self.core.playback.is_some() {
+            self.core.playback.as_mut().unwrap().step(delta);
             self.present_anim_frame();
             return;
         }
         let Some(item) = self.core.displayed_item else {
             return;
         };
-        if self.prepared.as_ref().is_some_and(|p| p.item == item) {
-            let anim = self.prepared.take().unwrap().anim;
-            self.anim_hint_shown_for = Some(item);
+        if self.core.prepared.as_ref().is_some_and(|p| p.item == item) {
+            let anim = self.core.prepared.take().unwrap().anim;
+            self.core.anim_hint_shown_for = Some(item);
             self.install_animation(anim, false, delta); // paused, stepped
             return;
         }
-        if let Some(d) = self.anim_decode.as_mut() {
+        if let Some(d) = self.core.anim_decode.as_mut() {
             d.want = AnimWant::Step(delta);
-            self.anim_hint_shown_for = Some(item);
+            self.core.anim_hint_shown_for = Some(item);
             return;
         }
         if self.has_motion(item) {
@@ -4753,7 +4694,7 @@ impl App {
         if step != 0 {
             pb.step(step);
         }
-        self.playback = Some(pb);
+        self.core.playback = Some(pb);
         self.present_anim_frame();
         if truncated {
             self.show_toast("Animation truncated");
@@ -4764,8 +4705,8 @@ impl App {
     fn frame_step_press(&mut self, key: PbKey, action: Action) {
         self.core.held.insert(key, action);
         let now = Instant::now();
-        self.framestep_started = Some(now);
-        self.framestep_last = Some(now);
+        self.core.framestep_started = Some(now);
+        self.core.framestep_last = Some(now);
         self.frame_step(frame_step_dir(action));
     }
 
@@ -4811,8 +4752,8 @@ impl App {
     /// screen until it lands (picked up by `poll_anim_decode`). `want` decides what
     /// happens on arrival — eager prep (stash ready), play (`P`), or step (frame-step).
     fn start_animation_decode(&mut self, item: usize, want: AnimWant) {
-        self.anim_gen += 1;
-        let gen = self.anim_gen;
+        self.core.anim_gen += 1;
+        let gen = self.core.anim_gen;
         let epoch = self.core.epoch;
         let source = Arc::clone(&self.core.source);
         let fit = self.decode_fit();
@@ -4824,7 +4765,7 @@ impl App {
             let result = decode_motion_job(live, &source, item, fit);
             let _ = tx.send(result);
         });
-        self.anim_decode = Some(AnimDecode {
+        self.core.anim_decode = Some(AnimDecode {
             gen,
             item,
             epoch,
@@ -4834,7 +4775,7 @@ impl App {
         // A user-initiated decode (P / step) means they've engaged — suppress the "▶ P"
         // hint. An eager prep is invisible background work, so leave the hint alone.
         if want != AnimWant::Eager {
-            self.anim_hint_shown_for = self.core.displayed_item;
+            self.core.anim_hint_shown_for = self.core.displayed_item;
         }
     }
 
@@ -4844,14 +4785,14 @@ impl App {
     /// the idle loop wakes to kick it), else `None`. Strictly off the hot path — only
     /// when settled (never while flying), exactly when the prefetch pool is idle.
     fn maybe_prepare_animation(&mut self, now: Instant) -> Option<Instant> {
-        if self.playback.is_some() || self.anim_decode.is_some() {
+        if self.core.playback.is_some() || self.core.anim_decode.is_some() {
             return None; // already playing, or a decode is already in flight
         }
         let item = self.core.displayed_item?;
         if self.core.displayed_item != self.core.target_item {
             return None; // still catching up to the target — not settled yet
         }
-        if self.prepared.as_ref().is_some_and(|p| p.item == item) {
+        if self.core.prepared.as_ref().is_some_and(|p| p.item == item) {
             return None; // already prepped and ready
         }
         if !self.has_motion(item) {
@@ -4875,7 +4816,7 @@ impl App {
         // Receive (and copy out what we need) in a scope so the `anim_decode` borrow
         // ends before we mutate it / install the playback.
         let outcome = {
-            let Some(d) = self.anim_decode.as_ref() else {
+            let Some(d) = self.core.anim_decode.as_ref() else {
                 return;
             };
             match d.rx.try_recv() {
@@ -4884,12 +4825,12 @@ impl App {
                 Err(TryRecvError::Disconnected) => None, // worker died
             }
         };
-        self.anim_decode = None;
+        self.core.anim_decode = None;
         let Some((gen, epoch, item, want, result)) = outcome else {
             return;
         };
         // Stale: a newer request superseded it, the fit changed, or we moved on.
-        if gen != self.anim_gen
+        if gen != self.core.anim_gen
             || epoch != self.core.epoch
             || self.core.displayed_item != Some(item)
         {
@@ -4901,7 +4842,7 @@ impl App {
                 // so there's no visible change — `P` will play it instantly. If the
                 // detailed panel is open, refresh it so the frame count/rate/loop appear.
                 AnimWant::Eager => {
-                    self.prepared = Some(Prepared { item, anim });
+                    self.core.prepared = Some(Prepared { item, anim });
                     if self.core.overlay_shown && self.core.info == InfoMode::Full {
                         self.show_overlay();
                     }
@@ -4927,7 +4868,7 @@ impl App {
     /// `set_image`, never the prefetch ring). Resets the per-frame deadline anchor.
     fn present_anim_frame(&mut self) {
         {
-            let Some(pb) = self.playback.as_ref() else {
+            let Some(pb) = self.core.playback.as_ref() else {
                 return;
             };
             let color = render_color(&pb.color());
@@ -4936,7 +4877,7 @@ impl App {
                 a.set_image(&frame.rgba, frame.width, frame.height, color, false, 1.0);
             }
         }
-        self.anim_frame_shown_at = Some(Instant::now());
+        self.core.anim_frame_shown_at = Some(Instant::now());
         // Keep a shown detailed-EXIF panel's live "Frame X / N" in sync as the frame
         // changes. Off the hot path (only during user-engaged playback/stepping), and
         // the EXIF read is memoized so this never re-reads the file per frame.
@@ -4950,28 +4891,29 @@ impl App {
     /// Advance playback to the due frame and return the next frame's wake deadline
     /// (None when not actively playing), so the loop sleeps exactly until then.
     fn tick_playback(&mut self, now: Instant) -> Option<Instant> {
-        let shown = self.anim_frame_shown_at;
-        let due = self.playback.as_ref().is_some_and(|pb| {
+        let shown = self.core.anim_frame_shown_at;
+        let due = self.core.playback.as_ref().is_some_and(|pb| {
             let since = shown
                 .map(|t| now.saturating_duration_since(t))
                 .unwrap_or(Duration::ZERO);
             pb.is_due(since)
         });
         if due {
-            self.playback.as_mut().unwrap().advance();
+            self.core.playback.as_mut().unwrap().advance();
             self.present_anim_frame(); // updates anim_frame_shown_at + draws
         }
         // A finished Live Photo reverts to the crisp still after a beat (rather than
         // parking on the low-res last motion frame). Arm the timer once, on the finish.
-        let live_finished = self
-            .playback
-            .as_ref()
-            .is_some_and(|pb| pb.is_finished() && pb.kind() == pb_decode::AnimationKind::LivePhoto);
-        if live_finished && self.live_revert_at.is_none() {
-            self.live_revert_at = Some(now + LIVE_REVERT_DELAY);
+        let live_finished =
+            self.core.playback.as_ref().is_some_and(|pb| {
+                pb.is_finished() && pb.kind() == pb_decode::AnimationKind::LivePhoto
+            });
+        if live_finished && self.core.live_revert_at.is_none() {
+            self.core.live_revert_at = Some(now + LIVE_REVERT_DELAY);
         }
-        let shown = self.anim_frame_shown_at;
-        self.playback
+        let shown = self.core.anim_frame_shown_at;
+        self.core
+            .playback
             .as_ref()
             .filter(|pb| pb.is_playing())
             .map(|pb| shown.unwrap_or(now) + pb.current_delay())
@@ -4997,21 +4939,21 @@ impl App {
     fn tick_frame_step(&mut self, now: Instant) -> bool {
         let dir = self.held_frame_step();
         if dir == 0 {
-            self.framestep_started = None;
-            self.framestep_last = None;
+            self.core.framestep_started = None;
+            self.core.framestep_last = None;
             return false;
         }
         // Need a decoded sequence to scrub; while it's still decoding, keep ticking.
-        if self.playback.is_none() {
+        if self.core.playback.is_none() {
             return true;
         }
         let past_delay =
-            timing::elapsed_since(self.framestep_started, now, self.core.initial_delay);
-        let due = timing::elapsed_since(self.framestep_last, now, FRAME_STEP_REPEAT);
+            timing::elapsed_since(self.core.framestep_started, now, self.core.initial_delay);
+        let due = timing::elapsed_since(self.core.framestep_last, now, FRAME_STEP_REPEAT);
         if past_delay && due {
-            self.playback.as_mut().unwrap().step(dir);
+            self.core.playback.as_mut().unwrap().step(dir);
             self.present_anim_frame();
-            self.framestep_last = Some(now);
+            self.core.framestep_last = Some(now);
         }
         true
     }
@@ -5036,17 +4978,17 @@ impl App {
     /// background does *not* suppress it — that's invisible work, and the hint is what
     /// invites the user to press P in the first place.
     fn maybe_show_anim_hint(&mut self, flying: bool) {
-        if flying || self.playback.is_some() {
+        if flying || self.core.playback.is_some() {
             return;
         }
         let Some(item) = self.core.displayed_item else {
             return;
         };
-        if self.anim_hint_shown_for == Some(item) {
+        if self.core.anim_hint_shown_for == Some(item) {
             return;
         }
         if self.has_motion(item) {
-            self.anim_hint_shown_for = Some(item);
+            self.core.anim_hint_shown_for = Some(item);
             // A Live Photo gets the livephoto mark; an animated still gets the play ▶. Styled
             // like the open-screen buttons: `▶ Play  P` with the shortcut dimmed at the right —
             // and it's a real button: hovering holds it open, a click plays (see the click /
@@ -5075,13 +5017,13 @@ impl App {
     /// still. Called when navigating away or changing source (the frames are RAM-only —
     /// privacy #2).
     fn stop_playback(&mut self) {
-        self.playback = None;
-        self.anim_frame_shown_at = None;
-        self.anim_decode = None;
-        self.prepared = None;
-        self.framestep_started = None;
-        self.framestep_last = None;
-        self.live_revert_at = None;
+        self.core.playback = None;
+        self.core.anim_frame_shown_at = None;
+        self.core.anim_decode = None;
+        self.core.prepared = None;
+        self.core.framestep_started = None;
+        self.core.framestep_last = None;
+        self.core.live_revert_at = None;
         self.live_audio = None; // dropping the player stops it
                                 // Leaving the animated still: drop the interactive play hint AND its toast **immediately**
                                 // (not a fade), so a stale/irrelevant button never lingers over the next photo — which
@@ -5126,7 +5068,8 @@ impl App {
             self.show_toast_icon("", Some(icon::assets::VOLUME_SLASH));
         } else {
             // Unmuting mid-playback: resume audio at the motion's current position.
-            if let (Some(pb), Some(item)) = (self.playback.as_ref(), self.core.displayed_item) {
+            if let (Some(pb), Some(item)) = (self.core.playback.as_ref(), self.core.displayed_item)
+            {
                 if pb.is_playing() {
                     let secs = pb.index() as f64 * pb.total_duration().as_secs_f64()
                         / pb.frame_count().max(1) as f64;
@@ -5901,11 +5844,11 @@ impl ApplicationHandler for App {
         // playback but **keeps** the decoded motion (`prepared`) — back to the normal
         // parked-and-prepped state, so replay is instant and the info panel keeps its
         // numbers (no re-decode, no reflow blink).
-        let revert_wake = match self.live_revert_at {
+        let revert_wake = match self.core.live_revert_at {
             Some(at) if now >= at => {
-                self.live_revert_at = None;
-                self.playback = None;
-                self.anim_frame_shown_at = None;
+                self.core.live_revert_at = None;
+                self.core.playback = None;
+                self.core.anim_frame_shown_at = None;
                 self.live_audio = None; // the motion (and its audio) is done
                 self.restore_still();
                 None

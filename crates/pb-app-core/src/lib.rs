@@ -20,6 +20,7 @@
 //! [ADR-021]: ../../../.taskmaster/docs/decisions.md
 
 pub mod action;
+pub mod animation;
 pub mod app_core;
 pub mod config;
 pub mod contract;

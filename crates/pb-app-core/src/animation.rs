@@ -14,7 +14,7 @@
 
 use std::time::Duration;
 
-use pb_decode::{AnimFrame, Animation, AnimationKind, ColorTransform};
+use pb_decode::{AnimFrame, Animation, AnimationKind, ColorTransform, DecodeError};
 
 /// Playback cursor over a decoded [`Animation`].
 pub struct Playback {
@@ -165,6 +165,39 @@ impl Playback {
         }
         self.index
     }
+}
+
+/// What to do with an animation decode once it lands.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AnimWant {
+    /// Eager prep on dwell: stash it ready (no visible change; `P` is then instant).
+    Eager,
+    /// `P` was pressed: start playing on arrival.
+    Play,
+    /// A frame-step key was pressed: land paused and step by this delta.
+    Step(i32),
+}
+
+/// An in-flight off-thread animation decode (the whole sequence for `item`), kicked by `P` /
+/// frame-step, or eagerly on dwell, so a big GIF/WebP never stalls the event loop. The still
+/// first frame stays on screen until it lands.
+pub struct AnimDecode {
+    pub gen: u64,
+    pub item: usize,
+    /// The geometry epoch at kick time; a resize in between invalidates the fit, so a late
+    /// result for the old size is discarded.
+    pub epoch: u64,
+    /// What to do when it lands — can be upgraded in flight (an eager prep becomes `Play` if
+    /// the user presses `P` before it finishes).
+    pub want: AnimWant,
+    pub rx: std::sync::mpsc::Receiver<Result<Animation, DecodeError>>,
+}
+
+/// A whole animation decoded ahead of the user (eager prep) and held ready for instant
+/// playback. RAM-only; dropped on navigate.
+pub struct Prepared {
+    pub item: usize,
+    pub anim: Animation,
 }
 
 #[cfg(test)]
