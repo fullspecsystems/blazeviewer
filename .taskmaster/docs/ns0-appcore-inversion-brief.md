@@ -35,11 +35,34 @@ end of each `ApplicationHandler` entry (`window_event` incl. the dialog-route ea
   Esc-guard trap, so they ride with their stages.
 
 **Revised checkpoint order** (supersedes §7 for execution): (1) ✅ effect queue + `Quit`.
-(2) window ops → effects (safe). (3) **dialog inversion** — shell owns `DialogWindow`,
-`ShowDialog`/results-as-events; unblocks (4). (4) rfd + clipboard → effects; then the
-`event_loop` full de-thread (now unblocked) + `request_redraw` (with smoke). (5) split
-`Active` → shell `window` + AppCore `Box<dyn Renderer>`; move state to `pb-app-core`; thin
-`WinitShell`. Stages 3–5 each want a manual hold-to-fly + dialog smoke before the next.
+(2) ✅ **dialog inversion** (deferred-open form). (3) window ops → effects (safe). (4) the
+`event_loop` full de-thread + `request_redraw` (with smoke). (5) rfd + clipboard → effects.
+(6) split `Active` → shell `window` + AppCore `Box<dyn Renderer>`; move state to
+`pb-app-core`; thin `WinitShell`. Stages want a manual hold-to-fly + dialog smoke between.
+
+**Checkpoint 2 landed** (commit `8ee89b1`): dialog opens are deferred through the shell. A
+`DialogRequest` enum + `App.pending_dialog`: openers record *what* to open; the single
+`DialogWindow::open` now lives in the shell's `open_pending_dialog` (called from
+`drain_effects`, where `event_loop` lives). The `become_loading` password→loading promotion
+and the focus-if-same-kind check stay synchronous. Dropped `event_loop` from 9 methods (the
+6 openers + `open_about`/`open_settings`/`report_archive_error`/`fail_archive_open`); params
+76 → 68. Green, but **behavior-sensitive — needs the dialog smoke** (archive open+progress,
+password retry, scan progress, confirm-delete, settings/about) since dialog creation now
+happens at the drain boundary instead of inline.
+
+**Stage 4 (`event_loop` full de-thread) — measured cost + the knot.** Converting `draw`
+(route its fatal-render `exit()` through `CoreEffect::Quit` via a local `fatal` flag, since
+`self.active.as_mut()` is borrowed; then drop its `event_loop`) is the trigger. Measured:
+`draw`'s 25 call sites → **16 methods** with a newly-unused `event_loop` at level 1, and
+tracing further it reaches ~40–60 methods (through `dispatch_action`/`dispatch_menu` and the
+nav/zoom/rotate/pan handlers), terminating at the 3 surface methods. **The knot:** the
+archive-open flow is *circular* — `begin_archive_open` and `finish_archive_open` pass
+`event_loop` to each other (1911/1977), so neither ever flags as unused; a compiler-driven
+iterative pass won't converge on them. Remove `event_loop` from **both simultaneously** (and
+check `finish_archive_open`/`poll_archive_load`/`reconfigure_edr_for_display`/`dialog_event`
+for any genuine use first). This stage is mechanical but large — do it as one focused pass,
+not an end-of-session sweep; the genuine `event_loop` keepers are `resumed`, `about_to_wait`,
+`window_event`, `drain_effects`, `open_pending_dialog`, and `run`/`main`.
 
 ## 0. TL;DR of the move
 
