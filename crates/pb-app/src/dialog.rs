@@ -404,9 +404,9 @@ impl DialogWindow {
             // macOS renders the body in SF Pro, whose taller line metrics need ~30px more
             // height than Segoe so the GitHub link at the bottom isn't clipped.
             #[cfg(target_os = "macos")]
-            DialogKind::About => (254.0, 337.0, false, "About PhotoBlaze"),
+            DialogKind::About => (254.0, 351.0, false, "About PhotoBlaze"),
             #[cfg(not(target_os = "macos"))]
-            DialogKind::About => (254.0, 307.0, false, "About PhotoBlaze"),
+            DialogKind::About => (254.0, 321.0, false, "About PhotoBlaze"),
             DialogKind::Settings => (560.0, 660.0, true, "PhotoBlaze Settings"),
             DialogKind::Confirm => (450.0, 172.0, false, "Confirm Delete"),
             DialogKind::Message => (470.0, 185.0, false, "PhotoBlaze"),
@@ -963,6 +963,16 @@ fn about_ui(ui: &mut egui::Ui, icon: Option<&egui::TextureHandle>) {
         ui.heading("PhotoBlaze");
         ui.add_space(2.0);
         ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+        // The build's git commit (set by build.rs), so a local build can be traced to the exact
+        // commit it was built from. Absent for a build with no git available (source tarball).
+        if let Some(build) = option_env!("PB_BUILD_ID") {
+            ui.add_space(1.0);
+            ui.label(
+                egui::RichText::new(format!("Build {build}"))
+                    .size(11.0)
+                    .weak(),
+            );
+        }
         ui.add_space(10.0);
         ui.label("An ultra-fast photo viewer");
         ui.add_space(8.0);

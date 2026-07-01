@@ -8,6 +8,9 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
+- The **About** dialog now shows a **build identifier** (the git commit the build came from,
+  with a `-dirty` marker for a build with local changes) under the version — so a specific
+  build can be traced back to the exact code it was built from.
 - **Play animated images on demand.** Animated **GIF, APNG, and animated WebP** (plus
   animated AVIF/HEIC on macOS) can now be played back — press **P** to play/pause. Landing on
   an animated photo flashes a brief **▶ Press P to play** hint (never while you're flicking

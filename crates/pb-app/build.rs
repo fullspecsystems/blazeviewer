@@ -46,12 +46,61 @@ const MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?
 </assembly>
 "#;
 
+/// Capture a short build identifier from git for the About dialog, so a local build can be
+/// traced back to the exact commit it was built from (handy while smoke-testing a series of
+/// commits). `Some("ca29dcc")`, or `Some("ca29dcc-dirty")` when the working tree has
+/// uncommitted changes; `None` when git isn't available (e.g. a build from a source tarball),
+/// in which case the About card just shows the version. Runs at build time only — no runtime
+/// git call, no viewing trace (privacy #2).
+fn git_build_id() -> Option<String> {
+    let run = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+    };
+    let hash = run(&["rev-parse", "--short", "HEAD"])?;
+    let hash = String::from_utf8(hash.stdout).ok()?.trim().to_string();
+    if hash.is_empty() {
+        return None;
+    }
+    // `git status --porcelain` prints one line per changed/untracked path → non-empty = dirty.
+    let dirty = run(&["status", "--porcelain"]).is_some_and(|o| !o.stdout.is_empty());
+    Some(if dirty { format!("{hash}-dirty") } else { hash })
+}
+
+/// Re-run this script (refreshing the build id) when the checked-out commit moves. Uses
+/// `git rev-parse --git-path` so the paths are correct even inside a git *worktree* (where
+/// `.git` is a file and HEAD lives under the parent repo's `worktrees/<name>/`). Unstaged
+/// edits can't retrigger a rebuild by themselves, so the `-dirty` flag only refreshes on the
+/// next rebuild — acceptable for a build stamp.
+fn rerun_on_git_head() {
+    for path in ["HEAD", "index"] {
+        if let Some(out) = std::process::Command::new("git")
+            .args(["rev-parse", "--git-path", path])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+        {
+            if let Ok(p) = String::from_utf8(out.stdout) {
+                println!("cargo:rerun-if-changed={}", p.trim());
+            }
+        }
+    }
+}
+
 fn main() {
+    if let Some(id) = git_build_id() {
+        println!("cargo:rustc-env=PB_BUILD_ID={id}");
+    }
+    rerun_on_git_head();
+    println!("cargo:rerun-if-changed=build.rs");
+
     #[cfg(windows)]
     {
         let icon = "icons/photoblaze.ico";
         println!("cargo:rerun-if-changed={icon}");
-        println!("cargo:rerun-if-changed=build.rs");
         let mut res = winresource::WindowsResource::new();
         res.set_icon(icon)
             .set("ProductName", "PhotoBlaze")
