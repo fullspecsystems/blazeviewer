@@ -14,10 +14,11 @@ smoke-verified**: keyboard + pointer + the whole `about_to_wait` tick loop route
 (**DeletePermanent** confirm, **Recursive/CancelScan** scan threads, **Quit** teardown) are
 legitimately host-side and stay behind the (reframed) `ShellFlowAction` seam. **All 7 owner-smoke-
 verified (2026-07-01) — "never seen a regression"; Fullscreen (`2f6003d`) "looks great."** Separately,
-the **archive/scan dialog-outcome flow** inversion has STARTED: the dialog-outcome *reactions* now
-live in the core (`CoreEvent::DialogResolved` + `CloseDialog`/`CancelScan`/`CancelArchiveLoad`
-effects, `3006765`, ✅ owner-smoke-verified); the resolve/scan compute relocation + the worker-flow
-inversion are the two remaining steps. Everything below the NS0 section is the previously-shipped work (macOS port,
+the **archive/scan flow** inversion is well underway: the dialog-outcome *reactions* are core
+(`CoreEvent::DialogResolved`, `3006765`, ✅ smoke-verified), and the **entire resolve/scan COMPUTE**
+(dir-scan + archive resolvers + the `archive` module) now lives in `pb_app_core::scan` (Step 2:
+`3cdb016`/`b21f59a`/`ef40042`, ⚠ unsmoked). Only the worker-flow inversion (Step 3 — thread/mpsc +
+progress dialogs → effects/events) remains, deferred as its own behavior-critical increment. Everything below the NS0 section is the previously-shipped work (macOS port,
 archive, settings, HEIC, color), unchanged._
 
 _The macOS (Apple Silicon) port is complete and SHIPPED in `v0.1.0-beta.4` (2026-06-30) — the
@@ -187,29 +188,30 @@ Mapped end-to-end (Explore agent) and inverted in the recommended low-risk order
   AppCore. Shell `route_dialog_outcome` maps `DialogOutcome`→`DialogResult`; only **PasswordSubmitted**
   (spawns the archive worker + pokes the live dialog) stays shell. 4 new core unit tests. Behavior-
   preserving (effects drain right after `dialog_event`, same event turn).
-- **◐ Step 2 — relocate the resolve/scan compute to core** (in sub-commits):
-  - **✅ 2a — the `Resolved` currency** (`3cdb016`): new `pb_app_core::scan` module holds `Resolved`
-    (fields now `pub`) + its pure builders (`empty`/`build_resolved`/`archive_resolved` — only
-    pb-core::open + pb-source::FsSource, no new deps) + the `ScanUpdate` stream message. main.rs
-    imports them; the resolver *functions* still run on the shell worker threads. Behavior-preserving.
-  - **❌ 2b (next) — the walkdir directory-scan resolvers + `ScanProgress`** → `pb_app_core::scan`:
-    `is_supported_image` (scan-only), `rel_display`, `collect_images`, `image_walker`, `resolve_source`,
-    `resolve_scan`, `stream_scan`, `sorted_image_walk`(test), and `ScanProgress`(+Inner+impl, methods
-    → `pub`). Add a **`walkdir`** dep to pb-app-core. Re-export `pub use pb_app_core::scan::ScanProgress`
-    from main.rs so dialog.rs's 8 `crate::ScanProgress` refs are untouched. Move the associated tests.
-    `begin_dir_scan` (shell) keeps the `thread::spawn`+`mpsc`, spawning `scan::stream_scan`.
-    `scan_display_name`/`scan_message` (dialog-string builders) can stay shell or move too. Mechanical,
-    no behavior change; commit green (no smoke needed — internal relocation).
-  - **❌ 2c — the archive resolvers + the `archive` module** → pb-app-core: `open_archive`,
-    `seven_z_preflight[_within]`, `load_seven_z`, `resolve_playlist`, and `archive.rs` (needs new
-    cfg-gated `windows` + `libc` deps for the RAM query — the one non-trivial bit; `ArchiveOpenError`
-    becomes core so Step 3's `ArchiveResolved` event can carry it). dialog.rs's `crate::archive::human_gb`
-    re-imports.
-- **❌ Step 3 (last, highest-risk) — invert the worker flow**: `begin_archive_open`/`begin_dir_scan`
-  → effects (`BeginArchiveOpen`/`BeginDirScan`; shell owns the thread + progress-dialog handle);
-  `poll_*` fires `CoreEvent`s (`ArchiveResolved`/`ScanBatch`/`ScanDone`) back into the core, which
-  runs `rebuild_playlist`/`extend_playlist`. Thread lifecycle + generation-supersede + the
-  `become_loading`/`set_scan` in-place progress promotions make this the delicate one.
+- **✅ Step 2 — the entire resolve/scan COMPUTE relocated to `pb_app_core::scan`** (⚠ unsmoked):
+  - **2a** (`3cdb016`): the `Resolved` currency (fields `pub`) + pure builders + `ScanUpdate`.
+  - **2b** (`b21f59a`): the walkdir dir-scan resolvers (`is_supported_image`/`rel_display`/
+    `collect_images`/`image_walker`/`resolve_source`/`resolve_scan`/`stream_scan`) + `ScanProgress`
+    (externally-called methods → `pub`) + a `walkdir` dep. main.rs re-exports `ScanProgress` so
+    dialog.rs is untouched; the scan/order tests pass unchanged via the `scan::` prefix.
+  - **2c** (`ef40042`): the archive resolvers (`open_archive`/`seven_z_preflight[_within]`/
+    `load_seven_z`/`resolve_playlist`) + `git mv archive.rs → pb-app-core` (with its tests + cfg-gated
+    `windows`/`libc` for the RAM pre-flight). main.rs re-exports the `archive` module.
+  - Net: the whole compute (folder walk, archive open, RAM pre-flight, cursor resolution) is now
+    core + reusable by the Swift host; **only the `thread::spawn`+`mpsc` worker plumbing + the egui
+    progress dialogs stay shell** (`begin_*`/`poll_*` spawn `scan::stream_scan` / call the resolvers).
+- **❌ Step 3 (last, highest-risk, DEFERRED — do as its own focused increment) — invert the worker flow**:
+  `begin_archive_open`/`begin_dir_scan` → effects (`BeginArchiveOpen`/`BeginDirScan`; shell owns the
+  thread + progress-dialog handle); `poll_*` fires `CoreEvent`s (`ArchiveResolved(Result<Resolved,
+  ArchiveOpenError>)` / `ScanBatch{resolved, first}` / `ScanDone{bootstrapped}`) back into the core,
+  which runs `filter_deleted`→`rebuild_playlist`/`extend_playlist` + the `scanning`/`request_prefetch`/
+  `show_open_hint` finalize. **Why deferred:** it touches the streaming-scan apply path (bootstrap-vs-
+  extend + `filter_deleted` + generation-supersede), the archive **password re-prompt** loop, the
+  progress-dialog reveal *timing*, and the open-routing decision — all behavior-critical + hard to unit-
+  test, so it wants fresh context + a dedicated hold-to-fly-adjacent smoke pass, not a rushed tail-of-
+  session move. Steps 1+2 already put the *compute* + the dialog *reactions* in the core; `begin_*`/
+  `poll_*` is legitimate shell plumbing (thread + egui dialogs) in the meantime, like the ShellFlowAction
+  residue. Not required for NS1.
 - The other `ShellFlowAction` arms (DeletePermanent confirm, Recursive/CancelScan scan-thread spawn,
   Quit teardown) remain genuine platform ops. None of this blocks NS1.
 
