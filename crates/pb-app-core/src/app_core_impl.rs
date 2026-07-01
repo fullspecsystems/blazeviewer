@@ -142,17 +142,28 @@ impl AppCore {
             // stays a flow action — it opens the shell confirm dialog first, then the shell's
             // dialog-outcome handler calls the core `do_delete(.., true)`.
             Action::Delete => self.delete_to_trash(),
+            // Toggle borderless fullscreen ⇄ windowed (NS0 5.6): flip the live mode + the
+            // persistent preference; the shell applies the window ops (and snapshots/persists the
+            // windowed geometry) when it drains the `SetWindowMode` effect (`apply_window_mode`).
+            Action::Fullscreen => {
+                self.windowed = !self.windowed;
+                // Record the new mode as the remembered last state (settings.fullscreen is the
+                // inverse of `windowed`), so `StartupMode::Remember` restores it + Settings stays
+                // in sync. Persisted by the shell's `apply_window_mode` (an explicit user action).
+                self.settings.fullscreen = !self.windowed;
+                self.effects
+                    .push(contract::CoreEffect::SetWindowMode(if self.windowed {
+                        contract::WindowMode::Windowed
+                    } else {
+                        contract::WindowMode::Fullscreen
+                    }));
+            }
             // Host-side commands — the residue whose execution *is* a platform operation:
-            // the permanent-delete confirm dialog, the fullscreen window ops (+ the shell-owned
-            // `windowed` flag), the off-thread directory-scan spawn / cancel, and Quit's window
-            // teardown. Routed through the one `ShellFlowAction` seam so the whole action
-            // vocabulary still dispatches here; the host runs the native op (see the effect's
-            // doc). The core-owned commands were lifted out into their own arms above.
-            Action::DeletePermanent
-            | Action::Fullscreen
-            | Action::Recursive
-            | Action::CancelScan
-            | Action::Quit => self
+            // the permanent-delete confirm dialog, the off-thread directory-scan spawn / cancel,
+            // and Quit's window teardown. Routed through the one `ShellFlowAction` seam so the
+            // whole action vocabulary still dispatches here; the host runs the native op (see the
+            // effect's doc). The core-owned commands were lifted out into their own arms above.
+            Action::DeletePermanent | Action::Recursive | Action::CancelScan | Action::Quit => self
                 .effects
                 .push(contract::CoreEffect::ShellFlowAction(action)),
         }
@@ -3247,6 +3258,7 @@ mod tests {
             pan_last: None,
             resize_settle_at: None,
             geometry_save_at: None,
+            windowed: true,
             meta_cache: HashMap::new(),
             current: None,
             exif_cache: HashMap::new(),

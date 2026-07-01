@@ -177,7 +177,6 @@ fn collect_monitor_rects(
 }
 
 struct App {
-    windowed: bool,
     /// The winit window (NS0: shell-owned — `WinitShell` in the eventual crate split).
     /// `None` until `resumed` creates it; always in lockstep with `core.renderer`, which
     /// is created on this window's surface.
@@ -370,7 +369,6 @@ impl App {
         // Preferences (nav feel, defaults, …); the hold loop reads them live.
         let settings = settings::Settings::load();
         Self {
-            windowed,
             window: None,
             core: AppCore {
                 now: Instant::now(),
@@ -405,6 +403,7 @@ impl App {
                 pan_last: None,
                 resize_settle_at: None,
                 geometry_save_at: None,
+                windowed,
                 meta_cache: HashMap::new(),
                 current: None,
                 exif_cache: HashMap::new(),
@@ -1058,53 +1057,31 @@ impl App {
         }
     }
 
-    /// Toggle between borderless "windowed fullscreen" and a 1280x800 window (F11
-    /// or Alt+Enter). The resulting resize event re-fits and re-decodes the photo.
-    /// NOTE: there is a brief flip-model resize artifact (the photo stretches for a
-    /// frame as the compositor scales the old buffer to the new size). A DWM-cloak
-    /// fix removed it but regressed the taskbar (shell stopped auto-hiding it on
-    /// fullscreen) and added a blank beat — net worse — so it was reverted; the
-    /// minor flash is accepted (see tasks.json #21 for the proper-fix direction).
-    fn toggle_fullscreen(&mut self) {
-        self.windowed = !self.windowed;
-        // Record the new mode as the remembered last state, in memory and on disk, so
-        // `StartupMode::Remember` restores it and the Settings dialog stays in sync.
-        self.core.settings.fullscreen = !self.windowed;
-        // Leaving windowed mode: snapshot where the window is now, so toggling back
-        // (and the next launch) restore this spot rather than the OS default corner (#1).
-        if !self.windowed {
-            self.capture_windowed_geometry();
-        }
-        // Persist the new mode + remembered geometry together (one atomic write). An
-        // explicit user action (the toggle), never the view path — privacy #2.
-        self.core.geometry_save_at = None;
-        self.core.settings.save();
-
-        // The window ops (fullscreen/decorations/sizing + macOS chrome + menu attach) are
-        // shell work: emit the mode change and let the drain apply it (`apply_window_mode`),
-        // which reads the `self.windowed` we just flipped. Same event-loop turn, so behavior
-        // is unchanged.
-        self.core
-            .effects
-            .push(contract::CoreEffect::SetWindowMode(if self.windowed {
-                contract::WindowMode::Windowed
-            } else {
-                contract::WindowMode::Fullscreen
-            }));
-    }
-
     /// Shell side of [`CoreEffect::SetWindowMode`]: apply the borderless-fullscreen ⇄ windowed
-    /// window ops, run from the drain. Reads the already-flipped `self.windowed` (the effect's
-    /// `WindowMode` payload is the same signal). Preserves `toggle_fullscreen`'s exact former
-    /// sequence — set_fullscreen/decorations, then macOS chrome + menu attach *before* the
-    /// windowed sizing, then the windowed geometry restore.
+    /// window ops, run from the drain. Reads the already-flipped `self.core.windowed` (the effect's
+    /// `WindowMode` payload is the same signal). The core `Fullscreen` arm flipped the mode; this
+    /// does the platform side — snapshot + persist the windowed geometry (an explicit user action,
+    /// never the view path — privacy #2), then set_fullscreen/decorations, macOS chrome + menu
+    /// attach *before* the windowed sizing, then the windowed geometry restore. NOTE: F11 /
+    /// Alt+Enter has a brief flip-model resize artifact (the photo stretches for a frame as the
+    /// compositor scales the old buffer); the DWM-cloak fix regressed the taskbar so it's accepted
+    /// (tasks.json #21).
     fn apply_window_mode(&mut self) {
         // Clone the window handle (an Arc) so it can be driven while `self` is still borrowed
         // mutably below (the menu attach needs `&mut self`).
         let Some(window) = self.window.clone() else {
             return;
         };
-        if self.windowed {
+        // Leaving windowed mode: snapshot where the window is now (a live window read — shell)
+        // *before* we resize away from it, so toggling back (and the next launch) restore this
+        // spot rather than the OS default corner (#1). Then persist the new mode + remembered
+        // geometry together (one atomic write) — an explicit user action, never the view path.
+        if !self.core.windowed {
+            self.capture_windowed_geometry();
+        }
+        self.core.geometry_save_at = None;
+        self.core.settings.save();
+        if self.core.windowed {
             window.set_fullscreen(None);
             window.set_decorations(true);
         } else {
@@ -1124,7 +1101,7 @@ impl App {
         // that strip (chromeless) while staying in the current Space; restore them when
         // returning to windowed mode.
         #[cfg(target_os = "macos")]
-        macos_chrome::set_chromeless(!self.windowed);
+        macos_chrome::set_chromeless(!self.core.windowed);
         // Show the menu in windowed mode, hide it in fullscreen (the chrome-free
         // speed mode). Adding/removing the bar resizes the client area → a `Resized`
         // event → the debounced re-decode path. Done *before* the windowed sizing
@@ -1132,7 +1109,7 @@ impl App {
         // (sizing pre-menu would lose that height on every toggle — a slow drift).
         self.apply_menu_for_mode();
 
-        if self.windowed {
+        if self.core.windowed {
             // Restore the saved windowed geometry when enough of it still lands on a
             // connected monitor; otherwise fall back to the default size at the
             // OS-chosen spot (so a stale off-screen position can't strand the window).
@@ -1176,7 +1153,7 @@ impl App {
     /// waits until the user stops (`about_to_wait`), so a drag isn't a write storm.
     /// No-op in fullscreen — that geometry is the monitor, not a user-chosen spot.
     fn track_windowed_geometry(&mut self) {
-        if !self.windowed {
+        if !self.core.windowed {
             return;
         }
         let before = self.core.settings.window;
@@ -1233,7 +1210,7 @@ impl App {
             self.core.view.mode,
             self.core.info,
             self.core.recursive,
-            !self.windowed, // `windowed` is the inverse of the fullscreen checkbox
+            !self.core.windowed, // `windowed` is the inverse of the fullscreen checkbox
             self.core.slideshow.on,
             self.core.settings.mute_live_audio,
             self.core.can_save_rotation(),
@@ -1315,7 +1292,7 @@ impl App {
     /// keeping it off the hold-to-fly hot path. RAM-only, never persisted (privacy #2).
     #[cfg(target_os = "macos")]
     fn refresh_proxy_icon(&mut self) {
-        let want = if self.windowed {
+        let want = if self.core.windowed {
             self.core
                 .displayed_item
                 .and_then(|i| self.core.source.path(i))
@@ -1347,7 +1324,7 @@ impl App {
         };
         // SAFETY: `hwnd` is the live window's handle for as long as `active` is set.
         unsafe {
-            if self.windowed {
+            if self.core.windowed {
                 if self.menu_attached {
                     let _ = menu.show_for_hwnd(hwnd);
                 } else {
@@ -1393,7 +1370,7 @@ impl App {
     #[cfg(windows)]
     fn refresh_menu_theme(&self) {
         darkmode::flush_menu_themes();
-        if !self.menu_attached || !self.windowed {
+        if !self.menu_attached || !self.core.windowed {
             return;
         }
         if let Some(a) = self.window.as_ref() {
@@ -1422,7 +1399,6 @@ impl App {
     fn perform_flow_action(&mut self, action: Action) {
         match action {
             Action::DeletePermanent => self.confirm_delete_permanent(),
-            Action::Fullscreen => self.toggle_fullscreen(),
             Action::Recursive => self.toggle_recursive(),
             Action::CancelScan => self.cancel_scan_command(),
             Action::Quit => self.begin_exit(),
@@ -1990,13 +1966,13 @@ impl ApplicationHandler for App {
         // The saved windowed geometry to restore on launch, if it still lands on a
         // connected monitor (#1) — used as the creation hint and re-applied after the
         // menu attaches below (so the client size accounts for the menu bar).
-        let restore = if self.windowed {
+        let restore = if self.core.windowed {
             let rects = collect_monitor_rects(event_loop.available_monitors());
             self.core.windowed_restore(&rects)
         } else {
             None
         };
-        attrs = if self.windowed {
+        attrs = if self.core.windowed {
             match restore {
                 Some(g) => attrs
                     .with_inner_size(PhysicalSize::new(g.w, g.h))
@@ -2038,7 +2014,7 @@ impl ApplicationHandler for App {
                 darkmode::allow_for_window(hwnd);
             }
             self.ensure_menu();
-            if self.windowed {
+            if self.core.windowed {
                 if let (Some(menu), Some(hwnd)) = (self.menu.as_ref(), hwnd_of(&window)) {
                     // SAFETY: `hwnd` is this freshly-created window's valid handle.
                     unsafe {
@@ -2148,9 +2124,9 @@ impl ApplicationHandler for App {
         window.request_redraw();
 
         // macOS: a fullscreen launch *is* the borderless mode — auto-hide the menu bar +
-        // Dock from the first frame so it's chromeless (toggle_fullscreen handles changes).
+        // Dock from the first frame so it's chromeless (`apply_window_mode` handles later toggles).
         #[cfg(target_os = "macos")]
-        if !self.windowed {
+        if !self.core.windowed {
             macos_chrome::set_chromeless(true);
         }
 

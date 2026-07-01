@@ -115,6 +115,12 @@ pub struct AppCore {
     pub resize_settle_at: Option<Instant>,
     /// When to persist the debounced window-geometry change (an explicit user action).
     pub geometry_save_at: Option<Instant>,
+    /// The live window presentation mode: `true` = a decorated window, `false` = borderless
+    /// "windowed fullscreen" (the chrome-free speed mode). Flipped by the `Fullscreen` action;
+    /// the shell applies the actual window ops via `SetWindowMode` (`apply_window_mode`) and reads
+    /// this to decide direction. The persistent preference is `settings.fullscreen` (the inverse);
+    /// this is the current runtime state. NS0 5.6.
+    pub windowed: bool,
 
     // --- Metadata caches (NS0 5.3) ---
     /// Per-item info-panel metadata, memoized so the panel doesn't re-derive per frame.
