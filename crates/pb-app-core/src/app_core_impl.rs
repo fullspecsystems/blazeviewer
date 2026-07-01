@@ -98,6 +98,67 @@ impl AppCore {
         }
     }
 
+    /// Drive the core from a single shell-neutral [`CoreEvent`] — the entry point a non-winit
+    /// host (the macOS SwiftUI/AppKit bridge, NS1) uses to run the viewer *without* the winit
+    /// shell. It mutates core state + accumulates [`CoreEffect`]s the host then drains. The host
+    /// stamps `self.now` at each event before calling (and [`CoreEvent::Tick`] carries it), so
+    /// the core never reads a wall clock — `handle` is deterministically unit-testable.
+    ///
+    /// **Coverage (NS0 5.5 Phase C1):** the **input + menu** events — KeyDown/KeyUp/FocusLost,
+    /// MenuAction, KeymapSubmitted — the primary way a host drives the viewer. Escape is *not*
+    /// special-cased here (it resolves through the keymap to `Quit` → `ShellFlowAction`); the
+    /// host owns the dialog-dismiss-vs-quit decision. Tick/Redraw/Resized/pointer/scroll/pinch +
+    /// the flow events (DroppedPaths/CancelDialog) are wired in **C2**, when the winit
+    /// `window_event`/`about_to_wait` are rewritten as translators (they touch the still-shell
+    /// tick / scan / pointer / flow paths); until then the shell keeps calling those directly.
+    pub fn handle(&mut self, ev: contract::CoreEvent) {
+        use contract::{CoreEvent, KeyResolution};
+        match ev {
+            CoreEvent::KeyDown { key, mods, repeat } => {
+                self.mods = mods;
+                match contract::resolve_key_down(&self.keymap, key, mods, repeat) {
+                    KeyResolution::Ignore => {}
+                    KeyResolution::OneShot(act) => self.dispatch_action(act),
+                    KeyResolution::NavStart(act) => self.nav_press(key, act),
+                    KeyResolution::HeldStart(act) => {
+                        self.held.insert(key, act);
+                    }
+                    KeyResolution::FrameStepStart(act) => self.frame_step_press(key, act),
+                }
+            }
+            CoreEvent::KeyUp { key } => {
+                self.held.remove(&key);
+            }
+            // Focus loss can swallow the key-up (a known winit hazard) — clear the held set +
+            // gesture accumulators so nav never sticks auto-advancing, and drop any stuck drag.
+            CoreEvent::FocusLost => {
+                self.held.clear();
+                self.hold_start = None;
+                self.mods = contract::Modifiers::NONE;
+                self.zoom_started = None;
+                self.zoom_last = None;
+                self.pan_started = None;
+                self.pan_last = None;
+                self.pie_glow_started = None;
+                self.dragging = false;
+            }
+            CoreEvent::MenuAction(action) => self.dispatch_action(action),
+            CoreEvent::KeymapSubmitted(keymap) => self.apply_keymap(keymap),
+            // Wired in C2 with the winit-shell translator rewrite (they touch the still-shell
+            // tick / scan / pointer / flow paths). Ignored for now so a host that sends them
+            // early is a no-op rather than a panic.
+            CoreEvent::Tick(_)
+            | CoreEvent::Redraw
+            | CoreEvent::Resized { .. }
+            | CoreEvent::PointerMoved { .. }
+            | CoreEvent::Scroll { .. }
+            | CoreEvent::Pinch { .. }
+            | CoreEvent::DoubleTap
+            | CoreEvent::DroppedPaths(_)
+            | CoreEvent::CancelDialog => {}
+        }
+    }
+
     /// Build the [`contract::MenuState`] for the given live state — the pure mapping from
     /// the app's view/edit state to the shell-neutral menu model. Takes no `self` and
     /// touches no muda, so it's unit-tested directly (`menu_state_*` tests). The two enum
@@ -2699,5 +2760,181 @@ impl AppCore {
             }
         }
         dir.signum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contract::{CoreEvent, Modifiers};
+    use crate::metrics::StageTimes;
+    use crate::settings::Settings;
+    use crate::{PbKey, Viewport};
+    use pb_core::Playlist;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    /// A minimal `AppCore` for driving `handle` in tests: an empty photo source, a 1-worker
+    /// pool whose decode always errors (never invoked here), no renderer/HUD, default keymap +
+    /// settings. Enough to exercise the pure input/menu routing without a window or GPU.
+    fn test_core() -> AppCore {
+        let decode: Arc<crate::decode_pool::DecodeFn> = Arc::new(|_src, _item, _fit, _prev| {
+            Err(pb_decode::DecodeError::Corrupt("test".into()))
+        });
+        let (pool, results) = crate::decode_pool::DecodePool::new(1, 1 << 20, decode);
+        let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(Vec::new()));
+        AppCore {
+            now: Instant::now(),
+            viewport: Viewport {
+                width: 1,
+                height: 1,
+                scale_factor: 1.0,
+            },
+            held: HashMap::new(),
+            last_present: None,
+            frame_interval: Duration::from_micros(8_333),
+            hold_start: None,
+            initial_delay: Duration::from_millis(120),
+            slideshow: slideshow::Slideshow::default(),
+            mods: Modifiers::NONE,
+            esc_guard_until: None,
+            fit: None,
+            view: ViewTransform::default(),
+            last_cursor: None,
+            dragging: false,
+            rotations: HashMap::new(),
+            zoom_started: None,
+            zoom_last: None,
+            pan_started: None,
+            pan_last: None,
+            resize_settle_at: None,
+            geometry_save_at: None,
+            meta_cache: HashMap::new(),
+            current: None,
+            exif_cache: HashMap::new(),
+            pool,
+            results,
+            ring: ResidentRing::new(0),
+            ahead: 8,
+            behind: 2,
+            failed: HashSet::new(),
+            deleted: HashSet::new(),
+            preview_resident: HashSet::new(),
+            pending_uploads: Vec::new(),
+            upgrade_done: HashSet::new(),
+            last_upgrade_set: Vec::new(),
+            full_requested_at: HashMap::new(),
+            live_motion_cache: HashMap::new(),
+            metrics: StageTimes::default(),
+            source,
+            playlist: Playlist::new(0, 0),
+            targets: Vec::new(),
+            last_nav: Nav::Forward,
+            displayed_item: None,
+            target_item: None,
+            epoch: 1,
+            root: PathBuf::new(),
+            scan_root: None,
+            recursive: false,
+            scanning: false,
+            launching: false,
+            pending_delete: None,
+            pending_confirm_delete: None,
+            info: InfoMode::Off,
+            overlay_shown: false,
+            overlay_item: None,
+            toast: None,
+            wait_started: None,
+            pie_finish: None,
+            pie_glow_started: None,
+            decode_ewma: 0.25,
+            pie_drawn: false,
+            pie_pushed: None,
+            chip_sig: None,
+            chip_built: Instant::now(),
+            chip_rect: None,
+            chip_hovered: false,
+            open_panel: None,
+            open_hover: None,
+            play_hint: None,
+            hud: None,
+            renderer: None,
+            undo_stack: Vec::new(),
+            playback: None,
+            anim_frame_shown_at: None,
+            anim_decode: None,
+            prepared: None,
+            anim_gen: 0,
+            anim_hint_shown_for: None,
+            framestep_started: None,
+            framestep_last: None,
+            live_revert_at: None,
+            keymap: Keymap::defaults(),
+            settings: Settings::default(),
+            effects: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn menu_flow_action_routes_through_shell_flow_effect() {
+        let mut core = test_core();
+        core.handle(CoreEvent::MenuAction(Action::Settings));
+        assert_eq!(core.effects.len(), 1);
+        assert!(matches!(
+            core.effects[0],
+            contract::CoreEffect::ShellFlowAction(Action::Settings)
+        ));
+    }
+
+    #[test]
+    fn menu_pure_action_runs_in_core_without_a_flow_effect() {
+        let mut core = test_core();
+        core.handle(CoreEvent::MenuAction(Action::ScaleFill));
+        // A pure arm runs in the core (mode flips) and never emits a ShellFlowAction.
+        assert_eq!(core.view.mode, ScaleMode::Fill);
+        assert!(!core
+            .effects
+            .iter()
+            .any(|e| matches!(e, contract::CoreEffect::ShellFlowAction(_))));
+    }
+
+    #[test]
+    fn focus_lost_clears_held_keys_and_gesture_state() {
+        let mut core = test_core();
+        core.held.insert(PbKey::ArrowLeft, Action::PanLeft);
+        core.dragging = true;
+        core.hold_start = Some(core.now);
+        core.handle(CoreEvent::FocusLost);
+        assert!(core.held.is_empty());
+        assert!(!core.dragging);
+        assert!(core.hold_start.is_none());
+        assert_eq!(core.mods, Modifiers::NONE);
+    }
+
+    #[test]
+    fn key_up_releases_only_that_key() {
+        let mut core = test_core();
+        core.held.insert(PbKey::ArrowLeft, Action::PanLeft);
+        core.held.insert(PbKey::ArrowRight, Action::PanRight);
+        core.handle(CoreEvent::KeyUp {
+            key: PbKey::ArrowLeft,
+        });
+        assert!(!core.held.contains_key(&PbKey::ArrowLeft));
+        assert!(core.held.contains_key(&PbKey::ArrowRight));
+    }
+
+    #[test]
+    fn os_key_repeat_is_ignored() {
+        let mut core = test_core();
+        // An OS auto-repeat (`repeat: true`) resolves to `Ignore` regardless of binding, so it
+        // touches no state and emits no effect (the hold loop drives fly-speed, not repeats).
+        core.handle(CoreEvent::KeyDown {
+            key: PbKey::Space,
+            mods: Modifiers::NONE,
+            repeat: true,
+        });
+        assert!(core.held.is_empty());
+        assert!(core.effects.is_empty());
     }
 }

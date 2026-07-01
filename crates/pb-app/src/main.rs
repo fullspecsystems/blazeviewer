@@ -3847,9 +3847,9 @@ mod tests {
     // Pure helpers now live in pb-app-core::engine / pb-decode; imported here (not at the
     // crate root) so the bin build doesn't see them as unused after the NS0 Phase B move.
     use pb_app_core::engine::{is_exif_blob, point_in_rect, scale_alpha};
-    use pb_render::ScaleMode;
     use pb_app_core::Toast;
     use pb_decode::read_exif_fields;
+    use pb_render::ScaleMode;
 
     #[test]
     fn exif_blob_filters_makernote_and_oversized() {
