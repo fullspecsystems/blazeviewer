@@ -24,11 +24,12 @@ pb-core = { workspace = true }
 pb-decode = { workspace = true }
 pb-source = { workspace = true }
 pb-render = { workspace = true }
+# The HUD CPU compositor (info panel / toasts / pie / chip + FA icons), split out of
+# this shell in NS0 so the orchestration core can own the render path (ADR-021).
+pb-hud = { workspace = true }
 # The design-system crate (tokens + components) backing our egui dialogs.
 pb-ui = { workspace = true }
 winit = "0.30"
-# Rasterizes the info-panel text using the OS UI font (loaded at runtime).
-fontdue = "0.9"
 # Native file/folder picker (Open dialog); uses the OS dialog on Windows. Default
 # features pull the Linux xdg-portal/zbus backend we don't need, so disable them —
 # the Windows (and later macOS) native backend is always compiled.

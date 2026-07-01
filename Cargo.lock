@@ -3474,7 +3474,6 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "egui-winit",
- "fontdue",
  "half",
  "libc",
  "little_exif",
@@ -3483,6 +3482,7 @@ dependencies = [
  "pb-app-core",
  "pb-core",
  "pb-decode",
+ "pb-hud",
  "pb-render",
  "pb-source",
  "pb-ui",
@@ -3532,6 +3532,14 @@ dependencies = [
  "resvg",
  "windows 0.62.2",
  "zune-jpeg 0.4.21",
+]
+
+[[package]]
+name = "pb-hud"
+version = "0.1.0"
+dependencies = [
+ "fontdue",
+ "resvg",
 ]
 
 [[package]]

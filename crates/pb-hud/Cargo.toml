@@ -1,0 +1,13 @@
+[package]
+name = "pb-hud"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "PhotoBlaze's HUD compositor: a shell-neutral CPU rasterizer that paints the info panel, toasts, loading pie, and scan chip (plus Font Awesome icons) into RGBA overlay bitmaps. No winit/egui/wgpu — pure compute, so both the winit shell and the future SwiftUI/UIKit shells composite overlays the same way (or swap in a native backend behind this seam)."
+
+# Deliberately UI-toolkit-free (no winit/egui/wgpu/Swift). Only pure-Rust rasterization:
+# fontdue for text, resvg (→ usvg/tiny-skia) for the Font Awesome SVG icons. All compile
+# unchanged on macOS/iOS, so this crate ports with zero platform work.
+[dependencies]
+fontdue = "0.9"
+resvg = { version = "0.47", default-features = false }

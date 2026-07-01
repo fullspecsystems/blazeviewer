@@ -62,9 +62,7 @@ mod delete;
 mod dialog;
 #[cfg(target_os = "macos")]
 mod hdr_surface;
-mod hud;
 mod hud_gallery;
-mod icon;
 mod live_audio;
 #[cfg(target_os = "macos")]
 mod macos_chrome;
@@ -85,6 +83,11 @@ use pb_app_core::{
     action, contract, keymap, pb_key, slideshow, timing, AppCore, InfoMode, Nav, OpenButton,
     OpenPanel, PhotoMeta, PlayHint, Toast,
 };
+// The HUD CPU compositor (info panel / toasts / pie / chip) and its Font Awesome icon
+// rasterizer now live in the shell-neutral `pb-hud` crate (NS0). Re-export them at the
+// crate root so the existing `crate::hud` / `crate::icon` / bare `hud::…` / `icon::…`
+// paths across the winit shell modules keep resolving unchanged.
+pub use pb_hud::{hud, icon};
 
 use action::Action;
 use animation::Playback;

@@ -17,6 +17,7 @@ members = [
     "crates/pb-source",
     "crates/pb-render",
     "crates/pb-ui",
+    "crates/pb-hud",
     "crates/pb-app-core",
     "crates/pb-app",
 ]
@@ -40,6 +41,7 @@ pb-decode = { path = "crates/pb-decode" }
 pb-source = { path = "crates/pb-source" }
 pb-render = { path = "crates/pb-render" }
 pb-ui = { path = "crates/pb-ui" }
+pb-hud = { path = "crates/pb-hud" }
 pb-app-core = { path = "crates/pb-app-core" }
 
 # Dev profile: keep OUR crates at a light opt-level (fast incremental compiles,
