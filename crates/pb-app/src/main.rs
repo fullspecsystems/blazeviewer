@@ -3544,63 +3544,102 @@ impl App {
     /// (task #8 — single source of truth), so rebinding a key updates the help. A
     /// few rows stay curated: pan (shown as arrow glyphs), help (`/ or ?`), and the
     /// "hold to fly" hint (no single binding).
-    fn help_rows(&self) -> Vec<Row> {
-        // Primary keys for an action, numpad aliases dropped, joined by " / ".
-        let keys = |a: Action| {
-            self.keymap
-                .bindings_for(a)
-                .iter()
-                .filter(|c| !keymap::is_numpad(c.code))
-                .map(|c| c.to_string())
-                .collect::<Vec<_>>()
-                .join(" / ")
-        };
-        // Two actions shown on one row (e.g. rotate cw / ccw).
-        let two = |a: Action, b: Action| format!("{} / {}", keys(a), keys(b));
+    /// The user-facing shortcut hint for an action, formatted for this platform: on macOS the
+    /// menu's ⌘-accelerator ([`menu::macos_menu_chord`]) where one exists — so Copy shows ⌘C and
+    /// Move to Trash shows ⌘⌫, matching the menu bar rather than the keymap's legacy binding —
+    /// else the primary keymap binding as Mac symbols; on Windows/Linux the spelled-out primary
+    /// binding. Empty when unbound.
+    fn help_shortcut(&self, action: Action) -> String {
+        #[cfg(target_os = "macos")]
+        if let Some(chord) = menu::macos_menu_chord(action) {
+            return chord.mac_symbol();
+        }
+        self.keymap
+            .bindings_for(action)
+            .iter()
+            .find(|c| !keymap::is_numpad(c.code))
+            .map(|c| c.shortcut_label())
+            .unwrap_or_default()
+    }
 
-        let entries: Vec<(String, &str)> = vec![
-            (keys(Action::Next), "Next photo"),
-            (keys(Action::Prev), "Previous photo"),
-            (keys(Action::Random), "Random photo (shuffle)"),
-            (keys(Action::RandomPrev), "Previous random photo"),
-            ("Hold nav key".to_string(), "Fly through photos"),
-            (
-                "\u{2190} \u{2191} \u{2193} \u{2192}".to_string(),
-                "Pan (hold to accelerate)",
+    /// The keyboard-help overlay as grouped sections (description + shortcut), sourced from the
+    /// live keymap / menu so customized bindings and platform symbols stay correct. Drives
+    /// [`hud::Hud::render_shortcuts`].
+    fn help_sections(&self) -> Vec<hud::ShortcutSection> {
+        let sc = |a: Action| self.help_shortcut(a);
+        let two =
+            |a: Action, b: Action| format!("{} / {}", self.help_shortcut(a), self.help_shortcut(b));
+        let row = |desc: &str, shortcut: String| (desc.to_string(), shortcut);
+        // Platform wording for the trash action (the shortcut itself comes from `help_shortcut`).
+        #[cfg(target_os = "macos")]
+        let trash = "Move to Trash";
+        #[cfg(not(target_os = "macos"))]
+        let trash = "Delete to Recycle Bin";
+
+        let section = |title: &str, rows: Vec<(String, String)>| hud::ShortcutSection {
+            title: title.to_string(),
+            rows,
+        };
+        vec![
+            section(
+                "Browse",
+                vec![
+                    row("Next photo", sc(Action::Next)),
+                    row("Previous photo", sc(Action::Prev)),
+                    row("Random photo", sc(Action::Random)),
+                    row("Previous random", sc(Action::RandomPrev)),
+                    row("Slideshow", sc(Action::SlideshowToggle)),
+                    row(
+                        "Slideshow faster / slower",
+                        two(Action::SlideshowFaster, Action::SlideshowSlower),
+                    ),
+                ],
             ),
-            (two(Action::ZoomIn, Action::ZoomOut), "Zoom in / out (hold)"),
-            (keys(Action::ScaleFit), "Fit to screen"),
-            (keys(Action::ScaleFill), "Fill screen (crop)"),
-            (
-                keys(Action::ToggleOriginal),
-                "Toggle original 1:1 \u{2194} fit",
+            section(
+                "View & Zoom",
+                vec![
+                    row("Fit to screen", sc(Action::ScaleFit)),
+                    row("Crop to fill", sc(Action::ScaleFill)),
+                    row("Toggle 1:1 and fit", sc(Action::ToggleOriginal)),
+                    row("Zoom out / in", two(Action::ZoomOut, Action::ZoomIn)),
+                    row("Pan", "\u{2190} \u{2191} \u{2193} \u{2192}".to_string()),
+                    row(
+                        "Rotate right / left",
+                        two(Action::RotateCw, Action::RotateCcw),
+                    ),
+                    row("Fullscreen", sc(Action::Fullscreen)),
+                ],
             ),
-            (
-                two(Action::RotateCw, Action::RotateCcw),
-                "Rotate 90\u{b0} cw / ccw",
+            section(
+                "Animation",
+                vec![
+                    row("Play / pause", sc(Action::PlayPause)),
+                    row(
+                        "Previous / next frame",
+                        two(Action::FramePrev, Action::FrameNext),
+                    ),
+                    row("Mute Live Photo audio", sc(Action::MuteLiveAudio)),
+                ],
             ),
-            (keys(Action::Recursive), "Recursive scan (current folder)"),
-            (
-                two(Action::OpenFile, Action::OpenFolder),
-                "Open file(s) / folder",
+            section(
+                "Files & App",
+                vec![
+                    row("Open file", sc(Action::OpenFile)),
+                    row("Open folder", sc(Action::OpenFolder)),
+                    row("Copy image", sc(Action::Copy)),
+                    row("Copy file path", sc(Action::CopyPath)),
+                    row("Save rotation", sc(Action::SaveRotation)),
+                    row("Undo", sc(Action::Undo)),
+                    row(trash, sc(Action::Delete)),
+                    row("Delete permanently", sc(Action::DeletePermanent)),
+                    row("Recursive (this folder)", sc(Action::Recursive)),
+                    row("Info panel", sc(Action::Info)),
+                    row("Full EXIF panel", sc(Action::FullExif)),
+                    row("Settings", sc(Action::Settings)),
+                    row("Quit", sc(Action::Quit)),
+                ],
             ),
-            (keys(Action::Fullscreen), "Toggle fullscreen"),
-            (
-                two(Action::Info, Action::FullExif),
-                "Info / full-EXIF panel",
-            ),
-            ("/ or ?".to_string(), "This help"),
-            (keys(Action::Quit), "Quit"),
-        ];
-        let mut rows = vec![Row::Span {
-            text: "PhotoBlaze Help".to_string(),
-            bold: true,
-        }];
-        rows.extend(entries.into_iter().map(|(k, d)| Row::Pair {
-            label: k,
-            value: d.to_string(),
-        }));
-        rows
+        ]
     }
 
     /// The full-EXIF "nerd" panel rows for the displayed photo: a filename/path
@@ -3860,12 +3899,19 @@ impl App {
                 hud.render_table(&rows, px, pad, info_bg)
             }
             InfoMode::Help => {
-                let help_px = (20.0 * self.scale_factor).max(12.0);
-                let rows = self.help_rows();
+                let help_px = (15.0 * self.scale_factor).max(10.0);
+                let sections = self.help_sections();
+                let margin = self.overlay_margin();
+                let win_h = self
+                    .active
+                    .as_ref()
+                    .map(|a| a.window.inner_size().height)
+                    .unwrap_or(0);
+                let max_h = (win_h as i32 - 2 * margin as i32).max(1);
                 let Some(hud) = self.hud.as_ref() else {
                     return;
                 };
-                hud.render_table(&rows, help_px, pad, hud::BG)
+                hud.render_shortcuts(&sections, help_px, hud::BG, max_h)
             }
         };
         let Some((bitmap, w, h)) = panel else {
@@ -3967,6 +4013,34 @@ impl App {
         let pad = (12.0 * self.scale_factor).round().max(4.0) as u32;
         if let Some(hud) = self.hud.as_ref() {
             if let Some((rgba, w, h)) = hud.render_panel_icon(msg, px, pad, icon, hud::BG) {
+                self.toast = Some(Toast {
+                    rgba,
+                    w,
+                    h,
+                    started: Instant::now(),
+                    uploaded_alpha: -1.0,
+                });
+                self.push_toast(1.0);
+            }
+        }
+        self.draw(event_loop);
+    }
+
+    /// Flash a **hint toast** styled like the open-screen buttons — a leading icon, a label, and
+    /// the keyboard shortcut dimmed at the right (e.g. `▶ Play  P`) — and fade it like any toast.
+    /// Used for discoverability affordances that teach a shortcut (the animation / Live Photo
+    /// play hint), so they match the open screen's look.
+    fn show_hint(&mut self, label: &str, icon: &str, shortcut: &str, event_loop: &ActiveEventLoop) {
+        let px = (20.0 * self.scale_factor).max(13.0);
+        if let Some(hud) = self.hud.as_ref() {
+            let spec = hud::ButtonSpec {
+                label,
+                icon: Some(icon),
+                shortcut: (!shortcut.is_empty()).then_some(shortcut),
+                shortcut_semibold: true,
+                min_w: 0,
+            };
+            if let Some((rgba, w, h)) = hud.render_button(&spec, px, hud::BG, false) {
                 self.toast = Some(Toast {
                     rgba,
                     w,
@@ -5028,13 +5102,15 @@ impl App {
         }
         if self.has_motion(item) {
             self.anim_hint_shown_for = Some(item);
-            // A Live Photo gets the livephoto mark; an animated still gets the play ▶.
+            // A Live Photo gets the livephoto mark; an animated still gets the play ▶. Styled
+            // like the open-screen buttons: `▶ Play  P` with the shortcut dimmed at the right.
             let icon = if self.is_live_photo(item) {
                 icon::assets::LIVE_PHOTO
             } else {
                 icon::assets::PLAY
             };
-            self.show_toast_icon("Press P to play", Some(icon), event_loop);
+            let shortcut = self.shortcut_for(Action::PlayPause);
+            self.show_hint("Play", icon, &shortcut, event_loop);
         }
     }
 

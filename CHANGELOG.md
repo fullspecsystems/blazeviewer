@@ -36,6 +36,15 @@ with any pre-release suffix carried only by the tag.
   shortcuts still work exactly as before. (Replaces the old "Press O to open…" text hint.)
 
 ### Changed
+- **The keyboard-help overlay (`?`) has been redesigned.** It's now grouped into sections
+  (Browse, View & Zoom, Animation, Files & App) with each command's shortcut shown dimmed and
+  right-aligned, menu style, at a more compact size that fits on screen. On macOS the shortcuts
+  use the real Mac symbols (⌘, ⇧, ⌥, ⌫) matching the menu bar — so **Move to Trash** shows ⌘⌫
+  and **Copy** shows ⌘C, not the legacy keys. It also now lists shortcuts that were missing:
+  Play/pause and frame-step, Mute Live Photo audio, Copy, Copy path, Save rotation, Undo, Move
+  to Trash, and Delete permanently. All reflect any bindings you've remapped in Settings.
+- The animation / Live Photo **"Play" hint** now matches the open-screen buttons — a play icon,
+  "Play", and the dimmed **P** shortcut — instead of the old "Press P to play" text.
 - The **Image** menu now shows each command's keyboard shortcut — Next, Previous, Random,
   Rotate, Play/Pause, and frame-step — reflecting any shortcut you've remapped in
   Settings ▸ Shortcuts (on macOS these previously showed no shortcut at all).

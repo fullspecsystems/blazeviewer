@@ -151,8 +151,10 @@ fn build_tiles(hud: &Hud) -> Vec<Tile> {
     if let Some(b) = hud.render_table(&exif_rows(), sp(15.0), info_pad, bg) {
         tiles.push(tile(hud, "EXIF panel (Shift+I)", b));
     }
-    if let Some(b) = hud.render_table(&help_rows(), sp(16.0), info_pad, hud::BG) {
-        tiles.push(tile(hud, "Help overlay (?)", b));
+    // Keyboard-help overlay: sectioned, description-left / shortcut-right (dimmed). `max_h`
+    // caps a column so a long list packs into multiple columns.
+    if let Some(b) = hud.render_shortcuts(&help_sections(), sp(15.0), hud::BG, s(360.0)) {
+        tiles.push(tile(hud, "Keyboard help (?)", b));
     }
 
     // Toasts: icon + text, status text, and an icon-only square pill.
@@ -171,6 +173,18 @@ fn build_tiles(hud: &Hud) -> Vec<Tile> {
     if let Some(b) = hud.render_panel_icon("", sp(20.0), toast_pad, Some(assets::ROTATE_RIGHT), bg)
     {
         tiles.push(tile(hud, "Toast \u{2014} icon only (rotate)", b));
+    }
+    // The animation "play" hint — the toast styled like the open-screen buttons (icon + label +
+    // dimmed shortcut), shown when landing on an animated still / Live Photo.
+    let play_hint = ButtonSpec {
+        label: "Play",
+        icon: Some(assets::PLAY),
+        shortcut: Some("P"),
+        shortcut_semibold: true,
+        min_w: 0,
+    };
+    if let Some(b) = hud.render_button(&play_hint, sp(20.0), bg, false) {
+        tiles.push(tile(hud, "Play hint (animation)", b));
     }
 
     // Buttons (the reusable primitive) across a few icon/label variants + a text-only one.
@@ -378,17 +392,45 @@ fn exif_rows() -> Vec<Row> {
     ]
 }
 
-fn help_rows() -> Vec<Row> {
+/// Sample sections for the keyboard-help overlay tile (static text — the live app sources these
+/// from the keymap; here they use macOS symbols to show the styling).
+fn help_sections() -> Vec<hud::ShortcutSection> {
+    let sec = |title: &str, rows: &[(&str, &str)]| hud::ShortcutSection {
+        title: title.to_string(),
+        rows: rows
+            .iter()
+            .map(|(d, s)| (d.to_string(), s.to_string()))
+            .collect(),
+    };
     vec![
-        Row::Span {
-            text: "Keyboard".into(),
-            bold: true,
-        },
-        pair("Space / \u{2192}", "Next photo"),
-        pair("Backspace / \u{2190}", "Previous photo"),
-        pair("Enter", "Random photo"),
-        pair("i", "Info overlay"),
-        pair("Esc", "Quit"),
+        sec(
+            "Browse",
+            &[
+                ("Next photo", "Space"),
+                ("Previous photo", "\u{232b}"),
+                ("Random photo", "Enter"),
+                ("Slideshow", "S"),
+            ],
+        ),
+        sec(
+            "View & Zoom",
+            &[
+                ("Fit to screen", "8"),
+                ("Zoom out / in", "- / ="),
+                ("Pan", "\u{2190} \u{2191} \u{2193} \u{2192}"),
+                ("Rotate right / left", "R / \u{21e7}R"),
+            ],
+        ),
+        sec(
+            "Files & App",
+            &[
+                ("Open file", "\u{2318}\u{2009}O"),
+                ("Copy image", "\u{2318}\u{2009}C"),
+                ("Move to Trash", "\u{2318}\u{2009}\u{232b}"),
+                ("Settings", "\u{2318}\u{2009},"),
+                ("Quit", "\u{2318}\u{2009}Q"),
+            ],
+        ),
     ]
 }
 

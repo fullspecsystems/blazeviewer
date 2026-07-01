@@ -445,6 +445,7 @@ fn key_symbol(code: KeyCode) -> &'static str {
         ArrowRight => "\u{2192}", // →
         ArrowUp => "\u{2191}",    // ↑
         ArrowDown => "\u{2193}",  // ↓
+        Backspace => "\u{232b}",  // ⌫ (erase-left; the Mac "delete" key, and the ⌘⌫ trash chord)
         _ => key_to_str(code),
     }
 }

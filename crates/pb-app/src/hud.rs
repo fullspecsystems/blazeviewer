@@ -63,6 +63,13 @@ pub mod tokens {
     /// Gap between the label and value columns (floored at 6px).
     pub const TABLE_COL_GAP: f32 = 0.7;
 
+    // ── Keyboard-shortcuts overlay (the `?` help) ────────────────────────────────────
+    /// The "/" separator between a pair of shortcuts (e.g. `- / =`) is drawn in this dimmer
+    /// gray — dimmer than the keys ([`TEXT_DIM`]) — so the two keys read as the emphasis.
+    pub const SHORTCUT_SEP: [u8; 3] = [120, 123, 130];
+    /// Translucent-white band behind each section heading, for visual separation.
+    pub const SECTION_BAND_ALPHA: f32 = 0.08;
+
     // ── Scan status card ─────────────────────────────────────────────────────────────
     /// Secondary (dim) line size — the path + count lines — relative to the heading.
     pub const CARD_SUB: f32 = 0.82;
@@ -130,6 +137,15 @@ pub enum Row {
     Span { text: String, bold: bool },
     /// A two-column row: a semibold label on the left + a regular value.
     Pair { label: String, value: String },
+}
+
+/// One section of the keyboard-shortcuts overlay ([`Hud::render_shortcuts`]): a semibold
+/// heading over its rows. Each row is `(description, shortcut)`; the description is left-aligned
+/// (white) and the shortcut is right-aligned and dimmed (menu-accelerator style). An empty
+/// shortcut renders the description alone.
+pub struct ShortcutSection {
+    pub title: String,
+    pub rows: Vec<(String, String)>,
 }
 
 /// Font weight to render a run of text in.
@@ -418,6 +434,149 @@ impl Hud {
             }
         }
         Some((canvas.into_rgba(), pw, ph))
+    }
+
+    /// Rasterize the **keyboard-shortcuts overlay** (the `?` help): `sections`, each a semibold
+    /// heading over `(description, shortcut)` rows — description left in white, shortcut
+    /// right-aligned and dimmed (menu-accelerator style, matching the open-screen buttons).
+    /// Sections pack top-to-bottom into as many **columns** as needed to keep each column within
+    /// `max_h` px, so a long list stays on one screen. Returns `(rgba, w, h)`.
+    pub fn render_shortcuts(
+        &self,
+        sections: &[ShortcutSection],
+        px: f32,
+        bg: [u8; 4],
+        max_h: i32,
+    ) -> Option<(Vec<u8>, u32, u32)> {
+        if sections.is_empty() {
+            return None;
+        }
+        let line_h = self.line_height(px)? as i32;
+        let asc = self.ascent(px)?;
+        let pad = (px * 1.1).round().max(6.0) as i32; // outer inset
+        let col_gap = (px * 2.2).round().max(12.0) as i32; // between columns
+        let sec_gap = (px * 0.85).round().max(8.0) as i32; // between sections stacked in a column
+        let title_gap = (px * 0.3).round() as i32; // breathing room under a heading band
+        let title_pad = (px * 0.2).round().max(1.0) as i32; // vertical padding inside the band
+        let band_pad = (px * 0.5).round().max(3.0) as i32; // band overhang past the column edges
+        let band_h = line_h + 2 * title_pad;
+        let pair_gap = (px * 1.6).round().max(10.0) as i32; // min gap between a description + shortcut
+
+        // One shortcut, split into runs so the "/" separator can be dimmed more than the keys:
+        // each run is (glyphs, advance, is_separator).
+        type ShortcutRun = (Vec<Glyph>, f32, bool);
+        struct LaidRow {
+            desc: Vec<Glyph>,
+            shortcut: Vec<ShortcutRun>,
+            shortcut_w: f32,
+        }
+        struct Laid {
+            title: Vec<Glyph>,
+            rows: Vec<LaidRow>,
+            w: i32,
+            h: i32,
+        }
+        let mut laid: Vec<Laid> = Vec::with_capacity(sections.len());
+        for s in sections {
+            let (title, title_w) = self.layout(&s.title, px, Weight::Semibold);
+            let mut content_w = title_w;
+            let mut rows = Vec::with_capacity(s.rows.len());
+            for (desc, sc) in &s.rows {
+                let (dg, dw) = self.layout(desc, px, Weight::Regular);
+                // Split a combined "a / b" shortcut on "/" so the slash is its own dim run.
+                let mut shortcut = Vec::new();
+                let mut sw = 0.0f32;
+                for (i, part) in sc.split('/').enumerate() {
+                    if i > 0 {
+                        let (g, w) = self.layout("/", px, Weight::Semibold);
+                        sw += w;
+                        shortcut.push((g, w, true));
+                    }
+                    let (g, w) = self.layout(part, px, Weight::Semibold);
+                    sw += w;
+                    shortcut.push((g, w, false));
+                }
+                content_w = content_w.max(dw + pair_gap as f32 + sw);
+                rows.push(LaidRow {
+                    desc: dg,
+                    shortcut,
+                    shortcut_w: sw,
+                });
+            }
+            let h = band_h + title_gap + rows.len() as i32 * line_h;
+            laid.push(Laid {
+                title,
+                rows,
+                w: content_w.ceil() as i32,
+                h,
+            });
+        }
+        let col_w = laid.iter().map(|s| s.w).max().unwrap_or(1);
+
+        // Pack sections into columns, each kept within `max_h`; record each section's (col, y).
+        let mut placements: Vec<(usize, i32)> = Vec::with_capacity(laid.len());
+        let (mut col, mut y, mut col_h_max) = (0usize, 0i32, 0i32);
+        for s in &laid {
+            let start = if y == 0 { 0 } else { y + sec_gap };
+            if y > 0 && start + s.h > max_h {
+                col += 1;
+                placements.push((col, 0));
+                y = s.h;
+            } else {
+                placements.push((col, start));
+                y = start + s.h;
+            }
+            col_h_max = col_h_max.max(y);
+        }
+        let n_cols = col as i32 + 1;
+
+        let total_w = pad + n_cols * col_w + (n_cols - 1) * col_gap + pad;
+        let total_h = pad + col_h_max + pad;
+        let mut canvas = Canvas::new(
+            total_w as u32,
+            total_h as u32,
+            bg,
+            (px * tokens::RADIUS_PANEL).round(),
+        );
+        for (s, &(c, sy)) in laid.iter().zip(&placements) {
+            let col_x = pad + c as i32 * (col_w + col_gap);
+            let top = pad + sy;
+            // A translucent band behind the heading (full column width + a little overhang).
+            canvas.fill_round_rect(
+                col_x - band_pad,
+                top,
+                col_w + 2 * band_pad,
+                band_h,
+                (px * 0.25).round(),
+                TEXT,
+                tokens::SECTION_BAND_ALPHA,
+            );
+            // Section heading (semibold, white), vertically centered in the band.
+            self.draw_line(
+                &mut canvas,
+                col_x as f32,
+                (top + title_pad) as f32 + asc,
+                &s.title,
+                TEXT,
+                px,
+            );
+            // Rows: description left (white), shortcut right-aligned (keys dimmed, "/" dimmer).
+            for (i, r) in s.rows.iter().enumerate() {
+                let ry = (top + band_h + title_gap + i as i32 * line_h) as f32 + asc;
+                self.draw_line(&mut canvas, col_x as f32, ry, &r.desc, TEXT, px);
+                let mut sx = (col_x + col_w) as f32 - r.shortcut_w;
+                for (glyphs, w, is_sep) in &r.shortcut {
+                    let rgb = if *is_sep {
+                        tokens::SHORTCUT_SEP
+                    } else {
+                        TEXT_DIM
+                    };
+                    self.draw_line(&mut canvas, sx, ry, glyphs, rgb, px);
+                    sx += w;
+                }
+            }
+        }
+        Some((canvas.into_rgba(), total_w as u32, total_h as u32))
     }
 
     /// Rasterize `lines` as **centered** text inside the translucent panel — each
@@ -1449,5 +1608,40 @@ mod tests {
         // The folder button is stacked strictly below the file button, within the bitmap.
         assert!(folder[1] >= file[1] + file[3], "folder sits below file");
         assert!(h >= folder[1] + folder[3], "panel is tall enough for both");
+    }
+
+    #[test]
+    fn render_shortcuts_packs_into_columns_when_short() {
+        let Some(hud) = Hud::load() else {
+            return;
+        };
+        let sections = vec![
+            ShortcutSection {
+                title: "Browse".into(),
+                rows: vec![
+                    ("Next photo".into(), "Space".into()),
+                    ("Previous photo".into(), "\u{232b}".into()),
+                ],
+            },
+            ShortcutSection {
+                title: "Files".into(),
+                rows: vec![("Copy image".into(), "\u{2318}\u{2009}C".into())],
+            },
+        ];
+        // Generous height → one column.
+        let (rgba, w, h) = hud
+            .render_shortcuts(&sections, 18.0, BG, 10_000)
+            .expect("renders");
+        assert!(w > 0 && h > 0);
+        assert_eq!(rgba.len(), (w * h * 4) as usize, "buffer matches w*h*4");
+        // A tight max height forces each section into its own column: wider, shorter.
+        let (_, w2, h2) = hud
+            .render_shortcuts(&sections, 18.0, BG, 1)
+            .expect("renders");
+        assert!(
+            w2 > w,
+            "a tight height forces more columns (wider): {w2} vs {w}"
+        );
+        assert!(h2 < h, "…and a shorter panel: {h2} vs {h}");
     }
 }
