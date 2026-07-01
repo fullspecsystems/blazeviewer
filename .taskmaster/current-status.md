@@ -2,12 +2,14 @@
 
 _Last updated: 2026-07-01. **ACTIVE STREAM: NS0 — the AppCore ownership inversion** (macOS
 SwiftUI groundwork, ADR-021) — see the NS0 section immediately below. On branch `swiftui`.
-NS0 is now **~80% done: the full STATE inversion + the bulk of the BEHAVIOR inversion (5.5
-Phase B) are complete — ~99 pure-core methods moved onto `impl AppCore`. What remains is the
-keystone `handle(CoreEvent)` (Phase C) + the scan/archive/dialog/delete/window FLOW inversion
-(5.6), which are entangled and smoke-gated** — so NS1 is NOT yet startable (it needs `handle()`).
-Everything below the NS0 section is the previously-shipped work (macOS port, archive, settings,
-HEIC, color), unchanged._
+NS0 is now **~90% done: the full STATE inversion, the BEHAVIOR inversion (Phase B, ~99 methods),
+`dispatch_action` moved onto `AppCore`, AND the keystone `handle(CoreEvent)` (Phase C1) all
+land. ✅ NS1 (the Swift bridge) is now UNBLOCKED — it can drive the viewer through `handle()`,
+which exists + is unit-tested.** What remains is **Phase C2** (rewrite the winit shell's
+`window_event`/`about_to_wait` as thin translators that also go through `handle()` — smoke-gated)
+and **5.6** (invert the scan/archive/dialog/delete/window FLOW — the `ShellFlowAction` arms get
+specific effects). Everything below the NS0 section is the previously-shipped work (macOS port,
+archive, settings, HEIC, color), unchanged._
 
 _The macOS (Apple Silicon) port is complete and SHIPPED in `v0.1.0-beta.4` (2026-06-30) — the
 first signed + notarized macOS DMG alongside the signed Windows MSI. Verified notarized +
@@ -90,54 +92,67 @@ each `cargo test --workspace` + `clippy -D warnings` + `fmt` clean, behavior-pre
   - **Delete state → core:** `pending_delete` + `pending_confirm_delete` moved onto `AppCore`.
     `do_delete`'s trash I/O + `delete_current`'s confirm dialog stay shell (→ 5.6).
 
-### ❌ NOT DONE — Phase C (`handle`) + 5.6 (flow inversion). **This is the entangled, smoke-gated back half.**
-- **`dispatch_action` cannot move yet** — it's the central `match action` (main.rs), and 10 of
-  its arms still call genuine shell/flow/IO methods: `begin_exit` (window teardown), `open_about`/
-  `open_settings` (dialog), `delete_current` (confirm dialog), `cancel_scan_command`/
-  `toggle_recursive` (scan flow), `save_rotation`/`undo` (the `save_rotation` little-exif I/O
-  module), `toggle_fullscreen` (the shell `windowed` field), `toggle_mute_audio` (the native
-  `menu_state` refresh). **Each must become a `CoreEffect`/`CoreEvent` first** — that work *is*
-  Phase C/E. The non-flow ones (`toggle_fullscreen`→`SetWindowMode`, `toggle_mute_audio`→
-  `SetMenuState`, `save_rotation`/`undo`→a `SaveRotation`/result effect) are self-contained; the
-  6 dialog/scan/exit arms are 5.6 proper.
-- **5.5 Phase C** — the keystone: once `dispatch_action` is core, add **`AppCore::handle(CoreEvent)`**
-  (KeyDown→resolve→`dispatch_action` + held-key update, Tick→advance/slideshow + `SetWake`,
-  Resized→viewport, pointer/scroll/pinch→view, MenuAction→dispatch_action for non-flow) + core
-  unit tests; rewrite `window_event` / `about_to_wait` as translators (stamp `now` → build
-  `CoreEvent` → `handle` → `drain_effects`). The `now` clock + `Viewport` are already core.
-- **5.6** — invert the scan/archive/dialog/delete-confirm/drop flow (migrate `Resolved`; untangle
-  `finish_picker` + `begin_archive_open`→`DialogWindow`) + native fullscreen. The 57 methods still
-  on `impl App` are exactly this: the effect executors (`drain_effects`, `open_pending_dialog`,
-  `write_clipboard`), the window/menu/native ops, the flow methods (`begin_dir_scan`,
-  `poll_dir_scan`, `begin_archive_open`, `finish_picker`, `dialog_event`, `handle_dialog_outcome`,
-  …), and the I/O-coupled `save_rotation`/`undo`/`do_delete`.
+### ✅ DONE — `dispatch_action` → core + `handle(CoreEvent)` (Phase C1), 2026-07-01
+- **`dispatch_action` moved onto `impl AppCore`** via a `CoreEffect::ShellFlowAction(Action)`
+  seam. Its 22 pure arms (nav/zoom/scale/rotate/copy/info/slideshow/play/frame) run in the core;
+  its 11 flow arms (save-rotation, delete×2, undo, fullscreen, recursive, cancel-scan, mute,
+  settings, about, quit) push `ShellFlowAction(action)`, which the shell's `perform_flow_action`
+  runs from `drain_effects`. So the **whole** action vocabulary dispatches through one core entry
+  point. `drain_effects` now **loops until quiescent** (bounded) so a flow action that enqueues a
+  follow-up effect lands the same event turn — `Fullscreen`→`SetWindowMode`, `Quit`→`Quit` need
+  this; dialog opens already ran at drain's end. `ShellFlowAction` is **provisional** — 5.6 gives
+  each flow a specific effect/`CoreEvent` + native macOS handling.
+- **`AppCore::handle(CoreEvent)` exists + is unit-tested (5 tests).** C1 covers the input + menu
+  events: KeyDown (→ `resolve_key_down` → dispatch/nav_press/held/frame-step), KeyUp + FocusLost
+  (the held-key release net), MenuAction (→ `dispatch_action`), KeymapSubmitted. A minimal test
+  `AppCore` (empty source, dummy pool, no window) drives it. Escape isn't special-cased here (it
+  resolves through the keymap to `Quit` → `ShellFlowAction`; the host owns dialog-dismiss-vs-quit).
 
-**⚠ NS1 (the Swift bridge) still cannot start until Phase C** — it drives the core through
-`handle()`, which does not exist yet (blocked on `dispatch_action` moving, which is blocked on the
-flow-arm effect conversions).
+**✅ NS1 (the Swift bridge) is UNBLOCKED** — it can drive the viewer through `handle()` today for
+keyboard + menu, with the unit tests as the safety net. `Tick`/`Resized`/pointer/scroll/pinch +
+the flow events are `handle()` no-ops until C2 wires them.
+
+### ❌ NOT DONE — Phase C2 (shell→translator) + 5.6 (flow inversion). **The smoke-gated back half.**
+- **C2 — rewrite the winit shell as a translator.** `handle()` is currently *additive*: the winit
+  `window_event`/`about_to_wait` still call core methods directly (their proven, smoke-verified
+  path). C2 rewrites them to *stamp `now` → build a `CoreEvent` → `self.core.handle(ev)` →
+  `drain_effects`*, so the winit shell exercises the **same** `handle()` the Swift host will. This
+  also wires the `handle()` no-op arms: `Tick` (the `about_to_wait` hold-loop/advance/slideshow +
+  a new `SetWake(Option<Instant>)` effect), `Resized` (viewport + renderer-resize), pointer/
+  scroll/pinch → view. Keep Escape's shell special-case (dialog-dismiss) as a pre-filter. **Heavily
+  smoke-gated** — it's the core input loop; `cargo test` can't validate feel.
+- **5.6 — invert the scan/archive/dialog/delete-confirm/drop FLOW** + native fullscreen: give the
+  11 `ShellFlowAction` arms specific effects/`CoreEvent`s (migrate `Resolved`; untangle
+  `finish_picker` + `begin_archive_open`→`DialogWindow`; `save_rotation`/`undo` → a save effect +
+  result event; `toggle_fullscreen` → move `windowed` + the `capture_windowed_geometry` ordering;
+  `toggle_mute_audio` → `SetMenuState`). The ~55 methods still on `impl App` are exactly this: the
+  effect executors (`drain_effects`, `open_pending_dialog`, `write_clipboard`, `perform_flow_action`),
+  the window/menu/native ops, the flow methods (`begin_dir_scan`, `poll_dir_scan`,
+  `begin_archive_open`, `finish_picker`, `dialog_event`, `handle_dialog_outcome`, …), and the
+  I/O-coupled `save_rotation`/`undo`/`do_delete`.
 
 ### ▶ Resume
-Read **`.taskmaster/docs/ns0-step5-behavior-inversion-plan.md`**. Phase B is done; **resume by
-converting `dispatch_action`'s 10 shell arms to effects/CoreEvents** (start with the 4 self-
-contained non-flow ones: `toggle_fullscreen`→`SetWindowMode` [brief 4e], `toggle_mute_audio`→a
-`SetMenuState` push, `save_rotation`+`undo`→a `SaveRotation`/result effect for the little-exif
-write). Once all 10 are effect-driven, `dispatch_action` moves onto `AppCore`, then add
-`handle(CoreEvent)` (Phase C), then invert the dialog/scan/archive flow (5.6). The proven move
-recipe: relocate any pb-app-local helper/const/type the method drags → `pb_app_core::engine` (or
-`keymap`/`settings`) first, then move the method (`self.core.X`→`self.X`; make it `pub`), then
-rewrite call sites `self.X(`→`self.core.X(`. **Hazards** (all hit + handled this session):
-multiline `self\n.core\n.field` chains (collapse with regex, not a literal replace); a method
-that calls a shell *module* path (`clipboard::`/`save_rotation::`/`delete::`) or an associated
-`Self::`/`App::` fn — the token classifier misses both, so grep the body before moving; and
-test-only imports must live in the `#[cfg(test)] mod tests` block, not the crate root (else the
-bin build flags them unused). The scratchpad has the move scripts
-(`move_methods.py`, `reclass3.py` — the comment-stripping classifier).
+Read **`.taskmaster/docs/ns0-step5-behavior-inversion-plan.md`**. Two independent tracks remain,
+either order:
+1. **NS1 can start now** — bind the Swift/AppKit host to `AppCore::handle()` (keyboard + menu),
+   drain `CoreEffect`s natively. `handle()` + the contract vocabulary are ready + tested.
+2. **Finish NS0** — do **C2** (the winit shell→translator rewrite; smoke-test hold-to-fly + nav +
+   pointer/zoom after) then **5.6** (flow inversion; smoke each dialog/delete/fullscreen path).
+   Recommended: C2 first (it proves `handle()` on the winit side before the Swift host relies on
+   it), then 5.6 gives the `ShellFlowAction` arms real effects.
 
-**Unsmoked since the owner's last manual test:** the entire Phase B method move (99 methods) +
-the live-audio effect seam + the `scanning`/`launching`/delete-state field moves. All are
-behavior-preserving (`cargo test` can't catch a feel regression, only a manual hold-to-fly +
-play/pause + delete + open-hint pass can). Not yet fast-forwarded onto `main`; a `git reset
---hard` to the pre-Phase-B commit (`44d9464`) is the clean rollback.
+**Move-recipe hazards** (all hit + handled this session, for whoever continues the moves): multiline
+`self\n.core\n.field` chains (regex-collapse, not a literal replace); a method calling a shell
+*module* path (`clipboard::`/`save_rotation::`/`delete::`) or an associated `Self::`/`App::` fn —
+the token classifier misses both, grep the body first; test-only imports go in the `#[cfg(test)]
+mod tests` block, not the crate root. Scratchpad has the scripts (`move_methods.py`, `reclass3.py`).
+
+**Unsmoked since the owner's last manual test:** all of this session's work — the Phase B moves
+(~99 methods), the live-audio effect seam, the `scanning`/`launching`/delete-state field moves,
+the `dispatch_action` split (**flow actions now run at `drain` instead of inline — same event turn,
+but the flow paths [Settings/About/Confirm-delete/Save/Undo/Fullscreen/Recursive/Stop-Scanning/
+Mute/Quit] want a manual pass**), and `handle()` (additive, unit-tested only). Not yet
+fast-forwarded onto `main`; `git reset --hard 44d9464` is the clean rollback to pre-Phase-B.
 
 ---
 

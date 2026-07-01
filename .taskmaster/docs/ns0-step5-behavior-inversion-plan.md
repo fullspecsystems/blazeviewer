@@ -1,13 +1,14 @@
 # NS0 Step 5 — Behavior Inversion (`AppCore::handle` + thin shell) — Execution Plan
 
 **Status:** revised after codex review (r1). **Branch:** `swiftui`. **Prereq done:** 5.1–5.4
-(state) + Phase 0 (contract cleanup) + Phase A (remaining state moves) + **Phase B (the ~99
-pure-core method moves onto `impl AppCore`) DONE (2026-07-01)** — all green (383 tests, clippy
-`-D warnings`, fmt), 8 commits, not yet fast-forwarded onto `main`. **RESUME by effect-ifying
-`dispatch_action`'s 10 remaining shell arms** (see `../current-status.md` §NS0 ▶ Resume for the
-exact list + order), then Phase C (`handle`), then Phase E (=5.6, the dialog/scan/archive flow).
-The scanning/launching flags, live-audio effects, and delete-state moves that Phase B needed are
-all in place. See `../current-status.md` §NS0 for the full done-vs-remaining summary.
+(state) + Phase 0 + Phase A + **Phase B (~99 method moves) + `dispatch_action`→core (via a
+`ShellFlowAction` seam) + `handle(CoreEvent)` Phase C1 all DONE (2026-07-01)** — green (388
+tests, clippy `-D warnings`, fmt), 11 commits, not yet fast-forwarded onto `main`. **✅ NS1 is
+UNBLOCKED — `handle()` exists + is unit-tested.** **REMAINING: Phase C2** (rewrite the winit
+`window_event`/`about_to_wait` as translators that also go through `handle()`, wiring the
+Tick/Resized/pointer no-op arms + a `SetWake` effect — smoke-gated) and **Phase E (=5.6, the
+dialog/scan/archive FLOW inversion — the 11 `ShellFlowAction` arms get specific effects)**. See
+`../current-status.md` §NS0 for the full done-vs-remaining summary + the two-track resume.
 
 Read `ns0-appcore-inversion-brief.md` first for the effect-seam (4a–4e) and the field-group
 map. **r1 changes (from codex review):** a new **Phase 0 contract-cleanup** runs first —
