@@ -2579,7 +2579,7 @@ impl App {
     /// Build the native menu bar once (cross-platform; muda owns the OS handle).
     fn ensure_menu(&mut self) {
         if self.menu.is_none() {
-            let built = menu::build_menu();
+            let built = menu::build_menu(&self.keymap);
             self.menu = Some(built.menu);
             self.save_rotation_item = Some(built.save_rotation);
             self.cancel_scan_item = Some(built.cancel_scan);

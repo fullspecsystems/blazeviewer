@@ -23,6 +23,9 @@ with any pre-release suffix carried only by the tag.
   duration, and the loop count.
 
 ### Changed
+- The **Image** menu now shows each command's keyboard shortcut — Next, Previous, Random,
+  Rotate, Play/Pause, and frame-step — reflecting any shortcut you've remapped in
+  Settings ▸ Shortcuts (on macOS these previously showed no shortcut at all).
 - **Open a folder and start browsing immediately — even huge, deeply nested ones.** Folders
   now **stream in**: the first photo appears almost at once and the rest of the library loads
   in the background while you flick through what's already there, instead of waiting for the
