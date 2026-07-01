@@ -604,13 +604,6 @@ struct App {
     /// a Live Photo. Dropped (which stops it) on pause-to-step, finish, or navigate.
     live_audio: Option<LiveAudio>,
 
-    /// Intent-level effects the orchestration layer queued this event/tick for the shell
-    /// to carry out (NS0, ADR-021). Instead of touching winit/native APIs directly,
-    /// orchestration pushes [`contract::CoreEffect`]s here and [`App::drain_effects`]
-    /// executes them at the end of each `ApplicationHandler` entry — the seam an AppKit
-    /// shell will re-implement. (Being filled in incrementally: today it carries `Quit`.)
-    effects: Vec<contract::CoreEffect>,
-
     /// A dialog the orchestration layer asked the shell to open, deferred so the opener
     /// methods don't need the `ActiveEventLoop` (window creation lives in the shell's
     /// `drain_effects`, not scattered through orchestration). Only one dialog shows at a
@@ -808,6 +801,7 @@ impl App {
                 play_hint: None,
                 hud: Hud::load(),
                 renderer: None,
+                effects: Vec::new(),
             },
             scale_factor: 1.0,
             pending_drops: Vec::new(),
@@ -851,7 +845,6 @@ impl App {
             framestep_last: None,
             live_revert_at: None,
             live_audio: None,
-            effects: Vec::new(),
             pending_dialog: None,
             live_motion_cache: HashMap::new(),
         }
@@ -1103,7 +1096,7 @@ impl App {
         // has no file on disk, so it gets an image-only copy (pixels still paste). The
         // pure decode + rotate prep stays here; the platform write is the shell's job.
         let file = self.core.source.path(item).map(|p| p.to_path_buf());
-        self.effects.push(contract::CoreEffect::WriteClipboard(
+        self.core.effects.push(contract::CoreEffect::WriteClipboard(
             contract::ClipboardPayload::Image { rgba, w, h, file },
         ));
     }
@@ -1123,7 +1116,7 @@ impl App {
         };
         // The shell writes the text and reports the success/failure toast (it can recover
         // the file name from `text` for the "Copied …" message).
-        self.effects.push(contract::CoreEffect::WriteClipboard(
+        self.core.effects.push(contract::CoreEffect::WriteClipboard(
             contract::ClipboardPayload::Text(text),
         ));
     }
@@ -1375,7 +1368,8 @@ impl App {
             r.clear_image();
             r.set_overlay(None, 0);
         }
-        self.effects
+        self.core
+            .effects
             .push(contract::CoreEffect::SetTitle("PhotoBlaze".to_string()));
         // Blank background + the centered "Press O to open…" hint (mirrors a bare launch).
         self.show_open_hint();
@@ -1398,7 +1392,9 @@ impl App {
             r.set_view(view);
             r.present_slot(slot);
         }
-        self.effects.push(contract::CoreEffect::SetTitle(title));
+        self.core
+            .effects
+            .push(contract::CoreEffect::SetTitle(title));
         self.core.ring.set_displayed(slot);
         // A fresh landing on a *different* photo re-arms the play hint. `anim_hint_shown_for`
         // is keyed to the item and only updated when landing on an animated one — so without
@@ -1429,10 +1425,12 @@ impl App {
         self.core.current = None;
         let name = file_name_of(self.core.source.name(item));
         let total = self.core.source.len();
-        self.effects.push(contract::CoreEffect::SetTitle(format!(
-            "{name} ({}/{total}) - decode error",
-            item + 1
-        )));
+        self.core
+            .effects
+            .push(contract::CoreEffect::SetTitle(format!(
+                "{name} ({}/{total}) - decode error",
+                item + 1
+            )));
         // The info panel belonged to the previous photo — drop it (and redraw to
         // remove it). Only touch the renderer if a panel was actually showing.
         if self.core.overlay_shown {
@@ -1685,7 +1683,9 @@ impl App {
                     );
                     r.set_overlay(None, 0);
                 }
-                self.effects.push(contract::CoreEffect::SetTitle(title));
+                self.core
+                    .effects
+                    .push(contract::CoreEffect::SetTitle(title));
                 self.core.overlay_shown = false;
                 self.core.overlay_item = None;
                 self.core.displayed_item = Some(idx);
@@ -2318,7 +2318,8 @@ impl App {
         // shell work: emit the mode change and let the drain apply it (`apply_window_mode`),
         // which reads the `self.windowed` we just flipped. Same event-loop turn, so behavior
         // is unchanged.
-        self.effects
+        self.core
+            .effects
             .push(contract::CoreEffect::SetWindowMode(if self.windowed {
                 contract::WindowMode::Windowed
             } else {
@@ -2562,7 +2563,9 @@ impl App {
             return;
         }
         self.menu_state = Some(next);
-        self.effects.push(contract::CoreEffect::SetMenuState(next));
+        self.core
+            .effects
+            .push(contract::CoreEffect::SetMenuState(next));
     }
 
     /// The shell side of [`CoreEffect::SetMenuState`]: mirror a [`contract::MenuState`] onto
@@ -2809,7 +2812,7 @@ impl App {
         if !start_dir.is_dir() {
             start_dir = fallback;
         }
-        self.effects.push(if folder {
+        self.core.effects.push(if folder {
             contract::CoreEffect::OpenFolderPanel { start_dir }
         } else {
             contract::CoreEffect::OpenFilePanel { start_dir }
@@ -2871,7 +2874,7 @@ impl App {
         self.core.target_item = self.core.playlist.current();
         self.load_current_sync();
         self.request_prefetch();
-        self.effects.push(contract::CoreEffect::RequestRender);
+        self.core.effects.push(contract::CoreEffect::RequestRender);
     }
 
     /// Grow the playlist in place as a streaming scan delivers more images: swap in the
@@ -2928,7 +2931,9 @@ impl App {
             return;
         }
         let title = title_for(self.core.source.name(item), item, self.core.source.len());
-        self.effects.push(contract::CoreEffect::SetTitle(title));
+        self.core
+            .effects
+            .push(contract::CoreEffect::SetTitle(title));
     }
 
     /// Push the current view transform to the renderer (re-places the quad).
@@ -4105,7 +4110,7 @@ impl App {
         if self.core.source.is_empty() {
             self.show_open_hint(); // re-rasterize the "Press O to open" hint
         }
-        self.effects.push(contract::CoreEffect::RequestRender);
+        self.core.effects.push(contract::CoreEffect::RequestRender);
     }
 
     /// Clear the scan card layer if it's up (and redraw to remove it).
@@ -4272,9 +4277,9 @@ impl App {
         } else {
             false
         };
-        // Push after the `self.core.renderer` borrow ends (can't touch `self.effects` inside it).
+        // Push after the `self.core.renderer` borrow ends (can't touch `self.core.effects` inside it).
         if fatal {
-            self.effects.push(contract::CoreEffect::Quit);
+            self.core.effects.push(contract::CoreEffect::Quit);
         }
         if drew {
             self.core.metrics.record("render", t0.elapsed());
@@ -4294,7 +4299,7 @@ impl App {
             a.set_visible(false);
         }
         self.clear_session_state();
-        self.effects.push(contract::CoreEffect::Quit);
+        self.core.effects.push(contract::CoreEffect::Quit);
     }
 
     /// Execute and clear the [`contract::CoreEffect`]s orchestration queued this
@@ -4306,7 +4311,7 @@ impl App {
     /// advance path used to do inline now land here — the total, not `present`, is flat).
     fn drain_effects(&mut self, event_loop: &ActiveEventLoop) {
         let t0 = Instant::now();
-        for effect in std::mem::take(&mut self.effects) {
+        for effect in std::mem::take(&mut self.core.effects) {
             match effect {
                 contract::CoreEffect::Quit => event_loop.exit(),
                 contract::CoreEffect::RequestRender => {
@@ -4588,7 +4593,9 @@ impl App {
         } else {
             contract::CursorKind::Default
         };
-        self.effects.push(contract::CoreEffect::SetCursor(kind));
+        self.core
+            .effects
+            .push(contract::CoreEffect::SetCursor(kind));
     }
 
     /// Zoom by `factor` (>1 in, <1 out) about the cursor — the shared effect for
@@ -5470,7 +5477,7 @@ impl ApplicationHandler for App {
             // photos become the playlist).
             WindowEvent::DroppedFile(path) => {
                 self.pending_drops.push(path);
-                self.effects.push(contract::CoreEffect::RequestRender);
+                self.core.effects.push(contract::CoreEffect::RequestRender);
             }
 
             WindowEvent::KeyboardInput {

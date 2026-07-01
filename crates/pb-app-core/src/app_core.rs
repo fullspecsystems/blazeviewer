@@ -24,6 +24,7 @@ use pb_hud::hud::Hud;
 use pb_render::{Renderer, Rotation, ViewTransform};
 use pb_source::PhotoSource;
 
+use crate::contract::CoreEffect;
 use crate::decode_pool::{DecodePool, Outcome};
 use crate::metrics::StageTimes;
 use crate::overlay::{InfoMode, OpenButton, OpenPanel, PlayHint, Toast};
@@ -196,4 +197,10 @@ pub struct AppCore {
     /// window itself stays shell-owned — the core drives rendering, the shell owns the OS
     /// handle it draws to.
     pub renderer: Option<Box<dyn Renderer>>,
+
+    // --- Effect sink (NS0 5.5 / Phase 0.1) ---
+    /// Orchestration pushes [`CoreEffect`]s here instead of touching the OS directly; the
+    /// shell's `drain_effects` executes them (the one place winit/muda/rfd/objc2 lives). Owned
+    /// by the core so methods moved onto `impl AppCore` can emit effects without a threaded sink.
+    pub effects: Vec<CoreEffect>,
 }
