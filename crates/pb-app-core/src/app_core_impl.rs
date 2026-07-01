@@ -398,6 +398,8 @@ impl AppCore {
                 self.now = now;
                 self.tick();
             }
+            // A chrome dialog resolved — run the reaction + emit the close/cancel effects.
+            CoreEvent::DialogResolved(result) => self.handle_dialog_resolved(result),
             // Wired in later C2 increments / 5.6 (they touch the still-shell scroll-delta / GPU
             // surface / flow paths). Ignored for now so a host that sends them early is a no-op.
             CoreEvent::Redraw
@@ -405,6 +407,75 @@ impl AppCore {
             | CoreEvent::Scroll { .. }
             | CoreEvent::DroppedPaths(_)
             | CoreEvent::CancelDialog => {}
+        }
+    }
+
+    /// React to a resolved chrome dialog (NS0 5.6): run the small core reaction (apply settings /
+    /// keymap, confirm a delete, arm the Esc-guard, forget a pending confirm/password) and emit the
+    /// uniform housekeeping effects — `CloseDialog`, and `CancelScan` / `CancelArchiveLoad` when a
+    /// dismiss/cancel abandons an in-flight worker. The host drove the dialog UI + extracted the
+    /// payloads; this owns the *reaction*. (The password-submit path spawns the archive worker, so
+    /// it's still handled shell-side and never reaches here.)
+    pub fn handle_dialog_resolved(&mut self, result: contract::DialogResult) {
+        use contract::{CoreEffect as E, DialogKind, DialogResult as R};
+        match result {
+            R::Dismissed(kind) => {
+                // The Esc that dismisses a focused dialog also leaks to the main window as a
+                // trailing/synthetic press once focus snaps back — briefly guard quit-on-Esc so
+                // closing a dialog never also exits the app.
+                self.esc_guard_until = Some(self.now + Duration::from_millis(300));
+                // Esc / close on the loading view cancels the in-flight open (harmless otherwise).
+                self.effects.push(E::CancelArchiveLoad);
+                // Guarded to the Scanning kind so closing a *different* dialog doesn't kill a fast
+                // scan still running quietly in the background.
+                if kind == Some(DialogKind::Scanning) {
+                    self.effects.push(E::CancelScan);
+                }
+                self.effects.push(E::CloseDialog);
+                self.pending_confirm_delete = None; // Esc / close = cancel the confirm
+                self.password_archive = None; // Esc / close = abandon the password prompt
+            }
+            R::PasswordCancelled => {
+                self.effects.push(E::CloseDialog);
+                self.password_archive = None;
+            }
+            // Settings: Save applies + persists the edited model; Cancel/Esc discard.
+            R::SettingsSaved { settings, keymap } => {
+                self.effects.push(E::CloseDialog);
+                if let Some(new) = settings {
+                    self.apply_settings(new);
+                }
+                if let Some(km) = keymap {
+                    self.apply_keymap(km);
+                }
+            }
+            R::SettingsCancelled => self.effects.push(E::CloseDialog),
+            // Loading: the only button is Cancel; make sure the open stops, then close.
+            R::LoadingCancelled => {
+                self.effects.push(E::CancelArchiveLoad);
+                self.effects.push(E::CloseDialog);
+                self.password_archive = None;
+            }
+            // Scanning: stop the walk, discard its partial result, and close — a cancelled scan
+            // keeps the current view, not a half-walked tree.
+            R::ScanningCancelled => {
+                self.effects.push(E::CancelScan);
+                self.effects.push(E::CloseDialog);
+            }
+            // Confirm drives a permanent delete on the pending item.
+            R::ConfirmAnswered(confirmed) => {
+                self.effects.push(E::CloseDialog);
+                let item = self.pending_confirm_delete.take();
+                if confirmed {
+                    if let Some(item) = item {
+                        if let Some(path) = self.source.path(item).map(Path::to_path_buf) {
+                            self.do_delete(item, &path, true);
+                        }
+                    }
+                }
+            }
+            // Message / others just close.
+            R::Closed => self.effects.push(E::CloseDialog),
         }
     }
 
@@ -3290,6 +3361,7 @@ mod tests {
             launching: false,
             dialog_open: false,
             archive_loading: false,
+            password_archive: None,
             pending_delete: None,
             pending_confirm_delete: None,
             info: InfoMode::Off,
@@ -3353,6 +3425,74 @@ mod tests {
             core.effects[0],
             contract::CoreEffect::ShowDialog(contract::DialogKind::Settings)
         ));
+    }
+
+    #[test]
+    fn dialog_closed_emits_close_only() {
+        // NS0 5.6: a plain Message/OK close just emits CloseDialog — nothing else.
+        let mut core = test_core();
+        core.handle(CoreEvent::DialogResolved(contract::DialogResult::Closed));
+        assert_eq!(core.effects.len(), 1);
+        assert!(matches!(core.effects[0], contract::CoreEffect::CloseDialog));
+    }
+
+    #[test]
+    fn dialog_dismiss_scanning_cancels_scan_and_archive_then_closes() {
+        // Dismissing the Scanning dialog cancels the scan (+ the always-safe archive cancel),
+        // closes, and clears the pending confirm/password — the Esc-guard is armed too.
+        let mut core = test_core();
+        core.pending_confirm_delete = Some(3);
+        core.password_archive = Some(std::path::PathBuf::from("/tmp/a.zip"));
+        core.handle(CoreEvent::DialogResolved(
+            contract::DialogResult::Dismissed(Some(contract::DialogKind::Scanning)),
+        ));
+        assert!(core
+            .effects
+            .iter()
+            .any(|e| matches!(e, contract::CoreEffect::CancelScan)));
+        assert!(core
+            .effects
+            .iter()
+            .any(|e| matches!(e, contract::CoreEffect::CancelArchiveLoad)));
+        assert!(core
+            .effects
+            .iter()
+            .any(|e| matches!(e, contract::CoreEffect::CloseDialog)));
+        assert_eq!(core.pending_confirm_delete, None);
+        assert_eq!(core.password_archive, None);
+        assert!(core.esc_guard_until.is_some());
+    }
+
+    #[test]
+    fn dialog_dismiss_non_scanning_does_not_cancel_scan() {
+        // Closing a *different* dialog must not kill a scan running quietly in the background.
+        let mut core = test_core();
+        core.handle(CoreEvent::DialogResolved(
+            contract::DialogResult::Dismissed(Some(contract::DialogKind::About)),
+        ));
+        assert!(!core
+            .effects
+            .iter()
+            .any(|e| matches!(e, contract::CoreEffect::CancelScan)));
+        assert!(core
+            .effects
+            .iter()
+            .any(|e| matches!(e, contract::CoreEffect::CloseDialog)));
+    }
+
+    #[test]
+    fn confirm_answered_no_takes_pending_and_closes_without_delete() {
+        // A "No"/cancel on the delete-confirm clears the pending item and closes — no delete.
+        let mut core = test_core();
+        core.pending_confirm_delete = Some(7);
+        core.handle(CoreEvent::DialogResolved(
+            contract::DialogResult::ConfirmAnswered(false),
+        ));
+        assert_eq!(core.pending_confirm_delete, None);
+        assert!(core
+            .effects
+            .iter()
+            .any(|e| matches!(e, contract::CoreEffect::CloseDialog)));
     }
 
     #[test]

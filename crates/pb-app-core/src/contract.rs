@@ -175,6 +175,35 @@ pub enum ClipboardPayload {
     Text(String),
 }
 
+/// What the user did in a chrome dialog — the shell-neutral result the host hands the core
+/// (via [`CoreEvent::DialogResolved`]) after it drives the dialog UI and extracts any payload
+/// (the edited settings/keymap, a confirm answer). The core runs the reaction (apply settings,
+/// confirm a delete, cancel an in-flight op) and emits the housekeeping effects (close the
+/// dialog, cancel the worker). NS0 5.6 — the *results* half of the dialog seam, now core-owned.
+/// (The password-submit case still spawns the archive worker, so it stays a shell path for now.)
+#[derive(Clone, Debug)]
+pub enum DialogResult {
+    /// Esc / close button dismissed a dialog of this kind (cancels the matching in-flight op).
+    Dismissed(Option<DialogKind>),
+    /// The password prompt's Cancel — abandon the pending archive.
+    PasswordCancelled,
+    /// Settings saved, carrying the (optionally) edited settings + keymap.
+    SettingsSaved {
+        settings: Option<crate::settings::Settings>,
+        keymap: Option<Keymap>,
+    },
+    /// Settings dialog's Cancel (its Esc goes through [`DialogResult::Dismissed`]).
+    SettingsCancelled,
+    /// The archive "Opening…" dialog's Cancel.
+    LoadingCancelled,
+    /// The folder "Scanning…" dialog's Cancel.
+    ScanningCancelled,
+    /// A Confirm dialog answered (`true` = the destructive action was confirmed).
+    ConfirmAnswered(bool),
+    /// A Message (or any other) dialog's OK / close.
+    Closed,
+}
+
 /// An intent-level event delivered *to* the core by the shell. The winit shell would
 /// translate `WindowEvent`s into these; the AppKit shell would translate `NSEvent`s /
 /// gesture recognizers — the core handles both identically.
@@ -216,6 +245,9 @@ pub enum CoreEvent {
     MenuAction(Action),
     /// The shortcut editor committed a new keymap (Keymap already lives in the core).
     KeymapSubmitted(Keymap),
+    /// A chrome dialog resolved (Save/Cancel/OK/Esc) — the host drove the UI + extracted any
+    /// payload; the core runs the reaction + emits the close/cancel effects. NS0 5.6.
+    DialogResolved(DialogResult),
     /// A dialog was cancelled / dismissed.
     CancelDialog,
     // NS-later (payload types still in the shell or other crates):
@@ -257,6 +289,12 @@ pub enum CoreEffect {
     ShowDialog(DialogKind),
     /// Close the open dialog.
     CloseDialog,
+    /// Cancel the in-flight directory scan (request the worker stop + drop its handle). Emitted
+    /// when the Scanning dialog is dismissed / cancelled. No-op if no scan is running. NS0 5.6.
+    CancelScan,
+    /// Cancel the in-flight archive open (request the worker stop; the poll frees it). Emitted
+    /// when a dialog dismiss / the Loading-cancel abandons an open. No-op if none. NS0 5.6.
+    CancelArchiveLoad,
     /// Sync the native menu's check/enabled marks.
     SetMenuState(MenuState),
     /// Surface a user-facing error (message dialog / toast).

@@ -263,7 +263,6 @@ struct App {
     pending_launch: Option<open::OpenPlan>,
     /// The archive currently awaiting a password: set when the password prompt opens,
     /// re-opened with the entered password on submit, cleared on success / cancel.
-    password_archive: Option<PathBuf>,
 
     // --- Live Photo audio (the animation playback *state* moved to AppCore in NS0 5.5; this
     // ObjC `AVAudioPlayer` handle stays shell-owned, driven from `self.core.playback`) ---
@@ -307,13 +306,14 @@ enum DialogRequest {
     },
 }
 
-/// What the user did in the dialog window — the result mirror of [`DialogRequest`]. The
-/// shell ([`App::dialog_event`]) drives egui, extracts any egui-side payload (a password,
-/// the edited settings/keymap), and hands the core one of these; [`App::handle_dialog_outcome`]
-/// runs the reaction. (NS0, ADR-021 step 4d: the *results* half of the dialog seam. It's not
-/// yet a clean shell/core split — `handle_dialog_outcome` still closes the window and the
-/// archive path reaches into the `DialogWindow` — because the archive/scan flow inverts with
-/// step 5; at that point these become `CoreEvent`s and the window ops become effects.)
+/// What the user did in the dialog window — the shell's raw extraction from egui. The shell
+/// ([`App::dialog_event`]) drives egui + pulls any payload (a password, the edited
+/// settings/keymap), then [`App::route_dialog_outcome`] dispatches it (NS0 5.6): every case but
+/// **PasswordSubmitted** maps to a [`contract::DialogResult`] and is handed to the core as a
+/// [`CoreEvent::DialogResolved`] — the core runs the reaction and emits the `CloseDialog` /
+/// `CancelScan` / `CancelArchiveLoad` effects. PasswordSubmitted still spawns the archive worker,
+/// so it stays shell-side. (The Loading/Scanning progress *dialogs* themselves — `become_loading`,
+/// `set_scan` — remain shell until the begin_archive_open/begin_dir_scan worker flow inverts.)
 enum DialogOutcome {
     /// Esc / close button dismissed a dialog of this kind (cancels the matching in-flight op).
     Dismissed(Option<dialog::DialogKind>),
@@ -435,6 +435,7 @@ impl App {
                 launching: false,
                 dialog_open: false,
                 archive_loading: false,
+                password_archive: None,
                 pending_delete: None,
                 pending_confirm_delete: None,
                 info: InfoMode::Off,
@@ -492,7 +493,6 @@ impl App {
             dir_scan: None,
             scan_gen: 0,
             pending_launch: None,
-            password_archive: None,
             live_audio: None,
             pending_dialog: None,
             requested_wake: None,
@@ -501,7 +501,7 @@ impl App {
 
     /// Confirm, then permanently delete the displayed photo (`Shift+Del`). Irreversible, so it
     /// opens the themed confirm dialog first (dark-aware, cross-platform); the delete runs on Yes
-    /// via `handle_dialog_outcome` → `self.core.do_delete(.., true)`. Only real files (not archive
+    /// via `DialogResolved`(ConfirmAnswered) → the core `do_delete(.., true)`. Only real files (not archive
     /// entries) can be deleted. The recoverable `Del` path is a pure core arm
     /// ([`AppCore::delete_to_trash`]).
     fn confirm_delete_permanent(&mut self) {
@@ -682,7 +682,7 @@ impl App {
     ) {
         match result {
             Ok(r) if !r.source.is_empty() => {
-                self.password_archive = None;
+                self.core.password_archive = None;
                 self.close_dialog();
                 self.core
                     .rebuild_playlist(r.source, r.root, r.scan_root, r.recursive, r.start);
@@ -694,7 +694,7 @@ impl App {
             // User cancelled: drop quietly, keeping whatever was on screen — no error
             // dialog. The loading dialog is already closed (or closes here as a backstop).
             Err(archive::ArchiveOpenError::Cancelled) => {
-                self.password_archive = None;
+                self.core.password_archive = None;
                 self.close_dialog();
             }
             Err(e) => self.fail_archive_open(&e),
@@ -924,7 +924,7 @@ impl App {
     /// A terminal archive-open failure (not a password retry): forget the pending
     /// archive and replace any open dialog with the error notice.
     fn fail_archive_open(&mut self, e: &archive::ArchiveOpenError) {
-        self.password_archive = None;
+        self.core.password_archive = None;
         self.report_archive_error(e);
     }
 
@@ -938,7 +938,7 @@ impl App {
     /// Password dialog opens; on a retry (`wrong`) the existing dialog gets an inline
     /// "Incorrect password" error and a cleared field rather than a jarring re-open.
     fn prompt_archive_password(&mut self, path: PathBuf, wrong: bool) {
-        self.password_archive = Some(path.clone());
+        self.core.password_archive = Some(path.clone());
         let is_password_dialog =
             self.dialog.as_ref().map(|d| d.kind()) == Some(dialog::DialogKind::Password);
         if wrong && is_password_dialog {
@@ -1509,7 +1509,7 @@ impl App {
             );
         if close {
             let kind = self.dialog.as_ref().map(|d| d.kind());
-            self.handle_dialog_outcome(DialogOutcome::Dismissed(kind));
+            self.route_dialog_outcome(DialogOutcome::Dismissed(kind));
             return;
         }
         // Render the dialog and pick up a button answer (if one was clicked).
@@ -1534,9 +1534,9 @@ impl App {
             }
         }
         if let Some(confirmed) = answer {
-            // Turn the button answer into a shell-neutral outcome, extracting any egui-side
-            // payload here (password / edited settings + keymap); the core reacts in
-            // `handle_dialog_outcome`.
+            // Turn the button answer into an outcome, extracting any egui-side payload here
+            // (password / edited settings + keymap); `route_dialog_outcome` then hands it to the
+            // core (or, for a password submit, drives the archive worker shell-side).
             let outcome = match kind {
                 Some(dialog::DialogKind::Password) if confirmed => {
                     DialogOutcome::PasswordSubmitted(
@@ -1558,45 +1558,20 @@ impl App {
                 Some(dialog::DialogKind::Confirm) => DialogOutcome::ConfirmAnswered(confirmed),
                 _ => DialogOutcome::Closed,
             };
-            self.handle_dialog_outcome(outcome);
+            self.route_dialog_outcome(outcome);
         }
     }
 
-    /// React to a [`DialogOutcome`] the shell extracted from the dialog window — the core
-    /// half of the dialog-result seam (NS0 step 4d). Mirrors [`App::open_pending_dialog`]
-    /// (the open side). Behavior is exactly the former inline `dialog_event` dispatch; only
-    /// the egui/winit event handling + payload extraction stays shell-side. (NS-later: the
-    /// `self.dialog = None` closes and the archive path's `become_loading` reach-in become
-    /// effects once the archive/scan flow inverts with step 5.)
-    fn handle_dialog_outcome(&mut self, outcome: DialogOutcome) {
-        match outcome {
-            DialogOutcome::Dismissed(kind) => {
-                // The Esc that dismisses a (focused) dialog also leaks to the main window as a
-                // trailing/synthetic press once focus snaps back — by then `dialog` is None, so
-                // the main-window guard can't catch it. Briefly guard quit-on-Esc so closing a
-                // dialog never also exits the app (the same leak `open_picker` handles).
-                self.core.esc_guard_until = Some(Instant::now() + Duration::from_millis(300));
-                // Esc / close on the loading view cancels the in-flight open (the worker stops
-                // and frees its partial RAM); harmless for the other kinds.
-                self.cancel_archive_load();
-                // Esc / close on the scanning view cancels the in-flight folder walk and discards
-                // its partial result. Guarded to the Scanning kind so closing a *different* dialog
-                // doesn't kill a fast scan still running quietly in the background (one dispatched
-                // <SCAN_DIALOG_DELAY ago, before any dialog).
-                if kind == Some(dialog::DialogKind::Scanning) {
-                    self.cancel_dir_scan();
-                    self.dir_scan = None;
-                }
-                self.dialog = None;
-                self.core.pending_confirm_delete = None; // Esc / close = cancel the confirm
-                self.password_archive = None; // Esc / close = abandon the password prompt
-            }
-            // The password dialog stays open until the open succeeds or is cancelled (a wrong
-            // password re-prompts in place), so it isn't closed here like the others.
-            DialogOutcome::PasswordSubmitted(pw) => match (pw, self.password_archive.clone()) {
+    /// Route a [`DialogOutcome`] the shell extracted from the dialog window (NS0 5.6). The
+    /// **PasswordSubmitted** case spawns the archive worker (+ pokes the live dialog), so it's
+    /// still handled shell-side here; every other outcome is a small core reaction, handed to the
+    /// core via [`CoreEvent::DialogResolved`], which runs it + emits the close / cancel effects.
+    fn route_dialog_outcome(&mut self, outcome: DialogOutcome) {
+        // PasswordSubmitted: show "Checking…", then re-open the pending archive with the entry
+        // (a 7z re-opens off-thread; zip is synchronous). Stays shell — it drives a worker.
+        if let DialogOutcome::PasswordSubmitted(pw) = outcome {
+            match (pw, self.core.password_archive.clone()) {
                 (Some(pw), Some(path)) => {
-                    // Show the "Checking…" state, then validate (zip is synchronous; a 7z
-                    // re-opens off-thread).
                     if let Some(d) = self.dialog.as_mut() {
                         d.set_checking(true);
                         d.request_redraw();
@@ -1605,54 +1580,28 @@ impl App {
                 }
                 // No archive pending (shouldn't happen): just close.
                 _ => self.dialog = None,
-            },
-            DialogOutcome::PasswordCancelled => {
-                // Cancel: close and forget the pending archive.
-                self.dialog = None;
-                self.password_archive = None;
             }
-            // Settings: Save applies + persists the edited model; Cancel/Esc discard.
-            DialogOutcome::SettingsSaved { settings, keymap } => {
-                self.dialog = None;
-                if let Some(new) = settings {
-                    self.core.apply_settings(new);
-                }
-                if let Some(km) = keymap {
-                    self.core.apply_keymap(km);
-                }
-            }
-            DialogOutcome::SettingsCancelled => self.dialog = None,
-            // Loading: the only button is Cancel (which already requested cancellation); make
-            // sure the in-flight open stops, then close. The worker returns Cancelled and
-            // `poll_archive_load` tidies up.
-            DialogOutcome::LoadingCancelled => {
-                self.cancel_archive_load();
-                self.dialog = None;
-                self.password_archive = None;
-            }
-            // Scanning: the only button is Cancel (which already requested cancellation); stop
-            // the walk, discard its partial result, and close — a cancelled scan must keep the
-            // current view, not load a half-walked tree.
-            DialogOutcome::ScanningCancelled => {
-                self.cancel_dir_scan();
-                self.dir_scan = None;
-                self.dialog = None;
-            }
-            // Confirm drives a delete.
-            DialogOutcome::ConfirmAnswered(confirmed) => {
-                self.dialog = None;
-                let item = self.core.pending_confirm_delete.take();
-                if confirmed {
-                    if let Some(item) = item {
-                        if let Some(path) = self.core.source.path(item).map(Path::to_path_buf) {
-                            self.core.do_delete(item, &path, true);
-                        }
-                    }
-                }
-            }
-            // Message / others just close.
-            DialogOutcome::Closed => self.dialog = None,
+            return;
         }
+        // The rest are core reactions — map to the shell-neutral result + hand to the core; the
+        // drain right after `dialog_event` (window_event) carries out the close / cancel effects.
+        let result = match outcome {
+            DialogOutcome::Dismissed(kind) => {
+                contract::DialogResult::Dismissed(kind.map(core_dialog_kind))
+            }
+            DialogOutcome::PasswordCancelled => contract::DialogResult::PasswordCancelled,
+            DialogOutcome::SettingsSaved { settings, keymap } => {
+                contract::DialogResult::SettingsSaved { settings, keymap }
+            }
+            DialogOutcome::SettingsCancelled => contract::DialogResult::SettingsCancelled,
+            DialogOutcome::LoadingCancelled => contract::DialogResult::LoadingCancelled,
+            DialogOutcome::ScanningCancelled => contract::DialogResult::ScanningCancelled,
+            DialogOutcome::ConfirmAnswered(c) => contract::DialogResult::ConfirmAnswered(c),
+            DialogOutcome::Closed => contract::DialogResult::Closed,
+            DialogOutcome::PasswordSubmitted(_) => unreachable!("handled above"),
+        };
+        self.core
+            .handle(contract::CoreEvent::DialogResolved(result));
     }
 
     /// The ambient **scan status card**: while a folder scan is streaming in (and the first
@@ -1790,6 +1739,15 @@ impl App {
                     contract::CoreEffect::ShowDialog(kind) => {
                         self.open_dialog(shell_dialog_kind(kind));
                     }
+                    // Close the open dialog window (NS0 5.6 — the ubiquitous dialog-outcome close).
+                    contract::CoreEffect::CloseDialog => self.dialog = None,
+                    // Cancel the in-flight directory scan + drop its worker handle.
+                    contract::CoreEffect::CancelScan => {
+                        self.cancel_dir_scan();
+                        self.dir_scan = None;
+                    }
+                    // Request the in-flight archive open stop (the poll frees it; no-op if none).
+                    contract::CoreEffect::CancelArchiveLoad => self.cancel_archive_load(),
                     contract::CoreEffect::WriteClipboard(payload) => {
                         self.write_clipboard(payload);
                     }
@@ -2549,6 +2507,21 @@ fn shell_dialog_kind(kind: contract::DialogKind) -> dialog::DialogKind {
         contract::DialogKind::Password => dialog::DialogKind::Password,
         contract::DialogKind::Loading => dialog::DialogKind::Loading,
         contract::DialogKind::Scanning => dialog::DialogKind::Scanning,
+    }
+}
+
+/// The reverse of [`shell_dialog_kind`] — the shell's [`dialog::DialogKind`] → the shell-neutral
+/// [`contract::DialogKind`] the core reasons about (NS0 5.6: carried on `DialogResult::Dismissed`
+/// so the core can tell a Scanning dismiss from the others).
+fn core_dialog_kind(kind: dialog::DialogKind) -> contract::DialogKind {
+    match kind {
+        dialog::DialogKind::About => contract::DialogKind::About,
+        dialog::DialogKind::Settings => contract::DialogKind::Settings,
+        dialog::DialogKind::Confirm => contract::DialogKind::Confirm,
+        dialog::DialogKind::Message => contract::DialogKind::Message,
+        dialog::DialogKind::Password => contract::DialogKind::Password,
+        dialog::DialogKind::Loading => contract::DialogKind::Loading,
+        dialog::DialogKind::Scanning => contract::DialogKind::Scanning,
     }
 }
 

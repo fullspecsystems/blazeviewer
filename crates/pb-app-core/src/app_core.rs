@@ -212,6 +212,10 @@ pub struct AppCore {
     /// The item awaiting a permanent-delete confirmation: set when the (themed egui) confirm
     /// dialog opens, consumed when it answers Yes. The dialog itself stays shell-owned.
     pub pending_confirm_delete: Option<usize>,
+    /// The archive path awaiting a password (pure data): set when the password prompt opens,
+    /// carried so a submit re-opens that archive and a cancel/dismiss forgets it. The prompt +
+    /// the worker spawn stay shell-owned; this is just the pending target. NS0 5.6.
+    pub password_archive: Option<std::path::PathBuf>,
 
     // --- HUD / overlay state (NS0 5.3e; the Hud rasterizer stays shell-side for 5.4) ---
     /// Which info overlay is active (`i` basic / `Shift+I` full EXIF / `?` help / off).
