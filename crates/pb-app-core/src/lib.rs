@@ -23,6 +23,7 @@ pub mod action;
 pub mod app_core;
 pub mod config;
 pub mod contract;
+pub mod decode_pool;
 pub mod keymap;
 pub mod meta;
 pub mod pb_key;

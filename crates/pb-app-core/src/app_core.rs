@@ -12,12 +12,16 @@
 //! Nav/prefetch/decode/residency, the renderer (`Box<dyn Renderer>`), and the
 //! `handle(CoreEvent)` dispatch follow (see the step-5 increment order in the brief).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
+use pb_core::ResidentRing;
 use pb_decode::FitBox;
 use pb_render::{Rotation, ScaleMode, ViewTransform};
 
+use crate::decode_pool::{DecodePool, Outcome};
 use crate::{Action, Modifiers, PbKey, PhotoMeta, Slideshow};
 
 /// The platform-neutral orchestration state the shell drives. Grows as step 5 relocates
@@ -77,6 +81,26 @@ pub struct AppCore {
     /// Per-item on-demand full-EXIF read (`Shift+I`): `(mtime, key/value pairs)`, so a
     /// re-open of the same unchanged file is instant. RAM-only (privacy #2).
     pub exif_cache: HashMap<usize, (u64, Vec<(String, String)>)>,
+
+    // --- Prefetch / decode / residency (NS0 5.3) ---
+    /// Off-thread priority decode pool — decode + I/O never block the event loop.
+    pub pool: DecodePool,
+    /// Completed decodes, drained + uploaded during the tick.
+    pub results: Receiver<Outcome>,
+    /// Pure item↔slot residency mirror for the renderer's texture ring.
+    pub ring: ResidentRing,
+    /// Prefetch window: how many items to decode ahead of / behind the cursor.
+    pub ahead: usize,
+    pub behind: usize,
+    /// Items whose decode failed (skipped / marked), so we don't retry them in a loop.
+    pub failed: HashSet<usize>,
+    /// Paths deleted this session — hidden from the playlist without a rescan.
+    pub deleted: HashSet<PathBuf>,
+    /// Items currently showing only their preview (a full-decode upgrade can replace it).
+    pub preview_resident: HashSet<usize>,
+    /// Completed decodes awaiting GPU upload — drained on the tick, never on the keypress
+    /// frame (a keypress stays a rebind).
+    pub pending_uploads: Vec<Outcome>,
 }
 
 impl AppCore {
@@ -88,6 +112,8 @@ impl AppCore {
         initial_delay: Duration,
         slideshow_interval: Duration,
         default_scale: ScaleMode,
+        pool: DecodePool,
+        results: Receiver<Outcome>,
     ) -> Self {
         Self {
             held: HashMap::new(),
@@ -118,6 +144,15 @@ impl AppCore {
             meta_cache: HashMap::new(),
             current: None,
             exif_cache: HashMap::new(),
+            pool,
+            results,
+            ring: ResidentRing::new(0),
+            ahead: 8,
+            behind: 2,
+            failed: HashSet::new(),
+            deleted: HashSet::new(),
+            preview_resident: HashSet::new(),
+            pending_uploads: Vec::new(),
         }
     }
 }

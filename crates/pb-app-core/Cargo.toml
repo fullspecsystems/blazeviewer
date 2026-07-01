@@ -13,8 +13,12 @@ description = "Platform-neutral orchestration model for PhotoBlaze: actions, the
 # the lockfile is unchanged by the split.
 toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
 # Engine crates the orchestration state (`AppCore`) references as step 5 relocates it
-# off the winit shell: the view transform + rotation (pb-render) and the decode-to-fit
-# box (pb-decode). Still no winit/egui/Swift here; pb-render pulls wgpu transitively,
-# which is expected — the `AppCore` the macOS Swift bridge links owns the renderer.
+# off the winit shell: the view transform + rotation (pb-render), the decode-to-fit box
+# (pb-decode), the pure nav / residency mirror (pb-core), and the PhotoSource seam +
+# decode pool (pb-source). Still no winit/egui/Swift here; pb-render pulls wgpu
+# transitively, which is expected — the `AppCore` the macOS Swift bridge links owns the
+# renderer + decode engine.
+pb-core = { workspace = true }
 pb-render = { workspace = true }
 pb-decode = { workspace = true }
+pb-source = { workspace = true }

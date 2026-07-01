@@ -32,7 +32,6 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -59,7 +58,6 @@ mod archive;
 mod clipboard;
 #[cfg(windows)]
 mod darkmode;
-mod decode_pool;
 mod delete;
 mod dialog;
 #[cfg(target_os = "macos")]
@@ -88,12 +86,12 @@ use pb_app_core::{action, contract, keymap, pb_key, slideshow, timing, AppCore, 
 
 use action::Action;
 use animation::Playback;
-use decode_pool::{recommended_workers, DecodeFn, DecodePool, Outcome};
 use hud::{Hud, Row};
 use keymap::Keymap;
 use live_audio::LiveAudio;
 use menu::MenuAction;
 use metrics::StageTimes;
+use pb_app_core::decode_pool::{recommended_workers, DecodeFn, DecodePool, Outcome};
 use pb_key::PbKey;
 
 /// VRAM budget for the resident texture ring (~1.5 GB → ~16–32 fit-size slots on
@@ -572,12 +570,6 @@ struct App {
     metrics: StageTimes,
 
     // --- Phase 3 prefetch engine ---
-    /// Off-thread priority decode pool (decode + I/O never block the event loop).
-    pool: DecodePool,
-    /// Completed decodes, drained + uploaded during `about_to_wait`.
-    results: Receiver<Outcome>,
-    /// Pure item↔slot residency mirror for the renderer's texture ring.
-    ring: ResidentRing,
     /// Geometry generation; bumped on resize / fit toggle. Stale-epoch decodes are
     /// discarded so an old-size result can't land on screen.
     epoch: u64,
@@ -596,22 +588,6 @@ struct App {
     /// on a photo — never on the fly-through path. RAM-only, index-keyed, cleared on a
     /// playlist rebuild. Always `None` off macOS (Windows Live Photos = task #39).
     live_motion_cache: HashMap<usize, Option<PathBuf>>,
-    /// Prefetch window: items ahead / behind the cursor.
-    ahead: usize,
-    behind: usize,
-    /// Items whose decode failed (corrupt/unreadable): skipped, never retried, so
-    /// a bad JPEG can't stall hold-to-fly or spin the event loop forever.
-    failed: HashSet<usize>,
-    /// Paths the user deleted **while a folder scan was still streaming in** — tombstones,
-    /// so a later batch (built from the worker's cumulative list, which still contains the
-    /// deleted path) can't reintroduce it. Filtered out of each incoming snapshot; RAM-only,
-    /// reset at the start of every scan. Empty in the common case (no delete mid-scan), so
-    /// it costs nothing then.
-    deleted: HashSet<PathBuf>,
-    /// Decoded images that arrived faster than the per-tick upload budget; carried
-    /// (in priority order) to the next tick so no decode work is wasted. They hold
-    /// their pool byte-budget reservation, which is the intended backpressure.
-    pending_uploads: Vec<Outcome>,
     /// Whether the current scan-based playlist is recursive (`Ctrl+R` toggles).
     recursive: bool,
     /// The directory the current playlist was scanned from — enables the `Ctrl+R`
@@ -668,10 +644,6 @@ struct App {
     /// The interactive play hint's state while it's the active toast (`None` otherwise). Drives
     /// its hover-to-hold / click-to-play behavior. See [`PlayHint`].
     play_hint: Option<PlayHint>,
-    /// Items whose resident ring slot holds a fast *preview* (e.g. a HEIC
-    /// thumbnail) rather than the full decode. While idle these are upgraded
-    /// ("sharpened") to full in priority order. Pruned to resident in `request_prefetch`.
-    preview_resident: HashSet<usize>,
     /// Items whose full-resolution decode turned out to be no better than the
     /// preview (e.g. a RAW whose only embedded image *is* its preview) — so we
     /// don't keep re-requesting their upgrade every idle tick.
@@ -947,6 +919,8 @@ impl App {
                 Duration::from_secs_f64(settings.slideshow_interval_secs),
                 // Start in the user's default scale mode (8/9/0 still switch it live).
                 scale_mode_of(settings.scale_mode),
+                pool,
+                results,
             ),
             root,
             hud: Hud::load(),
@@ -955,19 +929,11 @@ impl App {
             overlay_item: None,
             scale_factor: 1.0,
             metrics,
-            pool,
-            results,
-            ring: ResidentRing::new(0),
             epoch: 1,
             displayed_item: None,
             target_item: None,
             last_nav: Nav::Forward,
             targets: Vec::new(),
-            ahead: 8,
-            behind: 2,
-            failed: HashSet::new(),
-            deleted: HashSet::new(),
-            pending_uploads: Vec::new(),
             recursive,
             scan_root,
             pending_drops: Vec::new(),
@@ -987,7 +953,6 @@ impl App {
             open_panel: None,
             open_hover: None,
             play_hint: None,
-            preview_resident: HashSet::new(),
             upgrade_done: HashSet::new(),
             last_upgrade_set: Vec::new(),
             full_requested_at: HashMap::new(),
@@ -1081,21 +1046,27 @@ impl App {
         // sees (thrash). Use the sequential-only, no-wrap variant until the scan completes,
         // then normal prefetch (with its random hedges) resumes (`poll_dir_scan` Done arm).
         self.targets = if self.dir_scan.is_some() {
-            prefetch_targets_scanning(&self.playlist, self.ahead, self.behind)
+            prefetch_targets_scanning(&self.playlist, self.core.ahead, self.core.behind)
         } else {
-            prefetch_targets(&self.playlist, self.ahead, self.behind)
+            prefetch_targets(&self.playlist, self.core.ahead, self.core.behind)
         };
         let fit = self.decode_fit();
         // Drop tier bookkeeping for items no longer resident (evicted).
-        self.preview_resident
-            .retain(|i| self.ring.slot_for(*i).is_some());
+        self.core
+            .preview_resident
+            .retain(|i| self.core.ring.slot_for(*i).is_some());
         self.upgrade_done
-            .retain(|i| self.ring.slot_for(*i).is_some());
+            .retain(|i| self.core.ring.slot_for(*i).is_some());
         self.full_requested_at
-            .retain(|i, _| self.ring.slot_for(*i).is_some());
+            .retain(|i, _| self.core.ring.slot_for(*i).is_some());
         // Items decoded but not yet uploaded must not be re-requested (the pool no
         // longer tracks them, so it would decode them again).
-        let pending: HashSet<usize> = self.pending_uploads.iter().map(|o| o.key.item).collect();
+        let pending: HashSet<usize> = self
+            .core
+            .pending_uploads
+            .iter()
+            .map(|o| o.key.item)
+            .collect();
         let sharpen = self.sharpen_now();
         let ring: HashSet<usize> = self.prefetch_fulls().into_iter().collect();
         // Stamp when each full was first requested, for the `sharpen` latency metric.
@@ -1118,11 +1089,11 @@ impl App {
         let (mut head, mut previews, mut fulls): (Vec<Job>, Vec<Job>, Vec<Job>) =
             (Vec::new(), Vec::new(), Vec::new());
         for &t in &self.targets {
-            if self.failed.contains(&t) || pending.contains(&t) {
+            if self.core.failed.contains(&t) || pending.contains(&t) {
                 continue;
             }
-            let resident = self.ring.slot_for(t).is_some();
-            let is_prev = resident && self.preview_resident.contains(&t);
+            let resident = self.core.ring.slot_for(t).is_some();
+            let is_prev = resident && self.core.preview_resident.contains(&t);
             if resident && !is_prev {
                 continue; // already full
             }
@@ -1138,7 +1109,7 @@ impl App {
         let mut jobs = head;
         jobs.append(&mut previews);
         jobs.append(&mut fulls);
-        self.pool.set_targets(self.epoch, &self.source, &jobs);
+        self.core.pool.set_targets(self.epoch, &self.source, &jobs);
     }
 
     /// The on-screen photo to sharpen FIRST (top decode priority): the displayed one,
@@ -1150,8 +1121,8 @@ impl App {
             return None;
         }
         let d = self.displayed_item?;
-        (self.ring.slot_for(d).is_some()
-            && self.preview_resident.contains(&d)
+        (self.core.ring.slot_for(d).is_some()
+            && self.core.preview_resident.contains(&d)
             && !self.upgrade_done.contains(&d))
         .then_some(d)
     }
@@ -1173,13 +1144,13 @@ impl App {
             &self.targets,
             full_bytes,
             RING_BUDGET_BYTES,
-            self.ring.capacity().min(MAX_FULL_RING),
+            self.core.ring.capacity().min(MAX_FULL_RING),
         )
         .into_iter()
         .filter(|&i| {
             Some(i) != sharpen
-                && self.ring.slot_for(i).is_some()
-                && self.preview_resident.contains(&i)
+                && self.core.ring.slot_for(i).is_some()
+                && self.core.preview_resident.contains(&i)
                 && !self.upgrade_done.contains(&i)
                 && !self.is_raw_item(i)
         })
@@ -1368,8 +1339,8 @@ impl App {
                 self.core.rotations.remove(&item);
                 self.core.meta_cache.remove(&item);
                 self.core.exif_cache.remove(&item); // the file's EXIF (Orientation) just changed
-                self.failed.remove(&item);
-                self.preview_resident.remove(&item);
+                self.core.failed.remove(&item);
+                self.core.preview_resident.remove(&item);
                 self.upgrade_done.remove(&item);
                 self.invalidate_geometry();
                 self.load_current_sync();
@@ -1407,8 +1378,8 @@ impl App {
                         self.core.rotations.remove(&item);
                         self.core.meta_cache.remove(&item);
                         self.core.exif_cache.remove(&item); // EXIF Orientation reverted on disk
-                        self.failed.remove(&item);
-                        self.preview_resident.remove(&item);
+                        self.core.failed.remove(&item);
+                        self.core.preview_resident.remove(&item);
                         self.upgrade_done.remove(&item);
                         self.invalidate_geometry();
                         self.load_current_sync();
@@ -1499,7 +1470,7 @@ impl App {
         // cumulative list still has it) can't bring it back. (No-op once the scan finishes.)
         if self.dir_scan.is_some() {
             if let Some(p) = self.source.path(removed).map(Path::to_path_buf) {
-                self.deleted.insert(p);
+                self.core.deleted.insert(p);
             }
         }
         match delete::cursor_after_removal(len, removed) {
@@ -1529,8 +1500,8 @@ impl App {
         self.core.meta_cache.clear();
         self.core.exif_cache.clear();
         self.live_motion_cache.clear();
-        self.failed.clear();
-        self.preview_resident.clear();
+        self.core.failed.clear();
+        self.core.preview_resident.clear();
         self.upgrade_done.clear();
         self.last_upgrade_set.clear();
         self.undo_stack.clear();
@@ -1566,7 +1537,7 @@ impl App {
             r.present_slot(slot);
         }
         self.effects.push(contract::CoreEffect::SetTitle(title));
-        self.ring.set_displayed(slot);
+        self.core.ring.set_displayed(slot);
         // A fresh landing on a *different* photo re-arms the play hint. `anim_hint_shown_for`
         // is keyed to the item and only updated when landing on an animated one — so without
         // this, visiting a non-animated photo in between would leave it latched, and returning
@@ -1621,13 +1592,13 @@ impl App {
         if self.displayed_item == Some(item) {
             return true;
         }
-        if self.failed.contains(&item) {
+        if self.core.failed.contains(&item) {
             // Known-bad file: count it as shown (the previous frame stays up) so
             // navigation never stalls on a corrupt prefetched JPEG.
             self.present_failed(item);
             return true;
         }
-        if let Some(slot) = self.ring.slot_for(item) {
+        if let Some(slot) = self.core.ring.slot_for(item) {
             self.present_item(item, slot);
             true
         } else {
@@ -1644,8 +1615,8 @@ impl App {
     fn drain_results(&mut self) {
         // Gather everything ready plus last tick's leftovers, dropping stale /
         // duplicate / errored results so only live decoded images remain.
-        let mut ready: Vec<Outcome> = std::mem::take(&mut self.pending_uploads);
-        while let Ok(o) = self.results.try_recv() {
+        let mut ready: Vec<Outcome> = std::mem::take(&mut self.core.pending_uploads);
+        while let Ok(o) = self.core.results.try_recv() {
             ready.push(o);
         }
         let mut target_failed: Option<usize> = None;
@@ -1654,7 +1625,7 @@ impl App {
                 return false; // stale geometry
             }
             let item = o.key.item;
-            let resident = self.ring.slot_for(item).is_some();
+            let resident = self.core.ring.slot_for(item).is_some();
             if let Err(ref e) = o.result {
                 if resident {
                     // A full-upgrade decode failed, but the resident preview is fine
@@ -1663,7 +1634,7 @@ impl App {
                     return false;
                 }
                 eprintln!("decode failed for item {item}: {e}");
-                self.failed.insert(item);
+                self.core.failed.insert(item);
                 // Unstick the gated loop: a corrupt target counts as "shown".
                 // (Deferred out of the closure — `present_failed` needs &mut self.)
                 if self.target_item == Some(item) {
@@ -1678,7 +1649,7 @@ impl App {
                 // preview) is marked done here so the idle pass stops retrying —
                 // otherwise the upgrade loops forever, re-decoding every tick. Any
                 // other already-resident duplicate is dropped.
-                let is_prev = self.preview_resident.contains(&item);
+                let is_prev = self.core.preview_resident.contains(&item);
                 let img = o.result.as_ref().expect("Err handled above");
                 if is_prev && img.is_preview {
                     self.upgrade_done.insert(item);
@@ -1716,13 +1687,15 @@ impl App {
             // A full decode for an item already resident as a preview is its
             // in-place upgrade (the retain above kept only real fulls; preview-only
             // upgrade results were already marked `upgrade_done` and dropped).
-            let upgrade =
-                self.preview_resident.contains(&item) && self.ring.slot_for(item).is_some();
+            let upgrade = self.core.preview_resident.contains(&item)
+                && self.core.ring.slot_for(item).is_some();
             if uploads >= UPLOADS_PER_TICK {
                 // Carry still-wanted leftovers to the next tick (in priority order);
                 // drop now-obsolete ones so they don't pin pool byte-budget while
                 // the loop idles (work_pending wouldn't keep polling for them).
-                if self.targets.contains(&item) && (upgrade || self.ring.slot_for(item).is_none()) {
+                if self.targets.contains(&item)
+                    && (upgrade || self.core.ring.slot_for(item).is_none())
+                {
                     leftover.push(outcome);
                 }
                 continue;
@@ -1733,7 +1706,7 @@ impl App {
             }
             let item_bytes = img.pixels.len() as u64;
             if upgrade {
-                let slot = self.ring.slot_for(item).expect("resident as preview");
+                let slot = self.core.ring.slot_for(item).expect("resident as preview");
                 if let Some(a) = self.renderer.as_mut() {
                     let t0 = Instant::now();
                     a.upload_slot(
@@ -1747,8 +1720,8 @@ impl App {
                     );
                     self.metrics.record("upload", t0.elapsed());
                 }
-                self.ring.set_slot_bytes(item, item_bytes);
-                self.preview_resident.remove(&item);
+                self.core.ring.set_slot_bytes(item, item_bytes);
+                self.core.preview_resident.remove(&item);
                 // Real end-to-end sharpen latency for the ON-SCREEN photo (what the
                 // user actually waits on): full requested → full on screen. Ahead-ring
                 // fulls land late by design (low priority), so they'd skew this — only
@@ -1773,9 +1746,10 @@ impl App {
                 }
                 continue;
             }
-            if let Some(res) = self
-                .ring
-                .reserve_bytes(item, self.epoch, item_bytes, &self.targets)
+            if let Some(res) =
+                self.core
+                    .ring
+                    .reserve_bytes(item, self.epoch, item_bytes, &self.targets)
             {
                 if let Some(a) = self.renderer.as_mut() {
                     let t0 = Instant::now();
@@ -1790,11 +1764,11 @@ impl App {
                     );
                     self.metrics.record("upload", t0.elapsed());
                 }
-                self.ring.mark_resident(item, res.slot, self.epoch);
+                self.core.ring.mark_resident(item, res.slot, self.epoch);
                 if img.is_preview {
-                    self.preview_resident.insert(item);
+                    self.core.preview_resident.insert(item);
                 } else {
-                    self.preview_resident.remove(&item);
+                    self.core.preview_resident.remove(&item);
                 }
                 uploads += 1;
                 if self.target_item == Some(item) && self.displayed_item != Some(item) {
@@ -1803,7 +1777,7 @@ impl App {
             }
             // reserve == None (no longer wanted): drop the outcome, freeing budget.
         }
-        self.pending_uploads = leftover;
+        self.core.pending_uploads = leftover;
     }
 
     /// Synchronous decode + display of the current item — an instant frame on the
@@ -1853,7 +1827,7 @@ impl App {
             }
             Err(e) => {
                 eprintln!("decode failed: {}: {e}", self.source.name(idx));
-                self.failed.insert(idx);
+                self.core.failed.insert(idx);
                 // Keep the gate unstuck (count the bad file as "shown") and clear
                 // the stale frame's title/panel so they don't misreport it.
                 self.present_failed(idx);
@@ -1872,15 +1846,15 @@ impl App {
             max_height: 1,
         });
         let cap = ring_capacity(self.slot_bytes_estimate());
-        self.ring = ResidentRing::new_with_budget(cap, RING_BUDGET_BYTES);
+        self.core.ring = ResidentRing::new_with_budget(cap, RING_BUDGET_BYTES);
         if let Some(a) = self.renderer.as_mut() {
             a.reserve_ring(cap, fit.max_width, fit.max_height);
         }
         let (ahead, behind) = window_for_capacity(cap);
-        self.ahead = ahead;
-        self.behind = behind;
+        self.core.ahead = ahead;
+        self.core.behind = behind;
         // Drop decodes staged for the old geometry; they free their pool budget.
-        self.pending_uploads.clear();
+        self.core.pending_uploads.clear();
     }
 
     /// Apply a scaling mode (8 = fit, 9 = fill, 0 toggles original ↔ fill). Always
@@ -2105,7 +2079,7 @@ impl App {
         // Abandon any scan already running — its result would be stale, and it may be a
         // huge walk we don't want competing for I/O with the new one.
         self.cancel_dir_scan();
-        self.deleted.clear(); // fresh scan → fresh universe, no stale tombstones
+        self.core.deleted.clear(); // fresh scan → fresh universe, no stale tombstones
         self.scan_gen += 1;
         let generation = self.scan_gen;
         let progress = ScanProgress::new();
@@ -3016,8 +2990,8 @@ impl App {
         self.core.meta_cache.clear();
         self.core.exif_cache.clear();
         self.live_motion_cache.clear();
-        self.failed.clear();
-        self.preview_resident.clear();
+        self.core.failed.clear();
+        self.core.preview_resident.clear();
         self.upgrade_done.clear();
         self.last_upgrade_set.clear();
         // Undo entries reference the old source's indices/paths — drop them too.
@@ -3059,12 +3033,12 @@ impl App {
     /// still valid (the displayed photo's index doesn't shift). O(N) only when tombstones
     /// exist (rare).
     fn filter_deleted(&self, r: Resolved) -> Resolved {
-        if self.deleted.is_empty() {
+        if self.core.deleted.is_empty() {
             return r;
         }
         let paths: Vec<PathBuf> = (0..r.source.len())
             .filter_map(|i| r.source.path(i).map(Path::to_path_buf))
-            .filter(|p| !self.deleted.contains(p))
+            .filter(|p| !self.core.deleted.contains(p))
             .collect();
         let start = r.start.min(paths.len().saturating_sub(1));
         Resolved {
@@ -4578,14 +4552,14 @@ impl App {
     fn clear_session_state(&mut self) {
         // Abandon a still-running background scan so it stops walking on teardown.
         self.cancel_dir_scan();
-        self.ring = ResidentRing::new(0);
-        self.pending_uploads.clear();
+        self.core.ring = ResidentRing::new(0);
+        self.core.pending_uploads.clear();
         self.core.meta_cache.clear();
         self.core.exif_cache.clear();
         self.live_motion_cache.clear();
         self.core.rotations.clear();
-        self.failed.clear();
-        self.preview_resident.clear();
+        self.core.failed.clear();
+        self.core.preview_resident.clear();
         self.upgrade_done.clear();
         self.last_upgrade_set.clear();
         self.undo_stack.clear();
@@ -4841,7 +4815,7 @@ impl App {
             || self
                 .targets
                 .iter()
-                .any(|&t| self.ring.slot_for(t).is_none() && !self.failed.contains(&t))
+                .any(|&t| self.core.ring.slot_for(t).is_none() && !self.core.failed.contains(&t))
     }
 
     // --- Animation playback (task #37) -------------------------------------------------
@@ -5164,7 +5138,7 @@ impl App {
         let Some(item) = self.displayed_item else {
             return;
         };
-        if let Some(slot) = self.ring.slot_for(item) {
+        if let Some(slot) = self.core.ring.slot_for(item) {
             self.present_item(item, slot);
         } else {
             self.load_current_sync();
@@ -5519,11 +5493,11 @@ impl ApplicationHandler for App {
             max_height: 1,
         });
         let cap = ring_capacity(self.slot_bytes_estimate());
-        self.ring = ResidentRing::new_with_budget(cap, RING_BUDGET_BYTES);
+        self.core.ring = ResidentRing::new_with_budget(cap, RING_BUDGET_BYTES);
         renderer.reserve_ring(cap, fit.max_width, fit.max_height);
         let (ahead, behind) = window_for_capacity(cap);
-        self.ahead = ahead;
-        self.behind = behind;
+        self.core.ahead = ahead;
+        self.core.behind = behind;
         self.displayed_item = self.playlist.current();
         self.target_item = self.playlist.current();
         self.core.last_present = Some(Instant::now());
