@@ -35,10 +35,17 @@ end of each `ApplicationHandler` entry (`window_event` incl. the dialog-route ea
   Esc-guard trap, so they ride with their stages.
 
 **Revised checkpoint order** (supersedes §7 for execution): (1) ✅ effect queue + `Quit`.
-(2) ✅ **dialog inversion** (deferred-open form). (3) window ops → effects (safe). (4) the
-`event_loop` full de-thread + `request_redraw` (with smoke). (5) rfd + clipboard → effects.
-(6) split `Active` → shell `window` + AppCore `Box<dyn Renderer>`; move state to
-`pb-app-core`; thin `WinitShell`. Stages want a manual hold-to-fly + dialog smoke between.
+(2) ✅ **dialog inversion** (deferred-open form). (3) ✅ **`event_loop` full de-thread**
+(commit `e82d4d7`) — done ahead of window ops; params 68 → **5** (only `resumed`,
+`window_event`, `about_to_wait`, `drain_effects`, `open_pending_dialog`). `draw()` routes
+its fatal exit through `Quit`; the archive-flow circular knot was cut in the same global
+strip. Behavior-preserving (orchestration only *threaded* it). (4) window ops
+(`set_title`/`set_cursor`/`set_visible`) → effects (safe); `request_redraw` +
+`set_fullscreen` are hot-path/swapchain-sensitive — do with smoke. (5) rfd + clipboard →
+effects. (6) **the keystone**: split `Active` → shell `window` + AppCore
+`Box<dyn Renderer>`; move the orchestration state + methods into `pb-app-core` (they still
+touch `self.active`/renderer/muda/dialog directly — those couplings, not `event_loop`, are
+what's left); reduce the winit `App` to a thin `WinitShell`. Manual smoke between stages.
 
 **Checkpoint 2 landed** (commit `8ee89b1`): dialog opens are deferred through the shell. A
 `DialogRequest` enum + `App.pending_dialog`: openers record *what* to open; the single
