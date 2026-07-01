@@ -39,6 +39,11 @@ pub enum AnimationKind {
     /// Only decodable via the macOS Image I/O backend (no pure-Rust AV1/HEVC
     /// sequence decoder), so it's only ever produced on macOS.
     Heif,
+    /// The motion component of an Apple **Live Photo** — a short QuickTime `.mov`
+    /// (H.264 / HEVC) that lives in a *separate* file alongside the still, decoded on
+    /// macOS via AVFoundation (task #38). Not a byte-sniff of the still: produced by
+    /// the still↔`.mov` pairing, not `detect_animation`.
+    LivePhoto,
 }
 
 impl AnimationKind {
@@ -51,6 +56,7 @@ impl AnimationKind {
             AnimationKind::Apng => "APNG",
             AnimationKind::Webp => "WebP",
             AnimationKind::Heif => "HEIF",
+            AnimationKind::LivePhoto => "Live Photo",
         }
     }
 }
@@ -372,7 +378,9 @@ fn decode_with_image_crate(
         }
         // ISOBMFF sequences never reach this backend (the pure-Rust path can't decode
         // AV1/HEVC) — they're only ever detected on macOS, which routes to Image I/O.
-        AnimationKind::Heif => Err(DecodeError::Unsupported),
+        // Live Photo motion is a separate `.mov` decoded via AVFoundation (`livephoto`),
+        // never `decode_animation`, so it never reaches here either.
+        AnimationKind::Heif | AnimationKind::LivePhoto => Err(DecodeError::Unsupported),
     }
 }
 

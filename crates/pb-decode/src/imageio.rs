@@ -262,7 +262,7 @@ const MAX_DIM: usize = 100_000;
 /// **premultiplied** (Quartz contexts require it); callers that need straight alpha
 /// (the animation path) un-premultiply afterward — the still path's HEIC sources are
 /// opaque, so it leaves them as-is. `unsafe` because it drives CoreGraphics.
-unsafe fn draw_cgimage_p3(img: CGImageRef) -> Option<(Vec<u8>, u32, u32)> {
+pub(crate) unsafe fn draw_cgimage_p3(img: CGImageRef) -> Option<(Vec<u8>, u32, u32)> {
     let w = CGImageGetWidth(img);
     let h = CGImageGetHeight(img);
     if w == 0 || h == 0 || w > MAX_DIM || h > MAX_DIM {
@@ -479,7 +479,8 @@ unsafe fn decode_animation_frames_inner(
 
 /// Convert premultiplied RGBA bytes (what Quartz produces) back to straight alpha.
 /// Opaque pixels (`a == 255`) are untouched; fully transparent ones are zeroed.
-fn unpremultiply(buf: &mut [u8]) {
+/// `pub(crate)` so `livephoto.rs` reuses it on its P3-drawn motion frames.
+pub(crate) fn unpremultiply(buf: &mut [u8]) {
     for px in buf.chunks_exact_mut(4) {
         let a = px[3];
         if a == 0 {

@@ -1373,7 +1373,7 @@
         "id": 38,
         "title": "Live Photos (macOS): pair still + companion .mov, play the motion on P",
         "description": "Apple Live Photos are TWO files on disk — a still (JPEG on older iPhones, HEIC on newer) plus a short QuickTime .mov motion clip, linked by a shared content identifier. Detect and pair them during the folder scan, then reuse the task #37 animation playback machinery (P to play, step, eager-prep, present path) to play the motion on demand. macOS-first via AVFoundation; audio deferred; Windows tracked separately (#39). Reads only, RAM-only decode — the no-trace privacy guarantee (#2) holds. Both still variants (jpg/heic) work identically since the motion is the same .mov regardless of still format.",
-        "status": "pending",
+        "status": "in-progress",
         "priority": "medium",
         "dependencies": [
           37
@@ -1389,7 +1389,7 @@
             "id": 2,
             "title": "Decode .mov -> RGBA frames (AVFoundation)",
             "description": "macOS backend: AVURLAsset(.mov) + AVAssetImageGenerator with maximumSize (decode-to-fit -> bounds RAM; a full-res 3s clip is ~1GB of RGBA, so cap the long edge), appliesPreferredTrackTransform for orientation, requestedTimeTolerance=zero. Loop over frame times from the video track nominalFrameRate/duration, copyCGImage -> reuse draw_cgimage_p3 (imageio.rs) -> AnimFrame, producing an Animation (reuse the struct). Respect MAX_FRAMES/MAX_DECODED_BYTES. If per-frame copyCGImage seeking is too slow, switch to AVAssetReader sequential sample decode.",
-            "status": "pending"
+            "status": "review"
           },
           {
             "id": 3,

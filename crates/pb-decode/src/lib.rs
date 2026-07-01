@@ -21,6 +21,9 @@ mod common;
 mod image_backend;
 #[cfg(target_os = "macos")]
 mod imageio;
+// Apple Live Photo motion (.mov) decode via AVFoundation (task #38) — macOS only.
+#[cfg(target_os = "macos")]
+mod livephoto;
 // Shared ISOBMFF/`colr` parsing for the HEVC/AV1 container backends (WIC, Image I/O,
 // libheif). Only compiled where one of them is — keeps non-HEIC targets (e.g. the
 // Linux bench build) dead-code-free.
@@ -47,6 +50,8 @@ pub use imageio::ImageIoDecoder;
 pub use jxl::JxlDecoder;
 #[cfg(all(windows, feature = "libheif"))]
 pub use libheif::LibHeifDecoder;
+#[cfg(target_os = "macos")]
+pub use livephoto::decode_live_motion;
 pub use metadata::read_exif_fields;
 pub use raw::{is_raw_extension, RawPreviewDecoder};
 pub use svg::SvgDecoder;
