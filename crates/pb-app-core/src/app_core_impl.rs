@@ -179,15 +179,219 @@ impl AppCore {
             }
             // Trackpad double-tap ("smart magnify"): toggle 100%, sharing the `0` / menu path.
             CoreEvent::DoubleTap => self.dispatch_action(Action::ToggleOriginal),
-            // Wired in later C2 increments (they touch the still-shell tick / scan / scroll-delta /
-            // flow paths). Ignored for now so a host that sends them early is a no-op, not a panic.
-            CoreEvent::Tick(_)
-            | CoreEvent::Redraw
+            // The per-tick core loop (hold-to-fly / slideshow / prefetch / animation), stamping
+            // `now` from the event. Emits `SetWake` with the core's next deadline.
+            CoreEvent::Tick(now) => {
+                self.now = now;
+                self.tick();
+            }
+            // Wired in later C2 increments / 5.6 (they touch the still-shell scroll-delta / GPU
+            // surface / flow paths). Ignored for now so a host that sends them early is a no-op.
+            CoreEvent::Redraw
             | CoreEvent::Resized { .. }
             | CoreEvent::Scroll { .. }
             | CoreEvent::DroppedPaths(_)
             | CoreEvent::CancelDialog => {}
         }
+    }
+
+    /// The per-tick core loop (NS0 5.5 Phase C2): absorb finished decodes + uploads, run held
+    /// zoom/pan, the gated self-paced nav advance (hold-to-fly) and the slideshow, re-issue the
+    /// sharpen/prefetch when parked, update the info panel / toast / pie, run the deferred
+    /// resize decode + debounced geometry save, and drive on-demand animation playback + the
+    /// Live Photo revert + eager-prep. Ends by emitting [`CoreEffect::SetWake`] with the earliest
+    /// deadline the core wants to be ticked at (`None` = idle). `self.now` is stamped by the
+    /// caller (`CoreEvent::Tick` carries it). A winit host mins the wake with its own
+    /// dialog-repaint clock; the scan-count chip + dialog egui clock stay host-side.
+    pub fn tick(&mut self) {
+        let now = self.now;
+        // 1. Absorb finished decodes (uploads; presents the target if it arrived).
+        self.drain_results();
+
+        // 1b. Pick up a finished off-thread animation decode (kicked by `P` / frame-step) and
+        // install playback — never on the still/keypress hot path (#37).
+        self.poll_anim_decode();
+
+        // 2. Continuous zoom/pan while their keys are held (accelerating ramp).
+        let transforming = self.apply_view_holds(now);
+
+        // 3. Gated self-paced advance while a nav key (space/backspace) is held. The initial tap
+        // delay gates *repeat*, not draining/presenting, so a first-press miss shows the moment
+        // it decodes.
+        let nav = self.held_nav();
+        let past_delay = timing::elapsed_since(self.hold_start, now, self.initial_delay);
+        if let Some(dir) = nav {
+            // Advance only when caught up AND the (accelerating) interval elapsed, so every photo
+            // is shown and a miss simply holds. The gap ramps slow→fast over `ramp_secs` of held
+            // auto-repeat; the ceiling is the max-photos/sec cap (#20) or the refresh rate.
+            let caught_up = self.displayed_item == self.target_item;
+            let repeat_elapsed = match self.hold_start {
+                Some(t) => now.saturating_duration_since(t + self.initial_delay),
+                None => Duration::ZERO,
+            };
+            let interval = timing::advance_interval(
+                repeat_elapsed,
+                self.settings.start_speed,
+                self.settings.ramp_secs,
+                self.settings.max_advance_rate as f32,
+                self.frame_interval,
+            );
+            let due = timing::elapsed_since(self.last_present, now, interval);
+            if past_delay && caught_up && due {
+                self.advance(dir);
+            } else if !caught_up {
+                self.try_present_target();
+            }
+        } else {
+            self.hold_start = None;
+        }
+
+        // 3c. Slideshow auto-advance (task #23): on, not overridden by a held nav key or an open
+        // dialog, and readiness-gated like hold-to-fly (a not-ready slide holds, never skips).
+        let slideshow_running = self.slideshow.on && self.held_nav().is_none() && !self.dialog_open;
+        if slideshow_running {
+            let caught_up = self.displayed_item == self.target_item;
+            let since_shown = self
+                .last_present
+                .map(|t| now.saturating_duration_since(t))
+                .unwrap_or(Duration::ZERO);
+            if caught_up && self.slideshow.is_due(since_shown) {
+                self.advance(self.last_nav);
+            }
+        }
+
+        // 3b. Sharpen / prefetch-ahead. When parked, re-issue the prefetch whenever the
+        // wanted-fulls set changes (not every tick → no per-frame churn); keep ticking while any
+        // sharpen is outstanding so `drain_results` catches it.
+        let mut sharpen_pending = false;
+        if self.held_nav().is_none() {
+            let upgrade = self.fulls_wanted();
+            if upgrade != self.last_upgrade_set {
+                self.last_upgrade_set = upgrade.clone();
+                self.request_prefetch();
+            }
+            sharpen_pending = !upgrade.is_empty();
+        }
+
+        // 4. Info panel visibility. "Blaze mode" = actually flying (a nav key held past the tap
+        // delay): hide the panel so it isn't a strobing distraction. Otherwise keep it shown +
+        // tracking the current photo. Left untouched mid zoom/pan.
+        let flying = nav.is_some() && past_delay;
+        // 4a′. Flash the "Press P to play" hint once on settling on an animated still.
+        self.maybe_show_anim_hint(flying);
+        if self.info != InfoMode::Off {
+            if flying {
+                if self.overlay_shown {
+                    self.hide_overlay();
+                }
+            } else if !transforming
+                // Help is static; the info panels need a photo.
+                && (self.info == InfoMode::Help || self.current.is_some())
+                && (!self.overlay_shown || self.overlay_item != self.displayed_item)
+            {
+                self.show_overlay();
+            }
+        }
+
+        // 4b. Transient status toast: hold then fade; clears itself when expired.
+        let toast_active = self.tick_toast(now);
+
+        // 4c. The "not-ready" loading pie while the next photo is still decoding.
+        let pie_active = self.tick_pie(now);
+
+        // 4d. Once a resize/toggle has settled, run the deferred decode-to-fit: rebuild the ring
+        // at the new slot size, re-show the current photo crisp, and refill neighbours.
+        let resizing = match self.resize_settle_at {
+            Some(at) if now >= at => {
+                self.resize_settle_at = None;
+                self.invalidate_geometry();
+                self.load_current_sync();
+                self.target_item = self.playlist.current();
+                self.request_prefetch();
+                // Re-place a visible panel against the settled surface size (a fullscreen toggle
+                // otherwise leaves it jammed in the corner — #3).
+                if self.overlay_shown {
+                    self.show_overlay();
+                }
+                false
+            }
+            Some(_) => true, // still settling — keep ticking so it fires
+            None => false,
+        };
+
+        // 4e. Persist the windowed geometry once the user stops moving/resizing (#1). An explicit
+        // user action (positioning the window), never the view path.
+        if let Some(at) = self.geometry_save_at {
+            if now >= at {
+                self.geometry_save_at = None;
+                self.settings.save();
+            }
+        }
+
+        // 4g. On-demand animation (task #37): `tick_playback` advances to the due frame + returns
+        // the next frame's deadline; `tick_frame_step` drives the held `,`/`.` scrub.
+        let anim_wake = self.tick_playback(now);
+        let framestep_active = self.tick_frame_step(now);
+
+        // 4g'. A finished Live Photo reverts to the crisp still once the linger beat elapsed.
+        // Drops the finished playback but keeps the decoded motion (`prepared`) so replay is
+        // instant. The motion (and its audio) is done → stop the audio (shell owns the player).
+        let revert_wake = match self.live_revert_at {
+            Some(at) if now >= at => {
+                self.live_revert_at = None;
+                self.playback = None;
+                self.anim_frame_shown_at = None;
+                self.effects.push(contract::CoreEffect::StopLiveAudio);
+                self.restore_still();
+                None
+            }
+            other => other,
+        };
+
+        // 4h. Eagerly prep an animated still for instant playback once the user has rested on it
+        // — only when settled (never while flying), so it never competes with the fly hot path.
+        let prep_wake = if flying {
+            None
+        } else {
+            self.maybe_prepare_animation(now)
+        };
+
+        // 5. The core's next wake. Poll at the frame rate while interacting or work is
+        // outstanding; else sleep to the slideshow's next-slide deadline when it's the only
+        // thing pending; otherwise go idle (`None`) until a real event.
+        let base_wake = if nav.is_some()
+            || transforming
+            || self.work_pending()
+            || toast_active
+            || pie_active
+            || resizing
+            || sharpen_pending
+            || framestep_active
+            || self.pending_delete.is_some()
+            // Keep ticking until the debounced windowed-geometry save fires (#1).
+            || self.geometry_save_at.is_some()
+        {
+            Some(now + self.frame_interval)
+        } else if slideshow_running {
+            // Sleep until the next slide is due; clamp into the future so a just-passed deadline
+            // still schedules a wake (we advance on the following tick).
+            Some(
+                self.last_present
+                    .map(|t| t + self.slideshow.interval)
+                    .unwrap_or(now + self.frame_interval)
+                    .max(now + Duration::from_millis(1)),
+            )
+        } else {
+            None
+        };
+        // The earliest of the viewer's poll, the animation's next-frame deadline, the eager-prep
+        // dwell, and the Live-Photo-revert deadline; `None` = idle. (The host mins in its own
+        // dialog-repaint clock.)
+        let wake = [base_wake, anim_wake, prep_wake, revert_wake]
+            .into_iter()
+            .flatten()
+            .min();
+        self.effects.push(contract::CoreEffect::SetWake(wake));
     }
 
     /// Build the [`contract::MenuState`] for the given live state — the pure mapping from
