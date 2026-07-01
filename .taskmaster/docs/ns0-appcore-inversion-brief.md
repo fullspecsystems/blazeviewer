@@ -9,10 +9,12 @@
 ## STATUS — for the fresh session (updated 2026-06-30, branch `swiftui`)
 
 All work below is **committed, green (workspace suite 376 tests, clippy/fmt clean)**. Steps
-through **step 3 are owner-smoke-verified**; the step-4 leaf conversions (4a menu / 4b clipboard
-/ 4c rfd) are green + committed but **shell-side, so owner-smoke is pending** (see the smoke
-list in step 4). `main` (Live Photo support) is merged in. Nothing is half-done. Resume at
-**step 4 dialog + deferred window ops** below (do them with owner smoke — don't stack ahead).
+through **step 3 are owner-smoke-verified**; the step-4 conversions (4a menu / 4b clipboard /
+4c rfd / 4d dialog-results, partial) are green + committed but **shell-side, so owner-smoke is
+pending** (see the per-step smoke lists in step 4). `main` (Live Photo support) is merged in.
+Nothing is half-done. **Resume at the deferred window ops** (`set_visible`/`set_fullscreen`),
+then **step 5** — which now also absorbs the *clean* dialog seam (it's entangled with the
+archive/scan-flow inversion; see 4d finding). Do these with owner smoke — don't stack ahead.
 
 ### Landed — inversion seams + de-thread (the `event_loop` half)
 - **Ckpt 1** (`3d7c42d`): `CoreEffect` queue + `drain_effects`; `begin_exit` → `Quit`.
@@ -93,11 +95,22 @@ own commit, suite green, clippy/fmt clean — but shell-side, so **owner smoke p
   `finish_picker` sets `held.clear()` + `esc_guard_until` **first, unconditionally**, then opens
   — cancelling the picker still can't quit the app.
 
+- **◐ 4d — dialog results (partial)** (`b51f885`): `dialog_event`'s result dispatch is extracted
+  into a shell-neutral `DialogOutcome` enum (the result mirror of `DialogRequest`) + a core
+  `handle_dialog_outcome` (the result mirror of `open_pending_dialog`). `dialog_event` now only
+  drives egui/winit + extracts egui payloads (password / settings / keymap); the core reacts.
+  **Pure code-move, verified branch-by-branch** (same actions + ordering, incl. password
+  `set_checking` before `begin_archive_open`). **Finding that gates the *clean* seam:**
+  `begin_archive_open` (a "core" action) **reaches directly into the `DialogWindow`**
+  (`become_loading`) with load-bearing ordering, and `handle_dialog_outcome` still closes the
+  window (`self.dialog = None`). So making dialog results true `CoreEvent`s + the window ops
+  effects is **coupled to inverting the archive/scan flow — best done together in step 5**, not
+  forced now. *NEEDS SMOKE:* Settings save/cancel, Confirm-delete y/n, Message OK, Password
+  submit/wrong/cancel, Loading + Scanning Cancel, Esc on each.
+
 Remaining (behavior-sensitive — **do with owner smoke**, don't stack ahead of it):
-- **dialog:** shell owns `DialogWindow` fully; `dialog_event` results come back as
-  `CoreEvent`s (`DialogResult`/`PasswordSubmitted`/`SettingsSubmitted`/`KeymapSubmitted`). Opens
-  are already deferred (ckpt 2 `pending_dialog`/`open_pending_dialog`); this is the *results*
-  half — the biggest, highest-choreography piece. (Two-window egui, trap §6.6.)
+- **dialog (clean seam):** fold into **step 5** — window-close + `become_loading` → effects,
+  `DialogOutcome` → `CoreEvent`s, once the archive/scan flow inverts (they're entangled).
 - **deferred window ops:** `set_visible` (begin_exit — must hide **before** `clear_session_state`,
   so keep it inline or handle ordering) and `set_fullscreen` (swapchain/HDR-sensitive — smoke).
 
