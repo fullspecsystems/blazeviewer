@@ -13,9 +13,12 @@ smoke-verified**: keyboard + pointer + the whole `about_to_wait` tick loop route
 **Fullscreen** → core arm (`windowed` field migrated App → AppCore). The remaining 4
 (**DeletePermanent** confirm, **Recursive/CancelScan** scan threads, **Quit** teardown) are
 legitimately host-side and stay behind the (reframed) `ShellFlowAction` seam. **All 7 owner-smoke-
-verified (2026-07-01) — "never seen a regression"; Fullscreen (`2f6003d`) "looks great."**
-Everything below the NS0 section is the previously-shipped work (macOS port, archive, settings, HEIC,
-color), unchanged._
+verified (2026-07-01) — "never seen a regression"; Fullscreen (`2f6003d`) "looks great."** Separately,
+the **archive/scan dialog-outcome flow** inversion has STARTED: the dialog-outcome *reactions* now
+live in the core (`CoreEvent::DialogResolved` + `CloseDialog`/`CancelScan`/`CancelArchiveLoad`
+effects, `3006765`, ⚠ unsmoked); the resolve/scan compute relocation + the worker-flow inversion are
+the two remaining steps. Everything below the NS0 section is the previously-shipped work (macOS port,
+archive, settings, HEIC, color), unchanged._
 
 _The macOS (Apple Silicon) port is complete and SHIPPED in `v0.1.0-beta.4` (2026-06-30) — the
 first signed + notarized macOS DMG alongside the signed Windows MSI. Verified notarized +
@@ -174,11 +177,28 @@ core logic moves into its own `dispatch_action` arm / specific effect; only true
   *is* a platform op: **DeletePermanent** (opens the confirm dialog; its Yes calls the core
   `do_delete`), **Recursive** / **CancelScan** (spawn / cancel the off-thread scan + its dialog),
   **Quit** (hide-window teardown, also reached from window-close / Esc).
-- **❌ Optional last follow-up** (only if we want zero `ShellFlowAction`): the **archive/scan
-  dialog-outcome flow** (`begin_archive_open` reaching into `DialogWindow`, migrating
-  `DialogOutcome`/`Resolved` to `CoreEvent`s) — the coupled part the plan has flagged throughout.
-  The remaining `ShellFlowAction` arms (DeletePermanent confirm, Recursive/CancelScan scan threads,
-  Quit teardown) are otherwise genuine platform ops. Not required for NS1.
+### ◐ Archive/scan **dialog-outcome flow** inversion — STARTED (2026-07-01). The last coupled piece.
+Mapped end-to-end (Explore agent) and inverted in the recommended low-risk order:
+- **✅ Step 1 — dialog-outcome reactions → core** (`3006765`, ⚠ unsmoked): `handle_dialog_outcome`'s
+  reactions (apply_settings/keymap, `do_delete`, esc-guard, clear pending confirm/password) moved
+  into **`AppCore::handle_dialog_resolved`**, reached via a new **`CoreEvent::DialogResolved(DialogResult)`**.
+  The housekeeping is now effects: **`CloseDialog`** (wired its previously-dead drain arm) + new
+  **`CancelScan`** / **`CancelArchiveLoad`**. `password_archive` (pure `PathBuf`) migrated App →
+  AppCore. Shell `route_dialog_outcome` maps `DialogOutcome`→`DialogResult`; only **PasswordSubmitted**
+  (spawns the archive worker + pokes the live dialog) stays shell. 4 new core unit tests. Behavior-
+  preserving (effects drain right after `dialog_event`, same event turn).
+- **❌ Step 2 (next) — relocate the resolve/scan compute to core**: move `Resolved` + the builders
+  (`resolve_*`, `build_resolved`, `archive_resolved`, `open_archive`, `load_seven_z`,
+  `seven_z_preflight`, `collect_images`, `image_walker`, `stream_scan`), `ScanProgress`, and the
+  `archive` module into `pb-app-core` (+ a `walkdir` dep). Purely mechanical, all portable (pb-core/
+  pb-source/pb-decode already deps; nothing winit/egui). Keep the `std::thread::spawn`+`mpsc` shell-side.
+- **❌ Step 3 (last, highest-risk) — invert the worker flow**: `begin_archive_open`/`begin_dir_scan`
+  → effects (`BeginArchiveOpen`/`BeginDirScan`; shell owns the thread + progress-dialog handle);
+  `poll_*` fires `CoreEvent`s (`ArchiveResolved`/`ScanBatch`/`ScanDone`) back into the core, which
+  runs `rebuild_playlist`/`extend_playlist`. Thread lifecycle + generation-supersede + the
+  `become_loading`/`set_scan` in-place progress promotions make this the delicate one.
+- The other `ShellFlowAction` arms (DeletePermanent confirm, Recursive/CancelScan scan-thread spawn,
+  Quit teardown) remain genuine platform ops. None of this blocks NS1.
 
 ### ▶ Resume (next session)
 Read **`.taskmaster/docs/ns0-step5-behavior-inversion-plan.md`** (Phase E = 5.6). Two independent
