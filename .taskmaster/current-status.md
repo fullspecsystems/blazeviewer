@@ -7,12 +7,13 @@ NS0 is now **~90% done: the full STATE inversion, the BEHAVIOR inversion (Phase 
 land. ✅ NS1 (the Swift bridge) is now UNBLOCKED — it can drive the viewer through `handle()`,
 which exists + is unit-tested.** Phase C2 (winit shell → `handle()` translator) is **done + owner-
 smoke-verified**: keyboard + pointer + the whole `about_to_wait` tick loop route through `handle()`.
-**Phase 5.6 (the flow inversion) is underway:** 6 of 11 flow actions are now inverted into core arms
+**Phase 5.6 (the flow inversion) is underway:** 7 of 11 flow actions are now inverted into core arms
 / specific effects — **Mute** → core, **About/Settings** → `ShowDialog`, **SaveRotation/Undo** +
-**Delete-to-trash** → pure core arms (their EXIF / trash IO modules moved into `pb-app-core`). The
-remaining 5 (**DeletePermanent** confirm, **Fullscreen** window ops, **Recursive/CancelScan** scan
-threads, **Quit** teardown) are legitimately host-side and stay behind the (reframed)
-`ShellFlowAction` seam. **✅ Owner-smoke-verified (2026-07-01) — "never seen a regression."**
+**Delete-to-trash** → pure core arms (their EXIF / trash IO modules moved into `pb-app-core`), and
+**Fullscreen** → core arm (`windowed` field migrated App → AppCore). The remaining 4
+(**DeletePermanent** confirm, **Recursive/CancelScan** scan threads, **Quit** teardown) are
+legitimately host-side and stay behind the (reframed) `ShellFlowAction` seam. **First 6 owner-smoke-
+verified (2026-07-01) — "never seen a regression"; ⚠ Fullscreen (`0655292`) is unsmoked.**
 Everything below the NS0 section is the previously-shipped work (macOS port, archive, settings, HEIC,
 color), unchanged._
 
@@ -151,7 +152,7 @@ The winit shell now translates its **input events + the whole tick loop** to `Co
   `CoreEvent` and already call core methods directly. **`DroppedPaths`** is flow → 5.6.
   With these deferred, **C2 has met its goal**: the winit shell exercises the same `handle()` the
   Swift host will for keyboard + menu + pointer + the tick loop (the whole engine).
-### ◐ Phase 5.6 (the FLOW inversion). **6 of 11 flow actions inverted + SMOKE-VERIFIED; the rest are legitimately host-side.**
+### ◐ Phase 5.6 (the FLOW inversion). **7 of 11 flow actions inverted; the rest are legitimately host-side.**
 The `ShellFlowAction(Action)` catch-all is being decomposed: each flow action that has genuinely-
 core logic moves into its own `dispatch_action` arm / specific effect; only true platform ops stay.
 - **✅ Inverted this session (2026-07-01, owner-smoke-verified "never seen a regression"):**
@@ -165,16 +166,19 @@ core logic moves into its own `dispatch_action` arm / specific effect; only true
     thin platform-neutral EXIF write.
   - **Delete-to-trash** (`9eb299a`) → core arm + `do_delete` → core: `git mv delete.rs → pb-app-core`
     (trash dep + `DELETE_ADVANCE_DELAY`→engine); `Del` is now pure core, `do_delete` uses `self.now`.
+  - **Fullscreen** (`0655292`, ⚠ unsmoked) → core arm + **`windowed: bool` migrated App → AppCore**
+    (16 refs): the arm flips `windowed`/`settings.fullscreen` + pushes `SetWindowMode`; the live-
+    window geometry snapshot + `settings.save()` moved into the `SetWindowMode` handler
+    (`apply_window_mode`), which runs before the window ops so capture-before-resize still holds.
 - **Legitimately host-side — stay behind `ShellFlowAction` (reframed, `ab7a9e2`)**, since execution
   *is* a platform op: **DeletePermanent** (opens the confirm dialog; its Yes calls the core
-  `do_delete`), **Fullscreen** (borderless⇄windowed window ops + the shell-owned `windowed` flag),
-  **Recursive** / **CancelScan** (spawn / cancel the off-thread scan + its dialog), **Quit** (hide-
-  window teardown, also reached from window-close / Esc).
-- **❌ Optional larger follow-ups** (only if we want zero `ShellFlowAction`): **Fullscreen** needs a
-  `windowed`→core field migration (18 refs; but `windowed` is genuinely live window state) + a
-  `CaptureWindowedGeometry` effect; and the **archive/scan dialog-outcome flow** (`begin_archive_open`
-  reaching into `DialogWindow`, migrating `DialogOutcome`/`Resolved` to `CoreEvent`s) — the coupled
-  part the plan has flagged throughout. Neither is required for NS1; both are their own efforts.
+  `do_delete`), **Recursive** / **CancelScan** (spawn / cancel the off-thread scan + its dialog),
+  **Quit** (hide-window teardown, also reached from window-close / Esc).
+- **❌ Optional last follow-up** (only if we want zero `ShellFlowAction`): the **archive/scan
+  dialog-outcome flow** (`begin_archive_open` reaching into `DialogWindow`, migrating
+  `DialogOutcome`/`Resolved` to `CoreEvent`s) — the coupled part the plan has flagged throughout.
+  The remaining `ShellFlowAction` arms (DeletePermanent confirm, Recursive/CancelScan scan threads,
+  Quit teardown) are otherwise genuine platform ops. Not required for NS1.
 
 ### ▶ Resume (next session)
 Read **`.taskmaster/docs/ns0-step5-behavior-inversion-plan.md`** (Phase E = 5.6). Two independent
@@ -185,14 +189,14 @@ tracks remain, either order:
    `SetWake`→its run-loop timer, `ShellFlowAction`→native About/Settings/save panels, live-audio→
    `AVAudioPlayer`). `handle()`/`tick()`/the contract vocabulary are ready + unit-tested; the winit
    shell (`main.rs` `window_event`/`about_to_wait`) is the worked reference for what each event maps to.
-2. **5.6 is mostly done + smoke-verified** — the flow actions with genuine core logic are inverted
-   (Mute, About/Settings, SaveRotation/Undo, Delete-to-trash); the remaining `ShellFlowAction` arms
-   (DeletePermanent confirm, Fullscreen, Recursive/CancelScan, Quit) are legitimately host-side.
-   **Only if we want zero `ShellFlowAction`:** the Fullscreen `windowed`→core field migration + a
-   `CaptureWindowedGeometry` effect, and the archive/scan **dialog-outcome flow** inversion
-   (`begin_archive_open`→`DialogWindow`, migrate `DialogOutcome`/`Resolved` to `CoreEvent`s). Optional
-   deferred C2 bits: `Resized`→`handle` (core viewport part; shell keeps the GPU-surface/EDR poke) and
-   a `Scroll` seam for `MouseWheel`. None of these block NS1.
+2. **5.6 is mostly done** — the flow actions with genuine core logic are inverted (Mute, About/
+   Settings, SaveRotation/Undo, Delete-to-trash, **Fullscreen**); the remaining `ShellFlowAction`
+   arms (DeletePermanent confirm, Recursive/CancelScan scan threads, Quit teardown) are legitimately
+   host-side. **First: smoke Fullscreen** (F11/Alt+Enter toggle + windowed-spot memory across toggles
+   & relaunch). **Only if we want zero `ShellFlowAction`:** the archive/scan **dialog-outcome flow**
+   inversion (`begin_archive_open`→`DialogWindow`, migrate `DialogOutcome`/`Resolved` to `CoreEvent`s).
+   Optional deferred C2 bits: `Resized`→`handle` (core viewport part; shell keeps the GPU-surface/EDR
+   poke) and a `Scroll` seam for `MouseWheel`. None of these block NS1.
 
 **Move-recipe + wiring hazards** (all hit + handled this session): multiline `self\n.core\n.field`
 chains (regex-collapse, not a literal replace); a method calling a shell *module* path
