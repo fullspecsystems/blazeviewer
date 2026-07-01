@@ -12,3 +12,9 @@ description = "Platform-neutral orchestration model for PhotoBlaze: actions, the
 # Keymap config parse/format (keymap.toml). Same version + features as pb-app so
 # the lockfile is unchanged by the split.
 toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
+# Engine crates the orchestration state (`AppCore`) references as step 5 relocates it
+# off the winit shell: the view transform + rotation (pb-render) and the decode-to-fit
+# box (pb-decode). Still no winit/egui/Swift here; pb-render pulls wgpu transitively,
+# which is expected — the `AppCore` the macOS Swift bridge links owns the renderer.
+pb-render = { workspace = true }
+pb-decode = { workspace = true }

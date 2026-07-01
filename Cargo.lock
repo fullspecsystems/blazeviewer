@@ -3504,6 +3504,8 @@ dependencies = [
 name = "pb-app-core"
 version = "0.1.0"
 dependencies = [
+ "pb-decode",
+ "pb-render",
  "toml 0.8.2",
 ]
 

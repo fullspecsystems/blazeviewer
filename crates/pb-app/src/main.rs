@@ -567,17 +567,6 @@ struct App {
     /// slideshow / mods / esc_guard_until). Nav/prefetch/decode, the renderer, and the
     /// `handle(CoreEvent)` dispatch follow.
     core: AppCore,
-    /// Decode-to-fit target = the display size; photos are downscaled to it.
-    fit: Option<FitBox>,
-    /// Per-photo view transform (scaling mode + rotation + zoom + pan).
-    view: ViewTransform,
-    /// Last cursor position in physical pixels — the anchor for pinch/wheel zoom
-    /// and the reference point for drag-to-pan. `None` until the pointer first
-    /// moves over the window (then we zoom about the screen center).
-    last_cursor: Option<[f32; 2]>,
-    /// Whether the left mouse button is held — drives drag-to-pan (cross-platform,
-    /// the primary pan gesture on Windows where trackpad pinch/swipe aren't emitted).
-    dragging: bool,
     /// Scan root, for showing paths relative to it.
     root: PathBuf,
     /// Text renderer for the info panel (None if no system font was found).
@@ -644,9 +633,6 @@ struct App {
     /// (in priority order) to the next tick so no decode work is wasted. They hold
     /// their pool byte-budget reservation, which is the intended backpressure.
     pending_uploads: Vec<Outcome>,
-    /// Per-image rotation overrides (`r` / `Shift+R`); RAM-only, dropped on exit
-    /// (privacy task #2). Absent = upright (identity).
-    rotations: HashMap<usize, Rotation>,
     /// Whether the current scan-based playlist is recursive (`Ctrl+R` toggles).
     recursive: bool,
     /// The directory the current playlist was scanned from — enables the `Ctrl+R`
@@ -658,26 +644,11 @@ struct App {
     pending_drops: Vec<PathBuf>,
     /// The transient bottom-center status toast (e.g. recursion on/off), or `None`.
     toast: Option<Toast>,
-    /// When a window resize/toggle has "settled" enough to re-decode at the new
-    /// fit. A drag fires many Resized events; we GPU-scale the resident texture
-    /// instantly per event and defer the expensive decode-to-fit + ring refill
-    /// until this instant (debounced), so resizing stays smooth.
-    resize_settle_at: Option<Instant>,
-    /// Debounced "persist the windowed geometry" deadline (#1). Moving/resizing a
-    /// window fires a flurry of events; we update the in-memory geometry per event but
-    /// only write `settings.toml` once the user stops, so a drag isn't a write storm.
-    geometry_save_at: Option<Instant>,
     /// macOS: the EDR headroom last applied to the renderer (the window's display).
     /// On a window move we re-query the new screen and only reconfigure when it
     /// changes — so dragging across a display with different HDR capability adapts.
     #[cfg(target_os = "macos")]
     last_edr_headroom: f32,
-    /// Hold timers for the zoom/pan acceleration ramps (start = when the hold
-    /// began; last = previous step, for time-based deltas).
-    zoom_started: Option<Instant>,
-    zoom_last: Option<Instant>,
-    pan_started: Option<Instant>,
-    pan_last: Option<Instant>,
     /// "Not-ready" loading-pie state (the top-right affordance). `wait_started` is
     /// when the current miss began (None when caught up); `pie_finish` plays the
     /// snap-to-full fade once the photo lands; `pie_glow_started` is the last
@@ -995,15 +966,9 @@ impl App {
             core: AppCore::new(
                 Duration::from_millis(settings.hold_delay_ms as u64),
                 Duration::from_secs_f64(settings.slideshow_interval_secs),
+                // Start in the user's default scale mode (8/9/0 still switch it live).
+                scale_mode_of(settings.scale_mode),
             ),
-            fit: None,
-            // Start in the user's default scale mode (8/9/0 still switch it live).
-            view: ViewTransform {
-                mode: scale_mode_of(settings.scale_mode),
-                ..ViewTransform::default()
-            },
-            last_cursor: None,
-            dragging: false,
             root,
             hud: Hud::load(),
             info: InfoMode::Off,
@@ -1026,19 +991,12 @@ impl App {
             failed: HashSet::new(),
             deleted: HashSet::new(),
             pending_uploads: Vec::new(),
-            rotations: HashMap::new(),
             recursive,
             scan_root,
             pending_drops: Vec::new(),
             toast: None,
-            resize_settle_at: None,
-            geometry_save_at: None,
             #[cfg(target_os = "macos")]
             last_edr_headroom: 1.0,
-            zoom_started: None,
-            zoom_last: None,
-            pan_started: None,
-            pan_last: None,
             wait_started: None,
             pie_finish: None,
             pie_glow_started: None,
@@ -1102,8 +1060,8 @@ impl App {
     /// (downscale large photos), or full resolution for Fill / Original (so Fill
     /// isn't upscale-blurry and Original is pixel-exact).
     fn decode_fit(&self) -> Option<FitBox> {
-        match self.view.mode {
-            ScaleMode::Fit => self.fit,
+        match self.core.view.mode {
+            ScaleMode::Fit => self.core.fit,
             ScaleMode::Fill | ScaleMode::Original => None,
         }
     }
@@ -1113,7 +1071,7 @@ impl App {
     /// photo's true full-res size for Original. Sizes the ring so VRAM stays in
     /// budget even though full-res textures are much larger than fit ones.
     fn slot_bytes_estimate(&self) -> u64 {
-        let fit = self.fit.unwrap_or(FitBox {
+        let fit = self.core.fit.unwrap_or(FitBox {
             max_width: 1,
             max_height: 1,
         });
@@ -1279,10 +1237,10 @@ impl App {
     /// map (upright if absent), zoom/pan reset to a fresh framing. Returns the
     /// view to push to the renderer. (Scaling mode is global and left unchanged.)
     fn view_for(&mut self, item: usize) -> ViewTransform {
-        self.view.rotation = self.rotations.get(&item).copied().unwrap_or_default();
-        self.view.zoom = 1.0;
-        self.view.pan = [0.0, 0.0];
-        self.view
+        self.core.view.rotation = self.core.rotations.get(&item).copied().unwrap_or_default();
+        self.core.view.zoom = 1.0;
+        self.core.view.pan = [0.0, 0.0];
+        self.core.view
     }
 
     /// Rotate the on-screen photo 90° clockwise (counter-clockwise on `Shift+R`).
@@ -1291,14 +1249,14 @@ impl App {
         let Some(item) = self.displayed_item else {
             return;
         };
-        let cur = self.rotations.get(&item).copied().unwrap_or_default();
+        let cur = self.core.rotations.get(&item).copied().unwrap_or_default();
         let new = if ccw { cur.ccw() } else { cur.cw() };
         if new == Rotation::default() {
-            self.rotations.remove(&item);
+            self.core.rotations.remove(&item);
         } else {
-            self.rotations.insert(item, new);
+            self.core.rotations.insert(item, new);
         }
-        self.view.rotation = new;
+        self.core.view.rotation = new;
         self.push_view();
         // Flash a directional rotate icon (icon-only pill) as feedback.
         let ico = if ccw {
@@ -1329,7 +1287,7 @@ impl App {
             }
         };
         let rgba = clipboard::to_clipboard_rgba8(&img);
-        let rot = self.rotations.get(&item).copied().unwrap_or_default();
+        let rot = self.core.rotations.get(&item).copied().unwrap_or_default();
         let (rgba, w, h) = clipboard::rotate_rgba8(&rgba, img.width, img.height, rot);
         // Offer the source file as CF_HDROP too when there is one; an archive entry
         // has no file on disk, so it gets an image-only copy (pixels still paste). The
@@ -1407,7 +1365,7 @@ impl App {
         let Some(item) = self.displayed_item else {
             return;
         };
-        let rot = self.rotations.get(&item).copied().unwrap_or_default();
+        let rot = self.core.rotations.get(&item).copied().unwrap_or_default();
         if rot == Rotation::default() {
             self.show_toast("No rotation to save");
             return;
@@ -1430,7 +1388,7 @@ impl App {
                 // override and re-read from disk so the pixels are re-oriented from
                 // the file (else the ring's old-orientation pixels + a reset view
                 // would show it un-rotated, or a later re-decode would double-rotate).
-                self.rotations.remove(&item);
+                self.core.rotations.remove(&item);
                 self.meta_cache.remove(&item);
                 self.exif_cache.remove(&item); // the file's EXIF (Orientation) just changed
                 self.failed.remove(&item);
@@ -1469,7 +1427,7 @@ impl App {
             UndoAction::SaveRotation { item, path, prev } => {
                 match save_rotation::set_orientation(&path, prev) {
                     Ok(()) => {
-                        self.rotations.remove(&item);
+                        self.core.rotations.remove(&item);
                         self.meta_cache.remove(&item);
                         self.exif_cache.remove(&item); // EXIF Orientation reverted on disk
                         self.failed.remove(&item);
@@ -1590,7 +1548,7 @@ impl App {
         self.stop_playback(); // the deleted photo may have been playing (#37)
         self.source = Arc::new(FsSource::new(Vec::new()));
         self.playlist = Playlist::new(0, 0);
-        self.rotations.clear();
+        self.core.rotations.clear();
         self.meta_cache.clear();
         self.exif_cache.clear();
         self.live_motion_cache.clear();
@@ -1932,7 +1890,7 @@ impl App {
     /// and fit/original toggle so in-flight decodes for the old size are discarded.
     fn invalidate_geometry(&mut self) {
         self.epoch = self.epoch.wrapping_add(1);
-        let fit = self.fit.unwrap_or(FitBox {
+        let fit = self.core.fit.unwrap_or(FitBox {
             max_width: 1,
             max_height: 1,
         });
@@ -1954,10 +1912,10 @@ impl App {
     /// epoch and re-buffers neighbors (the decode resolution can change); pressing
     /// the current mode's key just re-frames, no re-decode.
     fn set_scale_mode(&mut self, mode: ScaleMode) {
-        let changed = self.view.mode != mode;
-        self.view.mode = mode;
-        self.view.zoom = 1.0;
-        self.view.pan = [0.0, 0.0];
+        let changed = self.core.view.mode != mode;
+        self.core.view.mode = mode;
+        self.core.view.zoom = 1.0;
+        self.core.view.pan = [0.0, 0.0];
         self.push_view();
         if changed {
             self.invalidate_geometry();
@@ -2536,7 +2494,7 @@ impl App {
         }
         // Persist the new mode + remembered geometry together (one atomic write). An
         // explicit user action (the toggle), never the view path — privacy #2.
-        self.geometry_save_at = None;
+        self.core.geometry_save_at = None;
         self.settings.save();
 
         // The window ops (fullscreen/decorations/sizing + macOS chrome + menu attach) are
@@ -2640,7 +2598,7 @@ impl App {
         let before = self.settings.window;
         self.capture_windowed_geometry();
         if self.settings.window != before {
-            self.geometry_save_at = Some(Instant::now() + Duration::from_millis(500));
+            self.core.geometry_save_at = Some(Instant::now() + Duration::from_millis(500));
         }
     }
 
@@ -2686,6 +2644,7 @@ impl App {
             return false;
         };
         let rotated = self
+            .core
             .rotations
             .get(&item)
             .is_some_and(|r| *r != Rotation::default());
@@ -2766,7 +2725,7 @@ impl App {
         let native_fullscreen = false;
 
         let next = Self::menu_state_from(
-            self.view.mode,
+            self.core.view.mode,
             self.info,
             self.recursive,
             !self.windowed, // `windowed` is the inverse of the fullscreen checkbox
@@ -2943,7 +2902,7 @@ impl App {
     /// continuous hold-to-zoom). Multiplies the current zoom, clamps to the allowed
     /// range, and re-frames. `factor` > 1 zooms in, < 1 zooms out.
     fn zoom_step(&mut self, factor: f32) {
-        self.view.zoom = (self.view.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        self.core.view.zoom = (self.core.view.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
         self.push_view();
         self.draw();
     }
@@ -2973,7 +2932,7 @@ impl App {
             Action::ScaleFill => self.set_scale_mode(ScaleMode::Fill),
             Action::ScaleOriginal => self.set_scale_mode(ScaleMode::Original),
             Action::ToggleOriginal => {
-                let next = if self.view.mode == ScaleMode::Original {
+                let next = if self.core.view.mode == ScaleMode::Original {
                     ScaleMode::Fit
                 } else {
                     ScaleMode::Original
@@ -3076,7 +3035,7 @@ impl App {
         self.recursive = recursive;
         self.playlist = Playlist::new(self.source.len(), 0).with_cursor(start);
         // Indices are reassigned — drop everything keyed by item index.
-        self.rotations.clear();
+        self.core.rotations.clear();
         self.meta_cache.clear();
         self.exif_cache.clear();
         self.live_motion_cache.clear();
@@ -3155,7 +3114,7 @@ impl App {
 
     /// Push the current view transform to the renderer (re-places the quad).
     fn push_view(&mut self) {
-        let view = self.view;
+        let view = self.core.view;
         if let Some(a) = self.renderer.as_mut() {
             a.set_view(view);
         }
@@ -3726,7 +3685,7 @@ impl App {
             }
         }
         // Cap to what fits the screen height (~1.5x the font size per line).
-        if let Some(fit) = self.fit {
+        if let Some(fit) = self.core.fit {
             let line_h = ((15.0 * self.scale_factor).max(8.0) * 1.5).max(1.0);
             let max_rows = (((fit.max_height as f32) - 40.0) / line_h).max(1.0) as usize;
             if rows.len() > max_rows {
@@ -3854,6 +3813,7 @@ impl App {
     /// fresh on every (re)show, so toggling between window sizes always re-spaces it.
     fn overlay_margin(&self) -> u32 {
         let short_edge = self
+            .core
             .fit
             .map(|f| f.max_width.min(f.max_height))
             .unwrap_or(800) as f32;
@@ -4340,7 +4300,10 @@ impl App {
     /// runs on every cursor-move, but the rebuild fires just on the enter/leave transition (one
     /// ~320px CPU composite), never per move or per frame, so it stays off the photo hot path.
     fn update_chip_hover(&mut self) {
-        let hovered = self.last_cursor.is_some_and(|[x, y]| self.chip_hit(x, y));
+        let hovered = self
+            .core
+            .last_cursor
+            .is_some_and(|[x, y]| self.chip_hit(x, y));
         if hovered == self.chip_hovered {
             return;
         }
@@ -4387,7 +4350,7 @@ impl App {
 
     /// Which open-panel button (if any) the pointer is currently over.
     fn open_hovered_button(&self) -> Option<OpenButton> {
-        let [x, y] = self.last_cursor?;
+        let [x, y] = self.core.last_cursor?;
         [OpenButton::File, OpenButton::Folder]
             .into_iter()
             .find(|&b| {
@@ -4433,7 +4396,7 @@ impl App {
 
     /// Whether the pointer is over the interactive play hint.
     fn play_hint_hit(&self) -> bool {
-        match (self.last_cursor, self.play_hint_rect()) {
+        match (self.core.last_cursor, self.play_hint_rect()) {
             (Some([x, y]), Some(rect)) => point_in_rect(rect, x, y),
             _ => false,
         }
@@ -4635,7 +4598,7 @@ impl App {
         self.meta_cache.clear();
         self.exif_cache.clear();
         self.live_motion_cache.clear();
-        self.rotations.clear();
+        self.core.rotations.clear();
         self.failed.clear();
         self.preview_resident.clear();
         self.upgrade_done.clear();
@@ -4755,7 +4718,7 @@ impl App {
 
     /// The current image texture + screen dimensions for pan-clamp math.
     fn screen_and_image(&self) -> Option<(u32, u32, u32, u32)> {
-        let fit = self.fit?;
+        let fit = self.core.fit?;
         let (iw, ih) = self.renderer.as_ref()?.image_size();
         Some((iw, ih, fit.max_width, fit.max_height))
     }
@@ -4765,7 +4728,7 @@ impl App {
     fn pannable(&self) -> bool {
         self.screen_and_image()
             .map(|(iw, ih, sw, sh)| {
-                let mp = self.view.max_pan(iw, ih, sw, sh);
+                let mp = self.core.view.max_pan(iw, ih, sw, sh);
                 mp[0] > 0.0 || mp[1] > 0.0
             })
             .unwrap_or(false)
@@ -4775,10 +4738,13 @@ impl App {
     /// a closed hand while dragging, an open hand when the image is pannable, the default arrow
     /// otherwise.
     fn refresh_cursor(&mut self) {
-        let over_button = self.last_cursor.is_some_and(|[x, y]| self.chip_hit(x, y))
+        let over_button = self
+            .core
+            .last_cursor
+            .is_some_and(|[x, y]| self.chip_hit(x, y))
             || self.open_hovered_button().is_some()
             || self.play_hint_hit();
-        let kind = if self.dragging {
+        let kind = if self.core.dragging {
             contract::CursorKind::Grabbing
         } else if over_button {
             contract::CursorKind::Pointer
@@ -4798,9 +4764,10 @@ impl App {
             return;
         };
         let anchor = self
+            .core
             .last_cursor
             .unwrap_or([sw as f32 / 2.0, sh as f32 / 2.0]);
-        self.view.zoom_about(factor, anchor, iw, ih, sw, sh);
+        self.core.view.zoom_about(factor, anchor, iw, ih, sw, sh);
         self.push_view();
         self.draw();
         // Zooming changes whether the image overflows — update the grab affordance
@@ -4814,12 +4781,12 @@ impl App {
         if dx == 0.0 && dy == 0.0 {
             return;
         }
-        self.view.pan[0] += dx;
-        self.view.pan[1] += dy;
+        self.core.view.pan[0] += dx;
+        self.core.view.pan[1] += dy;
         if let Some((iw, ih, sw, sh)) = self.screen_and_image() {
-            let mp = self.view.max_pan(iw, ih, sw, sh);
-            self.view.pan[0] = self.view.pan[0].clamp(-mp[0], mp[0]);
-            self.view.pan[1] = self.view.pan[1].clamp(-mp[1], mp[1]);
+            let mp = self.core.view.max_pan(iw, ih, sw, sh);
+            self.core.view.pan[0] = self.core.view.pan[0].clamp(-mp[0], mp[0]);
+            self.core.view.pan[1] = self.core.view.pan[1].clamp(-mp[1], mp[1]);
         }
         self.push_view();
         self.draw();
@@ -4833,42 +4800,42 @@ impl App {
 
         match self.zoom_held() {
             Some(dir) => {
-                let start = *self.zoom_started.get_or_insert(now);
-                let last = self.zoom_last.replace(now).unwrap_or(start);
+                let start = *self.core.zoom_started.get_or_insert(now);
+                let last = self.core.zoom_last.replace(now).unwrap_or(start);
                 let dt = (now - last).as_secs_f32().min(0.1);
                 let t = (now - start).as_secs_f32();
                 let rate =
                     ZOOM_MIN_RATE + (ZOOM_MAX_RATE - ZOOM_MIN_RATE) * (t / ZOOM_RAMP_SECS).min(1.0);
                 // Exponential (multiplicative) zoom about the screen center.
-                self.view.zoom =
-                    (self.view.zoom * (rate * dir * dt).exp()).clamp(MIN_ZOOM, MAX_ZOOM);
+                self.core.view.zoom =
+                    (self.core.view.zoom * (rate * dir * dt).exp()).clamp(MIN_ZOOM, MAX_ZOOM);
                 changed = true;
             }
             None => {
-                self.zoom_started = None;
-                self.zoom_last = None;
+                self.core.zoom_started = None;
+                self.core.zoom_last = None;
             }
         }
 
         let (px, py) = self.pan_held();
         if px != 0.0 || py != 0.0 {
-            let start = *self.pan_started.get_or_insert(now);
-            let last = self.pan_last.replace(now).unwrap_or(start);
+            let start = *self.core.pan_started.get_or_insert(now);
+            let last = self.core.pan_last.replace(now).unwrap_or(start);
             let dt = (now - last).as_secs_f32().min(0.1);
             let t = (now - start).as_secs_f32();
             let speed =
                 PAN_MIN_SPEED + (PAN_MAX_SPEED - PAN_MIN_SPEED) * (t / PAN_RAMP_SECS).min(1.0);
-            self.view.pan[0] += px * speed * dt;
-            self.view.pan[1] += py * speed * dt;
+            self.core.view.pan[0] += px * speed * dt;
+            self.core.view.pan[1] += py * speed * dt;
             if let Some((iw, ih, sw, sh)) = self.screen_and_image() {
-                let mp = self.view.max_pan(iw, ih, sw, sh);
-                self.view.pan[0] = self.view.pan[0].clamp(-mp[0], mp[0]);
-                self.view.pan[1] = self.view.pan[1].clamp(-mp[1], mp[1]);
+                let mp = self.core.view.max_pan(iw, ih, sw, sh);
+                self.core.view.pan[0] = self.core.view.pan[0].clamp(-mp[0], mp[0]);
+                self.core.view.pan[1] = self.core.view.pan[1].clamp(-mp[1], mp[1]);
             }
             changed = true;
         } else {
-            self.pan_started = None;
-            self.pan_last = None;
+            self.core.pan_started = None;
+            self.core.pan_last = None;
         }
 
         if changed {
@@ -5473,7 +5440,7 @@ impl ApplicationHandler for App {
 
         self.scale_factor = window.scale_factor() as f32;
         let isz = window.inner_size();
-        self.fit = Some(FitBox {
+        self.core.fit = Some(FitBox {
             max_width: isz.width.max(1),
             max_height: isz.height.max(1),
         });
@@ -5497,7 +5464,7 @@ impl ApplicationHandler for App {
         renderer.set_letterbox(self.settings.letterbox);
         let now = window.inner_size();
         if now != isz {
-            self.fit = Some(FitBox {
+            self.core.fit = Some(FitBox {
                 max_width: now.width.max(1),
                 max_height: now.height.max(1),
             });
@@ -5561,7 +5528,7 @@ impl ApplicationHandler for App {
         // Phase 3 engine: size the resident ring to the display and start filling
         // it. The first frame is already up via the single-image path; navigation
         // switches to the ring.
-        let fit = self.fit.unwrap_or(FitBox {
+        let fit = self.core.fit.unwrap_or(FitBox {
             max_width: 1,
             max_height: 1,
         });
@@ -5603,8 +5570,8 @@ impl ApplicationHandler for App {
                     max_width: size.width.max(1),
                     max_height: size.height.max(1),
                 };
-                if Some(new_fit) != self.fit {
-                    self.fit = Some(new_fit);
+                if Some(new_fit) != self.core.fit {
+                    self.core.fit = Some(new_fit);
                     if let Some(r) = self.renderer.as_mut() {
                         // Cheap, per-event: reconfigure the swapchain and let the
                         // renderer GPU-scale the resident texture to the new size.
@@ -5627,7 +5594,7 @@ impl ApplicationHandler for App {
                     // current photo to the new fit on every one (a CPU decode on
                     // the event-loop thread) is what made resize crawl. Defer the
                     // crisp decode-to-fit + ring refill until the size settles.
-                    self.resize_settle_at = Some(Instant::now() + Duration::from_millis(180));
+                    self.core.resize_settle_at = Some(Instant::now() + Duration::from_millis(180));
                 }
                 // Remember the new windowed size so it can be restored later (#1).
                 self.track_windowed_geometry();
@@ -5756,25 +5723,25 @@ impl ApplicationHandler for App {
                 self.core.held.clear();
                 self.core.hold_start = None;
                 self.core.mods = contract::Modifiers::NONE;
-                self.zoom_started = None;
-                self.zoom_last = None;
-                self.pan_started = None;
-                self.pan_last = None;
+                self.core.zoom_started = None;
+                self.core.zoom_last = None;
+                self.core.pan_started = None;
+                self.core.pan_last = None;
                 self.pie_glow_started = None;
                 // Focus loss can swallow the button-up — never leave a drag stuck.
-                self.dragging = false;
+                self.core.dragging = false;
             }
 
             // Track the pointer (anchor for pinch/wheel zoom) and, while the left
             // button is held, drag-to-pan: move the image by the cursor delta.
             WindowEvent::CursorMoved { position, .. } => {
                 let p = [position.x as f32, position.y as f32];
-                if self.dragging {
-                    if let Some(prev) = self.last_cursor {
+                if self.core.dragging {
+                    if let Some(prev) = self.core.last_cursor {
                         self.pan_by_pixels(p[0] - prev[0], p[1] - prev[1]);
                     }
                 }
-                self.last_cursor = Some(p);
+                self.core.last_cursor = Some(p);
                 self.update_chip_hover();
                 self.update_open_hover();
                 self.update_play_hint_hover();
@@ -5784,7 +5751,7 @@ impl ApplicationHandler for App {
             // Pointer left the window: drop any Cancel Scan / open-button / play-hint hover so
             // they don't stay lit.
             WindowEvent::CursorLeft { .. } => {
-                self.last_cursor = None;
+                self.core.last_cursor = None;
                 self.update_chip_hover();
                 self.update_open_hover();
                 self.update_play_hint_hover();
@@ -5812,12 +5779,13 @@ impl ApplicationHandler for App {
                     self.dispatch_action(Action::PlayPause);
                 } else if pressed
                     && self
+                        .core
                         .last_cursor
                         .is_some_and(|[cx, cy]| self.chip_hit(cx, cy))
                 {
                     self.cancel_scan_command();
                 } else {
-                    self.dragging = pressed;
+                    self.core.dragging = pressed;
                     self.refresh_cursor();
                 }
             }
@@ -6053,9 +6021,9 @@ impl ApplicationHandler for App {
         // rebuild the ring at the new slot size, re-show the current photo crisp,
         // and refill neighbours. Debounced from the Resized handler so a drag
         // doesn't re-decode on every intermediate size.
-        let resizing = match self.resize_settle_at {
+        let resizing = match self.core.resize_settle_at {
             Some(at) if now >= at => {
-                self.resize_settle_at = None;
+                self.core.resize_settle_at = None;
                 self.invalidate_geometry();
                 self.load_current_sync();
                 self.target_item = self.playlist.current();
@@ -6076,9 +6044,9 @@ impl ApplicationHandler for App {
         // 4e. Persist the windowed geometry once the user stops moving/resizing (#1).
         // Debounced from the Moved/Resized handlers so a drag isn't a write storm; an
         // explicit user action (positioning the window), never the view path.
-        if let Some(at) = self.geometry_save_at {
+        if let Some(at) = self.core.geometry_save_at {
             if now >= at {
-                self.geometry_save_at = None;
+                self.core.geometry_save_at = None;
                 self.settings.save();
             }
         }
@@ -6148,7 +6116,7 @@ impl ApplicationHandler for App {
             || self.pending_delete.is_some()
             // Keep ticking until the debounced windowed-geometry save fires (#1), so a
             // window move/resize is persisted even when nothing else wakes the loop.
-            || self.geometry_save_at.is_some()
+            || self.core.geometry_save_at.is_some()
         {
             Some(now + self.core.frame_interval)
         } else if slideshow_running {

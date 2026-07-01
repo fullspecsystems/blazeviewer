@@ -15,6 +15,9 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use pb_decode::FitBox;
+use pb_render::{Rotation, ScaleMode, ViewTransform};
+
 use crate::{Action, Modifiers, PbKey, Slideshow};
 
 /// The platform-neutral orchestration state the shell drives. Grows as step 5 relocates
@@ -41,13 +44,42 @@ pub struct AppCore {
     /// Briefly guards Esc-to-quit after a modal (picker / dialog) closes, so its stray Esc
     /// leak can't also quit the app.
     pub esc_guard_until: Option<Instant>,
+
+    // --- View / geometry (NS0 5.2) ---
+    /// Decode-to-fit target = the display size; photos are downscaled to it.
+    pub fit: Option<FitBox>,
+    /// Per-photo view transform (scaling mode + rotation + zoom + pan).
+    pub view: ViewTransform,
+    /// Last cursor position in physical px — the pinch/wheel-zoom anchor and the
+    /// drag-to-pan reference. `None` until the pointer first moves over the window.
+    pub last_cursor: Option<[f32; 2]>,
+    /// Whether the left mouse button is held — drives drag-to-pan.
+    pub dragging: bool,
+    /// Per-image in-RAM rotation overrides (`r` / `Shift+R`), applied as a GPU transform
+    /// at draw; RAM-only until the user Saves (privacy #2). Absent = upright.
+    pub rotations: HashMap<usize, Rotation>,
+    /// Pinch-zoom gesture timing accumulators (start + last event).
+    pub zoom_started: Option<Instant>,
+    pub zoom_last: Option<Instant>,
+    /// Two-finger pan gesture timing accumulators (start + last event).
+    pub pan_started: Option<Instant>,
+    pub pan_last: Option<Instant>,
+    /// When a window resize/toggle has "settled" enough to re-decode at the new fit.
+    pub resize_settle_at: Option<Instant>,
+    /// When to persist the debounced window-geometry change (an explicit user action).
+    pub geometry_save_at: Option<Instant>,
 }
 
 impl AppCore {
-    /// Build the initial core. `initial_delay` and `slideshow_interval` come from user
-    /// settings; the rest start at their launch defaults — nothing held, a ~120 Hz cadence
-    /// until the real refresh rate is read, slideshow off, no modifiers, no esc-guard.
-    pub fn new(initial_delay: Duration, slideshow_interval: Duration) -> Self {
+    /// Build the initial core. `initial_delay`, `slideshow_interval`, and `default_scale`
+    /// come from user settings; the rest start at their launch defaults — nothing held, a
+    /// ~120 Hz cadence until the real refresh rate is read, slideshow off, no modifiers,
+    /// upright at the default scale, no gesture/geometry timers pending.
+    pub fn new(
+        initial_delay: Duration,
+        slideshow_interval: Duration,
+        default_scale: ScaleMode,
+    ) -> Self {
         Self {
             held: HashMap::new(),
             last_present: None,
@@ -60,6 +92,20 @@ impl AppCore {
             },
             mods: Modifiers::NONE,
             esc_guard_until: None,
+            fit: None,
+            view: ViewTransform {
+                mode: default_scale,
+                ..ViewTransform::default()
+            },
+            last_cursor: None,
+            dragging: false,
+            rotations: HashMap::new(),
+            zoom_started: None,
+            zoom_last: None,
+            pan_started: None,
+            pan_last: None,
+            resize_settle_at: None,
+            geometry_save_at: None,
         }
     }
 }
