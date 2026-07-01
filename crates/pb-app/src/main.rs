@@ -71,7 +71,6 @@ mod macos_chrome;
 #[cfg(target_os = "macos")]
 mod macos_open;
 mod menu;
-mod metrics;
 mod pb_key_winit;
 #[cfg(target_os = "macos")]
 mod proxy_icon;
@@ -90,8 +89,8 @@ use hud::{Hud, Row};
 use keymap::Keymap;
 use live_audio::LiveAudio;
 use menu::MenuAction;
-use metrics::StageTimes;
 use pb_app_core::decode_pool::{recommended_workers, DecodeFn, DecodePool, Outcome};
+use pb_app_core::metrics::StageTimes;
 use pb_key::PbKey;
 
 /// VRAM budget for the resident texture ring (~1.5 GB → ~16–32 fit-size slots on
@@ -566,8 +565,6 @@ struct App {
     overlay_item: Option<usize>,
     /// Display scale factor, for sizing the panel.
     scale_factor: f32,
-    /// Per-stage timing (decode/upload/render); disabled unless `--metrics` is passed.
-    metrics: StageTimes,
 
     // --- Phase 3 prefetch engine ---
     /// Geometry generation; bumped on resize / fit toggle. Stale-epoch decodes are
@@ -921,6 +918,7 @@ impl App {
                 scale_mode_of(settings.scale_mode),
                 pool,
                 results,
+                metrics,
             ),
             root,
             hud: Hud::load(),
@@ -928,7 +926,6 @@ impl App {
             overlay_shown: false,
             overlay_item: None,
             scale_factor: 1.0,
-            metrics,
             epoch: 1,
             displayed_item: None,
             target_item: None,
@@ -1554,7 +1551,7 @@ impl App {
         // tracks the photo with no blank flash. The bitmap stays up meanwhile.
         self.core.last_present = Some(Instant::now());
         self.draw();
-        self.metrics.record("present", t0.elapsed());
+        self.core.metrics.record("present", t0.elapsed());
     }
 
     /// A target that failed to decode (corrupt/unreadable): count it as "shown"
@@ -1718,7 +1715,7 @@ impl App {
                         is_hdr(img),
                         img.peak,
                     );
-                    self.metrics.record("upload", t0.elapsed());
+                    self.core.metrics.record("upload", t0.elapsed());
                 }
                 self.core.ring.set_slot_bytes(item, item_bytes);
                 self.core.preview_resident.remove(&item);
@@ -1729,7 +1726,7 @@ impl App {
                 let t0 = self.full_requested_at.remove(&item);
                 if self.displayed_item == Some(item) {
                     if let Some(t0) = t0 {
-                        self.metrics.record("sharpen", t0.elapsed());
+                        self.core.metrics.record("sharpen", t0.elapsed());
                     }
                 }
                 uploads += 1;
@@ -1762,7 +1759,7 @@ impl App {
                         is_hdr(img),
                         img.peak,
                     );
-                    self.metrics.record("upload", t0.elapsed());
+                    self.core.metrics.record("upload", t0.elapsed());
                 }
                 self.core.ring.mark_resident(item, res.slot, self.epoch);
                 if img.is_preview {
@@ -1800,7 +1797,7 @@ impl App {
         // fast enough not to beachball, and faster still once dev builds optimize the
         // decoders; see the `[profile.dev]` note in the workspace Cargo.toml.)
         let decoded = decode_item(self.source.as_ref(), idx, self.decode_fit(), true);
-        self.metrics.record("decode", t0.elapsed());
+        self.core.metrics.record("decode", t0.elapsed());
         match decoded {
             Ok(img) => {
                 let meta = meta_for(self.source.as_ref(), idx, &self.root, &img);
@@ -4401,7 +4398,7 @@ impl App {
             self.effects.push(contract::CoreEffect::Quit);
         }
         if drew {
-            self.metrics.record("render", t0.elapsed());
+            self.core.metrics.record("render", t0.elapsed());
         }
     }
 
@@ -4486,7 +4483,7 @@ impl App {
             }
         }
         self.open_pending_dialog(event_loop);
-        self.metrics.record("drain", t0.elapsed());
+        self.core.metrics.record("drain", t0.elapsed());
     }
 
     /// Open the dialog an opener method deferred (see [`App::pending_dialog`]). The one
@@ -5435,7 +5432,7 @@ impl ApplicationHandler for App {
                 let t0 = Instant::now();
                 // Preview-first (see `load_current_sync`): the full decode lands off-thread.
                 let decoded = decode_item(self.source.as_ref(), idx, self.decode_fit(), true);
-                self.metrics.record("decode", t0.elapsed());
+                self.core.metrics.record("decode", t0.elapsed());
                 if let Ok(img) = decoded {
                     let meta = meta_for(self.source.as_ref(), idx, &self.root, &img);
                     self.core.current = Some(meta.clone());
@@ -7026,11 +7023,11 @@ fn main() {
     }
     event_loop.run_app(&mut app).expect("event loop");
 
-    let report = app.metrics.report();
+    let report = app.core.metrics.report();
     if !report.is_empty() {
         let mut d = POOL_DECODE_MS.lock().unwrap().clone();
         let times: Vec<f64> = d.iter().map(|(ms, _)| *ms).collect();
-        let p = metrics::percentiles(&times, &[50.0, 95.0, 99.0]);
+        let p = pb_app_core::metrics::percentiles(&times, &[50.0, 95.0, 99.0]);
         println!(
             "\npool decode (under load): n={} p50={:.1} p95={:.1} p99={:.1} ms",
             d.len(),

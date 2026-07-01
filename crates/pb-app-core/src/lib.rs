@@ -26,6 +26,7 @@ pub mod contract;
 pub mod decode_pool;
 pub mod keymap;
 pub mod meta;
+pub mod metrics;
 pub mod pb_key;
 pub mod slideshow;
 pub mod timing;

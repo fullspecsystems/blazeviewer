@@ -22,6 +22,7 @@ use pb_decode::FitBox;
 use pb_render::{Rotation, ScaleMode, ViewTransform};
 
 use crate::decode_pool::{DecodePool, Outcome};
+use crate::metrics::StageTimes;
 use crate::{Action, Modifiers, PbKey, PhotoMeta, Slideshow};
 
 /// The platform-neutral orchestration state the shell drives. Grows as step 5 relocates
@@ -101,6 +102,9 @@ pub struct AppCore {
     /// Completed decodes awaiting GPU upload — drained on the tick, never on the keypress
     /// frame (a keypress stays a rebind).
     pub pending_uploads: Vec<Outcome>,
+
+    /// Per-stage timing (decode/upload/render); disabled unless `--metrics` is passed.
+    pub metrics: StageTimes,
 }
 
 impl AppCore {
@@ -114,6 +118,7 @@ impl AppCore {
         default_scale: ScaleMode,
         pool: DecodePool,
         results: Receiver<Outcome>,
+        metrics: StageTimes,
     ) -> Self {
         Self {
             held: HashMap::new(),
@@ -153,6 +158,7 @@ impl AppCore {
             deleted: HashSet::new(),
             preview_resident: HashSet::new(),
             pending_uploads: Vec::new(),
+            metrics,
         }
     }
 }
