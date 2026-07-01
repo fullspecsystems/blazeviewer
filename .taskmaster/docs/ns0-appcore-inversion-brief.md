@@ -8,14 +8,15 @@
 
 ## STATUS — for the fresh session (updated 2026-06-30, branch `swiftui`)
 
-All work below is **committed, green (workspace suite 380 tests, clippy/fmt clean)**. Steps
-through **step 3 are owner-smoke-verified**; the **entire effect-seam 4a–4e** (menu / clipboard /
-rfd / dialog-results-partial / fullscreen) is green + committed but **shell-side, so owner-smoke
-is pending** (per-step smoke lists in step 4). `main` is merged in (incl. its help-overlay / Play
-hint / mute-icon / Open-buttons features, reconciled onto the inverted structure) and macOS Copy
-Image now writes image+file. Nothing is half-done. **The effect-seam is complete; the sole
-remaining piece is step 5 (the physical `AppCore` struct move)** — recommended on a smoke-verified
-base, done incrementally (see step 5's increment order + "why it's not an overnight slam").
+All work below is **committed, green (workspace suite 380 tests, clippy/fmt clean), and
+owner-smoke-verified** — the **entire effect-seam 4a–4e** (menu / clipboard / rfd /
+dialog-results-partial / fullscreen) passed the manual smoke ("everything works, same as
+before"), as did the reconciled `main` features (help-overlay / Play hint / mute icons /
+Open buttons) and the two macOS fixes (Copy Image writes image+file; the Scroll-wheel setting
+now applies to the trackpad). **The whole branch was fast-forwarded onto `main`** at this point.
+Nothing is half-done. **The effect-seam is complete; the sole remaining piece is step 5 (the
+physical `AppCore` struct move)** — a fresh phase, done incrementally (see step 5's increment
+order + "why it's not an overnight slam").
 
 ### Landed — inversion seams + de-thread (the `event_loop` half)
 - **Ckpt 1** (`3d7c42d`): `CoreEffect` queue + `drain_effects`; `begin_exit` → `Quit`.
