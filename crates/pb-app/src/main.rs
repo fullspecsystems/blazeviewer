@@ -140,6 +140,11 @@ const PAN_RAMP_SECS: f32 = 0.7;
 /// zoom gesture; plain scroll pans instead — see the `MouseWheel` handler).
 const PINCH_GAIN: f32 = 1.0;
 const WHEEL_ZOOM_STEP: f32 = 0.1;
+/// Per-**pixel** zoom factor for a pixel-precise scroll (`PixelDelta` — a macOS trackpad
+/// two-finger swipe) when the `Scroll wheel` setting is Zoom (or Ctrl is held). Much smaller
+/// than [`WHEEL_ZOOM_STEP`] because a trackpad delivers many events of tens of pixels each;
+/// `0.0025` gives ~1.6× over a full swipe. Tunable if the zoom feels too fast/slow.
+const PIXEL_ZOOM_STEP: f32 = 0.0025;
 /// Pixels panned per scroll *line* (`LineDelta`). On Windows winit reports both a
 /// real mouse wheel and a precision-trackpad two-finger swipe as `LineDelta` (it
 /// never emits `PixelDelta` there), so plain scroll pans by this much per line:
@@ -5857,29 +5862,40 @@ impl ApplicationHandler for App {
                 self.dispatch_action(Action::ToggleOriginal);
             }
 
-            // Scroll. macOS sends pixel-precise `PixelDelta` (always pan — pinch is the
-            // Mac zoom gesture); Windows reports both a real mouse wheel and a precision-
-            // trackpad two-finger swipe as `LineDelta`. The `Scroll wheel` setting picks
-            // what a plain `LineDelta` does (pan by default, or zoom); Ctrl always flips
-            // to the other action — so a two-finger swipe pans like on the Mac, and zoom
-            // stays reachable with Ctrl held (or as the default if the user prefers it).
-            WindowEvent::MouseWheel { delta, .. } => match delta {
-                MouseScrollDelta::PixelDelta(p) => {
-                    self.pan_by_pixels(p.x as f32 * GESTURE_PAN_DIR, p.y as f32 * GESTURE_PAN_DIR)
-                }
-                MouseScrollDelta::LineDelta(x, y) => {
-                    let zooms = self.settings.scroll_action == settings::ScrollAction::Zoom;
-                    if zooms != self.mods.ctrl {
-                        let factor = (1.0 + y * WHEEL_ZOOM_STEP).max(0.05);
-                        self.zoom_about_cursor(factor);
-                    } else {
-                        self.pan_by_pixels(
-                            x * WHEEL_PAN_STEP * GESTURE_PAN_DIR,
-                            y * WHEEL_PAN_STEP * GESTURE_PAN_DIR,
-                        );
+            // Scroll. macOS sends pixel-precise `PixelDelta` (a trackpad two-finger swipe);
+            // Windows reports both a real mouse wheel and a precision-trackpad swipe as
+            // `LineDelta` (and a macOS *mouse* wheel is `LineDelta` too). Both honor the same
+            // `Scroll wheel` setting — pan by default, or zoom — with Ctrl always flipping to
+            // the other action. So the setting is live on a Mac trackpad too (it used to be
+            // ignored there, hard-wired to pan); the default stays Pan, and Ctrl+swipe zooms.
+            WindowEvent::MouseWheel { delta, .. } => {
+                let zooms = self.settings.scroll_action == settings::ScrollAction::Zoom;
+                let zoom = zooms != self.mods.ctrl;
+                match delta {
+                    MouseScrollDelta::PixelDelta(p) => {
+                        if zoom {
+                            let factor = (1.0 + p.y as f32 * PIXEL_ZOOM_STEP).max(0.05);
+                            self.zoom_about_cursor(factor);
+                        } else {
+                            self.pan_by_pixels(
+                                p.x as f32 * GESTURE_PAN_DIR,
+                                p.y as f32 * GESTURE_PAN_DIR,
+                            );
+                        }
+                    }
+                    MouseScrollDelta::LineDelta(x, y) => {
+                        if zoom {
+                            let factor = (1.0 + y * WHEEL_ZOOM_STEP).max(0.05);
+                            self.zoom_about_cursor(factor);
+                        } else {
+                            self.pan_by_pixels(
+                                x * WHEEL_PAN_STEP * GESTURE_PAN_DIR,
+                                y * WHEEL_PAN_STEP * GESTURE_PAN_DIR,
+                            );
+                        }
                     }
                 }
-            },
+            }
 
             _ => {}
         }

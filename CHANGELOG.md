@@ -69,6 +69,10 @@ with any pre-release suffix carried only by the tag.
   against the left and right edges.
 
 ### Fixed
+- **The "Scroll wheel" setting (pan vs zoom) now applies to a macOS trackpad**, not just a
+  mouse wheel. A two-finger swipe was hard-wired to pan and ignored the setting; now Pan stays
+  the default but choosing **Zoom** makes a swipe zoom, and **Ctrl+swipe** always does the other
+  action (so zoom is reachable even in Pan mode). Pinch-to-zoom is unchanged.
 - **Copy Image (Ctrl/⌘C) now works on macOS** — it previously showed "Copy failed" because the
   image clipboard was implemented only on Windows. Like on Windows, it copies **both** the
   picture and a reference to the file, so a paste does the right thing wherever it lands: paste
