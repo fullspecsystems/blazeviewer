@@ -142,6 +142,16 @@ pub struct AppCore {
     /// Completed decodes awaiting GPU upload — drained on the tick, never on the keypress
     /// frame (a keypress stays a rebind).
     pub pending_uploads: Vec<Outcome>,
+    /// Items whose full-res decode turned out no better than the preview (e.g. a RAW whose
+    /// only embedded image *is* its preview) — so we don't re-request their upgrade each tick.
+    pub upgrade_done: HashSet<usize>,
+    /// The last full-upgrade set (the "sharp ring") issued, so the idle pump diffs against it.
+    pub last_upgrade_set: Vec<usize>,
+    /// When a full-res upgrade was requested per item, to rate-limit re-requests.
+    pub full_requested_at: HashMap<usize, Instant>,
+    /// Live Photo pairing, memoized per item: `Some(path)` = companion motion `.mov`, `None`
+    /// = not a Live Photo. Filled lazily only when settled on a photo; RAM-only (privacy #2).
+    pub live_motion_cache: HashMap<usize, Option<PathBuf>>,
 
     /// Per-stage timing (decode/upload/render); disabled unless `--metrics` is passed.
     pub metrics: StageTimes,

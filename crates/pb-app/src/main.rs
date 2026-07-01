@@ -459,11 +459,6 @@ struct App {
     /// OS window handle stays shell-owned; the `handle(CoreEvent)` dispatch follows.
     core: AppCore,
 
-    /// Live Photo pairing, memoized per item: `Some(path)` = the companion motion
-    /// `.mov`, `None` = not a Live Photo. Filled lazily (one `stat`) only when settled
-    /// on a photo — never on the fly-through path. RAM-only, index-keyed, cleared on a
-    /// playlist rebuild. Always `None` off macOS (Windows Live Photos = task #39).
-    live_motion_cache: HashMap<usize, Option<PathBuf>>,
     /// Files dropped on the window this burst; winit delivers one event per file,
     /// so they're coalesced here and applied once in `about_to_wait`.
     pending_drops: Vec<PathBuf>,
@@ -472,17 +467,6 @@ struct App {
     /// changes — so dragging across a display with different HDR capability adapts.
     #[cfg(target_os = "macos")]
     last_edr_headroom: f32,
-    /// Items whose full-resolution decode turned out to be no better than the
-    /// preview (e.g. a RAW whose only embedded image *is* its preview) — so we
-    /// don't keep re-requesting their upgrade every idle tick.
-    upgrade_done: HashSet<usize>,
-    /// The last full-upgrade set (the "sharp ring") we issued, so the idle pump
-    /// re-issues only when it changes (not every tick → no per-frame churn).
-    last_upgrade_set: Vec<usize>,
-    /// When each item's full ("sharpen") decode was first requested, to measure the
-    /// real end-to-end sharpen latency (full requested → full on screen) via the
-    /// `sharpen` metric stage. RAM-only, pruned to resident in `request_prefetch`.
-    full_requested_at: HashMap<usize, Instant>,
     /// The native menu bar (windowed mode only). Built once, kept alive here so its
     /// native handle outlives the window. `None` until the first window is created.
     menu: Option<muda::Menu>,
@@ -769,6 +753,10 @@ impl App {
                 deleted: HashSet::new(),
                 preview_resident: HashSet::new(),
                 pending_uploads: Vec::new(),
+                upgrade_done: HashSet::new(),
+                last_upgrade_set: Vec::new(),
+                full_requested_at: HashMap::new(),
+                live_motion_cache: HashMap::new(),
                 metrics,
                 source,
                 playlist,
@@ -806,9 +794,6 @@ impl App {
             pending_drops: Vec::new(),
             #[cfg(target_os = "macos")]
             last_edr_headroom: 1.0,
-            upgrade_done: HashSet::new(),
-            last_upgrade_set: Vec::new(),
-            full_requested_at: HashMap::new(),
             menu: None,
             #[cfg(target_os = "macos")]
             window_menu: None,
@@ -843,7 +828,6 @@ impl App {
             live_revert_at: None,
             live_audio: None,
             pending_dialog: None,
-            live_motion_cache: HashMap::new(),
         }
     }
 
@@ -905,9 +889,11 @@ impl App {
         self.core
             .preview_resident
             .retain(|i| self.core.ring.slot_for(*i).is_some());
-        self.upgrade_done
+        self.core
+            .upgrade_done
             .retain(|i| self.core.ring.slot_for(*i).is_some());
-        self.full_requested_at
+        self.core
+            .full_requested_at
             .retain(|i, _| self.core.ring.slot_for(*i).is_some());
         // Items decoded but not yet uploaded must not be re-requested (the pool no
         // longer tracks them, so it would decode them again).
@@ -921,10 +907,16 @@ impl App {
         let ring: HashSet<usize> = self.prefetch_fulls().into_iter().collect();
         // Stamp when each full was first requested, for the `sharpen` latency metric.
         if let Some(d) = sharpen {
-            self.full_requested_at.entry(d).or_insert_with(Instant::now);
+            self.core
+                .full_requested_at
+                .entry(d)
+                .or_insert_with(Instant::now);
         }
         for &t in &ring {
-            self.full_requested_at.entry(t).or_insert_with(Instant::now);
+            self.core
+                .full_requested_at
+                .entry(t)
+                .or_insert_with(Instant::now);
         }
 
         // Build the job list in three priority tiers (the pool decodes by position):
@@ -975,7 +967,7 @@ impl App {
         let d = self.core.displayed_item?;
         (self.core.ring.slot_for(d).is_some()
             && self.core.preview_resident.contains(&d)
-            && !self.upgrade_done.contains(&d))
+            && !self.core.upgrade_done.contains(&d))
         .then_some(d)
     }
 
@@ -1003,7 +995,7 @@ impl App {
             Some(i) != sharpen
                 && self.core.ring.slot_for(i).is_some()
                 && self.core.preview_resident.contains(&i)
-                && !self.upgrade_done.contains(&i)
+                && !self.core.upgrade_done.contains(&i)
                 && !self.is_raw_item(i)
         })
         .collect()
@@ -1193,7 +1185,7 @@ impl App {
                 self.core.exif_cache.remove(&item); // the file's EXIF (Orientation) just changed
                 self.core.failed.remove(&item);
                 self.core.preview_resident.remove(&item);
-                self.upgrade_done.remove(&item);
+                self.core.upgrade_done.remove(&item);
                 self.invalidate_geometry();
                 self.load_current_sync();
                 self.core.target_item = self.core.playlist.current();
@@ -1232,7 +1224,7 @@ impl App {
                         self.core.exif_cache.remove(&item); // EXIF Orientation reverted on disk
                         self.core.failed.remove(&item);
                         self.core.preview_resident.remove(&item);
-                        self.upgrade_done.remove(&item);
+                        self.core.upgrade_done.remove(&item);
                         self.invalidate_geometry();
                         self.load_current_sync();
                         self.core.target_item = self.core.playlist.current();
@@ -1351,11 +1343,11 @@ impl App {
         self.core.rotations.clear();
         self.core.meta_cache.clear();
         self.core.exif_cache.clear();
-        self.live_motion_cache.clear();
+        self.core.live_motion_cache.clear();
         self.core.failed.clear();
         self.core.preview_resident.clear();
-        self.upgrade_done.clear();
-        self.last_upgrade_set.clear();
+        self.core.upgrade_done.clear();
+        self.core.last_upgrade_set.clear();
         self.undo_stack.clear();
         self.invalidate_geometry();
         self.core.displayed_item = None;
@@ -1487,7 +1479,7 @@ impl App {
                 if resident {
                     // A full-upgrade decode failed, but the resident preview is fine
                     // — keep it and stop retrying the upgrade.
-                    self.upgrade_done.insert(item);
+                    self.core.upgrade_done.insert(item);
                     return false;
                 }
                 eprintln!("decode failed for item {item}: {e}");
@@ -1509,7 +1501,7 @@ impl App {
                 let is_prev = self.core.preview_resident.contains(&item);
                 let img = o.result.as_ref().expect("Err handled above");
                 if is_prev && img.is_preview {
-                    self.upgrade_done.insert(item);
+                    self.core.upgrade_done.insert(item);
                 }
                 return is_prev && !img.is_preview;
             }
@@ -1584,7 +1576,7 @@ impl App {
                 // user actually waits on): full requested → full on screen. Ahead-ring
                 // fulls land late by design (low priority), so they'd skew this — only
                 // record the displayed one.
-                let t0 = self.full_requested_at.remove(&item);
+                let t0 = self.core.full_requested_at.remove(&item);
                 if self.core.displayed_item == Some(item) {
                     if let Some(t0) = t0 {
                         self.core.metrics.record("sharpen", t0.elapsed());
@@ -2857,11 +2849,11 @@ impl App {
         self.core.rotations.clear();
         self.core.meta_cache.clear();
         self.core.exif_cache.clear();
-        self.live_motion_cache.clear();
+        self.core.live_motion_cache.clear();
         self.core.failed.clear();
         self.core.preview_resident.clear();
-        self.upgrade_done.clear();
-        self.last_upgrade_set.clear();
+        self.core.upgrade_done.clear();
+        self.core.last_upgrade_set.clear();
         // Undo entries reference the old source's indices/paths — drop them too.
         self.undo_stack.clear();
         // Invalidate the ring + bump the epoch (discards in-flight old decodes),
@@ -3632,7 +3624,8 @@ impl App {
     /// safe from the render/rows path; the `&mut` [`live_motion_path`](App::live_motion_path)
     /// is what fills the cache.
     fn is_live_photo(&self, item: usize) -> bool {
-        self.live_motion_cache
+        self.core
+            .live_motion_cache
             .get(&item)
             .is_some_and(|paired| paired.is_some())
     }
@@ -4432,12 +4425,12 @@ impl App {
         self.core.pending_uploads.clear();
         self.core.meta_cache.clear();
         self.core.exif_cache.clear();
-        self.live_motion_cache.clear();
+        self.core.live_motion_cache.clear();
         self.core.rotations.clear();
         self.core.failed.clear();
         self.core.preview_resident.clear();
-        self.upgrade_done.clear();
-        self.last_upgrade_set.clear();
+        self.core.upgrade_done.clear();
+        self.core.last_upgrade_set.clear();
         self.undo_stack.clear();
         self.core.current = None;
         self.core.toast = None;
@@ -4825,13 +4818,13 @@ impl App {
             return None;
         }
         #[cfg(target_os = "macos")]
-        if let Some(cached) = self.live_motion_cache.get(&item) {
+        if let Some(cached) = self.core.live_motion_cache.get(&item) {
             return cached.clone();
         }
         #[cfg(target_os = "macos")]
         {
             let paired = self.core.source.path(item).and_then(companion_motion);
-            self.live_motion_cache.insert(item, paired.clone());
+            self.core.live_motion_cache.insert(item, paired.clone());
             paired
         }
     }
@@ -5831,8 +5824,8 @@ impl ApplicationHandler for App {
         let mut sharpen_pending = false;
         if self.held_nav().is_none() {
             let upgrade = self.fulls_wanted();
-            if upgrade != self.last_upgrade_set {
-                self.last_upgrade_set = upgrade.clone();
+            if upgrade != self.core.last_upgrade_set {
+                self.core.last_upgrade_set = upgrade.clone();
                 self.request_prefetch();
             }
             sharpen_pending = !upgrade.is_empty();
