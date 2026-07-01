@@ -6,70 +6,94 @@
 > execution detail under it. **Nothing here changes behavior on purpose** — it's a
 > pure refactor gated on a manual smoke (owner is smoke-testing in parallel).
 
-## Progress & validated findings (2026-06-30)
+## STATUS — for the fresh session (updated 2026-06-30, branch `swiftui`)
 
-**Checkpoint 1 landed** (commit `3d7c42d`): the `CoreEffect` queue + `drain_effects`
-seam. `App` has `effects: Vec<contract::CoreEffect>`; `begin_exit` pushes
-`CoreEffect::Quit` (no longer takes `event_loop`); `drain_effects(event_loop)` runs at the
-end of each `ApplicationHandler` entry (`window_event` incl. the dialog-route early return,
-`about_to_wait`). Green (115 tests), clippy/fmt clean, exit fires the same loop iteration.
+All work below is **committed, green (workspace suite ~376 tests, clippy/fmt clean), and
+manually smoke-verified** by the owner. `main` (Live Photo support) is merged in. Nothing is
+half-done. Resume at **step 3** below.
 
-**Findings that reorder the plan (measured, not assumed):**
-- **`event_loop` is shallow but its de-thread cascades.** 76 fns take it; only ~8 real
-  uses (`exit` ×2, `set_control_flow` ×3, `resumed`'s window/monitor creation ×3). But
-  removing it from `draw` (25 call sites) cascades: any method whose *only* `event_loop`
-  use is `self.draw()` then has an unused param → its callers too. So `draw`'s de-thread
-  must ride along with the full pass, **after** dialogs. `begin_exit` was safe to convert
-  alone precisely because its 3 callers keep `event_loop` for other work (→ ckpt 1).
-- **De-threading is entangled with the dialog inversion.** `DialogWindow::open(event_loop,
-  …)` (`dialog.rs:389`) means the ~6 dialog-opening methods *need* `event_loop` to create
-  their window. `event_loop` can't leave those methods until dialogs become a
-  `ShowDialog` effect the shell fulfills. **Do dialogs before the final de-thread.**
-- **`request_redraw` is hot-path-sensitive, not a free leaf effect.** Its 11 sites interact
-  with frame pacing / the self-paced advance (keypress→photon). Rerouting it through the
-  deferred queue changes *when* redraw is requested relative to `set_control_flow` — do it
-  deliberately, with the manual hold-to-fly smoke, not as a mechanical batch.
-- **Safe, non-cascading, non-hot-path leaves still available:** window ops
-  (`set_title`/`set_cursor`/`set_fullscreen`, ~11) → `SetTitle`/`SetCursor`/`SetWindowMode`.
-  `clipboard` (4) and `rfd` panels (2) need new/`NS-later` effect payloads + (rfd) the
-  Esc-guard trap, so they ride with their stages.
+### Landed — inversion seams + de-thread (the `event_loop` half)
+- **Ckpt 1** (`3d7c42d`): `CoreEffect` queue + `drain_effects`; `begin_exit` → `Quit`.
+- **Ckpt 2** (`8ee89b1`): **dialog inversion** — a `DialogRequest` enum + `App.pending_dialog`;
+  the single `DialogWindow::open` now lives in the shell's `open_pending_dialog` (drained where
+  `event_loop` lives). `become_loading` promotion + focus-if-same-kind stay synchronous.
+- **Ckpt 3** (`e82d4d7`): **`event_loop` fully de-threaded** — 68 → **5** params (only
+  `resumed`, `window_event`, `about_to_wait`, `drain_effects`, `open_pending_dialog`). `draw()`
+  routes its fatal exit through `Quit`; the archive-flow circular knot (`begin_archive_open ↔
+  finish_archive_open`) was cut in one global strip. Orchestration is now winit-event-loop-free.
 
-**Revised checkpoint order** (supersedes §7 for execution): (1) ✅ effect queue + `Quit`.
-(2) ✅ **dialog inversion** (deferred-open form). (3) ✅ **`event_loop` full de-thread**
-(commit `e82d4d7`) — done ahead of window ops; params 68 → **5** (only `resumed`,
-`window_event`, `about_to_wait`, `drain_effects`, `open_pending_dialog`). `draw()` routes
-its fatal exit through `Quit`; the archive-flow circular knot was cut in the same global
-strip. Behavior-preserving (orchestration only *threaded* it). (4) window ops
-(`set_title`/`set_cursor`/`set_visible`) → effects (safe); `request_redraw` +
-`set_fullscreen` are hot-path/swapchain-sensitive — do with smoke. (5) rfd + clipboard →
-effects. (6) **the keystone**: split `Active` → shell `window` + AppCore
-`Box<dyn Renderer>`; move the orchestration state + methods into `pb-app-core` (they still
-touch `self.active`/renderer/muda/dialog directly — those couplings, not `event_loop`, are
-what's left); reduce the winit `App` to a thin `WinitShell`. Manual smoke between stages.
+### Landed — keystone steps 1–2 (the ownership half), each measured flat
+- **Step 1** (`98e85cc`): **`Active` split** into separate `window: Option<Arc<Window>>` +
+  `renderer: Option<WgpuRenderer>` fields (42 sites; the 5 "uses both" blocks split into two
+  disjoint-field borrows). Concrete types — no vtable, perf-neutral. **Measured flat.**
+- **Step 2** (`3264521`): **window ops → effects** — `set_title` (5 sites), main-window
+  `request_redraw` (3), `refresh_cursor` → `SetCursor` (`CursorKind` extended with
+  Grab/Grabbing/Pointer; shell maps via `cursor_icon`). `drain_effects` grew a real match +
+  a `drain` `--metrics` stage. **Measured flat** — `set_title` (~0.13 ms) relocated from
+  `present_item` to the drain (present p50 0.32 → 0.16, drain absorbed it, total flat).
 
-**Checkpoint 2 landed** (commit `8ee89b1`): dialog opens are deferred through the shell. A
-`DialogRequest` enum + `App.pending_dialog`: openers record *what* to open; the single
-`DialogWindow::open` now lives in the shell's `open_pending_dialog` (called from
-`drain_effects`, where `event_loop` lives). The `become_loading` password→loading promotion
-and the focus-if-same-kind check stay synchronous. Dropped `event_loop` from 9 methods (the
-6 openers + `open_about`/`open_settings`/`report_archive_error`/`fail_archive_open`); params
-76 → 68. Green, but **behavior-sensitive — needs the dialog smoke** (archive open+progress,
-password retry, scan progress, confirm-delete, settings/about) since dialog creation now
-happens at the drain boundary instead of inline.
+## Measurement methodology (keep using it)
 
-**Stage 4 (`event_loop` full de-thread) — measured cost + the knot.** Converting `draw`
-(route its fatal-render `exit()` through `CoreEffect::Quit` via a local `fatal` flag, since
-`self.active.as_mut()` is borrowed; then drop its `event_loop`) is the trigger. Measured:
-`draw`'s 25 call sites → **16 methods** with a newly-unused `event_loop` at level 1, and
-tracing further it reaches ~40–60 methods (through `dispatch_action`/`dispatch_menu` and the
-nav/zoom/rotate/pan handlers), terminating at the 3 surface methods. **The knot:** the
-archive-open flow is *circular* — `begin_archive_open` and `finish_archive_open` pass
-`event_loop` to each other (1911/1977), so neither ever flags as unused; a compiler-driven
-iterative pass won't converge on them. Remove `event_loop` from **both simultaneously** (and
-check `finish_archive_open`/`poll_archive_load`/`reconfigure_edr_for_display`/`dialog_event`
-for any genuine use first). This stage is mechanical but large — do it as one focused pass,
-not an end-of-session sweep; the genuine `event_loop` keepers are `resumed`, `about_to_wait`,
-`window_event`, `drain_effects`, `open_pending_dialog`, and `run`/`main`.
+Run `cargo run -p pb-app --release <folder> --metrics`, max the fly-speed sliders, **hold
+Space** through a few hundred photos, **Esc**. The exit summary prints per-stage p50/p95/p99;
+watch **`present`** (per-advance event-loop cost) and **`drain`** (effect execution). The
+owner's pinned corpus: `/Users/jdlien/code/wav-inspection/sample-reports/6055-prod` (large
+PNGs, decode-bound). **Rules:** keep the **same window size** (don't resize between runs — it
+reopens at saved geometry) and **same display** (60 vs 120 Hz changes the frame budget);
+compare **p50** (p95/p99 are vsync-blocking noise once frames are big — `render()` includes
+the swapchain present). References at this corpus/config (60 Hz): baseline `present`
+p50 ≈ 0.30 ms; after step 2 `present` p50 ≈ 0.16 ms + `drain` p95 ≈ 0.13 ms (total flat).
+The metric's job is to **catch a big mistake** (an accidental alloc/decode on the advance
+path spikes `present`); the ns-scale changes the remaining steps add are, as expected,
+imperceptible.
+
+> **Discovered optimization (separate from the refactor, worth doing later):** the metric
+> surfaced that **`NSWindow.setTitle` is ~0.13 ms — ~half the keypress-fast-path cost.** The
+> title is unreadable while flying, so **throttling it during hold-to-fly** (set only on
+> settle, or a few times/sec) shaves ~0.13 ms off every flown frame. Real win; not NS0.
+
+## Remaining steps (resume here)
+
+**Step 3 — `renderer` → `Box<dyn Renderer>` (the vtable).** The last renderer-abstraction
+piece and cleanly measurable (calls stay in `present_item`, just indirect → `present` p50
+should stay ~0.16 ms; a vtable dispatch is ~1 ns). Requires extending `pb_render::Renderer`
+(in `pb-render/src/lib.rs`) with the **9 methods `App` uses that aren't on it yet**, then
+`renderer: Option<WgpuRenderer>` → `Option<Box<dyn Renderer>>` (construction `Box::new`; the
+23 `r.method()` call sites are unchanged — `Box` auto-derefs). The 9 methods are currently
+**inherent** `pub fn`s in `gpu.rs` — **move them into `impl Renderer for WgpuRenderer`**
+(~line 1498) and drop `pub`; their signatures are all wgpu-free (primitives / `Option<(&[u8],
+u32,u32)>` / `[u8;3]`), so they abstract cleanly:
+- from the `impl WgpuRenderer` block ~1065–1300: `set_edr_headroom`, `hdr_surface_wants_edr`,
+  `image_size`, `poll` (leave `new`, `scene_scale`, `set_present_peak`, `present_mode` inherent);
+- from the `impl WgpuRenderer` block ~1301–1497 (exactly these 5): `set_letterbox`, `set_toast`,
+  `set_pie`, `set_chip`, `set_message`.
+Fix any pb-render-internal / example callers the compiler flags (they need `use
+pb_render::Renderer` in scope). Then re-measure `present` (expect flat).
+
+**Step 4 — remaining winit/native touches → effects/shell.** Now that `event_loop` and the
+renderer are handled, sever the rest so orchestration is winit/muda/egui/rfd-free:
+- **menu (muda):** `apply_menu_state` already computes a pure `MenuState`; emit
+  `CoreEffect::SetMenuState(state)` and move the muda-item application (the `changed!` diff +
+  the `self.view_checks`/`save_rotation_item`/etc. handles) into the shell's drain. Keep the
+  change-detection so it's not pushed every tick (no per-tick alloc).
+- **dialog:** shell owns `DialogWindow` fully; `dialog_event` results come back as
+  `CoreEvent`s (`DialogResult`/`PasswordSubmitted`/`SettingsSubmitted`/`KeymapSubmitted`).
+- **clipboard (4 sites, `copy_image`/`copy_path`):** → `WriteClipboard(payload)` effect
+  (add the variant + a shell-neutral `ClipboardPayload{ Image{rgba,w,h} | Path }`). **Trap:**
+  the success/failure toast currently reads the write result — either make it optimistic or
+  have the shell report back a `CoreEvent`.
+- **rfd panels (2):** → `OpenFilePanel`/`OpenFolderPanel` effects; result returns as
+  `CoreEvent::Open(LaunchInput)`. **Trap:** preserve `open_picker`'s `held.clear()` +
+  `esc_guard_until` (else cancelling the picker quits — `dialog.rs`/`open_picker` note).
+- **deferred window ops:** `set_visible` (begin_exit — must hide **before** `clear_session_state`,
+  so keep it inline or handle ordering) and `set_fullscreen` (swapchain/HDR-sensitive — smoke).
+
+**Step 5 — the physical move.** Lift the orchestration state + methods into `pb-app-core` as
+an `AppCore`; reduce the winit `App` to a thin `WinitShell` (owns `window`, muda handles,
+`DialogWindow`, translates winit events → `CoreEvent`, drains effects → native). `pb-app-core`
+gains deps on `pb-core`/`pb-decode`/`pb-source`/`pb-render` (allowed by the plan). Re-measure.
+
+Smoke between steps: hold-to-fly + a dialog + the specific paths a step touched.
 
 ## 0. TL;DR of the move
 

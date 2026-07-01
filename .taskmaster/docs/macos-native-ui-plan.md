@@ -220,9 +220,22 @@ the behavior-sensitive part the plan gates on:
 - **Exit criteria:** identical behavior on Windows and egui-on-Mac; `AppCore` is
   unit-testable with no winit/egui dependency; `cargo run -p pb-app` still works; full
   suite green on both platforms; zero user-visible change. *This phase is valuable even if
-  SwiftUI never happens* (it de-tangles the Windows egui side too). **Status:** the
-  shell-neutral model + seams are landed; the single `AppCore` object + full command/effect
-  loop is the remaining gate.
+  SwiftUI never happens* (it de-tangles the Windows egui side too).
+
+**Status (2026-06-30, branch `swiftui`) — the ownership inversion is underway and green.**
+The full execution log + measurement methodology + the resume point live in
+**`ns0-appcore-inversion-brief.md`** (read it before continuing). In short, all committed +
+green + owner-smoke-verified:
+- `event_loop` **fully de-threaded** (68 → 5 params); `CoreEffect` queue + `drain_effects`
+  seam; **dialog opens deferred** through the shell (ckpts 1–3).
+- Keystone **step 1**: `Active` split into `window` + `renderer` fields (perf-neutral,
+  *measured flat*). **Step 2**: window ops (`set_title`/`request_redraw`/cursor) → effects
+  (*measured flat*; work relocated to the drain).
+- **Instrumentation added** (`present` + `drain` `--metrics` stages) so every step is
+  before/after measured against a pinned corpus — the prime directive, applied to the refactor.
+- **Remaining:** step 3 `renderer` → `Box<dyn Renderer>` (extend the `Renderer` trait with 9
+  methods); step 4 menu/dialog/clipboard/rfd → effects; step 5 the physical move into
+  `pb-app-core` + thin `WinitShell`. The single `AppCore` object is the remaining gate.
 
 ## NS1 — Minimal SwiftUI/AppKit host: canvas only (proves the inversion)
 
