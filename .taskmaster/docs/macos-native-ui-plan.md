@@ -46,7 +46,10 @@ SwiftUI views are the easy part. The hard parts are (1) extracting a tested
 `AppCore` without changing behavior, and (2) proving the AppKit-owned
 `CAMetalLayer`/wgpu/frame-pump bridge. Treat NS0 and NS1 as proof gates: if either
 one gets messy, stop there and keep the egui-on-Mac beta shipping. Do not cut over
-until both gates are boring and measured.
+until both gates are boring and measured. **Update (2026-06-30):** NS0's low-risk
+half is landed — the shell-neutral model + tested seams are extracted into
+`pb-app-core` (see NS0 below). The *remaining* NS0 gate is the `AppCore`-struct
+ownership inversion, still un-started and still the behavior-sensitive part.
 
 **Windows invariant (the one rule):** every change here is either platform-neutral
 refactor (NS0) or `#[cfg(target_os = "macos")]` / a Mac-only target (NS1–NS3).
@@ -154,58 +157,72 @@ to talk to.
 ## NS0 — Extract `AppCore` (pure Rust, no Swift, winit still drives) — the keystone
 
 Refactor only. No Swift, no behavior change. The winit shell becomes a thin adapter
-over a new platform-neutral controller; everything keeps working on Windows **and**
-the egui-on-Mac beta.
+over a platform-neutral controller; everything keeps working on Windows **and** the
+egui-on-Mac beta.
 
-- **Create the crate split first.**
-  - `pb-app-core`: Rust orchestration library, no winit/egui/Swift. It may depend on
-    `pb-core`, `pb-decode`, `pb-source`, `pb-render` traits/types, `settings`,
-    `keymap`, `action`, and pure/I/O helpers that are not shell-owned.
-  - `pb-app`: the existing Windows/Linux/egui binary becomes `WinitShell`, adapting
-    winit events/effects to `pb-app-core`.
-  - A later macOS FFI/staticlib crate links `pb-app-core` and exposes only the Swift
-    bridge surface. Do not make Xcode depend on the current bin-only `pb-app`.
-- **Inventory `App`** in `main.rs`: separate (a) orchestration/state to move into
-  `AppCore`, (b) shell-owned objects (`Window`, `ActiveEventLoop`, dialog windows,
-  native menu handles, file panels, platform clipboard), and (c) renderer/surface
-  ownership. Prefer `AppCore` owning a `Box<dyn Renderer>` once the shell has created
-  the surface, so render behavior is shared and unit-testable with a fake renderer.
-- **Define the `AppCore` contract before moving code.** Use concrete enums and keep
-  the existing `Action` as the single command vocabulary:
-  - *Inputs/events from shell:* `Started{surface, size, scale, refresh_hz, edr_headroom}`,
-    `Tick(Instant)`, `Redraw`, `Resized{w,h,scale,edr_headroom}`, `FocusLost`,
-    `KeyDown{key: PbKey, mods, repeat}`, `KeyUp{key: PbKey}`, `PointerMoved`,
-    `DragPan`, `Scroll`, `Pinch`, `DoubleTap`, `DroppedPaths(Vec<PathBuf>)`,
-    `Open(LaunchInput)`, `MenuAction(Action)`, `DialogResult`, `PasswordSubmitted`,
-    `SettingsSubmitted(Settings)`, `KeymapSubmitted(Keymap)`, `CancelDialog`.
-  - *Effects to shell:* `RequestRender`, `WakeAt(Instant)`, `SetTitle(String)`,
-    `SetCursor(CursorKind)`, `SetWindowMode(WindowMode)`, `HideWindow`, `Quit`,
-    `OpenFilePanel`, `OpenFolderPanel`, `ShowDialog(DialogRequest)`,
-    `UpdateDialog(DialogUpdate)`, `CloseDialog`, `ShowNativeAbout(AboutInfo)`,
-    `SetMenuState(MenuState)`, `WriteClipboard(ClipboardPayload)`,
-    `ReportError(String)`.
-  - *Renderer operations:* stay inside `AppCore` through the `Renderer` trait where
-    practical (`set_image`, `present_slot`, overlays, `render`, `poll`). Shell effects
-    should not expose renderer internals except for surface lifecycle/size/EDR input.
-  - *Coverage requirement:* add focused parity tests for action dispatch, held-key
-    state, wake scheduling, dialog/effect sequencing, scan/archive cancellation, and
-    menu-state updates before changing the Swift target.
-- **Extract a PhotoBlaze-owned physical-key model.** `KeyChord` currently stores
-  `winit::keyboard::KeyCode`; replace that with `PbKey` plus modifiers, then add
-  `winit -> PbKey` and `NSEvent -> PbKey` adapters. The persisted keymap and FFI
-  bridge must not expose winit types.
-- **Move timing into AppCore** (or a shell-ticked timing module): slideshow dwell,
-  held-key fast-nav pacing, the "advance to newest ready frame each vsync" decision
-  (architecture §3) — so the shell only supplies a clock tick + a "render now"
-  signal, not the pacing logic.
-- **Keep winit the only caller.** The existing `App` becomes
-  `WinitShell: winit::ApplicationHandler` that translates events→commands and
-  effects→winit/render calls.
+### Landed (2026-06-30, on branch `swiftui`) — the shell-neutral seams
+
+The strangler-fig groundwork is in and green (full workspace suite, clippy, fmt), all
+behavior-preserving with Windows/winit + egui untouched. Main's animated-image support
+(GIF/APNG/WebP + macOS Image I/O; `P` play/pause, `,`/`.` frame-step) was merged in and
+flows through the new seams unchanged.
+
+- **`pb-app-core` crate exists** — `toml`-only, **no winit/egui/wgpu/muda/rfd/objc**.
+  Modules: `action`, `pb_key`, `keymap`, `slideshow`, `config` (the shared config dir),
+  `contract`, `timing`. The winit shell re-exports them at its crate root
+  (`use pb_app_core::{action, contract, keymap, pb_key, slideshow, timing}`), so the
+  existing `crate::…` paths in shell modules resolve unchanged (the crate move stayed
+  invisible to the rest of `pb-app`, incl. the feature branch it was merged with).
+- **App-owned physical-key model** — `PbKey` + the `pb_key_winit` adapter
+  (`winit::KeyCode → PbKey`); `KeyChord` stores `PbKey`, not winit `KeyCode`. The keymap
+  is now winit-free. (The `NSEvent → PbKey` adapter is NS1.)
+- **Contract vocabulary sketched** (`contract.rs`) — `CoreEvent` / `CoreEffect` /
+  `Modifiers` / `MenuState` / `KeyResolution` + value enums (`DialogKind`, `ScaleMode`,
+  `InfoOverlay`, `WindowMode`, `CursorKind`). This is the *vocabulary*, not yet the
+  driving loop; payloads that need types still in the shell or other crates (a `Settings`
+  form, `LaunchInput`, dialog request/result, the GPU surface handle) are marked
+  `NS-later`.
+- **Two contract types already proven against the live winit shell:**
+  - **`MenuState`** — one pure `menu_state_from` derive + one diffed `apply_menu_state`
+    replaced the five `refresh_*` methods and their five caches (checkmarks, Save Rotation
+    / Stop Scanning / Undo enabled+label, macOS native-fullscreen label), preserving the
+    per-item cached/no-op behavior.
+  - **`KeyResolution`** — `resolve_key_down` routes a KeyDown by `ActionKind`
+    (incl. the merged `FrameStep`), folding in the repeat gate and the ⌘-no-fall-through
+    rule; the four modifier bools were unified into `contract::Modifiers`.
+- **Timing moved into core** — `slideshow` (dwell), `timing::advance_interval` (the
+  accelerating hold-to-fly gap), and `timing::elapsed_since` (the shared tap-delay /
+  repeat gate now used by *both* the nav hold-to-fly and the frame-step scrubbing paths).
+  Pacing *math* is unit-tested in a pure crate; the shell keeps the control flow.
+
+### Still to do — the keystone (proof-gate; needs a critical call + manual validation)
+
+The remaining NS0 work is the actual **`AppCore` struct** and the ownership inversion —
+the behavior-sensitive part the plan gates on:
+
+- **Lift the orchestration state** out of the winit `App` god-object (`main.rs`) into an
+  `AppCore` that owns nav / prefetch / cache-residency / dialog / menu state and processes
+  `CoreEvent` → `CoreEffect`, reducing the winit `App` to a thin
+  `WinitShell: ApplicationHandler` that translates events→commands and effects→winit/render
+  calls. Separate (a) orchestration/state → `AppCore`, (b) shell-owned objects (`Window`,
+  `ActiveEventLoop`, dialog windows, native menu handles, file panels, clipboard), and
+  (c) renderer/surface ownership (prefer `AppCore` owning a `Box<dyn Renderer>` once the
+  shell creates the surface, so render is unit-testable with a fake renderer).
+- **Firm up the deferred contract payloads** (`Settings` form, `Open(LaunchInput)`,
+  `PasswordSubmitted`, dialog request/result, `Started{surface,…}`) as each is wired.
+- **Coverage before the Swift target:** focused parity tests for action dispatch, held-key
+  state, wake scheduling, dialog/effect sequencing, and scan/archive cancellation.
+- **Why gated:** this touches the self-paced-advance control flow, dialog choreography, and
+  the whole event loop — so it's the proof gate. Run a manual **hold-to-fly + frame-step +
+  dialog + shortcut-editor** smoke on the egui-Mac (and ideally Windows) build before/at
+  this step, and stop if it gets messy (the egui-Mac beta stays shippable regardless).
+
 - **Exit criteria:** identical behavior on Windows and egui-on-Mac; `AppCore` is
-  unit-testable with no winit/egui dependency; the current `cargo run -p pb-app`
-  path still works; full suite green on both platforms; zero user-visible change.
-  *This phase is valuable even if SwiftUI never happens* (it also de-tangles the
-  Windows egui side) — land it alone, first.
+  unit-testable with no winit/egui dependency; `cargo run -p pb-app` still works; full
+  suite green on both platforms; zero user-visible change. *This phase is valuable even if
+  SwiftUI never happens* (it de-tangles the Windows egui side too). **Status:** the
+  shell-neutral model + seams are landed; the single `AppCore` object + full command/effect
+  loop is the remaining gate.
 
 ## NS1 — Minimal SwiftUI/AppKit host: canvas only (proves the inversion)
 
@@ -371,12 +388,18 @@ the canonical record of the rationale; this plan is the execution detail.
 - `pb-app/src/dialog.rs`: one `DialogWindow` over a second winit window + egui;
   `DialogKind` = {About, Settings, Confirm, Message, Password, Loading, Scanning};
   `OpenProgress`/`ScanProgress` `Arc` handles already decouple worker→UI progress;
-  shortcut capture reads raw winit `KeyCode`.
-- `pb-app/src/main.rs`: **256 KB**, over the read limit — the winit
-  `ApplicationHandler` god-object; the `AppCore` extraction target.
-- Manifests: `pb-app` is currently bin-only; NS0/NS1 must add a library/staticlib
-  crate split before Xcode can link Rust. Existing ingredients: `winit 0.30`,
-  `wgpu 22`, `egui 0.29`, `muda 0.19` (NSMenu), `rfd 0.14` (native panels),
-  `objc2 0.6` (already in tree).
+  shortcut capture now maps the winit `KeyCode` through `pb_key_winit::from_winit`
+  into a `PbKey`/`KeyChord` (winit-free model; NS0), so only the *capture mechanism*
+  is shell-specific for NS2.6.
+- `pb-app/src/main.rs`: still the large winit `ApplicationHandler` god-object and the
+  remaining `AppCore`-struct extraction target — but the shell-neutral **model** and
+  the tested seams (`PbKey`, keymap, `MenuState`/`apply_menu_state`,
+  `resolve_key_down`/`Modifiers`, `timing`) are already lifted out into `pb-app-core`
+  (NS0 landed; see above).
+- Manifests: the **crate split is done** — `pb-app-core` (lib, `toml`-only) holds the
+  shell-neutral model; `pb-app` (bin) is the winit shell over it. NS1 still adds a
+  macOS FFI/`staticlib` crate that links `pb-app-core` for the Swift bridge (don't make
+  Xcode depend on the `pb-app` bin). Existing ingredients: `winit 0.30`, `wgpu 22`,
+  `egui 0.29`, `muda 0.19` (NSMenu), `rfd 0.14` (native panels), `objc2 0.6` (in tree).
 - ADR-019 (`pb-core::open` → `LaunchInput`): launch/open is already delivery-layer
   only; the Mac shell's open path is a shim, not new architecture.
