@@ -74,12 +74,11 @@ trash = { version = "5", default-features = false, features = [
 toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
 # Derive (de)serialization for the typed Settings model (settings.toml).
 serde = { version = "1", features = ["derive"] }
-# Cross-platform clipboard: **text** for Copy File Path (Shift+Ctrl+C / ⇧⌘C) on every
-# platform, and **image** (`image-data`) for Copy Image on non-Windows — where
-# `clipboard.rs` writes the pixels via arboard (→ NSPasteboard / Wayland-X11). Windows
-# keeps its richer Win32 path (CF_DIBV5 + CF_HDROP) and so needs only the text backend;
-# `image-data` is enabled per-target below. `default-features = false` drops the Linux
-# wayland backend we don't need.
+# Cross-platform **text** clipboard for Copy File Path (Shift+Ctrl+C / ⇧⌘C) on every
+# platform. Copy **Image** uses each platform's richer native path in `clipboard.rs`
+# (Windows: Win32 CF_DIBV5 + CF_HDROP; macOS: NSPasteboard image + file-url via objc2),
+# so only Linux falls back to arboard's `image-data` (enabled per-target below).
+# `default-features = false` drops the Linux wayland backend we don't need.
 arboard = { version = "3", default-features = false }
 # Iterative, symlink-safe directory walk for the recursive folder scan. The old hand-
 # rolled recursion overflowed the stack on a deeply nested tree and could loop forever on
@@ -88,10 +87,9 @@ arboard = { version = "3", default-features = false }
 # cycles), and bounds open dir handles. Already in the lockfile (transitive), so it's free.
 walkdir = "2"
 
-# Non-Windows (macOS/Linux) Copy Image: enable arboard's image clipboard. On macOS this
-# only adds small objc2 core-graphics/foundation bindings + the `image` crate (already in
-# the tree via pb-decode), so it's nearly free. Windows uses the Win32 path instead.
-[target.'cfg(not(windows))'.dependencies]
+# Linux Copy Image: enable arboard's image clipboard (Wayland/X11). Windows and macOS use
+# their own native paths in clipboard.rs, so only Linux needs this.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 arboard = { version = "3", default-features = false, features = ["image-data"] }
 
 # macOS: poke the wgpu CAMetalLayer for wide-gamut/EDR output (hdr_surface.rs) via

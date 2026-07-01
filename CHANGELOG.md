@@ -69,10 +69,13 @@ with any pre-release suffix carried only by the tag.
   against the left and right edges.
 
 ### Fixed
-- **Copy Image (Ctrl/⌘C) now works on macOS** (and Linux) — it previously showed "Copy
-  failed" because the image clipboard was implemented only on Windows. The pixels (with any
-  unsaved rotation baked in) now go to the system clipboard so you can paste the photo into
-  another app. Copying the *file path* (⇧⌘C) already worked everywhere.
+- **Copy Image (Ctrl/⌘C) now works on macOS** — it previously showed "Copy failed" because the
+  image clipboard was implemented only on Windows. Like on Windows, it copies **both** the
+  picture and a reference to the file, so a paste does the right thing wherever it lands: paste
+  into an image editor or document to get the **pixels** (with any unsaved rotation baked in),
+  into **Finder** to copy the **file**, or into a **terminal** to paste its **path**. (An image
+  from inside an archive has no file, so it copies just the pixels.) Linux copies the pixels via
+  arboard. Copying the *file path* as text (⇧⌘C) already worked everywhere.
 - **Opening a photo is instant again — no more multi-second freeze on RAW or large images.**
   The first frame is now decoded **preview-first**: for RAW and HEIC the embedded preview shows
   immediately (and refines to full resolution in the background a moment later), instead of
