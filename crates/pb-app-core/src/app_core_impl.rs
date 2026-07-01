@@ -22,16 +22,202 @@ use pb_source::PhotoSource;
 use hud::Row;
 use pb_hud::{hud, icon};
 
-use crate::animation::{AnimDecode, AnimWant, Playback};
+use crate::animation::{AnimDecode, AnimWant, Playback, Prepared};
 use crate::contract;
 use crate::decode_pool::Outcome;
 use crate::engine::*;
+use crate::pb_key::PbKey;
 use crate::{
     keymap, settings, slideshow, timing, Action, AppCore, InfoMode, Nav, OpenButton, PlayHint,
     Toast,
 };
 
 impl AppCore {
+    /// `P`: play/pause the current animation. Uses the eagerly-prepped sequence for
+    /// instant playback when it's ready; otherwise (upgrading an in-flight eager prep,
+    /// or kicking a fresh decode) it starts playing the moment frames land. On a still,
+    /// `P` does nothing.
+    pub fn toggle_play_pause(&mut self) {
+        if self.playback.is_some() {
+            // Was it parked at the end of a finite loop? Then toggling *restarts* from
+            // frame 0 (so the audio must restart too, not resume mid-track).
+            let was_finished = self.playback.as_ref().unwrap().is_finished();
+            let playing = self.playback.as_mut().unwrap().toggle_play();
+            if playing {
+                // (Re)started — present the current frame (frame 0 when replaying a
+                // finished loop, so the stale last frame doesn't linger) + anchor timing.
+                self.present_anim_frame();
+                if was_finished {
+                    if let Some(item) = self.displayed_item {
+                        self.start_live_audio(item); // replay from the top
+                    }
+                } else {
+                    self.effects.push(contract::CoreEffect::ResumeLiveAudio);
+                }
+            } else {
+                self.draw(); // paused — just redraw the held frame
+                self.effects.push(contract::CoreEffect::PauseLiveAudio);
+            }
+            return;
+        }
+        let Some(item) = self.displayed_item else {
+            return;
+        };
+        // Eagerly prepared on dwell → play instantly (no decode wait).
+        if self.prepared.as_ref().is_some_and(|p| p.item == item) {
+            let anim = self.prepared.take().unwrap().anim;
+            self.anim_hint_shown_for = Some(item); // engaged
+            self.install_animation(anim, true, 0);
+            self.start_live_audio(item);
+            return;
+        }
+        // An eager prep is already decoding → upgrade it to play on arrival.
+        if let Some(d) = self.anim_decode.as_mut() {
+            d.want = AnimWant::Play;
+            self.anim_hint_shown_for = Some(item);
+            return;
+        }
+        if self.has_motion(item) {
+            self.start_animation_decode(item, AnimWant::Play);
+        }
+    }
+
+    /// Step the current animation one frame (`delta`: `+1` next, `-1` previous),
+    /// pausing playback. Uses the eager prep when ready; otherwise upgrades an in-flight
+    /// prep (or kicks one) so the held-key scrub steps once frames land. No-op on a still.
+    pub fn frame_step(&mut self, delta: i32) {
+        // Scrubbing is not continuous playback — silence any Live Photo audio.
+        self.effects.push(contract::CoreEffect::StopLiveAudio);
+        if self.playback.is_some() {
+            self.playback.as_mut().unwrap().step(delta);
+            self.present_anim_frame();
+            return;
+        }
+        let Some(item) = self.displayed_item else {
+            return;
+        };
+        if self.prepared.as_ref().is_some_and(|p| p.item == item) {
+            let anim = self.prepared.take().unwrap().anim;
+            self.anim_hint_shown_for = Some(item);
+            self.install_animation(anim, false, delta); // paused, stepped
+            return;
+        }
+        if let Some(d) = self.anim_decode.as_mut() {
+            d.want = AnimWant::Step(delta);
+            self.anim_hint_shown_for = Some(item);
+            return;
+        }
+        if self.has_motion(item) {
+            self.start_animation_decode(item, AnimWant::Step(delta));
+        }
+    }
+
+    /// Keyboard frame-step press: track the key for hold-to-scrub, then step once now.
+    pub fn frame_step_press(&mut self, key: PbKey, action: Action) {
+        self.held.insert(key, action);
+        let now = Instant::now();
+        self.framestep_started = Some(now);
+        self.framestep_last = Some(now);
+        self.frame_step(frame_step_dir(action));
+    }
+
+    /// Pick up a finished off-thread animation decode (called each `about_to_wait`).
+    /// Discards a stale result (superseded request, geometry change, or the user
+    /// navigated away) and otherwise installs the [`Playback`] and shows frame 0.
+    pub fn poll_anim_decode(&mut self) {
+        use std::sync::mpsc::TryRecvError;
+        // Receive (and copy out what we need) in a scope so the `anim_decode` borrow
+        // ends before we mutate it / install the playback.
+        let outcome = {
+            let Some(d) = self.anim_decode.as_ref() else {
+                return;
+            };
+            match d.rx.try_recv() {
+                Ok(result) => Some((d.gen, d.epoch, d.item, d.want, result)),
+                Err(TryRecvError::Empty) => return, // still decoding
+                Err(TryRecvError::Disconnected) => None, // worker died
+            }
+        };
+        self.anim_decode = None;
+        let Some((gen, epoch, item, want, result)) = outcome else {
+            return;
+        };
+        // Stale: a newer request superseded it, the fit changed, or we moved on.
+        if gen != self.anim_gen || epoch != self.epoch || self.displayed_item != Some(item) {
+            return;
+        }
+        match result {
+            Ok(anim) => match want {
+                // Eager prep: hold it ready; the still keeps showing (frame 0 == still),
+                // so there's no visible change — `P` will play it instantly. If the
+                // detailed panel is open, refresh it so the frame count/rate/loop appear.
+                AnimWant::Eager => {
+                    self.prepared = Some(Prepared { item, anim });
+                    if self.overlay_shown && self.info == InfoMode::Full {
+                        self.show_overlay();
+                    }
+                }
+                AnimWant::Play => {
+                    self.install_animation(anim, true, 0);
+                    self.start_live_audio(item); // in sync with the first frame
+                }
+                AnimWant::Step(delta) => self.install_animation(anim, false, delta),
+            },
+            Err(e) => {
+                // An eager prep that fails stays silent (the user never asked); only a
+                // user-initiated P/step surfaces the error.
+                eprintln!("animation decode failed for item {item}: {e}");
+                if want != AnimWant::Eager {
+                    self.show_toast("Can't play this animation");
+                }
+            }
+        }
+    }
+
+    /// Stop and drop any playback / in-flight decode / eager prep, reverting to the
+    /// still. Called when navigating away or changing source (the frames are RAM-only —
+    /// privacy #2).
+    pub fn stop_playback(&mut self) {
+        self.playback = None;
+        self.anim_frame_shown_at = None;
+        self.anim_decode = None;
+        self.prepared = None;
+        self.framestep_started = None;
+        self.framestep_last = None;
+        self.live_revert_at = None;
+        self.effects.push(contract::CoreEffect::StopLiveAudio); // dropping the player stops it
+                                                                // Leaving the animated still: drop the interactive play hint AND its toast **immediately**
+                                                                // (not a fade), so a stale/irrelevant button never lingers over the next photo — which
+                                                                // could even be a non-animated one. Only the play hint owns the toast here; a passive
+                                                                // status toast (Copy/Save/…) has `play_hint == None` and is left to fade normally.
+        if self.play_hint.take().is_some() {
+            self.toast = None;
+            if let Some(a) = self.renderer.as_mut() {
+                a.set_toast(None, 0);
+            }
+            self.draw();
+        }
+    }
+
+    /// Start the Live Photo's audio from the top (its `.mov` track), if `item` is a Live
+    /// Photo with audio and audio isn't muted — the "cheap path" (task #38). A no-op for
+    /// an animation (no audio track), a silent clip, or when muted. Called when the motion
+    /// starts playing from frame 0.
+    pub fn start_live_audio(&mut self, item: usize) {
+        if self.settings.mute_live_audio {
+            self.effects.push(contract::CoreEffect::StopLiveAudio);
+            return;
+        }
+        // The core decides the motion path; the shell owns the ObjC player (drained effect).
+        // No companion motion → clear any existing audio (mirrors the old `and_then` → None).
+        match self.live_motion_path(item) {
+            Some(path) => self
+                .effects
+                .push(contract::CoreEffect::StartLiveAudio { path, at_secs: 0.0 }),
+            None => self.effects.push(contract::CoreEffect::StopLiveAudio),
+        }
+    }
+
     /// Toggle an info panel: the one-line basic panel with `i`, or the full-EXIF
     /// "nerd" table with `Shift+I`. Selecting the mode that's already showing hides
     /// it. When shown it appears immediately (idle); after navigation it reappears

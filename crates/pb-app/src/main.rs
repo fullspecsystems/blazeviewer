@@ -89,7 +89,6 @@ pub use pb_app_core::settings;
 pub use pb_app_core::animation;
 
 use action::Action;
-use animation::{AnimWant, Prepared};
 use hud::Hud;
 use keymap::Keymap;
 use live_audio::LiveAudio;
@@ -140,16 +139,6 @@ const GESTURE_PAN_DIR: f32 = 1.0;
 /// How long the delete icon shows on the just-deleted photo before the playlist
 /// advances to the next one — so the trash/recycle feedback registers first (#28).
 const DELETE_ADVANCE_DELAY: Duration = Duration::from_millis(160);
-
-/// The frame-step direction encoded by an action: `+1` next / `-1` previous / `0`
-/// for anything else.
-fn frame_step_dir(action: Action) -> i32 {
-    match action {
-        Action::FrameNext => 1,
-        Action::FramePrev => -1,
-        _ => 0,
-    }
-}
 
 /// How long an off-thread directory scan must run before the "Scanning Folder" progress
 /// dialog appears. A normal folder resolves in well under this, so the common case never
@@ -664,7 +653,7 @@ impl App {
         }
         // Deleting a playing animation stops playback so the doomed photo freezes on
         // its current frame under the trash icon (rather than animating until removal).
-        self.stop_playback();
+        self.core.stop_playback();
         // Recycle-bin icon for the recoverable delete, trash for a permanent one.
         let icon = if permanent {
             icon::assets::TRASH
@@ -712,7 +701,7 @@ impl App {
     /// the bare-launch empty state (a test pattern + title; `O`/drag-drop reopen).
     fn enter_empty_state(&mut self) {
         self.pending_delete = None;
-        self.stop_playback(); // the deleted photo may have been playing (#37)
+        self.core.stop_playback(); // the deleted photo may have been playing (#37)
         self.core.source = Arc::new(FsSource::new(Vec::new()));
         self.core.playlist = Playlist::new(0, 0);
         self.core.rotations.clear();
@@ -1765,11 +1754,11 @@ impl App {
             Action::SlideshowToggle => self.core.toggle_slideshow(),
             Action::SlideshowFaster => self.core.adjust_slideshow(-1),
             Action::SlideshowSlower => self.core.adjust_slideshow(1),
-            Action::PlayPause => self.toggle_play_pause(),
+            Action::PlayPause => self.core.toggle_play_pause(),
             // A menu click is a single step; the keyboard's hold-to-scrub goes through
             // `frame_step_press` (the FrameStep press arm) instead.
-            Action::FrameNext => self.frame_step(1),
-            Action::FramePrev => self.frame_step(-1),
+            Action::FrameNext => self.core.frame_step(1),
+            Action::FramePrev => self.core.frame_step(-1),
             Action::MuteLiveAudio => self.toggle_mute_audio(),
             Action::Settings => self.open_settings(),
             Action::About => self.open_about(),
@@ -1808,7 +1797,7 @@ impl App {
         }
         let start = start.min(source.len() - 1);
         self.pending_delete = None; // any rebuild supersedes a deferred delete-advance
-        self.stop_playback(); // a new source drops any playback of the old one (#2)
+        self.core.stop_playback(); // a new source drops any playback of the old one (#2)
         self.core.source = source;
         self.core.root = root;
         self.core.scan_root = scan_root;
@@ -2374,6 +2363,22 @@ impl App {
                         .map(classify_inputs);
                     self.finish_picker(input);
                 }
+                // Live Photo audio (task #38): the core decides when/where; the shell owns the
+                // ObjC `AVAudioPlayer`. A no-op on non-macOS (the stub player returns None).
+                contract::CoreEffect::StartLiveAudio { path, at_secs } => {
+                    self.live_audio = LiveAudio::play(&path, at_secs);
+                }
+                contract::CoreEffect::StopLiveAudio => self.live_audio = None,
+                contract::CoreEffect::PauseLiveAudio => {
+                    if let Some(a) = &self.live_audio {
+                        a.pause();
+                    }
+                }
+                contract::CoreEffect::ResumeLiveAudio => {
+                    if let Some(a) = &self.live_audio {
+                        a.resume();
+                    }
+                }
                 _ => {}
             }
         }
@@ -2461,7 +2466,7 @@ impl App {
         self.core.pie_finish = None;
         self.core.pie_glow_started = None;
         // Drop any on-demand animation playback + in-flight decode (RAM-only — #2).
-        self.stop_playback();
+        self.core.stop_playback();
     }
 
     /// Handle a nav keypress (space / backspace / enter). Tracks the held key for
@@ -2495,7 +2500,7 @@ impl App {
         }
         // Navigating away from an animated image stops playback and reverts to the
         // still (the frames are RAM-only — privacy #2). A no-op on a still.
-        self.stop_playback();
+        self.core.stop_playback();
         // Remember the direction so the slideshow auto-advances the way the user last
         // moved (manual nav during a slideshow steers it). The slideshow's own
         // `advance(self.core.last_nav)` calls are then idempotent here.
@@ -2573,153 +2578,6 @@ impl App {
 
     // --- Animation playback (task #37) -------------------------------------------------
 
-    /// `P`: play/pause the current animation. Uses the eagerly-prepped sequence for
-    /// instant playback when it's ready; otherwise (upgrading an in-flight eager prep,
-    /// or kicking a fresh decode) it starts playing the moment frames land. On a still,
-    /// `P` does nothing.
-    fn toggle_play_pause(&mut self) {
-        if self.core.playback.is_some() {
-            // Was it parked at the end of a finite loop? Then toggling *restarts* from
-            // frame 0 (so the audio must restart too, not resume mid-track).
-            let was_finished = self.core.playback.as_ref().unwrap().is_finished();
-            let playing = self.core.playback.as_mut().unwrap().toggle_play();
-            if playing {
-                // (Re)started — present the current frame (frame 0 when replaying a
-                // finished loop, so the stale last frame doesn't linger) + anchor timing.
-                self.core.present_anim_frame();
-                if was_finished {
-                    if let Some(item) = self.core.displayed_item {
-                        self.start_live_audio(item); // replay from the top
-                    }
-                } else if let Some(a) = &self.live_audio {
-                    a.resume();
-                }
-            } else {
-                self.core.draw(); // paused — just redraw the held frame
-                if let Some(a) = &self.live_audio {
-                    a.pause();
-                }
-            }
-            return;
-        }
-        let Some(item) = self.core.displayed_item else {
-            return;
-        };
-        // Eagerly prepared on dwell → play instantly (no decode wait).
-        if self.core.prepared.as_ref().is_some_and(|p| p.item == item) {
-            let anim = self.core.prepared.take().unwrap().anim;
-            self.core.anim_hint_shown_for = Some(item); // engaged
-            self.core.install_animation(anim, true, 0);
-            self.start_live_audio(item);
-            return;
-        }
-        // An eager prep is already decoding → upgrade it to play on arrival.
-        if let Some(d) = self.core.anim_decode.as_mut() {
-            d.want = AnimWant::Play;
-            self.core.anim_hint_shown_for = Some(item);
-            return;
-        }
-        if self.core.has_motion(item) {
-            self.core.start_animation_decode(item, AnimWant::Play);
-        }
-    }
-
-    /// Step the current animation one frame (`delta`: `+1` next, `-1` previous),
-    /// pausing playback. Uses the eager prep when ready; otherwise upgrades an in-flight
-    /// prep (or kicks one) so the held-key scrub steps once frames land. No-op on a still.
-    fn frame_step(&mut self, delta: i32) {
-        // Scrubbing is not continuous playback — silence any Live Photo audio.
-        self.live_audio = None;
-        if self.core.playback.is_some() {
-            self.core.playback.as_mut().unwrap().step(delta);
-            self.core.present_anim_frame();
-            return;
-        }
-        let Some(item) = self.core.displayed_item else {
-            return;
-        };
-        if self.core.prepared.as_ref().is_some_and(|p| p.item == item) {
-            let anim = self.core.prepared.take().unwrap().anim;
-            self.core.anim_hint_shown_for = Some(item);
-            self.core.install_animation(anim, false, delta); // paused, stepped
-            return;
-        }
-        if let Some(d) = self.core.anim_decode.as_mut() {
-            d.want = AnimWant::Step(delta);
-            self.core.anim_hint_shown_for = Some(item);
-            return;
-        }
-        if self.core.has_motion(item) {
-            self.core
-                .start_animation_decode(item, AnimWant::Step(delta));
-        }
-    }
-
-    /// Keyboard frame-step press: track the key for hold-to-scrub, then step once now.
-    fn frame_step_press(&mut self, key: PbKey, action: Action) {
-        self.core.held.insert(key, action);
-        let now = Instant::now();
-        self.core.framestep_started = Some(now);
-        self.core.framestep_last = Some(now);
-        self.frame_step(frame_step_dir(action));
-    }
-
-    /// Pick up a finished off-thread animation decode (called each `about_to_wait`).
-    /// Discards a stale result (superseded request, geometry change, or the user
-    /// navigated away) and otherwise installs the [`Playback`] and shows frame 0.
-    fn poll_anim_decode(&mut self) {
-        use std::sync::mpsc::TryRecvError;
-        // Receive (and copy out what we need) in a scope so the `anim_decode` borrow
-        // ends before we mutate it / install the playback.
-        let outcome = {
-            let Some(d) = self.core.anim_decode.as_ref() else {
-                return;
-            };
-            match d.rx.try_recv() {
-                Ok(result) => Some((d.gen, d.epoch, d.item, d.want, result)),
-                Err(TryRecvError::Empty) => return, // still decoding
-                Err(TryRecvError::Disconnected) => None, // worker died
-            }
-        };
-        self.core.anim_decode = None;
-        let Some((gen, epoch, item, want, result)) = outcome else {
-            return;
-        };
-        // Stale: a newer request superseded it, the fit changed, or we moved on.
-        if gen != self.core.anim_gen
-            || epoch != self.core.epoch
-            || self.core.displayed_item != Some(item)
-        {
-            return;
-        }
-        match result {
-            Ok(anim) => match want {
-                // Eager prep: hold it ready; the still keeps showing (frame 0 == still),
-                // so there's no visible change — `P` will play it instantly. If the
-                // detailed panel is open, refresh it so the frame count/rate/loop appear.
-                AnimWant::Eager => {
-                    self.core.prepared = Some(Prepared { item, anim });
-                    if self.core.overlay_shown && self.core.info == InfoMode::Full {
-                        self.core.show_overlay();
-                    }
-                }
-                AnimWant::Play => {
-                    self.core.install_animation(anim, true, 0);
-                    self.start_live_audio(item); // in sync with the first frame
-                }
-                AnimWant::Step(delta) => self.core.install_animation(anim, false, delta),
-            },
-            Err(e) => {
-                // An eager prep that fails stays silent (the user never asked); only a
-                // user-initiated P/step surfaces the error.
-                eprintln!("animation decode failed for item {item}: {e}");
-                if want != AnimWant::Eager {
-                    self.core.show_toast("Can't play this animation");
-                }
-            }
-        }
-    }
-
     /// Flash the "▶ Press P to play" hint once when settling on an animated still —
     /// suppressed while flying (the nag the owner flagged) and once the user has engaged
     /// (P / step, tracked via `anim_hint_shown_for`). An eager prep decoding in the
@@ -2759,46 +2617,6 @@ impl App {
             self.core.update_play_hint_hover();
             self.refresh_cursor();
         }
-    }
-
-    /// Stop and drop any playback / in-flight decode / eager prep, reverting to the
-    /// still. Called when navigating away or changing source (the frames are RAM-only —
-    /// privacy #2).
-    fn stop_playback(&mut self) {
-        self.core.playback = None;
-        self.core.anim_frame_shown_at = None;
-        self.core.anim_decode = None;
-        self.core.prepared = None;
-        self.core.framestep_started = None;
-        self.core.framestep_last = None;
-        self.core.live_revert_at = None;
-        self.live_audio = None; // dropping the player stops it
-                                // Leaving the animated still: drop the interactive play hint AND its toast **immediately**
-                                // (not a fade), so a stale/irrelevant button never lingers over the next photo — which
-                                // could even be a non-animated one. Only the play hint owns the toast here; a passive
-                                // status toast (Copy/Save/…) has `play_hint == None` and is left to fade normally.
-        if self.core.play_hint.take().is_some() {
-            self.core.toast = None;
-            if let Some(a) = self.core.renderer.as_mut() {
-                a.set_toast(None, 0);
-            }
-            self.core.draw();
-        }
-    }
-
-    /// Start the Live Photo's audio from the top (its `.mov` track), if `item` is a Live
-    /// Photo with audio and audio isn't muted — the "cheap path" (task #38). A no-op for
-    /// an animation (no audio track), a silent clip, or when muted. Called when the motion
-    /// starts playing from frame 0.
-    fn start_live_audio(&mut self, item: usize) {
-        if self.core.settings.mute_live_audio {
-            self.live_audio = None;
-            return;
-        }
-        self.live_audio = self
-            .core
-            .live_motion_path(item)
-            .and_then(|p| LiveAudio::play(&p, 0.0));
     }
 
     /// Toggle Live Photo audio mute (`M` / Image menu). Persists the choice, updates the
@@ -3198,7 +3016,7 @@ impl ApplicationHandler for App {
                                 self.core.held.insert(key, act);
                             }
                             contract::KeyResolution::FrameStepStart(act) => {
-                                self.frame_step_press(key, act)
+                                self.core.frame_step_press(key, act)
                             }
                         }
                     }
@@ -3418,7 +3236,7 @@ impl ApplicationHandler for App {
 
         // 1b. Pick up a finished off-thread animation decode (kicked by `P` /
         // frame-step) and install playback — never on the still/keypress hot path (#37).
-        self.poll_anim_decode();
+        self.core.poll_anim_decode();
 
         // 2. Continuous zoom/pan while their keys are held (accelerating ramp).
         let transforming = self.core.apply_view_holds(now);

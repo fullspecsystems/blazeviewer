@@ -268,6 +268,16 @@ pub fn title_for(name: &str, idx: usize, n: usize) -> String {
     format!("{} ({}/{n})", file_name_of(name), idx + 1)
 }
 
+/// The frame-step direction encoded by an action: `+1` next / `-1` previous / `0`
+/// for anything else.
+pub fn frame_step_dir(action: Action) -> i32 {
+    match action {
+        Action::FrameNext => 1,
+        Action::FramePrev => -1,
+        _ => 0,
+    }
+}
+
 /// Map the persisted scale-mode preference to the renderer's [`ScaleMode`].
 pub fn scale_mode_of(p: ScaleModePref) -> ScaleMode {
     match p {

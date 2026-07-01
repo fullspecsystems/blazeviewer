@@ -262,6 +262,17 @@ pub enum CoreEffect {
     /// Copy File Path command — never the view path). The shell does the platform write
     /// and surfaces the success/failure toast.
     WriteClipboard(ClipboardPayload),
+    /// Start (or restart) the Live Photo's audio — its companion `.mov` track — at `at_secs`,
+    /// replacing any currently-playing clip. The shell owns the `AVAudioPlayer` handle (an ObjC
+    /// object that can't live in the platform-neutral core); the core only decides *when* audio
+    /// should play and from *where* (task #38). A no-op on non-macOS (the stub player).
+    StartLiveAudio { path: PathBuf, at_secs: f64 },
+    /// Stop and drop the Live Photo audio (navigate away / pause-to-step / mute / finish).
+    StopLiveAudio,
+    /// Pause the playing Live Photo audio, leaving it resumable at the same position.
+    PauseLiveAudio,
+    /// Resume the paused Live Photo audio.
+    ResumeLiveAudio,
     // NS-later (payload types still in the shell or other crates):
     //   UpdateDialog(DialogUpdate)        — progress ticks into an open dialog
     //   ShowNativeAbout(AboutInfo)         — the standard NSApplication about panel
