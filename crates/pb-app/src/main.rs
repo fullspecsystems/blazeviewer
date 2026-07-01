@@ -45,7 +45,7 @@ use winit::window::{CursorIcon, Icon, Window, WindowId};
 use pb_core::open::{self, LaunchInput, Source};
 use pb_core::{Playlist, ResidentRing};
 use pb_decode::{decode_bytes, is_supported_extension, FitBox};
-use pb_render::{Renderer, Rotation, ScaleMode, ViewTransform, WgpuRenderer};
+use pb_render::{Renderer, Rotation, ViewTransform, WgpuRenderer};
 use pb_source::{seven_z_projected_bytes, FsSource, PhotoSource, SevenZSource, ZipSource};
 
 mod archive;
@@ -1567,62 +1567,29 @@ impl App {
     /// the menu and the keyboard share one dispatcher, so they can never drift. The
     /// id→`MenuAction` mapping is the pure, unit-tested `menu::action_for`.
     fn dispatch_menu(&mut self, action: MenuAction) {
-        self.dispatch_action(action.to_action());
+        self.core.dispatch_action(action.to_action());
     }
 
-    /// The single effect-half dispatcher for every [`Action`], shared by the keyboard
-    /// (one-shot keys, via the keymap) and the menu. Navigation here is a single
-    /// step (what the menu wants); the keyboard's held-to-fly nav and continuous
-    /// pan/zoom are driven by the hold loop (`about_to_wait`), not this path.
-    fn dispatch_action(&mut self, action: Action) {
+    /// Execute a [`contract::CoreEffect::ShellFlowAction`] — the **flow** arms of the action
+    /// vocabulary the core routes to the shell (the dialogs / window mode / scan / file-edit /
+    /// quit commands `AppCore::dispatch_action` doesn't own end-to-end yet). The result-mirror
+    /// of that core method's flow branch; `_ =>` is unreachable (the core only routes the flow
+    /// subset here) but keeps the match total. Runs from `drain_effects`. (NS0: replaced by
+    /// specific effects/`CoreEvent`s + native macOS handling as 5.6 inverts each flow.)
+    fn perform_flow_action(&mut self, action: Action) {
         match action {
-            Action::Next => self.core.advance(Nav::Forward),
-            Action::Prev => self.core.advance(Nav::Backward),
-            Action::Random => self.core.advance(Nav::Random),
-            Action::RandomPrev => self.core.advance(Nav::RandomPrev),
-            // Pan is continuous-while-held only (the hold loop); never single-dispatched.
-            Action::PanLeft | Action::PanRight | Action::PanUp | Action::PanDown => {}
-            Action::ZoomIn => self.core.zoom_step(1.25),
-            Action::ZoomOut => self.core.zoom_step(0.8),
-            Action::ScaleFit => self.core.set_scale_mode(ScaleMode::Fit),
-            Action::ScaleFill => self.core.set_scale_mode(ScaleMode::Fill),
-            Action::ScaleOriginal => self.core.set_scale_mode(ScaleMode::Original),
-            Action::ToggleOriginal => {
-                let next = if self.core.view.mode == ScaleMode::Original {
-                    ScaleMode::Fit
-                } else {
-                    ScaleMode::Original
-                };
-                self.core.set_scale_mode(next);
-            }
-            Action::RotateCw => self.core.rotate(false),
-            Action::RotateCcw => self.core.rotate(true),
-            Action::Copy => self.core.copy_image(),
-            Action::CopyPath => self.core.copy_path(),
             Action::SaveRotation => self.save_rotation(),
             Action::Delete => self.delete_current(false),
             Action::DeletePermanent => self.delete_current(true),
             Action::Undo => self.undo(),
-            Action::OpenFile => self.core.open_picker(false),
-            Action::OpenFolder => self.core.open_picker(true),
-            Action::Info => self.core.toggle_info(false),
-            Action::FullExif => self.core.toggle_info(true),
-            Action::Help => self.core.toggle_help(),
             Action::Fullscreen => self.toggle_fullscreen(),
             Action::Recursive => self.toggle_recursive(),
             Action::CancelScan => self.cancel_scan_command(),
-            Action::SlideshowToggle => self.core.toggle_slideshow(),
-            Action::SlideshowFaster => self.core.adjust_slideshow(-1),
-            Action::SlideshowSlower => self.core.adjust_slideshow(1),
-            Action::PlayPause => self.core.toggle_play_pause(),
-            // A menu click is a single step; the keyboard's hold-to-scrub goes through
-            // `frame_step_press` (the FrameStep press arm) instead.
-            Action::FrameNext => self.core.frame_step(1),
-            Action::FramePrev => self.core.frame_step(-1),
             Action::MuteLiveAudio => self.toggle_mute_audio(),
             Action::Settings => self.open_settings(),
             Action::About => self.open_about(),
             Action::Quit => self.begin_exit(),
+            _ => {}
         }
     }
 
@@ -1985,75 +1952,88 @@ impl App {
     /// advance path used to do inline now land here — the total, not `present`, is flat).
     fn drain_effects(&mut self, event_loop: &ActiveEventLoop) {
         let t0 = Instant::now();
-        for effect in std::mem::take(&mut self.core.effects) {
-            match effect {
-                contract::CoreEffect::Quit => event_loop.exit(),
-                contract::CoreEffect::RequestRender => {
-                    if let Some(w) = self.window.as_ref() {
-                        w.request_redraw();
+        // Drain until quiescent: a `ShellFlowAction` runs a shell flow method that can enqueue a
+        // follow-up effect which must land the SAME event turn — e.g. Fullscreen→`SetWindowMode`
+        // (else the mode flip lags a tick) and Quit→`Quit`. Bounded so a pathological re-push
+        // can't spin the loop.
+        let mut guard = 0;
+        while !self.core.effects.is_empty() && guard < 16 {
+            guard += 1;
+            for effect in std::mem::take(&mut self.core.effects) {
+                match effect {
+                    contract::CoreEffect::Quit => event_loop.exit(),
+                    contract::CoreEffect::RequestRender => {
+                        if let Some(w) = self.window.as_ref() {
+                            w.request_redraw();
+                        }
                     }
-                }
-                contract::CoreEffect::SetTitle(title) => {
-                    if let Some(w) = self.window.as_ref() {
-                        w.set_title(&title);
+                    contract::CoreEffect::SetTitle(title) => {
+                        if let Some(w) = self.window.as_ref() {
+                            w.set_title(&title);
+                        }
                     }
-                }
-                contract::CoreEffect::SetCursor(kind) => {
-                    if let Some(w) = self.window.as_ref() {
-                        w.set_cursor(cursor_icon(kind));
+                    contract::CoreEffect::SetCursor(kind) => {
+                        if let Some(w) = self.window.as_ref() {
+                            w.set_cursor(cursor_icon(kind));
+                        }
                     }
-                }
-                contract::CoreEffect::SetMenuState(state) => {
-                    self.apply_menu_to_native(&state);
-                }
-                contract::CoreEffect::SetWindowMode(_mode) => {
-                    self.apply_window_mode();
-                }
-                contract::CoreEffect::WriteClipboard(payload) => {
-                    self.write_clipboard(payload);
-                }
-                contract::CoreEffect::OpenFolderPanel { start_dir } => {
-                    let input = rfd::FileDialog::new()
-                        .set_directory(&start_dir)
-                        .pick_folder()
-                        .map(LaunchInput::Directory);
-                    self.finish_picker(input);
-                }
-                contract::CoreEffect::OpenFilePanel { start_dir } => {
-                    // Offer archives alongside images in the default filter (opening a zip
-                    // to view its photos is the same use case), plus an All-files escape
-                    // hatch. The picked paths go through `classify_inputs` — like drag-drop
-                    // — so a single picked `.zip` opens as an archive instead of being
-                    // mistaken for one file inside its folder.
-                    let mut exts: Vec<&str> = IMAGE_FILTER_EXTS.to_vec();
-                    exts.push("zip");
-                    exts.push("7z");
-                    let input = rfd::FileDialog::new()
-                        .add_filter("Images & archives", &exts)
-                        .add_filter("All files", &["*"])
-                        .set_directory(&start_dir)
-                        .pick_files()
-                        .filter(|ps| !ps.is_empty())
-                        .map(classify_inputs);
-                    self.finish_picker(input);
-                }
-                // Live Photo audio (task #38): the core decides when/where; the shell owns the
-                // ObjC `AVAudioPlayer`. A no-op on non-macOS (the stub player returns None).
-                contract::CoreEffect::StartLiveAudio { path, at_secs } => {
-                    self.live_audio = LiveAudio::play(&path, at_secs);
-                }
-                contract::CoreEffect::StopLiveAudio => self.live_audio = None,
-                contract::CoreEffect::PauseLiveAudio => {
-                    if let Some(a) = &self.live_audio {
-                        a.pause();
+                    contract::CoreEffect::SetMenuState(state) => {
+                        self.apply_menu_to_native(&state);
                     }
-                }
-                contract::CoreEffect::ResumeLiveAudio => {
-                    if let Some(a) = &self.live_audio {
-                        a.resume();
+                    contract::CoreEffect::SetWindowMode(_mode) => {
+                        self.apply_window_mode();
                     }
+                    contract::CoreEffect::WriteClipboard(payload) => {
+                        self.write_clipboard(payload);
+                    }
+                    contract::CoreEffect::OpenFolderPanel { start_dir } => {
+                        let input = rfd::FileDialog::new()
+                            .set_directory(&start_dir)
+                            .pick_folder()
+                            .map(LaunchInput::Directory);
+                        self.finish_picker(input);
+                    }
+                    contract::CoreEffect::OpenFilePanel { start_dir } => {
+                        // Offer archives alongside images in the default filter (opening a zip
+                        // to view its photos is the same use case), plus an All-files escape
+                        // hatch. The picked paths go through `classify_inputs` — like drag-drop
+                        // — so a single picked `.zip` opens as an archive instead of being
+                        // mistaken for one file inside its folder.
+                        let mut exts: Vec<&str> = IMAGE_FILTER_EXTS.to_vec();
+                        exts.push("zip");
+                        exts.push("7z");
+                        let input = rfd::FileDialog::new()
+                            .add_filter("Images & archives", &exts)
+                            .add_filter("All files", &["*"])
+                            .set_directory(&start_dir)
+                            .pick_files()
+                            .filter(|ps| !ps.is_empty())
+                            .map(classify_inputs);
+                        self.finish_picker(input);
+                    }
+                    // Live Photo audio (task #38): the core decides when/where; the shell owns the
+                    // ObjC `AVAudioPlayer`. A no-op on non-macOS (the stub player returns None).
+                    contract::CoreEffect::StartLiveAudio { path, at_secs } => {
+                        self.live_audio = LiveAudio::play(&path, at_secs);
+                    }
+                    contract::CoreEffect::StopLiveAudio => self.live_audio = None,
+                    contract::CoreEffect::PauseLiveAudio => {
+                        if let Some(a) = &self.live_audio {
+                            a.pause();
+                        }
+                    }
+                    contract::CoreEffect::ResumeLiveAudio => {
+                        if let Some(a) = &self.live_audio {
+                            a.resume();
+                        }
+                    }
+                    // The core routed a flow action (dialog / window / scan / file edit / quit) it
+                    // doesn't own end-to-end yet — run the shell half.
+                    contract::CoreEffect::ShellFlowAction(action) => {
+                        self.perform_flow_action(action);
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
         self.open_pending_dialog(event_loop);
@@ -2552,7 +2532,7 @@ impl ApplicationHandler for App {
                             repeat,
                         ) {
                             contract::KeyResolution::Ignore => {}
-                            contract::KeyResolution::OneShot(act) => self.dispatch_action(act),
+                            contract::KeyResolution::OneShot(act) => self.core.dispatch_action(act),
                             contract::KeyResolution::NavStart(act) => self.core.nav_press(key, act),
                             contract::KeyResolution::HeldStart(act) => {
                                 self.core.held.insert(key, act);
@@ -2643,13 +2623,13 @@ impl ApplicationHandler for App {
                 let open_hit = pressed.then(|| self.core.open_hovered_button()).flatten();
                 if let Some(button) = open_hit {
                     match button {
-                        OpenButton::File => self.dispatch_action(Action::OpenFile),
-                        OpenButton::Folder => self.dispatch_action(Action::OpenFolder),
+                        OpenButton::File => self.core.dispatch_action(Action::OpenFile),
+                        OpenButton::Folder => self.core.dispatch_action(Action::OpenFolder),
                     }
                 } else if pressed && self.core.play_hint_hit() {
                     // Click the play hint → play, and dismiss it (it's been used).
                     self.core.play_hint = None;
-                    self.dispatch_action(Action::PlayPause);
+                    self.core.dispatch_action(Action::PlayPause);
                 } else if pressed
                     && self
                         .core
@@ -2673,7 +2653,7 @@ impl ApplicationHandler for App {
             // Trackpad two-finger double-tap (macOS "smart magnify"): toggle 100%,
             // sharing the keyboard's `0` / menu toggle so they can't drift.
             WindowEvent::DoubleTapGesture { .. } => {
-                self.dispatch_action(Action::ToggleOriginal);
+                self.core.dispatch_action(Action::ToggleOriginal);
             }
 
             // Scroll. macOS sends pixel-precise `PixelDelta` (a trackpad two-finger swipe);
@@ -3867,6 +3847,7 @@ mod tests {
     // Pure helpers now live in pb-app-core::engine / pb-decode; imported here (not at the
     // crate root) so the bin build doesn't see them as unused after the NS0 Phase B move.
     use pb_app_core::engine::{is_exif_blob, point_in_rect, scale_alpha};
+    use pb_render::ScaleMode;
     use pb_app_core::Toast;
     use pb_decode::read_exif_fields;
 

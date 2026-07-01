@@ -34,6 +34,70 @@ use crate::{
 };
 
 impl AppCore {
+    /// Dispatch a one-shot [`Action`] — the single entry point shared by the keyboard
+    /// (one-shot keys, via the keymap) and the menu (`MenuAction::to_action`). The pure
+    /// view/nav/HUD/animation arms run here in the core; the **flow** arms (dialogs, window
+    /// mode, scan, file edits, quit) are routed to the shell/host via
+    /// [`CoreEffect::ShellFlowAction`] until 5.6 inverts them into specific effects/events.
+    /// Navigation here is a single step (what the menu wants); the keyboard's held-to-fly nav
+    /// and continuous pan/zoom are driven by the hold loop, not this path.
+    pub fn dispatch_action(&mut self, action: Action) {
+        match action {
+            Action::Next => self.advance(Nav::Forward),
+            Action::Prev => self.advance(Nav::Backward),
+            Action::Random => self.advance(Nav::Random),
+            Action::RandomPrev => self.advance(Nav::RandomPrev),
+            // Pan is continuous-while-held only (the hold loop); never single-dispatched.
+            Action::PanLeft | Action::PanRight | Action::PanUp | Action::PanDown => {}
+            Action::ZoomIn => self.zoom_step(1.25),
+            Action::ZoomOut => self.zoom_step(0.8),
+            Action::ScaleFit => self.set_scale_mode(ScaleMode::Fit),
+            Action::ScaleFill => self.set_scale_mode(ScaleMode::Fill),
+            Action::ScaleOriginal => self.set_scale_mode(ScaleMode::Original),
+            Action::ToggleOriginal => {
+                let next = if self.view.mode == ScaleMode::Original {
+                    ScaleMode::Fit
+                } else {
+                    ScaleMode::Original
+                };
+                self.set_scale_mode(next);
+            }
+            Action::RotateCw => self.rotate(false),
+            Action::RotateCcw => self.rotate(true),
+            Action::Copy => self.copy_image(),
+            Action::CopyPath => self.copy_path(),
+            Action::OpenFile => self.open_picker(false),
+            Action::OpenFolder => self.open_picker(true),
+            Action::Info => self.toggle_info(false),
+            Action::FullExif => self.toggle_info(true),
+            Action::Help => self.toggle_help(),
+            Action::SlideshowToggle => self.toggle_slideshow(),
+            Action::SlideshowFaster => self.adjust_slideshow(-1),
+            Action::SlideshowSlower => self.adjust_slideshow(1),
+            Action::PlayPause => self.toggle_play_pause(),
+            // A menu click is a single step; the keyboard's hold-to-scrub goes through
+            // `frame_step_press` (the FrameStep press arm) instead.
+            Action::FrameNext => self.frame_step(1),
+            Action::FramePrev => self.frame_step(-1),
+            // Flow arms — dialogs / window mode / scan / file edits / quit. The core doesn't own
+            // these end-to-end yet, so it routes them to the shell (host) via one effect,
+            // keeping the *whole* action vocabulary dispatching through this one core method.
+            Action::SaveRotation
+            | Action::Delete
+            | Action::DeletePermanent
+            | Action::Undo
+            | Action::Fullscreen
+            | Action::Recursive
+            | Action::CancelScan
+            | Action::MuteLiveAudio
+            | Action::Settings
+            | Action::About
+            | Action::Quit => self
+                .effects
+                .push(contract::CoreEffect::ShellFlowAction(action)),
+        }
+    }
+
     /// Build the [`contract::MenuState`] for the given live state — the pure mapping from
     /// the app's view/edit state to the shell-neutral menu model. Takes no `self` and
     /// touches no muda, so it's unit-tested directly (`menu_state_*` tests). The two enum
