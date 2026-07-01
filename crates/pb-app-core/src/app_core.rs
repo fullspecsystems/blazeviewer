@@ -26,8 +26,10 @@ use pb_source::PhotoSource;
 
 use crate::contract::CoreEffect;
 use crate::decode_pool::{DecodePool, Outcome};
+use crate::keymap::Keymap;
 use crate::metrics::StageTimes;
 use crate::overlay::{InfoMode, OpenButton, OpenPanel, PlayHint, Toast};
+use crate::settings::Settings;
 use crate::{Action, Modifiers, PbKey, PhotoMeta, Slideshow};
 
 /// A navigation move: forward (`space`/`→`), backward (`backspace`/`←`), a
@@ -217,6 +219,13 @@ pub struct AppCore {
     /// window itself stays shell-owned — the core drives rendering, the shell owns the OS
     /// handle it draws to.
     pub renderer: Option<Box<dyn Renderer>>,
+
+    // --- Config (NS0 5.5 / Phase 0.5) ---
+    /// The active keybindings (loaded from `keymap.toml`; editable via the shortcut editor).
+    pub keymap: Keymap,
+    /// Persisted user preferences (nav feel, defaults, saved window geometry). The hold loop
+    /// reads them live; the Settings dialog edits + saves them.
+    pub settings: Settings,
 
     // --- Effect sink (NS0 5.5 / Phase 0.1) ---
     /// Orchestration pushes [`CoreEffect`]s here instead of touching the OS directly; the

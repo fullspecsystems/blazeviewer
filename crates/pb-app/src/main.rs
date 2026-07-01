@@ -73,7 +73,6 @@ mod pb_key_winit;
 #[cfg(target_os = "macos")]
 mod proxy_icon;
 mod save_rotation;
-mod settings;
 // The action vocabulary, physical-key model, keymap, and slideshow timing now live
 // in the platform-neutral `pb-app-core` (NS0). Re-export them at the crate root so
 // the existing `crate::action` / `crate::keymap` / `crate::pb_key` / `crate::slideshow`
@@ -88,6 +87,9 @@ use pb_app_core::{
 // crate root so the existing `crate::hud` / `crate::icon` / bare `hud::…` / `icon::…`
 // paths across the winit shell modules keep resolving unchanged.
 pub use pb_hud::{hud, icon};
+// Persisted preferences model now lives in pb-app-core (NS0 5.5). Re-export at the crate
+// root so `crate::settings` / bare `settings::…` across main.rs + dialog.rs stay unchanged.
+pub use pb_app_core::settings;
 
 use action::Action;
 use animation::Playback;
@@ -538,14 +540,6 @@ struct App {
     /// The open egui dialog window (Settings / About), or `None`. At most one at a
     /// time; its events are routed by window id in `window_event`.
     dialog: Option<dialog::DialogWindow>,
-    /// Configurable key bindings (task #8): the chord→action map the keyboard
-    /// dispatch and the help overlay both read. Loaded once at startup (defaults +
-    /// optional `keymap.toml`); read-only.
-    keymap: Keymap,
-    /// Persisted user preferences (nav feel, defaults, etc.). Loaded at startup;
-    /// the hold-to-fly curve reads `start_speed`/`ramp_secs`/`max_advance_rate` live,
-    /// so a future Settings dialog can apply changes by mutating this in place.
-    settings: settings::Settings,
     /// An in-flight background archive open (a `.7z` eager-decompresses off-thread so
     /// it can't freeze the event loop). `None` when no archive is loading.
     archive_load: Option<ArchiveLoad>,
@@ -805,6 +799,8 @@ impl App {
                 play_hint: None,
                 hud: Hud::load(),
                 renderer: None,
+                keymap: Keymap::load(),
+                settings,
                 effects: Vec::new(),
             },
             pending_drops: Vec::new(),
@@ -830,8 +826,6 @@ impl App {
             pending_confirm_delete: None,
             menu_attached: false,
             dialog: None,
-            keymap: Keymap::load(),
-            settings,
             archive_load: None,
             archive_gen: 0,
             dir_scan: None,
@@ -2306,7 +2300,7 @@ impl App {
         self.windowed = !self.windowed;
         // Record the new mode as the remembered last state, in memory and on disk, so
         // `StartupMode::Remember` restores it and the Settings dialog stays in sync.
-        self.settings.fullscreen = !self.windowed;
+        self.core.settings.fullscreen = !self.windowed;
         // Leaving windowed mode: snapshot where the window is now, so toggling back
         // (and the next launch) restore this spot rather than the OS default corner (#1).
         if !self.windowed {
@@ -2315,7 +2309,7 @@ impl App {
         // Persist the new mode + remembered geometry together (one atomic write). An
         // explicit user action (the toggle), never the view path — privacy #2.
         self.core.geometry_save_at = None;
-        self.settings.save();
+        self.core.settings.save();
 
         // The window ops (fullscreen/decorations/sizing + macOS chrome + menu attach) are
         // shell work: emit the mode change and let the drain apply it (`apply_window_mode`),
@@ -2400,7 +2394,7 @@ impl App {
         if size.width == 0 || size.height == 0 {
             return;
         }
-        self.settings.window = Some(settings::WindowGeometry {
+        self.core.settings.window = Some(settings::WindowGeometry {
             x: pos.x,
             y: pos.y,
             w: size.width,
@@ -2416,9 +2410,9 @@ impl App {
         if !self.windowed {
             return;
         }
-        let before = self.settings.window;
+        let before = self.core.settings.window;
         self.capture_windowed_geometry();
-        if self.settings.window != before {
+        if self.core.settings.window != before {
             self.core.geometry_save_at = Some(Instant::now() + Duration::from_millis(500));
         }
     }
@@ -2430,7 +2424,7 @@ impl App {
         &self,
         monitors: &[(i32, i32, u32, u32)],
     ) -> Option<settings::WindowGeometry> {
-        let g = self.settings.window?;
+        let g = self.core.settings.window?;
         settings::geometry_on_screen(
             g,
             monitors,
@@ -2443,7 +2437,7 @@ impl App {
     /// Build the native menu bar once (cross-platform; muda owns the OS handle).
     fn ensure_menu(&mut self) {
         if self.menu.is_none() {
-            let built = menu::build_menu(&self.keymap);
+            let built = menu::build_menu(&self.core.keymap);
             self.menu = Some(built.menu);
             self.save_rotation_item = Some(built.save_rotation);
             self.cancel_scan_item = Some(built.cancel_scan);
@@ -2552,7 +2546,7 @@ impl App {
             self.core.recursive,
             !self.windowed, // `windowed` is the inverse of the fullscreen checkbox
             self.core.slideshow.on,
-            self.settings.mute_live_audio,
+            self.core.settings.mute_live_audio,
             self.can_save_rotation(),
             self.dir_scan.is_some(),
             // `None` = nothing to undo (disabled "Undo"); `Some(label)` = enabled w/ label.
@@ -2803,7 +2797,7 @@ impl App {
     fn open_picker(&mut self, folder: bool) {
         let fallback = default_picker_dir();
         let mut start_dir = picker_start_dir(
-            self.settings.picker_dir.as_deref(),
+            self.core.settings.picker_dir.as_deref(),
             self.core.source.container(),
             self.core.scan_root.as_deref(),
             &self.core.root,
@@ -3061,10 +3055,10 @@ impl App {
     /// the parts that aren't read live (hold delay, letterbox color, default scale
     /// mode), then persist to disk (an explicit user action — privacy #2). The nav-feel
     /// rates (start speed / ramp / max) and the info-panel opacity are read live, so
-    /// swapping `self.settings` is enough for those.
+    /// swapping `self.core.settings` is enough for those.
     fn apply_settings(&mut self, new: settings::Settings) {
-        let old = std::mem::replace(&mut self.settings, new);
-        let s = &self.settings;
+        let old = std::mem::replace(&mut self.core.settings, new);
+        let s = &self.core.settings;
 
         // Held-key repeat delay is cached on the struct (the curve below reads the
         // rates live, but this one is a Duration captured at construction).
@@ -3088,7 +3082,7 @@ impl App {
         }
 
         // Persist the whole model (atomic write; best-effort).
-        self.settings.save();
+        self.core.settings.save();
 
         // Redraw so the new letterbox shows even when the scale mode didn't change,
         // and rebuild the info panel so a new opacity takes effect immediately.
@@ -3100,12 +3094,12 @@ impl App {
     }
 
     /// Apply the keymap edited in the Settings dialog: swap it in live (every keypress
-    /// resolves through `self.keymap`, so future input uses it immediately) and persist
+    /// resolves through `self.core.keymap`, so future input uses it immediately) and persist
     /// `keymap.toml`. If the help overlay is open, rebuild it so its key labels — read
     /// from the live keymap — reflect the new bindings.
     fn apply_keymap(&mut self, keymap: Keymap) {
-        self.keymap = keymap;
-        self.keymap.save();
+        self.core.keymap = keymap;
+        self.core.keymap.save();
         if self.core.overlay_shown && self.core.info == InfoMode::Help {
             self.show_overlay();
         }
@@ -3345,7 +3339,8 @@ impl App {
         if let Some(chord) = menu::macos_menu_chord(action) {
             return chord.mac_symbol();
         }
-        self.keymap
+        self.core
+            .keymap
             .bindings_for(action)
             .iter()
             .find(|c| !c.code.is_numpad())
@@ -3663,7 +3658,7 @@ impl App {
         let pad = (7.0 * self.core.viewport.scale_factor).round().max(2.0) as u32;
         // The info / EXIF panels honor the user's opacity setting; the help overlay
         // keeps the standard translucency.
-        let info_bg = hud::bg_for_opacity(self.settings.info_opacity);
+        let info_bg = hud::bg_for_opacity(self.core.settings.info_opacity);
         // Resolve the Live Photo pairing (cached; one stat) up front so either panel can
         // label it — the basic line and the detailed table both read `is_live_photo`.
         if let Some(item) = self.core.displayed_item {
@@ -3740,7 +3735,8 @@ impl App {
     /// open-screen buttons' shortcut hints, so they reflect any shortcut the user remapped in
     /// Settings.
     fn shortcut_for(&self, action: Action) -> String {
-        self.keymap
+        self.core
+            .keymap
             .bindings_for(action)
             .first()
             .map(|c| c.shortcut_label())
@@ -4385,8 +4381,8 @@ impl App {
                     event_loop,
                     refresh,
                     &message,
-                    &self.settings,
-                    &self.keymap,
+                    &self.core.settings,
+                    &self.core.keymap,
                     parent.as_deref(),
                 );
             }
@@ -4396,8 +4392,8 @@ impl App {
                     event_loop,
                     refresh,
                     &message,
-                    &self.settings,
-                    &self.keymap,
+                    &self.core.settings,
+                    &self.core.keymap,
                     parent.as_deref(),
                 );
                 if let Some(d) = dlg.as_mut() {
@@ -4412,8 +4408,8 @@ impl App {
                     event_loop,
                     refresh,
                     &message,
-                    &self.settings,
-                    &self.keymap,
+                    &self.core.settings,
+                    &self.core.keymap,
                     parent.as_deref(),
                 );
                 if let Some(d) = dlg.as_mut() {
@@ -5141,7 +5137,7 @@ impl App {
     /// an animation (no audio track), a silent clip, or when muted. Called when the motion
     /// starts playing from frame 0.
     fn start_live_audio(&mut self, item: usize) {
-        if self.settings.mute_live_audio {
+        if self.core.settings.mute_live_audio {
             self.live_audio = None;
             return;
         }
@@ -5155,9 +5151,9 @@ impl App {
     /// unmuting a currently-playing Live Photo starts its audio at the current position so
     /// it stays in sync.
     fn toggle_mute_audio(&mut self) {
-        let muted = !self.settings.mute_live_audio;
-        self.settings.mute_live_audio = muted;
-        self.settings.save();
+        let muted = !self.core.settings.mute_live_audio;
+        self.core.settings.mute_live_audio = muted;
+        self.core.settings.save();
         self.menu_state = None; // invalidate the cache so the check re-asserts
         self.apply_menu_state();
         if muted {
@@ -5311,7 +5307,7 @@ impl ApplicationHandler for App {
             peak,
         );
         // Apply the user's saved letterbox color before the first frame paints.
-        renderer.set_letterbox(self.settings.letterbox);
+        renderer.set_letterbox(self.core.settings.letterbox);
         let now = window.inner_size();
         if now != isz {
             self.core.fit = Some(FitBox {
@@ -5530,8 +5526,12 @@ impl ApplicationHandler for App {
                         //   - frame-step → step one animation frame now, repeat while held.
                         // `resolve_key_down` folds in the repeat gate (OS auto-repeats
                         // resolve to `Ignore`) and the ⌘-doesn't-fall-through rule.
-                        match contract::resolve_key_down(&self.keymap, key, self.core.mods, repeat)
-                        {
+                        match contract::resolve_key_down(
+                            &self.core.keymap,
+                            key,
+                            self.core.mods,
+                            repeat,
+                        ) {
                             contract::KeyResolution::Ignore => {}
                             contract::KeyResolution::OneShot(act) => self.dispatch_action(act),
                             contract::KeyResolution::NavStart(act) => self.nav_press(key, act),
@@ -5664,7 +5664,7 @@ impl ApplicationHandler for App {
             // the other action. So the setting is live on a Mac trackpad too (it used to be
             // ignored there, hard-wired to pan); the default stays Pan, and Ctrl+swipe zooms.
             WindowEvent::MouseWheel { delta, .. } => {
-                let zooms = self.settings.scroll_action == settings::ScrollAction::Zoom;
+                let zooms = self.core.settings.scroll_action == settings::ScrollAction::Zoom;
                 let zoom = zooms != self.core.mods.ctrl;
                 match delta {
                     MouseScrollDelta::PixelDelta(p) => {
@@ -5785,9 +5785,9 @@ impl ApplicationHandler for App {
             };
             let interval = timing::advance_interval(
                 repeat_elapsed,
-                self.settings.start_speed,
-                self.settings.ramp_secs,
-                self.settings.max_advance_rate as f32,
+                self.core.settings.start_speed,
+                self.core.settings.ramp_secs,
+                self.core.settings.max_advance_rate as f32,
                 self.core.frame_interval,
             );
             let due = timing::elapsed_since(self.core.last_present, now, interval);
@@ -5904,7 +5904,7 @@ impl ApplicationHandler for App {
         if let Some(at) = self.core.geometry_save_at {
             if now >= at {
                 self.core.geometry_save_at = None;
-                self.settings.save();
+                self.core.settings.save();
             }
         }
 

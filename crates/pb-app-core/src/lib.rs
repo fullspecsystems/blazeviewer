@@ -29,6 +29,7 @@ pub mod meta;
 pub mod metrics;
 pub mod overlay;
 pub mod pb_key;
+pub mod settings;
 pub mod slideshow;
 pub mod timing;
 

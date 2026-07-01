@@ -9,9 +9,11 @@ description = "Platform-neutral orchestration model for PhotoBlaze: actions, the
 # the per-user config dir) is allowed here — that is platform code, not *shell*
 # code — but UI toolkits never are. This is the crate the macOS Swift bridge links.
 [dependencies]
-# Keymap config parse/format (keymap.toml). Same version + features as pb-app so
-# the lockfile is unchanged by the split.
+# Keymap + settings config parse/format (keymap.toml / settings.toml). Same version +
+# features as pb-app so the lockfile is unchanged by the split.
 toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
+# Typed (de)serialization for the persisted Settings model (NS0 5.5 / Phase 0.5).
+serde = { version = "1", features = ["derive"] }
 # Engine crates the orchestration state (`AppCore`) references as step 5 relocates it
 # off the winit shell: the view transform + rotation (pb-render), the decode-to-fit box
 # (pb-decode), the pure nav / residency mirror (pb-core), and the PhotoSource seam +

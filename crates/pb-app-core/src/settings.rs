@@ -220,7 +220,7 @@ impl Settings {
 fn settings_path() -> Option<PathBuf> {
     // The per-user config dir now lives in `pb-app-core` (shared with the keymap
     // loader); settings.toml sits beside keymap.toml in it.
-    pb_app_core::config_dir().map(|d| d.join("settings.toml"))
+    crate::config_dir().map(|d| d.join("settings.toml"))
 }
 
 /// The raw `settings.toml` text, if the file exists and is readable.
