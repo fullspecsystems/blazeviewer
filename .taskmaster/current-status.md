@@ -12,8 +12,8 @@ smoke-verified**: keyboard + pointer + the whole `about_to_wait` tick loop route
 **Delete-to-trash** → pure core arms (their EXIF / trash IO modules moved into `pb-app-core`), and
 **Fullscreen** → core arm (`windowed` field migrated App → AppCore). The remaining 4
 (**DeletePermanent** confirm, **Recursive/CancelScan** scan threads, **Quit** teardown) are
-legitimately host-side and stay behind the (reframed) `ShellFlowAction` seam. **First 6 owner-smoke-
-verified (2026-07-01) — "never seen a regression"; ⚠ Fullscreen (`0655292`) is unsmoked.**
+legitimately host-side and stay behind the (reframed) `ShellFlowAction` seam. **All 7 owner-smoke-
+verified (2026-07-01) — "never seen a regression"; Fullscreen (`2f6003d`) "looks great."**
 Everything below the NS0 section is the previously-shipped work (macOS port, archive, settings, HEIC,
 color), unchanged._
 
@@ -166,7 +166,7 @@ core logic moves into its own `dispatch_action` arm / specific effect; only true
     thin platform-neutral EXIF write.
   - **Delete-to-trash** (`9eb299a`) → core arm + `do_delete` → core: `git mv delete.rs → pb-app-core`
     (trash dep + `DELETE_ADVANCE_DELAY`→engine); `Del` is now pure core, `do_delete` uses `self.now`.
-  - **Fullscreen** (`0655292`, ⚠ unsmoked) → core arm + **`windowed: bool` migrated App → AppCore**
+  - **Fullscreen** (`0655292`, ✅ smoke-verified) → core arm + **`windowed: bool` migrated App → AppCore**
     (16 refs): the arm flips `windowed`/`settings.fullscreen` + pushes `SetWindowMode`; the live-
     window geometry snapshot + `settings.save()` moved into the `SetWindowMode` handler
     (`apply_window_mode`), which runs before the window ops so capture-before-resize still holds.
@@ -192,8 +192,8 @@ tracks remain, either order:
 2. **5.6 is mostly done** — the flow actions with genuine core logic are inverted (Mute, About/
    Settings, SaveRotation/Undo, Delete-to-trash, **Fullscreen**); the remaining `ShellFlowAction`
    arms (DeletePermanent confirm, Recursive/CancelScan scan threads, Quit teardown) are legitimately
-   host-side. **First: smoke Fullscreen** (F11/Alt+Enter toggle + windowed-spot memory across toggles
-   & relaunch). **Only if we want zero `ShellFlowAction`:** the archive/scan **dialog-outcome flow**
+   host-side (all 7 inverted actions are owner-smoke-verified). **Only if we want zero
+   `ShellFlowAction`:** the archive/scan **dialog-outcome flow**
    inversion (`begin_archive_open`→`DialogWindow`, migrate `DialogOutcome`/`Resolved` to `CoreEvent`s).
    Optional deferred C2 bits: `Resized`→`handle` (core viewport part; shell keeps the GPU-surface/EDR
    poke) and a `Scroll` seam for `MouseWheel`. None of these block NS1.
