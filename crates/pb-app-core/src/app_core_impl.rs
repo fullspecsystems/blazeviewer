@@ -144,16 +144,33 @@ impl AppCore {
             }
             CoreEvent::MenuAction(action) => self.dispatch_action(action),
             CoreEvent::KeymapSubmitted(keymap) => self.apply_keymap(keymap),
-            // Wired in C2 with the winit-shell translator rewrite (they touch the still-shell
-            // tick / scan / pointer / flow paths). Ignored for now so a host that sends them
-            // early is a no-op rather than a panic.
+            // Pointer moved: drag-to-pan (while the button is held) + refresh the on-image hover
+            // state (chip / open-panel buttons / play hint) + the cursor shape.
+            CoreEvent::PointerMoved { x, y } => {
+                let p = [x, y];
+                if self.dragging {
+                    if let Some(prev) = self.last_cursor {
+                        self.pan_by_pixels(p[0] - prev[0], p[1] - prev[1]);
+                    }
+                }
+                self.last_cursor = Some(p);
+                self.update_chip_hover();
+                self.update_open_hover();
+                self.update_play_hint_hover();
+                self.refresh_cursor();
+            }
+            // Trackpad pinch (macOS): magnify about the cursor (+ spread in / − pinch out).
+            CoreEvent::Pinch { delta } => {
+                self.zoom_about_cursor(1.0 + delta * PINCH_GAIN);
+            }
+            // Trackpad double-tap ("smart magnify"): toggle 100%, sharing the `0` / menu path.
+            CoreEvent::DoubleTap => self.dispatch_action(Action::ToggleOriginal),
+            // Wired in later C2 increments (they touch the still-shell tick / scan / scroll-delta /
+            // flow paths). Ignored for now so a host that sends them early is a no-op, not a panic.
             CoreEvent::Tick(_)
             | CoreEvent::Redraw
             | CoreEvent::Resized { .. }
-            | CoreEvent::PointerMoved { .. }
             | CoreEvent::Scroll { .. }
-            | CoreEvent::Pinch { .. }
-            | CoreEvent::DoubleTap
             | CoreEvent::DroppedPaths(_)
             | CoreEvent::CancelDialog => {}
         }

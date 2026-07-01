@@ -39,6 +39,10 @@ pub const ZOOM_MIN_RATE: f32 = 0.5;
 pub const ZOOM_MAX_RATE: f32 = 2.5;
 pub const ZOOM_RAMP_SECS: f32 = 0.7;
 
+/// Scales macOS's incremental trackpad magnification (`PinchGesture` delta) into a zoom
+/// factor (`1 + delta·gain`). Read by `AppCore::handle`'s `Pinch` arm.
+pub const PINCH_GAIN: f32 = 1.0;
+
 /// Hold-to-pan curve: pan speed (px/sec) ramps from a gentle start to a fast max
 /// over `PAN_RAMP_SECS`. Time-based, same shape as zoom (per the owner's note).
 pub const PAN_MIN_SPEED: f32 = 450.0;

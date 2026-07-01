@@ -113,11 +113,10 @@ static POOL_DECODE_MS: std::sync::Mutex<Vec<(f64, String)>> = std::sync::Mutex::
 /// Whether `--metrics` is on (gates the `POOL_DECODE_MS` recording in the off-thread
 /// decode closure, which has no access to the `StageTimes`).
 static METRICS_ON_FLAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// Trackpad gesture tuning. `PINCH_GAIN` scales macOS's incremental magnification
-/// (`WindowEvent::PinchGesture` delta) into a zoom factor (`1 + delta·gain`).
-/// `WHEEL_ZOOM_STEP` is the per-line zoom factor for **Ctrl+scroll** (the explicit
-/// zoom gesture; plain scroll pans instead — see the `MouseWheel` handler).
-const PINCH_GAIN: f32 = 1.0;
+/// Trackpad gesture tuning. `WHEEL_ZOOM_STEP` is the per-line zoom factor for
+/// **Ctrl+scroll** (the explicit zoom gesture; plain scroll pans instead — see the
+/// `MouseWheel` handler). (`PINCH_GAIN` moved to `pb_app_core::engine` with the pinch
+/// arm of `handle`.)
 const WHEEL_ZOOM_STEP: f32 = 0.1;
 /// Per-**pixel** zoom factor for a pixel-precise scroll (`PixelDelta` — a macOS trackpad
 /// two-finger swipe) when the `Scroll wheel` setting is Zoom (or Ctrl is held). Much smaller
@@ -2566,17 +2565,10 @@ impl ApplicationHandler for App {
             // Track the pointer (anchor for pinch/wheel zoom) and, while the left
             // button is held, drag-to-pan: move the image by the cursor delta.
             WindowEvent::CursorMoved { position, .. } => {
-                let p = [position.x as f32, position.y as f32];
-                if self.core.dragging {
-                    if let Some(prev) = self.core.last_cursor {
-                        self.core.pan_by_pixels(p[0] - prev[0], p[1] - prev[1]);
-                    }
-                }
-                self.core.last_cursor = Some(p);
-                self.core.update_chip_hover();
-                self.core.update_open_hover();
-                self.core.update_play_hint_hover();
-                self.core.refresh_cursor();
+                self.core.handle(contract::CoreEvent::PointerMoved {
+                    x: position.x as f32,
+                    y: position.y as f32,
+                });
             }
 
             // Pointer left the window: drop any Cancel Scan / open-button / play-hint hover so
@@ -2624,14 +2616,15 @@ impl ApplicationHandler for App {
             // Trackpad pinch (macOS): magnify about the cursor. `delta` is the
             // incremental magnification (+ spread to zoom in, − pinch to zoom out).
             WindowEvent::PinchGesture { delta, .. } => {
-                let factor = 1.0 + delta as f32 * PINCH_GAIN;
-                self.core.zoom_about_cursor(factor);
+                self.core.handle(contract::CoreEvent::Pinch {
+                    delta: delta as f32,
+                });
             }
 
             // Trackpad two-finger double-tap (macOS "smart magnify"): toggle 100%,
             // sharing the keyboard's `0` / menu toggle so they can't drift.
             WindowEvent::DoubleTapGesture { .. } => {
-                self.core.dispatch_action(Action::ToggleOriginal);
+                self.core.handle(contract::CoreEvent::DoubleTap);
             }
 
             // Scroll. macOS sends pixel-precise `PixelDelta` (a trackpad two-finger swipe);
