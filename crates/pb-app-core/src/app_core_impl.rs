@@ -93,6 +93,34 @@ impl AppCore {
             // `frame_step_press` (the FrameStep press arm) instead.
             Action::FrameNext => self.frame_step(1),
             Action::FramePrev => self.frame_step(-1),
+            // Mute / unmute the Live Photo audio (NS0 5.6, inverted): the mute *state* + its
+            // toast are core; only the ObjC audio player is the shell's (Stop/StartLiveAudio
+            // effects). The native menu's mute check re-asserts on the next per-tick
+            // `apply_menu_state` diff, so no explicit refresh is needed here.
+            Action::MuteLiveAudio => {
+                let muted = !self.settings.mute_live_audio;
+                self.settings.mute_live_audio = muted;
+                self.settings.save();
+                if muted {
+                    // Silence any playing clip now; a slashed-speaker icon pill = muted.
+                    self.effects.push(contract::CoreEffect::StopLiveAudio);
+                    self.show_toast_icon("", Some(icon::assets::VOLUME_SLASH));
+                } else {
+                    // Unmuting mid-playback: resume audio at the motion's current position.
+                    if let (Some(pb), Some(item)) = (self.playback.as_ref(), self.displayed_item) {
+                        if pb.is_playing() {
+                            let at_secs = pb.index() as f64 * pb.total_duration().as_secs_f64()
+                                / pb.frame_count().max(1) as f64;
+                            if let Some(path) = self.live_motion_path(item) {
+                                self.effects
+                                    .push(contract::CoreEffect::StartLiveAudio { path, at_secs });
+                            }
+                        }
+                    }
+                    // A speaker-with-waves icon pill = now audible.
+                    self.show_toast_icon("", Some(icon::assets::VOLUME));
+                }
+            }
             // Flow arms — dialogs / window mode / scan / file edits / quit. The core doesn't own
             // these end-to-end yet, so it routes them to the shell (host) via one effect,
             // keeping the *whole* action vocabulary dispatching through this one core method.
@@ -103,7 +131,6 @@ impl AppCore {
             | Action::Fullscreen
             | Action::Recursive
             | Action::CancelScan
-            | Action::MuteLiveAudio
             | Action::Settings
             | Action::About
             | Action::Quit => self

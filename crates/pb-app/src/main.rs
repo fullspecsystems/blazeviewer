@@ -1591,7 +1591,6 @@ impl App {
             Action::Fullscreen => self.toggle_fullscreen(),
             Action::Recursive => self.toggle_recursive(),
             Action::CancelScan => self.cancel_scan_command(),
-            Action::MuteLiveAudio => self.toggle_mute_audio(),
             Action::Settings => self.open_settings(),
             Action::About => self.open_about(),
             Action::Quit => self.begin_exit(),
@@ -2131,41 +2130,6 @@ impl App {
         self.core.pie_glow_started = None;
         // Drop any on-demand animation playback + in-flight decode (RAM-only — #2).
         self.core.stop_playback();
-    }
-
-    // --- Animation playback (task #37) -------------------------------------------------
-
-    /// Toggle Live Photo audio mute (`M` / Image menu). Persists the choice, updates the
-    /// menu check + a toast, and takes effect immediately: muting silences a playing clip;
-    /// unmuting a currently-playing Live Photo starts its audio at the current position so
-    /// it stays in sync.
-    fn toggle_mute_audio(&mut self) {
-        let muted = !self.core.settings.mute_live_audio;
-        self.core.settings.mute_live_audio = muted;
-        self.core.settings.save();
-        self.menu_state = None; // invalidate the cache so the check re-asserts
-        self.apply_menu_state();
-        if muted {
-            self.live_audio = None; // silence any playing clip now
-                                    // An icon-only pill (like the rotate toasts): a slashed speaker = now muted.
-            self.core
-                .show_toast_icon("", Some(icon::assets::VOLUME_SLASH));
-        } else {
-            // Unmuting mid-playback: resume audio at the motion's current position.
-            if let (Some(pb), Some(item)) = (self.core.playback.as_ref(), self.core.displayed_item)
-            {
-                if pb.is_playing() {
-                    let secs = pb.index() as f64 * pb.total_duration().as_secs_f64()
-                        / pb.frame_count().max(1) as f64;
-                    self.live_audio = self
-                        .core
-                        .live_motion_path(item)
-                        .and_then(|p| LiveAudio::play(&p, secs));
-                }
-            }
-            // A speaker with waves = now audible.
-            self.core.show_toast_icon("", Some(icon::assets::VOLUME));
-        }
     }
 }
 
