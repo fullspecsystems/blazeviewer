@@ -1327,7 +1327,7 @@
         "id": 37,
         "title": "Animated images (on-demand ▶ P playback)",
         "description": "Play GIF / APNG / animated WebP on demand (press P), never autoplay. Stills stay the hot path: flicking still decodes only the first frame; multi-frame decode + playback spin up only on P and never touch the prefetch ring or keypress→photon path. Frame-step with , / . (pauses if playing). See .taskmaster handoff + CLAUDE.md prime directive.",
-        "status": "in-progress",
+        "status": "done",
         "priority": "medium",
         "dependencies": [],
         "subtasks": [
@@ -1341,25 +1341,25 @@
             "id": 2,
             "title": "Playback state struct (pb-app, pure + tested)",
             "description": "Self-contained Animation/Playback sub-struct in pb-app (mirrors slideshow.rs: pure, no winit, unit-tested) holding the decoded frames + cursor: playing/paused, current frame index, loop-iteration counter, advance(elapsed)->frame honoring loop_count (0=infinite; stop on last frame when finite loops exhausted), next_frame()/prev_frame() (wrap), play_pause(). Kept shallow in the App god-struct so it lifts cleanly into AppCore (NS0).",
-            "status": "review"
+            "status": "done"
           },
           {
             "id": 3,
             "title": "Actions: PlayPause (P), FrameNext (.), FramePrev (,)",
             "description": "Add to action.rs (ALL/id/label/kind), keymap defaults (P, ., ,), menu (Image submenu + ids + MenuAction), dialog.rs KB_GROUPS, and main.rs dispatch_action arms. Frame-step pauses playback then steps one frame.",
-            "status": "review"
+            "status": "done"
           },
           {
             "id": 4,
             "title": "Off-thread decode + play/pause + about_to_wait frame pump",
             "description": "P on an animated image kicks an off-thread decode (never block the event loop; show pie while decoding), then plays via the existing set_image path — NOT the ring. about_to_wait advances to the due frame each tick and schedules a WaitUntil at the next frame deadline (reuse the slideshow continuous-repaint pattern); idle stays event-driven. P again pauses.",
-            "status": "review"
+            "status": "done"
           },
           {
             "id": 5,
             "title": "▶ P affordance + stop/reset on navigate",
             "description": "Show a small ▶ P hint (overlay/HUD) while an animated still is displayed (hidden while flying). Navigating to another image / any source change stops playback and resets. Detection cached per item (e.g. on PhotoMeta).",
-            "status": "review"
+            "status": "done"
           },
           {
             "id": 6,
@@ -1373,7 +1373,7 @@
         "id": 38,
         "title": "Live Photos (macOS): pair still + companion .mov, play the motion on P",
         "description": "Apple Live Photos are TWO files on disk — a still (JPEG on older iPhones, HEIC on newer) plus a short QuickTime .mov motion clip, linked by a shared content identifier. Detect and pair them during the folder scan, then reuse the task #37 animation playback machinery (P to play, step, eager-prep, present path) to play the motion on demand. macOS-first via AVFoundation; audio deferred; Windows tracked separately (#39). Reads only, RAM-only decode — the no-trace privacy guarantee (#2) holds. Both still variants (jpg/heic) work identically since the motion is the same .mov regardless of still format.",
-        "status": "in-progress",
+        "status": "done",
         "priority": "medium",
         "dependencies": [
           37
@@ -1383,31 +1383,31 @@
             "id": 1,
             "title": "Pair still + .mov during scan",
             "description": "In pb-source/scan, detect a Live Photo: a still that has a companion .mov (same basename, e.g. IMG_1234.HEIC + IMG_1234.MOV). Exclude the .mov from the playlist (it is not a photo) but record its path against the still item. Optionally verify via the shared content identifier (still: Apple MakerNote tag 17 read through CGImageSource; .mov: com.apple.quicktime.content.identifier) for robustness against basename collisions. Flow a LivePhoto marker + motion path to PhotoMeta, mirroring animated:Option<AnimationKind>.",
-            "status": "review"
+            "status": "done"
           },
           {
             "id": 2,
             "title": "Decode .mov -> RGBA frames (AVFoundation)",
             "description": "macOS backend: AVURLAsset(.mov) + AVAssetImageGenerator with maximumSize (decode-to-fit -> bounds RAM; a full-res 3s clip is ~1GB of RGBA, so cap the long edge), appliesPreferredTrackTransform for orientation, requestedTimeTolerance=zero. Loop over frame times from the video track nominalFrameRate/duration, copyCGImage -> reuse draw_cgimage_p3 (imageio.rs) -> AnimFrame, producing an Animation (reuse the struct). Respect MAX_FRAMES/MAX_DECODED_BYTES. If per-frame copyCGImage seeking is too slow, switch to AVAssetReader sequential sample decode.",
-            "status": "review"
+            "status": "done"
           },
           {
             "id": 3,
             "title": "Wire motion into Playback",
             "description": "Reuse Playback + the eager-prep/P-to-play/frame-step/present machinery from #37. Live Photo plays once then parks on the last frame (finite-loop semantics), not looping forever. Route P (and eager-prep on dwell) to decode+play the companion .mov instead of decode_animation. Distinct affordance: a LIVE badge / hint instead of the play triangle.",
-            "status": "review"
+            "status": "done"
           },
           {
             "id": 4,
             "title": "Live Photo info in the detailed panel",
             "description": "In the Shift+I panel, show it is a Live Photo plus the motion duration / frame count / current frame (reusing the animation_rows plumbing).",
-            "status": "review"
+            "status": "done"
           },
           {
             "id": 5,
             "title": "Audio (deferred)",
             "description": "DEFERRED per owner. Decode the .mov audio track (AVAssetReader) and play it in sync with the motion via a cross-platform audio-output seam. Non-trivial (sync, output device, seam) — the motion plays silently until this lands.",
-            "status": "review"
+            "status": "done"
           }
         ]
       },
