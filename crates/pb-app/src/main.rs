@@ -764,6 +764,13 @@ struct App {
     /// initial tap delay) and when the last repeat fired.
     framestep_started: Option<Instant>,
     framestep_last: Option<Instant>,
+
+    /// Intent-level effects the orchestration layer queued this event/tick for the shell
+    /// to carry out (NS0, ADR-021). Instead of touching winit/native APIs directly,
+    /// orchestration pushes [`contract::CoreEffect`]s here and [`App::drain_effects`]
+    /// executes them at the end of each `ApplicationHandler` entry — the seam an AppKit
+    /// shell will re-implement. (Being filled in incrementally: today it carries `Quit`.)
+    effects: Vec<contract::CoreEffect>,
 }
 
 /// What to do with an animation decode once it lands.
@@ -937,6 +944,7 @@ impl App {
             anim_hint_shown_for: None,
             framestep_started: None,
             framestep_last: None,
+            effects: Vec::new(),
             exif_cache: HashMap::new(),
         }
     }
@@ -2875,7 +2883,7 @@ impl App {
             Action::FramePrev => self.frame_step(-1, event_loop),
             Action::Settings => self.open_settings(event_loop),
             Action::About => self.open_about(event_loop),
-            Action::Quit => self.begin_exit(event_loop),
+            Action::Quit => self.begin_exit(),
         }
     }
 
@@ -4102,12 +4110,26 @@ impl App {
     ///    persistent thing PhotoBlaze touches is the photos it *reads*).
     /// 3. Exit the loop; `run_app` returns and `Drop` then frees the renderer
     ///    (VRAM) and joins the decode pool — all while the window is already gone.
-    fn begin_exit(&mut self, event_loop: &ActiveEventLoop) {
+    fn begin_exit(&mut self) {
         if let Some(a) = self.active.as_ref() {
             a.window.set_visible(false);
         }
         self.clear_session_state();
-        event_loop.exit();
+        self.effects.push(contract::CoreEffect::Quit);
+    }
+
+    /// Execute and clear the [`contract::CoreEffect`]s orchestration queued this
+    /// iteration — the one place the core's intents become real winit/native calls (the
+    /// seam an AppKit shell re-implements; NS0, ADR-021). Called at the end of each
+    /// `ApplicationHandler` entry that can produce effects. Only `Quit` is routed today;
+    /// more variants join as their call sites convert off direct winit access.
+    fn drain_effects(&mut self, event_loop: &ActiveEventLoop) {
+        for effect in std::mem::take(&mut self.effects) {
+            // Expands to a `match` in later NS0 checkpoints as more variants are routed.
+            if let contract::CoreEffect::Quit = effect {
+                event_loop.exit();
+            }
+        }
     }
 
     /// Drop every RAM-backed, photo-derived cache: decoded-pixel residency, staged
@@ -4936,10 +4958,11 @@ impl ApplicationHandler for App {
         // Events for our egui dialog window go to egui, not the photo viewer.
         if self.dialog.as_ref().map(|d| d.id()) == Some(id) {
             self.dialog_event(event, event_loop);
+            self.drain_effects(event_loop);
             return;
         }
         match event {
-            WindowEvent::CloseRequested => self.begin_exit(event_loop),
+            WindowEvent::CloseRequested => self.begin_exit(),
 
             WindowEvent::Resized(size) => {
                 let new_fit = FitBox {
@@ -5039,7 +5062,7 @@ impl ApplicationHandler for App {
                         let quit = esc_quits(self.esc_guard_until, Instant::now());
                         self.esc_guard_until = None;
                         if quit {
-                            self.begin_exit(event_loop);
+                            self.begin_exit();
                         }
                     } else if let Some(key) = pb_key_winit::from_winit(code) {
                         // Map the winit key to the shell-neutral `PbKey` (keys the keymap
@@ -5194,6 +5217,7 @@ impl ApplicationHandler for App {
 
             _ => {}
         }
+        self.drain_effects(event_loop);
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
@@ -5477,6 +5501,7 @@ impl ApplicationHandler for App {
             Some(at) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
             None => event_loop.set_control_flow(ControlFlow::Wait),
         }
+        self.drain_effects(event_loop);
     }
 }
 
