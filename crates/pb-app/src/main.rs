@@ -43,11 +43,10 @@ use winit::window::{CursorIcon, Icon, Window, WindowId};
 
 use pb_core::open::{self, LaunchInput, Source};
 use pb_core::{Playlist, ResidentRing};
-use pb_decode::{decode_bytes, is_supported_extension, FitBox};
+use pb_decode::{decode_bytes, FitBox};
 use pb_render::{Renderer, ViewTransform, WgpuRenderer};
-use pb_source::{seven_z_projected_bytes, FsSource, PhotoSource, SevenZSource, ZipSource};
+use pb_source::{FsSource, PhotoSource};
 
-mod archive;
 mod clipboard;
 #[cfg(windows)]
 mod darkmode;
@@ -103,6 +102,7 @@ use pb_app_core::metrics::StageTimes;
 // worker threads (which stay here); they produce these core types.
 use pb_app_core::scan::{self, Resolved, ScanUpdate};
 // Re-export so the shell's `ScanProgress` refs + dialog.rs's `crate::ScanProgress` stay unchanged.
+pub use pb_app_core::archive;
 pub use pb_app_core::scan::ScanProgress;
 
 /// Cap on decoded-but-not-yet-uploaded bytes held by the pool (backpressure).
@@ -557,7 +557,7 @@ impl App {
             return;
         }
         // An explicit file list is finite (no directory walk), so resolve it inline.
-        let r = resolve_playlist(&source, &cursor);
+        let r = scan::resolve_playlist(&source, &cursor);
         if r.source.is_empty() {
             eprintln!("PhotoBlaze: no supported images in that selection");
             return;
@@ -591,14 +591,14 @@ impl App {
             prev.progress.request_cancel();
         }
         if !is_7z {
-            let result = open_archive(&path, password);
+            let result = scan::open_archive(&path, password);
             self.finish_archive_open(result, was_password_attempt, path);
             return;
         }
         // 7z: refuse instantly if it won't fit RAM (before any background work). A
         // pre-flight password error (a header-encrypted archive) routes to the prompt
         // like any other, not the generic error dialog.
-        if let Err(e) = seven_z_preflight(&path, password.as_deref()) {
+        if let Err(e) = scan::seven_z_preflight(&path, password.as_deref()) {
             self.finish_archive_open(Err(e), was_password_attempt, path);
             return;
         }
@@ -609,7 +609,7 @@ impl App {
         let worker_path = path.clone();
         let worker_progress = progress.clone();
         std::thread::spawn(move || {
-            let result = load_seven_z(&worker_path, password, &worker_progress);
+            let result = scan::load_seven_z(&worker_path, password, &worker_progress);
             let _ = tx.send((generation, result));
         });
         // Show the determinate progress + Cancel dialog. If the password prompt is still
@@ -2713,112 +2713,6 @@ fn sorted_image_walk(root: &Path, recursive: bool) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Turn a planned [`Source`] into a concrete [`PhotoSource`] plus playlist framing.
-/// Scans and explicit lists become an [`FsSource`]; an archive opens a
-/// [`ZipSource`] (entries read into RAM on demand, never extracted to disk). On a
-/// hard archive failure it logs and falls back to an empty source.
-fn resolve_playlist(source: &Source, cursor: &open::Cursor) -> Resolved {
-    match source {
-        Source::Scan { .. } | Source::Explicit(_) => scan::resolve_scan(source, cursor, None),
-        // The launch / picker / drop paths open archives via the async-aware
-        // `App::begin_archive_open` (which surfaces failures through the egui
-        // dialog), so this arm is only a safety net: log and show empty on failure.
-        Source::Archive(path) => match open_archive(path, None) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("PhotoBlaze: {}", e.user_message());
-                Resolved::empty()
-            }
-        },
-    }
-}
-
-/// Open `path` as an archive playlist, dispatching by extension: `.7z` ->
-/// [`SevenZSource`] (eager, RAM-budget pre-flight), anything else -> [`ZipSource`]
-/// (lazy per-entry). Returns a structured [`ArchiveOpenError`](archive::ArchiveOpenError)
-/// so the caller can show the right message; entries are read into RAM, never
-/// extracted to disk.
-///
-/// `password` decrypts an encrypted archive (`None` on the first open; an encrypted
-/// archive then returns [`PasswordRequired`](archive::ArchiveOpenError::PasswordRequired)
-/// so the app can prompt, and a re-open carries the entered password). A ZIP's
-/// directory reads without one, and a *wrong* password still opens — so an actual
-/// entry decrypt ([`ZipSource::password_ok`]) is what catches it.
-fn open_archive(
-    path: &Path,
-    password: Option<String>,
-) -> Result<Resolved, archive::ArchiveOpenError> {
-    let is_7z = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("7z"));
-    if is_7z {
-        seven_z_preflight(path, password.as_deref())?;
-        // Synchronous safety-net path (the interactive paths use the async, cancellable
-        // `begin_archive_open`): a throwaway progress handle no UI reads.
-        load_seven_z(path, password, &pb_source::OpenProgress::new())
-    } else {
-        let has_password = password.is_some();
-        let zs = ZipSource::open(path, password, is_supported_extension)?;
-        // Encrypted but no password supplied -> prompt for one.
-        if zs.needs_password() {
-            return Err(archive::ArchiveOpenError::PasswordRequired);
-        }
-        // A password was supplied but it doesn't decrypt -> prompt again (open
-        // succeeds regardless of the password; the entry read is the real check).
-        if has_password && zs.is_encrypted() && !zs.password_ok() {
-            return Err(archive::ArchiveOpenError::PasswordRequired);
-        }
-        if zs.is_empty() {
-            return Err(archive::ArchiveOpenError::Empty);
-        }
-        Ok(scan::archive_resolved(path, Arc::new(zs)))
-    }
-}
-
-/// The RAM pre-flight for a 7z: predict-and-refuse before the (uncatchable) eager
-/// decompress, so an archive whose resident image bytes won't fit the budget is
-/// rejected instantly rather than aborting partway in. `password` is only needed
-/// for a header-encrypted archive (else the header reads without one); a wrong /
-/// missing one surfaces as `PasswordRequired` here, routing to the prompt.
-fn seven_z_preflight(path: &Path, password: Option<&str>) -> Result<(), archive::ArchiveOpenError> {
-    seven_z_preflight_within(path, password, archive::ram_budget())
-}
-
-/// The pre-flight comparison against an explicit `budget`, split out from
-/// [`seven_z_preflight`] so tests can drive the over-budget refusal path
-/// *deterministically* with an injected ceiling — rather than racing on the
-/// process-global `PB_ARCHIVE_RAM_BUDGET` env var (Rust runs tests in parallel
-/// threads, so mutating the environment from one test corrupts the others).
-fn seven_z_preflight_within(
-    path: &Path,
-    password: Option<&str>,
-    budget: u64,
-) -> Result<(), archive::ArchiveOpenError> {
-    let needed = seven_z_projected_bytes(path, password, is_supported_extension)?;
-    if needed > budget {
-        return Err(archive::ArchiveOpenError::TooLarge { needed, budget });
-    }
-    Ok(())
-}
-
-/// Eager-decompress a 7z into a [`Resolved`] (no pre-flight here — the caller runs
-/// [`seven_z_preflight`] first). This is the slow step the runtime path runs on a
-/// background thread (see `App::begin_archive_open`). `password` decrypts an
-/// encrypted archive; a wrong one fails decode and surfaces as `PasswordRequired`.
-fn load_seven_z(
-    path: &Path,
-    password: Option<String>,
-    progress: &pb_source::OpenProgress,
-) -> Result<Resolved, archive::ArchiveOpenError> {
-    let src =
-        SevenZSource::open_with_progress(path, password, is_supported_extension, Some(progress))?;
-    if src.is_empty() {
-        return Err(archive::ArchiveOpenError::Empty);
-    }
-    Ok(scan::archive_resolved(path, Arc::new(src)))
-}
-
 /// An in-flight background **directory scan**. A large/recursive folder is walked off
 /// the event loop — the synchronous walk used to block winit for seconds (macOS
 /// beachball) and then crash when the unresponsive window/GPU surface was torn down
@@ -2930,7 +2824,7 @@ fn main() {
     let resolved = if deferred {
         Resolved::empty()
     } else {
-        resolve_playlist(&plan.source, &plan.cursor)
+        scan::resolve_playlist(&plan.source, &plan.cursor)
     };
 
     match &plan.source {
@@ -3413,7 +3307,8 @@ mod tests {
         let before = snapshot_tree(&dir);
 
         // The disk-touching code the app runs while viewing a zip.
-        let resolved = resolve_playlist(&Source::Archive(zip_path.clone()), &open::Cursor::First);
+        let resolved =
+            scan::resolve_playlist(&Source::Archive(zip_path.clone()), &open::Cursor::First);
         assert_eq!(resolved.source.len(), 3, "zip should yield three images");
         let fit = FitBox {
             max_width: 64,
@@ -3459,7 +3354,8 @@ mod tests {
         let before = snapshot_tree(&dir);
 
         // Eager-open the 7z and view every entry: must not extract to disk.
-        let resolved = resolve_playlist(&Source::Archive(z_path.clone()), &open::Cursor::First);
+        let resolved =
+            scan::resolve_playlist(&Source::Archive(z_path.clone()), &open::Cursor::First);
         assert_eq!(resolved.source.len(), 3, "7z should yield three images");
         let fit = FitBox {
             max_width: 64,
@@ -3505,7 +3401,8 @@ mod tests {
         // The projection is the resident decompressed image bytes the eager open
         // would hold — at least the one image we put in.
         let needed =
-            seven_z_projected_bytes(&z_path, None, is_supported_extension).expect("project");
+            pb_source::seven_z_projected_bytes(&z_path, None, pb_decode::is_supported_extension)
+                .expect("project");
         assert!(
             needed >= IMG.len() as u64,
             "projection ({needed}) covers the image ({})",
@@ -3514,7 +3411,7 @@ mod tests {
 
         // A 1-byte budget is below the projection -> instant, structured refusal
         // (not a load attempt, not an abort).
-        match seven_z_preflight_within(&z_path, None, 1) {
+        match scan::seven_z_preflight_within(&z_path, None, 1) {
             Err(archive::ArchiveOpenError::TooLarge { needed: n, budget }) => {
                 assert_eq!(budget, 1);
                 assert_eq!(n, needed);
@@ -3523,7 +3420,7 @@ mod tests {
         }
 
         // The same archive fits under a generous budget: the pre-flight is the only gate.
-        seven_z_preflight_within(&z_path, None, u64::MAX).expect("fits under a huge budget");
+        scan::seven_z_preflight_within(&z_path, None, u64::MAX).expect("fits under a huge budget");
 
         let _ = fs::remove_dir_all(&dir);
     }

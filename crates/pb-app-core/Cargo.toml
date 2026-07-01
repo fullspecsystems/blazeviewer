@@ -43,3 +43,14 @@ trash = { version = "5", default-features = false, features = [
 # Iterative, symlink-safe directory walk for the scan resolvers migrated off the shell (NS0 5.6
 # Step 2b). Same crate the shell used; already in the lockfile.
 walkdir = "2"
+
+# Physical-RAM query for the 7z eager-decompress pre-flight (archive.rs), migrated off the shell
+# (NS0 5.6 Step 2c). Platform syscalls isolated in that one module; already in the workspace lock.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_SystemInformation",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"

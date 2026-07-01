@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use pb_core::open::{self, Source};
 use pb_decode::is_supported_extension;
-use pb_source::{FsSource, PhotoSource};
+use pb_source::{seven_z_projected_bytes, FsSource, PhotoSource, SevenZSource, ZipSource};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -379,4 +379,115 @@ pub fn stream_scan(
         let _ = tx.send((generation, ScanUpdate::Batch(snap)));
     }
     let _ = tx.send((generation, ScanUpdate::Done));
+}
+
+// ── Archive open + top-level playlist resolution (NS0 5.6 Step 2c) ──
+
+/// Open `path` as an archive playlist, dispatching by extension: `.7z` ->
+/// [`SevenZSource`] (eager, RAM-budget pre-flight), anything else -> [`ZipSource`]
+/// (lazy per-entry). Returns a structured [`ArchiveOpenError`](crate::archive::ArchiveOpenError)
+/// so the caller can show the right message; entries are read into RAM, never
+/// extracted to disk.
+///
+/// `password` decrypts an encrypted archive (`None` on the first open; an encrypted
+/// archive then returns [`PasswordRequired`](crate::archive::ArchiveOpenError::PasswordRequired)
+/// so the app can prompt, and a re-open carries the entered password). A ZIP's
+/// directory reads without one, and a *wrong* password still opens — so an actual
+/// entry decrypt ([`ZipSource::password_ok`]) is what catches it.
+pub fn open_archive(
+    path: &Path,
+    password: Option<String>,
+) -> Result<Resolved, crate::archive::ArchiveOpenError> {
+    let is_7z = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("7z"));
+    if is_7z {
+        seven_z_preflight(path, password.as_deref())?;
+        // Synchronous safety-net path (the interactive paths use the async, cancellable
+        // `begin_archive_open`): a throwaway progress handle no UI reads.
+        load_seven_z(path, password, &pb_source::OpenProgress::new())
+    } else {
+        let has_password = password.is_some();
+        let zs = ZipSource::open(path, password, is_supported_extension)?;
+        // Encrypted but no password supplied -> prompt for one.
+        if zs.needs_password() {
+            return Err(crate::archive::ArchiveOpenError::PasswordRequired);
+        }
+        // A password was supplied but it doesn't decrypt -> prompt again (open
+        // succeeds regardless of the password; the entry read is the real check).
+        if has_password && zs.is_encrypted() && !zs.password_ok() {
+            return Err(crate::archive::ArchiveOpenError::PasswordRequired);
+        }
+        if zs.is_empty() {
+            return Err(crate::archive::ArchiveOpenError::Empty);
+        }
+        Ok(archive_resolved(path, Arc::new(zs)))
+    }
+}
+
+/// The RAM pre-flight for a 7z: predict-and-refuse before the (uncatchable) eager
+/// decompress, so an archive whose resident image bytes won't fit the budget is
+/// rejected instantly rather than aborting partway in. `password` is only needed
+/// for a header-encrypted archive (else the header reads without one); a wrong /
+/// missing one surfaces as `PasswordRequired` here, routing to the prompt.
+pub fn seven_z_preflight(
+    path: &Path,
+    password: Option<&str>,
+) -> Result<(), crate::archive::ArchiveOpenError> {
+    seven_z_preflight_within(path, password, crate::archive::ram_budget())
+}
+
+/// The pre-flight comparison against an explicit `budget`, split out from
+/// [`seven_z_preflight`] so tests can drive the over-budget refusal path
+/// *deterministically* with an injected ceiling — rather than racing on the
+/// process-global `PB_ARCHIVE_RAM_BUDGET` env var (Rust runs tests in parallel
+/// threads, so mutating the environment from one test corrupts the others).
+pub fn seven_z_preflight_within(
+    path: &Path,
+    password: Option<&str>,
+    budget: u64,
+) -> Result<(), crate::archive::ArchiveOpenError> {
+    let needed = seven_z_projected_bytes(path, password, is_supported_extension)?;
+    if needed > budget {
+        return Err(crate::archive::ArchiveOpenError::TooLarge { needed, budget });
+    }
+    Ok(())
+}
+
+/// Eager-decompress a 7z into a [`Resolved`] (no pre-flight here — the caller runs
+/// [`seven_z_preflight`] first). This is the slow step the runtime path runs on a
+/// background thread (see `App::begin_archive_open`). `password` decrypts an
+/// encrypted archive; a wrong one fails decode and surfaces as `PasswordRequired`.
+pub fn load_seven_z(
+    path: &Path,
+    password: Option<String>,
+    progress: &pb_source::OpenProgress,
+) -> Result<Resolved, crate::archive::ArchiveOpenError> {
+    let src =
+        SevenZSource::open_with_progress(path, password, is_supported_extension, Some(progress))?;
+    if src.is_empty() {
+        return Err(crate::archive::ArchiveOpenError::Empty);
+    }
+    Ok(archive_resolved(path, Arc::new(src)))
+}
+
+/// Turn a planned [`Source`] into a concrete [`PhotoSource`] plus playlist framing.
+/// Scans and explicit lists become an [`FsSource`]; an archive opens a
+/// [`ZipSource`] (entries read into RAM on demand, never extracted to disk). On a
+/// hard archive failure it logs and falls back to an empty source.
+pub fn resolve_playlist(source: &Source, cursor: &open::Cursor) -> Resolved {
+    match source {
+        Source::Scan { .. } | Source::Explicit(_) => resolve_scan(source, cursor, None),
+        // The launch / picker / drop paths open archives via the async-aware
+        // `App::begin_archive_open` (which surfaces failures through the egui
+        // dialog), so this arm is only a safety net: log and show empty on failure.
+        Source::Archive(path) => match open_archive(path, None) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("PhotoBlaze: {}", e.user_message());
+                Resolved::empty()
+            }
+        },
+    }
 }
