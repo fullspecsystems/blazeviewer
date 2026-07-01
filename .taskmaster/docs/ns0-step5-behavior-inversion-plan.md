@@ -1,14 +1,15 @@
 # NS0 Step 5 — Behavior Inversion (`AppCore::handle` + thin shell) — Execution Plan
 
-**Status:** revised after codex review (r1). **Branch:** `swiftui`. **Prereq done:** 5.1–5.4
-(state) + Phase 0 + Phase A + **Phase B (~99 method moves) + `dispatch_action`→core (via a
-`ShellFlowAction` seam) + `handle(CoreEvent)` Phase C1 all DONE (2026-07-01)** — green (388
-tests, clippy `-D warnings`, fmt), 11 commits, not yet fast-forwarded onto `main`. **✅ NS1 is
-UNBLOCKED — `handle()` exists + is unit-tested.** **REMAINING: Phase C2** (rewrite the winit
-`window_event`/`about_to_wait` as translators that also go through `handle()`, wiring the
-Tick/Resized/pointer no-op arms + a `SetWake` effect — smoke-gated) and **Phase E (=5.6, the
-dialog/scan/archive FLOW inversion — the 11 `ShellFlowAction` arms get specific effects)**. See
-`../current-status.md` §NS0 for the full done-vs-remaining summary + the two-track resume.
+**Status:** revised after codex review (r1). **Branch:** `swiftui`. **Prereq done + OWNER-SMOKE-
+VERIFIED (2026-07-01):** 5.1–5.4 (state) + Phase 0 + Phase A + **Phase B (~99 method moves) +
+`dispatch_action`→core (via a `ShellFlowAction` seam) + `handle(CoreEvent)` (C1) + Phase C2 (the
+winit shell's keyboard/pointer input + the whole `about_to_wait` tick loop now route through
+`handle()`, via `AppCore::tick()` + a `SetWake` effect)** — green (388 tests, clippy `-D warnings`,
+fmt), ~18 commits, not yet fast-forwarded onto `main`. **✅ NS1 is UNBLOCKED.** **ONLY REMAINING NS0
+PHASE: E (=5.6) — the dialog/scan/archive/delete-confirm/drop FLOW inversion**: give the 11
+`ShellFlowAction` arms specific effects/`CoreEvent`s (+ the two small deferred C2 bits: `Resized`→
+`handle` core part, and a `Scroll` seam for `MouseWheel`). See `../current-status.md` §NS0 for the
+full done-vs-remaining summary + the resume plan.
 
 Read `ns0-appcore-inversion-brief.md` first for the effect-seam (4a–4e) and the field-group
 map. **r1 changes (from codex review):** a new **Phase 0 contract-cleanup** runs first —
