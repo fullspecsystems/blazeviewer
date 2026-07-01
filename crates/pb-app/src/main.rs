@@ -1528,9 +1528,8 @@ impl App {
             r.clear_image();
             r.set_overlay(None, 0);
         }
-        if let Some(w) = self.window.as_ref() {
-            w.set_title("PhotoBlaze");
-        }
+        self.effects
+            .push(contract::CoreEffect::SetTitle("PhotoBlaze".to_string()));
         // Blank background + the centered "Press O to open…" hint (mirrors a bare launch).
         self.show_open_hint();
         self.overlay_shown = false;
@@ -1552,9 +1551,7 @@ impl App {
             r.set_view(view);
             r.present_slot(slot);
         }
-        if let Some(w) = self.window.as_ref() {
-            w.set_title(&title);
-        }
+        self.effects.push(contract::CoreEffect::SetTitle(title));
         self.ring.set_displayed(slot);
         self.displayed_item = Some(item);
         self.current = self.meta_cache.get(&item).cloned();
@@ -1576,9 +1573,10 @@ impl App {
         self.current = None;
         let name = file_name_of(self.source.name(item));
         let total = self.source.len();
-        if let Some(w) = self.window.as_ref() {
-            w.set_title(&format!("{name} ({}/{total}) - decode error", item + 1));
-        }
+        self.effects.push(contract::CoreEffect::SetTitle(format!(
+            "{name} ({}/{total}) - decode error",
+            item + 1
+        )));
         // The info panel belonged to the previous photo — drop it (and redraw to
         // remove it). Only touch the renderer if a panel was actually showing.
         if self.overlay_shown {
@@ -1825,9 +1823,7 @@ impl App {
                     );
                     r.set_overlay(None, 0);
                 }
-                if let Some(w) = self.window.as_ref() {
-                    w.set_title(&title);
-                }
+                self.effects.push(contract::CoreEffect::SetTitle(title));
                 self.overlay_shown = false;
                 self.overlay_item = None;
                 self.displayed_item = Some(idx);
@@ -3013,9 +3009,7 @@ impl App {
         self.target_item = self.playlist.current();
         self.load_current_sync();
         self.request_prefetch();
-        if let Some(a) = self.window.as_ref() {
-            a.request_redraw();
-        }
+        self.effects.push(contract::CoreEffect::RequestRender);
     }
 
     /// Grow the playlist in place as a streaming scan delivers more images: swap in the
@@ -3072,9 +3066,7 @@ impl App {
             return;
         }
         let title = title_for(self.source.name(item), item, self.source.len());
-        if let Some(a) = self.window.as_ref() {
-            a.set_title(&title);
-        }
+        self.effects.push(contract::CoreEffect::SetTitle(title));
     }
 
     /// Push the current view transform to the renderer (re-places the quad).
@@ -4102,9 +4094,7 @@ impl App {
         if self.source.is_empty() {
             self.show_open_hint(); // re-rasterize the "Press O to open" hint
         }
-        if let Some(a) = self.window.as_ref() {
-            a.request_redraw();
-        }
+        self.effects.push(contract::CoreEffect::RequestRender);
     }
 
     /// Clear the scan card layer if it's up (and redraw to remove it).
@@ -4186,16 +4176,35 @@ impl App {
     /// Execute and clear the [`contract::CoreEffect`]s orchestration queued this
     /// iteration — the one place the core's intents become real winit/native calls (the
     /// seam an AppKit shell re-implements; NS0, ADR-021). Called at the end of each
-    /// `ApplicationHandler` entry that can produce effects. Only `Quit` is routed today;
-    /// more variants join as their call sites convert off direct winit access.
+    /// `ApplicationHandler` entry that can produce effects. More variants join as their
+    /// call sites convert off direct winit access. The `drain` metric times this so a
+    /// hold-to-fly frame's total event-loop cost is `present + drain` (window ops the
+    /// advance path used to do inline now land here — the total, not `present`, is flat).
     fn drain_effects(&mut self, event_loop: &ActiveEventLoop) {
+        let t0 = Instant::now();
         for effect in std::mem::take(&mut self.effects) {
-            // Expands to a `match` in later NS0 checkpoints as more variants are routed.
-            if let contract::CoreEffect::Quit = effect {
-                event_loop.exit();
+            match effect {
+                contract::CoreEffect::Quit => event_loop.exit(),
+                contract::CoreEffect::RequestRender => {
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
+                }
+                contract::CoreEffect::SetTitle(title) => {
+                    if let Some(w) = self.window.as_ref() {
+                        w.set_title(&title);
+                    }
+                }
+                contract::CoreEffect::SetCursor(kind) => {
+                    if let Some(w) = self.window.as_ref() {
+                        w.set_cursor(cursor_icon(kind));
+                    }
+                }
+                _ => {}
             }
         }
         self.open_pending_dialog(event_loop);
+        self.metrics.record("drain", t0.elapsed());
     }
 
     /// Open the dialog an opener method deferred (see [`App::pending_dialog`]). The one
@@ -4405,20 +4414,18 @@ impl App {
     /// Reflect the pan affordance in the pointer: a pointing hand over the Cancel Scan button,
     /// a closed hand while dragging, an open hand when the image is pannable, the default arrow
     /// otherwise.
-    fn refresh_cursor(&self) {
-        if let Some(a) = self.window.as_ref() {
-            let over_button = self.last_cursor.is_some_and(|[x, y]| self.chip_hit(x, y));
-            let icon = if self.dragging {
-                CursorIcon::Grabbing
-            } else if over_button {
-                CursorIcon::Pointer
-            } else if self.pannable() {
-                CursorIcon::Grab
-            } else {
-                CursorIcon::Default
-            };
-            a.set_cursor(icon);
-        }
+    fn refresh_cursor(&mut self) {
+        let over_button = self.last_cursor.is_some_and(|[x, y]| self.chip_hit(x, y));
+        let kind = if self.dragging {
+            contract::CursorKind::Grabbing
+        } else if over_button {
+            contract::CursorKind::Pointer
+        } else if self.pannable() {
+            contract::CursorKind::Grab
+        } else {
+            contract::CursorKind::Default
+        };
+        self.effects.push(contract::CoreEffect::SetCursor(kind));
     }
 
     /// Zoom by `factor` (>1 in, <1 out) about the cursor — the shared effect for
@@ -5265,9 +5272,7 @@ impl ApplicationHandler for App {
             // photos become the playlist).
             WindowEvent::DroppedFile(path) => {
                 self.pending_drops.push(path);
-                if let Some(a) = self.window.as_ref() {
-                    a.request_redraw();
-                }
+                self.effects.push(contract::CoreEffect::RequestRender);
             }
 
             WindowEvent::KeyboardInput {
@@ -5771,6 +5776,18 @@ fn point_in_rect([x0, y0, x1, y1]: [f32; 4], x: f32, y: f32) -> bool {
 
 fn title_for(name: &str, idx: usize, n: usize) -> String {
     format!("{} ({}/{n})", file_name_of(name), idx + 1)
+}
+
+/// Map the shell-neutral [`contract::CursorKind`] the core emits to the winit
+/// [`CursorIcon`] the shell shows (NS0). `Hidden` is unused on the `SetCursor` path —
+/// the chrome-free hide uses a separate mechanism — so it falls back to the arrow.
+fn cursor_icon(kind: contract::CursorKind) -> CursorIcon {
+    match kind {
+        contract::CursorKind::Default | contract::CursorKind::Hidden => CursorIcon::Default,
+        contract::CursorKind::Grab => CursorIcon::Grab,
+        contract::CursorKind::Grabbing => CursorIcon::Grabbing,
+        contract::CursorKind::Pointer => CursorIcon::Pointer,
+    }
 }
 
 /// Whether a path's extension is a supported image format (the decoder's single

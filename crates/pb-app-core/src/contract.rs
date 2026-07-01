@@ -93,6 +93,13 @@ pub enum CursorKind {
     #[default]
     Default,
     Hidden,
+    /// Panning is available (an open hand) — shown when the image is zoomed past the
+    /// window so a drag would pan it.
+    Grab,
+    /// Actively dragging to pan (a closed hand).
+    Grabbing,
+    /// Over a clickable affordance (e.g. the Cancel-scan chip).
+    Pointer,
 }
 
 /// Which chrome dialog the shell should present — the shell-neutral mirror of the
