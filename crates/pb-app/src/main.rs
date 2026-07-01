@@ -45,7 +45,7 @@ use winit::window::{CursorIcon, Icon, Window, WindowId};
 use pb_core::open::{self, LaunchInput, Source};
 use pb_core::{Playlist, ResidentRing};
 use pb_decode::{decode_bytes, is_supported_extension, FitBox};
-use pb_render::{Renderer, Rotation, ScaleMode, ViewTransform, WgpuRenderer, MAX_ZOOM, MIN_ZOOM};
+use pb_render::{Renderer, Rotation, ScaleMode, ViewTransform, WgpuRenderer};
 use pb_source::{seven_z_projected_bytes, FsSource, PhotoSource, SevenZSource, ZipSource};
 
 mod archive;
@@ -1274,7 +1274,7 @@ impl App {
             // connected monitor; otherwise fall back to the default size at the
             // OS-chosen spot (so a stale off-screen position can't strand the window).
             let rects = collect_monitor_rects(window.available_monitors());
-            match self.windowed_restore(&rects) {
+            match self.core.windowed_restore(&rects) {
                 Some(g) => {
                     let _ = window.request_inner_size(PhysicalSize::new(g.w, g.h));
                     window.set_outer_position(PhysicalPosition::new(g.x, g.y));
@@ -1323,23 +1323,6 @@ impl App {
         }
     }
 
-    /// The saved windowed geometry to restore, but only when enough of it still lands
-    /// on one of `monitors` — else `None`, so a window saved on a now-disconnected or
-    /// rearranged monitor opens at the default spot instead of off-screen (#1).
-    fn windowed_restore(
-        &self,
-        monitors: &[(i32, i32, u32, u32)],
-    ) -> Option<settings::WindowGeometry> {
-        let g = self.core.settings.window?;
-        settings::geometry_on_screen(
-            g,
-            monitors,
-            settings::MIN_VISIBLE_W,
-            settings::MIN_VISIBLE_H,
-        )
-        .then_some(g)
-    }
-
     /// Build the native menu bar once (cross-platform; muda owns the OS handle).
     fn ensure_menu(&mut self) {
         if self.menu.is_none() {
@@ -1377,49 +1360,6 @@ impl App {
                 .is_some_and(save_rotation::is_orientation_writable)
     }
 
-    /// Build the [`contract::MenuState`] for the given live state — the pure mapping from
-    /// the app's view/edit state to the shell-neutral menu model. Takes no `self` and
-    /// touches no muda, so it's unit-tested directly (`menu_state_*` tests). The two enum
-    /// mappings it owns are the only non-trivial logic: `pb_render::ScaleMode` → the View
-    /// scale group, and the 4-state [`InfoMode`] → the two info checkmarks (both `Help`
-    /// and `Off` show *neither*, exactly as the menu does today).
-    #[allow(clippy::too_many_arguments)]
-    fn menu_state_from(
-        scale: ScaleMode,
-        info: InfoMode,
-        recursive: bool,
-        fullscreen: bool,
-        slideshow: bool,
-        mute_live_audio: bool,
-        save_rotation_enabled: bool,
-        cancel_scan_enabled: bool,
-        undo: Option<&'static str>,
-        native_fullscreen_engaged: bool,
-    ) -> contract::MenuState {
-        contract::MenuState {
-            scale: match scale {
-                ScaleMode::Fit => contract::ScaleMode::Fit,
-                ScaleMode::Fill => contract::ScaleMode::Fill,
-                ScaleMode::Original => contract::ScaleMode::Original,
-            },
-            info: match info {
-                InfoMode::Basic => contract::InfoOverlay::Basic,
-                InfoMode::Full => contract::InfoOverlay::FullExif,
-                // Help and Off both leave the two info checkmarks off (the menu can't
-                // distinguish them — this is the faithful collapse of the 4-state enum).
-                InfoMode::Help | InfoMode::Off => contract::InfoOverlay::Hidden,
-            },
-            recursive,
-            fullscreen,
-            slideshow,
-            mute_live_audio,
-            save_rotation_enabled,
-            cancel_scan_enabled,
-            undo,
-            native_fullscreen_engaged,
-        }
-    }
-
     /// Derive the current [`contract::MenuState`] from live app state and, **only when it
     /// changed** since the last one applied (`self.menu_state`), emit a single
     /// [`CoreEffect::SetMenuState`] — the shell mirrors it onto the native menu in the drain
@@ -1446,7 +1386,7 @@ impl App {
         #[cfg(not(target_os = "macos"))]
         let native_fullscreen = false;
 
-        let next = Self::menu_state_from(
+        let next = AppCore::menu_state_from(
             self.core.view.mode,
             self.core.info,
             self.core.recursive,
@@ -1623,15 +1563,6 @@ impl App {
         }
     }
 
-    /// Step the zoom by `factor` (menu Zoom In/Out — the keyboard zoom is the
-    /// continuous hold-to-zoom). Multiplies the current zoom, clamps to the allowed
-    /// range, and re-frames. `factor` > 1 zooms in, < 1 zooms out.
-    fn zoom_step(&mut self, factor: f32) {
-        self.core.view.zoom = (self.core.view.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
-        self.core.push_view();
-        self.core.draw();
-    }
-
     /// Run a menu action by mapping it to the central [`Action`] and dispatching it —
     /// the menu and the keyboard share one dispatcher, so they can never drift. The
     /// id→`MenuAction` mapping is the pure, unit-tested `menu::action_for`.
@@ -1651,8 +1582,8 @@ impl App {
             Action::RandomPrev => self.core.advance(Nav::RandomPrev),
             // Pan is continuous-while-held only (the hold loop); never single-dispatched.
             Action::PanLeft | Action::PanRight | Action::PanUp | Action::PanDown => {}
-            Action::ZoomIn => self.zoom_step(1.25),
-            Action::ZoomOut => self.zoom_step(0.8),
+            Action::ZoomIn => self.core.zoom_step(1.25),
+            Action::ZoomOut => self.core.zoom_step(0.8),
             Action::ScaleFit => self.core.set_scale_mode(ScaleMode::Fit),
             Action::ScaleFill => self.core.set_scale_mode(ScaleMode::Fill),
             Action::ScaleOriginal => self.core.set_scale_mode(ScaleMode::Original),
@@ -1676,7 +1607,7 @@ impl App {
             Action::OpenFolder => self.core.open_picker(true),
             Action::Info => self.core.toggle_info(false),
             Action::FullExif => self.core.toggle_info(true),
-            Action::Help => self.toggle_help(),
+            Action::Help => self.core.toggle_help(),
             Action::Fullscreen => self.toggle_fullscreen(),
             Action::Recursive => self.toggle_recursive(),
             Action::CancelScan => self.cancel_scan_command(),
@@ -1733,21 +1664,6 @@ impl App {
         }
     }
 
-    /// Toggle the keybindings help overlay (`/` or `?`). Shares the single overlay
-    /// with the info panels, so it replaces whichever was showing.
-    fn toggle_help(&mut self) {
-        self.core.info = if self.core.info == InfoMode::Help {
-            InfoMode::Off
-        } else {
-            InfoMode::Help
-        };
-        if self.core.info == InfoMode::Off {
-            self.core.hide_overlay();
-        } else {
-            self.core.show_overlay();
-        }
-    }
-
     /// Open the "About PhotoBlaze" dialog (Help menu) — an egui window with the app
     /// icon + version, dark-mode-aware (see `dialog`).
     fn open_about(&mut self) {
@@ -1758,18 +1674,6 @@ impl App {
     /// settings; **Save** routes back to [`apply_settings`](Self::apply_settings).
     fn open_settings(&mut self) {
         self.open_dialog(dialog::DialogKind::Settings);
-    }
-
-    /// Apply the keymap edited in the Settings dialog: swap it in live (every keypress
-    /// resolves through `self.core.keymap`, so future input uses it immediately) and persist
-    /// `keymap.toml`. If the help overlay is open, rebuild it so its key labels — read
-    /// from the live keymap — reflect the new bindings.
-    fn apply_keymap(&mut self, keymap: Keymap) {
-        self.core.keymap = keymap;
-        self.core.keymap.save();
-        if self.core.overlay_shown && self.core.info == InfoMode::Help {
-            self.core.show_overlay();
-        }
     }
 
     /// Open (or focus, if already open) one of our egui dialog windows. Only one
@@ -1785,14 +1689,6 @@ impl App {
             kind,
             message: String::new(),
         });
-    }
-
-    /// Refresh rate in Hz (rounded, ≥1) — caps the Settings fly-speed slider and is
-    /// passed to every dialog window.
-    fn refresh_hz(&self) -> u32 {
-        (1.0 / self.core.frame_interval.as_secs_f32())
-            .round()
-            .max(1.0) as u32
     }
 
     /// Open the themed (dark-aware egui) "Delete Permanently" confirmation for `name`.
@@ -1954,7 +1850,7 @@ impl App {
                     self.core.apply_settings(new);
                 }
                 if let Some(km) = keymap {
-                    self.apply_keymap(km);
+                    self.core.apply_keymap(km);
                 }
             }
             DialogOutcome::SettingsCancelled => self.dialog = None,
@@ -2171,7 +2067,7 @@ impl App {
         let Some(req) = self.pending_dialog.take() else {
             return;
         };
-        let refresh = self.refresh_hz();
+        let refresh = self.core.refresh_hz();
         let parent = self.window.clone();
         match req {
             DialogRequest::Simple { kind, message } => {
@@ -2331,7 +2227,7 @@ impl ApplicationHandler for App {
         // menu attaches below (so the client size accounts for the menu bar).
         let restore = if self.windowed {
             let rects = collect_monitor_rects(event_loop.available_monitors());
-            self.windowed_restore(&rects)
+            self.core.windowed_restore(&rects)
         } else {
             None
         };
@@ -4501,7 +4397,7 @@ mod tests {
 
     /// A neutral baseline for the arguments, so each test varies just one thing.
     fn base_menu_state() -> contract::MenuState {
-        App::menu_state_from(
+        AppCore::menu_state_from(
             ScaleMode::Fit,
             InfoMode::Off,
             false,
@@ -4518,7 +4414,7 @@ mod tests {
     #[test]
     fn menu_state_maps_every_scale_mode() {
         let scale = |m| {
-            App::menu_state_from(
+            AppCore::menu_state_from(
                 m,
                 InfoMode::Off,
                 false,
@@ -4540,7 +4436,7 @@ mod tests {
     #[test]
     fn menu_state_collapses_info_mode_to_the_two_checkmarks() {
         let info = |i| {
-            App::menu_state_from(
+            AppCore::menu_state_from(
                 ScaleMode::Fit,
                 i,
                 false,
@@ -4566,7 +4462,7 @@ mod tests {
     fn menu_state_carries_undo_label_and_enabled_together() {
         // `None` on the undo stack → disabled "Undo"; a label → enabled with that title.
         assert_eq!(base_menu_state().undo, None);
-        let with_undo = App::menu_state_from(
+        let with_undo = AppCore::menu_state_from(
             ScaleMode::Fit,
             InfoMode::Off,
             false,
@@ -4584,7 +4480,7 @@ mod tests {
     #[test]
     fn menu_state_passes_through_every_bool_flag() {
         // Each toggle/enabled input lands on its own field (no crossed wires).
-        let all_on = App::menu_state_from(
+        let all_on = AppCore::menu_state_from(
             ScaleMode::Fit,
             InfoMode::Off,
             true, // recursive
@@ -4624,7 +4520,7 @@ mod tests {
         let a = base_menu_state();
         let b = base_menu_state();
         assert_eq!(a, b);
-        let changed = App::menu_state_from(
+        let changed = AppCore::menu_state_from(
             ScaleMode::Fit,
             InfoMode::Off,
             false,

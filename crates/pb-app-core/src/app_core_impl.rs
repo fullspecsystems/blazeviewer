@@ -26,6 +26,7 @@ use crate::animation::{AnimDecode, AnimWant, Playback, Prepared};
 use crate::contract;
 use crate::decode_pool::Outcome;
 use crate::engine::*;
+use crate::keymap::Keymap;
 use crate::pb_key::PbKey;
 use crate::{
     keymap, settings, slideshow, timing, Action, AppCore, InfoMode, Nav, OpenButton, OpenPanel,
@@ -33,6 +34,108 @@ use crate::{
 };
 
 impl AppCore {
+    /// Build the [`contract::MenuState`] for the given live state — the pure mapping from
+    /// the app's view/edit state to the shell-neutral menu model. Takes no `self` and
+    /// touches no muda, so it's unit-tested directly (`menu_state_*` tests). The two enum
+    /// mappings it owns are the only non-trivial logic: `pb_render::ScaleMode` → the View
+    /// scale group, and the 4-state [`InfoMode`] → the two info checkmarks (both `Help`
+    /// and `Off` show *neither*, exactly as the menu does today).
+    #[allow(clippy::too_many_arguments)]
+    pub fn menu_state_from(
+        scale: ScaleMode,
+        info: InfoMode,
+        recursive: bool,
+        fullscreen: bool,
+        slideshow: bool,
+        mute_live_audio: bool,
+        save_rotation_enabled: bool,
+        cancel_scan_enabled: bool,
+        undo: Option<&'static str>,
+        native_fullscreen_engaged: bool,
+    ) -> contract::MenuState {
+        contract::MenuState {
+            scale: match scale {
+                ScaleMode::Fit => contract::ScaleMode::Fit,
+                ScaleMode::Fill => contract::ScaleMode::Fill,
+                ScaleMode::Original => contract::ScaleMode::Original,
+            },
+            info: match info {
+                InfoMode::Basic => contract::InfoOverlay::Basic,
+                InfoMode::Full => contract::InfoOverlay::FullExif,
+                // Help and Off both leave the two info checkmarks off (the menu can't
+                // distinguish them — this is the faithful collapse of the 4-state enum).
+                InfoMode::Help | InfoMode::Off => contract::InfoOverlay::Hidden,
+            },
+            recursive,
+            fullscreen,
+            slideshow,
+            mute_live_audio,
+            save_rotation_enabled,
+            cancel_scan_enabled,
+            undo,
+            native_fullscreen_engaged,
+        }
+    }
+
+    /// The saved windowed geometry to restore, but only when enough of it still lands
+    /// on one of `monitors` — else `None`, so a window saved on a now-disconnected or
+    /// rearranged monitor opens at the default spot instead of off-screen (#1).
+    pub fn windowed_restore(
+        &self,
+        monitors: &[(i32, i32, u32, u32)],
+    ) -> Option<settings::WindowGeometry> {
+        let g = self.settings.window?;
+        settings::geometry_on_screen(
+            g,
+            monitors,
+            settings::MIN_VISIBLE_W,
+            settings::MIN_VISIBLE_H,
+        )
+        .then_some(g)
+    }
+
+    /// Step the zoom by `factor` (menu Zoom In/Out — the keyboard zoom is the
+    /// continuous hold-to-zoom). Multiplies the current zoom, clamps to the allowed
+    /// range, and re-frames. `factor` > 1 zooms in, < 1 zooms out.
+    pub fn zoom_step(&mut self, factor: f32) {
+        self.view.zoom = (self.view.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        self.push_view();
+        self.draw();
+    }
+
+    /// Toggle the keybindings help overlay (`/` or `?`). Shares the single overlay
+    /// with the info panels, so it replaces whichever was showing.
+    pub fn toggle_help(&mut self) {
+        self.info = if self.info == InfoMode::Help {
+            InfoMode::Off
+        } else {
+            InfoMode::Help
+        };
+        if self.info == InfoMode::Off {
+            self.hide_overlay();
+        } else {
+            self.show_overlay();
+        }
+    }
+
+    /// Apply the keymap edited in the Settings dialog: swap it in live (every keypress
+    /// resolves through `self.keymap`, so future input uses it immediately) and persist
+    /// `keymap.toml`. If the help overlay is open, rebuild it so its key labels — read
+    /// from the live keymap — reflect the new bindings.
+    pub fn apply_keymap(&mut self, keymap: Keymap) {
+        self.keymap = keymap;
+        self.keymap.save();
+        if self.overlay_shown && self.info == InfoMode::Help {
+            self.show_overlay();
+        }
+    }
+
+    /// Refresh rate in Hz (rounded, ≥1) — caps the Settings fly-speed slider and is
+    /// passed to every dialog window.
+    pub fn refresh_hz(&self) -> u32 {
+        (1.0 / self.frame_interval.as_secs_f32()).round().max(1.0) as u32
+    }
+
     /// Perform a deferred delete's playlist advance: drop the removed item, rebuild the
     /// source from the remaining paths (indices shift, so index-keyed state resets —
     /// fine for an explicit, infrequent command), and advance to the next photo (the
