@@ -187,11 +187,24 @@ Mapped end-to-end (Explore agent) and inverted in the recommended low-risk order
   AppCore. Shell `route_dialog_outcome` maps `DialogOutcome`→`DialogResult`; only **PasswordSubmitted**
   (spawns the archive worker + pokes the live dialog) stays shell. 4 new core unit tests. Behavior-
   preserving (effects drain right after `dialog_event`, same event turn).
-- **❌ Step 2 (next) — relocate the resolve/scan compute to core**: move `Resolved` + the builders
-  (`resolve_*`, `build_resolved`, `archive_resolved`, `open_archive`, `load_seven_z`,
-  `seven_z_preflight`, `collect_images`, `image_walker`, `stream_scan`), `ScanProgress`, and the
-  `archive` module into `pb-app-core` (+ a `walkdir` dep). Purely mechanical, all portable (pb-core/
-  pb-source/pb-decode already deps; nothing winit/egui). Keep the `std::thread::spawn`+`mpsc` shell-side.
+- **◐ Step 2 — relocate the resolve/scan compute to core** (in sub-commits):
+  - **✅ 2a — the `Resolved` currency** (`3cdb016`): new `pb_app_core::scan` module holds `Resolved`
+    (fields now `pub`) + its pure builders (`empty`/`build_resolved`/`archive_resolved` — only
+    pb-core::open + pb-source::FsSource, no new deps) + the `ScanUpdate` stream message. main.rs
+    imports them; the resolver *functions* still run on the shell worker threads. Behavior-preserving.
+  - **❌ 2b (next) — the walkdir directory-scan resolvers + `ScanProgress`** → `pb_app_core::scan`:
+    `is_supported_image` (scan-only), `rel_display`, `collect_images`, `image_walker`, `resolve_source`,
+    `resolve_scan`, `stream_scan`, `sorted_image_walk`(test), and `ScanProgress`(+Inner+impl, methods
+    → `pub`). Add a **`walkdir`** dep to pb-app-core. Re-export `pub use pb_app_core::scan::ScanProgress`
+    from main.rs so dialog.rs's 8 `crate::ScanProgress` refs are untouched. Move the associated tests.
+    `begin_dir_scan` (shell) keeps the `thread::spawn`+`mpsc`, spawning `scan::stream_scan`.
+    `scan_display_name`/`scan_message` (dialog-string builders) can stay shell or move too. Mechanical,
+    no behavior change; commit green (no smoke needed — internal relocation).
+  - **❌ 2c — the archive resolvers + the `archive` module** → pb-app-core: `open_archive`,
+    `seven_z_preflight[_within]`, `load_seven_z`, `resolve_playlist`, and `archive.rs` (needs new
+    cfg-gated `windows` + `libc` deps for the RAM query — the one non-trivial bit; `ArchiveOpenError`
+    becomes core so Step 3's `ArchiveResolved` event can carry it). dialog.rs's `crate::archive::human_gb`
+    re-imports.
 - **❌ Step 3 (last, highest-risk) — invert the worker flow**: `begin_archive_open`/`begin_dir_scan`
   → effects (`BeginArchiveOpen`/`BeginDirScan`; shell owns the thread + progress-dialog handle);
   `poll_*` fires `CoreEvent`s (`ArchiveResolved`/`ScanBatch`/`ScanDone`) back into the core, which
