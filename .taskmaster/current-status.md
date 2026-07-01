@@ -1,10 +1,84 @@
 # PhotoBlaze — Current Status (session handoff)
 
-_Last updated: 2026-06-30. On `main`. **The macOS (Apple Silicon) port is essentially
-complete and SHIPPED in `v0.1.0-beta.4` (2026-06-30) — the first signed + notarized macOS
-DMG alongside the signed Windows MSI (the project's first dual release).** The DMG verified
-notarized + stapled + Gatekeeper-accepted (`source=Notarized Developer ID`). Only small
-follow-ups remain (below)._
+_Last updated: 2026-07-01. **ACTIVE STREAM: NS0 — the AppCore ownership inversion** (macOS
+SwiftUI groundwork, ADR-021) — see the NS0 section immediately below. On branch `swiftui`,
+fast-forwarded onto `main` through Phase A. NS0 is **~half done: the full STATE inversion is
+complete; the BEHAVIOR inversion (5.5 Phase B/C) + flow inversion (5.6) remain** — so NS1 is
+NOT yet startable. Everything below the NS0 section is the previously-shipped work (macOS port,
+archive, settings, HEIC, color), unchanged._
+
+_The macOS (Apple Silicon) port is complete and SHIPPED in `v0.1.0-beta.4` (2026-06-30) — the
+first signed + notarized macOS DMG alongside the signed Windows MSI. Verified notarized +
+stapled + Gatekeeper-accepted (`source=Notarized Developer ID`)._
+
+---
+
+## 🧭 NS0 — AppCore ownership inversion (SwiftUI groundwork, ADR-021) — IN PROGRESS (2026-07-01)
+
+**Branch `swiftui` (≡ `main`, fast-forwarded through Phase A). Green throughout: 380 workspace
+tests, clippy `-D warnings`, fmt. Full detail + resume plan:
+`.taskmaster/docs/ns0-step5-behavior-inversion-plan.md` (r1, codex-reviewed).**
+
+**Goal:** invert the winit `App` god-object into a platform-neutral **`AppCore`** (in
+`pb-app-core`) + a thin shell, so a macOS SwiftUI/AppKit host can drive the *same* core via the
+`CoreEvent`/`CoreEffect` contract. This is the prerequisite for **NS1** (the Swift bridge).
+Two parts: **STATE** inversion (fields → AppCore) then **BEHAVIOR** inversion (methods →
+`impl AppCore` + a `handle(CoreEvent)` entry point).
+
+### ✅ DONE — the full STATE inversion
+- **5.1–5.4** — held-key/input/timing, view/geometry, metadata caches, the decode/prefetch/
+  residency engine, metrics, nav/playlist, HUD state + compositor, and the renderer — **all in
+  `AppCore`**. Construction switched from a growing `new(…)` to a named struct literal.
+- **New `pb-hud` crate** — the CPU HUD compositor (`hud.rs` + `icon.rs`, `fontdue`+`resvg`)
+  extracted from the winit shell so `pb-app-core` can own the render path without dragging a
+  UI-toolkit dep in. The shell re-exports it (`pub use pb_hud::{hud, icon}`) → zero call-site
+  churn. Pure-Rust → iOS-safe; the seam for a future native-overlay backend.
+- **5.5 Phase 0 (contract cleanup, codex-reviewed r1):** `effects: Vec<CoreEffect>` → AppCore
+  (before any method move); **`now: Instant` injected clock** (shell stamps it at each event
+  entry; the core never calls `Instant::now()` → `handle` is deterministically testable);
+  **`Viewport{width,height,scale_factor}`** (killed the scattered `window.inner_size()` /
+  `scale_factor` reads in core methods); **`Settings` migrated** into pb-app-core (added the
+  `serde` dep). `SetWake(Option<Instant>)` + live-audio effects intentionally deferred to the
+  phases that first construct them (dead-code rule).
+- **5.5 Phase A (remaining state):** prefetch-upgrade trio, `live_motion_cache`, undo (migrated
+  `UndoAction`), animation (git-mv `animation.rs` + relocated `AnimWant`/`AnimDecode`/`Prepared`).
+
+**Net:** `AppCore` owns **all** orchestration state. Still shell-owned = only platform handles:
+`window`, `dialog`(+`pending_dialog`), the muda native-menu handles (`menu`/`window_menu`/
+`native_fullscreen_item`/`proxy_icon_path`/`save_rotation_item`/`cancel_scan_item`/`undo_item`/
+`menu_attached`), `menu_state`, `last_edr_headroom`, the `live_audio` ObjC `AVAudioPlayer`
+handle, plus the **scan/archive/launch/delete/drop FLOW** state (→ 5.6). Two review-driven
+calls held: `undo_item` and `live_audio` stayed shell (native handles, not state).
+
+### ❌ NOT DONE — the behavior inversion (5.5 Phase B/C + 5.6)
+- **5.5 Phase B** — physically move the **~110 pure-core methods** from `impl App` (main.rs)
+  into `impl AppCore` (app_core.rs), in concern batches: B1 nav/prefetch · B2 view (zoom/pan/
+  rotate/fit) · B3 HUD-build · B4 animation (add `Start/Pause/Resume/StopLiveAudio` effects +
+  convert `live_audio` calls here) · B5 undo + misc. Per-method: `Instant::now()` → `self.now`.
+- **5.5 Phase C** — the keystone: add **`AppCore::handle(CoreEvent)`** (KeyDown→resolve→
+  `dispatch_action`, Tick→advance/slideshow + `SetWake`, Resized→viewport, pointer/scroll/pinch
+  →view, MenuAction→dispatch_action for non-flow) + core unit tests; rewrite `window_event` /
+  `about_to_wait` as translators (stamp `now` → build `CoreEvent` → `handle` → `drain_effects`).
+- **5.6** — invert the scan/archive/dialog/delete/drop flow (migrate `Resolved`; untangle
+  `finish_picker` + `begin_archive_open`→`DialogWindow`) + native fullscreen. Flow events stay
+  shell-routed until here.
+
+**⚠ NS1 (the Swift bridge) cannot start until Phase C** — it drives the core through `handle()`,
+which does not exist yet.
+
+### ▶ Resume
+Read **`.taskmaster/docs/ns0-step5-behavior-inversion-plan.md`** (the batch-by-batch plan, the
+`handle()` design, and the 7 codex fixes), then start at **Phase B1** (nav/prefetch methods).
+The move recipe (migrate pb-app-local types → relocate → redirect refs; watch the prefix-
+over-match / multiline-`self\n.field` / non-`self`-ref hazards) is proven across ~19 green
+increments. Central action dispatch: `dispatch_action` (main.rs). All committed + pushed;
+fast-forward `main` again at the next clean milestone.
+
+**Unsmoked since the owner's last manual test:** the renderer move, `pb-hud`, Phase 0
+(viewport/clock), and Phase A — all behavior-preserving field moves + effectively-no-op clock/
+viewport changes. A fast-forward is trivially revertible (`git reset --hard` the pre-NS0 main).
+
+---
 
 A fast, chrome-less, keyboard-driven photo viewer. The prefetch engine ("hold a
 key and fly") is done, plus broad multi-codec support, full-res RAW, the color

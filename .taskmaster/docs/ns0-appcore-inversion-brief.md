@@ -1,5 +1,14 @@
 # NS0 keystone — `AppCore` ownership-inversion execution brief
 
+> **⚠ SUPERSEDED for step-5 execution (2026-07-01).** This brief captures the *original*
+> analysis + the effect-seam (4a–4e) + the field-group map — still good reference. But the
+> **live status + the actual step-5 execution plan now live elsewhere**: read
+> **`ns0-step5-behavior-inversion-plan.md`** (r1, codex-reviewed — the batch-by-batch plan for
+> `handle(CoreEvent)` + the thin shell) and **`../current-status.md`** (the §NS0 handoff:
+> what's done vs remaining). Short version: the whole **STATE inversion is DONE** (5.1–5.4 +
+> 5.5 Phase 0 + A; all fields in `AppCore`, new `pb-hud` crate); the **BEHAVIOR inversion
+> (5.5 Phase B/C) + flow (5.6) REMAIN**. Don't take the "STATUS" section below as current.
+
 > **Purpose.** Prime a fresh session to do the *one-pass* ownership inversion that
 > finishes NS0 (ADR-021). Written 2026-06-30 on branch `swiftui` with full context of
 > the seams already landed. Read `macos-native-ui-plan.md` §NS0 first; this is the
