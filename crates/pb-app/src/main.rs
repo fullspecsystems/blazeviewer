@@ -438,11 +438,6 @@ fn truncate_exif_value(value: &str) -> String {
     }
 }
 
-struct Active {
-    window: Arc<Window>,
-    renderer: WgpuRenderer,
-}
-
 /// A transient bottom-center status toast (e.g. "Recursive folders: on"): a pill
 /// rasterized once, held briefly at full opacity, then faded out by re-uploading
 /// the bitmap with scaled alpha. Used for command feedback that has no other
@@ -514,7 +509,13 @@ struct App {
     /// `pb-core` navigates by index alone; this resolves an index to bytes + name.
     source: Arc<dyn PhotoSource>,
     playlist: Playlist,
-    active: Option<Active>,
+    /// The winit window (NS0: shell-owned — `WinitShell` in the eventual crate split).
+    /// `None` until `resumed` creates it; always in lockstep with `renderer`.
+    window: Option<Arc<Window>>,
+    /// The GPU renderer (NS0: AppCore-owned). Split out from the old `Active { window,
+    /// renderer }` so window ownership can move to the shell and rendering to the core.
+    /// `None` until `resumed`; created on the window's surface, so it shares its lifecycle.
+    renderer: Option<WgpuRenderer>,
     /// Physical keys currently held → the [`Action`] each resolved to at press time
     /// (OS auto-repeat ignored). Drives hold-to-fly nav and continuous pan/zoom; the
     /// action is captured on key-down so it stays stable while held, and is keyed by
@@ -926,7 +927,8 @@ impl App {
             windowed,
             source,
             playlist,
-            active: None,
+            window: None,
+            renderer: None,
             held: HashMap::new(),
             last_present: None,
             frame_interval: Duration::from_micros(8_333), // ~120 Hz until we read the real rate
@@ -1522,10 +1524,12 @@ impl App {
         self.displayed_item = None;
         self.target_item = None;
         self.current = None;
-        if let Some(a) = self.active.as_mut() {
-            a.renderer.clear_image();
-            a.renderer.set_overlay(None, 0);
-            a.window.set_title("PhotoBlaze");
+        if let Some(r) = self.renderer.as_mut() {
+            r.clear_image();
+            r.set_overlay(None, 0);
+        }
+        if let Some(w) = self.window.as_ref() {
+            w.set_title("PhotoBlaze");
         }
         // Blank background + the centered "Press O to open…" hint (mirrors a bare launch).
         self.show_open_hint();
@@ -1544,10 +1548,12 @@ impl App {
         let t0 = Instant::now();
         let view = self.view_for(item);
         let title = title_for(self.source.name(item), item, self.source.len());
-        if let Some(a) = self.active.as_mut() {
-            a.renderer.set_view(view);
-            a.renderer.present_slot(slot);
-            a.window.set_title(&title);
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_view(view);
+            r.present_slot(slot);
+        }
+        if let Some(w) = self.window.as_ref() {
+            w.set_title(&title);
         }
         self.ring.set_displayed(slot);
         self.displayed_item = Some(item);
@@ -1570,15 +1576,14 @@ impl App {
         self.current = None;
         let name = file_name_of(self.source.name(item));
         let total = self.source.len();
-        if let Some(a) = self.active.as_mut() {
-            a.window
-                .set_title(&format!("{name} ({}/{total}) - decode error", item + 1));
+        if let Some(w) = self.window.as_ref() {
+            w.set_title(&format!("{name} ({}/{total}) - decode error", item + 1));
         }
         // The info panel belonged to the previous photo — drop it (and redraw to
         // remove it). Only touch the renderer if a panel was actually showing.
         if self.overlay_shown {
-            if let Some(a) = self.active.as_mut() {
-                a.renderer.set_overlay(None, 0);
+            if let Some(r) = self.renderer.as_mut() {
+                r.set_overlay(None, 0);
             }
             self.overlay_shown = false;
             self.overlay_item = None;
@@ -1708,9 +1713,9 @@ impl App {
             let item_bytes = img.pixels.len() as u64;
             if upgrade {
                 let slot = self.ring.slot_for(item).expect("resident as preview");
-                if let Some(a) = self.active.as_mut() {
+                if let Some(a) = self.renderer.as_mut() {
                     let t0 = Instant::now();
-                    a.renderer.upload_slot(
+                    a.upload_slot(
                         slot,
                         &img.pixels,
                         img.width,
@@ -1740,8 +1745,8 @@ impl App {
                 // then redraw it now-sharp. `present_slot` keeps the current view, so
                 // any zoom/pan is preserved.
                 if self.displayed_item == Some(item) {
-                    if let Some(a) = self.active.as_mut() {
-                        a.renderer.present_slot(slot);
+                    if let Some(a) = self.renderer.as_mut() {
+                        a.present_slot(slot);
                     }
                     self.draw();
                 }
@@ -1751,9 +1756,9 @@ impl App {
                 .ring
                 .reserve_bytes(item, self.epoch, item_bytes, &self.targets)
             {
-                if let Some(a) = self.active.as_mut() {
+                if let Some(a) = self.renderer.as_mut() {
                     let t0 = Instant::now();
-                    a.renderer.upload_slot(
+                    a.upload_slot(
                         res.slot,
                         &img.pixels,
                         img.width,
@@ -1808,9 +1813,9 @@ impl App {
                 self.meta_cache.insert(idx, meta);
                 let view = self.view_for(idx);
                 let title = title_for(self.source.name(idx), idx, self.source.len());
-                if let Some(a) = self.active.as_mut() {
-                    a.renderer.set_view(view);
-                    a.renderer.set_image(
+                if let Some(r) = self.renderer.as_mut() {
+                    r.set_view(view);
+                    r.set_image(
                         &img.pixels,
                         img.width,
                         img.height,
@@ -1818,8 +1823,10 @@ impl App {
                         is_hdr(&img),
                         img.peak,
                     );
-                    a.renderer.set_overlay(None, 0);
-                    a.window.set_title(&title);
+                    r.set_overlay(None, 0);
+                }
+                if let Some(w) = self.window.as_ref() {
+                    w.set_title(&title);
                 }
                 self.overlay_shown = false;
                 self.overlay_item = None;
@@ -1847,8 +1854,8 @@ impl App {
         });
         let cap = ring_capacity(self.slot_bytes_estimate());
         self.ring = ResidentRing::new_with_budget(cap, RING_BUDGET_BYTES);
-        if let Some(a) = self.active.as_mut() {
-            a.renderer.reserve_ring(cap, fit.max_width, fit.max_height);
+        if let Some(a) = self.renderer.as_mut() {
+            a.reserve_ring(cap, fit.max_width, fit.max_height);
         }
         let (ahead, behind) = window_for_capacity(cap);
         self.ahead = ahead;
@@ -2386,7 +2393,7 @@ impl App {
     /// state — so it stays correct even for the green-button / gesture toggles.
     #[cfg(target_os = "macos")]
     fn toggle_native_fullscreen(&mut self) {
-        let Some(window) = self.active.as_ref().map(|a| a.window.clone()) else {
+        let Some(window) = self.window.clone() else {
             return;
         };
         if window.fullscreen().is_some() {
@@ -2403,13 +2410,13 @@ impl App {
     /// `WindowEvent::Moved`, which fires throughout a drag.
     #[cfg(target_os = "macos")]
     fn reconfigure_edr_for_display(&mut self) {
-        let changed = match self.active.as_ref() {
-            Some(a) if a.renderer.hdr_surface_wants_edr().is_some() => {
-                let hr = hdr_surface::window_max_edr(&a.window);
+        let changed = match (self.renderer.as_ref(), self.window.as_ref()) {
+            (Some(r), Some(w)) if r.hdr_surface_wants_edr().is_some() => {
+                let hr = hdr_surface::window_max_edr(w);
                 if (hr - self.last_edr_headroom).abs() > 0.01 {
                     // Different display HDR capability — re-poke the layer (colorspace
                     // + wantsEDR) for the new screen, then update the roll-off below.
-                    hdr_surface::configure(&a.window);
+                    hdr_surface::configure(w);
                     Some(hr)
                 } else {
                     None
@@ -2418,8 +2425,8 @@ impl App {
             _ => None,
         };
         if let Some(hr) = changed {
-            if let Some(a) = self.active.as_mut() {
-                a.renderer.set_edr_headroom(hr);
+            if let Some(r) = self.renderer.as_mut() {
+                r.set_edr_headroom(hr);
             }
             self.last_edr_headroom = hr;
             self.draw();
@@ -2450,7 +2457,7 @@ impl App {
 
         // Clone the window handle (an Arc) so the window can be driven while `self` is
         // still borrowed mutably below (the menu attach needs `&mut self`).
-        let Some(window) = self.active.as_ref().map(|a| a.window.clone()) else {
+        let Some(window) = self.window.clone() else {
             return;
         };
         if self.windowed {
@@ -2502,13 +2509,13 @@ impl App {
     /// into `settings.window`, so the windowed spot can be restored later (#1). A
     /// failed `outer_position` query (rare) or a zero size leaves the old value.
     fn capture_windowed_geometry(&mut self) {
-        let Some(a) = self.active.as_ref() else {
+        let Some(a) = self.window.as_ref() else {
             return;
         };
-        let Ok(pos) = a.window.outer_position() else {
+        let Ok(pos) = a.outer_position() else {
             return;
         };
-        let size = a.window.inner_size();
+        let size = a.inner_size();
         if size.width == 0 || size.height == 0 {
             return;
         }
@@ -2650,9 +2657,9 @@ impl App {
         // no such menu item, so it's always `false` there.
         #[cfg(target_os = "macos")]
         let native_fullscreen = self
-            .active
+            .window
             .as_ref()
-            .is_some_and(|a| hdr_surface::window_is_fullscreen(&a.window));
+            .is_some_and(|a| hdr_surface::window_is_fullscreen(a));
         #[cfg(not(target_os = "macos"))]
         let native_fullscreen = false;
 
@@ -2761,8 +2768,8 @@ impl App {
         if self.proxy_icon_path == want {
             return;
         }
-        if let Some(a) = self.active.as_ref() {
-            proxy_icon::set_represented_url(&a.window, want.as_deref());
+        if let Some(a) = self.window.as_ref() {
+            proxy_icon::set_represented_url(a, want.as_deref());
         }
         self.proxy_icon_path = want;
     }
@@ -2774,7 +2781,7 @@ impl App {
     #[cfg(windows)]
     fn apply_menu_for_mode(&mut self) {
         self.ensure_menu();
-        let Some(hwnd) = self.active.as_ref().and_then(|a| hwnd_of(&a.window)) else {
+        let Some(hwnd) = self.window.as_ref().and_then(|w| hwnd_of(w)) else {
             return;
         };
         let Some(menu) = self.menu.as_ref() else {
@@ -2831,8 +2838,8 @@ impl App {
         if !self.menu_attached || !self.windowed {
             return;
         }
-        if let Some(a) = self.active.as_ref() {
-            if let (Some(menu), Some(hwnd)) = (self.menu.as_ref(), hwnd_of(&a.window)) {
+        if let Some(a) = self.window.as_ref() {
+            if let (Some(menu), Some(hwnd)) = (self.menu.as_ref(), hwnd_of(a)) {
                 // SAFETY: the menu is attached to this live window's valid handle.
                 unsafe {
                     let _ = menu.set_theme_for_hwnd(hwnd, muda::MenuTheme::Auto);
@@ -3006,8 +3013,8 @@ impl App {
         self.target_item = self.playlist.current();
         self.load_current_sync();
         self.request_prefetch();
-        if let Some(a) = self.active.as_ref() {
-            a.window.request_redraw();
+        if let Some(a) = self.window.as_ref() {
+            a.request_redraw();
         }
     }
 
@@ -3065,16 +3072,16 @@ impl App {
             return;
         }
         let title = title_for(self.source.name(item), item, self.source.len());
-        if let Some(a) = self.active.as_ref() {
-            a.window.set_title(&title);
+        if let Some(a) = self.window.as_ref() {
+            a.set_title(&title);
         }
     }
 
     /// Push the current view transform to the renderer (re-places the quad).
     fn push_view(&mut self) {
         let view = self.view;
-        if let Some(a) = self.active.as_mut() {
-            a.renderer.set_view(view);
+        if let Some(a) = self.renderer.as_mut() {
+            a.set_view(view);
         }
     }
 
@@ -3206,8 +3213,8 @@ impl App {
         self.slideshow.interval = Duration::from_secs_f64(s.slideshow_interval_secs);
 
         // Letterbox / background fill → renderer (takes effect on the next draw).
-        if let Some(a) = self.active.as_mut() {
-            a.renderer.set_letterbox(s.letterbox);
+        if let Some(a) = self.renderer.as_mut() {
+            a.set_letterbox(s.letterbox);
         }
 
         // Default scale mode: apply live if it changed (re-frames + reloads at the new
@@ -3771,8 +3778,8 @@ impl App {
             return;
         };
         let margin = self.overlay_margin();
-        if let Some(a) = self.active.as_mut() {
-            a.renderer.set_overlay(Some((&bitmap, w, h)), margin);
+        if let Some(a) = self.renderer.as_mut() {
+            a.set_overlay(Some((&bitmap, w, h)), margin);
         }
         self.overlay_shown = true;
         self.overlay_item = self.displayed_item;
@@ -3781,8 +3788,8 @@ impl App {
 
     /// Hide the info panel (clears the overlay quad).
     fn hide_overlay(&mut self) {
-        if let Some(a) = self.active.as_mut() {
-            a.renderer.set_overlay(None, 0);
+        if let Some(a) = self.renderer.as_mut() {
+            a.set_overlay(None, 0);
         }
         self.overlay_shown = false;
         self.overlay_item = None;
@@ -3817,8 +3824,8 @@ impl App {
         let Some((bitmap, w, h)) = self.open_hint_panel() else {
             return;
         };
-        if let Some(a) = self.active.as_mut() {
-            a.renderer.set_message(Some((&bitmap, w, h)));
+        if let Some(a) = self.renderer.as_mut() {
+            a.set_message(Some((&bitmap, w, h)));
         }
     }
 
@@ -3863,8 +3870,8 @@ impl App {
             (scale_alpha(&t.rgba, alpha), t.w, t.h)
         };
         let margin = (64.0 * self.scale_factor).round().max(8.0) as u32;
-        if let Some(a) = self.active.as_mut() {
-            a.renderer.set_toast(Some((&faded, w, h)), margin);
+        if let Some(a) = self.renderer.as_mut() {
+            a.set_toast(Some((&faded, w, h)), margin);
         }
     }
 
@@ -3874,8 +3881,8 @@ impl App {
     fn tick_toast(&mut self, now: Instant) -> bool {
         let Some(alpha) = self.toast.as_ref().and_then(|t| t.alpha(now)) else {
             if self.toast.take().is_some() {
-                if let Some(a) = self.active.as_mut() {
-                    a.renderer.set_toast(None, 0);
+                if let Some(a) = self.renderer.as_mut() {
+                    a.set_toast(None, 0);
                 }
                 self.draw();
             }
@@ -3966,8 +3973,8 @@ impl App {
             rgba = scale_alpha(&rgba, alpha);
         }
         let margin = (PIE_MARGIN * self.scale_factor).round().max(4.0) as u32;
-        if let Some(a) = self.active.as_mut() {
-            a.renderer.set_pie(Some((&rgba, w, h)), margin);
+        if let Some(a) = self.renderer.as_mut() {
+            a.set_pie(Some((&rgba, w, h)), margin);
         }
         self.pie_drawn = true;
         self.pie_pushed = Some(want);
@@ -3977,8 +3984,8 @@ impl App {
     /// Clear the pie layer if it's up (and redraw to remove it).
     fn clear_pie(&mut self) {
         if self.pie_drawn {
-            if let Some(a) = self.active.as_mut() {
-                a.renderer.set_pie(None, 0);
+            if let Some(a) = self.renderer.as_mut() {
+                a.set_pie(None, 0);
             }
             self.pie_drawn = false;
             self.pie_pushed = None;
@@ -4033,9 +4040,9 @@ impl App {
         // Equal inset from the top and right edges; fixed card width, clamped to the window.
         let margin = (PIE_MARGIN * self.scale_factor).round().max(4.0) as u32;
         let win_w = self
-            .active
+            .window
             .as_ref()
-            .map(|a| a.window.inner_size().width)
+            .map(|a| a.inner_size().width)
             .unwrap_or(0);
         let width = ((SCAN_CARD_WIDTH * self.scale_factor).round())
             .min((win_w as f32 - 2.0 * margin as f32).max(1.0))
@@ -4058,10 +4065,10 @@ impl App {
             self.chip_rect = None;
             return;
         };
-        if let Some(a) = self.active.as_ref() {
+        if let Some(a) = self.window.as_ref() {
             // Card top-left in physical px (right edge inset by `margin`, top inset by `margin`),
             // then the button rect offset within it → the click hit-target.
-            let card_x0 = a.window.inner_size().width as f32 - margin as f32 - w as f32;
+            let card_x0 = a.inner_size().width as f32 - margin as f32 - w as f32;
             let card_y0 = margin as f32;
             let [bx, by, bw, bh] = btn.map(|v| v as f32);
             self.chip_rect = Some([
@@ -4071,8 +4078,8 @@ impl App {
                 card_y0 + by + bh,
             ]);
         }
-        if let Some(a) = self.active.as_mut() {
-            a.renderer.set_chip(Some((&rgba, w, h)), margin, margin);
+        if let Some(a) = self.renderer.as_mut() {
+            a.set_chip(Some((&rgba, w, h)), margin, margin);
         }
         self.draw();
     }
@@ -4095,16 +4102,16 @@ impl App {
         if self.source.is_empty() {
             self.show_open_hint(); // re-rasterize the "Press O to open" hint
         }
-        if let Some(a) = self.active.as_ref() {
-            a.window.request_redraw();
+        if let Some(a) = self.window.as_ref() {
+            a.request_redraw();
         }
     }
 
     /// Clear the scan card layer if it's up (and redraw to remove it).
     fn clear_chip(&mut self) {
         if self.chip_sig.is_some() {
-            if let Some(a) = self.active.as_mut() {
-                a.renderer.set_chip(None, 0, 0);
+            if let Some(a) = self.renderer.as_mut() {
+                a.set_chip(None, 0, 0);
             }
             self.chip_rect = None;
             self.chip_hovered = false;
@@ -4141,17 +4148,17 @@ impl App {
     fn draw(&mut self) {
         let t0 = Instant::now();
         let mut fatal = false;
-        let drew = if let Some(a) = self.active.as_mut() {
-            if let Err(e) = a.renderer.render() {
+        let drew = if let Some(a) = self.renderer.as_mut() {
+            if let Err(e) = a.render() {
                 eprintln!("fatal render error: {e:?}");
                 fatal = true;
             }
-            a.renderer.poll();
+            a.poll();
             true
         } else {
             false
         };
-        // Push after the `self.active` borrow ends (can't touch `self.effects` inside it).
+        // Push after the `self.renderer` borrow ends (can't touch `self.effects` inside it).
         if fatal {
             self.effects.push(contract::CoreEffect::Quit);
         }
@@ -4169,8 +4176,8 @@ impl App {
     /// 3. Exit the loop; `run_app` returns and `Drop` then frees the renderer
     ///    (VRAM) and joins the decode pool — all while the window is already gone.
     fn begin_exit(&mut self) {
-        if let Some(a) = self.active.as_ref() {
-            a.window.set_visible(false);
+        if let Some(a) = self.window.as_ref() {
+            a.set_visible(false);
         }
         self.clear_session_state();
         self.effects.push(contract::CoreEffect::Quit);
@@ -4199,7 +4206,7 @@ impl App {
             return;
         };
         let refresh = self.refresh_hz();
-        let parent = self.active.as_ref().map(|a| a.window.clone());
+        let parent = self.window.clone();
         match req {
             DialogRequest::Simple { kind, message } => {
                 self.dialog = dialog::DialogWindow::open(
@@ -4380,7 +4387,7 @@ impl App {
     /// The current image texture + screen dimensions for pan-clamp math.
     fn screen_and_image(&self) -> Option<(u32, u32, u32, u32)> {
         let fit = self.fit?;
-        let (iw, ih) = self.active.as_ref()?.renderer.image_size();
+        let (iw, ih) = self.renderer.as_ref()?.image_size();
         Some((iw, ih, fit.max_width, fit.max_height))
     }
 
@@ -4399,7 +4406,7 @@ impl App {
     /// a closed hand while dragging, an open hand when the image is pannable, the default arrow
     /// otherwise.
     fn refresh_cursor(&self) {
-        if let Some(a) = self.active.as_ref() {
+        if let Some(a) = self.window.as_ref() {
             let over_button = self.last_cursor.is_some_and(|[x, y]| self.chip_hit(x, y));
             let icon = if self.dragging {
                 CursorIcon::Grabbing
@@ -4410,7 +4417,7 @@ impl App {
             } else {
                 CursorIcon::Default
             };
-            a.window.set_cursor(icon);
+            a.set_cursor(icon);
         }
     }
 
@@ -4783,9 +4790,8 @@ impl App {
             };
             let color = render_color(&pb.color());
             let frame = pb.current_frame();
-            if let Some(a) = self.active.as_mut() {
-                a.renderer
-                    .set_image(&frame.rgba, frame.width, frame.height, color, false, 1.0);
+            if let Some(a) = self.renderer.as_mut() {
+                a.set_image(&frame.rgba, frame.width, frame.height, color, false, 1.0);
             }
         }
         self.anim_frame_shown_at = Some(Instant::now());
@@ -4967,7 +4973,7 @@ impl App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.active.is_some() {
+        if self.renderer.is_some() {
             return;
         }
 
@@ -5171,7 +5177,8 @@ impl ApplicationHandler for App {
         self.target_item = self.playlist.current();
         self.last_present = Some(Instant::now());
 
-        self.active = Some(Active { window, renderer });
+        self.window = Some(window);
+        self.renderer = Some(renderer);
         self.request_prefetch();
 
         // Now that the window + engine are live, kick off any launch we deferred (an archive
@@ -5200,19 +5207,21 @@ impl ApplicationHandler for App {
                 };
                 if Some(new_fit) != self.fit {
                     self.fit = Some(new_fit);
-                    if let Some(a) = self.active.as_mut() {
+                    if let Some(r) = self.renderer.as_mut() {
                         // Cheap, per-event: reconfigure the swapchain and let the
                         // renderer GPU-scale the resident texture to the new size.
-                        a.renderer.resize(size.width, size.height);
+                        r.resize(size.width, size.height);
                         // macOS: a surface reconfigure can reset the CAMetalLayer's
                         // colorspace/EDR, so re-assert them — keeps P3/HDR alive across
                         // a resize, fullscreen toggle, or a move to another display
                         // (which may have different EDR headroom).
                         #[cfg(target_os = "macos")]
-                        if a.renderer.hdr_surface_wants_edr().is_some() {
-                            let headroom = hdr_surface::configure(&a.window);
-                            a.renderer.set_edr_headroom(headroom);
-                            self.last_edr_headroom = headroom;
+                        if r.hdr_surface_wants_edr().is_some() {
+                            if let Some(w) = self.window.as_ref() {
+                                let headroom = hdr_surface::configure(w);
+                                r.set_edr_headroom(headroom);
+                                self.last_edr_headroom = headroom;
+                            }
                         }
                     }
                     self.draw();
@@ -5256,8 +5265,8 @@ impl ApplicationHandler for App {
             // photos become the playlist).
             WindowEvent::DroppedFile(path) => {
                 self.pending_drops.push(path);
-                if let Some(a) = self.active.as_ref() {
-                    a.window.request_redraw();
+                if let Some(a) = self.window.as_ref() {
+                    a.request_redraw();
                 }
             }
 
