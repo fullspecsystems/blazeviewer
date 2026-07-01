@@ -276,15 +276,18 @@ pub enum CoreEffect {
     PauseLiveAudio,
     /// Resume the paused Live Photo audio.
     ResumeLiveAudio,
-    /// Perform a **flow** action the core doesn't own end-to-end yet — the dialog / window /
-    /// scan / file-edit commands whose execution still lives in the shell (open the About /
-    /// Settings / confirm-delete dialog, save-rotation & undo's little-exif writes, the
-    /// fullscreen toggle's window ops, the recursive re-scan, Stop Scanning, mute-audio's
-    /// native-menu refresh, and Quit). `AppCore::dispatch_action` routes these here instead of
-    /// calling shell methods directly, so the whole action vocabulary dispatches through one
-    /// core entry point (unblocking `handle`). **Provisional seam:** NS0 5.6 replaces it with
-    /// specific effects / `CoreEvent`s (and the macOS host will service each flow natively —
-    /// native About/save panels, `NSWindow` fullscreen) as that flow is inverted.
+    /// Perform a genuinely **host-side command** — one whose execution *is* a platform
+    /// operation, not core orchestration. After NS0 5.6 this carries the residue that can't be
+    /// pure core: **DeletePermanent** (opens the themed confirm dialog; the Yes then calls the
+    /// core `do_delete`), **Fullscreen** (borderless⇄windowed `NSWindow`/Win32 window ops + the
+    /// live `windowed` mode flag the shell owns), **Recursive** / **CancelScan** (spawn / cancel
+    /// the off-thread directory walk + its progress dialog), and **Quit** (hide-window teardown,
+    /// also reached from the window-close / Esc paths). `AppCore::dispatch_action` routes these
+    /// here so the *whole* action vocabulary still dispatches through one core entry point; the
+    /// host matches on the `Action` and runs the native operation. The core-owned commands
+    /// (nav / zoom / scale / rotate / copy / info / slideshow / play / **mute** / **save-rotation**
+    /// / **undo** / **delete-to-trash**) and the dialog opens (**About** / **Settings** →
+    /// `ShowDialog`) have been lifted OUT of this seam into their own core arms / effects.
     ShellFlowAction(Action),
     // NS-later (payload types still in the shell or other crates):
     //   UpdateDialog(DialogUpdate)        — progress ticks into an open dialog

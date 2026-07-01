@@ -142,9 +142,12 @@ impl AppCore {
             // stays a flow action — it opens the shell confirm dialog first, then the shell's
             // dialog-outcome handler calls the core `do_delete(.., true)`.
             Action::Delete => self.delete_to_trash(),
-            // Flow arms — window mode / scan / permanent-delete-confirm / quit. The core doesn't
-            // own these end-to-end yet, so it routes them to the shell (host) via one effect,
-            // keeping the *whole* action vocabulary dispatching through this one core method.
+            // Host-side commands — the residue whose execution *is* a platform operation:
+            // the permanent-delete confirm dialog, the fullscreen window ops (+ the shell-owned
+            // `windowed` flag), the off-thread directory-scan spawn / cancel, and Quit's window
+            // teardown. Routed through the one `ShellFlowAction` seam so the whole action
+            // vocabulary still dispatches here; the host runs the native op (see the effect's
+            // doc). The core-owned commands were lifted out into their own arms above.
             Action::DeletePermanent
             | Action::Fullscreen
             | Action::Recursive
