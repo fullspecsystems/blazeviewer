@@ -2635,13 +2635,13 @@ impl App {
         }
     }
 
-    /// Mirror the live app state onto the native menu in one shot: derive the current
-    /// [`contract::MenuState`] and push only the items that differ from the last one
-    /// applied (`self.menu_state`). Replaces the former five `refresh_*` methods and their
-    /// five caches with one derive + one field-by-field diff — preserving the exact
-    /// cached/no-op behavior (when nothing changed, no OS call is made) and the per-item
-    /// granularity (each setter fires only when its own field changed). Safe to call every
-    /// tick from `about_to_wait`; a no-op until the menu exists.
+    /// Derive the current [`contract::MenuState`] from live app state and, **only when it
+    /// changed** since the last one applied (`self.menu_state`), emit a single
+    /// [`CoreEffect::SetMenuState`] — the shell mirrors it onto the native menu in the drain
+    /// (`apply_menu_to_native`). This is the core side of the menu seam (NS0, ADR-021): the
+    /// core decides *what* the menu should read; it never touches a muda handle. The change
+    /// gate keeps this off the per-tick path (nothing is pushed when nothing moved), so it's
+    /// safe to call every tick from `about_to_wait`; a no-op until the menu exists.
     fn apply_menu_state(&mut self) {
         // No menu yet (not built): nothing to mirror, and don't cache — so the first apply
         // once the items exist re-asserts every one of them from scratch. All menu handles
@@ -2674,78 +2674,67 @@ impl App {
             self.undo_stack.last().map(UndoAction::menu_label),
             native_fullscreen,
         );
-        let prev = self.menu_state;
-        // `true` on the first apply (`prev == None`) or when this field changed → push it.
-        macro_rules! changed {
-            ($field:ident) => {
-                prev.map_or(true, |p| p.$field != next.$field)
-            };
+        // Only sync when the state actually changed — kept off the per-tick path (nothing is
+        // pushed when nothing moved). The shell applies it in the drain via
+        // `apply_menu_to_native`; `MenuState` is `Copy`, so there's no alloc here.
+        if self.menu_state == Some(next) {
+            return;
         }
+        self.menu_state = Some(next);
+        self.effects.push(contract::CoreEffect::SetMenuState(next));
+    }
 
+    /// The shell side of [`CoreEffect::SetMenuState`]: mirror a [`contract::MenuState`] onto
+    /// the live native (muda) menu handles. Applies every mirrored item unconditionally —
+    /// the muda setters are idempotent and the core only emits the effect when the state
+    /// actually changed (via `apply_menu_state`), so there's no per-tick cost and no need to
+    /// re-diff here. A no-op for any item group whose handles aren't built yet (they're all
+    /// created together in `ensure_menu`). This is the only place a menu handle is touched —
+    /// the seam an AppKit shell re-implements.
+    fn apply_menu_to_native(&self, state: &contract::MenuState) {
         // View-menu checkmarks (scale group / recursive / fullscreen / slideshow / info).
         if let Some(c) = self.view_checks.as_ref() {
-            if changed!(scale) {
-                c.fit.set_checked(next.scale == contract::ScaleMode::Fit);
-                c.fill.set_checked(next.scale == contract::ScaleMode::Fill);
-                c.original
-                    .set_checked(next.scale == contract::ScaleMode::Original);
-            }
-            if changed!(recursive) {
-                c.recursive.set_checked(next.recursive);
-            }
-            if changed!(fullscreen) {
-                c.fullscreen.set_checked(next.fullscreen);
-            }
-            if changed!(slideshow) {
-                c.slideshow.set_checked(next.slideshow);
-            }
-            if changed!(mute_live_audio) {
-                c.mute_live_audio.set_checked(next.mute_live_audio);
-            }
-            if changed!(info) {
-                c.info
-                    .set_checked(next.info == contract::InfoOverlay::Basic);
-                c.full_exif
-                    .set_checked(next.info == contract::InfoOverlay::FullExif);
-            }
+            c.fit.set_checked(state.scale == contract::ScaleMode::Fit);
+            c.fill.set_checked(state.scale == contract::ScaleMode::Fill);
+            c.original
+                .set_checked(state.scale == contract::ScaleMode::Original);
+            c.recursive.set_checked(state.recursive);
+            c.fullscreen.set_checked(state.fullscreen);
+            c.slideshow.set_checked(state.slideshow);
+            c.mute_live_audio.set_checked(state.mute_live_audio);
+            c.info
+                .set_checked(state.info == contract::InfoOverlay::Basic);
+            c.full_exif
+                .set_checked(state.info == contract::InfoOverlay::FullExif);
         }
         // File ▸ Save Rotation enabled state.
-        if changed!(save_rotation_enabled) {
-            if let Some(it) = self.save_rotation_item.as_ref() {
-                it.set_enabled(next.save_rotation_enabled);
-            }
+        if let Some(it) = self.save_rotation_item.as_ref() {
+            it.set_enabled(state.save_rotation_enabled);
         }
         // File ▸ Stop Scanning enabled state.
-        if changed!(cancel_scan_enabled) {
-            if let Some(it) = self.cancel_scan_item.as_ref() {
-                it.set_enabled(next.cancel_scan_enabled);
-            }
+        if let Some(it) = self.cancel_scan_item.as_ref() {
+            it.set_enabled(state.cancel_scan_enabled);
         }
         // Edit ▸ Undo title + enabled state (Windows appends the `\tCtrl+Z` hint; macOS
         // shows the real ⌘Z key-equivalent the item already carries).
-        if changed!(undo) {
-            if let Some(it) = self.undo_item.as_ref() {
-                let base = next.undo.unwrap_or("Undo");
-                #[cfg(target_os = "macos")]
-                it.set_text(base);
-                #[cfg(not(target_os = "macos"))]
-                it.set_text(format!("{base}\tCtrl+Z"));
-                it.set_enabled(next.undo.is_some());
-            }
+        if let Some(it) = self.undo_item.as_ref() {
+            let base = state.undo.unwrap_or("Undo");
+            #[cfg(target_os = "macos")]
+            it.set_text(base);
+            #[cfg(not(target_os = "macos"))]
+            it.set_text(format!("{base}\tCtrl+Z"));
+            it.set_enabled(state.undo.is_some());
         }
         // macOS: native (Spaces) fullscreen item title ("Enter"/"Exit Full Screen") — a
         // title toggle, never a checkmark (the Mac convention).
         #[cfg(target_os = "macos")]
-        if changed!(native_fullscreen_engaged) {
-            if let Some(it) = self.native_fullscreen_item.as_ref() {
-                it.set_text(if next.native_fullscreen_engaged {
-                    "Exit Full Screen"
-                } else {
-                    "Enter Full Screen"
-                });
-            }
+        if let Some(it) = self.native_fullscreen_item.as_ref() {
+            it.set_text(if state.native_fullscreen_engaged {
+                "Exit Full Screen"
+            } else {
+                "Enter Full Screen"
+            });
         }
-        self.menu_state = Some(next);
     }
 
     /// macOS: keep the title-bar **proxy icon** (the window's represented file) pointed
@@ -4201,6 +4190,9 @@ impl App {
                     if let Some(w) = self.window.as_ref() {
                         w.set_cursor(cursor_icon(kind));
                     }
+                }
+                contract::CoreEffect::SetMenuState(state) => {
+                    self.apply_menu_to_native(&state);
                 }
                 _ => {}
             }
