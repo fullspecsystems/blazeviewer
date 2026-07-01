@@ -5,11 +5,13 @@ SwiftUI groundwork, ADR-021) — see the NS0 section immediately below. On branc
 NS0 is now **~90% done: the full STATE inversion, the BEHAVIOR inversion (Phase B, ~99 methods),
 `dispatch_action` moved onto `AppCore`, AND the keystone `handle(CoreEvent)` (Phase C1) all
 land. ✅ NS1 (the Swift bridge) is now UNBLOCKED — it can drive the viewer through `handle()`,
-which exists + is unit-tested.** What remains is **Phase C2** (rewrite the winit shell's
-`window_event`/`about_to_wait` as thin translators that also go through `handle()` — smoke-gated)
-and **5.6** (invert the scan/archive/dialog/delete/window FLOW — the `ShellFlowAction` arms get
-specific effects). Everything below the NS0 section is the previously-shipped work (macOS port,
-archive, settings, HEIC, color), unchanged._
+which exists + is unit-tested.** Phase C2 (winit shell → `handle()` translator) is underway:
+**keyboard + focus + pointer/pinch/double-tap now route through `handle()`**; what remains is the
+**`Tick`/`about_to_wait` hold-to-fly loop** (the hardest, most feel-critical method — deferred as
+its own heavily-smoke-gated increment; needs a `SetWake` effect + wake-combination machinery) and
+**5.6** (invert the scan/archive/dialog/delete/window FLOW — the `ShellFlowAction` arms get specific
+effects). Everything below the NS0 section is the previously-shipped work (macOS port, archive,
+settings, HEIC, color), unchanged._
 
 _The macOS (Apple Silicon) port is complete and SHIPPED in `v0.1.0-beta.4` (2026-06-30) — the
 first signed + notarized macOS DMG alongside the signed Windows MSI. Verified notarized +
@@ -109,18 +111,37 @@ each `cargo test --workspace` + `clippy -D warnings` + `fmt` clean, behavior-pre
   resolves through the keymap to `Quit` → `ShellFlowAction`; the host owns dialog-dismiss-vs-quit).
 
 **✅ NS1 (the Swift bridge) is UNBLOCKED** — it can drive the viewer through `handle()` today for
-keyboard + menu, with the unit tests as the safety net. `Tick`/`Resized`/pointer/scroll/pinch +
-the flow events are `handle()` no-ops until C2 wires them.
+keyboard + menu + pointer gestures, with the unit tests as the safety net.
 
-### ❌ NOT DONE — Phase C2 (shell→translator) + 5.6 (flow inversion). **The smoke-gated back half.**
-- **C2 — rewrite the winit shell as a translator.** `handle()` is currently *additive*: the winit
-  `window_event`/`about_to_wait` still call core methods directly (their proven, smoke-verified
-  path). C2 rewrites them to *stamp `now` → build a `CoreEvent` → `self.core.handle(ev)` →
-  `drain_effects`*, so the winit shell exercises the **same** `handle()` the Swift host will. This
-  also wires the `handle()` no-op arms: `Tick` (the `about_to_wait` hold-loop/advance/slideshow +
-  a new `SetWake(Option<Instant>)` effect), `Resized` (viewport + renderer-resize), pointer/
-  scroll/pinch → view. Keep Escape's shell special-case (dialog-dismiss) as a pre-filter. **Heavily
-  smoke-gated** — it's the core input loop; `cargo test` can't validate feel.
+### ◐ IN PROGRESS — Phase C2 (winit shell → translator). **Input events done; the Tick loop remains.**
+The winit shell now translates its **input** events to `CoreEvent`s and calls `self.core.handle(ev)`
+— the SAME entry the Swift host uses — instead of calling core methods inline:
+- **✅ Keyboard + focus** (`0b080ce`): `KeyboardInput` press/release → `KeyDown`/`KeyUp`;
+  `Focused(false)` → `FocusLost`. Escape keeps its shell pre-filter (dialog-dismiss / esc-guard /
+  begin_exit) ahead of `handle`.
+- **✅ Pointer gestures** (`345e830`): `CursorMoved` → `PointerMoved`, `PinchGesture` → `Pinch`,
+  `DoubleTapGesture` → `DoubleTap` (those three `handle` arms now implemented; `PINCH_GAIN`→engine).
+  `CursorLeft`/`MouseInput`/`MouseWheel` stay shell — no clean `CoreEvent` fit (`MouseWheel`'s
+  winit `LineDelta`-vs-`PixelDelta` per-type zoom constants don't map to the current `Scroll{dx,dy}`),
+  and they already call core methods directly.
+
+**❌ REMAINING C2 — the `Tick` loop + `Resized` (both deferred, deliberately).**
+- **`Tick` (`about_to_wait`) is the single hardest, most feel-critical method** — it interleaves the
+  core hold-to-fly/advance/slideshow/prefetch/animation logic with shell flow-polling (muda menu
+  events, `poll_dir_scan`/`poll_archive_load`, `pending_drops`→`open_input`, the dialog egui-repaint
+  clock, `tick_chip`, proxy-icon) **and** a *combined* wake: `min(base_wake, dialog_wake, anim_wake,
+  prep_wake, revert_wake)` → `set_control_flow`. Extracting `handle(Tick)` cleanly needs: a
+  **`CoreEffect::SetWake(Option<Instant>)`** + shell **wake-combination machinery** (the core's wake
+  min'd with the shell's dialog/archive wakes — drain stores the SetWake value, `about_to_wait`
+  combines it), a **`dialog_open` core mirror** (slideshow pauses while a dialog is up: reads
+  `self.dialog`), a **`work_pending` split** (core results/uploads vs the shell `archive_load`), and
+  the revert block's `self.live_audio = None` → `StopLiveAudio` effect. **Do this as its own focused
+  increment with heavy hold-to-fly smoke** — a subtle wake-timing bug silently degrades the headline
+  feature and `cargo test` can't catch it. (Left deliberately unattempted rather than rushed.)
+- **`Resized`/`ScaleFactorChanged`** stay shell: genuinely GPU/window-coupled (swapchain
+  reconfigure, the macOS `hdr_surface` CAMetalLayer EDR poke, `track_windowed_geometry` window read).
+  The macOS host owns its own surface resize; `handle(Resized{w,h,scale,edr})` would do only the
+  core-state part (viewport/fit/`resize_settle_at`/`draw`/apply-edr-to-renderer). Lower priority.
 - **5.6 — invert the scan/archive/dialog/delete-confirm/drop FLOW** + native fullscreen: give the
   11 `ShellFlowAction` arms specific effects/`CoreEvent`s (migrate `Resolved`; untangle
   `finish_picker` + `begin_archive_open`→`DialogWindow`; `save_rotation`/`undo` → a save effect +
