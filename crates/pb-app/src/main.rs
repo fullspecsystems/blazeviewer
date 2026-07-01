@@ -2565,8 +2565,26 @@ impl App {
         self.geometry_save_at = None;
         self.settings.save();
 
-        // Clone the window handle (an Arc) so the window can be driven while `self` is
-        // still borrowed mutably below (the menu attach needs `&mut self`).
+        // The window ops (fullscreen/decorations/sizing + macOS chrome + menu attach) are
+        // shell work: emit the mode change and let the drain apply it (`apply_window_mode`),
+        // which reads the `self.windowed` we just flipped. Same event-loop turn, so behavior
+        // is unchanged.
+        self.effects
+            .push(contract::CoreEffect::SetWindowMode(if self.windowed {
+                contract::WindowMode::Windowed
+            } else {
+                contract::WindowMode::Fullscreen
+            }));
+    }
+
+    /// Shell side of [`CoreEffect::SetWindowMode`]: apply the borderless-fullscreen ⇄ windowed
+    /// window ops, run from the drain. Reads the already-flipped `self.windowed` (the effect's
+    /// `WindowMode` payload is the same signal). Preserves `toggle_fullscreen`'s exact former
+    /// sequence — set_fullscreen/decorations, then macOS chrome + menu attach *before* the
+    /// windowed sizing, then the windowed geometry restore.
+    fn apply_window_mode(&mut self) {
+        // Clone the window handle (an Arc) so it can be driven while `self` is still borrowed
+        // mutably below (the menu attach needs `&mut self`).
         let Some(window) = self.window.clone() else {
             return;
         };
@@ -4534,6 +4552,9 @@ impl App {
                 }
                 contract::CoreEffect::SetMenuState(state) => {
                     self.apply_menu_to_native(&state);
+                }
+                contract::CoreEffect::SetWindowMode(_mode) => {
+                    self.apply_window_mode();
                 }
                 contract::CoreEffect::WriteClipboard(payload) => {
                     self.write_clipboard(payload);
