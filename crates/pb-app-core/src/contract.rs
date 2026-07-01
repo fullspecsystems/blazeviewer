@@ -248,6 +248,13 @@ pub enum CoreEvent {
     /// A chrome dialog resolved (Save/Cancel/OK/Esc) — the host drove the UI + extracted any
     /// payload; the core runs the reaction + emits the close/cancel effects. NS0 5.6.
     DialogResolved(DialogResult),
+    /// The streaming directory-scan worker produced a growing playlist snapshot (NS0 5.6 Step 3).
+    /// The host owns the worker thread + generation check; the core filters deleted items, then
+    /// bootstraps the playlist on the first non-empty batch (`scan_bootstrapped`) or extends it.
+    ScanBatch(crate::scan::Resolved),
+    /// The streaming directory scan finished (NS0 5.6 Step 3): the core resumes normal prefetch
+    /// and — if nothing was ever shown and the deck is empty — restores the "Press O to open" hint.
+    ScanDone,
     /// A dialog was cancelled / dismissed.
     CancelDialog,
     // NS-later (payload types still in the shell or other crates):

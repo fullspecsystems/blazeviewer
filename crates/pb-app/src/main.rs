@@ -45,7 +45,7 @@ use pb_core::open::{self, LaunchInput, Source};
 use pb_core::{Playlist, ResidentRing};
 use pb_decode::{decode_bytes, FitBox};
 use pb_render::{Renderer, ViewTransform, WgpuRenderer};
-use pb_source::{FsSource, PhotoSource};
+use pb_source::PhotoSource;
 
 mod clipboard;
 #[cfg(windows)]
@@ -432,6 +432,7 @@ impl App {
                 launching: false,
                 dialog_open: false,
                 archive_loading: false,
+                scan_bootstrapped: false,
                 password_archive: None,
                 pending_delete: None,
                 pending_confirm_delete: None,
@@ -757,13 +758,13 @@ impl App {
             }
         }
         self.core.scanning = true; // core mirror: use sequential-only prefetch while streaming
+        self.core.scan_bootstrapped = false; // fresh scan → first non-empty batch bootstraps
         self.dir_scan = Some(DirScan {
             generation,
             rx,
             progress,
             name,
             started: Instant::now(),
-            bootstrapped: false,
         });
     }
 
@@ -789,68 +790,35 @@ impl App {
                     if generation != cur_gen {
                         continue; // superseded by a newer open (defensive; rx is per-scan)
                     }
-                    // Drop any photos the user deleted mid-scan (the worker's cumulative list
-                    // still has them). A no-op — returns the snapshot untouched — when nothing
-                    // was deleted, which is the common case.
-                    let resolved = self.filter_deleted(resolved);
-                    let bootstrapped = self
-                        .dir_scan
-                        .as_ref()
-                        .map(|s| s.bootstrapped)
-                        .unwrap_or(true);
-                    if resolved.source.is_empty() {
-                        continue; // nothing to show yet (shouldn't happen — worker skips empties)
-                    }
-                    if !bootstrapped {
-                        // First non-empty batch: show a photo now (display + decode). The
-                        // Scanning dialog (if it had been revealed) stays until Done so a
-                        // genuinely slow walk keeps its progress + Cancel; once the chip
-                        // lands it'll demote to ambient at this point instead.
-                        if let Some(s) = self.dir_scan.as_mut() {
-                            s.bootstrapped = true;
-                        }
-                        self.core.rebuild_playlist(
-                            resolved.source,
-                            resolved.root,
-                            resolved.scan_root,
-                            resolved.recursive,
-                            resolved.start,
-                        );
-                    } else {
-                        // Later batch: grow the playlist in place, keeping the displayed
-                        // photo and every per-image cache (indices are append-only).
-                        self.core.extend_playlist(resolved.source);
-                    }
+                    // The core filters mid-scan deletes, bootstraps the first non-empty batch
+                    // (`scan_bootstrapped`), and extends the rest — see `AppCore::apply_scan_batch`.
+                    self.core.handle(contract::CoreEvent::ScanBatch(resolved));
                 }
                 Ok((generation, ScanUpdate::Done)) => {
                     if generation != cur_gen {
                         continue; // superseded
                     }
-                    let scan = self.dir_scan.take();
-                    self.core.scanning = false; // deck is final — resume normal prefetch below
+                    self.dir_scan = None; // walk finished — drop the worker handle
+                    let never_bootstrapped = !self.core.scan_bootstrapped;
+                    // Core: resume normal prefetch + restore the open hint if the deck stayed empty.
+                    self.core.handle(contract::CoreEvent::ScanDone);
                     self.close_scanning_dialog(); // walk finished — drop the progress dialog
-                    if scan.is_some_and(|s| !s.bootstrapped) {
+                    if never_bootstrapped {
                         eprintln!("PhotoBlaze: no supported images in that selection");
-                        // Nothing was ever shown and the scan found nothing: restore the
-                        // "Press O to open" hint the scan had suppressed (a bare-folder launch
-                        // onto an empty folder), but never blank an existing photo.
-                        if self.core.source.is_empty() {
-                            self.core.show_open_hint();
-                        }
                     }
-                    // Deck is final now: resume normal prefetch (random-ahead warm again).
-                    self.core.request_prefetch();
                     return;
                 }
                 Err(TryRecvError::Empty) => {
                     // Still scanning and nothing on screen yet: once the walk is slow enough
                     // to notice, reveal the Scanning dialog (count + current folder + Cancel).
-                    // Gated on `!bootstrapped` so it never pops over an already-shown photo,
+                    // Gated on `!scan_bootstrapped` so it never pops over an already-shown photo,
                     // and only when no other dialog is up (don't steal a Settings/Message
                     // window the user opened over a background scan).
-                    let reveal = self.dir_scan.as_ref().is_some_and(|s| {
-                        !s.bootstrapped && s.started.elapsed() >= SCAN_DIALOG_DELAY
-                    });
+                    let reveal = !self.core.scan_bootstrapped
+                        && self
+                            .dir_scan
+                            .as_ref()
+                            .is_some_and(|s| s.started.elapsed() >= SCAN_DIALOG_DELAY);
                     if reveal && self.dialog.is_none() {
                         let (name, progress) = match self.dir_scan.as_ref() {
                             Some(s) => (s.name.clone(), s.progress.clone()),
@@ -1416,31 +1384,6 @@ impl App {
         }
     }
 
-    /// Filter a streamed snapshot through the delete-tombstone set, rebuilding its `FsSource`
-    /// without the deleted paths. Returns the snapshot **unchanged** (no allocation) in the
-    /// common case where nothing was deleted mid-scan. Because the walk is append-only and we
-    /// remove the *same* paths from every snapshot, the filtered result stays a prefix-superset
-    /// of the current playlist — so the in-place [`extend_playlist`](App::extend_playlist) is
-    /// still valid (the displayed photo's index doesn't shift). O(N) only when tombstones
-    /// exist (rare).
-    fn filter_deleted(&self, r: Resolved) -> Resolved {
-        if self.core.deleted.is_empty() {
-            return r;
-        }
-        let paths: Vec<PathBuf> = (0..r.source.len())
-            .filter_map(|i| r.source.path(i).map(Path::to_path_buf))
-            .filter(|p| !self.core.deleted.contains(p))
-            .collect();
-        let start = r.start.min(paths.len().saturating_sub(1));
-        Resolved {
-            source: Arc::new(FsSource::new(paths)),
-            root: r.root,
-            scan_root: r.scan_root,
-            recursive: r.recursive,
-            start,
-        }
-    }
-
     /// Open (or focus, if already open) one of our egui dialog windows. Only one
     /// dialog is shown at a time; requesting a different kind replaces it.
     fn open_dialog(&mut self, kind: dialog::DialogKind) {
@@ -1612,7 +1555,7 @@ impl App {
     fn tick_chip(&mut self) {
         let want = match (self.dir_scan.as_ref(), self.core.displayed_item) {
             (Some(scan), Some(_))
-                if scan.bootstrapped && scan.started.elapsed() >= SCAN_DIALOG_DELAY =>
+                if self.core.scan_bootstrapped && scan.started.elapsed() >= SCAN_DIALOG_DELAY =>
             {
                 // Current folder being walked; hide it while it's just the root (it would
                 // duplicate the heading).
@@ -2732,10 +2675,6 @@ struct DirScan {
     /// When the scan was dispatched, so the Scanning dialog is deferred to slow scans
     /// only (a normal folder resolves in milliseconds and never flashes it).
     started: Instant,
-    /// Whether the first non-empty batch has been applied (the first image shown). Until
-    /// then the Scanning dialog may reveal and there's nothing on screen yet; the first
-    /// batch *bootstraps* the playlist (display + decode), later batches *extend* it.
-    bootstrapped: bool,
 }
 
 /// An in-flight background archive open. A `.7z` is eager-decompressed off the event
@@ -2901,6 +2840,7 @@ mod tests {
     use pb_app_core::Toast;
     use pb_decode::read_exif_fields;
     use pb_render::ScaleMode;
+    use pb_source::FsSource;
 
     #[test]
     fn exif_blob_filters_makernote_and_oversized() {

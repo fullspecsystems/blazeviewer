@@ -205,6 +205,11 @@ pub struct AppCore {
     /// `archive_load.is_some()`, synced at each tick) — keeps `work_pending` true so the loop
     /// keeps polling for the finished open. NS0 5.5 Phase C2.
     pub archive_loading: bool,
+    /// Whether the in-flight directory scan has applied its first non-empty batch (the first photo
+    /// is shown). The `ScanBatch` handler bootstraps the playlist while this is false, then extends
+    /// it; the host reads it to gate the Scanning-dialog reveal / the scan-count chip. Reset to
+    /// false when a new scan begins. NS0 5.6 Step 3 (was the shell `DirScan::bootstrapped`).
+    pub scan_bootstrapped: bool,
     /// A delete whose playlist-advance is deferred: `(fire_at, removed_index)`. The deleted
     /// photo stays on screen with its icon until `fire_at`, then the playlist drops the item and
     /// advances (`do_delete` sets it; `flush_pending_delete` fires it). RAM-only (privacy #2).

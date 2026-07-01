@@ -17,13 +17,28 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// A resolved playlist: the concrete [`PhotoSource`] plus the framing the app needs (display
-/// root, the scan root for `Ctrl+R`, recursive flag, start index).
+/// root, the scan root for `Ctrl+R`, recursive flag, start index). `Clone` is a cheap `Arc`
+/// bump (the source is shared); `Debug` is manual since `dyn PhotoSource` isn't `Debug` — both
+/// let it ride on `CoreEvent::ScanBatch` (NS0 5.6 Step 3).
+#[derive(Clone)]
 pub struct Resolved {
     pub source: Arc<dyn PhotoSource>,
     pub root: PathBuf,
     pub scan_root: Option<PathBuf>,
     pub recursive: bool,
     pub start: usize,
+}
+
+impl std::fmt::Debug for Resolved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Resolved")
+            .field("len", &self.source.len())
+            .field("root", &self.root)
+            .field("scan_root", &self.scan_root)
+            .field("recursive", &self.recursive)
+            .field("start", &self.start)
+            .finish()
+    }
 }
 
 impl Resolved {

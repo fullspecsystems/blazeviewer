@@ -400,6 +400,10 @@ impl AppCore {
             }
             // A chrome dialog resolved — run the reaction + emit the close/cancel effects.
             CoreEvent::DialogResolved(result) => self.handle_dialog_resolved(result),
+            // A streaming-scan snapshot / the scan's completion (the host owns the worker thread +
+            // generation check; the core applies the result to the playlist).
+            CoreEvent::ScanBatch(resolved) => self.apply_scan_batch(resolved),
+            CoreEvent::ScanDone => self.finish_scan(),
             // Wired in later C2 increments / 5.6 (they touch the still-shell scroll-delta / GPU
             // surface / flow paths). Ignored for now so a host that sends them early is a no-op.
             CoreEvent::Redraw
@@ -477,6 +481,65 @@ impl AppCore {
             // Message / others just close.
             R::Closed => self.effects.push(E::CloseDialog),
         }
+    }
+
+    /// Drop any photos the user deleted mid-scan from a streaming snapshot (the worker's cumulative
+    /// list still has them). A no-op — returns the snapshot untouched — when nothing was deleted,
+    /// which is the common case. NS0 5.6 Step 3 (was the shell's `App::filter_deleted`).
+    fn filter_deleted(&self, r: crate::scan::Resolved) -> crate::scan::Resolved {
+        if self.deleted.is_empty() {
+            return r;
+        }
+        let paths: Vec<PathBuf> = (0..r.source.len())
+            .filter_map(|i| r.source.path(i).map(Path::to_path_buf))
+            .filter(|p| !self.deleted.contains(p))
+            .collect();
+        let start = r.start.min(paths.len().saturating_sub(1));
+        crate::scan::Resolved {
+            source: Arc::new(FsSource::new(paths)),
+            root: r.root,
+            scan_root: r.scan_root,
+            recursive: r.recursive,
+            start,
+        }
+    }
+
+    /// Apply a streaming directory-scan snapshot ([`CoreEvent::ScanBatch`], NS0 5.6 Step 3): filter
+    /// out mid-scan deletes, then — for the first non-empty batch — **bootstrap** the playlist
+    /// (display + decode a photo now, well before the whole tree is walked) and mark
+    /// `scan_bootstrapped`; later batches **extend** it in place, keeping the displayed photo and
+    /// every per-image cache (indices are append-only). An empty snapshot is skipped. The host owns
+    /// the worker thread + generation check, so a superseded batch never reaches here.
+    fn apply_scan_batch(&mut self, resolved: crate::scan::Resolved) {
+        let resolved = self.filter_deleted(resolved);
+        if resolved.source.is_empty() {
+            return; // nothing to show yet (shouldn't happen — worker skips empties)
+        }
+        if !self.scan_bootstrapped {
+            self.scan_bootstrapped = true;
+            self.rebuild_playlist(
+                resolved.source,
+                resolved.root,
+                resolved.scan_root,
+                resolved.recursive,
+                resolved.start,
+            );
+        } else {
+            self.extend_playlist(resolved.source);
+        }
+    }
+
+    /// The streaming directory scan finished ([`CoreEvent::ScanDone`], NS0 5.6 Step 3): the deck is
+    /// final, so resume normal (random-ahead) prefetch. If nothing was ever shown and the deck is
+    /// empty (a bare-folder launch onto an empty folder), restore the "Press O to open" hint the
+    /// scan had suppressed — but never blank an existing photo. The host drops the worker handle +
+    /// closes the progress dialog.
+    fn finish_scan(&mut self) {
+        self.scanning = false;
+        if !self.scan_bootstrapped && self.source.is_empty() {
+            self.show_open_hint();
+        }
+        self.request_prefetch();
     }
 
     /// The per-tick core loop (NS0 5.5 Phase C2): absorb finished decodes + uploads, run held
@@ -3361,6 +3424,7 @@ mod tests {
             launching: false,
             dialog_open: false,
             archive_loading: false,
+            scan_bootstrapped: false,
             password_archive: None,
             pending_delete: None,
             pending_confirm_delete: None,
