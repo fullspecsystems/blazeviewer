@@ -3699,47 +3699,58 @@ impl App {
         if !is_live && !is_animated && detail.is_none() {
             return Vec::new();
         }
-        let Some((idx, count, total, loops)) = detail else {
-            // Not decoded yet — just the affordance, labeled by type.
-            let label = if is_live { "Live Photo" } else { "Animation" };
-            return vec![Row::Pair {
-                label: label.to_string(),
-                value: "press P to play".to_string(),
-            }];
-        };
+        // Reserve every row up front — the labels are known from the header sniff /
+        // pairing, so a Live Photo or animation always shows the same rows. Values are a
+        // pending placeholder until the sequence is decoded (eager prep on dwell), then
+        // fill in **in place**, so the panel never reflows when the numbers land a beat
+        // later. Playback then updates the live "Frame X / N" value with no row churn.
+        const PENDING: &str = "…";
         let mut rows = Vec::new();
-        // Name the Live Photo explicitly (the Codec row above shows the still's format).
+        // A Live Photo names itself + its frame count (the Codec row shows the still's
+        // format); an animation's count lives in the Frame row below.
         if is_live {
             rows.push(Row::Pair {
                 label: "Live Photo".to_string(),
-                value: format!("{count} frames"),
+                value: detail.map_or(PENDING.to_string(), |(_, count, _, _)| {
+                    format!("{count} frames")
+                }),
             });
         }
         rows.push(Row::Pair {
             label: "Frame".to_string(),
-            value: format!("{} / {}", idx + 1, count),
+            value: detail.map_or(PENDING.to_string(), |(idx, count, _, _)| {
+                format!("{} / {}", idx + 1, count)
+            }),
         });
-        let secs = total.as_secs_f64();
-        if secs > 0.0 {
-            rows.push(Row::Pair {
-                label: "Frame Rate".to_string(),
-                value: format!("{:.1} fps", count as f64 / secs),
-            });
-            rows.push(Row::Pair {
-                label: "Duration".to_string(),
-                value: format!("{secs:.2} s"),
-            });
-        }
+        rows.push(Row::Pair {
+            label: "Frame Rate".to_string(),
+            value: detail.map_or(PENDING.to_string(), |(_, count, total, _)| {
+                let secs = total.as_secs_f64();
+                if secs > 0.0 {
+                    format!("{:.1} fps", count as f64 / secs)
+                } else {
+                    PENDING.to_string()
+                }
+            }),
+        });
+        rows.push(Row::Pair {
+            label: "Duration".to_string(),
+            value: detail.map_or(PENDING.to_string(), |(_, _, total, _)| {
+                format!("{:.2} s", total.as_secs_f64())
+            }),
+        });
         // A Live Photo always plays once; the loop count is only meaningful for a
         // GIF/APNG/WebP loop.
         if !is_live {
             rows.push(Row::Pair {
                 label: "Loop".to_string(),
-                value: if loops == 0 {
-                    "Forever".to_string()
-                } else {
-                    format!("{loops}×")
-                },
+                value: detail.map_or(PENDING.to_string(), |(_, _, _, loops)| {
+                    if loops == 0 {
+                        "Forever".to_string()
+                    } else {
+                        format!("{loops}×")
+                    }
+                }),
             });
         }
         rows
@@ -5615,11 +5626,15 @@ impl ApplicationHandler for App {
 
         // 4g'. A finished Live Photo reverts to the crisp still once the linger beat has
         // elapsed (`tick_playback` armed the timer on finish). Returns a wake at the
-        // deadline so the idle loop comes back to perform the swap.
+        // deadline so the idle loop comes back to perform the swap. Drops the finished
+        // playback but **keeps** the decoded motion (`prepared`) — back to the normal
+        // parked-and-prepped state, so replay is instant and the info panel keeps its
+        // numbers (no re-decode, no reflow blink).
         let revert_wake = match self.live_revert_at {
             Some(at) if now >= at => {
                 self.live_revert_at = None;
-                self.stop_playback();
+                self.playback = None;
+                self.anim_frame_shown_at = None;
                 self.restore_still(event_loop);
                 None
             }
