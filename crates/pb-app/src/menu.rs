@@ -9,9 +9,16 @@
 //! Clicks emit a [`muda::MenuEvent`] carrying the item's id; `main.rs` polls the
 //! event channel in `about_to_wait`, maps the id to a [`MenuAction`] via the pure
 //! [`action_for`] (unit-tested here), and calls the **same `App` methods the
-//! keyboard already calls**. Shortcuts are shown as label hints only (`"Open
-//! File…\tO"`); no real muda accelerators are registered, because the winit key
-//! handler already owns those keys — a registered accelerator would double-fire.
+//! keyboard already calls**.
+//!
+//! **Shortcuts, per platform.** *Windows* shows shortcuts as right-aligned label hints
+//! (`"Open File…\tO"`) with no real accelerator registered — the winit key handler owns
+//! those keys and a registered accelerator would double-fire. *macOS* registers **real
+//! ⌘-chord key-equivalents** (Settings ⌘, / Copy ⌘C / Move to Trash ⌘⌫ / …) because the
+//! keymap never binds ⌘-chords, so NSMenu owns them cleanly with no double-fire; the
+//! **bare-key** items (nav, rotate, frame-step) carry **no accelerator and no hint text** —
+//! an NSMenu key-equivalent for a bare key would *steal* it from the keymap (breaking
+//! hold-to-fly), and literal hint text in an NSMenuItem title is non-idiomatic whitespace.
 
 use muda::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
@@ -218,7 +225,9 @@ fn check_item(id: &str, label: &str) -> CheckMenuItem {
 /// `"Shift+R"`, `"P"`), or empty if the action is unbound. Sourced live from the keymap so
 /// the menu reflects **customized** bindings (`KeyChord`'s `Display` — the same text the
 /// Settings ▸ Shortcuts editor shows), never a hardcoded guess. The first binding wins when
-/// an action has two (menus show one accelerator).
+/// an action has two (menus show one accelerator). Windows-only in production (macOS shows
+/// bare-key items with no hint — see [`build_menu`]); kept + tested cross-platform.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn shortcut_hint(keymap: &Keymap, action: Action) -> String {
     keymap
         .bindings_for(action)
@@ -228,10 +237,13 @@ fn shortcut_hint(keymap: &Keymap, action: Action) -> String {
 }
 
 /// A menu label with the action's current shortcut appended as a `\t` hint
-/// (`"Next\tSpace"`) — Windows right-aligns it in the accelerator column; macOS shows it as
-/// hint text (these are bare keymap keys, so we can't register a real key-equivalent without
-/// it hijacking the key from the keymap — see the module docs). No hint if the action is
-/// unbound, so an un-shortcutted item just reads as its plain label.
+/// (`"Next\tSpace"`), which **Windows** right-aligns in the accelerator column. Sourced
+/// live from the keymap so it tracks customized bindings. No hint if the action is unbound,
+/// so an un-shortcutted item just reads as its plain label. **Windows-only:** on macOS these
+/// bare-key items show no hint at all (a `\t` in an NSMenuItem title is just stray
+/// whitespace, and a real key-equivalent would hijack the key — see the module docs), so
+/// this is unused there.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn labeled(keymap: &Keymap, base: &str, action: Action) -> String {
     let hint = shortcut_hint(keymap, action);
     if hint.is_empty() {
@@ -435,7 +447,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
 /// double-fire. Bare-key fast-nav (Space / R / 8-9-0 / …) and the fullscreen toggles
 /// (F / ⌥⏎ / F11) stay keymap-owned, so those items carry no accelerator.
 #[cfg(target_os = "macos")]
-pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
+pub fn build_menu(_keymap: &Keymap) -> BuiltMenu {
     use muda::accelerator::{Accelerator, Code, Modifiers};
     /// The ⌘ (Command) key — `Modifiers::SUPER` maps to NSEventModifierFlags::Command.
     const CMD: Modifiers = Modifiers::SUPER;
@@ -566,37 +578,25 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
         &full_exif,
     ]);
 
+    // No accelerators / no hint text: these are bare-key bindings (Space / R / , / . / …)
+    // owned by the winit keymap. A macOS key-equivalent for a bare key would make NSMenu
+    // *steal* it from the keymap (breaking hold-to-fly), and — unlike Windows, which
+    // right-aligns a `\t` hint in the accelerator column — a literal hint in an NSMenuItem
+    // title just renders as stray whitespace. So the Mac items show a plain label (the
+    // idiomatic choice for a shortcut macOS can't express as a key-equivalent).
     let image = Submenu::new("Image", true);
     let _ = image.append_items(&[
-        &item(ids::NEXT, &labeled(keymap, "Next", Action::Next)),
-        &item(ids::PREVIOUS, &labeled(keymap, "Previous", Action::Prev)),
-        &item(ids::RANDOM, &labeled(keymap, "Random", Action::Random)),
-        &item(
-            ids::RANDOM_PREV,
-            &labeled(keymap, "Previous Random", Action::RandomPrev),
-        ),
+        &item(ids::NEXT, "Next"),
+        &item(ids::PREVIOUS, "Previous"),
+        &item(ids::RANDOM, "Random"),
+        &item(ids::RANDOM_PREV, "Previous Random"),
         &sep(),
-        &item(
-            ids::ROTATE_RIGHT,
-            &labeled(keymap, "Rotate Right", Action::RotateCw),
-        ),
-        &item(
-            ids::ROTATE_LEFT,
-            &labeled(keymap, "Rotate Left", Action::RotateCcw),
-        ),
+        &item(ids::ROTATE_RIGHT, "Rotate Right"),
+        &item(ids::ROTATE_LEFT, "Rotate Left"),
         &sep(),
-        &item(
-            ids::PLAY_PAUSE,
-            &labeled(keymap, "Play/Pause Animation", Action::PlayPause),
-        ),
-        &item(
-            ids::FRAME_NEXT,
-            &labeled(keymap, "Next Frame", Action::FrameNext),
-        ),
-        &item(
-            ids::FRAME_PREV,
-            &labeled(keymap, "Previous Frame", Action::FramePrev),
-        ),
+        &item(ids::PLAY_PAUSE, "Play/Pause Animation"),
+        &item(ids::FRAME_NEXT, "Next Frame"),
+        &item(ids::FRAME_PREV, "Previous Frame"),
     ]);
 
     // Standard macOS Window menu. The predefined items carry their native labels,
