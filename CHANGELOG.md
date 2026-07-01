@@ -44,7 +44,9 @@ with any pre-release suffix carried only by the tag.
   Play/pause and frame-step, Mute Live Photo audio, Copy, Copy path, Save rotation, Undo, Move
   to Trash, and Delete permanently. All reflect any bindings you've remapped in Settings.
 - The animation / Live Photo **"Play" hint** now matches the open-screen buttons — a play icon,
-  "Play", and the dimmed **P** shortcut — instead of the old "Press P to play" text.
+  "Play", and the dimmed **P** shortcut — instead of the old "Press P to play" text, and it's a
+  **real button**: hovering it holds it open (pausing the fade) and lights it up, and clicking it
+  plays, just like pressing **P**.
 - The **Image** menu now shows each command's keyboard shortcut — Next, Previous, Random,
   Rotate, Play/Pause, and frame-step — reflecting any shortcut you've remapped in
   Settings ▸ Shortcuts (on macOS these previously showed no shortcut at all).

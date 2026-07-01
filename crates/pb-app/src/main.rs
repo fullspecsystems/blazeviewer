@@ -501,6 +501,23 @@ struct Toast {
     uploaded_alpha: f32,
 }
 
+/// The interactive **play hint** — the `▶ Play  P` affordance shown when parked on an animated
+/// still / Live Photo. It's a real button riding on the transient toast layer: hovering it
+/// **pauses the fade** and lights it, and a click plays (same as `P`). `Some` only while the
+/// current toast *is* the play hint (passive toasts clear it), so only it responds to
+/// hover/click. Its click rect is derived from the live window size (bottom-center), so it
+/// stays correct across resizes. See [`App::show_hint`] / [`App::update_play_hint_hover`].
+#[derive(Clone, Copy)]
+struct PlayHint {
+    /// The toast bitmap size, for the bottom-center hit rect.
+    w: u32,
+    h: u32,
+    /// The leading icon (play ▶ or the Live Photo mark), to re-render lit on hover.
+    icon: &'static str,
+    /// Whether the pointer is over it (lit + fade paused).
+    hovered: bool,
+}
+
 impl Toast {
     /// Full-opacity hold, then a short linear fade (~1.3 s total).
     const HOLD: Duration = Duration::from_millis(950);
@@ -760,6 +777,9 @@ struct App {
     /// Which open-panel button is lit (hover), so the panel re-rasterizes only on a hover
     /// enter/leave transition (see [`App::update_open_hover`]), never per cursor-move.
     open_hover: Option<OpenButton>,
+    /// The interactive play hint's state while it's the active toast (`None` otherwise). Drives
+    /// its hover-to-hold / click-to-play behavior. See [`PlayHint`].
+    play_hint: Option<PlayHint>,
     /// Items whose resident ring slot holds a fast *preview* (e.g. a HEIC
     /// thumbnail) rather than the full decode. While idle these are upgraded
     /// ("sharpened") to full in priority order. Pruned to resident in `request_prefetch`.
@@ -1042,6 +1062,7 @@ impl App {
             chip_hovered: false,
             open_panel: None,
             open_hover: None,
+            play_hint: None,
             preview_resident: HashSet::new(),
             upgrade_done: HashSet::new(),
             last_upgrade_set: Vec::new(),
@@ -1607,6 +1628,15 @@ impl App {
             a.window.set_title(&title);
         }
         self.ring.set_displayed(slot);
+        // A fresh landing on a *different* photo re-arms the play hint. `anim_hint_shown_for`
+        // is keyed to the item and only updated when landing on an animated one — so without
+        // this, visiting a non-animated photo in between would leave it latched, and returning
+        // to an animated photo (or arriving from a non-animated one) wouldn't re-show the hint.
+        // Guarded on the item actually changing, so a re-present of the same photo (e.g. a play
+        // reverting to its still) doesn't re-arm it.
+        if self.displayed_item != Some(item) {
+            self.anim_hint_shown_for = None;
+        }
         self.displayed_item = Some(item);
         self.current = self.meta_cache.get(&item).cloned();
         // The panel (if shown) is now stale for the old photo; `about_to_wait`
@@ -4011,6 +4041,9 @@ impl App {
     fn show_toast_icon(&mut self, msg: &str, icon: Option<&str>, event_loop: &ActiveEventLoop) {
         let px = (26.0 * self.scale_factor).max(16.0);
         let pad = (12.0 * self.scale_factor).round().max(4.0) as u32;
+        // A passive toast is not the interactive play hint — drop any play-hint state so it
+        // doesn't respond to hover/click while a Copy/Save/… toast is up.
+        self.play_hint = None;
         if let Some(hud) = self.hud.as_ref() {
             if let Some((rgba, w, h)) = hud.render_panel_icon(msg, px, pad, icon, hud::BG) {
                 self.toast = Some(Toast {
@@ -4026,32 +4059,32 @@ impl App {
         self.draw(event_loop);
     }
 
-    /// Flash a **hint toast** styled like the open-screen buttons — a leading icon, a label, and
-    /// the keyboard shortcut dimmed at the right (e.g. `▶ Play  P`) — and fade it like any toast.
-    /// Used for discoverability affordances that teach a shortcut (the animation / Live Photo
-    /// play hint), so they match the open screen's look.
-    fn show_hint(&mut self, label: &str, icon: &str, shortcut: &str, event_loop: &ActiveEventLoop) {
+    /// Build the **play hint** toast — the `▶ Play  P` button (leading icon, label, dimmed
+    /// shortcut), at `hovered` fill/border — and push it. Returns the bitmap `(w, h)` so the
+    /// caller can record the hit rect. Shared by the first flash and the hover re-render.
+    fn build_play_hint(&mut self, icon: &str, hovered: bool) -> Option<(u32, u32)> {
         let px = (20.0 * self.scale_factor).max(13.0);
-        if let Some(hud) = self.hud.as_ref() {
+        let shortcut = self.shortcut_for(Action::PlayPause);
+        let built = self.hud.as_ref().and_then(|hud| {
             let spec = hud::ButtonSpec {
-                label,
+                label: "Play",
                 icon: Some(icon),
-                shortcut: (!shortcut.is_empty()).then_some(shortcut),
+                shortcut: (!shortcut.is_empty()).then_some(shortcut.as_str()),
                 shortcut_semibold: true,
                 min_w: 0,
             };
-            if let Some((rgba, w, h)) = hud.render_button(&spec, px, hud::BG, false) {
-                self.toast = Some(Toast {
-                    rgba,
-                    w,
-                    h,
-                    started: Instant::now(),
-                    uploaded_alpha: -1.0,
-                });
-                self.push_toast(1.0);
-            }
-        }
-        self.draw(event_loop);
+            hud.render_button(&spec, px, hud::BG, hovered)
+        });
+        let (rgba, w, h) = built?;
+        self.toast = Some(Toast {
+            rgba,
+            w,
+            h,
+            started: Instant::now(),
+            uploaded_alpha: -1.0,
+        });
+        self.push_toast(1.0);
+        Some((w, h))
     }
 
     /// Upload the current toast bitmap to the renderer at `alpha` (its alpha
@@ -4074,7 +4107,15 @@ impl App {
     /// event loop keeps ticking). Re-uploads only on a meaningful alpha change;
     /// clears the layer once expired.
     fn tick_toast(&mut self, now: Instant, event_loop: &ActiveEventLoop) -> bool {
+        // A hovered play hint pauses the fade: keep its toast pinned in the full-opacity hold
+        // window, so the button never vanishes out from under the pointer.
+        if self.play_hint.is_some_and(|ph| ph.hovered) {
+            if let Some(t) = self.toast.as_mut() {
+                t.started = now;
+            }
+        }
         let Some(alpha) = self.toast.as_ref().and_then(|t| t.alpha(now)) else {
+            self.play_hint = None;
             if self.toast.take().is_some() {
                 if let Some(a) = self.active.as_mut() {
                     a.renderer.set_toast(None, 0);
@@ -4403,6 +4444,50 @@ impl App {
         self.draw(event_loop);
     }
 
+    /// The interactive play hint's on-screen `[x0, y0, x1, y1]` rect (physical px), derived from
+    /// the live window size — the toast is bottom-center with a fixed margin, so this matches
+    /// the renderer's placement and survives resizes. `None` unless the play hint is the current
+    /// toast and still on screen.
+    fn play_hint_rect(&self) -> Option<[f32; 4]> {
+        let ph = self.play_hint?;
+        self.toast.as_ref()?; // only while its toast is actually up
+        let sz = self.active.as_ref()?.window.inner_size();
+        let margin = (64.0 * self.scale_factor).round().max(8.0);
+        let x0 = ((sz.width as f32 - ph.w as f32) * 0.5).max(0.0);
+        let y1 = sz.height as f32 - margin;
+        let y0 = y1 - ph.h as f32;
+        Some([x0, y0, x0 + ph.w as f32, y1])
+    }
+
+    /// Whether the pointer is over the interactive play hint.
+    fn play_hint_hit(&self) -> bool {
+        match (self.last_cursor, self.play_hint_rect()) {
+            (Some([x, y]), Some(rect)) => point_in_rect(rect, x, y),
+            _ => false,
+        }
+    }
+
+    /// Update the play hint's hover state from the cursor. On an enter/leave transition it
+    /// re-renders the button lit/unlit (the fade itself is paused while hovered — see
+    /// [`tick_toast`]). Cheap: one CPU composite per transition, never per move.
+    ///
+    /// [`tick_toast`]: App::tick_toast
+    fn update_play_hint_hover(&mut self, event_loop: &ActiveEventLoop) {
+        let hovered = self.play_hint_hit();
+        let Some(ph) = self.play_hint else {
+            return;
+        };
+        if ph.hovered == hovered {
+            return;
+        }
+        // Re-render at the new state (size is unchanged; keep the recorded w/h). Rebuilding
+        // resets the fade clock, which is what we want: hovering holds it at full, and leaving
+        // gives it a fresh hold before it fades.
+        self.build_play_hint(ph.icon, hovered);
+        self.play_hint = Some(PlayHint { hovered, ..ph });
+        self.draw(event_loop);
+    }
+
     /// Render one frame.
     fn draw(&mut self, event_loop: &ActiveEventLoop) {
         let t0 = Instant::now();
@@ -4592,7 +4677,8 @@ impl App {
     fn refresh_cursor(&self) {
         if let Some(a) = self.active.as_ref() {
             let over_button = self.last_cursor.is_some_and(|[x, y]| self.chip_hit(x, y))
-                || self.open_hovered_button().is_some();
+                || self.open_hovered_button().is_some()
+                || self.play_hint_hit();
             let icon = if self.dragging {
                 CursorIcon::Grabbing
             } else if over_button {
@@ -5103,14 +5189,26 @@ impl App {
         if self.has_motion(item) {
             self.anim_hint_shown_for = Some(item);
             // A Live Photo gets the livephoto mark; an animated still gets the play ▶. Styled
-            // like the open-screen buttons: `▶ Play  P` with the shortcut dimmed at the right.
+            // like the open-screen buttons: `▶ Play  P` with the shortcut dimmed at the right —
+            // and it's a real button: hovering holds it open, a click plays (see the click /
+            // hover wiring). Starts unhovered.
             let icon = if self.is_live_photo(item) {
                 icon::assets::LIVE_PHOTO
             } else {
                 icon::assets::PLAY
             };
-            let shortcut = self.shortcut_for(Action::PlayPause);
-            self.show_hint("Play", icon, &shortcut, event_loop);
+            if let Some((w, h)) = self.build_play_hint(icon, false) {
+                self.play_hint = Some(PlayHint {
+                    w,
+                    h,
+                    icon,
+                    hovered: false,
+                });
+            }
+            self.draw(event_loop);
+            // If the pointer already happens to sit over it, light it up (and hold it) at once.
+            self.update_play_hint_hover(event_loop);
+            self.refresh_cursor();
         }
     }
 
@@ -5126,6 +5224,17 @@ impl App {
         self.framestep_last = None;
         self.live_revert_at = None;
         self.live_audio = None; // dropping the player stops it
+                                // Leaving the animated still: drop the interactive play hint AND its toast **immediately**
+                                // (not a fade), so a stale/irrelevant button never lingers over the next photo — which
+                                // could even be a non-animated one. Only the play hint owns the toast here; a passive
+                                // status toast (Copy/Save/…) has `play_hint == None` and is left to fade normally.
+        if self.play_hint.take().is_some() {
+            self.toast = None;
+            if let Some(a) = self.active.as_mut() {
+                a.renderer.set_toast(None, 0);
+                a.window.request_redraw();
+            }
+        }
     }
 
     /// Start the Live Photo's audio from the top (its `.mov` track), if `item` is a Live
@@ -5575,15 +5684,17 @@ impl ApplicationHandler for App {
                 self.last_cursor = Some(p);
                 self.update_chip_hover(event_loop);
                 self.update_open_hover(event_loop);
+                self.update_play_hint_hover(event_loop);
                 self.refresh_cursor();
             }
 
-            // Pointer left the window: drop any Cancel Scan / open-button hover so they don't
-            // stay lit.
+            // Pointer left the window: drop any Cancel Scan / open-button / play-hint hover so
+            // they don't stay lit.
             WindowEvent::CursorLeft { .. } => {
                 self.last_cursor = None;
                 self.update_chip_hover(event_loop);
                 self.update_open_hover(event_loop);
+                self.update_play_hint_hover(event_loop);
             }
 
             // Left button toggles drag-to-pan (the cross-platform pan gesture).
@@ -5593,15 +5704,19 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 let pressed = state == ElementState::Pressed;
-                // A press on an interactive on-image control (an open-panel button, or the
-                // scan-count chip's Cancel button) fires that control and must NOT also start a
-                // drag-to-pan.
+                // A press on an interactive on-image control (an open-panel button, the play
+                // hint, or the scan-count chip's Cancel button) fires that control and must NOT
+                // also start a drag-to-pan.
                 let open_hit = pressed.then(|| self.open_hovered_button()).flatten();
                 if let Some(button) = open_hit {
                     match button {
                         OpenButton::File => self.dispatch_action(Action::OpenFile, event_loop),
                         OpenButton::Folder => self.dispatch_action(Action::OpenFolder, event_loop),
                     }
+                } else if pressed && self.play_hint_hit() {
+                    // Click the play hint → play, and dismiss it (it's been used).
+                    self.play_hint = None;
+                    self.dispatch_action(Action::PlayPause, event_loop);
                 } else if pressed
                     && self
                         .last_cursor
