@@ -16,8 +16,8 @@ legitimately host-side and stay behind the (reframed) `ShellFlowAction` seam. **
 verified (2026-07-01) — "never seen a regression"; Fullscreen (`2f6003d`) "looks great."** Separately,
 the **archive/scan dialog-outcome flow** inversion has STARTED: the dialog-outcome *reactions* now
 live in the core (`CoreEvent::DialogResolved` + `CloseDialog`/`CancelScan`/`CancelArchiveLoad`
-effects, `3006765`, ⚠ unsmoked); the resolve/scan compute relocation + the worker-flow inversion are
-the two remaining steps. Everything below the NS0 section is the previously-shipped work (macOS port,
+effects, `3006765`, ✅ owner-smoke-verified); the resolve/scan compute relocation + the worker-flow
+inversion are the two remaining steps. Everything below the NS0 section is the previously-shipped work (macOS port,
 archive, settings, HEIC, color), unchanged._
 
 _The macOS (Apple Silicon) port is complete and SHIPPED in `v0.1.0-beta.4` (2026-06-30) — the
@@ -179,7 +179,7 @@ core logic moves into its own `dispatch_action` arm / specific effect; only true
   **Quit** (hide-window teardown, also reached from window-close / Esc).
 ### ◐ Archive/scan **dialog-outcome flow** inversion — STARTED (2026-07-01). The last coupled piece.
 Mapped end-to-end (Explore agent) and inverted in the recommended low-risk order:
-- **✅ Step 1 — dialog-outcome reactions → core** (`3006765`, ⚠ unsmoked): `handle_dialog_outcome`'s
+- **✅ Step 1 — dialog-outcome reactions → core** (`3006765`, ✅ owner-smoke-verified): `handle_dialog_outcome`'s
   reactions (apply_settings/keymap, `do_delete`, esc-guard, clear pending confirm/password) moved
   into **`AppCore::handle_dialog_resolved`**, reached via a new **`CoreEvent::DialogResolved(DialogResult)`**.
   The housekeeping is now effects: **`CloseDialog`** (wired its previously-dead drain arm) + new

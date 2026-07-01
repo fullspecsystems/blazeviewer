@@ -1421,6 +1421,39 @@
           38
         ],
         "subtasks": []
+      },
+      {
+        "id": 40,
+        "title": "Reveal current photo in Finder / File Explorer",
+        "description": "A menu command (and optional shortcut) that opens the OS file manager with the current photo's containing folder open and the file selected — handy for jumping from the viewer to the file on disk.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "details": "Add a File-menu item that reveals the displayed photo in the native file manager, mirroring the platform idiom: macOS 'Show in Finder' (NSWorkspace.activateFileViewerSelectingURLs, or `open -R <path>` — reveals the containing folder AND selects the file); Windows 'Show in File Explorer' (`explorer /select,\"<path>\"`); Linux best-effort `xdg-open <dir>` (no per-file select via xdg). Only real on-disk files can be revealed — archive (zip/7z) entries + the empty deck have no file, so the item is disabled / toasts 'Nothing to reveal' (mirror the Save-Rotation greyed-out pattern via a can_reveal()/menu-state flag). READ-ONLY + privacy-safe: this is an explicit user command that only launches the OS file manager on a path already being viewed — no persistent trace, no file modification (same category as the existing Copy File Path). PLACEMENT: File menu near Copy File Path; consider a shortcut (macOS ⌘⇧R is taken by some apps for other things — pick something free, or leave shortcut-less initially). WIRING (post-NS0 5.6, effect-based): a new Action::RevealInFileManager → the core validates there's a real file (source.path(displayed_item).is_some()) + emits a CoreEffect::RevealPath(PathBuf); the shell drain runs the platform reveal (isolate the per-OS call behind a small helper like the other platform seams). Menu enabled-state via menu_state_from (like can_save_rotation). The core decision is testable; the OS launch is manual-only.",
+        "testStrategy": "Unit: the enabled/disabled decision (real file vs archive entry vs empty deck) is pure — assert can_reveal() true only when source.path(displayed_item) is Some. Manual: File > Show in Finder/Explorer opens the containing folder with the current photo selected on macOS + Windows; an archive entry / empty deck shows the item disabled (or the toast); Linux opens the folder.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Platform reveal helper",
+            "description": "A small per-OS seam: macOS NSWorkspace/open -R, Windows explorer /select, Linux xdg-open <dir>. Isolated like the other platform helpers.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 2,
+            "title": "Action + effect wiring",
+            "description": "Action::RevealInFileManager → core validates a real file + emits CoreEffect::RevealPath(path); shell drain calls the helper. Disabled/toast for archive entries + empty deck.",
+            "status": "pending",
+            "dependencies": []
+          },
+          {
+            "id": 3,
+            "title": "File-menu item + enabled state",
+            "description": "Add the menu item near Copy File Path; wire can_reveal() into menu_state_from so it greys out when there's no on-disk file. Optional keyboard shortcut.",
+            "status": "pending",
+            "dependencies": []
+          }
+        ]
       }
     ]
   }
