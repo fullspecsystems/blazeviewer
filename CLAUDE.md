@@ -56,7 +56,14 @@ crates/
   pb-ui      the chrome design system: egui tokens + components (cards, toggle,
              buttons, text fields) + a Windows-tracking light/dark theme. egui-only,
              no app deps; powers the dialogs and the standalone component gallery
-  pb-app     the binary: winit event loop, decode thread pool, wiring
+  pb-app-core platform-neutral orchestration model (NS0/ADR-021): the action vocabulary,
+             the PbKey key model + keymap, slideshow + hold-to-fly timing, the shared
+             config dir, and the CoreEvent/CoreEffect/MenuState/Modifiers/KeyResolution
+             contract. toml-only — no winit/egui/GPU — so the macOS SwiftUI shell and the
+             winit shell can drive the same core. The winit App re-exports its modules.
+  pb-app     the winit shell binary: event loop, decode thread pool, egui dialogs, wiring
+             over pb-app-core (still holds most orchestration until the NS0 AppCore-struct
+             inversion; the shell-neutral seams already live in pb-app-core)
 ```
 
 The crate boundaries *are* the A/B seams. Anything whose "is this faster?" answer
