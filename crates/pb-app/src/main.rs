@@ -156,6 +156,13 @@ const FRAME_STEP_REPEAT: Duration = Duration::from_millis(70);
 /// that tapping straight through a folder of animations never kicks a decode (#37).
 const EAGER_PREP_DELAY: Duration = Duration::from_millis(250);
 
+/// Cap on the Live Photo motion's long edge when decoding its `.mov` (task #38). The
+/// motion is a brief preview, not a pixel-peeping asset, so a ~1440px cap keeps the
+/// whole pre-decoded RGBA sequence's RAM bounded (~0.5 GB worst case) without a visible
+/// quality cost. Also clamped to the display fit, so a small window decodes smaller.
+#[cfg(target_os = "macos")]
+const MOTION_MAX_LONG_EDGE: u32 = 1440;
+
 /// The frame-step direction encoded by an action: `+1` next / `-1` previous / `0`
 /// for anything else.
 fn frame_step_dir(action: Action) -> i32 {
@@ -418,6 +425,35 @@ fn decode_item(
     Ok(img)
 }
 
+/// The off-thread decode for an on-demand motion sequence (tasks #37 / #38): a Live
+/// Photo's companion `.mov` via AVFoundation when `live` is set, otherwise the item's
+/// own bytes as a multi-frame animation. Both return a unified [`pb_decode::Animation`]
+/// so playback treats them identically.
+fn decode_motion_job(
+    live: Option<PathBuf>,
+    source: &Arc<dyn PhotoSource>,
+    item: usize,
+    fit: Option<FitBox>,
+) -> Result<pb_decode::Animation, DecodeError> {
+    #[cfg(target_os = "macos")]
+    if let Some(path) = &live {
+        // Cap the motion's long edge to the display fit, but never above the RAM ceiling.
+        let edge = fit
+            .map(|f| f.max_width.max(f.max_height))
+            .unwrap_or(MOTION_MAX_LONG_EDGE)
+            .min(MOTION_MAX_LONG_EDGE);
+        return pb_decode::decode_live_motion(path, edge);
+    }
+    // Off macOS `live` is always `None` (Live Photos = task #39); acknowledge it there so
+    // the parameter isn't flagged unused.
+    #[cfg(not(target_os = "macos"))]
+    let _ = &live;
+    match source.bytes(item) {
+        Ok(bytes) => pb_decode::decode_animation(&bytes, fit),
+        Err(e) => Err(DecodeError::Corrupt(format!("read error: {e}"))),
+    }
+}
+
 /// Max displayed characters for an EXIF value; longer ones are truncated so a
 /// single field can't blow out the panel width.
 const EXIF_VALUE_MAX: usize = 72;
@@ -592,6 +628,11 @@ struct App {
     /// tag/value pairs) so re-showing the panel — including per-frame while an animation
     /// plays — never re-reads/re-parses the file. RAM-only, dropped on navigate (#2).
     exif_cache: HashMap<usize, (u64, Vec<(String, String)>)>,
+    /// Live Photo pairing, memoized per item: `Some(path)` = the companion motion
+    /// `.mov`, `None` = not a Live Photo. Filled lazily (one `stat`) only when settled
+    /// on a photo — never on the fly-through path. RAM-only, index-keyed, cleared on a
+    /// playlist rebuild. Always `None` off macOS (Windows Live Photos = task #39).
+    live_motion_cache: HashMap<usize, Option<PathBuf>>,
     /// Prefetch window: items ahead / behind the cursor.
     ahead: usize,
     behind: usize,
@@ -1001,6 +1042,7 @@ impl App {
             framestep_started: None,
             framestep_last: None,
             exif_cache: HashMap::new(),
+            live_motion_cache: HashMap::new(),
         }
     }
 
@@ -1487,6 +1529,7 @@ impl App {
         self.rotations.clear();
         self.meta_cache.clear();
         self.exif_cache.clear();
+        self.live_motion_cache.clear();
         self.failed.clear();
         self.preview_resident.clear();
         self.upgrade_done.clear();
@@ -2981,6 +3024,7 @@ impl App {
         self.rotations.clear();
         self.meta_cache.clear();
         self.exif_cache.clear();
+        self.live_motion_cache.clear();
         self.failed.clear();
         self.preview_resident.clear();
         self.upgrade_done.clear();
@@ -4144,6 +4188,7 @@ impl App {
         self.pending_uploads.clear();
         self.meta_cache.clear();
         self.exif_cache.clear();
+        self.live_motion_cache.clear();
         self.rotations.clear();
         self.failed.clear();
         self.preview_resident.clear();
@@ -4435,7 +4480,7 @@ impl App {
             self.anim_hint_shown_for = Some(item);
             return;
         }
-        if self.current_is_animated(item) {
+        if self.has_motion(item) {
             self.start_animation_decode(item, AnimWant::Play);
         }
     }
@@ -4463,7 +4508,7 @@ impl App {
             self.anim_hint_shown_for = Some(item);
             return;
         }
-        if self.current_is_animated(item) {
+        if self.has_motion(item) {
             self.start_animation_decode(item, AnimWant::Step(delta));
         }
     }
@@ -4507,22 +4552,50 @@ impl App {
             .is_some()
     }
 
-    /// Kick the whole-sequence decode for `item` on a worker thread so a big GIF/WebP
-    /// never stalls the event loop; the still first frame stays on screen until it lands
-    /// (picked up by `poll_anim_decode`). `want` decides what happens on arrival —
-    /// eager prep (stash ready), play (`P`), or step (frame-step).
+    /// The companion motion `.mov` for item `item` if it's a Live Photo, else `None`
+    /// (task #38). Filesystem pairing, memoized per item and computed lazily — only ever
+    /// reached when settled on a photo, never on the fly-through path. Always `None` off
+    /// macOS (Windows Live Photos are task #39, since the decoder is macOS-only).
+    fn live_motion_path(&mut self, item: usize) -> Option<PathBuf> {
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = item;
+            return None;
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(cached) = self.live_motion_cache.get(&item) {
+            return cached.clone();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let paired = self.source.path(item).and_then(companion_motion);
+            self.live_motion_cache.insert(item, paired.clone());
+            paired
+        }
+    }
+
+    /// Whether item `item` has an on-demand motion component to play on `P` — either an
+    /// animated container (GIF/APNG/WebP/HEIF sequence) or a Live Photo's `.mov`.
+    fn has_motion(&mut self, item: usize) -> bool {
+        self.current_is_animated(item) || self.live_motion_path(item).is_some()
+    }
+
+    /// Kick the whole-sequence decode for `item` on a worker thread so a big GIF/WebP (or
+    /// a Live Photo `.mov`) never stalls the event loop; the still first frame stays on
+    /// screen until it lands (picked up by `poll_anim_decode`). `want` decides what
+    /// happens on arrival — eager prep (stash ready), play (`P`), or step (frame-step).
     fn start_animation_decode(&mut self, item: usize, want: AnimWant) {
         self.anim_gen += 1;
         let gen = self.anim_gen;
         let epoch = self.epoch;
         let source = Arc::clone(&self.source);
         let fit = self.decode_fit();
+        // A Live Photo decodes its companion `.mov` via AVFoundation; everything else
+        // decodes the still's own bytes as a multi-frame animation.
+        let live = self.live_motion_path(item);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let result = match source.bytes(item) {
-                Ok(bytes) => pb_decode::decode_animation(&bytes, fit),
-                Err(e) => Err(DecodeError::Corrupt(format!("read error: {e}"))),
-            };
+            let result = decode_motion_job(live, &source, item, fit);
             let _ = tx.send(result);
         });
         self.anim_decode = Some(AnimDecode {
@@ -4555,7 +4628,7 @@ impl App {
         if self.prepared.as_ref().is_some_and(|p| p.item == item) {
             return None; // already prepped and ready
         }
-        if !self.current_is_animated(item) {
+        if !self.has_motion(item) {
             return None;
         }
         match self.last_present.map(|t| t + EAGER_PREP_DELAY) {
@@ -4723,7 +4796,7 @@ impl App {
         if self.anim_hint_shown_for == Some(item) {
             return;
         }
-        if self.current_is_animated(item) {
+        if self.has_motion(item) {
             self.anim_hint_shown_for = Some(item);
             self.show_toast_icon("Press P to play", Some(icon::assets::PLAY), event_loop);
         }
@@ -5544,6 +5617,30 @@ fn is_supported_image(p: &Path) -> bool {
         .and_then(|e| e.to_str())
         .map(is_supported_extension)
         .unwrap_or(false)
+}
+
+/// The QuickTime motion component paired with a Live Photo still: a sibling file with
+/// the **same stem** and a `.mov`/`.qt` extension — Apple's on-disk convention
+/// (`IMG_1234.HEIC` + `IMG_1234.MOV`). Filename pairing is fast (one `stat`, no metadata
+/// read) and matches the export layout; a content-identifier cross-check to reject a
+/// coincidental name collision is a possible refinement (task #38). Returns the motion
+/// path if such a sibling exists on disk. Archive entries have no filesystem path, so
+/// they never pair here (Live-Photos-in-archives is out of scope for v1).
+///
+/// macOS-only for now: the motion decoder is AVFoundation, so a Windows build (Live
+/// Photos = task #39) has no consumer for a pairing and would flag this unused.
+#[cfg(target_os = "macos")]
+fn companion_motion(still: &Path) -> Option<PathBuf> {
+    let dir = still.parent()?;
+    let stem = still.file_stem()?;
+    for ext in ["mov", "MOV", "qt", "QT"] {
+        let mut cand = dir.join(stem);
+        cand.set_extension(ext);
+        if cand != still && cand.is_file() {
+            return Some(cand);
+        }
+    }
+    None
 }
 
 /// Walk `dir` for supported images, appending them to `out` (unsorted — the caller
@@ -6595,6 +6692,28 @@ mod tests {
             vec![dir.join("real.jpg"), dir.join("sub/inner.png")],
             "the walk terminates and returns the real images, never the symlinked re-entry"
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Live Photo pairing: a still finds its same-stem sibling `.mov`; a still with no
+    /// motion clip pairs to nothing. Filename-based (Apple's on-disk convention, #38).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn companion_motion_pairs_a_same_stem_mov() {
+        let dir = std::env::temp_dir().join(format!("pb_livepair_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("mkdir");
+        let still = dir.join("IMG_1.heic");
+        let motion = dir.join("IMG_1.mov");
+        fs::write(&still, b"still").expect("seed");
+        fs::write(&motion, b"motion").expect("seed");
+        // A still with no companion motion clip pairs to nothing.
+        let solo = dir.join("IMG_2.jpg");
+        fs::write(&solo, b"solo").expect("seed");
+
+        assert_eq!(companion_motion(&still), Some(motion));
+        assert_eq!(companion_motion(&solo), None);
 
         let _ = fs::remove_dir_all(&dir);
     }

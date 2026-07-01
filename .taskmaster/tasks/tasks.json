@@ -1383,7 +1383,7 @@
             "id": 1,
             "title": "Pair still + .mov during scan",
             "description": "In pb-source/scan, detect a Live Photo: a still that has a companion .mov (same basename, e.g. IMG_1234.HEIC + IMG_1234.MOV). Exclude the .mov from the playlist (it is not a photo) but record its path against the still item. Optionally verify via the shared content identifier (still: Apple MakerNote tag 17 read through CGImageSource; .mov: com.apple.quicktime.content.identifier) for robustness against basename collisions. Flow a LivePhoto marker + motion path to PhotoMeta, mirroring animated:Option<AnimationKind>.",
-            "status": "pending"
+            "status": "review"
           },
           {
             "id": 2,
@@ -1395,7 +1395,7 @@
             "id": 3,
             "title": "Wire motion into Playback",
             "description": "Reuse Playback + the eager-prep/P-to-play/frame-step/present machinery from #37. Live Photo plays once then parks on the last frame (finite-loop semantics), not looping forever. Route P (and eager-prep on dwell) to decode+play the companion .mov instead of decode_animation. Distinct affordance: a LIVE badge / hint instead of the play triangle.",
-            "status": "pending"
+            "status": "review"
           },
           {
             "id": 4,
