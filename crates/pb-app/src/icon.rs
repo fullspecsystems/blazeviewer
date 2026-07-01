@@ -33,6 +33,10 @@ pub mod assets {
     pub const STOP: &str = include_str!("../icons/stop.svg");
     /// Play triangle — the "Press P to play" hint shown on an animated still (#37).
     pub const PLAY: &str = include_str!("../icons/play.svg");
+    /// Live Photo mark (inner circle ringed by dots) — the play hint on a Live Photo
+    /// still (#38). Derived from the SF Symbols `livephoto` glyph as a placeholder; to be
+    /// replaced with an own-brand variant (owner).
+    pub const LIVE_PHOTO: &str = include_str!("../icons/livephoto.svg");
     // Status icons for the dialogs (lock/warning/trash) now live in the `pb-ui` icon
     // system (white-rasterized + tinted), not here — this set is only the HUD toasts.
 }
@@ -91,6 +95,22 @@ mod tests {
             .filter(|p| p[3] > 0 && p[3] < 255)
             .count();
         assert!(partial > 0, "anti-aliased edges should be semi-transparent");
+    }
+
+    /// The vendored SF-derived Live Photo glyph (a many-subpath fill) parses and
+    /// rasterizes to a white, near-square mark — guards against a malformed extraction.
+    #[test]
+    fn live_photo_rasterizes_to_white() {
+        let (rgba, w, h) = rasterize(assets::LIVE_PHOTO, 40, [255, 255, 255])
+            .expect("livephoto icon should rasterize");
+        assert_eq!(h, 40);
+        // viewBox is ~1750×1748 → essentially square.
+        assert!((w as i32 - 40).abs() <= 2, "near-square width, got {w}");
+        let opaque = rgba.chunks_exact(4).filter(|p| p[3] == 255).count();
+        assert!(opaque > 0, "the ring + dots should produce opaque pixels");
+        for p in rgba.chunks_exact(4).filter(|p| p[3] > 0) {
+            assert_eq!([p[0], p[1], p[2]], [255, 255, 255], "currentColor → white");
+        }
     }
 
     #[test]

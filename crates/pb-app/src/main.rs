@@ -4867,7 +4867,13 @@ impl App {
         }
         if self.has_motion(item) {
             self.anim_hint_shown_for = Some(item);
-            self.show_toast_icon("Press P to play", Some(icon::assets::PLAY), event_loop);
+            // A Live Photo gets the livephoto mark; an animated still gets the play ▶.
+            let icon = if self.is_live_photo(item) {
+                icon::assets::LIVE_PHOTO
+            } else {
+                icon::assets::PLAY
+            };
+            self.show_toast_icon("Press P to play", Some(icon), event_loop);
         }
     }
 
