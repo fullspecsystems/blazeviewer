@@ -22,6 +22,7 @@
 pub mod action;
 pub mod animation;
 pub mod app_core;
+pub mod app_core_impl;
 pub mod config;
 pub mod contract;
 pub mod decode_pool;

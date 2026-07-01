@@ -20,85 +20,8 @@
 //! Privacy (tasks.json #2): the clipboard is an explicit, user-initiated command —
 //! not a passive viewing trace — so it's outside the no-trace guarantee.
 
-use pb_decode::{DecodedImage, PixelFormat};
-use pb_render::Rotation;
-
-/// sRGB OETF (scene-linear → sRGB-encoded), matching the present shader's
-/// `srgb_oetf` in `pb-render/src/gpu.rs`.
-fn srgb_oetf(c: f32) -> f32 {
-    let x = c.clamp(0.0, 1.0);
-    if x <= 0.003_130_8 {
-        12.92 * x
-    } else {
-        1.055 * x.powf(1.0 / 2.4) - 0.055
-    }
-}
-
-/// Extended-Reinhard tone-map with white point `lw`, matching the present shader's
-/// `reinhard`. `lw = 1` is the identity (faithful SDR); a larger `lw` rolls HDR
-/// highlights into the displayable range.
-fn reinhard(v: f32, lw: f32) -> f32 {
-    let x = v.max(0.0);
-    x * (1.0 + x / (lw * lw)) / (1.0 + x)
-}
-
-/// Convert a decoded image to a straight-alpha RGBA8 buffer for the clipboard.
-///
-/// - `Rgba8` is taken as-is (source-encoded sRGB). The DIB clipboard format carries
-///   no ICC profile, so a wide-gamut source pastes interpreted as sRGB — a
-///   documented v1 limitation.
-/// - `Rgba16F` (HDR scene-linear scRGB) is tone-mapped to SDR sRGB8 exactly as the
-///   SDR present pass does: extended-Reinhard at the image `peak`, then sRGB-encode.
-pub fn to_clipboard_rgba8(img: &DecodedImage) -> Vec<u8> {
-    match img.format {
-        PixelFormat::Rgba8 => img.pixels.clone(),
-        PixelFormat::Rgba16F => {
-            let lw = img.peak.max(1.0);
-            let px_count = (img.width as usize) * (img.height as usize);
-            let mut out = Vec::with_capacity(px_count * 4);
-            // 4 half-floats (8 bytes) per pixel, little-endian.
-            for px in img.pixels.chunks_exact(8) {
-                for ch in 0..3 {
-                    let h = half::f16::from_le_bytes([px[ch * 2], px[ch * 2 + 1]]);
-                    let v = srgb_oetf(reinhard(h.to_f32(), lw));
-                    out.push((v * 255.0 + 0.5) as u8);
-                }
-                out.push(255); // opaque; HDR sources have no meaningful alpha here
-            }
-            out
-        }
-    }
-}
-
-/// Rotate a tightly-packed RGBA8 buffer by a 90° quadrant (clockwise), returning the
-/// rotated buffer and its new dimensions. `R0` clones unchanged. Used to bake the
-/// in-RAM rotation override (the `r` / `Shift+R` overlay transform, which is a GPU
-/// transform — not baked into the decoded pixels) into the copied image so the
-/// clipboard is WYSIWYG.
-pub fn rotate_rgba8(pixels: &[u8], w: u32, h: u32, rot: Rotation) -> (Vec<u8>, u32, u32) {
-    if rot == Rotation::R0 {
-        return (pixels.to_vec(), w, h);
-    }
-    let (wu, hu) = (w as usize, h as usize);
-    let (new_w, new_h) = if rot.swaps_axes() { (h, w) } else { (w, h) };
-    let nwu = new_w as usize;
-    let mut out = vec![0u8; wu * hu * 4];
-    for sy in 0..hu {
-        for sx in 0..wu {
-            // Destination pixel coordinates for this source pixel after the turn.
-            let (dx, dy) = match rot {
-                Rotation::R90 => (hu - 1 - sy, sx),
-                Rotation::R180 => (wu - 1 - sx, hu - 1 - sy),
-                Rotation::R270 => (sy, wu - 1 - sx),
-                Rotation::R0 => unreachable!(),
-            };
-            let src = (sy * wu + sx) * 4;
-            let dst = (dy * nwu + dx) * 4;
-            out[dst..dst + 4].copy_from_slice(&pixels[src..src + 4]);
-        }
-    }
-    (out, new_w, new_h)
-}
+// The pure pixel transforms migrated to pb-app-core::engine (NS0 5.5 / Phase B) with the
+// `copy_image` orchestration method; the shell keeps only the Win32/arboard writes here.
 
 /// Write the image (pixels, CF_DIBV5) **and** a reference to its file (CF_HDROP) to
 /// the OS clipboard. `rgba` is straight-alpha `width×height`; `path` is the source
@@ -405,8 +328,11 @@ mod win {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use pb_decode::ColorTransform;
+    use pb_decode::{ColorTransform, DecodedImage, PixelFormat};
+    use pb_render::Rotation;
+    // The pure pixel transforms now live in pb-app-core::engine (NS0 5.5 / Phase B); their
+    // unit tests stayed here with the clipboard shell that consumes them.
+    use pb_app_core::engine::{rotate_rgba8, srgb_oetf, to_clipboard_rgba8};
 
     fn img_rgba8(width: u32, height: u32, pixels: Vec<u8>) -> DecodedImage {
         DecodedImage {

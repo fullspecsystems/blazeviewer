@@ -14,6 +14,9 @@ description = "Platform-neutral orchestration model for PhotoBlaze: actions, the
 toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
 # Typed (de)serialization for the persisted Settings model (NS0 5.5 / Phase 0.5).
 serde = { version = "1", features = ["derive"] }
+# fp16 → sRGB8 conversion for the clipboard copy prep (`engine::to_clipboard_rgba8`),
+# migrated with `copy_image` off the winit shell (NS0 5.5 / Phase B). Same pin as pb-decode.
+half = "2"
 # Engine crates the orchestration state (`AppCore`) references as step 5 relocates it
 # off the winit shell: the view transform + rotation (pb-render), the decode-to-fit box
 # (pb-decode), the pure nav / residency mirror (pb-core), and the PhotoSource seam +
