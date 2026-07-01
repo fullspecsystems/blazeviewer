@@ -48,6 +48,11 @@ pub enum Nav {
 /// through `self.core.*` (fields are `pub` during the incremental move — they collapse
 /// behind `handle(CoreEvent)` / accessors once the split is complete).
 pub struct AppCore {
+    /// The injected wall-clock "now" for this event/tick — **the core never calls
+    /// `Instant::now()`** (NS0 5.5 / Phase 0.3). The shell stamps it at each event-loop entry
+    /// (and `CoreEvent::Tick` carries the same instant), so all timing within one event uses a
+    /// single consistent instant and unit tests can drive time deterministically.
+    pub now: Instant,
     /// Physical keys currently held → the [`Action`] each resolved to at press time (the
     /// hold-to-fly / continuous-action set). OS key-repeat is ignored; focus loss clears it.
     pub held: HashMap<PbKey, Action>,

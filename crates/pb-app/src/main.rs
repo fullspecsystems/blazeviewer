@@ -733,6 +733,7 @@ impl App {
             windowed,
             window: None,
             core: AppCore {
+                now: Instant::now(),
                 held: HashMap::new(),
                 last_present: None,
                 frame_interval: Duration::from_micros(8_333),
@@ -5184,6 +5185,8 @@ impl App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        // Stamp the injected clock (NS0 5.5) before any core method runs on this entry.
+        self.core.now = Instant::now();
         if self.core.renderer.is_some() {
             return;
         }
@@ -5403,6 +5406,8 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // Stamp the injected clock once per event (NS0 5.5); the core reads `self.core.now`.
+        self.core.now = Instant::now();
         // Events for our egui dialog window go to egui, not the photo viewer.
         if self.dialog.as_ref().map(|d| d.id()) == Some(id) {
             self.dialog_event(event);
@@ -5691,7 +5696,10 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let now = Instant::now();
+        // Stamp the injected clock once per tick (NS0 5.5): the core reads `self.core.now`
+        // instead of calling `Instant::now()`, so all timing this tick is consistent.
+        self.core.now = Instant::now();
+        let now = self.core.now;
         // 0. Native menu-bar clicks (windowed mode). Map each id to the same action
         // the keyboard triggers and dispatch it; an unknown/foreign id is ignored.
         while let Ok(ev) = muda::MenuEvent::receiver().try_recv() {
