@@ -33,7 +33,7 @@ pub mod slideshow;
 pub mod timing;
 
 pub use action::{Action, ActionKind};
-pub use app_core::{AppCore, Nav};
+pub use app_core::{AppCore, Nav, Viewport};
 pub use config::config_dir;
 pub use contract::{CoreEffect, CoreEvent, KeyResolution, MenuState, Modifiers};
 pub use keymap::{KeyChord, Keymap};

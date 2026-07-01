@@ -43,6 +43,18 @@ pub enum Nav {
     RandomPrev,
 }
 
+/// The surface geometry the core needs for overlay sizing + hit-testing (NS0 5.5 / Phase
+/// 0.4): the window's inner size in physical pixels and its DPI scale factor. **Core-owned
+/// display state** — the shell updates it on `Resized` / `ScaleFactorChanged` / `resumed`, so
+/// orchestration methods never read `window.inner_size()` / `window.scale_factor()` directly
+/// (which is what let the HUD-build + hit-rect methods move off the shell).
+#[derive(Clone, Copy)]
+pub struct Viewport {
+    pub width: u32,
+    pub height: u32,
+    pub scale_factor: f32,
+}
+
 /// The platform-neutral orchestration state the shell drives. Grows as step 5 relocates
 /// field groups off the winit shell; the shell holds one `AppCore` and reaches its state
 /// through `self.core.*` (fields are `pub` during the incremental move — they collapse
@@ -53,6 +65,9 @@ pub struct AppCore {
     /// (and `CoreEvent::Tick` carries the same instant), so all timing within one event uses a
     /// single consistent instant and unit tests can drive time deterministically.
     pub now: Instant,
+    /// Surface geometry (physical size + DPI scale) for overlay sizing / hit-testing, kept
+    /// current by the shell (NS0 5.5 / Phase 0.4) so the core never reads the window directly.
+    pub viewport: Viewport,
     /// Physical keys currently held → the [`Action`] each resolved to at press time (the
     /// hold-to-fly / continuous-action set). OS key-repeat is ignored; focus loss clears it.
     pub held: HashMap<PbKey, Action>,

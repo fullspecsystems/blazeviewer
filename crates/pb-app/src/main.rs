@@ -81,7 +81,7 @@ mod settings;
 // resolving unchanged.
 use pb_app_core::{
     action, contract, keymap, pb_key, slideshow, timing, AppCore, InfoMode, Nav, OpenButton,
-    OpenPanel, PhotoMeta, PlayHint, Toast,
+    OpenPanel, PhotoMeta, PlayHint, Toast, Viewport,
 };
 // The HUD CPU compositor (info panel / toasts / pie / chip) and its Font Awesome icon
 // rasterizer now live in the shell-neutral `pb-hud` crate (NS0). Re-export them at the
@@ -456,8 +456,6 @@ struct App {
     /// state, the HUD overlay state + compositor (`pb-hud`), and the renderer. Only the
     /// OS window handle stays shell-owned; the `handle(CoreEvent)` dispatch follows.
     core: AppCore,
-    /// Display scale factor, for sizing the panel.
-    scale_factor: f32,
 
     /// Live Photo pairing, memoized per item: `Some(path)` = the companion motion
     /// `.mov`, `None` = not a Live Photo. Filled lazily (one `stat`) only when settled
@@ -734,6 +732,11 @@ impl App {
             window: None,
             core: AppCore {
                 now: Instant::now(),
+                viewport: Viewport {
+                    width: 1,
+                    height: 1,
+                    scale_factor: 1.0,
+                },
                 held: HashMap::new(),
                 last_present: None,
                 frame_interval: Duration::from_micros(8_333),
@@ -804,7 +807,6 @@ impl App {
                 renderer: None,
                 effects: Vec::new(),
             },
-            scale_factor: 1.0,
             pending_drops: Vec::new(),
             #[cfg(target_os = "macos")]
             last_edr_headroom: 1.0,
@@ -3512,7 +3514,7 @@ impl App {
         }
         // Cap to what fits the screen height (~1.5x the font size per line).
         if let Some(fit) = self.core.fit {
-            let line_h = ((15.0 * self.scale_factor).max(8.0) * 1.5).max(1.0);
+            let line_h = ((15.0 * self.core.viewport.scale_factor).max(8.0) * 1.5).max(1.0);
             let max_rows = (((fit.max_height as f32) - 40.0) / line_h).max(1.0) as usize;
             if rows.len() > max_rows {
                 rows.truncate(max_rows.saturating_sub(1));
@@ -3650,15 +3652,15 @@ impl App {
             .fit
             .map(|f| f.max_width.min(f.max_height))
             .unwrap_or(800) as f32;
-        let floor = 10.0 * self.scale_factor;
+        let floor = 10.0 * self.core.viewport.scale_factor;
         (short_edge * 0.015).max(floor).round().max(1.0) as u32
     }
 
     /// Rasterize the active overlay (info panel or help) and draw it. The help
     /// overlay uses a larger font than the info panels.
     fn show_overlay(&mut self) {
-        let px = (15.0 * self.scale_factor).max(8.0);
-        let pad = (7.0 * self.scale_factor).round().max(2.0) as u32;
+        let px = (15.0 * self.core.viewport.scale_factor).max(8.0);
+        let pad = (7.0 * self.core.viewport.scale_factor).round().max(2.0) as u32;
         // The info / EXIF panels honor the user's opacity setting; the help overlay
         // keeps the standard translucency.
         let info_bg = hud::bg_for_opacity(self.settings.info_opacity);
@@ -3700,14 +3702,10 @@ impl App {
                 hud.render_table(&rows, px, pad, info_bg)
             }
             InfoMode::Help => {
-                let help_px = (15.0 * self.scale_factor).max(10.0);
+                let help_px = (15.0 * self.core.viewport.scale_factor).max(10.0);
                 let sections = self.help_sections();
                 let margin = self.overlay_margin();
-                let win_h = self
-                    .window
-                    .as_ref()
-                    .map(|w| w.inner_size().height)
-                    .unwrap_or(0);
+                let win_h = self.core.viewport.height;
                 let max_h = (win_h as i32 - 2 * margin as i32).max(1);
                 let Some(hud) = self.core.hud.as_ref() else {
                     return;
@@ -3760,7 +3758,7 @@ impl App {
         let hud = self.core.hud.as_ref()?;
         // A normal button size (like the scan card's Cancel button) — the call to action doesn't
         // need to shout; it's white text on an empty gray screen.
-        let px = (16.0 * self.scale_factor).max(11.0);
+        let px = (16.0 * self.core.viewport.scale_factor).max(11.0);
         let file_key = self.shortcut_for(Action::OpenFile);
         let folder_key = self.shortcut_for(Action::OpenFolder);
         hud.render_open_panel(
@@ -3810,8 +3808,8 @@ impl App {
     /// caller that also changed the view (e.g. `rotate`) renders even when there's
     /// no system font to build a toast from.
     fn show_toast_icon(&mut self, msg: &str, icon: Option<&str>) {
-        let px = (26.0 * self.scale_factor).max(16.0);
-        let pad = (12.0 * self.scale_factor).round().max(4.0) as u32;
+        let px = (26.0 * self.core.viewport.scale_factor).max(16.0);
+        let pad = (12.0 * self.core.viewport.scale_factor).round().max(4.0) as u32;
         // A passive toast is not the interactive play hint — drop any play-hint state so it
         // doesn't respond to hover/click while a Copy/Save/… toast is up.
         self.core.play_hint = None;
@@ -3834,7 +3832,7 @@ impl App {
     /// shortcut), at `hovered` fill/border — and push it. Returns the bitmap `(w, h)` so the
     /// caller can record the hit rect. Shared by the first flash and the hover re-render.
     fn build_play_hint(&mut self, icon: &str, hovered: bool) -> Option<(u32, u32)> {
-        let px = (20.0 * self.scale_factor).max(13.0);
+        let px = (20.0 * self.core.viewport.scale_factor).max(13.0);
         let shortcut = self.shortcut_for(Action::PlayPause);
         let built = self.core.hud.as_ref().and_then(|hud| {
             let spec = hud::ButtonSpec {
@@ -3868,7 +3866,7 @@ impl App {
             t.uploaded_alpha = alpha;
             (scale_alpha(&t.rgba, alpha), t.w, t.h)
         };
-        let margin = (64.0 * self.scale_factor).round().max(8.0) as u32;
+        let margin = (64.0 * self.core.viewport.scale_factor).round().max(8.0) as u32;
         if let Some(a) = self.core.renderer.as_mut() {
             a.set_toast(Some((&faded, w, h)), margin);
         }
@@ -3976,12 +3974,16 @@ impl App {
         if unchanged && self.core.pie_drawn {
             return;
         }
-        let diameter = (PIE_DIAMETER * self.scale_factor).round().max(12.0) as u32;
+        let diameter = (PIE_DIAMETER * self.core.viewport.scale_factor)
+            .round()
+            .max(12.0) as u32;
         let (mut rgba, w, h) = hud::render_pie(diameter, progress, glow);
         if alpha < 1.0 {
             rgba = scale_alpha(&rgba, alpha);
         }
-        let margin = (PIE_MARGIN * self.scale_factor).round().max(4.0) as u32;
+        let margin = (PIE_MARGIN * self.core.viewport.scale_factor)
+            .round()
+            .max(4.0) as u32;
         if let Some(a) = self.core.renderer.as_mut() {
             a.set_pie(Some((&rgba, w, h)), margin);
         }
@@ -4047,17 +4049,15 @@ impl App {
         let noun = if count == 1 { "image" } else { "images" };
         let count_line = format!("{} {noun} found", hud::format_thousands(count as u64));
         // Equal inset from the top and right edges; fixed card width, clamped to the window.
-        let margin = (PIE_MARGIN * self.scale_factor).round().max(4.0) as u32;
-        let win_w = self
-            .window
-            .as_ref()
-            .map(|a| a.inner_size().width)
-            .unwrap_or(0);
-        let width = ((SCAN_CARD_WIDTH * self.scale_factor).round())
+        let margin = (PIE_MARGIN * self.core.viewport.scale_factor)
+            .round()
+            .max(4.0) as u32;
+        let win_w = self.core.viewport.width;
+        let width = ((SCAN_CARD_WIDTH * self.core.viewport.scale_factor).round())
             .min((win_w as f32 - 2.0 * margin as f32).max(1.0))
             .max(1.0) as u32;
         let card = self.core.hud.as_ref().and_then(|hud| {
-            let px = (15.0 * self.scale_factor).max(10.0);
+            let px = (15.0 * self.core.viewport.scale_factor).max(10.0);
             hud.render_scan_card(
                 &heading,
                 path,
@@ -4074,19 +4074,17 @@ impl App {
             self.core.chip_rect = None;
             return;
         };
-        if let Some(a) = self.window.as_ref() {
-            // Card top-left in physical px (right edge inset by `margin`, top inset by `margin`),
-            // then the button rect offset within it → the click hit-target.
-            let card_x0 = a.inner_size().width as f32 - margin as f32 - w as f32;
-            let card_y0 = margin as f32;
-            let [bx, by, bw, bh] = btn.map(|v| v as f32);
-            self.core.chip_rect = Some([
-                card_x0 + bx,
-                card_y0 + by,
-                card_x0 + bx + bw,
-                card_y0 + by + bh,
-            ]);
-        }
+        // Card top-left in physical px (right edge inset by `margin`, top inset by `margin`),
+        // then the button rect offset within it → the click hit-target.
+        let card_x0 = self.core.viewport.width as f32 - margin as f32 - w as f32;
+        let card_y0 = margin as f32;
+        let [bx, by, bw, bh] = btn.map(|v| v as f32);
+        self.core.chip_rect = Some([
+            card_x0 + bx,
+            card_y0 + by,
+            card_x0 + bx + bw,
+            card_y0 + by + bh,
+        ]);
         if let Some(a) = self.core.renderer.as_mut() {
             a.set_chip(Some((&rgba, w, h)), margin, margin);
         }
@@ -4177,7 +4175,7 @@ impl App {
             return None;
         }
         let panel = self.core.open_panel?;
-        let sz = self.window.as_ref()?.inner_size();
+        let sz = self.core.viewport;
         // Same centering the renderer applies (see `center_quad_vertices`): clamped to ≥ 0.
         let x0 = ((sz.width as f32 - panel.w as f32) * 0.5).max(0.0);
         let y0 = ((sz.height as f32 - panel.h as f32) * 0.5).max(0.0);
@@ -4227,8 +4225,8 @@ impl App {
     fn play_hint_rect(&self) -> Option<[f32; 4]> {
         let ph = self.core.play_hint?;
         self.core.toast.as_ref()?; // only while its toast is actually up
-        let sz = self.window.as_ref()?.inner_size();
-        let margin = (64.0 * self.scale_factor).round().max(8.0);
+        let sz = self.core.viewport;
+        let margin = (64.0 * self.core.viewport.scale_factor).round().max(8.0);
         let x0 = ((sz.width as f32 - ph.w as f32) * 0.5).max(0.0);
         let y1 = sz.height as f32 - margin;
         let y0 = y1 - ph.h as f32;
@@ -5288,8 +5286,10 @@ impl ApplicationHandler for App {
             window.set_outer_position(PhysicalPosition::new(g.x, g.y));
         }
 
-        self.scale_factor = window.scale_factor() as f32;
+        self.core.viewport.scale_factor = window.scale_factor() as f32;
         let isz = window.inner_size();
+        self.core.viewport.width = isz.width.max(1);
+        self.core.viewport.height = isz.height.max(1);
         self.core.fit = Some(FitBox {
             max_width: isz.width.max(1),
             max_height: isz.height.max(1),
@@ -5418,6 +5418,8 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => self.begin_exit(),
 
             WindowEvent::Resized(size) => {
+                self.core.viewport.width = size.width.max(1);
+                self.core.viewport.height = size.height.max(1);
                 let new_fit = FitBox {
                     max_width: size.width.max(1),
                     max_height: size.height.max(1),
@@ -5459,8 +5461,8 @@ impl ApplicationHandler for App {
             // after this reconfigures the swapchain + re-decodes the photo to the new size.
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 let sf = scale_factor as f32;
-                if (sf - self.scale_factor).abs() > f32::EPSILON {
-                    self.scale_factor = sf;
+                if (sf - self.core.viewport.scale_factor).abs() > f32::EPSILON {
+                    self.core.viewport.scale_factor = sf;
                     self.rescale_overlays();
                 }
             }
