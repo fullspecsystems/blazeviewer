@@ -3491,7 +3491,6 @@ dependencies = [
  "serde",
  "sevenz-rust2",
  "toml 0.8.2",
- "trash",
  "walkdir",
  "windows 0.62.2",
  "winit",
@@ -3512,6 +3511,7 @@ dependencies = [
  "pb-source",
  "serde",
  "toml 0.8.2",
+ "trash",
 ]
 
 [[package]]

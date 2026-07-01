@@ -52,7 +52,6 @@ mod archive;
 mod clipboard;
 #[cfg(windows)]
 mod darkmode;
-mod delete;
 mod dialog;
 #[cfg(target_os = "macos")]
 mod hdr_surface;
@@ -132,10 +131,6 @@ const WHEEL_PAN_STEP: f32 = 80.0;
 /// on Windows). `+1.0` makes the image follow the fingers (grab-and-drag); flip to
 /// `-1.0` to invert.
 const GESTURE_PAN_DIR: f32 = 1.0;
-
-/// How long the delete icon shows on the just-deleted photo before the playlist
-/// advances to the next one — so the trash/recycle feedback registers first (#28).
-const DELETE_ADVANCE_DELAY: Duration = Duration::from_millis(160);
 
 /// How long an off-thread directory scan must run before the "Scanning Folder" progress
 /// dialog appears. A normal folder resolves in well under this, so the common case never
@@ -505,60 +500,24 @@ impl App {
         }
     }
 
-    /// Delete the current photo (task #28). `permanent` (`Shift+Del`) removes the
-    /// file after a confirmation; otherwise (`Del`) it goes to the Recycle Bin —
-    /// recoverable, no prompt. The first op that *removes* a user's file: explicit
-    /// command only (CLAUDE.md boundary). Only real files (not archive entries) can be
-    /// deleted. After deletion the playlist drops the item and advances to the next
-    /// photo (the previous if it was the last; the empty state if none remain).
-    fn delete_current(&mut self, permanent: bool) {
+    /// Confirm, then permanently delete the displayed photo (`Shift+Del`). Irreversible, so it
+    /// opens the themed confirm dialog first (dark-aware, cross-platform); the delete runs on Yes
+    /// via `handle_dialog_outcome` → `self.core.do_delete(.., true)`. Only real files (not archive
+    /// entries) can be deleted. The recoverable `Del` path is a pure core arm
+    /// ([`AppCore::delete_to_trash`]).
+    fn confirm_delete_permanent(&mut self) {
         // Settle any still-pending delete-advance first (e.g. a rapid second Del).
         self.core.flush_pending_delete();
         let Some(item) = self.core.displayed_item else {
             return;
         };
-        let Some(path) = self.core.source.path(item).map(Path::to_path_buf) else {
+        if self.core.source.path(item).is_none() {
             self.core.show_toast("Can't delete this"); // archive entry — no file
             return;
-        };
-        if permanent {
-            // Permanent delete is irreversible — confirm first, via the themed egui
-            // dialog (dark-aware, and cross-platform for the macOS port). The delete
-            // runs when the dialog answers Yes (`dialog_event`), on this item.
-            let name = file_name_of(self.core.source.name(item));
-            self.core.pending_confirm_delete = Some(item);
-            self.open_confirm_delete(&name);
-            return;
         }
-        self.do_delete(item, &path, false);
-    }
-
-    /// Perform the actual deletion of `item` (`path`) — recoverable (Recycle Bin) or
-    /// permanent — then flash an icon-only pill on the still-shown photo and defer the
-    /// playlist advance a beat (`DELETE_ADVANCE_DELAY`) so the feedback registers
-    /// first. The permanent path reaches here only after the confirm dialog's Yes.
-    fn do_delete(&mut self, item: usize, path: &Path, permanent: bool) {
-        let res = if permanent {
-            delete::delete_permanently(path)
-        } else {
-            delete::send_to_trash(path)
-        };
-        if let Err(e) = res {
-            eprintln!("delete failed: {}: {e}", path.display());
-            self.core.show_toast("Delete failed");
-            return;
-        }
-        // Deleting a playing animation stops playback so the doomed photo freezes on
-        // its current frame under the trash icon (rather than animating until removal).
-        self.core.stop_playback();
-        // Recycle-bin icon for the recoverable delete, trash for a permanent one.
-        let icon = if permanent {
-            icon::assets::TRASH
-        } else {
-            icon::assets::RECYCLE
-        };
-        self.core.show_toast_icon("", Some(icon));
-        self.core.pending_delete = Some((Instant::now() + DELETE_ADVANCE_DELAY, item));
+        let name = file_name_of(self.core.source.name(item));
+        self.core.pending_confirm_delete = Some(item);
+        self.open_confirm_delete(&name);
     }
 
     /// Defer a launch **plan** until the window + engine exist (`resumed` fires it).
@@ -1462,8 +1421,7 @@ impl App {
     /// specific effects/`CoreEvent`s + native macOS handling as 5.6 inverts each flow.)
     fn perform_flow_action(&mut self, action: Action) {
         match action {
-            Action::Delete => self.delete_current(false),
-            Action::DeletePermanent => self.delete_current(true),
+            Action::DeletePermanent => self.confirm_delete_permanent(),
             Action::Fullscreen => self.toggle_fullscreen(),
             Action::Recursive => self.toggle_recursive(),
             Action::CancelScan => self.cancel_scan_command(),
@@ -1711,7 +1669,7 @@ impl App {
                 if confirmed {
                     if let Some(item) = item {
                         if let Some(path) = self.core.source.path(item).map(Path::to_path_buf) {
-                            self.do_delete(item, &path, true);
+                            self.core.do_delete(item, &path, true);
                         }
                     }
                 }

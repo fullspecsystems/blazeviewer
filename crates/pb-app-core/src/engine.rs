@@ -62,6 +62,11 @@ pub const EAGER_PREP_DELAY: Duration = Duration::from_millis(250);
 /// the crisp still — "a beat after the video finishes" (task #38).
 pub const LIVE_REVERT_DELAY: Duration = Duration::from_millis(450);
 
+/// After a delete, hold the doomed photo (under a trash/recycle icon) for a beat before
+/// advancing the playlist off it, so the feedback registers rather than the next photo
+/// snapping in instantly (`do_delete` → `flush_pending_delete`).
+pub const DELETE_ADVANCE_DELAY: Duration = Duration::from_millis(160);
+
 /// Cap on the Live Photo motion's long edge when decoding its `.mov` (task #38). The
 /// motion is a brief preview, not a pixel-peeping asset, so a ~1440px cap keeps the
 /// whole pre-decoded RGBA sequence's RAM bounded (~0.5 GB worst case) without a visible

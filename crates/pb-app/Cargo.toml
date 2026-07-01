@@ -56,14 +56,6 @@ half = "2"
 # SVG backend, so it's already in the lockfile. Runs only when an overlay is rebuilt
 # (off the photo hot path).
 resvg = { version = "0.47", default-features = false }
-# Send a deleted photo to the OS Recycle Bin / Trash (Del). Uses IFileOperation on
-# Windows; cross-platform for the later macOS port. `default-features = false` drops
-# the Linux DBus/KDE backends + `chrono` (only needed for the deferred undo/list).
-# `coinit_apartmentthreaded`: trash requires a COM-init mode on Windows, and winit's
-# main thread is STA (it uses OLE drag-drop), so apartment-threaded matches.
-trash = { version = "5", default-features = false, features = [
-    "coinit_apartmentthreaded",
-] }
 # Parse + write the config files: the optional keymap.toml (task #8) and the typed
 # settings.toml (task #20/#22). Read on the view path is privacy-safe (task #2);
 # writes happen only on an explicit user action (Save / fullscreen toggle).

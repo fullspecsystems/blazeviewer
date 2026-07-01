@@ -137,11 +137,15 @@ impl AppCore {
             // platform-neutral `std::fs`). An explicit user command — never the view path.
             Action::SaveRotation => self.save_rotation(),
             Action::Undo => self.undo(),
-            // Flow arms — window mode / scan / delete / quit. The core doesn't own these
-            // end-to-end yet, so it routes them to the shell (host) via one effect, keeping the
-            // *whole* action vocabulary dispatching through this one core method.
-            Action::Delete
-            | Action::DeletePermanent
+            // Delete-to-trash (`Del`) is a pure core arm now (recoverable, no prompt; the
+            // cross-platform trash I/O moved into pb-app-core). `DeletePermanent` (`Shift+Del`)
+            // stays a flow action — it opens the shell confirm dialog first, then the shell's
+            // dialog-outcome handler calls the core `do_delete(.., true)`.
+            Action::Delete => self.delete_to_trash(),
+            // Flow arms — window mode / scan / permanent-delete-confirm / quit. The core doesn't
+            // own these end-to-end yet, so it routes them to the shell (host) via one effect,
+            // keeping the *whole* action vocabulary dispatching through this one core method.
+            Action::DeletePermanent
             | Action::Fullscreen
             | Action::Recursive
             | Action::CancelScan
@@ -259,6 +263,52 @@ impl AppCore {
                 }
             }
         }
+    }
+
+    /// **Delete to Trash** (`Del`): send the displayed photo to the OS Recycle Bin / Trash
+    /// (recoverable, no prompt). Archive entries have no file on disk → a toast, no-op. The
+    /// playlist advance is deferred a beat by [`do_delete`](Self::do_delete).
+    pub fn delete_to_trash(&mut self) {
+        // Settle any still-pending delete-advance first (e.g. a rapid second Del).
+        self.flush_pending_delete();
+        let Some(item) = self.displayed_item else {
+            return;
+        };
+        let Some(path) = self.source.path(item).map(Path::to_path_buf) else {
+            self.show_toast("Can't delete this"); // archive entry — no file
+            return;
+        };
+        self.do_delete(item, &path, false);
+    }
+
+    /// Perform the actual deletion of `item` (`path`) — recoverable (Recycle Bin) or permanent —
+    /// then flash an icon-only pill on the still-shown photo and defer the playlist advance a beat
+    /// (`DELETE_ADVANCE_DELAY`) so the feedback registers first. The permanent path reaches here
+    /// only after the shell's confirm dialog answers Yes (`do_delete(.., true)`). An explicit,
+    /// user-initiated file removal — never the passive view path (privacy #2). The trash / remove
+    /// I/O is cross-platform (`crate::delete`), so this is a pure core method.
+    pub fn do_delete(&mut self, item: usize, path: &Path, permanent: bool) {
+        let res = if permanent {
+            crate::delete::delete_permanently(path)
+        } else {
+            crate::delete::send_to_trash(path)
+        };
+        if let Err(e) = res {
+            eprintln!("delete failed: {}: {e}", path.display());
+            self.show_toast("Delete failed");
+            return;
+        }
+        // Deleting a playing animation stops playback so the doomed photo freezes on its current
+        // frame under the trash icon (rather than animating until removal).
+        self.stop_playback();
+        // Recycle-bin icon for the recoverable delete, trash for a permanent one.
+        let icon = if permanent {
+            icon::assets::TRASH
+        } else {
+            icon::assets::RECYCLE
+        };
+        self.show_toast_icon("", Some(icon));
+        self.pending_delete = Some((self.now + DELETE_ADVANCE_DELAY, item));
     }
 
     /// Drive the core from a single shell-neutral [`CoreEvent`] — the entry point a non-winit
