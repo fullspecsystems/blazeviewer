@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use pb_core::{Playlist, ResidentRing};
 use pb_decode::FitBox;
-use pb_render::{Rotation, ViewTransform};
+use pb_render::{Renderer, Rotation, ViewTransform};
 use pb_source::PhotoSource;
 
 use crate::decode_pool::{DecodePool, Outcome};
@@ -183,4 +183,12 @@ pub struct AppCore {
     pub open_hover: Option<OpenButton>,
     /// The interactive play hint riding the toast layer, or `None`.
     pub play_hint: Option<PlayHint>,
+
+    // --- Rendering (NS0 5.4) ---
+    /// The GPU renderer, behind the [`Renderer`] trait object so backends are swappable and
+    /// the core never names a concrete GPU type. `None` until the shell's window is created;
+    /// then set to a concrete `WgpuRenderer` (boxed) built on that window's surface. The
+    /// window itself stays shell-owned — the core drives rendering, the shell owns the OS
+    /// handle it draws to.
+    pub renderer: Option<Box<dyn Renderer>>,
 }

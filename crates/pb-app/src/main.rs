@@ -443,14 +443,9 @@ fn collect_monitor_rects(
 struct App {
     windowed: bool,
     /// The winit window (NS0: shell-owned — `WinitShell` in the eventual crate split).
-    /// `None` until `resumed` creates it; always in lockstep with `renderer`.
+    /// `None` until `resumed` creates it; always in lockstep with `core.renderer`, which
+    /// is created on this window's surface.
     window: Option<Arc<Window>>,
-    /// The GPU renderer (NS0: AppCore-owned), behind the [`Renderer`] trait object so
-    /// backends are swappable and the core never names a concrete GPU type. Split out
-    /// from the old `Active { window, renderer }` so window ownership can move to the
-    /// shell and rendering to the core. `None` until `resumed`; created on the window's
-    /// surface (a concrete [`WgpuRenderer`], then boxed), so it shares its lifecycle.
-    renderer: Option<Box<dyn Renderer>>,
     /// The platform-neutral orchestration state (NS0 step 5, ADR-021), reached as
     /// `self.core.*`. Grown incrementally off this shell; it now owns the held-key /
     /// input / self-paced-advance timing, the view + geometry transform, the metadata
@@ -743,7 +738,6 @@ impl App {
         Self {
             windowed,
             window: None,
-            renderer: None,
             core: AppCore {
                 held: HashMap::new(),
                 last_present: None,
@@ -811,6 +805,7 @@ impl App {
                 open_panel: None,
                 open_hover: None,
                 play_hint: None,
+                renderer: None,
             },
             hud: Hud::load(),
             scale_factor: 1.0,
@@ -1375,7 +1370,7 @@ impl App {
         self.core.displayed_item = None;
         self.core.target_item = None;
         self.core.current = None;
-        if let Some(r) = self.renderer.as_mut() {
+        if let Some(r) = self.core.renderer.as_mut() {
             r.clear_image();
             r.set_overlay(None, 0);
         }
@@ -1398,7 +1393,7 @@ impl App {
         let t0 = Instant::now();
         let view = self.view_for(item);
         let title = title_for(self.core.source.name(item), item, self.core.source.len());
-        if let Some(r) = self.renderer.as_mut() {
+        if let Some(r) = self.core.renderer.as_mut() {
             r.set_view(view);
             r.present_slot(slot);
         }
@@ -1440,7 +1435,7 @@ impl App {
         // The info panel belonged to the previous photo — drop it (and redraw to
         // remove it). Only touch the renderer if a panel was actually showing.
         if self.core.overlay_shown {
-            if let Some(r) = self.renderer.as_mut() {
+            if let Some(r) = self.core.renderer.as_mut() {
                 r.set_overlay(None, 0);
             }
             self.core.overlay_shown = false;
@@ -1574,7 +1569,7 @@ impl App {
             let item_bytes = img.pixels.len() as u64;
             if upgrade {
                 let slot = self.core.ring.slot_for(item).expect("resident as preview");
-                if let Some(a) = self.renderer.as_mut() {
+                if let Some(a) = self.core.renderer.as_mut() {
                     let t0 = Instant::now();
                     a.upload_slot(
                         slot,
@@ -1606,7 +1601,7 @@ impl App {
                 // then redraw it now-sharp. `present_slot` keeps the current view, so
                 // any zoom/pan is preserved.
                 if self.core.displayed_item == Some(item) {
-                    if let Some(a) = self.renderer.as_mut() {
+                    if let Some(a) = self.core.renderer.as_mut() {
                         a.present_slot(slot);
                     }
                     self.draw();
@@ -1618,7 +1613,7 @@ impl App {
                     .ring
                     .reserve_bytes(item, self.core.epoch, item_bytes, &self.core.targets)
             {
-                if let Some(a) = self.renderer.as_mut() {
+                if let Some(a) = self.core.renderer.as_mut() {
                     let t0 = Instant::now();
                     a.upload_slot(
                         res.slot,
@@ -1677,7 +1672,7 @@ impl App {
                 self.core.meta_cache.insert(idx, meta);
                 let view = self.view_for(idx);
                 let title = title_for(self.core.source.name(idx), idx, self.core.source.len());
-                if let Some(r) = self.renderer.as_mut() {
+                if let Some(r) = self.core.renderer.as_mut() {
                     r.set_view(view);
                     r.set_image(
                         &img.pixels,
@@ -1716,7 +1711,7 @@ impl App {
         });
         let cap = ring_capacity(self.slot_bytes_estimate());
         self.core.ring = ResidentRing::new_with_budget(cap, RING_BUDGET_BYTES);
-        if let Some(a) = self.renderer.as_mut() {
+        if let Some(a) = self.core.renderer.as_mut() {
             a.reserve_ring(cap, fit.max_width, fit.max_height);
         }
         let (ahead, behind) = window_for_capacity(cap);
@@ -2273,7 +2268,7 @@ impl App {
     /// `WindowEvent::Moved`, which fires throughout a drag.
     #[cfg(target_os = "macos")]
     fn reconfigure_edr_for_display(&mut self) {
-        let changed = match (self.renderer.as_ref(), self.window.as_ref()) {
+        let changed = match (self.core.renderer.as_ref(), self.window.as_ref()) {
             (Some(r), Some(w)) if r.hdr_surface_wants_edr().is_some() => {
                 let hr = hdr_surface::window_max_edr(w);
                 if (hr - self.last_edr_headroom).abs() > 0.01 {
@@ -2288,7 +2283,7 @@ impl App {
             _ => None,
         };
         if let Some(hr) = changed {
-            if let Some(r) = self.renderer.as_mut() {
+            if let Some(r) = self.core.renderer.as_mut() {
                 r.set_edr_headroom(hr);
             }
             self.last_edr_headroom = hr;
@@ -2938,7 +2933,7 @@ impl App {
     /// Push the current view transform to the renderer (re-places the quad).
     fn push_view(&mut self) {
         let view = self.core.view;
-        if let Some(a) = self.renderer.as_mut() {
+        if let Some(a) = self.core.renderer.as_mut() {
             a.set_view(view);
         }
     }
@@ -3072,7 +3067,7 @@ impl App {
         self.core.slideshow.interval = Duration::from_secs_f64(s.slideshow_interval_secs);
 
         // Letterbox / background fill → renderer (takes effect on the next draw).
-        if let Some(a) = self.renderer.as_mut() {
+        if let Some(a) = self.core.renderer.as_mut() {
             a.set_letterbox(s.letterbox);
         }
 
@@ -3717,7 +3712,7 @@ impl App {
             return;
         };
         let margin = self.overlay_margin();
-        if let Some(a) = self.renderer.as_mut() {
+        if let Some(a) = self.core.renderer.as_mut() {
             a.set_overlay(Some((&bitmap, w, h)), margin);
         }
         self.core.overlay_shown = true;
@@ -3727,7 +3722,7 @@ impl App {
 
     /// Hide the info panel (clears the overlay quad).
     fn hide_overlay(&mut self) {
-        if let Some(a) = self.renderer.as_mut() {
+        if let Some(a) = self.core.renderer.as_mut() {
             a.set_overlay(None, 0);
         }
         self.core.overlay_shown = false;
@@ -3790,7 +3785,7 @@ impl App {
             return;
         };
         self.core.open_panel = Some(OpenPanel { w, h, file, folder });
-        if let Some(a) = self.renderer.as_mut() {
+        if let Some(a) = self.core.renderer.as_mut() {
             a.set_message(Some((&bitmap, w, h)));
         }
     }
@@ -3867,7 +3862,7 @@ impl App {
             (scale_alpha(&t.rgba, alpha), t.w, t.h)
         };
         let margin = (64.0 * self.scale_factor).round().max(8.0) as u32;
-        if let Some(a) = self.renderer.as_mut() {
+        if let Some(a) = self.core.renderer.as_mut() {
             a.set_toast(Some((&faded, w, h)), margin);
         }
     }
@@ -3886,7 +3881,7 @@ impl App {
         let Some(alpha) = self.core.toast.as_ref().and_then(|t| t.alpha(now)) else {
             self.core.play_hint = None;
             if self.core.toast.take().is_some() {
-                if let Some(a) = self.renderer.as_mut() {
+                if let Some(a) = self.core.renderer.as_mut() {
                     a.set_toast(None, 0);
                 }
                 self.draw();
@@ -3980,7 +3975,7 @@ impl App {
             rgba = scale_alpha(&rgba, alpha);
         }
         let margin = (PIE_MARGIN * self.scale_factor).round().max(4.0) as u32;
-        if let Some(a) = self.renderer.as_mut() {
+        if let Some(a) = self.core.renderer.as_mut() {
             a.set_pie(Some((&rgba, w, h)), margin);
         }
         self.core.pie_drawn = true;
@@ -3991,7 +3986,7 @@ impl App {
     /// Clear the pie layer if it's up (and redraw to remove it).
     fn clear_pie(&mut self) {
         if self.core.pie_drawn {
-            if let Some(a) = self.renderer.as_mut() {
+            if let Some(a) = self.core.renderer.as_mut() {
                 a.set_pie(None, 0);
             }
             self.core.pie_drawn = false;
@@ -4085,7 +4080,7 @@ impl App {
                 card_y0 + by + bh,
             ]);
         }
-        if let Some(a) = self.renderer.as_mut() {
+        if let Some(a) = self.core.renderer.as_mut() {
             a.set_chip(Some((&rgba, w, h)), margin, margin);
         }
         self.draw();
@@ -4115,7 +4110,7 @@ impl App {
     /// Clear the scan card layer if it's up (and redraw to remove it).
     fn clear_chip(&mut self) {
         if self.core.chip_sig.is_some() {
-            if let Some(a) = self.renderer.as_mut() {
+            if let Some(a) = self.core.renderer.as_mut() {
                 a.set_chip(None, 0, 0);
             }
             self.core.chip_rect = None;
@@ -4266,7 +4261,7 @@ impl App {
     fn draw(&mut self) {
         let t0 = Instant::now();
         let mut fatal = false;
-        let drew = if let Some(a) = self.renderer.as_mut() {
+        let drew = if let Some(a) = self.core.renderer.as_mut() {
             if let Err(e) = a.render() {
                 eprintln!("fatal render error: {e:?}");
                 fatal = true;
@@ -4276,7 +4271,7 @@ impl App {
         } else {
             false
         };
-        // Push after the `self.renderer` borrow ends (can't touch `self.effects` inside it).
+        // Push after the `self.core.renderer` borrow ends (can't touch `self.effects` inside it).
         if fatal {
             self.effects.push(contract::CoreEffect::Quit);
         }
@@ -4558,7 +4553,7 @@ impl App {
     /// The current image texture + screen dimensions for pan-clamp math.
     fn screen_and_image(&self) -> Option<(u32, u32, u32, u32)> {
         let fit = self.core.fit?;
-        let (iw, ih) = self.renderer.as_ref()?.image_size();
+        let (iw, ih) = self.core.renderer.as_ref()?.image_size();
         Some((iw, ih, fit.max_width, fit.max_height))
     }
 
@@ -4970,7 +4965,7 @@ impl App {
             };
             let color = render_color(&pb.color());
             let frame = pb.current_frame();
-            if let Some(a) = self.renderer.as_mut() {
+            if let Some(a) = self.core.renderer.as_mut() {
                 a.set_image(&frame.rgba, frame.width, frame.height, color, false, 1.0);
             }
         }
@@ -5127,7 +5122,7 @@ impl App {
                                 // status toast (Copy/Save/…) has `play_hint == None` and is left to fade normally.
         if self.core.play_hint.take().is_some() {
             self.core.toast = None;
-            if let Some(a) = self.renderer.as_mut() {
+            if let Some(a) = self.core.renderer.as_mut() {
                 a.set_toast(None, 0);
             }
             self.draw();
@@ -5181,7 +5176,7 @@ impl App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.renderer.is_some() {
+        if self.core.renderer.is_some() {
             return;
         }
 
@@ -5387,7 +5382,7 @@ impl ApplicationHandler for App {
         self.core.last_present = Some(Instant::now());
 
         self.window = Some(window);
-        self.renderer = Some(Box::new(renderer));
+        self.core.renderer = Some(Box::new(renderer));
         self.request_prefetch();
 
         // Now that the window + engine are live, kick off any launch we deferred (an archive
@@ -5416,7 +5411,7 @@ impl ApplicationHandler for App {
                 };
                 if Some(new_fit) != self.core.fit {
                     self.core.fit = Some(new_fit);
-                    if let Some(r) = self.renderer.as_mut() {
+                    if let Some(r) = self.core.renderer.as_mut() {
                         // Cheap, per-event: reconfigure the swapchain and let the
                         // renderer GPU-scale the resident texture to the new size.
                         r.resize(size.width, size.height);
