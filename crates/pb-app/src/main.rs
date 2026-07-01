@@ -1537,6 +1537,11 @@ impl App {
     /// Show ring `slot` (holding `item`): the keypress fast path — a rebind, no
     /// decode or upload. Updates the pin, title, and info panel.
     fn present_item(&mut self, item: usize, slot: usize) {
+        // `present` = the whole event-loop-thread cost of one advance (rebind + title +
+        // GPU-submit), the keypress fast path. It's the metric to watch for a hold-to-fly
+        // regression: the NS0 inversion (renderer behind `Box<dyn Renderer>`, window ops as
+        // effects) must leave this flat. `--metrics` only; a no-op branch otherwise.
+        let t0 = Instant::now();
         let view = self.view_for(item);
         let title = title_for(self.source.name(item), item, self.source.len());
         if let Some(a) = self.active.as_mut() {
@@ -1552,6 +1557,7 @@ impl App {
         // tracks the photo with no blank flash. The bitmap stays up meanwhile.
         self.last_present = Some(Instant::now());
         self.draw();
+        self.metrics.record("present", t0.elapsed());
     }
 
     /// A target that failed to decode (corrupt/unreadable): count it as "shown"
