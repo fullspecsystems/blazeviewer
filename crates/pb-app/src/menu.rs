@@ -23,36 +23,12 @@
 use muda::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
 use crate::action::Action;
-#[cfg(target_os = "macos")]
-use crate::keymap::KeyChord;
 use crate::keymap::Keymap;
 
-/// The macOS **menu accelerator** for an action, as a [`KeyChord`], for the actions whose
-/// real Mac shortcut is a ⌘-chord that differs from the keymap's legacy binding (Copy is ⌘C,
-/// not the keymap's ⌃C; Move to Trash is ⌘⌫, not the bare Del; etc.). Returns `None` for
-/// actions driven by their bare keymap key (nav, zoom, rotate, `F`, `P`, …). The keyboard-help
-/// overlay uses this so it shows the same shortcut the menu bar does.
-///
-/// **Must mirror the accelerators in [`build_menu`]'s macOS build.** (Kept as a small table
-/// rather than derived, because `build_menu` speaks muda's `Accelerator` type; this speaks
-/// `KeyChord` so it formats through [`KeyChord::mac_symbol`].)
-#[cfg(target_os = "macos")]
-pub fn macos_menu_chord(action: Action) -> Option<KeyChord> {
-    let c = |s: &str| KeyChord::parse(s).expect("literal menu-accel chord parses");
-    Some(match action {
-        Action::OpenFile => c("Cmd+O"),
-        Action::OpenFolder => c("Shift+Cmd+O"),
-        Action::SaveRotation => c("Cmd+S"),
-        Action::Copy => c("Cmd+C"),
-        Action::CopyPath => c("Shift+Cmd+C"),
-        Action::Undo => c("Cmd+Z"),
-        Action::Delete => c("Cmd+Backspace"), // Move to Trash (⌘⌫)
-        Action::DeletePermanent => c("Alt+Cmd+Backspace"), // Delete Immediately (⌥⌘⌫)
-        Action::Settings => c("Cmd+,"),
-        Action::Quit => c("Cmd+Q"),
-        _ => return None,
-    })
-}
+// `macos_menu_chord` (the ⌘-accelerator table the keyboard-help overlay formats through) moved
+// to `pb_app_core::keymap` (NS0 5.5 / Phase B) so `AppCore`'s help-overlay build can reach it.
+// `build_menu` here registers the native NSMenu key-equivalents via muda's `Accelerator`
+// directly, so it never needed this table.
 
 /// Stable string ids for the menu items. Kept in one place so the builder and the
 /// dispatcher ([`action_for`]) can never drift apart.
@@ -721,25 +697,6 @@ mod tests {
             labeled(&cleared, "Next Frame", Action::FrameNext),
             "Next Frame"
         );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn macos_menu_chords_format_as_the_menu_shows_them() {
-        // The ⌘-chords the keyboard-help overlay shows come from here and must match the menu
-        // bar's accelerators — Copy is ⌘C (not the keymap's ⌃C), Move to Trash is ⌘⌫, etc.
-        let sym = |a: Action| macos_menu_chord(a).unwrap().mac_symbol();
-        assert_eq!(sym(Action::Copy), "\u{2318}\u{2009}C"); // ⌘ C
-        assert_eq!(sym(Action::OpenFolder), "\u{21e7}\u{2318}\u{2009}O"); // ⇧⌘ O
-        assert_eq!(sym(Action::Delete), "\u{2318}\u{2009}\u{232b}"); // ⌘ ⌫
-        assert_eq!(
-            sym(Action::DeletePermanent),
-            "\u{2325}\u{2318}\u{2009}\u{232b}"
-        ); // ⌥⌘ ⌫
-           // Bare-key actions have no menu accelerator (help falls back to the keymap binding).
-        assert_eq!(macos_menu_chord(Action::Next), None);
-        assert_eq!(macos_menu_chord(Action::PlayPause), None);
-        assert_eq!(macos_menu_chord(Action::RotateCw), None);
     }
 
     #[test]

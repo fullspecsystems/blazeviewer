@@ -11,10 +11,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pb_decode::{decode_named_bytes, DecodeError, DecodedImage, FitBox, PixelFormat};
-use pb_render::Rotation;
+use pb_render::{Rotation, ScaleMode};
 use pb_source::PhotoSource;
 
 use crate::meta::PhotoMeta;
+use crate::settings::ScaleModePref;
 use crate::{Action, Nav};
 
 /// VRAM budget for the resident texture ring (~1.5 GB → ~16–32 fit-size slots on
@@ -52,6 +53,10 @@ pub const FRAME_STEP_REPEAT: Duration = Duration::from_millis(70);
 /// sequence in the background (so a slow WebP/AVIF plays instantly on `P`). Long enough
 /// that tapping straight through a folder of animations never kicks a decode (#37).
 pub const EAGER_PREP_DELAY: Duration = Duration::from_millis(250);
+
+/// How long a finished Live Photo lingers on its last motion frame before reverting to
+/// the crisp still — "a beat after the video finishes" (task #38).
+pub const LIVE_REVERT_DELAY: Duration = Duration::from_millis(450);
 
 /// Cap on the Live Photo motion's long edge when decoding its `.mov` (task #38). The
 /// motion is a brief preview, not a pixel-peeping asset, so a ~1440px cap keeps the
@@ -261,6 +266,15 @@ pub fn point_in_rect([x0, y0, x1, y1]: [f32; 4], x: f32, y: f32) -> bool {
 /// The window-title string for a photo: `name (idx/n)`.
 pub fn title_for(name: &str, idx: usize, n: usize) -> String {
     format!("{} ({}/{n})", file_name_of(name), idx + 1)
+}
+
+/// Map the persisted scale-mode preference to the renderer's [`ScaleMode`].
+pub fn scale_mode_of(p: ScaleModePref) -> ScaleMode {
+    match p {
+        ScaleModePref::Fit => ScaleMode::Fit,
+        ScaleModePref::Fill => ScaleMode::Fill,
+        ScaleModePref::Original => ScaleMode::Original,
+    }
 }
 
 /// The folder the Open dialog should start in.

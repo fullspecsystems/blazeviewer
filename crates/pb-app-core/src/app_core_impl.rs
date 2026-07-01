@@ -22,13 +22,342 @@ use pb_source::PhotoSource;
 use hud::Row;
 use pb_hud::{hud, icon};
 
-use crate::animation::{AnimDecode, AnimWant};
+use crate::animation::{AnimDecode, AnimWant, Playback};
 use crate::contract;
 use crate::decode_pool::Outcome;
 use crate::engine::*;
-use crate::{slideshow, Action, AppCore, Nav, OpenButton, PlayHint, Toast};
+use crate::{
+    keymap, settings, slideshow, timing, Action, AppCore, InfoMode, Nav, OpenButton, PlayHint,
+    Toast,
+};
 
 impl AppCore {
+    /// Toggle an info panel: the one-line basic panel with `i`, or the full-EXIF
+    /// "nerd" table with `Shift+I`. Selecting the mode that's already showing hides
+    /// it. When shown it appears immediately (idle); after navigation it reappears
+    /// once you stop (see `about_to_wait`).
+    pub fn toggle_info(&mut self, full: bool) {
+        let target = if full {
+            InfoMode::Full
+        } else {
+            InfoMode::Basic
+        };
+        self.info = if self.info == target {
+            InfoMode::Off
+        } else {
+            target
+        };
+        if self.info == InfoMode::Off {
+            self.hide_overlay();
+        } else {
+            self.show_overlay();
+        }
+    }
+
+    /// Apply the settings the user saved in the dialog: swap in the new model, apply
+    /// the parts that aren't read live (hold delay, letterbox color, default scale
+    /// mode), then persist to disk (an explicit user action — privacy #2). The nav-feel
+    /// rates (start speed / ramp / max) and the info-panel opacity are read live, so
+    /// swapping `self.settings` is enough for those.
+    pub fn apply_settings(&mut self, new: settings::Settings) {
+        let old = std::mem::replace(&mut self.settings, new);
+        let s = &self.settings;
+
+        // Held-key repeat delay is cached on the struct (the curve below reads the
+        // rates live, but this one is a Duration captured at construction).
+        self.initial_delay = Duration::from_millis(s.hold_delay_ms as u64);
+
+        // Default slideshow interval → the live timer. A running slideshow's deadline is
+        // `last_present + interval`, recomputed each tick, so this takes effect at once
+        // (the `[`/`]` live override is just a different write to the same field).
+        self.slideshow.interval = Duration::from_secs_f64(s.slideshow_interval_secs);
+
+        // Letterbox / background fill → renderer (takes effect on the next draw).
+        if let Some(a) = self.renderer.as_mut() {
+            a.set_letterbox(s.letterbox);
+        }
+
+        // Default scale mode: apply live if it changed (re-frames + reloads at the new
+        // fit). `set_scale_mode` redraws for us.
+        let scale_changed = old.scale_mode != s.scale_mode;
+        if scale_changed {
+            self.set_scale_mode(scale_mode_of(s.scale_mode));
+        }
+
+        // Persist the whole model (atomic write; best-effort).
+        self.settings.save();
+
+        // Redraw so the new letterbox shows even when the scale mode didn't change,
+        // and rebuild the info panel so a new opacity takes effect immediately.
+        if self.overlay_shown {
+            self.show_overlay();
+        } else if !scale_changed {
+            self.draw();
+        }
+    }
+
+    /// The keybindings help table: a title row, then every hotkey → action as a
+    /// shaded-key / description pair. The key labels are read from the live keymap
+    /// (task #8 — single source of truth), so rebinding a key updates the help. A
+    /// few rows stay curated: pan (shown as arrow glyphs), help (`/ or ?`), and the
+    /// "hold to fly" hint (no single binding).
+    /// The user-facing shortcut hint for an action, formatted for this platform: on macOS the
+    /// menu's ⌘-accelerator ([`menu::macos_menu_chord`]) where one exists — so Copy shows ⌘C and
+    /// Move to Trash shows ⌘⌫, matching the menu bar rather than the keymap's legacy binding —
+    /// else the primary keymap binding as Mac symbols; on Windows/Linux the spelled-out primary
+    /// binding. Empty when unbound.
+    pub fn help_shortcut(&self, action: Action) -> String {
+        #[cfg(target_os = "macos")]
+        if let Some(chord) = keymap::macos_menu_chord(action) {
+            return chord.mac_symbol();
+        }
+        self.keymap
+            .bindings_for(action)
+            .iter()
+            .find(|c| !c.code.is_numpad())
+            .map(|c| c.shortcut_label())
+            .unwrap_or_default()
+    }
+
+    /// The keyboard-help overlay as grouped sections (description + shortcut), sourced from the
+    /// live keymap / menu so customized bindings and platform symbols stay correct. Drives
+    /// [`hud::Hud::render_shortcuts`].
+    pub fn help_sections(&self) -> Vec<hud::ShortcutSection> {
+        let sc = |a: Action| self.help_shortcut(a);
+        let two =
+            |a: Action, b: Action| format!("{} / {}", self.help_shortcut(a), self.help_shortcut(b));
+        let row = |desc: &str, shortcut: String| (desc.to_string(), shortcut);
+        // Platform wording for the trash action (the shortcut itself comes from `help_shortcut`).
+        #[cfg(target_os = "macos")]
+        let trash = "Move to Trash";
+        #[cfg(not(target_os = "macos"))]
+        let trash = "Delete to Recycle Bin";
+
+        let section = |title: &str, rows: Vec<(String, String)>| hud::ShortcutSection {
+            title: title.to_string(),
+            rows,
+        };
+        vec![
+            section(
+                "Browse",
+                vec![
+                    row("Next photo", sc(Action::Next)),
+                    row("Previous photo", sc(Action::Prev)),
+                    row("Random photo", sc(Action::Random)),
+                    row("Previous random", sc(Action::RandomPrev)),
+                    row("Slideshow", sc(Action::SlideshowToggle)),
+                    row(
+                        "Slideshow faster / slower",
+                        two(Action::SlideshowFaster, Action::SlideshowSlower),
+                    ),
+                ],
+            ),
+            section(
+                "View & Zoom",
+                vec![
+                    row("Fit to screen", sc(Action::ScaleFit)),
+                    row("Crop to fill", sc(Action::ScaleFill)),
+                    row("Toggle 1:1 and fit", sc(Action::ToggleOriginal)),
+                    row("Zoom out / in", two(Action::ZoomOut, Action::ZoomIn)),
+                    row("Pan", "\u{2190} \u{2191} \u{2193} \u{2192}".to_string()),
+                    row(
+                        "Rotate right / left",
+                        two(Action::RotateCw, Action::RotateCcw),
+                    ),
+                    row("Fullscreen", sc(Action::Fullscreen)),
+                ],
+            ),
+            section(
+                "Animation",
+                vec![
+                    row("Play / pause", sc(Action::PlayPause)),
+                    row(
+                        "Previous / next frame",
+                        two(Action::FramePrev, Action::FrameNext),
+                    ),
+                    row("Mute Live Photo audio", sc(Action::MuteLiveAudio)),
+                ],
+            ),
+            section(
+                "Files & App",
+                vec![
+                    row("Open file", sc(Action::OpenFile)),
+                    row("Open folder", sc(Action::OpenFolder)),
+                    row("Copy image", sc(Action::Copy)),
+                    row("Copy file path", sc(Action::CopyPath)),
+                    row("Save rotation", sc(Action::SaveRotation)),
+                    row("Undo", sc(Action::Undo)),
+                    row(trash, sc(Action::Delete)),
+                    row("Delete permanently", sc(Action::DeletePermanent)),
+                    row("Recursive (this folder)", sc(Action::Recursive)),
+                    row("Info panel", sc(Action::Info)),
+                    row("Full EXIF panel", sc(Action::FullExif)),
+                    row("Settings", sc(Action::Settings)),
+                    row("Quit", sc(Action::Quit)),
+                ],
+            ),
+        ]
+    }
+
+    /// Rasterize the active overlay (info panel or help) and draw it. The help
+    /// overlay uses a larger font than the info panels.
+    pub fn show_overlay(&mut self) {
+        let px = (15.0 * self.viewport.scale_factor).max(8.0);
+        let pad = (7.0 * self.viewport.scale_factor).round().max(2.0) as u32;
+        // The info / EXIF panels honor the user's opacity setting; the help overlay
+        // keeps the standard translucency.
+        let info_bg = hud::bg_for_opacity(self.settings.info_opacity);
+        // Resolve the Live Photo pairing (cached; one stat) up front so either panel can
+        // label it — the basic line and the detailed table both read `is_live_photo`.
+        if let Some(item) = self.displayed_item {
+            self.live_motion_path(item);
+        }
+        let is_live = self.displayed_item.is_some_and(|i| self.is_live_photo(i));
+        let panel = match self.info {
+            InfoMode::Off => return,
+            InfoMode::Basic => {
+                let (Some(hud), Some(meta)) = (self.hud.as_ref(), self.current.as_ref()) else {
+                    return;
+                };
+                let mut text = format!("{} · {}×{} · {}", meta.rel, meta.w, meta.h, meta.codec);
+                if is_live {
+                    text.push_str(" · Live"); // a Live Photo's motion is playable (P)
+                }
+                hud.render_panel(&text, px, pad, info_bg)
+            }
+            InfoMode::Full => {
+                // Warm the EXIF read once so the table build (and its per-frame rebuilds
+                // during playback) never re-read the file.
+                if let Some(item) = self.displayed_item {
+                    self.ensure_exif_cached(item);
+                }
+                let rows = self.exif_rows();
+                let Some(hud) = self.hud.as_ref() else {
+                    return;
+                };
+                if rows.is_empty() {
+                    return;
+                }
+                hud.render_table(&rows, px, pad, info_bg)
+            }
+            InfoMode::Help => {
+                let help_px = (15.0 * self.viewport.scale_factor).max(10.0);
+                let sections = self.help_sections();
+                let margin = self.overlay_margin();
+                let win_h = self.viewport.height;
+                let max_h = (win_h as i32 - 2 * margin as i32).max(1);
+                let Some(hud) = self.hud.as_ref() else {
+                    return;
+                };
+                hud.render_shortcuts(&sections, help_px, hud::BG, max_h)
+            }
+        };
+        let Some((bitmap, w, h)) = panel else {
+            return;
+        };
+        let margin = self.overlay_margin();
+        if let Some(a) = self.renderer.as_mut() {
+            a.set_overlay(Some((&bitmap, w, h)), margin);
+        }
+        self.overlay_shown = true;
+        self.overlay_item = self.displayed_item;
+        self.draw();
+    }
+
+    /// Install a decoded animation as active playback and show its first (or stepped)
+    /// frame. `play` starts continuous playback; a non-zero `step` lands paused on that
+    /// frame (the frame-step path). Surfaces the truncation toast.
+    pub fn install_animation(&mut self, anim: pb_decode::Animation, play: bool, step: i32) {
+        let truncated = anim.truncated;
+        let mut pb = Playback::new(anim, play);
+        if step != 0 {
+            pb.step(step);
+        }
+        self.playback = Some(pb);
+        self.present_anim_frame();
+        if truncated {
+            self.show_toast("Animation truncated");
+        }
+    }
+
+    /// Upload the current animation frame and redraw (the playback present path —
+    /// `set_image`, never the prefetch ring). Resets the per-frame deadline anchor.
+    pub fn present_anim_frame(&mut self) {
+        {
+            let Some(pb) = self.playback.as_ref() else {
+                return;
+            };
+            let color = render_color(&pb.color());
+            let frame = pb.current_frame();
+            if let Some(a) = self.renderer.as_mut() {
+                a.set_image(&frame.rgba, frame.width, frame.height, color, false, 1.0);
+            }
+        }
+        self.anim_frame_shown_at = Some(Instant::now());
+        // Keep a shown detailed-EXIF panel's live "Frame X / N" in sync as the frame
+        // changes. Off the hot path (only during user-engaged playback/stepping), and
+        // the EXIF read is memoized so this never re-reads the file per frame.
+        if self.overlay_shown && self.info == InfoMode::Full {
+            self.show_overlay(); // rebuilds the table + draws
+        } else {
+            self.draw();
+        }
+    }
+
+    /// Advance playback to the due frame and return the next frame's wake deadline
+    /// (None when not actively playing), so the loop sleeps exactly until then.
+    pub fn tick_playback(&mut self, now: Instant) -> Option<Instant> {
+        let shown = self.anim_frame_shown_at;
+        let due = self.playback.as_ref().is_some_and(|pb| {
+            let since = shown
+                .map(|t| now.saturating_duration_since(t))
+                .unwrap_or(Duration::ZERO);
+            pb.is_due(since)
+        });
+        if due {
+            self.playback.as_mut().unwrap().advance();
+            self.present_anim_frame(); // updates anim_frame_shown_at + draws
+        }
+        // A finished Live Photo reverts to the crisp still after a beat (rather than
+        // parking on the low-res last motion frame). Arm the timer once, on the finish.
+        let live_finished = self
+            .playback
+            .as_ref()
+            .is_some_and(|pb| pb.is_finished() && pb.kind() == pb_decode::AnimationKind::LivePhoto);
+        if live_finished && self.live_revert_at.is_none() {
+            self.live_revert_at = Some(now + LIVE_REVERT_DELAY);
+        }
+        let shown = self.anim_frame_shown_at;
+        self.playback
+            .as_ref()
+            .filter(|pb| pb.is_playing())
+            .map(|pb| shown.unwrap_or(now) + pb.current_delay())
+    }
+
+    /// Drive the held-key frame-step scrub (`,`/`.`). Returns whether a frame-step key
+    /// is held (so the loop keeps polling). One step on press, then repeats at
+    /// [`FRAME_STEP_REPEAT`] after the initial tap delay.
+    pub fn tick_frame_step(&mut self, now: Instant) -> bool {
+        let dir = self.held_frame_step();
+        if dir == 0 {
+            self.framestep_started = None;
+            self.framestep_last = None;
+            return false;
+        }
+        // Need a decoded sequence to scrub; while it's still decoding, keep ticking.
+        if self.playback.is_none() {
+            return true;
+        }
+        let past_delay = timing::elapsed_since(self.framestep_started, now, self.initial_delay);
+        let due = timing::elapsed_since(self.framestep_last, now, FRAME_STEP_REPEAT);
+        if past_delay && due {
+            self.playback.as_mut().unwrap().step(dir);
+            self.present_anim_frame();
+            self.framestep_last = Some(now);
+        }
+        true
+    }
+
     /// Apply a scaling mode (8 = fit, 9 = fill, 0 toggles original ↔ fill). Always
     /// resets zoom/pan back to the mode's natural framing — so tapping a mode key
     /// is also "reset my zoom." Only an actual mode *change* bumps the geometry
@@ -90,36 +419,23 @@ impl AppCore {
         };
         let fit = self.decode_fit();
         // Drop tier bookkeeping for items no longer resident (evicted).
-        self
-            .preview_resident
+        self.preview_resident
             .retain(|i| self.ring.slot_for(*i).is_some());
-        self
-            .upgrade_done
+        self.upgrade_done
             .retain(|i| self.ring.slot_for(*i).is_some());
-        self
-            .full_requested_at
+        self.full_requested_at
             .retain(|i, _| self.ring.slot_for(*i).is_some());
         // Items decoded but not yet uploaded must not be re-requested (the pool no
         // longer tracks them, so it would decode them again).
-        let pending: HashSet<usize> = self
-            .pending_uploads
-            .iter()
-            .map(|o| o.key.item)
-            .collect();
+        let pending: HashSet<usize> = self.pending_uploads.iter().map(|o| o.key.item).collect();
         let sharpen = self.sharpen_now();
         let ring: HashSet<usize> = self.prefetch_fulls().into_iter().collect();
         // Stamp when each full was first requested, for the `sharpen` latency metric.
         if let Some(d) = sharpen {
-            self
-                .full_requested_at
-                .entry(d)
-                .or_insert_with(Instant::now);
+            self.full_requested_at.entry(d).or_insert_with(Instant::now);
         }
         for &t in &ring {
-            self
-                .full_requested_at
-                .entry(t)
-                .or_insert_with(Instant::now);
+            self.full_requested_at.entry(t).or_insert_with(Instant::now);
         }
 
         // Build the job list in three priority tiers (the pool decodes by position):
@@ -154,9 +470,7 @@ impl AppCore {
         let mut jobs = head;
         jobs.append(&mut previews);
         jobs.append(&mut fulls);
-        self
-            .pool
-            .set_targets(self.epoch, &self.source, &jobs);
+        self.pool.set_targets(self.epoch, &self.source, &jobs);
     }
 
     /// The decode-to-fit target for the current mode: the display size in Fit mode
