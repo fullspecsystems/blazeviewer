@@ -635,8 +635,14 @@ impl DialogWindow {
                 if is_modifier_key(code) {
                     return true; // wait for a real key to combine with held modifiers
                 }
+                // Map the winit key into the shell-neutral `PbKey` the keymap stores.
+                // A physically-unnameable key (e.g. F13) can't form a persistable
+                // binding, so stay armed and wait for one the keymap can express.
+                let Some(key) = crate::pb_key_winit::from_winit(code) else {
+                    return true;
+                };
                 let chord = KeyChord::new(
-                    code,
+                    key,
                     self.cap_ctrl,
                     self.cap_shift,
                     self.cap_alt,

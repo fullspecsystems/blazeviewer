@@ -1,0 +1,14 @@
+[package]
+name = "pb-app-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Platform-neutral orchestration model for PhotoBlaze: actions, the physical-key model, and the keymap — no winit/egui/Swift, so every shell (winit on Windows, AppKit on macOS) drives the same core (NS0/ADR-021)."
+
+# Deliberately shell-free: no winit/egui/wgpu. Config I/O (the keymap loader and
+# the per-user config dir) is allowed here — that is platform code, not *shell*
+# code — but UI toolkits never are. This is the crate the macOS Swift bridge links.
+[dependencies]
+# Keymap config parse/format (keymap.toml). Same version + features as pb-app so
+# the lockfile is unchanged by the split.
+toml = { version = "0.8", default-features = false, features = ["parse", "display"] }

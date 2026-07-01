@@ -10,9 +10,8 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use winit::keyboard::KeyCode;
-
 use crate::action::Action;
+use crate::pb_key::PbKey;
 
 /// A single key combination: a physical key plus the modifier flags that must be
 /// held with it. Modifier order doesn't matter (equality is by the bool flags), so
@@ -24,7 +23,7 @@ use crate::action::Action;
 /// through to the bare-key actions — ⌘S → Slideshow, ⌘R → Rotate — when Cmd is held).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct KeyChord {
-    pub code: KeyCode,
+    pub code: PbKey,
     pub ctrl: bool,
     pub shift: bool,
     pub alt: bool,
@@ -34,7 +33,7 @@ pub struct KeyChord {
 impl KeyChord {
     /// Build a chord from a physical key + the current modifier state (what the
     /// press handler does on each key-down). `logo` = the Cmd/Win "super" key.
-    pub fn new(code: KeyCode, ctrl: bool, shift: bool, alt: bool, logo: bool) -> Self {
+    pub fn new(code: PbKey, ctrl: bool, shift: bool, alt: bool, logo: bool) -> Self {
         Self {
             code,
             ctrl,
@@ -62,7 +61,7 @@ impl KeyChord {
                 _ => return None,
             }
         }
-        let code = str_to_key(key_tok)?;
+        let code = PbKey::from_name(key_tok)?;
         Some(KeyChord {
             code,
             ctrl,
@@ -89,20 +88,14 @@ impl fmt::Display for KeyChord {
         if self.shift {
             write!(f, "Shift+")?;
         }
-        write!(f, "{}", key_to_str(self.code))
+        write!(f, "{}", self.code.as_str())
     }
-}
-
-/// Is this a numeric-keypad key? Used to keep numpad aliases out of the help
-/// overlay (they're bound, just not worth showing next to the primary key).
-pub fn is_numpad(code: KeyCode) -> bool {
-    key_to_str(code).starts_with("Numpad")
 }
 
 /// The configurable key→action table. Holds both directions: chord→action for the
 /// input dispatch, and action→chords for the help overlay / editor. `Clone` so the
 /// Settings editor can edit a draft and commit it on Save (or discard on Cancel).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Keymap {
     by_chord: HashMap<KeyChord, Action>,
     by_action: HashMap<Action, Vec<KeyChord>>,
@@ -213,7 +206,7 @@ impl Keymap {
     /// Persist to `keymap.toml`, atomically (temp + rename). Best-effort; an explicit
     /// user action only (Settings ▸ Save) — privacy #2 (config, never photo data).
     pub fn save(&self) -> bool {
-        let Some(dir) = crate::settings::config_dir() else {
+        let Some(dir) = crate::config_dir() else {
             return false;
         };
         let _ = std::fs::create_dir_all(&dir);
@@ -378,181 +371,8 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
 /// Read the user's `keymap.toml` from the config dir, if it exists and is readable.
 /// `None` (use defaults) on any failure — read-only, privacy-safe.
 fn read_config() -> Option<String> {
-    let path = crate::settings::config_dir()?.join("keymap.toml");
+    let path = crate::config_dir()?.join("keymap.toml");
     std::fs::read_to_string(path).ok()
-}
-
-/// Human name for a physical key — config-friendly (`"Left"`, `"NumpadAdd"`), used
-/// for parsing and for the help overlay. Unknown keys print as `"?"` (only reachable
-/// for an unbound key, since every bound chord uses a named key).
-fn key_to_str(code: KeyCode) -> &'static str {
-    use KeyCode::*;
-    match code {
-        Space => "Space",
-        Backspace => "Backspace",
-        Enter => "Enter",
-        NumpadEnter => "NumpadEnter",
-        Escape => "Esc",
-        Tab => "Tab",
-        Delete => "Delete",
-        Insert => "Insert",
-        Home => "Home",
-        End => "End",
-        PageUp => "PageUp",
-        PageDown => "PageDown",
-        ArrowLeft => "Left",
-        ArrowRight => "Right",
-        ArrowUp => "Up",
-        ArrowDown => "Down",
-        Equal => "=",
-        Minus => "-",
-        Comma => ",",
-        Period => ".",
-        Slash => "/",
-        Backslash => "\\",
-        Semicolon => ";",
-        Quote => "'",
-        BracketLeft => "[",
-        BracketRight => "]",
-        Backquote => "`",
-        NumpadAdd => "NumpadAdd",
-        NumpadSubtract => "NumpadSubtract",
-        NumpadMultiply => "NumpadMultiply",
-        NumpadDivide => "NumpadDivide",
-        NumpadDecimal => "NumpadDecimal",
-        Digit0 => "0",
-        Digit1 => "1",
-        Digit2 => "2",
-        Digit3 => "3",
-        Digit4 => "4",
-        Digit5 => "5",
-        Digit6 => "6",
-        Digit7 => "7",
-        Digit8 => "8",
-        Digit9 => "9",
-        Numpad0 => "Numpad0",
-        Numpad1 => "Numpad1",
-        Numpad2 => "Numpad2",
-        Numpad3 => "Numpad3",
-        Numpad4 => "Numpad4",
-        Numpad5 => "Numpad5",
-        Numpad6 => "Numpad6",
-        Numpad7 => "Numpad7",
-        Numpad8 => "Numpad8",
-        Numpad9 => "Numpad9",
-        KeyA => "A",
-        KeyB => "B",
-        KeyC => "C",
-        KeyD => "D",
-        KeyE => "E",
-        KeyF => "F",
-        KeyG => "G",
-        KeyH => "H",
-        KeyI => "I",
-        KeyJ => "J",
-        KeyK => "K",
-        KeyL => "L",
-        KeyM => "M",
-        KeyN => "N",
-        KeyO => "O",
-        KeyP => "P",
-        KeyQ => "Q",
-        KeyR => "R",
-        KeyS => "S",
-        KeyT => "T",
-        KeyU => "U",
-        KeyV => "V",
-        KeyW => "W",
-        KeyX => "X",
-        KeyY => "Y",
-        KeyZ => "Z",
-        F1 => "F1",
-        F2 => "F2",
-        F3 => "F3",
-        F4 => "F4",
-        F5 => "F5",
-        F6 => "F6",
-        F7 => "F7",
-        F8 => "F8",
-        F9 => "F9",
-        F10 => "F10",
-        F11 => "F11",
-        F12 => "F12",
-        _ => "?",
-    }
-}
-
-/// Parse a key name (the final token of a chord) into a physical key. Letters and
-/// digits are accepted case-insensitively; named keys match [`key_to_str`] (plus a
-/// few friendly aliases). `None` for an unknown name.
-fn str_to_key(s: &str) -> Option<KeyCode> {
-    use KeyCode::*;
-    // Single letter or digit (case-insensitive for letters).
-    if s.len() == 1 {
-        let ch = s.chars().next().unwrap();
-        if ch.is_ascii_alphabetic() {
-            let idx = ch.to_ascii_uppercase() as u8 - b'A';
-            const LETTERS: [KeyCode; 26] = [
-                KeyA, KeyB, KeyC, KeyD, KeyE, KeyF, KeyG, KeyH, KeyI, KeyJ, KeyK, KeyL, KeyM, KeyN,
-                KeyO, KeyP, KeyQ, KeyR, KeyS, KeyT, KeyU, KeyV, KeyW, KeyX, KeyY, KeyZ,
-            ];
-            return Some(LETTERS[idx as usize]);
-        }
-        if ch.is_ascii_digit() {
-            const DIGITS: [KeyCode; 10] = [
-                Digit0, Digit1, Digit2, Digit3, Digit4, Digit5, Digit6, Digit7, Digit8, Digit9,
-            ];
-            return Some(DIGITS[(ch as u8 - b'0') as usize]);
-        }
-    }
-    let m = match s.to_ascii_lowercase().as_str() {
-        "space" => Space,
-        "backspace" => Backspace,
-        "enter" | "return" => Enter,
-        "numpadenter" => NumpadEnter,
-        "esc" | "escape" => Escape,
-        "tab" => Tab,
-        "delete" | "del" => Delete,
-        "insert" | "ins" => Insert,
-        "home" => Home,
-        "end" => End,
-        "pageup" | "pgup" => PageUp,
-        "pagedown" | "pgdn" => PageDown,
-        "left" => ArrowLeft,
-        "right" => ArrowRight,
-        "up" => ArrowUp,
-        "down" => ArrowDown,
-        "=" | "equal" | "plus" => Equal,
-        "-" | "minus" => Minus,
-        "," | "comma" => Comma,
-        "." | "period" => Period,
-        "/" | "slash" => Slash,
-        "\\" | "backslash" => Backslash,
-        ";" | "semicolon" => Semicolon,
-        "'" | "quote" => Quote,
-        "[" => BracketLeft,
-        "]" => BracketRight,
-        "`" => Backquote,
-        "numpadadd" => NumpadAdd,
-        "numpadsubtract" => NumpadSubtract,
-        "numpadmultiply" => NumpadMultiply,
-        "numpaddivide" => NumpadDivide,
-        "numpaddecimal" => NumpadDecimal,
-        "f1" => F1,
-        "f2" => F2,
-        "f3" => F3,
-        "f4" => F4,
-        "f5" => F5,
-        "f6" => F6,
-        "f7" => F7,
-        "f8" => F8,
-        "f9" => F9,
-        "f10" => F10,
-        "f11" => F11,
-        "f12" => F12,
-        _ => return None,
-    };
-    Some(m)
 }
 
 #[cfg(test)]
@@ -601,7 +421,7 @@ mod tests {
         for s in ["Cmd+S", "Command+S", "Super+S", "Win+S", "Meta+S", "Logo+S"] {
             let c = KeyChord::parse(s).unwrap_or_else(|| panic!("parse {s:?}"));
             assert!(c.logo && !c.ctrl, "{s:?} should set logo, not ctrl");
-            assert_eq!(c.code, KeyCode::KeyS);
+            assert_eq!(c.code, PbKey::KeyS);
         }
     }
 
@@ -635,7 +455,7 @@ mod tests {
         let a = KeyChord::parse("Ctrl+Shift+R").unwrap();
         let b = KeyChord::parse("shift+control+r").unwrap();
         assert_eq!(a, b);
-        assert_eq!(a.code, KeyCode::KeyR);
+        assert_eq!(a.code, PbKey::KeyR);
         assert!(a.ctrl && a.shift && !a.alt);
     }
 
@@ -774,10 +594,38 @@ mod tests {
     }
 
     #[test]
-    fn numpad_detection() {
-        assert!(is_numpad(KeyCode::NumpadAdd));
-        assert!(is_numpad(KeyCode::NumpadEnter));
-        assert!(!is_numpad(KeyCode::Enter));
-        assert!(!is_numpad(KeyCode::Equal));
+    fn every_default_chord_round_trips_through_its_string() {
+        // The defaults are the contract the help overlay and editor render. Each
+        // default chord must survive Display → parse, so what the user sees is what
+        // reloads from config. (This is the guard that would catch binding a default
+        // to a display-only key like the numpad digits.)
+        let km = Keymap::defaults();
+        for &action in Action::ALL {
+            for chord in km.bindings_for(action) {
+                let printed = chord.to_string();
+                assert_eq!(
+                    KeyChord::parse(&printed),
+                    Some(*chord),
+                    "{action:?} default chord {printed:?} does not round-trip",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn full_default_map_survives_a_toml_round_trip() {
+        // Serialize the entire default keymap and reload it: every action's bindings
+        // must come back identical (stronger than the single-cleared-action case).
+        let km = Keymap::defaults();
+        let mut reloaded = Keymap::defaults();
+        let warnings = reloaded.merge_toml(&km.to_toml());
+        assert!(warnings.is_empty(), "{warnings:?}");
+        for &action in Action::ALL {
+            assert_eq!(
+                reloaded.bindings_for(action),
+                km.bindings_for(action),
+                "{action:?} bindings drifted across the TOML round-trip",
+            );
+        }
     }
 }

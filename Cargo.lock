@@ -3477,6 +3477,7 @@ dependencies = [
  "little_exif",
  "muda",
  "objc2 0.6.4",
+ "pb-app-core",
  "pb-core",
  "pb-decode",
  "pb-render",
@@ -3494,6 +3495,13 @@ dependencies = [
  "winit",
  "winresource",
  "zip",
+]
+
+[[package]]
+name = "pb-app-core"
+version = "0.1.0"
+dependencies = [
+ "toml 0.8.2",
 ]
 
 [[package]]

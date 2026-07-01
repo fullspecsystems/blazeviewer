@@ -17,6 +17,9 @@ path = "src/main.rs"
 libheif = ["pb-decode/libheif"]
 
 [dependencies]
+# Platform-neutral orchestration model (actions, key model, keymap) — shared with
+# the future macOS native shell; this binary is the winit shell over it (NS0).
+pb-app-core = { workspace = true }
 pb-core = { workspace = true }
 pb-decode = { workspace = true }
 pb-source = { workspace = true }

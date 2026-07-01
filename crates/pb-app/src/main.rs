@@ -54,7 +54,6 @@ use pb_render::{
 };
 use pb_source::{seven_z_projected_bytes, FsSource, PhotoSource, SevenZSource, ZipSource};
 
-mod action;
 mod archive;
 mod clipboard;
 #[cfg(windows)]
@@ -67,24 +66,31 @@ mod hdr_surface;
 mod hud;
 mod hud_gallery;
 mod icon;
-mod keymap;
 #[cfg(target_os = "macos")]
 mod macos_chrome;
 #[cfg(target_os = "macos")]
 mod macos_open;
 mod menu;
 mod metrics;
+mod pb_key_winit;
 #[cfg(target_os = "macos")]
 mod proxy_icon;
 mod save_rotation;
 mod settings;
-mod slideshow;
-use action::{Action, ActionKind};
+// The action vocabulary, physical-key model, keymap, and slideshow timing now live
+// in the platform-neutral `pb-app-core` (NS0). Re-export them at the crate root so
+// the existing `crate::action` / `crate::keymap` / `crate::pb_key` / `crate::slideshow`
+// paths in the winit shell modules (and the `use action::…` lines below) keep
+// resolving unchanged.
+use pb_app_core::{action, contract, keymap, pb_key, slideshow};
+
+use action::Action;
 use decode_pool::{recommended_workers, DecodeFn, DecodePool, Outcome};
 use hud::{Hud, Row};
-use keymap::{KeyChord, Keymap};
+use keymap::Keymap;
 use menu::MenuAction;
 use metrics::StageTimes;
+use pb_key::PbKey;
 
 /// VRAM budget for the resident texture ring (~1.5 GB → ~16–32 fit-size slots on
 /// a 7680-wide display, far more on smaller ones). Capacity is clamped to [4, 64].
@@ -489,8 +495,8 @@ struct App {
     /// Physical keys currently held → the [`Action`] each resolved to at press time
     /// (OS auto-repeat ignored). Drives hold-to-fly nav and continuous pan/zoom; the
     /// action is captured on key-down so it stays stable while held, and is keyed by
-    /// `KeyCode` so the key-up (which carries no modifiers) can remove it.
-    held: HashMap<KeyCode, Action>,
+    /// [`PbKey`] so the key-up (which carries no modifiers) can remove it.
+    held: HashMap<PbKey, Action>,
     /// When a frame was last actually presented. Caps the advance rate from the
     /// presentation (not the advance attempt), so a late-arriving miss isn't
     /// replaced in the same tick it finally shows; also delays the idle panel.
@@ -575,16 +581,13 @@ struct App {
     /// Per-image rotation overrides (`r` / `Shift+R`); RAM-only, dropped on exit
     /// (privacy task #2). Absent = upright (identity).
     rotations: HashMap<usize, Rotation>,
-    /// Whether a Shift key is currently held (for `Shift+R`, `Shift+I`).
-    shift: bool,
-    /// Whether a Ctrl key is held (for `Ctrl+R` = toggle recursive scan).
-    ctrl: bool,
-    /// Whether an Alt key is held (for `Alt+Enter` = toggle fullscreen).
-    alt: bool,
-    /// Whether the "super" key is held — **Cmd (⌘) on macOS**, the Windows key
-    /// elsewhere. Lets Mac's OS-standard ⌘-shortcuts (⌘C/⌘S/…) be distinct chords
-    /// from the bare keys, so holding Cmd doesn't fire a bare-key action.
-    logo: bool,
+    /// The keyboard modifiers currently held (Shift/Ctrl/Alt + the platform "super" key —
+    /// **Cmd (⌘) on macOS**, the Windows key elsewhere). Tracked so a key-down forms the
+    /// right chord; keeping `logo` separate lets Mac's OS-standard ⌘-shortcuts (⌘C/⌘S/…)
+    /// be distinct chords from the bare keys, so holding Cmd never fires a bare-key action.
+    /// The shell-neutral [`contract::Modifiers`] the input seam ([`contract::resolve_key_down`])
+    /// consumes.
+    mods: contract::Modifiers,
     /// Whether the current scan-based playlist is recursive (`Ctrl+R` toggles).
     recursive: bool,
     /// The directory the current playlist was scanned from — enables the `Ctrl+R`
@@ -672,12 +675,10 @@ struct App {
     window_menu: Option<muda::Submenu>,
     /// macOS-only: the native (Spaces) fullscreen menu item, kept so its title can flip
     /// between "Enter Full Screen" and "Exit Full Screen" to mirror the live state (the
-    /// Mac convention — no checkmark). `native_fullscreen_on` caches the last-pushed
-    /// state so the per-tick refresh is a no-op when nothing changed.
+    /// Mac convention — no checkmark). The last-pushed engaged state is cached as part of
+    /// [`App::menu_state`], so the per-tick refresh is a no-op when nothing changed.
     #[cfg(target_os = "macos")]
     native_fullscreen_item: Option<muda::MenuItem>,
-    #[cfg(target_os = "macos")]
-    native_fullscreen_on: bool,
     /// macOS-only: the file currently shown as the title-bar proxy icon (the window's
     /// represented file). Caches the last-pushed value so the per-tick refresh is a
     /// no-op `setRepresentedURL:` call when the displayed photo hasn't changed. `None`
@@ -687,30 +688,25 @@ struct App {
     proxy_icon_path: Option<PathBuf>,
     /// The "Save Rotation" menu item, kept so its enabled state can be toggled at
     /// runtime (only enabled when the current photo has an unsaved rotation on an
-    /// EXIF-writable file). `save_enabled` caches the last-pushed state so the
-    /// refresh is a no-op Win32 call when nothing changed.
+    /// EXIF-writable file).
     save_rotation_item: Option<muda::MenuItem>,
-    save_enabled: bool,
     /// The File ▸ Stop Scanning menu item, enabled only while a folder scan is streaming in.
-    /// `cancel_scan_enabled` caches the last-pushed state so the per-tick refresh is a no-op
-    /// when unchanged.
     cancel_scan_item: Option<muda::MenuItem>,
-    cancel_scan_enabled: bool,
     /// The undo stack (Edit ▸ Undo / `Ctrl+Z`) — RAM-only, cleared on any source/playlist
     /// change (see [`UndoAction`]). The most recent reversible edit is on top.
     undo_stack: Vec<UndoAction>,
     /// The Edit ▸ Undo menu item, kept so its title + enabled state can mirror the top of
-    /// the undo stack at runtime. `undo_menu_state` caches the last-pushed label so the
-    /// per-tick refresh is a no-op when unchanged: `None` = never pushed; `Some(None)` =
-    /// disabled ("Undo"); `Some(Some(label))` = enabled showing `label`.
+    /// the undo stack at runtime.
     undo_item: Option<muda::MenuItem>,
-    undo_menu_state: Option<Option<&'static str>>,
     /// The View-menu checkable items (scale mode / recursive / fullscreen / info), kept
-    /// so their checked state can mirror the live app state at runtime. `view_checks_state`
-    /// caches the last-pushed `(scale mode, recursive, fullscreen, slideshow, info)` so the
-    /// per-tick refresh is a no-op Win32 call when nothing changed.
+    /// so their checked state can mirror the live app state at runtime.
     view_checks: Option<menu::ViewChecks>,
-    view_checks_state: Option<(ScaleMode, bool, bool, bool, InfoMode)>,
+    /// The last [`contract::MenuState`] pushed to the native menu — the single cache
+    /// behind [`App::apply_menu_state`]. Every runtime menu mirror (checkmarks, Save
+    /// Rotation / Stop Scanning / Undo enabled+label, the macOS native-fullscreen label)
+    /// is diffed field-by-field against this, so the per-tick refresh only touches the OS
+    /// for items that actually changed. `None` = nothing pushed yet (re-assert everything).
+    menu_state: Option<contract::MenuState>,
     /// A delete whose playlist-advance is deferred: `(fire_at, removed_index)`. The
     /// deleted photo stays on screen with its icon until `fire_at`, then the playlist
     /// drops the item and advances (see `delete_current` / `flush_pending_delete`).
@@ -831,10 +827,7 @@ impl App {
             deleted: HashSet::new(),
             pending_uploads: Vec::new(),
             rotations: HashMap::new(),
-            shift: false,
-            ctrl: false,
-            alt: false,
-            logo: false,
+            mods: contract::Modifiers::NONE,
             recursive,
             scan_root,
             pending_drops: Vec::new(),
@@ -867,18 +860,13 @@ impl App {
             #[cfg(target_os = "macos")]
             native_fullscreen_item: None,
             #[cfg(target_os = "macos")]
-            native_fullscreen_on: false,
-            #[cfg(target_os = "macos")]
             proxy_icon_path: None,
             save_rotation_item: None,
-            save_enabled: false,
             cancel_scan_item: None,
-            cancel_scan_enabled: false,
             undo_stack: Vec::new(),
             undo_item: None,
-            undo_menu_state: None,
             view_checks: None,
-            view_checks_state: None,
+            menu_state: None,
             pending_delete: None,
             pending_confirm_delete: None,
             menu_attached: false,
@@ -2506,113 +2494,154 @@ impl App {
                 .is_some_and(save_rotation::is_orientation_writable)
     }
 
-    /// Sync the "Save Rotation" menu item's enabled state to [`can_save_rotation`].
-    /// Cheap + idempotent (skips the Win32 call when unchanged), so it's safe to call
-    /// from the per-tick `about_to_wait`.
-    fn refresh_save_menu_item(&mut self) {
-        let want = self.can_save_rotation();
-        if want != self.save_enabled {
-            if let Some(it) = self.save_rotation_item.as_ref() {
-                it.set_enabled(want);
-            }
-            self.save_enabled = want;
+    /// Build the [`contract::MenuState`] for the given live state — the pure mapping from
+    /// the app's view/edit state to the shell-neutral menu model. Takes no `self` and
+    /// touches no muda, so it's unit-tested directly (`menu_state_*` tests). The two enum
+    /// mappings it owns are the only non-trivial logic: `pb_render::ScaleMode` → the View
+    /// scale group, and the 4-state [`InfoMode`] → the two info checkmarks (both `Help`
+    /// and `Off` show *neither*, exactly as the menu does today).
+    #[allow(clippy::too_many_arguments)]
+    fn menu_state_from(
+        scale: ScaleMode,
+        info: InfoMode,
+        recursive: bool,
+        fullscreen: bool,
+        slideshow: bool,
+        save_rotation_enabled: bool,
+        cancel_scan_enabled: bool,
+        undo: Option<&'static str>,
+        native_fullscreen_engaged: bool,
+    ) -> contract::MenuState {
+        contract::MenuState {
+            scale: match scale {
+                ScaleMode::Fit => contract::ScaleMode::Fit,
+                ScaleMode::Fill => contract::ScaleMode::Fill,
+                ScaleMode::Original => contract::ScaleMode::Original,
+            },
+            info: match info {
+                InfoMode::Basic => contract::InfoOverlay::Basic,
+                InfoMode::Full => contract::InfoOverlay::FullExif,
+                // Help and Off both leave the two info checkmarks off (the menu can't
+                // distinguish them — this is the faithful collapse of the 4-state enum).
+                InfoMode::Help | InfoMode::Off => contract::InfoOverlay::Hidden,
+            },
+            recursive,
+            fullscreen,
+            slideshow,
+            save_rotation_enabled,
+            cancel_scan_enabled,
+            undo,
+            native_fullscreen_engaged,
         }
     }
 
-    /// Enable File ▸ Stop Scanning only while a folder scan is streaming in. Cheap + cached
-    /// (skips the OS call when unchanged), so it's safe to call from the per-tick
-    /// `about_to_wait` alongside [`refresh_save_menu_item`](App::refresh_save_menu_item).
-    fn refresh_cancel_scan_menu_item(&mut self) {
-        let want = self.dir_scan.is_some();
-        if want != self.cancel_scan_enabled {
-            if let Some(it) = self.cancel_scan_item.as_ref() {
-                it.set_enabled(want);
-            }
-            self.cancel_scan_enabled = want;
-        }
-    }
-
-    /// Mirror the top of the undo stack onto the Edit ▸ Undo item: disabled + plain
-    /// "Undo" when empty, otherwise enabled with a title naming the next undo (e.g.
-    /// "Undo Save Rotation"). On Windows the `\tCtrl+Z` accelerator hint is appended to
-    /// the label (macOS shows the real ⌘Z key-equivalent the item already carries).
-    /// Cheap + cached, so it's safe to call from the per-tick `about_to_wait`.
-    fn refresh_undo_menu_item(&mut self) {
-        // `None` = nothing to undo (disabled); `Some(label)` = enabled with that label.
-        let top = self.undo_stack.last().map(UndoAction::menu_label);
-        if self.undo_menu_state == Some(top) {
+    /// Mirror the live app state onto the native menu in one shot: derive the current
+    /// [`contract::MenuState`] and push only the items that differ from the last one
+    /// applied (`self.menu_state`). Replaces the former five `refresh_*` methods and their
+    /// five caches with one derive + one field-by-field diff — preserving the exact
+    /// cached/no-op behavior (when nothing changed, no OS call is made) and the per-item
+    /// granularity (each setter fires only when its own field changed). Safe to call every
+    /// tick from `about_to_wait`; a no-op until the menu exists.
+    fn apply_menu_state(&mut self) {
+        // No menu yet (not built): nothing to mirror, and don't cache — so the first apply
+        // once the items exist re-asserts every one of them from scratch. All menu handles
+        // are built together in `ensure_menu`, so `view_checks` gates them all.
+        if self.view_checks.is_none() {
             return;
         }
-        if let Some(it) = self.undo_item.as_ref() {
-            let base = top.unwrap_or("Undo");
-            #[cfg(target_os = "macos")]
-            it.set_text(base);
-            #[cfg(not(target_os = "macos"))]
-            it.set_text(format!("{base}\tCtrl+Z"));
-            it.set_enabled(top.is_some());
-        }
-        self.undo_menu_state = Some(top);
-    }
-
-    /// Mirror the live view state onto the View-menu checkmarks: scale mode (one of
-    /// Fit / Crop to Fill / Original checked), Recursive Folders, and Fullscreen.
-    /// Cheap + cached (skips the Win32 calls when nothing changed), so it's safe to
-    /// call from the per-tick `about_to_wait` alongside [`refresh_save_menu_item`].
-    fn refresh_view_menu_checks(&mut self) {
-        let Some(c) = self.view_checks.as_ref() else {
-            return;
-        };
-        // `windowed` is the inverse of fullscreen.
-        let state = (
-            self.view.mode,
-            self.recursive,
-            !self.windowed,
-            self.slideshow.on,
-            self.info,
-        );
-        if self.view_checks_state == Some(state) {
-            return;
-        }
-        let (mode, recursive, fullscreen, slideshow, info) = state;
-        c.fit.set_checked(mode == ScaleMode::Fit);
-        c.fill.set_checked(mode == ScaleMode::Fill);
-        c.original.set_checked(mode == ScaleMode::Original);
-        c.recursive.set_checked(recursive);
-        c.fullscreen.set_checked(fullscreen);
-        c.slideshow.set_checked(slideshow);
-        c.info.set_checked(info == InfoMode::Basic);
-        c.full_exif.set_checked(info == InfoMode::Full);
-        self.view_checks_state = Some(state);
-    }
-
-    /// macOS: flip the native (Spaces) fullscreen menu item's title between "Enter Full
-    /// Screen" and "Exit Full Screen" to mirror the live state — the Mac-standard
-    /// behavior (a title toggle, never a checkmark). Driven off the real
-    /// `NSWindow.styleMask` ([`hdr_surface::window_is_fullscreen`]), not winit's
-    /// `Window::fullscreen()` — the latter tracks the *requested* borderless mode and
-    /// reads `None` even while `toggleFullScreen:` has us fullscreen, so it never flips.
-    /// The styleMask is the OS truth however fullscreen was entered (our menu, ⌃⌘F, the
-    /// green button, a Mission Control gesture). Cached, so the per-tick call is a no-op
-    /// until it actually changes. (macOS's own auto-injected Globe/Fn+F fullscreen item
-    /// won't update its label for us, which is why we manage our own.)
-    #[cfg(target_os = "macos")]
-    fn refresh_native_fullscreen_label(&mut self) {
-        let Some(item) = self.native_fullscreen_item.as_ref() else {
-            return;
-        };
-        let on = self
+        // Native (Spaces) fullscreen is OS truth (the real `NSWindow.styleMask` via
+        // `hdr_surface::window_is_fullscreen`), not winit's requested-mode flag — read
+        // every tick so a green-button / gesture toggle flips the label too. Windows has
+        // no such menu item, so it's always `false` there.
+        #[cfg(target_os = "macos")]
+        let native_fullscreen = self
             .active
             .as_ref()
             .is_some_and(|a| hdr_surface::window_is_fullscreen(&a.window));
-        if self.native_fullscreen_on == on {
-            return;
+        #[cfg(not(target_os = "macos"))]
+        let native_fullscreen = false;
+
+        let next = Self::menu_state_from(
+            self.view.mode,
+            self.info,
+            self.recursive,
+            !self.windowed, // `windowed` is the inverse of the fullscreen checkbox
+            self.slideshow.on,
+            self.can_save_rotation(),
+            self.dir_scan.is_some(),
+            // `None` = nothing to undo (disabled "Undo"); `Some(label)` = enabled w/ label.
+            self.undo_stack.last().map(UndoAction::menu_label),
+            native_fullscreen,
+        );
+        let prev = self.menu_state;
+        // `true` on the first apply (`prev == None`) or when this field changed → push it.
+        macro_rules! changed {
+            ($field:ident) => {
+                prev.map_or(true, |p| p.$field != next.$field)
+            };
         }
-        item.set_text(if on {
-            "Exit Full Screen"
-        } else {
-            "Enter Full Screen"
-        });
-        self.native_fullscreen_on = on;
+
+        // View-menu checkmarks (scale group / recursive / fullscreen / slideshow / info).
+        if let Some(c) = self.view_checks.as_ref() {
+            if changed!(scale) {
+                c.fit.set_checked(next.scale == contract::ScaleMode::Fit);
+                c.fill.set_checked(next.scale == contract::ScaleMode::Fill);
+                c.original
+                    .set_checked(next.scale == contract::ScaleMode::Original);
+            }
+            if changed!(recursive) {
+                c.recursive.set_checked(next.recursive);
+            }
+            if changed!(fullscreen) {
+                c.fullscreen.set_checked(next.fullscreen);
+            }
+            if changed!(slideshow) {
+                c.slideshow.set_checked(next.slideshow);
+            }
+            if changed!(info) {
+                c.info
+                    .set_checked(next.info == contract::InfoOverlay::Basic);
+                c.full_exif
+                    .set_checked(next.info == contract::InfoOverlay::FullExif);
+            }
+        }
+        // File ▸ Save Rotation enabled state.
+        if changed!(save_rotation_enabled) {
+            if let Some(it) = self.save_rotation_item.as_ref() {
+                it.set_enabled(next.save_rotation_enabled);
+            }
+        }
+        // File ▸ Stop Scanning enabled state.
+        if changed!(cancel_scan_enabled) {
+            if let Some(it) = self.cancel_scan_item.as_ref() {
+                it.set_enabled(next.cancel_scan_enabled);
+            }
+        }
+        // Edit ▸ Undo title + enabled state (Windows appends the `\tCtrl+Z` hint; macOS
+        // shows the real ⌘Z key-equivalent the item already carries).
+        if changed!(undo) {
+            if let Some(it) = self.undo_item.as_ref() {
+                let base = next.undo.unwrap_or("Undo");
+                #[cfg(target_os = "macos")]
+                it.set_text(base);
+                #[cfg(not(target_os = "macos"))]
+                it.set_text(format!("{base}\tCtrl+Z"));
+                it.set_enabled(next.undo.is_some());
+            }
+        }
+        // macOS: native (Spaces) fullscreen item title ("Enter"/"Exit Full Screen") — a
+        // title toggle, never a checkmark (the Mac convention).
+        #[cfg(target_os = "macos")]
+        if changed!(native_fullscreen_engaged) {
+            if let Some(it) = self.native_fullscreen_item.as_ref() {
+                it.set_text(if next.native_fullscreen_engaged {
+                    "Exit Full Screen"
+                } else {
+                    "Enter Full Screen"
+                });
+            }
+        }
+        self.menu_state = Some(next);
     }
 
     /// macOS: keep the title-bar **proxy icon** (the window's represented file) pointed
@@ -3334,7 +3363,7 @@ impl App {
             self.keymap
                 .bindings_for(a)
                 .iter()
-                .filter(|c| !keymap::is_numpad(c.code))
+                .filter(|c| !c.code.is_numpad())
                 .map(|c| c.to_string())
                 .collect::<Vec<_>>()
                 .join(" / ")
@@ -3940,8 +3969,8 @@ impl App {
     /// hold-to-fly, then either advances, or — when we're still catching up to the
     /// previous target, so the press can't be serviced yet — flashes the loading
     /// pie (brighten-on-keypress) so the input never feels dead.
-    fn nav_press(&mut self, code: KeyCode, action: Action, event_loop: &ActiveEventLoop) {
-        self.held.insert(code, action);
+    fn nav_press(&mut self, key: PbKey, action: Action, event_loop: &ActiveEventLoop) {
+        self.held.insert(key, action);
         self.hold_start = Some(Instant::now());
         let Some(nav) = nav_of(action) else {
             return;
@@ -4495,29 +4524,34 @@ impl ApplicationHandler for App {
                         if quit {
                             self.begin_exit(event_loop);
                         }
-                    } else if !repeat {
-                        // Real press only — OS auto-repeats are ignored so they can't
-                        // queue up and delay the release. Every key is resolved through
-                        // the configurable keymap (task #8) and routed by kind:
+                    } else if let Some(key) = pb_key_winit::from_winit(code) {
+                        // Map the winit key to the shell-neutral `PbKey` (keys the keymap
+                        // can't name → ignored), then resolve it through the pure input
+                        // seam and execute the routing decision:
                         //   - one-shot → run the command now (`dispatch_action`);
                         //   - nav → start hold-to-fly (advance now, repeat in the loop);
                         //   - held → track by physical key; pan/zoom apply each frame in
                         //     `about_to_wait`.
-                        // Holding for all of these is driven by `about_to_wait`.
-                        let chord = KeyChord::new(code, self.ctrl, self.shift, self.alt, self.logo);
-                        if let Some(act) = self.keymap.action_for(&chord) {
-                            match act.kind() {
-                                ActionKind::OneShot => self.dispatch_action(act, event_loop),
-                                ActionKind::Nav => self.nav_press(code, act, event_loop),
-                                ActionKind::Held => {
-                                    self.held.insert(code, act);
-                                }
+                        // `resolve_key_down` folds in the repeat gate (OS auto-repeats
+                        // resolve to `Ignore`) and the ⌘-doesn't-fall-through rule.
+                        match contract::resolve_key_down(&self.keymap, key, self.mods, repeat) {
+                            contract::KeyResolution::Ignore => {}
+                            contract::KeyResolution::OneShot(act) => {
+                                self.dispatch_action(act, event_loop)
+                            }
+                            contract::KeyResolution::NavStart(act) => {
+                                self.nav_press(key, act, event_loop)
+                            }
+                            contract::KeyResolution::HeldStart(act) => {
+                                self.held.insert(key, act);
                             }
                         }
                     }
                 }
                 ElementState::Released => {
-                    self.held.remove(&code);
+                    if let Some(key) = pb_key_winit::from_winit(code) {
+                        self.held.remove(&key);
+                    }
                 }
             },
 
@@ -4528,13 +4562,16 @@ impl ApplicationHandler for App {
                 self.refresh_menu_theme();
             }
 
-            // Track Shift for Shift+R / Shift+I.
+            // Track the modifier state for chord building (Shift+R, Ctrl+R, Alt+Enter, ⌘…).
             WindowEvent::ModifiersChanged(mods) => {
-                self.shift = mods.state().shift_key();
-                self.ctrl = mods.state().control_key();
-                self.alt = mods.state().alt_key();
-                // `super_key()` is Cmd (⌘) on macOS, the Windows key elsewhere.
-                self.logo = mods.state().super_key();
+                let s = mods.state();
+                self.mods = contract::Modifiers {
+                    ctrl: s.control_key(),
+                    shift: s.shift_key(),
+                    alt: s.alt_key(),
+                    // `super_key()` is Cmd (⌘) on macOS, the Windows key elsewhere.
+                    logo: s.super_key(),
+                };
             }
 
             // Focus loss can swallow the key-up event; clear held keys so
@@ -4543,10 +4580,7 @@ impl ApplicationHandler for App {
             WindowEvent::Focused(false) => {
                 self.held.clear();
                 self.hold_start = None;
-                self.shift = false;
-                self.ctrl = false;
-                self.alt = false;
-                self.logo = false;
+                self.mods = contract::Modifiers::NONE;
                 self.zoom_started = None;
                 self.zoom_last = None;
                 self.pan_started = None;
@@ -4617,7 +4651,7 @@ impl ApplicationHandler for App {
                 ),
                 MouseScrollDelta::LineDelta(x, y) => {
                     let zooms = self.settings.scroll_action == settings::ScrollAction::Zoom;
-                    if zooms != self.ctrl {
+                    if zooms != self.mods.ctrl {
                         let factor = (1.0 + y * WHEEL_ZOOM_STEP).max(0.05);
                         self.zoom_about_cursor(factor, event_loop);
                     } else {
@@ -4652,24 +4686,14 @@ impl ApplicationHandler for App {
                 // desync from the real state (e.g. clicking the already-active scale mode
                 // unchecks it though nothing changed). Invalidate the cache so the refresh
                 // below re-asserts the true state unconditionally.
-                self.view_checks_state = None;
+                self.menu_state = None;
             }
         }
-        // Keep "Save Rotation" enabled only when it applies (cheap + cached, so this
-        // per-tick call is a no-op unless the photo/rotation actually changed).
-        self.refresh_save_menu_item();
-        // Keep Edit ▸ Undo's label + enabled state mirroring the top of the undo stack
-        // (cached, so it's a no-op until the stack changes).
-        self.refresh_undo_menu_item();
-        // Enable File ▸ Stop Scanning only while a scan streams in (cached no-op otherwise).
-        self.refresh_cancel_scan_menu_item();
-        // Keep the View-menu checkmarks (scale mode / recursive / fullscreen / info) in
-        // sync with the live state — likewise cached, so it's a no-op until state changes.
-        self.refresh_view_menu_checks();
-        // macOS: keep the native fullscreen item's title ("Enter"/"Exit Full Screen") in
-        // sync — cached, and catches green-button / gesture toggles, not just our menu.
-        #[cfg(target_os = "macos")]
-        self.refresh_native_fullscreen_label();
+        // Mirror the live app state onto the whole native menu in one diffed pass — the
+        // View checkmarks, Save Rotation / Stop Scanning / Undo enabled+label, and (macOS)
+        // the native-fullscreen title. Cached field-by-field, so this per-tick call is a
+        // no-op unless something actually changed.
+        self.apply_menu_state();
         // macOS: keep the title-bar proxy icon pointed at the displayed photo (cached).
         #[cfg(target_os = "macos")]
         self.refresh_proxy_icon();
@@ -6475,5 +6499,142 @@ mod tests {
         let empty = Path::new("");
         assert_eq!(picker_start_dir(None, None, None, empty, fb), fb);
         assert_eq!(picker_start_dir(None, None, Some(empty), empty, fb), fb);
+    }
+
+    // --- Typed menu state (`App::menu_state_from`) --------------------------------
+    // The pure derivation from live app state to the shell-neutral `contract::MenuState`.
+    // The muda-touching `apply_menu_state` diff isn't unit-testable (needs OS handles),
+    // but the mapping it depends on is fully covered here.
+
+    /// A neutral baseline for the arguments, so each test varies just one thing.
+    fn base_menu_state() -> contract::MenuState {
+        App::menu_state_from(
+            ScaleMode::Fit,
+            InfoMode::Off,
+            false,
+            false,
+            false,
+            false,
+            false,
+            None,
+            false,
+        )
+    }
+
+    #[test]
+    fn menu_state_maps_every_scale_mode() {
+        let scale = |m| {
+            App::menu_state_from(
+                m,
+                InfoMode::Off,
+                false,
+                false,
+                false,
+                false,
+                false,
+                None,
+                false,
+            )
+            .scale
+        };
+        assert_eq!(scale(ScaleMode::Fit), contract::ScaleMode::Fit);
+        assert_eq!(scale(ScaleMode::Fill), contract::ScaleMode::Fill);
+        assert_eq!(scale(ScaleMode::Original), contract::ScaleMode::Original);
+    }
+
+    #[test]
+    fn menu_state_collapses_info_mode_to_the_two_checkmarks() {
+        let info = |i| {
+            App::menu_state_from(
+                ScaleMode::Fit,
+                i,
+                false,
+                false,
+                false,
+                false,
+                false,
+                None,
+                false,
+            )
+            .info
+        };
+        assert_eq!(info(InfoMode::Basic), contract::InfoOverlay::Basic);
+        assert_eq!(info(InfoMode::Full), contract::InfoOverlay::FullExif);
+        // The menu has no glyph for Help or Off — both leave *neither* box checked, the
+        // exact behavior of the old `info == Basic` / `info == Full` checkmark tests.
+        assert_eq!(info(InfoMode::Help), contract::InfoOverlay::Hidden);
+        assert_eq!(info(InfoMode::Off), contract::InfoOverlay::Hidden);
+    }
+
+    #[test]
+    fn menu_state_carries_undo_label_and_enabled_together() {
+        // `None` on the undo stack → disabled "Undo"; a label → enabled with that title.
+        assert_eq!(base_menu_state().undo, None);
+        let with_undo = App::menu_state_from(
+            ScaleMode::Fit,
+            InfoMode::Off,
+            false,
+            false,
+            false,
+            false,
+            false,
+            Some("Undo Save Rotation"),
+            false,
+        );
+        assert_eq!(with_undo.undo, Some("Undo Save Rotation"));
+    }
+
+    #[test]
+    fn menu_state_passes_through_every_bool_flag() {
+        // Each toggle/enabled input lands on its own field (no crossed wires).
+        let all_on = App::menu_state_from(
+            ScaleMode::Fit,
+            InfoMode::Off,
+            true, // recursive
+            true, // fullscreen
+            true, // slideshow
+            true, // save_rotation_enabled
+            true, // cancel_scan_enabled
+            None,
+            true, // native_fullscreen_engaged
+        );
+        assert!(all_on.recursive);
+        assert!(all_on.fullscreen);
+        assert!(all_on.slideshow);
+        assert!(all_on.save_rotation_enabled);
+        assert!(all_on.cancel_scan_enabled);
+        assert!(all_on.native_fullscreen_engaged);
+
+        // The baseline leaves them all off.
+        let b = base_menu_state();
+        assert!(
+            !b.recursive
+                && !b.fullscreen
+                && !b.slideshow
+                && !b.save_rotation_enabled
+                && !b.cancel_scan_enabled
+                && !b.native_fullscreen_engaged
+        );
+    }
+
+    #[test]
+    fn menu_state_equality_drives_the_no_op_cache() {
+        // The diff in `apply_menu_state` relies on `PartialEq`: identical inputs must
+        // compare equal (→ no OS call), and any single change must compare unequal.
+        let a = base_menu_state();
+        let b = base_menu_state();
+        assert_eq!(a, b);
+        let changed = App::menu_state_from(
+            ScaleMode::Fit,
+            InfoMode::Off,
+            false,
+            false,
+            true, // slideshow flipped
+            false,
+            false,
+            None,
+            false,
+        );
+        assert_ne!(a, changed);
     }
 }

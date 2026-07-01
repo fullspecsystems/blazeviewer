@@ -17,6 +17,7 @@ members = [
     "crates/pb-source",
     "crates/pb-render",
     "crates/pb-ui",
+    "crates/pb-app-core",
     "crates/pb-app",
 ]
 # Throwaway measurement spikes have their own heavy deps; keep them out of the
@@ -39,6 +40,7 @@ pb-decode = { path = "crates/pb-decode" }
 pb-source = { path = "crates/pb-source" }
 pb-render = { path = "crates/pb-render" }
 pb-ui = { path = "crates/pb-ui" }
+pb-app-core = { path = "crates/pb-app-core" }
 
 # Dev profile: keep OUR crates at a light opt-level (fast incremental compiles,
 # debuggable) but build every *dependency* with full optimization. The image

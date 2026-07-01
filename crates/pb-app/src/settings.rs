@@ -213,30 +213,10 @@ impl Settings {
     }
 }
 
-/// Per-user config directory for PhotoBlaze (created on demand), or `None` if the
-/// platform's config location can't be determined. Shared with the keymap loader
-/// (`keymap::read_config`), which reads `keymap.toml` from the same directory.
-pub(crate) fn config_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("PhotoBlaze"))
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::env::var_os("HOME")
-            .map(|h| PathBuf::from(h).join("Library/Application Support/PhotoBlaze"))
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-            .map(|c| c.join("photoblaze"))
-    }
-}
-
 fn settings_path() -> Option<PathBuf> {
-    config_dir().map(|d| d.join("settings.toml"))
+    // The per-user config dir now lives in `pb-app-core` (shared with the keymap
+    // loader); settings.toml sits beside keymap.toml in it.
+    pb_app_core::config_dir().map(|d| d.join("settings.toml"))
 }
 
 /// The raw `settings.toml` text, if the file exists and is readable.
