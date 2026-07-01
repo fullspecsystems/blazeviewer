@@ -8,13 +8,14 @@
 
 ## STATUS — for the fresh session (updated 2026-06-30, branch `swiftui`)
 
-All work below is **committed, green (workspace suite 376 tests, clippy/fmt clean)**. Steps
-through **step 3 are owner-smoke-verified**; the step-4 conversions (4a menu / 4b clipboard /
-4c rfd / 4d dialog-results, partial) are green + committed but **shell-side, so owner-smoke is
-pending** (see the per-step smoke lists in step 4). `main` (Live Photo support) is merged in.
-Nothing is half-done. **Resume at the deferred window ops** (`set_visible`/`set_fullscreen`),
-then **step 5** — which now also absorbs the *clean* dialog seam (it's entangled with the
-archive/scan-flow inversion; see 4d finding). Do these with owner smoke — don't stack ahead.
+All work below is **committed, green (workspace suite 380 tests, clippy/fmt clean)**. Steps
+through **step 3 are owner-smoke-verified**; the **entire effect-seam 4a–4e** (menu / clipboard /
+rfd / dialog-results-partial / fullscreen) is green + committed but **shell-side, so owner-smoke
+is pending** (per-step smoke lists in step 4). `main` is merged in (incl. its help-overlay / Play
+hint / mute-icon / Open-buttons features, reconciled onto the inverted structure) and macOS Copy
+Image now writes image+file. Nothing is half-done. **The effect-seam is complete; the sole
+remaining piece is step 5 (the physical `AppCore` struct move)** — recommended on a smoke-verified
+base, done incrementally (see step 5's increment order + "why it's not an overnight slam").
 
 ### Landed — inversion seams + de-thread (the `event_loop` half)
 - **Ckpt 1** (`3d7c42d`): `CoreEffect` queue + `drain_effects`; `begin_exit` → `Quit`.
@@ -108,16 +109,41 @@ own commit, suite green, clippy/fmt clean — but shell-side, so **owner smoke p
   forced now. *NEEDS SMOKE:* Settings save/cancel, Confirm-delete y/n, Message OK, Password
   submit/wrong/cancel, Loading + Scanning Cancel, Esc on each.
 
-Remaining (behavior-sensitive — **do with owner smoke**, don't stack ahead of it):
-- **dialog (clean seam):** fold into **step 5** — window-close + `become_loading` → effects,
-  `DialogOutcome` → `CoreEvent`s, once the archive/scan flow inverts (they're entangled).
-- **deferred window ops:** `set_visible` (begin_exit — must hide **before** `clear_session_state`,
-  so keep it inline or handle ordering) and `set_fullscreen` (swapchain/HDR-sensitive — smoke).
+- **✅ 4e — fullscreen toggle** (`b4556a5`): `toggle_fullscreen` does only the core-state part
+  (flip `windowed`, persist `settings.fullscreen`, snapshot geometry, save) and emits
+  `CoreEffect::SetWindowMode`; the window ops (set_fullscreen/decorations + monitor sizing,
+  macOS chrome, menu attach, geometry restore) move verbatim into the shell-side
+  `apply_window_mode`, run from the drain the same turn (op order preserved exactly).
+  `set_visible` **stays inline in `begin_exit`** by design — it must hide *before*
+  `clear_session_state` (instant-close feel), which a deferred effect can't guarantee; native
+  (Spaces) fullscreen reads window state, so it folds into step 5. *NEEDS SMOKE (swapchain):*
+  F / ⌥⏎ / F11 borderless⇄windowed, geometry restore, menu show/hide.
 
-**Step 5 — the physical move.** Lift the orchestration state + methods into `pb-app-core` as
-an `AppCore`; reduce the winit `App` to a thin `WinitShell` (owns `window`, muda handles,
-`DialogWindow`, translates winit events → `CoreEvent`, drains effects → native). `pb-app-core`
-gains deps on `pb-core`/`pb-decode`/`pb-source`/`pb-render` (allowed by the plan). Re-measure.
+**The effect-seam (4a–4e) is complete — orchestration no longer calls muda/rfd/clipboard/
+window-mode directly; it emits effects the drain executes.** What remains is the physical
+packaging (step 5). **Recommended: smoke 4a–4e first, then do step 5 on that verified base** —
+don't build the big struct move on an unsmoked surface (the effect-seam changes are all
+shell-side, so `cargo test` can't validate them; only a manual pass can).
+
+**Step 5 — the physical move (the remaining keystone; its own focused, incremental effort).**
+Lift the orchestration state + methods into `pb-app-core` as an `AppCore`; reduce the winit
+`App` to a thin `WinitShell` (owns `window`, muda handles, `DialogWindow`, translates winit
+events → `CoreEvent`, drains effects → native). `pb-app-core` gains deps on
+`pb-core`/`pb-decode`/`pb-source`/`pb-render` (allowed by the plan). This also absorbs the
+*clean* dialog seam (§4d finding — it's entangled with inverting the archive/scan flow, which
+happens here) and native-fullscreen. Re-measure `present`/`drain` after.
+
+> **Why it's not an overnight slam.** `main.rs` is ~7.6 k lines; the split relocates ~40 fields
+> (§2) + hundreds of methods and rewrites every `self.<field>` for a moved field to
+> `self.core.<field>`, plus the borrow-checker fallout where a method touches both shell and
+> core state. A half-moved struct doesn't compile — so this is done **incrementally, green at
+> each commit**, not in one pass (per §10: stop at the last green step). Suggested increment
+> order: (1) create the empty `AppCore` + wire the crate deps; (2) move the leaf state groups
+> that few methods touch (metadata caches, overlays/HUD, held-key/timing) behind `self.core.`;
+> (3) move nav/prefetch/decode/residency; (4) move the renderer into `AppCore` as `Box<dyn
+> Renderer>`; (5) introduce `AppCore::handle(CoreEvent) -> Vec<CoreEffect>` and thin the shell
+> to translate+apply; (6) invert the archive/scan/dialog flow (the §4d clean seam) + native
+> fullscreen. Smoke after each group.
 
 Smoke between steps: hold-to-fly + a dialog + the specific paths a step touched.
 

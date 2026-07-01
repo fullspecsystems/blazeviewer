@@ -236,8 +236,13 @@ green + owner-smoke-verified:
   0.135 ms, vs step-2's ~0.16 / ~0.13; the vtable dispatch is ~1 ns).
 - **Instrumentation added** (`present` + `drain` `--metrics` stages) so every step is
   before/after measured against a pinned corpus — the prime directive, applied to the refactor.
-- **Remaining:** step 4 menu/dialog/clipboard/rfd → effects; step 5 the physical move into
-  `pb-app-core` + thin `WinitShell`. The single `AppCore` object is the remaining gate.
+- **Effect-seam (step 4a–4e) complete:** menu → `SetMenuState`, clipboard → `WriteClipboard`,
+  rfd panels → `OpenFilePanel/OpenFolderPanel`, dialog results → `DialogOutcome` (partial;
+  clean seam folds into step 5), fullscreen → `SetWindowMode`. Orchestration no longer calls
+  muda/rfd/clipboard/window-mode directly. All green + committed, **owner-smoke pending**.
+- **Remaining:** step 5 — the physical move of orchestration state + methods into `pb-app-core`
+  as `AppCore` + a thin `WinitShell`. The single `AppCore` object is the remaining gate; do it
+  on a smoke-verified base, incrementally (see the brief's step-5 increment order).
 
 ## NS1 — Minimal SwiftUI/AppKit host: canvas only (proves the inversion)
 
