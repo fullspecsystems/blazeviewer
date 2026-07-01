@@ -40,3 +40,6 @@ little_exif = "0.6"
 trash = { version = "5", default-features = false, features = [
     "coinit_apartmentthreaded",
 ] }
+# Iterative, symlink-safe directory walk for the scan resolvers migrated off the shell (NS0 5.6
+# Step 2b). Same crate the shell used; already in the lockfile.
+walkdir = "2"

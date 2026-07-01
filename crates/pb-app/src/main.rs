@@ -31,7 +31,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -103,6 +102,8 @@ use pb_app_core::metrics::StageTimes;
 // + the `ScanUpdate` stream message. The resolver *functions* still run on the shell's scan/archive
 // worker threads (which stay here); they produce these core types.
 use pb_app_core::scan::{self, Resolved, ScanUpdate};
+// Re-export so the shell's `ScanProgress` refs + dialog.rs's `crate::ScanProgress` stay unchanged.
+pub use pb_app_core::scan::ScanProgress;
 
 /// Cap on decoded-but-not-yet-uploaded bytes held by the pool (backpressure).
 const POOL_BUDGET_BYTES: usize = 512 * 1024 * 1024;
@@ -141,14 +142,6 @@ const GESTURE_PAN_DIR: f32 = 1.0;
 /// flashes a dialog (and never pays for the extra window); only a genuinely large/nested
 /// tree (the `~/Library` case) reveals it — with a live count, current folder, and Cancel.
 const SCAN_DIALOG_DELAY: Duration = Duration::from_millis(250);
-
-/// How often the streaming scan worker publishes a growing playlist snapshot. Time-bounded
-/// (not per-count) so the number of snapshots — and thus the per-snapshot O(N) `FsSource`
-/// rebuild — stays small (≈ scan_duration / this) regardless of folder size. The first
-/// batch lands at the first interval boundary (or at scan end for a fast folder, which is
-/// then the only batch), bootstrapping the view well under [`SCAN_DIALOG_DELAY`]; this just
-/// governs how often the rest refills.
-const SCAN_BATCH_INTERVAL: Duration = Duration::from_millis(150);
 
 /// How often the scan card is re-rasterized at most. The live current-folder line changes per
 /// directory (fast); throttling the rebuild keeps the software composite off the hot path
@@ -743,7 +736,7 @@ impl App {
         let worker_progress = progress.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            stream_scan(
+            scan::stream_scan(
                 roots,
                 recursive,
                 cursor,
@@ -2538,82 +2531,6 @@ fn cursor_icon(kind: contract::CursorKind) -> CursorIcon {
     }
 }
 
-/// Whether a path's extension is a supported image format (the decoder's single
-/// source of truth — see `pb_decode::is_supported_extension`).
-fn is_supported_image(p: &Path) -> bool {
-    p.extension()
-        .and_then(|e| e.to_str())
-        .map(is_supported_extension)
-        .unwrap_or(false)
-}
-
-/// Walk `dir` for supported images, appending them to `out` (unsorted — the caller
-/// sorts once across all roots). `recursive` descends every subfolder; otherwise only
-/// the immediate children are listed.
-///
-/// This is deliberately **crash-proof on hostile trees**, the bug that made opening a
-/// large nested folder (e.g. macOS's `~/Library`) beachball then die:
-/// * **iterative** (walkdir, not recursion) — a tree thousands of levels deep can't
-///   overflow the stack the old recursive walk did, and open directory handles stay
-///   bounded instead of one-per-level;
-/// * **never follows symlinks** (walkdir's default) — a directory symlink/alias that
-///   points back at an ancestor can't send it into an infinite loop;
-/// * **error-tolerant** — a permission-denied folder (macOS TCC guards much of
-///   `~/Library`) or a file that vanished mid-walk is skipped, not fatal.
-///
-/// `cancel`, if set, stops the walk at the next entry so a superseding open can abandon
-/// a huge in-flight scan; whatever was gathered so far is left in `out`.
-fn collect_images(
-    dir: &Path,
-    recursive: bool,
-    progress: Option<&ScanProgress>,
-    out: &mut Vec<PathBuf>,
-) {
-    let max_depth = if recursive { usize::MAX } else { 1 };
-    // follow_links(false) is the default, but state it: symlinked dirs are yielded yet
-    // never descended, so the walk stays inside the intended tree and can't cycle.
-    let walker = walkdir::WalkDir::new(dir)
-        .max_depth(max_depth)
-        .follow_links(false);
-    for entry in walker {
-        if progress.is_some_and(|p| p.is_cancelled()) {
-            return;
-        }
-        // Skip unreadable entries (permissions, races) rather than aborting the scan.
-        let Ok(entry) = entry else {
-            continue;
-        };
-        // file_type() here does not traverse symlinks (matches follow_links(false)), so
-        // a symlinked file/dir is not mistaken for a real one.
-        let ft = entry.file_type();
-        if ft.is_dir() {
-            // Publish the directory now being walked so the Scanning dialog shows real
-            // motion. Cheap: once per directory (a mutex write), not per file.
-            if let Some(p) = progress {
-                p.set_current(rel_display(entry.path(), dir));
-            }
-        } else if ft.is_file() && is_supported_image(entry.path()) {
-            if let Some(p) = progress {
-                p.incr_found();
-            }
-            out.push(entry.into_path());
-        }
-    }
-}
-
-/// A scanned directory's path relative to the scan root, as a display string for the
-/// Scanning dialog's "current folder" caption. The root itself (empty relative path)
-/// shows as its own folder name so the caption is never blank.
-fn rel_display(path: &Path, root: &Path) -> String {
-    match path.strip_prefix(root) {
-        Ok(rel) if !rel.as_os_str().is_empty() => rel.display().to_string(),
-        _ => root
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| root.display().to_string()),
-    }
-}
-
 /// The folder name shown in the Scanning dialog ("Scanning "name"…") — the first scan
 /// root's own name, falling back to its full path for a root with no file name (e.g. `/`).
 fn scan_display_name(source: &Source) -> String {
@@ -2641,7 +2558,7 @@ fn scan_message(name: &str) -> String {
 #[cfg(test)]
 fn scan_images(dir: &Path, recursive: bool) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    collect_images(dir, recursive, None, &mut paths);
+    scan::collect_images(dir, recursive, None, &mut paths);
     paths.sort();
     paths
 }
@@ -2784,162 +2701,16 @@ fn classify_inputs(paths: Vec<PathBuf>) -> LaunchInput {
     LaunchInput::Files(files)
 }
 
-/// Execute an [`open::OpenPlan`]'s [`Source`]: scan the roots (or filter the
-/// explicit list) into the ordered image paths to play. Returns the paths, the
-/// root for relative-path display, the scan root (for `Ctrl+R`; `None` for an
-/// explicit list), and whether the scan was recursive.
-fn resolve_source(
-    source: &Source,
-    progress: Option<&ScanProgress>,
-) -> (Vec<PathBuf>, PathBuf, Option<PathBuf>, bool) {
-    match source {
-        Source::Scan { roots, recursive } => {
-            let mut paths = Vec::new();
-            for r in roots {
-                collect_images(r, *recursive, progress, &mut paths);
-            }
-            paths.sort();
-            let root = roots.first().cloned().unwrap_or_else(|| PathBuf::from("."));
-            (paths, root, roots.first().cloned(), *recursive)
-        }
-        Source::Explicit(files) => {
-            let paths: Vec<PathBuf> = files
-                .iter()
-                .filter(|p| is_supported_image(p.as_path()))
-                .cloned()
-                .collect();
-            let root = files
-                .first()
-                .and_then(|p| p.parent())
-                .filter(|d| !d.as_os_str().is_empty())
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| PathBuf::from("."));
-            (paths, root, None, false)
-        }
-        // Archives don't resolve to a path list; `resolve_playlist` routes them to
-        // `open_archive` instead. This arm only keeps the match exhaustive.
-        Source::Archive(_) => (Vec::new(), PathBuf::from("."), None, false),
-    }
-}
-
-/// Resolve a filesystem [`Source`] (folder scan or explicit list) into a playlist,
-/// driving `progress` (image count + current folder) and honoring its cancel flag so a
-/// superseding open / the Scanning dialog can abandon a huge in-flight scan. The cursor
-/// math + `FsSource` build is shared with [`resolve_playlist`]; this carries the
-/// (cancellable) directory I/O, so it's what the off-thread scan worker runs.
-fn resolve_scan(
-    source: &Source,
-    cursor: &open::Cursor,
-    progress: Option<&ScanProgress>,
-) -> Resolved {
-    let (paths, root, scan_root, recursive) = resolve_source(source, progress);
-    let start = open::resolve_cursor(&paths, cursor);
-    Resolved {
-        source: Arc::new(FsSource::new(paths)),
-        root,
-        scan_root,
-        recursive,
-        start,
-    }
-}
-
-/// The configured directory walker shared by the streaming scan and its tests: depth-first,
-/// each directory's entries **sorted by file name** — which reproduces `Vec<PathBuf>::sort()`
-/// order exactly (`Path`'s `Ord` is component-wise, not byte-string — verified), so streaming
-/// changes nothing about the order today's walk-then-`paths.sort()` produces. Symlinks are
-/// yielded but never followed, so the walk can't cycle. `recursive` sets the depth.
-fn image_walker(root: &Path, recursive: bool) -> walkdir::WalkDir {
-    walkdir::WalkDir::new(root)
-        .max_depth(if recursive { usize::MAX } else { 1 })
-        .sort_by_file_name()
-        .follow_links(false)
-}
-
 /// All supported images under `root` in playlist order — the sorted image sequence the
 /// streaming scan emits, collected eagerly. Used by the order-guarantee tests.
 #[cfg(test)]
 fn sorted_image_walk(root: &Path, recursive: bool) -> Vec<PathBuf> {
-    image_walker(root, recursive)
+    scan::image_walker(root, recursive)
         .into_iter()
         .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_file() && is_supported_image(e.path()))
+        .filter(|e| e.file_type().is_file() && scan::is_supported_image(e.path()))
         .map(walkdir::DirEntry::into_path)
         .collect()
-}
-
-/// Walk `roots` off the event loop, **streaming** the playlist in: emit a growing snapshot
-/// every [`SCAN_BATCH_INTERVAL`] (and a final one), then [`ScanUpdate::Done`]. The first
-/// non-empty batch lets the app show a photo almost immediately; later batches extend the
-/// playlist in place, so the user browses while the rest of a big tree is still being walked.
-/// Drives `progress` (image count + current folder) and bails at the next entry once its
-/// cancel flag is set. Each snapshot is built here (off-thread) so the UI swap is O(1).
-/// Sending stops early if the receiver is gone (a superseding open dropped it).
-#[allow(clippy::too_many_arguments)]
-fn stream_scan(
-    roots: Vec<PathBuf>,
-    recursive: bool,
-    cursor: open::Cursor,
-    root: PathBuf,
-    scan_root: Option<PathBuf>,
-    generation: u64,
-    progress: ScanProgress,
-    tx: std::sync::mpsc::Sender<(u64, ScanUpdate)>,
-) {
-    let mut paths: Vec<PathBuf> = Vec::new();
-    let mut last_emit = Instant::now();
-    let mut sent_len = 0usize;
-    // For a single-file open (`Cursor::At`) we must not bootstrap until the opened file is
-    // in the snapshot — otherwise `resolve_cursor` falls back to index 0 and we'd show the
-    // wrong photo. So hold interval emits until the target is found (it always will be: it's
-    // in the flat parent dir being scanned). `Cursor::First` never gates. The *final* emit
-    // below is unconditional, so a target that's since been deleted still shows the folder.
-    let target = match &cursor {
-        open::Cursor::At(p) => Some(p.clone()),
-        open::Cursor::First => None,
-    };
-    let mut gated = target.is_some();
-    'outer: for r in &roots {
-        for entry in image_walker(r, recursive) {
-            if progress.is_cancelled() {
-                break 'outer;
-            }
-            let Ok(entry) = entry else {
-                continue; // skip unreadable entries (permissions, races) — don't abort
-            };
-            let ft = entry.file_type();
-            if ft.is_dir() {
-                // Publish the directory now being walked (relative to its root) for the chip.
-                progress.set_current(rel_display(entry.path(), r));
-            } else if ft.is_file() && is_supported_image(entry.path()) {
-                let p = entry.into_path();
-                progress.incr_found();
-                if gated && target.as_ref() == Some(&p) {
-                    gated = false; // the opened file is now in the snapshot — emits may start
-                }
-                paths.push(p);
-                if !gated && last_emit.elapsed() >= SCAN_BATCH_INTERVAL {
-                    let snap = scan::build_resolved(
-                        paths.clone(),
-                        &cursor,
-                        root.clone(),
-                        scan_root.clone(),
-                        recursive,
-                    );
-                    if tx.send((generation, ScanUpdate::Batch(snap))).is_err() {
-                        return; // receiver dropped — superseded; stop and free our buffers
-                    }
-                    sent_len = paths.len();
-                    last_emit = Instant::now();
-                }
-            }
-        }
-    }
-    // Final batch: the un-emitted remainder, or the only batch for a fast folder.
-    if !paths.is_empty() && (paths.len() > sent_len || sent_len == 0) {
-        let snap = scan::build_resolved(paths, &cursor, root, scan_root, recursive);
-        let _ = tx.send((generation, ScanUpdate::Batch(snap)));
-    }
-    let _ = tx.send((generation, ScanUpdate::Done));
 }
 
 /// Turn a planned [`Source`] into a concrete [`PhotoSource`] plus playlist framing.
@@ -2948,7 +2719,7 @@ fn stream_scan(
 /// hard archive failure it logs and falls back to an empty source.
 fn resolve_playlist(source: &Source, cursor: &open::Cursor) -> Resolved {
     match source {
-        Source::Scan { .. } | Source::Explicit(_) => resolve_scan(source, cursor, None),
+        Source::Scan { .. } | Source::Explicit(_) => scan::resolve_scan(source, cursor, None),
         // The launch / picker / drop paths open archives via the async-aware
         // `App::begin_archive_open` (which surfaces failures through the egui
         // dialog), so this arm is only a safety net: log and show empty on failure.
@@ -3046,72 +2817,6 @@ fn load_seven_z(
         return Err(archive::ArchiveOpenError::Empty);
     }
     Ok(scan::archive_resolved(path, Arc::new(src)))
-}
-
-/// Shared, thread-safe progress + cancellation for an off-thread directory scan — the
-/// folder-walk analogue of [`pb_source::OpenProgress`]. A folder walk has no knowable
-/// total (you'd have to walk the tree twice), so this carries *indeterminate* progress:
-/// a running count of images found and the directory currently being walked, plus the
-/// cancel flag the Scanning dialog's Cancel / Esc (and a superseding open / teardown)
-/// set. Cheap to [`clone`](Clone) — it's an `Arc` — so the walk worker and the UI thread
-/// each hold one.
-#[derive(Clone, Default)]
-pub(crate) struct ScanProgress {
-    inner: Arc<ScanProgressInner>,
-}
-
-#[derive(Default)]
-struct ScanProgressInner {
-    /// Supported images found so far (bumped per match by the walk worker).
-    found: AtomicUsize,
-    /// Set by the UI to stop the walk at its next entry (Cancel / Esc / a superseding open).
-    cancel: AtomicBool,
-    /// The directory currently being walked, relative to the scan root (display string).
-    current: std::sync::Mutex<String>,
-}
-
-impl ScanProgress {
-    fn new() -> Self {
-        Self::default()
-    }
-
-    /// Supported images found so far (read by the Scanning dialog each frame).
-    pub(crate) fn found(&self) -> usize {
-        self.inner.found.load(Ordering::Relaxed)
-    }
-
-    /// Worker-side: record one more supported image.
-    fn incr_found(&self) {
-        self.inner.found.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Ask the walk to stop at its next entry (the Cancel button / Esc / a superseding open).
-    pub(crate) fn request_cancel(&self) {
-        self.inner.cancel.store(true, Ordering::Relaxed);
-    }
-
-    /// Whether cancellation has been requested (polled by the walk loop).
-    fn is_cancelled(&self) -> bool {
-        self.inner.cancel.load(Ordering::Relaxed)
-    }
-
-    /// Worker-side: publish the directory now being walked (relative to the scan root).
-    /// A poisoned lock just means a prior writer panicked mid-update — drop the value
-    /// rather than propagate; a stale caption is harmless.
-    fn set_current(&self, dir: String) {
-        if let Ok(mut g) = self.inner.current.lock() {
-            *g = dir;
-        }
-    }
-
-    /// The directory currently being walked (empty until the worker sets one).
-    pub(crate) fn current(&self) -> String {
-        self.inner
-            .current
-            .lock()
-            .map(|g| g.clone())
-            .unwrap_or_default()
-    }
 }
 
 /// An in-flight background **directory scan**. A large/recursive folder is walked off
@@ -3349,7 +3054,7 @@ mod tests {
             PathBuf::from("/p/notes.txt"),
             PathBuf::from("/p/b.png"),
         ]);
-        let (paths, root, scan_root, recursive) = resolve_source(&src, None);
+        let (paths, root, scan_root, recursive) = scan::resolve_source(&src, None);
         assert_eq!(
             paths,
             vec![PathBuf::from("/p/a.jpg"), PathBuf::from("/p/b.png")]
@@ -3492,7 +3197,7 @@ mod tests {
         let progress = ScanProgress::new();
         progress.request_cancel();
         let mut out = Vec::new();
-        collect_images(&dir, true, Some(&progress), &mut out);
+        scan::collect_images(&dir, true, Some(&progress), &mut out);
         assert!(out.is_empty(), "a pre-cancelled scan collects nothing");
 
         let _ = fs::remove_dir_all(&dir);
@@ -3511,7 +3216,7 @@ mod tests {
 
         let progress = ScanProgress::new();
         let mut out = Vec::new();
-        collect_images(&dir, true, Some(&progress), &mut out);
+        scan::collect_images(&dir, true, Some(&progress), &mut out);
 
         assert_eq!(out.len(), 3, "three supported images (the .txt is skipped)");
         assert_eq!(
@@ -3532,11 +3237,11 @@ mod tests {
         let root = Path::new("/photos/Library");
         // A descendant shows its path relative to the root.
         assert_eq!(
-            rel_display(Path::new("/photos/Library/2024/Iceland"), root),
+            scan::rel_display(Path::new("/photos/Library/2024/Iceland"), root),
             Path::new("2024/Iceland").display().to_string()
         );
         // The root itself (empty relative) falls back to the root's own folder name.
-        assert_eq!(rel_display(root, root), "Library");
+        assert_eq!(scan::rel_display(root, root), "Library");
     }
 
     #[test]
