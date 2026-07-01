@@ -2929,9 +2929,11 @@ impl App {
         }
     }
 
-    /// Show the native picker (`O` = file(s), `Shift+O` = folder) and open the
-    /// result. Modal — it blocks the event loop while open, which is fine: the app
-    /// isn't flying through photos with a dialog up.
+    /// Request the native picker (`O` = file(s), `Shift+O` = folder). Computes the start
+    /// directory from live state (core), then emits an [`CoreEffect::OpenFilePanel`] /
+    /// [`OpenFolderPanel`](CoreEffect::OpenFolderPanel); the shell runs the modal panel in
+    /// the drain and re-enters via [`App::finish_picker`]. Modal — it blocks the event loop
+    /// while open, which is fine: the app isn't flying through photos with a dialog up.
     fn open_picker(&mut self, folder: bool) {
         let fallback = default_picker_dir();
         let mut start_dir = picker_start_dir(
@@ -2947,32 +2949,19 @@ impl App {
         if !start_dir.is_dir() {
             start_dir = fallback;
         }
-        let input = if folder {
-            rfd::FileDialog::new()
-                .set_directory(&start_dir)
-                .pick_folder()
-                .map(LaunchInput::Directory)
+        self.effects.push(if folder {
+            contract::CoreEffect::OpenFolderPanel { start_dir }
         } else {
-            // Offer archives alongside images in the default filter (opening a zip
-            // to view its photos is the same use case), plus an All-files escape
-            // hatch. The picked paths go through `classify_inputs` — like drag-drop
-            // — so a single picked `.zip` opens as an archive instead of being
-            // mistaken for one file inside its folder.
-            let mut exts: Vec<&str> = IMAGE_FILTER_EXTS.to_vec();
-            exts.push("zip");
-            exts.push("7z");
-            rfd::FileDialog::new()
-                .add_filter("Images & archives", &exts)
-                .add_filter("All files", &["*"])
-                .set_directory(&start_dir)
-                .pick_files()
-                .filter(|ps| !ps.is_empty())
-                .map(classify_inputs)
-        };
-        // The modal picker ran its own message loop; the Esc (or Enter) used to
-        // dismiss it can leak to our window as a stray key event. Drop any keys it
-        // left "held", and guard Esc-to-quit briefly so cancelling the picker never
-        // closes PhotoBlaze.
+            contract::CoreEffect::OpenFilePanel { start_dir }
+        });
+    }
+
+    /// Core tail of the picker flow, run by the shell after the modal panel closes with the
+    /// resolved [`LaunchInput`] (`None` = cancelled). Sets the Esc/held guard **first** (the
+    /// modal ran its own message loop; the Esc/Enter that dismissed it can leak to our window
+    /// as a stray key event — drop any keys it left "held", and guard Esc-to-quit briefly so
+    /// cancelling the picker never closes PhotoBlaze), then opens the input if one was picked.
+    fn finish_picker(&mut self, input: Option<LaunchInput>) {
         self.held.clear();
         self.esc_guard_until = Some(Instant::now() + Duration::from_millis(300));
         if let Some(input) = input {
@@ -4218,6 +4207,31 @@ impl App {
                 }
                 contract::CoreEffect::WriteClipboard(payload) => {
                     self.write_clipboard(payload);
+                }
+                contract::CoreEffect::OpenFolderPanel { start_dir } => {
+                    let input = rfd::FileDialog::new()
+                        .set_directory(&start_dir)
+                        .pick_folder()
+                        .map(LaunchInput::Directory);
+                    self.finish_picker(input);
+                }
+                contract::CoreEffect::OpenFilePanel { start_dir } => {
+                    // Offer archives alongside images in the default filter (opening a zip
+                    // to view its photos is the same use case), plus an All-files escape
+                    // hatch. The picked paths go through `classify_inputs` — like drag-drop
+                    // — so a single picked `.zip` opens as an archive instead of being
+                    // mistaken for one file inside its folder.
+                    let mut exts: Vec<&str> = IMAGE_FILTER_EXTS.to_vec();
+                    exts.push("zip");
+                    exts.push("7z");
+                    let input = rfd::FileDialog::new()
+                        .add_filter("Images & archives", &exts)
+                        .add_filter("All files", &["*"])
+                        .set_directory(&start_dir)
+                        .pick_files()
+                        .filter(|ps| !ps.is_empty())
+                        .map(classify_inputs);
+                    self.finish_picker(input);
                 }
                 _ => {}
             }

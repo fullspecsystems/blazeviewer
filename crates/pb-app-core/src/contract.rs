@@ -245,10 +245,11 @@ pub enum CoreEffect {
     HideWindow,
     /// Quit the application (clean teardown — privacy #6).
     Quit,
-    /// Open the native file picker.
-    OpenFilePanel,
-    /// Open the native folder picker.
-    OpenFolderPanel,
+    /// Open the native file picker (images + archives filter) at `start_dir`. The shell
+    /// runs the modal panel and re-enters the core with the picked paths.
+    OpenFilePanel { start_dir: PathBuf },
+    /// Open the native folder picker at `start_dir`.
+    OpenFolderPanel { start_dir: PathBuf },
     /// Present a chrome dialog (payload is `NS-later`; see [`DialogKind`]).
     ShowDialog(DialogKind),
     /// Close the open dialog.
