@@ -74,6 +74,8 @@ pub enum Action {
     PlayPause,
     FrameNext,
     FramePrev,
+    // Live Photo audio (mute toggle; #38).
+    MuteLiveAudio,
     // Application.
     Settings,
     About,
@@ -120,6 +122,7 @@ impl Action {
         Action::PlayPause,
         Action::FrameNext,
         Action::FramePrev,
+        Action::MuteLiveAudio,
         Action::Settings,
         Action::About,
         Action::Quit,
@@ -164,6 +167,7 @@ impl Action {
             Action::PlayPause => "play_pause",
             Action::FrameNext => "frame_next",
             Action::FramePrev => "frame_prev",
+            Action::MuteLiveAudio => "mute_live_audio",
             Action::Settings => "settings",
             Action::About => "about",
             Action::Quit => "quit",
@@ -217,6 +221,7 @@ impl Action {
             Action::PlayPause => "Play/pause animation",
             Action::FrameNext => "Next frame",
             Action::FramePrev => "Previous frame",
+            Action::MuteLiveAudio => "Mute Live Photo audio",
             Action::Settings => "Settings",
             Action::About => "About",
             Action::Quit => "Quit",

@@ -134,6 +134,8 @@ pub struct MenuState {
     pub fullscreen: bool,
     /// View ▸ Slideshow.
     pub slideshow: bool,
+    /// Image ▸ Mute Live Photo Audio — checked when Live Photo audio is muted (#38).
+    pub mute_live_audio: bool,
     /// File ▸ Save Rotation — enabled only with an unsaved rotation on a writable file.
     pub save_rotation_enabled: bool,
     /// File ▸ Stop Scanning — enabled only while a folder scan is streaming in.

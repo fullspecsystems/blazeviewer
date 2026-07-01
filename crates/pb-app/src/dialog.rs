@@ -257,7 +257,12 @@ const KB_GROUPS: &[(&str, &[Action])] = &[
     ),
     (
         "Animation",
-        &[Action::PlayPause, Action::FrameNext, Action::FramePrev],
+        &[
+            Action::PlayPause,
+            Action::FrameNext,
+            Action::FramePrev,
+            Action::MuteLiveAudio,
+        ],
     ),
     (
         "Application",

@@ -1373,7 +1373,7 @@
         "id": 38,
         "title": "Live Photos (macOS): pair still + companion .mov, play the motion on P",
         "description": "Apple Live Photos are TWO files on disk — a still (JPEG on older iPhones, HEIC on newer) plus a short QuickTime .mov motion clip, linked by a shared content identifier. Detect and pair them during the folder scan, then reuse the task #37 animation playback machinery (P to play, step, eager-prep, present path) to play the motion on demand. macOS-first via AVFoundation; audio deferred; Windows tracked separately (#39). Reads only, RAM-only decode — the no-trace privacy guarantee (#2) holds. Both still variants (jpg/heic) work identically since the motion is the same .mov regardless of still format.",
-        "status": "pending",
+        "status": "in-progress",
         "priority": "medium",
         "dependencies": [
           37
@@ -1383,31 +1383,31 @@
             "id": 1,
             "title": "Pair still + .mov during scan",
             "description": "In pb-source/scan, detect a Live Photo: a still that has a companion .mov (same basename, e.g. IMG_1234.HEIC + IMG_1234.MOV). Exclude the .mov from the playlist (it is not a photo) but record its path against the still item. Optionally verify via the shared content identifier (still: Apple MakerNote tag 17 read through CGImageSource; .mov: com.apple.quicktime.content.identifier) for robustness against basename collisions. Flow a LivePhoto marker + motion path to PhotoMeta, mirroring animated:Option<AnimationKind>.",
-            "status": "pending"
+            "status": "review"
           },
           {
             "id": 2,
             "title": "Decode .mov -> RGBA frames (AVFoundation)",
             "description": "macOS backend: AVURLAsset(.mov) + AVAssetImageGenerator with maximumSize (decode-to-fit -> bounds RAM; a full-res 3s clip is ~1GB of RGBA, so cap the long edge), appliesPreferredTrackTransform for orientation, requestedTimeTolerance=zero. Loop over frame times from the video track nominalFrameRate/duration, copyCGImage -> reuse draw_cgimage_p3 (imageio.rs) -> AnimFrame, producing an Animation (reuse the struct). Respect MAX_FRAMES/MAX_DECODED_BYTES. If per-frame copyCGImage seeking is too slow, switch to AVAssetReader sequential sample decode.",
-            "status": "pending"
+            "status": "review"
           },
           {
             "id": 3,
             "title": "Wire motion into Playback",
             "description": "Reuse Playback + the eager-prep/P-to-play/frame-step/present machinery from #37. Live Photo plays once then parks on the last frame (finite-loop semantics), not looping forever. Route P (and eager-prep on dwell) to decode+play the companion .mov instead of decode_animation. Distinct affordance: a LIVE badge / hint instead of the play triangle.",
-            "status": "pending"
+            "status": "review"
           },
           {
             "id": 4,
             "title": "Live Photo info in the detailed panel",
             "description": "In the Shift+I panel, show it is a Live Photo plus the motion duration / frame count / current frame (reusing the animation_rows plumbing).",
-            "status": "pending"
+            "status": "review"
           },
           {
             "id": 5,
             "title": "Audio (deferred)",
             "description": "DEFERRED per owner. Decode the .mov audio track (AVAssetReader) and play it in sync with the motion via a cross-platform audio-output seam. Non-trivial (sync, output device, seam) — the motion plays silently until this lands.",
-            "status": "deferred"
+            "status": "review"
           }
         ]
       },

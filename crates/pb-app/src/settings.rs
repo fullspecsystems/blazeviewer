@@ -117,6 +117,9 @@ pub struct Settings {
     /// the no-trace boundary. Pinning a folder also stops the OS dialog from surfacing its
     /// own last-folder memory on the next launch.
     pub picker_dir: Option<PathBuf>,
+    /// Play a Live Photo's audio when its motion plays (#38). Muted via `M` / the Image
+    /// menu; persisted so the choice sticks. Default on (audio plays).
+    pub mute_live_audio: bool,
 }
 
 impl Default for Settings {
@@ -139,7 +142,8 @@ impl Default for Settings {
             info_opacity: 60,        // hud::BG alpha 153/255 ≈ 60%
             slideshow_interval_secs: slideshow::DEFAULT_INTERVAL.as_secs_f64(), // 4.0
             window: None,
-            picker_dir: None, // start in the current photo's folder
+            picker_dir: None,       // start in the current photo's folder
+            mute_live_audio: false, // Live Photo audio plays by default (#38)
         }
     }
 }

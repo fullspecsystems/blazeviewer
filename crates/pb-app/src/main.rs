@@ -67,6 +67,7 @@ mod hdr_surface;
 mod hud;
 mod hud_gallery;
 mod icon;
+mod live_audio;
 #[cfg(target_os = "macos")]
 mod macos_chrome;
 #[cfg(target_os = "macos")]
@@ -90,6 +91,7 @@ use animation::Playback;
 use decode_pool::{recommended_workers, DecodeFn, DecodePool, Outcome};
 use hud::{Hud, Row};
 use keymap::Keymap;
+use live_audio::LiveAudio;
 use menu::MenuAction;
 use metrics::StageTimes;
 use pb_key::PbKey;
@@ -161,6 +163,17 @@ const FRAME_STEP_REPEAT: Duration = Duration::from_millis(70);
 /// sequence in the background (so a slow WebP/AVIF plays instantly on `P`). Long enough
 /// that tapping straight through a folder of animations never kicks a decode (#37).
 const EAGER_PREP_DELAY: Duration = Duration::from_millis(250);
+
+/// How long a finished Live Photo lingers on its last motion frame before reverting to
+/// the crisp still — "a beat after the video finishes" (task #38).
+const LIVE_REVERT_DELAY: Duration = Duration::from_millis(450);
+
+/// Cap on the Live Photo motion's long edge when decoding its `.mov` (task #38). The
+/// motion is a brief preview, not a pixel-peeping asset, so a ~1440px cap keeps the
+/// whole pre-decoded RGBA sequence's RAM bounded (~0.5 GB worst case) without a visible
+/// quality cost. Also clamped to the display fit, so a small window decodes smaller.
+#[cfg(target_os = "macos")]
+const MOTION_MAX_LONG_EDGE: u32 = 1440;
 
 /// The frame-step direction encoded by an action: `+1` next / `-1` previous / `0`
 /// for anything else.
@@ -286,7 +299,7 @@ enum UndoAction {
 
 impl UndoAction {
     /// The dynamic Edit-menu title for this action (e.g. "Undo Save Rotation"), so the
-    /// menu shows *what* the next undo will reverse (see `App::refresh_undo_menu_item`).
+    /// menu shows *what* the next undo will reverse (applied via `App::apply_menu_state`).
     fn menu_label(&self) -> &'static str {
         match self {
             UndoAction::SaveRotation { .. } => "Undo Save Rotation",
@@ -371,6 +384,35 @@ fn decode_item(
     // still first frame; only `decode_animation` (on `P`) decodes the whole sequence.
     img.animated = pb_decode::detect_animation(&bytes);
     Ok(img)
+}
+
+/// The off-thread decode for an on-demand motion sequence (tasks #37 / #38): a Live
+/// Photo's companion `.mov` via AVFoundation when `live` is set, otherwise the item's
+/// own bytes as a multi-frame animation. Both return a unified [`pb_decode::Animation`]
+/// so playback treats them identically.
+fn decode_motion_job(
+    live: Option<PathBuf>,
+    source: &Arc<dyn PhotoSource>,
+    item: usize,
+    fit: Option<FitBox>,
+) -> Result<pb_decode::Animation, DecodeError> {
+    #[cfg(target_os = "macos")]
+    if let Some(path) = &live {
+        // Cap the motion's long edge to the display fit, but never above the RAM ceiling.
+        let edge = fit
+            .map(|f| f.max_width.max(f.max_height))
+            .unwrap_or(MOTION_MAX_LONG_EDGE)
+            .min(MOTION_MAX_LONG_EDGE);
+        return pb_decode::decode_live_motion(path, edge);
+    }
+    // Off macOS `live` is always `None` (Live Photos = task #39); acknowledge it there so
+    // the parameter isn't flagged unused.
+    #[cfg(not(target_os = "macos"))]
+    let _ = &live;
+    match source.bytes(item) {
+        Ok(bytes) => pb_decode::decode_animation(&bytes, fit),
+        Err(e) => Err(DecodeError::Corrupt(format!("read error: {e}"))),
+    }
 }
 
 /// Max displayed characters for an EXIF value; longer ones are truncated so a
@@ -547,6 +589,11 @@ struct App {
     /// tag/value pairs) so re-showing the panel — including per-frame while an animation
     /// plays — never re-reads/re-parses the file. RAM-only, dropped on navigate (#2).
     exif_cache: HashMap<usize, (u64, Vec<(String, String)>)>,
+    /// Live Photo pairing, memoized per item: `Some(path)` = the companion motion
+    /// `.mov`, `None` = not a Live Photo. Filled lazily (one `stat`) only when settled
+    /// on a photo — never on the fly-through path. RAM-only, index-keyed, cleared on a
+    /// playlist rebuild. Always `None` off macOS (Windows Live Photos = task #39).
+    live_motion_cache: HashMap<usize, Option<PathBuf>>,
     /// Prefetch window: items ahead / behind the cursor.
     ahead: usize,
     behind: usize,
@@ -692,9 +739,10 @@ struct App {
     view_checks: Option<menu::ViewChecks>,
     /// The last [`contract::MenuState`] pushed to the native menu — the single cache
     /// behind [`App::apply_menu_state`]. Every runtime menu mirror (checkmarks, Save
-    /// Rotation / Stop Scanning / Undo enabled+label, the macOS native-fullscreen label)
-    /// is diffed field-by-field against this, so the per-tick refresh only touches the OS
-    /// for items that actually changed. `None` = nothing pushed yet (re-assert everything).
+    /// Rotation / Stop Scanning / Undo enabled+label, the macOS native-fullscreen label,
+    /// the Live Photo mute check) is diffed field-by-field against this, so the per-tick
+    /// refresh only touches the OS for items that actually changed. `None` = nothing
+    /// pushed yet (re-assert everything).
     menu_state: Option<contract::MenuState>,
     /// A delete whose playlist-advance is deferred: `(fire_at, removed_index)`. The
     /// deleted photo stays on screen with its icon until `fire_at`, then the playlist
@@ -764,6 +812,14 @@ struct App {
     /// initial tap delay) and when the last repeat fired.
     framestep_started: Option<Instant>,
     framestep_last: Option<Instant>,
+    /// When a finished **Live Photo** should revert to the crisp still (task #38). Armed
+    /// the moment the motion finishes; firing swaps the low-res last motion frame back
+    /// for the full-res still — Apple's "play, then back to the photo" behavior.
+    live_revert_at: Option<Instant>,
+    /// The Live Photo's audio (its `.mov` track), playing while the motion plays — the
+    /// "cheap path" (task #38). `None` when nothing is playing / it's a silent clip / not
+    /// a Live Photo. Dropped (which stops it) on pause-to-step, finish, or navigate.
+    live_audio: Option<LiveAudio>,
 
     /// Intent-level effects the orchestration layer queued this event/tick for the shell
     /// to carry out (NS0, ADR-021). Instead of touching winit/native APIs directly,
@@ -974,9 +1030,12 @@ impl App {
             anim_hint_shown_for: None,
             framestep_started: None,
             framestep_last: None,
+            live_revert_at: None,
+            live_audio: None,
             effects: Vec::new(),
             pending_dialog: None,
             exif_cache: HashMap::new(),
+            live_motion_cache: HashMap::new(),
         }
     }
 
@@ -1463,6 +1522,7 @@ impl App {
         self.rotations.clear();
         self.meta_cache.clear();
         self.exif_cache.clear();
+        self.live_motion_cache.clear();
         self.failed.clear();
         self.preview_resident.clear();
         self.upgrade_done.clear();
@@ -2350,7 +2410,7 @@ impl App {
     /// as a deliberate alternative to our borderless speed mode (F / ⌥⏎ / F11). winit's
     /// `Fullscreen::Borderless(None)` maps to AppKit's `toggleFullScreen:` on macOS.
     /// Driven from our "Enter Full Screen" menu item (⌃⌘F). The Enter/Exit label is kept
-    /// in sync separately (`refresh_native_fullscreen_label`), reading the real window
+    /// in sync separately (via `App::apply_menu_state`), reading the real window
     /// state — so it stays correct even for the green-button / gesture toggles.
     #[cfg(target_os = "macos")]
     fn toggle_native_fullscreen(&mut self) {
@@ -2568,6 +2628,7 @@ impl App {
         recursive: bool,
         fullscreen: bool,
         slideshow: bool,
+        mute_live_audio: bool,
         save_rotation_enabled: bool,
         cancel_scan_enabled: bool,
         undo: Option<&'static str>,
@@ -2589,6 +2650,7 @@ impl App {
             recursive,
             fullscreen,
             slideshow,
+            mute_live_audio,
             save_rotation_enabled,
             cancel_scan_enabled,
             undo,
@@ -2628,6 +2690,7 @@ impl App {
             self.recursive,
             !self.windowed, // `windowed` is the inverse of the fullscreen checkbox
             self.slideshow.on,
+            self.settings.mute_live_audio,
             self.can_save_rotation(),
             self.dir_scan.is_some(),
             // `None` = nothing to undo (disabled "Undo"); `Some(label)` = enabled w/ label.
@@ -2658,6 +2721,9 @@ impl App {
             }
             if changed!(slideshow) {
                 c.slideshow.set_checked(next.slideshow);
+            }
+            if changed!(mute_live_audio) {
+                c.mute_live_audio.set_checked(next.mute_live_audio);
             }
             if changed!(info) {
                 c.info
@@ -2868,6 +2934,7 @@ impl App {
             // `frame_step_press` (the FrameStep press arm) instead.
             Action::FrameNext => self.frame_step(1, event_loop),
             Action::FramePrev => self.frame_step(-1, event_loop),
+            Action::MuteLiveAudio => self.toggle_mute_audio(event_loop),
             Action::Settings => self.open_settings(),
             Action::About => self.open_about(),
             Action::Quit => self.begin_exit(),
@@ -2954,6 +3021,7 @@ impl App {
         self.rotations.clear();
         self.meta_cache.clear();
         self.exif_cache.clear();
+        self.live_motion_cache.clear();
         self.failed.clear();
         self.preview_resident.clear();
         self.upgrade_done.clear();
@@ -3575,9 +3643,10 @@ impl App {
     /// average frame rate, the duration, and the loop count; before that, just a hint
     /// that `P` will play it. The codec/format is already shown by the Codec row above.
     fn animation_rows(&self, item: usize) -> Vec<Row> {
-        if self.current.as_ref().and_then(|m| m.animated).is_none() {
-            return Vec::new(); // not an animated container
-        }
+        // A Live Photo (its pairing is resolved into `live_motion_cache` when the panel
+        // opens) or an animated container. Neither → nothing to add.
+        let is_live = self.is_live_photo(item);
+        let is_animated = self.current.as_ref().and_then(|m| m.animated).is_some();
         // Frame/timing detail needs a decoded sequence — the live playback, or the one
         // eagerly prepped for this item.
         let detail: Option<(usize, usize, Duration, u32)> = if let Some(pb) = &self.playback {
@@ -3594,36 +3663,74 @@ impl App {
         } else {
             None
         };
-        let Some((idx, count, total, loops)) = detail else {
-            return vec![Row::Pair {
-                label: "Animation".to_string(),
-                value: "press P to play".to_string(),
-            }];
-        };
-        let mut rows = vec![Row::Pair {
-            label: "Frame".to_string(),
-            value: format!("{} / {}", idx + 1, count),
-        }];
-        let secs = total.as_secs_f64();
-        if secs > 0.0 {
+        if !is_live && !is_animated && detail.is_none() {
+            return Vec::new();
+        }
+        // Reserve every row up front — the labels are known from the header sniff /
+        // pairing, so a Live Photo or animation always shows the same rows. Values are a
+        // pending placeholder until the sequence is decoded (eager prep on dwell), then
+        // fill in **in place**, so the panel never reflows when the numbers land a beat
+        // later. Playback then updates the live "Frame X / N" value with no row churn.
+        const PENDING: &str = "…";
+        let mut rows = Vec::new();
+        // A Live Photo names itself + its frame count (the Codec row shows the still's
+        // format); an animation's count lives in the Frame row below.
+        if is_live {
             rows.push(Row::Pair {
-                label: "Frame Rate".to_string(),
-                value: format!("{:.1} fps", count as f64 / secs),
-            });
-            rows.push(Row::Pair {
-                label: "Duration".to_string(),
-                value: format!("{secs:.2} s"),
+                label: "Live Photo".to_string(),
+                value: detail.map_or(PENDING.to_string(), |(_, count, _, _)| {
+                    format!("{count} frames")
+                }),
             });
         }
         rows.push(Row::Pair {
-            label: "Loop".to_string(),
-            value: if loops == 0 {
-                "Forever".to_string()
-            } else {
-                format!("{loops}×")
-            },
+            label: "Frame".to_string(),
+            value: detail.map_or(PENDING.to_string(), |(idx, count, _, _)| {
+                format!("{} / {}", idx + 1, count)
+            }),
         });
+        rows.push(Row::Pair {
+            label: "Frame Rate".to_string(),
+            value: detail.map_or(PENDING.to_string(), |(_, count, total, _)| {
+                let secs = total.as_secs_f64();
+                if secs > 0.0 {
+                    format!("{:.1} fps", count as f64 / secs)
+                } else {
+                    PENDING.to_string()
+                }
+            }),
+        });
+        rows.push(Row::Pair {
+            label: "Duration".to_string(),
+            value: detail.map_or(PENDING.to_string(), |(_, _, total, _)| {
+                format!("{:.2} s", total.as_secs_f64())
+            }),
+        });
+        // A Live Photo always plays once; the loop count is only meaningful for a
+        // GIF/APNG/WebP loop.
+        if !is_live {
+            rows.push(Row::Pair {
+                label: "Loop".to_string(),
+                value: detail.map_or(PENDING.to_string(), |(_, _, _, loops)| {
+                    if loops == 0 {
+                        "Forever".to_string()
+                    } else {
+                        format!("{loops}×")
+                    }
+                }),
+            });
+        }
         rows
+    }
+
+    /// Whether item `item` is a Live Photo, from the pairing cache (populated when the
+    /// info panel opens / on dwell). A `&self` read — never triggers a stat — so it's
+    /// safe from the render/rows path; the `&mut` [`live_motion_path`](App::live_motion_path)
+    /// is what fills the cache.
+    fn is_live_photo(&self, item: usize) -> bool {
+        self.live_motion_cache
+            .get(&item)
+            .is_some_and(|paired| paired.is_some())
     }
 
     /// Corner inset (physical px) for the info/EXIF/help panel. Scales with the
@@ -3647,13 +3754,22 @@ impl App {
         // The info / EXIF panels honor the user's opacity setting; the help overlay
         // keeps the standard translucency.
         let info_bg = hud::bg_for_opacity(self.settings.info_opacity);
+        // Resolve the Live Photo pairing (cached; one stat) up front so either panel can
+        // label it — the basic line and the detailed table both read `is_live_photo`.
+        if let Some(item) = self.displayed_item {
+            self.live_motion_path(item);
+        }
+        let is_live = self.displayed_item.is_some_and(|i| self.is_live_photo(i));
         let panel = match self.info {
             InfoMode::Off => return,
             InfoMode::Basic => {
                 let (Some(hud), Some(meta)) = (self.hud.as_ref(), self.current.as_ref()) else {
                     return;
                 };
-                let text = format!("{} · {}×{} · {}", meta.rel, meta.w, meta.h, meta.codec);
+                let mut text = format!("{} · {}×{} · {}", meta.rel, meta.w, meta.h, meta.codec);
+                if is_live {
+                    text.push_str(" · Live"); // a Live Photo's motion is playable (P)
+                }
                 hud.render_panel(&text, px, pad, info_bg)
             }
             InfoMode::Full => {
@@ -4166,6 +4282,7 @@ impl App {
         self.pending_uploads.clear();
         self.meta_cache.clear();
         self.exif_cache.clear();
+        self.live_motion_cache.clear();
         self.rotations.clear();
         self.failed.clear();
         self.preview_resident.clear();
@@ -4431,13 +4548,26 @@ impl App {
     /// `P` does nothing.
     fn toggle_play_pause(&mut self, event_loop: &ActiveEventLoop) {
         if self.playback.is_some() {
+            // Was it parked at the end of a finite loop? Then toggling *restarts* from
+            // frame 0 (so the audio must restart too, not resume mid-track).
+            let was_finished = self.playback.as_ref().unwrap().is_finished();
             let playing = self.playback.as_mut().unwrap().toggle_play();
             if playing {
                 // (Re)started — present the current frame (frame 0 when replaying a
                 // finished loop, so the stale last frame doesn't linger) + anchor timing.
                 self.present_anim_frame(event_loop);
+                if was_finished {
+                    if let Some(item) = self.displayed_item {
+                        self.start_live_audio(item); // replay from the top
+                    }
+                } else if let Some(a) = &self.live_audio {
+                    a.resume();
+                }
             } else {
                 self.draw(event_loop); // paused — just redraw the held frame
+                if let Some(a) = &self.live_audio {
+                    a.pause();
+                }
             }
             return;
         }
@@ -4449,6 +4579,7 @@ impl App {
             let anim = self.prepared.take().unwrap().anim;
             self.anim_hint_shown_for = Some(item); // engaged
             self.install_animation(anim, true, 0, event_loop);
+            self.start_live_audio(item);
             return;
         }
         // An eager prep is already decoding → upgrade it to play on arrival.
@@ -4457,7 +4588,7 @@ impl App {
             self.anim_hint_shown_for = Some(item);
             return;
         }
-        if self.current_is_animated(item) {
+        if self.has_motion(item) {
             self.start_animation_decode(item, AnimWant::Play);
         }
     }
@@ -4466,6 +4597,8 @@ impl App {
     /// pausing playback. Uses the eager prep when ready; otherwise upgrades an in-flight
     /// prep (or kicks one) so the held-key scrub steps once frames land. No-op on a still.
     fn frame_step(&mut self, delta: i32, event_loop: &ActiveEventLoop) {
+        // Scrubbing is not continuous playback — silence any Live Photo audio.
+        self.live_audio = None;
         if self.playback.is_some() {
             self.playback.as_mut().unwrap().step(delta);
             self.present_anim_frame(event_loop);
@@ -4485,7 +4618,7 @@ impl App {
             self.anim_hint_shown_for = Some(item);
             return;
         }
-        if self.current_is_animated(item) {
+        if self.has_motion(item) {
             self.start_animation_decode(item, AnimWant::Step(delta));
         }
     }
@@ -4529,22 +4662,50 @@ impl App {
             .is_some()
     }
 
-    /// Kick the whole-sequence decode for `item` on a worker thread so a big GIF/WebP
-    /// never stalls the event loop; the still first frame stays on screen until it lands
-    /// (picked up by `poll_anim_decode`). `want` decides what happens on arrival —
-    /// eager prep (stash ready), play (`P`), or step (frame-step).
+    /// The companion motion `.mov` for item `item` if it's a Live Photo, else `None`
+    /// (task #38). Filesystem pairing, memoized per item and computed lazily — only ever
+    /// reached when settled on a photo, never on the fly-through path. Always `None` off
+    /// macOS (Windows Live Photos are task #39, since the decoder is macOS-only).
+    fn live_motion_path(&mut self, item: usize) -> Option<PathBuf> {
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = item;
+            return None;
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(cached) = self.live_motion_cache.get(&item) {
+            return cached.clone();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let paired = self.source.path(item).and_then(companion_motion);
+            self.live_motion_cache.insert(item, paired.clone());
+            paired
+        }
+    }
+
+    /// Whether item `item` has an on-demand motion component to play on `P` — either an
+    /// animated container (GIF/APNG/WebP/HEIF sequence) or a Live Photo's `.mov`.
+    fn has_motion(&mut self, item: usize) -> bool {
+        self.current_is_animated(item) || self.live_motion_path(item).is_some()
+    }
+
+    /// Kick the whole-sequence decode for `item` on a worker thread so a big GIF/WebP (or
+    /// a Live Photo `.mov`) never stalls the event loop; the still first frame stays on
+    /// screen until it lands (picked up by `poll_anim_decode`). `want` decides what
+    /// happens on arrival — eager prep (stash ready), play (`P`), or step (frame-step).
     fn start_animation_decode(&mut self, item: usize, want: AnimWant) {
         self.anim_gen += 1;
         let gen = self.anim_gen;
         let epoch = self.epoch;
         let source = Arc::clone(&self.source);
         let fit = self.decode_fit();
+        // A Live Photo decodes its companion `.mov` via AVFoundation; everything else
+        // decodes the still's own bytes as a multi-frame animation.
+        let live = self.live_motion_path(item);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let result = match source.bytes(item) {
-                Ok(bytes) => pb_decode::decode_animation(&bytes, fit),
-                Err(e) => Err(DecodeError::Corrupt(format!("read error: {e}"))),
-            };
+            let result = decode_motion_job(live, &source, item, fit);
             let _ = tx.send(result);
         });
         self.anim_decode = Some(AnimDecode {
@@ -4577,7 +4738,7 @@ impl App {
         if self.prepared.as_ref().is_some_and(|p| p.item == item) {
             return None; // already prepped and ready
         }
-        if !self.current_is_animated(item) {
+        if !self.has_motion(item) {
             return None;
         }
         match self.last_present.map(|t| t + EAGER_PREP_DELAY) {
@@ -4626,7 +4787,10 @@ impl App {
                         self.show_overlay(event_loop);
                     }
                 }
-                AnimWant::Play => self.install_animation(anim, true, 0, event_loop),
+                AnimWant::Play => {
+                    self.install_animation(anim, true, 0, event_loop);
+                    self.start_live_audio(item); // in sync with the first frame
+                }
                 AnimWant::Step(delta) => self.install_animation(anim, false, delta, event_loop),
             },
             Err(e) => {
@@ -4679,11 +4843,34 @@ impl App {
             self.playback.as_mut().unwrap().advance();
             self.present_anim_frame(event_loop); // updates anim_frame_shown_at + draws
         }
+        // A finished Live Photo reverts to the crisp still after a beat (rather than
+        // parking on the low-res last motion frame). Arm the timer once, on the finish.
+        let live_finished = self
+            .playback
+            .as_ref()
+            .is_some_and(|pb| pb.is_finished() && pb.kind() == pb_decode::AnimationKind::LivePhoto);
+        if live_finished && self.live_revert_at.is_none() {
+            self.live_revert_at = Some(now + LIVE_REVERT_DELAY);
+        }
         let shown = self.anim_frame_shown_at;
         self.playback
             .as_ref()
             .filter(|pb| pb.is_playing())
             .map(|pb| shown.unwrap_or(now) + pb.current_delay())
+    }
+
+    /// Revert a finished Live Photo to its crisp full-res still: rebind the resident
+    /// still texture (it was never evicted — playback draws via `set_image`, not the
+    /// ring), re-decoding only in the rare case it's no longer resident.
+    fn restore_still(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(item) = self.displayed_item else {
+            return;
+        };
+        if let Some(slot) = self.ring.slot_for(item) {
+            self.present_item(item, slot, event_loop);
+        } else {
+            self.load_current_sync(event_loop);
+        }
     }
 
     /// Drive the held-key frame-step scrub (`,`/`.`). Returns whether a frame-step key
@@ -4739,9 +4926,15 @@ impl App {
         if self.anim_hint_shown_for == Some(item) {
             return;
         }
-        if self.current_is_animated(item) {
+        if self.has_motion(item) {
             self.anim_hint_shown_for = Some(item);
-            self.show_toast_icon("Press P to play", Some(icon::assets::PLAY), event_loop);
+            // A Live Photo gets the livephoto mark; an animated still gets the play ▶.
+            let icon = if self.is_live_photo(item) {
+                icon::assets::LIVE_PHOTO
+            } else {
+                icon::assets::PLAY
+            };
+            self.show_toast_icon("Press P to play", Some(icon), event_loop);
         }
     }
 
@@ -4755,6 +4948,50 @@ impl App {
         self.prepared = None;
         self.framestep_started = None;
         self.framestep_last = None;
+        self.live_revert_at = None;
+        self.live_audio = None; // dropping the player stops it
+    }
+
+    /// Start the Live Photo's audio from the top (its `.mov` track), if `item` is a Live
+    /// Photo with audio and audio isn't muted — the "cheap path" (task #38). A no-op for
+    /// an animation (no audio track), a silent clip, or when muted. Called when the motion
+    /// starts playing from frame 0.
+    fn start_live_audio(&mut self, item: usize) {
+        if self.settings.mute_live_audio {
+            self.live_audio = None;
+            return;
+        }
+        self.live_audio = self
+            .live_motion_path(item)
+            .and_then(|p| LiveAudio::play(&p, 0.0));
+    }
+
+    /// Toggle Live Photo audio mute (`M` / Image menu). Persists the choice, updates the
+    /// menu check + a toast, and takes effect immediately: muting silences a playing clip;
+    /// unmuting a currently-playing Live Photo starts its audio at the current position so
+    /// it stays in sync.
+    fn toggle_mute_audio(&mut self, event_loop: &ActiveEventLoop) {
+        let muted = !self.settings.mute_live_audio;
+        self.settings.mute_live_audio = muted;
+        self.settings.save();
+        self.menu_state = None; // invalidate the cache so the check re-asserts
+        self.apply_menu_state();
+        if muted {
+            self.live_audio = None; // silence any playing clip now
+            self.show_toast("Live Photo audio muted", event_loop);
+        } else {
+            // Unmuting mid-playback: resume audio at the motion's current position.
+            if let (Some(pb), Some(item)) = (self.playback.as_ref(), self.displayed_item) {
+                if pb.is_playing() {
+                    let secs = pb.index() as f64 * pb.total_duration().as_secs_f64()
+                        / pb.frame_count().max(1) as f64;
+                    self.live_audio = self
+                        .live_motion_path(item)
+                        .and_then(|p| LiveAudio::play(&p, secs));
+                }
+            }
+            self.show_toast("Live Photo audio on", event_loop);
+        }
     }
 }
 
@@ -5472,6 +5709,24 @@ impl ApplicationHandler for App {
         let anim_wake = self.tick_playback(now, event_loop);
         let framestep_active = self.tick_frame_step(now, event_loop);
 
+        // 4g'. A finished Live Photo reverts to the crisp still once the linger beat has
+        // elapsed (`tick_playback` armed the timer on finish). Returns a wake at the
+        // deadline so the idle loop comes back to perform the swap. Drops the finished
+        // playback but **keeps** the decoded motion (`prepared`) — back to the normal
+        // parked-and-prepped state, so replay is instant and the info panel keeps its
+        // numbers (no re-decode, no reflow blink).
+        let revert_wake = match self.live_revert_at {
+            Some(at) if now >= at => {
+                self.live_revert_at = None;
+                self.playback = None;
+                self.anim_frame_shown_at = None;
+                self.live_audio = None; // the motion (and its audio) is done
+                self.restore_still(event_loop);
+                None
+            }
+            other => other,
+        };
+
         // 4h. Eagerly prep an animated still for instant playback once the user has
         // rested on it (see `maybe_prepare_animation`). Only when settled — never while
         // flying — so it never competes with the fly-through hot path. Returns a wake at
@@ -5515,7 +5770,7 @@ impl ApplicationHandler for App {
         };
         // The earliest pending wake across the viewer, an open dialog, the animation's
         // next-frame deadline, and the eager-prep dwell deadline; `None` = idle.
-        let wake = [base_wake, dialog_wake, anim_wake, prep_wake]
+        let wake = [base_wake, dialog_wake, anim_wake, prep_wake, revert_wake]
             .into_iter()
             .flatten()
             .min();
@@ -5553,6 +5808,30 @@ fn is_supported_image(p: &Path) -> bool {
         .and_then(|e| e.to_str())
         .map(is_supported_extension)
         .unwrap_or(false)
+}
+
+/// The QuickTime motion component paired with a Live Photo still: a sibling file with
+/// the **same stem** and a `.mov`/`.qt` extension — Apple's on-disk convention
+/// (`IMG_1234.HEIC` + `IMG_1234.MOV`). Filename pairing is fast (one `stat`, no metadata
+/// read) and matches the export layout; a content-identifier cross-check to reject a
+/// coincidental name collision is a possible refinement (task #38). Returns the motion
+/// path if such a sibling exists on disk. Archive entries have no filesystem path, so
+/// they never pair here (Live-Photos-in-archives is out of scope for v1).
+///
+/// macOS-only for now: the motion decoder is AVFoundation, so a Windows build (Live
+/// Photos = task #39) has no consumer for a pairing and would flag this unused.
+#[cfg(target_os = "macos")]
+fn companion_motion(still: &Path) -> Option<PathBuf> {
+    let dir = still.parent()?;
+    let stem = still.file_stem()?;
+    for ext in ["mov", "MOV", "qt", "QT"] {
+        let mut cand = dir.join(stem);
+        cand.set_extension(ext);
+        if cand != still && cand.is_file() {
+            return Some(cand);
+        }
+    }
+    None
 }
 
 /// Walk `dir` for supported images, appending them to `out` (unsorted — the caller
@@ -6608,6 +6887,28 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// Live Photo pairing: a still finds its same-stem sibling `.mov`; a still with no
+    /// motion clip pairs to nothing. Filename-based (Apple's on-disk convention, #38).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn companion_motion_pairs_a_same_stem_mov() {
+        let dir = std::env::temp_dir().join(format!("pb_livepair_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("mkdir");
+        let still = dir.join("IMG_1.heic");
+        let motion = dir.join("IMG_1.mov");
+        fs::write(&still, b"still").expect("seed");
+        fs::write(&motion, b"motion").expect("seed");
+        // A still with no companion motion clip pairs to nothing.
+        let solo = dir.join("IMG_2.jpg");
+        fs::write(&solo, b"solo").expect("seed");
+
+        assert_eq!(companion_motion(&still), Some(motion));
+        assert_eq!(companion_motion(&solo), None);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// A pre-cancelled scan stops immediately and gathers nothing — proving the cancel
     /// flag a superseding open (and the Scanning dialog's Cancel) relies on actually
     /// short-circuits the walk.
@@ -7041,6 +7342,7 @@ mod tests {
             false,
             false,
             false,
+            false, // mute_live_audio
             false,
             false,
             None,
@@ -7057,6 +7359,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false, // mute_live_audio
                 false,
                 false,
                 None,
@@ -7078,6 +7381,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false, // mute_live_audio
                 false,
                 false,
                 None,
@@ -7103,6 +7407,7 @@ mod tests {
             false,
             false,
             false,
+            false, // mute_live_audio
             false,
             false,
             Some("Undo Save Rotation"),
@@ -7120,6 +7425,7 @@ mod tests {
             true, // recursive
             true, // fullscreen
             true, // slideshow
+            true, // mute_live_audio
             true, // save_rotation_enabled
             true, // cancel_scan_enabled
             None,
@@ -7128,6 +7434,7 @@ mod tests {
         assert!(all_on.recursive);
         assert!(all_on.fullscreen);
         assert!(all_on.slideshow);
+        assert!(all_on.mute_live_audio);
         assert!(all_on.save_rotation_enabled);
         assert!(all_on.cancel_scan_enabled);
         assert!(all_on.native_fullscreen_engaged);
@@ -7138,6 +7445,7 @@ mod tests {
             !b.recursive
                 && !b.fullscreen
                 && !b.slideshow
+                && !b.mute_live_audio
                 && !b.save_rotation_enabled
                 && !b.cancel_scan_enabled
                 && !b.native_fullscreen_engaged
@@ -7157,6 +7465,7 @@ mod tests {
             false,
             false,
             true, // slideshow flipped
+            false,
             false,
             false,
             None,
