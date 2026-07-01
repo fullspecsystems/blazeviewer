@@ -25,6 +25,7 @@ pub mod app_core;
 pub mod config;
 pub mod contract;
 pub mod decode_pool;
+pub mod engine;
 pub mod keymap;
 pub mod meta;
 pub mod metrics;

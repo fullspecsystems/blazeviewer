@@ -44,10 +44,7 @@ use winit::window::{CursorIcon, Icon, Window, WindowId};
 
 use pb_core::open::{self, LaunchInput, Source};
 use pb_core::{full_ring, prefetch_targets, prefetch_targets_scanning, Playlist, ResidentRing};
-use pb_decode::{
-    decode_bytes, decode_named_bytes, is_supported_extension, read_exif_fields, DecodeError,
-    DecodedImage, FitBox, PixelFormat,
-};
+use pb_decode::{decode_bytes, is_supported_extension, read_exif_fields, FitBox};
 use pb_render::{
     test_pattern, Renderer, Rotation, ScaleMode, ViewTransform, WgpuRenderer, MAX_ZOOM, MIN_ZOOM,
 };
@@ -79,7 +76,7 @@ mod save_rotation;
 // resolving unchanged.
 use pb_app_core::{
     action, contract, keymap, pb_key, slideshow, timing, AppCore, InfoMode, Nav, OpenButton,
-    OpenPanel, PhotoMeta, PlayHint, Toast, UndoAction, Viewport,
+    OpenPanel, PlayHint, Toast, UndoAction, Viewport,
 };
 // The HUD CPU compositor (info panel / toasts / pie / chip) and its Font Awesome icon
 // rasterizer now live in the shell-neutral `pb-hud` crate (NS0). Re-export them at the
@@ -100,17 +97,21 @@ use keymap::Keymap;
 use live_audio::LiveAudio;
 use menu::MenuAction;
 use pb_app_core::decode_pool::{recommended_workers, DecodeFn, DecodePool, Outcome};
+// Engine tuning constants + pure helpers migrated to pb-app-core (NS0 5.5 / Phase B) so the
+// orchestration methods that use them can live on `AppCore`. The shell still shares several.
+use pb_app_core::engine::{
+    decode_item, decode_motion_job, file_name_of, is_exif_blob, is_hdr, meta_for, nav_of,
+    point_in_rect, render_color, ring_capacity, scale_alpha, title_for, truncate_exif_value,
+    window_for_capacity, EAGER_PREP_DELAY, FRAME_STEP_REPEAT, MAX_FULL_RING, PAN_MAX_SPEED,
+    PAN_MIN_SPEED, PAN_RAMP_SECS, PIE_DIAMETER, PIE_EWMA_ALPHA, PIE_FILL_CAP, PIE_FINISH_FADE,
+    PIE_GLOW_DUR, PIE_MARGIN, PIE_SHOW_DELAY, PIE_TAU_MIN, RING_BUDGET_BYTES, UPLOADS_PER_TICK,
+    ZOOM_MAX_RATE, ZOOM_MIN_RATE, ZOOM_RAMP_SECS,
+};
 use pb_app_core::metrics::StageTimes;
 use pb_key::PbKey;
 
-/// VRAM budget for the resident texture ring (~1.5 GB → ~16–32 fit-size slots on
-/// a 7680-wide display, far more on smaller ones). Capacity is clamped to [4, 64].
-const RING_BUDGET_BYTES: u64 = 1_500_000_000;
 /// Cap on decoded-but-not-yet-uploaded bytes held by the pool (backpressure).
 const POOL_BUDGET_BYTES: usize = 512 * 1024 * 1024;
-/// Max slot uploads performed per `about_to_wait` tick, so a burst of finished
-/// decodes can't blow the frame budget.
-const UPLOADS_PER_TICK: usize = 2;
 /// Per-decode wall time *as the pool sees it* (i.e. under real concurrent load),
 /// printed with the `--metrics` report. Isolated decode is fast; this shows how much
 /// 8-way contention inflates it (it's how the RAW-demosaic-on-preview stall was
@@ -120,27 +121,6 @@ static POOL_DECODE_MS: std::sync::Mutex<Vec<(f64, String)>> = std::sync::Mutex::
 /// Whether `--metrics` is on (gates the `POOL_DECODE_MS` recording in the off-thread
 /// decode closure, which has no access to the `StageTimes`).
 static METRICS_ON_FLAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// Cap on the **full-resolution** "sharp ring" upgraded around the cursor when
-/// parked (`upgrade_set`). The preview window can be much larger (up to the ring's
-/// 64-slot capacity on small windows), but holding more than this many *fulls*
-/// resident is wasted decode — nobody pause-and-steps two dozen photos before
-/// either flying (previews carry that) or stopping. Keeps the on-park decode burst
-/// bounded. On a 7680 fullscreen the byte-budgeted capacity (~12–32) binds first.
-const MAX_FULL_RING: usize = 24;
-
-/// Hold-to-zoom curve: the e-folding zoom rate (per second) ramps from a gentle
-/// start (fine tuning) to a fast max over `ZOOM_RAMP_SECS`. Time-based so it's
-/// frame-rate independent.
-const ZOOM_MIN_RATE: f32 = 0.5;
-const ZOOM_MAX_RATE: f32 = 2.5;
-const ZOOM_RAMP_SECS: f32 = 0.7;
-
-/// Hold-to-pan curve: pan speed (px/sec) ramps from a gentle start to a fast max
-/// over `PAN_RAMP_SECS`. Time-based, same shape as zoom (per the owner's note).
-const PAN_MIN_SPEED: f32 = 450.0;
-const PAN_MAX_SPEED: f32 = 3200.0;
-const PAN_RAMP_SECS: f32 = 0.7;
-
 /// Trackpad gesture tuning. `PINCH_GAIN` scales macOS's incremental magnification
 /// (`WindowEvent::PinchGesture` delta) into a zoom factor (`1 + delta·gain`).
 /// `WHEEL_ZOOM_STEP` is the per-line zoom factor for **Ctrl+scroll** (the explicit
@@ -167,25 +147,9 @@ const GESTURE_PAN_DIR: f32 = 1.0;
 /// advances to the next one — so the trash/recycle feedback registers first (#28).
 const DELETE_ADVANCE_DELAY: Duration = Duration::from_millis(160);
 
-/// Repeat interval for the held frame-step scrub (`,`/`.`), after the initial tap
-/// delay (`initial_delay`). ~14 fps — quick enough to scrub, slow enough to read (#37).
-const FRAME_STEP_REPEAT: Duration = Duration::from_millis(70);
-
-/// How long the user must rest on an animated still before we eagerly decode the whole
-/// sequence in the background (so a slow WebP/AVIF plays instantly on `P`). Long enough
-/// that tapping straight through a folder of animations never kicks a decode (#37).
-const EAGER_PREP_DELAY: Duration = Duration::from_millis(250);
-
 /// How long a finished Live Photo lingers on its last motion frame before reverting to
 /// the crisp still — "a beat after the video finishes" (task #38).
 const LIVE_REVERT_DELAY: Duration = Duration::from_millis(450);
-
-/// Cap on the Live Photo motion's long edge when decoding its `.mov` (task #38). The
-/// motion is a brief preview, not a pixel-peeping asset, so a ~1440px cap keeps the
-/// whole pre-decoded RGBA sequence's RAM bounded (~0.5 GB worst case) without a visible
-/// quality cost. Also clamped to the display fit, so a small window decodes smaller.
-#[cfg(target_os = "macos")]
-const MOTION_MAX_LONG_EDGE: u32 = 1440;
 
 /// The frame-step direction encoded by an action: `+1` next / `-1` previous / `0`
 /// for anything else.
@@ -220,180 +184,6 @@ const SCAN_CARD_WIDTH: f32 = 320.0;
 /// directory (fast); throttling the rebuild keeps the software composite off the hot path
 /// while the displayed path/count lag by at most this. Show/hide is immediate.
 const SCAN_CARD_REFRESH: Duration = Duration::from_millis(120);
-
-/// "Not-ready" loading-pie tuning (the top-right affordance shown while the next
-/// photo is still decoding). The fill is a deliberate "honest-ish" fake: there is
-/// no true decode progress, so it eases asymptotically toward — but never reaches
-/// — full, on a time constant self-calibrated to how long misses usually take.
-/// Only appears once a wait outlasts `PIE_SHOW_DELAY`, so fast hits never flash it.
-const PIE_SHOW_DELAY: f32 = 0.12; // s a wait must persist before the pie appears
-const PIE_TAU_MIN: f32 = 0.06; // s floor on the fill time constant
-const PIE_FILL_CAP: f32 = 0.93; // the wedge never quite completes (the "lie")
-const PIE_FINISH_FADE: f32 = 0.18; // s to snap-to-full then fade once ready
-const PIE_GLOW_DUR: f32 = 0.30; // s the keypress brighten-pulse decays over
-const PIE_EWMA_ALPHA: f32 = 0.30; // weight of the latest wait in the time estimate
-const PIE_DIAMETER: f32 = 46.0; // logical px (scaled by the display factor)
-const PIE_MARGIN: f32 = 24.0; // logical px in from the top-right corner
-
-/// Ring capacity from the per-slot byte size and the VRAM budget. Full-res
-/// (Original) slots are several times bigger than fit slots, so the prefetch
-/// window is correspondingly smaller — but still resident and async.
-fn ring_capacity(slot_bytes: u64) -> usize {
-    ((RING_BUDGET_BYTES / slot_bytes.max(1)) as usize).clamp(4, 64)
-}
-
-/// Split the ring into an ahead/behind prefetch window (the current item, always
-/// resident, takes the remaining slot). Biased forward; a few behind so reversing
-/// stays cheap.
-fn window_for_capacity(cap: usize) -> (usize, usize) {
-    let usable = cap.saturating_sub(1);
-    let ahead = (usable * 4 / 5).max(1);
-    let behind = usable.saturating_sub(ahead);
-    (ahead, behind)
-}
-
-/// Translate the decoder's color transform into the renderer's (identical fields,
-/// distinct crate types so neither crate depends on the other).
-fn render_color(c: &pb_decode::ColorTransform) -> pb_render::ColorTransform {
-    pb_render::ColorTransform {
-        matrix: c.matrix,
-        trc: c.trc,
-        enabled: c.enabled,
-    }
-}
-
-/// Whether a decoded image is HDR (scene-linear fp16 → the renderer's HDR path).
-fn is_hdr(img: &DecodedImage) -> bool {
-    img.format == PixelFormat::Rgba16F
-}
-
-/// The navigation direction for a nav [`Action`], or `None` for any non-nav action.
-/// Bridges the central keymap vocabulary to the engine's `Nav` (used by the press
-/// handler and `held_nav`).
-fn nav_of(action: Action) -> Option<Nav> {
-    match action {
-        Action::Next => Some(Nav::Forward),
-        Action::Prev => Some(Nav::Backward),
-        Action::Random => Some(Nav::Random),
-        Action::RandomPrev => Some(Nav::RandomPrev),
-        _ => None,
-    }
-}
-
-/// Build a photo's info panel data from its path + decoded image.
-/// A path shown relative to the scan root (forward-slashed), or its file name if
-/// it isn't under the root.
-fn rel_to_root(path: &Path, root: &Path) -> String {
-    match path.strip_prefix(root) {
-        Ok(r) => r.to_string_lossy().replace('\\', "/"),
-        Err(_) => path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("?")
-            .to_string(),
-    }
-}
-
-/// The info-panel metadata for `item`: its display path (root-relative for a real
-/// file, the archive-relative entry name otherwise) plus the decoded dimensions
-/// and codec.
-fn meta_for(source: &dyn PhotoSource, item: usize, root: &Path, img: &DecodedImage) -> PhotoMeta {
-    let rel = match source.path(item) {
-        Some(p) => rel_to_root(p, root),
-        None => source.name(item).to_string(),
-    };
-    PhotoMeta {
-        rel,
-        w: img.orig_width,
-        h: img.orig_height,
-        codec: img.codec,
-        animated: img.animated,
-    }
-}
-
-/// Resolve item `item`'s encoded bytes from `source` and decode them to fit. The
-/// single decode entry point shared by the off-thread pool and the synchronous
-/// (first-frame / resize / copy) paths, so a filesystem photo and a ZIP entry
-/// decode through exactly the same routing. All reads are RAM-only.
-fn decode_item(
-    source: &dyn PhotoSource,
-    item: usize,
-    fit: Option<FitBox>,
-    allow_preview: bool,
-) -> Result<DecodedImage, DecodeError> {
-    let bytes = source
-        .bytes(item)
-        .map_err(|e| DecodeError::Corrupt(format!("read error: {e}")))?;
-    let mut img = decode_named_bytes(source.name(item), &bytes, fit, allow_preview)?;
-    // Cheap header sniff so the viewer knows an on-demand animation is available
-    // (the ▶ P hint / `P` to play). Off the keypress path — this runs in the decode
-    // worker (or the sync first-paint), never on the event loop. The pixels stay the
-    // still first frame; only `decode_animation` (on `P`) decodes the whole sequence.
-    img.animated = pb_decode::detect_animation(&bytes);
-    Ok(img)
-}
-
-/// The off-thread decode for an on-demand motion sequence (tasks #37 / #38): a Live
-/// Photo's companion `.mov` via AVFoundation when `live` is set, otherwise the item's
-/// own bytes as a multi-frame animation. Both return a unified [`pb_decode::Animation`]
-/// so playback treats them identically.
-fn decode_motion_job(
-    live: Option<PathBuf>,
-    source: &Arc<dyn PhotoSource>,
-    item: usize,
-    fit: Option<FitBox>,
-) -> Result<pb_decode::Animation, DecodeError> {
-    #[cfg(target_os = "macos")]
-    if let Some(path) = &live {
-        // Cap the motion's long edge to the display fit, but never above the RAM ceiling.
-        let edge = fit
-            .map(|f| f.max_width.max(f.max_height))
-            .unwrap_or(MOTION_MAX_LONG_EDGE)
-            .min(MOTION_MAX_LONG_EDGE);
-        return pb_decode::decode_live_motion(path, edge);
-    }
-    // Off macOS `live` is always `None` (Live Photos = task #39); acknowledge it there so
-    // the parameter isn't flagged unused.
-    #[cfg(not(target_os = "macos"))]
-    let _ = &live;
-    match source.bytes(item) {
-        Ok(bytes) => pb_decode::decode_animation(&bytes, fit),
-        Err(e) => Err(DecodeError::Corrupt(format!("read error: {e}"))),
-    }
-}
-
-/// Max displayed characters for an EXIF value; longer ones are truncated so a
-/// single field can't blow out the panel width.
-const EXIF_VALUE_MAX: usize = 72;
-
-/// Whether an EXIF `(tag, value)` is a binary blob better left out of the panel —
-/// Apple's MakerNote/Padding render as kilobytes of hex, and any value that long
-/// is binary noise, not human-readable metadata.
-fn is_exif_blob(tag: &str, value: &str) -> bool {
-    matches!(tag, "MakerNote" | "Padding") || value.len() > 256
-}
-
-/// Truncate an over-long EXIF value to `EXIF_VALUE_MAX` characters with an
-/// ellipsis (counted in chars, so multibyte values aren't split mid-codepoint).
-fn truncate_exif_value(value: &str) -> String {
-    if value.chars().count() <= EXIF_VALUE_MAX {
-        value.to_string()
-    } else {
-        let mut s: String = value.chars().take(EXIF_VALUE_MAX).collect();
-        s.push('…');
-        s
-    }
-}
-
-/// A copy of `rgba` with its alpha channel scaled by `factor` (clamped 0..=1).
-fn scale_alpha(rgba: &[u8], factor: f32) -> Vec<u8> {
-    let f = factor.clamp(0.0, 1.0);
-    let mut out = rgba.to_vec();
-    for px in out.chunks_exact_mut(4) {
-        px[3] = (px[3] as f32 * f).round().clamp(0.0, 255.0) as u8;
-    }
-    out
-}
 
 /// Whether an Escape press should quit, given an optional "ignore Esc until"
 /// guard set briefly after the file picker closes (to swallow the stray Esc that
@@ -5912,25 +5702,6 @@ impl ApplicationHandler for App {
     }
 }
 
-/// The last path component of a (possibly archive-relative) name, e.g.
-/// `trip/day1/IMG.jpg` → `IMG.jpg`. Falls back to the whole string.
-fn file_name_of(name: &str) -> String {
-    Path::new(name)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(name)
-        .to_string()
-}
-/// Whether physical-px point `(x, y)` lies within `[x0, y0, x1, y1]` (inclusive) — the
-/// overlay click hit-test (the scan-count chip today; EXIF copy buttons later).
-fn point_in_rect([x0, y0, x1, y1]: [f32; 4], x: f32, y: f32) -> bool {
-    x >= x0 && x <= x1 && y >= y0 && y <= y1
-}
-
-fn title_for(name: &str, idx: usize, n: usize) -> String {
-    format!("{} ({}/{n})", file_name_of(name), idx + 1)
-}
-
 /// Map the shell-neutral [`contract::CursorKind`] the core emits to the winit
 /// [`CursorIcon`] the shell shows (NS0). `Hidden` is unused on the `SetCursor` path —
 /// the chrome-free hide uses a separate mechanism — so it falls back to the arrow.
@@ -7395,17 +7166,6 @@ mod tests {
         seven_z_preflight_within(&z_path, None, u64::MAX).expect("fits under a huge budget");
 
         let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn truncate_exif_value_caps_long_values() {
-        assert_eq!(truncate_exif_value("1/250 s"), "1/250 s");
-        let out = truncate_exif_value(&"a".repeat(100));
-        assert_eq!(out.chars().count(), EXIF_VALUE_MAX + 1); // value + ellipsis
-        assert!(out.ends_with('…'));
-        // Multibyte values are truncated on char boundaries, not bytes.
-        let out = truncate_exif_value(&"é".repeat(100));
-        assert_eq!(out.chars().count(), EXIF_VALUE_MAX + 1);
     }
 
     #[test]
