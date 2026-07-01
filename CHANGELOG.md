@@ -29,6 +29,11 @@ with any pre-release suffix carried only by the tag.
   it finishes. The Live Photo's **audio** plays with the motion; mute it with **M** (or Image ▸
   Mute Live Photo Audio — the choice is remembered). The detailed info panel shows it's a Live
   Photo (with frame count / rate / duration), and the basic info line marks it **· Live**.
+- **The open screen is now interactive.** With no photo loaded, PhotoBlaze shows two clickable
+  buttons — **Open File** and **Open Folder** — each with its keyboard shortcut shown dimmed and
+  right-aligned, menu style (`O` and, on macOS, `⇧ O`), reflecting anything you've remapped in
+  Settings ▸ Shortcuts. They light up on hover and open the picker on click; the keyboard
+  shortcuts still work exactly as before. (Replaces the old "Press O to open…" text hint.)
 
 ### Changed
 - The **Image** menu now shows each command's keyboard shortcut — Next, Previous, Random,

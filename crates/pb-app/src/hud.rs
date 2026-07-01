@@ -101,6 +101,14 @@ pub mod tokens {
     /// Button border alpha on hover — lifted from [`BUTTON_BORDER_ALPHA`] to match the brighter
     /// fill.
     pub const BUTTON_BORDER_ALPHA_HOVER: f32 = 0.25;
+    /// Minimum gap between the button's label and a trailing shortcut hint (floored at 6px). A
+    /// shortcut is drawn dimmed and **right-aligned** in the button — menu-accelerator style —
+    /// so when the button is wider than its content the gap grows to push the hint to the edge.
+    pub const BUTTON_SHORTCUT_GAP: f32 = 0.9;
+
+    // ── Open-screen call to action (two stacked buttons) ──────────────────────────────
+    /// Vertical gap between the stacked "Open File" / "Open Folder" buttons (floored at 4px).
+    pub const OPEN_BUTTON_GAP: f32 = 0.45;
 }
 
 use tokens::{SHADOW, SHADOW_ALPHA, TEXT, TEXT_DIM};
@@ -168,6 +176,32 @@ pub struct Hud {
 /// One laid-out glyph: its metrics, coverage bitmap, and pen x-offset on the line.
 type Glyph = (fontdue::Metrics, Vec<u8>, f32);
 
+/// The rasterized open panel from [`Hud::render_open_panel`]: the bitmap `(rgba, w, h)` plus
+/// each button's `[x, y, w, h]` rect within it (file, then folder — the click targets).
+pub type OpenPanelBitmap = (Vec<u8>, u32, u32, [u32; 4], [u32; 4]);
+
+/// A HUD **button's content + sizing** — a label, an optional leading icon, and an optional
+/// trailing **shortcut hint** (drawn dimmed and right-aligned, menu-accelerator style) — plus a
+/// `min_w` so a stack of buttons can share one width. Passed to [`Hud::button_size`] /
+/// [`Hud::draw_button`] so measure and draw always agree, and so a new variant is one field
+/// rather than another positional argument.
+#[derive(Clone, Copy, Default)]
+pub struct ButtonSpec<'a> {
+    /// The button's text label (regular weight).
+    pub label: &'a str,
+    /// An optional leading icon — an SVG source from [`crate::icon::assets`].
+    pub icon: Option<&'a str>,
+    /// An optional trailing shortcut hint: already-formatted accelerator text (e.g. `"O"` /
+    /// `"⇧ O"`), drawn dimmed and right-aligned like a menu shortcut — no box, just the text.
+    pub shortcut: Option<&'a str>,
+    /// Draw the shortcut hint one weight heavier (Semibold instead of Regular), so the dimmed
+    /// text keeps a bit more presence. `false` = Regular (matches the label's weight).
+    pub shortcut_semibold: bool,
+    /// Minimum width in px (`0` = fit content). A larger value keeps the label at the left and
+    /// pushes the shortcut to the right edge, so several buttons at a shared width line up.
+    pub min_w: i32,
+}
+
 /// A laid-out button (from [`Hud::layout_button`]): everything [`Hud::button_size`] and
 /// [`Hud::draw_button`] need, computed once so measure and draw agree exactly.
 struct ButtonLayout {
@@ -177,10 +211,15 @@ struct ButtonLayout {
     icon: Option<(Vec<u8>, u32, u32)>,
     /// Gap between the icon and the label (0 when there's no icon).
     icon_gap: i32,
+    /// The trailing shortcut hint's glyphs + advance width (dimmed, right-aligned). `None` when
+    /// there's no shortcut. (The gap before it is implied by the right-alignment against the
+    /// inner edge, so it isn't stored — only reserved in `content_w`.)
+    shortcut: Option<(Vec<Glyph>, f32)>,
     /// Inner padding: left/right and top/bottom (tuned separately, see [`tokens::BUTTON_PAD_X`]).
     pad_x: i32,
     pad_y: i32,
-    /// Total button width / height in px.
+    /// Natural content width (before any `min_w` expansion) and the final box size.
+    content_w: i32,
     w: i32,
     h: i32,
 }
@@ -460,7 +499,14 @@ impl Hud {
 
         // The Cancel button is a shared HUD primitive ([`draw_button`]); measure it now so we
         // can size the card's height and horizontally center it.
-        let (bw, bh) = self.button_size(button_label, Some(button_icon), px_sub)?;
+        let button = ButtonSpec {
+            label: button_label,
+            icon: Some(button_icon),
+            shortcut: None,
+            shortcut_semibold: false,
+            min_w: 0,
+        };
+        let (bw, bh) = self.button_size(&button, px_sub)?;
         let (bw, bh) = (bw as i32, bh as i32);
 
         // Vertical rhythm.
@@ -506,47 +552,38 @@ impl Hud {
 
         // Centered button (stop icon + label, faint fill, subtle border; lifts on hover).
         let bx = (cw - bw) / 2;
-        let button_rect = self.draw_button(
-            &mut canvas,
-            bx,
-            y,
-            button_label,
-            Some(button_icon),
-            px_sub,
-            button_hovered,
-        )?;
+        let button_rect = self.draw_button(&mut canvas, bx, y, &button, px_sub, button_hovered)?;
         Some((canvas.into_rgba(), cw as u32, ch as u32, button_rect))
     }
 
-    /// Measure the reusable HUD **button**: the `(w, h)` a button with `label` (plus an
-    /// optional leading `icon`) occupies at text size `px`. Pair with [`draw_button`] —
-    /// measure to *place* (e.g. the scan card centers it with this width), then draw.
-    pub fn button_size(&self, label: &str, icon: Option<&str>, px: f32) -> Option<(u32, u32)> {
-        let b = self.layout_button(label, icon, px)?;
+    /// Measure the reusable HUD **button**: the `(w, h)` `spec` occupies at text size `px`.
+    /// Pair with [`draw_button`] — measure to *place* (e.g. the scan card centers it with this
+    /// width; the open panel takes the max of two to align them), then draw.
+    pub fn button_size(&self, spec: &ButtonSpec, px: f32) -> Option<(u32, u32)> {
+        let b = self.layout_button(spec, px)?;
         Some((b.w.max(0) as u32, b.h.max(0) as u32))
     }
 
     /// Draw the reusable HUD **button** into `canvas` at `(x, y)` — a faint fill, a subtle
-    /// rounded border, then the optional leading icon and the `label`, all at text size `px`.
-    /// When `hovered`, the fill + border lift to their `*_HOVER` alphas so the button lights up
-    /// under the pointer. Returns its `[x, y, w, h]` rect (the click target).
+    /// rounded border, then the optional leading icon, the label, and an optional trailing
+    /// dimmed shortcut hint (right-aligned, menu-style), all at text size `px`. When `hovered`,
+    /// the fill + border lift to their `*_HOVER` alphas so the button lights up under the
+    /// pointer. Returns its `[x, y, w, h]` rect (the click target).
     ///
     /// Draws **directly into the destination** canvas — the fill and the border ([`tokens`]
     /// `BUTTON_FILL_ALPHA` / `BUTTON_BORDER_ALPHA`) composite *over* the panel it lands on, so
     /// they read consistently on the scan card or a `BG` swatch. (For a freestanding swatch use
     /// [`render_button`], which supplies that backing canvas.)
-    #[allow(clippy::too_many_arguments)]
     fn draw_button(
         &self,
         canvas: &mut Canvas,
         x: i32,
         y: i32,
-        label: &str,
-        icon: Option<&str>,
+        spec: &ButtonSpec,
         px: f32,
         hovered: bool,
     ) -> Option<[u32; 4]> {
-        let b = self.layout_button(label, icon, px)?;
+        let b = self.layout_button(spec, px)?;
         let asc = self.ascent(px)?;
         let r = (px * tokens::BUTTON_RADIUS).round();
         let (fill_a, border_a) = if hovered {
@@ -560,20 +597,25 @@ impl Hud {
         canvas.fill_round_rect(x, y, b.w, b.h, r, TEXT, fill_a);
         let t = (px * tokens::BUTTON_BORDER).round().max(1.0) as i32;
         canvas.stroke_round_rect(x, y, b.w, b.h, r, t, TEXT, border_a);
-        let mut cx = x + b.pad_x;
+        let baseline = (y + b.pad_y) as f32 + asc;
+        // With a shortcut hint the button is justified (label left, hint right) like a menu row;
+        // without one the content block is centered when widened past its natural size (min_w).
+        let mut cx = if b.shortcut.is_some() {
+            x + b.pad_x
+        } else {
+            x + b.pad_x + ((b.w - b.content_w) / 2).max(0)
+        };
         if let Some((rgba, iw, ih)) = &b.icon {
             let iy = y + (b.h - *ih as i32) / 2;
             self.draw_icon(canvas, rgba, *iw, *ih, cx, iy, px);
             cx += *iw as i32 + b.icon_gap;
         }
-        self.draw_line(
-            canvas,
-            cx as f32,
-            (y + b.pad_y) as f32 + asc,
-            &b.glyphs,
-            TEXT,
-            px,
-        );
+        self.draw_line(canvas, cx as f32, baseline, &b.glyphs, TEXT, px);
+        // Trailing shortcut hint: dimmed, right-aligned against the button's inner edge.
+        if let Some((glyphs, adv)) = &b.shortcut {
+            let sx = (x + b.w - b.pad_x) as f32 - adv;
+            self.draw_line(canvas, sx, baseline, glyphs, TEXT_DIM, px);
+        }
         Some([
             x.max(0) as u32,
             y.max(0) as u32,
@@ -588,29 +630,28 @@ impl Hud {
     /// on a card. Returns `(rgba, w, h)`.
     pub fn render_button(
         &self,
-        label: &str,
-        icon: Option<&str>,
+        spec: &ButtonSpec,
         px: f32,
         bg: [u8; 4],
         hovered: bool,
     ) -> Option<(Vec<u8>, u32, u32)> {
-        let (w, h) = self.button_size(label, icon, px)?;
+        let (w, h) = self.button_size(spec, px)?;
         let mut canvas = Canvas::new(w, h, bg, (px * tokens::BUTTON_RADIUS).round());
-        self.draw_button(&mut canvas, 0, 0, label, icon, px, hovered)?;
+        self.draw_button(&mut canvas, 0, 0, spec, px, hovered)?;
         Some((canvas.into_rgba(), w, h))
     }
 
-    /// Lay out a button once — its label glyphs, rasterized icon, paddings, and resulting
-    /// `(w, h)` — shared by [`button_size`] and [`draw_button`] so measure and draw can never
-    /// disagree. All sizing flows from the button's own text height `px` via the `BUTTON_*`
-    /// [`tokens`], so a button is self-contained: the same call reads identically on a card,
-    /// in a toast, or as a gallery swatch.
-    fn layout_button(&self, label: &str, icon: Option<&str>, px: f32) -> Option<ButtonLayout> {
-        let (glyphs, label_adv) = self.layout(label, px, Weight::Regular);
+    /// Lay out a button once — its label glyphs, rasterized icon, optional shortcut hint,
+    /// paddings, and resulting `(w, h)` — shared by [`button_size`] and [`draw_button`] so
+    /// measure and draw can never disagree. All sizing flows from the button's own text height
+    /// `px` via the `BUTTON_*` [`tokens`], so a button is self-contained: the same call reads
+    /// identically on a card, in a toast, or as a gallery swatch.
+    fn layout_button(&self, spec: &ButtonSpec, px: f32) -> Option<ButtonLayout> {
+        let (glyphs, label_adv) = self.layout(spec.label, px, Weight::Regular);
         let line_h = self.line_height(px)? as i32;
         let pad_x = (px * tokens::BUTTON_PAD_X).round().max(3.0) as i32;
         let pad_y = (px * tokens::BUTTON_PAD_Y).round().max(2.0) as i32;
-        let icon = icon.and_then(|svg| {
+        let icon = spec.icon.and_then(|svg| {
             let h = (px * tokens::BUTTON_ICON).round().max(1.0) as u32;
             crate::icon::rasterize(svg, h, TEXT)
         });
@@ -621,17 +662,106 @@ impl Hud {
             ),
             None => (0, 0),
         };
-        let w = icon_w + icon_gap + label_adv.ceil() as i32 + 2 * pad_x;
+        // The shortcut hint is drawn at the same size as the label, just dimmed (menu style) —
+        // optionally a weight heavier for a touch more presence.
+        let shortcut_weight = if spec.shortcut_semibold {
+            Weight::Semibold
+        } else {
+            Weight::Regular
+        };
+        let shortcut = spec.shortcut.map(|t| self.layout(t, px, shortcut_weight));
+        let (shortcut_w, shortcut_gap) = match &shortcut {
+            Some((_, adv)) => (
+                adv.ceil() as i32,
+                (px * tokens::BUTTON_SHORTCUT_GAP).round().max(6.0) as i32,
+            ),
+            None => (0, 0),
+        };
+        let content_w =
+            icon_w + icon_gap + label_adv.ceil() as i32 + shortcut_gap + shortcut_w + 2 * pad_x;
+        let w = content_w.max(spec.min_w);
         let h = line_h + 2 * pad_y;
         Some(ButtonLayout {
             glyphs,
             icon,
             icon_gap,
+            shortcut,
             pad_x,
             pad_y,
+            content_w,
             w,
             h,
         })
+    }
+
+    /// Rasterize the **open-screen call to action**: two centered, interactive buttons stacked
+    /// vertically — "Open File" and "Open Folder", each with its keyboard shortcut dimmed and
+    /// right-aligned in menu-accelerator style. Each sits on its own translucent pill (`bg`), so
+    /// it reads over any photo, and both share the wider one's width so the shortcuts line up.
+    /// `file_key` / `folder_key` are the pre-formatted shortcut hints (empty → none);
+    /// `file_hovered` / `folder_hovered` light the respective button. Returns
+    /// `(rgba, w, h, file_rect, folder_rect)` where the rects are each button's `[x, y, w, h]`
+    /// **within the bitmap** — the click targets; the caller offsets them to screen px.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_open_panel(
+        &self,
+        file_label: &str,
+        file_key: &str,
+        folder_label: &str,
+        folder_key: &str,
+        px: f32,
+        bg: [u8; 4],
+        shortcut_semibold: bool,
+        file_hovered: bool,
+        folder_hovered: bool,
+    ) -> Option<OpenPanelBitmap> {
+        let file = ButtonSpec {
+            label: file_label,
+            icon: None,
+            shortcut: (!file_key.is_empty()).then_some(file_key),
+            shortcut_semibold,
+            min_w: 0,
+        };
+        let folder = ButtonSpec {
+            label: folder_label,
+            icon: None,
+            shortcut: (!folder_key.is_empty()).then_some(folder_key),
+            shortcut_semibold,
+            min_w: 0,
+        };
+        // Size both, then give each the wider one's width so the stack aligns.
+        let (fw, fh) = self.button_size(&file, px)?;
+        let (dw, dh) = self.button_size(&folder, px)?;
+        let bw = fw.max(dw) as i32;
+        let file = ButtonSpec { min_w: bw, ..file };
+        let folder = ButtonSpec {
+            min_w: bw,
+            ..folder
+        };
+
+        let gap = (px * tokens::OPEN_BUTTON_GAP).round().max(4.0) as i32;
+        let (fh, dh) = (fh as i32, dh as i32);
+        let w = bw;
+        let h = fh + gap + dh;
+        let r = (px * tokens::BUTTON_RADIUS).round();
+        let pill = [bg[0], bg[1], bg[2]];
+        let pill_a = bg[3] as f32 / 255.0;
+
+        // A fully transparent canvas: each button paints its own dark pill, so the gap between
+        // them (and around them) stays clear for the photo to show through.
+        let mut canvas = Canvas::new(w as u32, h as u32, [0, 0, 0, 0], 0.0);
+        canvas.fill_round_rect(0, 0, bw, fh, r, pill, pill_a);
+        let file_rect = self.draw_button(&mut canvas, 0, 0, &file, px, file_hovered)?;
+        let y2 = fh + gap;
+        canvas.fill_round_rect(0, y2, bw, dh, r, pill, pill_a);
+        let folder_rect = self.draw_button(&mut canvas, 0, y2, &folder, px, folder_hovered)?;
+        Some((
+            canvas.into_rgba(),
+            w as u32,
+            h as u32,
+            file_rect,
+            folder_rect,
+        ))
     }
 
     /// Shorten `text` so it lays out within `max_w` px, inserting an ellipsis on the dropped
@@ -1290,5 +1420,34 @@ mod tests {
         assert_eq!(corner_coverage(99, 99, 100, 100, r), 0.0);
         // Radius 0 → no rounding anywhere.
         assert_eq!(corner_coverage(0, 0, 100, 100, 0.0), 1.0);
+    }
+
+    #[test]
+    fn open_panel_stacks_two_width_aligned_buttons() {
+        // A font is needed to lay the panel out; skip on a headless box without one.
+        let Some(hud) = Hud::load() else {
+            return;
+        };
+        let (_rgba, w, h, file, folder) = hud
+            .render_open_panel(
+                "Open File",
+                "O",
+                "Open Folder",
+                "\u{21e7}\u{2009}O",
+                20.0,
+                BG,
+                true,
+                false,
+                false,
+            )
+            .expect("open panel renders");
+        // Both buttons span the panel width (min_w = the wider button), left-aligned at 0.
+        assert_eq!(file[0], 0);
+        assert_eq!(folder[0], 0);
+        assert_eq!(file[2], w, "file button spans the panel width");
+        assert_eq!(folder[2], w, "folder button spans the panel width");
+        // The folder button is stacked strictly below the file button, within the bitmap.
+        assert!(folder[1] >= file[1] + file[3], "folder sits below file");
+        assert!(h >= folder[1] + folder[3], "panel is tall enough for both");
     }
 }

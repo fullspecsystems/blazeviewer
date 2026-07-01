@@ -13,7 +13,7 @@
 //! crisp. The PNG write is an explicit dev command, so the no-trace guarantee (no disk writes
 //! on the *view* path) is untouched.
 
-use crate::hud::{self, Hud, Row};
+use crate::hud::{self, ButtonSpec, Hud, Row};
 use crate::icon::assets;
 use resvg::tiny_skia;
 use std::path::Path;
@@ -174,33 +174,74 @@ fn build_tiles(hud: &Hud) -> Vec<Tile> {
     }
 
     // Buttons (the reusable primitive) across a few icon/label variants + a text-only one.
-    for (label, icon, cap) in [
+    let icon_button = |label, icon| ButtonSpec {
+        label,
+        icon: Some(icon),
+        shortcut: None,
+        shortcut_semibold: false,
+        min_w: 0,
+    };
+    for (spec, cap) in [
         (
-            "Cancel Scan",
-            Some(assets::STOP),
+            icon_button("Cancel Scan", assets::STOP),
             "Button \u{2014} Cancel Scan",
         ),
-        ("Copy", Some(assets::CLIPBOARD), "Button \u{2014} Copy"),
-        ("Delete", Some(assets::TRASH), "Button \u{2014} Delete"),
         (
-            "Save Rotation",
-            Some(assets::FLOPPY),
+            icon_button("Copy", assets::CLIPBOARD),
+            "Button \u{2014} Copy",
+        ),
+        (
+            icon_button("Delete", assets::TRASH),
+            "Button \u{2014} Delete",
+        ),
+        (
+            icon_button("Save Rotation", assets::FLOPPY),
             "Button \u{2014} Save",
         ),
-        ("OK", None, "Button \u{2014} text only"),
+        (
+            ButtonSpec {
+                label: "OK",
+                ..Default::default()
+            },
+            "Button \u{2014} text only",
+        ),
     ] {
-        if let Some(b) = hud.render_button(label, icon, btn_px, bg, false) {
+        if let Some(b) = hud.render_button(&spec, btn_px, bg, false) {
             tiles.push(tile(hud, cap, b));
         }
     }
 
     // Hover state — the same button at rest and lit (fill + border lifted), side by side, to
     // tune the BUTTON_*_HOVER alphas against the resting look.
-    if let Some(b) = hud.render_button("Cancel Scan", Some(assets::STOP), btn_px, bg, false) {
+    let cancel = icon_button("Cancel Scan", assets::STOP);
+    if let Some(b) = hud.render_button(&cancel, btn_px, bg, false) {
         tiles.push(tile(hud, "Button \u{2014} rest", b));
     }
-    if let Some(b) = hud.render_button("Cancel Scan", Some(assets::STOP), btn_px, bg, true) {
+    if let Some(b) = hud.render_button(&cancel, btn_px, bg, true) {
         tiles.push(tile(hud, "Button \u{2014} hover (lit)", b));
+    }
+
+    // The open-screen call to action — two stacked buttons, each with its shortcut dimmed and
+    // right-aligned (menu-accelerator style). Shown with the shortcut hint at Regular vs
+    // Semibold weight (to compare), plus the File-hover lit state.
+    for (semibold, file_hover, cap) in [
+        (false, false, "Open screen \u{2014} shortcut Regular"),
+        (true, false, "Open screen \u{2014} shortcut Semibold"),
+        (true, true, "Open screen \u{2014} Semibold, File hover"),
+    ] {
+        if let Some((r, w, h, _, _)) = hud.render_open_panel(
+            "Open File",
+            "O",
+            "Open Folder",
+            "\u{21e7}\u{2009}O",
+            sp(15.0),
+            bg,
+            semibold,
+            file_hover,
+            false,
+        ) {
+            tiles.push(tile(hud, cap, (r, w, h)));
+        }
     }
 
     // Loading pie at a few fills.
@@ -213,14 +254,15 @@ fn build_tiles(hud: &Hud) -> Vec<Tile> {
         tiles.push(tile(hud, cap, b));
     }
 
-    // Empty-state hint.
+    // Centered multi-line text panel (the general primitive; the live empty state is now the
+    // "Open screen" buttons above, but this stays available for any centered message).
     if let Some(b) = hud.render_centered(
         &["Press O to open a file", "or Shift+O to open a folder"],
         sp(20.0),
         s(10.0) as u32,
         bg,
     ) {
-        tiles.push(tile(hud, "Empty-state hint", b));
+        tiles.push(tile(hud, "Centered text panel", b));
     }
 
     tiles

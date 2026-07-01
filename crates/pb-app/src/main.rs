@@ -553,6 +553,26 @@ fn collect_monitor_rects(
         .collect()
 }
 
+/// Which empty-state **open button** the pointer is over (the call-to-action panel shown when
+/// no photo is loaded). Two interactive buttons — Open File and Open Folder.
+#[derive(Clone, Copy, PartialEq)]
+enum OpenButton {
+    File,
+    Folder,
+}
+
+/// The empty-state open panel's geometry while it's shown: the bitmap `(w, h)` and each
+/// button's `[x, y, w, h]` rect **within the bitmap**. The renderer centers the message layer
+/// itself, so the on-screen click rects are derived from the live window size at hit-test time
+/// (see [`App::open_button_rect`]) — resize- and DPI-proof.
+#[derive(Clone, Copy)]
+struct OpenPanel {
+    w: u32,
+    h: u32,
+    file: [u32; 4],
+    folder: [u32; 4],
+}
+
 struct App {
     windowed: bool,
     /// Where the playlist's images come from — a filesystem listing or an archive.
@@ -733,6 +753,13 @@ struct App {
     /// state. Flipped only on a hover **enter/leave transition** (see [`App::update_chip_hover`]),
     /// which re-rasterizes the card once; never per cursor-move or per frame.
     chip_hovered: bool,
+    /// The empty-state open panel's geometry while it's the active overlay (the two Open
+    /// File / Open Folder buttons); `None` when a photo is shown. Its buttons are the click
+    /// targets — see [`App::open_button_rect`].
+    open_panel: Option<OpenPanel>,
+    /// Which open-panel button is lit (hover), so the panel re-rasterizes only on a hover
+    /// enter/leave transition (see [`App::update_open_hover`]), never per cursor-move.
+    open_hover: Option<OpenButton>,
     /// Items whose resident ring slot holds a fast *preview* (e.g. a HEIC
     /// thumbnail) rather than the full decode. While idle these are upgraded
     /// ("sharpened") to full in priority order. Pruned to resident in `request_prefetch`.
@@ -1013,6 +1040,8 @@ impl App {
             chip_built: Instant::now(),
             chip_rect: None,
             chip_hovered: false,
+            open_panel: None,
+            open_hover: None,
             preview_resident: HashSet::new(),
             upgrade_done: HashSet::new(),
             last_upgrade_set: Vec::new(),
@@ -3861,34 +3890,61 @@ impl App {
         self.draw(event_loop);
     }
 
-    /// Build the centered empty-state hint panel ("Press O to open a file / or
-    /// Shift+O to open a folder"). `None` if no system font loaded. Returns an owned
-    /// bitmap so callers can apply it to a renderer they still own (e.g. mid-setup).
-    fn open_hint_panel(&self) -> Option<(Vec<u8>, u32, u32)> {
-        let px = (20.0 * self.scale_factor).max(12.0);
-        let pad = (10.0 * self.scale_factor).round().max(3.0) as u32;
-        self.hud.as_ref()?.render_centered(
-            &["Press O to open a file", "or Shift+O to open a folder"],
+    /// The pre-formatted shortcut hint for an action's primary binding (empty if unbound) — the
+    /// macOS symbol form (`⇧ O`) on macOS, the spelled-out form (`Shift+O`) elsewhere. Drives the
+    /// open-screen buttons' shortcut hints, so they reflect any shortcut the user remapped in
+    /// Settings.
+    fn shortcut_for(&self, action: Action) -> String {
+        self.keymap
+            .bindings_for(action)
+            .first()
+            .map(|c| c.shortcut_label())
+            .unwrap_or_default()
+    }
+
+    /// Build the empty-state **open panel** — two centered, interactive buttons ("Open File" and
+    /// "Open Folder", each with its shortcut dimmed and right-aligned menu-style), lit per the
+    /// current [`open_hover`]. `None` if no system font loaded. Returns the owned bitmap plus
+    /// each button's bitmap-relative rect, so callers can apply it to a renderer they still own
+    /// (e.g. mid-setup) and record the click targets.
+    ///
+    /// [`open_hover`]: App::open_hover
+    fn open_panel_bitmap(&self) -> Option<hud::OpenPanelBitmap> {
+        let hud = self.hud.as_ref()?;
+        // A normal button size (like the scan card's Cancel button) — the call to action doesn't
+        // need to shout; it's white text on an empty gray screen.
+        let px = (16.0 * self.scale_factor).max(11.0);
+        let file_key = self.shortcut_for(Action::OpenFile);
+        let folder_key = self.shortcut_for(Action::OpenFolder);
+        hud.render_open_panel(
+            "Open File",
+            &file_key,
+            "Open Folder",
+            &folder_key,
             px,
-            pad,
             hud::BG,
+            true, // shortcut hint a notch heavier (Semibold) so the dimmed text keeps presence
+            self.open_hover == Some(OpenButton::File),
+            self.open_hover == Some(OpenButton::Folder),
         )
     }
 
-    /// Show the empty-state hint over the (blank) viewer — used when there are no
-    /// images to display. Rebuilt against the current scale; the renderer re-centers
-    /// it on resize and drops it the moment a photo is shown.
+    /// Show the empty-state open panel over the (blank) viewer — used when there are no images
+    /// to display. Rebuilt against the current scale + hover; the renderer re-centers it on
+    /// resize and drops it the moment a photo is shown. Records the button rects for hit-testing.
     fn show_open_hint(&mut self) {
-        // Suppress the hint while a folder scan is pending (deferred startup launch) or
-        // streaming in — the first photo is about to bootstrap, so "Press O to open" would
-        // flash briefly and misleads (it implies nothing is loading). If the scan turns out
-        // empty, `poll_dir_scan`'s Done arm restores the hint.
+        // Suppress the panel while a folder scan is pending (deferred startup launch) or
+        // streaming in — the first photo is about to bootstrap, so the call to action would
+        // flash briefly and mislead (it implies nothing is loading). If the scan turns out
+        // empty, `poll_dir_scan`'s Done arm restores it.
         if self.dir_scan.is_some() || self.pending_launch.is_some() {
             return;
         }
-        let Some((bitmap, w, h)) = self.open_hint_panel() else {
+        let Some((bitmap, w, h, file, folder)) = self.open_panel_bitmap() else {
+            self.open_panel = None;
             return;
         };
+        self.open_panel = Some(OpenPanel { w, h, file, folder });
         if let Some(a) = self.active.as_mut() {
             a.renderer.set_message(Some((&bitmap, w, h)));
         }
@@ -4209,6 +4265,70 @@ impl App {
         }
     }
 
+    /// Whether the empty-state open panel is the active overlay, so its buttons are
+    /// hit-testable: the panel is built, no photo is loaded, and no scan is pending/streaming
+    /// (which would suppress it). Mirrors [`show_open_hint`]'s show condition.
+    ///
+    /// [`show_open_hint`]: App::show_open_hint
+    fn open_hint_active(&self) -> bool {
+        self.open_panel.is_some()
+            && self.source.is_empty()
+            && self.dir_scan.is_none()
+            && self.pending_launch.is_none()
+    }
+
+    /// The on-screen `[x0, y0, x1, y1]` rect (physical px) of an open-panel button, derived
+    /// from the live window size — the renderer centers the message layer, so this stays
+    /// correct across resizes and DPI changes without re-storing absolute coordinates. `None`
+    /// unless the open panel is the active overlay.
+    fn open_button_rect(&self, which: OpenButton) -> Option<[f32; 4]> {
+        if !self.open_hint_active() {
+            return None;
+        }
+        let panel = self.open_panel?;
+        let sz = self.active.as_ref()?.window.inner_size();
+        // Same centering the renderer applies (see `center_quad_vertices`): clamped to ≥ 0.
+        let x0 = ((sz.width as f32 - panel.w as f32) * 0.5).max(0.0);
+        let y0 = ((sz.height as f32 - panel.h as f32) * 0.5).max(0.0);
+        let [bx, by, bw, bh] = match which {
+            OpenButton::File => panel.file,
+            OpenButton::Folder => panel.folder,
+        }
+        .map(|v| v as f32);
+        Some([x0 + bx, y0 + by, x0 + bx + bw, y0 + by + bh])
+    }
+
+    /// Which open-panel button (if any) the pointer is currently over.
+    fn open_hovered_button(&self) -> Option<OpenButton> {
+        let [x, y] = self.last_cursor?;
+        [OpenButton::File, OpenButton::Folder]
+            .into_iter()
+            .find(|&b| {
+                self.open_button_rect(b)
+                    .is_some_and(|r| point_in_rect(r, x, y))
+            })
+    }
+
+    /// Update the open panel's hover "lit" state from the latest cursor position, re-rendering
+    /// the panel only when hover **changes** (one CPU composite on the enter/leave transition,
+    /// never per move). Mirrors [`update_chip_hover`] for the empty-state call to action.
+    ///
+    /// [`update_chip_hover`]: App::update_chip_hover
+    fn update_open_hover(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.open_hint_active() {
+            return;
+        }
+        let hovered = self.open_hovered_button();
+        if hovered == self.open_hover {
+            return;
+        }
+        self.open_hover = hovered;
+        // Rebuild the panel with the new lit button (content is otherwise unchanged), re-upload
+        // it, and present so the change shows immediately.
+        self.show_open_hint();
+        self.draw(event_loop);
+    }
+
     /// Render one frame.
     fn draw(&mut self, event_loop: &ActiveEventLoop) {
         let t0 = Instant::now();
@@ -4397,7 +4517,8 @@ impl App {
     /// otherwise.
     fn refresh_cursor(&self) {
         if let Some(a) = self.active.as_ref() {
-            let over_button = self.last_cursor.is_some_and(|[x, y]| self.chip_hit(x, y));
+            let over_button = self.last_cursor.is_some_and(|[x, y]| self.chip_hit(x, y))
+                || self.open_hovered_button().is_some();
             let icon = if self.dragging {
                 CursorIcon::Grabbing
             } else if over_button {
@@ -5142,12 +5263,13 @@ impl ApplicationHandler for App {
             self.last_edr_headroom = headroom;
         }
 
-        // Empty launch (no folder/file given): show a blank background with the
-        // centered "Press O to open…" hint instead of an image.
+        // Empty launch (no folder/file given): show a blank background with the centered
+        // Open File / Open Folder call to action instead of an image.
         if self.playlist.current().is_none() {
             renderer.clear_image();
-            if let Some((bitmap, w, h)) = self.open_hint_panel() {
+            if let Some((bitmap, w, h, file, folder)) = self.open_panel_bitmap() {
                 renderer.set_message(Some((&bitmap, w, h)));
+                self.open_panel = Some(OpenPanel { w, h, file, folder });
             }
         }
 
@@ -5376,13 +5498,16 @@ impl ApplicationHandler for App {
                 }
                 self.last_cursor = Some(p);
                 self.update_chip_hover(event_loop);
+                self.update_open_hover(event_loop);
                 self.refresh_cursor();
             }
 
-            // Pointer left the window: drop any Cancel Scan hover so the button doesn't stay lit.
+            // Pointer left the window: drop any Cancel Scan / open-button hover so they don't
+            // stay lit.
             WindowEvent::CursorLeft { .. } => {
                 self.last_cursor = None;
                 self.update_chip_hover(event_loop);
+                self.update_open_hover(event_loop);
             }
 
             // Left button toggles drag-to-pan (the cross-platform pan gesture).
@@ -5392,9 +5517,16 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 let pressed = state == ElementState::Pressed;
-                // A press on the scan-count chip cancels the scan (the one interactive
-                // on-image control) — and must NOT also start a drag-to-pan.
-                if pressed
+                // A press on an interactive on-image control (an open-panel button, or the
+                // scan-count chip's Cancel button) fires that control and must NOT also start a
+                // drag-to-pan.
+                let open_hit = pressed.then(|| self.open_hovered_button()).flatten();
+                if let Some(button) = open_hit {
+                    match button {
+                        OpenButton::File => self.dispatch_action(Action::OpenFile, event_loop),
+                        OpenButton::Folder => self.dispatch_action(Action::OpenFolder, event_loop),
+                    }
+                } else if pressed
                     && self
                         .last_cursor
                         .is_some_and(|[cx, cy]| self.chip_hit(cx, cy))
