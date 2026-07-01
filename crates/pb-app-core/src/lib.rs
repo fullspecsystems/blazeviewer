@@ -25,6 +25,7 @@ pub mod contract;
 pub mod keymap;
 pub mod pb_key;
 pub mod slideshow;
+pub mod timing;
 
 pub use action::{Action, ActionKind};
 pub use config::config_dir;
