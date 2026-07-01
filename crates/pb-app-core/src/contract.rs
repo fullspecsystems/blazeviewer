@@ -157,6 +157,24 @@ pub struct MenuState {
     pub native_fullscreen_engaged: bool,
 }
 
+/// What to write to the system clipboard — the shell-neutral payload of
+/// [`CoreEffect::WriteClipboard`]. The core builds this (decode + rotate is pure data
+/// prep); the shell performs the actual platform write (Win32 `CF_DIBV5`/`CF_HDROP`,
+/// `NSPasteboard`, or `arboard` text) so the core stays free of clipboard APIs.
+#[derive(Clone, Debug)]
+pub enum ClipboardPayload {
+    /// A decoded RGBA8 image (`w*h*4`), plus the source file to also offer as a
+    /// file-drop when one exists on disk (`None` for an archive entry → image-only).
+    Image {
+        rgba: Vec<u8>,
+        w: u32,
+        h: u32,
+        file: Option<PathBuf>,
+    },
+    /// Plain text — a file path or (for an archive entry) its name.
+    Text(String),
+}
+
 /// An intent-level event delivered *to* the core by the shell. The winit shell would
 /// translate `WindowEvent`s into these; the AppKit shell would translate `NSEvent`s /
 /// gesture recognizers — the core handles both identically.
@@ -239,10 +257,13 @@ pub enum CoreEffect {
     SetMenuState(MenuState),
     /// Surface a user-facing error (message dialog / toast).
     ReportError(String),
+    /// Write an image or text payload to the system clipboard (an explicit user Copy /
+    /// Copy File Path command — never the view path). The shell does the platform write
+    /// and surfaces the success/failure toast.
+    WriteClipboard(ClipboardPayload),
     // NS-later (payload types still in the shell or other crates):
     //   UpdateDialog(DialogUpdate)        — progress ticks into an open dialog
     //   ShowNativeAbout(AboutInfo)         — the standard NSApplication about panel
-    //   WriteClipboard(ClipboardPayload)   — image / path payloads
 }
 
 /// The core's decision for a physical key-down, routed by the resolved [`Action`]'s

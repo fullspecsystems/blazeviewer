@@ -1277,19 +1277,12 @@ impl App {
         let rot = self.rotations.get(&item).copied().unwrap_or_default();
         let (rgba, w, h) = clipboard::rotate_rgba8(&rgba, img.width, img.height, rot);
         // Offer the source file as CF_HDROP too when there is one; an archive entry
-        // has no file on disk, so it gets an image-only copy (pixels still paste).
-        let wrote = match self.source.path(item) {
-            Some(path) => clipboard::set_image_and_file(w, h, &rgba, path),
-            None => clipboard::set_image(w, h, &rgba),
-        };
-        match wrote {
-            // Icon-only pill (the clipboard glyph says it all).
-            Ok(()) => self.show_toast_icon("", Some(icon::assets::CLIPBOARD)),
-            Err(e) => {
-                eprintln!("copy: clipboard write failed: {e}");
-                self.show_toast("Copy failed");
-            }
-        }
+        // has no file on disk, so it gets an image-only copy (pixels still paste). The
+        // pure decode + rotate prep stays here; the platform write is the shell's job.
+        let file = self.source.path(item).map(|p| p.to_path_buf());
+        self.effects.push(contract::CoreEffect::WriteClipboard(
+            contract::ClipboardPayload::Image { rgba, w, h, file },
+        ));
     }
 
     /// Copy the current photo's **file path** to the clipboard as text (Shift+Ctrl+C /
@@ -1305,15 +1298,44 @@ impl App {
             Some(p) => p.to_string_lossy().into_owned(),
             None => self.source.name(item).to_string(),
         };
-        let fname = file_name_of(&text).to_string();
-        match arboard::Clipboard::new().and_then(|mut c| c.set_text(text)) {
-            Ok(()) => {
-                let msg = format!("Copied {fname}");
-                self.show_toast(&msg);
+        // The shell writes the text and reports the success/failure toast (it can recover
+        // the file name from `text` for the "Copied …" message).
+        self.effects.push(contract::CoreEffect::WriteClipboard(
+            contract::ClipboardPayload::Text(text),
+        ));
+    }
+
+    /// The shell side of [`CoreEffect::WriteClipboard`]: perform the platform clipboard
+    /// write and surface the same success/failure toast the inline copy did (run from the
+    /// drain, so still the same event-loop turn — the toast renders synchronously via
+    /// `show_toast`). This is the only place the clipboard APIs are touched — the seam an
+    /// AppKit shell re-implements with `NSPasteboard`. (NS-later: once `AppCore` is split
+    /// out, the write result comes back as a `CoreEvent` and the core owns the toast.)
+    fn write_clipboard(&mut self, payload: contract::ClipboardPayload) {
+        match payload {
+            contract::ClipboardPayload::Image { rgba, w, h, file } => {
+                let wrote = match file {
+                    Some(path) => clipboard::set_image_and_file(w, h, &rgba, &path),
+                    None => clipboard::set_image(w, h, &rgba),
+                };
+                match wrote {
+                    // Icon-only pill (the clipboard glyph says it all).
+                    Ok(()) => self.show_toast_icon("", Some(icon::assets::CLIPBOARD)),
+                    Err(e) => {
+                        eprintln!("copy: clipboard write failed: {e}");
+                        self.show_toast("Copy failed");
+                    }
+                }
             }
-            Err(e) => {
-                eprintln!("copy path: clipboard write failed: {e}");
-                self.show_toast("Copy path failed");
+            contract::ClipboardPayload::Text(text) => {
+                let fname = file_name_of(&text).to_string();
+                match arboard::Clipboard::new().and_then(|mut c| c.set_text(text)) {
+                    Ok(()) => self.show_toast(&format!("Copied {fname}")),
+                    Err(e) => {
+                        eprintln!("copy path: clipboard write failed: {e}");
+                        self.show_toast("Copy path failed");
+                    }
+                }
             }
         }
     }
@@ -4193,6 +4215,9 @@ impl App {
                 }
                 contract::CoreEffect::SetMenuState(state) => {
                     self.apply_menu_to_native(&state);
+                }
+                contract::CoreEffect::WriteClipboard(payload) => {
+                    self.write_clipboard(payload);
                 }
                 _ => {}
             }
