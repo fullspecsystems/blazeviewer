@@ -191,6 +191,14 @@ pub struct AppCore {
     /// (the core-owned mirror of the shell's `pending_launch.is_some()`, kept in sync at its
     /// mutations). Suppresses the "Press O to open" empty-state hint until the launch resolves.
     pub launching: bool,
+    /// Whether a chrome dialog (Settings / About / a progress card) is open — the core-owned
+    /// mirror of the shell's `dialog.is_some()`, synced at each tick. The slideshow pauses while
+    /// a dialog is up (host's own modal picker pauses itself). NS0 5.5 Phase C2 (the Tick loop).
+    pub dialog_open: bool,
+    /// Whether a background archive open is still decompressing (the mirror of the shell's
+    /// `archive_load.is_some()`, synced at each tick) — keeps `work_pending` true so the loop
+    /// keeps polling for the finished open. NS0 5.5 Phase C2.
+    pub archive_loading: bool,
     /// A delete whose playlist-advance is deferred: `(fire_at, removed_index)`. The deleted
     /// photo stays on screen with its icon until `fire_at`, then the playlist drops the item and
     /// advances (`do_delete` sets it; `flush_pending_delete` fires it). RAM-only (privacy #2).

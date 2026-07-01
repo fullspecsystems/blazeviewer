@@ -34,6 +34,20 @@ use crate::{
 };
 
 impl AppCore {
+    /// Whether prefetch/upload work is still outstanding (keep polling if so).
+    pub fn work_pending(&self) -> bool {
+        self.archive_loading
+            // An off-thread animation decode in flight keeps the loop polling so
+            // `poll_anim_decode` picks it up promptly (active playback drives its own
+            // precise next-frame wake via `tick_playback`, not this frame poll).
+            || self.anim_decode.is_some()
+            || self.displayed_item != self.target_item
+            || self
+                .targets
+                .iter()
+                .any(|&t| self.ring.slot_for(t).is_none() && !self.failed.contains(&t))
+    }
+
     /// Dispatch a one-shot [`Action`] — the single entry point shared by the keyboard
     /// (one-shot keys, via the keymap) and the menu (`MenuAction::to_action`). The pure
     /// view/nav/HUD/animation arms run here in the core; the **flow** arms (dialogs, window
@@ -2856,6 +2870,8 @@ mod tests {
             recursive: false,
             scanning: false,
             launching: false,
+            dialog_open: false,
+            archive_loading: false,
             pending_delete: None,
             pending_confirm_delete: None,
             info: InfoMode::Off,

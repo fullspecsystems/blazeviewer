@@ -285,6 +285,10 @@ struct App {
     /// time, so it's an `Option`. Opened at the same boundary as `effects`. (NS0 dialog
     /// inversion; the shell owns `DialogWindow` outright in NS2.)
     pending_dialog: Option<DialogRequest>,
+    /// The core's requested next wake-up (`CoreEffect::SetWake`), stored by `drain_effects`
+    /// and min'd with the shell's own dialog-repaint deadline in `about_to_wait` for the
+    /// event loop's control-flow. `None` = the core is idle.
+    requested_wake: Option<Instant>,
 }
 
 /// A deferred dialog open (see [`App::pending_dialog`]). Carries only what the opener
@@ -436,6 +440,8 @@ impl App {
                 recursive,
                 scanning: false,
                 launching: false,
+                dialog_open: false,
+                archive_loading: false,
                 pending_delete: None,
                 pending_confirm_delete: None,
                 info: InfoMode::Off,
@@ -496,6 +502,7 @@ impl App {
             password_archive: None,
             live_audio: None,
             pending_dialog: None,
+            requested_wake: None,
         }
     }
 
@@ -2031,6 +2038,10 @@ impl App {
                     contract::CoreEffect::ShellFlowAction(action) => {
                         self.perform_flow_action(action);
                     }
+                    // The core's requested next wake (from the Tick handler). Stored, not applied
+                    // here — `about_to_wait` mins it with the shell's dialog-repaint deadline for
+                    // the event loop's control-flow.
+                    contract::CoreEffect::SetWake(at) => self.requested_wake = at,
                     _ => {}
                 }
             }
@@ -2120,21 +2131,6 @@ impl App {
         self.core.pie_glow_started = None;
         // Drop any on-demand animation playback + in-flight decode (RAM-only — #2).
         self.core.stop_playback();
-    }
-
-    /// Whether prefetch/upload work is still outstanding (keep polling if so).
-    fn work_pending(&self) -> bool {
-        self.archive_load.is_some()
-            // An off-thread animation decode in flight keeps the loop polling so
-            // `poll_anim_decode` picks it up promptly (active playback drives its own
-            // precise next-frame wake via `tick_playback`, not this frame poll).
-            || self.core.anim_decode.is_some()
-            || self.core.displayed_item != self.core.target_item
-            || self
-                .core
-                .targets
-                .iter()
-                .any(|&t| self.core.ring.slot_for(t).is_none() && !self.core.failed.contains(&t))
     }
 
     // --- Animation playback (task #37) -------------------------------------------------
@@ -2724,6 +2720,13 @@ impl ApplicationHandler for App {
         self.poll_archive_load();
         self.poll_dir_scan();
 
+        // Sync the core-owned mirrors of the shell flow state this tick reads: whether a chrome
+        // dialog is up (the slideshow pauses under one) and whether an archive is still loading
+        // (keeps `work_pending` polling). Synced after the polls so a just-finished archive/scan
+        // is reflected; a dialog opened later this tick (in the drain) applies next tick.
+        self.core.dialog_open = self.dialog.is_some();
+        self.core.archive_loading = self.archive_load.is_some();
+
         // 1. Absorb finished decodes (uploads; presents the target if it arrived).
         self.core.drain_results();
 
@@ -2778,7 +2781,7 @@ impl ApplicationHandler for App {
         // (never skips). Manual nav resets the timer (it moves `last_present`); a live
         // `[`/`]` interval change applies immediately (deadline is `last_present + interval`).
         let slideshow_running =
-            self.core.slideshow.on && self.core.held_nav().is_none() && self.dialog.is_none();
+            self.core.slideshow.on && self.core.held_nav().is_none() && !self.core.dialog_open;
         if slideshow_running {
             let caught_up = self.core.displayed_item == self.core.target_item;
             let since_shown = self
@@ -2934,7 +2937,7 @@ impl ApplicationHandler for App {
         //    honor an open dialog's timed repaint; otherwise go fully idle until an event.
         let base_wake = if nav.is_some()
             || transforming
-            || self.work_pending()
+            || self.core.work_pending()
             || toast_active
             || pie_active
             || resizing

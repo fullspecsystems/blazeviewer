@@ -233,8 +233,11 @@ pub enum CoreEvent {
 pub enum CoreEffect {
     /// Request a redraw on the next opportunity.
     RequestRender,
-    /// Schedule a wake-up at this instant (held-key pacing / slideshow dwell).
-    WakeAt(Instant),
+    /// Set when the core next wants to be ticked: `Some(at)` → wake at that instant (held-key
+    /// pacing / slideshow dwell / the animation's next-frame deadline), `None` → go idle until
+    /// the next real event. Emitted by the `Tick` handler; the host takes the min of this and any
+    /// host-side wake (e.g. the winit shell's dialog-repaint deadline) for its control-flow.
+    SetWake(Option<Instant>),
     /// Set the window title.
     SetTitle(String),
     /// Set the pointer cursor.
