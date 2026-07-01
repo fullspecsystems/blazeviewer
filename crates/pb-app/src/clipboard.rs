@@ -121,22 +121,32 @@ pub fn set_image(width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
     win::set(width, height, rgba, None)
 }
 
-/// Non-Windows stub (macOS port is deferred; it would mirror this with `NSPasteboard`
-/// writing both an image and a file URL).
+/// Non-Windows (macOS/Linux): write the image **pixels** to the clipboard via `arboard`
+/// (→ `NSPasteboard` on macOS, Wayland/X11 data-control on Linux). The CF_HDROP-style
+/// file-drop reference is a Windows-only extra — a paste still lands the pixels — so this
+/// mirror copies just the image, ignoring `path`.
 #[cfg(not(windows))]
 pub fn set_image_and_file(
-    _width: u32,
-    _height: u32,
-    _rgba: &[u8],
+    width: u32,
+    height: u32,
+    rgba: &[u8],
     _path: &std::path::Path,
 ) -> Result<(), String> {
-    Err("clipboard copy is only implemented on Windows".to_string())
+    set_image(width, height, rgba)
 }
 
-/// Non-Windows stub for the image-only write.
+/// Non-Windows image-only write. `rgba` is straight-alpha `width×height` RGBA8, exactly
+/// the layout `arboard::ImageData` expects; arboard encodes it for the platform pasteboard.
 #[cfg(not(windows))]
-pub fn set_image(_width: u32, _height: u32, _rgba: &[u8]) -> Result<(), String> {
-    Err("clipboard copy is only implemented on Windows".to_string())
+pub fn set_image(width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
+    let image = arboard::ImageData {
+        width: width as usize,
+        height: height as usize,
+        bytes: std::borrow::Cow::Borrowed(rgba),
+    };
+    arboard::Clipboard::new()
+        .and_then(|mut c| c.set_image(image))
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(windows)]
