@@ -81,7 +81,10 @@ mod settings;
 // the existing `crate::action` / `crate::keymap` / `crate::pb_key` / `crate::slideshow`
 // paths in the winit shell modules (and the `use action::…` lines below) keep
 // resolving unchanged.
-use pb_app_core::{action, contract, keymap, pb_key, slideshow, timing, AppCore, Nav, PhotoMeta};
+use pb_app_core::{
+    action, contract, keymap, pb_key, slideshow, timing, AppCore, InfoMode, Nav, OpenButton,
+    OpenPanel, PhotoMeta, PlayHint, Toast,
+};
 
 use action::Action;
 use animation::Playback;
@@ -257,18 +260,6 @@ fn is_hdr(img: &DecodedImage) -> bool {
     img.format == PixelFormat::Rgba16F
 }
 
-/// Which overlay is showing: nothing, the one-line basic panel (`i`), the
-/// full-EXIF "nerd" table (`Shift+I`), or the keybindings help (`/` or `?`). All
-/// share the single overlay quad, so they're mutually exclusive. (About is a
-/// native dialog now, not an overlay — see `about_dialog`.)
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum InfoMode {
-    Off,
-    Basic,
-    Full,
-    Help,
-}
-
 /// A reversible user edit, recorded on the undo stack (Edit ▸ Undo / `Ctrl+Z`). RAM-only,
 /// dropped on exit — no on-disk undo journal (privacy #2). The stack is cleared whenever
 /// the playlist/source changes (open, delete-rebuild, empty state — see
@@ -414,53 +405,6 @@ fn truncate_exif_value(value: &str) -> String {
     }
 }
 
-/// A transient bottom-center status toast (e.g. "Recursive folders: on"): a pill
-/// rasterized once, held briefly at full opacity, then faded out by re-uploading
-/// the bitmap with scaled alpha. Used for command feedback that has no other
-/// on-screen cue (tasks.json #10) — deliberately NOT shown for next/prev/zoom.
-struct Toast {
-    rgba: Vec<u8>,
-    w: u32,
-    h: u32,
-    started: Instant,
-    /// Alpha last pushed to the renderer, so the fade re-uploads only on change.
-    uploaded_alpha: f32,
-}
-
-/// The interactive **play hint** — the `▶ Play  P` affordance shown when parked on an animated
-/// still / Live Photo. It's a real button riding on the transient toast layer: hovering it
-/// **pauses the fade** and lights it, and a click plays (same as `P`). `Some` only while the
-/// current toast *is* the play hint (passive toasts clear it), so only it responds to
-/// hover/click. Its click rect is derived from the live window size (bottom-center), so it
-/// stays correct across resizes. See [`App::show_hint`] / [`App::update_play_hint_hover`].
-#[derive(Clone, Copy)]
-struct PlayHint {
-    /// The toast bitmap size, for the bottom-center hit rect.
-    w: u32,
-    h: u32,
-    /// The leading icon (play ▶ or the Live Photo mark), to re-render lit on hover.
-    icon: &'static str,
-    /// Whether the pointer is over it (lit + fade paused).
-    hovered: bool,
-}
-
-impl Toast {
-    /// Full-opacity hold, then a short linear fade (~1.3 s total).
-    const HOLD: Duration = Duration::from_millis(950);
-    const FADE: Duration = Duration::from_millis(380);
-
-    /// The toast's alpha at `now`, or `None` once it has fully expired.
-    fn alpha(&self, now: Instant) -> Option<f32> {
-        let e = now.saturating_duration_since(self.started);
-        if e <= Self::HOLD {
-            Some(1.0)
-        } else {
-            let f = (e - Self::HOLD).as_secs_f32() / Self::FADE.as_secs_f32();
-            (f < 1.0).then_some(1.0 - f)
-        }
-    }
-}
-
 /// A copy of `rgba` with its alpha channel scaled by `factor` (clamped 0..=1).
 fn scale_alpha(rgba: &[u8], factor: f32) -> Vec<u8> {
     let f = factor.clamp(0.0, 1.0);
@@ -496,26 +440,6 @@ fn collect_monitor_rects(
         .collect()
 }
 
-/// Which empty-state **open button** the pointer is over (the call-to-action panel shown when
-/// no photo is loaded). Two interactive buttons — Open File and Open Folder.
-#[derive(Clone, Copy, PartialEq)]
-enum OpenButton {
-    File,
-    Folder,
-}
-
-/// The empty-state open panel's geometry while it's shown: the bitmap `(w, h)` and each
-/// button's `[x, y, w, h]` rect **within the bitmap**. The renderer centers the message layer
-/// itself, so the on-screen click rects are derived from the live window size at hit-test time
-/// (see [`App::open_button_rect`]) — resize- and DPI-proof.
-#[derive(Clone, Copy)]
-struct OpenPanel {
-    w: u32,
-    h: u32,
-    file: [u32; 4],
-    folder: [u32; 4],
-}
-
 struct App {
     windowed: bool,
     /// The winit window (NS0: shell-owned — `WinitShell` in the eventual crate split).
@@ -530,19 +454,12 @@ struct App {
     /// The platform-neutral orchestration state (NS0 step 5, ADR-021), reached as
     /// `self.core.*`. Grown incrementally off this shell; it now owns the held-key /
     /// input / self-paced-advance timing, the view + geometry transform, the metadata
-    /// caches, the whole prefetch/decode/residency engine, the metrics, and the
-    /// nav/playlist state. The renderer and the `handle(CoreEvent)` dispatch follow.
+    /// caches, the whole prefetch/decode/residency engine, the metrics, the nav/playlist
+    /// state, and the HUD overlay *state* (the Hud rasterizer stays shell-side). The
+    /// renderer and the `handle(CoreEvent)` dispatch follow.
     core: AppCore,
     /// Text renderer for the info panel (None if no system font was found).
     hud: Option<Hud>,
-    /// Which info overlay is active (`i` basic / `Shift+I` full EXIF / off).
-    info: InfoMode,
-    /// Whether the panel is currently drawn.
-    overlay_shown: bool,
-    /// Which item the drawn panel was built for; when it differs from
-    /// `displayed_item` the panel is stale and gets rebuilt (so it tracks the
-    /// photo with no blank flash on single-step navigation).
-    overlay_item: Option<usize>,
     /// Display scale factor, for sizing the panel.
     scale_factor: f32,
 
@@ -554,53 +471,11 @@ struct App {
     /// Files dropped on the window this burst; winit delivers one event per file,
     /// so they're coalesced here and applied once in `about_to_wait`.
     pending_drops: Vec<PathBuf>,
-    /// The transient bottom-center status toast (e.g. recursion on/off), or `None`.
-    toast: Option<Toast>,
     /// macOS: the EDR headroom last applied to the renderer (the window's display).
     /// On a window move we re-query the new screen and only reconfigure when it
     /// changes — so dragging across a display with different HDR capability adapts.
     #[cfg(target_os = "macos")]
     last_edr_headroom: f32,
-    /// "Not-ready" loading-pie state (the top-right affordance). `wait_started` is
-    /// when the current miss began (None when caught up); `pie_finish` plays the
-    /// snap-to-full fade once the photo lands; `pie_glow_started` is the last
-    /// keypress brighten-pulse. `decode_ewma` is the self-calibrating fill time
-    /// constant (a rolling mean of how long misses actually take). `pie_drawn`
-    /// tracks whether a pie bitmap is up, and `pie_pushed` the last
-    /// (progress, glow, alpha) rasterized, so we re-upload only on a visible change.
-    wait_started: Option<Instant>,
-    pie_finish: Option<Instant>,
-    pie_glow_started: Option<Instant>,
-    decode_ewma: f32,
-    pie_drawn: bool,
-    pie_pushed: Option<(f32, f32, f32)>,
-    /// The scan status card's content signature `(folder name, current folder, browsable
-    /// count)` while it's shown, or `None` when hidden. Cached so the card is only
-    /// re-rasterized when its content actually changes (and then no faster than
-    /// [`SCAN_CARD_REFRESH`]), off the photo hot path.
-    chip_sig: Option<(String, String, usize)>,
-    /// When the scan card was last (re)built — throttles the rebuild (the current-folder line
-    /// changes fast; see [`SCAN_CARD_REFRESH`]).
-    chip_built: Instant,
-    /// The **Cancel Scan button's** on-screen rect in physical px `[x0, y0, x1, y1]` while the
-    /// card is shown — only the button is clickable (not the whole card). The reusable overlay
-    /// hit-region: the first interactive on-image control; future EXIF copy buttons register
-    /// rects the same way. `None` when the card is hidden.
-    chip_rect: Option<[f32; 4]>,
-    /// Whether the pointer is currently over the Cancel Scan button — drives its hover "lit"
-    /// state. Flipped only on a hover **enter/leave transition** (see [`App::update_chip_hover`]),
-    /// which re-rasterizes the card once; never per cursor-move or per frame.
-    chip_hovered: bool,
-    /// The empty-state open panel's geometry while it's the active overlay (the two Open
-    /// File / Open Folder buttons); `None` when a photo is shown. Its buttons are the click
-    /// targets — see [`App::open_button_rect`].
-    open_panel: Option<OpenPanel>,
-    /// Which open-panel button is lit (hover), so the panel re-rasterizes only on a hover
-    /// enter/leave transition (see [`App::update_open_hover`]), never per cursor-move.
-    open_hover: Option<OpenButton>,
-    /// The interactive play hint's state while it's the active toast (`None` otherwise). Drives
-    /// its hover-to-hold / click-to-play behavior. See [`PlayHint`].
-    play_hint: Option<PlayHint>,
     /// Items whose full-resolution decode turned out to be no better than the
     /// preview (e.g. a RAW whose only embedded image *is* its preview) — so we
     /// don't keep re-requesting their upgrade every idle tick.
@@ -919,29 +794,29 @@ impl App {
                 root,
                 scan_root,
                 recursive,
+                info: InfoMode::Off,
+                overlay_shown: false,
+                overlay_item: None,
+                toast: None,
+                wait_started: None,
+                pie_finish: None,
+                pie_glow_started: None,
+                decode_ewma: 0.25,
+                pie_drawn: false,
+                pie_pushed: None,
+                chip_sig: None,
+                chip_built: Instant::now(),
+                chip_rect: None,
+                chip_hovered: false,
+                open_panel: None,
+                open_hover: None,
+                play_hint: None,
             },
             hud: Hud::load(),
-            info: InfoMode::Off,
-            overlay_shown: false,
-            overlay_item: None,
             scale_factor: 1.0,
             pending_drops: Vec::new(),
-            toast: None,
             #[cfg(target_os = "macos")]
             last_edr_headroom: 1.0,
-            wait_started: None,
-            pie_finish: None,
-            pie_glow_started: None,
-            decode_ewma: 0.25,
-            pie_drawn: false,
-            pie_pushed: None,
-            chip_sig: None,
-            chip_built: Instant::now(),
-            chip_rect: None,
-            chip_hovered: false,
-            open_panel: None,
-            open_hover: None,
-            play_hint: None,
             upgrade_done: HashSet::new(),
             last_upgrade_set: Vec::new(),
             full_requested_at: HashMap::new(),
@@ -1508,8 +1383,8 @@ impl App {
             .push(contract::CoreEffect::SetTitle("PhotoBlaze".to_string()));
         // Blank background + the centered "Press O to open…" hint (mirrors a bare launch).
         self.show_open_hint();
-        self.overlay_shown = false;
-        self.overlay_item = None;
+        self.core.overlay_shown = false;
+        self.core.overlay_item = None;
         self.draw();
     }
 
@@ -1564,12 +1439,12 @@ impl App {
         )));
         // The info panel belonged to the previous photo — drop it (and redraw to
         // remove it). Only touch the renderer if a panel was actually showing.
-        if self.overlay_shown {
+        if self.core.overlay_shown {
             if let Some(r) = self.renderer.as_mut() {
                 r.set_overlay(None, 0);
             }
-            self.overlay_shown = false;
-            self.overlay_item = None;
+            self.core.overlay_shown = false;
+            self.core.overlay_item = None;
             self.draw();
         }
     }
@@ -1815,8 +1690,8 @@ impl App {
                     r.set_overlay(None, 0);
                 }
                 self.effects.push(contract::CoreEffect::SetTitle(title));
-                self.overlay_shown = false;
-                self.overlay_item = None;
+                self.core.overlay_shown = false;
+                self.core.overlay_item = None;
                 self.core.displayed_item = Some(idx);
             }
             Err(e) => {
@@ -2673,7 +2548,7 @@ impl App {
 
         let next = Self::menu_state_from(
             self.core.view.mode,
-            self.info,
+            self.core.info,
             self.core.recursive,
             !self.windowed, // `windowed` is the inverse of the fullscreen checkbox
             self.core.slideshow.on,
@@ -3139,12 +3014,12 @@ impl App {
         } else {
             InfoMode::Basic
         };
-        self.info = if self.info == target {
+        self.core.info = if self.core.info == target {
             InfoMode::Off
         } else {
             target
         };
-        if self.info == InfoMode::Off {
+        if self.core.info == InfoMode::Off {
             self.hide_overlay();
         } else {
             self.show_overlay();
@@ -3154,12 +3029,12 @@ impl App {
     /// Toggle the keybindings help overlay (`/` or `?`). Shares the single overlay
     /// with the info panels, so it replaces whichever was showing.
     fn toggle_help(&mut self) {
-        self.info = if self.info == InfoMode::Help {
+        self.core.info = if self.core.info == InfoMode::Help {
             InfoMode::Off
         } else {
             InfoMode::Help
         };
-        if self.info == InfoMode::Off {
+        if self.core.info == InfoMode::Off {
             self.hide_overlay();
         } else {
             self.show_overlay();
@@ -3213,7 +3088,7 @@ impl App {
 
         // Redraw so the new letterbox shows even when the scale mode didn't change,
         // and rebuild the info panel so a new opacity takes effect immediately.
-        if self.overlay_shown {
+        if self.core.overlay_shown {
             self.show_overlay();
         } else if !scale_changed {
             self.draw();
@@ -3227,7 +3102,7 @@ impl App {
     fn apply_keymap(&mut self, keymap: Keymap) {
         self.keymap = keymap;
         self.keymap.save();
-        if self.overlay_shown && self.info == InfoMode::Help {
+        if self.core.overlay_shown && self.core.info == InfoMode::Help {
             self.show_overlay();
         }
     }
@@ -3794,7 +3669,7 @@ impl App {
             .core
             .displayed_item
             .is_some_and(|i| self.is_live_photo(i));
-        let panel = match self.info {
+        let panel = match self.core.info {
             InfoMode::Off => return,
             InfoMode::Basic => {
                 let (Some(hud), Some(meta)) = (self.hud.as_ref(), self.core.current.as_ref())
@@ -3845,8 +3720,8 @@ impl App {
         if let Some(a) = self.renderer.as_mut() {
             a.set_overlay(Some((&bitmap, w, h)), margin);
         }
-        self.overlay_shown = true;
-        self.overlay_item = self.core.displayed_item;
+        self.core.overlay_shown = true;
+        self.core.overlay_item = self.core.displayed_item;
         self.draw();
     }
 
@@ -3855,8 +3730,8 @@ impl App {
         if let Some(a) = self.renderer.as_mut() {
             a.set_overlay(None, 0);
         }
-        self.overlay_shown = false;
-        self.overlay_item = None;
+        self.core.overlay_shown = false;
+        self.core.overlay_item = None;
         self.draw();
     }
 
@@ -3894,8 +3769,8 @@ impl App {
             px,
             hud::BG,
             true, // shortcut hint a notch heavier (Semibold) so the dimmed text keeps presence
-            self.open_hover == Some(OpenButton::File),
-            self.open_hover == Some(OpenButton::Folder),
+            self.core.open_hover == Some(OpenButton::File),
+            self.core.open_hover == Some(OpenButton::Folder),
         )
     }
 
@@ -3911,10 +3786,10 @@ impl App {
             return;
         }
         let Some((bitmap, w, h, file, folder)) = self.open_panel_bitmap() else {
-            self.open_panel = None;
+            self.core.open_panel = None;
             return;
         };
-        self.open_panel = Some(OpenPanel { w, h, file, folder });
+        self.core.open_panel = Some(OpenPanel { w, h, file, folder });
         if let Some(a) = self.renderer.as_mut() {
             a.set_message(Some((&bitmap, w, h)));
         }
@@ -3937,10 +3812,10 @@ impl App {
         let pad = (12.0 * self.scale_factor).round().max(4.0) as u32;
         // A passive toast is not the interactive play hint — drop any play-hint state so it
         // doesn't respond to hover/click while a Copy/Save/… toast is up.
-        self.play_hint = None;
+        self.core.play_hint = None;
         if let Some(hud) = self.hud.as_ref() {
             if let Some((rgba, w, h)) = hud.render_panel_icon(msg, px, pad, icon, hud::BG) {
-                self.toast = Some(Toast {
+                self.core.toast = Some(Toast {
                     rgba,
                     w,
                     h,
@@ -3970,7 +3845,7 @@ impl App {
             hud.render_button(&spec, px, hud::BG, hovered)
         });
         let (rgba, w, h) = built?;
-        self.toast = Some(Toast {
+        self.core.toast = Some(Toast {
             rgba,
             w,
             h,
@@ -3985,7 +3860,7 @@ impl App {
     /// channel scaled), centered near the bottom.
     fn push_toast(&mut self, alpha: f32) {
         let (faded, w, h) = {
-            let Some(t) = self.toast.as_mut() else {
+            let Some(t) = self.core.toast.as_mut() else {
                 return;
             };
             t.uploaded_alpha = alpha;
@@ -4003,14 +3878,14 @@ impl App {
     fn tick_toast(&mut self, now: Instant) -> bool {
         // A hovered play hint pauses the fade: keep its toast pinned in the full-opacity hold
         // window, so the button never vanishes out from under the pointer.
-        if self.play_hint.is_some_and(|ph| ph.hovered) {
-            if let Some(t) = self.toast.as_mut() {
+        if self.core.play_hint.is_some_and(|ph| ph.hovered) {
+            if let Some(t) = self.core.toast.as_mut() {
                 t.started = now;
             }
         }
-        let Some(alpha) = self.toast.as_ref().and_then(|t| t.alpha(now)) else {
-            self.play_hint = None;
-            if self.toast.take().is_some() {
+        let Some(alpha) = self.core.toast.as_ref().and_then(|t| t.alpha(now)) else {
+            self.core.play_hint = None;
+            if self.core.toast.take().is_some() {
                 if let Some(a) = self.renderer.as_mut() {
                     a.set_toast(None, 0);
                 }
@@ -4019,6 +3894,7 @@ impl App {
             return false;
         };
         let changed = self
+            .core
             .toast
             .as_ref()
             .is_some_and(|t| (alpha - t.uploaded_alpha).abs() > 0.02);
@@ -4032,7 +3908,7 @@ impl App {
     /// The current keypress brighten-pulse intensity (0..=1), decaying to 0 over
     /// `PIE_GLOW_DUR` after the last dropped nav press.
     fn pie_glow(&self, now: Instant) -> f32 {
-        match self.pie_glow_started {
+        match self.core.pie_glow_started {
             Some(t) => (1.0 - (now - t).as_secs_f32() / PIE_GLOW_DUR).clamp(0.0, 1.0),
             None => 0.0,
         }
@@ -4048,11 +3924,11 @@ impl App {
         let not_ready =
             self.core.target_item.is_some() && self.core.displayed_item != self.core.target_item;
         if not_ready {
-            self.pie_finish = None;
-            let start = *self.wait_started.get_or_insert(now);
+            self.core.pie_finish = None;
+            let start = *self.core.wait_started.get_or_insert(now);
             let elapsed = (now - start).as_secs_f32();
             if elapsed >= PIE_SHOW_DELAY {
-                let tau = self.decode_ewma.max(PIE_TAU_MIN);
+                let tau = self.core.decode_ewma.max(PIE_TAU_MIN);
                 // Asymptotic ease: ~half-full at one tau, approaching the cap but
                 // never quite arriving (the deliberate, honest-ish "lie").
                 let progress = (1.0 - 2f32.powf(-elapsed / tau)).min(PIE_FILL_CAP);
@@ -4065,23 +3941,23 @@ impl App {
         }
         // Caught up. If we were mid-wait, learn how long it took (so the estimate
         // tracks this machine + folder), and if the pie was up, play the finish.
-        if let Some(start) = self.wait_started.take() {
+        if let Some(start) = self.core.wait_started.take() {
             let waited = (now - start).as_secs_f32();
-            self.decode_ewma = (self.decode_ewma * (1.0 - PIE_EWMA_ALPHA)
+            self.core.decode_ewma = (self.core.decode_ewma * (1.0 - PIE_EWMA_ALPHA)
                 + waited * PIE_EWMA_ALPHA)
                 .clamp(PIE_TAU_MIN, 2.0);
-            if self.pie_drawn {
-                self.pie_finish = Some(now);
+            if self.core.pie_drawn {
+                self.core.pie_finish = Some(now);
             }
         }
-        if let Some(fstart) = self.pie_finish {
+        if let Some(fstart) = self.core.pie_finish {
             let t = (now - fstart).as_secs_f32();
             if t < PIE_FINISH_FADE {
                 let glow = self.pie_glow(now);
                 self.push_pie(1.0, glow, 1.0 - t / PIE_FINISH_FADE);
                 return true;
             }
-            self.pie_finish = None;
+            self.core.pie_finish = None;
         }
         self.clear_pie();
         false
@@ -4092,10 +3968,10 @@ impl App {
     /// changes (quantized), so the slow tail of the asymptote doesn't churn.
     fn push_pie(&mut self, progress: f32, glow: f32, alpha: f32) {
         let want = (progress, glow, alpha);
-        let unchanged = self.pie_pushed.is_some_and(|(p, g, a)| {
+        let unchanged = self.core.pie_pushed.is_some_and(|(p, g, a)| {
             (p - progress).abs() < 0.01 && (g - glow).abs() < 0.04 && (a - alpha).abs() < 0.02
         });
-        if unchanged && self.pie_drawn {
+        if unchanged && self.core.pie_drawn {
             return;
         }
         let diameter = (PIE_DIAMETER * self.scale_factor).round().max(12.0) as u32;
@@ -4107,19 +3983,19 @@ impl App {
         if let Some(a) = self.renderer.as_mut() {
             a.set_pie(Some((&rgba, w, h)), margin);
         }
-        self.pie_drawn = true;
-        self.pie_pushed = Some(want);
+        self.core.pie_drawn = true;
+        self.core.pie_pushed = Some(want);
         self.draw();
     }
 
     /// Clear the pie layer if it's up (and redraw to remove it).
     fn clear_pie(&mut self) {
-        if self.pie_drawn {
+        if self.core.pie_drawn {
             if let Some(a) = self.renderer.as_mut() {
                 a.set_pie(None, 0);
             }
-            self.pie_drawn = false;
-            self.pie_pushed = None;
+            self.core.pie_drawn = false;
+            self.core.pie_pushed = None;
             self.draw();
         }
     }
@@ -4145,21 +4021,21 @@ impl App {
             }
             _ => None,
         };
-        if want == self.chip_sig {
+        if want == self.core.chip_sig {
             return;
         }
         // Show/hide is immediate; a content tick (folder/count) is throttled so the software
         // composite stays off the hot path.
-        let toggling = want.is_some() != self.chip_sig.is_some();
-        if !toggling && self.chip_built.elapsed() < SCAN_CARD_REFRESH {
+        let toggling = want.is_some() != self.core.chip_sig.is_some();
+        if !toggling && self.core.chip_built.elapsed() < SCAN_CARD_REFRESH {
             return;
         }
         match &want {
             Some((name, path, count)) => self.push_chip(name, path, *count),
             None => self.clear_chip(),
         }
-        self.chip_sig = want;
-        self.chip_built = Instant::now();
+        self.core.chip_sig = want;
+        self.core.chip_built = Instant::now();
     }
 
     /// Rasterize the scan status card and place it at the top-right with equal top/right insets.
@@ -4189,11 +4065,11 @@ impl App {
                 px,
                 width,
                 hud::BG,
-                self.chip_hovered,
+                self.core.chip_hovered,
             )
         });
         let Some((rgba, w, h, btn)) = card else {
-            self.chip_rect = None;
+            self.core.chip_rect = None;
             return;
         };
         if let Some(a) = self.window.as_ref() {
@@ -4202,7 +4078,7 @@ impl App {
             let card_x0 = a.inner_size().width as f32 - margin as f32 - w as f32;
             let card_y0 = margin as f32;
             let [bx, by, bw, bh] = btn.map(|v| v as f32);
-            self.chip_rect = Some([
+            self.core.chip_rect = Some([
                 card_x0 + bx,
                 card_y0 + by,
                 card_x0 + bx + bw,
@@ -4225,10 +4101,10 @@ impl App {
     ///
     /// [`scale_factor`]: App::scale_factor
     fn rescale_overlays(&mut self) {
-        self.pie_pushed = None; // re-rasterize the loading pie at the new scale next tick
-        self.chip_sig = None; // re-rasterize the scan card next tick
-        if self.overlay_shown {
-            self.overlay_item = None; // force the info/EXIF/help panel to re-show next tick
+        self.core.pie_pushed = None; // re-rasterize the loading pie at the new scale next tick
+        self.core.chip_sig = None; // re-rasterize the scan card next tick
+        if self.core.overlay_shown {
+            self.core.overlay_item = None; // force the info/EXIF/help panel to re-show next tick
         }
         if self.core.source.is_empty() {
             self.show_open_hint(); // re-rasterize the "Press O to open" hint
@@ -4238,12 +4114,12 @@ impl App {
 
     /// Clear the scan card layer if it's up (and redraw to remove it).
     fn clear_chip(&mut self) {
-        if self.chip_sig.is_some() {
+        if self.core.chip_sig.is_some() {
             if let Some(a) = self.renderer.as_mut() {
                 a.set_chip(None, 0, 0);
             }
-            self.chip_rect = None;
-            self.chip_hovered = false;
+            self.core.chip_rect = None;
+            self.core.chip_hovered = false;
             self.draw();
         }
     }
@@ -4253,7 +4129,9 @@ impl App {
     /// overlay, test it here before the click falls through to drag-to-pan. (Future EXIF copy
     /// buttons will register their own rects the same way.)
     fn chip_hit(&self, x: f32, y: f32) -> bool {
-        self.chip_rect.is_some_and(|rect| point_in_rect(rect, x, y))
+        self.core
+            .chip_rect
+            .is_some_and(|rect| point_in_rect(rect, x, y))
     }
 
     /// Update the Cancel Scan button's hover "lit" state from the latest cursor position, and —
@@ -4265,13 +4143,13 @@ impl App {
             .core
             .last_cursor
             .is_some_and(|[x, y]| self.chip_hit(x, y));
-        if hovered == self.chip_hovered {
+        if hovered == self.core.chip_hovered {
             return;
         }
-        self.chip_hovered = hovered;
+        self.core.chip_hovered = hovered;
         // Re-render the card in the new hover state; its content (name/path/count) is unchanged,
         // so this bypasses the content throttle and feels instant.
-        if let Some((name, path, count)) = self.chip_sig.clone() {
+        if let Some((name, path, count)) = self.core.chip_sig.clone() {
             self.push_chip(&name, &path, count);
         }
     }
@@ -4282,7 +4160,7 @@ impl App {
     ///
     /// [`show_open_hint`]: App::show_open_hint
     fn open_hint_active(&self) -> bool {
-        self.open_panel.is_some()
+        self.core.open_panel.is_some()
             && self.core.source.is_empty()
             && self.dir_scan.is_none()
             && self.pending_launch.is_none()
@@ -4296,7 +4174,7 @@ impl App {
         if !self.open_hint_active() {
             return None;
         }
-        let panel = self.open_panel?;
+        let panel = self.core.open_panel?;
         let sz = self.window.as_ref()?.inner_size();
         // Same centering the renderer applies (see `center_quad_vertices`): clamped to ≥ 0.
         let x0 = ((sz.width as f32 - panel.w as f32) * 0.5).max(0.0);
@@ -4330,10 +4208,10 @@ impl App {
             return;
         }
         let hovered = self.open_hovered_button();
-        if hovered == self.open_hover {
+        if hovered == self.core.open_hover {
             return;
         }
-        self.open_hover = hovered;
+        self.core.open_hover = hovered;
         // Rebuild the panel with the new lit button (content is otherwise unchanged), re-upload
         // it, and present so the change shows immediately.
         self.show_open_hint();
@@ -4345,8 +4223,8 @@ impl App {
     /// the renderer's placement and survives resizes. `None` unless the play hint is the current
     /// toast and still on screen.
     fn play_hint_rect(&self) -> Option<[f32; 4]> {
-        let ph = self.play_hint?;
-        self.toast.as_ref()?; // only while its toast is actually up
+        let ph = self.core.play_hint?;
+        self.core.toast.as_ref()?; // only while its toast is actually up
         let sz = self.window.as_ref()?.inner_size();
         let margin = (64.0 * self.scale_factor).round().max(8.0);
         let x0 = ((sz.width as f32 - ph.w as f32) * 0.5).max(0.0);
@@ -4370,7 +4248,7 @@ impl App {
     /// [`tick_toast`]: App::tick_toast
     fn update_play_hint_hover(&mut self) {
         let hovered = self.play_hint_hit();
-        let Some(ph) = self.play_hint else {
+        let Some(ph) = self.core.play_hint else {
             return;
         };
         if ph.hovered == hovered {
@@ -4380,7 +4258,7 @@ impl App {
         // resets the fade clock, which is what we want: hovering holds it at full, and leaving
         // gives it a fresh hold before it fades.
         self.build_play_hint(ph.icon, hovered);
-        self.play_hint = Some(PlayHint { hovered, ..ph });
+        self.core.play_hint = Some(PlayHint { hovered, ..ph });
         self.draw();
     }
 
@@ -4566,10 +4444,10 @@ impl App {
         self.last_upgrade_set.clear();
         self.undo_stack.clear();
         self.core.current = None;
-        self.toast = None;
-        self.wait_started = None;
-        self.pie_finish = None;
-        self.pie_glow_started = None;
+        self.core.toast = None;
+        self.core.wait_started = None;
+        self.core.pie_finish = None;
+        self.core.pie_glow_started = None;
         // Drop any on-demand animation playback + in-flight decode (RAM-only — #2).
         self.stop_playback();
     }
@@ -4585,7 +4463,7 @@ impl App {
             return;
         };
         if self.core.target_item.is_some() && self.core.displayed_item != self.core.target_item {
-            self.pie_glow_started = Some(Instant::now());
+            self.core.pie_glow_started = Some(Instant::now());
         } else {
             self.advance(nav);
         }
@@ -5062,7 +4940,7 @@ impl App {
                 // detailed panel is open, refresh it so the frame count/rate/loop appear.
                 AnimWant::Eager => {
                     self.prepared = Some(Prepared { item, anim });
-                    if self.overlay_shown && self.info == InfoMode::Full {
+                    if self.core.overlay_shown && self.core.info == InfoMode::Full {
                         self.show_overlay();
                     }
                 }
@@ -5100,7 +4978,7 @@ impl App {
         // Keep a shown detailed-EXIF panel's live "Frame X / N" in sync as the frame
         // changes. Off the hot path (only during user-engaged playback/stepping), and
         // the EXIF read is memoized so this never re-reads the file per frame.
-        if self.overlay_shown && self.info == InfoMode::Full {
+        if self.core.overlay_shown && self.core.info == InfoMode::Full {
             self.show_overlay(); // rebuilds the table + draws
         } else {
             self.draw();
@@ -5217,7 +5095,7 @@ impl App {
                 icon::assets::PLAY
             };
             if let Some((w, h)) = self.build_play_hint(icon, false) {
-                self.play_hint = Some(PlayHint {
+                self.core.play_hint = Some(PlayHint {
                     w,
                     h,
                     icon,
@@ -5247,8 +5125,8 @@ impl App {
                                 // (not a fade), so a stale/irrelevant button never lingers over the next photo — which
                                 // could even be a non-animated one. Only the play hint owns the toast here; a passive
                                 // status toast (Copy/Save/…) has `play_hint == None` and is left to fade normally.
-        if self.play_hint.take().is_some() {
-            self.toast = None;
+        if self.core.play_hint.take().is_some() {
+            self.core.toast = None;
             if let Some(a) = self.renderer.as_mut() {
                 a.set_toast(None, 0);
             }
@@ -5475,7 +5353,7 @@ impl ApplicationHandler for App {
             renderer.clear_image();
             if let Some((bitmap, w, h, file, folder)) = self.open_panel_bitmap() {
                 renderer.set_message(Some((&bitmap, w, h)));
-                self.open_panel = Some(OpenPanel { w, h, file, folder });
+                self.core.open_panel = Some(OpenPanel { w, h, file, folder });
             }
         }
 
@@ -5693,7 +5571,7 @@ impl ApplicationHandler for App {
                 self.core.zoom_last = None;
                 self.core.pan_started = None;
                 self.core.pan_last = None;
-                self.pie_glow_started = None;
+                self.core.pie_glow_started = None;
                 // Focus loss can swallow the button-up — never leave a drag stuck.
                 self.core.dragging = false;
             }
@@ -5741,7 +5619,7 @@ impl ApplicationHandler for App {
                     }
                 } else if pressed && self.play_hint_hit() {
                     // Click the play hint → play, and dismiss it (it's been used).
-                    self.play_hint = None;
+                    self.core.play_hint = None;
                     self.dispatch_action(Action::PlayPause);
                 } else if pressed
                     && self
@@ -5957,15 +5835,15 @@ impl ApplicationHandler for App {
         // 4a′. Flash the "Press P to play" hint once on settling on an animated still —
         // suppressed while flying (no nag mid-fly) and once playback has engaged (#37).
         self.maybe_show_anim_hint(flying);
-        if self.info != InfoMode::Off {
+        if self.core.info != InfoMode::Off {
             if flying {
-                if self.overlay_shown {
+                if self.core.overlay_shown {
                     self.hide_overlay();
                 }
             } else if !transforming
                 // Help is static (no photo needed); the info panels need a photo.
-                && (self.info == InfoMode::Help || self.core.current.is_some())
-                && (!self.overlay_shown || self.overlay_item != self.core.displayed_item)
+                && (self.core.info == InfoMode::Help || self.core.current.is_some())
+                && (!self.core.overlay_shown || self.core.overlay_item != self.core.displayed_item)
             {
                 self.show_overlay();
             }
@@ -5998,7 +5876,7 @@ impl ApplicationHandler for App {
                 // size, with a freshly sized corner margin. A fullscreen toggle resizes
                 // the surface but leaves the panel's quad placed for the old one, so
                 // after toggling it can end up jammed in the corner — re-show fixes it (#3).
-                if self.overlay_shown {
+                if self.core.overlay_shown {
                     self.show_overlay();
                 }
                 false

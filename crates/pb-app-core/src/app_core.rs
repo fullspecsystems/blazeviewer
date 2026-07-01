@@ -25,6 +25,7 @@ use pb_source::PhotoSource;
 
 use crate::decode_pool::{DecodePool, Outcome};
 use crate::metrics::StageTimes;
+use crate::overlay::{InfoMode, OpenButton, OpenPanel, PlayHint, Toast};
 use crate::{Action, Modifiers, PbKey, PhotoMeta, Slideshow};
 
 /// A navigation move: forward (`space`/`→`), backward (`backspace`/`←`), a
@@ -145,4 +146,41 @@ pub struct AppCore {
     pub scan_root: Option<PathBuf>,
     /// Whether the current scan-based playlist is recursive (`Ctrl+R` toggles).
     pub recursive: bool,
+
+    // --- HUD / overlay state (NS0 5.3e; the Hud rasterizer stays shell-side for 5.4) ---
+    /// Which info overlay is active (`i` basic / `Shift+I` full EXIF / `?` help / off).
+    pub info: InfoMode,
+    /// Whether the info panel is currently drawn.
+    pub overlay_shown: bool,
+    /// Which item the drawn panel was built for; when it differs from `displayed_item` the
+    /// panel is stale and gets rebuilt (tracks the photo with no blank flash on single-step).
+    pub overlay_item: Option<usize>,
+    /// The current transient status toast (command feedback), or `None`.
+    pub toast: Option<Toast>,
+    /// When the current decode-wait started, for the delayed loading pie.
+    pub wait_started: Option<Instant>,
+    /// When the loading pie should finish its sweep.
+    pub pie_finish: Option<Instant>,
+    /// When the pie's completion glow started.
+    pub pie_glow_started: Option<Instant>,
+    /// EWMA of recent decode durations, to size the pie's expected sweep.
+    pub decode_ewma: f32,
+    /// Whether the pie was drawn this cycle (so it clears exactly once when done).
+    pub pie_drawn: bool,
+    /// The pie geometry last pushed to the renderer `(cx, cy, r)`, to skip redundant uploads.
+    pub pie_pushed: Option<(f32, f32, f32)>,
+    /// Signature of the last-built help/hint chip `(a, b, gen)`, to rebuild only on change.
+    pub chip_sig: Option<(String, String, usize)>,
+    /// When the current chip bitmap was built (for its fade/animation).
+    pub chip_built: Instant,
+    /// The chip's on-screen rect `[x, y, w, h]`, for hover hit-testing.
+    pub chip_rect: Option<[f32; 4]>,
+    /// Whether the pointer is over the chip.
+    pub chip_hovered: bool,
+    /// The empty-state open panel's geometry while shown, or `None`.
+    pub open_panel: Option<OpenPanel>,
+    /// Which empty-state open button the pointer is over, or `None`.
+    pub open_hover: Option<OpenButton>,
+    /// The interactive play hint riding the toast layer, or `None`.
+    pub play_hint: Option<PlayHint>,
 }
