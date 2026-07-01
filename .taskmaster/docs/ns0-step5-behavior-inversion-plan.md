@@ -1,10 +1,13 @@
 # NS0 Step 5 — Behavior Inversion (`AppCore::handle` + thin shell) — Execution Plan
 
-**Status:** revised after codex review (r1). **Branch:** `swiftui` (≡ `main` through Phase A).
-**Prereq done:** 5.1–5.4 (state) + **Phase 0 (contract cleanup) DONE** + **Phase A (remaining
-state moves) DONE** — all green, committed, pushed. **RESUME AT PHASE B** (move the ~110
-pure-core methods into `impl AppCore`), then Phase C (`handle`), then Phase E (=5.6). This plan
-covers 5.5 + 5.6; see `../current-status.md` §NS0 for the done-vs-remaining summary.
+**Status:** revised after codex review (r1). **Branch:** `swiftui`. **Prereq done:** 5.1–5.4
+(state) + Phase 0 (contract cleanup) + Phase A (remaining state moves) + **Phase B (the ~99
+pure-core method moves onto `impl AppCore`) DONE (2026-07-01)** — all green (383 tests, clippy
+`-D warnings`, fmt), 8 commits, not yet fast-forwarded onto `main`. **RESUME by effect-ifying
+`dispatch_action`'s 10 remaining shell arms** (see `../current-status.md` §NS0 ▶ Resume for the
+exact list + order), then Phase C (`handle`), then Phase E (=5.6, the dialog/scan/archive flow).
+The scanning/launching flags, live-audio effects, and delete-state moves that Phase B needed are
+all in place. See `../current-status.md` §NS0 for the full done-vs-remaining summary.
 
 Read `ns0-appcore-inversion-brief.md` first for the effect-seam (4a–4e) and the field-group
 map. **r1 changes (from codex review):** a new **Phase 0 contract-cleanup** runs first —

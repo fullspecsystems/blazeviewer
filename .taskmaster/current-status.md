@@ -1,11 +1,13 @@
 # PhotoBlaze — Current Status (session handoff)
 
 _Last updated: 2026-07-01. **ACTIVE STREAM: NS0 — the AppCore ownership inversion** (macOS
-SwiftUI groundwork, ADR-021) — see the NS0 section immediately below. On branch `swiftui`,
-fast-forwarded onto `main` through Phase A. NS0 is **~half done: the full STATE inversion is
-complete; the BEHAVIOR inversion (5.5 Phase B/C) + flow inversion (5.6) remain** — so NS1 is
-NOT yet startable. Everything below the NS0 section is the previously-shipped work (macOS port,
-archive, settings, HEIC, color), unchanged._
+SwiftUI groundwork, ADR-021) — see the NS0 section immediately below. On branch `swiftui`.
+NS0 is now **~80% done: the full STATE inversion + the bulk of the BEHAVIOR inversion (5.5
+Phase B) are complete — ~99 pure-core methods moved onto `impl AppCore`. What remains is the
+keystone `handle(CoreEvent)` (Phase C) + the scan/archive/dialog/delete/window FLOW inversion
+(5.6), which are entangled and smoke-gated** — so NS1 is NOT yet startable (it needs `handle()`).
+Everything below the NS0 section is the previously-shipped work (macOS port, archive, settings,
+HEIC, color), unchanged._
 
 _The macOS (Apple Silicon) port is complete and SHIPPED in `v0.1.0-beta.4` (2026-06-30) — the
 first signed + notarized macOS DMG alongside the signed Windows MSI. Verified notarized +
@@ -15,8 +17,9 @@ stapled + Gatekeeper-accepted (`source=Notarized Developer ID`)._
 
 ## 🧭 NS0 — AppCore ownership inversion (SwiftUI groundwork, ADR-021) — IN PROGRESS (2026-07-01)
 
-**Branch `swiftui` (≡ `main`, fast-forwarded through Phase A). Green throughout: 380 workspace
-tests, clippy `-D warnings`, fmt. Full detail + resume plan:
+**Branch `swiftui`. Green throughout: 383 workspace tests, clippy `-D warnings`, fmt. `main.rs`
+is down from 7,618 → 4,537 lines; `impl AppCore` now carries 99 methods (`app_core_impl.rs`),
+57 methods remain on `impl App`. Full detail + resume plan:
 `.taskmaster/docs/ns0-step5-behavior-inversion-plan.md` (r1, codex-reviewed).**
 
 **Goal:** invert the winit `App` god-object into a platform-neutral **`AppCore`** (in
@@ -43,40 +46,98 @@ Two parts: **STATE** inversion (fields → AppCore) then **BEHAVIOR** inversion 
 - **5.5 Phase A (remaining state):** prefetch-upgrade trio, `live_motion_cache`, undo (migrated
   `UndoAction`), animation (git-mv `animation.rs` + relocated `AnimWant`/`AnimDecode`/`Prepared`).
 
-**Net:** `AppCore` owns **all** orchestration state. Still shell-owned = only platform handles:
-`window`, `dialog`(+`pending_dialog`), the muda native-menu handles (`menu`/`window_menu`/
-`native_fullscreen_item`/`proxy_icon_path`/`save_rotation_item`/`cancel_scan_item`/`undo_item`/
-`menu_attached`), `menu_state`, `last_edr_headroom`, the `live_audio` ObjC `AVAudioPlayer`
-handle, plus the **scan/archive/launch/delete/drop FLOW** state (→ 5.6). Two review-driven
-calls held: `undo_item` and `live_audio` stayed shell (native handles, not state).
+**Net:** `AppCore` owns **all** orchestration state, and now (Phase B) also the deferred-delete
+state (`pending_delete`/`pending_confirm_delete`) + the `scanning`/`launching` flow mirrors. Still
+shell-owned = only platform handles + live async flow: `window`, `windowed`, `dialog`
+(+`pending_dialog`), the muda native-menu handles (`menu`/`window_menu`/`native_fullscreen_item`/
+`proxy_icon_path`/`save_rotation_item`/`cancel_scan_item`/`undo_item`/`menu_attached`),
+`menu_state`, `last_edr_headroom`, the `live_audio` ObjC `AVAudioPlayer` handle (driven via
+effects now), plus the **scan/archive/launch/drop FLOW** handles (`dir_scan`/`scan_gen`/
+`archive_load`/`archive_gen`/`pending_launch`/`password_archive`/`pending_drops`) → inverted in 5.6.
 
-### ❌ NOT DONE — the behavior inversion (5.5 Phase B/C + 5.6)
-- **5.5 Phase B** — physically move the **~110 pure-core methods** from `impl App` (main.rs)
-  into `impl AppCore` (app_core.rs), in concern batches: B1 nav/prefetch · B2 view (zoom/pan/
-  rotate/fit) · B3 HUD-build · B4 animation (add `Start/Pause/Resume/StopLiveAudio` effects +
-  convert `live_audio` calls here) · B5 undo + misc. Per-method: `Instant::now()` → `self.now`.
-- **5.5 Phase C** — the keystone: add **`AppCore::handle(CoreEvent)`** (KeyDown→resolve→
-  `dispatch_action`, Tick→advance/slideshow + `SetWake`, Resized→viewport, pointer/scroll/pinch
-  →view, MenuAction→dispatch_action for non-flow) + core unit tests; rewrite `window_event` /
-  `about_to_wait` as translators (stamp `now` → build `CoreEvent` → `handle` → `drain_effects`).
-- **5.6** — invert the scan/archive/dialog/delete/drop flow (migrate `Resolved`; untangle
-  `finish_picker` + `begin_archive_open`→`DialogWindow`) + native fullscreen. Flow events stay
-  shell-routed until here.
+### ✅ DONE — Phase B (the pure-core BEHAVIOR inversion), 2026-07-01
+The ~99 pure-core orchestration methods now live on **`impl AppCore`** (new
+`crates/pb-app-core/src/app_core_impl.rs`) instead of `impl App`. Done as **8 green commits**,
+each `cargo test --workspace` + `clippy -D warnings` + `fmt` clean, behavior-preserving
+(`self.core.X` → `self.X`; the shell calls them as `self.core.method()`):
+- **Engine helpers/consts → `pb_app_core::engine`** (new module): the decode entry points
+  (`decode_item`/`decode_motion_job`), `meta_for`/`rel_to_root`, `render_color`, `is_hdr`,
+  `nav_of`, `ring_capacity`/`window_for_capacity`, the EXIF/`scale_alpha`/`point_in_rect`/
+  `title_for`/`file_name_of` helpers, the picker-dir helpers, the **clipboard pixel transforms**
+  (`to_clipboard_rgba8`/`rotate_rgba8`/`srgb_oetf`/`reinhard`, `half` dep added), `companion_motion`,
+  `cursor_after_removal`, `scale_mode_of`, `frame_step_dir`, and all the tuning consts (ring/zoom/
+  pan/pie/frame-step). **`macos_menu_chord` → `pb_app_core::keymap`** (pure Action→KeyChord table).
+- **Methods moved (by cluster):** nav/prefetch/residency (`present_item`, `drain_results`,
+  `try_present_target`, `sharpen_now`, `prefetch_fulls`, `load_current_sync`, **`request_prefetch`**,
+  **`advance`**, **`nav_press`**, …), view zoom/pan/rotate/fit (`view_for`, `zoom_held`, `pan_held`,
+  `pan_by_pixels`, `apply_view_holds`, `zoom_step`, `zoom_about_cursor`, `set_scale_mode`, …), HUD
+  build + overlay/help (`show_overlay`, `help_sections`, `help_shortcut`, `toggle_info`,
+  `toggle_help`, push/tick toast/pie/chip, play-hint, `exif_rows`, `open_panel_bitmap`, the
+  open-hint chain), the **animation-playback cluster** (`toggle_play_pause`, `frame_step`,
+  `frame_step_press`, `poll_anim_decode`, `start_live_audio`, `stop_playback`,
+  `present_anim_frame`, `install_animation`, `tick_playback`, `tick_frame_step`,
+  `maybe_show_anim_hint`), the delete-advance pure cluster (`flush_pending_delete`,
+  `enter_empty_state`, `rebuild_playlist`), `refresh_cursor`, `copy_image`/`copy_path`,
+  `menu_state_from`, `apply_settings`, `apply_keymap`, `refresh_hz`, `windowed_restore`, …
+- **Couplings resolved to enable the moves:**
+  - **`scanning` + `launching` bools** on `AppCore` — core-owned mirrors of the shell's
+    `dir_scan.is_some()` / `pending_launch.is_some()`, kept in sync at every mutation. Let
+    `request_prefetch` + the open-hint chain move without the shell flow fields.
+  - **Live-audio effects (B4):** `CoreEffect::{StartLiveAudio{path,at_secs}, StopLiveAudio,
+    PauseLiveAudio, ResumeLiveAudio}`. The shell owns the ObjC `AVAudioPlayer` and executes them
+    in `drain_effects` (no-op on non-macOS via the stub); the core pushes them. Same-turn drain =
+    behavior-preserving.
+  - **Delete state → core:** `pending_delete` + `pending_confirm_delete` moved onto `AppCore`.
+    `do_delete`'s trash I/O + `delete_current`'s confirm dialog stay shell (→ 5.6).
 
-**⚠ NS1 (the Swift bridge) cannot start until Phase C** — it drives the core through `handle()`,
-which does not exist yet.
+### ❌ NOT DONE — Phase C (`handle`) + 5.6 (flow inversion). **This is the entangled, smoke-gated back half.**
+- **`dispatch_action` cannot move yet** — it's the central `match action` (main.rs), and 10 of
+  its arms still call genuine shell/flow/IO methods: `begin_exit` (window teardown), `open_about`/
+  `open_settings` (dialog), `delete_current` (confirm dialog), `cancel_scan_command`/
+  `toggle_recursive` (scan flow), `save_rotation`/`undo` (the `save_rotation` little-exif I/O
+  module), `toggle_fullscreen` (the shell `windowed` field), `toggle_mute_audio` (the native
+  `menu_state` refresh). **Each must become a `CoreEffect`/`CoreEvent` first** — that work *is*
+  Phase C/E. The non-flow ones (`toggle_fullscreen`→`SetWindowMode`, `toggle_mute_audio`→
+  `SetMenuState`, `save_rotation`/`undo`→a `SaveRotation`/result effect) are self-contained; the
+  6 dialog/scan/exit arms are 5.6 proper.
+- **5.5 Phase C** — the keystone: once `dispatch_action` is core, add **`AppCore::handle(CoreEvent)`**
+  (KeyDown→resolve→`dispatch_action` + held-key update, Tick→advance/slideshow + `SetWake`,
+  Resized→viewport, pointer/scroll/pinch→view, MenuAction→dispatch_action for non-flow) + core
+  unit tests; rewrite `window_event` / `about_to_wait` as translators (stamp `now` → build
+  `CoreEvent` → `handle` → `drain_effects`). The `now` clock + `Viewport` are already core.
+- **5.6** — invert the scan/archive/dialog/delete-confirm/drop flow (migrate `Resolved`; untangle
+  `finish_picker` + `begin_archive_open`→`DialogWindow`) + native fullscreen. The 57 methods still
+  on `impl App` are exactly this: the effect executors (`drain_effects`, `open_pending_dialog`,
+  `write_clipboard`), the window/menu/native ops, the flow methods (`begin_dir_scan`,
+  `poll_dir_scan`, `begin_archive_open`, `finish_picker`, `dialog_event`, `handle_dialog_outcome`,
+  …), and the I/O-coupled `save_rotation`/`undo`/`do_delete`.
+
+**⚠ NS1 (the Swift bridge) still cannot start until Phase C** — it drives the core through
+`handle()`, which does not exist yet (blocked on `dispatch_action` moving, which is blocked on the
+flow-arm effect conversions).
 
 ### ▶ Resume
-Read **`.taskmaster/docs/ns0-step5-behavior-inversion-plan.md`** (the batch-by-batch plan, the
-`handle()` design, and the 7 codex fixes), then start at **Phase B1** (nav/prefetch methods).
-The move recipe (migrate pb-app-local types → relocate → redirect refs; watch the prefix-
-over-match / multiline-`self\n.field` / non-`self`-ref hazards) is proven across ~19 green
-increments. Central action dispatch: `dispatch_action` (main.rs). All committed + pushed;
-fast-forward `main` again at the next clean milestone.
+Read **`.taskmaster/docs/ns0-step5-behavior-inversion-plan.md`**. Phase B is done; **resume by
+converting `dispatch_action`'s 10 shell arms to effects/CoreEvents** (start with the 4 self-
+contained non-flow ones: `toggle_fullscreen`→`SetWindowMode` [brief 4e], `toggle_mute_audio`→a
+`SetMenuState` push, `save_rotation`+`undo`→a `SaveRotation`/result effect for the little-exif
+write). Once all 10 are effect-driven, `dispatch_action` moves onto `AppCore`, then add
+`handle(CoreEvent)` (Phase C), then invert the dialog/scan/archive flow (5.6). The proven move
+recipe: relocate any pb-app-local helper/const/type the method drags → `pb_app_core::engine` (or
+`keymap`/`settings`) first, then move the method (`self.core.X`→`self.X`; make it `pub`), then
+rewrite call sites `self.X(`→`self.core.X(`. **Hazards** (all hit + handled this session):
+multiline `self\n.core\n.field` chains (collapse with regex, not a literal replace); a method
+that calls a shell *module* path (`clipboard::`/`save_rotation::`/`delete::`) or an associated
+`Self::`/`App::` fn — the token classifier misses both, so grep the body before moving; and
+test-only imports must live in the `#[cfg(test)] mod tests` block, not the crate root (else the
+bin build flags them unused). The scratchpad has the move scripts
+(`move_methods.py`, `reclass3.py` — the comment-stripping classifier).
 
-**Unsmoked since the owner's last manual test:** the renderer move, `pb-hud`, Phase 0
-(viewport/clock), and Phase A — all behavior-preserving field moves + effectively-no-op clock/
-viewport changes. A fast-forward is trivially revertible (`git reset --hard` the pre-NS0 main).
+**Unsmoked since the owner's last manual test:** the entire Phase B method move (99 methods) +
+the live-audio effect seam + the `scanning`/`launching`/delete-state field moves. All are
+behavior-preserving (`cargo test` can't catch a feel regression, only a manual hold-to-fly +
+play/pause + delete + open-hint pass can). Not yet fast-forwarded onto `main`; a `git reset
+--hard` to the pre-Phase-B commit (`44d9464`) is the clean rollback.
 
 ---
 
