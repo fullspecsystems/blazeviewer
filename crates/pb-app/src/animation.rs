@@ -14,7 +14,7 @@
 
 use std::time::Duration;
 
-use pb_decode::{AnimFrame, Animation, ColorTransform};
+use pb_decode::{AnimFrame, Animation, AnimationKind, ColorTransform};
 
 /// Playback cursor over a decoded [`Animation`].
 pub struct Playback {
@@ -45,6 +45,12 @@ impl Playback {
 
     pub fn frame_count(&self) -> usize {
         self.anim.frames.len()
+    }
+
+    /// What kind of motion this is — notably [`AnimationKind::LivePhoto`], which reverts
+    /// to the crisp still after finishing rather than parking on the low-res last frame.
+    pub fn kind(&self) -> AnimationKind {
+        self.anim.kind
     }
 
     /// The current frame index (0-based) — the EXIF panel's live "Frame X / N".
@@ -164,7 +170,6 @@ impl Playback {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pb_decode::AnimationKind;
 
     /// An `n`-frame animation, each frame `delay_ms`, looping `loop_count` times.
     fn anim(n: usize, delay_ms: u64, loop_count: u32) -> Animation {

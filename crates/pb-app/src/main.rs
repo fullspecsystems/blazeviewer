@@ -156,6 +156,10 @@ const FRAME_STEP_REPEAT: Duration = Duration::from_millis(70);
 /// that tapping straight through a folder of animations never kicks a decode (#37).
 const EAGER_PREP_DELAY: Duration = Duration::from_millis(250);
 
+/// How long a finished Live Photo lingers on its last motion frame before reverting to
+/// the crisp still — "a beat after the video finishes" (task #38).
+const LIVE_REVERT_DELAY: Duration = Duration::from_millis(450);
+
 /// Cap on the Live Photo motion's long edge when decoding its `.mov` (task #38). The
 /// motion is a brief preview, not a pixel-peeping asset, so a ~1440px cap keeps the
 /// whole pre-decoded RGBA sequence's RAM bounded (~0.5 GB worst case) without a visible
@@ -860,6 +864,10 @@ struct App {
     /// initial tap delay) and when the last repeat fired.
     framestep_started: Option<Instant>,
     framestep_last: Option<Instant>,
+    /// When a finished **Live Photo** should revert to the crisp still (task #38). Armed
+    /// the moment the motion finishes; firing swaps the low-res last motion frame back
+    /// for the full-res still — Apple's "play, then back to the photo" behavior.
+    live_revert_at: Option<Instant>,
 }
 
 /// What to do with an animation decode once it lands.
@@ -1041,6 +1049,7 @@ impl App {
             anim_hint_shown_for: None,
             framestep_started: None,
             framestep_last: None,
+            live_revert_at: None,
             exif_cache: HashMap::new(),
             live_motion_cache: HashMap::new(),
         }
@@ -3667,9 +3676,10 @@ impl App {
     /// average frame rate, the duration, and the loop count; before that, just a hint
     /// that `P` will play it. The codec/format is already shown by the Codec row above.
     fn animation_rows(&self, item: usize) -> Vec<Row> {
-        if self.current.as_ref().and_then(|m| m.animated).is_none() {
-            return Vec::new(); // not an animated container
-        }
+        // A Live Photo (its pairing is resolved into `live_motion_cache` when the panel
+        // opens) or an animated container. Neither → nothing to add.
+        let is_live = self.is_live_photo(item);
+        let is_animated = self.current.as_ref().and_then(|m| m.animated).is_some();
         // Frame/timing detail needs a decoded sequence — the live playback, or the one
         // eagerly prepped for this item.
         let detail: Option<(usize, usize, Duration, u32)> = if let Some(pb) = &self.playback {
@@ -3686,16 +3696,29 @@ impl App {
         } else {
             None
         };
+        if !is_live && !is_animated && detail.is_none() {
+            return Vec::new();
+        }
         let Some((idx, count, total, loops)) = detail else {
+            // Not decoded yet — just the affordance, labeled by type.
+            let label = if is_live { "Live Photo" } else { "Animation" };
             return vec![Row::Pair {
-                label: "Animation".to_string(),
+                label: label.to_string(),
                 value: "press P to play".to_string(),
             }];
         };
-        let mut rows = vec![Row::Pair {
+        let mut rows = Vec::new();
+        // Name the Live Photo explicitly (the Codec row above shows the still's format).
+        if is_live {
+            rows.push(Row::Pair {
+                label: "Live Photo".to_string(),
+                value: format!("{count} frames"),
+            });
+        }
+        rows.push(Row::Pair {
             label: "Frame".to_string(),
             value: format!("{} / {}", idx + 1, count),
-        }];
+        });
         let secs = total.as_secs_f64();
         if secs > 0.0 {
             rows.push(Row::Pair {
@@ -3707,15 +3730,29 @@ impl App {
                 value: format!("{secs:.2} s"),
             });
         }
-        rows.push(Row::Pair {
-            label: "Loop".to_string(),
-            value: if loops == 0 {
-                "Forever".to_string()
-            } else {
-                format!("{loops}×")
-            },
-        });
+        // A Live Photo always plays once; the loop count is only meaningful for a
+        // GIF/APNG/WebP loop.
+        if !is_live {
+            rows.push(Row::Pair {
+                label: "Loop".to_string(),
+                value: if loops == 0 {
+                    "Forever".to_string()
+                } else {
+                    format!("{loops}×")
+                },
+            });
+        }
         rows
+    }
+
+    /// Whether item `item` is a Live Photo, from the pairing cache (populated when the
+    /// info panel opens / on dwell). A `&self` read — never triggers a stat — so it's
+    /// safe from the render/rows path; the `&mut` [`live_motion_path`](App::live_motion_path)
+    /// is what fills the cache.
+    fn is_live_photo(&self, item: usize) -> bool {
+        self.live_motion_cache
+            .get(&item)
+            .is_some_and(|paired| paired.is_some())
     }
 
     /// Corner inset (physical px) for the info/EXIF/help panel. Scales with the
@@ -3739,13 +3776,22 @@ impl App {
         // The info / EXIF panels honor the user's opacity setting; the help overlay
         // keeps the standard translucency.
         let info_bg = hud::bg_for_opacity(self.settings.info_opacity);
+        // Resolve the Live Photo pairing (cached; one stat) up front so either panel can
+        // label it — the basic line and the detailed table both read `is_live_photo`.
+        if let Some(item) = self.displayed_item {
+            self.live_motion_path(item);
+        }
+        let is_live = self.displayed_item.is_some_and(|i| self.is_live_photo(i));
         let panel = match self.info {
             InfoMode::Off => return,
             InfoMode::Basic => {
                 let (Some(hud), Some(meta)) = (self.hud.as_ref(), self.current.as_ref()) else {
                     return;
                 };
-                let text = format!("{} · {}×{} · {}", meta.rel, meta.w, meta.h, meta.codec);
+                let mut text = format!("{} · {}×{} · {}", meta.rel, meta.w, meta.h, meta.codec);
+                if is_live {
+                    text.push_str(" · Live"); // a Live Photo's motion is playable (P)
+                }
                 hud.render_panel(&text, px, pad, info_bg)
             }
             InfoMode::Full => {
@@ -4730,11 +4776,34 @@ impl App {
             self.playback.as_mut().unwrap().advance();
             self.present_anim_frame(event_loop); // updates anim_frame_shown_at + draws
         }
+        // A finished Live Photo reverts to the crisp still after a beat (rather than
+        // parking on the low-res last motion frame). Arm the timer once, on the finish.
+        let live_finished = self
+            .playback
+            .as_ref()
+            .is_some_and(|pb| pb.is_finished() && pb.kind() == pb_decode::AnimationKind::LivePhoto);
+        if live_finished && self.live_revert_at.is_none() {
+            self.live_revert_at = Some(now + LIVE_REVERT_DELAY);
+        }
         let shown = self.anim_frame_shown_at;
         self.playback
             .as_ref()
             .filter(|pb| pb.is_playing())
             .map(|pb| shown.unwrap_or(now) + pb.current_delay())
+    }
+
+    /// Revert a finished Live Photo to its crisp full-res still: rebind the resident
+    /// still texture (it was never evicted — playback draws via `set_image`, not the
+    /// ring), re-decoding only in the rare case it's no longer resident.
+    fn restore_still(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(item) = self.displayed_item else {
+            return;
+        };
+        if let Some(slot) = self.ring.slot_for(item) {
+            self.present_item(item, slot, event_loop);
+        } else {
+            self.load_current_sync(event_loop);
+        }
     }
 
     /// Drive the held-key frame-step scrub (`,`/`.`). Returns whether a frame-step key
@@ -4812,6 +4881,7 @@ impl App {
         self.prepared = None;
         self.framestep_started = None;
         self.framestep_last = None;
+        self.live_revert_at = None;
     }
 }
 
@@ -5537,6 +5607,19 @@ impl ApplicationHandler for App {
         let anim_wake = self.tick_playback(now, event_loop);
         let framestep_active = self.tick_frame_step(now, event_loop);
 
+        // 4g'. A finished Live Photo reverts to the crisp still once the linger beat has
+        // elapsed (`tick_playback` armed the timer on finish). Returns a wake at the
+        // deadline so the idle loop comes back to perform the swap.
+        let revert_wake = match self.live_revert_at {
+            Some(at) if now >= at => {
+                self.live_revert_at = None;
+                self.stop_playback();
+                self.restore_still(event_loop);
+                None
+            }
+            other => other,
+        };
+
         // 4h. Eagerly prep an animated still for instant playback once the user has
         // rested on it (see `maybe_prepare_animation`). Only when settled — never while
         // flying — so it never competes with the fly-through hot path. Returns a wake at
@@ -5580,7 +5663,7 @@ impl ApplicationHandler for App {
         };
         // The earliest pending wake across the viewer, an open dialog, the animation's
         // next-frame deadline, and the eager-prep dwell deadline; `None` = idle.
-        let wake = [base_wake, dialog_wake, anim_wake, prep_wake]
+        let wake = [base_wake, dialog_wake, anim_wake, prep_wake, revert_wake]
             .into_iter()
             .flatten()
             .min();

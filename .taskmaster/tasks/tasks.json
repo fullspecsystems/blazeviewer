@@ -1401,7 +1401,7 @@
             "id": 4,
             "title": "Live Photo info in the detailed panel",
             "description": "In the Shift+I panel, show it is a Live Photo plus the motion duration / frame count / current frame (reusing the animation_rows plumbing).",
-            "status": "pending"
+            "status": "review"
           },
           {
             "id": 5,
