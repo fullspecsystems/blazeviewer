@@ -17,6 +17,7 @@ use std::collections::HashSet;
 use pb_core::{full_ring, prefetch_targets, prefetch_targets_scanning, ResidentRing};
 use pb_decode::{read_exif_fields, FitBox};
 use pb_render::{test_pattern, Rotation, ScaleMode, ViewTransform, MAX_ZOOM, MIN_ZOOM};
+use pb_source::PhotoSource;
 
 use hud::Row;
 use pb_hud::{hud, icon};
@@ -28,6 +29,46 @@ use crate::engine::*;
 use crate::{slideshow, Action, AppCore, Nav, OpenButton, PlayHint, Toast};
 
 impl AppCore {
+    /// Apply a scaling mode (8 = fit, 9 = fill, 0 toggles original ↔ fill). Always
+    /// resets zoom/pan back to the mode's natural framing — so tapping a mode key
+    /// is also "reset my zoom." Only an actual mode *change* bumps the geometry
+    /// epoch and re-buffers neighbors (the decode resolution can change); pressing
+    /// the current mode's key just re-frames, no re-decode.
+    pub fn set_scale_mode(&mut self, mode: ScaleMode) {
+        let changed = self.view.mode != mode;
+        self.view.mode = mode;
+        self.view.zoom = 1.0;
+        self.view.pan = [0.0, 0.0];
+        self.push_view();
+        if changed {
+            self.invalidate_geometry();
+            self.load_current_sync();
+            self.target_item = self.playlist.current();
+            self.request_prefetch();
+        } else {
+            self.draw();
+        }
+    }
+
+    /// Grow the playlist in place as a streaming scan delivers more images: swap in the
+    /// larger snapshot and extend the cursor's universe **without** resetting the displayed
+    /// photo, the cursor, the resident ring, or any per-image cache. The contrast with
+    /// [`rebuild_playlist`](App::rebuild_playlist) is the whole point — a fresh open nukes
+    /// everything; a *grow* keeps it, because indices are append-only (index `i` is still
+    /// the same photo). New neighbours become decodable, so we re-issue prefetch (still the
+    /// scanning, anti-thrash variant — the scan isn't done yet), and the title's "X / N"
+    /// total ticks up. A no-op if the snapshot isn't actually larger.
+    pub fn extend_playlist(&mut self, source: Arc<dyn PhotoSource>) {
+        let new_len = source.len();
+        if new_len <= self.source.len() {
+            return;
+        }
+        self.source = source;
+        self.playlist.extend(new_len);
+        self.request_prefetch();
+        self.refresh_title();
+    }
+
     /// Recompute the prefetch want-list and hand it to the decode pool. Two tiers:
     /// the whole window is fetched as fast **previews** (HEIC thumbnails etc.) so
     /// scrolling never outruns decode; then, once **settled**, a current-first ring

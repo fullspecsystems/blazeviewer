@@ -746,27 +746,6 @@ impl App {
         self.core.draw();
     }
 
-    /// Apply a scaling mode (8 = fit, 9 = fill, 0 toggles original ↔ fill). Always
-    /// resets zoom/pan back to the mode's natural framing — so tapping a mode key
-    /// is also "reset my zoom." Only an actual mode *change* bumps the geometry
-    /// epoch and re-buffers neighbors (the decode resolution can change); pressing
-    /// the current mode's key just re-frames, no re-decode.
-    fn set_scale_mode(&mut self, mode: ScaleMode) {
-        let changed = self.core.view.mode != mode;
-        self.core.view.mode = mode;
-        self.core.view.zoom = 1.0;
-        self.core.view.pan = [0.0, 0.0];
-        self.core.push_view();
-        if changed {
-            self.core.invalidate_geometry();
-            self.core.load_current_sync();
-            self.core.target_item = self.core.playlist.current();
-            self.core.request_prefetch();
-        } else {
-            self.core.draw();
-        }
-    }
-
     /// Defer a launch **plan** until the window + engine exist (`resumed` fires it).
     /// Used for an archive *and* a folder scan on the command line / double-click so startup
     /// shows the window first and the open runs behind the spinner / dialog / streaming scan
@@ -1067,7 +1046,7 @@ impl App {
                     } else {
                         // Later batch: grow the playlist in place, keeping the displayed
                         // photo and every per-image cache (indices are append-only).
-                        self.extend_playlist(resolved.source);
+                        self.core.extend_playlist(resolved.source);
                     }
                 }
                 Ok((generation, ScanUpdate::Done)) => {
@@ -1760,16 +1739,16 @@ impl App {
             Action::PanLeft | Action::PanRight | Action::PanUp | Action::PanDown => {}
             Action::ZoomIn => self.zoom_step(1.25),
             Action::ZoomOut => self.zoom_step(0.8),
-            Action::ScaleFit => self.set_scale_mode(ScaleMode::Fit),
-            Action::ScaleFill => self.set_scale_mode(ScaleMode::Fill),
-            Action::ScaleOriginal => self.set_scale_mode(ScaleMode::Original),
+            Action::ScaleFit => self.core.set_scale_mode(ScaleMode::Fit),
+            Action::ScaleFill => self.core.set_scale_mode(ScaleMode::Fill),
+            Action::ScaleOriginal => self.core.set_scale_mode(ScaleMode::Original),
             Action::ToggleOriginal => {
                 let next = if self.core.view.mode == ScaleMode::Original {
                     ScaleMode::Fit
                 } else {
                     ScaleMode::Original
                 };
-                self.set_scale_mode(next);
+                self.core.set_scale_mode(next);
             }
             Action::RotateCw => self.core.rotate(false),
             Action::RotateCcw => self.core.rotate(true),
@@ -1858,25 +1837,6 @@ impl App {
         self.core.load_current_sync();
         self.core.request_prefetch();
         self.core.effects.push(contract::CoreEffect::RequestRender);
-    }
-
-    /// Grow the playlist in place as a streaming scan delivers more images: swap in the
-    /// larger snapshot and extend the cursor's universe **without** resetting the displayed
-    /// photo, the cursor, the resident ring, or any per-image cache. The contrast with
-    /// [`rebuild_playlist`](App::rebuild_playlist) is the whole point — a fresh open nukes
-    /// everything; a *grow* keeps it, because indices are append-only (index `i` is still
-    /// the same photo). New neighbours become decodable, so we re-issue prefetch (still the
-    /// scanning, anti-thrash variant — the scan isn't done yet), and the title's "X / N"
-    /// total ticks up. A no-op if the snapshot isn't actually larger.
-    fn extend_playlist(&mut self, source: Arc<dyn PhotoSource>) {
-        let new_len = source.len();
-        if new_len <= self.core.source.len() {
-            return;
-        }
-        self.core.source = source;
-        self.core.playlist.extend(new_len);
-        self.core.request_prefetch();
-        self.core.refresh_title();
     }
 
     /// Filter a streamed snapshot through the delete-tombstone set, rebuilding its `FsSource`
@@ -1980,7 +1940,7 @@ impl App {
         // fit). `set_scale_mode` redraws for us.
         let scale_changed = old.scale_mode != s.scale_mode;
         if scale_changed {
-            self.set_scale_mode(scale_mode_of(s.scale_mode));
+            self.core.set_scale_mode(scale_mode_of(s.scale_mode));
         }
 
         // Persist the whole model (atomic write; best-effort).
