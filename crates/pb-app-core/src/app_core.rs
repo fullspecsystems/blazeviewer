@@ -182,6 +182,11 @@ pub struct AppCore {
     pub scan_root: Option<PathBuf>,
     /// Whether the current scan-based playlist is recursive (`Ctrl+R` toggles).
     pub recursive: bool,
+    /// Whether a directory scan is streaming the playlist in (the core-owned mirror of the
+    /// shell's `dir_scan.is_some()`; the shell keeps it in sync at every `dir_scan` mutation).
+    /// While set, `request_prefetch` uses the sequential-only, no-wrap prefetch so the random
+    /// look-ahead doesn't thrash against the deck regenerating on each batch (NS0 5.5 Phase B).
+    pub scanning: bool,
 
     // --- HUD / overlay state (NS0 5.3e; the Hud rasterizer stays shell-side for 5.4) ---
     /// Which info overlay is active (`i` basic / `Shift+I` full EXIF / `?` help / off).

@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use pb_core::{full_ring, ResidentRing};
+use std::collections::HashSet;
+
+use pb_core::{full_ring, prefetch_targets, prefetch_targets_scanning, ResidentRing};
 use pb_decode::{read_exif_fields, FitBox};
 use pb_render::{test_pattern, Rotation, ScaleMode, ViewTransform, MAX_ZOOM, MIN_ZOOM};
 
@@ -26,6 +28,96 @@ use crate::engine::*;
 use crate::{slideshow, Action, AppCore, Nav, OpenButton, PlayHint, Toast};
 
 impl AppCore {
+    /// Recompute the prefetch want-list and hand it to the decode pool. Two tiers:
+    /// the whole window is fetched as fast **previews** (HEIC thumbnails etc.) so
+    /// scrolling never outruns decode; then, once **settled**, a current-first ring
+    /// of the resident window is re-fetched at full resolution and upgraded in place
+    /// (see `upgrade_set`). While a nav key is held the upgrade set is empty, so fast
+    /// scrolling stays entirely on the cheap preview tier — the parallel decoders
+    /// aren't tied up on fulls you fly past. (Pre-libheif this was a single on-screen
+    /// full because WIC's HEVC decoder serialized; libheif decodes in parallel, so we
+    /// now fill a VRAM-bounded ring of fulls around the cursor.)
+    pub fn request_prefetch(&mut self) {
+        // While a folder scan is streaming in, the random deck regenerates on every batch,
+        // so prefetching the random look-ahead would decode-then-evict photos the user never
+        // sees (thrash). Use the sequential-only, no-wrap variant until the scan completes,
+        // then normal prefetch (with its random hedges) resumes (`poll_dir_scan` Done arm).
+        self.targets = if self.scanning {
+            prefetch_targets_scanning(&self.playlist, self.ahead, self.behind)
+        } else {
+            prefetch_targets(&self.playlist, self.ahead, self.behind)
+        };
+        let fit = self.decode_fit();
+        // Drop tier bookkeeping for items no longer resident (evicted).
+        self
+            .preview_resident
+            .retain(|i| self.ring.slot_for(*i).is_some());
+        self
+            .upgrade_done
+            .retain(|i| self.ring.slot_for(*i).is_some());
+        self
+            .full_requested_at
+            .retain(|i, _| self.ring.slot_for(*i).is_some());
+        // Items decoded but not yet uploaded must not be re-requested (the pool no
+        // longer tracks them, so it would decode them again).
+        let pending: HashSet<usize> = self
+            .pending_uploads
+            .iter()
+            .map(|o| o.key.item)
+            .collect();
+        let sharpen = self.sharpen_now();
+        let ring: HashSet<usize> = self.prefetch_fulls().into_iter().collect();
+        // Stamp when each full was first requested, for the `sharpen` latency metric.
+        if let Some(d) = sharpen {
+            self
+                .full_requested_at
+                .entry(d)
+                .or_insert_with(Instant::now);
+        }
+        for &t in &ring {
+            self
+                .full_requested_at
+                .entry(t)
+                .or_insert_with(Instant::now);
+        }
+
+        // Build the job list in three priority tiers (the pool decodes by position):
+        //   1. `sharpen` — the on-screen photo's full, so what you're looking at goes
+        //      sharp ASAP the moment you park.
+        //   2. previews — the whole window, so flying / re-flying is always instant.
+        //   3. `ring` fulls — the sharp ring prefetched around the cursor, queued
+        //      behind every preview, so a fast fly stays smooth (these decode only in
+        //      the pool's spare capacity) and the fulls land ahead of where you're
+        //      heading — a stop finds the photo already sharp.
+        type Job = (usize, Option<FitBox>, bool);
+        let (mut head, mut previews, mut fulls): (Vec<Job>, Vec<Job>, Vec<Job>) =
+            (Vec::new(), Vec::new(), Vec::new());
+        for &t in &self.targets {
+            if self.failed.contains(&t) || pending.contains(&t) {
+                continue;
+            }
+            let resident = self.ring.slot_for(t).is_some();
+            let is_prev = resident && self.preview_resident.contains(&t);
+            if resident && !is_prev {
+                continue; // already full
+            }
+            if !resident {
+                previews.push((t, fit, true));
+            } else if Some(t) == sharpen {
+                head.push((t, fit, false));
+            } else if ring.contains(&t) {
+                fulls.push((t, fit, false));
+            }
+            // else: resident preview not in the ring → leave it as a preview
+        }
+        let mut jobs = head;
+        jobs.append(&mut previews);
+        jobs.append(&mut fulls);
+        self
+            .pool
+            .set_targets(self.epoch, &self.source, &jobs);
+    }
+
     /// The decode-to-fit target for the current mode: the display size in Fit mode
     /// (downscale large photos), or full resolution for Fill / Original (so Fill
     /// isn't upscale-blurry and Original is pixel-exact).

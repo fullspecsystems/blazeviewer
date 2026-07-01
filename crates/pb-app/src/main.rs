@@ -43,7 +43,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorIcon, Icon, Window, WindowId};
 
 use pb_core::open::{self, LaunchInput, Source};
-use pb_core::{prefetch_targets, prefetch_targets_scanning, Playlist, ResidentRing};
+use pb_core::{Playlist, ResidentRing};
 use pb_decode::{decode_bytes, is_supported_extension, FitBox};
 use pb_render::{Renderer, Rotation, ScaleMode, ViewTransform, WgpuRenderer, MAX_ZOOM, MIN_ZOOM};
 use pb_source::{seven_z_projected_bytes, FsSource, PhotoSource, SevenZSource, ZipSource};
@@ -458,6 +458,7 @@ impl App {
                 root,
                 scan_root,
                 recursive,
+                scanning: false,
                 info: InfoMode::Off,
                 overlay_shown: false,
                 overlay_item: None,
@@ -521,97 +522,6 @@ impl App {
         }
     }
 
-    /// Recompute the prefetch want-list and hand it to the decode pool. Two tiers:
-    /// the whole window is fetched as fast **previews** (HEIC thumbnails etc.) so
-    /// scrolling never outruns decode; then, once **settled**, a current-first ring
-    /// of the resident window is re-fetched at full resolution and upgraded in place
-    /// (see `upgrade_set`). While a nav key is held the upgrade set is empty, so fast
-    /// scrolling stays entirely on the cheap preview tier — the parallel decoders
-    /// aren't tied up on fulls you fly past. (Pre-libheif this was a single on-screen
-    /// full because WIC's HEVC decoder serialized; libheif decodes in parallel, so we
-    /// now fill a VRAM-bounded ring of fulls around the cursor.)
-    fn request_prefetch(&mut self) {
-        // While a folder scan is streaming in, the random deck regenerates on every batch,
-        // so prefetching the random look-ahead would decode-then-evict photos the user never
-        // sees (thrash). Use the sequential-only, no-wrap variant until the scan completes,
-        // then normal prefetch (with its random hedges) resumes (`poll_dir_scan` Done arm).
-        self.core.targets = if self.dir_scan.is_some() {
-            prefetch_targets_scanning(&self.core.playlist, self.core.ahead, self.core.behind)
-        } else {
-            prefetch_targets(&self.core.playlist, self.core.ahead, self.core.behind)
-        };
-        let fit = self.core.decode_fit();
-        // Drop tier bookkeeping for items no longer resident (evicted).
-        self.core
-            .preview_resident
-            .retain(|i| self.core.ring.slot_for(*i).is_some());
-        self.core
-            .upgrade_done
-            .retain(|i| self.core.ring.slot_for(*i).is_some());
-        self.core
-            .full_requested_at
-            .retain(|i, _| self.core.ring.slot_for(*i).is_some());
-        // Items decoded but not yet uploaded must not be re-requested (the pool no
-        // longer tracks them, so it would decode them again).
-        let pending: HashSet<usize> = self
-            .core
-            .pending_uploads
-            .iter()
-            .map(|o| o.key.item)
-            .collect();
-        let sharpen = self.core.sharpen_now();
-        let ring: HashSet<usize> = self.core.prefetch_fulls().into_iter().collect();
-        // Stamp when each full was first requested, for the `sharpen` latency metric.
-        if let Some(d) = sharpen {
-            self.core
-                .full_requested_at
-                .entry(d)
-                .or_insert_with(Instant::now);
-        }
-        for &t in &ring {
-            self.core
-                .full_requested_at
-                .entry(t)
-                .or_insert_with(Instant::now);
-        }
-
-        // Build the job list in three priority tiers (the pool decodes by position):
-        //   1. `sharpen` — the on-screen photo's full, so what you're looking at goes
-        //      sharp ASAP the moment you park.
-        //   2. previews — the whole window, so flying / re-flying is always instant.
-        //   3. `ring` fulls — the sharp ring prefetched around the cursor, queued
-        //      behind every preview, so a fast fly stays smooth (these decode only in
-        //      the pool's spare capacity) and the fulls land ahead of where you're
-        //      heading — a stop finds the photo already sharp.
-        type Job = (usize, Option<FitBox>, bool);
-        let (mut head, mut previews, mut fulls): (Vec<Job>, Vec<Job>, Vec<Job>) =
-            (Vec::new(), Vec::new(), Vec::new());
-        for &t in &self.core.targets {
-            if self.core.failed.contains(&t) || pending.contains(&t) {
-                continue;
-            }
-            let resident = self.core.ring.slot_for(t).is_some();
-            let is_prev = resident && self.core.preview_resident.contains(&t);
-            if resident && !is_prev {
-                continue; // already full
-            }
-            if !resident {
-                previews.push((t, fit, true));
-            } else if Some(t) == sharpen {
-                head.push((t, fit, false));
-            } else if ring.contains(&t) {
-                fulls.push((t, fit, false));
-            }
-            // else: resident preview not in the ring → leave it as a preview
-        }
-        let mut jobs = head;
-        jobs.append(&mut previews);
-        jobs.append(&mut fulls);
-        self.core
-            .pool
-            .set_targets(self.core.epoch, &self.core.source, &jobs);
-    }
-
     /// Persist the current photo's in-RAM rotation to its file's EXIF Orientation
     /// tag (`Ctrl+S` / File ▸ Save Rotation, task #29) — lossless (the compressed
     /// pixels are untouched). The first write to a user's photo bytes, and like
@@ -656,7 +566,7 @@ impl App {
                 self.core.invalidate_geometry();
                 self.core.load_current_sync();
                 self.core.target_item = self.core.playlist.current();
-                self.request_prefetch();
+                self.core.request_prefetch();
                 self.core.undo_stack.push(UndoAction::SaveRotation {
                     item,
                     path: path.clone(),
@@ -695,7 +605,7 @@ impl App {
                         self.core.invalidate_geometry();
                         self.core.load_current_sync();
                         self.core.target_item = self.core.playlist.current();
-                        self.request_prefetch();
+                        self.core.request_prefetch();
                         self.core
                             .show_toast_icon("Rotation undone", Some(icon::assets::UNDO));
                     }
@@ -851,7 +761,7 @@ impl App {
             self.core.invalidate_geometry();
             self.core.load_current_sync();
             self.core.target_item = self.core.playlist.current();
-            self.request_prefetch();
+            self.core.request_prefetch();
         } else {
             self.core.draw();
         }
@@ -1094,6 +1004,7 @@ impl App {
                 d.set_scan(&msg, progress.clone());
             }
         }
+        self.core.scanning = true; // core mirror: use sequential-only prefetch while streaming
         self.dir_scan = Some(DirScan {
             generation,
             rx,
@@ -1164,6 +1075,7 @@ impl App {
                         continue; // superseded
                     }
                     let scan = self.dir_scan.take();
+                    self.core.scanning = false; // deck is final — resume normal prefetch below
                     self.close_scanning_dialog(); // walk finished — drop the progress dialog
                     if scan.is_some_and(|s| !s.bootstrapped) {
                         eprintln!("PhotoBlaze: no supported images in that selection");
@@ -1175,7 +1087,7 @@ impl App {
                         }
                     }
                     // Deck is final now: resume normal prefetch (random-ahead warm again).
-                    self.request_prefetch();
+                    self.core.request_prefetch();
                     return;
                 }
                 Err(TryRecvError::Empty) => {
@@ -1198,6 +1110,7 @@ impl App {
                 }
                 Err(TryRecvError::Disconnected) => {
                     self.dir_scan = None;
+                    self.core.scanning = false;
                     self.close_scanning_dialog(); // worker died — don't strand its dialog
                     return;
                 }
@@ -1233,6 +1146,9 @@ impl App {
         if let Some(scan) = self.dir_scan.as_ref() {
             scan.progress.request_cancel();
         }
+        // Every cancel path clears `dir_scan` immediately after; keep the core mirror in sync
+        // so a `request_prefetch` after the cancel uses the normal (random-ahead) prefetch.
+        self.core.scanning = false;
     }
 
     /// User command (File ▸ Stop Scanning, or a bound key): stop an in-flight folder scan,
@@ -1246,7 +1162,7 @@ impl App {
         self.cancel_dir_scan();
         self.dir_scan = None;
         self.close_scanning_dialog();
-        self.request_prefetch();
+        self.core.request_prefetch();
         self.core.show_toast("Scan stopped");
     }
 
@@ -1940,7 +1856,7 @@ impl App {
         self.core.displayed_item = self.core.playlist.current();
         self.core.target_item = self.core.playlist.current();
         self.core.load_current_sync();
-        self.request_prefetch();
+        self.core.request_prefetch();
         self.core.effects.push(contract::CoreEffect::RequestRender);
     }
 
@@ -1959,7 +1875,7 @@ impl App {
         }
         self.core.source = source;
         self.core.playlist.extend(new_len);
-        self.request_prefetch();
+        self.core.request_prefetch();
         self.core.refresh_title();
     }
 
@@ -2875,7 +2791,7 @@ impl App {
         // Both modes use the async engine: present on a ring hit, else hold the
         // previous frame while the decode (fit-sized or full-res) lands.
         self.core.try_present_target();
-        self.request_prefetch();
+        self.core.request_prefetch();
     }
 
     /// Reflect the pan affordance in the pointer: a pointing hand over the Cancel Scan button,
@@ -3510,7 +3426,7 @@ impl ApplicationHandler for App {
 
         self.window = Some(window);
         self.core.renderer = Some(Box::new(renderer));
-        self.request_prefetch();
+        self.core.request_prefetch();
 
         // Now that the window + engine are live, kick off any launch we deferred (an archive
         // or a folder scan): a big .7z loads behind the spinner, a folder streams in (window
@@ -3953,7 +3869,7 @@ impl ApplicationHandler for App {
             let upgrade = self.core.fulls_wanted();
             if upgrade != self.core.last_upgrade_set {
                 self.core.last_upgrade_set = upgrade.clone();
-                self.request_prefetch();
+                self.core.request_prefetch();
             }
             sharpen_pending = !upgrade.is_empty();
         }
@@ -4004,7 +3920,7 @@ impl ApplicationHandler for App {
                 self.core.invalidate_geometry();
                 self.core.load_current_sync();
                 self.core.target_item = self.core.playlist.current();
-                self.request_prefetch();
+                self.core.request_prefetch();
                 // Re-place a visible info/EXIF/help panel against the settled surface
                 // size, with a freshly sized corner margin. A fullscreen toggle resizes
                 // the surface but leaves the panel's quad placed for the old one, so
