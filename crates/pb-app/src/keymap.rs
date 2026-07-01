@@ -435,8 +435,8 @@ fn read_config() -> Option<String> {
 /// for parsing and for the help overlay. Unknown keys print as `"?"` (only reachable
 /// for an unbound key, since every bound chord uses a named key).
 /// A key's macOS glyph where one is conventional (the arrow keys), else its spelled-out
-/// [`key_to_str`] name. Only substitutes glyphs the keycap's monospace face reliably carries,
-/// so the chip never renders a tofu box. Used by [`KeyChord::mac_symbol`].
+/// [`key_to_str`] name — the key half of a shortcut hint. Only the arrows are substituted
+/// (they're safe in the UI font); other keys stay spelled out. Used by [`KeyChord::mac_symbol`].
 #[cfg(target_os = "macos")]
 fn key_symbol(code: KeyCode) -> &'static str {
     use KeyCode::*;
