@@ -453,11 +453,9 @@ struct App {
     /// `self.core.*`. Grown incrementally off this shell; it now owns the held-key /
     /// input / self-paced-advance timing, the view + geometry transform, the metadata
     /// caches, the whole prefetch/decode/residency engine, the metrics, the nav/playlist
-    /// state, and the HUD overlay *state* (the Hud rasterizer stays shell-side). The
-    /// renderer and the `handle(CoreEvent)` dispatch follow.
+    /// state, the HUD overlay state + compositor (`pb-hud`), and the renderer. Only the
+    /// OS window handle stays shell-owned; the `handle(CoreEvent)` dispatch follows.
     core: AppCore,
-    /// Text renderer for the info panel (None if no system font was found).
-    hud: Option<Hud>,
     /// Display scale factor, for sizing the panel.
     scale_factor: f32,
 
@@ -808,9 +806,9 @@ impl App {
                 open_panel: None,
                 open_hover: None,
                 play_hint: None,
+                hud: Hud::load(),
                 renderer: None,
             },
-            hud: Hud::load(),
             scale_factor: 1.0,
             pending_drops: Vec::new(),
             #[cfg(target_os = "macos")]
@@ -3670,7 +3668,7 @@ impl App {
         let panel = match self.core.info {
             InfoMode::Off => return,
             InfoMode::Basic => {
-                let (Some(hud), Some(meta)) = (self.hud.as_ref(), self.core.current.as_ref())
+                let (Some(hud), Some(meta)) = (self.core.hud.as_ref(), self.core.current.as_ref())
                 else {
                     return;
                 };
@@ -3687,7 +3685,7 @@ impl App {
                     self.ensure_exif_cached(item);
                 }
                 let rows = self.exif_rows();
-                let Some(hud) = self.hud.as_ref() else {
+                let Some(hud) = self.core.hud.as_ref() else {
                     return;
                 };
                 if rows.is_empty() {
@@ -3705,7 +3703,7 @@ impl App {
                     .map(|w| w.inner_size().height)
                     .unwrap_or(0);
                 let max_h = (win_h as i32 - 2 * margin as i32).max(1);
-                let Some(hud) = self.hud.as_ref() else {
+                let Some(hud) = self.core.hud.as_ref() else {
                     return;
                 };
                 hud.render_shortcuts(&sections, help_px, hud::BG, max_h)
@@ -3753,7 +3751,7 @@ impl App {
     ///
     /// [`open_hover`]: App::open_hover
     fn open_panel_bitmap(&self) -> Option<hud::OpenPanelBitmap> {
-        let hud = self.hud.as_ref()?;
+        let hud = self.core.hud.as_ref()?;
         // A normal button size (like the scan card's Cancel button) — the call to action doesn't
         // need to shout; it's white text on an empty gray screen.
         let px = (16.0 * self.scale_factor).max(11.0);
@@ -3811,7 +3809,7 @@ impl App {
         // A passive toast is not the interactive play hint — drop any play-hint state so it
         // doesn't respond to hover/click while a Copy/Save/… toast is up.
         self.core.play_hint = None;
-        if let Some(hud) = self.hud.as_ref() {
+        if let Some(hud) = self.core.hud.as_ref() {
             if let Some((rgba, w, h)) = hud.render_panel_icon(msg, px, pad, icon, hud::BG) {
                 self.core.toast = Some(Toast {
                     rgba,
@@ -3832,7 +3830,7 @@ impl App {
     fn build_play_hint(&mut self, icon: &str, hovered: bool) -> Option<(u32, u32)> {
         let px = (20.0 * self.scale_factor).max(13.0);
         let shortcut = self.shortcut_for(Action::PlayPause);
-        let built = self.hud.as_ref().and_then(|hud| {
+        let built = self.core.hud.as_ref().and_then(|hud| {
             let spec = hud::ButtonSpec {
                 label: "Play",
                 icon: Some(icon),
@@ -4052,7 +4050,7 @@ impl App {
         let width = ((SCAN_CARD_WIDTH * self.scale_factor).round())
             .min((win_w as f32 - 2.0 * margin as f32).max(1.0))
             .max(1.0) as u32;
-        let card = self.hud.as_ref().and_then(|hud| {
+        let card = self.core.hud.as_ref().and_then(|hud| {
             let px = (15.0 * self.scale_factor).max(10.0);
             hud.render_scan_card(
                 &heading,

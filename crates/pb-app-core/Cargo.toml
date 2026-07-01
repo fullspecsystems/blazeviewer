@@ -22,3 +22,7 @@ pb-core = { workspace = true }
 pb-render = { workspace = true }
 pb-decode = { workspace = true }
 pb-source = { workspace = true }
+# The HUD CPU compositor — AppCore owns `hud: Option<Hud>` so it drives the overlay
+# render path. Shell-neutral pure compute (fontdue + resvg), no UI toolkit, so the
+# "no winit/egui" invariant holds.
+pb-hud = { workspace = true }

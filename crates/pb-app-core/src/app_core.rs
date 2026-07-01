@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use pb_core::{Playlist, ResidentRing};
 use pb_decode::FitBox;
+use pb_hud::hud::Hud;
 use pb_render::{Renderer, Rotation, ViewTransform};
 use pb_source::PhotoSource;
 
@@ -185,6 +186,10 @@ pub struct AppCore {
     pub play_hint: Option<PlayHint>,
 
     // --- Rendering (NS0 5.4) ---
+    /// The HUD text/overlay compositor (`pb-hud`), or `None` if no system font was found.
+    /// CPU-rasterizes the info panel / toasts / pie / chip into RGBA bitmaps the renderer
+    /// uploads as quads — behind a crate seam so a native-overlay backend can swap in later.
+    pub hud: Option<Hud>,
     /// The GPU renderer, behind the [`Renderer`] trait object so backends are swappable and
     /// the core never names a concrete GPU type. `None` until the shell's window is created;
     /// then set to a concrete `WgpuRenderer` (boxed) built on that window's surface. The
