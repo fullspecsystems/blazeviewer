@@ -1,48 +1,53 @@
 # NS0 Step 5 — Behavior Inversion (`AppCore::handle` + thin shell) — Execution Plan
 
-**Status:** proposed, for review. **Branch:** `swiftui` (worktree `photoblaze-wt1`).
+**Status:** revised after codex review (r1), ready to execute. **Branch:** `swiftui`.
 **Prereq done:** 5.1–5.4 (the bulk of the *state* inversion). **This plan covers 5.5 + 5.6.**
 
-Read the companion `ns0-appcore-inversion-brief.md` first for the effect-seam (4a–4e) and
-the field-group map. This document is the concrete, sequenced plan to finish NS0.
+Read `ns0-appcore-inversion-brief.md` first for the effect-seam (4a–4e) and the field-group
+map. **r1 changes (from codex review):** a new **Phase 0 contract-cleanup** runs first —
+`effects`→core, a `now` clock field, a `Viewport` struct, `SetWake(Option<Instant>)`,
+live-audio effects, and the `Settings` migration with its real deps — because several method
+moves fail to compile or leak the boundary if attempted before their inputs are core-owned
+and clock-injected. The scan/archive/dialog/delete/**drop** flow stays **explicitly
+shell-side until Phase E**.
 
 ---
 
 ## 0. How to use this
 
 Execute top-to-bottom. **Every numbered step ends green** (`cargo test --workspace`,
-`cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`) and is its own commit.
-Smoke the hot path (zoom/pan/rotate/hold-to-fly/nav/info-panel/`--metrics`) at the ★ marks.
-The recipe for every "move X into AppCore" is the proven one from 5.3: **migrate the
-pb-app-local *types* first, then relocate fields/methods, then redirect refs** (watch the
-three recurring hazards: prefix over-matches → placeholder swap; multiline `self\n.field` →
-compiler catches; non-`self` refs like `app.field` / `module::fn`).
+`cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`) and is its own commit. Smoke
+the hot path (zoom/pan/rotate/hold-to-fly/nav/info-panel/`--metrics`) at the ★ marks. The
+recipe for every "move X into AppCore" is the proven one from 5.3: **migrate the pb-app-local
+*types* first, then relocate fields/methods, then redirect refs** (hazards: prefix
+over-matches → placeholder swap; multiline `self\n.field` → compiler catches; non-`self` refs
+like `app.field` / `module::fn`).
 
 ---
 
 ## 1. Corrected status — the state inversion is ~80%, not 100%
 
-5.1–5.4 moved the *big* groups into `AppCore` (timing, view/geometry, caches, decode/
-prefetch/residency, metrics, nav/playlist, HUD state + compositor, renderer). But the
-method-graph analysis surfaced **state groups still on `App`** that must move before the
-methods can:
+5.1–5.4 moved the *big* groups into `AppCore`. State groups **still on `App`** that must move
+before their methods can:
 
-| still-on-App state | fields | type migration needed |
+| still-on-App state | fields | type migration |
 |---|---|---|
-| **Display** | `scale_factor` | none (f32) |
-| **Prefetch-upgrade** | `upgrade_done`, `last_upgrade_set`, `full_requested_at` | none (std) |
-| **Live Photo cache** | `live_motion_cache` | none (std) |
-| **Drops** | `pending_drops` | none (std) |
-| **Undo** | `undo_stack`, `undo_item` | `UndoAction` (main.rs:272 enum) → pb-app-core |
-| **Animation** | `playback`, `anim_*`, `prepared`, `framestep_*`, `live_revert_at`, `live_audio` | `Playback` (animation.rs), `Prepared` (main.rs:704), `animation.rs` module |
-| **Config** | `keymap`, `settings` | `Keymap` already in core; **`Settings`** (settings.rs, 26 uses) → pb-app-core |
+| **Viewport** | `scale_factor` (+ the window-size reads scattered in methods) | none — new `Viewport` struct (§3.4) |
+| **Prefetch-upgrade** | `upgrade_done`, `last_upgrade_set`, `full_requested_at` | none |
+| **Live Photo cache** | `live_motion_cache` | none |
+| **Drops** | `pending_drops` | none (but stays shell-*routed* until E — see §3.6) |
+| **Undo** | `undo_stack`, `undo_item` | `UndoAction` (main.rs:272) → core |
+| **Animation** | `playback`, `anim_*`, `prepared`, `framestep_*`, `live_revert_at` | `Playback` (animation.rs), `Prepared` (main.rs:704) → core |
+| **Live audio** | *(handle stays shell)* — see §3.5 | represent as effects, not a moved field |
+| **Config** | `keymap`, `settings` | `Keymap` already in core; **`Settings`** → core (needs `serde` dep, §3.7) |
+| **Effects** | `effects: Vec<CoreEffect>` | none — **moves in Phase 0.1, before any method move** |
 
-Genuinely **shell-owned** (stay on `App`): `window`, `windowed`, `dialog`, `effects`,
-`pending_dialog`, the native menu handles (`menu`, `window_menu`, `native_fullscreen_item`,
-`proxy_icon_path`, `save_rotation_item`, `cancel_scan_item`, `menu_attached`), `menu_state`,
-`last_edr_headroom`. Plus the **scan/archive/launch** group (`dir_scan`, `scan_gen`,
-`archive_load`, `archive_gen`, `pending_launch`, `password_archive`, `pending_delete`,
-`pending_confirm_delete`) — deferred to 5.6 (coupled to the dialog flow).
+Genuinely **shell-owned** (stay on `App`): `window`, `windowed`, `dialog`, `pending_dialog`,
+the native menu handles (`menu`, `window_menu`, `native_fullscreen_item`, `proxy_icon_path`,
+`save_rotation_item`, `cancel_scan_item`, `menu_attached`), `menu_state`, `last_edr_headroom`,
+the `live_audio` handle (§3.5). Plus the **scan/archive/launch/delete/drop** flow (`dir_scan`,
+`scan_gen`, `archive_load`, `archive_gen`, `pending_launch`, `password_archive`,
+`pending_delete`, `pending_confirm_delete`, `pending_drops`-routing) — deferred to **5.6**.
 
 ---
 
@@ -51,172 +56,153 @@ Genuinely **shell-owned** (stay on `App`): `window`, `windowed`, `dialog`, `effe
 ```
 winit shell (pb-app)                         AppCore (pb-app-core)
 ────────────────────                         ─────────────────────
-ApplicationHandler::window_event  ──translate──▶  handle(CoreEvent) ──▶ dispatch to
-ApplicationHandler::about_to_wait ──translate──▶     orchestration methods (impl AppCore)
-ApplicationHandler::resumed       ── Started ──▶     which mutate self.* and push
-                                                     self.effects: Vec<CoreEffect>
-drain_effects(event_loop) ◀── reads self.core.effects ── (window/menu/dialog/clipboard ops)
+window_event  ──stamp now, translate──▶  handle(CoreEvent) ──▶ dispatch to
+about_to_wait ──stamp now, translate──▶      orchestration methods (impl AppCore)
+resumed       ──── Started/Resized ───▶      mutate self.*, read self.now/self.viewport,
+                                             push self.effects: Vec<CoreEffect>
+drain_effects(event_loop) ◀── reads self.core.effects ── (window/menu/dialog/clipboard/
+                                                          live-audio/wake ops)
 ```
 
-- **The shell shrinks to:** create the window (`resumed`), translate every winit event into
-  a `CoreEvent`, call `self.core.handle(ev)`, then `self.drain_effects(event_loop)`. Plus the
-  effect *executors* (native window/menu/dialog/clipboard ops) — the only place winit/muda/
-  rfd/objc2 is touched. The egui `dialog` window + `dialog_event` stay shell (its own window).
-- **`AppCore::handle(CoreEvent)`** is the single entry point. It owns the key→action
-  resolution and calls `dispatch_action` (already the central `match action` at main.rs:2741).
+- **The shell shrinks to:** create window (`resumed`); at each event-loop entry stamp
+  `self.core.now`; translate the winit event into a `CoreEvent`; call `self.core.handle(ev)`;
+  then `self.drain_effects(event_loop)`. Plus the effect *executors* (native window/menu/
+  dialog/clipboard/live-audio/wake) — the only place winit/muda/rfd/objc2 is touched. The egui
+  `dialog` window + `dialog_event` stay shell.
+- **`AppCore::handle(CoreEvent)`** owns key→action resolution and calls `dispatch_action`
+  (central `match action` at main.rs:2741). In **5.5 it handles the non-flow events only**;
+  flow events stay shell-routed until 5.6 (§3.6).
 
 ### Method census (impl App, 156 methods)
-- **88 pure-core** — touch only `self.core.*` + `self.effects`; move to `impl AppCore` once
-  their *types* are in pb-app-core.
-- **~18 window/scale_factor touchers** — most are HUD-build methods needing only
-  `scale_factor` (→ moves to core, Phase A) or window *size* (→ read `self.core.fit`, which
-  already holds surface w/h, Phase B). ~6 are genuine native-window ops that **stay shell**
-  (native fullscreen, EDR reconfigure, geometry capture, proxy icon, `begin_exit`,
-  `drain_effects`, `apply_window_mode`).
-- **37 dialog/menu/event_loop-coupled** — split between "push an effect and become core" and
-  "stay shell" (the scan/archive/dialog flow = 5.6).
+88 pure-core · ~18 window/`scale_factor` touchers (→ `Viewport`, §3.4) · 37 dialog/menu/
+flow-coupled (→ mostly 5.6).
 
 ---
 
-## 3. Design decisions (please confirm during review)
+## 3. Design decisions (locked by review)
 
-1. **`effects` moves into `AppCore`.** Methods on `impl AppCore` push to `self.effects`;
-   the shell drains `self.core.effects` in `drain_effects`. (Alternative — `handle(&mut self,
-   ev, sink: &mut Vec<CoreEffect>)` — threads a param through every method; rejected as
-   noisier. Moving the field is consistent with everything else.)
-2. **`handle` signature:** `pub fn handle(&mut self, ev: CoreEvent)` on `impl AppCore`,
-   returning nothing (effects accumulate on `self.effects`). The shell always follows a
-   `handle` call with `drain_effects`.
-3. **`Tick` carries `Instant`** (already in the variant) — `AppCore` stays clock-injectable
-   (no `Instant::now()` inside core; the shell stamps it). Keeps core deterministically
-   testable — a *big* payoff: `handle`-driven nav/timing become unit-testable without winit.
-4. **Window-size decoupling:** the 3 hit-rect methods (`open_button_rect`, `play_hint_rect`,
-   `push_chip`) read `self.window.inner_size()` today; switch them to `self.core.fit`
-   (`FitBox { max_width, max_height }` is the surface size). Removes their last window dep.
-5. **`Settings` migration:** move `settings.rs` into pb-app-core (config I/O already lives
-   there — `config_dir`, keymap load/save; the brief lists Config as AppCore-owned). Verify
-   it pulls no winit/egui (expected: it's `toml` + `serde`).
-6. **What does NOT move in 5.5:** the scan/archive/launch/delete flow and its dialog
-   choreography (that's 5.6). 5.5's `handle` will, for those actions, push the *existing*
-   effects / emit the NS-later CoreEvents (`Open`, `SettingsSubmitted`, `PasswordSubmitted`,
-   `DialogResult`) as stubs the shell still services until 5.6 inverts them.
+1. **`effects` moves into `AppCore` in Phase 0.1 — *before* any method move.** Methods on
+   `impl AppCore` push `self.effects`; the shell drains `self.core.effects`. (Fixes the draft's
+   self-contradiction: do **not** defer this field to the end.)
+2. **`handle` signature:** `pub fn handle(&mut self, ev: CoreEvent)`; effects accumulate on
+   `self.effects`; the shell always follows with `drain_effects`.
+3. **Clock injection via a `now` field (codex #1).** Add `AppCore::now: Instant`. The shell
+   stamps `self.core.now` at each event-loop entry (and `Tick` carries the same instant).
+   **Every `Instant::now()` inside a core-bound method becomes `self.now`** — the flagged sites
+   (`nav_press` 4455, toast/play-hint 3806/3830, `frame_step_press` 4797, animation present,
+   chip timing, …) are converted in Phase 0.3 for still-on-App methods and stay converted
+   through the move. Core never calls `Instant::now()` → deterministic unit tests set `now`.
+4. **`Viewport { width: u32, height: u32, scale_factor: f32 }` on `AppCore` (codex #4).**
+   Replaces the loose `scale_factor` field and **all** `window.inner_size()` / `scale_factor`
+   reads in core-bound methods (audit catches `show_overlay`'s help-height read at 3696, not
+   just the 3 hit-rect methods). The shell updates it on `Resized` / `ScaleFactorChanged` /
+   `resumed`. Always-present (not `Option`), independent of the decode-fit `FitBox`.
+5. **Live audio stays a shell handle; audio is effects (codex #6).** `live_audio` is an ObjC
+   `AVAudioPlayer` wrapper (live_audio.rs:34). Move only the *playback/pairing state* into core;
+   add `CoreEffect::{StartLiveAudio(PathBuf), PauseLiveAudio, ResumeLiveAudio, StopLiveAudio}`;
+   the shell owns the `LiveAudio` object and executes those in `drain_effects`.
+6. **Wake semantics: `CoreEffect::SetWake(Option<Instant>)` (codex #7).** `Some(at)` →
+   `ControlFlow::WaitUntil(at)`, `None` → `Wait`. Replaces the un-expressible `WakeAt(Instant)`
+   (couldn't say "go idle"). `handle`/`about_to_wait` emit it.
+7. **`Settings` migration is concrete (codex #5).** `settings.rs` uses `serde` derives +
+   `crate::slideshow` + `pb_app_core::config_dir()`. Add
+   `serde = { version = "1", features = ["derive"] }` to pb-app-core; move the module in;
+   `crate::slideshow` resolves unchanged (slideshow is already in core); `pb_app_core::
+   config_dir()` → `crate::config_dir()`; re-export (`pub use settings::Settings` + a crate-root
+   `pub use pb_app_core::settings` in the shell) so `dialog.rs` / `main.rs` don't churn.
+8. **Flow stays shell-side until Phase E (codex #3).** In 5.5, `handle` covers input/timing/
+   view/nav + non-flow menu actions. `DroppedPaths`, dialog/picker completion (`finish_picker`
+   at 4336), archive open (`begin_archive_open`→`DialogWindow` at 1848), scan/delete results
+   remain shell-routed. We do **not** claim NS1 can drive all behavior through `handle` until E
+   makes those flow events real.
 
 ---
 
 ## 4. Phased execution plan
 
-### Phase A — finish the pure-core STATE moves (mechanical, proven recipe)
-Each is a `git`-committed increment; no behavior change. Order chosen so later method moves
-find their fields already in `core`.
+### Phase 0 — Contract cleanup (do first; unblocks everything)
+- **0.1 `effects` → AppCore.** Field move; `drain_effects` reads `self.core.effects`. *(no
+  behavior change; must precede Phase C.)*
+- **0.2 Wake + live-audio effects.** Add `CoreEffect::SetWake(Option<Instant>)` and
+  `Start/Pause/Resume/StopLiveAudio`; route `about_to_wait`'s Wait/WaitUntil through `SetWake`.
+- **0.3 Clock field.** Add `AppCore::now: Instant`; shell stamps it at each event entry;
+  convert `Instant::now()` in core-bound methods → `self.core.now` (still on App) / `self.now`
+  (after move). ★ smoke (timing-sensitive).
+- **0.4 `Viewport` struct.** Introduce on `AppCore`; shell updates on resize/scale-change;
+  replace every `window.inner_size()` + `scale_factor` read in core-bound methods. Removes the
+  loose `scale_factor` field. ★ smoke (overlay/HUD sizing).
+- **0.5 Config migration.** Add `serde` to pb-app-core; move `settings.rs` in (§3.7); move
+  `keymap` + `settings` fields to core. ★ smoke (settings + keymap).
 
-- **A1. `scale_factor` → AppCore.** Field move; redirect ~19 refs; the 2 shell set-sites
-  (`resumed` L5281, resize L5451) become `self.core.scale_factor = …`. Unblocks ~10 HUD-build
-  methods. *(no type migration)*
-- **A2. Prefetch-upgrade trio → AppCore** (`upgrade_done`, `last_upgrade_set`,
-  `full_requested_at`). *(no type migration)*
-- **A3. `live_motion_cache` + `pending_drops` → AppCore.** *(no type migration)*
-- **A4. Undo → AppCore.** Migrate `UndoAction` (main.rs:272) → `pb_app_core` first, then
-  move `undo_stack`, `undo_item`.
-- **A5. Animation → AppCore.** Migrate `animation.rs` (Playback + friends) + `Prepared`
-  (main.rs:704) into pb-app-core (verify winit/egui-free), then move `playback`, `anim_*`,
-  `prepared`, `framestep_*`, `live_revert_at`, `live_audio`. *(largest of Phase A; `live_audio`
-  may be platform — if it wraps a macOS/OS audio handle, keep the handle shell-side behind an
-  effect and move only the pairing state.)*
-- **A6. Config → AppCore.** Migrate `settings.rs` (`Settings`) into pb-app-core, then move
-  `keymap` + `settings`. ★ **smoke** (settings + keymap touch a lot).
+### Phase A — remaining pure-core STATE moves (mechanical, proven recipe)
+- **A1** Prefetch-upgrade trio (`upgrade_done`, `last_upgrade_set`, `full_requested_at`).
+- **A2** `live_motion_cache` (the pairing cache; `pending_drops` stays shell-routed per §3.6 —
+  move the field only if its readers are all core; otherwise leave until E).
+- **A3** Undo — migrate `UndoAction`, then `undo_stack` + `undo_item`.
+- **A4** Animation — migrate `animation.rs` (`Playback`) + `Prepared`; move `playback`,
+  `anim_*`, `prepared`, `framestep_*`, `live_revert_at`. Audio via effects (§3.5). ★ smoke.
 
-**Exit A:** every non-flow state field is in `AppCore`; `App` holds only window/dialog/menu/
-effects/flow state. ~6 commits.
+**Exit 0+A:** every non-flow state field + input (clock, viewport) is core-owned.
 
-### Phase B — decouple the window-size hit-rect methods
-- **B1.** Rewrite `open_button_rect`, `play_hint_rect`, `push_chip` to use `self.core.fit`
-  instead of `self.window.inner_size()`. Small; makes them pure-core. 1 commit.
+### Phase B — move the pure-core methods to `impl AppCore` (batches, green each)
+~110 pure-core methods, moved by concern. Each references only core-available types (Phase 0/A
+migrations + pb-core/pb-decode/pb-render/pb-source/pb-hud):
+- **B1 Nav/prefetch/residency** — `advance`, `nav_press`, `request_prefetch`, `drain_results`,
+  eviction/targets helpers (pb-core `open::{LaunchInput,Source,Cursor}` already in core).
+- **B2 View — zoom/pan/rotate/fit** — `zoom_held`, gestures, `set_scale_mode`, `view_for`. ★ smoke.
+- **B3 HUD build** — `show_overlay`, `push_toast/pie/chip`, `build_play_hint`, `exif_rows`,
+  `open_panel_bitmap`, `show_toast_icon` (pb-hud types; viewport in core).
+- **B4 Animation playback** — toggle/frame-step/tick methods (audio via effects).
+- **B5 Undo + small helpers.** `dispatch_action` moves in whichever batch leaves it pure; its
+  *flow* arms push effects / defer to E. ★ smoke after B.
 
-### Phase C — move the pure-core methods to `impl AppCore`
-Now ~110 methods are pure-core. Move them in **concern batches**, green per batch. The move
-is physical (main.rs `impl App` → app_core.rs `impl AppCore`); each method must reference only
-types available in pb-app-core (Phase A migrations + pb-core/pb-decode/pb-render/pb-source/
-pb-hud). Suggested batches (each ~10–25 methods):
+### Phase C — `AppCore::handle(CoreEvent)` for non-flow events + thin the shell (the keystone)
+- **C1** Add `pub fn handle(&mut self, ev: CoreEvent)`: `KeyDown`→resolve→`dispatch_action` +
+  held-key update; `KeyUp`/`FocusLost`→release; `Tick`→advance/slideshow (+ `SetWake`);
+  `Resized`/`ScaleFactorChanged`→viewport + renderer-resize effect; `PointerMoved`/`Scroll`/
+  `Pinch`/`DoubleTap`→view; `Redraw`→frame decision; `MenuAction(a)`→`dispatch_action` for
+  **non-flow** actions. **Add core unit tests** (inject `now`; assert emitted effects) — the
+  first real `handle` tests.
+- **C2** Rewrite the shell handlers as translators: main-window `window_event` + `about_to_wait`
+  stamp `now`, build a `CoreEvent`, call `handle`, then `drain_effects`. `resumed` stays. The
+  egui `dialog` arm + all flow events stay shell-routed (§3.6). ★ **smoke thoroughly.**
 
-- **C1. Nav/prefetch/residency** — `advance`, `nav_press`, `request_prefetch`, `drain_results`,
-  eviction/targets helpers. (Uses pb-core `open::{LaunchInput,Source,Cursor}` — already in core.)
-- **C2. View — zoom/pan/rotate/fit** — `zoom_held`, gesture handlers, `set_scale_mode`,
-  `view_for`. ★ smoke.
-- **C3. HUD build** — `show_overlay`, `push_toast`/`push_pie`/`push_chip`, `build_play_hint`,
-  `exif_rows`, `open_panel_bitmap`, `show_toast_icon` (pb-hud types; `scale_factor` now in core).
-- **C4. Animation playback** — `toggle_playback`/frame-step/tick methods.
-- **C5. Undo + misc** — `undo`, `push_undo`, small helpers.
+**Exit C = 5.5 done:** the shell is a translator + effect executor for all non-flow behavior.
 
-**Note:** `dispatch_action` (2741) moves in whichever batch leaves it pure; its arms that do
-*flow* things (open dialog, scan, delete) push effects / emit CoreEvents and are finalized in
-5.6. ★ smoke after C. ~5 commits.
+### Phase E — 5.6: invert the scan/archive/dialog/launch/delete/drop flow + native fullscreen
+Migrate `Resolved` (main.rs:6332) into core. Untangle the entangled paths codex flagged:
+`drain_effects` running pickers + immediate `finish_picker` (4336) → `OpenFilePanel`/
+`OpenFolderPanel` effect returns a `CoreEvent::Open`/`Picked`; `begin_archive_open` mutating
+`DialogWindow` (1848) → `ShowDialog`/`Progress` effects + `CoreEvent::PasswordSubmitted`/
+`Open`. Wire the NS-later events (`Open(LaunchInput)`, `SettingsSubmitted(Settings)`,
+`PasswordSubmitted(String)`, `DialogResult(..)`) and `DroppedPaths`→core. Native fullscreen
+(`toggle_native_fullscreen`) stays a shell executor driven by `SetWindowMode`. ★ smoke.
 
-### Phase D — `AppCore::handle(CoreEvent)` + thin the shell
-- **D1. Move `effects` into AppCore** (field move; `drain_effects` reads `self.core.effects`).
-- **D2. Add `pub fn handle(&mut self, ev: CoreEvent)`** on `impl AppCore`, matching each
-  variant to the moved methods: `KeyDown`→resolve via keymap→`dispatch_action` (+ held-key set
-  update); `KeyUp`/`FocusLost`→held-key release; `Tick`→advance/slideshow eval; `Resized`→fit/
-  renderer-resize effect; `PointerMoved`/`Scroll`/`Pinch`/`DoubleTap`→view methods; `Redraw`→
-  frame decision; `MenuAction(a)`→`dispatch_action(a)`; `DroppedPaths`→core; `KeymapSubmitted`/
-  `CancelDialog`→core. Unit-test `handle` directly (clock injected) — first real core tests.
-- **D3. Rewrite the shell event handlers as translators.** `window_event` (main window arm)
-  and `about_to_wait` build the `CoreEvent`, call `self.core.handle(ev)`, then
-  `self.drain_effects(event_loop)`. `resumed` stays (creates window + renderer, then
-  `handle(Started/Resized)`). The egui `dialog` window arm stays shell. ★ **smoke thoroughly.**
-  ~3 commits.
-
-**Exit D = 5.5 done:** the winit shell is a translator + effect executor; `AppCore` owns
-behavior. NS1's Swift bridge can now call `handle` with `NSEvent`-derived `CoreEvent`s.
-
-### Phase E — 5.6: invert the scan/archive/dialog/launch flow + native fullscreen
-The remaining 37 coupled methods + the 4d blocker (`begin_archive_open` reaches into
-`DialogWindow::become_loading`). Migrate `Resolved` (main.rs:6332) into core;
-wire the NS-later CoreEvents/Effects: `Open(LaunchInput)`, `SettingsSubmitted(Settings)`,
-`PasswordSubmitted(String)`, `DialogResult(..)`, and `ShowDialog`/`Progress`/`Error` effects.
-Dialog *results* become `CoreEvent`s; dialog *opens* become `CoreEffect`s (the shell owns the
-egui `DialogWindow`). Native fullscreen (`toggle_native_fullscreen`) stays a shell effect
-executor driven by `SetWindowMode`. ★ smoke. ~4–6 commits.
-
-**Exit E = NS0 complete.**
+**Exit E = NS0 complete.** Only then does NS1's Swift bridge drive *all* behavior via `handle`.
 
 ---
 
 ## 5. Risks & mitigations
+- **Compile-order (was a real draft bug):** `effects` (0.1), clock (0.3), viewport (0.4),
+  and type migrations must land *before* the methods that use them. Phase 0/A enforce this.
+- **Cross-crate method move exposes hidden pb-app type deps.** Per-batch recipe migrates types
+  first; if a method drags a shell type, split it (thin shell wrapper pushes an effect, move
+  the pure part). Compiler enumerates gaps.
+- **Flow entanglement (codex #3):** `finish_picker`/`begin_archive_open`/`DialogWindow` are
+  intertwined; keep the whole scan/archive/dialog/delete/drop flow shell-routed until E rather
+  than half-invert it in 5.5.
+- **Borrow conflicts** — low risk; proven across 5.1–5.4 (disjoint `self.core.*` field borrows).
+- **`Settings` surface (26 uses)** — config I/O only; verify no winit/egui and that load/save
+  still resolve via `config_dir`.
+- **`live_audio`** — never move the ObjC handle; only state + effects (codex #6).
 
-- **Cross-crate method move exposes hidden pb-app type deps.** Mitigation: the per-batch
-  recipe migrates types first; if a method drags an unexpected shell type, split it (keep a
-  thin shell wrapper that pushes an effect, move the pure part). The compiler enumerates the
-  gaps immediately.
-- **Borrow conflicts when a moved method calls another + holds a field borrow.** Low risk —
-  proven across 5.1–5.4 (disjoint `self.core.*` field borrows; methods never held a borrow
-  across an `&mut self` call). Same-crate `impl AppCore` methods behave identically.
-- **`dispatch_action` arms that do shell work.** They already push effects post-4a–4e; any
-  residual direct shell call becomes an effect or a deferred-to-5.6 `CoreEvent` stub. Audit
-  the `match action` at 2741 before C.
-- **`live_audio` / platform handles in the animation group.** If it owns an OS audio object,
-  keep the object shell-side behind a `PlayAudio`/`StopAudio` effect; move only pairing state.
-- **`Settings` migration surface (26 uses).** It's config I/O (toml/serde) — should be clean,
-  but verify no winit/egui and that `Settings::load/save` paths still resolve via `config_dir`.
-- **Two `KeyboardInput` sites** (dialog window vs main). Only the main-window arm becomes a
-  `KeyDown` translation; the dialog arm stays egui.
+## 6. Effort shape
+Phase 0: ~5 commits · Phase A: ~4 · Phase B: ~5 · Phase C: ~2 (keystone) · Phase E (5.6):
+~4–6. Total ~20–22 green commits; smoke at 0.3/0.4/0.5/A4/B2/B(end)/C2/E. **Recommend
+0→A→B→C in one focused session (= 5.5 complete), E (5.6) in a second.**
 
----
-
-## 6. Effort shape (for scheduling one session)
-- Phase A: ~6 small commits (mechanical field/type moves).
-- Phase B: 1 small commit.
-- Phase C: ~5 batch commits (the physical method relocation — the bulk).
-- Phase D: ~3 commits (the keystone: `handle` + translators).
-- Phase E (5.6): ~4–6 commits (flow inversion + native fullscreen).
-
-Total ~19–21 green commits. A/B/D/E each have a smoke checkpoint. **Recommend executing
-A→B→C→D in one focused session (that completes 5.5), then E (5.6) in a second**, but the
-plan supports one continuous run.
-
-## 7. Open questions for review
-1. OK to **move `effects` and `Settings` into pb-app-core** (§3.1, §3.5)?
-2. OK to fold the remaining **state groups (Phase A)** in as "5.4c-style" moves before the
-   method inversion, rather than calling them separate roadmap items?
-3. Split **5.5 (A–D) and 5.6 (E) across two sessions**, or one continuous run?
-4. Any method you want to keep shell-side regardless (e.g. if you're already eyeing a native
-   SwiftUI reimplementation for it in NS2/NS3)?
+## 7. Decisions locked by review (were open questions)
+1. `effects` **and** `Settings` move into pb-app-core — **yes** (0.1, 0.5; `serde` added).
+2. Remaining state groups fold in as Phase 0/A prep moves — **yes**.
+3. 5.5 (0–C) and 5.6 (E) split across two sessions — **yes** (flow stays shell until E).
+4. `live_audio` ObjC handle stays shell-side — **yes** (state moves, audio is effects).
