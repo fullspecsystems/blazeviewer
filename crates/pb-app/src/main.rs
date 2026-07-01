@@ -99,6 +99,10 @@ use pb_app_core::engine::{
     window_for_capacity, RING_BUDGET_BYTES,
 };
 use pb_app_core::metrics::StageTimes;
+// Playlist-resolution currency migrated to pb-app-core (NS0 5.6 Step 2): the `Resolved` snapshot
+// + the `ScanUpdate` stream message. The resolver *functions* still run on the shell's scan/archive
+// worker threads (which stay here); they produce these core types.
+use pb_app_core::scan::{self, Resolved, ScanUpdate};
 
 /// Cap on decoded-but-not-yet-uploaded bytes held by the pool (backpressure).
 const POOL_BUDGET_BYTES: usize = 512 * 1024 * 1024;
@@ -2818,31 +2822,6 @@ fn resolve_source(
     }
 }
 
-/// A resolved playlist: the concrete [`PhotoSource`] plus the framing the app
-/// needs (display root, the scan root for `Ctrl+R`, recursive flag, start index).
-struct Resolved {
-    source: Arc<dyn PhotoSource>,
-    root: PathBuf,
-    scan_root: Option<PathBuf>,
-    recursive: bool,
-    start: usize,
-}
-
-impl Resolved {
-    /// The "nothing to show" fallback — an empty filesystem source. Callers treat
-    /// `source.is_empty()` uniformly (empty folder, or an archive that failed/needs
-    /// a password), so an open failure never blanks a currently-shown photo.
-    fn empty() -> Self {
-        Resolved {
-            source: Arc::new(FsSource::new(Vec::new())),
-            root: PathBuf::from("."),
-            scan_root: None,
-            recursive: false,
-            start: 0,
-        }
-    }
-}
-
 /// Resolve a filesystem [`Source`] (folder scan or explicit list) into a playlist,
 /// driving `progress` (image count + current folder) and honoring its cancel flag so a
 /// superseding open / the Scanning dialog can abandon a huge in-flight scan. The cursor
@@ -2886,28 +2865,6 @@ fn sorted_image_walk(root: &Path, recursive: bool) -> Vec<PathBuf> {
         .filter(|e| e.file_type().is_file() && is_supported_image(e.path()))
         .map(walkdir::DirEntry::into_path)
         .collect()
-}
-
-/// Build a playlist snapshot from the paths gathered so far. Runs on the **scan worker
-/// thread** so constructing the `FsSource` (which rebuilds the display-name list, O(N)) never
-/// touches the event loop — the UI just swaps the resulting `Arc`. `start` is resolved
-/// against this snapshot; it's only used by the bootstrap (first) batch (later batches keep
-/// the app's own cursor via [`extend_playlist`](App::extend_playlist)).
-fn build_resolved(
-    paths: Vec<PathBuf>,
-    cursor: &open::Cursor,
-    root: PathBuf,
-    scan_root: Option<PathBuf>,
-    recursive: bool,
-) -> Resolved {
-    let start = open::resolve_cursor(&paths, cursor);
-    Resolved {
-        source: Arc::new(FsSource::new(paths)),
-        root,
-        scan_root,
-        recursive,
-        start,
-    }
 }
 
 /// Walk `roots` off the event loop, **streaming** the playlist in: emit a growing snapshot
@@ -2961,7 +2918,7 @@ fn stream_scan(
                 }
                 paths.push(p);
                 if !gated && last_emit.elapsed() >= SCAN_BATCH_INTERVAL {
-                    let snap = build_resolved(
+                    let snap = scan::build_resolved(
                         paths.clone(),
                         &cursor,
                         root.clone(),
@@ -2979,7 +2936,7 @@ fn stream_scan(
     }
     // Final batch: the un-emitted remainder, or the only batch for a fast folder.
     if !paths.is_empty() && (paths.len() > sent_len || sent_len == 0) {
-        let snap = build_resolved(paths, &cursor, root, scan_root, recursive);
+        let snap = scan::build_resolved(paths, &cursor, root, scan_root, recursive);
         let _ = tx.send((generation, ScanUpdate::Batch(snap)));
     }
     let _ = tx.send((generation, ScanUpdate::Done));
@@ -3044,7 +3001,7 @@ fn open_archive(
         if zs.is_empty() {
             return Err(archive::ArchiveOpenError::Empty);
         }
-        Ok(archive_resolved(path, Arc::new(zs)))
+        Ok(scan::archive_resolved(path, Arc::new(zs)))
     }
 }
 
@@ -3088,19 +3045,7 @@ fn load_seven_z(
     if src.is_empty() {
         return Err(archive::ArchiveOpenError::Empty);
     }
-    Ok(archive_resolved(path, Arc::new(src)))
-}
-
-/// A [`Resolved`] for an archive `source`: the archive path is the display root,
-/// and entry names are already archive-relative (so the info panel uses them).
-fn archive_resolved(path: &Path, source: Arc<dyn PhotoSource>) -> Resolved {
-    Resolved {
-        root: path.to_path_buf(),
-        source,
-        scan_root: None,
-        recursive: false,
-        start: 0,
-    }
+    Ok(scan::archive_resolved(path, Arc::new(src)))
 }
 
 /// Shared, thread-safe progress + cancellation for an off-thread directory scan — the
@@ -3167,17 +3112,6 @@ impl ScanProgress {
             .map(|g| g.clone())
             .unwrap_or_default()
     }
-}
-
-/// A message from the streaming scan worker ([`stream_scan`]). The walk runs off the event
-/// loop and **streams** the playlist in: each `Batch` carries a growing [`Resolved`] snapshot
-/// (the cumulative `FsSource` so far, built off-thread so the UI swap is O(1)); `Done` ends
-/// the walk. The app bootstraps the playlist on the first non-empty batch (showing a photo
-/// almost immediately) and extends it in place on the rest — so browsing starts before the
-/// whole tree is scanned.
-enum ScanUpdate {
-    Batch(Resolved),
-    Done,
 }
 
 /// An in-flight background **directory scan**. A large/recursive folder is walked off
