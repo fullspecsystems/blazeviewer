@@ -30,7 +30,7 @@ use crate::keymap::Keymap;
 use crate::pb_key::PbKey;
 use crate::{
     keymap, settings, slideshow, timing, Action, AppCore, InfoMode, Nav, OpenButton, OpenPanel,
-    PlayHint, Toast,
+    PlayHint, Toast, UndoAction,
 };
 
 impl AppCore {
@@ -131,19 +131,133 @@ impl AppCore {
             Action::Settings => self.effects.push(contract::CoreEffect::ShowDialog(
                 contract::DialogKind::Settings,
             )),
-            // Flow arms — window mode / scan / file edits / quit. The core doesn't own these
+            // Save the pending rotation to the file's EXIF / undo the last edit (NS0 5.6,
+            // inverted): the EXIF-IO module moved into `pb-app-core`, so these are now pure core
+            // arms (all the cache invalidation + undo-stack state is core; the disk write is
+            // platform-neutral `std::fs`). An explicit user command — never the view path.
+            Action::SaveRotation => self.save_rotation(),
+            Action::Undo => self.undo(),
+            // Flow arms — window mode / scan / delete / quit. The core doesn't own these
             // end-to-end yet, so it routes them to the shell (host) via one effect, keeping the
             // *whole* action vocabulary dispatching through this one core method.
-            Action::SaveRotation
-            | Action::Delete
+            Action::Delete
             | Action::DeletePermanent
-            | Action::Undo
             | Action::Fullscreen
             | Action::Recursive
             | Action::CancelScan
             | Action::Quit => self
                 .effects
                 .push(contract::CoreEffect::ShellFlowAction(action)),
+        }
+    }
+
+    /// Whether **Save Rotation** is available for the displayed photo: it has a pending in-RAM
+    /// rotation *and* its source is a writable-orientation file (JPEG on disk, not an archive
+    /// entry). Drives the Edit-menu item's enabled state (`apply_menu_state`).
+    pub fn can_save_rotation(&self) -> bool {
+        let Some(item) = self.displayed_item else {
+            return false;
+        };
+        let rotated = self
+            .rotations
+            .get(&item)
+            .is_some_and(|r| *r != Rotation::default());
+        rotated
+            && self
+                .source
+                .path(item)
+                .is_some_and(crate::save_rotation::is_orientation_writable)
+    }
+
+    /// **Save Rotation** (`Ctrl+S` / Edit menu): bake the displayed photo's pending in-RAM
+    /// rotation into its file's EXIF Orientation, then drop the RAM override + caches and re-read
+    /// from disk so the pixels are re-oriented from the file (else a later re-decode would
+    /// double-rotate). Records an undo entry. A deliberate, user-initiated write to the user's own
+    /// file — never the passive view path (privacy #2). The EXIF write is platform-neutral
+    /// `std::fs` (`crate::save_rotation`), so this is a pure core arm.
+    pub fn save_rotation(&mut self) {
+        let Some(item) = self.displayed_item else {
+            return;
+        };
+        let rot = self.rotations.get(&item).copied().unwrap_or_default();
+        if rot == Rotation::default() {
+            self.show_toast("No rotation to save");
+            return;
+        }
+        let Some(path) = self.source.path(item).map(Path::to_path_buf) else {
+            // Archive entry — no file on disk to write back to.
+            self.show_toast("Can't save rotation here");
+            return;
+        };
+        if !crate::save_rotation::is_orientation_writable(&path) {
+            self.show_toast("Save rotation: JPEG only");
+            return;
+        }
+        // Capture the file's orientation *before* the write so the save can be reversed
+        // (Edit ▸ Undo) by restoring this exact value.
+        let prev = crate::save_rotation::read_orientation(&path);
+        match crate::save_rotation::write_orientation(&path, rot) {
+            Ok(_) => {
+                // The rotation is now baked into the file's EXIF: drop the RAM override and
+                // re-read from disk so the pixels are re-oriented from the file.
+                self.rotations.remove(&item);
+                self.meta_cache.remove(&item);
+                self.exif_cache.remove(&item); // the file's EXIF (Orientation) just changed
+                self.failed.remove(&item);
+                self.preview_resident.remove(&item);
+                self.upgrade_done.remove(&item);
+                self.invalidate_geometry();
+                self.load_current_sync();
+                self.target_item = self.playlist.current();
+                self.request_prefetch();
+                self.undo_stack.push(UndoAction::SaveRotation {
+                    item,
+                    path: path.clone(),
+                    prev,
+                });
+                self.show_toast_icon("", Some(icon::assets::FLOPPY));
+            }
+            Err(e) => {
+                eprintln!("save rotation failed: {}: {e}", path.display());
+                self.show_toast("Save failed");
+            }
+        }
+    }
+
+    /// **Undo** (`Ctrl+Z` / Edit menu) the last reversible edit. Today that's a saved rotation:
+    /// restore the file's previous EXIF Orientation and refresh the caches like the save did. On
+    /// an I/O failure the file is untouched, so the entry is pushed back for a retry.
+    pub fn undo(&mut self) {
+        let Some(action) = self.undo_stack.pop() else {
+            self.show_toast("Nothing to undo");
+            return;
+        };
+        match action {
+            UndoAction::SaveRotation { item, path, prev } => {
+                match crate::save_rotation::set_orientation(&path, prev) {
+                    Ok(()) => {
+                        self.rotations.remove(&item);
+                        self.meta_cache.remove(&item);
+                        self.exif_cache.remove(&item); // EXIF Orientation reverted on disk
+                        self.failed.remove(&item);
+                        self.preview_resident.remove(&item);
+                        self.upgrade_done.remove(&item);
+                        self.invalidate_geometry();
+                        self.load_current_sync();
+                        self.target_item = self.playlist.current();
+                        self.request_prefetch();
+                        self.show_toast_icon("Rotation undone", Some(icon::assets::UNDO));
+                    }
+                    Err(e) => {
+                        eprintln!("undo rotation failed: {}: {e}", path.display());
+                        self.show_toast("Undo failed");
+                        // The file wasn't changed, so the edit is still reversible — keep it on
+                        // the stack for a retry.
+                        self.undo_stack
+                            .push(UndoAction::SaveRotation { item, path, prev });
+                    }
+                }
+            }
         }
     }
 

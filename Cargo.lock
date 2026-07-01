@@ -3476,7 +3476,6 @@ dependencies = [
  "egui-winit",
  "half",
  "libc",
- "little_exif",
  "muda",
  "objc2 0.6.4",
  "pb-app-core",
@@ -3505,6 +3504,7 @@ name = "pb-app-core"
 version = "0.1.0"
 dependencies = [
  "half",
+ "little_exif",
  "pb-core",
  "pb-decode",
  "pb-hud",

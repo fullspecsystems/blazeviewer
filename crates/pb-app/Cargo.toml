@@ -56,10 +56,6 @@ half = "2"
 # SVG backend, so it's already in the lockfile. Runs only when an overlay is rebuilt
 # (off the photo hot path).
 resvg = { version = "0.47", default-features = false }
-# Lossless EXIF write for Save Rotation (Ctrl+S): rewrites only the Orientation tag,
-# leaving the compressed JPEG scan untouched (the crate has no image codec, so it
-# physically can't re-encode pixels — it only rewrites metadata segments).
-little_exif = "0.6"
 # Send a deleted photo to the OS Recycle Bin / Trash (Del). Uses IFileOperation on
 # Windows; cross-platform for the later macOS port. `default-features = false` drops
 # the Linux DBus/KDE backends + `chrono` (only needed for the deferred undo/list).

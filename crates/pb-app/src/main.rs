@@ -45,7 +45,7 @@ use winit::window::{CursorIcon, Icon, Window, WindowId};
 use pb_core::open::{self, LaunchInput, Source};
 use pb_core::{Playlist, ResidentRing};
 use pb_decode::{decode_bytes, is_supported_extension, FitBox};
-use pb_render::{Renderer, Rotation, ViewTransform, WgpuRenderer};
+use pb_render::{Renderer, ViewTransform, WgpuRenderer};
 use pb_source::{seven_z_projected_bytes, FsSource, PhotoSource, SevenZSource, ZipSource};
 
 mod archive;
@@ -66,7 +66,6 @@ mod menu;
 mod pb_key_winit;
 #[cfg(target_os = "macos")]
 mod proxy_icon;
-mod save_rotation;
 // The action vocabulary, physical-key model, keymap, and slideshow timing now live
 // in the platform-neutral `pb-app-core` (NS0). Re-export them at the crate root so
 // the existing `crate::action` / `crate::keymap` / `crate::pb_key` / `crate::slideshow`
@@ -503,107 +502,6 @@ impl App {
             live_audio: None,
             pending_dialog: None,
             requested_wake: None,
-        }
-    }
-
-    /// Persist the current photo's in-RAM rotation to its file's EXIF Orientation
-    /// tag (`Ctrl+S` / File ▸ Save Rotation, task #29) — lossless (the compressed
-    /// pixels are untouched). The first write to a user's photo bytes, and like
-    /// Copy/Delete it only ever runs on an explicit command. JPEG only for now;
-    /// other formats (and archive entries, which have no file) are greyed out + toast.
-    /// On success the RAM override is dropped and the photo refreshed from disk, so
-    /// the displayed orientation now comes from the file (a clean round-trip with no
-    /// double-rotation).
-    fn save_rotation(&mut self) {
-        let Some(item) = self.core.displayed_item else {
-            return;
-        };
-        let rot = self.core.rotations.get(&item).copied().unwrap_or_default();
-        if rot == Rotation::default() {
-            self.core.show_toast("No rotation to save");
-            return;
-        }
-        let Some(path) = self.core.source.path(item).map(Path::to_path_buf) else {
-            // Archive entry — no file on disk to write back to.
-            self.core.show_toast("Can't save rotation here");
-            return;
-        };
-        if !save_rotation::is_orientation_writable(&path) {
-            self.core.show_toast("Save rotation: JPEG only");
-            return;
-        }
-        // Capture the file's orientation *before* the write so the save can be reversed
-        // (Edit ▸ Undo) by restoring this exact value.
-        let prev = save_rotation::read_orientation(&path);
-        match save_rotation::write_orientation(&path, rot) {
-            Ok(_) => {
-                // The rotation is now baked into the file's EXIF: drop the RAM
-                // override and re-read from disk so the pixels are re-oriented from
-                // the file (else the ring's old-orientation pixels + a reset view
-                // would show it un-rotated, or a later re-decode would double-rotate).
-                self.core.rotations.remove(&item);
-                self.core.meta_cache.remove(&item);
-                self.core.exif_cache.remove(&item); // the file's EXIF (Orientation) just changed
-                self.core.failed.remove(&item);
-                self.core.preview_resident.remove(&item);
-                self.core.upgrade_done.remove(&item);
-                self.core.invalidate_geometry();
-                self.core.load_current_sync();
-                self.core.target_item = self.core.playlist.current();
-                self.core.request_prefetch();
-                self.core.undo_stack.push(UndoAction::SaveRotation {
-                    item,
-                    path: path.clone(),
-                    prev,
-                });
-                self.core.show_toast_icon("", Some(icon::assets::FLOPPY));
-            }
-            Err(e) => {
-                eprintln!("save rotation failed: {}: {e}", path.display());
-                self.core.show_toast("Save failed");
-            }
-        }
-    }
-
-    /// Reverse the most recent reversible edit (Edit ▸ Undo / `Ctrl+Z`). Today the only
-    /// entry kind is a saved rotation: rewrite the file's EXIF Orientation back to the
-    /// value it held before the save, then refresh so the reverted file is re-read
-    /// (`invalidate_geometry` rebuilds the ring, so neighbors re-decode from disk too —
-    /// the undone photo shows correctly whether or not it's the one on screen). On a
-    /// write failure the file is untouched, so the entry is pushed back to retry.
-    fn undo(&mut self) {
-        let Some(action) = self.core.undo_stack.pop() else {
-            self.core.show_toast("Nothing to undo");
-            return;
-        };
-        match action {
-            UndoAction::SaveRotation { item, path, prev } => {
-                match save_rotation::set_orientation(&path, prev) {
-                    Ok(()) => {
-                        self.core.rotations.remove(&item);
-                        self.core.meta_cache.remove(&item);
-                        self.core.exif_cache.remove(&item); // EXIF Orientation reverted on disk
-                        self.core.failed.remove(&item);
-                        self.core.preview_resident.remove(&item);
-                        self.core.upgrade_done.remove(&item);
-                        self.core.invalidate_geometry();
-                        self.core.load_current_sync();
-                        self.core.target_item = self.core.playlist.current();
-                        self.core.request_prefetch();
-                        self.core
-                            .show_toast_icon("Rotation undone", Some(icon::assets::UNDO));
-                    }
-                    Err(e) => {
-                        eprintln!("undo rotation failed: {}: {e}", path.display());
-                        self.core.show_toast("Undo failed");
-                        // The file wasn't changed, so the edit is still reversible —
-                        // keep it on the stack for a retry.
-                        self.core
-                            .undo_stack
-                            .push(UndoAction::SaveRotation { item, path, prev });
-                    }
-                }
-            }
         }
     }
 
@@ -1346,26 +1244,6 @@ impl App {
         }
     }
 
-    /// Whether "Save Rotation" applies right now: the displayed photo has an unsaved
-    /// (non-upright) rotation override, sits on a real file on disk (not an archive
-    /// entry), and that file's format supports a lossless EXIF Orientation rewrite.
-    fn can_save_rotation(&self) -> bool {
-        let Some(item) = self.core.displayed_item else {
-            return false;
-        };
-        let rotated = self
-            .core
-            .rotations
-            .get(&item)
-            .is_some_and(|r| *r != Rotation::default());
-        rotated
-            && self
-                .core
-                .source
-                .path(item)
-                .is_some_and(save_rotation::is_orientation_writable)
-    }
-
     /// Derive the current [`contract::MenuState`] from live app state and, **only when it
     /// changed** since the last one applied (`self.menu_state`), emit a single
     /// [`CoreEffect::SetMenuState`] — the shell mirrors it onto the native menu in the drain
@@ -1399,7 +1277,7 @@ impl App {
             !self.windowed, // `windowed` is the inverse of the fullscreen checkbox
             self.core.slideshow.on,
             self.core.settings.mute_live_audio,
-            self.can_save_rotation(),
+            self.core.can_save_rotation(),
             self.dir_scan.is_some(),
             // `None` = nothing to undo (disabled "Undo"); `Some(label)` = enabled w/ label.
             self.core.undo_stack.last().map(UndoAction::menu_label),
@@ -1584,10 +1462,8 @@ impl App {
     /// specific effects/`CoreEvent`s + native macOS handling as 5.6 inverts each flow.)
     fn perform_flow_action(&mut self, action: Action) {
         match action {
-            Action::SaveRotation => self.save_rotation(),
             Action::Delete => self.delete_current(false),
             Action::DeletePermanent => self.delete_current(true),
-            Action::Undo => self.undo(),
             Action::Fullscreen => self.toggle_fullscreen(),
             Action::Recursive => self.toggle_recursive(),
             Action::CancelScan => self.cancel_scan_command(),

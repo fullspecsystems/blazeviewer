@@ -31,3 +31,6 @@ pb-source = { workspace = true }
 # render path. Shell-neutral pure compute (fontdue + resvg), no UI toolkit, so the
 # "no winit/egui" invariant holds.
 pb-hud = { workspace = true }
+# EXIF Orientation read/write for the save-rotation / undo commands (NS0 5.6 — moved off the
+# shell so those flow actions are pure core arms). Pure Rust, no C build risk.
+little_exif = "0.6"
