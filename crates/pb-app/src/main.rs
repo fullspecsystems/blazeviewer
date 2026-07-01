@@ -1591,8 +1591,6 @@ impl App {
             Action::Fullscreen => self.toggle_fullscreen(),
             Action::Recursive => self.toggle_recursive(),
             Action::CancelScan => self.cancel_scan_command(),
-            Action::Settings => self.open_settings(),
-            Action::About => self.open_about(),
             Action::Quit => self.begin_exit(),
             _ => {}
         }
@@ -1634,18 +1632,6 @@ impl App {
             recursive: r.recursive,
             start,
         }
-    }
-
-    /// Open the "About PhotoBlaze" dialog (Help menu) — an egui window with the app
-    /// icon + version, dark-mode-aware (see `dialog`).
-    fn open_about(&mut self) {
-        self.open_dialog(dialog::DialogKind::About);
-    }
-
-    /// Open the Settings dialog (Ctrl+,) — an egui window seeded from the live
-    /// settings; **Save** routes back to [`apply_settings`](Self::apply_settings).
-    fn open_settings(&mut self) {
-        self.open_dialog(dialog::DialogKind::Settings);
     }
 
     /// Open (or focus, if already open) one of our egui dialog windows. Only one
@@ -1987,6 +1973,12 @@ impl App {
                     }
                     contract::CoreEffect::SetWindowMode(_mode) => {
                         self.apply_window_mode();
+                    }
+                    // Present a chrome dialog (About / Settings today; the payload-carrying kinds
+                    // still open via their own flow paths). Maps the shell-neutral kind onto the
+                    // shell's `dialog::DialogKind` and defers the actual window to `open_dialog`.
+                    contract::CoreEffect::ShowDialog(kind) => {
+                        self.open_dialog(shell_dialog_kind(kind));
                     }
                     contract::CoreEffect::WriteClipboard(payload) => {
                         self.write_clipboard(payload);
@@ -2734,6 +2726,22 @@ impl ApplicationHandler for App {
 /// Map the shell-neutral [`contract::CursorKind`] the core emits to the winit
 /// [`CursorIcon`] the shell shows (NS0). `Hidden` is unused on the `SetCursor` path —
 /// the chrome-free hide uses a separate mechanism — so it falls back to the arrow.
+/// Map the shell-neutral [`contract::DialogKind`] the core emits (via `ShowDialog`) to the
+/// shell's own [`dialog::DialogKind`] — a 1:1 mirror (NS0 5.6). The payload-carrying kinds
+/// (Confirm/Message/Password/Loading/Scanning) currently reach the shell through their flow
+/// paths, not `ShowDialog`, but the map is total so it stays correct as those invert.
+fn shell_dialog_kind(kind: contract::DialogKind) -> dialog::DialogKind {
+    match kind {
+        contract::DialogKind::About => dialog::DialogKind::About,
+        contract::DialogKind::Settings => dialog::DialogKind::Settings,
+        contract::DialogKind::Confirm => dialog::DialogKind::Confirm,
+        contract::DialogKind::Message => dialog::DialogKind::Message,
+        contract::DialogKind::Password => dialog::DialogKind::Password,
+        contract::DialogKind::Loading => dialog::DialogKind::Loading,
+        contract::DialogKind::Scanning => dialog::DialogKind::Scanning,
+    }
+}
+
 fn cursor_icon(kind: contract::CursorKind) -> CursorIcon {
     match kind {
         contract::CursorKind::Default | contract::CursorKind::Hidden => CursorIcon::Default,

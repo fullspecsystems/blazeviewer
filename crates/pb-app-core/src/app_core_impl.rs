@@ -121,9 +121,19 @@ impl AppCore {
                     self.show_toast_icon("", Some(icon::assets::VOLUME));
                 }
             }
-            // Flow arms — dialogs / window mode / scan / file edits / quit. The core doesn't own
-            // these end-to-end yet, so it routes them to the shell (host) via one effect,
-            // keeping the *whole* action vocabulary dispatching through this one core method.
+            // Open the About / Settings chrome dialog (NS0 5.6, inverted): a payload-free
+            // `ShowDialog` effect the host services natively (a winit egui window now, a native
+            // panel on macOS later). The other dialog kinds (Confirm/Message/Password/Loading/
+            // Scanning) carry payloads still owned by the shell → they open via 5.6's flow paths.
+            Action::About => self.effects.push(contract::CoreEffect::ShowDialog(
+                contract::DialogKind::About,
+            )),
+            Action::Settings => self.effects.push(contract::CoreEffect::ShowDialog(
+                contract::DialogKind::Settings,
+            )),
+            // Flow arms — window mode / scan / file edits / quit. The core doesn't own these
+            // end-to-end yet, so it routes them to the shell (host) via one effect, keeping the
+            // *whole* action vocabulary dispatching through this one core method.
             Action::SaveRotation
             | Action::Delete
             | Action::DeletePermanent
@@ -131,8 +141,6 @@ impl AppCore {
             | Action::Fullscreen
             | Action::Recursive
             | Action::CancelScan
-            | Action::Settings
-            | Action::About
             | Action::Quit => self
                 .effects
                 .push(contract::CoreEffect::ShellFlowAction(action)),
@@ -3142,12 +3150,29 @@ mod tests {
 
     #[test]
     fn menu_flow_action_routes_through_shell_flow_effect() {
+        // `Quit` is a still-shell flow action (window teardown) — it routes through the
+        // catch-all `ShellFlowAction` seam. (Settings/About/Mute have been inverted onto their
+        // own effects; see the tests below.)
+        let mut core = test_core();
+        core.handle(CoreEvent::MenuAction(Action::Quit));
+        assert_eq!(core.effects.len(), 1);
+        assert!(matches!(
+            core.effects[0],
+            contract::CoreEffect::ShellFlowAction(Action::Quit)
+        ));
+    }
+
+    #[test]
+    fn settings_action_emits_show_dialog_effect() {
+        // NS0 5.6: About/Settings dispatch a payload-free `ShowDialog` effect, not ShellFlowAction.
+        // (Mute isn't unit-tested here — its arm calls `Settings::save`, which writes the real
+        // on-disk config; it's covered by the shell smoke instead.)
         let mut core = test_core();
         core.handle(CoreEvent::MenuAction(Action::Settings));
         assert_eq!(core.effects.len(), 1);
         assert!(matches!(
             core.effects[0],
-            contract::CoreEffect::ShellFlowAction(Action::Settings)
+            contract::CoreEffect::ShowDialog(contract::DialogKind::Settings)
         ));
     }
 
