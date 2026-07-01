@@ -5,15 +5,16 @@ SwiftUI groundwork, ADR-021) — see the NS0 section immediately below. On branc
 NS0 is now **~90% done: the full STATE inversion, the BEHAVIOR inversion (Phase B, ~99 methods),
 `dispatch_action` moved onto `AppCore`, AND the keystone `handle(CoreEvent)` (Phase C1) all
 land. ✅ NS1 (the Swift bridge) is now UNBLOCKED — it can drive the viewer through `handle()`,
-which exists + is unit-tested.** Phase C2 (winit shell → `handle()` translator) is **substantially
-done + OWNER-SMOKE-VERIFIED (2026-07-01)**: keyboard + focus + pointer/pinch/double-tap **and the
-whole `about_to_wait` tick loop** now route through `handle()` (via `AppCore::tick()` + a `SetWake`
-effect) — the winit shell exercises the same `handle()` the Swift host will, for the entire engine,
-and the owner confirmed "everything is looking good" (hold-to-fly / slideshow / animation / resize /
-dialogs all felt right). Only `Resized` (GPU/window-coupled) + scroll-delta remain shell (deferred).
-**5.6** (invert the scan/archive/dialog/delete/window FLOW — the `ShellFlowAction` arms get specific
-effects) is the last NS0 phase. Everything below the NS0 section is the previously-shipped work
-(macOS port, archive, settings, HEIC, color), unchanged._
+which exists + is unit-tested.** Phase C2 (winit shell → `handle()` translator) is **done + owner-
+smoke-verified**: keyboard + pointer + the whole `about_to_wait` tick loop route through `handle()`.
+**Phase 5.6 (the flow inversion) is underway:** 6 of 11 flow actions are now inverted into core arms
+/ specific effects — **Mute** → core, **About/Settings** → `ShowDialog`, **SaveRotation/Undo** +
+**Delete-to-trash** → pure core arms (their EXIF / trash IO modules moved into `pb-app-core`). The
+remaining 5 (**DeletePermanent** confirm, **Fullscreen** window ops, **Recursive/CancelScan** scan
+threads, **Quit** teardown) are legitimately host-side and stay behind the (reframed)
+`ShellFlowAction` seam. ⚠ The 5.6 commits are **unsmoked** — need a mute / dialogs / save-rotation+undo
+/ delete pass. Everything below the NS0 section is the previously-shipped work (macOS port, archive,
+settings, HEIC, color), unchanged._
 
 _The macOS (Apple Silicon) port is complete and SHIPPED in `v0.1.0-beta.4` (2026-06-30) — the
 first signed + notarized macOS DMG alongside the signed Windows MSI. Verified notarized +
@@ -149,15 +150,30 @@ The winit shell now translates its **input events + the whole tick loop** to `Co
   `CoreEvent` and already call core methods directly. **`DroppedPaths`** is flow → 5.6.
   With these deferred, **C2 has met its goal**: the winit shell exercises the same `handle()` the
   Swift host will for keyboard + menu + pointer + the tick loop (the whole engine).
-- **5.6 — invert the scan/archive/dialog/delete-confirm/drop FLOW** + native fullscreen: give the
-  11 `ShellFlowAction` arms specific effects/`CoreEvent`s (migrate `Resolved`; untangle
-  `finish_picker` + `begin_archive_open`→`DialogWindow`; `save_rotation`/`undo` → a save effect +
-  result event; `toggle_fullscreen` → move `windowed` + the `capture_windowed_geometry` ordering;
-  `toggle_mute_audio` → `SetMenuState`). The ~55 methods still on `impl App` are exactly this: the
-  effect executors (`drain_effects`, `open_pending_dialog`, `write_clipboard`, `perform_flow_action`),
-  the window/menu/native ops, the flow methods (`begin_dir_scan`, `poll_dir_scan`,
-  `begin_archive_open`, `finish_picker`, `dialog_event`, `handle_dialog_outcome`, …), and the
-  I/O-coupled `save_rotation`/`undo`/`do_delete`.
+### ◐ IN PROGRESS — Phase 5.6 (the FLOW inversion). **6 of 11 flow actions inverted; the rest are legitimately host-side.**
+The `ShellFlowAction(Action)` catch-all is being decomposed: each flow action that has genuinely-
+core logic moves into its own `dispatch_action` arm / specific effect; only true platform ops stay.
+- **✅ Inverted this session (2026-07-01):**
+  - **MuteLiveAudio** (`bbfc003`) → core arm — the mute *state* + toast are core; only the ObjC
+    player is shell (`Stop/StartLiveAudio` effects); the native menu re-asserts via per-tick
+    `apply_menu_state`.
+  - **About / Settings** (`b96aaed`) → the existing `CoreEffect::ShowDialog(DialogKind)` + a shell
+    `shell_dialog_kind` map (drops `open_about`/`open_settings`).
+  - **SaveRotation / Undo** (`d54e444`) → **pure core arms**: `git mv save_rotation.rs → pb-app-core`
+    (little_exif + the `orient6.jpg` fixture move with it), since they were ~95% core-state around a
+    thin platform-neutral EXIF write.
+  - **Delete-to-trash** (`9eb299a`) → core arm + `do_delete` → core: `git mv delete.rs → pb-app-core`
+    (trash dep + `DELETE_ADVANCE_DELAY`→engine); `Del` is now pure core, `do_delete` uses `self.now`.
+- **Legitimately host-side — stay behind `ShellFlowAction` (reframed, `ab7a9e2`)**, since execution
+  *is* a platform op: **DeletePermanent** (opens the confirm dialog; its Yes calls the core
+  `do_delete`), **Fullscreen** (borderless⇄windowed window ops + the shell-owned `windowed` flag),
+  **Recursive** / **CancelScan** (spawn / cancel the off-thread scan + its dialog), **Quit** (hide-
+  window teardown, also reached from window-close / Esc).
+- **❌ Optional larger follow-ups** (only if we want zero `ShellFlowAction`): **Fullscreen** needs a
+  `windowed`→core field migration (18 refs; but `windowed` is genuinely live window state) + a
+  `CaptureWindowedGeometry` effect; and the **archive/scan dialog-outcome flow** (`begin_archive_open`
+  reaching into `DialogWindow`, migrating `DialogOutcome`/`Resolved` to `CoreEvent`s) — the coupled
+  part the plan has flagged throughout. Neither is required for NS1; both are their own efforts.
 
 ### ▶ Resume (next session)
 Read **`.taskmaster/docs/ns0-step5-behavior-inversion-plan.md`** (Phase E = 5.6). Two independent
@@ -168,13 +184,15 @@ tracks remain, either order:
    `SetWake`→its run-loop timer, `ShellFlowAction`→native About/Settings/save panels, live-audio→
    `AVAudioPlayer`). `handle()`/`tick()`/the contract vocabulary are ready + unit-tested; the winit
    shell (`main.rs` `window_event`/`about_to_wait`) is the worked reference for what each event maps to.
-2. **Finish NS0 = 5.6 (the FLOW inversion)** — the one remaining phase. Give the 11 `ShellFlowAction`
-   arms specific effects/`CoreEvent`s and invert the scan/archive/dialog/delete-confirm/drop flow +
-   native fullscreen (see the ❌ REMAINING 5.6 bullet above for the exact list). Do it a few flow
-   paths at a time, green + smoke each (dialogs, delete-confirm, fullscreen, save-rotation, drops).
-   The ~54 methods still on `impl App` are exactly this flow surface + the effect executors. Also do
-   the two small deferred C2 bits if wanted: `Resized`→`handle` (core viewport part; shell keeps the
-   GPU-surface/EDR poke) and a `Scroll` seam refinement for `MouseWheel`.
+2. **5.6 is mostly done** — the flow actions with genuine core logic are inverted (Mute, About/
+   Settings, SaveRotation/Undo, Delete-to-trash); the remaining `ShellFlowAction` arms (DeletePermanent
+   confirm, Fullscreen, Recursive/CancelScan, Quit) are legitimately host-side. **First: smoke the 5.6
+   commits** (mute toast+audio, About/Settings open, rotate→Ctrl+S save + Ctrl+Z undo, Del→trash +
+   Shift+Del confirm). **Then, only if we want zero `ShellFlowAction`:** the Fullscreen `windowed`→core
+   field migration + a `CaptureWindowedGeometry` effect, and the archive/scan **dialog-outcome flow**
+   inversion (`begin_archive_open`→`DialogWindow`, migrate `DialogOutcome`/`Resolved` to `CoreEvent`s).
+   Optional deferred C2 bits: `Resized`→`handle` (core viewport part; shell keeps the GPU-surface/EDR
+   poke) and a `Scroll` seam for `MouseWheel`. None of these block NS1.
 
 **Move-recipe + wiring hazards** (all hit + handled this session): multiline `self\n.core\n.field`
 chains (regex-collapse, not a literal replace); a method calling a shell *module* path
