@@ -6,6 +6,41 @@
 > execution detail under it. **Nothing here changes behavior on purpose** — it's a
 > pure refactor gated on a manual smoke (owner is smoke-testing in parallel).
 
+## Progress & validated findings (2026-06-30)
+
+**Checkpoint 1 landed** (commit `3d7c42d`): the `CoreEffect` queue + `drain_effects`
+seam. `App` has `effects: Vec<contract::CoreEffect>`; `begin_exit` pushes
+`CoreEffect::Quit` (no longer takes `event_loop`); `drain_effects(event_loop)` runs at the
+end of each `ApplicationHandler` entry (`window_event` incl. the dialog-route early return,
+`about_to_wait`). Green (115 tests), clippy/fmt clean, exit fires the same loop iteration.
+
+**Findings that reorder the plan (measured, not assumed):**
+- **`event_loop` is shallow but its de-thread cascades.** 76 fns take it; only ~8 real
+  uses (`exit` ×2, `set_control_flow` ×3, `resumed`'s window/monitor creation ×3). But
+  removing it from `draw` (25 call sites) cascades: any method whose *only* `event_loop`
+  use is `self.draw()` then has an unused param → its callers too. So `draw`'s de-thread
+  must ride along with the full pass, **after** dialogs. `begin_exit` was safe to convert
+  alone precisely because its 3 callers keep `event_loop` for other work (→ ckpt 1).
+- **De-threading is entangled with the dialog inversion.** `DialogWindow::open(event_loop,
+  …)` (`dialog.rs:389`) means the ~6 dialog-opening methods *need* `event_loop` to create
+  their window. `event_loop` can't leave those methods until dialogs become a
+  `ShowDialog` effect the shell fulfills. **Do dialogs before the final de-thread.**
+- **`request_redraw` is hot-path-sensitive, not a free leaf effect.** Its 11 sites interact
+  with frame pacing / the self-paced advance (keypress→photon). Rerouting it through the
+  deferred queue changes *when* redraw is requested relative to `set_control_flow` — do it
+  deliberately, with the manual hold-to-fly smoke, not as a mechanical batch.
+- **Safe, non-cascading, non-hot-path leaves still available:** window ops
+  (`set_title`/`set_cursor`/`set_fullscreen`, ~11) → `SetTitle`/`SetCursor`/`SetWindowMode`.
+  `clipboard` (4) and `rfd` panels (2) need new/`NS-later` effect payloads + (rfd) the
+  Esc-guard trap, so they ride with their stages.
+
+**Revised checkpoint order** (supersedes §7 for execution): (1) ✅ effect queue + `Quit`.
+(2) window ops → effects (safe). (3) **dialog inversion** — shell owns `DialogWindow`,
+`ShowDialog`/results-as-events; unblocks (4). (4) rfd + clipboard → effects; then the
+`event_loop` full de-thread (now unblocked) + `request_redraw` (with smoke). (5) split
+`Active` → shell `window` + AppCore `Box<dyn Renderer>`; move state to `pb-app-core`; thin
+`WinitShell`. Stages 3–5 each want a manual hold-to-fly + dialog smoke before the next.
+
 ## 0. TL;DR of the move
 
 `pb-app/src/main.rs` (7,120 lines) is a winit god-object: one `struct App` (73 fields)
