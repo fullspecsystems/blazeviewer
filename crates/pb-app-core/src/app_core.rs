@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use pb_decode::FitBox;
 use pb_render::{Rotation, ScaleMode, ViewTransform};
 
-use crate::{Action, Modifiers, PbKey, Slideshow};
+use crate::{Action, Modifiers, PbKey, PhotoMeta, Slideshow};
 
 /// The platform-neutral orchestration state the shell drives. Grows as step 5 relocates
 /// field groups off the winit shell; the shell holds one `AppCore` and reaches its state
@@ -68,6 +68,15 @@ pub struct AppCore {
     pub resize_settle_at: Option<Instant>,
     /// When to persist the debounced window-geometry change (an explicit user action).
     pub geometry_save_at: Option<Instant>,
+
+    // --- Metadata caches (NS0 5.3) ---
+    /// Per-item info-panel metadata, memoized so the panel doesn't re-derive per frame.
+    pub meta_cache: HashMap<usize, PhotoMeta>,
+    /// The displayed photo's metadata (mirror of the `meta_cache` entry for the current item).
+    pub current: Option<PhotoMeta>,
+    /// Per-item on-demand full-EXIF read (`Shift+I`): `(mtime, key/value pairs)`, so a
+    /// re-open of the same unchanged file is instant. RAM-only (privacy #2).
+    pub exif_cache: HashMap<usize, (u64, Vec<(String, String)>)>,
 }
 
 impl AppCore {
@@ -106,6 +115,9 @@ impl AppCore {
             pan_last: None,
             resize_settle_at: None,
             geometry_save_at: None,
+            meta_cache: HashMap::new(),
+            current: None,
+            exif_cache: HashMap::new(),
         }
     }
 }

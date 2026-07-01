@@ -84,7 +84,7 @@ mod settings;
 // the existing `crate::action` / `crate::keymap` / `crate::pb_key` / `crate::slideshow`
 // paths in the winit shell modules (and the `use action::…` lines below) keep
 // resolving unchanged.
-use pb_app_core::{action, contract, keymap, pb_key, slideshow, timing, AppCore};
+use pb_app_core::{action, contract, keymap, pb_key, slideshow, timing, AppCore, PhotoMeta};
 
 use action::Action;
 use animation::Playback;
@@ -258,19 +258,6 @@ fn render_color(c: &pb_decode::ColorTransform) -> pb_render::ColorTransform {
 /// Whether a decoded image is HDR (scene-linear fp16 → the renderer's HDR path).
 fn is_hdr(img: &DecodedImage) -> bool {
     img.format == PixelFormat::Rgba16F
-}
-
-/// One photo's info, for the corner overlay panel.
-#[derive(Clone)]
-struct PhotoMeta {
-    rel: String,
-    w: u32,
-    h: u32,
-    codec: &'static str,
-    /// If this photo is an animated container (GIF/APNG/WebP, or an AVIF/HEIC
-    /// sequence on macOS), which kind — so the viewer can offer on-demand playback
-    /// (the ▶ P hint, task #37). `None` for a still. Sniffed during decode.
-    animated: Option<pb_decode::AnimationKind>,
 }
 
 /// Which overlay is showing: nothing, the one-line basic panel (`i`), the
@@ -579,8 +566,6 @@ struct App {
     /// `displayed_item` the panel is stale and gets rebuilt (so it tracks the
     /// photo with no blank flash on single-step navigation).
     overlay_item: Option<usize>,
-    /// The current photo's info, for the panel.
-    current: Option<PhotoMeta>,
     /// Display scale factor, for sizing the panel.
     scale_factor: f32,
     /// Per-stage timing (decode/upload/render); disabled unless `--metrics` is passed.
@@ -606,12 +591,6 @@ struct App {
     last_nav: Nav,
     /// The current prefetch want-list (priority order), used as eviction `keep`.
     targets: Vec<usize>,
-    /// Per-item info panel data, cached when decoded (RAM-only; privacy task #2).
-    meta_cache: HashMap<usize, PhotoMeta>,
-    /// Lazily-read EXIF for the detailed panel, memoized per item (file size + the raw
-    /// tag/value pairs) so re-showing the panel — including per-frame while an animation
-    /// plays — never re-reads/re-parses the file. RAM-only, dropped on navigate (#2).
-    exif_cache: HashMap<usize, (u64, Vec<(String, String)>)>,
     /// Live Photo pairing, memoized per item: `Some(path)` = the companion motion
     /// `.mov`, `None` = not a Live Photo. Filled lazily (one `stat`) only when settled
     /// on a photo — never on the fly-through path. RAM-only, index-keyed, cleared on a
@@ -974,7 +953,6 @@ impl App {
             info: InfoMode::Off,
             overlay_shown: false,
             overlay_item: None,
-            current: None,
             scale_factor: 1.0,
             metrics,
             pool,
@@ -985,7 +963,6 @@ impl App {
             target_item: None,
             last_nav: Nav::Forward,
             targets: Vec::new(),
-            meta_cache: HashMap::new(),
             ahead: 8,
             behind: 2,
             failed: HashSet::new(),
@@ -1051,7 +1028,6 @@ impl App {
             live_audio: None,
             effects: Vec::new(),
             pending_dialog: None,
-            exif_cache: HashMap::new(),
             live_motion_cache: HashMap::new(),
         }
     }
@@ -1082,6 +1058,7 @@ impl App {
             // Full-res (Original): estimate from the current photo's true size,
             // never below a fit slot (and clamp_to_max bounds the real extreme).
             None => self
+                .core
                 .current
                 .as_ref()
                 .map(|m| (m.w as u64 * m.h as u64 * 4).max(fit_bytes))
@@ -1389,8 +1366,8 @@ impl App {
                 // the file (else the ring's old-orientation pixels + a reset view
                 // would show it un-rotated, or a later re-decode would double-rotate).
                 self.core.rotations.remove(&item);
-                self.meta_cache.remove(&item);
-                self.exif_cache.remove(&item); // the file's EXIF (Orientation) just changed
+                self.core.meta_cache.remove(&item);
+                self.core.exif_cache.remove(&item); // the file's EXIF (Orientation) just changed
                 self.failed.remove(&item);
                 self.preview_resident.remove(&item);
                 self.upgrade_done.remove(&item);
@@ -1428,8 +1405,8 @@ impl App {
                 match save_rotation::set_orientation(&path, prev) {
                     Ok(()) => {
                         self.core.rotations.remove(&item);
-                        self.meta_cache.remove(&item);
-                        self.exif_cache.remove(&item); // EXIF Orientation reverted on disk
+                        self.core.meta_cache.remove(&item);
+                        self.core.exif_cache.remove(&item); // EXIF Orientation reverted on disk
                         self.failed.remove(&item);
                         self.preview_resident.remove(&item);
                         self.upgrade_done.remove(&item);
@@ -1549,8 +1526,8 @@ impl App {
         self.source = Arc::new(FsSource::new(Vec::new()));
         self.playlist = Playlist::new(0, 0);
         self.core.rotations.clear();
-        self.meta_cache.clear();
-        self.exif_cache.clear();
+        self.core.meta_cache.clear();
+        self.core.exif_cache.clear();
         self.live_motion_cache.clear();
         self.failed.clear();
         self.preview_resident.clear();
@@ -1560,7 +1537,7 @@ impl App {
         self.invalidate_geometry();
         self.displayed_item = None;
         self.target_item = None;
-        self.current = None;
+        self.core.current = None;
         if let Some(r) = self.renderer.as_mut() {
             r.clear_image();
             r.set_overlay(None, 0);
@@ -1600,7 +1577,7 @@ impl App {
             self.anim_hint_shown_for = None;
         }
         self.displayed_item = Some(item);
-        self.current = self.meta_cache.get(&item).cloned();
+        self.core.current = self.core.meta_cache.get(&item).cloned();
         // The panel (if shown) is now stale for the old photo; `about_to_wait`
         // rebuilds it for `item` next tick (or hides it while flying), so it
         // tracks the photo with no blank flash. The bitmap stays up meanwhile.
@@ -1616,7 +1593,7 @@ impl App {
     /// frame stays up rather than flashing black.
     fn present_failed(&mut self, item: usize) {
         self.displayed_item = Some(item);
-        self.current = None;
+        self.core.current = None;
         let name = file_name_of(self.source.name(item));
         let total = self.source.len();
         self.effects.push(contract::CoreEffect::SetTitle(format!(
@@ -1750,9 +1727,9 @@ impl App {
                 }
                 continue;
             }
-            if !self.meta_cache.contains_key(&item) {
+            if !self.core.meta_cache.contains_key(&item) {
                 let m = meta_for(self.source.as_ref(), item, &self.root, img);
-                self.meta_cache.insert(item, m);
+                self.core.meta_cache.insert(item, m);
             }
             let item_bytes = img.pixels.len() as u64;
             if upgrade {
@@ -1853,8 +1830,8 @@ impl App {
         match decoded {
             Ok(img) => {
                 let meta = meta_for(self.source.as_ref(), idx, &self.root, &img);
-                self.current = Some(meta.clone());
-                self.meta_cache.insert(idx, meta);
+                self.core.current = Some(meta.clone());
+                self.core.meta_cache.insert(idx, meta);
                 let view = self.view_for(idx);
                 let title = title_for(self.source.name(idx), idx, self.source.len());
                 if let Some(r) = self.renderer.as_mut() {
@@ -3036,8 +3013,8 @@ impl App {
         self.playlist = Playlist::new(self.source.len(), 0).with_cursor(start);
         // Indices are reassigned — drop everything keyed by item index.
         self.core.rotations.clear();
-        self.meta_cache.clear();
-        self.exif_cache.clear();
+        self.core.meta_cache.clear();
+        self.core.exif_cache.clear();
         self.live_motion_cache.clear();
         self.failed.clear();
         self.preview_resident.clear();
@@ -3141,8 +3118,8 @@ impl App {
             Some(idx) => match decode_item(self.source.as_ref(), idx, self.decode_fit(), true) {
                 Ok(img) => {
                     let meta = meta_for(self.source.as_ref(), idx, &self.root, &img);
-                    self.current = Some(meta.clone());
-                    self.meta_cache.insert(idx, meta);
+                    self.core.current = Some(meta.clone());
+                    self.core.meta_cache.insert(idx, meta);
                     let title = title_for(self.source.name(idx), idx, self.source.len());
                     let (w, h, hdr, peak) = (img.width, img.height, is_hdr(&img), img.peak);
                     let color = render_color(&img.color);
@@ -3150,7 +3127,7 @@ impl App {
                 }
                 Err(e) => {
                     eprintln!("decode failed: {}: {e}", self.source.name(idx));
-                    self.current = None;
+                    self.core.current = None;
                     let p = test_pattern(1600, 1000);
                     (
                         p,
@@ -3166,7 +3143,7 @@ impl App {
             None => {
                 // No images: hand the renderer a 1×1 dummy just to construct, then the
                 // caller blanks it (`clear_image`) and shows the "Press O to open" hint.
-                self.current = None;
+                self.core.current = None;
                 (
                     vec![0, 0, 0, 255],
                     1,
@@ -3651,7 +3628,7 @@ impl App {
                 bold: false,
             });
         }
-        if let Some(meta) = &self.current {
+        if let Some(meta) = &self.core.current {
             rows.push(Row::Pair {
                 label: "Dimensions".to_string(),
                 value: format!("{} × {}", meta.w, meta.h),
@@ -3666,7 +3643,7 @@ impl App {
         rows.extend(self.animation_rows(item));
         // File size + EXIF from the memoized read (populated by `ensure_exif_cached`
         // before this is called; a cold miss simply omits them until the next rebuild).
-        if let Some((size, fields)) = self.exif_cache.get(&item) {
+        if let Some((size, fields)) = self.core.exif_cache.get(&item) {
             rows.push(Row::Pair {
                 label: "File Size".to_string(),
                 value: format!("{} bytes", hud::format_thousands(*size)),
@@ -3703,12 +3680,14 @@ impl App {
     /// the detailed panel — and its per-frame rebuilds while an animation plays — read
     /// the encoded bytes at most once. RAM-only, read-only (privacy #2).
     fn ensure_exif_cached(&mut self, item: usize) {
-        if self.exif_cache.contains_key(&item) {
+        if self.core.exif_cache.contains_key(&item) {
             return;
         }
         if let Ok(bytes) = self.source.bytes(item) {
             let fields = read_exif_fields(&bytes);
-            self.exif_cache.insert(item, (bytes.len() as u64, fields));
+            self.core
+                .exif_cache
+                .insert(item, (bytes.len() as u64, fields));
         }
     }
 
@@ -3720,7 +3699,12 @@ impl App {
         // A Live Photo (its pairing is resolved into `live_motion_cache` when the panel
         // opens) or an animated container. Neither → nothing to add.
         let is_live = self.is_live_photo(item);
-        let is_animated = self.current.as_ref().and_then(|m| m.animated).is_some();
+        let is_animated = self
+            .core
+            .current
+            .as_ref()
+            .and_then(|m| m.animated)
+            .is_some();
         // Frame/timing detail needs a decoded sequence — the live playback, or the one
         // eagerly prepped for this item.
         let detail: Option<(usize, usize, Duration, u32)> = if let Some(pb) = &self.playback {
@@ -3838,7 +3822,8 @@ impl App {
         let panel = match self.info {
             InfoMode::Off => return,
             InfoMode::Basic => {
-                let (Some(hud), Some(meta)) = (self.hud.as_ref(), self.current.as_ref()) else {
+                let (Some(hud), Some(meta)) = (self.hud.as_ref(), self.core.current.as_ref())
+                else {
                     return;
                 };
                 let mut text = format!("{} · {}×{} · {}", meta.rel, meta.w, meta.h, meta.codec);
@@ -4595,8 +4580,8 @@ impl App {
         self.cancel_dir_scan();
         self.ring = ResidentRing::new(0);
         self.pending_uploads.clear();
-        self.meta_cache.clear();
-        self.exif_cache.clear();
+        self.core.meta_cache.clear();
+        self.core.exif_cache.clear();
         self.live_motion_cache.clear();
         self.core.rotations.clear();
         self.failed.clear();
@@ -4604,7 +4589,7 @@ impl App {
         self.upgrade_done.clear();
         self.last_upgrade_set.clear();
         self.undo_stack.clear();
-        self.current = None;
+        self.core.current = None;
         self.toast = None;
         self.wait_started = None;
         self.pie_finish = None;
@@ -4969,7 +4954,8 @@ impl App {
 
     /// Whether item `item` is an animated container (from the cached header sniff).
     fn current_is_animated(&self, item: usize) -> bool {
-        self.meta_cache
+        self.core
+            .meta_cache
             .get(&item)
             .and_then(|m| m.animated)
             .is_some()
@@ -5478,8 +5464,8 @@ impl ApplicationHandler for App {
                 self.metrics.record("decode", t0.elapsed());
                 if let Ok(img) = decoded {
                     let meta = meta_for(self.source.as_ref(), idx, &self.root, &img);
-                    self.current = Some(meta.clone());
-                    self.meta_cache.insert(idx, meta);
+                    self.core.current = Some(meta.clone());
+                    self.core.meta_cache.insert(idx, meta);
                     renderer.set_image(
                         &img.pixels,
                         img.width,
@@ -5998,7 +5984,7 @@ impl ApplicationHandler for App {
                 }
             } else if !transforming
                 // Help is static (no photo needed); the info panels need a photo.
-                && (self.info == InfoMode::Help || self.current.is_some())
+                && (self.info == InfoMode::Help || self.core.current.is_some())
                 && (!self.overlay_shown || self.overlay_item != self.displayed_item)
             {
                 self.show_overlay();
