@@ -17,7 +17,7 @@ verified (2026-07-01) — "never seen a regression"; Fullscreen (`2f6003d`) "loo
 the **archive/scan flow** inversion is well underway: the dialog-outcome *reactions* are core
 (`CoreEvent::DialogResolved`, `3006765`, ✅ smoke-verified), and the **entire resolve/scan COMPUTE**
 (dir-scan + archive resolvers + the `archive` module) now lives in `pb_app_core::scan` (Step 2:
-`3cdb016`/`b21f59a`/`ef40042`, ⚠ unsmoked). Only the worker-flow inversion (Step 3 — thread/mpsc +
+`3cdb016`/`b21f59a`/`ef40042`, ✅ smoke-verified). Only the worker-flow inversion (Step 3 — thread/mpsc +
 progress dialogs → effects/events) remains, deferred as its own behavior-critical increment. Everything below the NS0 section is the previously-shipped work (macOS port,
 archive, settings, HEIC, color), unchanged._
 
@@ -188,7 +188,7 @@ Mapped end-to-end (Explore agent) and inverted in the recommended low-risk order
   AppCore. Shell `route_dialog_outcome` maps `DialogOutcome`→`DialogResult`; only **PasswordSubmitted**
   (spawns the archive worker + pokes the live dialog) stays shell. 4 new core unit tests. Behavior-
   preserving (effects drain right after `dialog_event`, same event turn).
-- **✅ Step 2 — the entire resolve/scan COMPUTE relocated to `pb_app_core::scan`** (⚠ unsmoked):
+- **✅ Step 2 — the entire resolve/scan COMPUTE relocated to `pb_app_core::scan`** (✅ owner-smoke-verified — large archive + dialogs + progress bar unchanged):
   - **2a** (`3cdb016`): the `Resolved` currency (fields `pub`) + pure builders + `ScanUpdate`.
   - **2b** (`b21f59a`): the walkdir dir-scan resolvers (`is_supported_image`/`rel_display`/
     `collect_images`/`image_walker`/`resolve_source`/`resolve_scan`/`stream_scan`) + `ScanProgress`
