@@ -134,6 +134,7 @@ fn build_tiles(hud: &Hud) -> Vec<Tile> {
         sp(15.0),
         s(320.0) as u32,
         bg,
+        false,
     ) {
         tiles.push(tile(hud, "Scan status card", (r, w, h)));
     }
@@ -188,9 +189,18 @@ fn build_tiles(hud: &Hud) -> Vec<Tile> {
         ),
         ("OK", None, "Button \u{2014} text only"),
     ] {
-        if let Some(b) = hud.render_button(label, icon, btn_px, bg) {
+        if let Some(b) = hud.render_button(label, icon, btn_px, bg, false) {
             tiles.push(tile(hud, cap, b));
         }
+    }
+
+    // Hover state — the same button at rest and lit (fill + border lifted), side by side, to
+    // tune the BUTTON_*_HOVER alphas against the resting look.
+    if let Some(b) = hud.render_button("Cancel Scan", Some(assets::STOP), btn_px, bg, false) {
+        tiles.push(tile(hud, "Button \u{2014} rest", b));
+    }
+    if let Some(b) = hud.render_button("Cancel Scan", Some(assets::STOP), btn_px, bg, true) {
+        tiles.push(tile(hud, "Button \u{2014} hover (lit)", b));
     }
 
     // Loading pie at a few fills.
@@ -244,6 +254,7 @@ fn build_composite(hud: &Hud) -> Sheet {
         sp(15.0),
         s(320.0) as u32,
         bg,
+        false,
     ) {
         c.over(&(r, cw, ch), w - inset - cw as i32, inset);
     }

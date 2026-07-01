@@ -99,6 +99,9 @@ pub(crate) fn finalize_oriented(
         // overrides `color` on the returned image (see e.g. `zune`, `wic`).
         color: ColorTransform::srgb(),
         peak: 1.0,
+        // The caller's decode entry sets this from a header sniff; decoders here only
+        // ever produce the still first frame.
+        animated: None,
     })
 }
 
@@ -150,6 +153,7 @@ pub(crate) fn finalize_hdr_scrgb(
         is_preview: false,
         color: ColorTransform::srgb(), // already scene-linear; shader passes through
         peak,
+        animated: None,
     })
 }
 

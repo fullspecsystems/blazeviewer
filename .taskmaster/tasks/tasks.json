@@ -1341,25 +1341,25 @@
             "id": 2,
             "title": "Playback state struct (pb-app, pure + tested)",
             "description": "Self-contained Animation/Playback sub-struct in pb-app (mirrors slideshow.rs: pure, no winit, unit-tested) holding the decoded frames + cursor: playing/paused, current frame index, loop-iteration counter, advance(elapsed)->frame honoring loop_count (0=infinite; stop on last frame when finite loops exhausted), next_frame()/prev_frame() (wrap), play_pause(). Kept shallow in the App god-struct so it lifts cleanly into AppCore (NS0).",
-            "status": "pending"
+            "status": "review"
           },
           {
             "id": 3,
             "title": "Actions: PlayPause (P), FrameNext (.), FramePrev (,)",
             "description": "Add to action.rs (ALL/id/label/kind), keymap defaults (P, ., ,), menu (Image submenu + ids + MenuAction), dialog.rs KB_GROUPS, and main.rs dispatch_action arms. Frame-step pauses playback then steps one frame.",
-            "status": "pending"
+            "status": "review"
           },
           {
             "id": 4,
             "title": "Off-thread decode + play/pause + about_to_wait frame pump",
             "description": "P on an animated image kicks an off-thread decode (never block the event loop; show pie while decoding), then plays via the existing set_image path — NOT the ring. about_to_wait advances to the due frame each tick and schedules a WaitUntil at the next frame deadline (reuse the slideshow continuous-repaint pattern); idle stays event-driven. P again pauses.",
-            "status": "pending"
+            "status": "review"
           },
           {
             "id": 5,
             "title": "▶ P affordance + stop/reset on navigate",
             "description": "Show a small ▶ P hint (overlay/HUD) while an animated still is displayed (hidden while flying). Navigating to another image / any source change stops playback and resets. Detection cached per item (e.g. on PhotoMeta).",
-            "status": "pending"
+            "status": "review"
           },
           {
             "id": 6,

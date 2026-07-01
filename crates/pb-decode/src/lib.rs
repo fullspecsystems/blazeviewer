@@ -99,6 +99,12 @@ pub struct DecodedImage {
     /// Peak scene-linear value, for HDR (`Rgba16F`) images — the tone-map white
     /// point used when presenting to an SDR display. 1.0 for SDR sources.
     pub peak: f32,
+    /// If the source container is animated (GIF/APNG/animated-WebP, or an AVIF/HEIC
+    /// sequence on macOS), which kind — set by the caller from a cheap header sniff
+    /// ([`detect_animation`]). `None` for a still. The decoded pixels are always just
+    /// the first frame (the canonical still everywhere); this only flags that an
+    /// on-demand multi-frame [`decode_animation`] playback is available (task #37).
+    pub animated: Option<AnimationKind>,
 }
 
 impl DecodedImage {
@@ -203,6 +209,7 @@ impl ImageDecoder for SolidColorDecoder {
             is_preview: false,
             color: ColorTransform::srgb(),
             peak: 1.0,
+            animated: None,
         })
     }
 

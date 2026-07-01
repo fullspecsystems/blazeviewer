@@ -349,6 +349,7 @@ mod tests {
             is_preview: false,
             color: pb_decode::ColorTransform::srgb(),
             peak: 1.0,
+            animated: None,
         }
     }
 

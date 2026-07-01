@@ -7,6 +7,21 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Added
+- **Play animated images on demand.** Animated **GIF, APNG, and animated WebP** (plus
+  animated AVIF/HEIC on macOS) can now be played back — press **P** to play/pause. Landing on
+  an animated photo flashes a brief **▶ Press P to play** hint (never while you're flicking
+  through a folder). Step through frames one at a time with **.** (next) and **,** (previous) —
+  stepping pauses playback, and holding either key scrubs. Browsing stays exactly as fast as
+  before: flicking through a folder still only decodes each photo's first frame, and the whole
+  animation is decoded only when you actually ask to play it. Once you pause on an animated
+  photo it's quietly prepared in the background, so pressing **P** plays **instantly** even for
+  slower formats (a large WebP or AVIF used to take a second or two to start). All three
+  shortcuts are remappable (Settings ▸ Shortcuts) and available under the **Image** menu.
+- The detailed info panel (**Shift+I**) now shows animation properties for an animated photo —
+  the current frame / total frames (live while it plays or steps), the frame rate, the
+  duration, and the loop count.
+
 ### Changed
 - **Open a folder and start browsing immediately — even huge, deeply nested ones.** Folders
   now **stream in**: the first photo appears almost at once and the rest of the library loads

@@ -59,6 +59,9 @@ pub mod ids {
     pub const RANDOM_PREV: &str = "random_prev";
     pub const ROTATE_RIGHT: &str = "rotate_right";
     pub const ROTATE_LEFT: &str = "rotate_left";
+    pub const PLAY_PAUSE: &str = "play_pause";
+    pub const FRAME_NEXT: &str = "frame_next";
+    pub const FRAME_PREV: &str = "frame_prev";
 
     pub const HELP: &str = "help";
     pub const ABOUT: &str = "about";
@@ -98,6 +101,9 @@ pub enum MenuAction {
     RandomPrev,
     RotateRight,
     RotateLeft,
+    PlayPause,
+    FrameNext,
+    FramePrev,
     Help,
     About,
 }
@@ -137,6 +143,9 @@ impl MenuAction {
             MenuAction::RandomPrev => Action::RandomPrev,
             MenuAction::RotateRight => Action::RotateCw,
             MenuAction::RotateLeft => Action::RotateCcw,
+            MenuAction::PlayPause => Action::PlayPause,
+            MenuAction::FrameNext => Action::FrameNext,
+            MenuAction::FramePrev => Action::FramePrev,
             MenuAction::Help => Action::Help,
             MenuAction::About => Action::About,
         }
@@ -177,6 +186,9 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         RANDOM_PREV => MenuAction::RandomPrev,
         ROTATE_RIGHT => MenuAction::RotateRight,
         ROTATE_LEFT => MenuAction::RotateLeft,
+        PLAY_PAUSE => MenuAction::PlayPause,
+        FRAME_NEXT => MenuAction::FrameNext,
+        FRAME_PREV => MenuAction::FramePrev,
         HELP => MenuAction::Help,
         ABOUT => MenuAction::About,
         _ => return None,
@@ -333,6 +345,10 @@ pub fn build_menu() -> BuiltMenu {
         &sep(),
         &item(ids::ROTATE_RIGHT, "Rotate Right\tR"),
         &item(ids::ROTATE_LEFT, "Rotate Left\tShift+R"),
+        &sep(),
+        &item(ids::PLAY_PAUSE, "Play/Pause Animation\tP"),
+        &item(ids::FRAME_NEXT, "Next Frame\t."),
+        &item(ids::FRAME_PREV, "Previous Frame\t,"),
     ]);
 
     let help = Submenu::new("&Help", true);
@@ -513,6 +529,10 @@ pub fn build_menu() -> BuiltMenu {
         &sep(),
         &item(ids::ROTATE_RIGHT, "Rotate Right"),
         &item(ids::ROTATE_LEFT, "Rotate Left"),
+        &sep(),
+        &item(ids::PLAY_PAUSE, "Play/Pause Animation"),
+        &item(ids::FRAME_NEXT, "Next Frame"),
+        &item(ids::FRAME_PREV, "Previous Frame"),
     ]);
 
     // Standard macOS Window menu. The predefined items carry their native labels,
@@ -605,6 +625,9 @@ mod tests {
         assert_eq!(action_for(ids::RANDOM_PREV), Some(MenuAction::RandomPrev));
         assert_eq!(action_for(ids::ROTATE_RIGHT), Some(MenuAction::RotateRight));
         assert_eq!(action_for(ids::ROTATE_LEFT), Some(MenuAction::RotateLeft));
+        assert_eq!(action_for(ids::PLAY_PAUSE), Some(MenuAction::PlayPause));
+        assert_eq!(action_for(ids::FRAME_NEXT), Some(MenuAction::FrameNext));
+        assert_eq!(action_for(ids::FRAME_PREV), Some(MenuAction::FramePrev));
         assert_eq!(action_for(ids::HELP), Some(MenuAction::Help));
         assert_eq!(action_for(ids::ABOUT), Some(MenuAction::About));
     }

@@ -31,6 +31,8 @@ pub mod assets {
     pub const UNDO: &str = include_str!("../icons/arrow-u-turn-up-left.svg");
     /// Stop square — the "Cancel Scan" button on the scan status card.
     pub const STOP: &str = include_str!("../icons/stop.svg");
+    /// Play triangle — the "Press P to play" hint shown on an animated still (#37).
+    pub const PLAY: &str = include_str!("../icons/play.svg");
     // Status icons for the dialogs (lock/warning/trash) now live in the `pb-ui` icon
     // system (white-rasterized + tinted), not here — this set is only the HUD toasts.
 }

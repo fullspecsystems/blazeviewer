@@ -250,6 +250,9 @@ pub enum KeyResolution {
     NavStart(Action),
     /// Begin tracking a continuous held action (pan/zoom, applied each frame).
     HeldStart(Action),
+    /// Begin an animation frame-step: step one frame now, then repeat while held to
+    /// scrub through the frames (`,` / `.`).
+    FrameStepStart(Action),
 }
 
 /// Resolve a physical key-down against the loaded keymap — the pure heart of the input
@@ -276,6 +279,7 @@ pub fn resolve_key_down(
             ActionKind::OneShot => KeyResolution::OneShot(action),
             ActionKind::Nav => KeyResolution::NavStart(action),
             ActionKind::Held => KeyResolution::HeldStart(action),
+            ActionKind::FrameStep => KeyResolution::FrameStepStart(action),
         },
     }
 }
@@ -367,6 +371,11 @@ mod tests {
         assert_eq!(
             resolve_key_down(&km, PbKey::KeyC, ctrl, false),
             KeyResolution::OneShot(Action::Copy),
+        );
+        // FrameStep: `.` → FrameNext, scrubbing one animation frame per press/repeat.
+        assert_eq!(
+            resolve_key_down(&km, PbKey::Period, m, false),
+            KeyResolution::FrameStepStart(Action::FrameNext),
         );
     }
 

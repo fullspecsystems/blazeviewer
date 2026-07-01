@@ -1,0 +1,278 @@
+//! Animation playback state (task #37) — the pure, testable core, mirroring
+//! `slideshow.rs`. It owns a decoded sequence plus a cursor; the event loop drives it
+//! by elapsed time (`is_due` / `advance`) and reads back the current frame to present.
+//! No winit, no renderer, no I/O — kept deliberately shallow so it lifts cleanly into
+//! the future `AppCore` (macos-native-ui-plan NS0).
+//!
+//! Privacy (task #2): the frames are a RAM-only cache, dropped when playback stops or
+//! the user navigates away. Nothing here is serialized.
+//!
+//! Loop semantics: `loop_count == 0` means loop forever; a positive `N` plays the
+//! whole sequence `N` times and then **parks on the last frame** (`finished`), the
+//! GIF/APNG/WebP convention. Play/pause and the `,`/`.` frame-step never run off the
+//! photo hot path — this only spins up when the user presses `P` (or steps a frame).
+
+use std::time::Duration;
+
+use pb_decode::{AnimFrame, Animation, ColorTransform};
+
+/// Playback cursor over a decoded [`Animation`].
+pub struct Playback {
+    anim: Animation,
+    /// The frame currently shown.
+    index: usize,
+    /// Advancing on each `is_due` tick (false = paused).
+    playing: bool,
+    /// Completed full passes, for honoring a finite loop count.
+    loops_done: u32,
+    /// A finite loop count was reached: parked on the last frame, no more advancing
+    /// until the user restarts (play/pause) or steps a frame.
+    finished: bool,
+}
+
+impl Playback {
+    /// Wrap a decoded animation. `playing` starts it immediately (the `P`-to-play
+    /// path) or paused (the frame-step path), beginning on frame 0.
+    pub fn new(anim: Animation, playing: bool) -> Self {
+        Self {
+            anim,
+            index: 0,
+            playing,
+            loops_done: 0,
+            finished: false,
+        }
+    }
+
+    pub fn frame_count(&self) -> usize {
+        self.anim.frames.len()
+    }
+
+    /// The current frame index (0-based) — the EXIF panel's live "Frame X / N".
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    /// The frame to display right now.
+    pub fn current_frame(&self) -> &AnimFrame {
+        &self.anim.frames[self.index]
+    }
+
+    /// The source→sRGB color transform every frame shares (P3 on the Image I/O path).
+    pub fn color(&self) -> ColorTransform {
+        self.anim.color
+    }
+
+    /// How long the current frame is held before advancing.
+    pub fn current_delay(&self) -> Duration {
+        self.anim.frames[self.index].delay
+    }
+
+    /// The loop count (0 = loop forever) — surfaced in the EXIF panel.
+    pub fn loop_count(&self) -> u32 {
+        self.anim.loop_count
+    }
+
+    /// Total play time of one full pass (sum of every frame's delay) — the EXIF
+    /// panel's duration + average frame-rate figures.
+    pub fn total_duration(&self) -> Duration {
+        self.anim.frames.iter().map(|f| f.delay).sum()
+    }
+
+    /// Whether playback is actively advancing (playing and not parked at the end of a
+    /// finite loop).
+    pub fn is_playing(&self) -> bool {
+        self.playing && !self.finished
+    }
+
+    /// Whether a finite loop count has been exhausted (parked on the last frame).
+    /// Exercised by the unit tests (it pins the finite-loop park/replay behavior); not
+    /// yet read by the event loop, which only needs [`is_playing`](Self::is_playing).
+    #[allow(dead_code)]
+    pub fn is_finished(&self) -> bool {
+        self.finished
+    }
+
+    /// Toggle play/pause; returns the new playing state. Pressing `P` on a finite loop
+    /// that has finished (parked on the last frame) replays it from the top.
+    pub fn toggle_play(&mut self) -> bool {
+        if self.finished {
+            self.finished = false;
+            self.loops_done = 0;
+            self.index = 0; // replay from the first frame
+            self.playing = true;
+        } else {
+            self.playing = !self.playing;
+        }
+        self.playing
+    }
+
+    /// Whether the current frame's display time has elapsed and we should advance.
+    /// `since_shown` is `now − frame_shown_at`, supplied by the caller (kept
+    /// `Duration`-based so this is trivially testable, no `Instant` needed).
+    pub fn is_due(&self, since_shown: Duration) -> bool {
+        self.is_playing() && self.frame_count() > 1 && since_shown >= self.current_delay()
+    }
+
+    /// Advance to the next frame for playback, honoring the loop count. A pass
+    /// completes the moment its **last frame is shown** (we land on `n-1`): that's when
+    /// `loops_done` ticks, and when a finite count is reached we set `finished` and park
+    /// right there on the last frame (rather than wrapping off it first). Otherwise we
+    /// wrap to frame 0 to begin the next pass. Returns the new frame index.
+    pub fn advance(&mut self) -> usize {
+        if self.finished {
+            return self.index; // parked on the last frame — no-op until restart
+        }
+        let n = self.frame_count();
+        if n <= 1 {
+            // A degenerate single-frame "animation": nothing to advance; a finite
+            // loop is immediately done.
+            self.finished = self.anim.loop_count != 0;
+            return self.index;
+        }
+        if self.index + 1 < n {
+            self.index += 1;
+            // Landing on the last frame completes this pass (it has now been shown).
+            if self.index + 1 == n {
+                self.loops_done += 1;
+                if self.anim.loop_count != 0 && self.loops_done >= self.anim.loop_count {
+                    self.finished = true; // park on the last frame
+                }
+            }
+        } else {
+            // We were parked-but-not-finished on the last frame (an infinite loop, or a
+            // finite one with passes left): wrap to start the next pass.
+            self.index = 0;
+        }
+        self.index
+    }
+
+    /// Manual single-frame step (the `,`/`.` scrub): pause, then move by `delta`
+    /// frames with wrap-around (and clear any finished/loop state so stepping past the
+    /// end keeps working). Returns the new frame index.
+    pub fn step(&mut self, delta: i32) -> usize {
+        self.playing = false;
+        self.finished = false;
+        self.loops_done = 0;
+        let n = self.frame_count() as i64;
+        if n > 0 {
+            self.index = (self.index as i64 + delta as i64).rem_euclid(n) as usize;
+        }
+        self.index
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pb_decode::AnimationKind;
+
+    /// An `n`-frame animation, each frame `delay_ms`, looping `loop_count` times.
+    fn anim(n: usize, delay_ms: u64, loop_count: u32) -> Animation {
+        let frames = (0..n)
+            .map(|i| AnimFrame {
+                rgba: vec![i as u8; 4],
+                width: 1,
+                height: 1,
+                delay: Duration::from_millis(delay_ms),
+            })
+            .collect();
+        Animation {
+            kind: AnimationKind::Gif,
+            width: 1,
+            height: 1,
+            frames,
+            loop_count,
+            codec: "GIF",
+            color: ColorTransform::srgb(),
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn new_starts_on_frame_zero() {
+        let pb = Playback::new(anim(3, 100, 0), true);
+        assert_eq!(pb.index(), 0);
+        assert!(pb.is_playing());
+        assert_eq!(pb.frame_count(), 3);
+    }
+
+    #[test]
+    fn advance_wraps_an_infinite_loop_forever() {
+        let mut pb = Playback::new(anim(3, 100, 0), true);
+        assert_eq!(pb.advance(), 1);
+        assert_eq!(pb.advance(), 2);
+        assert_eq!(pb.advance(), 0); // wrap
+        assert_eq!(pb.advance(), 1);
+        assert!(!pb.is_finished());
+        assert!(pb.is_playing());
+    }
+
+    #[test]
+    fn advance_parks_on_last_frame_after_a_finite_count() {
+        // 2 frames, play twice: 0→1→0→1, then finished, parked on the last frame.
+        let mut pb = Playback::new(anim(2, 100, 2), true);
+        assert_eq!(pb.advance(), 1); // end of pass 1
+        assert_eq!(pb.advance(), 0); // start of pass 2 (loops_done = 1)
+        assert_eq!(pb.advance(), 1); // end of pass 2 (loops_done = 2 → finished)
+        assert!(pb.is_finished());
+        assert!(!pb.is_playing());
+        // Further advances are no-ops while parked on the last frame.
+        assert_eq!(pb.advance(), 1);
+        assert_eq!(pb.index(), 1);
+    }
+
+    #[test]
+    fn is_due_respects_playing_delay_and_finish() {
+        let mut pb = Playback::new(anim(3, 100, 0), true);
+        assert!(!pb.is_due(Duration::from_millis(99)));
+        assert!(pb.is_due(Duration::from_millis(100)));
+        assert!(pb.is_due(Duration::from_millis(250)));
+        // Paused → never due.
+        pb.toggle_play();
+        assert!(!pb.is_due(Duration::from_secs(10)));
+        // A single-frame animation is never due (nothing to advance to).
+        let solo = Playback::new(anim(1, 100, 0), true);
+        assert!(!solo.is_due(Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn step_pauses_and_wraps_both_directions() {
+        let mut pb = Playback::new(anim(4, 100, 0), true);
+        assert_eq!(pb.step(1), 1);
+        assert!(!pb.is_playing(), "stepping pauses");
+        assert_eq!(pb.step(-1), 0);
+        assert_eq!(pb.step(-1), 3, "wraps below zero to the last frame");
+        assert_eq!(pb.step(2), 1, "wraps above the end");
+    }
+
+    #[test]
+    fn toggle_play_restarts_a_finished_finite_loop() {
+        let mut pb = Playback::new(anim(2, 100, 1), true);
+        pb.advance(); // 0→1, end of the single pass → finished
+        assert!(pb.is_finished());
+        assert!(pb.toggle_play(), "toggling a finished loop replays it");
+        assert!(pb.is_playing());
+        assert!(!pb.is_finished());
+    }
+
+    #[test]
+    fn total_duration_and_loop_count_report_the_whole_sequence() {
+        let pb = Playback::new(anim(4, 40, 3), true);
+        assert_eq!(pb.total_duration(), Duration::from_millis(160)); // 4 × 40ms
+        assert_eq!(pb.loop_count(), 3);
+        // Total duration is the full pass, independent of the current cursor.
+        let mut pb = pb;
+        pb.advance();
+        assert_eq!(pb.total_duration(), Duration::from_millis(160));
+        assert_eq!(Playback::new(anim(2, 100, 0), true).loop_count(), 0); // infinite
+    }
+
+    #[test]
+    fn current_frame_and_delay_track_the_cursor() {
+        let mut pb = Playback::new(anim(3, 40, 0), true);
+        assert_eq!(pb.current_frame().rgba, vec![0u8; 4]);
+        assert_eq!(pb.current_delay(), Duration::from_millis(40));
+        pb.advance();
+        assert_eq!(pb.current_frame().rgba, vec![1u8; 4]);
+    }
+}
