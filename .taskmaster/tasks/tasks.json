@@ -1407,7 +1407,7 @@
             "id": 5,
             "title": "Audio (deferred)",
             "description": "DEFERRED per owner. Decode the .mov audio track (AVAssetReader) and play it in sync with the motion via a cross-platform audio-output seam. Non-trivial (sync, output device, seam) — the motion plays silently until this lands.",
-            "status": "deferred"
+            "status": "review"
           }
         ]
       },
