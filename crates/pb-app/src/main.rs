@@ -84,7 +84,7 @@ mod settings;
 // the existing `crate::action` / `crate::keymap` / `crate::pb_key` / `crate::slideshow`
 // paths in the winit shell modules (and the `use action::…` lines below) keep
 // resolving unchanged.
-use pb_app_core::{action, contract, keymap, pb_key, slideshow, timing};
+use pb_app_core::{action, contract, keymap, pb_key, slideshow, timing, AppCore};
 
 use action::Action;
 use animation::Playback;
@@ -560,21 +560,13 @@ struct App {
     /// shell and rendering to the core. `None` until `resumed`; created on the window's
     /// surface (a concrete [`WgpuRenderer`], then boxed), so it shares its lifecycle.
     renderer: Option<Box<dyn Renderer>>,
-    /// Physical keys currently held → the [`Action`] each resolved to at press time
-    /// (OS auto-repeat ignored). Drives hold-to-fly nav and continuous pan/zoom; the
-    /// action is captured on key-down so it stays stable while held, and is keyed by
-    /// [`PbKey`] so the key-up (which carries no modifiers) can remove it.
-    held: HashMap<PbKey, Action>,
-    /// When a frame was last actually presented. Caps the advance rate from the
-    /// presentation (not the advance attempt), so a late-arriving miss isn't
-    /// replaced in the same tick it finally shows; also delays the idle panel.
-    last_present: Option<Instant>,
-    /// Minimum time between advances while holding (≈ one display refresh).
-    frame_interval: Duration,
-    /// When the current hold's first press happened (for the initial-delay gate).
-    hold_start: Option<Instant>,
-    /// Delay after the first press before auto-repeat begins (tap = one photo).
-    initial_delay: Duration,
+    /// The platform-neutral orchestration state (NS0 step 5, ADR-021), reached as
+    /// `self.core.*`. Grows as each step-5 increment relocates a field group off this
+    /// shell; first in is the held-key set, input modifiers, and the self-paced-advance
+    /// timing (held / last_present / frame_interval / hold_start / initial_delay /
+    /// slideshow / mods / esc_guard_until). Nav/prefetch/decode, the renderer, and the
+    /// `handle(CoreEvent)` dispatch follow.
+    core: AppCore,
     /// Decode-to-fit target = the display size; photos are downscaled to it.
     fit: Option<FitBox>,
     /// Per-photo view transform (scaling mode + rotation + zoom + pan).
@@ -619,9 +611,6 @@ struct App {
     displayed_item: Option<usize>,
     /// The item we're trying to show (== displayed once caught up).
     target_item: Option<usize>,
-    /// Slideshow timer state (task #23): on/off + the per-slide interval. RAM-only,
-    /// dropped on exit (privacy #2).
-    slideshow: slideshow::Slideshow,
     /// The last navigation direction, so the slideshow auto-advances the way the user
     /// last moved (space → forward, backspace → back, enter → random). Updated on
     /// every `advance`, so manual nav during a slideshow steers it.
@@ -658,13 +647,6 @@ struct App {
     /// Per-image rotation overrides (`r` / `Shift+R`); RAM-only, dropped on exit
     /// (privacy task #2). Absent = upright (identity).
     rotations: HashMap<usize, Rotation>,
-    /// The keyboard modifiers currently held (Shift/Ctrl/Alt + the platform "super" key —
-    /// **Cmd (⌘) on macOS**, the Windows key elsewhere). Tracked so a key-down forms the
-    /// right chord; keeping `logo` separate lets Mac's OS-standard ⌘-shortcuts (⌘C/⌘S/…)
-    /// be distinct chords from the bare keys, so holding Cmd never fires a bare-key action.
-    /// The shell-neutral [`contract::Modifiers`] the input seam ([`contract::resolve_key_down`])
-    /// consumes.
-    mods: contract::Modifiers,
     /// Whether the current scan-based playlist is recursive (`Ctrl+R` toggles).
     recursive: bool,
     /// The directory the current playlist was scanned from — enables the `Ctrl+R`
@@ -676,10 +658,6 @@ struct App {
     pending_drops: Vec<PathBuf>,
     /// The transient bottom-center status toast (e.g. recursion on/off), or `None`.
     toast: Option<Toast>,
-    /// Briefly set after the file picker closes: ignore Esc-to-quit until this
-    /// instant, so the Esc that dismissed the modal picker doesn't also exit the
-    /// app (the dialog's own message loop can leak that key to our window).
-    esc_guard_until: Option<Instant>,
     /// When a window resize/toggle has "settled" enough to re-decode at the new
     /// fit. A drag fires many Resized events; we GPU-scale the resident texture
     /// instantly per event and defer the expensive decode-to-fit + ring refill
@@ -1014,11 +992,10 @@ impl App {
             playlist,
             window: None,
             renderer: None,
-            held: HashMap::new(),
-            last_present: None,
-            frame_interval: Duration::from_micros(8_333), // ~120 Hz until we read the real rate
-            hold_start: None,
-            initial_delay: Duration::from_millis(settings.hold_delay_ms as u64),
+            core: AppCore::new(
+                Duration::from_millis(settings.hold_delay_ms as u64),
+                Duration::from_secs_f64(settings.slideshow_interval_secs),
+            ),
             fit: None,
             // Start in the user's default scale mode (8/9/0 still switch it live).
             view: ViewTransform {
@@ -1041,12 +1018,6 @@ impl App {
             epoch: 1,
             displayed_item: None,
             target_item: None,
-            // Seed the per-slide dwell from the saved default (#31); `[`/`]` still
-            // adjust it live for the session without rewriting the setting.
-            slideshow: slideshow::Slideshow {
-                interval: Duration::from_secs_f64(settings.slideshow_interval_secs),
-                ..slideshow::Slideshow::default()
-            },
             last_nav: Nav::Forward,
             targets: Vec::new(),
             meta_cache: HashMap::new(),
@@ -1056,12 +1027,10 @@ impl App {
             deleted: HashSet::new(),
             pending_uploads: Vec::new(),
             rotations: HashMap::new(),
-            mods: contract::Modifiers::NONE,
             recursive,
             scan_root,
             pending_drops: Vec::new(),
             toast: None,
-            esc_guard_until: None,
             resize_settle_at: None,
             geometry_save_at: None,
             #[cfg(target_os = "macos")]
@@ -1677,7 +1646,7 @@ impl App {
         // The panel (if shown) is now stale for the old photo; `about_to_wait`
         // rebuilds it for `item` next tick (or hides it while flying), so it
         // tracks the photo with no blank flash. The bitmap stays up meanwhile.
-        self.last_present = Some(Instant::now());
+        self.core.last_present = Some(Instant::now());
         self.draw();
         self.metrics.record("present", t0.elapsed());
     }
@@ -1955,7 +1924,7 @@ impl App {
                 self.present_failed(idx);
             }
         }
-        self.last_present = Some(Instant::now());
+        self.core.last_present = Some(Instant::now());
         self.draw();
     }
 
@@ -2484,9 +2453,9 @@ impl App {
     /// resets the timer (`last_present = now`) so the first slide shows for a full
     /// interval before advancing; `about_to_wait` drives the auto-advance from there.
     fn toggle_slideshow(&mut self) {
-        let on = self.slideshow.toggle();
+        let on = self.core.slideshow.toggle();
         if on {
-            self.last_present = Some(Instant::now());
+            self.core.last_present = Some(Instant::now());
         }
         self.show_toast(if on { "Slideshow" } else { "Slideshow Stopped" });
     }
@@ -2496,7 +2465,7 @@ impl App {
     /// change applies live: the deadline is `last_present + interval`, so a running
     /// slideshow's current slide gets more / less remaining time immediately.
     fn adjust_slideshow(&mut self, steps: i32) {
-        let interval = self.slideshow.adjust(steps);
+        let interval = self.core.slideshow.adjust(steps);
         self.show_toast(&slideshow::format_interval(interval));
     }
 
@@ -2801,7 +2770,7 @@ impl App {
             self.info,
             self.recursive,
             !self.windowed, // `windowed` is the inverse of the fullscreen checkbox
-            self.slideshow.on,
+            self.core.slideshow.on,
             self.settings.mute_live_audio,
             self.can_save_rotation(),
             self.dir_scan.is_some(),
@@ -3075,8 +3044,8 @@ impl App {
     /// as a stray key event — drop any keys it left "held", and guard Esc-to-quit briefly so
     /// cancelling the picker never closes PhotoBlaze), then opens the input if one was picked.
     fn finish_picker(&mut self, input: Option<LaunchInput>) {
-        self.held.clear();
-        self.esc_guard_until = Some(Instant::now() + Duration::from_millis(300));
+        self.core.held.clear();
+        self.core.esc_guard_until = Some(Instant::now() + Duration::from_millis(300));
         if let Some(input) = input {
             self.open_input(input);
         }
@@ -3312,12 +3281,12 @@ impl App {
 
         // Held-key repeat delay is cached on the struct (the curve below reads the
         // rates live, but this one is a Duration captured at construction).
-        self.initial_delay = Duration::from_millis(s.hold_delay_ms as u64);
+        self.core.initial_delay = Duration::from_millis(s.hold_delay_ms as u64);
 
         // Default slideshow interval → the live timer. A running slideshow's deadline is
         // `last_present + interval`, recomputed each tick, so this takes effect at once
         // (the `[`/`]` live override is just a different write to the same field).
-        self.slideshow.interval = Duration::from_secs_f64(s.slideshow_interval_secs);
+        self.core.slideshow.interval = Duration::from_secs_f64(s.slideshow_interval_secs);
 
         // Letterbox / background fill → renderer (takes effect on the next draw).
         if let Some(a) = self.renderer.as_mut() {
@@ -3373,7 +3342,9 @@ impl App {
     /// Refresh rate in Hz (rounded, ≥1) — caps the Settings fly-speed slider and is
     /// passed to every dialog window.
     fn refresh_hz(&self) -> u32 {
-        (1.0 / self.frame_interval.as_secs_f32()).round().max(1.0) as u32
+        (1.0 / self.core.frame_interval.as_secs_f32())
+            .round()
+            .max(1.0) as u32
     }
 
     /// Open the themed (dark-aware egui) "Delete Permanently" confirmation for `name`.
@@ -3492,7 +3463,7 @@ impl App {
                 // trailing/synthetic press once focus snaps back — by then `dialog` is None, so
                 // the main-window guard can't catch it. Briefly guard quit-on-Esc so closing a
                 // dialog never also exits the app (the same leak `open_picker` handles).
-                self.esc_guard_until = Some(Instant::now() + Duration::from_millis(300));
+                self.core.esc_guard_until = Some(Instant::now() + Duration::from_millis(300));
                 // Esc / close on the loading view cancels the in-flight open (the worker stops
                 // and frees its partial RAM); harmless for the other kinds.
                 self.cancel_archive_load();
@@ -4684,8 +4655,8 @@ impl App {
     /// previous target, so the press can't be serviced yet — flashes the loading
     /// pie (brighten-on-keypress) so the input never feels dead.
     fn nav_press(&mut self, key: PbKey, action: Action) {
-        self.held.insert(key, action);
-        self.hold_start = Some(Instant::now());
+        self.core.held.insert(key, action);
+        self.core.hold_start = Some(Instant::now());
         let Some(nav) = nav_of(action) else {
             return;
         };
@@ -4734,7 +4705,7 @@ impl App {
     /// one, but two *different* nav directions held at once is treated as idle.
     fn held_nav(&self) -> Option<Nav> {
         let mut dir: Option<Nav> = None;
-        for &action in self.held.values() {
+        for &action in self.core.held.values() {
             if let Some(n) = nav_of(action) {
                 match dir {
                     None => dir = Some(n),
@@ -4751,7 +4722,7 @@ impl App {
     fn zoom_held(&self) -> Option<f32> {
         let mut zin = false;
         let mut zout = false;
-        for &action in self.held.values() {
+        for &action in self.core.held.values() {
             match action {
                 Action::ZoomIn => zin = true,
                 Action::ZoomOut => zout = true,
@@ -4770,7 +4741,7 @@ impl App {
     fn pan_held(&self) -> (f32, f32) {
         let mut x = 0.0;
         let mut y = 0.0;
-        for &action in self.held.values() {
+        for &action in self.core.held.values() {
             match action {
                 Action::PanLeft => x += 1.0,
                 Action::PanRight => x -= 1.0,
@@ -5022,7 +4993,7 @@ impl App {
 
     /// Keyboard frame-step press: track the key for hold-to-scrub, then step once now.
     fn frame_step_press(&mut self, key: PbKey, action: Action) {
-        self.held.insert(key, action);
+        self.core.held.insert(key, action);
         let now = Instant::now();
         self.framestep_started = Some(now);
         self.framestep_last = Some(now);
@@ -5116,7 +5087,7 @@ impl App {
         if !self.has_motion(item) {
             return None;
         }
-        match self.last_present.map(|t| t + EAGER_PREP_DELAY) {
+        match self.core.last_present.map(|t| t + EAGER_PREP_DELAY) {
             // Still within the dwell window — wake at the deadline to kick it then.
             Some(due) if now < due => Some(due),
             _ => {
@@ -5261,7 +5232,8 @@ impl App {
         if self.playback.is_none() {
             return true;
         }
-        let past_delay = timing::elapsed_since(self.framestep_started, now, self.initial_delay);
+        let past_delay =
+            timing::elapsed_since(self.framestep_started, now, self.core.initial_delay);
         let due = timing::elapsed_since(self.framestep_last, now, FRAME_STEP_REPEAT);
         if past_delay && due {
             self.playback.as_mut().unwrap().step(dir);
@@ -5275,7 +5247,7 @@ impl App {
     /// ([`Action::FramePrev`]) / `0` if neither or both.
     fn held_frame_step(&self) -> i32 {
         let mut dir = 0i32;
-        for &action in self.held.values() {
+        for &action in self.core.held.values() {
             match action {
                 Action::FrameNext => dir += 1,
                 Action::FramePrev => dir -= 1,
@@ -5409,7 +5381,7 @@ impl ApplicationHandler for App {
             let hz = hz as f64 / 1000.0;
             println!("display refresh: {hz:.2} Hz");
             if hz > 0.0 {
-                self.frame_interval = Duration::from_secs_f64(1.0 / hz);
+                self.core.frame_interval = Duration::from_secs_f64(1.0 / hz);
             }
         }
 
@@ -5601,7 +5573,7 @@ impl ApplicationHandler for App {
         self.behind = behind;
         self.displayed_item = self.playlist.current();
         self.target_item = self.playlist.current();
-        self.last_present = Some(Instant::now());
+        self.core.last_present = Some(Instant::now());
 
         self.window = Some(window);
         self.renderer = Some(Box::new(renderer));
@@ -5715,14 +5687,14 @@ impl ApplicationHandler for App {
                             self.pending_confirm_delete = None;
                             // Same leak guard as the dialog path: a held/repeated Esc
                             // after this close must not fall through to quit.
-                            self.esc_guard_until =
+                            self.core.esc_guard_until =
                                 Some(Instant::now() + Duration::from_millis(300));
                             return;
                         }
                         // Swallow a stray Esc that leaked from dismissing the file
                         // picker (open_picker); a real Esc a moment later still quits.
-                        let quit = esc_quits(self.esc_guard_until, Instant::now());
-                        self.esc_guard_until = None;
+                        let quit = esc_quits(self.core.esc_guard_until, Instant::now());
+                        self.core.esc_guard_until = None;
                         if quit {
                             self.begin_exit();
                         }
@@ -5737,12 +5709,13 @@ impl ApplicationHandler for App {
                         //   - frame-step → step one animation frame now, repeat while held.
                         // `resolve_key_down` folds in the repeat gate (OS auto-repeats
                         // resolve to `Ignore`) and the ⌘-doesn't-fall-through rule.
-                        match contract::resolve_key_down(&self.keymap, key, self.mods, repeat) {
+                        match contract::resolve_key_down(&self.keymap, key, self.core.mods, repeat)
+                        {
                             contract::KeyResolution::Ignore => {}
                             contract::KeyResolution::OneShot(act) => self.dispatch_action(act),
                             contract::KeyResolution::NavStart(act) => self.nav_press(key, act),
                             contract::KeyResolution::HeldStart(act) => {
-                                self.held.insert(key, act);
+                                self.core.held.insert(key, act);
                             }
                             contract::KeyResolution::FrameStepStart(act) => {
                                 self.frame_step_press(key, act)
@@ -5752,7 +5725,7 @@ impl ApplicationHandler for App {
                 }
                 ElementState::Released => {
                     if let Some(key) = pb_key_winit::from_winit(code) {
-                        self.held.remove(&key);
+                        self.core.held.remove(&key);
                     }
                 }
             },
@@ -5767,7 +5740,7 @@ impl ApplicationHandler for App {
             // Track the modifier state for chord building (Shift+R, Ctrl+R, Alt+Enter, ⌘…).
             WindowEvent::ModifiersChanged(mods) => {
                 let s = mods.state();
-                self.mods = contract::Modifiers {
+                self.core.mods = contract::Modifiers {
                     ctrl: s.control_key(),
                     shift: s.shift_key(),
                     alt: s.alt_key(),
@@ -5780,9 +5753,9 @@ impl ApplicationHandler for App {
             // navigation never gets stuck auto-advancing (a known winit repeat /
             // lost-key-up hazard, called out in CLAUDE.md).
             WindowEvent::Focused(false) => {
-                self.held.clear();
-                self.hold_start = None;
-                self.mods = contract::Modifiers::NONE;
+                self.core.held.clear();
+                self.core.hold_start = None;
+                self.core.mods = contract::Modifiers::NONE;
                 self.zoom_started = None;
                 self.zoom_last = None;
                 self.pan_started = None;
@@ -5870,7 +5843,7 @@ impl ApplicationHandler for App {
             // ignored there, hard-wired to pan); the default stays Pan, and Ctrl+swipe zooms.
             WindowEvent::MouseWheel { delta, .. } => {
                 let zooms = self.settings.scroll_action == settings::ScrollAction::Zoom;
-                let zoom = zooms != self.mods.ctrl;
+                let zoom = zooms != self.core.mods.ctrl;
                 match delta {
                     MouseScrollDelta::PixelDelta(p) => {
                         if zoom {
@@ -5971,7 +5944,7 @@ impl ApplicationHandler for App {
         // first-press miss shows the moment it decodes. (plain `match`, not
         // `is_none_or`: that's 1.82+ vs the 1.80 MSRV.)
         let nav = self.held_nav();
-        let past_delay = timing::elapsed_since(self.hold_start, now, self.initial_delay);
+        let past_delay = timing::elapsed_since(self.core.hold_start, now, self.core.initial_delay);
         if let Some(dir) = nav {
             // Advance only when caught up (target shown) AND the (accelerating)
             // interval elapsed, so every photo is shown and a miss simply holds.
@@ -5981,8 +5954,8 @@ impl ApplicationHandler for App {
             // ceiling is the configured max-photos/sec cap (#20), or the refresh rate
             // when uncapped. All three are read live from the settings.
             let caught_up = self.displayed_item == self.target_item;
-            let repeat_elapsed = match self.hold_start {
-                Some(t) => now.saturating_duration_since(t + self.initial_delay),
+            let repeat_elapsed = match self.core.hold_start {
+                Some(t) => now.saturating_duration_since(t + self.core.initial_delay),
                 None => Duration::ZERO,
             };
             let interval = timing::advance_interval(
@@ -5990,16 +5963,16 @@ impl ApplicationHandler for App {
                 self.settings.start_speed,
                 self.settings.ramp_secs,
                 self.settings.max_advance_rate as f32,
-                self.frame_interval,
+                self.core.frame_interval,
             );
-            let due = timing::elapsed_since(self.last_present, now, interval);
+            let due = timing::elapsed_since(self.core.last_present, now, interval);
             if past_delay && caught_up && due {
                 self.advance(dir);
             } else if !caught_up {
                 self.try_present_target();
             }
         } else {
-            self.hold_start = None;
+            self.core.hold_start = None;
         }
 
         // 3c. Slideshow auto-advance (task #23). When on and not overridden by a held
@@ -6010,14 +5983,15 @@ impl ApplicationHandler for App {
         // (never skips). Manual nav resets the timer (it moves `last_present`); a live
         // `[`/`]` interval change applies immediately (deadline is `last_present + interval`).
         let slideshow_running =
-            self.slideshow.on && self.held_nav().is_none() && self.dialog.is_none();
+            self.core.slideshow.on && self.held_nav().is_none() && self.dialog.is_none();
         if slideshow_running {
             let caught_up = self.displayed_item == self.target_item;
             let since_shown = self
+                .core
                 .last_present
                 .map(|t| now.saturating_duration_since(t))
                 .unwrap_or(Duration::ZERO);
-            if caught_up && self.slideshow.is_due(since_shown) {
+            if caught_up && self.core.slideshow.is_due(since_shown) {
                 self.advance(self.last_nav);
             }
         }
@@ -6176,16 +6150,17 @@ impl ApplicationHandler for App {
             // window move/resize is persisted even when nothing else wakes the loop.
             || self.geometry_save_at.is_some()
         {
-            Some(now + self.frame_interval)
+            Some(now + self.core.frame_interval)
         } else if slideshow_running {
             // Sleep until the next slide is due rather than spinning — when caught up and
             // waiting, only the deadline wakes us. Fall back to a frame poll if no slide
             // has shown yet; clamp into the future so a just-passed deadline still
             // schedules a wake (we advance on the following tick).
             Some(
-                self.last_present
-                    .map(|t| t + self.slideshow.interval)
-                    .unwrap_or(now + self.frame_interval)
+                self.core
+                    .last_present
+                    .map(|t| t + self.core.slideshow.interval)
+                    .unwrap_or(now + self.core.frame_interval)
                     .max(now + Duration::from_millis(1)),
             )
         } else {

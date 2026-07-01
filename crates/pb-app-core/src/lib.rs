@@ -20,6 +20,7 @@
 //! [ADR-021]: ../../../.taskmaster/docs/decisions.md
 
 pub mod action;
+pub mod app_core;
 pub mod config;
 pub mod contract;
 pub mod keymap;
@@ -28,6 +29,7 @@ pub mod slideshow;
 pub mod timing;
 
 pub use action::{Action, ActionKind};
+pub use app_core::AppCore;
 pub use config::config_dir;
 pub use contract::{CoreEffect, CoreEvent, KeyResolution, MenuState, Modifiers};
 pub use keymap::{KeyChord, Keymap};
