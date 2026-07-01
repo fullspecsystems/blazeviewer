@@ -32,6 +32,7 @@ pub mod pb_key;
 pub mod settings;
 pub mod slideshow;
 pub mod timing;
+pub mod undo;
 
 pub use action::{Action, ActionKind};
 pub use app_core::{AppCore, Nav, Viewport};
@@ -42,3 +43,4 @@ pub use meta::PhotoMeta;
 pub use overlay::{InfoMode, OpenButton, OpenPanel, PlayHint, Toast};
 pub use pb_key::PbKey;
 pub use slideshow::Slideshow;
+pub use undo::UndoAction;

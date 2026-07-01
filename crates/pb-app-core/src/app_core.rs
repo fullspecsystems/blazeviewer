@@ -30,6 +30,7 @@ use crate::keymap::Keymap;
 use crate::metrics::StageTimes;
 use crate::overlay::{InfoMode, OpenButton, OpenPanel, PlayHint, Toast};
 use crate::settings::Settings;
+use crate::undo::UndoAction;
 use crate::{Action, Modifiers, PbKey, PhotoMeta, Slideshow};
 
 /// A navigation move: forward (`space`/`→`), backward (`backspace`/`←`), a
@@ -229,6 +230,11 @@ pub struct AppCore {
     /// window itself stays shell-owned — the core drives rendering, the shell owns the OS
     /// handle it draws to.
     pub renderer: Option<Box<dyn Renderer>>,
+
+    /// The undo stack of reversible user edits (Edit ▸ Undo / `Ctrl+Z`). RAM-only; cleared on
+    /// a playlist/source change. The native "Undo" menu item stays shell-owned (a muda handle,
+    /// enabled/disabled from this state).
+    pub undo_stack: Vec<UndoAction>,
 
     // --- Config (NS0 5.5 / Phase 0.5) ---
     /// The active keybindings (loaded from `keymap.toml`; editable via the shortcut editor).

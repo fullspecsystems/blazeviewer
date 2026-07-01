@@ -80,7 +80,7 @@ mod save_rotation;
 // resolving unchanged.
 use pb_app_core::{
     action, contract, keymap, pb_key, slideshow, timing, AppCore, InfoMode, Nav, OpenButton,
-    OpenPanel, PhotoMeta, PlayHint, Toast, Viewport,
+    OpenPanel, PhotoMeta, PlayHint, Toast, UndoAction, Viewport,
 };
 // The HUD CPU compositor (info panel / toasts / pie / chip) and its Font Awesome icon
 // rasterizer now live in the shell-neutral `pb-hud` crate (NS0). Re-export them at the
@@ -263,33 +263,6 @@ fn render_color(c: &pb_decode::ColorTransform) -> pb_render::ColorTransform {
 /// Whether a decoded image is HDR (scene-linear fp16 → the renderer's HDR path).
 fn is_hdr(img: &DecodedImage) -> bool {
     img.format == PixelFormat::Rgba16F
-}
-
-/// A reversible user edit, recorded on the undo stack (Edit ▸ Undo / `Ctrl+Z`). RAM-only,
-/// dropped on exit — no on-disk undo journal (privacy #2). The stack is cleared whenever
-/// the playlist/source changes (open, delete-rebuild, empty state — see
-/// [`App::rebuild_playlist`]/[`App::enter_empty_state`]), so a recorded `item` index
-/// always indexes the current source. Only a saved rotation is reversible today; deletes
-/// (recoverable / permanent) are a future / never extension of the same stack.
-enum UndoAction {
-    /// Undo a saved EXIF rotation: restore `path`'s Orientation tag to `prev` — the value
-    /// it held *before* the save. `item` is the playlist index it was saved at, used to
-    /// refresh that photo's cached decode after the restore.
-    SaveRotation {
-        item: usize,
-        path: PathBuf,
-        prev: u8,
-    },
-}
-
-impl UndoAction {
-    /// The dynamic Edit-menu title for this action (e.g. "Undo Save Rotation"), so the
-    /// menu shows *what* the next undo will reverse (applied via `App::apply_menu_state`).
-    fn menu_label(&self) -> &'static str {
-        match self {
-            UndoAction::SaveRotation { .. } => "Undo Save Rotation",
-        }
-    }
 }
 
 /// The navigation direction for a nav [`Action`], or `None` for any non-nav action.
@@ -495,9 +468,6 @@ struct App {
     save_rotation_item: Option<muda::MenuItem>,
     /// The File ▸ Stop Scanning menu item, enabled only while a folder scan is streaming in.
     cancel_scan_item: Option<muda::MenuItem>,
-    /// The undo stack (Edit ▸ Undo / `Ctrl+Z`) — RAM-only, cleared on any source/playlist
-    /// change (see [`UndoAction`]). The most recent reversible edit is on top.
-    undo_stack: Vec<UndoAction>,
     /// The Edit ▸ Undo menu item, kept so its title + enabled state can mirror the top of
     /// the undo stack at runtime.
     undo_item: Option<muda::MenuItem>,
@@ -787,6 +757,7 @@ impl App {
                 play_hint: None,
                 hud: Hud::load(),
                 renderer: None,
+                undo_stack: Vec::new(),
                 keymap: Keymap::load(),
                 settings,
                 effects: Vec::new(),
@@ -803,7 +774,6 @@ impl App {
             proxy_icon_path: None,
             save_rotation_item: None,
             cancel_scan_item: None,
-            undo_stack: Vec::new(),
             undo_item: None,
             view_checks: None,
             menu_state: None,
@@ -1190,7 +1160,7 @@ impl App {
                 self.load_current_sync();
                 self.core.target_item = self.core.playlist.current();
                 self.request_prefetch();
-                self.undo_stack.push(UndoAction::SaveRotation {
+                self.core.undo_stack.push(UndoAction::SaveRotation {
                     item,
                     path: path.clone(),
                     prev,
@@ -1211,7 +1181,7 @@ impl App {
     /// the undone photo shows correctly whether or not it's the one on screen). On a
     /// write failure the file is untouched, so the entry is pushed back to retry.
     fn undo(&mut self) {
-        let Some(action) = self.undo_stack.pop() else {
+        let Some(action) = self.core.undo_stack.pop() else {
             self.show_toast("Nothing to undo");
             return;
         };
@@ -1236,7 +1206,8 @@ impl App {
                         self.show_toast("Undo failed");
                         // The file wasn't changed, so the edit is still reversible —
                         // keep it on the stack for a retry.
-                        self.undo_stack
+                        self.core
+                            .undo_stack
                             .push(UndoAction::SaveRotation { item, path, prev });
                     }
                 }
@@ -1348,7 +1319,7 @@ impl App {
         self.core.preview_resident.clear();
         self.core.upgrade_done.clear();
         self.core.last_upgrade_set.clear();
-        self.undo_stack.clear();
+        self.core.undo_stack.clear();
         self.invalidate_geometry();
         self.core.displayed_item = None;
         self.core.target_item = None;
@@ -2542,7 +2513,7 @@ impl App {
             self.can_save_rotation(),
             self.dir_scan.is_some(),
             // `None` = nothing to undo (disabled "Undo"); `Some(label)` = enabled w/ label.
-            self.undo_stack.last().map(UndoAction::menu_label),
+            self.core.undo_stack.last().map(UndoAction::menu_label),
             native_fullscreen,
         );
         // Only sync when the state actually changed — kept off the per-tick path (nothing is
@@ -2855,7 +2826,7 @@ impl App {
         self.core.upgrade_done.clear();
         self.core.last_upgrade_set.clear();
         // Undo entries reference the old source's indices/paths — drop them too.
-        self.undo_stack.clear();
+        self.core.undo_stack.clear();
         // Invalidate the ring + bump the epoch (discards in-flight old decodes),
         // then synchronously show the new current photo and refill around it.
         self.invalidate_geometry();
@@ -4431,7 +4402,7 @@ impl App {
         self.core.preview_resident.clear();
         self.core.upgrade_done.clear();
         self.core.last_upgrade_set.clear();
-        self.undo_stack.clear();
+        self.core.undo_stack.clear();
         self.core.current = None;
         self.core.toast = None;
         self.core.wait_started = None;
