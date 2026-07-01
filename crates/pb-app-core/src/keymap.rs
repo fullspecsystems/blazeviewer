@@ -70,6 +70,64 @@ impl KeyChord {
             logo,
         })
     }
+
+    /// The shortcut hint shown in the UI: on macOS its compact symbol notation
+    /// ([`mac_symbol`](Self::mac_symbol) — e.g. `⇧ O`); elsewhere the spelled-out
+    /// [`Display`](fmt::Display) form (e.g. `Shift+O`), matching Windows habits.
+    pub fn shortcut_label(&self) -> String {
+        #[cfg(target_os = "macos")]
+        {
+            self.mac_symbol()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.to_string()
+        }
+    }
+
+    /// A compact, Apple-HIG-ordered **symbol** rendering — the `⌃⌥⇧⌘` modifiers (Control,
+    /// Option, Shift, Command) in that order, then the key (arrows as glyphs) — i.e. macOS's
+    /// own shortcut notation. A **thin space** separates the modifier cluster from the key
+    /// (`⇧ O`, `⌘ O`) so they don't crowd, matching how the menu bar spaces them. The
+    /// word-style [`Display`](fmt::Display) drives menus and text.
+    #[cfg(target_os = "macos")]
+    pub fn mac_symbol(&self) -> String {
+        let mut mods = String::new();
+        if self.ctrl {
+            mods.push('\u{2303}'); // ⌃ Control
+        }
+        if self.alt {
+            mods.push('\u{2325}'); // ⌥ Option
+        }
+        if self.shift {
+            mods.push('\u{21e7}'); // ⇧ Shift
+        }
+        if self.logo {
+            mods.push('\u{2318}'); // ⌘ Command
+        }
+        let key = key_symbol(self.code);
+        if mods.is_empty() {
+            key.to_string()
+        } else {
+            format!("{mods}\u{2009}{key}") // U+2009 THIN SPACE before the key
+        }
+    }
+}
+
+/// A key's macOS glyph where one is conventional (the arrow keys + erase-left), else its
+/// spelled-out [`PbKey::as_str`] name — the key half of a shortcut hint. Only these are
+/// substituted (they're safe in the UI font); other keys stay spelled out. Used by
+/// [`KeyChord::mac_symbol`].
+#[cfg(target_os = "macos")]
+fn key_symbol(code: PbKey) -> &'static str {
+    match code {
+        PbKey::ArrowLeft => "\u{2190}",  // ←
+        PbKey::ArrowRight => "\u{2192}", // →
+        PbKey::ArrowUp => "\u{2191}",    // ↑
+        PbKey::ArrowDown => "\u{2193}",  // ↓
+        PbKey::Backspace => "\u{232b}",  // ⌫ (erase-left; the Mac "delete" key, ⌘⌫ trash chord)
+        _ => code.as_str(),
+    }
 }
 
 impl fmt::Display for KeyChord {
@@ -616,6 +674,26 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_symbol_uses_apple_modifier_glyphs_in_hig_order() {
+        let p = |s: &str| KeyChord::parse(s).unwrap();
+        // A bare key is just the key (no modifier → no thin space); the open-screen hints are
+        // "O" and "⇧ O".
+        assert_eq!(p("O").mac_symbol(), "O");
+        assert_eq!(p("Shift+O").mac_symbol(), "\u{21e7}\u{2009}O");
+        assert_eq!(p("Cmd+S").mac_symbol(), "\u{2318}\u{2009}S");
+        // Modifiers always print ⌃⌥⇧⌘ (tight), then a thin space, then the key — regardless of
+        // how the chord was written.
+        assert_eq!(
+            p("Shift+Ctrl+Alt+Cmd+F").mac_symbol(),
+            "\u{2303}\u{2325}\u{21e7}\u{2318}\u{2009}F"
+        );
+        // Arrow keys render as glyphs; shortcut_label defers to mac_symbol on macOS.
+        assert_eq!(p("Left").mac_symbol(), "\u{2190}");
+        assert_eq!(p("Shift+O").shortcut_label(), "\u{21e7}\u{2009}O");
     }
 
     #[test]

@@ -451,6 +451,23 @@ struct Toast {
     uploaded_alpha: f32,
 }
 
+/// The interactive **play hint** — the `▶ Play  P` affordance shown when parked on an animated
+/// still / Live Photo. It's a real button riding on the transient toast layer: hovering it
+/// **pauses the fade** and lights it, and a click plays (same as `P`). `Some` only while the
+/// current toast *is* the play hint (passive toasts clear it), so only it responds to
+/// hover/click. Its click rect is derived from the live window size (bottom-center), so it
+/// stays correct across resizes. See [`App::show_hint`] / [`App::update_play_hint_hover`].
+#[derive(Clone, Copy)]
+struct PlayHint {
+    /// The toast bitmap size, for the bottom-center hit rect.
+    w: u32,
+    h: u32,
+    /// The leading icon (play ▶ or the Live Photo mark), to re-render lit on hover.
+    icon: &'static str,
+    /// Whether the pointer is over it (lit + fade paused).
+    hovered: bool,
+}
+
 impl Toast {
     /// Full-opacity hold, then a short linear fade (~1.3 s total).
     const HOLD: Duration = Duration::from_millis(950);
@@ -501,6 +518,26 @@ fn collect_monitor_rects(
             (p.x, p.y, s.width, s.height)
         })
         .collect()
+}
+
+/// Which empty-state **open button** the pointer is over (the call-to-action panel shown when
+/// no photo is loaded). Two interactive buttons — Open File and Open Folder.
+#[derive(Clone, Copy, PartialEq)]
+enum OpenButton {
+    File,
+    Folder,
+}
+
+/// The empty-state open panel's geometry while it's shown: the bitmap `(w, h)` and each
+/// button's `[x, y, w, h]` rect **within the bitmap**. The renderer centers the message layer
+/// itself, so the on-screen click rects are derived from the live window size at hit-test time
+/// (see [`App::open_button_rect`]) — resize- and DPI-proof.
+#[derive(Clone, Copy)]
+struct OpenPanel {
+    w: u32,
+    h: u32,
+    file: [u32; 4],
+    folder: [u32; 4],
 }
 
 struct App {
@@ -688,6 +725,16 @@ struct App {
     /// state. Flipped only on a hover **enter/leave transition** (see [`App::update_chip_hover`]),
     /// which re-rasterizes the card once; never per cursor-move or per frame.
     chip_hovered: bool,
+    /// The empty-state open panel's geometry while it's the active overlay (the two Open
+    /// File / Open Folder buttons); `None` when a photo is shown. Its buttons are the click
+    /// targets — see [`App::open_button_rect`].
+    open_panel: Option<OpenPanel>,
+    /// Which open-panel button is lit (hover), so the panel re-rasterizes only on a hover
+    /// enter/leave transition (see [`App::update_open_hover`]), never per cursor-move.
+    open_hover: Option<OpenButton>,
+    /// The interactive play hint's state while it's the active toast (`None` otherwise). Drives
+    /// its hover-to-hold / click-to-play behavior. See [`PlayHint`].
+    play_hint: Option<PlayHint>,
     /// Items whose resident ring slot holds a fast *preview* (e.g. a HEIC
     /// thumbnail) rather than the full decode. While idle these are upgraded
     /// ("sharpened") to full in priority order. Pruned to resident in `request_prefetch`.
@@ -1028,6 +1075,9 @@ impl App {
             chip_built: Instant::now(),
             chip_rect: None,
             chip_hovered: false,
+            open_panel: None,
+            open_hover: None,
+            play_hint: None,
             preview_resident: HashSet::new(),
             upgrade_done: HashSet::new(),
             last_upgrade_set: Vec::new(),
@@ -1608,6 +1658,15 @@ impl App {
         }
         self.effects.push(contract::CoreEffect::SetTitle(title));
         self.ring.set_displayed(slot);
+        // A fresh landing on a *different* photo re-arms the play hint. `anim_hint_shown_for`
+        // is keyed to the item and only updated when landing on an animated one — so without
+        // this, visiting a non-animated photo in between would leave it latched, and returning
+        // to an animated photo (or arriving from a non-animated one) wouldn't re-show the hint.
+        // Guarded on the item actually changing, so a re-present of the same photo (e.g. a play
+        // reverting to its still) doesn't re-arm it.
+        if self.displayed_item != Some(item) {
+            self.anim_hint_shown_for = None;
+        }
         self.displayed_item = Some(item);
         self.current = self.meta_cache.get(&item).cloned();
         // The panel (if shown) is now stale for the old photo; `about_to_wait`
@@ -3495,63 +3554,102 @@ impl App {
     /// (task #8 — single source of truth), so rebinding a key updates the help. A
     /// few rows stay curated: pan (shown as arrow glyphs), help (`/ or ?`), and the
     /// "hold to fly" hint (no single binding).
-    fn help_rows(&self) -> Vec<Row> {
-        // Primary keys for an action, numpad aliases dropped, joined by " / ".
-        let keys = |a: Action| {
-            self.keymap
-                .bindings_for(a)
-                .iter()
-                .filter(|c| !c.code.is_numpad())
-                .map(|c| c.to_string())
-                .collect::<Vec<_>>()
-                .join(" / ")
-        };
-        // Two actions shown on one row (e.g. rotate cw / ccw).
-        let two = |a: Action, b: Action| format!("{} / {}", keys(a), keys(b));
+    /// The user-facing shortcut hint for an action, formatted for this platform: on macOS the
+    /// menu's ⌘-accelerator ([`menu::macos_menu_chord`]) where one exists — so Copy shows ⌘C and
+    /// Move to Trash shows ⌘⌫, matching the menu bar rather than the keymap's legacy binding —
+    /// else the primary keymap binding as Mac symbols; on Windows/Linux the spelled-out primary
+    /// binding. Empty when unbound.
+    fn help_shortcut(&self, action: Action) -> String {
+        #[cfg(target_os = "macos")]
+        if let Some(chord) = menu::macos_menu_chord(action) {
+            return chord.mac_symbol();
+        }
+        self.keymap
+            .bindings_for(action)
+            .iter()
+            .find(|c| !c.code.is_numpad())
+            .map(|c| c.shortcut_label())
+            .unwrap_or_default()
+    }
 
-        let entries: Vec<(String, &str)> = vec![
-            (keys(Action::Next), "Next photo"),
-            (keys(Action::Prev), "Previous photo"),
-            (keys(Action::Random), "Random photo (shuffle)"),
-            (keys(Action::RandomPrev), "Previous random photo"),
-            ("Hold nav key".to_string(), "Fly through photos"),
-            (
-                "\u{2190} \u{2191} \u{2193} \u{2192}".to_string(),
-                "Pan (hold to accelerate)",
+    /// The keyboard-help overlay as grouped sections (description + shortcut), sourced from the
+    /// live keymap / menu so customized bindings and platform symbols stay correct. Drives
+    /// [`hud::Hud::render_shortcuts`].
+    fn help_sections(&self) -> Vec<hud::ShortcutSection> {
+        let sc = |a: Action| self.help_shortcut(a);
+        let two =
+            |a: Action, b: Action| format!("{} / {}", self.help_shortcut(a), self.help_shortcut(b));
+        let row = |desc: &str, shortcut: String| (desc.to_string(), shortcut);
+        // Platform wording for the trash action (the shortcut itself comes from `help_shortcut`).
+        #[cfg(target_os = "macos")]
+        let trash = "Move to Trash";
+        #[cfg(not(target_os = "macos"))]
+        let trash = "Delete to Recycle Bin";
+
+        let section = |title: &str, rows: Vec<(String, String)>| hud::ShortcutSection {
+            title: title.to_string(),
+            rows,
+        };
+        vec![
+            section(
+                "Browse",
+                vec![
+                    row("Next photo", sc(Action::Next)),
+                    row("Previous photo", sc(Action::Prev)),
+                    row("Random photo", sc(Action::Random)),
+                    row("Previous random", sc(Action::RandomPrev)),
+                    row("Slideshow", sc(Action::SlideshowToggle)),
+                    row(
+                        "Slideshow faster / slower",
+                        two(Action::SlideshowFaster, Action::SlideshowSlower),
+                    ),
+                ],
             ),
-            (two(Action::ZoomIn, Action::ZoomOut), "Zoom in / out (hold)"),
-            (keys(Action::ScaleFit), "Fit to screen"),
-            (keys(Action::ScaleFill), "Fill screen (crop)"),
-            (
-                keys(Action::ToggleOriginal),
-                "Toggle original 1:1 \u{2194} fit",
+            section(
+                "View & Zoom",
+                vec![
+                    row("Fit to screen", sc(Action::ScaleFit)),
+                    row("Crop to fill", sc(Action::ScaleFill)),
+                    row("Toggle 1:1 and fit", sc(Action::ToggleOriginal)),
+                    row("Zoom out / in", two(Action::ZoomOut, Action::ZoomIn)),
+                    row("Pan", "\u{2190} \u{2191} \u{2193} \u{2192}".to_string()),
+                    row(
+                        "Rotate right / left",
+                        two(Action::RotateCw, Action::RotateCcw),
+                    ),
+                    row("Fullscreen", sc(Action::Fullscreen)),
+                ],
             ),
-            (
-                two(Action::RotateCw, Action::RotateCcw),
-                "Rotate 90\u{b0} cw / ccw",
+            section(
+                "Animation",
+                vec![
+                    row("Play / pause", sc(Action::PlayPause)),
+                    row(
+                        "Previous / next frame",
+                        two(Action::FramePrev, Action::FrameNext),
+                    ),
+                    row("Mute Live Photo audio", sc(Action::MuteLiveAudio)),
+                ],
             ),
-            (keys(Action::Recursive), "Recursive scan (current folder)"),
-            (
-                two(Action::OpenFile, Action::OpenFolder),
-                "Open file(s) / folder",
+            section(
+                "Files & App",
+                vec![
+                    row("Open file", sc(Action::OpenFile)),
+                    row("Open folder", sc(Action::OpenFolder)),
+                    row("Copy image", sc(Action::Copy)),
+                    row("Copy file path", sc(Action::CopyPath)),
+                    row("Save rotation", sc(Action::SaveRotation)),
+                    row("Undo", sc(Action::Undo)),
+                    row(trash, sc(Action::Delete)),
+                    row("Delete permanently", sc(Action::DeletePermanent)),
+                    row("Recursive (this folder)", sc(Action::Recursive)),
+                    row("Info panel", sc(Action::Info)),
+                    row("Full EXIF panel", sc(Action::FullExif)),
+                    row("Settings", sc(Action::Settings)),
+                    row("Quit", sc(Action::Quit)),
+                ],
             ),
-            (keys(Action::Fullscreen), "Toggle fullscreen"),
-            (
-                two(Action::Info, Action::FullExif),
-                "Info / full-EXIF panel",
-            ),
-            ("/ or ?".to_string(), "This help"),
-            (keys(Action::Quit), "Quit"),
-        ];
-        let mut rows = vec![Row::Span {
-            text: "PhotoBlaze Help".to_string(),
-            bold: true,
-        }];
-        rows.extend(entries.into_iter().map(|(k, d)| Row::Pair {
-            label: k,
-            value: d.to_string(),
-        }));
-        rows
+        ]
     }
 
     /// The full-EXIF "nerd" panel rows for the displayed photo: a filename/path
@@ -3811,12 +3909,19 @@ impl App {
                 hud.render_table(&rows, px, pad, info_bg)
             }
             InfoMode::Help => {
-                let help_px = (20.0 * self.scale_factor).max(12.0);
-                let rows = self.help_rows();
+                let help_px = (15.0 * self.scale_factor).max(10.0);
+                let sections = self.help_sections();
+                let margin = self.overlay_margin();
+                let win_h = self
+                    .window
+                    .as_ref()
+                    .map(|w| w.inner_size().height)
+                    .unwrap_or(0);
+                let max_h = (win_h as i32 - 2 * margin as i32).max(1);
                 let Some(hud) = self.hud.as_ref() else {
                     return;
                 };
-                hud.render_table(&rows, help_px, pad, hud::BG)
+                hud.render_shortcuts(&sections, help_px, hud::BG, max_h)
             }
         };
         let Some((bitmap, w, h)) = panel else {
@@ -3841,34 +3946,61 @@ impl App {
         self.draw();
     }
 
-    /// Build the centered empty-state hint panel ("Press O to open a file / or
-    /// Shift+O to open a folder"). `None` if no system font loaded. Returns an owned
-    /// bitmap so callers can apply it to a renderer they still own (e.g. mid-setup).
-    fn open_hint_panel(&self) -> Option<(Vec<u8>, u32, u32)> {
-        let px = (20.0 * self.scale_factor).max(12.0);
-        let pad = (10.0 * self.scale_factor).round().max(3.0) as u32;
-        self.hud.as_ref()?.render_centered(
-            &["Press O to open a file", "or Shift+O to open a folder"],
+    /// The pre-formatted shortcut hint for an action's primary binding (empty if unbound) — the
+    /// macOS symbol form (`⇧ O`) on macOS, the spelled-out form (`Shift+O`) elsewhere. Drives the
+    /// open-screen buttons' shortcut hints, so they reflect any shortcut the user remapped in
+    /// Settings.
+    fn shortcut_for(&self, action: Action) -> String {
+        self.keymap
+            .bindings_for(action)
+            .first()
+            .map(|c| c.shortcut_label())
+            .unwrap_or_default()
+    }
+
+    /// Build the empty-state **open panel** — two centered, interactive buttons ("Open File" and
+    /// "Open Folder", each with its shortcut dimmed and right-aligned menu-style), lit per the
+    /// current [`open_hover`]. `None` if no system font loaded. Returns the owned bitmap plus
+    /// each button's bitmap-relative rect, so callers can apply it to a renderer they still own
+    /// (e.g. mid-setup) and record the click targets.
+    ///
+    /// [`open_hover`]: App::open_hover
+    fn open_panel_bitmap(&self) -> Option<hud::OpenPanelBitmap> {
+        let hud = self.hud.as_ref()?;
+        // A normal button size (like the scan card's Cancel button) — the call to action doesn't
+        // need to shout; it's white text on an empty gray screen.
+        let px = (16.0 * self.scale_factor).max(11.0);
+        let file_key = self.shortcut_for(Action::OpenFile);
+        let folder_key = self.shortcut_for(Action::OpenFolder);
+        hud.render_open_panel(
+            "Open File",
+            &file_key,
+            "Open Folder",
+            &folder_key,
             px,
-            pad,
             hud::BG,
+            true, // shortcut hint a notch heavier (Semibold) so the dimmed text keeps presence
+            self.open_hover == Some(OpenButton::File),
+            self.open_hover == Some(OpenButton::Folder),
         )
     }
 
-    /// Show the empty-state hint over the (blank) viewer — used when there are no
-    /// images to display. Rebuilt against the current scale; the renderer re-centers
-    /// it on resize and drops it the moment a photo is shown.
+    /// Show the empty-state open panel over the (blank) viewer — used when there are no images
+    /// to display. Rebuilt against the current scale + hover; the renderer re-centers it on
+    /// resize and drops it the moment a photo is shown. Records the button rects for hit-testing.
     fn show_open_hint(&mut self) {
-        // Suppress the hint while a folder scan is pending (deferred startup launch) or
-        // streaming in — the first photo is about to bootstrap, so "Press O to open" would
-        // flash briefly and misleads (it implies nothing is loading). If the scan turns out
-        // empty, `poll_dir_scan`'s Done arm restores the hint.
+        // Suppress the panel while a folder scan is pending (deferred startup launch) or
+        // streaming in — the first photo is about to bootstrap, so the call to action would
+        // flash briefly and mislead (it implies nothing is loading). If the scan turns out
+        // empty, `poll_dir_scan`'s Done arm restores it.
         if self.dir_scan.is_some() || self.pending_launch.is_some() {
             return;
         }
-        let Some((bitmap, w, h)) = self.open_hint_panel() else {
+        let Some((bitmap, w, h, file, folder)) = self.open_panel_bitmap() else {
+            self.open_panel = None;
             return;
         };
+        self.open_panel = Some(OpenPanel { w, h, file, folder });
         if let Some(a) = self.renderer.as_mut() {
             a.set_message(Some((&bitmap, w, h)));
         }
@@ -3889,6 +4021,9 @@ impl App {
     fn show_toast_icon(&mut self, msg: &str, icon: Option<&str>) {
         let px = (26.0 * self.scale_factor).max(16.0);
         let pad = (12.0 * self.scale_factor).round().max(4.0) as u32;
+        // A passive toast is not the interactive play hint — drop any play-hint state so it
+        // doesn't respond to hover/click while a Copy/Save/… toast is up.
+        self.play_hint = None;
         if let Some(hud) = self.hud.as_ref() {
             if let Some((rgba, w, h)) = hud.render_panel_icon(msg, px, pad, icon, hud::BG) {
                 self.toast = Some(Toast {
@@ -3902,6 +4037,34 @@ impl App {
             }
         }
         self.draw();
+    }
+
+    /// Build the **play hint** toast — the `▶ Play  P` button (leading icon, label, dimmed
+    /// shortcut), at `hovered` fill/border — and push it. Returns the bitmap `(w, h)` so the
+    /// caller can record the hit rect. Shared by the first flash and the hover re-render.
+    fn build_play_hint(&mut self, icon: &str, hovered: bool) -> Option<(u32, u32)> {
+        let px = (20.0 * self.scale_factor).max(13.0);
+        let shortcut = self.shortcut_for(Action::PlayPause);
+        let built = self.hud.as_ref().and_then(|hud| {
+            let spec = hud::ButtonSpec {
+                label: "Play",
+                icon: Some(icon),
+                shortcut: (!shortcut.is_empty()).then_some(shortcut.as_str()),
+                shortcut_semibold: true,
+                min_w: 0,
+            };
+            hud.render_button(&spec, px, hud::BG, hovered)
+        });
+        let (rgba, w, h) = built?;
+        self.toast = Some(Toast {
+            rgba,
+            w,
+            h,
+            started: Instant::now(),
+            uploaded_alpha: -1.0,
+        });
+        self.push_toast(1.0);
+        Some((w, h))
     }
 
     /// Upload the current toast bitmap to the renderer at `alpha` (its alpha
@@ -3924,7 +4087,15 @@ impl App {
     /// event loop keeps ticking). Re-uploads only on a meaningful alpha change;
     /// clears the layer once expired.
     fn tick_toast(&mut self, now: Instant) -> bool {
+        // A hovered play hint pauses the fade: keep its toast pinned in the full-opacity hold
+        // window, so the button never vanishes out from under the pointer.
+        if self.play_hint.is_some_and(|ph| ph.hovered) {
+            if let Some(t) = self.toast.as_mut() {
+                t.started = now;
+            }
+        }
         let Some(alpha) = self.toast.as_ref().and_then(|t| t.alpha(now)) else {
+            self.play_hint = None;
             if self.toast.take().is_some() {
                 if let Some(a) = self.renderer.as_mut() {
                     a.set_toast(None, 0);
@@ -4185,6 +4356,114 @@ impl App {
         if let Some((name, path, count)) = self.chip_sig.clone() {
             self.push_chip(&name, &path, count);
         }
+    }
+
+    /// Whether the empty-state open panel is the active overlay, so its buttons are
+    /// hit-testable: the panel is built, no photo is loaded, and no scan is pending/streaming
+    /// (which would suppress it). Mirrors [`show_open_hint`]'s show condition.
+    ///
+    /// [`show_open_hint`]: App::show_open_hint
+    fn open_hint_active(&self) -> bool {
+        self.open_panel.is_some()
+            && self.source.is_empty()
+            && self.dir_scan.is_none()
+            && self.pending_launch.is_none()
+    }
+
+    /// The on-screen `[x0, y0, x1, y1]` rect (physical px) of an open-panel button, derived
+    /// from the live window size — the renderer centers the message layer, so this stays
+    /// correct across resizes and DPI changes without re-storing absolute coordinates. `None`
+    /// unless the open panel is the active overlay.
+    fn open_button_rect(&self, which: OpenButton) -> Option<[f32; 4]> {
+        if !self.open_hint_active() {
+            return None;
+        }
+        let panel = self.open_panel?;
+        let sz = self.window.as_ref()?.inner_size();
+        // Same centering the renderer applies (see `center_quad_vertices`): clamped to ≥ 0.
+        let x0 = ((sz.width as f32 - panel.w as f32) * 0.5).max(0.0);
+        let y0 = ((sz.height as f32 - panel.h as f32) * 0.5).max(0.0);
+        let [bx, by, bw, bh] = match which {
+            OpenButton::File => panel.file,
+            OpenButton::Folder => panel.folder,
+        }
+        .map(|v| v as f32);
+        Some([x0 + bx, y0 + by, x0 + bx + bw, y0 + by + bh])
+    }
+
+    /// Which open-panel button (if any) the pointer is currently over.
+    fn open_hovered_button(&self) -> Option<OpenButton> {
+        let [x, y] = self.last_cursor?;
+        [OpenButton::File, OpenButton::Folder]
+            .into_iter()
+            .find(|&b| {
+                self.open_button_rect(b)
+                    .is_some_and(|r| point_in_rect(r, x, y))
+            })
+    }
+
+    /// Update the open panel's hover "lit" state from the latest cursor position, re-rendering
+    /// the panel only when hover **changes** (one CPU composite on the enter/leave transition,
+    /// never per move). Mirrors [`update_chip_hover`] for the empty-state call to action.
+    ///
+    /// [`update_chip_hover`]: App::update_chip_hover
+    fn update_open_hover(&mut self) {
+        if !self.open_hint_active() {
+            return;
+        }
+        let hovered = self.open_hovered_button();
+        if hovered == self.open_hover {
+            return;
+        }
+        self.open_hover = hovered;
+        // Rebuild the panel with the new lit button (content is otherwise unchanged), re-upload
+        // it, and present so the change shows immediately.
+        self.show_open_hint();
+        self.draw();
+    }
+
+    /// The interactive play hint's on-screen `[x0, y0, x1, y1]` rect (physical px), derived from
+    /// the live window size — the toast is bottom-center with a fixed margin, so this matches
+    /// the renderer's placement and survives resizes. `None` unless the play hint is the current
+    /// toast and still on screen.
+    fn play_hint_rect(&self) -> Option<[f32; 4]> {
+        let ph = self.play_hint?;
+        self.toast.as_ref()?; // only while its toast is actually up
+        let sz = self.window.as_ref()?.inner_size();
+        let margin = (64.0 * self.scale_factor).round().max(8.0);
+        let x0 = ((sz.width as f32 - ph.w as f32) * 0.5).max(0.0);
+        let y1 = sz.height as f32 - margin;
+        let y0 = y1 - ph.h as f32;
+        Some([x0, y0, x0 + ph.w as f32, y1])
+    }
+
+    /// Whether the pointer is over the interactive play hint.
+    fn play_hint_hit(&self) -> bool {
+        match (self.last_cursor, self.play_hint_rect()) {
+            (Some([x, y]), Some(rect)) => point_in_rect(rect, x, y),
+            _ => false,
+        }
+    }
+
+    /// Update the play hint's hover state from the cursor. On an enter/leave transition it
+    /// re-renders the button lit/unlit (the fade itself is paused while hovered — see
+    /// [`tick_toast`]). Cheap: one CPU composite per transition, never per move.
+    ///
+    /// [`tick_toast`]: App::tick_toast
+    fn update_play_hint_hover(&mut self) {
+        let hovered = self.play_hint_hit();
+        let Some(ph) = self.play_hint else {
+            return;
+        };
+        if ph.hovered == hovered {
+            return;
+        }
+        // Re-render at the new state (size is unchanged; keep the recorded w/h). Rebuilding
+        // resets the fade clock, which is what we want: hovering holds it at full, and leaving
+        // gives it a fresh hold before it fades.
+        self.build_play_hint(ph.icon, hovered);
+        self.play_hint = Some(PlayHint { hovered, ..ph });
+        self.draw();
     }
 
     /// Render one frame.
@@ -4499,7 +4778,9 @@ impl App {
     /// a closed hand while dragging, an open hand when the image is pannable, the default arrow
     /// otherwise.
     fn refresh_cursor(&mut self) {
-        let over_button = self.last_cursor.is_some_and(|[x, y]| self.chip_hit(x, y));
+        let over_button = self.last_cursor.is_some_and(|[x, y]| self.chip_hit(x, y))
+            || self.open_hovered_button().is_some()
+            || self.play_hint_hit();
         let kind = if self.dragging {
             contract::CursorKind::Grabbing
         } else if over_button {
@@ -4995,13 +5276,27 @@ impl App {
         }
         if self.has_motion(item) {
             self.anim_hint_shown_for = Some(item);
-            // A Live Photo gets the livephoto mark; an animated still gets the play ▶.
+            // A Live Photo gets the livephoto mark; an animated still gets the play ▶. Styled
+            // like the open-screen buttons: `▶ Play  P` with the shortcut dimmed at the right —
+            // and it's a real button: hovering holds it open, a click plays (see the click /
+            // hover wiring). Starts unhovered.
             let icon = if self.is_live_photo(item) {
                 icon::assets::LIVE_PHOTO
             } else {
                 icon::assets::PLAY
             };
-            self.show_toast_icon("Press P to play", Some(icon));
+            if let Some((w, h)) = self.build_play_hint(icon, false) {
+                self.play_hint = Some(PlayHint {
+                    w,
+                    h,
+                    icon,
+                    hovered: false,
+                });
+            }
+            self.draw();
+            // If the pointer already happens to sit over it, light it up (and hold it) at once.
+            self.update_play_hint_hover();
+            self.refresh_cursor();
         }
     }
 
@@ -5017,6 +5312,17 @@ impl App {
         self.framestep_last = None;
         self.live_revert_at = None;
         self.live_audio = None; // dropping the player stops it
+                                // Leaving the animated still: drop the interactive play hint AND its toast **immediately**
+                                // (not a fade), so a stale/irrelevant button never lingers over the next photo — which
+                                // could even be a non-animated one. Only the play hint owns the toast here; a passive
+                                // status toast (Copy/Save/…) has `play_hint == None` and is left to fade normally.
+        if self.play_hint.take().is_some() {
+            self.toast = None;
+            if let Some(a) = self.renderer.as_mut() {
+                a.set_toast(None, 0);
+            }
+            self.draw();
+        }
     }
 
     /// Start the Live Photo's audio from the top (its `.mov` track), if `item` is a Live
@@ -5045,7 +5351,8 @@ impl App {
         self.apply_menu_state();
         if muted {
             self.live_audio = None; // silence any playing clip now
-            self.show_toast("Live Photo audio muted");
+                                    // An icon-only pill (like the rotate toasts): a slashed speaker = now muted.
+            self.show_toast_icon("", Some(icon::assets::VOLUME_SLASH));
         } else {
             // Unmuting mid-playback: resume audio at the motion's current position.
             if let (Some(pb), Some(item)) = (self.playback.as_ref(), self.displayed_item) {
@@ -5057,7 +5364,8 @@ impl App {
                         .and_then(|p| LiveAudio::play(&p, secs));
                 }
             }
-            self.show_toast("Live Photo audio on");
+            // A speaker with waves = now audible.
+            self.show_toast_icon("", Some(icon::assets::VOLUME));
         }
     }
 }
@@ -5230,12 +5538,13 @@ impl ApplicationHandler for App {
             self.last_edr_headroom = headroom;
         }
 
-        // Empty launch (no folder/file given): show a blank background with the
-        // centered "Press O to open…" hint instead of an image.
+        // Empty launch (no folder/file given): show a blank background with the centered
+        // Open File / Open Folder call to action instead of an image.
         if self.playlist.current().is_none() {
             renderer.clear_image();
-            if let Some((bitmap, w, h)) = self.open_hint_panel() {
+            if let Some((bitmap, w, h, file, folder)) = self.open_panel_bitmap() {
                 renderer.set_message(Some((&bitmap, w, h)));
+                self.open_panel = Some(OpenPanel { w, h, file, folder });
             }
         }
 
@@ -5468,13 +5777,18 @@ impl ApplicationHandler for App {
                 }
                 self.last_cursor = Some(p);
                 self.update_chip_hover();
+                self.update_open_hover();
+                self.update_play_hint_hover();
                 self.refresh_cursor();
             }
 
-            // Pointer left the window: drop any Cancel Scan hover so the button doesn't stay lit.
+            // Pointer left the window: drop any Cancel Scan / open-button / play-hint hover so
+            // they don't stay lit.
             WindowEvent::CursorLeft { .. } => {
                 self.last_cursor = None;
                 self.update_chip_hover();
+                self.update_open_hover();
+                self.update_play_hint_hover();
             }
 
             // Left button toggles drag-to-pan (the cross-platform pan gesture).
@@ -5484,9 +5798,20 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 let pressed = state == ElementState::Pressed;
-                // A press on the scan-count chip cancels the scan (the one interactive
-                // on-image control) — and must NOT also start a drag-to-pan.
-                if pressed
+                // A press on an interactive on-image control (an open-panel button, the play
+                // hint, or the scan-count chip's Cancel button) fires that control and must NOT
+                // also start a drag-to-pan.
+                let open_hit = pressed.then(|| self.open_hovered_button()).flatten();
+                if let Some(button) = open_hit {
+                    match button {
+                        OpenButton::File => self.dispatch_action(Action::OpenFile),
+                        OpenButton::Folder => self.dispatch_action(Action::OpenFolder),
+                    }
+                } else if pressed && self.play_hint_hit() {
+                    // Click the play hint → play, and dismiss it (it's been used).
+                    self.play_hint = None;
+                    self.dispatch_action(Action::PlayPause);
+                } else if pressed
                     && self
                         .last_cursor
                         .is_some_and(|[cx, cy]| self.chip_hit(cx, cy))

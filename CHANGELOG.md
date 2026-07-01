@@ -29,8 +29,24 @@ with any pre-release suffix carried only by the tag.
   it finishes. The Live Photo's **audio** plays with the motion; mute it with **M** (or Image ▸
   Mute Live Photo Audio — the choice is remembered). The detailed info panel shows it's a Live
   Photo (with frame count / rate / duration), and the basic info line marks it **· Live**.
+- **The open screen is now interactive.** With no photo loaded, PhotoBlaze shows two clickable
+  buttons — **Open File** and **Open Folder** — each with its keyboard shortcut shown dimmed and
+  right-aligned, menu style (`O` and, on macOS, `⇧ O`), reflecting anything you've remapped in
+  Settings ▸ Shortcuts. They light up on hover and open the picker on click; the keyboard
+  shortcuts still work exactly as before. (Replaces the old "Press O to open…" text hint.)
 
 ### Changed
+- **The keyboard-help overlay (`?`) has been redesigned.** It's now grouped into sections
+  (Browse, View & Zoom, Animation, Files & App) with each command's shortcut shown dimmed and
+  right-aligned, menu style, at a more compact size that fits on screen. On macOS the shortcuts
+  use the real Mac symbols (⌘, ⇧, ⌥, ⌫) matching the menu bar — so **Move to Trash** shows ⌘⌫
+  and **Copy** shows ⌘C, not the legacy keys. It also now lists shortcuts that were missing:
+  Play/pause and frame-step, Mute Live Photo audio, Copy, Copy path, Save rotation, Undo, Move
+  to Trash, and Delete permanently. All reflect any bindings you've remapped in Settings.
+- The animation / Live Photo **"Play" hint** now matches the open-screen buttons — a play icon,
+  "Play", and the dimmed **P** shortcut — instead of the old "Press P to play" text, and it's a
+  **real button**: hovering it holds it open (pausing the fade) and lights it up, and clicking it
+  plays, just like pressing **P**.
 - The **Image** menu now shows each command's keyboard shortcut — Next, Previous, Random,
   Rotate, Play/Pause, and frame-step — reflecting any shortcut you've remapped in
   Settings ▸ Shortcuts. (On macOS these are single, unmodified keys like Space or R that a

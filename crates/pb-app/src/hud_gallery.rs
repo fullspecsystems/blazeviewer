@@ -13,7 +13,7 @@
 //! crisp. The PNG write is an explicit dev command, so the no-trace guarantee (no disk writes
 //! on the *view* path) is untouched.
 
-use crate::hud::{self, Hud, Row};
+use crate::hud::{self, ButtonSpec, Hud, Row};
 use crate::icon::assets;
 use resvg::tiny_skia;
 use std::path::Path;
@@ -151,8 +151,10 @@ fn build_tiles(hud: &Hud) -> Vec<Tile> {
     if let Some(b) = hud.render_table(&exif_rows(), sp(15.0), info_pad, bg) {
         tiles.push(tile(hud, "EXIF panel (Shift+I)", b));
     }
-    if let Some(b) = hud.render_table(&help_rows(), sp(16.0), info_pad, hud::BG) {
-        tiles.push(tile(hud, "Help overlay (?)", b));
+    // Keyboard-help overlay: sectioned, description-left / shortcut-right (dimmed). `max_h`
+    // caps a column so a long list packs into multiple columns.
+    if let Some(b) = hud.render_shortcuts(&help_sections(), sp(15.0), hud::BG, s(360.0)) {
+        tiles.push(tile(hud, "Keyboard help (?)", b));
     }
 
     // Toasts: icon + text, status text, and an icon-only square pill.
@@ -172,35 +174,95 @@ fn build_tiles(hud: &Hud) -> Vec<Tile> {
     {
         tiles.push(tile(hud, "Toast \u{2014} icon only (rotate)", b));
     }
+    if let Some(b) = hud.render_panel_icon("", sp(20.0), toast_pad, Some(assets::VOLUME_SLASH), bg)
+    {
+        tiles.push(tile(hud, "Toast \u{2014} audio muted", b));
+    }
+    if let Some(b) = hud.render_panel_icon("", sp(20.0), toast_pad, Some(assets::VOLUME), bg) {
+        tiles.push(tile(hud, "Toast \u{2014} audio on", b));
+    }
+    // The animation "play" hint — the toast styled like the open-screen buttons (icon + label +
+    // dimmed shortcut), shown when landing on an animated still / Live Photo.
+    let play_hint = ButtonSpec {
+        label: "Play",
+        icon: Some(assets::PLAY),
+        shortcut: Some("P"),
+        shortcut_semibold: true,
+        min_w: 0,
+    };
+    if let Some(b) = hud.render_button(&play_hint, sp(20.0), bg, false) {
+        tiles.push(tile(hud, "Play hint (animation)", b));
+    }
 
     // Buttons (the reusable primitive) across a few icon/label variants + a text-only one.
-    for (label, icon, cap) in [
+    let icon_button = |label, icon| ButtonSpec {
+        label,
+        icon: Some(icon),
+        shortcut: None,
+        shortcut_semibold: false,
+        min_w: 0,
+    };
+    for (spec, cap) in [
         (
-            "Cancel Scan",
-            Some(assets::STOP),
+            icon_button("Cancel Scan", assets::STOP),
             "Button \u{2014} Cancel Scan",
         ),
-        ("Copy", Some(assets::CLIPBOARD), "Button \u{2014} Copy"),
-        ("Delete", Some(assets::TRASH), "Button \u{2014} Delete"),
         (
-            "Save Rotation",
-            Some(assets::FLOPPY),
+            icon_button("Copy", assets::CLIPBOARD),
+            "Button \u{2014} Copy",
+        ),
+        (
+            icon_button("Delete", assets::TRASH),
+            "Button \u{2014} Delete",
+        ),
+        (
+            icon_button("Save Rotation", assets::FLOPPY),
             "Button \u{2014} Save",
         ),
-        ("OK", None, "Button \u{2014} text only"),
+        (
+            ButtonSpec {
+                label: "OK",
+                ..Default::default()
+            },
+            "Button \u{2014} text only",
+        ),
     ] {
-        if let Some(b) = hud.render_button(label, icon, btn_px, bg, false) {
+        if let Some(b) = hud.render_button(&spec, btn_px, bg, false) {
             tiles.push(tile(hud, cap, b));
         }
     }
 
     // Hover state — the same button at rest and lit (fill + border lifted), side by side, to
     // tune the BUTTON_*_HOVER alphas against the resting look.
-    if let Some(b) = hud.render_button("Cancel Scan", Some(assets::STOP), btn_px, bg, false) {
+    let cancel = icon_button("Cancel Scan", assets::STOP);
+    if let Some(b) = hud.render_button(&cancel, btn_px, bg, false) {
         tiles.push(tile(hud, "Button \u{2014} rest", b));
     }
-    if let Some(b) = hud.render_button("Cancel Scan", Some(assets::STOP), btn_px, bg, true) {
+    if let Some(b) = hud.render_button(&cancel, btn_px, bg, true) {
         tiles.push(tile(hud, "Button \u{2014} hover (lit)", b));
+    }
+
+    // The open-screen call to action — two stacked buttons, each with its shortcut dimmed and
+    // right-aligned (menu-accelerator style). Shown with the shortcut hint at Regular vs
+    // Semibold weight (to compare), plus the File-hover lit state.
+    for (semibold, file_hover, cap) in [
+        (false, false, "Open screen \u{2014} shortcut Regular"),
+        (true, false, "Open screen \u{2014} shortcut Semibold"),
+        (true, true, "Open screen \u{2014} Semibold, File hover"),
+    ] {
+        if let Some((r, w, h, _, _)) = hud.render_open_panel(
+            "Open File",
+            "O",
+            "Open Folder",
+            "\u{21e7}\u{2009}O",
+            sp(15.0),
+            bg,
+            semibold,
+            file_hover,
+            false,
+        ) {
+            tiles.push(tile(hud, cap, (r, w, h)));
+        }
     }
 
     // Loading pie at a few fills.
@@ -213,14 +275,15 @@ fn build_tiles(hud: &Hud) -> Vec<Tile> {
         tiles.push(tile(hud, cap, b));
     }
 
-    // Empty-state hint.
+    // Centered multi-line text panel (the general primitive; the live empty state is now the
+    // "Open screen" buttons above, but this stays available for any centered message).
     if let Some(b) = hud.render_centered(
         &["Press O to open a file", "or Shift+O to open a folder"],
         sp(20.0),
         s(10.0) as u32,
         bg,
     ) {
-        tiles.push(tile(hud, "Empty-state hint", b));
+        tiles.push(tile(hud, "Centered text panel", b));
     }
 
     tiles
@@ -336,17 +399,45 @@ fn exif_rows() -> Vec<Row> {
     ]
 }
 
-fn help_rows() -> Vec<Row> {
+/// Sample sections for the keyboard-help overlay tile (static text — the live app sources these
+/// from the keymap; here they use macOS symbols to show the styling).
+fn help_sections() -> Vec<hud::ShortcutSection> {
+    let sec = |title: &str, rows: &[(&str, &str)]| hud::ShortcutSection {
+        title: title.to_string(),
+        rows: rows
+            .iter()
+            .map(|(d, s)| (d.to_string(), s.to_string()))
+            .collect(),
+    };
     vec![
-        Row::Span {
-            text: "Keyboard".into(),
-            bold: true,
-        },
-        pair("Space / \u{2192}", "Next photo"),
-        pair("Backspace / \u{2190}", "Previous photo"),
-        pair("Enter", "Random photo"),
-        pair("i", "Info overlay"),
-        pair("Esc", "Quit"),
+        sec(
+            "Browse",
+            &[
+                ("Next photo", "Space"),
+                ("Previous photo", "\u{232b}"),
+                ("Random photo", "Enter"),
+                ("Slideshow", "S"),
+            ],
+        ),
+        sec(
+            "View & Zoom",
+            &[
+                ("Fit to screen", "8"),
+                ("Zoom out / in", "- / ="),
+                ("Pan", "\u{2190} \u{2191} \u{2193} \u{2192}"),
+                ("Rotate right / left", "R / \u{21e7}R"),
+            ],
+        ),
+        sec(
+            "Files & App",
+            &[
+                ("Open file", "\u{2318}\u{2009}O"),
+                ("Copy image", "\u{2318}\u{2009}C"),
+                ("Move to Trash", "\u{2318}\u{2009}\u{232b}"),
+                ("Settings", "\u{2318}\u{2009},"),
+                ("Quit", "\u{2318}\u{2009}Q"),
+            ],
+        ),
     ]
 }
 
