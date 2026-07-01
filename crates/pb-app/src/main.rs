@@ -680,10 +680,10 @@ impl App {
     ) {
         match result {
             Ok(r) if !r.source.is_empty() => {
-                self.core.password_archive = None;
+                // Close the loading/password dialog (host-side, like the scan's Done), then hand
+                // the resolved playlist to the core to install + forget the pending password.
                 self.close_dialog();
-                self.core
-                    .rebuild_playlist(r.source, r.root, r.scan_root, r.recursive, r.start);
+                self.core.handle(contract::CoreEvent::ArchiveResolved(r));
             }
             Ok(_) => self.fail_archive_open(&archive::ArchiveOpenError::Empty),
             Err(archive::ArchiveOpenError::PasswordRequired) => {

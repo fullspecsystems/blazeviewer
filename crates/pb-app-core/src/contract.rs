@@ -255,6 +255,11 @@ pub enum CoreEvent {
     /// The streaming directory scan finished (NS0 5.6 Step 3): the core resumes normal prefetch
     /// and — if nothing was ever shown and the deck is empty — restores the "Press O to open" hint.
     ScanDone,
+    /// A background archive open resolved to a non-empty playlist (NS0 5.6 Step 3): the core
+    /// installs it (`rebuild_playlist`) and forgets any pending password. The host owns the worker
+    /// thread + generation check + closing the progress dialog; the *failure* cases (empty /
+    /// password-required / cancelled / error) stay host-side (they drive native dialogs).
+    ArchiveResolved(crate::scan::Resolved),
     /// A dialog was cancelled / dismissed.
     CancelDialog,
     // NS-later (payload types still in the shell or other crates):

@@ -404,6 +404,8 @@ impl AppCore {
             // generation check; the core applies the result to the playlist).
             CoreEvent::ScanBatch(resolved) => self.apply_scan_batch(resolved),
             CoreEvent::ScanDone => self.finish_scan(),
+            // A background archive open resolved to a non-empty playlist — install it.
+            CoreEvent::ArchiveResolved(resolved) => self.apply_archive(resolved),
             // Wired in later C2 increments / 5.6 (they touch the still-shell scroll-delta / GPU
             // surface / flow paths). Ignored for now so a host that sends them early is a no-op.
             CoreEvent::Redraw
@@ -540,6 +542,21 @@ impl AppCore {
             self.show_open_hint();
         }
         self.request_prefetch();
+    }
+
+    /// Install a resolved archive playlist ([`CoreEvent::ArchiveResolved`], NS0 5.6 Step 3): the
+    /// open succeeded with a non-empty deck, so rebuild the playlist onto it and forget any pending
+    /// password. The host closes the loading/password dialog (like the scan's Done); the failure
+    /// cases (empty / password-required / cancelled / error) stay host-side.
+    fn apply_archive(&mut self, resolved: crate::scan::Resolved) {
+        self.password_archive = None;
+        self.rebuild_playlist(
+            resolved.source,
+            resolved.root,
+            resolved.scan_root,
+            resolved.recursive,
+            resolved.start,
+        );
     }
 
     /// The per-tick core loop (NS0 5.5 Phase C2): absorb finished decodes + uploads, run held
