@@ -5263,7 +5263,8 @@ impl App {
         self.refresh_view_menu_checks();
         if muted {
             self.live_audio = None; // silence any playing clip now
-            self.show_toast("Live Photo audio muted", event_loop);
+                                    // An icon-only pill (like the rotate toasts): a slashed speaker = now muted.
+            self.show_toast_icon("", Some(icon::assets::VOLUME_SLASH), event_loop);
         } else {
             // Unmuting mid-playback: resume audio at the motion's current position.
             if let (Some(pb), Some(item)) = (self.playback.as_ref(), self.displayed_item) {
@@ -5275,7 +5276,8 @@ impl App {
                         .and_then(|p| LiveAudio::play(&p, secs));
                 }
             }
-            self.show_toast("Live Photo audio on", event_loop);
+            // A speaker with waves = now audible.
+            self.show_toast_icon("", Some(icon::assets::VOLUME), event_loop);
         }
     }
 }

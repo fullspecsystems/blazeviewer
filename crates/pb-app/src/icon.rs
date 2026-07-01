@@ -37,6 +37,12 @@ pub mod assets {
     /// still (#38). Derived from the SF Symbols `livephoto` glyph as a placeholder; to be
     /// replaced with an own-brand variant (owner).
     pub const LIVE_PHOTO: &str = include_str!("../icons/livephoto.svg");
+    /// Speaker with sound waves — the "Live Photo audio on" toast (unmute). Mirrors the Mac
+    /// keyboard's volume key (#38).
+    pub const VOLUME: &str = include_str!("../icons/volume.svg");
+    /// Speaker with a slash — the "Live Photo audio muted" toast (mute). Mirrors the Mac
+    /// keyboard's mute key (#38).
+    pub const VOLUME_SLASH: &str = include_str!("../icons/volume-slash.svg");
     // Status icons for the dialogs (lock/warning/trash) now live in the `pb-ui` icon
     // system (white-rasterized + tinted), not here — this set is only the HUD toasts.
 }

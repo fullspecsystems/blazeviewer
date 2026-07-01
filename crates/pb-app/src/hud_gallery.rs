@@ -174,6 +174,13 @@ fn build_tiles(hud: &Hud) -> Vec<Tile> {
     {
         tiles.push(tile(hud, "Toast \u{2014} icon only (rotate)", b));
     }
+    if let Some(b) = hud.render_panel_icon("", sp(20.0), toast_pad, Some(assets::VOLUME_SLASH), bg)
+    {
+        tiles.push(tile(hud, "Toast \u{2014} audio muted", b));
+    }
+    if let Some(b) = hud.render_panel_icon("", sp(20.0), toast_pad, Some(assets::VOLUME), bg) {
+        tiles.push(tile(hud, "Toast \u{2014} audio on", b));
+    }
     // The animation "play" hint — the toast styled like the open-screen buttons (icon + label +
     // dimmed shortcut), shown when landing on an animated still / Live Photo.
     let play_hint = ButtonSpec {
