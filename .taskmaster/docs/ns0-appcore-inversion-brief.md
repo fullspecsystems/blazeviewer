@@ -8,9 +8,11 @@
 
 ## STATUS — for the fresh session (updated 2026-06-30, branch `swiftui`)
 
-All work below is **committed, green (workspace suite 376 tests, clippy/fmt clean), and
-manually smoke-verified** by the owner. `main` (Live Photo support) is merged in. Nothing is
-half-done. Resume at **step 4** below.
+All work below is **committed, green (workspace suite 376 tests, clippy/fmt clean)**. Steps
+through **step 3 are owner-smoke-verified**; the step-4 leaf conversions (4a menu / 4b clipboard
+/ 4c rfd) are green + committed but **shell-side, so owner-smoke is pending** (see the smoke
+list in step 4). `main` (Live Photo support) is merged in. Nothing is half-done. Resume at
+**step 4 dialog + deferred window ops** below (do them with owner smoke — don't stack ahead).
 
 ### Landed — inversion seams + de-thread (the `event_loop` half)
 - **Ckpt 1** (`3d7c42d`): `CoreEffect` queue + `drain_effects`; `begin_exit` → `Quit`.
@@ -70,21 +72,32 @@ imperceptible.
 above). The `Renderer` trait now carries all 18 methods `App` uses; the field is
 `Option<Box<dyn Renderer>>`. `present` p50 0.177 ms / `drain` p95 0.135 ms — flat vs step 2.
 
-**Step 4 — remaining winit/native touches → effects/shell.** Now that `event_loop` and the
-renderer are handled, sever the rest so orchestration is winit/muda/egui/rfd-free:
-- **menu (muda):** `apply_menu_state` already computes a pure `MenuState`; emit
-  `CoreEffect::SetMenuState(state)` and move the muda-item application (the `changed!` diff +
-  the `self.view_checks`/`save_rotation_item`/etc. handles) into the shell's drain. Keep the
-  change-detection so it's not pushed every tick (no per-tick alloc).
+**Step 4 — remaining winit/native touches → effects/shell.** Sever the rest so orchestration
+is winit/muda/egui/rfd-free. The three low-risk "leaf" conversions are **✅ DONE** (each its
+own commit, suite green, clippy/fmt clean — but shell-side, so **owner smoke pending**):
+- **✅ 4a — menu (muda)** (`5f57544`): `apply_menu_state` splits into the core-side derive+gate
+  (emits `CoreEffect::SetMenuState` only when the state changed vs the cache — still no per-tick
+  push) and the shell-side `apply_menu_to_native` (the muda-handle application, run from the
+  drain). Per-field diffing dropped (the effect only fires on a real change, so applying all
+  idempotent setters then is free). Every call site is drained the same turn → no menu lag.
+- **✅ 4b — clipboard** (`6be86dc`): added `contract::ClipboardPayload { Image{rgba,w,h,file} |
+  Text }` + a real `CoreEffect::WriteClipboard`. `copy_image`/`copy_path` do only the pure prep
+  and push the effect; the platform write (Win32 CF_DIBV5/CF_HDROP, arboard text) runs in the
+  shell-side `write_clipboard` from the drain. **Kept result-driven, not optimistic** — on
+  non-Windows `clipboard::set_image` returns `Err`, so the egui-Mac beta legitimately toasts
+  "Copy failed"; an optimistic pill would lie there. Same-turn drain + synchronous `show_toast`
+  = byte-identical toasts. *NS-later:* post-split, the write result returns as a `CoreEvent`.
+- **✅ 4c — rfd panels** (`9bd247a`): `open_picker` computes `start_dir` (core) and emits
+  `CoreEffect::OpenFilePanel/OpenFolderPanel { start_dir }`; the shell runs the modal panel in
+  the drain and re-enters via `finish_picker(Option<LaunchInput>)`. **Trap preserved exactly:**
+  `finish_picker` sets `held.clear()` + `esc_guard_until` **first, unconditionally**, then opens
+  — cancelling the picker still can't quit the app.
+
+Remaining (behavior-sensitive — **do with owner smoke**, don't stack ahead of it):
 - **dialog:** shell owns `DialogWindow` fully; `dialog_event` results come back as
-  `CoreEvent`s (`DialogResult`/`PasswordSubmitted`/`SettingsSubmitted`/`KeymapSubmitted`).
-- **clipboard (4 sites, `copy_image`/`copy_path`):** → `WriteClipboard(payload)` effect
-  (add the variant + a shell-neutral `ClipboardPayload{ Image{rgba,w,h} | Path }`). **Trap:**
-  the success/failure toast currently reads the write result — either make it optimistic or
-  have the shell report back a `CoreEvent`.
-- **rfd panels (2):** → `OpenFilePanel`/`OpenFolderPanel` effects; result returns as
-  `CoreEvent::Open(LaunchInput)`. **Trap:** preserve `open_picker`'s `held.clear()` +
-  `esc_guard_until` (else cancelling the picker quits — `dialog.rs`/`open_picker` note).
+  `CoreEvent`s (`DialogResult`/`PasswordSubmitted`/`SettingsSubmitted`/`KeymapSubmitted`). Opens
+  are already deferred (ckpt 2 `pending_dialog`/`open_pending_dialog`); this is the *results*
+  half — the biggest, highest-choreography piece. (Two-window egui, trap §6.6.)
 - **deferred window ops:** `set_visible` (begin_exit — must hide **before** `clear_session_state`,
   so keep it inline or handle ordering) and `set_fullscreen` (swapchain/HDR-sensitive — smoke).
 
