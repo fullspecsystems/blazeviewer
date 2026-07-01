@@ -16,6 +16,7 @@
 use muda::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
 use crate::action::Action;
+use crate::keymap::Keymap;
 
 /// Stable string ids for the menu items. Kept in one place so the builder and the
 /// dispatcher ([`action_for`]) can never drift apart.
@@ -213,6 +214,33 @@ fn check_item(id: &str, label: &str) -> CheckMenuItem {
     CheckMenuItem::with_id(id, label, true, false, None)
 }
 
+/// The user's **current** shortcut for `action` as a display string (e.g. `"Space"`,
+/// `"Shift+R"`, `"P"`), or empty if the action is unbound. Sourced live from the keymap so
+/// the menu reflects **customized** bindings (`KeyChord`'s `Display` — the same text the
+/// Settings ▸ Shortcuts editor shows), never a hardcoded guess. The first binding wins when
+/// an action has two (menus show one accelerator).
+fn shortcut_hint(keymap: &Keymap, action: Action) -> String {
+    keymap
+        .bindings_for(action)
+        .first()
+        .map(|c| c.to_string())
+        .unwrap_or_default()
+}
+
+/// A menu label with the action's current shortcut appended as a `\t` hint
+/// (`"Next\tSpace"`) — Windows right-aligns it in the accelerator column; macOS shows it as
+/// hint text (these are bare keymap keys, so we can't register a real key-equivalent without
+/// it hijacking the key from the keymap — see the module docs). No hint if the action is
+/// unbound, so an un-shortcutted item just reads as its plain label.
+fn labeled(keymap: &Keymap, base: &str, action: Action) -> String {
+    let hint = shortcut_hint(keymap, action);
+    if hint.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}\t{hint}")
+    }
+}
+
 /// Handles to the View-menu checkable items, returned from [`build_menu`] so the app
 /// can mirror its live state onto them (see `App::refresh_view_menu_checks`). Scale
 /// mode is a one-of-three group (exactly one checked); `recursive`/`fullscreen` are
@@ -269,7 +297,7 @@ pub struct BuiltMenu {
 /// **View checks** (scale mode / recursive / fullscreen — see
 /// `App::refresh_view_menu_checks`).
 #[cfg(not(target_os = "macos"))]
-pub fn build_menu() -> BuiltMenu {
+pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
     let menu = Menu::new();
     let sep = || PredefinedMenuItem::separator();
 
@@ -338,17 +366,35 @@ pub fn build_menu() -> BuiltMenu {
 
     let image = Submenu::new("&Image", true);
     let _ = image.append_items(&[
-        &item(ids::NEXT, "Next\tSpace"),
-        &item(ids::PREVIOUS, "Previous\tBackspace"),
-        &item(ids::RANDOM, "Random\tEnter"),
-        &item(ids::RANDOM_PREV, "Previous Random\tShift+Enter"),
+        &item(ids::NEXT, &labeled(keymap, "Next", Action::Next)),
+        &item(ids::PREVIOUS, &labeled(keymap, "Previous", Action::Prev)),
+        &item(ids::RANDOM, &labeled(keymap, "Random", Action::Random)),
+        &item(
+            ids::RANDOM_PREV,
+            &labeled(keymap, "Previous Random", Action::RandomPrev),
+        ),
         &sep(),
-        &item(ids::ROTATE_RIGHT, "Rotate Right\tR"),
-        &item(ids::ROTATE_LEFT, "Rotate Left\tShift+R"),
+        &item(
+            ids::ROTATE_RIGHT,
+            &labeled(keymap, "Rotate Right", Action::RotateCw),
+        ),
+        &item(
+            ids::ROTATE_LEFT,
+            &labeled(keymap, "Rotate Left", Action::RotateCcw),
+        ),
         &sep(),
-        &item(ids::PLAY_PAUSE, "Play/Pause Animation\tP"),
-        &item(ids::FRAME_NEXT, "Next Frame\t."),
-        &item(ids::FRAME_PREV, "Previous Frame\t,"),
+        &item(
+            ids::PLAY_PAUSE,
+            &labeled(keymap, "Play/Pause Animation", Action::PlayPause),
+        ),
+        &item(
+            ids::FRAME_NEXT,
+            &labeled(keymap, "Next Frame", Action::FrameNext),
+        ),
+        &item(
+            ids::FRAME_PREV,
+            &labeled(keymap, "Previous Frame", Action::FramePrev),
+        ),
     ]);
 
     let help = Submenu::new("&Help", true);
@@ -389,7 +435,7 @@ pub fn build_menu() -> BuiltMenu {
 /// double-fire. Bare-key fast-nav (Space / R / 8-9-0 / …) and the fullscreen toggles
 /// (F / ⌥⏎ / F11) stay keymap-owned, so those items carry no accelerator.
 #[cfg(target_os = "macos")]
-pub fn build_menu() -> BuiltMenu {
+pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
     use muda::accelerator::{Accelerator, Code, Modifiers};
     /// The ⌘ (Command) key — `Modifiers::SUPER` maps to NSEventModifierFlags::Command.
     const CMD: Modifiers = Modifiers::SUPER;
@@ -522,17 +568,35 @@ pub fn build_menu() -> BuiltMenu {
 
     let image = Submenu::new("Image", true);
     let _ = image.append_items(&[
-        &item(ids::NEXT, "Next"),
-        &item(ids::PREVIOUS, "Previous"),
-        &item(ids::RANDOM, "Random"),
-        &item(ids::RANDOM_PREV, "Previous Random"),
+        &item(ids::NEXT, &labeled(keymap, "Next", Action::Next)),
+        &item(ids::PREVIOUS, &labeled(keymap, "Previous", Action::Prev)),
+        &item(ids::RANDOM, &labeled(keymap, "Random", Action::Random)),
+        &item(
+            ids::RANDOM_PREV,
+            &labeled(keymap, "Previous Random", Action::RandomPrev),
+        ),
         &sep(),
-        &item(ids::ROTATE_RIGHT, "Rotate Right"),
-        &item(ids::ROTATE_LEFT, "Rotate Left"),
+        &item(
+            ids::ROTATE_RIGHT,
+            &labeled(keymap, "Rotate Right", Action::RotateCw),
+        ),
+        &item(
+            ids::ROTATE_LEFT,
+            &labeled(keymap, "Rotate Left", Action::RotateCcw),
+        ),
         &sep(),
-        &item(ids::PLAY_PAUSE, "Play/Pause Animation"),
-        &item(ids::FRAME_NEXT, "Next Frame"),
-        &item(ids::FRAME_PREV, "Previous Frame"),
+        &item(
+            ids::PLAY_PAUSE,
+            &labeled(keymap, "Play/Pause Animation", Action::PlayPause),
+        ),
+        &item(
+            ids::FRAME_NEXT,
+            &labeled(keymap, "Next Frame", Action::FrameNext),
+        ),
+        &item(
+            ids::FRAME_PREV,
+            &labeled(keymap, "Previous Frame", Action::FramePrev),
+        ),
     ]);
 
     // Standard macOS Window menu. The predefined items carry their native labels,
@@ -581,6 +645,40 @@ pub fn build_menu() -> BuiltMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keymap::KeyChord;
+
+    #[test]
+    fn image_labels_carry_the_users_keymap_shortcut() {
+        let km = Keymap::defaults();
+        // The animation actions the Image menu added surface their default chords…
+        assert_eq!(shortcut_hint(&km, Action::PlayPause), "P");
+        assert_eq!(shortcut_hint(&km, Action::FrameNext), ".");
+        assert_eq!(shortcut_hint(&km, Action::FramePrev), ",");
+        // …and a label reads "base\thint" (a bound nav action too).
+        assert_eq!(
+            labeled(&km, "Play/Pause Animation", Action::PlayPause),
+            "Play/Pause Animation\tP",
+        );
+        assert!(labeled(&km, "Next", Action::Next).starts_with("Next\t"));
+
+        // It tracks a *customized* binding, not a hardcoded guess.
+        let mut custom = Keymap::defaults();
+        let chord = KeyChord::parse("Shift+P").expect("valid chord");
+        custom.set_slot(Action::PlayPause, 0, chord);
+        assert_eq!(shortcut_hint(&custom, Action::PlayPause), chord.to_string());
+        assert_eq!(
+            labeled(&custom, "Play/Pause Animation", Action::PlayPause),
+            format!("Play/Pause Animation\t{chord}"),
+        );
+
+        // An unbound action falls back to the plain label (no trailing tab).
+        let mut cleared = Keymap::defaults();
+        cleared.clear_slot(Action::FrameNext, 0);
+        assert_eq!(
+            labeled(&cleared, "Next Frame", Action::FrameNext),
+            "Next Frame"
+        );
+    }
 
     #[test]
     fn action_for_maps_every_known_id() {
