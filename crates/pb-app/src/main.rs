@@ -151,6 +151,11 @@ const DELETE_ADVANCE_DELAY: Duration = Duration::from_millis(160);
 /// delay (`initial_delay`). ~14 fps — quick enough to scrub, slow enough to read (#37).
 const FRAME_STEP_REPEAT: Duration = Duration::from_millis(70);
 
+/// How long the user must rest on an animated still before we eagerly decode the whole
+/// sequence in the background (so a slow WebP/AVIF plays instantly on `P`). Long enough
+/// that tapping straight through a folder of animations never kicks a decode (#37).
+const EAGER_PREP_DELAY: Duration = Duration::from_millis(250);
+
 /// The frame-step direction encoded by an action: `+1` next / `-1` previous / `0`
 /// for anything else.
 fn frame_step_dir(action: Action) -> i32 {
@@ -583,6 +588,10 @@ struct App {
     targets: Vec<usize>,
     /// Per-item info panel data, cached when decoded (RAM-only; privacy task #2).
     meta_cache: HashMap<usize, PhotoMeta>,
+    /// Lazily-read EXIF for the detailed panel, memoized per item (file size + the raw
+    /// tag/value pairs) so re-showing the panel — including per-frame while an animation
+    /// plays — never re-reads/re-parses the file. RAM-only, dropped on navigate (#2).
+    exif_cache: HashMap<usize, (u64, Vec<(String, String)>)>,
     /// Prefetch window: items ahead / behind the cursor.
     ahead: usize,
     behind: usize,
@@ -792,9 +801,14 @@ struct App {
     /// When the current animation frame was shown — the deadline anchor for advancing
     /// to the next frame.
     anim_frame_shown_at: Option<Instant>,
-    /// An off-thread animation decode in flight (a `P`/frame-step kicked it), so a
-    /// large sequence never blocks the event loop. `None` when idle.
+    /// An off-thread animation decode in flight (a `P`/frame-step kicked it, or an
+    /// eager prep on dwell), so a large sequence never blocks the event loop. `None`
+    /// when idle.
     anim_decode: Option<AnimDecode>,
+    /// A whole animation decoded *ahead* of the user (eager prep on dwell) and held
+    /// ready, so pressing `P` on a slow-to-decode WebP/AVIF is instant. RAM-only,
+    /// dropped on navigate (privacy #2); at most one at a time.
+    prepared: Option<Prepared>,
     /// Monotonic id for animation-decode requests; a newer one supersedes a stale
     /// result that finally arrives after the user moved on.
     anim_gen: u64,
@@ -807,18 +821,37 @@ struct App {
     framestep_last: Option<Instant>,
 }
 
-/// An in-flight off-thread animation decode (the whole sequence for `item`), kicked
-/// by `P` / frame-step so a big GIF/WebP never stalls the event loop. The still first
-/// frame stays on screen until it lands.
+/// What to do with an animation decode once it lands.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AnimWant {
+    /// Eager prep on dwell: stash it ready (no visible change; `P` is then instant).
+    Eager,
+    /// `P` was pressed: start playing on arrival.
+    Play,
+    /// A frame-step key was pressed: land paused and step by this delta.
+    Step(i32),
+}
+
+/// An in-flight off-thread animation decode (the whole sequence for `item`), kicked by
+/// `P` / frame-step, or eagerly on dwell, so a big GIF/WebP never stalls the event
+/// loop. The still first frame stays on screen until it lands.
 struct AnimDecode {
     gen: u64,
     item: usize,
     /// The geometry epoch at kick time; a resize in between invalidates the fit, so a
     /// late result for the old size is discarded.
     epoch: u64,
-    /// Start playing on arrival (`P`) vs. land paused for frame-stepping (`,`/`.`).
-    autoplay: bool,
+    /// What to do when it lands — can be upgraded in flight (an eager prep becomes
+    /// `Play` if the user presses `P` before it finishes).
+    want: AnimWant,
     rx: std::sync::mpsc::Receiver<Result<pb_decode::Animation, DecodeError>>,
+}
+
+/// A whole animation decoded ahead of the user (eager prep) and held ready for instant
+/// playback. RAM-only; dropped on navigate.
+struct Prepared {
+    item: usize,
+    anim: pb_decode::Animation,
 }
 
 impl App {
@@ -962,10 +995,12 @@ impl App {
             playback: None,
             anim_frame_shown_at: None,
             anim_decode: None,
+            prepared: None,
             anim_gen: 0,
             anim_hint_shown_for: None,
             framestep_started: None,
             framestep_last: None,
+            exif_cache: HashMap::new(),
         }
     }
 
@@ -1281,6 +1316,7 @@ impl App {
                 // would show it un-rotated, or a later re-decode would double-rotate).
                 self.rotations.remove(&item);
                 self.meta_cache.remove(&item);
+                self.exif_cache.remove(&item); // the file's EXIF (Orientation) just changed
                 self.failed.remove(&item);
                 self.preview_resident.remove(&item);
                 self.upgrade_done.remove(&item);
@@ -1319,6 +1355,7 @@ impl App {
                     Ok(()) => {
                         self.rotations.remove(&item);
                         self.meta_cache.remove(&item);
+                        self.exif_cache.remove(&item); // EXIF Orientation reverted on disk
                         self.failed.remove(&item);
                         self.preview_resident.remove(&item);
                         self.upgrade_done.remove(&item);
@@ -1444,10 +1481,12 @@ impl App {
     /// the bare-launch empty state (a test pattern + title; `O`/drag-drop reopen).
     fn enter_empty_state(&mut self, event_loop: &ActiveEventLoop) {
         self.pending_delete = None;
+        self.stop_playback(); // the deleted photo may have been playing (#37)
         self.source = Arc::new(FsSource::new(Vec::new()));
         self.playlist = Playlist::new(0, 0);
         self.rotations.clear();
         self.meta_cache.clear();
+        self.exif_cache.clear();
         self.failed.clear();
         self.preview_resident.clear();
         self.upgrade_done.clear();
@@ -2941,6 +2980,7 @@ impl App {
         // Indices are reassigned — drop everything keyed by item index.
         self.rotations.clear();
         self.meta_cache.clear();
+        self.exif_cache.clear();
         self.failed.clear();
         self.preview_resident.clear();
         self.upgrade_done.clear();
@@ -3527,23 +3567,26 @@ impl App {
                 value: meta.codec.to_uppercase(),
             });
         }
-        // Read the encoded bytes once (RAM-only, via the source) for both the exact
-        // size and the EXIF fields — works the same for a file or an archive entry.
-        if let Ok(bytes) = self.source.bytes(item) {
+        // Animation facts (frame count, live current frame, rate, loop) — right under
+        // the codec so an animated file reads as one block.
+        rows.extend(self.animation_rows(item));
+        // File size + EXIF from the memoized read (populated by `ensure_exif_cached`
+        // before this is called; a cold miss simply omits them until the next rebuild).
+        if let Some((size, fields)) = self.exif_cache.get(&item) {
             rows.push(Row::Pair {
                 label: "File Size".to_string(),
-                value: format!("{} bytes", hud::format_thousands(bytes.len() as u64)),
+                value: format!("{} bytes", hud::format_thousands(*size)),
             });
-            for (tag, val) in read_exif_fields(&bytes) {
+            for (tag, val) in fields {
                 // Skip binary blobs that render as meaningless hex (Apple
                 // MakerNote/Padding are kilobytes long); truncate anything else
                 // that's overlong so one field can't blow out the panel width.
-                if is_exif_blob(&tag, &val) {
+                if is_exif_blob(tag, val) {
                     continue;
                 }
                 rows.push(Row::Pair {
-                    label: tag,
-                    value: truncate_exif_value(&val),
+                    label: tag.clone(),
+                    value: truncate_exif_value(val),
                 });
             }
         }
@@ -3559,6 +3602,75 @@ impl App {
                 });
             }
         }
+        rows
+    }
+
+    /// Populate the per-item EXIF cache (file size + raw tag/value pairs) if absent, so
+    /// the detailed panel — and its per-frame rebuilds while an animation plays — read
+    /// the encoded bytes at most once. RAM-only, read-only (privacy #2).
+    fn ensure_exif_cached(&mut self, item: usize) {
+        if self.exif_cache.contains_key(&item) {
+            return;
+        }
+        if let Ok(bytes) = self.source.bytes(item) {
+            let fields = read_exif_fields(&bytes);
+            self.exif_cache.insert(item, (bytes.len() as u64, fields));
+        }
+    }
+
+    /// Animation facts for the detailed panel: empty for a still. Once the sequence is
+    /// decoded (playing, or eagerly prepped) it reports the live current frame, the
+    /// average frame rate, the duration, and the loop count; before that, just a hint
+    /// that `P` will play it. The codec/format is already shown by the Codec row above.
+    fn animation_rows(&self, item: usize) -> Vec<Row> {
+        if self.current.as_ref().and_then(|m| m.animated).is_none() {
+            return Vec::new(); // not an animated container
+        }
+        // Frame/timing detail needs a decoded sequence — the live playback, or the one
+        // eagerly prepped for this item.
+        let detail: Option<(usize, usize, Duration, u32)> = if let Some(pb) = &self.playback {
+            Some((
+                pb.index(),
+                pb.frame_count(),
+                pb.total_duration(),
+                pb.loop_count(),
+            ))
+        } else if let Some(p) = self.prepared.as_ref().filter(|p| p.item == item) {
+            let count = p.anim.frames.len();
+            let total: Duration = p.anim.frames.iter().map(|f| f.delay).sum();
+            Some((0, count, total, p.anim.loop_count))
+        } else {
+            None
+        };
+        let Some((idx, count, total, loops)) = detail else {
+            return vec![Row::Pair {
+                label: "Animation".to_string(),
+                value: "press P to play".to_string(),
+            }];
+        };
+        let mut rows = vec![Row::Pair {
+            label: "Frame".to_string(),
+            value: format!("{} / {}", idx + 1, count),
+        }];
+        let secs = total.as_secs_f64();
+        if secs > 0.0 {
+            rows.push(Row::Pair {
+                label: "Frame Rate".to_string(),
+                value: format!("{:.1} fps", count as f64 / secs),
+            });
+            rows.push(Row::Pair {
+                label: "Duration".to_string(),
+                value: format!("{secs:.2} s"),
+            });
+        }
+        rows.push(Row::Pair {
+            label: "Loop".to_string(),
+            value: if loops == 0 {
+                "Forever".to_string()
+            } else {
+                format!("{loops}×")
+            },
+        });
         rows
     }
 
@@ -3593,6 +3705,11 @@ impl App {
                 hud.render_panel(&text, px, pad, info_bg)
             }
             InfoMode::Full => {
+                // Warm the EXIF read once so the table build (and its per-frame rebuilds
+                // during playback) never re-read the file.
+                if let Some(item) = self.displayed_item {
+                    self.ensure_exif_cached(item);
+                }
                 let rows = self.exif_rows();
                 let Some(hud) = self.hud.as_ref() else {
                     return;
@@ -4026,6 +4143,7 @@ impl App {
         self.ring = ResidentRing::new(0);
         self.pending_uploads.clear();
         self.meta_cache.clear();
+        self.exif_cache.clear();
         self.rotations.clear();
         self.failed.clear();
         self.preview_resident.clear();
@@ -4285,9 +4403,10 @@ impl App {
 
     // --- Animation playback (task #37) -------------------------------------------------
 
-    /// `P`: play/pause the current animation. If it isn't decoded yet (and the photo
-    /// is animated), kick the off-thread decode and start playing when it lands. On a
-    /// still, `P` does nothing.
+    /// `P`: play/pause the current animation. Uses the eagerly-prepped sequence for
+    /// instant playback when it's ready; otherwise (upgrading an in-flight eager prep,
+    /// or kicking a fresh decode) it starts playing the moment frames land. On a still,
+    /// `P` does nothing.
     fn toggle_play_pause(&mut self, event_loop: &ActiveEventLoop) {
         if self.playback.is_some() {
             let playing = self.playback.as_mut().unwrap().toggle_play();
@@ -4300,34 +4419,74 @@ impl App {
             }
             return;
         }
-        if self.anim_decode.is_some() {
-            return; // a decode is already on its way (it'll autoplay)
-        }
         let Some(item) = self.displayed_item else {
             return;
         };
+        // Eagerly prepared on dwell → play instantly (no decode wait).
+        if self.prepared.as_ref().is_some_and(|p| p.item == item) {
+            let anim = self.prepared.take().unwrap().anim;
+            self.anim_hint_shown_for = Some(item); // engaged
+            self.install_animation(anim, true, 0, event_loop);
+            return;
+        }
+        // An eager prep is already decoding → upgrade it to play on arrival.
+        if let Some(d) = self.anim_decode.as_mut() {
+            d.want = AnimWant::Play;
+            self.anim_hint_shown_for = Some(item);
+            return;
+        }
         if self.current_is_animated(item) {
-            self.start_animation_decode(item, true);
+            self.start_animation_decode(item, AnimWant::Play);
         }
     }
 
     /// Step the current animation one frame (`delta`: `+1` next, `-1` previous),
-    /// pausing playback. If not decoded yet (and animated), kick a paused decode so
-    /// the held-key scrub can step once frames are ready. A no-op on a still.
+    /// pausing playback. Uses the eager prep when ready; otherwise upgrades an in-flight
+    /// prep (or kicks one) so the held-key scrub steps once frames land. No-op on a still.
     fn frame_step(&mut self, delta: i32, event_loop: &ActiveEventLoop) {
         if self.playback.is_some() {
             self.playback.as_mut().unwrap().step(delta);
             self.present_anim_frame(event_loop);
             return;
         }
-        if self.anim_decode.is_some() {
-            return;
-        }
         let Some(item) = self.displayed_item else {
             return;
         };
+        if self.prepared.as_ref().is_some_and(|p| p.item == item) {
+            let anim = self.prepared.take().unwrap().anim;
+            self.anim_hint_shown_for = Some(item);
+            self.install_animation(anim, false, delta, event_loop); // paused, stepped
+            return;
+        }
+        if let Some(d) = self.anim_decode.as_mut() {
+            d.want = AnimWant::Step(delta);
+            self.anim_hint_shown_for = Some(item);
+            return;
+        }
         if self.current_is_animated(item) {
-            self.start_animation_decode(item, false);
+            self.start_animation_decode(item, AnimWant::Step(delta));
+        }
+    }
+
+    /// Install a decoded animation as active playback and show its first (or stepped)
+    /// frame. `play` starts continuous playback; a non-zero `step` lands paused on that
+    /// frame (the frame-step path). Surfaces the truncation toast.
+    fn install_animation(
+        &mut self,
+        anim: pb_decode::Animation,
+        play: bool,
+        step: i32,
+        event_loop: &ActiveEventLoop,
+    ) {
+        let truncated = anim.truncated;
+        let mut pb = Playback::new(anim, play);
+        if step != 0 {
+            pb.step(step);
+        }
+        self.playback = Some(pb);
+        self.present_anim_frame(event_loop);
+        if truncated {
+            self.show_toast("Animation truncated", event_loop);
         }
     }
 
@@ -4349,10 +4508,10 @@ impl App {
     }
 
     /// Kick the whole-sequence decode for `item` on a worker thread so a big GIF/WebP
-    /// never stalls the event loop; the still first frame stays on screen until it
-    /// lands (picked up by `poll_anim_decode`). `autoplay` starts it playing (`P`) vs.
-    /// paused (frame-step).
-    fn start_animation_decode(&mut self, item: usize, autoplay: bool) {
+    /// never stalls the event loop; the still first frame stays on screen until it lands
+    /// (picked up by `poll_anim_decode`). `want` decides what happens on arrival —
+    /// eager prep (stash ready), play (`P`), or step (frame-step).
+    fn start_animation_decode(&mut self, item: usize, want: AnimWant) {
         self.anim_gen += 1;
         let gen = self.anim_gen;
         let epoch = self.epoch;
@@ -4370,11 +4529,43 @@ impl App {
             gen,
             item,
             epoch,
-            autoplay,
+            want,
             rx,
         });
-        // The user has engaged — don't also nag with the "▶ P" hint.
-        self.anim_hint_shown_for = self.displayed_item;
+        // A user-initiated decode (P / step) means they've engaged — suppress the "▶ P"
+        // hint. An eager prep is invisible background work, so leave the hint alone.
+        if want != AnimWant::Eager {
+            self.anim_hint_shown_for = self.displayed_item;
+        }
+    }
+
+    /// When the user has rested on an animated still, eagerly decode the whole sequence
+    /// in the background so pressing `P` is instant (fixes the slow first-play on WebP /
+    /// AVIF, ~0.6–2s to decode). Returns the wake deadline while the dwell elapses (so
+    /// the idle loop wakes to kick it), else `None`. Strictly off the hot path — only
+    /// when settled (never while flying), exactly when the prefetch pool is idle.
+    fn maybe_prepare_animation(&mut self, now: Instant) -> Option<Instant> {
+        if self.playback.is_some() || self.anim_decode.is_some() {
+            return None; // already playing, or a decode is already in flight
+        }
+        let item = self.displayed_item?;
+        if self.displayed_item != self.target_item {
+            return None; // still catching up to the target — not settled yet
+        }
+        if self.prepared.as_ref().is_some_and(|p| p.item == item) {
+            return None; // already prepped and ready
+        }
+        if !self.current_is_animated(item) {
+            return None;
+        }
+        match self.last_present.map(|t| t + EAGER_PREP_DELAY) {
+            // Still within the dwell window — wake at the deadline to kick it then.
+            Some(due) if now < due => Some(due),
+            _ => {
+                self.start_animation_decode(item, AnimWant::Eager);
+                None
+            }
+        }
     }
 
     /// Pick up a finished off-thread animation decode (called each `about_to_wait`).
@@ -4389,13 +4580,13 @@ impl App {
                 return;
             };
             match d.rx.try_recv() {
-                Ok(result) => Some((d.gen, d.epoch, d.item, d.autoplay, result)),
+                Ok(result) => Some((d.gen, d.epoch, d.item, d.want, result)),
                 Err(TryRecvError::Empty) => return, // still decoding
                 Err(TryRecvError::Disconnected) => None, // worker died
             }
         };
         self.anim_decode = None;
-        let Some((gen, epoch, item, autoplay, result)) = outcome else {
+        let Some((gen, epoch, item, want, result)) = outcome else {
             return;
         };
         // Stale: a newer request superseded it, the fit changed, or we moved on.
@@ -4403,17 +4594,26 @@ impl App {
             return;
         }
         match result {
-            Ok(anim) => {
-                let truncated = anim.truncated;
-                self.playback = Some(Playback::new(anim, autoplay));
-                self.present_anim_frame(event_loop);
-                if truncated {
-                    self.show_toast("Animation truncated", event_loop);
+            Ok(anim) => match want {
+                // Eager prep: hold it ready; the still keeps showing (frame 0 == still),
+                // so there's no visible change — `P` will play it instantly. If the
+                // detailed panel is open, refresh it so the frame count/rate/loop appear.
+                AnimWant::Eager => {
+                    self.prepared = Some(Prepared { item, anim });
+                    if self.overlay_shown && self.info == InfoMode::Full {
+                        self.show_overlay(event_loop);
+                    }
                 }
-            }
+                AnimWant::Play => self.install_animation(anim, true, 0, event_loop),
+                AnimWant::Step(delta) => self.install_animation(anim, false, delta, event_loop),
+            },
             Err(e) => {
+                // An eager prep that fails stays silent (the user never asked); only a
+                // user-initiated P/step surfaces the error.
                 eprintln!("animation decode failed for item {item}: {e}");
-                self.show_toast("Can't play this animation", event_loop);
+                if want != AnimWant::Eager {
+                    self.show_toast("Can't play this animation", event_loop);
+                }
             }
         }
     }
@@ -4433,7 +4633,14 @@ impl App {
             }
         }
         self.anim_frame_shown_at = Some(Instant::now());
-        self.draw(event_loop);
+        // Keep a shown detailed-EXIF panel's live "Frame X / N" in sync as the frame
+        // changes. Off the hot path (only during user-engaged playback/stepping), and
+        // the EXIF read is memoized so this never re-reads the file per frame.
+        if self.overlay_shown && self.info == InfoMode::Full {
+            self.show_overlay(event_loop); // rebuilds the table + draws
+        } else {
+            self.draw(event_loop);
+        }
     }
 
     /// Advance playback to the due frame and return the next frame's wake deadline
@@ -4502,10 +4709,12 @@ impl App {
     }
 
     /// Flash the "▶ Press P to play" hint once when settling on an animated still —
-    /// suppressed while flying (the nag the owner flagged) and once playback/stepping
-    /// has engaged.
+    /// suppressed while flying (the nag the owner flagged) and once the user has engaged
+    /// (P / step, tracked via `anim_hint_shown_for`). An eager prep decoding in the
+    /// background does *not* suppress it — that's invisible work, and the hint is what
+    /// invites the user to press P in the first place.
     fn maybe_show_anim_hint(&mut self, flying: bool, event_loop: &ActiveEventLoop) {
-        if flying || self.playback.is_some() || self.anim_decode.is_some() {
+        if flying || self.playback.is_some() {
             return;
         }
         let Some(item) = self.displayed_item else {
@@ -4520,12 +4729,14 @@ impl App {
         }
     }
 
-    /// Stop and drop any playback / in-flight decode, reverting to the still. Called
-    /// when navigating away or changing source (the frames are RAM-only — privacy #2).
+    /// Stop and drop any playback / in-flight decode / eager prep, reverting to the
+    /// still. Called when navigating away or changing source (the frames are RAM-only —
+    /// privacy #2).
     fn stop_playback(&mut self) {
         self.playback = None;
         self.anim_frame_shown_at = None;
         self.anim_decode = None;
+        self.prepared = None;
         self.framestep_started = None;
         self.framestep_last = None;
     }
@@ -5253,6 +5464,16 @@ impl ApplicationHandler for App {
         let anim_wake = self.tick_playback(now, event_loop);
         let framestep_active = self.tick_frame_step(now, event_loop);
 
+        // 4h. Eagerly prep an animated still for instant playback once the user has
+        // rested on it (see `maybe_prepare_animation`). Only when settled — never while
+        // flying — so it never competes with the fly-through hot path. Returns a wake at
+        // the dwell deadline so the idle loop comes back to kick the background decode.
+        let prep_wake = if flying {
+            None
+        } else {
+            self.maybe_prepare_animation(now)
+        };
+
         // 5. Poll at the frame rate while interacting or work is outstanding; else sleep
         //    to the slideshow's next-slide deadline when it's the only thing pending;
         //    honor an open dialog's timed repaint; otherwise go fully idle until an event.
@@ -5284,9 +5505,9 @@ impl ApplicationHandler for App {
         } else {
             None
         };
-        // The earliest pending wake across the viewer, an open dialog, and the
-        // animation's next-frame deadline; `None` = idle.
-        let wake = [base_wake, dialog_wake, anim_wake]
+        // The earliest pending wake across the viewer, an open dialog, the animation's
+        // next-frame deadline, and the eager-prep dwell deadline; `None` = idle.
+        let wake = [base_wake, dialog_wake, anim_wake, prep_wake]
             .into_iter()
             .flatten()
             .min();

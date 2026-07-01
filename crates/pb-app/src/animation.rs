@@ -47,10 +47,7 @@ impl Playback {
         self.anim.frames.len()
     }
 
-    /// The current frame index. Exercised by the unit tests and reserved for the
-    /// frame-count HUD ("4 / 12") once that lands; kept now so the state machine stays
-    /// fully testable.
-    #[allow(dead_code)]
+    /// The current frame index (0-based) — the EXIF panel's live "Frame X / N".
     pub fn index(&self) -> usize {
         self.index
     }
@@ -68,6 +65,17 @@ impl Playback {
     /// How long the current frame is held before advancing.
     pub fn current_delay(&self) -> Duration {
         self.anim.frames[self.index].delay
+    }
+
+    /// The loop count (0 = loop forever) — surfaced in the EXIF panel.
+    pub fn loop_count(&self) -> u32 {
+        self.anim.loop_count
+    }
+
+    /// Total play time of one full pass (sum of every frame's delay) — the EXIF
+    /// panel's duration + average frame-rate figures.
+    pub fn total_duration(&self) -> Duration {
+        self.anim.frames.iter().map(|f| f.delay).sum()
     }
 
     /// Whether playback is actively advancing (playing and not parked at the end of a
@@ -245,6 +253,18 @@ mod tests {
         assert!(pb.toggle_play(), "toggling a finished loop replays it");
         assert!(pb.is_playing());
         assert!(!pb.is_finished());
+    }
+
+    #[test]
+    fn total_duration_and_loop_count_report_the_whole_sequence() {
+        let pb = Playback::new(anim(4, 40, 3), true);
+        assert_eq!(pb.total_duration(), Duration::from_millis(160)); // 4 × 40ms
+        assert_eq!(pb.loop_count(), 3);
+        // Total duration is the full pass, independent of the current cursor.
+        let mut pb = pb;
+        pb.advance();
+        assert_eq!(pb.total_duration(), Duration::from_millis(160));
+        assert_eq!(Playback::new(anim(2, 100, 0), true).loop_count(), 0); // infinite
     }
 
     #[test]
