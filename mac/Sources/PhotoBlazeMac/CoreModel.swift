@@ -724,7 +724,72 @@ final class CoreModel {
     @ObservationIgnored private(set) var desiredCursor: NSCursor = .arrow
 
     /// The hosting NSWindow (handed over by the canvas view) — the SetTitle target.
-    @ObservationIgnored weak var hostWindow: NSWindow?
+    @ObservationIgnored weak var hostWindow: NSWindow? {
+        didSet {
+            guard oldValue !== hostWindow else { return }
+            installScreenChangeClamp()
+        }
+    }
+
+    @ObservationIgnored private var screenChangeObserver: NSObjectProtocol?
+    @ObservationIgnored private var dragSettleTimer: Timer?
+
+    /// Clamp-on-screen-change: dragging the window from a wide monitor to a narrower one
+    /// leaves it wider than the destination screen — stock AppKit only protects titlebar
+    /// reachability, never width. When the window lands on a new screen and doesn't
+    /// *fit*, shrink it to the screen's visible area (never grow, and a window that fits
+    /// but sits partly offscreen is left alone — parking a window half-off is a
+    /// legitimate user choice). Deferred until the drag settles: the notification fires
+    /// mid-drag with the button still down, and resizing a window the user is holding is
+    /// the one version of this that would feel platform-hostile.
+    private func installScreenChangeClamp() {
+        if let old = screenChangeObserver {
+            NotificationCenter.default.removeObserver(old)
+            screenChangeObserver = nil
+        }
+        guard let window = hostWindow else { return }
+        screenChangeObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didChangeScreenNotification, object: window, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.clampToScreenWhenSettled() }
+        }
+    }
+
+    private func clampToScreenWhenSettled() {
+        guard !speedModeFullscreen else { return } // F mode owns its frame
+        dragSettleTimer?.invalidate()
+        dragSettleTimer = nil
+        // A window drag belongs to the window server — its mouse events never reach the
+        // app — so poll the global button state until the user lets go.
+        guard NSEvent.pressedMouseButtons != 0 else {
+            clampToScreenNow()
+            return
+        }
+        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self, NSEvent.pressedMouseButtons == 0 else { return }
+                timer.invalidate()
+                self.dragSettleTimer = nil
+                self.clampToScreenNow()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        dragSettleTimer = timer
+    }
+
+    private func clampToScreenNow() {
+        guard !speedModeFullscreen, let window = hostWindow, let screen = window.screen
+        else { return }
+        let visible = screen.visibleFrame
+        var frame = window.frame
+        guard frame.width > visible.width || frame.height > visible.height else { return }
+        frame.size.width = min(frame.width, visible.width)
+        frame.size.height = min(frame.height, visible.height)
+        frame.origin.x = max(visible.minX, min(frame.origin.x, visible.maxX - frame.width))
+        frame.origin.y = max(visible.minY, min(frame.origin.y, visible.maxY - frame.height))
+        window.setFrame(frame, display: true, animate: true)
+        log("clamped oversized window to \(Int(frame.width))×\(Int(frame.height)) after screen change")
+    }
 
     /// The path the proxy icon currently shows (cached so unchanged photos are a no-op).
     @ObservationIgnored private var proxyIconPath = ""
