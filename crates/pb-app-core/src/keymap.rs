@@ -396,6 +396,11 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         // Copy the current file's path to the clipboard. Shift+Ctrl+C on Windows; on
         // macOS the menu's ⇧⌘C accelerator drives it (this real-Control chord also works).
         one(Action::CopyPath, "Shift+Ctrl+C"),
+        // Copy the photo's details as text — context-menu only by default.
+        (Action::CopyImageDetails, vec![]),
+        // Reveal in Finder / File Explorer — menu-only by default (no obvious cross-platform
+        // key; ⇧⌘R is taken by other apps on macOS). A user can bind one in Settings.
+        (Action::RevealInFileManager, vec![]),
         one(Action::SaveRotation, "Ctrl+S"),
         one(Action::Delete, "Delete"),
         one(Action::DeletePermanent, "Shift+Delete"),

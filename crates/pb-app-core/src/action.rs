@@ -50,6 +50,15 @@ pub enum Action {
     // File operations.
     Copy,
     CopyPath,
+    /// Copy the current photo's details (dimensions, codec, size, EXIF tags) to the
+    /// clipboard as text — the same facts the info panel shows. Named "image details"
+    /// rather than "EXIF" since not every format carries EXIF (a PNG still has
+    /// dimensions/codec/size).
+    CopyImageDetails,
+    /// Reveal the current photo in the OS file manager (macOS Finder / Windows File
+    /// Explorer), with its containing folder open and the file selected. Only real
+    /// on-disk files can be revealed (an archive entry / the empty deck cannot).
+    RevealInFileManager,
     SaveRotation,
     Delete,
     DeletePermanent,
@@ -104,6 +113,8 @@ impl Action {
         Action::RotateCcw,
         Action::Copy,
         Action::CopyPath,
+        Action::CopyImageDetails,
+        Action::RevealInFileManager,
         Action::SaveRotation,
         Action::Delete,
         Action::DeletePermanent,
@@ -149,6 +160,8 @@ impl Action {
             Action::RotateCcw => "rotate_ccw",
             Action::Copy => "copy",
             Action::CopyPath => "copy_path",
+            Action::CopyImageDetails => "copy_image_details",
+            Action::RevealInFileManager => "reveal",
             Action::SaveRotation => "save_rotation",
             Action::Delete => "delete",
             Action::DeletePermanent => "delete_permanent",
@@ -203,6 +216,19 @@ impl Action {
             Action::RotateCcw => "Rotate counter-clockwise",
             Action::Copy => "Copy image",
             Action::CopyPath => "Copy file path",
+            Action::CopyImageDetails => "Copy image details",
+            // The platform-idiomatic name (Finder on macOS, File Explorer elsewhere) —
+            // the menu bar sets its own label too; this feeds the keybindings editor / help.
+            Action::RevealInFileManager => {
+                #[cfg(target_os = "macos")]
+                {
+                    "Show in Finder"
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    "Show in File Explorer"
+                }
+            }
             Action::SaveRotation => "Save rotation",
             Action::Delete => "Delete to Recycle Bin",
             Action::DeletePermanent => "Delete permanently",

@@ -8,6 +8,17 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
+- **Show the current photo in Finder / File Explorer.** A new **File ▸ Show in Finder** (macOS)
+  / **Show in File Explorer** (Windows) command opens the photo's containing folder with the file
+  selected, so you can jump from the viewer straight to the file on disk. It's greyed out for
+  photos inside an archive (there's no file to reveal) and on the empty open screen.
+- **Right-click a photo for a context menu.** A secondary-click over the image brings up the
+  common per-photo commands — Next / Previous / Random / Previous Random, Rotate Left / Right,
+  Play/Pause (for animated photos and Live Photos), Start/Stop Slideshow, Copy Image, Copy File
+  Path, Copy Image Details, Show in Finder / File Explorer, and Enter/Exit Fullscreen. It works
+  in fullscreen too, where the menu bar is hidden — so it's the easy way back out.
+- **Copy a photo's details** to the clipboard as text (from the right-click menu) — the same
+  facts the info panel shows (dimensions, format, size, and every EXIF tag).
 - The **About** dialog now shows a **build identifier** (the git commit the build came from,
   with a `-dirty` marker for a build with local changes) under the version — so a specific
   build can be traced back to the exact code it was built from.

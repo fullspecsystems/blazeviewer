@@ -63,6 +63,7 @@ mod menu;
 mod pb_key_winit;
 #[cfg(target_os = "macos")]
 mod proxy_icon;
+mod reveal;
 // The action vocabulary, physical-key model, keymap, and slideshow timing now live
 // in the platform-neutral `pb-app-core` (NS0). Re-export them at the crate root so
 // the existing `crate::action` / `crate::keymap` / `crate::pb_key` / `crate::slideshow`
@@ -200,6 +201,9 @@ struct App {
     /// runtime (only enabled when the current photo has an unsaved rotation on an
     /// EXIF-writable file).
     save_rotation_item: Option<muda::MenuItem>,
+    /// The File ▸ Show in Finder/Explorer menu item, enabled only when a real on-disk file
+    /// is displayed (greyed out for archive entries + the empty deck; see `AppCore::can_reveal`).
+    reveal_item: Option<muda::MenuItem>,
     /// The File ▸ Stop Scanning menu item, enabled only while a folder scan is streaming in.
     cancel_scan_item: Option<muda::MenuItem>,
     /// The Edit ▸ Undo menu item, kept so its title + enabled state can mirror the top of
@@ -460,6 +464,7 @@ impl App {
             #[cfg(target_os = "macos")]
             proxy_icon_path: None,
             save_rotation_item: None,
+            reveal_item: None,
             cancel_scan_item: None,
             undo_item: None,
             view_checks: None,
@@ -1084,6 +1089,7 @@ impl App {
             let built = menu::build_menu(&self.core.keymap);
             self.menu = Some(built.menu);
             self.save_rotation_item = Some(built.save_rotation);
+            self.reveal_item = Some(built.reveal);
             self.cancel_scan_item = Some(built.cancel_scan);
             self.undo_item = Some(built.undo);
             self.view_checks = Some(built.checks);
@@ -1129,6 +1135,7 @@ impl App {
             self.core.slideshow.on,
             self.core.settings.mute_live_audio,
             self.core.can_save_rotation(),
+            self.core.can_reveal(),
             self.dir_scan.is_some(),
             // `None` = nothing to undo (disabled "Undo"); `Some(label)` = enabled w/ label.
             self.core.undo_stack.last().map(UndoAction::menu_label),
@@ -1173,6 +1180,10 @@ impl App {
         if let Some(it) = self.save_rotation_item.as_ref() {
             it.set_enabled(state.save_rotation_enabled);
         }
+        // File ▸ Show in Finder/Explorer enabled state.
+        if let Some(it) = self.reveal_item.as_ref() {
+            it.set_enabled(state.reveal_enabled);
+        }
         // File ▸ Stop Scanning enabled state.
         if let Some(it) = self.cancel_scan_item.as_ref() {
             it.set_enabled(state.cancel_scan_enabled);
@@ -1197,6 +1208,39 @@ impl App {
                 "Enter Full Screen"
             });
         }
+    }
+
+    /// The shell side of [`contract::CoreEffect::ShowContextMenu`] (task #41): build a fresh
+    /// muda popup from the shell-neutral [`contract::ContextMenuState`] and show it at the
+    /// cursor. The per-OS `show_context_menu_for_*` call is **synchronous** (TrackPopupMenu on
+    /// Windows, `popUpMenuPositioningItem` on macOS) and posts any selection to the shared
+    /// [`muda::MenuEvent`] channel *before* it returns — the same channel the menu bar uses —
+    /// so the click is picked up by the next `about_to_wait` poll (→ `action_for` →
+    /// `dispatch_action`), and the local menu only needs to outlive this call. `None` position
+    /// = the current cursor location. The seam an AppKit host re-implements with an `NSMenu`.
+    fn show_context_menu_native(&mut self, state: &contract::ContextMenuState) {
+        let menu = menu::build_context_menu(state);
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        #[cfg(windows)]
+        if let Some(hwnd) = hwnd_of(window) {
+            use muda::ContextMenu;
+            // SAFETY: `hwnd` is this live window's valid handle; `None` = show at the cursor.
+            unsafe {
+                let _ = menu.show_context_menu_for_hwnd(hwnd, None);
+            }
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(view) = ns_view_ptr(window) {
+            use muda::ContextMenu;
+            // SAFETY: `view` is this live window's NSView; `None` = show at the cursor.
+            unsafe {
+                let _ = menu.show_context_menu_for_nsview(view, None);
+            }
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
+        let _ = (menu, window);
     }
 
     /// macOS: keep the title-bar **proxy icon** (the window's represented file) pointed
@@ -1554,12 +1598,19 @@ impl App {
                 }
             }
             contract::ClipboardPayload::Text(text) => {
-                let fname = file_name_of(&text).to_string();
+                // A single-line payload is a file path → name it in the toast ("Copied IMG…").
+                // A multi-line payload is the EXIF blob (Copy EXIF Data) → a generic toast, since
+                // its "filename" is meaningless. A path never contains a newline, so this is safe.
+                let toast = if text.contains('\n') {
+                    "Copied to clipboard".to_string()
+                } else {
+                    format!("Copied {}", file_name_of(&text))
+                };
                 match arboard::Clipboard::new().and_then(|mut c| c.set_text(text)) {
-                    Ok(()) => self.core.show_toast(&format!("Copied {fname}")),
+                    Ok(()) => self.core.show_toast(&toast),
                     Err(e) => {
-                        eprintln!("copy path: clipboard write failed: {e}");
-                        self.core.show_toast("Copy path failed");
+                        eprintln!("copy text: clipboard write failed: {e}");
+                        self.core.show_toast("Copy failed");
                     }
                 }
             }
@@ -1638,6 +1689,16 @@ impl App {
                     }
                     contract::CoreEffect::WriteClipboard(payload) => {
                         self.write_clipboard(payload);
+                    }
+                    // Reveal the current photo in the OS file manager (macOS Finder / Windows
+                    // File Explorer). The core already validated a real on-disk file; the shell
+                    // runs the per-OS launch behind `reveal::in_file_manager`.
+                    contract::CoreEffect::RevealPath(path) => {
+                        reveal::in_file_manager(&path);
+                    }
+                    // Pop up the right-click photo context menu at the cursor (task #41).
+                    contract::CoreEffect::ShowContextMenu(state) => {
+                        self.show_context_menu_native(&state);
                     }
                     contract::CoreEffect::OpenFolderPanel { start_dir } => {
                         let input = rfd::FileDialog::new()
@@ -2226,6 +2287,17 @@ impl ApplicationHandler for App {
                 }
             }
 
+            // Right button opens the photo context menu (task #41) — the common per-photo
+            // commands, at the cursor. Works in the borderless fullscreen speed mode too,
+            // where the menu bar is hidden. Shown on press; the core decides the item set.
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => {
+                self.core.show_context_menu();
+            }
+
             // Trackpad pinch (macOS): magnify about the cursor. `delta` is the
             // incremental magnification (+ spread to zoom in, − pinch to zoom out).
             WindowEvent::PinchGesture { delta, .. } => {
@@ -2535,6 +2607,18 @@ fn hwnd_of(window: &Window) -> Option<isize> {
     let handle = window.window_handle().ok()?;
     match handle.as_raw() {
         RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
+        _ => None,
+    }
+}
+
+/// macOS: the window's `NSView` pointer, for muda's `show_context_menu_for_nsview` (task
+/// #41). Same `RawWindowHandle::AppKit` path `proxy_icon` / `hdr_surface` use.
+#[cfg(target_os = "macos")]
+fn ns_view_ptr(window: &Window) -> Option<*const std::ffi::c_void> {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let handle = window.window_handle().ok()?;
+    match handle.as_raw() {
+        RawWindowHandle::AppKit(h) => Some(h.ns_view.as_ptr() as *const std::ffi::c_void),
         _ => None,
     }
 }
@@ -3314,8 +3398,9 @@ mod tests {
             false,
             false,
             false, // mute_live_audio
-            false,
-            false,
+            false, // save_rotation_enabled
+            false, // reveal_enabled
+            false, // cancel_scan_enabled
             None,
             false,
         )
@@ -3331,8 +3416,9 @@ mod tests {
                 false,
                 false,
                 false, // mute_live_audio
-                false,
-                false,
+                false, // save_rotation_enabled
+                false, // reveal_enabled
+                false, // cancel_scan_enabled
                 None,
                 false,
             )
@@ -3353,8 +3439,9 @@ mod tests {
                 false,
                 false,
                 false, // mute_live_audio
-                false,
-                false,
+                false, // save_rotation_enabled
+                false, // reveal_enabled
+                false, // cancel_scan_enabled
                 None,
                 false,
             )
@@ -3379,8 +3466,9 @@ mod tests {
             false,
             false,
             false, // mute_live_audio
-            false,
-            false,
+            false, // save_rotation_enabled
+            false, // reveal_enabled
+            false, // cancel_scan_enabled
             Some("Undo Save Rotation"),
             false,
         );
@@ -3398,6 +3486,7 @@ mod tests {
             true, // slideshow
             true, // mute_live_audio
             true, // save_rotation_enabled
+            true, // reveal_enabled
             true, // cancel_scan_enabled
             None,
             true, // native_fullscreen_engaged
@@ -3407,6 +3496,7 @@ mod tests {
         assert!(all_on.slideshow);
         assert!(all_on.mute_live_audio);
         assert!(all_on.save_rotation_enabled);
+        assert!(all_on.reveal_enabled);
         assert!(all_on.cancel_scan_enabled);
         assert!(all_on.native_fullscreen_engaged);
 
@@ -3418,6 +3508,7 @@ mod tests {
                 && !b.slideshow
                 && !b.mute_live_audio
                 && !b.save_rotation_enabled
+                && !b.reveal_enabled
                 && !b.cancel_scan_enabled
                 && !b.native_fullscreen_engaged
         );
@@ -3435,10 +3526,11 @@ mod tests {
             InfoMode::Off,
             false,
             false,
-            true, // slideshow flipped
-            false,
-            false,
-            false,
+            true,  // slideshow flipped
+            false, // mute_live_audio
+            false, // save_rotation_enabled
+            false, // reveal_enabled
+            false, // cancel_scan_enabled
             None,
             false,
         );

@@ -1426,7 +1426,7 @@
         "id": 40,
         "title": "Reveal current photo in Finder / File Explorer",
         "description": "A menu command (and optional shortcut) that opens the OS file manager with the current photo's containing folder open and the file selected — handy for jumping from the viewer to the file on disk.",
-        "status": "pending",
+        "status": "done",
         "priority": "medium",
         "dependencies": [],
         "details": "Add a File-menu item that reveals the displayed photo in the native file manager, mirroring the platform idiom: macOS 'Show in Finder' (NSWorkspace.activateFileViewerSelectingURLs, or `open -R <path>` — reveals the containing folder AND selects the file); Windows 'Show in File Explorer' (`explorer /select,\"<path>\"`); Linux best-effort `xdg-open <dir>` (no per-file select via xdg). Only real on-disk files can be revealed — archive (zip/7z) entries + the empty deck have no file, so the item is disabled / toasts 'Nothing to reveal' (mirror the Save-Rotation greyed-out pattern via a can_reveal()/menu-state flag). READ-ONLY + privacy-safe: this is an explicit user command that only launches the OS file manager on a path already being viewed — no persistent trace, no file modification (same category as the existing Copy File Path). PLACEMENT: File menu near Copy File Path; consider a shortcut (macOS ⌘⇧R is taken by some apps for other things — pick something free, or leave shortcut-less initially). WIRING (post-NS0 5.6, effect-based): a new Action::RevealInFileManager → the core validates there's a real file (source.path(displayed_item).is_some()) + emits a CoreEffect::RevealPath(PathBuf); the shell drain runs the platform reveal (isolate the per-OS call behind a small helper like the other platform seams). Menu enabled-state via menu_state_from (like can_save_rotation). The core decision is testable; the OS launch is manual-only.",
@@ -1436,22 +1436,59 @@
             "id": 1,
             "title": "Platform reveal helper",
             "description": "A small per-OS seam: macOS NSWorkspace/open -R, Windows explorer /select, Linux xdg-open <dir>. Isolated like the other platform helpers.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 2,
             "title": "Action + effect wiring",
             "description": "Action::RevealInFileManager → core validates a real file + emits CoreEffect::RevealPath(path); shell drain calls the helper. Disabled/toast for archive entries + empty deck.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 3,
             "title": "File-menu item + enabled state",
             "description": "Add the menu item near Copy File Path; wire can_reveal() into menu_state_from so it greys out when there's no on-disk file. Optional keyboard shortcut.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
+          }
+        ]
+      },
+      {
+        "id": 41,
+        "title": "Right-click context menu on the photo",
+        "description": "A native secondary-click (right-click) context menu over the image exposing the most common per-photo commands, so the user can act on the current photo without the menu bar (which is gone in fullscreen speed-mode) or memorizing shortcuts. Home for Show in Finder/Explorer (#40) and other per-photo actions.",
+        "status": "review",
+        "priority": "medium",
+        "dependencies": [],
+        "details": "Show a native OS-drawn context menu at the cursor on right-click over the photo, dispatching through the SAME MenuAction->Action path the menu bar already uses (menu.rs action_for). Reuse muda's context-menu support (ContextMenu::show_context_menu_for_hwnd on Windows / show_context_menu_for_nsview on macOS) rather than hand-drawing one: native look, perf-neutral (built lazily only on right-click, never per frame, off the keypress hot path), and zero new dispatch code. Build a small DEDICATED menu (a curated subset), not the whole menu bar. INITIAL ITEMS (curated subset of existing actions): Copy, Copy File Path, Show in Finder/Explorer (#40), Rotate Right/Left, Save Rotation, Delete, Show Image Info. Enabled-state reuses the existing menu_state flags (can_save_rotation, the future can_reveal, archive-entry/empty-deck checks) so items grey out consistently with the menu bar. BIG WIN: works in fullscreen speed-mode too, where the menu bar is hidden -- the context menu becomes the only chrome-free pointer route to these commands. WIRING (effect/seam-based, consistent with NS0): winit delivers right-click via MouseInput(MouseButton::Right); the shell already routes MouseInput to core. Add a core handler that emits CoreEffect::ShowContextMenu { x, y } (cursor pos), and the shell drain builds+shows the muda context menu (a platform op, like SetMenuState); clicks come back through the existing MenuEvent channel -> action_for -> dispatch_action, so no parallel dispatch path. Keep the item list + which-are-enabled in a shared, testable place (mirror menu_state_from) so the NS1 Swift host can build an NSMenu from the same description. POLISH: suppress/ignore a right-click during active hold-to-fly so it can't stutter a fly; don't show over the empty deck (or show a reduced menu with just Open). See task #40 for the reveal action it will host.",
+        "testStrategy": "Unit: factor the item set + enabled-state into pure code (e.g. context_menu_items(source, displayed_item, rotations) -> which actions + enabled) and assert it mirrors menu_state_from -- Save Rotation enabled only with a pending rotation on an EXIF-writable file, Reveal/Copy File Path disabled for archive entries + the empty deck. Manual: right-click the photo in BOTH windowed and fullscreen -> menu appears at the cursor; every item performs the same action as its menu-bar/shortcut equivalent; disabled items grey out correctly; a right-click mid-fly doesn't hitch playback.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Right-click detection + native show seam",
+            "description": "winit MouseInput(Right) -> core handler emits CoreEffect::ShowContextMenu{x,y}; shell drain builds+shows a muda context menu at the cursor (show_context_menu_for_hwnd / _nsview). Platform op behind the effect seam like SetMenuState.",
+            "status": "done",
+            "dependencies": []
+          },
+          {
+            "id": 2,
+            "title": "Curated item set + shared dispatch + enabled-state",
+            "description": "Define the curated subset (Copy, Copy File Path, Show in Finder/Explorer, Rotate R/L, Save Rotation, Delete, Info) in a shared testable description; clicks dispatch via the existing MenuEvent -> action_for -> dispatch_action path; enabled-state reuses menu_state flags (mirror menu_state_from).",
+            "status": "done",
+            "dependencies": [
+              1
+            ]
+          },
+          {
+            "id": 3,
+            "title": "Fullscreen support + polish",
+            "description": "Verify it works in fullscreen speed-mode (where the menu bar is hidden); suppress a right-click during active hold-to-fly; sensible behavior over the empty deck; confirm perf-neutral (menu built lazily, off the hot path).",
+            "status": "pending",
+            "dependencies": [
+              2
+            ]
           }
         ]
       }

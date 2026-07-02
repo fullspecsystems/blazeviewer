@@ -80,6 +80,8 @@ impl AppCore {
             Action::RotateCcw => self.rotate(true),
             Action::Copy => self.copy_image(),
             Action::CopyPath => self.copy_path(),
+            Action::CopyImageDetails => self.copy_image_details(),
+            Action::RevealInFileManager => self.reveal_in_file_manager(),
             Action::OpenFile => self.open_picker(false),
             Action::OpenFolder => self.open_picker(true),
             Action::Info => self.toggle_info(false),
@@ -884,6 +886,7 @@ impl AppCore {
         slideshow: bool,
         mute_live_audio: bool,
         save_rotation_enabled: bool,
+        reveal_enabled: bool,
         cancel_scan_enabled: bool,
         undo: Option<&'static str>,
         native_fullscreen_engaged: bool,
@@ -906,6 +909,7 @@ impl AppCore {
             slideshow,
             mute_live_audio,
             save_rotation_enabled,
+            reveal_enabled,
             cancel_scan_enabled,
             undo,
             native_fullscreen_engaged,
@@ -2123,6 +2127,86 @@ impl AppCore {
         self.effects.push(contract::CoreEffect::WriteClipboard(
             contract::ClipboardPayload::Text(text),
         ));
+    }
+
+    /// Whether **Show in Finder/Explorer** is available: the displayed photo is a real
+    /// file on disk (not an archive entry, not the empty deck). Drives the File-menu
+    /// item's enabled state (`menu_state_from` / `apply_menu_state`), mirroring
+    /// [`can_save_rotation`](Self::can_save_rotation).
+    pub fn can_reveal(&self) -> bool {
+        self.displayed_item
+            .is_some_and(|item| self.source.path(item).is_some())
+    }
+
+    /// **Show in Finder/Explorer** (File menu): reveal the displayed photo in the OS file
+    /// manager — its containing folder open, the file selected. Only a real on-disk file can
+    /// be revealed; an archive entry or the empty deck toasts instead. An explicit user
+    /// command that only launches the file manager on a path already being viewed — no pixel
+    /// read, no persistent trace (privacy #2, same category as Copy File Path). The platform
+    /// launch is the shell's job (`CoreEffect::RevealPath`).
+    pub fn reveal_in_file_manager(&mut self) {
+        let path = self.displayed_item.and_then(|item| self.source.path(item));
+        match path {
+            Some(p) => self
+                .effects
+                .push(contract::CoreEffect::RevealPath(p.to_path_buf())),
+            None => self.show_toast("Nothing to reveal"),
+        }
+    }
+
+    /// **Copy EXIF data** (context menu): copy the displayed photo's metadata to the
+    /// clipboard as text — the same facts the full-EXIF panel shows (filename, dimensions,
+    /// codec, exact byte size, and every non-blob EXIF tag), read on-demand from RAM
+    /// (privacy #2). Unlike the panel, this is *not* truncated to the screen — it copies the
+    /// full set. The platform clipboard write is the shell's job (`WriteClipboard`).
+    pub fn copy_image_details(&mut self) {
+        let Some(item) = self.displayed_item else {
+            self.show_toast("Nothing to copy");
+            return;
+        };
+        self.ensure_exif_cached(item);
+        let mut lines: Vec<String> = vec![file_name_of(self.source.name(item)).to_string()];
+        if let Some(meta) = &self.current {
+            lines.push(format!("Dimensions: {} × {}", meta.w, meta.h));
+            lines.push(format!("Codec: {}", meta.codec.to_uppercase()));
+        }
+        if let Some((size, fields)) = self.exif_cache.get(&item) {
+            lines.push(format!("File Size: {} bytes", hud::format_thousands(*size)));
+            for (tag, val) in fields {
+                // Skip binary blobs (Apple MakerNote/Padding) that render as meaningless hex.
+                if is_exif_blob(tag, val) {
+                    continue;
+                }
+                lines.push(format!("{tag}: {val}"));
+            }
+        }
+        // Only the filename line means there was nothing worth copying.
+        if lines.len() <= 1 {
+            self.show_toast("No EXIF data");
+            return;
+        }
+        self.effects.push(contract::CoreEffect::WriteClipboard(
+            contract::ClipboardPayload::Text(lines.join("\n")),
+        ));
+    }
+
+    /// Right-click over the photo (task #41): ask the shell to pop up the **photo context
+    /// menu** at the cursor. Fills a shell-neutral [`contract::ContextMenuState`] from live
+    /// state (Play only when the photo has motion, Show in Finder/Explorer only for a real
+    /// on-disk file) and pushes [`contract::CoreEffect::ShowContextMenu`]. Over the empty
+    /// deck there's nothing per-photo to offer, so no menu is shown.
+    pub fn show_context_menu(&mut self) {
+        let Some(item) = self.displayed_item else {
+            return;
+        };
+        let state = contract::ContextMenuState {
+            has_image: true,
+            has_motion: self.has_motion(item),
+            can_reveal: self.source.path(item).is_some(),
+            fullscreen: !self.windowed,
+        };
+        self.effects
+            .push(contract::CoreEffect::ShowContextMenu(state));
     }
 
     /// Show ring `slot` (holding `item`): the keypress fast path — a rebind, no

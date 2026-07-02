@@ -151,6 +151,9 @@ pub struct MenuState {
     pub mute_live_audio: bool,
     /// File ▸ Save Rotation — enabled only with an unsaved rotation on a writable file.
     pub save_rotation_enabled: bool,
+    /// File ▸ Show in Finder/Explorer — enabled only for a real on-disk file (not an
+    /// archive entry or the empty deck).
+    pub reveal_enabled: bool,
     /// File ▸ Stop Scanning — enabled only while a folder scan is streaming in.
     pub cancel_scan_enabled: bool,
     /// Edit ▸ Undo — the dynamic title/enabled state mirroring the top of the undo
@@ -161,6 +164,27 @@ pub struct MenuState {
     /// macOS only: whether native (Spaces) full-screen is engaged, so the shell can
     /// flip the item's "Enter/Exit Full Screen" label. Always `false` on Windows.
     pub native_fullscreen_engaged: bool,
+}
+
+/// What the right-click **photo context menu** should offer for the current photo (task
+/// #41) — the shell-neutral description the host turns into a native popup (a muda `Menu`
+/// now, an `NSMenu` later). The core fills it from live state on right-click; the shell
+/// builds + shows the menu. Items whose target doesn't apply are simply omitted.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct ContextMenuState {
+    /// A real photo is displayed (not the empty deck) — the per-photo items are shown. The
+    /// core omits the whole menu when this is false, so `true` in practice today.
+    pub has_image: bool,
+    /// The current photo has a motion component (animated container / Live Photo) → include
+    /// the Play/Pause item.
+    pub has_motion: bool,
+    /// The current photo is a real on-disk file (not an archive entry) → include Show in
+    /// Finder/Explorer.
+    pub can_reveal: bool,
+    /// Currently in the borderless fullscreen speed mode → the Fullscreen item reads
+    /// "Exit Fullscreen" (else "Enter Fullscreen"). Especially useful in fullscreen, where
+    /// the menu bar is hidden and the only other way out is a keyboard shortcut.
+    pub fullscreen: bool,
 }
 
 /// What to write to the system clipboard — the shell-neutral payload of
@@ -339,6 +363,18 @@ pub enum CoreEffect {
     /// Copy File Path command — never the view path). The shell does the platform write
     /// and surfaces the success/failure toast.
     WriteClipboard(ClipboardPayload),
+    /// Reveal a file in the OS file manager — open its containing folder and select it
+    /// (macOS `NSWorkspace`/`open -R`, Windows `explorer /select`, Linux best-effort
+    /// `xdg-open <dir>`). An explicit user command on a path already being viewed: it only
+    /// launches the file manager, never reads pixels or writes a trace (privacy #2, same
+    /// category as Copy File Path). The core validates a real on-disk file exists before
+    /// emitting this; the shell runs the per-OS launch behind a small helper.
+    RevealPath(PathBuf),
+    /// Show the right-click **photo context menu** at the cursor (task #41). The core emits
+    /// this on a secondary-click over a photo, carrying the item description; the shell builds
+    /// a native popup from it (a muda `Menu` at the cursor now, an `NSMenu` later) whose clicks
+    /// arrive as `MenuAction`s on the shared dispatch path — no parallel wiring.
+    ShowContextMenu(ContextMenuState),
     /// Start (or restart) the Live Photo's audio — its companion `.mov` track — at `at_secs`,
     /// replacing any currently-playing clip. The shell owns the `AVAudioPlayer` handle (an ObjC
     /// object that can't live in the platform-neutral core); the core only decides *when* audio
@@ -475,7 +511,7 @@ mod tests {
         assert_eq!(m.scale, ScaleMode::Fit);
         assert_eq!(m.info, InfoOverlay::Hidden);
         assert!(!m.recursive && !m.fullscreen && !m.slideshow);
-        assert!(!m.save_rotation_enabled && !m.cancel_scan_enabled);
+        assert!(!m.save_rotation_enabled && !m.cancel_scan_enabled && !m.reveal_enabled);
         assert_eq!(m.undo, None);
         assert!(!m.native_fullscreen_engaged);
     }

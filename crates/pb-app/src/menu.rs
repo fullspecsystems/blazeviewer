@@ -37,6 +37,7 @@ pub mod ids {
     pub const OPEN_FOLDER: &str = "open_folder";
     pub const CANCEL_SCAN: &str = "cancel_scan";
     pub const SAVE_ROTATION: &str = "save_rotation";
+    pub const REVEAL: &str = "reveal";
     pub const DELETE: &str = "delete";
     pub const DELETE_PERMANENTLY: &str = "delete_permanently";
     pub const SETTINGS: &str = "settings";
@@ -45,6 +46,7 @@ pub mod ids {
     pub const UNDO: &str = "undo";
     pub const COPY: &str = "copy";
     pub const COPY_PATH: &str = "copy_path";
+    pub const COPY_IMAGE_DETAILS: &str = "copy_image_details";
 
     pub const FIT: &str = "fit";
     pub const FILL: &str = "fill";
@@ -90,6 +92,7 @@ pub enum MenuAction {
     OpenFolder,
     CancelScan,
     SaveRotation,
+    Reveal,
     Delete,
     DeletePermanently,
     Settings,
@@ -97,6 +100,7 @@ pub enum MenuAction {
     Undo,
     Copy,
     CopyPath,
+    CopyImageDetails,
     Fit,
     Fill,
     Original,
@@ -133,6 +137,7 @@ impl MenuAction {
             MenuAction::OpenFolder => Action::OpenFolder,
             MenuAction::CancelScan => Action::CancelScan,
             MenuAction::SaveRotation => Action::SaveRotation,
+            MenuAction::Reveal => Action::RevealInFileManager,
             MenuAction::Delete => Action::Delete,
             MenuAction::DeletePermanently => Action::DeletePermanent,
             MenuAction::Settings => Action::Settings,
@@ -140,6 +145,7 @@ impl MenuAction {
             MenuAction::Undo => Action::Undo,
             MenuAction::Copy => Action::Copy,
             MenuAction::CopyPath => Action::CopyPath,
+            MenuAction::CopyImageDetails => Action::CopyImageDetails,
             MenuAction::Fit => Action::ScaleFit,
             MenuAction::Fill => Action::ScaleFill,
             MenuAction::Original => Action::ScaleOriginal,
@@ -177,6 +183,7 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         OPEN_FOLDER => MenuAction::OpenFolder,
         CANCEL_SCAN => MenuAction::CancelScan,
         SAVE_ROTATION => MenuAction::SaveRotation,
+        REVEAL => MenuAction::Reveal,
         DELETE => MenuAction::Delete,
         DELETE_PERMANENTLY => MenuAction::DeletePermanently,
         SETTINGS => MenuAction::Settings,
@@ -184,6 +191,7 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         UNDO => MenuAction::Undo,
         COPY => MenuAction::Copy,
         COPY_PATH => MenuAction::CopyPath,
+        COPY_IMAGE_DETAILS => MenuAction::CopyImageDetails,
         FIT => MenuAction::Fit,
         FILL => MenuAction::Fill,
         ORIGINAL => MenuAction::Original,
@@ -286,6 +294,10 @@ pub struct ViewChecks {
 pub struct BuiltMenu {
     pub menu: Menu,
     pub save_rotation: MenuItem,
+    /// The File ▸ Show in Finder/Explorer item. Returned so the app can enable it only when
+    /// the displayed photo is a real on-disk file (see `AppCore::can_reveal`); it greys out
+    /// for archive entries + the empty deck. Starts disabled (empty deck at launch).
+    pub reveal: MenuItem,
     /// File ▸ Stop Scanning. Returned so the app can enable it only while a folder scan is
     /// streaming in (see `App::refresh_cancel_scan_menu_item`). Starts disabled.
     pub cancel_scan: MenuItem,
@@ -326,6 +338,8 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
 
     // Disabled until a rotation is pending on an eligible file (toggled at runtime).
     let save_rotation = MenuItem::with_id(ids::SAVE_ROTATION, "Save Rotation\tCtrl+S", false, None);
+    // Disabled until a real on-disk file is displayed (toggled at runtime).
+    let reveal = MenuItem::with_id(ids::REVEAL, "Show in File Explorer", false, None);
     // Disabled until a folder scan is actually streaming in (toggled at runtime).
     let cancel_scan = MenuItem::with_id(ids::CANCEL_SCAN, "Stop Scanning", false, None);
 
@@ -336,6 +350,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
         &cancel_scan,
         &sep(),
         &save_rotation,
+        &reveal,
         &sep(),
         &item(ids::DELETE, "Delete\tDel"),
         &item(ids::DELETE_PERMANENTLY, "Delete Permanently\tShift+Del"),
@@ -437,6 +452,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
     BuiltMenu {
         menu,
         save_rotation,
+        reveal,
         cancel_scan,
         undo,
         checks: ViewChecks {
@@ -499,6 +515,10 @@ pub fn build_menu(_keymap: &Keymap) -> BuiltMenu {
         Some(Accelerator::new(Some(CMD), Code::KeyS)),
     );
 
+    // Disabled until a real on-disk file is displayed (toggled at runtime). Shortcut-less —
+    // ⇧⌘R is claimed by other Mac apps; a user can bind one in Settings.
+    let reveal = MenuItem::with_id(ids::REVEAL, "Show in Finder", false, None);
+
     // Disabled until a folder scan is actually streaming in (toggled at runtime). No
     // accelerator — it's a contextual command, menu-only.
     let cancel_scan = MenuItem::with_id(ids::CANCEL_SCAN, "Stop Scanning", false, None);
@@ -515,6 +535,7 @@ pub fn build_menu(_keymap: &Keymap) -> BuiltMenu {
         &cancel_scan,
         &sep(),
         &save_rotation,
+        &reveal,
         &sep(),
         // macOS Finder idioms: Move to Trash = ⌘⌫, Delete Immediately = ⌥⌘⌫ (NOT ⇧⌘⌫,
         // which Finder maps to *Empty Trash*). These are ⌘-chords, so NSMenu owns them
@@ -643,6 +664,7 @@ pub fn build_menu(_keymap: &Keymap) -> BuiltMenu {
     BuiltMenu {
         menu,
         save_rotation,
+        reveal,
         cancel_scan,
         undo,
         checks: ViewChecks {
@@ -659,6 +681,61 @@ pub fn build_menu(_keymap: &Keymap) -> BuiltMenu {
         window,
         native_fullscreen,
     }
+}
+
+/// Build the right-click **photo context menu** (task #41): a fresh popup of the most
+/// common per-photo commands, shown over the image at the cursor. Reuses the menu-bar item
+/// ids, so a click dispatches through the same [`action_for`] → [`Action`] path as the bar
+/// (no parallel wiring) — muda ids need not be unique across menus. The set is curated from
+/// [`ContextMenuState`](crate::contract::ContextMenuState): **Play** only when the photo has
+/// motion, **Show in Finder/Explorer** only for a real on-disk file. Works in the borderless
+/// fullscreen speed mode too, where the menu bar is hidden — its whole point.
+pub fn build_context_menu(state: &crate::contract::ContextMenuState) -> Menu {
+    let menu = Menu::new();
+    let sep = || PredefinedMenuItem::separator();
+
+    // Navigation.
+    let _ = menu.append_items(&[
+        &item(ids::NEXT, "Next"),
+        &item(ids::PREVIOUS, "Previous"),
+        &item(ids::RANDOM, "Random"),
+        &item(ids::RANDOM_PREV, "Previous Random"),
+        &sep(),
+        // Transforms.
+        &item(ids::ROTATE_LEFT, "Rotate Left"),
+        &item(ids::ROTATE_RIGHT, "Rotate Right"),
+    ]);
+    // Play/Pause only for a photo with a motion component (animated / Live Photo).
+    if state.has_motion {
+        let _ = menu.append(&item(ids::PLAY_PAUSE, "Play/Pause"));
+    }
+    // Auto-advance slideshow (a toggle — one label covers start + stop).
+    let _ = menu.append_items(&[&sep(), &item(ids::SLIDESHOW, "Start/Stop Slideshow")]);
+    // Clipboard group.
+    let _ = menu.append_items(&[
+        &sep(),
+        &item(ids::COPY, "Copy Image"),
+        &item(ids::COPY_PATH, "Copy File Path"),
+        &item(ids::COPY_IMAGE_DETAILS, "Copy Image Details"),
+    ]);
+    // Reveal only for a real on-disk file (archive entries have no path). The label follows
+    // the platform idiom, matching the File-menu item.
+    if state.can_reveal {
+        #[cfg(target_os = "macos")]
+        let reveal_label = "Show in Finder";
+        #[cfg(not(target_os = "macos"))]
+        let reveal_label = "Show in File Explorer";
+        let _ = menu.append(&item(ids::REVEAL, reveal_label));
+    }
+    // Fullscreen toggle, last. The label tracks the live mode — vital in the fullscreen
+    // speed mode, where the menu bar is hidden and this is the only pointer route out.
+    let fullscreen_label = if state.fullscreen {
+        "Exit Fullscreen"
+    } else {
+        "Enter Fullscreen"
+    };
+    let _ = menu.append_items(&[&sep(), &item(ids::FULLSCREEN, fullscreen_label)]);
+    menu
 }
 
 #[cfg(test)]
@@ -709,6 +786,7 @@ mod tests {
             action_for(ids::SAVE_ROTATION),
             Some(MenuAction::SaveRotation)
         );
+        assert_eq!(action_for(ids::REVEAL), Some(MenuAction::Reveal));
         assert_eq!(action_for(ids::DELETE), Some(MenuAction::Delete));
         assert_eq!(
             action_for(ids::DELETE_PERMANENTLY),
@@ -718,6 +796,11 @@ mod tests {
         assert_eq!(action_for(ids::EXIT), Some(MenuAction::Exit));
         assert_eq!(action_for(ids::UNDO), Some(MenuAction::Undo));
         assert_eq!(action_for(ids::COPY), Some(MenuAction::Copy));
+        assert_eq!(action_for(ids::COPY_PATH), Some(MenuAction::CopyPath));
+        assert_eq!(
+            action_for(ids::COPY_IMAGE_DETAILS),
+            Some(MenuAction::CopyImageDetails)
+        );
         assert_eq!(action_for(ids::FIT), Some(MenuAction::Fit));
         assert_eq!(action_for(ids::FILL), Some(MenuAction::Fill));
         assert_eq!(action_for(ids::ORIGINAL), Some(MenuAction::Original));
