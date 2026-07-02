@@ -50,6 +50,7 @@ use pb_source::PhotoSource;
 mod clipboard;
 #[cfg(windows)]
 mod darkmode;
+mod default_app;
 mod dialog;
 #[cfg(target_os = "macos")]
 mod hdr_surface;
@@ -288,12 +289,12 @@ enum DialogRequest {
 
 /// What the user did in the dialog window — the shell's raw extraction from egui. The shell
 /// ([`App::dialog_event`]) drives egui + pulls any payload (a password, the edited
-/// settings/keymap), then [`App::route_dialog_outcome`] dispatches it (NS0 5.6): every case but
-/// **PasswordSubmitted** maps to a [`contract::DialogResult`] and is handed to the core as a
+/// settings/keymap), then [`App::route_dialog_outcome`] dispatches it (NS0 5.6): every case maps
+/// to a [`contract::DialogResult`] and is handed to the core as a
 /// [`CoreEvent::DialogResolved`] — the core runs the reaction and emits the `CloseDialog` /
-/// `CancelScan` / `CancelArchiveLoad` effects. PasswordSubmitted still spawns the archive worker,
-/// so it stays shell-side. (The Loading/Scanning progress *dialogs* themselves — `become_loading`,
-/// `set_scan` — remain shell until the begin_archive_open/begin_dir_scan worker flow inverts.)
+/// `CancelScan` / `CancelArchiveLoad` / `BeginArchiveOpen` (password retry) effects. (The
+/// Loading/Scanning progress *dialogs* themselves — `become_loading`, `set_scan` — remain
+/// shell-owned.)
 enum DialogOutcome {
     /// Esc / close button dismissed a dialog of this kind (cancels the matching in-flight op).
     Dismissed(Option<dialog::DialogKind>),
@@ -541,8 +542,11 @@ impl App {
         // two eager 7z decompresses never run (and pile up RAM) at once — the original
         // hang's worst case was the user re-triggering a "never-finishing" open and
         // stacking full-archive workers. The superseded worker stops at its next entry
-        // boundary and frees its partial buffers; its result is dropped (rx replaced).
-        if let Some(prev) = self.archive_load.as_ref() {
+        // boundary and frees its partial buffers. `take()` (not just cancel) drops the
+        // handle + rx now: a result the old worker already sent — its generation still
+        // matches — must never be received after this newer open. The zip-sync and
+        // preflight-error paths below have no gen bump of their own to protect them.
+        if let Some(prev) = self.archive_load.take() {
             prev.progress.request_cancel();
         }
         if !is_7z {
@@ -616,7 +620,15 @@ impl App {
                 self.finish_archive_open(result, was_attempt, path);
             }
             Err(TryRecvError::Empty) => {} // still loading
-            Err(TryRecvError::Disconnected) => self.archive_load = None, // worker died
+            Err(TryRecvError::Disconnected) => {
+                // Worker died without a result (e.g. a panic inside the decompressor).
+                // Drop the handle and don't strand its progress dialog — the Loading
+                // spinner would otherwise stay up forever (mirrors poll_dir_scan).
+                self.archive_load = None;
+                if self.dialog.as_ref().map(|d| d.kind()) == Some(dialog::DialogKind::Loading) {
+                    self.dialog = None;
+                }
+            }
         }
     }
 
@@ -766,14 +778,16 @@ impl App {
                     // Still scanning and nothing on screen yet: once the walk is slow enough
                     // to notice, reveal the Scanning dialog (count + current folder + Cancel).
                     // Gated on `!scan_bootstrapped` so it never pops over an already-shown photo,
-                    // and only when no other dialog is up (don't steal a Settings/Message
-                    // window the user opened over a background scan).
+                    // and only when no other dialog is up *or queued* (don't steal a
+                    // Settings/Message window the user opened over a background scan, and don't
+                    // overwrite a Password/Message request `poll_archive_load` queued into
+                    // `pending_dialog` earlier this same tick — it opens at the end of the drain).
                     let reveal = !self.core.scan_bootstrapped
                         && self
                             .dir_scan
                             .as_ref()
                             .is_some_and(|s| s.started.elapsed() >= SCAN_DIALOG_DELAY);
-                    if reveal && self.dialog.is_none() {
+                    if reveal && self.dialog.is_none() && self.pending_dialog.is_none() {
                         let (name, progress) = match self.dir_scan.as_ref() {
                             Some(s) => (s.name.clone(), s.progress.clone()),
                             None => return,
@@ -1749,7 +1763,15 @@ impl App {
                     // here — `about_to_wait` mins it with the shell's dialog-repaint deadline for
                     // the event loop's control-flow.
                     contract::CoreEffect::SetWake(at) => self.requested_wake = at,
-                    _ => {}
+                    // Not emitted by the core today, but matched explicitly (no `_`
+                    // wildcard) so a new effect variant is a compile error here rather
+                    // than a silently swallowed no-op.
+                    contract::CoreEffect::HideWindow => {
+                        if let Some(a) = self.window.as_ref() {
+                            a.set_visible(false);
+                        }
+                    }
+                    contract::CoreEffect::ReportError(msg) => self.open_message(&msg),
                 }
             }
         }
@@ -2065,6 +2087,10 @@ impl ApplicationHandler for App {
             self.core.launching = false; // the deferred launch is firing now
             self.core.open_plan(plan.source, plan.cursor);
         }
+        // Run the launch effects (BeginArchiveOpen / BeginDirScan) now rather than leaving
+        // them queued for the first `about_to_wait` — the worker exists before the first
+        // Tick/polls run instead of one turn later.
+        self.drain_effects(event_loop);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
@@ -2365,10 +2391,6 @@ impl ApplicationHandler for App {
         // macOS: keep the title-bar proxy icon pointed at the displayed photo (cached).
         #[cfg(target_os = "macos")]
         self.refresh_proxy_icon();
-        // Deferred delete-advance: once the icon has shown for a beat, drop the item.
-        if self.core.pending_delete.is_some_and(|(at, _)| now >= at) {
-            self.core.flush_pending_delete();
-        }
         // 0b. Apply any files dropped on the window this burst (coalesced — winit
         // delivers one `DroppedFile` per file).
         if !self.pending_drops.is_empty() {

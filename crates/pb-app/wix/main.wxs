@@ -113,6 +113,35 @@
                         <RegistryValue Root='HKCR' Key='.7z\OpenWithProgids'  Name='PhotoBlaze.Archive' Value='' Type='string'/>
                     </Component>
 
+                    <!-- App registration: RegisteredApplications + Capabilities give
+                         PhotoBlaze its OWN page in Settings > Default apps, which is
+                         what lets the in-app "Set default..." button deep-link there
+                         (ms-settings:defaultapps?registeredAppMachine=PhotoBlaze; see
+                         src/default_app.rs - keep the extension list in sync). Still
+                         never seizes a default (ADR-018): the page only OFFERS the
+                         per-type switch for the user to flip. -->
+                    <Component Id='AppRegistration' Guid='*'>
+                        <RegistryValue Root='HKLM' Key='SOFTWARE\PhotoBlaze\Capabilities' Name='ApplicationName' Value='PhotoBlaze' Type='string' KeyPath='yes'/>
+                        <RegistryValue Root='HKLM' Key='SOFTWARE\PhotoBlaze\Capabilities' Name='ApplicationDescription' Value='A fast, keyboard-driven photo viewer.' Type='string'/>
+                        <RegistryValue Root='HKLM' Key='SOFTWARE\PhotoBlaze\Capabilities\FileAssociations' Name='.jpg'  Value='PhotoBlaze.Image' Type='string'/>
+                        <RegistryValue Root='HKLM' Key='SOFTWARE\PhotoBlaze\Capabilities\FileAssociations' Name='.jpeg' Value='PhotoBlaze.Image' Type='string'/>
+                        <RegistryValue Root='HKLM' Key='SOFTWARE\PhotoBlaze\Capabilities\FileAssociations' Name='.jpe'  Value='PhotoBlaze.Image' Type='string'/>
+                        <RegistryValue Root='HKLM' Key='SOFTWARE\PhotoBlaze\Capabilities\FileAssociations' Name='.jfif' Value='PhotoBlaze.Image' Type='string'/>
+                        <RegistryValue Root='HKLM' Key='SOFTWARE\PhotoBlaze\Capabilities\FileAssociations' Name='.png'  Value='PhotoBlaze.Image' Type='string'/>
+                        <RegistryValue Root='HKLM' Key='SOFTWARE\PhotoBlaze\Capabilities\FileAssociations' Name='.gif'  Value='PhotoBlaze.Image' Type='string'/>
+                        <RegistryValue Root='HKLM' Key='SOFTWARE\PhotoBlaze\Capabilities\FileAssociations' Name='.bmp'  Value='PhotoBlaze.Image' Type='string'/>
+                        <RegistryValue Root='HKLM' Key='SOFTWARE\PhotoBlaze\Capabilities\FileAssociations' Name='.tif'  Value='PhotoBlaze.Image' Type='string'/>
+                        <RegistryValue Root='HKLM' Key='SOFTWARE\PhotoBlaze\Capabilities\FileAssociations' Name='.tiff' Value='PhotoBlaze.Image' Type='string'/>
+                        <RegistryValue Root='HKLM' Key='SOFTWARE\PhotoBlaze\Capabilities\FileAssociations' Name='.webp' Value='PhotoBlaze.Image' Type='string'/>
+                        <RegistryValue Root='HKLM' Key='SOFTWARE\PhotoBlaze\Capabilities\FileAssociations' Name='.heic' Value='PhotoBlaze.Image' Type='string'/>
+                        <RegistryValue Root='HKLM' Key='SOFTWARE\PhotoBlaze\Capabilities\FileAssociations' Name='.heif' Value='PhotoBlaze.Image' Type='string'/>
+                        <RegistryValue Root='HKLM' Key='SOFTWARE\PhotoBlaze\Capabilities\FileAssociations' Name='.avif' Value='PhotoBlaze.Image' Type='string'/>
+                        <RegistryValue Root='HKLM' Key='SOFTWARE\PhotoBlaze\Capabilities\FileAssociations' Name='.jxl'  Value='PhotoBlaze.Image' Type='string'/>
+                        <RegistryValue Root='HKLM' Key='SOFTWARE\PhotoBlaze\Capabilities\FileAssociations' Name='.zip'  Value='PhotoBlaze.Archive' Type='string'/>
+                        <RegistryValue Root='HKLM' Key='SOFTWARE\PhotoBlaze\Capabilities\FileAssociations' Name='.7z'   Value='PhotoBlaze.Archive' Type='string'/>
+                        <RegistryValue Root='HKLM' Key='SOFTWARE\RegisteredApplications' Name='PhotoBlaze' Value='SOFTWARE\PhotoBlaze\Capabilities' Type='string'/>
+                    </Component>
+
                     <!-- Folder verb: right-click a folder (or its background) ->
                          "Open with PhotoBlaze". Opening a folder browses it
                          recursively (the app's default). %V is the folder path. -->
@@ -158,6 +187,7 @@
             <ComponentRef Id='Associations'/>
             <ComponentRef Id='ArchiveProgId'/>
             <ComponentRef Id='ArchiveAssociations'/>
+            <ComponentRef Id='AppRegistration'/>
             <ComponentRef Id='FolderVerb'/>
             <ComponentRef Id='StartMenuShortcut'/>
         </Feature>

@@ -1,6 +1,39 @@
 # PhotoBlaze — Current Status (session handoff)
 
-_Last updated: 2026-07-01. **NS1 (the macOS SwiftUI/AppKit host) has BEGUN — its FFI
+_Last updated: 2026-07-02 (Windows session)._
+
+## 🪟 Windows session 2026-07-01→02 — CI green again + Live Photos + HEIC ships parallel
+
+**CI fix:** the Windows job had been red since 7/1 — two clippy `-D warnings` errors in
+`pb-app-core` (an unused `keymap` import; a needless return in a `cfg(not(macos))` arm),
+both invisible from macOS. Fixed + a 4-agent review of the whole NS0 refactor landed real
+fixes: **reveal-in-Explorer quoting** (paths with spaces opened Documents — `raw_arg` +
+path-only quotes), a `pending_dialog` overwrite race, dir-scans now keep the loop polling
+(`work_pending`), `resumed` drains launch effects, `tick()` flushes `pending_delete` (NS1
+contract), **nine `Instant::now()` calls in the core re-stamped from the injected
+`self.now`** (the NS0 0.3 determinism contract), archive-open supersession (`take()` the
+old load) + the stranded Loading dialog on worker death. Preexisting scan-vs-archive
+playlist clobber documented but NOT fixed (needs a design pass: `open_plan` should cancel
+cross-type in-flight opens).
+
+**Live Photos on Windows (task #39, DONE, owner-verified):** `pb-decode/src/mf_video.rs`
+(Media Foundation IMFSourceReader → RGB32, auto-rotation, true per-sample timing) +
+`live_audio.rs` Windows impl (WinRT MediaPlayer). Gates widened to `any(macos, windows)`.
+
+**HEIC parallel decode ships (task #16 was stale — phases were done 6/28):** re-verified
+post-NS0 (heic_bench **45.4/s, 4.88×** vs WIC's 9.4/s), `autocorrect_broken_input` set for
+the Sony color quirk (#24 → review; no Sony sample on disk to confirm), and **release.yml
+now builds the MSI with `--features libheif`** (+ ci.yml gates the feature) via
+`setup-libheif.ps1` with the vcpkg `installed` tree cached (`VCPKG_ROOT=C:\vcpkg-pb` on
+runners — first run pays ~15 min, then cached). **"Set default…" (task #14.1)** now
+deep-links PhotoBlaze's own Default-apps page (HKCU self-registration fallback +
+MSI `AppRegistration` component).
+
+---
+
+_Below: the NS1 handoff (macOS), unchanged._
+
+_**NS1 (the macOS SwiftUI/AppKit host) has BEGUN — its FFI
 foundation is laid and on `origin/main` (`59fdd77`).** The FFI boundary is
 **`swift-bridge`** (owner-confirmed, the plan's pick); a new macOS-only staticlib crate
 **`crates/pb-mac-ffi`** bridges the platform-neutral `AppCore` to a Swift host — opaque

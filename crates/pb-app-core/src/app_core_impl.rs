@@ -29,8 +29,8 @@ use crate::engine::*;
 use crate::keymap::Keymap;
 use crate::pb_key::PbKey;
 use crate::{
-    keymap, settings, slideshow, timing, Action, AppCore, InfoMode, Nav, OpenButton, OpenPanel,
-    PlayHint, Toast, UndoAction,
+    settings, slideshow, timing, Action, AppCore, InfoMode, Nav, OpenButton, OpenPanel, PlayHint,
+    Toast, UndoAction,
 };
 
 impl AppCore {
@@ -50,6 +50,7 @@ impl AppCore {
         });
         let (pool, results) = crate::decode_pool::DecodePool::new(1, 1 << 20, decode);
         let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(Vec::new()));
+        let settings = settings::Settings::default();
         AppCore {
             now: Instant::now(),
             viewport,
@@ -57,7 +58,9 @@ impl AppCore {
             last_present: None,
             frame_interval: Duration::from_micros(8_333),
             hold_start: None,
-            initial_delay: Duration::from_millis(120),
+            // Derived from the settings model like the real shell (main.rs), not a
+            // separate literal that can drift from `Settings::default()`.
+            initial_delay: Duration::from_millis(settings.hold_delay_ms as u64),
             slideshow: slideshow::Slideshow::default(),
             mods: contract::Modifiers::NONE,
             esc_guard_until: None,
@@ -138,7 +141,7 @@ impl AppCore {
             framestep_last: None,
             live_revert_at: None,
             keymap: Keymap::defaults(),
-            settings: settings::Settings::default(),
+            settings,
             effects: Vec::new(),
         }
     }
@@ -174,6 +177,10 @@ impl AppCore {
     /// Whether prefetch/upload work is still outstanding (keep polling if so).
     pub fn work_pending(&self) -> bool {
         self.archive_loading
+            // A streaming dir scan keeps the loop polling too, so `poll_dir_scan` picks up
+            // batches (and the delayed Scanning-dialog reveal) even when the event queue is
+            // quiet — without this, a slow walk on an idle app waits for the next OS event.
+            || self.scanning
             // An off-thread animation decode in flight keeps the loop polling so
             // `poll_anim_decode` picks it up promptly (active playback drives its own
             // precise next-frame wake via `tick_playback`, not this frame poll).
@@ -819,6 +826,12 @@ impl AppCore {
     /// dialog-repaint clock; the scan-count chip + dialog egui clock stay host-side.
     pub fn tick(&mut self) {
         let now = self.now;
+        // 0. Deferred delete-advance: once the trash icon has shown for a beat, drop the
+        // item. In the core (not the host) so every host that drives `Tick` gets it —
+        // the wake condition below already polls while one is pending.
+        if self.pending_delete.is_some_and(|(at, _)| now >= at) {
+            self.flush_pending_delete();
+        }
         // 1. Absorb finished decodes (uploads; presents the target if it arrived).
         self.drain_results();
 
@@ -1332,12 +1345,12 @@ impl AppCore {
     /// pie (brighten-on-keypress) so the input never feels dead.
     pub fn nav_press(&mut self, key: PbKey, action: Action) {
         self.held.insert(key, action);
-        self.hold_start = Some(Instant::now());
+        self.hold_start = Some(self.now);
         let Some(nav) = nav_of(action) else {
             return;
         };
         if self.target_item.is_some() && self.displayed_item != self.target_item {
-            self.pie_glow_started = Some(Instant::now());
+            self.pie_glow_started = Some(self.now);
         } else {
             self.advance(nav);
         }
@@ -1535,7 +1548,7 @@ impl AppCore {
     /// Keyboard frame-step press: track the key for hold-to-scrub, then step once now.
     pub fn frame_step_press(&mut self, key: PbKey, action: Action) {
         self.held.insert(key, action);
-        let now = Instant::now();
+        let now = self.now;
         self.framestep_started = Some(now);
         self.framestep_last = Some(now);
         self.frame_step(frame_step_dir(action));
@@ -1714,7 +1727,7 @@ impl AppCore {
     /// binding. Empty when unbound.
     pub fn help_shortcut(&self, action: Action) -> String {
         #[cfg(target_os = "macos")]
-        if let Some(chord) = keymap::macos_menu_chord(action) {
+        if let Some(chord) = crate::keymap::macos_menu_chord(action) {
             return chord.mac_symbol();
         }
         self.keymap
@@ -1899,7 +1912,7 @@ impl AppCore {
                 a.set_image(&frame.rgba, frame.width, frame.height, color, false, 1.0);
             }
         }
-        self.anim_frame_shown_at = Some(Instant::now());
+        self.anim_frame_shown_at = Some(self.now);
         // Keep a shown detailed-EXIF panel's live "Frame X / N" in sync as the frame
         // changes. Off the hot path (only during user-engaged playback/stepping), and
         // the EXIF read is memoized so this never re-reads the file per frame.
@@ -2376,7 +2389,7 @@ impl AppCore {
         // The panel (if shown) is now stale for the old photo; `about_to_wait`
         // rebuilds it for `item` next tick (or hides it while flying), so it
         // tracks the photo with no blank flash. The bitmap stays up meanwhile.
-        self.last_present = Some(Instant::now());
+        self.last_present = Some(self.now);
         self.draw();
         self.metrics.record("present", t0.elapsed());
     }
@@ -2654,7 +2667,7 @@ impl AppCore {
                 self.present_failed(idx);
             }
         }
-        self.last_present = Some(Instant::now());
+        self.last_present = Some(self.now);
         self.draw();
     }
 
@@ -2684,7 +2697,7 @@ impl AppCore {
     pub fn toggle_slideshow(&mut self) {
         let on = self.slideshow.toggle();
         if on {
-            self.last_present = Some(Instant::now());
+            self.last_present = Some(self.now);
         }
         self.show_toast(if on { "Slideshow" } else { "Slideshow Stopped" });
     }
@@ -3094,7 +3107,7 @@ impl AppCore {
                     rgba,
                     w,
                     h,
-                    started: Instant::now(),
+                    started: self.now,
                     uploaded_alpha: -1.0,
                 });
                 self.push_toast(1.0);
@@ -3124,7 +3137,7 @@ impl AppCore {
             rgba,
             w,
             h,
-            started: Instant::now(),
+            started: self.now,
             uploaded_alpha: -1.0,
         });
         self.push_toast(1.0);
@@ -3577,20 +3590,20 @@ impl AppCore {
     }
 
     /// The companion motion `.mov` for item `item` if it's a Live Photo, else `None`
-    /// (task #38). Filesystem pairing, memoized per item and computed lazily — only ever
-    /// reached when settled on a photo, never on the fly-through path. Always `None` off
-    /// macOS (Windows Live Photos are task #39, since the decoder is macOS-only).
+    /// (tasks #38 / #39). Filesystem pairing, memoized per item and computed lazily —
+    /// only ever reached when settled on a photo, never on the fly-through path. Always
+    /// `None` on platforms without a motion decoder (macOS + Windows have one).
     pub fn live_motion_path(&mut self, item: usize) -> Option<PathBuf> {
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", windows)))]
         {
             let _ = item;
-            return None;
+            None
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         if let Some(cached) = self.live_motion_cache.get(&item) {
             return cached.clone();
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         {
             let paired = self.source.path(item).and_then(companion_motion);
             self.live_motion_cache.insert(item, paired.clone());
@@ -3708,6 +3721,42 @@ mod tests {
             height: 1,
             scale_factor: 1.0,
         })
+    }
+
+    #[test]
+    fn tick_flushes_a_due_pending_delete() {
+        // NS1 contract: a host that only drives `handle(Tick)` still gets the deferred
+        // delete-advance — it must not depend on a shell-side flush (the winit shell's
+        // was removed in favor of this core arm).
+        let mut core = test_core();
+        let t0 = core.now;
+        core.pending_delete = Some((t0 + Duration::from_millis(200), 0));
+        core.handle(CoreEvent::Tick(t0));
+        assert!(
+            core.pending_delete.is_some(),
+            "before the deadline the delete must stay pending"
+        );
+        core.handle(CoreEvent::Tick(t0 + Duration::from_millis(200)));
+        assert!(
+            core.pending_delete.is_none(),
+            "a Tick at/past the deadline must flush the pending delete"
+        );
+    }
+
+    #[test]
+    fn nav_press_stamps_hold_start_from_the_injected_clock() {
+        // The core never reads the wall clock (NS0 0.3): timing state is stamped from
+        // the injected `self.now`, so a host/test driving synthetic time stays coherent
+        // (hold-to-fly gates against the same clock the Tick events carry).
+        let mut core = test_core();
+        let t = core.now + Duration::from_secs(1000);
+        core.now = t;
+        core.nav_press(PbKey::Space, Action::Next);
+        assert_eq!(
+            core.hold_start,
+            Some(t),
+            "hold_start must come from the injected clock, not Instant::now()"
+        );
     }
 
     #[test]

@@ -1,17 +1,18 @@
-//! Dev spike (task #38): decode a Live Photo motion `.mov` via AVFoundation and dump
-//! stats, writing a couple of frames to PNG so we can eyeball rotation + pixels.
+//! Dev spike (tasks #38 / #39): decode a Live Photo motion `.mov` (AVFoundation on
+//! macOS, Media Foundation on Windows) and dump stats, writing a couple of frames to
+//! PNG so we can eyeball rotation + pixels.
 //!
 //!   cargo run -p pb-decode --example live_probe -- <file.mov>... [--dump <dir>]
 //!
-//! macOS-only (AVFoundation). Pass `--dump <dir>` to write frame 0 + the middle frame
-//! of each clip as PNGs into <dir>.
+//! Pass `--dump <dir>` to write frame 0 + the middle frame of each clip as PNGs
+//! into <dir>.
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn main() {
-    eprintln!("live_probe is macOS-only (AVFoundation).");
+    eprintln!("live_probe needs an OS motion decoder (macOS AVFoundation / Windows MF).");
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn main() {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};

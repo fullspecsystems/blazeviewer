@@ -43,6 +43,13 @@ with any pre-release suffix carried only by the tag.
   it finishes. The Live Photo's **audio** plays with the motion; mute it with **M** (or Image ▸
   Mute Live Photo Audio — the choice is remembered). The detailed info panel shows it's a Live
   Photo (with frame count / rate / duration), and the basic info line marks it **· Live**.
+- **Live Photos play on Windows too.** The same Live Photo experience that landed on macOS
+  now works on Windows: landing on an Apple Live Photo (a still with a companion `.mov`)
+  shows the **Live Photo ◉ Press P to play** hint, **P** plays the motion with sound (mute
+  with **M**), and frame-step / info-panel details all work identically. The motion decodes
+  through the Windows OS decoder, so H.264 clips (iPhone 6s) work out of the box and HEVC
+  clips (iPhone 7 and later) use the same **HEVC Video Extensions** the viewer already
+  relies on for HEIC stills — plus the frames now follow the clip's true per-frame timing.
 - **The open screen is now interactive.** With no photo loaded, PhotoBlaze shows two clickable
   buttons — **Open File** and **Open Folder** — each with its keyboard shortcut shown dimmed and
   right-aligned, menu style (`O` and, on macOS, `⇧ O`), reflecting anything you've remapped in
@@ -50,6 +57,19 @@ with any pre-release suffix carried only by the tag.
   shortcuts still work exactly as before. (Replaces the old "Press O to open…" text hint.)
 
 ### Changed
+- **HEIC is much faster on Windows.** Full-resolution HEIC decoding now uses a parallel
+  CPU decoder (libheif) instead of the Windows built-in codec, which can only decode one
+  photo at a time no matter how many cores the machine has. Measured on the reference
+  corpus: ~4.9× the throughput (45 vs 9 full decodes per second on a 12 MP iPhone HEIC),
+  with lower per-photo latency too. Combined with the existing look-ahead, sharp
+  full-resolution HEICs are now pre-decoded around the photo you're on as you browse,
+  instead of each one sharpening only after you land on it. (Ships in the installer
+  build; H.264/HEVC hardware requirements are unchanged.)
+- **"Set default…" now opens PhotoBlaze's own page** in Windows Settings ▸ Default apps —
+  with every image type PhotoBlaze handles listed for one-click switching — instead of
+  dumping you at the top of the generic Default apps list. Works on existing installs
+  (the button registers the app for your user account if the installer hasn't), and new
+  installs register machine-wide.
 - **The keyboard-help overlay (`?`) has been redesigned.** It's now grouped into sections
   (Browse, View & Zoom, Animation, Files & App) with each command's shortcut shown dimmed and
   right-aligned, menu style, at a more compact size that fits on screen. On macOS the shortcuts
@@ -83,6 +103,17 @@ with any pre-release suffix carried only by the tag.
   against the left and right edges.
 
 ### Fixed
+- **Show in File Explorer now actually shows the photo** (Windows). For almost any real
+  path — anything with a space in it, like `My Photos`, or a comma — it opened a Documents
+  window with nothing selected instead of the photo's folder, because of how Explorer's
+  `/select` argument was quoted. Paths with spaces, commas, and non-ASCII characters all
+  select correctly now.
+- **A slow folder scan no longer waits for you to move the mouse.** On a slow scan of a
+  quiet app, the first photo (and the scanning progress card) could stall until the next
+  input event woke the app; the app now keeps checking on its own while a scan streams in.
+- **Opening another archive while a large 7z is still loading is now reliable.** The
+  superseded load could finish late and replace the archive you'd just opened; and if an
+  archive open died mid-load, its "Opening…" spinner could stay up forever.
 - **The "Scroll wheel" setting (pan vs zoom) now applies to a macOS trackpad**, not just a
   mouse wheel. A two-finger swipe was hard-wired to pan and ignored the setting; now Pan stays
   the default but choosing **Zoom** makes a swipe zoom, and **Ctrl+swipe** always does the other

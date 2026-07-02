@@ -1,24 +1,25 @@
-//! Live Photo audio (task #38) — the "cheap path": play the companion `.mov`'s audio
-//! track via `AVAudioPlayer`, tied to the motion's play/pause state.
+//! Live Photo audio (tasks #38/#39) — the "cheap path": play the companion `.mov`'s
+//! audio track via the platform's media player (`AVAudioPlayer` on macOS, the WinRT
+//! `MediaPlayer` on Windows), tied to the motion's play/pause state.
 //!
-//! `AVAudioPlayer` reads the `.mov`'s audio track straight from the file URL and plays
-//! it on its own thread, so there's no PCM extraction and no new audio-output plumbing.
+//! Both players read the `.mov`'s audio track straight from the file URL and play it
+//! on their own thread, so there's no PCM extraction and no new audio-output plumbing.
 //! Sync is "start together, pause together": the video frame pump and the audio are both
 //! wall-clock-driven, so over a ~3 s clip they stay together to the ear. It is *not*
 //! sample-accurate — that would want the `AVPlayer` streaming rework (a v2 task).
 //!
-//! Read-only, RAM-only — no trace written (privacy #2). macOS-only (Windows audio is
-//! part of task #39); off macOS this is a no-op stub so the call sites stay cfg-free.
+//! Read-only, RAM-only — no trace written (privacy #2). Elsewhere (Linux) this is a
+//! no-op stub so the call sites stay cfg-free.
 
 use std::path::Path;
 
 pub use imp::LiveAudio;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 mod imp {
     use super::Path;
 
-    /// No-op stub off macOS — Live Photos don't play there yet (task #39), so this is
+    /// No-op stub off macOS/Windows — Live Photos don't play there yet, so this is
     /// never actually constructed; it just keeps the `pb-app` call sites platform-free.
     pub struct LiveAudio;
 
@@ -179,5 +180,136 @@ mod imp {
         }
         send_bool(player, sel(b"prepareToPlay\0"));
         Some(player)
+    }
+}
+
+#[cfg(windows)]
+mod imp {
+    use super::Path;
+    use windows::core::HSTRING;
+    use windows::Foundation::{TimeSpan, Uri};
+    use windows::Media::Core::MediaSource;
+    use windows::Media::Playback::MediaPlayer;
+
+    /// A WinRT `MediaPlayer` for a Live Photo's motion `.mov`, playing its audio track —
+    /// the Windows analog of the macOS `AVAudioPlayer` path. Closed (`IClosable`) on
+    /// drop, which also stops playback and releases the media pipeline.
+    pub struct LiveAudio {
+        player: MediaPlayer,
+    }
+
+    impl LiveAudio {
+        /// Open the `.mov`'s audio and start playing from `start_secs` into the clip
+        /// (`0.0` = the top, to line up with the motion's first frame; a non-zero offset
+        /// keeps a mid-playback unmute in sync). `None` if the player can't be made.
+        ///
+        /// Never blocks this thread: the source opens async on Media Foundation's own
+        /// threads, but the seek and `Play()` issued *before* `MediaOpened` stick — the
+        /// session queues them and playback starts at the requested offset once the
+        /// source is ready (verified empirically; no `MediaOpened` handler needed).
+        pub fn play(path: &Path, start_secs: f64) -> Option<LiveAudio> {
+            let uri = Uri::CreateUri(&HSTRING::from(file_uri(path)?)).ok()?;
+            let source = MediaSource::CreateFromUri(&uri).ok()?;
+            let player = MediaPlayer::new().ok()?;
+            player.SetAutoPlay(false).ok()?;
+            player.SetSource(&source).ok()?;
+            let start = TimeSpan {
+                Duration: (start_secs.max(0.0) * 1e7) as i64, // seconds → 100 ns ticks
+            };
+            player.PlaybackSession().ok()?.SetPosition(start).ok()?;
+            player.Play().ok()?;
+            Some(LiveAudio { player })
+        }
+
+        /// Pause (keeps the position) — mirrors pausing the motion.
+        pub fn pause(&self) {
+            let _ = self.player.Pause();
+        }
+
+        /// Resume from where it paused — mirrors resuming the motion.
+        pub fn resume(&self) {
+            let _ = self.player.Play();
+        }
+    }
+
+    impl Drop for LiveAudio {
+        fn drop(&mut self) {
+            let _ = self.player.Pause();
+            let _ = self.player.Close(); // IClosable — tears down the media pipeline
+        }
+    }
+
+    /// `file:///` URI for a local path, percent-encoded byte-wise. `Uri::CreateUri`
+    /// tolerates raw spaces (it encodes them itself) but *misparses* a literal `#`,
+    /// `%`, or `?` in a filename as fragment/escape/query — and it leaves existing
+    /// `%XX` escapes alone, so pre-encoding everything outside the unreserved set
+    /// (plus the separators we mean: `/` and the drive `:`) is both safe and exact.
+    fn file_uri(path: &Path) -> Option<String> {
+        let s = path.to_str()?;
+        let s = s.strip_prefix(r"\\?\").unwrap_or(s);
+        // UNC `\\server\share\…` → `file://server/share/…`; drive paths get the
+        // empty-authority `file:///C:/…` form.
+        let (prefix, rest) = match s.strip_prefix(r"\\") {
+            Some(unc) => ("file://", unc),
+            None => ("file:///", s),
+        };
+        let mut uri = String::with_capacity(prefix.len() + rest.len() * 3);
+        uri.push_str(prefix);
+        for b in rest.bytes() {
+            match b {
+                b'\\' => uri.push('/'),
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' => uri.push(b as char),
+                b'-' | b'.' | b'_' | b'~' | b'/' | b':' => uri.push(b as char),
+                _ => {
+                    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                    uri.push('%');
+                    uri.push(HEX[(b >> 4) as usize] as char);
+                    uri.push(HEX[(b & 0xF) as usize] as char);
+                }
+            }
+        }
+        Some(uri)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::file_uri;
+        use std::path::Path;
+
+        #[test]
+        fn drive_path_forward_slashed() {
+            assert_eq!(
+                file_uri(Path::new(r"D:\Photos\IMG_0001.mov")).unwrap(),
+                "file:///D:/Photos/IMG_0001.mov"
+            );
+        }
+
+        #[test]
+        fn reserved_and_space_bytes_are_escaped() {
+            assert_eq!(
+                file_uri(Path::new(r"C:\a b\100% #1?.mov")).unwrap(),
+                "file:///C:/a%20b/100%25%20%231%3F.mov"
+            );
+        }
+
+        #[test]
+        fn verbatim_prefix_stripped_and_unc_kept_as_authority() {
+            assert_eq!(
+                file_uri(Path::new(r"\\?\C:\x.mov")).unwrap(),
+                "file:///C:/x.mov"
+            );
+            assert_eq!(
+                file_uri(Path::new(r"\\nas\share\x.mov")).unwrap(),
+                "file://nas/share/x.mov"
+            );
+        }
+
+        #[test]
+        fn non_ascii_is_utf8_percent_encoded() {
+            assert_eq!(
+                file_uri(Path::new(r"C:\Fotoğraf\été.mov")).unwrap(),
+                "file:///C:/Foto%C4%9Fraf/%C3%A9t%C3%A9.mov"
+            );
+        }
     }
 }
