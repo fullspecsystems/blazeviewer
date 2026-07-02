@@ -52,59 +52,48 @@ struct PhotoBlazeMacApp: App {
     @State private var model = CoreModel()
 
     var body: some Scene {
-        WindowGroup("PhotoBlaze (SwiftUI host)") {
-            EffectLogView(model: model)
-                .onAppear {
-                    // After SwiftUI has installed its own main menu, replace it with ours.
-                    model.installMenuBarIfNeeded()
-                    model.openLaunchPathIfAny()
-                }
+        WindowGroup("PhotoBlaze") {
+            ContentView(model: model)
+        }
+        // ⌘, / App menu ▸ Settings… — reached via ShowDialog("settings") →
+        // `openSettingsAction` (installed by ContentView; only a view can grab the
+        // environment's openSettings action).
+        Settings {
+            SettingsView(model: model)
         }
     }
 }
 
-/// The slice-1 debug surface: shows the effects the Rust core returns for each key event —
-/// the on-screen proof that Swift → CoreEvent → AppCore::handle → CoreEffect → Swift works.
-struct EffectLogView: View {
+/// The viewer window: the wgpu canvas fills it edge to edge (the NS1 effect-log debug
+/// chrome retired with the NS2 dialogs — the FFI trace still prints on a terminal launch),
+/// with the NS2 dialog sheets presented over it.
+struct ContentView: View {
     let model: CoreModel
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            // The wgpu canvas (NS1 item 2): Rust draws the letterbox + the "Press O to
-            // open" hint into this CAMetalLayer — the empty-deck frame, GPU-rendered.
-            MetalCanvas(model: model)
-                .frame(minHeight: 220)
-
-            Text("PhotoBlaze — NS1 slice-1 host")
-                .font(.headline)
-            Text(
-                """
-                Key events are forwarded to the Rust AppCore; the CoreEffects it returns \
-                appear below. Space/Backspace/arrows drive nav on an empty deck; \
-                Esc quits through ShellFlowAction("quit") — the full FFI round trip.
-                """
-            )
-            .font(.caption)
-            .foregroundStyle(.secondary)
-
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(model.effectLog) { line in
-                            Text(line.text)
-                                .font(.system(.caption, design: .monospaced))
-                                .id(line.id)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .onChange(of: model.effectLog.last?.id) { _, last in
-                    if let last { proxy.scrollTo(last, anchor: .bottom) }
+        MetalCanvas(model: model)
+            .frame(minWidth: 520, minHeight: 360)
+            .onAppear {
+                // After SwiftUI has installed its own main menu, replace it with ours.
+                model.installMenuBarIfNeeded()
+                model.openLaunchPathIfAny()
+                model.openSettingsAction = { openSettings() }
+            }
+            // Password / Loading / Scanning ride one item-driven sheet. The binding's
+            // nil-write is the *user* dismissal signal (Esc/etc. beyond the buttons);
+            // a programmatic CloseDialog clears activeSheet directly and never lands here.
+            .sheet(
+                item: Binding(
+                    get: { model.activeSheet },
+                    set: { if $0 == nil { model.userDismissedSheet() } }
+                )
+            ) { kind in
+                switch kind {
+                case .password: PasswordSheetView(model: model)
+                case .loading: LoadingSheetView(model: model)
+                case .scanning: ScanningSheetView(model: model)
                 }
             }
-            .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 6))
-        }
-        .padding()
-        .frame(minWidth: 520, minHeight: 360)
     }
 }

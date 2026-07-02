@@ -1,7 +1,8 @@
 # PhotoBlaze — Current Status (session handoff)
 
-_Last updated: 2026-07-02 (Windows session + the macOS NS1 session — **NS1 items 1–3 done**: the
-SwiftUI host runs the real engine over FFI; see **▶ Resume**)._
+_Last updated: 2026-07-02 (**NS2 native dialogs code-complete except the NS2.6 shortcut
+editor** — Confirm/Message/Password/Loading/Scanning + the Settings scene all landed, awaiting
+the owner smoke; NS1 complete + owner-smoked; see **▶ Resume** → the NS2 block)._
 
 ## 🪟 Windows session 2026-07-01→02 — CI green again + Live Photos + HEIC ships parallel
 
@@ -260,7 +261,7 @@ Mapped end-to-end (Explore agent) and inverted in the recommended low-risk order
 - The other `ShellFlowAction` arms (DeletePermanent confirm, Recursive/CancelScan scan-thread spawn,
   Quit teardown) remain genuine platform ops. None of this blocks NS1.
 
-### ▶ Resume (NS1 in progress — the Swift/AppKit host)
+### ▶ Resume (NS1 ✅ complete + owner-smoked; NS2 dialogs code-complete, smoke pending)
 
 **ITEMS 1–3 of 10 DONE (2026-07-02 session, commits `4048c69`/`6e3744f`/`9485884`, pushed to
 `origin/swiftui`; origin/main merged in — incl. its Windows-CI clippy fix).** The Swift host is
@@ -362,13 +363,57 @@ host's effect log, which retires as the NS2 dialogs land. Optional leftover chec
 the AppKit-owned layer on the XDR (`~/Downloads/test-images/WideGamut-*-HDR.avif` — trust the
 panel, not a screenshot).
 
-**▶ NEXT: NS2 — the native dialogs** (plan §NS2, easiest first): the About panel is already the
-standard NSApplication one (done with the menu); next Confirm/Message → NSAlert (unblocks
-DeletePermanent + surfacing ReportError natively), Loading/Scanning → SwiftUI progress views over
-the existing progress handles (needs a progress-snapshot FFI), Settings → a SwiftUI `Settings`
-scene bound to a `SettingsForm` mirror, Password → NSSecureTextField (unblocks encrypted
-archives), and the shortcut-capture editor LAST (the long pole). `DialogResolved(DialogResult)`
-is the event to bridge; `ShowDialog(kind)` already crosses.
+**▶ NS2 — the native dialogs: CODE-COMPLETE except the shortcut editor (2026-07-02 session,
+⚠ awaiting the owner smoke).** Everything except NS2.6 landed in one pass, green throughout
+(workspace tests incl. 4 new pb-mac-ffi dialog-flow tests, clippy `-D warnings`, fmt,
+`build-swift-host.sh --debug`, and a live launch+quit smoke on `/private/tmp/pb-corpus`):
+- **The effect bridge:** `DialogResolved` crosses as per-gesture FFI entry points
+  (`dialog_dismissed/closed/confirm_answered`, `password_submitted/cancelled`,
+  `loading/scanning/settings_cancelled`, `submit_settings`) — NOT an enum payload (gotcha #3).
+  `CloseDialog` + `SetDialogChecking` cross out; dialog text rides the clipboard-style
+  **stash + pull** (`dialog_message()`, `dialog_password_error()`). pb-mac-ffi keeps a
+  `shown_dialog` mirror (the winit `dialog.kind()` twin) for kind-guarded closes, and maintains
+  `core.dialog_open` (slideshow pauses while a dialog is up).
+- **Confirm/Message → NSAlert sheets** (`presentConfirmAlert`/`presentMessageAlert` in
+  CoreModel): `ShellFlowAction(DeletePermanent)` is now intercepted Rust-side
+  (`confirm_delete_permanent` mirrors winit — flush pending delete, archive-entry toast, arm
+  `pending_confirm_delete`, "Permanently delete 'name'?"); `ReportError` presents natively.
+- **Loading/Scanning → SwiftUI sheets** (`DialogViews.swift`) over a `dialog_progress()`
+  snapshot FFI (the handles already lived in pb-mac-ffi): Loading = determinate bar (spinner
+  until the 7z header publishes a total) + Cancel; Scanning = the winit-parity **deferred
+  reveal** (250 ms `SCAN_DIALOG_DELAY`, never over a shown photo/another dialog) with live
+  count + current folder + Cancel; a superseding open re-points the sheet in place.
+- **Password → SwiftUI sheet with SecureField** (native secure entry): lock icon + two-line
+  prompt, Enter submits / Esc cancels, wrong password **re-prompts in place** with the inline
+  error + "Checking…" state (`SetDialogChecking`) — full winit parity incl. the
+  password→loading promote (state-driven sheets make `become_loading` implicit). **Encrypted
+  archives now work on the Swift host** (the NS1 `ReportError` stopgap is gone).
+- **Settings groundwork (item 5):** `SettingsFormFfi` transparent-struct mirror +
+  `settings_form()/submit_settings()` (the fold is a **pure fn** `fold_settings_form`,
+  unit-tested WITHOUT touching the real settings.toml — `apply_settings` persists!), and a
+  SwiftUI `Settings` scene (`SettingsView.swift`) with the full egui form surface (speed/ramp/
+  max-fps-with-refresh-ceiling/hold-delay sliders, scroll/scale/startup pickers, letterbox
+  ColorPicker, opacity, slideshow interval, recursive, pinned picker folder + Choose…).
+  ⌘, / App menu ▸ Settings route through `ShowDialog("settings")` → the `openSettings`
+  environment action. Save = fold+clamp Rust-side → `SettingsSaved` applies + persists;
+  Cancel/window-✕ discards (and clears `dialog_open` so the slideshow resumes).
+- **The NS1 debug chrome is retired:** `EffectLogView` is gone — the canvas fills the window;
+  the FFI trace still prints on a terminal launch (DEBUG builds).
+- **Key-monitor gating:** while a panel/alert/sheet is up, the local monitor passes events
+  through untouched (typing in the password field must not drive the viewer).
+
+**Owner smoke checklist (all at once):** (1) ⇧Del on a photo → native Delete/Cancel sheet, both
+answers; on an archive entry → "Can't delete this" toast. (2) A corrupt/refused archive →
+native error alert. (3) An encrypted .zip AND .7z → password sheet; wrong entry → inline-error
+re-prompt; right entry → opens (a 7z shows Checking… → Opening…). (4) A big .7z → determinate
+progress + Cancel. (5) A huge folder tree (~/Library-scale) → Scanning sheet after ~250 ms with
+live count/folder; its Cancel keeps the prior view, while menu ▸ Stop Scanning mid-stream keeps
+the partial deck. (6) ⌘, → Settings: edit + Save → behavior changes + persists across relaunch;
+Cancel/✕ discards; the slideshow pauses while any dialog is up.
+
+**Still NS2.6 (deliberately last):** the shortcut-capture keybinding editor — see
+`.taskmaster/docs/ns2-shortcut-capture-notes.md` (the KeyboardShortcuts-package review: a local
+event monitor + the existing KeyMap Carbon table; Esc-unbindable is a recorded punt).
 
 **Host-launch note:** the `AppDelegate` sets the activation policy in
 `applicationWillFinishLaunching` so bare-binary launches (`swift run` / the executable straight

@@ -39,18 +39,30 @@ use pb_core::open::{self, Cursor, LaunchInput, Source};
 use pb_core::ResidentRing;
 use pb_render::Renderer as _;
 
+/// How long a folder walk runs before the Scanning progress dialog is revealed — a fast
+/// scan (the overwhelmingly common case) never flashes a dialog. Mirrors the winit shell's
+/// `SCAN_DIALOG_DELAY`.
+const SCAN_DIALOG_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// An in-flight streaming folder walk — the mirror of the winit shell's `DirScan`
-/// (worker thread + generation guard; the progress dialog is NS2).
+/// (worker thread + generation guard + the Scanning dialog's display name/reveal timer).
 struct DirScan {
     generation: u64,
     rx: Receiver<(u64, ScanUpdate)>,
     progress: ScanProgress,
+    /// The scan root's display name for the Scanning dialog headline.
+    name: String,
+    /// When the walk started — the Scanning dialog reveals after [`SCAN_DIALOG_DELAY`].
+    started: Instant,
 }
 
 /// An in-flight background archive open — the mirror of the winit shell's `ArchiveLoad`.
 struct ArchiveLoad {
     generation: u64,
     rx: Receiver<(u64, Result<Resolved, ArchiveOpenError>)>,
+    /// The archive being opened — kept for the password prompt (a `PasswordRequired`
+    /// failure re-opens this path with the entered password).
+    path: PathBuf,
     was_password_attempt: bool,
     progress: pb_source::OpenProgress,
 }
@@ -75,6 +87,19 @@ pub struct AppCoreHandle {
     /// The latest `SetMenuState` payload (the drain emits a `MenuStateChanged` marker; the
     /// host pulls the whole struct via `menu_state()` — same stash pattern as the clipboard).
     last_menu_state: contract::MenuState,
+    /// What chrome dialog the host is currently showing — the mirror of the winit shell's
+    /// `self.dialog.kind()` checks, so kind-guarded closes (a finished scan closes only a
+    /// *Scanning* dialog) and the password retry-in-place work identically. Maintained at
+    /// the `ShowDialog`/`CloseDialog` emit sites in `next_effect`. About isn't tracked (it's
+    /// the standalone NSApp panel, not a dialog the flow manages).
+    shown_dialog: Option<contract::DialogKind>,
+    /// The text payload of the most recent `ShowDialog` (the confirm question, the password
+    /// prompt, the loading/scanning headline) — the host pulls it via `dialog_message()`
+    /// right after the marker (stash + pull, like the clipboard; gotcha #3).
+    dialog_message: String,
+    /// The inline error under the password field after a wrong attempt ("" = none) —
+    /// pulled via `dialog_password_error()` with each `ShowDialog("password")`.
+    password_error: String,
 }
 
 impl AppCoreHandle {
@@ -95,6 +120,9 @@ impl AppCoreHandle {
             archive_gen: 0,
             pending_clipboard: None,
             last_menu_state: contract::MenuState::default(),
+            shown_dialog: None,
+            dialog_message: String::new(),
+            password_error: String::new(),
         }
     }
 
@@ -318,6 +346,228 @@ impl AppCoreHandle {
         }
     }
 
+    // ---- The NS2 dialog seam: `ShowDialog`/`CloseDialog`/`SetDialogChecking` effects out
+    // (with the text payload stashed — see `dialog_message`), `DialogResolved` results in.
+    // Each entry point maps one user gesture in a native dialog to the shell-neutral
+    // `contract::DialogResult` and lets `AppCore::handle_dialog_resolved` own the reaction
+    // (close, cancel workers, run the delete, re-open the archive) — the same seam the
+    // winit shell's `route_dialog_outcome` feeds.
+
+    /// The text payload of the most recent `ShowDialog` (pull right after the marker).
+    fn dialog_message(&self) -> String {
+        self.dialog_message.clone()
+    }
+
+    /// The inline password-field error ("" = none) — set on a wrong-password retry.
+    fn dialog_password_error(&self) -> String {
+        self.password_error.clone()
+    }
+
+    /// Esc / the close button dismissed the current dialog (whatever kind is up). The core
+    /// arms the esc-guard, cancels a matching in-flight op, and closes.
+    fn dialog_dismissed(&mut self) {
+        self.core.now = Instant::now();
+        let kind = self.shown_dialog;
+        self.core.handle(CoreEvent::DialogResolved(
+            contract::DialogResult::Dismissed(kind),
+        ));
+    }
+
+    /// A Message (or any other single-button) dialog's OK.
+    fn dialog_closed(&mut self) {
+        self.core.now = Instant::now();
+        self.core
+            .handle(CoreEvent::DialogResolved(contract::DialogResult::Closed));
+    }
+
+    /// The delete Confirm dialog answered (`true` = Delete). The core runs the permanent
+    /// delete on the armed `pending_confirm_delete` item.
+    fn dialog_confirm_answered(&mut self, confirmed: bool) {
+        self.core.now = Instant::now();
+        self.core.handle(CoreEvent::DialogResolved(
+            contract::DialogResult::ConfirmAnswered(confirmed),
+        ));
+    }
+
+    /// The password prompt submitted an entry: the core shows "Checking…" and re-opens the
+    /// pending archive with it (`BeginArchiveOpen` — intercepted onto this crate's worker).
+    fn password_submitted(&mut self, password: String) {
+        self.core.now = Instant::now();
+        self.core.handle(CoreEvent::DialogResolved(
+            contract::DialogResult::PasswordSubmitted(Some(password)),
+        ));
+    }
+
+    /// The password prompt's Cancel — abandon the pending archive.
+    fn password_cancelled(&mut self) {
+        self.core.now = Instant::now();
+        self.core.handle(CoreEvent::DialogResolved(
+            contract::DialogResult::PasswordCancelled,
+        ));
+    }
+
+    /// The archive "Opening…" dialog's Cancel.
+    fn loading_cancelled(&mut self) {
+        self.core.now = Instant::now();
+        self.core.handle(CoreEvent::DialogResolved(
+            contract::DialogResult::LoadingCancelled,
+        ));
+    }
+
+    /// The folder "Scanning…" dialog's Cancel (stops the walk, discards the partial result).
+    fn scanning_cancelled(&mut self) {
+        self.core.now = Instant::now();
+        self.core.handle(CoreEvent::DialogResolved(
+            contract::DialogResult::ScanningCancelled,
+        ));
+    }
+
+    /// The Settings window's Cancel (its Esc goes through `dialog_dismissed`).
+    fn settings_cancelled(&mut self) {
+        self.core.now = Instant::now();
+        self.core.handle(CoreEvent::DialogResolved(
+            contract::DialogResult::SettingsCancelled,
+        ));
+    }
+
+    /// A live snapshot of whichever progress the shown dialog tracks — the host polls this
+    /// each pump while a Loading (fraction) or Scanning (found + current dir) dialog is up.
+    /// The handles live in this crate (the workers are Rust-side), so this is just a read.
+    fn dialog_progress(&self) -> ffi::DialogProgressFfi {
+        ffi::DialogProgressFfi {
+            fraction: self
+                .archive_load
+                .as_ref()
+                .map(|l| l.progress.fraction())
+                .unwrap_or(0.0),
+            found: self
+                .dir_scan
+                .as_ref()
+                .map(|s| s.progress.found() as u64)
+                .unwrap_or(0),
+            current_dir: self
+                .dir_scan
+                .as_ref()
+                .map(|s| s.progress.current())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The current settings as the flat form the Settings window binds to (NS2 item 5).
+    /// `refresh_hz` rides along as the max-speed slider's ceiling (out-only).
+    fn settings_form(&self) -> ffi::SettingsFormFfi {
+        use pb_app_core::settings::{ScaleModePref, ScrollAction, StartupMode};
+        let s = &self.core.settings;
+        let hz = self.core.refresh_hz().max(1);
+        // An uncapped (0) or ≥refresh saved rate shows pinned at the ceiling (egui parity).
+        let max_fps = if s.max_advance_rate == 0 || s.max_advance_rate >= hz {
+            hz
+        } else {
+            s.max_advance_rate
+        };
+        ffi::SettingsFormFfi {
+            start_speed: s.start_speed,
+            ramp_secs: s.ramp_secs,
+            max_fps,
+            refresh_hz: hz,
+            hold_delay_ms: s.hold_delay_ms,
+            scroll_action: match s.scroll_action {
+                ScrollAction::Pan => 0,
+                ScrollAction::Zoom => 1,
+            },
+            recursive: s.recursive,
+            scale_mode: match s.scale_mode {
+                ScaleModePref::Fit => 0,
+                ScaleModePref::Fill => 1,
+                ScaleModePref::Original => 2,
+            },
+            letterbox_r: s.letterbox[0],
+            letterbox_g: s.letterbox[1],
+            letterbox_b: s.letterbox[2],
+            info_opacity: s.info_opacity,
+            startup_mode: match s.startup_mode {
+                StartupMode::Fullscreen => 0,
+                StartupMode::Windowed => 1,
+                StartupMode::Remember => 2,
+            },
+            slideshow_interval_secs: s.slideshow_interval_secs,
+            picker_fixed: s.picker_dir.is_some(),
+            picker_dir: s
+                .picker_dir
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            mute_live_audio: s.mute_live_audio,
+        }
+    }
+
+    /// Settings Save: fold the edited form onto the current settings and hand the result
+    /// to the core (`SettingsSaved` applies + persists it). The keymap half stays `None`
+    /// until the NS2.6 shortcut editor.
+    fn submit_settings(&mut self, form: ffi::SettingsFormFfi) {
+        self.core.now = Instant::now();
+        let s = fold_settings_form(&self.core.settings, &form, self.core.refresh_hz());
+        self.core.handle(CoreEvent::DialogResolved(
+            contract::DialogResult::SettingsSaved {
+                settings: Some(s),
+                keymap: None,
+            },
+        ));
+    }
+
+    /// `ShellFlowAction(DeletePermanent)` intercepted — the winit shell's
+    /// `confirm_delete_permanent` mirrored: settle any pending delete-advance, refuse an
+    /// archive entry with a toast, else arm `pending_confirm_delete` and open the native
+    /// confirm dialog with the file name in the question.
+    fn confirm_delete_permanent(&mut self) {
+        self.core.flush_pending_delete();
+        let Some(item) = self.core.displayed_item else {
+            return;
+        };
+        if self.core.source.path(item).is_none() {
+            self.core.show_toast("Can't delete this"); // archive entry — no file
+            return;
+        }
+        let name = engine::file_name_of(self.core.source.name(item));
+        self.core.pending_confirm_delete = Some(item);
+        self.dialog_message = format!("Permanently delete \u{2018}{name}\u{2019}?");
+        self.core.effects.push(contract::CoreEffect::ShowDialog(
+            contract::DialogKind::Confirm,
+        ));
+    }
+
+    /// Prompt for an archive's password (or re-prompt after a wrong one) — the winit
+    /// shell's `prompt_archive_password` mirrored. Remembers `path` so a submitted entry
+    /// re-opens it; a retry sets the inline error (the host re-shows the same sheet in
+    /// place — state-driven SwiftUI makes winit's promote-in-place dance implicit).
+    fn prompt_archive_password(&mut self, path: PathBuf, wrong: bool) {
+        self.core.password_archive = Some(path.clone());
+        self.password_error = if wrong && self.shown_dialog == Some(contract::DialogKind::Password)
+        {
+            "Incorrect password. Please try again.".to_string()
+        } else {
+            String::new()
+        };
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("this archive");
+        // Two lines: the lead on one, the (possibly long) file name on its own.
+        self.dialog_message = format!("Enter the password for\n\u{201c}{name}\u{201d}");
+        self.core.effects.push(contract::CoreEffect::ShowDialog(
+            contract::DialogKind::Password,
+        ));
+    }
+
+    /// Push a `CloseDialog` (so the host dismisses its sheet) only when the shown dialog is
+    /// one of `kinds` — the winit shell's kind-guarded closes (`close_scanning_dialog`, the
+    /// archive success's loading/password close) so an unrelated dialog is never stolen.
+    fn close_dialog_kinds(&mut self, kinds: &[contract::DialogKind]) {
+        if self.shown_dialog.is_some_and(|k| kinds.contains(&k)) {
+            self.core.effects.push(contract::CoreEffect::CloseDialog);
+        }
+    }
+
     /// A physical key went down. `key` is a [`PbKey`] name accepted by `PbKey::from_name`
     /// (e.g. `"Space"`, `"Escape"`, `"Right"`, `"C"` — NOT winit's `"ArrowRight"`/`"KeyC"`
     /// spellings) — the Swift host maps `NSEvent` → this name (the input-adapter job, NS1).
@@ -515,6 +765,25 @@ impl AppCoreHandle {
                 // this crate) — run here; only the genuinely Swift-native flows surface.
                 C::ShellFlowAction(Action::Recursive) => self.toggle_recursive(),
                 C::ShellFlowAction(Action::CancelScan) => self.cancel_scan_command(),
+                // NS2: the permanent-delete confirm opens Rust-side (arms the pending item
+                // + composes the question), surfacing as ShowDialog("confirm").
+                C::ShellFlowAction(Action::DeletePermanent) => self.confirm_delete_permanent(),
+                // Track what's shown (the winit shell's `self.dialog.kind()` mirror) and
+                // keep the core's `dialog_open` in sync — it pauses the slideshow while a
+                // dialog is up. About is the standalone NSApp panel, not tracked.
+                C::ShowDialog(kind) => {
+                    if kind != contract::DialogKind::About {
+                        self.shown_dialog = Some(kind);
+                        self.core.dialog_open = true;
+                    }
+                    return Some(map_effect(C::ShowDialog(kind)));
+                }
+                C::CloseDialog => {
+                    self.shown_dialog = None;
+                    self.core.dialog_open = false;
+                    self.password_error.clear();
+                    return Some(ffi::CoreEffectFfi::CloseDialog);
+                }
                 // The image payload can be tens of MB — stash it and surface a bare
                 // marker; the host pulls it via the clipboard accessors (gotcha #3).
                 C::WriteClipboard(payload) => {
@@ -568,13 +837,14 @@ impl AppCoreHandle {
             return;
         }
         self.cancel_dir_scan();
+        self.close_dialog_kinds(&[contract::DialogKind::Scanning]);
         self.core.request_prefetch();
         self.core.show_toast("Scan stopped");
     }
 
     // ---- The shell's Rust half: the scan/archive worker flow (mirrors the winit shell's
-    // `begin_*`/`poll_*`; the progress/password dialogs those drive are NS2 — failures
-    // surface as `ReportError` for now).
+    // `begin_*`/`poll_*`, including the Loading/Scanning/Password dialogs those drive —
+    // opened by pushing `ShowDialog` with the text stashed in `dialog_message`).
 
     /// Start a streaming folder walk on a worker thread (`CoreEffect::BeginDirScan`).
     fn begin_dir_scan(&mut self, source: Source, cursor: Cursor) {
@@ -589,6 +859,12 @@ impl AppCoreHandle {
         };
         let root = roots.first().cloned().unwrap_or_else(|| PathBuf::from("."));
         let scan_root = roots.first().cloned();
+        // The scan root's display name for the Scanning dialog headline (winit's
+        // `scan_display_name`).
+        let name = root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| root.display().to_string());
         let worker_progress = progress.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -603,12 +879,23 @@ impl AppCoreHandle {
                 tx,
             );
         });
+        // A Scanning dialog already up (a previous slow scan the user re-opened over):
+        // re-point it at this walk in place — the host updates the same sheet, no flicker
+        // (winit's `set_scan`).
+        if self.shown_dialog == Some(contract::DialogKind::Scanning) {
+            self.dialog_message = format!("Scanning \u{201c}{name}\u{201d}\u{2026}");
+            self.core.effects.push(contract::CoreEffect::ShowDialog(
+                contract::DialogKind::Scanning,
+            ));
+        }
         self.core.scanning = true; // sequential-only prefetch while streaming
         self.core.scan_bootstrapped = false; // first non-empty batch bootstraps
         self.dir_scan = Some(DirScan {
             generation,
             rx,
             progress,
+            name,
+            started: Instant::now(),
         });
     }
 
@@ -635,6 +922,8 @@ impl AppCoreHandle {
                     self.dir_scan = None;
                     let never_bootstrapped = !self.core.scan_bootstrapped;
                     self.core.handle(CoreEvent::ScanDone);
+                    // Walk finished — drop the Scanning progress dialog (if it revealed).
+                    self.close_dialog_kinds(&[contract::DialogKind::Scanning]);
                     if never_bootstrapped {
                         self.core.effects.push(contract::CoreEffect::ReportError(
                             "No supported images in that selection.".into(),
@@ -642,11 +931,33 @@ impl AppCoreHandle {
                     }
                     return;
                 }
-                // Still scanning (the deferred Scanning progress dialog is NS2).
-                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Empty) => {
+                    // Still scanning with nothing on screen yet: once the walk has
+                    // outlasted the reveal delay, show the Scanning dialog (live count +
+                    // current folder + Cancel) — winit's deferred reveal, same gates: never
+                    // over an already-shown photo, never stealing another dialog.
+                    let reveal = !self.core.scan_bootstrapped
+                        && self.shown_dialog.is_none()
+                        && self
+                            .dir_scan
+                            .as_ref()
+                            .is_some_and(|s| s.started.elapsed() >= SCAN_DIALOG_DELAY);
+                    if reveal {
+                        if let Some(s) = self.dir_scan.as_ref() {
+                            self.dialog_message =
+                                format!("Scanning \u{201c}{}\u{201d}\u{2026}", s.name);
+                            self.core.effects.push(contract::CoreEffect::ShowDialog(
+                                contract::DialogKind::Scanning,
+                            ));
+                        }
+                    }
+                    return;
+                }
                 Err(TryRecvError::Disconnected) => {
                     self.dir_scan = None;
                     self.core.scanning = false;
+                    // Worker died — don't strand its progress dialog.
+                    self.close_dialog_kinds(&[contract::DialogKind::Scanning]);
                     return;
                 }
             }
@@ -677,26 +988,38 @@ impl AppCoreHandle {
         }
         if !is_7z {
             let result = scan::open_archive(&path, password);
-            self.finish_archive_open(result, was_password_attempt);
+            self.finish_archive_open(result, was_password_attempt, path);
             return;
         }
         if let Err(e) = scan::seven_z_preflight(&path, password.as_deref()) {
-            self.finish_archive_open(Err(e), was_password_attempt);
+            self.finish_archive_open(Err(e), was_password_attempt, path);
             return;
         }
         self.archive_gen += 1;
         let generation = self.archive_gen;
         let progress = pb_source::OpenProgress::new();
         let (tx, rx) = std::sync::mpsc::channel();
-        let worker_path = path;
+        let worker_path = path.clone();
         let worker_progress = progress.clone();
         std::thread::spawn(move || {
             let result = scan::load_seven_z(&worker_path, password, &worker_progress);
             let _ = tx.send((generation, result));
         });
+        // The determinate "Opening…" progress + Cancel dialog. If the password prompt is
+        // still up (a just-verified entry), the same ShowDialog replaces its content in
+        // place — SwiftUI's state-driven sheet makes winit's `become_loading` implicit.
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("archive");
+        self.dialog_message = format!("Opening \u{201c}{name}\u{201d}\u{2026}");
+        self.core.effects.push(contract::CoreEffect::ShowDialog(
+            contract::DialogKind::Loading,
+        ));
         self.archive_load = Some(ArchiveLoad {
             generation,
             rx,
+            path,
             was_password_attempt,
             progress,
         });
@@ -715,44 +1038,61 @@ impl AppCoreHandle {
                 if generation != load_gen {
                     return; // superseded by a newer open
                 }
-                let was_attempt = load.map(|l| l.was_password_attempt).unwrap_or(false);
-                self.finish_archive_open(result, was_attempt);
+                let (path, was_attempt) = match load {
+                    Some(l) => (l.path, l.was_password_attempt),
+                    None => return,
+                };
+                self.finish_archive_open(result, was_attempt, path);
             }
             Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => self.archive_load = None,
+            Err(TryRecvError::Disconnected) => {
+                // Worker died without a result (a panic inside the decompressor). Drop the
+                // handle and don't strand its Loading dialog (winit parity).
+                self.archive_load = None;
+                self.close_dialog_kinds(&[contract::DialogKind::Loading]);
+            }
         }
     }
 
-    /// Act on a finished archive open. Success installs the playlist via
-    /// `ArchiveResolved`; failures report. Password entry needs the NS2 native dialogs, so
-    /// `PasswordRequired` surfaces as an error until then.
+    /// Act on a finished archive open (zip-sync or 7z-async) — the winit shell's
+    /// `finish_archive_open` mirrored: a non-empty success closes the loading/password
+    /// dialog and installs the playlist via `ArchiveResolved`; `PasswordRequired` opens
+    /// (or re-prompts, after a wrong attempt) the password dialog; any other failure
+    /// replaces the dialog with the error notice.
     fn finish_archive_open(
         &mut self,
         result: Result<Resolved, ArchiveOpenError>,
         was_password_attempt: bool,
+        path: PathBuf,
     ) {
+        use contract::DialogKind as K;
         match result {
             Ok(r) if !r.source.is_empty() => {
+                self.close_dialog_kinds(&[K::Loading, K::Password]);
                 self.core.handle(CoreEvent::ArchiveResolved(r));
             }
-            Ok(_) => self.report_error(ArchiveOpenError::Empty.user_message()),
+            Ok(_) => self.fail_archive_open(&ArchiveOpenError::Empty),
             Err(ArchiveOpenError::PasswordRequired) => {
-                self.core.password_archive = None;
-                let msg = if was_password_attempt {
-                    "Incorrect archive password.".to_string()
-                } else {
-                    "That archive is password-protected (password entry arrives with the \
-                     native dialogs — NS2)."
-                        .to_string()
-                };
-                self.report_error(msg);
+                self.prompt_archive_password(path, was_password_attempt);
             }
             // User cancelled: drop quietly, keeping whatever is on screen.
             Err(ArchiveOpenError::Cancelled) => {
                 self.core.password_archive = None;
+                self.close_dialog_kinds(&[K::Loading]);
             }
-            Err(e) => self.report_error(e.user_message()),
+            Err(e) => self.fail_archive_open(&e),
         }
+    }
+
+    /// A terminal archive-open failure (not a password retry): forget the pending archive
+    /// and replace any loading/password dialog with the error notice.
+    fn fail_archive_open(&mut self, e: &ArchiveOpenError) {
+        self.core.password_archive = None;
+        self.close_dialog_kinds(&[
+            contract::DialogKind::Loading,
+            contract::DialogKind::Password,
+        ]);
+        self.report_error(e.user_message());
     }
 
     /// Ask the in-flight archive open (if any) to stop; the poll drops it quietly.
@@ -767,6 +1107,56 @@ impl AppCoreHandle {
             .effects
             .push(contract::CoreEffect::ReportError(msg));
     }
+}
+
+/// Fold an edited Settings form back onto `base`, preserving the fields the form doesn't
+/// expose (the remembered fullscreen state, window geometry), clamped to valid ranges —
+/// the egui `SettingsDraft::to_settings` mirrored. Pure (no I/O), so it's unit-testable
+/// without touching the user's real settings.toml (`SettingsSaved` → `apply_settings`
+/// persists).
+fn fold_settings_form(
+    base: &pb_app_core::settings::Settings,
+    form: &ffi::SettingsFormFfi,
+    refresh_hz: u32,
+) -> pb_app_core::settings::Settings {
+    use pb_app_core::settings::{ScaleModePref, ScrollAction, StartupMode};
+    let mut s = base.clone();
+    s.start_speed = form.start_speed;
+    s.ramp_secs = form.ramp_secs;
+    // The slider tops out at the refresh rate; that ceiling means "uncapped" (0).
+    s.max_advance_rate = if form.max_fps >= refresh_hz.max(1) {
+        0
+    } else {
+        form.max_fps
+    };
+    s.hold_delay_ms = form.hold_delay_ms;
+    s.scroll_action = match form.scroll_action {
+        1 => ScrollAction::Zoom,
+        _ => ScrollAction::Pan,
+    };
+    s.recursive = form.recursive;
+    s.scale_mode = match form.scale_mode {
+        1 => ScaleModePref::Fill,
+        2 => ScaleModePref::Original,
+        _ => ScaleModePref::Fit,
+    };
+    s.letterbox = [form.letterbox_r, form.letterbox_g, form.letterbox_b];
+    s.info_opacity = form.info_opacity;
+    s.startup_mode = match form.startup_mode {
+        0 => StartupMode::Fullscreen,
+        1 => StartupMode::Windowed,
+        _ => StartupMode::Remember,
+    };
+    s.slideshow_interval_secs = form.slideshow_interval_secs;
+    // Pin a folder only when the toggle is on *and* one was chosen (egui parity).
+    s.picker_dir = if form.picker_fixed && !form.picker_dir.is_empty() {
+        Some(PathBuf::from(form.picker_dir.clone()))
+    } else {
+        None
+    };
+    s.mute_live_audio = form.mute_live_audio;
+    s.clamp();
+    s
 }
 
 /// Is this path a viewable archive (`.zip` / `.7z`)? Mirrors the winit shell's helper.
@@ -861,7 +1251,10 @@ fn map_effect(e: contract::CoreEffect) -> ffi::CoreEffectFfi {
         C::ShowContextMenu(s) => {
             E::ShowContextMenu(s.has_image, s.has_motion, s.can_reveal, s.fullscreen)
         }
-        // Dialog updates, … — bridged with the NS2 dialogs.
+        // The password sheet's "Checking…" state while a submitted entry re-opens the
+        // archive. (CloseDialog is handled in `next_effect` — it updates the shown-dialog
+        // mirror there.)
+        C::SetDialogChecking => E::SetDialogChecking,
         _ => E::Other,
     }
 }
@@ -880,10 +1273,11 @@ mod ffi {
         SetWake(f64),
         ClearWake,
         Quit,
-        // A host-side flow command, by stable Action id ("quit", "delete_permanent",
-        // "recursive", "cancel_scan") — the host runs the native operation.
+        // A host-side flow command, by stable Action id — in practice only "quit"
+        // reaches Swift (recursive / cancel_scan / delete_permanent are intercepted
+        // Rust-side; delete opens the confirm via ShowDialog).
         ShellFlowAction(String),
-        // A user-facing error message (an NSAlert once the NS2 dialogs land).
+        // A user-facing error message — the host presents it natively (NSAlert).
         ReportError(String),
         // Run the native NSOpenPanel at this start directory; picked paths return
         // via open_paths (files+archives / folders respectively).
@@ -911,10 +1305,55 @@ mod ffi {
         // fullscreen) — the curated item set mirrors menu.rs build_context_menu.
         ShowContextMenu(bool, bool, bool, bool),
         // Present a chrome dialog by kind ("about" | "settings" | "confirm" | "message" |
-        // "password" | "loading" | "scanning"). Only "about" is native so far (NS2 owns
-        // the rest).
+        // "password" | "loading" | "scanning"). "about" = the standard NSApp panel;
+        // "settings" opens the Settings window; the rest carry their text via
+        // dialog_message() (+ dialog_password_error() for "password") — pull right after
+        // the marker, then present. Re-delivery of the SAME kind updates the sheet in
+        // place (a scanning re-point, a wrong-password retry).
         ShowDialog(String),
+        // Dismiss the shown dialog/sheet (the user's answer was processed, the scan/open
+        // finished or failed, …). Also clears the "checking" state.
+        CloseDialog,
+        // The password sheet's "Checking…" state: a submitted entry is being verified
+        // against the archive (disable the field + Unlock until the next ShowDialog/
+        // CloseDialog resolves it).
+        SetDialogChecking,
         Other,
+    }
+
+    // A live progress snapshot for the shown dialog — poll via dialog_progress() each
+    // pump while a Loading (fraction 0..1) or Scanning (found + current_dir) sheet is up.
+    #[swift_bridge(swift_repr = "struct")]
+    struct DialogProgressFfi {
+        fraction: f32,
+        found: u64,
+        current_dir: String,
+    }
+
+    // The Settings window's flat form — a mirror of pb_app_core::settings::Settings
+    // (NS2 item 5). Encodings: scroll_action 0 pan / 1 zoom; scale_mode 0 fit / 1 fill /
+    // 2 original; startup_mode 0 fullscreen / 1 windowed / 2 remember. max_fps rides in
+    // [1, refresh_hz]; at the ceiling it means "uncapped" (stored 0). refresh_hz is
+    // out-only (the slider ceiling); picker_dir "" = none.
+    #[swift_bridge(swift_repr = "struct")]
+    struct SettingsFormFfi {
+        start_speed: f32,
+        ramp_secs: f32,
+        max_fps: u32,
+        refresh_hz: u32,
+        hold_delay_ms: u32,
+        scroll_action: u8,
+        recursive: bool,
+        scale_mode: u8,
+        letterbox_r: u8,
+        letterbox_g: u8,
+        letterbox_b: u8,
+        info_opacity: u8,
+        startup_mode: u8,
+        slideshow_interval_secs: f64,
+        picker_fixed: bool,
+        picker_dir: String,
+        mute_live_audio: bool,
     }
 
     // The native menu's check/enabled state — the mirror of contract::MenuState (scale:
@@ -978,6 +1417,23 @@ mod ffi {
         fn menu_action(&mut self, id: &str);
         fn menu_state(&self) -> MenuStateFfi;
         fn context_menu(&mut self);
+
+        // The NS2 dialog seam: payload pulls (after a ShowDialog marker), the
+        // DialogResolved results (one entry point per user gesture), the live progress
+        // snapshot, and the Settings form round-trip.
+        fn dialog_message(&self) -> String;
+        fn dialog_password_error(&self) -> String;
+        fn dialog_dismissed(&mut self);
+        fn dialog_closed(&mut self);
+        fn dialog_confirm_answered(&mut self, confirmed: bool);
+        fn password_submitted(&mut self, password: String);
+        fn password_cancelled(&mut self);
+        fn loading_cancelled(&mut self);
+        fn scanning_cancelled(&mut self);
+        fn settings_cancelled(&mut self);
+        fn dialog_progress(&self) -> DialogProgressFfi;
+        fn settings_form(&self) -> SettingsFormFfi;
+        fn submit_settings(&mut self, form: SettingsFormFfi);
 
         // The canvas surface (NS1 item 2). `layer_ptr` = the retained CAMetalLayer's
         // pointer bits (swift-bridge has no raw-pointer type; usize crosses as UInt).
@@ -1061,5 +1517,158 @@ mod tests {
         assert_eq!(h.core.source.len(), 1);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn has_dialog(effects: &[ffi::CoreEffectFfi], kind: &str) -> bool {
+        effects
+            .iter()
+            .any(|e| matches!(e, ffi::CoreEffectFfi::ShowDialog(k) if k == kind))
+    }
+
+    fn has_close(effects: &[ffi::CoreEffectFfi]) -> bool {
+        effects
+            .iter()
+            .any(|e| matches!(e, ffi::CoreEffectFfi::CloseDialog))
+    }
+
+    /// Bootstrap a one-photo playlist in a temp dir (the open_path pattern), returning the
+    /// handle + the photo's path.
+    fn handle_with_photo(tag: &str) -> (AppCoreHandle, PathBuf) {
+        const FIXTURE: &[u8] = include_bytes!("../../pb-app-core/tests/fixtures/orient6.jpg");
+        let dir = std::env::temp_dir().join(format!("pb-mac-ffi-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("one.jpg");
+        std::fs::write(&file, FIXTURE).unwrap();
+        let mut h = AppCoreHandle::new(800, 600, 1.0);
+        h.open_path(dir.to_str().unwrap());
+        let _ = drain(&mut h);
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while h.core.playlist.current().is_none() && Instant::now() < deadline {
+            h.tick();
+            let _ = drain(&mut h);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(h.core.playlist.current(), Some(0), "fixture bootstraps");
+        (h, file)
+    }
+
+    /// NS2: DeletePermanent is intercepted Rust-side — it arms the pending item and opens
+    /// the confirm dialog (question carries the file name); No keeps the file, Yes runs the
+    /// permanent delete. The whole loop through `handle_dialog_resolved`, no Swift.
+    #[test]
+    fn delete_permanent_confirms_then_deletes() {
+        let (mut h, file) = handle_with_photo("delete");
+
+        h.menu_action("delete_permanent");
+        let effects = drain(&mut h);
+        assert!(has_dialog(&effects, "confirm"), "confirm dialog opens");
+        assert!(
+            h.dialog_message().contains("one.jpg"),
+            "the question names the file: {:?}",
+            h.dialog_message()
+        );
+
+        h.dialog_confirm_answered(false);
+        let effects = drain(&mut h);
+        assert!(has_close(&effects), "No closes the dialog");
+        assert!(file.exists(), "No leaves the file alone");
+
+        h.menu_action("delete_permanent");
+        let _ = drain(&mut h);
+        h.dialog_confirm_answered(true);
+        let _ = drain(&mut h);
+        assert!(!file.exists(), "Yes permanently deletes the file");
+
+        std::fs::remove_dir_all(file.parent().unwrap()).ok();
+    }
+
+    /// NS2: the password flow — PasswordRequired prompts (message names the archive), a
+    /// wrong attempt re-prompts in place with the inline error, and a submitted entry
+    /// drives Checking + the re-open (which fails here — the path doesn't exist — so the
+    /// prompt closes and the error surfaces natively).
+    #[test]
+    fn password_required_prompts_and_a_submit_rechecks() {
+        let mut h = AppCoreHandle::new(800, 600, 1.0);
+        let path = PathBuf::from("/nonexistent/locked.7z");
+
+        h.finish_archive_open(Err(ArchiveOpenError::PasswordRequired), false, path.clone());
+        let effects = drain(&mut h);
+        assert!(has_dialog(&effects, "password"));
+        assert!(h.dialog_message().contains("locked.7z"));
+        assert!(
+            h.dialog_password_error().is_empty(),
+            "fresh prompt, no error"
+        );
+        assert_eq!(h.core.password_archive.as_deref(), Some(path.as_path()));
+
+        // A wrong attempt (was_password_attempt) re-prompts with the inline error.
+        h.finish_archive_open(Err(ArchiveOpenError::PasswordRequired), true, path.clone());
+        let effects = drain(&mut h);
+        assert!(has_dialog(&effects, "password"));
+        assert!(
+            !h.dialog_password_error().is_empty(),
+            "retry shows the error"
+        );
+
+        // Submit → Checking + BeginArchiveOpen (intercepted; the bogus path errors out,
+        // which closes the prompt and reports).
+        h.password_submitted("hunter2".to_string());
+        let effects = drain(&mut h);
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, ffi::CoreEffectFfi::SetDialogChecking)));
+        assert!(has_close(&effects));
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, ffi::CoreEffectFfi::ReportError(_))));
+        assert!(
+            h.core.password_archive.is_none(),
+            "failed open forgets the archive"
+        );
+    }
+
+    /// NS2: Esc on a shown dialog routes through the core's Dismissed reaction — the
+    /// dialog closes, the mirrors clear, and the esc-guard arms (so the Esc can't leak
+    /// into quit).
+    #[test]
+    fn dismissing_the_shown_dialog_closes_and_guards() {
+        let mut h = AppCoreHandle::new(800, 600, 1.0);
+        h.shown_dialog = Some(contract::DialogKind::Scanning);
+        h.core.dialog_open = true;
+
+        h.dialog_dismissed();
+        let effects = drain(&mut h);
+        assert!(has_close(&effects));
+        assert!(h.shown_dialog.is_none());
+        assert!(!h.core.dialog_open);
+        assert!(h.core.esc_guard_until.is_some(), "esc-guard armed");
+    }
+
+    /// NS2 item 5: the Settings form fold — encodings map both ways, out-of-range values
+    /// clamp, the max-speed ceiling means "uncapped", and fields the form doesn't expose
+    /// (the remembered fullscreen state) are preserved. Pure — never touches settings.toml.
+    #[test]
+    fn settings_form_folds_back_with_clamps() {
+        use pb_app_core::settings::ScrollAction;
+        let h = AppCoreHandle::new(800, 600, 1.0);
+        let mut form = h.settings_form();
+
+        form.recursive = !form.recursive;
+        form.start_speed = 999.0; // clamps to 60
+        form.scroll_action = 1; // zoom
+        form.max_fps = form.refresh_hz; // ceiling = uncapped
+        form.picker_fixed = true;
+        form.picker_dir = "/photos".to_string();
+
+        let folded = fold_settings_form(&h.core.settings, &form, form.refresh_hz);
+        assert_eq!(folded.start_speed, 60.0);
+        assert_eq!(folded.scroll_action, ScrollAction::Zoom);
+        assert_eq!(folded.max_advance_rate, 0, "slider ceiling = uncapped");
+        assert_eq!(folded.picker_dir.as_deref(), Some(Path::new("/photos")));
+        assert_ne!(folded.recursive, h.core.settings.recursive);
+        assert_eq!(
+            folded.fullscreen, h.core.settings.fullscreen,
+            "unexposed field preserved"
+        );
     }
 }

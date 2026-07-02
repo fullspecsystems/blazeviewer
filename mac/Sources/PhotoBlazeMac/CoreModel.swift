@@ -4,14 +4,15 @@ import Observation
 import PbMacFfi
 import UniformTypeIdentifiers
 
-/// One drained-effect line in the on-screen log (id is a monotonic counter so the
-/// capped log never reuses SwiftUI row identities).
-struct EffectLine: Identifiable {
-    let id: Int
-    let text: String
+/// Which NS2 dialog is presented as a SwiftUI sheet over the canvas. Confirm/Message are
+/// NSAlert sheets (native buttons + Return/Esc for free); About is the standard NSApp
+/// panel; Settings is its own window — none of those ride through here.
+enum SheetKind: String, Identifiable {
+    case password, loading, scanning
+    var id: String { rawValue }
 }
 
-/// The Swift-side owner of the Rust engine — the NS1 slice-1 host model.
+/// The Swift-side owner of the Rust engine — the NS1 host model.
 ///
 /// Owns the opaque `AppCoreHandle` (the whole `AppCore` lives behind it), forwards input
 /// events in, and pulls the effect queue dry on the main actor after every event/tick —
@@ -21,9 +22,30 @@ struct EffectLine: Identifiable {
 final class CoreModel {
     /// The Rust engine. All calls happen on the main actor.
     private let core: AppCoreHandle
-    /// Drained effects, oldest first, capped — the visible proof of the FFI round trip.
-    private(set) var effectLog: [EffectLine] = []
-    private var nextLineId = 0
+
+    // MARK: - Dialog state (NS2) — the SwiftUI-observable model the drain mutates
+
+    /// The presented sheet, driven by ShowDialog/CloseDialog. Set programmatically here;
+    /// a *user* dismissal goes through `userDismissedSheet()` (→ `dialog_dismissed`).
+    private(set) var activeSheet: SheetKind?
+    /// The dialog's headline/body text (confirm question, password prompt, progress title).
+    private(set) var dialogMessage = ""
+    /// Inline error under the password field after a wrong attempt ("" = none).
+    private(set) var passwordError = ""
+    /// The password field's live contents (view-bound; scrubbed on submit/close).
+    var passwordEntry = ""
+    /// The password sheet's "Checking…" state while a submitted entry is verified.
+    private(set) var dialogChecking = false
+    /// Loading sheet: decompressed fraction (0 until the archive header sets a total).
+    private(set) var progressFraction: Double = 0
+    /// Scanning sheet: supported images found so far / the folder being walked.
+    private(set) var scanFound = 0
+    private(set) var scanCurrentDir = ""
+    /// An NSAlert sheet (confirm/message) is up — gates the key monitor like `panelOpen`.
+    @ObservationIgnored private var alertUp = false
+    /// Opens the SwiftUI Settings scene — injected by the root view (`openSettings` is an
+    /// Environment action only a view can reach).
+    @ObservationIgnored var openSettingsAction: (() -> Void)?
 
     @ObservationIgnored private var keyMonitor: Any?
     @ObservationIgnored private var focusObserver: NSObjectProtocol?
@@ -89,9 +111,10 @@ final class CoreModel {
         // AppKit, so the standard menu shortcuts (⌘Q, ⌘W, ⌘M, …) keep working.
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
             guard let self, let name = KeyMap.pbKeyName(for: event.keyCode) else { return event }
-            // A native panel (NSOpenPanel) owns the keyboard while it's up — don't swallow
-            // its typing/navigation; the viewer ignores input until it resolves.
-            if self.panelOpen {
+            // A native panel (NSOpenPanel), an alert, or a dialog sheet owns the keyboard
+            // while it's up — don't swallow its typing/navigation (the password field!);
+            // the viewer ignores input until it resolves.
+            if self.panelOpen || self.alertUp || self.activeSheet != nil {
                 return event
             }
             if event.type == .keyDown {
@@ -258,16 +281,152 @@ final class CoreModel {
         menuAction(id)
     }
 
-    /// `CoreEffect::ShowDialog`: About maps to the standard NSApplication panel (the
-    /// ADR-021 choice); the other kinds arrive with the NS2 native dialogs.
+    /// `CoreEffect::ShowDialog` — the NS2 dialog router. About = the standard NSApplication
+    /// panel (ADR-021); Confirm/Message = NSAlert sheets; Password/Loading/Scanning =
+    /// SwiftUI sheets bound to the dialog state; Settings = the Settings scene. The text
+    /// payload rides in `dialog_message()` (pull-after-marker). Re-delivery of the same
+    /// kind updates the sheet in place (a scanning re-point, a wrong-password retry).
     private func showDialog(_ kind: String) {
         switch kind {
         case "about":
             NSApp.activate()
             NSApp.orderFrontStandardAboutPanel(nil)
+        case "settings":
+            openSettingsAction?()
+        case "confirm":
+            presentConfirmAlert(core.dialog_message().toString())
+        case "message":
+            presentMessageAlert(core.dialog_message().toString())
+        case "password":
+            dialogMessage = core.dialog_message().toString()
+            passwordError = core.dialog_password_error().toString()
+            passwordEntry = "" // fresh prompt or wrong-attempt retry: field starts empty
+            dialogChecking = false
+            activeSheet = .password
+        case "loading":
+            dialogMessage = core.dialog_message().toString()
+            progressFraction = 0
+            dialogChecking = false
+            activeSheet = .loading
+        case "scanning":
+            dialogMessage = core.dialog_message().toString()
+            scanFound = 0
+            scanCurrentDir = ""
+            activeSheet = .scanning
         default:
-            log("ShowDialog(\(kind)) — NS2")
+            log("ShowDialog(\(kind)) — unknown kind")
         }
+    }
+
+    /// The delete Confirm (`ShowDialog("confirm")`): a native warning sheet, Delete as the
+    /// destructive default, Cancel on Esc. The answer returns via `dialog_confirm_answered`
+    /// and the core runs (or forgets) the armed permanent delete.
+    private func presentConfirmAlert(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Delete").hasDestructiveAction = true
+        alert.addButton(withTitle: "Cancel")
+        presentAlert(alert) { [weak self] response in
+            guard let self else { return }
+            self.core.dialog_confirm_answered(response == .alertFirstButtonReturn)
+            self.kick() // the delete-advance runs on the tick loop
+            self.drainEffects()
+        }
+    }
+
+    /// A one-button informational / error notice (`ReportError` + `ShowDialog("message")`):
+    /// the egui Message dialog's native twin.
+    private func presentMessageAlert(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        presentAlert(alert) { [weak self] _ in
+            guard let self else { return }
+            self.core.dialog_closed()
+            self.drainEffects()
+        }
+    }
+
+    /// Run an alert as a window-attached sheet (app-modal fallback when no window yet),
+    /// gating the key monitor while it's up so its Return/Esc aren't swallowed.
+    private func presentAlert(
+        _ alert: NSAlert, completion: @escaping (NSApplication.ModalResponse) -> Void
+    ) {
+        alertUp = true
+        if let window = hostWindow {
+            alert.beginSheetModal(for: window) { [weak self] response in
+                MainActor.assumeIsolated {
+                    self?.alertUp = false
+                    completion(response)
+                }
+            }
+        } else {
+            let response = alert.runModal()
+            alertUp = false
+            completion(response)
+        }
+    }
+
+    // MARK: - Sheet actions (NS2) — each maps one user gesture to its DialogResolved entry
+
+    /// The user dismissed the presented sheet by a path other than its buttons (the sheet
+    /// binding wrote nil). The core cancels any matching in-flight op and closes.
+    func userDismissedSheet() {
+        activeSheet = nil
+        core.dialog_dismissed()
+        drainEffects()
+    }
+
+    /// Password Unlock / Return: submit the entry; the core shows "Checking…" and re-opens
+    /// the pending archive with it. The field is scrubbed immediately (RAM-only etiquette).
+    func passwordSubmit() {
+        let entry = passwordEntry
+        passwordEntry = ""
+        guard !entry.isEmpty else { return }
+        core.password_submitted(entry)
+        kick() // the re-open runs on this crate's worker; the pump polls it
+        drainEffects()
+    }
+
+    /// Password Cancel / Esc: abandon the pending archive.
+    func passwordCancel() {
+        passwordEntry = ""
+        core.password_cancelled()
+        drainEffects()
+    }
+
+    /// The archive "Opening…" sheet's Cancel.
+    func loadingCancel() {
+        core.loading_cancelled()
+        drainEffects()
+    }
+
+    /// The folder "Scanning…" sheet's Cancel (stops the walk, keeps the current view).
+    func scanningCancel() {
+        core.scanning_cancelled()
+        drainEffects()
+    }
+
+    // MARK: - Settings (NS2 item 5)
+
+    /// The current settings as the flat form the Settings window binds to.
+    func settingsForm() -> SettingsFormFfi {
+        core.settings_form()
+    }
+
+    /// Settings Save: validate/clamp Rust-side and apply + persist through the core.
+    func settingsSave(_ form: SettingsFormFfi) {
+        core.submit_settings(form)
+        kick()
+        drainEffects()
+    }
+
+    /// Settings Cancel (buttons or the window's close button) — discard the draft.
+    func settingsCancel() {
+        core.settings_cancelled()
+        drainEffects()
     }
 
     /// Open dropped / Finder-opened paths (multi-select aware — the launch policy classifies).
@@ -291,6 +450,14 @@ final class CoreModel {
     func pump() {
         core.tick()
         drainEffects()
+        // Refresh the shown progress sheet from the Rust-side handles (a cheap read; the
+        // pump is already running while a scan/open worker is in flight).
+        if activeSheet == .loading || activeSheet == .scanning {
+            let p = core.dialog_progress()
+            progressFraction = Double(p.fraction)
+            scanFound = Int(p.found)
+            scanCurrentDir = p.current_dir.toString()
+        }
         updatePacing()
     }
 
@@ -415,8 +582,18 @@ final class CoreModel {
                 NSApp.terminate(nil)
             }
         case .ReportError(let msg):
-            // An NSAlert once the NS2 dialogs land.
-            log("ERROR: \(msg.toString())")
+            // A user-facing error (bad open, refused archive, …) — a native alert.
+            let text = msg.toString()
+            log("ERROR: \(text)")
+            presentMessageAlert(text)
+        case .CloseDialog:
+            // Programmatic close (the answer was processed / the op finished). Setting
+            // activeSheet directly never routes through userDismissedSheet().
+            activeSheet = nil
+            dialogChecking = false
+            passwordEntry = ""
+        case .SetDialogChecking:
+            dialogChecking = true
         case .OpenFilePanel(let dir):
             presentOpenPanel(startDir: dir.toString(), choosingFolders: false)
         case .OpenFolderPanel(let dir):
@@ -457,12 +634,12 @@ final class CoreModel {
         }
     }
 
+    /// Dev diagnostics. The NS1 on-screen effect log retired with the NS2 dialogs; a
+    /// terminal launch (`swift run`, the dev build-run loop) still sees the trace.
     private func log(_ text: String) {
-        effectLog.append(EffectLine(id: nextLineId, text: text))
-        nextLineId += 1
-        if effectLog.count > 200 {
-            effectLog.removeFirst(effectLog.count - 200)
-        }
+        #if DEBUG
+            print("PB: \(text)")
+        #endif
     }
 
     // MARK: - Native handlers (the genuinely-platform effects)
