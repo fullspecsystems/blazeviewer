@@ -97,6 +97,17 @@ pub enum CursorKind {
     Pointer,
 }
 
+/// A scroll delta, carrying the same distinction winit's `MouseScrollDelta` does — the core needs
+/// it because a line-precise wheel and a pixel-precise trackpad swipe use different zoom/pan steps.
+/// **Pixels**: a macOS trackpad two-finger swipe (tens of pixels per event). **Lines**: a real
+/// mouse wheel (~1 notch) and — on Windows — a precision-trackpad swipe too (winit reports both as
+/// lines there). Both honor the `Scroll wheel` = Pan/Zoom setting (Ctrl flips it).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum ScrollDelta {
+    Lines { x: f32, y: f32 },
+    Pixels { x: f32, y: f32 },
+}
+
 /// Which chrome dialog the shell should present — the shell-neutral mirror of the
 /// existing `dialog::DialogKind`. (The *payload* each needs — settings form, error
 /// text, progress handles — is `NS-later`: those types still live in the shell.)
@@ -229,8 +240,9 @@ pub enum CoreEvent {
     Resized { width: u32, height: u32, scale: f32 },
     /// Pointer moved (un-hides the cursor; may pan while dragging).
     PointerMoved { x: f32, y: f32 },
-    /// Scroll wheel / two-finger scroll (pan or zoom per settings).
-    Scroll { dx: f32, dy: f32 },
+    /// Scroll wheel / two-finger scroll — pan or zoom per the `Scroll wheel` setting (Ctrl flips
+    /// it), with the line-vs-pixel distinction the core needs for the right step size.
+    Scroll(ScrollDelta),
     /// Pinch / magnify gesture (zoom).
     Pinch { delta: f32 },
     /// Double-tap / double-click (toggle 1:1 ↔ fit).

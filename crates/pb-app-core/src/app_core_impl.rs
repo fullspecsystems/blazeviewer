@@ -413,13 +413,12 @@ impl AppCore {
                 height,
                 scale,
             } => self.resize(width, height, scale),
-            // Still shell-side (no clean core seam yet): scroll-delta zoom/pan (the winit
-            // LineDelta-vs-PixelDelta constants), the shell's own redraw scheduling, and dropped
-            // paths (a flow the shell classifies). Ignored so a host sending them early is a no-op.
-            CoreEvent::Redraw
-            | CoreEvent::Scroll { .. }
-            | CoreEvent::DroppedPaths(_)
-            | CoreEvent::CancelDialog => {}
+            // Scroll wheel / trackpad two-finger swipe → zoom or pan (per the setting; Ctrl flips).
+            CoreEvent::Scroll(delta) => self.scroll(delta),
+            // Still shell-side (no clean core seam yet): the shell's own redraw scheduling, and
+            // dropped paths (a flow the shell classifies). Ignored so a host sending them early is
+            // a no-op, not a panic.
+            CoreEvent::Redraw | CoreEvent::DroppedPaths(_) | CoreEvent::CancelDialog => {}
         }
     }
 
@@ -639,6 +638,36 @@ impl AppCore {
         // Deferred crisp decode-to-fit + ring refill once the size settles (`self.now` is stamped
         // by the host at the start of the event).
         self.resize_settle_at = Some(self.now + Duration::from_millis(180));
+    }
+
+    /// A scroll wheel / trackpad two-finger swipe ([`CoreEvent::Scroll`], NS0 loose-end): pan (the
+    /// default) or zoom-about-the-cursor, per the `Scroll wheel` setting with **Ctrl** always
+    /// flipping to the other action. A line-precise wheel and a pixel-precise trackpad swipe use
+    /// different step sizes (a trackpad delivers tens of pixels per event), so the [`ScrollDelta`]
+    /// carries which it is.
+    pub fn scroll(&mut self, delta: contract::ScrollDelta) {
+        use contract::ScrollDelta;
+        let zooms = self.settings.scroll_action == settings::ScrollAction::Zoom;
+        let zoom = zooms != self.mods.ctrl;
+        match delta {
+            ScrollDelta::Pixels { x, y } => {
+                if zoom {
+                    self.zoom_about_cursor((1.0 + y * PIXEL_ZOOM_STEP).max(0.05));
+                } else {
+                    self.pan_by_pixels(x * GESTURE_PAN_DIR, y * GESTURE_PAN_DIR);
+                }
+            }
+            ScrollDelta::Lines { x, y } => {
+                if zoom {
+                    self.zoom_about_cursor((1.0 + y * WHEEL_ZOOM_STEP).max(0.05));
+                } else {
+                    self.pan_by_pixels(
+                        x * WHEEL_PAN_STEP * GESTURE_PAN_DIR,
+                        y * WHEEL_PAN_STEP * GESTURE_PAN_DIR,
+                    );
+                }
+            }
+        }
     }
 
     /// The per-tick core loop (NS0 5.5 Phase C2): absorb finished decodes + uploads, run held

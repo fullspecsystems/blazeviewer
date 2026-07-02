@@ -116,26 +116,6 @@ static POOL_DECODE_MS: std::sync::Mutex<Vec<(f64, String)>> = std::sync::Mutex::
 /// Whether `--metrics` is on (gates the `POOL_DECODE_MS` recording in the off-thread
 /// decode closure, which has no access to the `StageTimes`).
 static METRICS_ON_FLAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// Trackpad gesture tuning. `WHEEL_ZOOM_STEP` is the per-line zoom factor for
-/// **Ctrl+scroll** (the explicit zoom gesture; plain scroll pans instead — see the
-/// `MouseWheel` handler). (`PINCH_GAIN` moved to `pb_app_core::engine` with the pinch
-/// arm of `handle`.)
-const WHEEL_ZOOM_STEP: f32 = 0.1;
-/// Per-**pixel** zoom factor for a pixel-precise scroll (`PixelDelta` — a macOS trackpad
-/// two-finger swipe) when the `Scroll wheel` setting is Zoom (or Ctrl is held). Much smaller
-/// than [`WHEEL_ZOOM_STEP`] because a trackpad delivers many events of tens of pixels each;
-/// `0.0025` gives ~1.6× over a full swipe. Tunable if the zoom feels too fast/slow.
-const PIXEL_ZOOM_STEP: f32 = 0.0025;
-/// Pixels panned per scroll *line* (`LineDelta`). On Windows winit reports both a
-/// real mouse wheel and a precision-trackpad two-finger swipe as `LineDelta` (it
-/// never emits `PixelDelta` there), so plain scroll pans by this much per line:
-/// the fractional high-res lines from a trackpad pan smoothly, while a 1.0 mouse
-/// notch makes one comfortable step.
-const WHEEL_PAN_STEP: f32 = 80.0;
-/// Sign of two-finger trackpad panning (`PixelDelta` on macOS, `LineDelta` scroll
-/// on Windows). `+1.0` makes the image follow the fingers (grab-and-drag); flip to
-/// `-1.0` to invert.
-const GESTURE_PAN_DIR: f32 = 1.0;
 
 /// How long an off-thread directory scan must run before the "Scanning Folder" progress
 /// dialog appears. A normal folder resolves in well under this, so the common case never
@@ -2267,32 +2247,14 @@ impl ApplicationHandler for App {
             // the other action. So the setting is live on a Mac trackpad too (it used to be
             // ignored there, hard-wired to pan); the default stays Pan, and Ctrl+swipe zooms.
             WindowEvent::MouseWheel { delta, .. } => {
-                let zooms = self.core.settings.scroll_action == settings::ScrollAction::Zoom;
-                let zoom = zooms != self.core.mods.ctrl;
-                match delta {
-                    MouseScrollDelta::PixelDelta(p) => {
-                        if zoom {
-                            let factor = (1.0 + p.y as f32 * PIXEL_ZOOM_STEP).max(0.05);
-                            self.core.zoom_about_cursor(factor);
-                        } else {
-                            self.core.pan_by_pixels(
-                                p.x as f32 * GESTURE_PAN_DIR,
-                                p.y as f32 * GESTURE_PAN_DIR,
-                            );
-                        }
-                    }
-                    MouseScrollDelta::LineDelta(x, y) => {
-                        if zoom {
-                            let factor = (1.0 + y * WHEEL_ZOOM_STEP).max(0.05);
-                            self.core.zoom_about_cursor(factor);
-                        } else {
-                            self.core.pan_by_pixels(
-                                x * WHEEL_PAN_STEP * GESTURE_PAN_DIR,
-                                y * WHEEL_PAN_STEP * GESTURE_PAN_DIR,
-                            );
-                        }
-                    }
-                }
+                let scroll = match delta {
+                    MouseScrollDelta::PixelDelta(p) => contract::ScrollDelta::Pixels {
+                        x: p.x as f32,
+                        y: p.y as f32,
+                    },
+                    MouseScrollDelta::LineDelta(x, y) => contract::ScrollDelta::Lines { x, y },
+                };
+                self.core.handle(contract::CoreEvent::Scroll(scroll));
             }
 
             _ => {}

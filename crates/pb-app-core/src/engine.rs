@@ -43,6 +43,20 @@ pub const ZOOM_RAMP_SECS: f32 = 0.7;
 /// factor (`1 + delta·gain`). Read by `AppCore::handle`'s `Pinch` arm.
 pub const PINCH_GAIN: f32 = 1.0;
 
+/// Scroll-wheel / trackpad tuning (read by `AppCore::scroll`). `WHEEL_ZOOM_STEP` is the per-line
+/// zoom factor for a line-precise wheel/swipe (Ctrl+scroll, or the Zoom setting).
+pub const WHEEL_ZOOM_STEP: f32 = 0.1;
+/// Per-**pixel** zoom factor for a pixel-precise scroll (a macOS trackpad two-finger swipe). Much
+/// smaller than [`WHEEL_ZOOM_STEP`] because a trackpad delivers many events of tens of pixels each;
+/// `0.0025` gives ~1.6× over a full swipe.
+pub const PIXEL_ZOOM_STEP: f32 = 0.0025;
+/// Pixels panned per scroll *line* (`LineDelta`). Fractional high-res lines from a trackpad pan
+/// smoothly, while a 1.0 mouse notch makes one comfortable step.
+pub const WHEEL_PAN_STEP: f32 = 80.0;
+/// Sign of two-finger trackpad panning. `+1.0` makes the image follow the fingers (grab-and-drag);
+/// flip to `-1.0` to invert.
+pub const GESTURE_PAN_DIR: f32 = 1.0;
+
 /// Hold-to-pan curve: pan speed (px/sec) ramps from a gentle start to a fast max
 /// over `PAN_RAMP_SECS`. Time-based, same shape as zoom (per the owner's note).
 pub const PAN_MIN_SPEED: f32 = 450.0;
