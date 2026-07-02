@@ -1347,16 +1347,11 @@ fn elide_path(path: &str) -> String {
 
 /// Open the OS "default apps" settings so the user can make PhotoBlaze the default
 /// photo viewer. Windows doesn't let an app set itself as default programmatically
-/// (the user must confirm in Settings), so we deep-link to the right page. Best-effort,
-/// and a no-op on other platforms for now.
+/// (the user must confirm in Settings), so we deep-link — to PhotoBlaze's own page
+/// where the registration allows (see `default_app`). Best-effort, and a no-op on
+/// other platforms for now.
 fn open_default_apps() {
-    #[cfg(windows)]
-    {
-        // `explorer.exe` resolves the `ms-settings:` protocol → the Default apps page.
-        let _ = std::process::Command::new("explorer.exe")
-            .arg("ms-settings:defaultapps")
-            .spawn();
-    }
+    crate::default_app::open_default_apps();
 }
 
 /// Best-effort scrub of a secret String's bytes in place (overwrite with NUL, which
@@ -1611,7 +1606,7 @@ fn general_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
             p,
             None,
             "Default photo viewer",
-            Some("Opens Windows Default apps to set PhotoBlaze"),
+            Some("Opens PhotoBlaze's page in Windows Default apps"),
             |ui| {
                 if pbui::secondary_button(ui, "Set default\u{2026}").clicked() {
                     open_default_apps();

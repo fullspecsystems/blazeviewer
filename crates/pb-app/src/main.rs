@@ -50,6 +50,7 @@ use pb_source::PhotoSource;
 mod clipboard;
 #[cfg(windows)]
 mod darkmode;
+mod default_app;
 mod dialog;
 #[cfg(target_os = "macos")]
 mod hdr_surface;

@@ -116,6 +116,11 @@ windows = { version = "0.62", features = [
     "Foundation",
     "Media_Core",
     "Media_Playback",
+    # RegisteredApplications/Capabilities self-registration so "Set default…" can
+    # deep-link PhotoBlaze's own Default-apps page (task #14, src/default_app.rs).
+    # Win32_Security: RegCreateKeyExW's SECURITY_ATTRIBUTES parameter lives there.
+    "Win32_System_Registry",
+    "Win32_Security",
 ] }
 
 # Test-only: build archive fixtures for the no-trace integration tests. Same crates
