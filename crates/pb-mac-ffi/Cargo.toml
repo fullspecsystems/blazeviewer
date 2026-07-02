@@ -24,11 +24,13 @@ package = ["dep:swift-bridge-build"]
 
 [dependencies]
 pb-app-core = { workspace = true }
-# The concrete wgpu presenter (the CAMetalLayer surface constructor) + the CPU HUD
-# compositor (the open-panel hint on the empty deck) — both platform-neutral crates the
-# winit shell also uses; needed here to construct them for the Swift host.
+# The concrete wgpu presenter (the CAMetalLayer surface constructor) + the launch-input
+# policy (pb-core::open, ADR-019) + the worker progress handles (pb-source) — the same
+# platform-neutral crates the winit shell composes; needed here to build the shell's Rust
+# half for the Swift host.
 pb-render = { workspace = true }
-pb-hud = { workspace = true }
+pb-core = { workspace = true }
+pb-source = { workspace = true }
 
 # swift-bridge is macOS-target-only: on a Windows/Linux target the whole `ffi` module is
 # `cfg`'d out (see lib.rs), so the crate builds to an empty staticlib and never pulls the

@@ -5,17 +5,30 @@ import SwiftUI
 /// the effects out. The wgpu canvas (item 2), real photo source (item 3), and the rest of
 /// the event/effect surface land in the following slices; the egui-on-Mac beta remains the
 /// shippable Mac artifact until the NS3 cutover.
+/// Makes a **bare-binary launch** (`swift run`, running the executable straight out of the
+/// .app — the dev loop) behave like a Finder launch: without a proper activation policy in
+/// place *before* SwiftUI reconciles its scenes, the initial `WindowGroup` window is never
+/// created at all (the app runs windowless with a working menu bar — a fun one to debug).
+/// `.onAppear` is too late to fix that, since with no window it never runs.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.regular)
+    }
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.activate()
+    }
+}
+
 @main
 struct PhotoBlazeMacApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @State private var model = CoreModel()
 
     var body: some Scene {
         WindowGroup("PhotoBlaze (SwiftUI host)") {
             EffectLogView(model: model)
                 .onAppear {
-                    // `swift run` launches a bare executable; make sure it fronts like an app.
-                    NSApp.setActivationPolicy(.regular)
-                    NSApp.activate()
+                    model.openLaunchPathIfAny()
                 }
         }
     }

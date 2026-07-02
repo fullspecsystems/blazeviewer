@@ -46,6 +46,24 @@ final class CoreModel {
         startTicking()
     }
 
+    /// Deferred launch work, run from the view's `onAppear` (the window + canvas exist by
+    /// then — the winit shell defers its launch into `resumed()` for the same reason):
+    /// a path on the command line (open …/PhotoBlazeMac.app --args /photos) opens like the
+    /// winit CLI arg — folder → recursive scan, image → its folder with the cursor on it,
+    /// .zip/.7z → the archive contents. Finder-drop + openURLs land with the input adapter
+    /// (item 4); the native open panel with the menus (item 8).
+    func openLaunchPathIfAny() {
+        guard !launchPathOpened else { return }
+        launchPathOpened = true
+        if let path = ProcessInfo.processInfo.arguments.dropFirst().first(where: { !$0.hasPrefix("-") }) {
+            core.open_path(path)
+            log("open_path(\(path))")
+            drainEffects()
+        }
+    }
+
+    @ObservationIgnored private var launchPathOpened = false
+
     // MARK: - Events in
 
     private func installInputForwarding() {
@@ -192,6 +210,9 @@ final class CoreModel {
             if action == "quit" {
                 NSApp.terminate(nil)
             }
+        case .ReportError(let msg):
+            // An NSAlert once the NS2 dialogs land.
+            log("ERROR: \(msg.toString())")
         case .Other:
             log("Other (not yet bridged)")
         }

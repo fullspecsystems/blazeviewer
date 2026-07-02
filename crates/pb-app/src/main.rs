@@ -106,8 +106,7 @@ use pb_app_core::scan::{self, Resolved, ScanUpdate};
 pub use pb_app_core::archive;
 pub use pb_app_core::scan::ScanProgress;
 
-/// Cap on decoded-but-not-yet-uploaded bytes held by the pool (backpressure).
-const POOL_BUDGET_BYTES: usize = 512 * 1024 * 1024;
+use pb_app_core::engine::POOL_BUDGET_BYTES;
 /// Per-decode wall time *as the pool sees it* (i.e. under real concurrent load),
 /// printed with the `--metrics` report. Isolated decode is fast; this shows how much
 /// 8-way contention inflates it (it's how the RAW-demosaic-on-preview stall was

@@ -143,6 +143,34 @@ impl AppCore {
         }
     }
 
+    /// A **real, host-ready** `AppCore` for a native shell (the macOS SwiftUI host, NS1):
+    /// [`headless`](Self::headless) plus the live engine — the real priority decode pool over
+    /// [`decode_item`], the user's loaded [`Settings`](settings::Settings) + [`Keymap`] (and
+    /// the settings-derived nav feel: hold delay, slideshow dwell, default scale mode), and
+    /// the CPU HUD compositor. The deck starts empty; the host routes opens through
+    /// [`open_plan`](Self::open_plan) (→ the `Begin*` effects) exactly like the winit shell.
+    /// The winit `App::new` builds the same engine inline (its construction predates this).
+    pub fn new_host(viewport: crate::Viewport) -> AppCore {
+        let mut core = AppCore::headless(viewport);
+        let decode: Arc<crate::decode_pool::DecodeFn> =
+            Arc::new(|src, item, fit, allow_preview| decode_item(src, item, fit, allow_preview));
+        let (pool, results) = crate::decode_pool::DecodePool::new(
+            crate::decode_pool::recommended_workers(),
+            POOL_BUDGET_BYTES,
+            decode,
+        );
+        core.pool = pool;
+        core.results = results;
+        let settings = settings::Settings::load();
+        core.initial_delay = Duration::from_millis(settings.hold_delay_ms as u64);
+        core.slideshow.interval = Duration::from_secs_f64(settings.slideshow_interval_secs);
+        core.view.mode = scale_mode_of(settings.scale_mode);
+        core.keymap = Keymap::load();
+        core.settings = settings;
+        core.hud = hud::Hud::load();
+        core
+    }
+
     /// Whether prefetch/upload work is still outstanding (keep polling if so).
     pub fn work_pending(&self) -> bool {
         self.archive_loading

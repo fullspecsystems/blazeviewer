@@ -21,6 +21,10 @@ use crate::{Action, Nav};
 /// VRAM budget for the resident texture ring (~1.5 GB → ~16–32 fit-size slots on
 /// a 7680-wide display, far more on smaller ones). Capacity is clamped to [4, 64].
 pub const RING_BUDGET_BYTES: u64 = 1_500_000_000;
+/// Cap on decoded-but-not-yet-uploaded bytes held by the decode pool (backpressure).
+/// Shared by every shell's pool construction (the winit `App::new`, the macOS host's
+/// [`AppCore::new_host`](crate::AppCore::new_host)).
+pub const POOL_BUDGET_BYTES: usize = 512 * 1024 * 1024;
 /// Max slot uploads performed per `about_to_wait` tick, so a burst of finished
 /// decodes can't blow the frame budget.
 pub const UPLOADS_PER_TICK: usize = 2;
