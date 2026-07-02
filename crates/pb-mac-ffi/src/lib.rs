@@ -28,7 +28,9 @@
 use std::time::Instant;
 
 use pb_app_core::contract::{self, CoreEvent, Modifiers};
+use pb_app_core::overlay::OpenPanel;
 use pb_app_core::{AppCore, PbKey, Viewport};
+use pb_render::Renderer as _;
 
 /// The opaque handle the Swift host holds — it owns the entire `AppCore` engine.
 pub struct AppCoreHandle {
@@ -101,6 +103,108 @@ impl AppCoreHandle {
     fn tick(&mut self) {
         self.core.now = Instant::now();
         self.core.handle(CoreEvent::Tick(self.core.now));
+    }
+
+    /// Attach the host's **retained `CAMetalLayer`** (passed as its raw pointer bits — the
+    /// slice of NS1 item 2) and stand the wgpu renderer up on it: create the surface, route
+    /// the real size through the standard `Resized` path, and — on an empty deck — show the
+    /// blank letterbox + the "Press O to open" hint exactly like the winit shell's
+    /// `resumed()`. The host then pokes the layer's EDR colorspace (see `wants_edr`) and
+    /// calls `render`.
+    ///
+    /// Safety contract (upheld by the Swift host; see `WgpuRenderer::new_from_ca_layer`):
+    /// the layer is valid + retained and outlives the renderer (`detach_layer` runs before
+    /// the view/layer dies), and every call happens on the main actor.
+    fn attach_layer(&mut self, layer_ptr: usize, width: u32, height: u32, scale: f32) {
+        self.core.now = Instant::now();
+        // The CPU HUD compositor (system-font rasterizer) — headless skips it; a canvas
+        // needs it for the open-panel hint (and later the info/toast overlays).
+        if self.core.hud.is_none() {
+            self.core.hud = pb_hud::hud::Hud::load();
+        }
+        let (rgba, iw, ih, color, hdr, peak, title) = self.core.initial_image();
+        // SAFETY: the host passes a valid retained CAMetalLayer and guarantees the
+        // lifetime + main-thread rules (documented on `new_from_ca_layer`).
+        let mut renderer = unsafe {
+            pb_render::WgpuRenderer::new_from_ca_layer(
+                layer_ptr as *mut std::ffi::c_void,
+                width,
+                height,
+                &rgba,
+                iw,
+                ih,
+                color,
+                hdr,
+                peak,
+            )
+        };
+        renderer.set_letterbox(self.core.settings.letterbox);
+        self.core.renderer = Some(Box::new(renderer));
+        self.core
+            .effects
+            .push(contract::CoreEffect::SetTitle(title));
+        // Sync viewport / fit / swapchain through the same path every resize takes.
+        self.core.handle(CoreEvent::Resized {
+            width,
+            height,
+            scale,
+        });
+        // Empty deck (no launch input yet — real construction is NS1 item 3): blank
+        // letterbox + the centered Open File / Open Folder call to action.
+        if self.core.playlist.current().is_none() {
+            let panel = self.core.open_panel_bitmap();
+            if let Some(r) = self.core.renderer.as_mut() {
+                r.clear_image();
+                if let Some((bitmap, w, h, file, folder)) = panel {
+                    r.set_message(Some((&bitmap, w, h)));
+                    self.core.open_panel = Some(OpenPanel { w, h, file, folder });
+                }
+            }
+        }
+    }
+
+    /// Drop the renderer (and its wgpu surface). The host MUST call this before the
+    /// hosting view/layer is destroyed — the other half of the layer-lifetime contract.
+    fn detach_layer(&mut self) {
+        self.core.renderer = None;
+    }
+
+    /// The surface resized (or moved to a display with a different backing scale):
+    /// `width`×`height` in physical pixels. The host calls `render` afterwards.
+    fn resized(&mut self, width: u32, height: u32, scale: f32) {
+        self.core.now = Instant::now();
+        self.core.handle(CoreEvent::Resized {
+            width,
+            height,
+            scale,
+        });
+    }
+
+    /// Draw a frame into the attached layer. No-op when no layer is attached.
+    fn render(&mut self) {
+        if let Some(r) = self.core.renderer.as_mut() {
+            let _ = r.render();
+        }
+    }
+
+    /// Whether the surface came up fp16 scRGB (HDR/wide-gamut capable) — when true the
+    /// host must set the layer's colorspace to extended-linear-sRGB + enable EDR (the
+    /// macOS layer poke `pb-app/src/hdr_surface.rs` does on the winit target; the host
+    /// owns the layer here) and report the panel headroom via `set_edr_headroom`.
+    fn wants_edr(&self) -> bool {
+        self.core
+            .renderer
+            .as_ref()
+            .and_then(|r| r.hdr_surface_wants_edr())
+            .is_some()
+    }
+
+    /// The display's EDR headroom (max EDR color component value; ≥ 1.0) for the
+    /// highlight roll-off — macOS hard-clips above it (unlike Windows' DWM tone-map).
+    fn set_edr_headroom(&mut self, headroom: f32) {
+        if let Some(r) = self.core.renderer.as_mut() {
+            r.set_edr_headroom(headroom);
+        }
     }
 
     /// Pull the next effect the core produced, or `None` when the queue is drained — the host
@@ -182,6 +286,15 @@ mod ffi {
         fn focus_lost(&mut self);
         fn tick(&mut self);
         fn next_effect(&mut self) -> Option<CoreEffectFfi>;
+
+        // The canvas surface (NS1 item 2). `layer_ptr` = the retained CAMetalLayer's
+        // pointer bits (swift-bridge has no raw-pointer type; usize crosses as UInt).
+        fn attach_layer(&mut self, layer_ptr: usize, width: u32, height: u32, scale: f32);
+        fn detach_layer(&mut self);
+        fn resized(&mut self, width: u32, height: u32, scale: f32);
+        fn render(&mut self);
+        fn wants_edr(&self) -> bool;
+        fn set_edr_headroom(&mut self, headroom: f32);
     }
 }
 

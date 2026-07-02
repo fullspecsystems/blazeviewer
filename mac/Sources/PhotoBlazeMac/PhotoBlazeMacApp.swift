@@ -28,6 +28,11 @@ struct EffectLogView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            // The wgpu canvas (NS1 item 2): Rust draws the letterbox + the "Press O to
+            // open" hint into this CAMetalLayer — the empty-deck frame, GPU-rendered.
+            MetalCanvas(model: model)
+                .frame(minHeight: 220)
+
             Text("PhotoBlaze — NS1 slice-1 host")
                 .font(.headline)
             Text(

@@ -1077,14 +1077,30 @@ impl WgpuRenderer {
         hdr: bool,
         peak: f32,
     ) -> Self {
+        let instance = instance();
+        let surface = instance.create_surface(target).expect("create surface");
         pollster::block_on(Self::new_async(
-            target, width, height, image, img_w, img_h, color, hdr, peak,
+            instance, surface, width, height, image, img_w, img_h, color, hdr, peak,
         ))
     }
 
+    /// macOS-only: create the presenter on a **host-owned, retained `CAMetalLayer`** — the
+    /// AppKit/SwiftUI shell path (NS1, ADR-021), where the window/view/layer belong to the
+    /// Swift host and Rust only draws into the layer it's handed. winit is absent on that
+    /// target, so there is no raw-window-handle; the surface goes through wgpu's unsafe
+    /// `SurfaceTargetUnsafe::CoreAnimationLayer` instead.
+    ///
+    /// # Safety
+    /// - `layer` must point to a valid, **retained** `CAMetalLayer`, and it must outlive
+    ///   the returned renderer — the host drops the renderer *before* the view/layer dies.
+    /// - Creation, `resize`, `render`, and drop must all happen on the **main thread**
+    ///   (AppKit layers are not safe to reconfigure off it); the FFI effect-drain rule
+    ///   already pins the callers there.
+    /// - The host reports size changes (`resize`) before drawing at a new size.
+    #[cfg(target_os = "macos")]
     #[allow(clippy::too_many_arguments)]
-    async fn new_async(
-        target: impl Into<wgpu::SurfaceTarget<'static>>,
+    pub unsafe fn new_from_ca_layer(
+        layer: *mut std::ffi::c_void,
         width: u32,
         height: u32,
         image: &[u8],
@@ -1095,7 +1111,29 @@ impl WgpuRenderer {
         peak: f32,
     ) -> Self {
         let instance = instance();
-        let surface = instance.create_surface(target).expect("create surface");
+        // SAFETY: the caller upholds the layer contract documented above.
+        let surface = unsafe {
+            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer))
+        }
+        .expect("create surface from CAMetalLayer");
+        pollster::block_on(Self::new_async(
+            instance, surface, width, height, image, img_w, img_h, color, hdr, peak,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn new_async(
+        instance: wgpu::Instance,
+        surface: wgpu::Surface<'static>,
+        width: u32,
+        height: u32,
+        image: &[u8],
+        img_w: u32,
+        img_h: u32,
+        color: ColorTransform,
+        hdr: bool,
+        peak: f32,
+    ) -> Self {
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,

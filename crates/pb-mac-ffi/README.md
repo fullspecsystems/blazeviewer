@@ -33,6 +33,12 @@ Current FFI surface (grows per NS1 slice):
 | `focus_lost()` | `CoreEvent::FocusLost` |
 | `tick()` | `CoreEvent::Tick(now)` |
 | `next_effect() -> CoreEffectFfi?` | pulls one queued effect (loop until `nil`) |
+| `attach_layer(ptr:width:height:scale:)` | wgpu surface on the host's retained `CAMetalLayer` |
+| `detach_layer()` | drop the renderer (BEFORE the view/layer dies) |
+| `resized(width:height:scale:)` | `CoreEvent::Resized` (viewport/fit/swapchain) |
+| `render()` | draw a frame into the attached layer |
+| `wants_edr() -> Bool` | fp16 scRGB surface? → host tags the layer + EDR |
+| `set_edr_headroom(_:)` | the panel's EDR headroom for the highlight roll-off |
 
 `key` is a **`PbKey` name accepted by `PbKey::from_name`** — `"Space"`, `"Escape"`,
 `"Left"`/`"Right"`/`"Up"`/`"Down"`, `"Return"`, `"Backspace"`, single letters/digits

@@ -3553,6 +3553,8 @@ name = "pb-mac-ffi"
 version = "0.1.0"
 dependencies = [
  "pb-app-core",
+ "pb-hud",
+ "pb-render",
  "swift-bridge",
  "swift-bridge-build",
 ]

@@ -113,6 +113,56 @@ final class CoreModel {
         tickTimer = timer
     }
 
+    // MARK: - The wgpu canvas (NS1 item 2)
+
+    /// Stand the Rust renderer up on the view's `CAMetalLayer`. The layer is retained by
+    /// the view; `detachCanvas` drops the renderer before the view dies (the FFI layer
+    /// contract), so passing the unretained pointer bits is sound.
+    func attachCanvas(layer: CAMetalLayer, pixelSize: CGSize, scale: CGFloat) {
+        let ptr = UInt(bitPattern: Unmanaged.passUnretained(layer).toOpaque())
+        core.attach_layer(ptr, UInt32(pixelSize.width), UInt32(pixelSize.height), Float(scale))
+        configureEDR(on: layer)
+        core.render()
+        log("canvas attached (\(Int(pixelSize.width))×\(Int(pixelSize.height)) @\(scale)x)")
+        drainEffects()
+    }
+
+    func canvasResized(pixelSize: CGSize, scale: CGFloat) {
+        core.resized(UInt32(pixelSize.width), UInt32(pixelSize.height), Float(scale))
+        if let layer = canvasLayer {
+            // A surface reconfigure can reset the layer's colorspace — re-assert, exactly
+            // like the winit shell does after its resize handling.
+            configureEDR(on: layer)
+        }
+        core.render()
+        drainEffects()
+    }
+
+    func detachCanvas() {
+        canvasLayer = nil
+        core.detach_layer()
+    }
+
+    /// The layer poke `pb-app/src/hdr_surface.rs` does on the winit target — here the host
+    /// owns the layer, so it's plain Swift: an fp16 scRGB surface needs the layer tagged
+    /// extended-linear-sRGB (+ EDR on), and the roll-off needs the panel's real headroom
+    /// (macOS hard-clips above it; Windows' DWM tone-maps for you).
+    private func configureEDR(on layer: CAMetalLayer) {
+        canvasLayer = layer
+        guard core.wants_edr() else { return }
+        layer.colorspace = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)
+        layer.wantsExtendedDynamicRangeContent = true
+        // NSScreen.main for now; tracking the WINDOW's actual screen (the winit shell's
+        // Moved handler — the multi-display bug the port already hit once) comes with the
+        // window plumbing in a later slice.
+        let headroom = Float(NSScreen.main?.maximumExtendedDynamicRangeColorComponentValue ?? 1.0)
+        core.set_edr_headroom(max(1.0, headroom))
+    }
+
+    /// The attached canvas layer, kept weakly-by-convention (the view owns it; cleared in
+    /// `detachCanvas`) so resize can re-assert the EDR colorspace.
+    @ObservationIgnored private weak var canvasLayer: CAMetalLayer?
+
     // MARK: - Effects out
 
     /// Pull the effect queue dry and execute each effect — always on the main actor.
@@ -125,6 +175,7 @@ final class CoreModel {
     private func apply(_ effect: CoreEffectFfi) {
         switch effect {
         case .RequestRender:
+            core.render()
             log("RequestRender")
         case .SetTitle(let title):
             log("SetTitle(\"\(title.toString())\")")
