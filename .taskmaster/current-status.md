@@ -147,16 +147,19 @@ The winit shell now translates its **input events + the whole tick loop** to `Co
   clock) + `handle(Tick)` + drain + control-flow. **✅ Owner-smoke-verified (2026-07-01)** —
   hold-to-fly / slideshow / animation / resize / dialog responsiveness all felt right.
 
-**❌ REMAINING C2 (low-priority, deferred) — `Resized` + scroll.**
-- **`Resized`/`ScaleFactorChanged`** stay shell: genuinely GPU/window-coupled (swapchain
-  reconfigure, the macOS `hdr_surface` CAMetalLayer EDR poke, `track_windowed_geometry` window read).
-  The macOS host owns its own surface resize; `handle(Resized{w,h,scale,edr})` would do only the
-  core-state part (viewport/fit/`resize_settle_at`/`draw`/apply-edr-to-renderer).
-- **`MouseWheel`/scroll** stays shell: winit's `LineDelta`-vs-`PixelDelta` per-type zoom constants
-  don't map to the current `Scroll{dx,dy}` seam without refinement. `MouseInput`/`CursorLeft` have no
-  `CoreEvent` and already call core methods directly. **`DroppedPaths`** is flow → 5.6.
-  With these deferred, **C2 has met its goal**: the winit shell exercises the same `handle()` the
-  Swift host will for keyboard + menu + pointer + the tick loop (the whole engine).
+**✅ C2 COMPLETE — the two former loose ends are wired (⚠ unsmoked):**
+- **`Resized`/`ScaleFactorChanged`** (`6ae58da`) → `handle(CoreEvent::Resized{width,height,scale})`
+  → `AppCore::resize` (viewport, DPI-change overlay rescale, fit, swapchain reconfigure via the
+  core-owned `renderer.resize`, debounced crisp re-decode). The shell computes the fit-change before
+  calling `handle` and does its GPU/window bits *around* it — the macOS `hdr_surface` EDR re-assert
+  (after the reconfigure, before draw) + the `draw` + `track_windowed_geometry` — all gated on that
+  fit-change. `CoreEvent::Resized` dropped its `edr_headroom` field (the host owns EDR).
+- **`MouseWheel`/scroll** (`45af83b`) → a new `contract::ScrollDelta{Lines|Pixels}` on
+  `CoreEvent::Scroll` → `AppCore::scroll` (pan/zoom per the setting, Ctrl flips; the four tuning
+  consts moved to `engine`). The shell just maps `MouseScrollDelta` → `ScrollDelta`.
+- Still shell (no clean seam / genuinely platform): `MouseInput`/`CursorLeft` (call core methods
+  directly), `DroppedPaths` (the shell classifies inputs → `open_input` → the core `open_plan`).
+  **The whole input surface + engine now runs through `handle()`.**
 ### ◐ Phase 5.6 (the FLOW inversion). **7 of 11 flow actions inverted; the rest are legitimately host-side.**
 The `ShellFlowAction(Action)` catch-all is being decomposed: each flow action that has genuinely-
 core logic moves into its own `dispatch_action` arm / specific effect; only true platform ops stay.
