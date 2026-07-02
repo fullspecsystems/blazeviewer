@@ -20,6 +20,10 @@ members = [
     "crates/pb-hud",
     "crates/pb-app-core",
     "crates/pb-app",
+    # macOS-only FFI staticlib for the SwiftUI/AppKit host (NS1). Its swift-bridge deps
+    # are target-gated to macOS, so on Windows/Linux CI (`--workspace`) it builds an empty
+    # staticlib — the winit `pb-app` build is untouched.
+    "crates/pb-mac-ffi",
 ]
 # Throwaway measurement spikes have their own heavy deps; keep them out of the
 # clean core workspace.

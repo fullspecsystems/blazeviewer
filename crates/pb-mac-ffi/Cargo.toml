@@ -1,0 +1,23 @@
+[package]
+name = "pb-mac-ffi"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "macOS Swift/AppKit FFI bridge for PhotoBlaze (NS1, ADR-021): a swift-bridge staticlib exposing the platform-neutral AppCore to a SwiftUI host. macOS-only; empty on other targets."
+
+# `staticlib` = the archive Xcode links into the .app; `rlib` = so `cargo test` can build
+# a test harness against the bridge on macOS.
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+pb-app-core = { workspace = true }
+
+# swift-bridge is macOS-target-only: on a Windows/Linux target the whole `ffi` module is
+# `cfg`'d out (see lib.rs), so the crate builds to an empty staticlib and never pulls the
+# swift-bridge graph. Keeps the existing `--workspace` CI on Windows/Linux untouched.
+[target.'cfg(target_os = "macos")'.dependencies]
+swift-bridge = "0.1"
+
+[target.'cfg(target_os = "macos")'.build-dependencies]
+swift-bridge-build = "0.1"

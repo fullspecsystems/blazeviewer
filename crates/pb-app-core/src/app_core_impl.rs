@@ -34,6 +34,115 @@ use crate::{
 };
 
 impl AppCore {
+    /// A **headless** `AppCore`: an empty photo source, a 1-worker no-op decode pool, no
+    /// renderer / HUD / window, default keymap + settings. This is the construction seam the
+    /// macOS FFI bridge (NS1) builds on — enough to drive the pure input / menu / effect path
+    /// through [`handle`](Self::handle) + the effect drain without a window, GPU, or photos, so
+    /// the KeyDown→effect round-trip can be proven before a live surface + real source are
+    /// layered on. The `handle` unit tests reuse it (via `test_core`), so there's one
+    /// construction literal, not two. `now` is a starting stamp; every shell/host overwrites it
+    /// per event (the core never reads the wall clock itself — NS0 0.3).
+    pub fn headless(viewport: crate::Viewport) -> AppCore {
+        // A 1-worker pool whose decode always errors: a headless core has no photos, so it's
+        // never invoked. A real host installs a decode closure over its `PhotoSource`.
+        let decode: Arc<crate::decode_pool::DecodeFn> = Arc::new(|_src, _item, _fit, _prev| {
+            Err(pb_decode::DecodeError::Corrupt("headless".into()))
+        });
+        let (pool, results) = crate::decode_pool::DecodePool::new(1, 1 << 20, decode);
+        let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(Vec::new()));
+        AppCore {
+            now: Instant::now(),
+            viewport,
+            held: std::collections::HashMap::new(),
+            last_present: None,
+            frame_interval: Duration::from_micros(8_333),
+            hold_start: None,
+            initial_delay: Duration::from_millis(120),
+            slideshow: slideshow::Slideshow::default(),
+            mods: contract::Modifiers::NONE,
+            esc_guard_until: None,
+            fit: None,
+            view: ViewTransform::default(),
+            last_cursor: None,
+            dragging: false,
+            rotations: std::collections::HashMap::new(),
+            zoom_started: None,
+            zoom_last: None,
+            pan_started: None,
+            pan_last: None,
+            resize_settle_at: None,
+            geometry_save_at: None,
+            windowed: true,
+            meta_cache: std::collections::HashMap::new(),
+            current: None,
+            exif_cache: std::collections::HashMap::new(),
+            pool,
+            results,
+            ring: ResidentRing::new(0),
+            ahead: 8,
+            behind: 2,
+            failed: HashSet::new(),
+            deleted: HashSet::new(),
+            preview_resident: HashSet::new(),
+            pending_uploads: Vec::new(),
+            upgrade_done: HashSet::new(),
+            last_upgrade_set: Vec::new(),
+            full_requested_at: std::collections::HashMap::new(),
+            live_motion_cache: std::collections::HashMap::new(),
+            metrics: crate::metrics::StageTimes::default(),
+            source,
+            playlist: Playlist::new(0, 0),
+            targets: Vec::new(),
+            last_nav: Nav::Forward,
+            displayed_item: None,
+            target_item: None,
+            epoch: 1,
+            root: PathBuf::new(),
+            scan_root: None,
+            recursive: false,
+            scanning: false,
+            launching: false,
+            dialog_open: false,
+            archive_loading: false,
+            scan_bootstrapped: false,
+            password_archive: None,
+            pending_delete: None,
+            pending_confirm_delete: None,
+            info: InfoMode::Off,
+            overlay_shown: false,
+            overlay_item: None,
+            toast: None,
+            wait_started: None,
+            pie_finish: None,
+            pie_glow_started: None,
+            decode_ewma: 0.25,
+            pie_drawn: false,
+            pie_pushed: None,
+            chip_sig: None,
+            chip_built: Instant::now(),
+            chip_rect: None,
+            chip_hovered: false,
+            open_panel: None,
+            open_hover: None,
+            play_hint: None,
+            hud: None,
+            renderer: None,
+            undo_stack: Vec::new(),
+            playback: None,
+            anim_frame_shown_at: None,
+            anim_decode: None,
+            prepared: None,
+            anim_gen: 0,
+            anim_hint_shown_for: None,
+            framestep_started: None,
+            framestep_last: None,
+            live_revert_at: None,
+            keymap: Keymap::defaults(),
+            settings: settings::Settings::default(),
+            effects: Vec::new(),
+        }
+    }
+
     /// Whether prefetch/upload work is still outstanding (keep polling if so).
     pub fn work_pending(&self) -> bool {
         self.archive_loading
@@ -3561,118 +3670,16 @@ impl AppCore {
 mod tests {
     use super::*;
     use crate::contract::{CoreEvent, Modifiers};
-    use crate::metrics::StageTimes;
-    use crate::settings::Settings;
     use crate::{PbKey, Viewport};
-    use pb_core::Playlist;
-    use std::collections::HashMap;
-    use std::path::PathBuf;
-    use std::time::{Duration, Instant};
 
-    /// A minimal `AppCore` for driving `handle` in tests: an empty photo source, a 1-worker
-    /// pool whose decode always errors (never invoked here), no renderer/HUD, default keymap +
-    /// settings. Enough to exercise the pure input/menu routing without a window or GPU.
+    /// A minimal `AppCore` for driving `handle` in tests — the public [`AppCore::headless`]
+    /// constructor at a 1×1 viewport (one construction literal, shared with the NS1 FFI bridge).
     fn test_core() -> AppCore {
-        let decode: Arc<crate::decode_pool::DecodeFn> = Arc::new(|_src, _item, _fit, _prev| {
-            Err(pb_decode::DecodeError::Corrupt("test".into()))
-        });
-        let (pool, results) = crate::decode_pool::DecodePool::new(1, 1 << 20, decode);
-        let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(Vec::new()));
-        AppCore {
-            now: Instant::now(),
-            viewport: Viewport {
-                width: 1,
-                height: 1,
-                scale_factor: 1.0,
-            },
-            held: HashMap::new(),
-            last_present: None,
-            frame_interval: Duration::from_micros(8_333),
-            hold_start: None,
-            initial_delay: Duration::from_millis(120),
-            slideshow: slideshow::Slideshow::default(),
-            mods: Modifiers::NONE,
-            esc_guard_until: None,
-            fit: None,
-            view: ViewTransform::default(),
-            last_cursor: None,
-            dragging: false,
-            rotations: HashMap::new(),
-            zoom_started: None,
-            zoom_last: None,
-            pan_started: None,
-            pan_last: None,
-            resize_settle_at: None,
-            geometry_save_at: None,
-            windowed: true,
-            meta_cache: HashMap::new(),
-            current: None,
-            exif_cache: HashMap::new(),
-            pool,
-            results,
-            ring: ResidentRing::new(0),
-            ahead: 8,
-            behind: 2,
-            failed: HashSet::new(),
-            deleted: HashSet::new(),
-            preview_resident: HashSet::new(),
-            pending_uploads: Vec::new(),
-            upgrade_done: HashSet::new(),
-            last_upgrade_set: Vec::new(),
-            full_requested_at: HashMap::new(),
-            live_motion_cache: HashMap::new(),
-            metrics: StageTimes::default(),
-            source,
-            playlist: Playlist::new(0, 0),
-            targets: Vec::new(),
-            last_nav: Nav::Forward,
-            displayed_item: None,
-            target_item: None,
-            epoch: 1,
-            root: PathBuf::new(),
-            scan_root: None,
-            recursive: false,
-            scanning: false,
-            launching: false,
-            dialog_open: false,
-            archive_loading: false,
-            scan_bootstrapped: false,
-            password_archive: None,
-            pending_delete: None,
-            pending_confirm_delete: None,
-            info: InfoMode::Off,
-            overlay_shown: false,
-            overlay_item: None,
-            toast: None,
-            wait_started: None,
-            pie_finish: None,
-            pie_glow_started: None,
-            decode_ewma: 0.25,
-            pie_drawn: false,
-            pie_pushed: None,
-            chip_sig: None,
-            chip_built: Instant::now(),
-            chip_rect: None,
-            chip_hovered: false,
-            open_panel: None,
-            open_hover: None,
-            play_hint: None,
-            hud: None,
-            renderer: None,
-            undo_stack: Vec::new(),
-            playback: None,
-            anim_frame_shown_at: None,
-            anim_decode: None,
-            prepared: None,
-            anim_gen: 0,
-            anim_hint_shown_for: None,
-            framestep_started: None,
-            framestep_last: None,
-            live_revert_at: None,
-            keymap: Keymap::defaults(),
-            settings: Settings::default(),
-            effects: Vec::new(),
-        }
+        AppCore::headless(Viewport {
+            width: 1,
+            height: 1,
+            scale_factor: 1.0,
+        })
     }
 
     #[test]
