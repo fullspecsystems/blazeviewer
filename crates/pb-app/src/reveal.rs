@@ -32,15 +32,20 @@ fn launch(path: &Path) -> std::io::Result<()> {
     Command::new("open").arg("-R").arg(path).spawn().map(|_| ())
 }
 
-/// Windows: `explorer /select,<path>` opens the containing folder and selects the file.
-/// The `/select,<path>` token must be a **single** argument (Explorer parses its own
-/// command line), and Explorer needs backslash separators — real filesystem paths from
-/// the directory scan already use them. Explorer often returns a non-zero exit code even
-/// on success, so we only `spawn` and never check the status.
+/// Windows: `explorer /select,"<path>"` opens the containing folder and selects the file.
+/// Explorer parses its own command line, splitting on space/comma/`=` outside quotes — so
+/// the quotes must wrap **only the path**, not the whole `/select,…` token. `raw_arg`
+/// (not `arg`) is required: `arg` would quote the entire argument when the path contains
+/// a space, which makes Explorer stop recognizing the `/select` switch and fall back to
+/// opening Documents. `"` is illegal in Windows filenames, so no escaping is needed.
+/// Explorer needs backslash separators — real filesystem paths from the directory scan
+/// already use them. Explorer often returns a non-zero exit code even on success, so we
+/// only `spawn` and never check the status.
 #[cfg(windows)]
 fn launch(path: &Path) -> std::io::Result<()> {
-    Command::new("explorer")
-        .arg(format!("/select,{}", path.display()))
+    use std::os::windows::process::CommandExt;
+    Command::new("explorer.exe")
+        .raw_arg(format!("/select,\"{}\"", path.display()))
         .spawn()
         .map(|_| ())
 }

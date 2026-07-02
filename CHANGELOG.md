@@ -83,6 +83,17 @@ with any pre-release suffix carried only by the tag.
   against the left and right edges.
 
 ### Fixed
+- **Show in File Explorer now actually shows the photo** (Windows). For almost any real
+  path — anything with a space in it, like `My Photos`, or a comma — it opened a Documents
+  window with nothing selected instead of the photo's folder, because of how Explorer's
+  `/select` argument was quoted. Paths with spaces, commas, and non-ASCII characters all
+  select correctly now.
+- **A slow folder scan no longer waits for you to move the mouse.** On a slow scan of a
+  quiet app, the first photo (and the scanning progress card) could stall until the next
+  input event woke the app; the app now keeps checking on its own while a scan streams in.
+- **Opening another archive while a large 7z is still loading is now reliable.** The
+  superseded load could finish late and replace the archive you'd just opened; and if an
+  archive open died mid-load, its "Opening…" spinner could stay up forever.
 - **The "Scroll wheel" setting (pan vs zoom) now applies to a macOS trackpad**, not just a
   mouse wheel. A two-finger swipe was hard-wired to pan and ignored the setting; now Pan stays
   the default but choosing **Zoom** makes a swipe zoom, and **Ctrl+swipe** always does the other
