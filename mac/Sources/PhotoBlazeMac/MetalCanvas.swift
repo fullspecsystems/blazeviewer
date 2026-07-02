@@ -116,13 +116,23 @@ final class MetalCanvasNSView: NSView {
         return true
     }
 
+    private var pump: FramePump?
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         guard window != nil, !attached, let metalLayer = layer as? CAMetalLayer else { return }
         let scale = backingScale
         metalLayer.contentsScale = scale
         attached = true
+        model?.hostWindow = window
         onAttach?(metalLayer, pixelSize(at: scale), scale)
+        // Stand the display-synchronized frame pump up on this view (it tracks the view's
+        // display for the refresh rate); the model paces it, we own its lifetime.
+        if let model {
+            let pump = FramePump(view: self, model: model)
+            self.pump = pump
+            model.framePump = pump
+        }
     }
 
     override func layout() {
@@ -134,10 +144,14 @@ final class MetalCanvasNSView: NSView {
     }
 
     /// Called by the representable's dismantle: drop the Rust renderer BEFORE this view
-    /// (and its layer) dies — the FFI layer-lifetime contract.
+    /// (and its layer) dies — the FFI layer-lifetime contract. The pump goes first (it
+    /// must not fire into a detached core).
     func detachNow() {
         guard attached else { return }
         attached = false
+        pump?.invalidate()
+        pump = nil
+        model?.framePump = nil
         onDetach?()
     }
 

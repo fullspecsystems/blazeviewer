@@ -27,9 +27,14 @@ final class CoreModel {
     @ObservationIgnored private var keyMonitor: Any?
     @ObservationIgnored private var focusObserver: NSObjectProtocol?
     @ObservationIgnored private var keyLossObserver: NSObjectProtocol?
-    /// Slice-1 frame pump: a coarse fixed timer driving `tick()`. Replaced by the real
-    /// MTKView-driven pump honoring SetWake in NS1 item 7.
-    @ObservationIgnored private var tickTimer: Timer?
+    /// The display-synchronized frame pump (owned by the canvas view, which creates and
+    /// invalidates it with the layer). Nil until the canvas attaches.
+    @ObservationIgnored var framePump: FramePump?
+    /// A precise off-link wake for a far-out `SetWake` deadline (slideshow dwell, the
+    /// Live Photo revert) — cheaper than running the display link the whole wait.
+    @ObservationIgnored private var wakeTimer: Timer?
+    /// The core's latest wake request, as seconds-from-drain: nil = idle until an event.
+    @ObservationIgnored private var requestedWakeDelay: Double?
 
     init() {
         // Headless viewport at the main screen's pixel size (the live CAMetalLayer surface
@@ -45,7 +50,6 @@ final class CoreModel {
         log("AppCoreHandle created (\(Int(frame.width * scale))×\(Int(frame.height * scale)) @\(scale)x)")
 
         installInputForwarding()
-        startTicking()
     }
 
     /// Deferred launch work, run from the view's `onAppear` (the window + canvas exist by
@@ -102,6 +106,7 @@ final class CoreModel {
             } else {
                 self.core.key_up(name)
             }
+            self.kick() // a hold/nav may have started — run the pump
             self.drainEffects()
             return event.modifierFlags.contains(.command) ? event : nil
         }
@@ -147,30 +152,35 @@ final class CoreModel {
     /// Left mouse press/release: on-image controls or drag-to-pan (the core decides).
     func mouseLeft(pressed: Bool) {
         core.mouse_left(pressed)
+        kick()
         drainEffects()
     }
 
     /// Line-precise scroll (mouse wheel notches).
     func scrollLines(x: Float, y: Float) {
         core.scroll_lines(x, y)
+        kick()
         drainEffects()
     }
 
     /// Pixel-precise scroll (trackpad two-finger swipe), already scaled to physical px.
     func scrollPixels(x: Float, y: Float) {
         core.scroll_pixels(x, y)
+        kick()
         drainEffects()
     }
 
     /// Trackpad pinch (incremental magnification).
     func pinch(delta: Float) {
         core.pinch(delta)
+        kick()
         drainEffects()
     }
 
     /// Trackpad smart-magnify (two-finger double-tap): 100% ↔ fit.
     func doubleTap() {
         core.double_tap()
+        kick()
         drainEffects()
     }
 
@@ -183,19 +193,56 @@ final class CoreModel {
         }
         core.open_paths(vec)
         log("open_paths(\(paths.count): \(paths.first ?? ""))")
+        kick() // the scan/open worker needs the pump polling
         drainEffects()
     }
 
-    private func startTicking() {
-        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                self.core.tick()
-                self.drainEffects()
-            }
+    // MARK: - The frame pump (NS1 item 7)
+
+    /// One frame of the engine loop, fired by the display link each refresh while running:
+    /// tick (held-key pacing, slideshow, prefetch pump, animation, worker polls) → drain →
+    /// re-decide the pacing. The winit `about_to_wait` equivalent.
+    func pump() {
+        core.tick()
+        drainEffects()
+        updatePacing()
+    }
+
+    /// Continuous while the engine has work or an imminent wake; a precise timer for a
+    /// far-out wake; fully idle (link paused, no timers) otherwise. Mirrors the winit
+    /// shell's ControlFlow::WaitUntil/Wait decision.
+    private func updatePacing() {
+        guard let pump = framePump else { return }
+        wakeTimer?.invalidate()
+        wakeTimer = nil
+        if core.work_pending() {
+            pump.paused = false
+            return
         }
-        RunLoop.main.add(timer, forMode: .common)
-        tickTimer = timer
+        guard let delay = requestedWakeDelay else {
+            pump.paused = true // idle: the next input/panel/wake kicks us awake
+            return
+        }
+        if delay <= 0.02 {
+            pump.paused = false // within ~a frame — stay on the link
+        } else {
+            pump.paused = true
+            let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.framePump?.paused = false
+                    self.pump()
+                }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            wakeTimer = timer
+        }
+    }
+
+    /// Any input may start work (a hold, a decode, an open) — make sure the loop is alive;
+    /// it re-pauses itself once the engine goes quiet.
+    private func kick() {
+        framePump?.paused = false
     }
 
     // MARK: - The wgpu canvas (NS1 item 2)
@@ -263,9 +310,13 @@ final class CoreModel {
             core.render()
             log("RequestRender")
         case .SetTitle(let title):
-            log("SetTitle(\"\(title.toString())\")")
-        case .SetWakeSoon, .ClearWake:
-            break // the fixed timer stands in for the wake seam until item 7
+            let t = title.toString()
+            hostWindow?.title = t
+            log("SetTitle(\"\(t)\")")
+        case .SetWake(let seconds):
+            requestedWakeDelay = seconds
+        case .ClearWake:
+            requestedWakeDelay = nil
         case .Quit:
             log("Quit → NSApp.terminate")
             NSApp.terminate(nil)
@@ -362,4 +413,7 @@ final class CoreModel {
     /// The cursor the core last asked for — the canvas re-asserts it whenever AppKit
     /// runs a cursor update over the view.
     @ObservationIgnored private(set) var desiredCursor: NSCursor = .arrow
+
+    /// The hosting NSWindow (handed over by the canvas view) — the SetTitle target.
+    @ObservationIgnored weak var hostWindow: NSWindow?
 }

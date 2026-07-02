@@ -201,6 +201,13 @@ impl AppCoreHandle {
         self.core.handle(CoreEvent::DoubleTap);
     }
 
+    /// Whether engine work is still outstanding (prefetch/decode/scan/archive in flight) —
+    /// the host keeps the display link running while true, pauses when idle (the frame
+    /// pump's continuous-vs-on-demand decision, NS1 item 7).
+    fn work_pending(&self) -> bool {
+        self.core.work_pending() || self.dir_scan.is_some() || self.archive_load.is_some()
+    }
+
     /// A physical key went down. `key` is a [`PbKey`] name accepted by `PbKey::from_name`
     /// (e.g. `"Space"`, `"Escape"`, `"Right"`, `"C"` — NOT winit's `"ArrowRight"`/`"KeyC"`
     /// spellings) — the Swift host maps `NSEvent` → this name (the input-adapter job, NS1).
@@ -614,9 +621,12 @@ fn map_effect(e: contract::CoreEffect) -> ffi::CoreEffectFfi {
         C::SetTitle(title) => E::SetTitle(title),
         C::Quit => E::Quit,
         C::SetWake(None) => E::ClearWake,
-        // A real Instant→deadline conversion needs a host time base; a later slice adds it.
-        // For now the host just knows "wake again soon".
-        C::SetWake(Some(_at)) => E::SetWakeSoon,
+        // The wake deadline crosses as seconds-from-now (an `Instant` has no meaning across
+        // the FFI): 0.0 = wake immediately. Converted at drain time — the host schedules its
+        // timer in the same event turn, so the relative delay stays accurate.
+        C::SetWake(Some(at)) => {
+            E::SetWake(at.saturating_duration_since(Instant::now()).as_secs_f64())
+        }
         // A genuinely host-side command (DeletePermanent confirm / Recursive / CancelScan /
         // Quit teardown — see `CoreEffect::ShellFlowAction`), carried by its stable snake_case
         // action id. Esc quits through THIS (the keymap resolves Escape → Action::Quit → a
@@ -664,7 +674,9 @@ mod ffi {
     enum CoreEffectFfi {
         RequestRender,
         SetTitle(String),
-        SetWakeSoon,
+        // Tick again in this many seconds (0.0 = now): held-key pacing, slideshow dwell,
+        // the animation's next frame. ClearWake = go idle until the next real event.
+        SetWake(f64),
         ClearWake,
         Quit,
         // A host-side flow command, by stable Action id ("quit", "delete_permanent",
@@ -711,6 +723,7 @@ mod ffi {
         fn scroll_pixels(&mut self, x: f32, y: f32);
         fn pinch(&mut self, delta: f32);
         fn double_tap(&mut self);
+        fn work_pending(&self) -> bool;
 
         // The canvas surface (NS1 item 2). `layer_ptr` = the retained CAMetalLayer's
         // pointer bits (swift-bridge has no raw-pointer type; usize crosses as UInt).
