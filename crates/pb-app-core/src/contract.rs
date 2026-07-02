@@ -180,6 +180,9 @@ pub enum ClipboardPayload {
 pub enum DialogResult {
     /// Esc / close button dismissed a dialog of this kind (cancels the matching in-flight op).
     Dismissed(Option<DialogKind>),
+    /// Password entry submitted (archive unlock); `None` if extraction failed. The core shows the
+    /// "Checking…" state and re-opens the pending archive with the entry (via `BeginArchiveOpen`).
+    PasswordSubmitted(Option<String>),
     /// The password prompt's Cancel — abandon the pending archive.
     PasswordCancelled,
     /// Settings saved, carrying the (optionally) edited settings + keymap.
@@ -308,6 +311,10 @@ pub enum CoreEffect {
     ShowDialog(DialogKind),
     /// Close the open dialog.
     CloseDialog,
+    /// Put the open password dialog into its "Checking…" state (while the just-entered password is
+    /// validated — a zip is synchronous, a 7z re-opens off-thread). NS0 5.6. No-op if not a password
+    /// dialog.
+    SetDialogChecking,
     /// Cancel the in-flight directory scan (request the worker stop + drop its handle). Emitted
     /// when the Scanning dialog is dismissed / cancelled. No-op if no scan is running. NS0 5.6.
     CancelScan,

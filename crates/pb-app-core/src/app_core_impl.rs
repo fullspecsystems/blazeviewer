@@ -441,6 +441,19 @@ impl AppCore {
                 self.pending_confirm_delete = None; // Esc / close = cancel the confirm
                 self.password_archive = None; // Esc / close = abandon the password prompt
             }
+            // A password was entered: show "Checking…" + re-open the pending archive with it (a
+            // wrong one re-prompts in place, so the dialog isn't closed here — the archive-open
+            // result drives that). Nothing pending (shouldn't happen) → just close.
+            R::PasswordSubmitted(pw) => match (pw, self.password_archive.clone()) {
+                (Some(pw), Some(path)) => {
+                    self.effects.push(E::SetDialogChecking);
+                    self.effects.push(E::BeginArchiveOpen {
+                        path,
+                        password: Some(pw),
+                    });
+                }
+                _ => self.effects.push(E::CloseDialog),
+            },
             R::PasswordCancelled => {
                 self.effects.push(E::CloseDialog);
                 self.password_archive = None;

@@ -1472,33 +1472,17 @@ impl App {
         }
     }
 
-    /// Route a [`DialogOutcome`] the shell extracted from the dialog window (NS0 5.6). The
-    /// **PasswordSubmitted** case spawns the archive worker (+ pokes the live dialog), so it's
-    /// still handled shell-side here; every other outcome is a small core reaction, handed to the
-    /// core via [`CoreEvent::DialogResolved`], which runs it + emits the close / cancel effects.
+    /// Map a [`DialogOutcome`] the shell extracted from the dialog window to the shell-neutral
+    /// [`contract::DialogResult`] and hand it to the core via [`CoreEvent::DialogResolved`] (NS0
+    /// 5.6). The core runs every reaction — including the password submit (it shows "Checking…" +
+    /// re-opens the archive via `BeginArchiveOpen`) — and emits the close / cancel / begin effects,
+    /// which the drain right after `dialog_event` (window_event) carries out.
     fn route_dialog_outcome(&mut self, outcome: DialogOutcome) {
-        // PasswordSubmitted: show "Checking…", then re-open the pending archive with the entry
-        // (a 7z re-opens off-thread; zip is synchronous). Stays shell — it drives a worker.
-        if let DialogOutcome::PasswordSubmitted(pw) = outcome {
-            match (pw, self.core.password_archive.clone()) {
-                (Some(pw), Some(path)) => {
-                    if let Some(d) = self.dialog.as_mut() {
-                        d.set_checking(true);
-                        d.request_redraw();
-                    }
-                    self.begin_archive_open(path, Some(pw));
-                }
-                // No archive pending (shouldn't happen): just close.
-                _ => self.dialog = None,
-            }
-            return;
-        }
-        // The rest are core reactions — map to the shell-neutral result + hand to the core; the
-        // drain right after `dialog_event` (window_event) carries out the close / cancel effects.
         let result = match outcome {
             DialogOutcome::Dismissed(kind) => {
                 contract::DialogResult::Dismissed(kind.map(core_dialog_kind))
             }
+            DialogOutcome::PasswordSubmitted(pw) => contract::DialogResult::PasswordSubmitted(pw),
             DialogOutcome::PasswordCancelled => contract::DialogResult::PasswordCancelled,
             DialogOutcome::SettingsSaved { settings, keymap } => {
                 contract::DialogResult::SettingsSaved { settings, keymap }
@@ -1508,7 +1492,6 @@ impl App {
             DialogOutcome::ScanningCancelled => contract::DialogResult::ScanningCancelled,
             DialogOutcome::ConfirmAnswered(c) => contract::DialogResult::ConfirmAnswered(c),
             DialogOutcome::Closed => contract::DialogResult::Closed,
-            DialogOutcome::PasswordSubmitted(_) => unreachable!("handled above"),
         };
         self.core
             .handle(contract::CoreEvent::DialogResolved(result));
@@ -1651,6 +1634,13 @@ impl App {
                     }
                     // Close the open dialog window (NS0 5.6 — the ubiquitous dialog-outcome close).
                     contract::CoreEffect::CloseDialog => self.dialog = None,
+                    // Put the password dialog into its "Checking…" state while validating.
+                    contract::CoreEffect::SetDialogChecking => {
+                        if let Some(d) = self.dialog.as_mut() {
+                            d.set_checking(true);
+                            d.request_redraw();
+                        }
+                    }
                     // Cancel the in-flight directory scan + drop its worker handle.
                     contract::CoreEffect::CancelScan => {
                         self.cancel_dir_scan();
