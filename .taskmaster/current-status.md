@@ -314,14 +314,20 @@ it. Also fixed: keys cross the FFI as `PbKey::from_name` spellings (`"Right"`/`"
    TCC note: the app's Downloads access is approved; a non-TCC corpus lives at
    `/private/tmp/pb-corpus`.
 
-**NS1 remaining — items 4–10** (rough dependency order; the winit shell
+**Item 4 — NSEvent input adapter ✅ (2026-07-02, `44cb76f`; R-rotate + I-info-panel verified
+live in the canvas — HUD overlays render; pinch/scroll/drag/drop need an owner trackpad
+smoke):** `KeyMap.swift` (full Carbon-keyCode→PbKey-name table; numpad digits unmapped —
+`from_name` has no spelling), ⌘-chords forward to the core AND pass to AppKit (menu shortcuts
+live), focus net incl. `didResignKey`, canvas responder overrides (pointer/mouse/scroll/pinch/
+smart-magnify, winit conventions), `.fileURL` drop + `application:open:` (pre-handler URL
+buffer) → `open_paths(Vec<String>)` (classify_inputs mirrored). New FFI: pointer_moved /
+mouse_left (open-panel buttons + play-hint + chip-cancel + drag-pan) / scroll_lines /
+scroll_pixels / pinch / double_tap / open_paths.
+
+**NS1 remaining — items 5–10** (rough dependency order; the winit shell
 `crates/pb-app/src/main.rs` + `crates/pb-app-core/src/contract.rs` remain the worked reference):
-4. **NSEvent → PbKey/Modifiers input adapter** (Swift side) — the full keyCode→`PbKey` name map
-   (the slice-1 map in `CoreModel.pbKeyName` covers only nav keys), modifiers via `flagsChanged`,
-   ignore OS repeat, clear-on-focus-loss (partly done via `didResignActive`), magnify→`Pinch`,
-   scroll→`Scroll`, double-tap; Finder drop + `application:openURLs:` → `open_path`.
-5. **Expand the FFI event surface** — PointerMoved / Scroll(ScrollDelta) / Pinch / DoubleTap /
-   MenuAction(Action) / DroppedPaths / DialogResolved (Resized is done: `resized()`).
+5. **Expand the FFI event surface** — MenuAction(Action) / DialogResolved (PointerMoved / Scroll /
+   Pinch / DoubleTap / Resized / DroppedPaths are done via item 4's methods).
 6. **Expand the effect drain + native handlers** — SetCursor / SetWindowMode / HideWindow /
    SetMenuState / WriteClipboard→NSPasteboard / RevealPath→NSWorkspace / ShowContextMenu→NSMenu /
    live-audio→AVAudioPlayer / the rest of ShellFlowAction; plus a real `Instant`→deadline for
