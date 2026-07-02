@@ -559,6 +559,37 @@ impl AppCore {
         );
     }
 
+    /// Route an opened source (NS0 5.6 Step 3c) — the entry point the picker / drag-drop / a
+    /// deferred launch funnel through. An **archive** or a **folder scan** starts its off-thread
+    /// worker via an effect (`BeginArchiveOpen` / `BeginDirScan`; the host owns the thread +
+    /// progress dialog + generation, and feeds results back as `ArchiveResolved` / `ScanBatch`).
+    /// A finite **explicit list** has no directory walk, so it resolves inline and installs now.
+    pub fn open_plan(&mut self, source: pb_core::open::Source, cursor: pb_core::open::Cursor) {
+        use pb_core::open::Source;
+        match source {
+            Source::Archive(path) => {
+                self.effects.push(contract::CoreEffect::BeginArchiveOpen {
+                    path,
+                    password: None,
+                });
+            }
+            src @ Source::Scan { .. } => {
+                self.effects.push(contract::CoreEffect::BeginDirScan {
+                    source: src,
+                    cursor,
+                });
+            }
+            src @ Source::Explicit(_) => {
+                let r = crate::scan::resolve_playlist(&src, &cursor);
+                if r.source.is_empty() {
+                    eprintln!("PhotoBlaze: no supported images in that selection");
+                    return;
+                }
+                self.rebuild_playlist(r.source, r.root, r.scan_root, r.recursive, r.start);
+            }
+        }
+    }
+
     /// The per-tick core loop (NS0 5.5 Phase C2): absorb finished decodes + uploads, run held
     /// zoom/pan, the gated self-paced nav advance (hold-to-fly) and the slideshow, re-issue the
     /// sharpen/prefetch when parked, update the info panel / toast / pie, run the deferred

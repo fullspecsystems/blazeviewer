@@ -534,37 +534,7 @@ impl App {
     /// current photo isn't blanked.
     fn open_input(&mut self, input: LaunchInput) {
         let plan = open::plan(input);
-        self.open_plan(plan.source, plan.cursor);
-    }
-
-    /// Route a planned open to the right path — archives async, folder scans stream, an
-    /// explicit list resolves inline. Shared by runtime opens ([`open_input`](App::open_input))
-    /// and the deferred startup launch ([`resumed`](App::resumed)), so the startup recursive
-    /// override (carried on the plan) is honored on both paths.
-    fn open_plan(&mut self, source: Source, cursor: open::Cursor) {
-        // Archives open via the async-aware path (a .7z decompresses off-thread so it
-        // can't freeze the loop).
-        if let Source::Archive(path) = &source {
-            self.begin_archive_open(path.clone(), None);
-            return;
-        }
-        // Folder scans also run OFF the event loop and **stream** in: walking a large/nested
-        // tree (the worst case is opening `~/Library`) can take seconds, and doing it
-        // synchronously beachballed the run loop and then crashed the app. The first batch
-        // shows a photo almost immediately; the current view stays put until it lands
-        // (`poll_dir_scan`).
-        if matches!(source, Source::Scan { .. }) {
-            self.begin_dir_scan(source, cursor);
-            return;
-        }
-        // An explicit file list is finite (no directory walk), so resolve it inline.
-        let r = scan::resolve_playlist(&source, &cursor);
-        if r.source.is_empty() {
-            eprintln!("PhotoBlaze: no supported images in that selection");
-            return;
-        }
-        self.core
-            .rebuild_playlist(r.source, r.root, r.scan_root, r.recursive, r.start);
+        self.core.open_plan(plan.source, plan.cursor);
     }
 
     /// Start opening an archive at runtime (picker / drag-drop / a deferred launch).
@@ -1688,6 +1658,14 @@ impl App {
                     }
                     // Request the in-flight archive open stop (the poll frees it; no-op if none).
                     contract::CoreEffect::CancelArchiveLoad => self.cancel_archive_load(),
+                    // Start the off-thread archive / folder-scan workers (NS0 5.6 Step 3c). The
+                    // core routed the open; the shell owns the thread + progress dialog + generation.
+                    contract::CoreEffect::BeginArchiveOpen { path, password } => {
+                        self.begin_archive_open(path, password);
+                    }
+                    contract::CoreEffect::BeginDirScan { source, cursor } => {
+                        self.begin_dir_scan(source, cursor);
+                    }
                     contract::CoreEffect::WriteClipboard(payload) => {
                         self.write_clipboard(payload);
                     }
@@ -2055,7 +2033,7 @@ impl ApplicationHandler for App {
         // launch resolve, before the event loop, could do none of these).
         if let Some(plan) = self.pending_launch.take() {
             self.core.launching = false; // the deferred launch is firing now
-            self.open_plan(plan.source, plan.cursor);
+            self.core.open_plan(plan.source, plan.cursor);
         }
     }
 

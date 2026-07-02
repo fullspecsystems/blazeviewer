@@ -25,6 +25,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::{Action, ActionKind, Keymap, PbKey};
+use pb_core::open::{Cursor, Source};
 
 /// The keyboard modifier flags carried with a key event — the shell-neutral mirror
 /// of the four bools the winit handler already tracks. `logo` is the platform
@@ -297,6 +298,18 @@ pub enum CoreEffect {
     OpenFilePanel { start_dir: PathBuf },
     /// Open the native folder picker at `start_dir`.
     OpenFolderPanel { start_dir: PathBuf },
+    /// Start opening an archive off the event loop (NS0 5.6 Step 3): the host spawns the worker
+    /// (a `.zip` is synchronous; a `.7z` decompresses on a thread after a RAM pre-flight), holds
+    /// the progress-dialog handle + generation, and feeds the result back as `ArchiveResolved` (or
+    /// drives the failure dialogs). `password` is `Some` only on a re-open with an entered password.
+    BeginArchiveOpen {
+        path: PathBuf,
+        password: Option<String>,
+    },
+    /// Start scanning a folder off the event loop (NS0 5.6 Step 3): the host spawns the streaming
+    /// walk worker, holds its handle + generation + progress dialog, and feeds snapshots back as
+    /// `ScanBatch` / `ScanDone`.
+    BeginDirScan { source: Source, cursor: Cursor },
     /// Present a chrome dialog (payload is `NS-later`; see [`DialogKind`]).
     ShowDialog(DialogKind),
     /// Close the open dialog.
