@@ -411,9 +411,33 @@ live count/folder; its Cancel keeps the prior view, while menu ▸ Stop Scanning
 the partial deck. (6) ⌘, → Settings: edit + Save → behavior changes + persists across relaunch;
 Cancel/✕ discards; the slideshow pauses while any dialog is up.
 
-**Still NS2.6 (deliberately last):** the shortcut-capture keybinding editor — see
-`.taskmaster/docs/ns2-shortcut-capture-notes.md` (the KeyboardShortcuts-package review: a local
-event monitor + the existing KeyMap Carbon table; Esc-unbindable is a recorded punt).
+**✅ NS2.6 — the Shortcuts editor SHIPPED (2026-07-02, same session): NS2 IS FEATURE-COMPLETE.**
+Built per `ns2-shortcut-capture-notes.md`: `EDITOR_GROUPS` hoisted to `pb_app_core::keymap`
+(egui's KB_GROUPS re-points — the two shells render the same editor), an FFI **draft keymap**
+(begin/capture/clear/reset/steal-note/dirty; chords display via `KeyChord::mac_symbol` glyphs),
+and a Settings **General/Shortcuts TabView** with a global Save/Cancel (commits both drafts —
+`submit_settings` folds `SettingsSaved{keymap}` only when dirty). Capture = an app-local
+NSEvent monitor that swallows the chord (⌘Q can't quit mid-capture; **bare keys capture** —
+the KeyboardShortcuts-package disqualifier), maps through the same Carbon→PbKey table as the
+viewer, Esc cancels (the recorded punt). **Latent input bug fixed en route:** the key monitor
+now forwards only while the *viewer* window is key — typing Space in Settings used to advance
+the photo behind it (also a plausible double-Esc mechanism; its debug tracing remains in).
+
+**Also this session (owner-verified live):** title-bar proxy icon (SetTitle-cadence
+`representedURL`), **true borderless F mode** (square corners/every pixel — dynamic
+`canBecomeKeyWindow` via `class_replaceMethod` on the window CLASS; the `object_setClass`
+isa-swap version segfaulted in SwiftUI's KVO teardown, a recorded gotcha), titlebar
+clobber-proofing (`assertWindowChrome` per drain + `.toolbarBackground(.hidden)`),
+clamp-oversized-window-on-monitor-change (shrink-only, drag-settle-aware; the OS's Tahoe
+window management resizes windows cross-display on its own — resize forensics logging is in
+the debug build), and CI cost policy (main+PR+dispatch only — a full run bills ~260 min).
+
+**Owner smoke for NS2.6:** ⌘, → Shortcuts tab: rebind Next to a bare key (steal note appears),
+capture ⌘-chords, Clear/Add secondary slots, Reset to defaults, Save → new binding drives the
+viewer + persists across relaunch; Cancel discards; typing in Settings no longer moves photos.
+**After NS2: NS3** (Mac-assed polish + cutover — window restoration, appearance tracking,
+accessibility, gestures as recognizers, EDR/P3 validation through the SwiftUI host, then flip
+the default Mac target and retire egui-on-Mac).
 
 **Host-launch note:** the `AppDelegate` sets the activation policy in
 `applicationWillFinishLaunching` so bare-binary launches (`swift run` / the executable straight
