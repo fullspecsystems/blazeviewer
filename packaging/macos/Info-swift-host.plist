@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Bundle metadata for the NS1 SwiftUI host (ADR-021) — the strangler-fig target that will
+  become the default Mac app at the NS3 cutover. Assembled into PhotoBlazeMac.app by
+  scripts/build-swift-host.sh (which substitutes the version placeholders from the pb-app
+  crate version). Distinct bundle id from the shipping egui beta (com.jdlien.PhotoBlaze)
+  so the two coexist during NS1–NS3. File associations / icons arrive with the cutover.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>PhotoBlazeMac</string>
+	<key>CFBundleDisplayName</key>
+	<string>PhotoBlaze (SwiftUI)</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.jdlien.PhotoBlazeMac</string>
+	<key>CFBundleExecutable</key>
+	<string>PhotoBlazeMac</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>__SHORT_VERSION__</string>
+	<key>CFBundleVersion</key>
+	<string>__VERSION__</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+</dict>
+</plist>

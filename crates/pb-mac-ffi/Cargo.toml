@@ -5,10 +5,22 @@ edition.workspace = true
 license.workspace = true
 description = "macOS Swift/AppKit FFI bridge for PhotoBlaze (NS1, ADR-021): a swift-bridge staticlib exposing the platform-neutral AppCore to a SwiftUI host. macOS-only; empty on other targets."
 
-# `staticlib` = the archive Xcode links into the .app; `rlib` = so `cargo test` can build
-# a test harness against the bridge on macOS.
+# `staticlib` = the archive the Swift host links into the .app; `rlib` = so `cargo test`
+# can build a test harness against the bridge on macOS.
 [lib]
 crate-type = ["staticlib", "rlib"]
+
+# Packages the built staticlib + the generated glue into the xcframework-backed local
+# Swift package (`PbMacFfi/`) that the `mac/` SwiftPM host consumes. A `[[bin]]` (not a
+# build.rs step) because it needs the *built* `.a`; driven by scripts/build-swift-host.sh.
+[[bin]]
+name = "create-package"
+path = "src/bin/create_package.rs"
+required-features = ["package"]
+
+[features]
+# Enables the `create-package` bin (pulls swift-bridge-build in as a regular dependency).
+package = ["dep:swift-bridge-build"]
 
 [dependencies]
 pb-app-core = { workspace = true }
@@ -18,6 +30,7 @@ pb-app-core = { workspace = true }
 # swift-bridge graph. Keeps the existing `--workspace` CI on Windows/Linux untouched.
 [target.'cfg(target_os = "macos")'.dependencies]
 swift-bridge = "0.1"
+swift-bridge-build = { version = "0.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.build-dependencies]
 swift-bridge-build = "0.1"

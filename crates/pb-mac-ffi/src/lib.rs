@@ -6,9 +6,10 @@
 //! - **Events in:** the host translates `NSEvent` / gesture recognizers / menu clicks into
 //!   calls on [`AppCoreHandle`] (`key_down` / `key_up` / `focus_lost` / `tick` / …), which
 //!   build the shell-neutral [`pb_app_core::contract::CoreEvent`]s and call `AppCore::handle`.
-//! - **Effects out:** the host drains [`AppCoreHandle::drain_effects`] **on the main actor**
-//!   and executes each [`ffi::CoreEffectFfi`] (render, set title, wake, quit, …). A worker
-//!   thread may only *schedule* a main-thread drain — never touch AppKit/render directly.
+//! - **Effects out:** the host pulls [`AppCoreHandle::next_effect`] **on the main actor**
+//!   until `None` and executes each [`ffi::CoreEffectFfi`] (render, set title, wake, quit, …).
+//!   A worker thread may only *schedule* a main-thread drain — never touch AppKit/render
+//!   directly.
 //!
 //! **macOS-only.** The `swift-bridge` dependency and this whole module are target-gated, so
 //! on Windows/Linux the crate compiles to an empty staticlib and the winit `pb-app` build is
@@ -48,10 +49,13 @@ impl AppCoreHandle {
         }
     }
 
-    /// A physical key went down. `key` is a [`PbKey`] name (`PbKey::as_str`, e.g. `"Space"`,
-    /// `"ArrowRight"`, `"KeyC"`) — the Swift host maps `NSEvent` → this name (the input-adapter
-    /// job, NS1). Unknown names are ignored. OS auto-repeat is passed via `repeat`; the core
-    /// drops it for held actions, exactly as the winit shell does.
+    /// A physical key went down. `key` is a [`PbKey`] name accepted by `PbKey::from_name`
+    /// (e.g. `"Space"`, `"Escape"`, `"Right"`, `"C"` — NOT winit's `"ArrowRight"`/`"KeyC"`
+    /// spellings) — the Swift host maps `NSEvent` → this name (the input-adapter job, NS1).
+    /// Unknown names are ignored. OS auto-repeat is passed via `is_repeat` (named to dodge
+    /// the Swift keyword `repeat` — swift-bridge gotcha #4: a Rust param named after a Swift
+    /// keyword generates Swift glue that doesn't compile); the core drops repeats for held
+    /// actions, exactly as the winit shell does.
     fn key_down(
         &mut self,
         key: &str,
@@ -59,7 +63,7 @@ impl AppCoreHandle {
         shift: bool,
         alt: bool,
         logo: bool,
-        repeat: bool,
+        is_repeat: bool,
     ) {
         // The FFI is host/shell code, so it stamps the clock (the core never reads it — NS0).
         self.core.now = Instant::now();
@@ -72,7 +76,7 @@ impl AppCoreHandle {
                     alt,
                     logo,
                 },
-                repeat,
+                repeat: is_repeat,
             });
         }
     }
@@ -99,14 +103,22 @@ impl AppCoreHandle {
         self.core.handle(CoreEvent::Tick(self.core.now));
     }
 
-    /// Drain the effects the core produced since the last drain, mapped to the FFI enum. The
-    /// host runs these on the main actor. Slice 1 maps a representative subset; every other
-    /// effect arrives as [`ffi::CoreEffectFfi::Other`] until it's bridged in a later slice.
-    fn drain_effects(&mut self) -> Vec<ffi::CoreEffectFfi> {
-        std::mem::take(&mut self.core.effects)
-            .into_iter()
-            .map(map_effect)
-            .collect()
+    /// Pull the next effect the core produced, or `None` when the queue is drained — the host
+    /// loops this on the main actor after each event/tick (`while let e = next_effect() { … }`).
+    /// Slice 1 maps a representative subset; every other effect arrives as
+    /// [`ffi::CoreEffectFfi::Other`] until it's bridged in a later slice.
+    ///
+    /// Pull-style rather than `-> Vec<CoreEffectFfi>` (swift-bridge gotcha #3): 0.1.59
+    /// generates the *Rust* half of a `Vec<transparent enum>` return but not the Swift-side
+    /// `Vectorizable` conformance or the `Vec_…` C shims, so the generated Swift doesn't
+    /// compile. `Option<transparent enum>` is fully supported — and a handful of nanosecond
+    /// FFI calls per event is free anyway.
+    fn next_effect(&mut self) -> Option<ffi::CoreEffectFfi> {
+        if self.core.effects.is_empty() {
+            None
+        } else {
+            Some(map_effect(self.core.effects.remove(0)))
+        }
     }
 }
 
@@ -122,6 +134,11 @@ fn map_effect(e: contract::CoreEffect) -> ffi::CoreEffectFfi {
         // A real Instant→deadline conversion needs a host time base; a later slice adds it.
         // For now the host just knows "wake again soon".
         C::SetWake(Some(_at)) => E::SetWakeSoon,
+        // A genuinely host-side command (DeletePermanent confirm / Recursive / CancelScan /
+        // Quit teardown — see `CoreEffect::ShellFlowAction`), carried by its stable snake_case
+        // action id. Esc quits through THIS (the keymap resolves Escape → Action::Quit → a
+        // host-side flow action), not through `CoreEffect::Quit` — the host matches "quit".
+        C::ShellFlowAction(action) => E::ShellFlowAction(action.id().to_string()),
         // Menu state, dialogs, clipboard, reveal, context menu, live audio, window mode,
         // surface ops, … — each bridged in a later NS1 slice.
         _ => E::Other,
@@ -140,6 +157,9 @@ mod ffi {
         SetWakeSoon,
         ClearWake,
         Quit,
+        // A host-side flow command, by stable Action id ("quit", "delete_permanent",
+        // "recursive", "cancel_scan") — the host runs the native operation.
+        ShellFlowAction(String),
         Other,
     }
 
@@ -156,12 +176,12 @@ mod ffi {
             shift: bool,
             alt: bool,
             logo: bool,
-            repeat: bool,
+            is_repeat: bool,
         );
         fn key_up(&mut self, key: &str);
         fn focus_lost(&mut self);
         fn tick(&mut self);
-        fn drain_effects(&mut self) -> Vec<CoreEffectFfi>;
+        fn next_effect(&mut self) -> Option<CoreEffectFfi>;
     }
 }
 
@@ -169,20 +189,29 @@ mod ffi {
 mod tests {
     use super::*;
 
-    /// Slice-1 proof: an event driven in through the FFI produces effects the host can drain
+    /// Pull the queue dry, as the Swift host's drain loop does.
+    fn drain(h: &mut AppCoreHandle) -> Vec<ffi::CoreEffectFfi> {
+        std::iter::from_fn(|| h.next_effect()).collect()
+    }
+
+    /// Slice-1 proof: an event driven in through the FFI produces effects the host can pull
     /// out — the full round-trip through the real `AppCore::handle`, and the queue is emptied
-    /// by a drain. Escape resolves (default keymap) to Quit, which always enqueues an effect,
-    /// so this holds even on a headless core with no photos.
+    /// by a drain. Escape resolves (default keymap) to `Action::Quit`, a HOST-side flow
+    /// command — so the drain must contain `ShellFlowAction("quit")` (NOT `CoreEffect::Quit`;
+    /// the host runs the quit teardown), even on a headless core with no photos.
     #[test]
     fn event_in_produces_effects_out() {
         let mut h = AppCoreHandle::new(1920, 1080, 2.0);
         h.key_down("Escape", false, false, false, false, false);
+        let effects = drain(&mut h);
         assert!(
-            !h.drain_effects().is_empty(),
-            "an event should produce a drainable effect"
+            effects
+                .iter()
+                .any(|e| matches!(e, ffi::CoreEffectFfi::ShellFlowAction(id) if id == "quit")),
+            "Escape should resolve to the host-side quit flow action"
         );
         assert!(
-            h.drain_effects().is_empty(),
+            drain(&mut h).is_empty(),
             "draining empties the effect queue"
         );
     }
@@ -193,6 +222,6 @@ mod tests {
     fn unknown_key_name_is_ignored() {
         let mut h = AppCoreHandle::new(800, 600, 1.0);
         h.key_down("NotAKey", false, false, false, false, false);
-        assert!(h.drain_effects().is_empty());
+        assert!(drain(&mut h).is_empty());
     }
 }

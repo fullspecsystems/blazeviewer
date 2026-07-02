@@ -1,0 +1,4 @@
+# SwiftPM build products.
+/.build/
+# Xcode's SwiftPM workspace state when the package is opened in the IDE.
+/.swiftpm/
