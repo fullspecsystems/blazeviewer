@@ -859,30 +859,38 @@ final class CoreModel {
     /// keeps the mask that way if SwiftUI re-adds `.titled` mid-mode.
     @ObservationIgnored private var borderlessOK = false
 
+    /// Window classes already patched keyable (once per class, app lifetime).
+    private static var keyablePatched: Set<String> = []
+
     /// Let `window` stay key without `.titled`: NSWindow refuses key status while
     /// borderless (and SwiftUI's window class keeps that default), which would mean a
-    /// dead keyboard in the F speed mode. Swap in a dynamic subclass whose
-    /// `canBecomeKey`/`canBecomeMain` return true — the runtime twin of the static
-    /// override winit's own NSWindow subclass ships for exactly this. Idempotent; the
-    /// override is harmless in windowed mode (titled windows already answer yes).
+    /// dead keyboard in the F speed mode — the effect winit gets from a static
+    /// `canBecomeKeyWindow → YES` override on its own NSWindow subclass.
+    ///
+    /// ⚠ Patch the window's declared CLASS, never the instance's isa: the first version
+    /// used `object_setClass` (a dynamic subclass swap), which corrupts KVO's
+    /// bookkeeping on an observed object — SwiftUI KVO-observes its window, and the
+    /// very next `setStyleMask` crashed in `NSHostingView`'s observer removal
+    /// (the owner-reported F-mode segfault). A `class_replaceMethod` override leaves
+    /// the KVO shim chain intact. Titled windows already answer yes, so the override
+    /// only changes behavior for the borderless speed mode; the Settings window (same
+    /// class, always titled) is unaffected.
     private func makeKeyableWhenBorderless(_ window: NSWindow) {
-        guard let base: AnyClass = object_getClass(window) else { return }
-        let subName = "PBKeyable_" + NSStringFromClass(base)
-        if NSClassFromString(subName) == nil {
-            guard let sub = objc_allocateClassPair(base, subName, 0) else { return }
-            let yes: @convention(block) (AnyObject?) -> Bool = { _ in true }
-            class_addMethod(
-                sub, NSSelectorFromString("canBecomeKeyWindow"),
-                imp_implementationWithBlock(yes), "B@:"
-            )
-            class_addMethod(
-                sub, NSSelectorFromString("canBecomeMainWindow"),
-                imp_implementationWithBlock(yes), "B@:"
-            )
-            objc_registerClassPair(sub)
+        // Walk past any KVO shim (NSKVONotifying_*) to the real declared class.
+        var cls: AnyClass = object_getClass(window) ?? NSWindow.self
+        while NSStringFromClass(cls).hasPrefix("NSKVONotifying_"),
+              let sup = class_getSuperclass(cls) {
+            cls = sup
         }
-        if let sub = NSClassFromString(subName), object_getClass(window) != sub {
-            object_setClass(window, sub)
+        let name = NSStringFromClass(cls)
+        guard !Self.keyablePatched.contains(name) else { return }
+        Self.keyablePatched.insert(name)
+        let yes: @convention(block) (AnyObject?) -> Bool = { _ in true }
+        for sel in ["canBecomeKeyWindow", "canBecomeMainWindow"] {
+            class_replaceMethod(
+                cls, NSSelectorFromString(sel),
+                imp_implementationWithBlock(yes), "B@:"
+            )
         }
     }
 
