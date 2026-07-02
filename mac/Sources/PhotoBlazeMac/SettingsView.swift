@@ -44,7 +44,11 @@ struct SettingsView: View {
             }
             .padding(12)
         }
-        .frame(width: 560, height: 640)
+        // Resizable (owner request): min keeps every control usable, ideal is the
+        // opening size, and growth is unbounded — the Shortcuts list especially earns
+        // a taller window. (windowResizability(.contentMinSize) on the scene lets the
+        // window range above these minimums.)
+        .frame(minWidth: 520, idealWidth: 560, minHeight: 480, idealHeight: 640)
         .onAppear {
             if !loaded {
                 draft = SettingsDraft(form: model.settingsForm())
