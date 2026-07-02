@@ -18,7 +18,7 @@ the **archive/scan flow** inversion is **COMPLETE**: the dialog-outcome *reactio
 `3006765`), the entire resolve/scan **compute** (Step 2, `3cdb016`/`b21f59a`/`ef40042`), and the
 **worker flow** (Step 3, `dc0982d`/`e9c58f8`/`0b8f023`) are all core-driven — the core routes an open
 → `BeginArchiveOpen`/`BeginDirScan` effect → host worker → `ScanBatch`/`ScanDone`/`ArchiveResolved`
-events → core applies. Steps 1+2 smoke-verified; **Step 3 ⚠ unsmoked**. Only the thread/mpsc + egui
+events → core applies. Steps 1–3 all owner-smoke-verified ("all clear"). Only the thread/mpsc + egui
 progress dialogs stay shell. **NS0 5.6 is effectively complete.** Everything below the NS0 section is the previously-shipped work (macOS port,
 archive, settings, HEIC, color), unchanged._
 
@@ -201,7 +201,7 @@ Mapped end-to-end (Explore agent) and inverted in the recommended low-risk order
   - Net: the whole compute (folder walk, archive open, RAM pre-flight, cursor resolution) is now
     core + reusable by the Swift host; **only the `thread::spawn`+`mpsc` worker plumbing + the egui
     progress dialogs stay shell** (`begin_*`/`poll_*` spawn `scan::stream_scan` / call the resolvers).
-- **✅ Step 3 — the worker flow inverted (⚠ unsmoked)**, in three sub-commits:
+- **✅ Step 3 — the worker flow inverted (✅ owner-smoke-verified "all clear")**, in three sub-commits:
   - **3a — dir-scan apply** (`dc0982d`): `poll_dir_scan` → `CoreEvent::ScanBatch(Resolved)` →
     `AppCore::apply_scan_batch` (`filter_deleted`→bootstrap-first/extend-rest) + `ScanDone` →
     `finish_scan` (scanning=false / request_prefetch / restore open-hint on an empty deck).
@@ -217,8 +217,9 @@ Mapped end-to-end (Explore agent) and inverted in the recommended low-risk order
   - Net: **the whole archive/scan flow is core-driven** — core routes the open → `Begin*` effect →
     host worker → `ScanBatch`/`ScanDone`/`ArchiveResolved` events → core applies. Only the
     thread/mpsc/egui-dialog plumbing stays shell. Behavior-preserving (the `Begin*` runs at drain,
-    same event turn as the old inline call). **NS0 5.6 is effectively COMPLETE** — the last coupled
-    flow is inverted.
+    same event turn as the old inline call). **NS0 5.6 is COMPLETE** — the last coupled
+    flow is inverted; even PasswordSubmitted (`8dfc507`, the one dialog outcome left shell in Step 1)
+    is now core via `BeginArchiveOpen` + a `SetDialogChecking` effect (⚠ that last commit unsmoked).
 - The other `ShellFlowAction` arms (DeletePermanent confirm, Recursive/CancelScan scan-thread spawn,
   Quit teardown) remain genuine platform ops. None of this blocks NS1.
 
