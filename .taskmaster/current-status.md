@@ -1,20 +1,27 @@
 # PhotoBlaze — Current Status (session handoff)
 
-_Last updated: 2026-07-01. **NS0 — the AppCore ownership inversion (ADR-021, the macOS
-SwiftUI/AppKit groundwork) is COMPLETE.** On branch `swiftui`, fast-forwarded + pushed to
-`origin/main` (`4089157`). The winit `App` god-object is fully inverted into a platform-neutral
-**`AppCore`** (crate `pb-app-core`) + a thin winit shell: every input event
-(keyboard/focus/pointer/pinch/double-tap/**resize**/**scroll**), the tick loop, all menu + dialog
-actions, the dialog outcomes, and the whole open/scan/archive flow run through
-**`AppCore::handle(CoreEvent)`** + a **`CoreEffect`** drain. The shell is a translator
+_Last updated: 2026-07-01. **NS1 (the macOS SwiftUI/AppKit host) has BEGUN — its FFI
+foundation is laid and on `origin/main` (`59fdd77`).** The FFI boundary is
+**`swift-bridge`** (owner-confirmed, the plan's pick); a new macOS-only staticlib crate
+**`crates/pb-mac-ffi`** bridges the platform-neutral `AppCore` to a Swift host — opaque
+`AppCoreHandle`, events in (`key_down`/`key_up`/`focus_lost`/`tick`), effects out
+(`drain_effects → Vec<CoreEffectFfi>`). The **KeyDown→effect round-trip is proven** by a Rust
+test, and `AppCore::headless(Viewport)` is the public construction seam it builds on (the
+`handle` tests reuse it). swift-bridge deps + the `ffi` module are **macOS-target-gated**, so
+Windows/Linux `--workspace` CI builds an empty staticlib (winit `pb-app` untouched). The rest of
+NS1 is scoped as a 10-item list — see the **▶ Resume** section. Also shipped this session (both on
+`main`): **Show in Finder / File Explorer** (task #40) and the **right-click photo context menu**
+(task #41). Green throughout: workspace tests, clippy `-D warnings`, fmt._
+
+_**NS0 — the AppCore ownership inversion (ADR-021) is COMPLETE** and on `main`. The winit `App`
+god-object is fully inverted into a platform-neutral **`AppCore`** (crate `pb-app-core`) + a thin
+winit shell: every input event (keyboard/focus/pointer/pinch/double-tap/**resize**/**scroll**), the
+tick loop, all menu + dialog actions, the dialog outcomes, and the whole open/scan/archive flow run
+through **`AppCore::handle(CoreEvent)`** + a **`CoreEffect`** drain. The shell is a translator
 (`WindowEvent`→`CoreEvent`) + effect-executor; what stays shell is genuine platform machinery — the
-winit window, the GPU surface, `thread::spawn`+`mpsc` workers, and the egui dialogs. Green: **393
-workspace tests, clippy `-D warnings`, fmt**; owner-smoke-verified across the inversion (three tail
-commits — PasswordSubmitted `8dfc507`, Resized `6ae58da`, scroll `45af83b` — are green but await a
-final smoke). **The next phase is NS1: a Swift/AppKit host driving the same `handle()`/effects via a
-C FFI layer** — see the **▶ Resume** section at the end of the NS0 block. The NS0 section below is the
-detailed step-by-step record; everything under it is previously-shipped work (macOS port, archive,
-settings, HEIC, color), unchanged._
+winit window, the GPU surface, `thread::spawn`+`mpsc` workers, and the egui dialogs. The NS0 section
+below is the detailed step-by-step record; everything under it is previously-shipped work (macOS
+port, archive, settings, HEIC, color), unchanged._
 
 _The macOS (Apple Silicon) port is complete and SHIPPED in `v0.1.0-beta.4` (2026-06-30) — the
 first signed + notarized macOS DMG alongside the signed Windows MSI. Verified notarized +
@@ -219,34 +226,54 @@ Mapped end-to-end (Explore agent) and inverted in the recommended low-risk order
 - The other `ShellFlowAction` arms (DeletePermanent confirm, Recursive/CancelScan scan-thread spawn,
   Quit teardown) remain genuine platform ops. None of this blocks NS1.
 
-### ▶ Resume (next phase = NS1, the Swift/AppKit bridge)
-NS0 is done, green, and on `main`. Two things before/at the start of NS1:
+### ▶ Resume (NS1 in progress — the Swift/AppKit host)
 
-**0. Smoke the three green-but-unsmoked tail commits** (a quick pass): scroll (`45af83b`) —
-mouse-wheel + trackpad pan a zoomed photo, Ctrl+scroll zooms about the cursor, the *Scroll wheel =
-Zoom* setting inverts it; resize (`6ae58da`) — drag-resize re-fits + crisp re-decodes on settle,
-fullscreen toggle, and HDR stays alive on a P3/HDR mac across a resize/display-move; PasswordSubmitted
-(`8dfc507`) — a password-protected `.zip`/`.7z` (correct → Checking… → opens; wrong → re-prompt;
-Cancel/Esc abandon).
+**FOUNDATION DONE (2026-07-01, `59fdd77`, on `main`).** The open FFI question is settled:
+**`swift-bridge`** (owner-confirmed; the plan's pick — best fit for the enum-heavy
+`CoreEvent`/`CoreEffect` contract). New macOS-only staticlib **`crates/pb-mac-ffi`** bridges
+`AppCore`: opaque `AppCoreHandle`, events in (`key_down`/`key_up`/`focus_lost`/`tick`; a key is
+passed by its `PbKey` name via `PbKey::from_name`), effects out (`drain_effects → Vec<CoreEffectFfi>`,
+a slice-1 subset — rest map to `Other`). The **KeyDown→effect round-trip is proven** (Rust test);
+**`AppCore::headless(Viewport)`** is the public construction seam it builds on (and `#[cfg(test)]
+test_core` now delegates to it — one construction literal). swift-bridge deps + the `ffi` module are
+macOS-target-gated → Windows/Linux `--workspace` CI builds an empty staticlib. `build.rs` emits the
+Swift/C glue to `generated/` (git-ignored). Two swift-bridge gotchas: **no `///` doc comments inside
+the bridge module** (→ build.rs codegen panic; use `//`), and a crate-level
+`#![allow(clippy::unnecessary_cast)]` for its generated shims. Setup + Xcode-integration steps live
+in `crates/pb-mac-ffi/README.md`. See `.taskmaster/docs/macos-native-ui-plan.md` §NS1.
 
-**1. NS1 — bind a native macOS host to the core.** The host owns the `NSWindow`/`CAMetalLayer` + the
-run loop and drives the Rust engine over a **C FFI layer** (`extern "C"` shim over `AppCore`):
-- **Events in:** translate `NSEvent`/gesture-recognizer/`NSMenu` input into `CoreEvent`s
-  (KeyDown/KeyUp/FocusLost/PointerMoved/Scroll(ScrollDelta)/Pinch/DoubleTap/Resized/MenuAction/Tick/
-  DialogResolved/ScanBatch/ScanDone/ArchiveResolved) and call `AppCore::handle(ev)`.
-- **Effects out:** drain the accumulated `CoreEffect`s natively — `SetWake`→a run-loop timer,
-  `SetTitle`/`SetCursor`/`SetWindowMode`/`HideWindow`/`Quit`→`NSWindow`/app, `SetMenuState`→`NSMenu`,
-  `ShowDialog`/`CloseDialog`/`SetDialogChecking`→native panels, `Begin{ArchiveOpen,DirScan}`→a GCD
-  worker feeding results back as the `*Resolved`/`ScanBatch` events, `WriteClipboard`→`NSPasteboard`,
-  `Start/Stop/Pause/ResumeLiveAudio`→`AVAudioPlayer`, `ShellFlowAction(Action)`→the native op.
-- **The winit shell (`crates/pb-app/src/main.rs`) is the worked reference** — its
-  `window_event`/`about_to_wait`/`drain_effects` show exactly what each event maps to and what each
-  effect does. The full contract + docs are in `crates/pb-app-core/src/contract.rs`. The GPU/render
-  path (`pb-render`, wgpu-on-Metal) already ports; the host just needs to hand the core a surface.
-- **Open question to settle early:** the FFI boundary shape (a C-ABI `pb_app_core` staticlib +
-  handmade header, vs `cbindgen`/`swift-bridge`), and how the `CoreEvent`/`CoreEffect` enums cross it
-  (a flat C tagged-union, or opaque handles + accessor fns). Prototype one event (KeyDown) + one
-  effect (RequestRender) end-to-end first.
+**NS1 remaining — 10 items** (rough dependency order; the winit shell
+`crates/pb-app/src/main.rs` `window_event`/`about_to_wait`/`drain_effects` + the contract in
+`crates/pb-app-core/src/contract.rs` are the worked reference for every event/effect):
+1. **Xcode app target + build wiring** — arm64-only, macOS 14+, behind a separate target/flag; Run
+   Script `cargo build -p pb-mac-ffi --target aarch64-apple-darwin`, link the `.a`, add generated
+   `.swift` + a bridging header/module map; minimal SwiftUI app creating `AppCoreHandle`.
+2. **CAMetalLayer wgpu surface** — a macOS-only `SurfaceTargetUnsafe::CoreAnimationLayer` constructor;
+   prove create/resize/EDR-reconfigure/draw/teardown on a canvas-only build; document the safety +
+   main-thread contract; hand the retained `CAMetalLayer` (`*mut c_void`) across FFI.
+3. **Real `AppCore` construction over FFI** — replace `headless` with a launch input + decode pool +
+   source + the renderer bound to the surface (winit `App::new` is the reference); wire the
+   scan/archive worker (`Begin*` effects → a GCD worker → `ScanBatch`/`ScanDone`/`ArchiveResolved`).
+4. **NSEvent → PbKey/Modifiers input adapter** (Swift side) — keyCode→`PbKey` name, modifiers, ignore
+   OS repeat, clear-on-focus-loss, magnify→`Pinch`, scroll→`Scroll`, double-tap; drop + `openURLs:`.
+5. **Expand the FFI event surface** — the rest of `CoreEvent`: PointerMoved / Scroll(ScrollDelta) /
+   Pinch / DoubleTap / Resized / MenuAction(Action) / DroppedPaths / DialogResolved / Scan*/Archive*.
+6. **Expand the effect drain + native handlers** — the rest of `CoreEffect`: SetCursor /
+   SetWindowMode / HideWindow / SetMenuState / ReportError / WriteClipboard→NSPasteboard /
+   RevealPath→NSWorkspace / ShowContextMenu→NSMenu / Begin*→GCD / live-audio→AVAudioPlayer /
+   ShellFlowAction; plus a real `Instant`→deadline for `SetWake` (replaces the slice-1 `SetWakeSoon`).
+7. **Frame pump** — `MTKViewDelegate.draw(in:)` drives Tick/Redraw; refresh-rate `preferredFramesPerSecond`;
+   on-demand when idle, continuous while `work_pending`; wake from `SetWake`; `presentedTime` seam.
+8. **Menu + native open panel** — muda-under-NSApp vs a thin Swift NSMenu from the same `Action` ids;
+   keep `SetMenuState` synced (incl. the new Show-in-Finder enabled-state + the context menu);
+   `NSOpenPanel` for the `OpenFilePanel`/`OpenFolderPanel` effects.
+9. **Mac-SwiftUI CI lane** — add to the matrix, keep the egui-Mac lane until the NS3 cutover.
+10. **Verify NS1 exit criteria** — photos + fly-at-refresh + keyboard/trackpad + native menu/open, no
+    egui in the canvas path, Windows untouched; owner smoke on Apple Silicon (incl. HDR/P3 EDR through
+    the AppKit-owned CAMetalLayer).
+
+**Pre-existing (optional) smoke — the three green tail commits of NS0** await a final owner pass:
+scroll (`45af83b`), resize (`6ae58da`), PasswordSubmitted (`8dfc507`). Not blocking NS1.
 
 **Move-recipe hazards (for any further Rust-side moves):** multiline `self\n.core\n.field` chains
 (regex-collapse, not a literal replace); a method calling a shell *module* path or an associated

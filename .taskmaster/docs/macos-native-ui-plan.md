@@ -249,10 +249,24 @@ green + owner-smoke-verified:
 Stand up the Mac app target. **Behind a build flag / separate target** so the
 shippable egui-on-Mac beta is never broken. No dialogs yet.
 
-- **FFI boundary — `swift-bridge`** (recommended over UniFFI: it handles methods and
-  simple enums/opaque handles cleanly; UniFFI is awkward for the live surface + tight
-  loop). Rust compiles through a dedicated `staticlib`/bridge crate; expose an opaque
-  `AppCore` handle, FFI-safe command/event structs, and an effect-drain API.
+> **✅ FOUNDATION DONE (2026-07-01, `59fdd77`, on `main`).** FFI = **`swift-bridge`**
+> (owner-confirmed). New macOS-only staticlib **`crates/pb-mac-ffi`** exposes an opaque
+> `AppCoreHandle`, events in (`key_down`/`key_up`/`focus_lost`/`tick`), and effects out
+> (`drain_effects → Vec<CoreEffectFfi>`); the **KeyDown→effect round-trip is proven** (Rust test).
+> `AppCore::headless(Viewport)` is the public construction seam. swift-bridge deps + the `ffi`
+> module are macOS-target-gated (Windows/Linux CI builds an empty staticlib). swift-bridge
+> gotchas: no `///` doc comments inside the bridge module; crate-level
+> `#![allow(clippy::unnecessary_cast)]` for its generated shims. Integration steps:
+> `crates/pb-mac-ffi/README.md`. **The live 10-item NS1 task list is in
+> `.taskmaster/current-status.md` (▶ Resume).** The remaining bullets below are the design
+> reference for those tasks.
+
+- **FFI boundary — `swift-bridge` ✅ (decided + wired).** (Recommended over UniFFI: it handles
+  methods and simple enums/opaque handles cleanly; UniFFI is awkward for the live surface + tight
+  loop. Also chosen over a hand-rolled C-ABI for the ergonomic marshaling of the enum-heavy effect
+  drain — swift-bridge 0.1.59 handles the enum-with-data / `&str` / `Vec<enum>` / opaque-handle
+  design as-is.) Rust compiles through the dedicated `pb-mac-ffi` `staticlib`; it exposes the
+  opaque `AppCore` handle, FFI-safe command/event calls, and the effect-drain API.
 - **Main-thread rule:** Swift/AppKit/wgpu surface calls run on the main thread. Rust
   worker threads may enqueue work internally, but effects are **drained by Swift on
   the main actor** (`drain_effects()`), not delivered through arbitrary callbacks.

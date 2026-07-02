@@ -175,6 +175,13 @@ decode is still WIC-bound (~250 ms–1 s).
 
 ### ADR-021 — macOS chrome: native AppKit/SwiftUI shell over an extracted `AppCore`; egui retained on Windows
 *Decided 2026-06-30. Execution plan: [`macos-native-ui-plan.md`](macos-native-ui-plan.md).*
+*Status (2026-07-01): **NS0 (`AppCore` extraction) COMPLETE**, on `main` — the winit shell drives
+the engine entirely through `AppCore::handle(CoreEvent)` + a `CoreEffect` drain. **NS1 FOUNDATION
+laid** — the FFI boundary is **`swift-bridge`** (chosen over UniFFI and a hand-rolled C-ABI for the
+ergonomic marshaling of the enum-heavy effect drain); a macOS-only `staticlib` crate
+`crates/pb-mac-ffi` bridges `AppCore` with the KeyDown→effect round-trip proven. Remaining NS1 work
+(CAMetalLayer surface, real construction, input adapter, event/effect expansion, frame pump, menu,
+CI, exit criteria) is tracked in `current-status.md` ▶ Resume.*
 On the **macOS target only**, the egui `DialogWindow` chrome is replaced by a native
 AppKit/SwiftUI shell that owns the `NSWindow` + run loop and hosts the wgpu/Metal
 canvas in an `MTKView`. This requires extracting a platform-neutral **`AppCore`**
