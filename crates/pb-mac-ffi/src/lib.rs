@@ -72,6 +72,9 @@ pub struct AppCoreHandle {
     /// shape swift-bridge mis-generates (gotcha #3); the host pulls it via the
     /// `clipboard_*`/`take_clipboard_*` accessors instead.
     pending_clipboard: Option<contract::ClipboardPayload>,
+    /// The latest `SetMenuState` payload (the drain emits a `MenuStateChanged` marker; the
+    /// host pulls the whole struct via `menu_state()` — same stash pattern as the clipboard).
+    last_menu_state: contract::MenuState,
 }
 
 impl AppCoreHandle {
@@ -91,7 +94,24 @@ impl AppCoreHandle {
             archive_load: None,
             archive_gen: 0,
             pending_clipboard: None,
+            last_menu_state: contract::MenuState::default(),
         }
+    }
+
+    /// A native menu item fired, by stable [`Action`] id (`"open_file"`, `"rotate_cw"`, …)
+    /// — the same dispatch path as the keyboard. Unknown ids are ignored.
+    fn menu_action(&mut self, id: &str) {
+        self.core.now = Instant::now();
+        if let Some(action) = Action::from_id(id) {
+            self.core.handle(CoreEvent::MenuAction(action));
+        }
+    }
+
+    /// Right-click over the photo: the core decides the context-menu item set from live
+    /// state and answers with `ShowContextMenu` (task #41); the host pops the NSMenu.
+    fn context_menu(&mut self) {
+        self.core.now = Instant::now();
+        self.core.show_context_menu();
     }
 
     /// Open a single file / folder / archive path — the `--pb-open` dev argument, or a
@@ -269,6 +289,32 @@ impl AppCoreHandle {
                 self.pending_clipboard = other;
                 Vec::new()
             }
+        }
+    }
+
+    /// The latest menu check/enabled state (pull after a `MenuStateChanged` marker).
+    fn menu_state(&self) -> ffi::MenuStateFfi {
+        let s = &self.last_menu_state;
+        ffi::MenuStateFfi {
+            scale: match s.scale {
+                contract::ScaleMode::Fit => 0,
+                contract::ScaleMode::Fill => 1,
+                contract::ScaleMode::Original => 2,
+            },
+            info: match s.info {
+                contract::InfoOverlay::Hidden => 0,
+                contract::InfoOverlay::Basic => 1,
+                contract::InfoOverlay::FullExif => 2,
+            },
+            recursive: s.recursive,
+            fullscreen: s.fullscreen,
+            slideshow: s.slideshow,
+            mute_live_audio: s.mute_live_audio,
+            save_rotation_enabled: s.save_rotation_enabled,
+            reveal_enabled: s.reveal_enabled,
+            cancel_scan_enabled: s.cancel_scan_enabled,
+            undo_enabled: s.undo.is_some(),
+            undo_label: s.undo.unwrap_or("Undo").to_string(),
         }
     }
 
@@ -474,6 +520,11 @@ impl AppCoreHandle {
                 C::WriteClipboard(payload) => {
                     self.pending_clipboard = Some(payload);
                     return Some(ffi::CoreEffectFfi::WriteClipboard);
+                }
+                // Same stash pattern: the host pulls the struct via `menu_state()`.
+                C::SetMenuState(state) => {
+                    self.last_menu_state = state;
+                    return Some(ffi::CoreEffectFfi::MenuStateChanged);
                 }
                 other => return Some(map_effect(other)),
             }
@@ -788,7 +839,29 @@ fn map_effect(e: contract::CoreEffect) -> ffi::CoreEffectFfi {
         }
         // Esc-teardown step 1: hide before quitting so nothing flashes.
         C::HideWindow => E::HideWindow,
-        // Menu state, dialogs, context menu, … — each bridged in a later NS1 slice.
+        // A chrome dialog, by kind name. "about" maps to the standard NSApplication
+        // about panel (ADR-021's resolved choice); the rest arrive with the NS2 dialogs.
+        C::ShowDialog(kind) => {
+            use contract::DialogKind as D;
+            E::ShowDialog(
+                match kind {
+                    D::About => "about",
+                    D::Settings => "settings",
+                    D::Confirm => "confirm",
+                    D::Message => "message",
+                    D::Password => "password",
+                    D::Loading => "loading",
+                    D::Scanning => "scanning",
+                }
+                .to_string(),
+            )
+        }
+        // The right-click photo context menu (task #41): the host builds the popup from
+        // these flags (has_image, has_motion, can_reveal, fullscreen).
+        C::ShowContextMenu(s) => {
+            E::ShowContextMenu(s.has_image, s.has_motion, s.can_reveal, s.fullscreen)
+        }
+        // Dialog updates, … — bridged with the NS2 dialogs.
         _ => E::Other,
     }
 }
@@ -832,7 +905,33 @@ mod ffi {
         SetWindowMode(bool),
         // Hide the window (the Esc-teardown step before Quit).
         HideWindow,
+        // The menu check/enabled state changed — pull the new one via menu_state().
+        MenuStateChanged,
+        // Pop the photo context menu at the cursor: (has_image, has_motion, can_reveal,
+        // fullscreen) — the curated item set mirrors menu.rs build_context_menu.
+        ShowContextMenu(bool, bool, bool, bool),
+        // Present a chrome dialog by kind ("about" | "settings" | "confirm" | "message" |
+        // "password" | "loading" | "scanning"). Only "about" is native so far (NS2 owns
+        // the rest).
+        ShowDialog(String),
         Other,
+    }
+
+    // The native menu's check/enabled state — the mirror of contract::MenuState (scale:
+    // 0 fit / 1 fill / 2 original; info: 0 hidden / 1 basic / 2 full-exif).
+    #[swift_bridge(swift_repr = "struct")]
+    struct MenuStateFfi {
+        scale: u8,
+        info: u8,
+        recursive: bool,
+        fullscreen: bool,
+        slideshow: bool,
+        mute_live_audio: bool,
+        save_rotation_enabled: bool,
+        reveal_enabled: bool,
+        cancel_scan_enabled: bool,
+        undo_enabled: bool,
+        undo_label: String,
     }
 
     extern "Rust" {
@@ -874,6 +973,11 @@ mod ffi {
         fn clipboard_image_height(&self) -> u32;
         fn clipboard_image_file(&self) -> String;
         fn take_clipboard_image(&mut self) -> Vec<u8>;
+
+        // The native menu (NS1 item 8): clicks in by Action id, state out by pull.
+        fn menu_action(&mut self, id: &str);
+        fn menu_state(&self) -> MenuStateFfi;
+        fn context_menu(&mut self);
 
         // The canvas surface (NS1 item 2). `layer_ptr` = the retained CAMetalLayer's
         // pointer bits (swift-bridge has no raw-pointer type; usize crosses as UInt).

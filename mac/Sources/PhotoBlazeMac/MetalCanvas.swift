@@ -77,6 +77,14 @@ final class MetalCanvasNSView: NSView {
         model?.mouseLeft(pressed: false)
     }
 
+    override func rightMouseDown(with event: NSEvent) {
+        // Track the position first (the core builds the menu from live state at the cursor),
+        // then let the model pop the menu the ShowContextMenu effect describes.
+        let (x, y) = corePoint(for: event)
+        model?.pointerMoved(x: x, y: y)
+        model?.contextMenu(at: event, in: self)
+    }
+
     override func scrollWheel(with event: NSEvent) {
         if event.hasPreciseScrollingDeltas {
             // Trackpad two-finger swipe: points → physical px (the winit PixelDelta unit).

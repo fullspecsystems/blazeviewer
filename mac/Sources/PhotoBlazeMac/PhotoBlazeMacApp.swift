@@ -55,6 +55,8 @@ struct PhotoBlazeMacApp: App {
         WindowGroup("PhotoBlaze (SwiftUI host)") {
             EffectLogView(model: model)
                 .onAppear {
+                    // After SwiftUI has installed its own main menu, replace it with ours.
+                    model.installMenuBarIfNeeded()
                     model.openLaunchPathIfAny()
                 }
         }

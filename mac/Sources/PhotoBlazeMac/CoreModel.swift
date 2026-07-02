@@ -185,6 +185,91 @@ final class CoreModel {
         drainEffects()
     }
 
+    /// The native menu bar. Installed from `onAppear` — SwiftUI writes its own main menu
+    /// during launch, so ours must land after it to win.
+    @ObservationIgnored private var menuBar: MenuBar?
+
+    func installMenuBarIfNeeded() {
+        guard menuBar == nil else { return }
+        menuBar = MenuBar(model: self)
+        menuBar?.sync(core.menu_state())
+    }
+
+    /// A native menu item fired (by stable Action id) — same dispatch as the keyboard.
+    func menuAction(_ id: String) {
+        core.menu_action(id)
+        kick()
+        drainEffects()
+    }
+
+    /// Right-click over the photo: ask the core for the context-menu description; the
+    /// resulting ShowContextMenu effect pops it at the stashed event location.
+    func contextMenu(at event: NSEvent, in view: NSView) {
+        pendingContextMenuEvent = (event, view)
+        core.context_menu()
+        drainEffects()
+        pendingContextMenuEvent = nil
+    }
+
+    @ObservationIgnored private var pendingContextMenuEvent: (NSEvent, NSView)?
+
+    /// `CoreEffect::ShowContextMenu` — the curated per-photo popup (task #41), mirroring
+    /// menu.rs `build_context_menu`. Items dispatch by the same Action ids as the menu bar.
+    fileprivate func popContextMenu(
+        hasImage: Bool, hasMotion: Bool, canReveal: Bool, fullscreen: Bool
+    ) {
+        guard hasImage, let (event, view) = pendingContextMenuEvent else { return }
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let add = { (id: String, title: String) in
+            let item = NSMenuItem(
+                title: title, action: #selector(self.contextItemFired(_:)), keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = id
+            menu.addItem(item)
+        }
+        add("next", "Next")
+        add("prev", "Previous")
+        add("random", "Random")
+        add("random_prev", "Previous Random")
+        menu.addItem(.separator())
+        add("rotate_ccw", "Rotate Left")
+        add("rotate_cw", "Rotate Right")
+        if hasMotion {
+            add("play_pause", "Play/Pause")
+        }
+        menu.addItem(.separator())
+        add("slideshow", "Start/Stop Slideshow")
+        menu.addItem(.separator())
+        add("copy", "Copy Image")
+        add("copy_path", "Copy File Path")
+        add("copy_image_details", "Copy Image Details")
+        if canReveal {
+            add("reveal", "Show in Finder")
+        }
+        menu.addItem(.separator())
+        add("fullscreen", fullscreen ? "Exit Fullscreen" : "Enter Fullscreen")
+        NSMenu.popUpContextMenu(menu, with: event, for: view)
+    }
+
+    @objc private func contextItemFired(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        menuAction(id)
+    }
+
+    /// `CoreEffect::ShowDialog`: About maps to the standard NSApplication panel (the
+    /// ADR-021 choice); the other kinds arrive with the NS2 native dialogs.
+    private func showDialog(_ kind: String) {
+        switch kind {
+        case "about":
+            NSApp.activate()
+            NSApp.orderFrontStandardAboutPanel(nil)
+        default:
+            log("ShowDialog(\(kind)) — NS2")
+        }
+    }
+
     /// Open dropped / Finder-opened paths (multi-select aware — the launch policy classifies).
     func openPaths(_ paths: [String]) {
         guard !paths.isEmpty else { return }
@@ -358,6 +443,15 @@ final class CoreModel {
             setWindowMode(fullscreen: fullscreen)
         case .HideWindow:
             hostWindow?.orderOut(nil)
+        case .MenuStateChanged:
+            menuBar?.sync(core.menu_state())
+        case .ShowContextMenu(let hasImage, let hasMotion, let canReveal, let fullscreen):
+            popContextMenu(
+                hasImage: hasImage, hasMotion: hasMotion,
+                canReveal: canReveal, fullscreen: fullscreen
+            )
+        case .ShowDialog(let kind):
+            showDialog(kind.toString())
         case .Other:
             log("Other (not yet bridged)")
         }
