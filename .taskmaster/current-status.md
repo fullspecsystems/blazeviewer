@@ -280,7 +280,7 @@ with the egui beta).
   drew the letterbox + "Open File / Open Folder" hint inside the SwiftUI window. The host owns the
   EDR poke (Swift tags the layer extended-linear-sRGB + `wantsEDR` + headroom after attach/resize —
   `wants_edr()` / `set_edr_headroom()` over FFI).
-- **Item 3 — real construction + open flow ✅ (e2e-tested; visual smoke pending, see ⚠):**
+- **Item 3 — real construction + open flow ✅ (VERIFIED LIVE 2026-07-02 + e2e-tested):**
   `AppCore::new_host(viewport)` (real decode pool + loaded Settings/Keymap + Hud;
   `POOL_BUDGET_BYTES` moved to `engine`); FFI `open_path` classifies dir/archive/file →
   `open_plan`; the **`Begin*`/`Cancel*` effects are intercepted inside pb-mac-ffi's drain** and run
@@ -288,7 +288,10 @@ with the egui beta).
   `ScanBatch`/`ScanDone`/`ArchiveResolved`) — Swift never sees them. Failures → the new
   `CoreEffectFfi::ReportError` (incl. PasswordRequired until the NS2 dialogs). `attach_layer` does
   the full `resumed()` dance (ring sizing/reserve, prefetch kickoff, empty-deck hint). An e2e Rust
-  test drives open_path → scan worker → playlist bootstrap with no Swift/GPU.
+  test drives open_path → scan worker → playlist bootstrap with no Swift/GPU. **Seen on-screen
+  (M2 Max):** the corpus scans, photos (HEIC/JPG/PNG) render in the AppKit-owned CAMetalLayer
+  through the real pool + resident ring, Space advances 1/15→4/15 by ring rebind with `SetTitle`
+  effects, Esc quits via `ShellFlowAction("quit")`.
 
 **swift-bridge gotchas (now 4, all in `crates/pb-mac-ffi/README.md`):** (1) no `///` in the bridge
 module; (2) crate-wide `allow(unnecessary_cast)`; (3) **a `Vec<transparent enum>` return generates
@@ -298,16 +301,18 @@ bridge param a Swift keyword** (`repeat` → `is_repeat`) — the generated call
 it. Also fixed: keys cross the FFI as `PbKey::from_name` spellings (`"Right"`/`"C"`), NOT winit's
 (`"ArrowRight"`/`"KeyC"`).
 
-**⚠ Item-3 visual smoke BLOCKED on a reboot (machine, not code):** during the session the disk hit
-~500 MB free and macOS **stopped creating windows for any newly launched app**
-(Calculator/Dictionary/TextEdit all launch windowless; `NSApp.windows` stays empty; the
-previously-verified item-2 build fails identically — that's the proof it's environmental).
-After a reboot: `./scripts/build-swift-host.sh --debug && open
-target/swift-host/debug/PhotoBlazeMac.app --args "$HOME/Downloads/test-images"` → photos should
-render in the canvas, Space/Backspace flick, Esc quits. (~7 GB was freed by deleting
-`target/debug/incremental`; `~/code/photoblaze/target` is another 16 GB if more is needed.
-Also: the app's Downloads-folder TCC access was approved by the owner; a non-TCC corpus lives at
-`/private/tmp/pb-corpus`.)
+**The windowless-app saga, RESOLVED (2026-07-02, commit `29a1a48`) — two stacked problems:**
+1. **AppKit treats a bare path in `argv[1]` as a document-open launch and suppresses the initial
+   `WindowGroup` window entirely** (windowless app with a live menu bar; `NSApp.windows` empty;
+   File ▸ New Window still works). This is why every `--args <path>` launch failed while no-arg
+   launches worked. **Dev launches now use a flag AppKit ignores:**
+   `open target/swift-host/debug/PhotoBlazeMac.app --args --pb-open <folder>`.
+   (The real Finder-open path — `application:openURLs:` — is NS1 item 4.)
+2. The disk genuinely hit ~500 MB free and macOS temporarily stopped creating windows for ANY
+   newly launched app (Calculator/TextEdit too) — owner freed ~200 GB and it cleared without a
+   reboot. That transient made (1) look environmental for a whole evening.
+   TCC note: the app's Downloads access is approved; a non-TCC corpus lives at
+   `/private/tmp/pb-corpus`.
 
 **NS1 remaining — items 4–10** (rough dependency order; the winit shell
 `crates/pb-app/src/main.rs` + `crates/pb-app-core/src/contract.rs` remain the worked reference):
@@ -334,10 +339,11 @@ Also: the app's Downloads-folder TCC access was approved by the owner; a non-TCC
     no egui in the canvas path, Windows untouched; owner smoke on Apple Silicon (incl. HDR/P3 EDR
     through the AppKit-owned CAMetalLayer).
 
-**Host-launch gotcha (learned the hard way):** a bare-binary launch (`swift run` / running the
-executable out of the .app) needs the activation policy set in
-`applicationWillFinishLaunching` (the `AppDelegate` in `PhotoBlazeMacApp.swift`) or SwiftUI never
-creates the initial `WindowGroup` window — the app runs windowless with a working menu bar.
+**Host-launch note:** the `AppDelegate` sets the activation policy in
+`applicationWillFinishLaunching` so bare-binary launches (`swift run` / the executable straight
+out of the .app) front + focus properly; it's also the future `application:openURLs:` hook. (The
+windowless-window mystery itself was the `argv[1]` document-open suppression above, not
+activation.)
 
 **Pre-existing (optional) smoke — the three green tail commits of NS0** await a final owner pass:
 scroll (`45af83b`), resize (`6ae58da`), PasswordSubmitted (`8dfc507`). Not blocking NS1.
