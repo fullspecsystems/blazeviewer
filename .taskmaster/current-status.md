@@ -324,26 +324,42 @@ buffer) → `open_paths(Vec<String>)` (classify_inputs mirrored). New FFI: point
 mouse_left (open-panel buttons + play-hint + chip-cancel + drag-pan) / scroll_lines /
 scroll_pixels / pinch / double_tap / open_paths.
 
-**NS1 remaining — items 5–10** (rough dependency order; the winit shell
-`crates/pb-app/src/main.rs` + `crates/pb-app-core/src/contract.rs` remain the worked reference):
-5. **Expand the FFI event surface** — MenuAction(Action) / DialogResolved (PointerMoved / Scroll /
-   Pinch / DoubleTap / Resized / DroppedPaths are done via item 4's methods).
-6. **Expand the effect drain + native handlers** — SetCursor / SetWindowMode / HideWindow /
-   SetMenuState / WriteClipboard→NSPasteboard / RevealPath→NSWorkspace / ShowContextMenu→NSMenu /
-   live-audio→AVAudioPlayer / the rest of ShellFlowAction; plus a real `Instant`→deadline for
-   `SetWake` (replaces the slice-1 `SetWakeSoon` + the 30 Hz stand-in timer in `CoreModel`).
-7. **Frame pump** — replace the 30 Hz timer: `CVDisplayLink`/`CADisplayLink` at the display
-   refresh, on-demand when idle, continuous while `work_pending`; wake from `SetWake`;
-   `presentedTime` seam.
-8. **Menu + native open panel** — a Swift NSMenu from the `Action` ids (or muda-under-NSApp);
-   `SetMenuState` sync (incl. Show-in-Finder + the context menu); `NSOpenPanel` for the
-   `OpenFilePanel`/`OpenFolderPanel` effects (the canvas hint's O/⇧O keys already resolve; the
-   panel effects surface as `Other` today).
-9. **Mac-SwiftUI CI lane** — add to the matrix (`build-swift-host.sh` is CI-ready), keep the
-   egui-Mac lane until the NS3 cutover.
-10. **Verify NS1 exit criteria** — photos + fly-at-refresh + keyboard/trackpad + native menu/open,
-    no egui in the canvas path, Windows untouched; owner smoke on Apple Silicon (incl. HDR/P3 EDR
-    through the AppKit-owned CAMetalLayer).
+**Items 5–9 ✅ (2026-07-02 session, commits `50b961d`…`2a7df31`):**
+- **Item 5 (event surface):** everything except `DialogResolved` (NS2's half) — MenuAction via
+  `menu_action(id)`, the rest landed with item 4.
+- **Item 6 (effect handlers) — the drain is feature-complete except NS2 dialogs.** Panels →
+  **NSOpenPanel** (images+archives filter; key monitor passes through while a panel is up);
+  SetCursor → NSCursor + **canvas cursor ownership** (`.cursorUpdate` re-assert — fixed the
+  owner-reported resize-cursor leak); WriteClipboard → **marker + pull accessors** (a `Vec<u8>`
+  in a transparent-enum payload is gotcha-#3 territory) → one pasteboard item with TIFF + fileURL,
+  verified live incl. ⇧⌃C path copy; RevealPath → NSWorkspace; live-audio → a Swift
+  AVAudioPlayer; SetWindowMode → the chromeless-but-key speed mode (keep `.titled` — a borderless
+  NSWindow can't become key — hide titlebar/lights, auto-hide menu bar+Dock), verified live F in/
+  out; HideWindow → orderOut; SetTitle → the real window title; ShellFlowAction
+  Recursive/CancelScan intercepted Rust-side (toggle_recursive/cancel_scan_command mirrored).
+- **Item 7 (frame pump) — the 30 Hz stand-in is gone.** `FramePump` = `NSView.displayLink`
+  (macOS 14+) driving tick+drain per refresh while active; `SetWake(f64 secs)` (converted at
+  drain time) schedules precise off-link Timers; `work_pending()` over FFI decides
+  continuous-vs-idle; every input `kick()`s. **Verified live: slideshow advances on pure SetWake
+  timers; idle CPU 0.0%.**
+- **Item 8 (menu):** `MenuBar.swift` mirrors the muda macOS build_menu (same Action ids, real ⌘
+  key-equivalents, Finder delete idioms ⌘⌫/⌥⌘⌫, native Hide/Window selectors, windowsMenu+
+  helpMenu); SetMenuState → `MenuStateChanged` marker + `menu_state() -> MenuStateFfi`
+  (transparent struct works); About → the **standard NSApplication panel** (the ADR-021 choice);
+  the right-click context menu pops the curated task-#41 set through the same ids. Verified live:
+  menu-Rotate transformed the canvas, Fit ✓, Stop Scanning disabled, About opens.
+- **Item 9 (CI):** the `mac-swift` lane (macos-15 arm64) runs the pb-mac-ffi + pb-app-core tests
+  and the full `build-swift-host.sh --debug` chain — also the only CI compile of the
+  macOS-gated Rust. (No separate egui-Mac lane was ever needed; release.yml builds the DMG.)
+
+**Item 10 — NS1 exit criteria (owner smoke, the last step):** on the Apple Silicon machine run
+`./scripts/build-swift-host.sh --debug && open target/swift-host/debug/PhotoBlazeMac.app --args
+--pb-open <big folder>` and verify: hold-Space **flies at refresh rate** (the pump now runs at
+display refresh — this is the criterion that needs a human eye + a real corpus), trackpad
+pinch/two-finger-pan/smart-magnify, drag-a-file/folder onto the canvas, right-click context menu,
+menu bar commands, F speed-mode in/out, HDR/P3 (canvas EDR poke) on the XDR, Esc quit. Windows
+untouched throughout (all Mac code is target-gated; CI green). Already machine-verified: photos/
+nav/rotate/info/slideshow/clipboard/panels/About/idle-pause.
 
 **Host-launch note:** the `AppDelegate` sets the activation policy in
 `applicationWillFinishLaunching` so bare-binary launches (`swift run` / the executable straight

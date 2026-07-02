@@ -4,6 +4,11 @@
 # so the full workspace builds and tests there. The pure `pb-core` crate is also
 # checked on Linux — it has no I/O or GPU, matching the project's "gate the
 # platform-independent logic on Linux" methodology (decisions.md ADR-010/011).
+# The mac-swift lane (NS1, ADR-021) gates the SwiftUI host: the pb-mac-ffi
+# bridge tests + the full build-swift-host.sh chain (cargo staticlib →
+# swift-bridge package → swift build → .app). The egui-on-Mac beta needs no
+# separate lane — the workspace it builds from is the same code the Windows
+# job compiles, and release.yml builds the Mac DMG.
 
 name: ci
 
@@ -63,3 +68,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Test pb-core (pure, platform-independent)
         run: cargo test -p pb-core
+
+  # The NS1 SwiftUI host (arm64 runner = the aarch64-apple-darwin target the app ships).
+  # Kept lean (macOS minutes are pricey): the FFI bridge tests + the whole host build
+  # chain — which is also the only CI compile of the macOS-gated Rust (imageio, ffi, …).
+  mac-swift:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test the FFI bridge (round-trip + the open flow, no GPU needed)
+        run: cargo test -p pb-mac-ffi -p pb-app-core
+      - name: Build the SwiftUI host (.app)
+        run: ./scripts/build-swift-host.sh --debug
