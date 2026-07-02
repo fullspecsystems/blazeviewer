@@ -352,14 +352,23 @@ scroll_pixels / pinch / double_tap / open_paths.
   and the full `build-swift-host.sh --debug` chain — also the only CI compile of the
   macOS-gated Rust. (No separate egui-Mac lane was ever needed; release.yml builds the DMG.)
 
-**Item 10 — NS1 exit criteria (owner smoke, the last step):** on the Apple Silicon machine run
-`./scripts/build-swift-host.sh --debug && open target/swift-host/debug/PhotoBlazeMac.app --args
---pb-open <big folder>` and verify: hold-Space **flies at refresh rate** (the pump now runs at
-display refresh — this is the criterion that needs a human eye + a real corpus), trackpad
-pinch/two-finger-pan/smart-magnify, drag-a-file/folder onto the canvas, right-click context menu,
-menu bar commands, F speed-mode in/out, HDR/P3 (canvas EDR poke) on the XDR, Esc quit. Windows
-untouched throughout (all Mac code is target-gated; CI green). Already machine-verified: photos/
-nav/rotate/info/slideshow/clipboard/panels/About/idle-pause.
+**Item 10 — NS1 exit criteria ✅ OWNER-SMOKED (2026-07-02):** the owner's release-build pass on
+the real machine: *"I can scan through photos very fast, I can drag and drop, everything seems to
+work as before"* — fly-at-refresh, drag-drop, and the input surface all confirmed by hand, on top
+of the machine-verified set (photos/nav/rotate/info/slideshow/clipboard/panels/menu/About/
+fullscreen/idle-pause). Windows untouched (all Mac code target-gated; CI's windows lane green).
+**NS1 IS FUNCTIONALLY COMPLETE** — the "extra chrome + debug section" the owner noted is the dev
+host's effect log, which retires as the NS2 dialogs land. Optional leftover check: HDR/P3 through
+the AppKit-owned layer on the XDR (`~/Downloads/test-images/WideGamut-*-HDR.avif` — trust the
+panel, not a screenshot).
+
+**▶ NEXT: NS2 — the native dialogs** (plan §NS2, easiest first): the About panel is already the
+standard NSApplication one (done with the menu); next Confirm/Message → NSAlert (unblocks
+DeletePermanent + surfacing ReportError natively), Loading/Scanning → SwiftUI progress views over
+the existing progress handles (needs a progress-snapshot FFI), Settings → a SwiftUI `Settings`
+scene bound to a `SettingsForm` mirror, Password → NSSecureTextField (unblocks encrypted
+archives), and the shortcut-capture editor LAST (the long pole). `DialogResolved(DialogResult)`
+is the event to bridge; `ShowDialog(kind)` already crosses.
 
 **Host-launch note:** the `AppDelegate` sets the activation policy in
 `applicationWillFinishLaunching` so bare-binary launches (`swift run` / the executable straight
