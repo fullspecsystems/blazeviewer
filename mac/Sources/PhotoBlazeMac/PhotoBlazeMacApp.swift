@@ -73,6 +73,13 @@ struct ContentView: View {
 
     var body: some View {
         MetalCanvas(model: model)
+            // The borderless speed mode (F) keeps `.titled` (a borderless NSWindow can't
+            // become key) and instead extends content under a transparent titlebar
+            // (`.fullSizeContentView`). SwiftUI still insets for that titlebar's safe
+            // area, which left a titlebar-height strip visible — ignoring it lets the
+            // canvas truly fill the screen. A no-op in windowed mode (the content rect
+            // excludes the titlebar there, so there's no inset to ignore).
+            .ignoresSafeArea()
             .frame(minWidth: 520, minHeight: 360)
             .onAppear {
                 // After SwiftUI has installed its own main menu, replace it with ours.

@@ -808,6 +808,7 @@ final class CoreModel {
             window.styleMask.insert(.fullSizeContentView)
             window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden
+            window.titlebarSeparatorStyle = .none // no hairline where the bar was
             setTrafficLights(hidden: true, in: window)
             NSApp.presentationOptions = [.autoHideMenuBar, .autoHideDock]
             if let screen = window.screen ?? NSScreen.main {
@@ -818,6 +819,7 @@ final class CoreModel {
             window.styleMask.remove(.fullSizeContentView)
             window.titlebarAppearsTransparent = false
             window.titleVisibility = .visible
+            window.titlebarSeparatorStyle = .automatic
             setTrafficLights(hidden: false, in: window)
             if let frame = savedFrame {
                 window.setFrame(frame, display: true)
