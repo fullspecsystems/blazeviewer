@@ -249,17 +249,21 @@ green + owner-smoke-verified:
 Stand up the Mac app target. **Behind a build flag / separate target** so the
 shippable egui-on-Mac beta is never broken. No dialogs yet.
 
-> **✅ FOUNDATION DONE (2026-07-01, `59fdd77`, on `main`).** FFI = **`swift-bridge`**
-> (owner-confirmed). New macOS-only staticlib **`crates/pb-mac-ffi`** exposes an opaque
-> `AppCoreHandle`, events in (`key_down`/`key_up`/`focus_lost`/`tick`), and effects out
-> (`drain_effects → Vec<CoreEffectFfi>`); the **KeyDown→effect round-trip is proven** (Rust test).
-> `AppCore::headless(Viewport)` is the public construction seam. swift-bridge deps + the `ffi`
-> module are macOS-target-gated (Windows/Linux CI builds an empty staticlib). swift-bridge
-> gotchas: no `///` doc comments inside the bridge module; crate-level
-> `#![allow(clippy::unnecessary_cast)]` for its generated shims. Integration steps:
-> `crates/pb-mac-ffi/README.md`. **The live 10-item NS1 task list is in
-> `.taskmaster/current-status.md` (▶ Resume).** The remaining bullets below are the design
-> reference for those tasks.
+> **✅ ITEMS 1–3 of 10 DONE (2026-07-02; foundation was `59fdd77`).** FFI = **`swift-bridge`**
+> (owner-confirmed). The host is a **SwiftPM executable** (`mac/`, macOS 14+ arm64 — not an
+> .xcodeproj; `open mac/Package.swift` gives the full Xcode IDE), built by
+> **`scripts/build-swift-host.sh`**: cargo staticlib → the `create-package` bin (swift-bridge's
+> `create_package`) wraps it + the generated glue into the xcframework-backed local package
+> `crates/pb-mac-ffi/PbMacFfi/` → swift build → `PhotoBlazeMac.app`. **Proven live:** the
+> Esc→`ShellFlowAction("quit")`→terminate round trip (item 1); the AppKit-owned
+> `CAMetalLayer` canvas — `WgpuRenderer::new_from_ca_layer` over a plain layer-hosting NSView
+> (never MTKView), create/draw/resize/EDR/teardown on-screen (item 2); and the real engine over
+> FFI — `AppCore::new_host`, `open_path`, the `Begin*` scan/archive workers running **inside
+> pb-mac-ffi** on Rust threads, e2e-tested (item 3). Effects drain **pull-style**
+> (`next_effect() -> Option<CoreEffectFfi>` — swift-bridge can't emit compilable Swift for
+> `Vec<transparent enum>`). All four swift-bridge gotchas: `crates/pb-mac-ffi/README.md`.
+> **The live NS1 task list (items 4–10 remaining) is in `.taskmaster/current-status.md`
+> (▶ Resume).** The remaining bullets below are the design reference for those tasks.
 
 - **FFI boundary — `swift-bridge` ✅ (decided + wired).** (Recommended over UniFFI: it handles
   methods and simple enums/opaque handles cleanly; UniFFI is awkward for the live surface + tight

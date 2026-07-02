@@ -1,6 +1,7 @@
 # PhotoBlaze — Current Status (session handoff)
 
-_Last updated: 2026-07-02 (Windows session)._
+_Last updated: 2026-07-02 (Windows session + the macOS NS1 session — **NS1 items 1–3 done**: the
+SwiftUI host runs the real engine over FFI; see **▶ Resume**)._
 
 ## 🪟 Windows session 2026-07-01→02 — CI green again + Live Photos + HEIC ships parallel
 
@@ -261,49 +262,82 @@ Mapped end-to-end (Explore agent) and inverted in the recommended low-risk order
 
 ### ▶ Resume (NS1 in progress — the Swift/AppKit host)
 
-**FOUNDATION DONE (2026-07-01, `59fdd77`, on `main`).** The open FFI question is settled:
-**`swift-bridge`** (owner-confirmed; the plan's pick — best fit for the enum-heavy
-`CoreEvent`/`CoreEffect` contract). New macOS-only staticlib **`crates/pb-mac-ffi`** bridges
-`AppCore`: opaque `AppCoreHandle`, events in (`key_down`/`key_up`/`focus_lost`/`tick`; a key is
-passed by its `PbKey` name via `PbKey::from_name`), effects out (`drain_effects → Vec<CoreEffectFfi>`,
-a slice-1 subset — rest map to `Other`). The **KeyDown→effect round-trip is proven** (Rust test);
-**`AppCore::headless(Viewport)`** is the public construction seam it builds on (and `#[cfg(test)]
-test_core` now delegates to it — one construction literal). swift-bridge deps + the `ffi` module are
-macOS-target-gated → Windows/Linux `--workspace` CI builds an empty staticlib. `build.rs` emits the
-Swift/C glue to `generated/` (git-ignored). Two swift-bridge gotchas: **no `///` doc comments inside
-the bridge module** (→ build.rs codegen panic; use `//`), and a crate-level
-`#![allow(clippy::unnecessary_cast)]` for its generated shims. Setup + Xcode-integration steps live
-in `crates/pb-mac-ffi/README.md`. See `.taskmaster/docs/macos-native-ui-plan.md` §NS1.
+**ITEMS 1–3 of 10 DONE (2026-07-02 session, commits `4048c69`/`6e3744f`/`9485884`, pushed to
+`origin/swiftui`; origin/main merged in — incl. its Windows-CI clippy fix).** The Swift host is
+real: a **SwiftPM executable** (`mac/`, macOS 14+ arm64 — chosen over an .xcodeproj;
+`open mac/Package.swift` still gives the full Xcode IDE) built by **`scripts/build-swift-host.sh`**
+(cargo staticlib → the `create-package` bin wraps it + the generated glue into the
+xcframework-backed local package `crates/pb-mac-ffi/PbMacFfi/` → swift build →
+`target/swift-host/<profile>/PhotoBlazeMac.app`, bundle id `com.jdlien.PhotoBlazeMac` — coexists
+with the egui beta).
 
-**NS1 remaining — 10 items** (rough dependency order; the winit shell
-`crates/pb-app/src/main.rs` `window_event`/`about_to_wait`/`drain_effects` + the contract in
-`crates/pb-app-core/src/contract.rs` are the worked reference for every event/effect):
-1. **Xcode app target + build wiring** — arm64-only, macOS 14+, behind a separate target/flag; Run
-   Script `cargo build -p pb-mac-ffi --target aarch64-apple-darwin`, link the `.a`, add generated
-   `.swift` + a bridging header/module map; minimal SwiftUI app creating `AppCoreHandle`.
-2. **CAMetalLayer wgpu surface** — a macOS-only `SurfaceTargetUnsafe::CoreAnimationLayer` constructor;
-   prove create/resize/EDR-reconfigure/draw/teardown on a canvas-only build; document the safety +
-   main-thread contract; hand the retained `CAMetalLayer` (`*mut c_void`) across FFI.
-3. **Real `AppCore` construction over FFI** — replace `headless` with a launch input + decode pool +
-   source + the renderer bound to the surface (winit `App::new` is the reference); wire the
-   scan/archive worker (`Begin*` effects → a GCD worker → `ScanBatch`/`ScanDone`/`ArchiveResolved`).
-4. **NSEvent → PbKey/Modifiers input adapter** (Swift side) — keyCode→`PbKey` name, modifiers, ignore
-   OS repeat, clear-on-focus-loss, magnify→`Pinch`, scroll→`Scroll`, double-tap; drop + `openURLs:`.
-5. **Expand the FFI event surface** — the rest of `CoreEvent`: PointerMoved / Scroll(ScrollDelta) /
-   Pinch / DoubleTap / Resized / MenuAction(Action) / DroppedPaths / DialogResolved / Scan*/Archive*.
-6. **Expand the effect drain + native handlers** — the rest of `CoreEffect`: SetCursor /
-   SetWindowMode / HideWindow / SetMenuState / ReportError / WriteClipboard→NSPasteboard /
-   RevealPath→NSWorkspace / ShowContextMenu→NSMenu / Begin*→GCD / live-audio→AVAudioPlayer /
-   ShellFlowAction; plus a real `Instant`→deadline for `SetWake` (replaces the slice-1 `SetWakeSoon`).
-7. **Frame pump** — `MTKViewDelegate.draw(in:)` drives Tick/Redraw; refresh-rate `preferredFramesPerSecond`;
-   on-demand when idle, continuous while `work_pending`; wake from `SetWake`; `presentedTime` seam.
-8. **Menu + native open panel** — muda-under-NSApp vs a thin Swift NSMenu from the same `Action` ids;
-   keep `SetMenuState` synced (incl. the new Show-in-Finder enabled-state + the context menu);
-   `NSOpenPanel` for the `OpenFilePanel`/`OpenFolderPanel` effects.
-9. **Mac-SwiftUI CI lane** — add to the matrix, keep the egui-Mac lane until the NS3 cutover.
-10. **Verify NS1 exit criteria** — photos + fly-at-refresh + keyboard/trackpad + native menu/open, no
-    egui in the canvas path, Windows untouched; owner smoke on Apple Silicon (incl. HDR/P3 EDR through
-    the AppKit-owned CAMetalLayer).
+- **Item 1 — host + build wiring ✅ (proven live):** Esc → `key_down("Escape")` → keymap →
+  `ShellFlowAction("quit")` → `NSApp.terminate` — the app quit itself through the Rust core.
+- **Item 2 — CAMetalLayer wgpu surface ✅ (proven live):** `WgpuRenderer::new_from_ca_layer`
+  (macOS-only, `SurfaceTargetUnsafe::CoreAnimationLayer`; the safety contract is on the doc
+  comment) over a **plain layer-hosting NSView** (`MetalCanvasNSView` — deliberately NOT MTKView;
+  wgpu owns the drawable loop). Create/draw/resize/teardown verified on-screen: the Rust engine
+  drew the letterbox + "Open File / Open Folder" hint inside the SwiftUI window. The host owns the
+  EDR poke (Swift tags the layer extended-linear-sRGB + `wantsEDR` + headroom after attach/resize —
+  `wants_edr()` / `set_edr_headroom()` over FFI).
+- **Item 3 — real construction + open flow ✅ (e2e-tested; visual smoke pending, see ⚠):**
+  `AppCore::new_host(viewport)` (real decode pool + loaded Settings/Keymap + Hud;
+  `POOL_BUDGET_BYTES` moved to `engine`); FFI `open_path` classifies dir/archive/file →
+  `open_plan`; the **`Begin*`/`Cancel*` effects are intercepted inside pb-mac-ffi's drain** and run
+  on Rust worker threads (the winit `begin_*`/`poll_*` mirrored; `tick()` polls results into
+  `ScanBatch`/`ScanDone`/`ArchiveResolved`) — Swift never sees them. Failures → the new
+  `CoreEffectFfi::ReportError` (incl. PasswordRequired until the NS2 dialogs). `attach_layer` does
+  the full `resumed()` dance (ring sizing/reserve, prefetch kickoff, empty-deck hint). An e2e Rust
+  test drives open_path → scan worker → playlist bootstrap with no Swift/GPU.
+
+**swift-bridge gotchas (now 4, all in `crates/pb-mac-ffi/README.md`):** (1) no `///` in the bridge
+module; (2) crate-wide `allow(unnecessary_cast)`; (3) **a `Vec<transparent enum>` return generates
+Rust that compiles but Swift that doesn't** (no `Vectorizable` conformance — only `swift build`
+catches it) → the drain is pull-style `next_effect() -> Option<CoreEffectFfi>`; (4) **never name a
+bridge param a Swift keyword** (`repeat` → `is_repeat`) — the generated call site doesn't escape
+it. Also fixed: keys cross the FFI as `PbKey::from_name` spellings (`"Right"`/`"C"`), NOT winit's
+(`"ArrowRight"`/`"KeyC"`).
+
+**⚠ Item-3 visual smoke BLOCKED on a reboot (machine, not code):** during the session the disk hit
+~500 MB free and macOS **stopped creating windows for any newly launched app**
+(Calculator/Dictionary/TextEdit all launch windowless; `NSApp.windows` stays empty; the
+previously-verified item-2 build fails identically — that's the proof it's environmental).
+After a reboot: `./scripts/build-swift-host.sh --debug && open
+target/swift-host/debug/PhotoBlazeMac.app --args "$HOME/Downloads/test-images"` → photos should
+render in the canvas, Space/Backspace flick, Esc quits. (~7 GB was freed by deleting
+`target/debug/incremental`; `~/code/photoblaze/target` is another 16 GB if more is needed.
+Also: the app's Downloads-folder TCC access was approved by the owner; a non-TCC corpus lives at
+`/private/tmp/pb-corpus`.)
+
+**NS1 remaining — items 4–10** (rough dependency order; the winit shell
+`crates/pb-app/src/main.rs` + `crates/pb-app-core/src/contract.rs` remain the worked reference):
+4. **NSEvent → PbKey/Modifiers input adapter** (Swift side) — the full keyCode→`PbKey` name map
+   (the slice-1 map in `CoreModel.pbKeyName` covers only nav keys), modifiers via `flagsChanged`,
+   ignore OS repeat, clear-on-focus-loss (partly done via `didResignActive`), magnify→`Pinch`,
+   scroll→`Scroll`, double-tap; Finder drop + `application:openURLs:` → `open_path`.
+5. **Expand the FFI event surface** — PointerMoved / Scroll(ScrollDelta) / Pinch / DoubleTap /
+   MenuAction(Action) / DroppedPaths / DialogResolved (Resized is done: `resized()`).
+6. **Expand the effect drain + native handlers** — SetCursor / SetWindowMode / HideWindow /
+   SetMenuState / WriteClipboard→NSPasteboard / RevealPath→NSWorkspace / ShowContextMenu→NSMenu /
+   live-audio→AVAudioPlayer / the rest of ShellFlowAction; plus a real `Instant`→deadline for
+   `SetWake` (replaces the slice-1 `SetWakeSoon` + the 30 Hz stand-in timer in `CoreModel`).
+7. **Frame pump** — replace the 30 Hz timer: `CVDisplayLink`/`CADisplayLink` at the display
+   refresh, on-demand when idle, continuous while `work_pending`; wake from `SetWake`;
+   `presentedTime` seam.
+8. **Menu + native open panel** — a Swift NSMenu from the `Action` ids (or muda-under-NSApp);
+   `SetMenuState` sync (incl. Show-in-Finder + the context menu); `NSOpenPanel` for the
+   `OpenFilePanel`/`OpenFolderPanel` effects (the canvas hint's O/⇧O keys already resolve; the
+   panel effects surface as `Other` today).
+9. **Mac-SwiftUI CI lane** — add to the matrix (`build-swift-host.sh` is CI-ready), keep the
+   egui-Mac lane until the NS3 cutover.
+10. **Verify NS1 exit criteria** — photos + fly-at-refresh + keyboard/trackpad + native menu/open,
+    no egui in the canvas path, Windows untouched; owner smoke on Apple Silicon (incl. HDR/P3 EDR
+    through the AppKit-owned CAMetalLayer).
+
+**Host-launch gotcha (learned the hard way):** a bare-binary launch (`swift run` / running the
+executable out of the .app) needs the activation policy set in
+`applicationWillFinishLaunching` (the `AppDelegate` in `PhotoBlazeMacApp.swift`) or SwiftUI never
+creates the initial `WindowGroup` window — the app runs windowless with a working menu bar.
 
 **Pre-existing (optional) smoke — the three green tail commits of NS0** await a final owner pass:
 scroll (`45af83b`), resize (`6ae58da`), PasswordSubmitted (`8dfc507`). Not blocking NS1.
