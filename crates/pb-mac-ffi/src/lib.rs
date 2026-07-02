@@ -100,6 +100,13 @@ pub struct AppCoreHandle {
     /// The inline error under the password field after a wrong attempt ("" = none) —
     /// pulled via `dialog_password_error()` with each `ShowDialog("password")`.
     password_error: String,
+    /// The Shortcuts editor's draft keymap (NS2.6) — begun when the Settings window
+    /// opens, edited via `keymap_capture`/`keymap_clear_slot`, folded into
+    /// `SettingsSaved` by `submit_settings` when dirty, dropped on cancel.
+    keymap_draft: Option<pb_app_core::keymap::Keymap>,
+    keymap_dirty: bool,
+    /// The transient editor note ("Moved ⌘C from Copy Image") — pulled after a capture.
+    keymap_note: String,
 }
 
 impl AppCoreHandle {
@@ -123,6 +130,9 @@ impl AppCoreHandle {
             shown_dialog: None,
             dialog_message: String::new(),
             password_error: String::new(),
+            keymap_draft: None,
+            keymap_dirty: false,
+            keymap_note: String::new(),
         }
     }
 
@@ -436,8 +446,12 @@ impl AppCoreHandle {
     }
 
     /// The Settings window's Cancel (its Esc goes through `dialog_dismissed`).
+    /// Discards the Shortcuts draft along with the form edits.
     fn settings_cancelled(&mut self) {
         self.core.now = Instant::now();
+        self.keymap_draft = None;
+        self.keymap_dirty = false;
+        self.keymap_note.clear();
         self.core.handle(CoreEvent::DialogResolved(
             contract::DialogResult::SettingsCancelled,
         ));
@@ -515,17 +529,152 @@ impl AppCoreHandle {
     }
 
     /// Settings Save: fold the edited form onto the current settings and hand the result
-    /// to the core (`SettingsSaved` applies + persists it). The keymap half stays `None`
-    /// until the NS2.6 shortcut editor.
+    /// to the core (`SettingsSaved` applies + persists it), along with the Shortcuts
+    /// draft when a binding actually changed (egui parity: an untouched keymap crosses
+    /// as `None` so `apply_keymap` isn't re-run for nothing).
     fn submit_settings(&mut self, form: ffi::SettingsFormFfi) {
         self.core.now = Instant::now();
         let s = fold_settings_form(&self.core.settings, &form, self.core.refresh_hz());
+        let keymap = if self.keymap_dirty {
+            self.keymap_draft.take()
+        } else {
+            self.keymap_draft = None;
+            None
+        };
+        self.keymap_dirty = false;
+        self.keymap_note.clear();
         self.core.handle(CoreEvent::DialogResolved(
             contract::DialogResult::SettingsSaved {
                 settings: Some(s),
-                keymap: None,
+                keymap,
             },
         ));
+    }
+
+    // ---- The Shortcuts editor (NS2.6): a Rust-side draft keymap edited through
+    // per-gesture calls, mirroring the egui Shortcuts tab exactly (same
+    // `EDITOR_GROUPS`, two slots, steal-with-note, reset). The host renders rows and
+    // captures chords (an AppKit local event monitor + the KeyMap Carbon table); every
+    // edit lands here so the model/steal semantics can't drift between shells.
+
+    /// Start (or restart) editing: draft = the live keymap. Call when the Settings
+    /// window opens; Save folds the draft via `submit_settings`, Cancel drops it.
+    fn keymap_begin_edit(&mut self) {
+        self.keymap_draft = Some(self.core.keymap.clone());
+        self.keymap_dirty = false;
+        self.keymap_note.clear();
+    }
+
+    /// The editor's section count (the shared `EDITOR_GROUPS` shape).
+    fn keymap_group_count(&self) -> usize {
+        pb_app_core::keymap::EDITOR_GROUPS.len()
+    }
+
+    fn keymap_group_title(&self, group: usize) -> String {
+        pb_app_core::keymap::EDITOR_GROUPS
+            .get(group)
+            .map(|(t, _)| t.to_string())
+            .unwrap_or_default()
+    }
+
+    fn keymap_group_len(&self, group: usize) -> usize {
+        pb_app_core::keymap::EDITOR_GROUPS
+            .get(group)
+            .map(|(_, a)| a.len())
+            .unwrap_or(0)
+    }
+
+    /// The stable action id at (group, index) — the currency the edit calls take.
+    fn keymap_action_id(&self, group: usize, index: usize) -> String {
+        pb_app_core::keymap::EDITOR_GROUPS
+            .get(group)
+            .and_then(|(_, a)| a.get(index))
+            .map(|a| a.id().to_string())
+            .unwrap_or_default()
+    }
+
+    fn keymap_action_label(&self, group: usize, index: usize) -> String {
+        pb_app_core::keymap::EDITOR_GROUPS
+            .get(group)
+            .and_then(|(_, a)| a.get(index))
+            .map(|a| a.label().to_string())
+            .unwrap_or_default()
+    }
+
+    /// The chord in `slot` (0 primary / 1 secondary) of `action_id`, as macOS glyphs
+    /// (`⌃⇧ R`, `→`, "" = unbound) — read from the draft while editing.
+    fn keymap_slot_display(&self, action_id: &str, slot: usize) -> String {
+        let Some(action) = Action::from_id(action_id) else {
+            return String::new();
+        };
+        let map = self.keymap_draft.as_ref().unwrap_or(&self.core.keymap);
+        map.slot(action, slot)
+            .map(|c| c.mac_symbol())
+            .unwrap_or_default()
+    }
+
+    /// A captured chord for `slot` of `action_id` (key = a `PbKey::from_name` name from
+    /// the host's Carbon table). Steals the chord from any prior owner — the note
+    /// ("Moved ⌘C from Copy Image") lands in `keymap_last_note`. Returns false for a
+    /// key the keymap can't express (the host stays armed and waits, egui parity).
+    #[allow(clippy::too_many_arguments)]
+    fn keymap_capture(
+        &mut self,
+        action_id: &str,
+        slot: usize,
+        key: &str,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+        logo: bool,
+    ) -> bool {
+        let (Some(action), Some(key)) = (Action::from_id(action_id), PbKey::from_name(key)) else {
+            return false;
+        };
+        let Some(draft) = self.keymap_draft.as_mut() else {
+            return false;
+        };
+        let chord = pb_app_core::keymap::KeyChord::new(key, ctrl, shift, alt, logo);
+        let stolen = draft.set_slot(action, slot, chord);
+        self.keymap_dirty = true;
+        self.keymap_note = stolen
+            .map(|a| {
+                format!(
+                    "Moved {} from \u{201c}{}\u{201d}",
+                    chord.mac_symbol(),
+                    a.label()
+                )
+            })
+            .unwrap_or_default();
+        true
+    }
+
+    /// The transient "moved from …" note from the last capture ("" = none).
+    fn keymap_last_note(&self) -> String {
+        self.keymap_note.clone()
+    }
+
+    fn keymap_clear_slot(&mut self, action_id: &str, slot: usize) {
+        let Some(action) = Action::from_id(action_id) else {
+            return;
+        };
+        if let Some(draft) = self.keymap_draft.as_mut() {
+            draft.clear_slot(action, slot);
+            self.keymap_dirty = true;
+            self.keymap_note.clear();
+        }
+    }
+
+    fn keymap_reset_defaults(&mut self) {
+        if let Some(draft) = self.keymap_draft.as_mut() {
+            draft.reset_to_defaults();
+            self.keymap_dirty = true;
+            self.keymap_note.clear();
+        }
+    }
+
+    fn keymap_is_dirty(&self) -> bool {
+        self.keymap_dirty
     }
 
     /// `ShellFlowAction(DeletePermanent)` intercepted — the winit shell's
@@ -1449,6 +1598,30 @@ mod ffi {
         fn settings_form(&self) -> SettingsFormFfi;
         fn submit_settings(&mut self, form: SettingsFormFfi);
 
+        // The Shortcuts editor (NS2.6): a Rust-side draft keymap; rows by (group, index),
+        // edits by stable action id; chords display as macOS glyphs.
+        fn keymap_begin_edit(&mut self);
+        fn keymap_group_count(&self) -> usize;
+        fn keymap_group_title(&self, group: usize) -> String;
+        fn keymap_group_len(&self, group: usize) -> usize;
+        fn keymap_action_id(&self, group: usize, index: usize) -> String;
+        fn keymap_action_label(&self, group: usize, index: usize) -> String;
+        fn keymap_slot_display(&self, action_id: &str, slot: usize) -> String;
+        fn keymap_capture(
+            &mut self,
+            action_id: &str,
+            slot: usize,
+            key: &str,
+            ctrl: bool,
+            shift: bool,
+            alt: bool,
+            logo: bool,
+        ) -> bool;
+        fn keymap_last_note(&self) -> String;
+        fn keymap_clear_slot(&mut self, action_id: &str, slot: usize);
+        fn keymap_reset_defaults(&mut self);
+        fn keymap_is_dirty(&self) -> bool;
+
         // The canvas surface (NS1 item 2). `layer_ptr` = the retained CAMetalLayer's
         // pointer bits (swift-bridge has no raw-pointer type; usize crosses as UInt).
         fn attach_layer(&mut self, layer_ptr: usize, width: u32, height: u32, scale: f32);
@@ -1668,6 +1841,49 @@ mod tests {
         assert!(h.shown_dialog.is_none());
         assert!(!h.core.dialog_open);
         assert!(h.core.esc_guard_until.is_some(), "esc-guard armed");
+    }
+
+    /// NS2.6: the Shortcuts-editor draft — capture binds (with the steal note when the
+    /// chord had another owner), clear unbinds, dirty tracks edits, and none of it
+    /// touches the live keymap until Save. Pure draft ops — no keymap.toml I/O.
+    #[test]
+    fn keymap_draft_captures_steals_and_clears() {
+        let mut h = AppCoreHandle::new(800, 600, 1.0);
+        h.keymap_begin_edit();
+        assert!(!h.keymap_is_dirty());
+        assert!(h.keymap_group_count() > 0);
+        assert_eq!(h.keymap_group_title(0), "Navigation");
+        assert_eq!(h.keymap_action_id(0, 0), "next");
+
+        // Space is Next's default primary → binding it to Prev steals it (note names Next).
+        assert!(h.keymap_capture("prev", 0, "Space", false, false, false, false));
+        assert!(h.keymap_is_dirty());
+        assert!(
+            h.keymap_last_note().contains("Next"),
+            "steal note names the prior owner: {:?}",
+            h.keymap_last_note()
+        );
+        assert_eq!(h.keymap_slot_display("prev", 0), "Space");
+
+        // Unknown key names are refused (host stays armed) and don't dirty further state.
+        assert!(!h.keymap_capture("prev", 1, "NotAKey", false, false, false, false));
+
+        h.keymap_clear_slot("prev", 0);
+        assert_eq!(h.keymap_slot_display("prev", 0), "");
+
+        // The LIVE keymap is untouched throughout (draft-only until Save).
+        assert_eq!(
+            h.core
+                .keymap
+                .slot(Action::from_id("next").unwrap(), 0)
+                .map(|c| c.mac_symbol()),
+            Some("Space".to_string())
+        );
+
+        // Reset restores defaults in the draft.
+        h.keymap_reset_defaults();
+        assert_eq!(h.keymap_slot_display("next", 0), "Space");
+        assert!(h.keymap_is_dirty());
     }
 
     /// NS2 item 5: the Settings form fold — encodings map both ways, out-of-range values

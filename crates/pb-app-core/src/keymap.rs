@@ -150,6 +150,68 @@ impl fmt::Display for KeyChord {
     }
 }
 
+/// The keyboard-shortcut editor's command list, grouped into sections by area
+/// (matching the menu). Shared by every shell's Shortcuts editor — the egui tab and
+/// the SwiftUI settings pane render the SAME groups/order, so the editors can't
+/// drift. Each command gets a Primary + Secondary chord slot (see [`Keymap::slot`]).
+pub const EDITOR_GROUPS: &[(&str, &[Action])] = &[
+    (
+        "Navigation",
+        &[
+            Action::Next,
+            Action::Prev,
+            Action::Random,
+            Action::RandomPrev,
+            Action::PanLeft,
+            Action::PanRight,
+            Action::PanUp,
+            Action::PanDown,
+            Action::ZoomIn,
+            Action::ZoomOut,
+        ],
+    ),
+    (
+        "View",
+        &[
+            Action::ScaleFit,
+            Action::ScaleFill,
+            Action::ScaleOriginal,
+            Action::ToggleOriginal,
+            Action::Info,
+            Action::FullExif,
+            Action::Help,
+            Action::Fullscreen,
+            Action::Recursive,
+        ],
+    ),
+    (
+        "Image & File",
+        &[
+            Action::RotateCw,
+            Action::RotateCcw,
+            Action::Copy,
+            Action::SaveRotation,
+            Action::Delete,
+            Action::DeletePermanent,
+            Action::OpenFile,
+            Action::OpenFolder,
+        ],
+    ),
+    (
+        "Animation",
+        &[
+            Action::PlayPause,
+            Action::FrameNext,
+            Action::FramePrev,
+            Action::MuteLiveAudio,
+        ],
+    ),
+    (
+        "Application",
+        &[Action::Settings, Action::About, Action::Quit],
+    ),
+];
+
 /// The configurable key→action table. Holds both directions: chord→action for the
 /// input dispatch, and action→chords for the help overlay / editor. `Clone` so the
 /// Settings editor can edit a draft and commit it on Save (or discard on Cancel).

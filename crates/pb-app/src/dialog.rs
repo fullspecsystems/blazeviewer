@@ -209,66 +209,11 @@ struct KbEdit<'a> {
     note: &'a mut Option<String>,
 }
 
-/// The keyboard-shortcut editor, grouped into cards by area (matching the menu).
-/// Every [`Action`] appears so any command is rebindable, including ones with no
-/// default key (their slots read "Set…"/"Add…").
-const KB_GROUPS: &[(&str, &[Action])] = &[
-    (
-        "Navigation",
-        &[
-            Action::Next,
-            Action::Prev,
-            Action::Random,
-            Action::RandomPrev,
-            Action::PanLeft,
-            Action::PanRight,
-            Action::PanUp,
-            Action::PanDown,
-            Action::ZoomIn,
-            Action::ZoomOut,
-        ],
-    ),
-    (
-        "View",
-        &[
-            Action::ScaleFit,
-            Action::ScaleFill,
-            Action::ScaleOriginal,
-            Action::ToggleOriginal,
-            Action::Info,
-            Action::FullExif,
-            Action::Help,
-            Action::Fullscreen,
-            Action::Recursive,
-        ],
-    ),
-    (
-        "Image & File",
-        &[
-            Action::RotateCw,
-            Action::RotateCcw,
-            Action::Copy,
-            Action::SaveRotation,
-            Action::Delete,
-            Action::DeletePermanent,
-            Action::OpenFile,
-            Action::OpenFolder,
-        ],
-    ),
-    (
-        "Animation",
-        &[
-            Action::PlayPause,
-            Action::FrameNext,
-            Action::FramePrev,
-            Action::MuteLiveAudio,
-        ],
-    ),
-    (
-        "Application",
-        &[Action::Settings, Action::About, Action::Quit],
-    ),
-];
+/// The keyboard-shortcut editor's command list — shared with the SwiftUI host's
+/// Shortcuts pane so the two editors can't drift (moved to `pb_app_core::keymap`
+/// for NS2.6). Every listed command is rebindable, including ones with no default
+/// key (their slots read "Set…"/"Add…").
+const KB_GROUPS: &[(&str, &[Action])] = pb_app_core::keymap::EDITOR_GROUPS;
 
 /// Is this physical key a bare modifier? (Capture waits for a "real" key to combine
 /// with the held modifiers, rather than committing on the modifier press itself.)

@@ -120,10 +120,13 @@ final class CoreModel {
                         + "sheet=\(self.activeSheet?.rawValue ?? "none")"
                 )
             }
-            // A native panel (NSOpenPanel), an alert, or a dialog sheet owns the keyboard
-            // while it's up — don't swallow its typing/navigation (the password field!);
-            // the viewer ignores input until it resolves.
-            if self.panelOpen || self.alertUp || self.activeSheet != nil {
+            // Keys drive the viewer only while the VIEWER window is key. A native panel
+            // (NSOpenPanel), an alert, or a dialog sheet owns the keyboard while it's up
+            // (don't swallow the password field's typing!) — and so does any other key
+            // window: without the isKeyWindow gate, typing Space in the Settings window
+            // advanced the photo behind it (the monitor is app-wide).
+            if self.panelOpen || self.alertUp || self.activeSheet != nil
+                || self.hostWindow?.isKeyWindow != true {
                 return event
             }
             if event.type == .keyDown {
@@ -433,10 +436,69 @@ final class CoreModel {
         drainEffects()
     }
 
-    /// Settings Cancel (buttons or the window's close button) — discard the draft.
+    /// Settings Cancel (buttons or the window's close button) — discard the draft
+    /// (both the form edits and the Shortcuts draft, dropped Rust-side).
     func settingsCancel() {
         core.settings_cancelled()
         drainEffects()
+    }
+
+    // MARK: - The Shortcuts editor (NS2.6) — thin wrappers over the Rust draft
+
+    struct ShortcutCommand: Identifiable {
+        let id: String
+        let label: String
+    }
+
+    struct ShortcutGroup: Identifiable {
+        let title: String
+        let commands: [ShortcutCommand]
+        var id: String { title }
+    }
+
+    /// Begin editing (draft = the live keymap). Called when the Settings window opens.
+    func keymapBeginEdit() {
+        core.keymap_begin_edit()
+    }
+
+    /// The editor's sections/rows — the shared `EDITOR_GROUPS` shape, same as egui's.
+    func keymapGroups() -> [ShortcutGroup] {
+        (0..<Int(core.keymap_group_count())).map { g in
+            ShortcutGroup(
+                title: core.keymap_group_title(UInt(g)).toString(),
+                commands: (0..<Int(core.keymap_group_len(UInt(g)))).map { i in
+                    ShortcutCommand(
+                        id: core.keymap_action_id(UInt(g), UInt(i)).toString(),
+                        label: core.keymap_action_label(UInt(g), UInt(i)).toString()
+                    )
+                }
+            )
+        }
+    }
+
+    /// The chord glyphs in a slot ("" = unbound), from the draft.
+    func keymapSlotDisplay(id: String, slot: Int) -> String {
+        core.keymap_slot_display(id, UInt(slot)).toString()
+    }
+
+    /// A captured chord. False = the keymap can't express that key (stay armed).
+    func keymapCapture(
+        id: String, slot: Int, key: String, ctrl: Bool, shift: Bool, alt: Bool, logo: Bool
+    ) -> Bool {
+        core.keymap_capture(id, UInt(slot), key, ctrl, shift, alt, logo)
+    }
+
+    /// The transient "Moved ⌘C from Copy Image" note from the last capture ("" = none).
+    func keymapNote() -> String {
+        core.keymap_last_note().toString()
+    }
+
+    func keymapClear(id: String, slot: Int) {
+        core.keymap_clear_slot(id, UInt(slot))
+    }
+
+    func keymapResetDefaults() {
+        core.keymap_reset_defaults()
     }
 
     /// Open dropped / Finder-opened paths (multi-select aware — the launch policy classifies).
