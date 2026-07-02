@@ -406,10 +406,17 @@ impl AppCore {
             CoreEvent::ScanDone => self.finish_scan(),
             // A background archive open resolved to a non-empty playlist — install it.
             CoreEvent::ArchiveResolved(resolved) => self.apply_archive(resolved),
-            // Wired in later C2 increments / 5.6 (they touch the still-shell scroll-delta / GPU
-            // surface / flow paths). Ignored for now so a host that sends them early is a no-op.
+            // The surface resized / its scale changed — update viewport + fit, reconfigure the
+            // swapchain, rescale overlays on a DPI change, and debounce the crisp re-decode.
+            CoreEvent::Resized {
+                width,
+                height,
+                scale,
+            } => self.resize(width, height, scale),
+            // Still shell-side (no clean core seam yet): scroll-delta zoom/pan (the winit
+            // LineDelta-vs-PixelDelta constants), the shell's own redraw scheduling, and dropped
+            // paths (a flow the shell classifies). Ignored so a host sending them early is a no-op.
             CoreEvent::Redraw
-            | CoreEvent::Resized { .. }
             | CoreEvent::Scroll { .. }
             | CoreEvent::DroppedPaths(_)
             | CoreEvent::CancelDialog => {}
@@ -601,6 +608,37 @@ impl AppCore {
                 self.rebuild_playlist(r.source, r.root, r.scan_root, r.recursive, r.start);
             }
         }
+    }
+
+    /// The surface resized (or its backing scale changed) — the core-owned part of the host's
+    /// resize handling ([`CoreEvent::Resized`], NS0 loose-end). Update the viewport + (on a DPI
+    /// change) rescale the CPU overlays, and — only when the *fit box* actually changes — swap it,
+    /// reconfigure the swapchain (`renderer.resize`; the resident texture GPU-scales to the new
+    /// size), and debounce the crisp decode-to-fit (a drag fires this many times a second, so the
+    /// per-image CPU re-decode waits for the size to settle). The host does its platform surface
+    /// bits *around* this — the macOS EDR re-assert (after `resize`, before draw) + the redraw,
+    /// gated on the same fit-change the host computes from [`fit`](Self::fit) before calling here.
+    pub fn resize(&mut self, width: u32, height: u32, scale: f32) {
+        if (scale - self.viewport.scale_factor).abs() > f32::EPSILON {
+            self.viewport.scale_factor = scale;
+            self.rescale_overlays();
+        }
+        self.viewport.width = width.max(1);
+        self.viewport.height = height.max(1);
+        let new_fit = FitBox {
+            max_width: width.max(1),
+            max_height: height.max(1),
+        };
+        if Some(new_fit) == self.fit {
+            return;
+        }
+        self.fit = Some(new_fit);
+        if let Some(r) = self.renderer.as_mut() {
+            r.resize(width, height);
+        }
+        // Deferred crisp decode-to-fit + ring refill once the size settles (`self.now` is stamped
+        // by the host at the start of the event).
+        self.resize_settle_at = Some(self.now + Duration::from_millis(180));
     }
 
     /// The per-tick core loop (NS0 5.5 Phase C2): absorb finished decodes + uploads, run held

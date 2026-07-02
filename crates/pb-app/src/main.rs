@@ -2040,53 +2040,58 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => self.begin_exit(),
 
             WindowEvent::Resized(size) => {
-                self.core.viewport.width = size.width.max(1);
-                self.core.viewport.height = size.height.max(1);
+                // Compute the fit-change *before* `handle` updates the core's fit, so the shell can
+                // gate its GPU/window bits (the macOS EDR re-assert + the redraw) on the same
+                // signal without recomputing it inside the core.
                 let new_fit = FitBox {
                     max_width: size.width.max(1),
                     max_height: size.height.max(1),
                 };
-                if Some(new_fit) != self.core.fit {
-                    self.core.fit = Some(new_fit);
-                    if let Some(r) = self.core.renderer.as_mut() {
-                        // Cheap, per-event: reconfigure the swapchain and let the
-                        // renderer GPU-scale the resident texture to the new size.
-                        r.resize(size.width, size.height);
-                        // macOS: a surface reconfigure can reset the CAMetalLayer's
-                        // colorspace/EDR, so re-assert them — keeps P3/HDR alive across
-                        // a resize, fullscreen toggle, or a move to another display
-                        // (which may have different EDR headroom).
-                        #[cfg(target_os = "macos")]
-                        if r.hdr_surface_wants_edr().is_some() {
-                            if let Some(w) = self.window.as_ref() {
-                                let headroom = hdr_surface::configure(w);
+                let fit_changed = Some(new_fit) != self.core.fit;
+                // Core: viewport + fit + swapchain reconfigure + the debounced crisp re-decode.
+                self.core.handle(contract::CoreEvent::Resized {
+                    width: size.width,
+                    height: size.height,
+                    scale: self.core.viewport.scale_factor,
+                });
+                if fit_changed {
+                    // macOS: the swapchain reconfigure (`renderer.resize`, just done by the core)
+                    // can reset the CAMetalLayer's colorspace/EDR, so re-assert them here — after
+                    // the reconfigure, before the redraw — to keep P3/HDR alive across a resize /
+                    // fullscreen toggle / move to a display with different EDR headroom. Needs the
+                    // window, so it stays shell-side.
+                    #[cfg(target_os = "macos")]
+                    if self
+                        .core
+                        .renderer
+                        .as_ref()
+                        .is_some_and(|r| r.hdr_surface_wants_edr().is_some())
+                    {
+                        if let Some(w) = self.window.as_ref() {
+                            let headroom = hdr_surface::configure(w);
+                            self.last_edr_headroom = headroom;
+                            if let Some(r) = self.core.renderer.as_mut() {
                                 r.set_edr_headroom(headroom);
-                                self.last_edr_headroom = headroom;
                             }
                         }
                     }
                     self.core.draw();
-                    // A drag fires Resized many times a second; re-decoding the
-                    // current photo to the new fit on every one (a CPU decode on
-                    // the event-loop thread) is what made resize crawl. Defer the
-                    // crisp decode-to-fit + ring refill until the size settles.
-                    self.core.resize_settle_at = Some(Instant::now() + Duration::from_millis(180));
                 }
                 // Remember the new windowed size so it can be restored later (#1).
                 self.track_windowed_geometry();
             }
 
             // The window's backing scale factor changed — a move to a monitor with a
-            // different DPI (a 1× display ↔ a 2× Retina one), or a live OS DPI change. Update
-            // the factor every CPU-rasterized overlay is sized by, then rebuild them so the
-            // overlay text stays crisp at the new DPI. The `Resized` that winit sends right
-            // after this reconfigures the swapchain + re-decodes the photo to the new size.
+            // different DPI (a 1× display ↔ a 2× Retina one), or a live OS DPI change. Route it
+            // through the same `Resized` handler at the current size + new scale: the core updates
+            // the scale factor + rescales every CPU-rasterized overlay so its text stays crisp.
+            // The `Resized` winit sends right after reconfigures the swapchain + re-decodes.
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                let sf = scale_factor as f32;
-                if (sf - self.core.viewport.scale_factor).abs() > f32::EPSILON {
-                    self.core.viewport.scale_factor = sf;
-                    self.core.rescale_overlays();
-                }
+                self.core.handle(contract::CoreEvent::Resized {
+                    width: self.core.viewport.width,
+                    height: self.core.viewport.height,
+                    scale: scale_factor as f32,
+                });
             }
 
             // Track the windowed position so toggling back / relaunching restores it

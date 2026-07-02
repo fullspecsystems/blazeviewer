@@ -222,13 +222,11 @@ pub enum CoreEvent {
     Tick(Instant),
     /// The shell is about to draw and wants the core's current frame decision.
     Redraw,
-    /// Surface geometry / display headroom changed.
-    Resized {
-        width: u32,
-        height: u32,
-        scale: f32,
-        edr_headroom: f32,
-    },
+    /// The surface resized (or its backing scale changed): the core updates the viewport + the
+    /// fit box, reconfigures the swapchain (`renderer.resize`), rescales the CPU overlays on a
+    /// scale change, and debounces a crisp decode-to-fit. The host does its platform-specific
+    /// surface bits around this (the macOS EDR re-assert + the redraw) — see the winit shell.
+    Resized { width: u32, height: u32, scale: f32 },
     /// Pointer moved (un-hides the cursor; may pan while dragging).
     PointerMoved { x: f32, y: f32 },
     /// Scroll wheel / two-finger scroll (pan or zoom per settings).
