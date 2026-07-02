@@ -58,6 +58,43 @@ struct HeifError {
     message: *const c_char,
 }
 
+/// Mirror of C `struct heif_color_conversion_options` (heif_color.h, version 1 —
+/// the header notes it can never grow, so this layout is final).
+#[repr(C)]
+struct HeifColorConversionOptions {
+    version: u8,
+    preferred_chroma_downsampling_algorithm: c_int,
+    preferred_chroma_upsampling_algorithm: c_int,
+    only_use_preferred_chroma_algorithm: u8,
+}
+
+/// Mirror of C `struct heif_decoding_options` (heif_decoding.h) through the
+/// version-9 fields — just far enough to reach `autocorrect_broken_input`. We
+/// never construct one (always `heif_decoding_options_alloc`, so the library owns
+/// the real size + version); this mirror only types the field pokes, and the
+/// `version >= 9` guard keeps them sound if an older libheif is ever linked.
+#[repr(C)]
+struct HeifDecodingOptions {
+    version: u8,
+    ignore_transformations: u8,
+    start_progress: *const c_void,
+    on_progress: *const c_void,
+    end_progress: *const c_void,
+    progress_user_data: *mut c_void,
+    convert_hdr_to_8bit: u8,
+    strict_decoding: u8,
+    decoder_id: *const c_char,
+    color_conversion_options: HeifColorConversionOptions,
+    cancel_decoding: *const c_void,
+    color_conversion_options_ext: *mut c_void,
+    ignore_sequence_editlist: c_int,
+    output_image_nclx_profile: *mut c_void,
+    num_library_threads: c_int,
+    num_codec_threads: c_int,
+    autocorrect_broken_input: u8,
+    // version-10+ fields follow in C; never touched here.
+}
+
 // Symbols resolve against the static heif.lib/libde265.lib linked by build.rs.
 extern "C" {
     fn heif_init(params: *mut c_void) -> HeifError;
@@ -89,6 +126,8 @@ extern "C" {
         out_stride: *mut c_int,
     ) -> *const u8;
     fn heif_image_release(img: *const HeifImage);
+    fn heif_decoding_options_alloc() -> *mut HeifDecodingOptions;
+    fn heif_decoding_options_free(options: *mut HeifDecodingOptions);
 }
 
 // RAII guards so an early error return frees everything (no leaks across the FFI).
@@ -108,6 +147,14 @@ struct Img(*mut HeifImage);
 impl Drop for Img {
     fn drop(&mut self) {
         unsafe { heif_image_release(self.0) }
+    }
+}
+struct Opts(*mut HeifDecodingOptions);
+impl Drop for Opts {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { heif_decoding_options_free(self.0) }
+        }
     }
 }
 
@@ -167,13 +214,24 @@ fn decode_hevc(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
         }
         let handle = Handle(hptr);
 
+        // Sony-quirk workaround (tasks.json #24): some Sony HIF/HEIC files carry an
+        // nclx `colr` box whose YCbCr range flag disagrees with the HEVC VUI.
+        // Spec-strict libheif follows `colr` and renders ~3.5% darker mid-tones
+        // than WIC/Apple (which follow the VUI); `autocorrect_broken_input`
+        // (libheif ≥ 1.21, options version 9) opts into the quirk fix. A no-op
+        // for conformant files (iPhone HEICs stay pixel-identical to WIC).
+        let opts = Opts(heif_decoding_options_alloc());
+        if !opts.0.is_null() && (*opts.0).version >= 9 {
+            (*opts.0).autocorrect_broken_input = 1;
+        }
+
         let mut iptr: *mut HeifImage = ptr::null_mut();
         check(heif_decode_image(
             handle.0,
             &mut iptr,
             HEIF_COLORSPACE_RGB,
             HEIF_CHROMA_INTERLEAVED_RGBA,
-            ptr::null(),
+            opts.0 as *const c_void,
         ))?;
         if iptr.is_null() {
             return Err("null decoded image".into());

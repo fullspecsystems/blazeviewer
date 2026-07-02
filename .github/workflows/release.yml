@@ -35,6 +35,10 @@ jobs:
   # green `main` (CI status is visible on the commit before you tag).
   windows-msi:
     runs-on: windows-latest
+    env:
+      # Fixed vcpkg location so the libheif cache key, setup-libheif.ps1, and
+      # pb-decode/build.rs all agree (build.rs reads VCPKG_ROOT).
+      VCPKG_ROOT: C:\vcpkg-pb
     steps:
       - uses: actions/checkout@v4
 
@@ -43,6 +47,21 @@ jobs:
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
+
+      # The parallel-HEIC decode backend (tasks.json #16): the release binary ships
+      # with `--features libheif` (WIC serializes HEVC; libheif measured ~4.8× its
+      # throughput). Only the vcpkg `installed` tree is cached — buildtrees/downloads
+      # are transient. First run pays the ~15 min C build; hits skip it entirely.
+      - name: Cache libheif (vcpkg installed tree)
+        id: libheif-cache
+        uses: actions/cache@v4
+        with:
+          path: C:\vcpkg-pb\installed
+          key: libheif-${{ runner.os }}-x64-windows-static-md-v1
+      - name: Build libheif (vcpkg, cache miss only)
+        if: steps.libheif-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: pwsh scripts/setup-libheif.ps1
 
       # Cache the compiled cargo-wix binary so it isn't rebuilt from source (~2 min)
       # on every run. Bump the key suffix to force a refresh.
@@ -93,7 +112,7 @@ jobs:
           Write-Host "Tag core matches crate version: $crateVer"
 
       - name: Build release binary
-        run: cargo build --release -p pb-app
+        run: cargo build --release -p pb-app --features libheif
 
       # --- Signing is gated on whether the secrets exist ---
       - name: Detect signing configuration
