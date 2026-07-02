@@ -14,11 +14,35 @@ import SwiftUI
 /// initial `WindowGroup` window entirely (windowless app, live menu bar). Hence the
 /// `--pb-open <path>` flag (see `CoreModel.openLaunchPathIfAny`).
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Finder / Dock / "Open with" URLs. May fire before the model installs its handler
+    /// (a cold double-click launch), so early arrivals are buffered and replayed.
+    @MainActor private static var openHandler: (([URL]) -> Void)?
+    @MainActor private static var pendingURLs: [URL] = []
+
+    @MainActor static func installOpenHandler(_ handler: @escaping ([URL]) -> Void) {
+        openHandler = handler
+        if !pendingURLs.isEmpty {
+            handler(pendingURLs)
+            pendingURLs.removeAll()
+        }
+    }
+
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
     }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.activate()
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        MainActor.assumeIsolated {
+            if let handler = Self.openHandler {
+                handler(urls)
+            } else {
+                Self.pendingURLs.append(contentsOf: urls)
+            }
+        }
     }
 }
 

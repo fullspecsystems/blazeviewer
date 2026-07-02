@@ -25,6 +25,7 @@ final class CoreModel {
 
     @ObservationIgnored private var keyMonitor: Any?
     @ObservationIgnored private var focusObserver: NSObjectProtocol?
+    @ObservationIgnored private var keyLossObserver: NSObjectProtocol?
     /// Slice-1 frame pump: a coarse fixed timer driving `tick()`. Replaced by the real
     /// MTKView-driven pump honoring SetWake in NS1 item 7.
     @ObservationIgnored private var tickTimer: Timer?
@@ -76,10 +77,12 @@ final class CoreModel {
 
     private func installInputForwarding() {
         // A local monitor sees key events before the responder chain; returning nil swallows
-        // them (no system beep). The full NSEvent → PbKey adapter (letters, gestures, OS-repeat
-        // policy) is NS1 item 4 — this is just enough surface to drive the engine's nav keys.
+        // them (no system beep). The full physical-key map lives in `KeyMap` (NS1 item 4).
+        // ⌘-chords are forwarded to the core (a custom keymap may bind one; unbound ⌘ never
+        // falls through to the bare key — the contract's logo rule) but ALSO passed on to
+        // AppKit, so the standard menu shortcuts (⌘Q, ⌘W, ⌘M, …) keep working.
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
-            guard let self, let name = Self.pbKeyName(for: event.keyCode) else { return event }
+            guard let self, let name = KeyMap.pbKeyName(for: event.keyCode) else { return event }
             if event.type == .keyDown {
                 let f = event.modifierFlags
                 self.core.key_down(
@@ -94,37 +97,87 @@ final class CoreModel {
                 self.core.key_up(name)
             }
             self.drainEffects()
-            return nil
+            return event.modifierFlags.contains(.command) ? event : nil
         }
 
-        // The focus-loss release net: held keys are cleared so nothing keeps flying.
+        // The focus-loss release net: held keys are cleared so nothing keeps flying —
+        // on app deactivation AND on the window losing key status (a dialog opening).
         focusObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didResignActiveNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                self.core.focus_lost()
-                self.drainEffects()
-            }
+            MainActor.assumeIsolated { self?.forwardFocusLost() }
+        }
+        keyLossObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.forwardFocusLost() }
+        }
+
+        // Finder / Dock / "Open with" URLs (application:open:) — route through the same
+        // classify-and-open path as a drop. Buffered by AppDelegate if they arrive before
+        // this handler is installed (a cold double-click launch).
+        AppDelegate.installOpenHandler { [weak self] urls in
+            self?.openPaths(urls.map(\.path))
         }
     }
 
-    /// Slice-1 `keyCode` → `PbKey` name map (see `PbKey::from_name`) — nav keys only.
-    private static func pbKeyName(for keyCode: UInt16) -> String? {
-        switch keyCode {
-        case 49: return "Space"
-        case 53: return "Escape"
-        case 36: return "Return"
-        case 76: return "NumpadEnter"
-        case 51: return "Backspace"
-        case 123: return "Left"
-        case 124: return "Right"
-        case 125: return "Down"
-        case 126: return "Up"
-        default: return nil
+    private func forwardFocusLost() {
+        core.focus_lost()
+        drainEffects()
+    }
+
+    // MARK: - Pointer + gestures (forwarded by MetalCanvasNSView)
+
+    /// Pointer moved over the canvas, in physical px, top-left origin (the winit convention).
+    func pointerMoved(x: Float, y: Float) {
+        core.pointer_moved(x, y)
+        drainEffects()
+    }
+
+    /// Left mouse press/release: on-image controls or drag-to-pan (the core decides).
+    func mouseLeft(pressed: Bool) {
+        core.mouse_left(pressed)
+        drainEffects()
+    }
+
+    /// Line-precise scroll (mouse wheel notches).
+    func scrollLines(x: Float, y: Float) {
+        core.scroll_lines(x, y)
+        drainEffects()
+    }
+
+    /// Pixel-precise scroll (trackpad two-finger swipe), already scaled to physical px.
+    func scrollPixels(x: Float, y: Float) {
+        core.scroll_pixels(x, y)
+        drainEffects()
+    }
+
+    /// Trackpad pinch (incremental magnification).
+    func pinch(delta: Float) {
+        core.pinch(delta)
+        drainEffects()
+    }
+
+    /// Trackpad smart-magnify (two-finger double-tap): 100% ↔ fit.
+    func doubleTap() {
+        core.double_tap()
+        drainEffects()
+    }
+
+    /// Open dropped / Finder-opened paths (multi-select aware — the launch policy classifies).
+    func openPaths(_ paths: [String]) {
+        guard !paths.isEmpty else { return }
+        let vec = RustVec<RustString>()
+        for p in paths {
+            vec.push(value: RustString(p))
         }
+        core.open_paths(vec)
+        log("open_paths(\(paths.count): \(paths.first ?? ""))")
+        drainEffects()
     }
 
     private func startTicking() {

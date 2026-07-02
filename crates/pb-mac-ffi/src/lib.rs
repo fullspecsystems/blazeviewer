@@ -34,7 +34,7 @@ use pb_app_core::contract::{self, CoreEvent, Modifiers};
 use pb_app_core::engine;
 use pb_app_core::overlay::OpenPanel;
 use pb_app_core::scan::{self, Resolved, ScanProgress, ScanUpdate};
-use pb_app_core::{AppCore, PbKey, Viewport};
+use pb_app_core::{Action, AppCore, PbKey, Viewport};
 use pb_core::open::{self, Cursor, LaunchInput, Source};
 use pb_core::ResidentRing;
 use pb_render::Renderer as _;
@@ -88,23 +88,117 @@ impl AppCoreHandle {
         }
     }
 
-    /// Open a file / folder / archive path — the CLI argument, a Finder drop, or the native
-    /// open panel. Classified like the winit shell's `classify_inputs` (a directory scans
-    /// recursively per the launch policy, a `.zip`/`.7z` opens to its contents, a lone file
-    /// scans its folder flat with the cursor on it — ADR-019), then routed through the core's
-    /// `open_plan`, whose `Begin*` effects this crate executes on its worker threads.
+    /// Open a single file / folder / archive path — the `--pb-open` dev argument, or a
+    /// one-item drop. See [`open_paths`](Self::open_paths).
     fn open_path(&mut self, path: &str) {
+        self.open_paths(vec![path.to_string()]);
+    }
+
+    /// Open launch/drop/panel paths — the winit shell's `classify_inputs` mirrored (ADR-019):
+    /// a lone directory scans recursively, a lone `.zip`/`.7z` opens to its contents, files
+    /// scan/list per the launch policy (a single file → its folder flat, cursor on it). Routed
+    /// through the core's `open_plan`, whose `Begin*` effects this crate executes on its
+    /// worker threads. Empty / all-empty input is ignored (never blanks the current photo).
+    fn open_paths(&mut self, paths: Vec<String>) {
         self.core.now = Instant::now();
-        let p = PathBuf::from(path);
-        let input = if p.is_dir() {
-            LaunchInput::Directory(p)
-        } else if is_archive(&p) {
-            LaunchInput::Archive(p)
+        let paths: Vec<PathBuf> = paths
+            .into_iter()
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from)
+            .collect();
+        if paths.is_empty() {
+            return;
+        }
+        let input = if paths.len() == 1 && paths[0].is_dir() {
+            LaunchInput::Directory(paths.into_iter().next().expect("len == 1"))
+        } else if paths.len() == 1 && is_archive(&paths[0]) {
+            LaunchInput::Archive(paths.into_iter().next().expect("len == 1"))
         } else {
-            LaunchInput::Files(vec![p])
+            // One or more files (a directory inside a multi-selection is uncommon and is
+            // ignored). If somehow every path is a directory, open the first.
+            let files: Vec<PathBuf> = paths.iter().filter(|p| !p.is_dir()).cloned().collect();
+            if files.is_empty() {
+                LaunchInput::Directory(paths.into_iter().next().expect("non-empty"))
+            } else {
+                LaunchInput::Files(files)
+            }
         };
         let plan = open::plan(input);
         self.core.open_plan(plan.source, plan.cursor);
+    }
+
+    /// The pointer moved (physical px, top-left origin — the winit `CursorMoved` convention;
+    /// the Swift view flips AppKit's bottom-left origin and scales by the backing factor).
+    /// Anchors pinch/wheel zoom, drives drag-to-pan while the left button is down, and
+    /// un-hides the cursor.
+    fn pointer_moved(&mut self, x: f32, y: f32) {
+        self.core.now = Instant::now();
+        self.core.handle(CoreEvent::PointerMoved { x, y });
+    }
+
+    /// Left mouse button pressed/released — the winit shell's `MouseInput(Left)` arm
+    /// mirrored: a press on an interactive on-image control (an open-panel button, the play
+    /// hint, the scan-chip's Cancel) fires that control; anywhere else it toggles
+    /// drag-to-pan.
+    fn mouse_left(&mut self, pressed: bool) {
+        self.core.now = Instant::now();
+        let open_hit = if pressed {
+            self.core.open_hovered_button()
+        } else {
+            None
+        };
+        if let Some(button) = open_hit {
+            match button {
+                pb_app_core::OpenButton::File => self.core.dispatch_action(Action::OpenFile),
+                pb_app_core::OpenButton::Folder => self.core.dispatch_action(Action::OpenFolder),
+            }
+        } else if pressed && self.core.play_hint_hit() {
+            // Click the play hint → play, and dismiss it (it's been used).
+            self.core.play_hint = None;
+            self.core.dispatch_action(Action::PlayPause);
+        } else if pressed
+            && self
+                .core
+                .last_cursor
+                .is_some_and(|[cx, cy]| self.core.chip_hit(cx, cy))
+        {
+            // The scan-count chip's Cancel: stop the walk, keep what streamed in.
+            self.cancel_dir_scan();
+            self.core.request_prefetch();
+            self.core.show_toast("Scan stopped");
+        } else {
+            self.core.dragging = pressed;
+            self.core.refresh_cursor();
+        }
+    }
+
+    /// Line-precise scroll (a mouse wheel notch) — pan or zoom per the Scroll-wheel setting.
+    fn scroll_lines(&mut self, x: f32, y: f32) {
+        self.core.now = Instant::now();
+        self.core
+            .handle(CoreEvent::Scroll(contract::ScrollDelta::Lines { x, y }));
+    }
+
+    /// Pixel-precise scroll (a trackpad two-finger swipe), in **physical px** (the winit
+    /// convention — the Swift view scales AppKit's points by the backing factor).
+    fn scroll_pixels(&mut self, x: f32, y: f32) {
+        self.core.now = Instant::now();
+        self.core
+            .handle(CoreEvent::Scroll(contract::ScrollDelta::Pixels { x, y }));
+    }
+
+    /// Trackpad pinch: `delta` is the incremental magnification (`NSEvent.magnification`,
+    /// + spread to zoom in, − pinch to zoom out) — zooms about the cursor.
+    fn pinch(&mut self, delta: f32) {
+        self.core.now = Instant::now();
+        self.core.handle(CoreEvent::Pinch { delta });
+    }
+
+    /// Trackpad two-finger double-tap ("smart magnify"): toggle 100% ↔ fit, sharing the
+    /// keyboard's `0` toggle so they can't drift.
+    fn double_tap(&mut self) {
+        self.core.now = Instant::now();
+        self.core.handle(CoreEvent::DoubleTap);
     }
 
     /// A physical key went down. `key` is a [`PbKey`] name accepted by `PbKey::from_name`
@@ -577,6 +671,16 @@ mod ffi {
         fn tick(&mut self);
         fn next_effect(&mut self) -> Option<CoreEffectFfi>;
         fn open_path(&mut self, path: &str);
+        fn open_paths(&mut self, paths: Vec<String>);
+
+        // Pointer + gestures (NS1 item 4) — same conventions as the winit shell:
+        // physical px, top-left origin; pixel scrolls scaled by the backing factor.
+        fn pointer_moved(&mut self, x: f32, y: f32);
+        fn mouse_left(&mut self, pressed: bool);
+        fn scroll_lines(&mut self, x: f32, y: f32);
+        fn scroll_pixels(&mut self, x: f32, y: f32);
+        fn pinch(&mut self, delta: f32);
+        fn double_tap(&mut self);
 
         // The canvas surface (NS1 item 2). `layer_ptr` = the retained CAMetalLayer's
         // pointer bits (swift-bridge has no raw-pointer type; usize crosses as UInt).
