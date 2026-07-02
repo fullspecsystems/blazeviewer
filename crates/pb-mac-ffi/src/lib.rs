@@ -262,6 +262,19 @@ impl AppCoreHandle {
         self.core.work_pending() || self.dir_scan.is_some() || self.archive_load.is_some()
     }
 
+    /// The displayed photo's on-disk path ("" for an archive entry or the empty deck) —
+    /// the host's title-bar **proxy icon** source (`NSWindow.representedURL`, macOS port
+    /// task #12). Pulled on each `SetTitle` (that effect fires exactly when the displayed
+    /// item changes, so the refresh stays off the hold-to-fly hot path). RAM-only, never
+    /// `noteNewRecentDocumentURL:` (no Recents → privacy #2 holds).
+    fn current_photo_path(&self) -> String {
+        self.core
+            .displayed_item
+            .and_then(|i| self.core.source.path(i))
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
     /// Show a HUD toast — the host's feedback line after it executes a platform op
     /// (clipboard written, etc.), mirroring the winit shell's post-write toasts.
     fn toast(&mut self, msg: &str) {
@@ -1405,6 +1418,7 @@ mod ffi {
         fn double_tap(&mut self);
         fn work_pending(&self) -> bool;
         fn toast(&mut self, msg: &str);
+        fn current_photo_path(&self) -> String;
 
         // The WriteClipboard payload accessors (marker effect + pull — see the field doc).
         fn take_clipboard_text(&mut self) -> String;
@@ -1579,6 +1593,18 @@ mod tests {
         let _ = drain(&mut h);
         assert!(!file.exists(), "Yes permanently deletes the file");
 
+        std::fs::remove_dir_all(file.parent().unwrap()).ok();
+    }
+
+    /// The proxy-icon source: a real on-disk photo reports its path; an empty deck (and an
+    /// archive entry — no file) reports "".
+    #[test]
+    fn current_photo_path_names_the_displayed_file() {
+        let h = AppCoreHandle::new(800, 600, 1.0);
+        assert_eq!(h.current_photo_path(), "", "empty deck → no proxy icon");
+
+        let (h, file) = handle_with_photo("proxy");
+        assert_eq!(h.current_photo_path(), file.to_string_lossy());
         std::fs::remove_dir_all(file.parent().unwrap()).ok();
     }
 

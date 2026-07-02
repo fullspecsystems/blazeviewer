@@ -565,6 +565,10 @@ final class CoreModel {
         case .SetTitle(let title):
             let t = title.toString()
             hostWindow?.title = t
+            // SetTitle fires exactly when the displayed item changes — the right cadence
+            // for the title-bar proxy icon too (hover the title bar to reveal/drag it;
+            // hover-to-reveal is standard since macOS 11).
+            refreshProxyIcon()
             log("SetTitle(\"\(t)\")")
         case .SetWake(let seconds):
             requestedWakeDelay = seconds
@@ -709,6 +713,23 @@ final class CoreModel {
     /// The hosting NSWindow (handed over by the canvas view) — the SetTitle target.
     @ObservationIgnored weak var hostWindow: NSWindow?
 
+    /// The path the proxy icon currently shows (cached so unchanged photos are a no-op).
+    @ObservationIgnored private var proxyIconPath = ""
+    /// The window is in the borderless fullscreen speed mode (no title bar → no proxy).
+    @ObservationIgnored private var speedModeFullscreen = false
+
+    /// The title-bar **proxy icon** (`NSWindow.representedURL` — the winit shell's
+    /// `refresh_proxy_icon` mirrored, macOS port task #12): the draggable doc icon +
+    /// ⌘-click folder popup. Windowed mode only, and only for a real on-disk file — an
+    /// archive entry or the empty deck clears it. RAM-only, never
+    /// `noteNewRecentDocumentURL:` (no Recents → privacy #2 holds).
+    private func refreshProxyIcon() {
+        let want = speedModeFullscreen ? "" : core.current_photo_path().toString()
+        guard want != proxyIconPath else { return }
+        proxyIconPath = want
+        hostWindow?.representedURL = want.isEmpty ? nil : URL(fileURLWithPath: want)
+    }
+
     /// The Live Photo's audio player (its companion .mov's audio track). The core decides
     /// when/where; this is just the retained platform handle (the winit shell's ObjC twin).
     @ObservationIgnored private var liveAudio: AVAudioPlayer?
@@ -780,6 +801,8 @@ final class CoreModel {
     /// bespoke window treatment.
     private func setWindowMode(fullscreen: Bool) {
         guard let window = hostWindow else { return }
+        speedModeFullscreen = fullscreen
+        refreshProxyIcon() // no title bar in the speed mode → clear; restore on exit
         if fullscreen {
             savedFrame = window.frame
             window.styleMask.insert(.fullSizeContentView)
