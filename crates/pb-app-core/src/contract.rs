@@ -1,25 +1,19 @@
-//! The `AppCore` ⇄ shell contract — **a type sketch, not yet wired** (NS0, ADR-021).
+//! The `AppCore` ⇄ shell contract — **the live seam** (NS0, ADR-021).
 //!
 //! ADR-021 inverts ownership on the macOS target: an AppKit/SwiftUI host owns the
 //! window + run loop and drives the Rust engine, where today winit *is* the engine.
-//! For anything but winit to drive PhotoBlaze, the orchestration layer has to speak
-//! a **shell-neutral vocabulary**: intent-level events *in* ([`CoreEvent`]), effects
+//! For anything but winit to drive PhotoBlaze, the orchestration layer speaks a
+//! **shell-neutral vocabulary**: intent-level events *in* ([`CoreEvent`]), effects
 //! the shell must carry out *out* ([`CoreEffect`]), with the existing [`Action`] kept
 //! as the single command vocabulary (the plan's explicit rule).
 //!
-//! This module defines that vocabulary so it can be reviewed and tested **before**
-//! any code moves behind it. Nothing here is consumed yet: `main.rs` still owns the
-//! winit loop directly. Landing the types first (per the plan: "Define the `AppCore`
-//! contract before moving code") lets the eventual extraction be a sequence of small,
-//! mechanical, behavior-preserving moves rather than a big-bang rewrite.
-//!
-//! **Scope note.** Several payloads the final contract needs reference types that
-//! still live in the winit shell or other crates (a `Settings` form, `LaunchInput`
-//! from `pb-core::open`, the dialog request/result structs, the GPU surface handle).
-//! Those variants are intentionally **omitted or stubbed with a `NS-later:` note**
-//! rather than dragging their types into this crate prematurely — the sketch covers
-//! the part of the contract that is already expressible with shell-neutral types
-//! ([`Action`], [`PbKey`], [`Keymap`]) plus `std`. It will firm up as NS1/NS2 wire it.
+//! This is **wired and load-bearing** now (NS0 5.5/5.6): the winit shell translates its
+//! `WindowEvent`s into [`CoreEvent`]s and calls [`AppCore::handle`](crate::AppCore::handle)
+//! for keyboard / pointer / the tick loop / dialog outcomes / the archive+scan worker results,
+//! and executes the returned [`CoreEffect`]s in its drain. The macOS host will drive the same
+//! `handle` + drain the same effects. A few payloads still reference shell/other-crate types and
+//! are noted `NS-later`, but the core input + command + open/scan/archive flows all run through
+//! this vocabulary today.
 
 use std::path::PathBuf;
 use std::time::Instant;
