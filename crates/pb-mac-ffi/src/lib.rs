@@ -67,6 +67,11 @@ pub struct AppCoreHandle {
     scan_gen: u64,
     archive_load: Option<ArchiveLoad>,
     archive_gen: u64,
+    /// The payload of an in-flight `WriteClipboard` effect. Stashed here (the drain emits a
+    /// bare marker) because a `Vec<u8>` inside a transparent-enum payload is exactly the
+    /// shape swift-bridge mis-generates (gotcha #3); the host pulls it via the
+    /// `clipboard_*`/`take_clipboard_*` accessors instead.
+    pending_clipboard: Option<contract::ClipboardPayload>,
 }
 
 impl AppCoreHandle {
@@ -85,6 +90,7 @@ impl AppCoreHandle {
             scan_gen: 0,
             archive_load: None,
             archive_gen: 0,
+            pending_clipboard: None,
         }
     }
 
@@ -206,6 +212,64 @@ impl AppCoreHandle {
     /// pump's continuous-vs-on-demand decision, NS1 item 7).
     fn work_pending(&self) -> bool {
         self.core.work_pending() || self.dir_scan.is_some() || self.archive_load.is_some()
+    }
+
+    /// Show a HUD toast — the host's feedback line after it executes a platform op
+    /// (clipboard written, etc.), mirroring the winit shell's post-write toasts.
+    fn toast(&mut self, msg: &str) {
+        self.core.show_toast(msg);
+    }
+
+    // ---- The WriteClipboard payload accessors (see `pending_clipboard`). The host, on
+    // the `WriteClipboard` marker: try `take_clipboard_text()` first; if empty, read the
+    // image dimensions/file and `take_clipboard_image()`.
+
+    /// The pending text payload ("" if none / it's an image). Consumes it.
+    fn take_clipboard_text(&mut self) -> String {
+        match self.pending_clipboard.take() {
+            Some(contract::ClipboardPayload::Text(t)) => t,
+            other => {
+                self.pending_clipboard = other; // put a non-text payload back
+                String::new()
+            }
+        }
+    }
+
+    /// Pending image width in px (0 = no image payload).
+    fn clipboard_image_width(&self) -> u32 {
+        match &self.pending_clipboard {
+            Some(contract::ClipboardPayload::Image { w, .. }) => *w,
+            _ => 0,
+        }
+    }
+
+    /// Pending image height in px (0 = no image payload).
+    fn clipboard_image_height(&self) -> u32 {
+        match &self.pending_clipboard {
+            Some(contract::ClipboardPayload::Image { h, .. }) => *h,
+            _ => 0,
+        }
+    }
+
+    /// The on-disk file to offer alongside the pixels ("" for an archive entry).
+    fn clipboard_image_file(&self) -> String {
+        match &self.pending_clipboard {
+            Some(contract::ClipboardPayload::Image { file: Some(p), .. }) => {
+                p.to_string_lossy().into_owned()
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// The pending image's RGBA8 pixels (`w*h*4`; empty if none). Consumes the payload.
+    fn take_clipboard_image(&mut self) -> Vec<u8> {
+        match self.pending_clipboard.take() {
+            Some(contract::ClipboardPayload::Image { rgba, .. }) => rgba,
+            other => {
+                self.pending_clipboard = other;
+                Vec::new()
+            }
+        }
     }
 
     /// A physical key went down. `key` is a [`PbKey`] name accepted by `PbKey::from_name`
@@ -401,10 +465,60 @@ impl AppCoreHandle {
                 C::BeginArchiveOpen { path, password } => self.begin_archive_open(path, password),
                 C::CancelScan => self.cancel_dir_scan(),
                 C::CancelArchiveLoad => self.cancel_archive_load(),
+                // Flow commands whose execution is shell-*Rust* (the scan worker lives in
+                // this crate) — run here; only the genuinely Swift-native flows surface.
+                C::ShellFlowAction(Action::Recursive) => self.toggle_recursive(),
+                C::ShellFlowAction(Action::CancelScan) => self.cancel_scan_command(),
+                // The image payload can be tens of MB — stash it and surface a bare
+                // marker; the host pulls it via the clipboard accessors (gotcha #3).
+                C::WriteClipboard(payload) => {
+                    self.pending_clipboard = Some(payload);
+                    return Some(ffi::CoreEffectFfi::WriteClipboard);
+                }
                 other => return Some(map_effect(other)),
             }
         }
         None
+    }
+
+    /// Toggle recursive scanning of the current folder — the winit shell's
+    /// `toggle_recursive` mirrored: re-stream the walk with the flag flipped, preserving
+    /// the current photo by path. A no-op for an explicit list / archive (no scan root).
+    fn toggle_recursive(&mut self) {
+        let Some(root) = self.core.scan_root.clone() else {
+            return;
+        };
+        let recursive = !self.core.recursive;
+        let cursor = self
+            .core
+            .displayed_item
+            .and_then(|i| self.core.source.path(i))
+            .map(Path::to_path_buf)
+            .map(Cursor::At)
+            .unwrap_or(Cursor::First);
+        self.begin_dir_scan(
+            Source::Scan {
+                roots: vec![root],
+                recursive,
+            },
+            cursor,
+        );
+        self.core.show_toast(if recursive {
+            "Recursive folders: on"
+        } else {
+            "Recursive folders: off"
+        });
+    }
+
+    /// File ▸ Stop Scanning — stop the in-flight walk, **keeping what streamed in**
+    /// (the winit `cancel_scan_command` mirrored). No-op when no scan is running.
+    fn cancel_scan_command(&mut self) {
+        if self.dir_scan.is_none() {
+            return;
+        }
+        self.cancel_dir_scan();
+        self.core.request_prefetch();
+        self.core.show_toast("Scan stopped");
     }
 
     // ---- The shell's Rust half: the scan/archive worker flow (mirrors the winit shell's
@@ -659,8 +773,22 @@ fn map_effect(e: contract::CoreEffect) -> ffi::CoreEffectFfi {
                 .to_string(),
             )
         }
-        // Menu state, dialogs, clipboard, reveal, context menu, live audio, window mode,
-        // surface ops, … — each bridged in a later NS1 slice.
+        // Reveal in Finder (File ▸ Show in Finder / the context menu) — NSWorkspace.
+        C::RevealPath(path) => E::RevealPath(path.to_string_lossy().into_owned()),
+        // The Live Photo's audio track (its companion .mov) — the host owns AVAudioPlayer.
+        C::StartLiveAudio { path, at_secs } => {
+            E::StartLiveAudio(path.to_string_lossy().into_owned(), at_secs)
+        }
+        C::StopLiveAudio => E::StopLiveAudio,
+        C::PauseLiveAudio => E::PauseLiveAudio,
+        C::ResumeLiveAudio => E::ResumeLiveAudio,
+        // The borderless fullscreen speed mode (F) ↔ windowed. `true` = fullscreen.
+        C::SetWindowMode(mode) => {
+            E::SetWindowMode(matches!(mode, contract::WindowMode::Fullscreen))
+        }
+        // Esc-teardown step 1: hide before quitting so nothing flashes.
+        C::HideWindow => E::HideWindow,
+        // Menu state, dialogs, context menu, … — each bridged in a later NS1 slice.
         _ => E::Other,
     }
 }
@@ -690,6 +818,20 @@ mod ffi {
         OpenFolderPanel(String),
         // Pointer cursor by kind: "default" | "hidden" | "grab" | "grabbing" | "pointer".
         SetCursor(String),
+        // A clipboard write is pending — pull it via take_clipboard_text() /
+        // clipboard_image_*() + take_clipboard_image(), write to NSPasteboard, toast().
+        WriteClipboard,
+        // Reveal this path in Finder (select it in a new window).
+        RevealPath(String),
+        // Live Photo audio (path to the companion .mov, start offset in seconds).
+        StartLiveAudio(String, f64),
+        StopLiveAudio,
+        PauseLiveAudio,
+        ResumeLiveAudio,
+        // true = enter the borderless fullscreen speed mode; false = restore windowed.
+        SetWindowMode(bool),
+        // Hide the window (the Esc-teardown step before Quit).
+        HideWindow,
         Other,
     }
 
@@ -724,6 +866,14 @@ mod ffi {
         fn pinch(&mut self, delta: f32);
         fn double_tap(&mut self);
         fn work_pending(&self) -> bool;
+        fn toast(&mut self, msg: &str);
+
+        // The WriteClipboard payload accessors (marker effect + pull — see the field doc).
+        fn take_clipboard_text(&mut self) -> String;
+        fn clipboard_image_width(&self) -> u32;
+        fn clipboard_image_height(&self) -> u32;
+        fn clipboard_image_file(&self) -> String;
+        fn take_clipboard_image(&mut self) -> Vec<u8>;
 
         // The canvas surface (NS1 item 2). `layer_ptr` = the retained CAMetalLayer's
         // pointer bits (swift-bridge has no raw-pointer type; usize crosses as UInt).

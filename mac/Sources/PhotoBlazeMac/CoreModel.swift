@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Observation
 import PbMacFfi
 import UniformTypeIdentifiers
@@ -337,6 +338,26 @@ final class CoreModel {
             presentOpenPanel(startDir: dir.toString(), choosingFolders: true)
         case .SetCursor(let kind):
             applyCursor(kind.toString())
+        case .WriteClipboard:
+            writeClipboard()
+        case .RevealPath(let path):
+            NSWorkspace.shared.activateFileViewerSelecting([
+                URL(fileURLWithPath: path.toString())
+            ])
+            log("RevealPath")
+        case .StartLiveAudio(let path, let atSecs):
+            startLiveAudio(path: path.toString(), atSecs: atSecs)
+        case .StopLiveAudio:
+            liveAudio?.stop()
+            liveAudio = nil
+        case .PauseLiveAudio:
+            liveAudio?.pause()
+        case .ResumeLiveAudio:
+            liveAudio?.play()
+        case .SetWindowMode(let fullscreen):
+            setWindowMode(fullscreen: fullscreen)
+        case .HideWindow:
+            hostWindow?.orderOut(nil)
         case .Other:
             log("Other (not yet bridged)")
         }
@@ -416,4 +437,105 @@ final class CoreModel {
 
     /// The hosting NSWindow (handed over by the canvas view) — the SetTitle target.
     @ObservationIgnored weak var hostWindow: NSWindow?
+
+    /// The Live Photo's audio player (its companion .mov's audio track). The core decides
+    /// when/where; this is just the retained platform handle (the winit shell's ObjC twin).
+    @ObservationIgnored private var liveAudio: AVAudioPlayer?
+
+    private func startLiveAudio(path: String, atSecs: Double) {
+        liveAudio?.stop()
+        liveAudio = try? AVAudioPlayer(contentsOf: URL(fileURLWithPath: path))
+        liveAudio?.currentTime = max(0, atSecs)
+        liveAudio?.play()
+    }
+
+    /// `CoreEffect::WriteClipboard` (via the marker + accessors): text goes on as a string;
+    /// an image goes on as one pasteboard item carrying BOTH the rendered TIFF and — when
+    /// the photo is a real on-disk file — its file URL, mirroring the Windows
+    /// CF_DIBV5 + CF_HDROP pairing. The host toasts afterwards (winit-shell parity).
+    private func writeClipboard() {
+        let pb = NSPasteboard.general
+        let text = core.take_clipboard_text().toString()
+        if !text.isEmpty {
+            pb.clearContents()
+            pb.setString(text, forType: .string)
+            let toastMsg = text.contains("\n")
+                ? "Copied to clipboard"
+                : "Copied \((text as NSString).lastPathComponent)"
+            core.toast(toastMsg)
+            return
+        }
+        let w = Int(core.clipboard_image_width())
+        let h = Int(core.clipboard_image_height())
+        let file = core.clipboard_image_file().toString()
+        let rgba = core.take_clipboard_image()
+        guard w > 0, h > 0, rgba.len() == w * h * 4 else { return }
+        let data = Data(bytes: UnsafeRawPointer(rgba.as_ptr()), count: rgba.len())
+        guard let provider = CGDataProvider(data: data as CFData),
+              let cg = CGImage(
+                  width: w,
+                  height: h,
+                  bitsPerComponent: 8,
+                  bitsPerPixel: 32,
+                  bytesPerRow: w * 4,
+                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
+                  provider: provider,
+                  decode: nil,
+                  shouldInterpolate: false,
+                  intent: .defaultIntent
+              )
+        else {
+            core.toast("Copy failed")
+            return
+        }
+        let image = NSImage(cgImage: cg, size: NSSize(width: w, height: h))
+        pb.clearContents()
+        let item = NSPasteboardItem()
+        if let tiff = image.tiffRepresentation {
+            item.setData(tiff, forType: .tiff)
+        }
+        if !file.isEmpty {
+            item.setString(URL(fileURLWithPath: file).absoluteString, forType: .fileURL)
+        }
+        pb.writeObjects([item])
+        core.toast("Copied")
+    }
+
+    /// `CoreEffect::SetWindowMode` — the borderless fullscreen **speed mode** (F), NOT
+    /// macOS native Spaces fullscreen. Chromeless-but-key: keep `.titled` (a truly
+    /// borderless NSWindow can't become key) and hide the titlebar + traffic lights
+    /// instead; menu bar + Dock auto-hide while frontmost. NS3 replaces this with the
+    /// bespoke window treatment.
+    private func setWindowMode(fullscreen: Bool) {
+        guard let window = hostWindow else { return }
+        if fullscreen {
+            savedFrame = window.frame
+            window.styleMask.insert(.fullSizeContentView)
+            window.titlebarAppearsTransparent = true
+            window.titleVisibility = .hidden
+            setTrafficLights(hidden: true, in: window)
+            NSApp.presentationOptions = [.autoHideMenuBar, .autoHideDock]
+            if let screen = window.screen ?? NSScreen.main {
+                window.setFrame(screen.frame, display: true)
+            }
+        } else {
+            NSApp.presentationOptions = []
+            window.styleMask.remove(.fullSizeContentView)
+            window.titlebarAppearsTransparent = false
+            window.titleVisibility = .visible
+            setTrafficLights(hidden: false, in: window)
+            if let frame = savedFrame {
+                window.setFrame(frame, display: true)
+            }
+        }
+    }
+
+    @ObservationIgnored private var savedFrame: NSRect?
+
+    private func setTrafficLights(hidden: Bool, in window: NSWindow) {
+        for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            window.standardWindowButton(kind)?.isHidden = hidden
+        }
+    }
 }
