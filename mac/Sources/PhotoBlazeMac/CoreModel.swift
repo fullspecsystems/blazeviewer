@@ -747,13 +747,37 @@ final class CoreModel {
             NotificationCenter.default.removeObserver(old)
             screenChangeObserver = nil
         }
+        if let old = resizeTraceObserver {
+            NotificationCenter.default.removeObserver(old)
+            resizeTraceObserver = nil
+        }
         guard let window = hostWindow else { return }
         screenChangeObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didChangeScreenNotification, object: window, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.clampToScreenWhenSettled() }
         }
+        // DEBUG forensics for the owner-reported cross-monitor size weirdness: log every
+        // PROGRAMMATIC resize (a hand drag has inLiveResize == true — skip those). Our
+        // own clamp logs separately, so an unexplained entry here is the OS (drag-tiling
+        // fill / pre-tile size restore) or SwiftUI resizing the window.
+        #if DEBUG
+            resizeTraceObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didResizeNotification, object: window, queue: .main
+            ) { [weak self] note in
+                MainActor.assumeIsolated {
+                    guard let self, let w = note.object as? NSWindow, !w.inLiveResize
+                    else { return }
+                    self.log(
+                        "window resized programmatically to "
+                            + "\(Int(w.frame.width))×\(Int(w.frame.height))"
+                    )
+                }
+            }
+        #endif
     }
+
+    @ObservationIgnored private var resizeTraceObserver: NSObjectProtocol?
 
     private func clampToScreenWhenSettled() {
         guard !speedModeFullscreen else { return } // F mode owns its frame
@@ -781,14 +805,22 @@ final class CoreModel {
         guard !speedModeFullscreen, let window = hostWindow, let screen = window.screen
         else { return }
         let visible = screen.visibleFrame
-        var frame = window.frame
+        let frame = window.frame
         guard frame.width > visible.width || frame.height > visible.height else { return }
-        frame.size.width = min(frame.width, visible.width)
-        frame.size.height = min(frame.height, visible.height)
-        frame.origin.x = max(visible.minX, min(frame.origin.x, visible.maxX - frame.width))
-        frame.origin.y = max(visible.minY, min(frame.origin.y, visible.maxY - frame.height))
-        window.setFrame(frame, display: true, animate: true)
-        log("clamped oversized window to \(Int(frame.width))×\(Int(frame.height)) after screen change")
+        let fitted = Self.shrunkToFit(frame, in: visible)
+        window.setFrame(fitted, display: true, animate: true)
+        log("clamped oversized window to \(Int(fitted.width))×\(Int(fitted.height)) after screen change")
+    }
+
+    /// Shrink-only fit: each axis is clamped independently to `visible` (never grown),
+    /// then the frame is pulled fully inside it. A frame that already fits is unchanged.
+    private static func shrunkToFit(_ frame: NSRect, in visible: NSRect) -> NSRect {
+        var f = frame
+        f.size.width = min(f.width, visible.width)
+        f.size.height = min(f.height, visible.height)
+        f.origin.x = max(visible.minX, min(f.origin.x, visible.maxX - f.width))
+        f.origin.y = max(visible.minY, min(f.origin.y, visible.maxY - f.height))
+        return f
     }
 
     /// The path the proxy icon currently shows (cached so unchanged photos are a no-op).
@@ -911,7 +943,15 @@ final class CoreModel {
             }
             borderlessOK = false
             if let frame = savedFrame {
-                window.setFrame(frame, display: true)
+                // Belt-and-braces: re-fit the remembered windowed frame to the window's
+                // current screen before restoring, so an F exit can never re-impose a
+                // frame larger than the screen it lands on (shrink-only; the common
+                // same-screen round trip restores exactly).
+                let visible = (window.screen ?? NSScreen.main)?.visibleFrame
+                window.setFrame(
+                    visible.map { Self.shrunkToFit(frame, in: $0) } ?? frame,
+                    display: true
+                )
             }
         }
         assertWindowChrome()
