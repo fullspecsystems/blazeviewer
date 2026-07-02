@@ -29,14 +29,16 @@ done
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-CARGO_FLAGS=()
-[[ "$PROFILE" == "release" ]] && CARGO_FLAGS=(--release)
-
 echo "==> cargo build -p pb-mac-ffi ($PROFILE, aarch64-apple-darwin)"
 # Deployment target 14.0 (ADR-021) so the Rust objects match the Swift target's floor
-# (otherwise ld warns: object built for newer macOS than being linked).
-MACOSX_DEPLOYMENT_TARGET=14.0 \
-	cargo build -p pb-mac-ffi "${CARGO_FLAGS[@]}" --target aarch64-apple-darwin
+# (otherwise ld warns: object built for newer macOS than being linked). No flag array:
+# expanding an EMPTY array under `set -u` is "unbound variable" on the macOS runners'
+# bash 3.2 (fixed in bash 4.4) — the CI failure that taught us.
+if [[ "$PROFILE" == "release" ]]; then
+	MACOSX_DEPLOYMENT_TARGET=14.0 cargo build -p pb-mac-ffi --release --target aarch64-apple-darwin
+else
+	MACOSX_DEPLOYMENT_TARGET=14.0 cargo build -p pb-mac-ffi --target aarch64-apple-darwin
+fi
 
 echo "==> create-package (swift-bridge glue + staticlib → Swift package)"
 cargo run -q -p pb-mac-ffi --features package --bin create-package -- "--$PROFILE"

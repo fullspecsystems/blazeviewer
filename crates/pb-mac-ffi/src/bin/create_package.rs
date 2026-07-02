@@ -42,6 +42,29 @@ fn main() {
         out_dir: out_dir.clone(),
         package_name: "PbMacFfi".to_string(),
     });
+
+    // swift-bridge's generated runtime glue predates Swift 5.10's `@retroactive`: it
+    // declares conformances (RustStr: Identifiable/Equatable) on types the compiler sees
+    // as imported from the RustXcframework module, which warns on every build. Both sides
+    // of the "conformance" are swift-bridge's own code, so the warning is moot — annotate
+    // it away in the copy we just wrote. A plain string replace: if upstream's text ever
+    // changes this becomes a harmless no-op (and the warning returns as the signal).
+    let core_swift = out_dir.join("Sources/PbMacFfi/SwiftBridgeCore.swift");
+    if let Ok(src) = std::fs::read_to_string(&core_swift) {
+        let patched = src
+            .replace(
+                "extension RustStr: Identifiable {",
+                "extension RustStr: @retroactive Identifiable {",
+            )
+            .replace(
+                "extension RustStr: Equatable {",
+                "extension RustStr: @retroactive Equatable {",
+            );
+        if patched != src {
+            let _ = std::fs::write(&core_swift, patched);
+        }
+    }
+
     println!("Swift package written to {}", out_dir.display());
 }
 
