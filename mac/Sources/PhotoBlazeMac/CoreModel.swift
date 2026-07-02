@@ -1,6 +1,7 @@
 import AppKit
 import Observation
 import PbMacFfi
+import UniformTypeIdentifiers
 
 /// One drained-effect line in the on-screen log (id is a monotonic counter so the
 /// capped log never reuses SwiftUI row identities).
@@ -83,6 +84,11 @@ final class CoreModel {
         // AppKit, so the standard menu shortcuts (⌘Q, ⌘W, ⌘M, …) keep working.
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
             guard let self, let name = KeyMap.pbKeyName(for: event.keyCode) else { return event }
+            // A native panel (NSOpenPanel) owns the keyboard while it's up — don't swallow
+            // its typing/navigation; the viewer ignores input until it resolves.
+            if self.panelOpen {
+                return event
+            }
             if event.type == .keyDown {
                 let f = event.modifierFlags
                 self.core.key_down(
@@ -274,6 +280,12 @@ final class CoreModel {
         case .ReportError(let msg):
             // An NSAlert once the NS2 dialogs land.
             log("ERROR: \(msg.toString())")
+        case .OpenFilePanel(let dir):
+            presentOpenPanel(startDir: dir.toString(), choosingFolders: false)
+        case .OpenFolderPanel(let dir):
+            presentOpenPanel(startDir: dir.toString(), choosingFolders: true)
+        case .SetCursor(let kind):
+            applyCursor(kind.toString())
         case .Other:
             log("Other (not yet bridged)")
         }
@@ -286,4 +298,68 @@ final class CoreModel {
             effectLog.removeFirst(effectLog.count - 200)
         }
     }
+
+    // MARK: - Native handlers (the genuinely-platform effects)
+
+    /// Whether an NSOpenPanel is up — the key monitor passes events through untouched then,
+    /// so typing in the panel (its search field, ⌘-shortcuts) isn't swallowed by the viewer.
+    @ObservationIgnored private(set) var panelOpen = false
+
+    /// The native open panel (`CoreEffect::OpenFilePanel`/`OpenFolderPanel`). Mirrors the
+    /// winit shell's rfd usage: files default to the images+archives filter (a picked `.zip`
+    /// opens as an archive), multi-select allowed; results feed `open_paths` — the same
+    /// classify-and-open path as a Finder drop.
+    private func presentOpenPanel(startDir: String, choosingFolders: Bool) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = !choosingFolders
+        panel.canChooseDirectories = choosingFolders
+        panel.allowsMultipleSelection = !choosingFolders
+        panel.directoryURL = URL(fileURLWithPath: startDir, isDirectory: true)
+        if !choosingFolders {
+            // Images + archives — mirror IMAGE_FILTER_EXTS (+zip/7z) in pb-app/src/main.rs.
+            // (No "All files" escape hatch here — NSOpenPanel has no filter popup like
+            // Windows'; anything exotic can come in via the folder panel or a drop.)
+            let exts = [
+                "jpg", "jpeg", "jpe", "jfif", "png", "gif", "bmp", "tif", "tiff", "webp",
+                "tga", "qoi", "jxl", "svg", "svgz", "heic", "heif", "avif", "hdr", "exr",
+                "arw", "nef", "cr2", "cr3", "dng", "raf", "rw2", "orf", "srw", "pef", "raw",
+                "zip", "7z",
+            ]
+            panel.allowedContentTypes = exts.compactMap { UTType(filenameExtension: $0) }
+        }
+        panelOpen = true
+        panel.begin { [weak self] response in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.panelOpen = false
+                guard response == .OK, !panel.urls.isEmpty else { return }
+                self.openPaths(panel.urls.map(\.path))
+            }
+        }
+    }
+
+    /// `CoreEffect::SetCursor` → NSCursor. "hidden" uses hide-until-mouse-moves, matching
+    /// the viewer's cursor etiquette (any movement brings it back). The canvas view also
+    /// re-asserts `desiredCursor` on AppKit's `cursorUpdate` pass, so a window-edge resize
+    /// cursor (or any SwiftUI cursor rect) can't leak over the canvas.
+    private func applyCursor(_ kind: String) {
+        switch kind {
+        case "hidden":
+            desiredCursor = .arrow
+            NSCursor.setHiddenUntilMouseMoves(true)
+        case "grab":
+            desiredCursor = .openHand
+        case "grabbing":
+            desiredCursor = .closedHand
+        case "pointer":
+            desiredCursor = .pointingHand
+        default:
+            desiredCursor = .arrow
+        }
+        desiredCursor.set()
+    }
+
+    /// The cursor the core last asked for — the canvas re-asserts it whenever AppKit
+    /// runs a cursor update over the view.
+    @ObservationIgnored private(set) var desiredCursor: NSCursor = .arrow
 }

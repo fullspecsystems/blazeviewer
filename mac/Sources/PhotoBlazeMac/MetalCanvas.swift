@@ -36,9 +36,16 @@ final class MetalCanvasNSView: NSView {
         trackingAreas.forEach(removeTrackingArea)
         addTrackingArea(NSTrackingArea(
             rect: .zero,
-            options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect],
+            options: [.mouseMoved, .cursorUpdate, .activeInKeyWindow, .inVisibleRect],
             owner: self
         ))
+    }
+
+    /// Claim cursor ownership over the canvas: without this, the last AppKit cursor the
+    /// pointer crossed (a window-resize edge, a SwiftUI divider) leaks over the photo until
+    /// the core happens to emit a SetCursor transition.
+    override func cursorUpdate(with event: NSEvent) {
+        (model?.desiredCursor ?? .arrow).set()
     }
 
     /// AppKit's view coords are bottom-left-origin points; the core speaks top-left-origin

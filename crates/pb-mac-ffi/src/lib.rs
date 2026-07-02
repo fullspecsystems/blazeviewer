@@ -625,6 +625,30 @@ fn map_effect(e: contract::CoreEffect) -> ffi::CoreEffectFfi {
         // A user-facing error (bad open, refused archive, …) — an NSAlert once the NS2
         // dialogs land; the host logs it until then.
         C::ReportError(msg) => E::ReportError(msg),
+        // The native open panels (the empty-deck buttons + the O / ⇧O keys + the future
+        // File menu): the host runs an NSOpenPanel at `start_dir` and feeds the picked
+        // paths back through `open_paths` — the same classify-and-open as a drop.
+        C::OpenFilePanel { start_dir } => {
+            E::OpenFilePanel(start_dir.to_string_lossy().into_owned())
+        }
+        C::OpenFolderPanel { start_dir } => {
+            E::OpenFolderPanel(start_dir.to_string_lossy().into_owned())
+        }
+        // Pointer cursor, by kind name — the host maps to NSCursor (hover feedback for the
+        // on-canvas controls, the pan hand, the hidden viewer cursor).
+        C::SetCursor(kind) => {
+            use contract::CursorKind as K;
+            E::SetCursor(
+                match kind {
+                    K::Default => "default",
+                    K::Hidden => "hidden",
+                    K::Grab => "grab",
+                    K::Grabbing => "grabbing",
+                    K::Pointer => "pointer",
+                }
+                .to_string(),
+            )
+        }
         // Menu state, dialogs, clipboard, reveal, context menu, live audio, window mode,
         // surface ops, … — each bridged in a later NS1 slice.
         _ => E::Other,
@@ -648,6 +672,12 @@ mod ffi {
         ShellFlowAction(String),
         // A user-facing error message (an NSAlert once the NS2 dialogs land).
         ReportError(String),
+        // Run the native NSOpenPanel at this start directory; picked paths return
+        // via open_paths (files+archives / folders respectively).
+        OpenFilePanel(String),
+        OpenFolderPanel(String),
+        // Pointer cursor by kind: "default" | "hidden" | "grab" | "grabbing" | "pointer".
+        SetCursor(String),
         Other,
     }
 
