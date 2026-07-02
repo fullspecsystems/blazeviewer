@@ -57,6 +57,19 @@ with any pre-release suffix carried only by the tag.
   shortcuts still work exactly as before. (Replaces the old "Press O to open…" text hint.)
 
 ### Changed
+- **HEIC is much faster on Windows.** Full-resolution HEIC decoding now uses a parallel
+  CPU decoder (libheif) instead of the Windows built-in codec, which can only decode one
+  photo at a time no matter how many cores the machine has. Measured on the reference
+  corpus: ~4.9× the throughput (45 vs 9 full decodes per second on a 12 MP iPhone HEIC),
+  with lower per-photo latency too. Combined with the existing look-ahead, sharp
+  full-resolution HEICs are now pre-decoded around the photo you're on as you browse,
+  instead of each one sharpening only after you land on it. (Ships in the installer
+  build; H.264/HEVC hardware requirements are unchanged.)
+- **"Set default…" now opens PhotoBlaze's own page** in Windows Settings ▸ Default apps —
+  with every image type PhotoBlaze handles listed for one-click switching — instead of
+  dumping you at the top of the generic Default apps list. Works on existing installs
+  (the button registers the app for your user account if the installer hasn't), and new
+  installs register machine-wide.
 - **The keyboard-help overlay (`?`) has been redesigned.** It's now grouped into sections
   (Browse, View & Zoom, Animation, Files & App) with each command's shortcut shown dimmed and
   right-aligned, menu style, at a more compact size that fits on screen. On macOS the shortcuts

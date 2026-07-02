@@ -507,8 +507,8 @@
           {
             "id": 1,
             "title": "'Set as default' deep-link button/action",
-            "description": "Open ms-settings:defaultapps so the user can one-click confirm the default.",
-            "status": "pending",
+            "description": "Open ms-settings:defaultapps so the user can one-click confirm the default. DONE 2026-07-01: deep-links ms-settings:defaultapps?registeredApp{Machine,User}=PhotoBlaze via pb-app/src/default_app.rs; HKCU self-registration fallback for pre-registration installs; MSI now writes HKLM RegisteredApplications+Capabilities (AppRegistration component).",
+            "status": "done",
             "dependencies": []
           },
           {
@@ -565,8 +565,8 @@
       {
         "id": 16,
         "title": "HEIC/AVIF: parallel CPU libheif decode (break the WIC serialization)",
-        "description": "Route HEIC/AVIF decode to CPU libheif behind the ImageDecoder seam (A/B vs WIC) so the pool's concurrent workers actually parallelize. WIC's HEVC decoder serializes (~1.7x on 8 threads, measured), capping HEIC at ~8/s no matter the worker count; libheif (no shared GPU session) runs truly parallel -> ~8x -> prefetch full-res AHEAD of the user. Preview-first + on-land sharpen already shipped (ADR-020). Full plan, phasing, and the higher-res-preview spike: docs/heic-decode-plan.md.",
-        "status": "pending",
+        "description": "Route HEIC/AVIF decode to CPU libheif behind the ImageDecoder seam (A/B vs WIC) so the pool's concurrent workers actually parallelize. WIC's HEVC decoder serializes (~1.7x on 8 threads, measured), capping HEIC at ~8/s no matter the worker count; libheif (no shared GPU session) runs truly parallel -> ~8x -> prefetch full-res AHEAD of the user. Preview-first + on-land sharpen already shipped (ADR-020). Full plan, phasing, and the higher-res-preview spike: docs/heic-decode-plan.md. — DONE. Phases 0-3 were already implemented+measured 2026-06-28 (see docs/heic-decode-plan.md: 45/s vs WIC 9.4/s, full-ring prefetch landed); this entry was stale. 2026-07-01: re-verified post-NS0 refactor (heic_bench 45.4/s, 4.88x; feature builds+tests green), the release MSI and CI now build --features libheif (vcpkg installed-tree cached, VCPKG_ROOT=C:/vcpkg-pb on runners), and the Sony color follow-up landed (see #24).",
+        "status": "done",
         "priority": "high",
         "dependencies": [],
         "details": "See docs/heic-decode-plan.md. Decision: ADR-020 (CPU libheif now; NVDEC deferred — iPhone HEICs are 48-tile HEVC grids that libheif handles free). Phase 0 (OWNER, blocker): install vcpkg + cmake, `vcpkg install libheif` (libde265 + dav1d), set VCPKG_ROOT, decide static/dynamic link (dynamic -> ship DLLs in the MSI, update packaging.md). Phase 1: LibHeifDecoder (libheif-rs/libheif-sys) as an ImageDecoder for HEIC+AVIF, cargo-feature-gated, A/B vs WicDecoder; reuse common::finalize_oriented + the colr/CICP color path; preview via libheif thumbnail. Phase 2: bench concurrent throughput vs WIC over 12 & 48 MP (target >=~50/s). Phase 3 (payoff): widen request_prefetch's `upgrade_item` from displayed-only to the window (current-first) so fulls prefetch AHEAD -> sharp at scroll speed; watch VRAM budget + per-frame churn. Phase 4 (gated): NVDEC (ADR-012) only if 48 MP still lags.",
@@ -575,28 +575,28 @@
             "id": 1,
             "title": "Toolchain: vcpkg + libheif (owner)",
             "description": "Install vcpkg/cmake; vcpkg install libheif; VCPKG_ROOT; static-vs-dynamic + MSI DLL shipping.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 2,
             "title": "LibHeifDecoder behind the seam (feature-gated, A/B vs WIC)",
             "description": "ImageDecoder for HEIC+AVIF via libheif-rs; orientation + colr color; thumbnail preview.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 3,
             "title": "Benchmark concurrent throughput vs WIC",
             "description": "12 & 48 MP; confirm >=~50/s so fulls can be prefetched ahead.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 4,
             "title": "Prefetch fulls ahead (widen upgrade_item to the window)",
             "description": "Once decode is fast+parallel, fill full-res window current-first; mind VRAM + churn.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           }
         ]
@@ -856,8 +856,8 @@
       {
         "id": 24,
         "title": "HEIC color parity (libheif vs WIC): Sony/Apple re-encoded mid-tone difference",
-        "description": "On macOS/Apple-re-encoded HEICs of Sony-originated photos, the libheif decode backend renders ~3.5% darker in the mid-tones than WIC (and Apple/Windows Photos). The shift is uniform across R/G/B (no hue cast) and both backends span the full 0..255 range. Decide the correct rendering and make libheif match it.",
-        "status": "pending",
+        "description": "On macOS/Apple-re-encoded HEICs of Sony-originated photos, the libheif decode backend renders ~3.5% darker in the mid-tones than WIC (and Apple/Windows Photos). The shift is uniform across R/G/B (no hue cast) and both backends span the full 0..255 range. Decide the correct rendering and make libheif match it. — 2026-07-01: autocorrect_broken_input=1 set via heif_decoding_options_alloc (libheif >= 1.21 has this flag purpose-built for exactly this Sony colr-vs-VUI range quirk; version>=9 guarded). iPhone parity re-verified unchanged (heic_compare mean 0.567 levels). REMAINING: no Sony DSC*.heic sample exists on disk anymore — need one to confirm the mid-tone fix and close.",
+        "status": "review",
         "priority": "low",
         "dependencies": [],
         "details": "Found 2026-06-28 while validating the libheif HEIC backend (see .taskmaster/docs/heic-decode-plan.md SESSION UPDATE). The heic_compare example shows iPhone HEICs are pixel-identical between WIC and libheif (mean <1 level/channel), but Sony-originated HEICs differ by mean ~9-11 levels (3.5-4%), uniform across channels, both spanning 0..255 - so NOT a limited/full-range bug and NOT a matrix/color cast, but a transfer-curve (gamma) interpretation difference. PROVENANCE (the files are misleadingly named): EXIF says SONY / ILCE-7M3 (the A7III) + Adobe Lightroom, and the 42-tile 1024x576 HEVC grid is the macOS HEIF encoder's signature - so these are A7III shots, Lightroom-processed, then re-encoded to HEIC by macOS/Apple Photos (the A7III shoots no HEIF). LIKELY CAUSE: the documented libheif quirk where a file's colr (nclx) box disagrees with the HEVC VUI on the transfer/range flag; libheif trusts the bitstream, WIC follows the colr box (which takes precedence per MIAF). SUSPECTED FIX: set heif_decoding_options.autocorrect_broken_input = 1 (and/or output_image_nclx_profile_passthrough) so libheif honors colr. That needs hand-rolling libheif's VERSIONED decoding_options struct (10 versions deep, incl. a nested heif_color_conversion_options) and verifying the target field lands at the correct offset (sanity-check the version byte; confirm the Sony delta collapses to MATCH). LOW PRIORITY: subtle, no clipping/cast, likely imperceptible while browsing, and 'correct' is debatable without a ground-truth render. CORPUS: 10 Sony DSC*.heic in 'C:\\Users\\jdlien\\Pictures\\iCloud Photos\\Photos' (plus the Sony in D:\\Media\\Pictures\\test-images). VERIFY: cargo run -q --release --example heic_compare -p pb-decode --features libheif -- <file> (watch the mean delta + per-channel means).",
@@ -867,14 +867,14 @@
             "id": 1,
             "title": "Confirm the cause and pick the target rendering",
             "description": "Dump the Sony file's nclx (colr) transfer/matrix/range vs the HEVC VUI; decide the spec-correct rendering (likely colr = WIC) and whether the target is WIC-parity or Apple-Photos-parity.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 2,
             "title": "Replicate heif_decoding_options and set autocorrect_broken_input",
             "description": "Hand-roll the versioned struct (incl. nested heif_color_conversion_options), alloc via heif_decoding_options_alloc, verify the version byte, set autocorrect_broken_input=1, pass to heif_decode_image, free via heif_decoding_options_free (Drop-guarded).",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           },
           {
