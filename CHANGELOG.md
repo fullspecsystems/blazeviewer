@@ -64,7 +64,11 @@ with any pre-release suffix carried only by the tag.
   with lower per-photo latency too. Combined with the existing look-ahead, sharp
   full-resolution HEICs are now pre-decoded around the photo you're on as you browse,
   instead of each one sharpening only after you land on it. (Ships in the installer
-  build; H.264/HEVC hardware requirements are unchanged.)
+  build; H.264/HEVC hardware requirements are unchanged.) It also **renders some HEICs
+  more faithfully**: full-range HEICs (e.g. photos received through Apple shared albums)
+  were decoded by the Windows codec as TV-range — washed out, with the deepest shadows
+  and brightest highlights clipped. The new decoder honors the file's tags, so those
+  photos get their real contrast back.
 - **"Set default…" now opens PhotoBlaze's own page** in Windows Settings ▸ Default apps —
   with every image type PhotoBlaze handles listed for one-click switching — instead of
   dumping you at the top of the generic Default apps list. Works on existing installs
