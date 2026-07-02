@@ -555,6 +555,9 @@ final class CoreModel {
         while let effect = core.next_effect() {
             apply(effect)
         }
+        // SwiftUI may have clobbered the F-mode chrome during any UI pass since the last
+        // drain — re-assert it (compare-before-set, so a no-op in the steady state).
+        assertWindowChrome()
     }
 
     private func apply(_ effect: CoreEffectFfi) {
@@ -716,7 +719,9 @@ final class CoreModel {
     /// The path the proxy icon currently shows (cached so unchanged photos are a no-op).
     @ObservationIgnored private var proxyIconPath = ""
     /// The window is in the borderless fullscreen speed mode (no title bar → no proxy).
-    @ObservationIgnored private var speedModeFullscreen = false
+    /// Observable: ContentView drives the SwiftUI-owned titlebar surface off it
+    /// (`.toolbarBackground` — the AppKit props alone get re-clobbered by SwiftUI).
+    private(set) var speedModeFullscreen = false
 
     /// The title-bar **proxy icon** (`NSWindow.representedURL` — the winit shell's
     /// `refresh_proxy_icon` mirrored, macOS port task #12): the draggable doc icon +
@@ -803,24 +808,15 @@ final class CoreModel {
         guard let window = hostWindow else { return }
         speedModeFullscreen = fullscreen
         refreshProxyIcon() // no title bar in the speed mode → clear; restore on exit
+        assertWindowChrome()
         if fullscreen {
             savedFrame = window.frame
-            window.styleMask.insert(.fullSizeContentView)
-            window.titlebarAppearsTransparent = true
-            window.titleVisibility = .hidden
-            window.titlebarSeparatorStyle = .none // no hairline where the bar was
-            setTrafficLights(hidden: true, in: window)
             NSApp.presentationOptions = [.autoHideMenuBar, .autoHideDock]
             if let screen = window.screen ?? NSScreen.main {
                 window.setFrame(screen.frame, display: true)
             }
         } else {
             NSApp.presentationOptions = []
-            window.styleMask.remove(.fullSizeContentView)
-            window.titlebarAppearsTransparent = false
-            window.titleVisibility = .visible
-            window.titlebarSeparatorStyle = .automatic
-            setTrafficLights(hidden: false, in: window)
             if let frame = savedFrame {
                 window.setFrame(frame, display: true)
             }
@@ -829,9 +825,37 @@ final class CoreModel {
 
     @ObservationIgnored private var savedFrame: NSRect?
 
-    private func setTrafficLights(hidden: Bool, in window: NSWindow) {
+    /// Keep the window chrome matching the mode. A one-shot mutation is NOT enough:
+    /// SwiftUI owns the WindowGroup window's titlebar and re-asserts transparency /
+    /// button visibility on its own update passes (clobbering the F-mode styling — the
+    /// owner-reported "titlebar stays, stoplights visible" bug). So the desired chrome is
+    /// cheaply re-asserted after every drain, compare-before-set — the same
+    /// defeat-the-framework pattern the winit shell uses for per-tick menu state.
+    private func assertWindowChrome() {
+        guard let window = hostWindow else { return }
+        let fs = speedModeFullscreen
+        if window.styleMask.contains(.fullSizeContentView) != fs {
+            if fs {
+                window.styleMask.insert(.fullSizeContentView)
+            } else {
+                window.styleMask.remove(.fullSizeContentView)
+            }
+        }
+        if window.titlebarAppearsTransparent != fs {
+            window.titlebarAppearsTransparent = fs
+        }
+        let vis: NSWindow.TitleVisibility = fs ? .hidden : .visible
+        if window.titleVisibility != vis {
+            window.titleVisibility = vis
+        }
+        let sep: NSTitlebarSeparatorStyle = fs ? .none : .automatic
+        if window.titlebarSeparatorStyle != sep {
+            window.titlebarSeparatorStyle = sep
+        }
         for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
-            window.standardWindowButton(kind)?.isHidden = hidden
+            if let button = window.standardWindowButton(kind), button.isHidden != fs {
+                button.isHidden = fs
+            }
         }
     }
 }

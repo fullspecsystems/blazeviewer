@@ -81,6 +81,14 @@ struct ContentView: View {
             // excludes the titlebar there, so there's no inset to ignore).
             .ignoresSafeArea()
             .frame(minWidth: 520, minHeight: 360)
+            // SwiftUI owns the WindowGroup titlebar surface and repaints it over the
+            // AppKit-side transparency during its own update passes — hide it through
+            // SwiftUI itself while the F speed mode is on (the AppKit props are also
+            // re-asserted each drain; both are needed to keep the bar gone on Tahoe).
+            .toolbarBackground(
+                model.speedModeFullscreen ? Visibility.hidden : .automatic,
+                for: .windowToolbar
+            )
             .onAppear {
                 // After SwiftUI has installed its own main menu, replace it with ours.
                 model.installMenuBarIfNeeded()
