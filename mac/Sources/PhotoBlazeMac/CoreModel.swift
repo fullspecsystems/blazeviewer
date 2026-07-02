@@ -48,14 +48,22 @@ final class CoreModel {
 
     /// Deferred launch work, run from the view's `onAppear` (the window + canvas exist by
     /// then — the winit shell defers its launch into `resumed()` for the same reason):
-    /// a path on the command line (open …/PhotoBlazeMac.app --args /photos) opens like the
-    /// winit CLI arg — folder → recursive scan, image → its folder with the cursor on it,
-    /// .zip/.7z → the archive contents. Finder-drop + openURLs land with the input adapter
-    /// (item 4); the native open panel with the menus (item 8).
+    /// a path passed as `--pb-open /photos` (i.e. `open …/PhotoBlazeMac.app --args
+    /// --pb-open /photos`) opens like the winit CLI arg — folder → recursive scan, image →
+    /// its folder with the cursor on it, .zip/.7z → the archive contents.
+    ///
+    /// **Why a flag, not a bare path (the great windowless-app hunt):** AppKit treats a
+    /// bare path in `argv[1]` as a document-open launch, and then *suppresses the initial
+    /// WindowGroup window entirely* — the app runs windowless with a live menu bar. A
+    /// `-`-prefixed argument is ignored by that machinery. Finder-drop +
+    /// `application:openURLs:` land with the input adapter (item 4); the native open panel
+    /// with the menus (item 8).
     func openLaunchPathIfAny() {
         guard !launchPathOpened else { return }
         launchPathOpened = true
-        if let path = ProcessInfo.processInfo.arguments.dropFirst().first(where: { !$0.hasPrefix("-") }) {
+        let args = ProcessInfo.processInfo.arguments
+        if let flag = args.firstIndex(of: "--pb-open"), args.indices.contains(flag + 1) {
+            let path = args[flag + 1]
             core.open_path(path)
             log("open_path(\(path))")
             drainEffects()

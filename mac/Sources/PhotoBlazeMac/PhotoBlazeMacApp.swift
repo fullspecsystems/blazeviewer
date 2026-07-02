@@ -5,11 +5,14 @@ import SwiftUI
 /// the effects out. The wgpu canvas (item 2), real photo source (item 3), and the rest of
 /// the event/effect surface land in the following slices; the egui-on-Mac beta remains the
 /// shippable Mac artifact until the NS3 cutover.
-/// Makes a **bare-binary launch** (`swift run`, running the executable straight out of the
-/// .app — the dev loop) behave like a Finder launch: without a proper activation policy in
-/// place *before* SwiftUI reconciles its scenes, the initial `WindowGroup` window is never
-/// created at all (the app runs windowless with a working menu bar — a fun one to debug).
-/// `.onAppear` is too late to fix that, since with no window it never runs.
+/// Early activation for **bare-binary launches** (`swift run`, running the executable
+/// straight out of the .app — the dev loop), so they front + focus like a Finder launch.
+/// Also the future home of `application:openURLs:`/`openFile:` (NS1 item 4).
+///
+/// NOTE the launch gotcha that was chased for a whole evening: it was NOT activation —
+/// AppKit treats a bare path in `argv[1]` as a document-open launch and suppresses the
+/// initial `WindowGroup` window entirely (windowless app, live menu bar). Hence the
+/// `--pb-open <path>` flag (see `CoreModel.openLaunchPathIfAny`).
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
