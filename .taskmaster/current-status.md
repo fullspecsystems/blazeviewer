@@ -1,26 +1,20 @@
 # PhotoBlaze — Current Status (session handoff)
 
-_Last updated: 2026-07-01. **ACTIVE STREAM: NS0 — the AppCore ownership inversion** (macOS
-SwiftUI groundwork, ADR-021) — see the NS0 section immediately below. On branch `swiftui`.
-NS0 is now **~90% done: the full STATE inversion, the BEHAVIOR inversion (Phase B, ~99 methods),
-`dispatch_action` moved onto `AppCore`, AND the keystone `handle(CoreEvent)` (Phase C1) all
-land. ✅ NS1 (the Swift bridge) is now UNBLOCKED — it can drive the viewer through `handle()`,
-which exists + is unit-tested.** Phase C2 (winit shell → `handle()` translator) is **done + owner-
-smoke-verified**: keyboard + pointer + the whole `about_to_wait` tick loop route through `handle()`.
-**Phase 5.6 (the flow inversion) is underway:** 7 of 11 flow actions are now inverted into core arms
-/ specific effects — **Mute** → core, **About/Settings** → `ShowDialog`, **SaveRotation/Undo** +
-**Delete-to-trash** → pure core arms (their EXIF / trash IO modules moved into `pb-app-core`), and
-**Fullscreen** → core arm (`windowed` field migrated App → AppCore). The remaining 4
-(**DeletePermanent** confirm, **Recursive/CancelScan** scan threads, **Quit** teardown) are
-legitimately host-side and stay behind the (reframed) `ShellFlowAction` seam. **All 7 owner-smoke-
-verified (2026-07-01) — "never seen a regression"; Fullscreen (`2f6003d`) "looks great."** Separately,
-the **archive/scan flow** inversion is **COMPLETE**: the dialog-outcome *reactions* (Step 1,
-`3006765`), the entire resolve/scan **compute** (Step 2, `3cdb016`/`b21f59a`/`ef40042`), and the
-**worker flow** (Step 3, `dc0982d`/`e9c58f8`/`0b8f023`) are all core-driven — the core routes an open
-→ `BeginArchiveOpen`/`BeginDirScan` effect → host worker → `ScanBatch`/`ScanDone`/`ArchiveResolved`
-events → core applies. Steps 1–3 all owner-smoke-verified ("all clear"). Only the thread/mpsc + egui
-progress dialogs stay shell. **NS0 5.6 is effectively complete.** Everything below the NS0 section is the previously-shipped work (macOS port,
-archive, settings, HEIC, color), unchanged._
+_Last updated: 2026-07-01. **NS0 — the AppCore ownership inversion (ADR-021, the macOS
+SwiftUI/AppKit groundwork) is COMPLETE.** On branch `swiftui`, fast-forwarded + pushed to
+`origin/main` (`4089157`). The winit `App` god-object is fully inverted into a platform-neutral
+**`AppCore`** (crate `pb-app-core`) + a thin winit shell: every input event
+(keyboard/focus/pointer/pinch/double-tap/**resize**/**scroll**), the tick loop, all menu + dialog
+actions, the dialog outcomes, and the whole open/scan/archive flow run through
+**`AppCore::handle(CoreEvent)`** + a **`CoreEffect`** drain. The shell is a translator
+(`WindowEvent`→`CoreEvent`) + effect-executor; what stays shell is genuine platform machinery — the
+winit window, the GPU surface, `thread::spawn`+`mpsc` workers, and the egui dialogs. Green: **393
+workspace tests, clippy `-D warnings`, fmt**; owner-smoke-verified across the inversion (three tail
+commits — PasswordSubmitted `8dfc507`, Resized `6ae58da`, scroll `45af83b` — are green but await a
+final smoke). **The next phase is NS1: a Swift/AppKit host driving the same `handle()`/effects via a
+C FFI layer** — see the **▶ Resume** section at the end of the NS0 block. The NS0 section below is the
+detailed step-by-step record; everything under it is previously-shipped work (macOS port, archive,
+settings, HEIC, color), unchanged._
 
 _The macOS (Apple Silicon) port is complete and SHIPPED in `v0.1.0-beta.4` (2026-06-30) — the
 first signed + notarized macOS DMG alongside the signed Windows MSI. Verified notarized +
@@ -28,16 +22,15 @@ stapled + Gatekeeper-accepted (`source=Notarized Developer ID`)._
 
 ---
 
-## 🧭 NS0 — AppCore ownership inversion (SwiftUI groundwork, ADR-021) — IN PROGRESS (2026-07-01)
+## 🧭 NS0 — AppCore ownership inversion (SwiftUI groundwork, ADR-021) — ✅ COMPLETE (2026-07-01)
 
-**Branch `swiftui`. Green throughout: 389 workspace tests, clippy `-D warnings`, fmt.
-Owner-smoke-verified through Phase C2's tick loop AND the 5.6 flow inversions (2026-07-01,
-"never seen a regression"). `main.rs` is down from 7,618 → ~4,400 lines; `impl AppCore` now carries
-the full engine + `handle`/`tick`/`dispatch_action` + the mute/save-rotation/undo/delete arms
-(`app_core_impl.rs`), and the EXIF-write (`save_rotation`) + trash (`delete`) modules moved in too.
-Full detail + resume plan: `.taskmaster/docs/ns0-step5-behavior-inversion-plan.md` (r1, codex-reviewed).
-**Not yet fast-forwarded onto `main`** — this is a clean, smoke-verified FF point (owner's call);
-rollback is `git reset --hard 44d9464` (pre-Phase-B).**
+**Branch `swiftui`, fast-forwarded + pushed to `origin/main` (`4089157`). Green throughout: 393
+workspace tests, clippy `-D warnings`, fmt; owner-smoke-verified across the inversion. `main.rs` is
+down from 7,618 → ~4,300 lines; `impl AppCore` carries the full engine + `handle`/`tick`/
+`dispatch_action` + every command arm, and the resolve/scan compute (`scan`), EXIF-write
+(`save_rotation`), trash (`delete`), and archive-RAM (`archive`) modules all moved into
+`pb-app-core`. Rollback (if ever needed): `git reset --hard 44d9464` (pre-Phase-B). The step-by-step
+detail below is a historical record; the actionable next step is the **▶ Resume** section (NS1).**
 
 **Goal:** invert the winit `App` god-object into a platform-neutral **`AppCore`** (in
 `pb-app-core`) + a thin shell, so a macOS SwiftUI/AppKit host can drive the *same* core via the
@@ -123,10 +116,10 @@ each `cargo test --workspace` + `clippy -D warnings` + `fmt` clean, behavior-pre
   `AppCore` (empty source, dummy pool, no window) drives it. Escape isn't special-cased here (it
   resolves through the keymap to `Quit` → `ShellFlowAction`; the host owns dialog-dismiss-vs-quit).
 
-**✅ NS1 (the Swift bridge) is UNBLOCKED** — it can drive the viewer through `handle()` today for
-keyboard + menu + pointer gestures, with the unit tests as the safety net.
+**✅ NS1 (the Swift bridge) is UNBLOCKED** — and, after C2 below, the winit shell drives the *entire*
+engine through `handle()` (not just keyboard/menu), so the Swift host has a fully worked reference.
 
-### ◐ IN PROGRESS — Phase C2 (winit shell → translator). **Input + Tick done; only GPU/scroll bits remain.**
+### ✅ DONE — Phase C2 (winit shell → translator). **The whole input surface + tick loop route through `handle()`.**
 The winit shell now translates its **input events + the whole tick loop** to `CoreEvent`s and calls
 `self.core.handle(ev)` — the SAME entry the Swift host uses — instead of calling core methods inline:
 - **✅ Keyboard + focus** (`0b080ce`): `KeyboardInput` press/release → `KeyDown`/`KeyUp`;
@@ -160,7 +153,7 @@ The winit shell now translates its **input events + the whole tick loop** to `Co
 - Still shell (no clean seam / genuinely platform): `MouseInput`/`CursorLeft` (call core methods
   directly), `DroppedPaths` (the shell classifies inputs → `open_input` → the core `open_plan`).
   **The whole input surface + engine now runs through `handle()`.**
-### ◐ Phase 5.6 (the FLOW inversion). **7 of 11 flow actions inverted; the rest are legitimately host-side.**
+### ✅ DONE — Phase 5.6 (the FLOW inversion). **7 of 11 flow actions inverted; the rest are legitimately host-side.**
 The `ShellFlowAction(Action)` catch-all is being decomposed: each flow action that has genuinely-
 core logic moves into its own `dispatch_action` arm / specific effect; only true platform ops stay.
 - **✅ Inverted this session (2026-07-01, owner-smoke-verified "never seen a regression"):**
@@ -182,7 +175,7 @@ core logic moves into its own `dispatch_action` arm / specific effect; only true
   *is* a platform op: **DeletePermanent** (opens the confirm dialog; its Yes calls the core
   `do_delete`), **Recursive** / **CancelScan** (spawn / cancel the off-thread scan + its dialog),
   **Quit** (hide-window teardown, also reached from window-close / Esc).
-### ◐ Archive/scan **dialog-outcome flow** inversion — STARTED (2026-07-01). The last coupled piece.
+### ✅ DONE — Archive/scan flow inversion (2026-07-01). The last coupled piece — now fully core-driven.
 Mapped end-to-end (Explore agent) and inverted in the recommended low-risk order:
 - **✅ Step 1 — dialog-outcome reactions → core** (`3006765`, ✅ owner-smoke-verified): `handle_dialog_outcome`'s
   reactions (apply_settings/keymap, `do_delete`, esc-guard, clear pending confirm/password) moved
@@ -226,37 +219,45 @@ Mapped end-to-end (Explore agent) and inverted in the recommended low-risk order
 - The other `ShellFlowAction` arms (DeletePermanent confirm, Recursive/CancelScan scan-thread spawn,
   Quit teardown) remain genuine platform ops. None of this blocks NS1.
 
-### ▶ Resume (next session)
-Read **`.taskmaster/docs/ns0-step5-behavior-inversion-plan.md`** (Phase E = 5.6). Two independent
-tracks remain, either order:
-1. **NS1 can start** — bind the Swift/AppKit host to `AppCore::handle()`. The host: builds
-   `CoreEvent`s (KeyDown/KeyUp/FocusLost/MenuAction/PointerMoved/Pinch/DoubleTap/Tick), calls
-   `self.handle(ev)`, then drains the returned `CoreEffect`s natively (menu state, clipboard,
-   `SetWake`→its run-loop timer, `ShellFlowAction`→native About/Settings/save panels, live-audio→
-   `AVAudioPlayer`). `handle()`/`tick()`/the contract vocabulary are ready + unit-tested; the winit
-   shell (`main.rs` `window_event`/`about_to_wait`) is the worked reference for what each event maps to.
-2. **5.6 is mostly done** — the flow actions with genuine core logic are inverted (Mute, About/
-   Settings, SaveRotation/Undo, Delete-to-trash, **Fullscreen**); the remaining `ShellFlowAction`
-   arms (DeletePermanent confirm, Recursive/CancelScan scan threads, Quit teardown) are legitimately
-   host-side (all 7 inverted actions are owner-smoke-verified). **Only if we want zero
-   `ShellFlowAction`:** the archive/scan **dialog-outcome flow**
-   inversion (`begin_archive_open`→`DialogWindow`, migrate `DialogOutcome`/`Resolved` to `CoreEvent`s).
-   Optional deferred C2 bits: `Resized`→`handle` (core viewport part; shell keeps the GPU-surface/EDR
-   poke) and a `Scroll` seam for `MouseWheel`. None of these block NS1.
+### ▶ Resume (next phase = NS1, the Swift/AppKit bridge)
+NS0 is done, green, and on `main`. Two things before/at the start of NS1:
 
-**Move-recipe + wiring hazards** (all hit + handled this session): multiline `self\n.core\n.field`
-chains (regex-collapse, not a literal replace); a method calling a shell *module* path
-(`clipboard::`/`save_rotation::`/`delete::`) or an associated `Self::`/`App::` fn — the token
-classifier misses both, grep the body first; test-only imports go in the `#[cfg(test)] mod tests`
-block, not the crate root; effects that enqueue follow-up effects need the drain's bounded
-loop-until-quiescent (already in place). Scratchpad has the scripts (`move_methods.py`, `reclass3.py`).
+**0. Smoke the three green-but-unsmoked tail commits** (a quick pass): scroll (`45af83b`) —
+mouse-wheel + trackpad pan a zoomed photo, Ctrl+scroll zooms about the cursor, the *Scroll wheel =
+Zoom* setting inverts it; resize (`6ae58da`) — drag-resize re-fits + crisp re-decodes on settle,
+fullscreen toggle, and HDR stays alive on a P3/HDR mac across a resize/display-move; PasswordSubmitted
+(`8dfc507`) — a password-protected `.zip`/`.7z` (correct → Checking… → opens; wrong → re-prompt;
+Cancel/Esc abandon).
 
-**Smoke status:** ✅ this whole session (Phase B moves, `dispatch_action` split, `handle()` + the C2
-keyboard/pointer/**tick-loop** translation) is **owner-smoke-verified — "everything is looking good."**
-The one thing worth a *release* build re-check before shipping: the flow paths under
-`ShellFlowAction` (Settings/About/Confirm-delete/Save/Undo/Fullscreen/Recursive/Stop-Scanning/
-Mute/Quit) now run at `drain` instead of inline (same event turn). Still on `swiftui`, not yet
-fast-forwarded onto `main` (a good FF point now); `git reset --hard 44d9464` = pre-Phase-B rollback.
+**1. NS1 — bind a native macOS host to the core.** The host owns the `NSWindow`/`CAMetalLayer` + the
+run loop and drives the Rust engine over a **C FFI layer** (`extern "C"` shim over `AppCore`):
+- **Events in:** translate `NSEvent`/gesture-recognizer/`NSMenu` input into `CoreEvent`s
+  (KeyDown/KeyUp/FocusLost/PointerMoved/Scroll(ScrollDelta)/Pinch/DoubleTap/Resized/MenuAction/Tick/
+  DialogResolved/ScanBatch/ScanDone/ArchiveResolved) and call `AppCore::handle(ev)`.
+- **Effects out:** drain the accumulated `CoreEffect`s natively — `SetWake`→a run-loop timer,
+  `SetTitle`/`SetCursor`/`SetWindowMode`/`HideWindow`/`Quit`→`NSWindow`/app, `SetMenuState`→`NSMenu`,
+  `ShowDialog`/`CloseDialog`/`SetDialogChecking`→native panels, `Begin{ArchiveOpen,DirScan}`→a GCD
+  worker feeding results back as the `*Resolved`/`ScanBatch` events, `WriteClipboard`→`NSPasteboard`,
+  `Start/Stop/Pause/ResumeLiveAudio`→`AVAudioPlayer`, `ShellFlowAction(Action)`→the native op.
+- **The winit shell (`crates/pb-app/src/main.rs`) is the worked reference** — its
+  `window_event`/`about_to_wait`/`drain_effects` show exactly what each event maps to and what each
+  effect does. The full contract + docs are in `crates/pb-app-core/src/contract.rs`. The GPU/render
+  path (`pb-render`, wgpu-on-Metal) already ports; the host just needs to hand the core a surface.
+- **Open question to settle early:** the FFI boundary shape (a C-ABI `pb_app_core` staticlib +
+  handmade header, vs `cbindgen`/`swift-bridge`), and how the `CoreEvent`/`CoreEffect` enums cross it
+  (a flat C tagged-union, or opaque handles + accessor fns). Prototype one event (KeyDown) + one
+  effect (RequestRender) end-to-end first.
+
+**Move-recipe hazards (for any further Rust-side moves):** multiline `self\n.core\n.field` chains
+(regex-collapse, not a literal replace); a method calling a shell *module* path or an associated
+`Self::`/`App::` fn — the token classifier misses both, grep the body first; test-only imports go in
+the `#[cfg(test)] mod tests` block; effects that enqueue follow-ups rely on the drain's bounded
+loop-until-quiescent (already in place). Scratchpad has `move_methods.py` / `reclass3.py`.
+
+**Optional Rust-side tidy (not blocking NS1):** the residual `ShellFlowAction` arms
+(DeletePermanent-confirm / Recursive / CancelScan / Quit) are legitimately host-side commands and can
+stay; the two egui-dialog *payload* seams (progress handles, error text) are the last things still
+crossing shell↔core as concrete types.
 
 ---
 
@@ -272,7 +273,7 @@ the fly-speed cap (#20) are also done, and the typed Settings model + live backe
 are in (#22)** — only the Settings *dialog form* remains; see "Settings + configurable
 keymap stream" below.
 
-## 🍎 macOS (Apple Silicon) port — IN PROGRESS (2026-06-29) — see `.taskmaster/docs/macos-port-plan.md`
+## 🍎 macOS (Apple Silicon) port — ✅ SHIPPED (v0.1.0-beta.4, 2026-06-30) — see `.taskmaster/docs/macos-port-plan.md`
 
 A **cfg-gated monorepo** port (NOT a fork): one codebase, `#[cfg(target_os="macos")]`
 siblings beside the `#[cfg(windows)]` arms; `cargo build` picks Metal / NSMenu / Image I/O
