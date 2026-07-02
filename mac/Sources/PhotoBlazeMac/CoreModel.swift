@@ -111,6 +111,15 @@ final class CoreModel {
         // AppKit, so the standard menu shortcuts (⌘Q, ⌘W, ⌘M, …) keep working.
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
             guard let self, let name = KeyMap.pbKeyName(for: event.keyCode) else { return event }
+            // Escape tracing for the owner-reported "second Esc quits, first is ignored"
+            // — shows exactly which gate (panel/alert/sheet) or state ate the press.
+            if name == "Escape" {
+                self.log(
+                    "Esc \(event.type == .keyDown ? "dn" : "up") repeat=\(event.isARepeat) "
+                        + "gate: panel=\(self.panelOpen) alert=\(self.alertUp) "
+                        + "sheet=\(self.activeSheet?.rawValue ?? "none")"
+                )
+            }
             // A native panel (NSOpenPanel), an alert, or a dialog sheet owns the keyboard
             // while it's up — don't swallow its typing/navigation (the password field!);
             // the viewer ignores input until it resolves.
@@ -374,6 +383,7 @@ final class CoreModel {
     /// The user dismissed the presented sheet by a path other than its buttons (the sheet
     /// binding wrote nil). The core cancels any matching in-flight op and closes.
     func userDismissedSheet() {
+        log("userDismissedSheet")
         activeSheet = nil
         core.dialog_dismissed()
         drainEffects()
@@ -808,22 +818,73 @@ final class CoreModel {
         guard let window = hostWindow else { return }
         speedModeFullscreen = fullscreen
         refreshProxyIcon() // no title bar in the speed mode → clear; restore on exit
-        assertWindowChrome()
         if fullscreen {
             savedFrame = window.frame
+            savedStyleMask = window.styleMask
+            // TRUE borderless: dropping `.titled` is what removes Tahoe's superelliptical
+            // corner radius + glass rim, so the photo owns every pixel. A bare borderless
+            // NSWindow refuses key status (and SwiftUI's window class doesn't override
+            // that — the probe below failed on the first attempt), so first make the
+            // window keyable-when-borderless, then probe; if it still refuses, fall back
+            // to the chromeless-but-titled look rather than a dead keyboard.
+            makeKeyableWhenBorderless(window)
+            window.styleMask = [.borderless, .fullSizeContentView]
+            borderlessOK = window.canBecomeKey
+            if !borderlessOK {
+                window.styleMask = savedStyleMask ?? window.styleMask
+                log("borderless probe failed — keeping the titled fallback")
+            }
             NSApp.presentationOptions = [.autoHideMenuBar, .autoHideDock]
             if let screen = window.screen ?? NSScreen.main {
                 window.setFrame(screen.frame, display: true)
             }
+            window.makeKeyAndOrderFront(nil)
         } else {
             NSApp.presentationOptions = []
+            if let mask = savedStyleMask {
+                window.styleMask = mask
+            }
+            borderlessOK = false
             if let frame = savedFrame {
                 window.setFrame(frame, display: true)
             }
         }
+        assertWindowChrome()
     }
 
     @ObservationIgnored private var savedFrame: NSRect?
+    /// The windowed-mode style mask, captured entering F mode and restored on exit.
+    @ObservationIgnored private var savedStyleMask: NSWindow.StyleMask?
+    /// F mode achieved true borderless (vs the titled fallback) — assertWindowChrome
+    /// keeps the mask that way if SwiftUI re-adds `.titled` mid-mode.
+    @ObservationIgnored private var borderlessOK = false
+
+    /// Let `window` stay key without `.titled`: NSWindow refuses key status while
+    /// borderless (and SwiftUI's window class keeps that default), which would mean a
+    /// dead keyboard in the F speed mode. Swap in a dynamic subclass whose
+    /// `canBecomeKey`/`canBecomeMain` return true — the runtime twin of the static
+    /// override winit's own NSWindow subclass ships for exactly this. Idempotent; the
+    /// override is harmless in windowed mode (titled windows already answer yes).
+    private func makeKeyableWhenBorderless(_ window: NSWindow) {
+        guard let base: AnyClass = object_getClass(window) else { return }
+        let subName = "PBKeyable_" + NSStringFromClass(base)
+        if NSClassFromString(subName) == nil {
+            guard let sub = objc_allocateClassPair(base, subName, 0) else { return }
+            let yes: @convention(block) (AnyObject?) -> Bool = { _ in true }
+            class_addMethod(
+                sub, NSSelectorFromString("canBecomeKeyWindow"),
+                imp_implementationWithBlock(yes), "B@:"
+            )
+            class_addMethod(
+                sub, NSSelectorFromString("canBecomeMainWindow"),
+                imp_implementationWithBlock(yes), "B@:"
+            )
+            objc_registerClassPair(sub)
+        }
+        if let sub = NSClassFromString(subName), object_getClass(window) != sub {
+            object_setClass(window, sub)
+        }
+    }
 
     /// Keep the window chrome matching the mode. A one-shot mutation is NOT enough:
     /// SwiftUI owns the WindowGroup window's titlebar and re-asserts transparency /
@@ -834,12 +895,21 @@ final class CoreModel {
     private func assertWindowChrome() {
         guard let window = hostWindow else { return }
         let fs = speedModeFullscreen
-        if window.styleMask.contains(.fullSizeContentView) != fs {
+        if fs, borderlessOK {
+            // True borderless mode: keep it that way if SwiftUI re-adds `.titled`.
+            if window.styleMask.contains(.titled) {
+                window.styleMask = [.borderless, .fullSizeContentView]
+            }
+        } else if window.styleMask.contains(.fullSizeContentView) != fs {
             if fs {
                 window.styleMask.insert(.fullSizeContentView)
             } else {
                 window.styleMask.remove(.fullSizeContentView)
             }
+        }
+        // No shadow in F mode — its rim highlight reads as a border at the screen edge.
+        if window.hasShadow != !fs {
+            window.hasShadow = !fs
         }
         if window.titlebarAppearsTransparent != fs {
             window.titlebarAppearsTransparent = fs
