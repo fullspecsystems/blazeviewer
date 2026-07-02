@@ -111,6 +111,11 @@ windows = { version = "0.62", features = [
     # GlobalMemoryStatusEx / MEMORYSTATUSEX: query available physical RAM for the
     # eager-archive (7z) memory budget (see src/archive.rs).
     "Win32_System_SystemInformation",
+    # WinRT MediaPlayer for Live Photo audio (task #39, src/live_audio.rs):
+    # Media.Playback.MediaPlayer + Media.Core.MediaSource + Foundation.Uri/TimeSpan.
+    "Foundation",
+    "Media_Core",
+    "Media_Playback",
 ] }
 
 # Test-only: build archive fixtures for the no-trace integration tests. Same crates

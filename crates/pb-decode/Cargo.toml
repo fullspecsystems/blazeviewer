@@ -51,6 +51,7 @@ name = "heic_compare"
 required-features = ["libheif"]
 
 [target."cfg(windows)".dependencies]
-# AVIF + HEIC via the Windows Imaging Component (the OS codec extensions);
+# AVIF + HEIC via the Windows Imaging Component (the OS codec extensions), and the
+# Live Photo motion .mov via Media Foundation (task #39, same OS-codec pattern);
 # pure-Rust bindings, no native build. cfg-gated off on non-Windows targets.
-windows = { version = "0.62.2", features = ["Win32_Graphics_Imaging", "Win32_System_Com", "Win32_Foundation"] }
+windows = { version = "0.62.2", features = ["Win32_Graphics_Imaging", "Win32_System_Com", "Win32_Foundation", "Win32_Media_MediaFoundation"] }

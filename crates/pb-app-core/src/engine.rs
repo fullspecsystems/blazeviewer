@@ -85,7 +85,7 @@ pub const DELETE_ADVANCE_DELAY: Duration = Duration::from_millis(160);
 /// motion is a brief preview, not a pixel-peeping asset, so a ~1440px cap keeps the
 /// whole pre-decoded RGBA sequence's RAM bounded (~0.5 GB worst case) without a visible
 /// quality cost. Also clamped to the display fit, so a small window decodes smaller.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub const MOTION_MAX_LONG_EDGE: u32 = 1440;
 
 /// Max displayed characters for an EXIF value; longer ones are truncated so a
@@ -213,17 +213,17 @@ pub fn decode_item(
     Ok(img)
 }
 
-/// The off-thread decode for an on-demand motion sequence (tasks #37 / #38): a Live
-/// Photo's companion `.mov` via AVFoundation when `live` is set, otherwise the item's
-/// own bytes as a multi-frame animation. Both return a unified [`pb_decode::Animation`]
-/// so playback treats them identically.
+/// The off-thread decode for an on-demand motion sequence (tasks #37 / #38 / #39): a
+/// Live Photo's companion `.mov` (AVFoundation on macOS, Media Foundation on Windows)
+/// when `live` is set, otherwise the item's own bytes as a multi-frame animation. Both
+/// return a unified [`pb_decode::Animation`] so playback treats them identically.
 pub fn decode_motion_job(
     live: Option<PathBuf>,
     source: &Arc<dyn PhotoSource>,
     item: usize,
     fit: Option<FitBox>,
 ) -> Result<pb_decode::Animation, DecodeError> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     if let Some(path) = &live {
         // Cap the motion's long edge to the display fit, but never above the RAM ceiling.
         let edge = fit
@@ -232,9 +232,9 @@ pub fn decode_motion_job(
             .min(MOTION_MAX_LONG_EDGE);
         return pb_decode::decode_live_motion(path, edge);
     }
-    // Off macOS `live` is always `None` (Live Photos = task #39); acknowledge it there so
-    // the parameter isn't flagged unused.
-    #[cfg(not(target_os = "macos"))]
+    // On other platforms `live` is always `None` (no motion decoder); acknowledge it
+    // there so the parameter isn't flagged unused.
+    #[cfg(not(any(target_os = "macos", windows)))]
     let _ = &live;
     match source.bytes(item) {
         Ok(bytes) => pb_decode::decode_animation(&bytes, fit),
@@ -456,9 +456,9 @@ pub fn rotate_rgba8(pixels: &[u8], w: u32, h: u32, rot: Rotation) -> (Vec<u8>, u
 /// path if such a sibling exists on disk. Archive entries have no filesystem path, so
 /// they never pair here (Live-Photos-in-archives is out of scope for v1).
 ///
-/// macOS-only for now: the motion decoder is AVFoundation, so a Windows build (Live
-/// Photos = task #39) has no consumer for a pairing and would flag this unused.
-#[cfg(target_os = "macos")]
+/// Only where a motion decoder exists (AVFoundation on macOS, Media Foundation on
+/// Windows) — elsewhere a pairing would have no consumer and be flagged unused.
+#[cfg(any(target_os = "macos", windows))]
 pub fn companion_motion(still: &Path) -> Option<PathBuf> {
     let dir = still.parent()?;
     let stem = still.file_stem()?;
@@ -608,7 +608,7 @@ mod tests {
 
     /// Live Photo pairing: a still finds its same-stem sibling `.mov`; a still with no
     /// motion clip pairs to nothing. Filename-based (Apple's on-disk convention, #38).
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     #[test]
     fn companion_motion_pairs_a_same_stem_mov() {
         use std::fs;

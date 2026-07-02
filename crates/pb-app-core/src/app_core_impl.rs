@@ -3562,20 +3562,20 @@ impl AppCore {
     }
 
     /// The companion motion `.mov` for item `item` if it's a Live Photo, else `None`
-    /// (task #38). Filesystem pairing, memoized per item and computed lazily — only ever
-    /// reached when settled on a photo, never on the fly-through path. Always `None` off
-    /// macOS (Windows Live Photos are task #39, since the decoder is macOS-only).
+    /// (tasks #38 / #39). Filesystem pairing, memoized per item and computed lazily —
+    /// only ever reached when settled on a photo, never on the fly-through path. Always
+    /// `None` on platforms without a motion decoder (macOS + Windows have one).
     pub fn live_motion_path(&mut self, item: usize) -> Option<PathBuf> {
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", windows)))]
         {
             let _ = item;
             None
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         if let Some(cached) = self.live_motion_cache.get(&item) {
             return cached.clone();
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         {
             let paired = self.source.path(item).and_then(companion_motion);
             self.live_motion_cache.insert(item, paired.clone());

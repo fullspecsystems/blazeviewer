@@ -1414,8 +1414,8 @@
       {
         "id": 39,
         "title": "Live Photos (Windows): decode the companion .mov via Media Foundation",
-        "description": "Windows port of #38. Pairing (#38 subtask 1) is cross-platform and reused as-is. Only the decode backend differs: replace AVFoundation with Media Foundation IMFSourceReader reading the .mov video track to frames (same as the AVIF/HEIC WIC pattern in wic.rs — a cfg(windows) backend behind the same seam). Content-identifier read on Windows uses the same MakerNote (still) + a QuickTime atom parse (.mov) if content-id verification is wanted. Deferred until the macOS path proves the design.",
-        "status": "deferred",
+        "description": "Windows port of #38. Pairing (#38 subtask 1) is cross-platform and reused as-is. Only the decode backend differs: replace AVFoundation with Media Foundation IMFSourceReader reading the .mov video track to frames (same as the AVIF/HEIC WIC pattern in wic.rs — a cfg(windows) backend behind the same seam). Content-identifier read on Windows uses the same MakerNote (still) + a QuickTime atom parse (.mov) if content-id verification is wanted. Deferred until the macOS path proves the design. — IMPLEMENTED 2026-07-01 (pb-decode/src/mf_video.rs IMFSourceReader->RGB32 with true per-sample timing + auto-rotation via advanced video processing; live_audio.rs Windows WinRT MediaPlayer; pairing/gates un-gated to any(macos,windows)). Verified against real 2019/2020 iPhone Live Photos (portrait rotation + colors eyeballed via live_probe --dump). Awaiting owner smoke-test in the app.",
+        "status": "review",
         "priority": "low",
         "dependencies": [
           38

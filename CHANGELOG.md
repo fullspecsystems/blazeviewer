@@ -43,6 +43,13 @@ with any pre-release suffix carried only by the tag.
   it finishes. The Live Photo's **audio** plays with the motion; mute it with **M** (or Image ▸
   Mute Live Photo Audio — the choice is remembered). The detailed info panel shows it's a Live
   Photo (with frame count / rate / duration), and the basic info line marks it **· Live**.
+- **Live Photos play on Windows too.** The same Live Photo experience that landed on macOS
+  now works on Windows: landing on an Apple Live Photo (a still with a companion `.mov`)
+  shows the **Live Photo ◉ Press P to play** hint, **P** plays the motion with sound (mute
+  with **M**), and frame-step / info-panel details all work identically. The motion decodes
+  through the Windows OS decoder, so H.264 clips (iPhone 6s) work out of the box and HEVC
+  clips (iPhone 7 and later) use the same **HEVC Video Extensions** the viewer already
+  relies on for HEIC stills — plus the frames now follow the clip's true per-frame timing.
 - **The open screen is now interactive.** With no photo loaded, PhotoBlaze shows two clickable
   buttons — **Open File** and **Open Folder** — each with its keyboard shortcut shown dimmed and
   right-aligned, menu style (`O` and, on macOS, `⇧ O`), reflecting anything you've remapped in
