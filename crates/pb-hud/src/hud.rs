@@ -92,16 +92,17 @@ pub mod tokens {
     pub const BUTTON_ICON: f32 = 0.95;
     /// Gap between the button's icon and label (floored at 2px).
     pub const BUTTON_ICON_GAP: f32 = 0.38;
-    /// Button corner radius, as a fraction of the button's text size (non-macOS).
+    /// Button corner radius, as a fraction of the button's text size (non-macOS —
+    /// this token is cfg'd out on Mac; the macOS knob is `BUTTON_RADIUS_OF_HEIGHT`).
     pub const BUTTON_RADIUS: f32 = 0.45;
     /// macOS button corner radius, as a fraction of the button's HEIGHT — Tahoe's
     /// concentric principle (radii derive from control geometry, not point values).
     /// Matches the platform's bordered utility buttons (the screenshot-editor
     /// "Done" — the owner's reference): visibly rounder than classic AppKit,
-    /// deliberately NOT a capsule. 0.40 rather than the nominal ⅓ because the
-    /// n = 2.2 gauge in `corner_distance` cuts slightly less than a circle at equal
-    /// radius — together they land on the reference silhouette (probe-verified).
-    pub const BUTTON_RADIUS_OF_HEIGHT: f32 = 0.40;
+    /// deliberately NOT a capsule. Sits near the nominal ⅓ (0.40 probe-matched the
+    /// reference, but read a touch large in situ; the n = 2.2 gauge in
+    /// `corner_distance` cuts slightly less than a circle at equal radius).
+    pub const BUTTON_RADIUS_OF_HEIGHT: f32 = 0.34;
     /// Button border thickness (floored at 1px).
     pub const BUTTON_BORDER: f32 = 0.1;
     /// Button background fill alpha (a barely-there wash).
