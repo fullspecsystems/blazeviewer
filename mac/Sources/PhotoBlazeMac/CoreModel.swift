@@ -403,7 +403,7 @@ final class CoreModel {
         let center = NSMutableParagraphStyle()
         center.alignment = .center
         let credits = NSMutableAttributedString(
-            string: "An ultra-fast photo viewer\n\n",
+            string: "An ultra-fast image viewer\n\n",
             attributes: [
                 .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
                 .foregroundColor: NSColor.labelColor,
@@ -524,6 +524,14 @@ final class CoreModel {
     /// The current settings as the flat form the Settings window binds to.
     func settingsForm() -> SettingsFormFfi {
         core.settings_form()
+    }
+
+    /// The current image's containing folder ("" = nothing open / an archive entry) —
+    /// the Settings window shows it, grayed, as the unpinned "Open files in" default.
+    func currentImageFolder() -> String {
+        let p = core.current_photo_path().toString()
+        guard !p.isEmpty else { return "" }
+        return (p as NSString).deletingLastPathComponent
     }
 
     /// A live edit from the auto-saving Settings window: fold + clamp Rust-side; the
@@ -712,7 +720,10 @@ final class CoreModel {
     /// A short-lived resize guard now corrects any remaining clobber the moment it
     /// lands — before the window is meaningfully visible — then retires.
     private func applyStartupWindowState() {
-        guard let window = hostWindow else { return }
+        guard let window = hostWindow else {
+            startupSettled = true
+            return
+        }
         window.isRestorable = false // settings.toml is the restorer here, not Cocoa
         // Kill SwiftUI's frame persistence: stop future saves AND delete the already-
         // stored value, so no stale remembered size re-applies on this or any later
@@ -724,6 +735,9 @@ final class CoreModel {
             NSWindow.removeFrame(usingName: autosave)
         }
         let saved = savedWindowFrame()
+        log(
+            "startup restore: saved=\(saved.map { "\($0)" } ?? "nil") "
+                + "fullscreen=\(core.startup_fullscreen()) window=\(window.frame)")
         if core.startup_fullscreen() {
             // Land F mode on the monitor the user was on: place the window at the
             // remembered windowed frame FIRST, so setWindowMode fullscreens that
@@ -736,25 +750,35 @@ final class CoreModel {
             beginLaunchFrameGuard(target: window.frame, window: window, expectFullscreen: true)
             return
         }
-        guard let frame = saved else { return }
+        guard let frame = saved else {
+            startupSettled = true
+            return
+        }
         window.setFrame(frame, display: true)
         beginLaunchFrameGuard(target: frame, window: window)
     }
 
-    /// For the first ~2 s after the restore, snap any programmatic resize away from the
-    /// restored frame straight back (SwiftUI's launch layout re-applying its remembered
-    /// size). User interaction or a mode change ends the guard — the user's intent wins —
-    /// and a correction cap keeps any unforeseen resize war finite. A launch into the F
-    /// speed mode guards its fullscreen frame the same way (`expectFullscreen`).
+    /// For the first ~2 s after the restore, snap any programmatic resize OR move away
+    /// from the restored frame straight back (SwiftUI's launch layout re-applying its
+    /// remembered size — and, with its frame autosave severed, re-CENTERING the window
+    /// on the main screen, which is a pure didMove the old resize-only guard never saw:
+    /// the #42 "always restarts in the middle of the primary monitor" mechanism). User
+    /// interaction or a mode change ends the guard — the user's intent wins — and a
+    /// correction cap keeps any unforeseen frame war finite. A launch into the F speed
+    /// mode guards its fullscreen frame the same way (`expectFullscreen`).
     private func beginLaunchFrameGuard(
         target: NSRect, window: NSWindow, expectFullscreen: Bool = false
     ) {
         launchFrameCorrections = 0
         launchFrameExpectsFullscreen = expectFullscreen
-        launchFrameGuard = NotificationCenter.default.addObserver(
-            forName: NSWindow.didResizeNotification, object: window, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.enforceLaunchFrame(target) }
+        launchFrameGuards = [
+            NSWindow.didResizeNotification, NSWindow.didMoveNotification,
+        ].map { name in
+            NotificationCenter.default.addObserver(
+                forName: name, object: window, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.enforceLaunchFrame(target) }
+            }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
             self?.endLaunchFrameGuard()
@@ -782,20 +806,26 @@ final class CoreModel {
             endLaunchFrameGuard()
             return
         }
-        log(
-            "launch frame guard: \(Int(window.frame.width))×\(Int(window.frame.height))"
-                + " → snapping back to \(Int(target.width))×\(Int(target.height))")
+        log("launch frame guard: \(window.frame) → snapping back to \(target)")
         window.setFrame(target, display: true)
     }
 
     private func endLaunchFrameGuard() {
-        if let g = launchFrameGuard {
+        for g in launchFrameGuards {
             NotificationCenter.default.removeObserver(g)
-            launchFrameGuard = nil
         }
+        launchFrameGuards.removeAll()
+        startupSettled = true // the frame is user-intent from here — geometry notes may record
     }
 
-    @ObservationIgnored private var launchFrameGuard: NSObjectProtocol?
+    @ObservationIgnored private var launchFrameGuards: [NSObjectProtocol] = []
+    /// Launch settling is over — `noteWindowGeometry` may record. Until then the
+    /// move/resize observers see SwiftUI's own launch placement (its scene-storage frame
+    /// lands BEFORE our restore in some launches — a race, trace 2026-07-03), and
+    /// recording it would clobber the loaded `settings.window` in memory — making the
+    /// restore a no-op — and then the debounced save would overwrite the REAL remembered
+    /// geometry on disk. That self-clobber was #42's "position sticks but size doesn't."
+    @ObservationIgnored private var startupSettled = false
     @ObservationIgnored private var launchFrameCorrections = 0
     @ObservationIgnored private var launchFrameExpectsFullscreen = false
 
@@ -836,8 +866,9 @@ final class CoreModel {
 
     /// Window moved/resized: refresh the remembered geometry (winit's
     /// `track_windowed_geometry` — the core dedupes and owns the debounced save).
+    /// Suppressed until the startup restore settles — see `startupSettled`.
     private func noteWindowGeometry() {
-        guard !speedModeFullscreen, let window = hostWindow else { return }
+        guard startupSettled, !speedModeFullscreen, let window = hostWindow else { return }
         let scale = window.backingScaleFactor
         let primaryTop = NSScreen.screens.first?.frame.maxY ?? 0
         let f = window.frame
