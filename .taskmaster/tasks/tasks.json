@@ -116,21 +116,147 @@
       },
       {
         "id": 43,
-        "title": "Compare mode: view two photos side by side",
-        "description": "Owner idea (2026-07-02, sparked by the accidental window-tab bar): compare two photos for culling. NOT wired today — the app is strictly single-engine (one AppCoreHandle/playlist/ring/renderer; a second window fights over it). Two designs to weigh: (a) true multi-window/tab = one engine per window + a SHARED decode pool seam + VRAM budget split + key-window input routing; (b) likely cheaper + closer to the culling workflow: a split-view compare mode in ONE window — two panes, one engine, two cursors into the same playlist, focus-pane keyboard nav. Prime-directive check: pane decode traffic must not degrade single-view fly speed.",
+        "title": "Flicker compare mode: pin (Shift+Y) + instant A/B toggle (Y)",
+        "description": "Owner-approved 2026-07-03 — full design + implementation order in .taskmaster/docs/compare-mode-plan.md. Y pins the current photo, then flips instantly between the pin and wherever you are (full-screen flicker comparison — perceptually better than side-by-side for culling, and a keypress-is-a-rebind cheap in this engine). Shift+Y moves/clears the pin. Zoom/pan carries across same-dimension flips (the 100%-crop sharpness workflow). Pin is RAM-only (privacy ADR-018), survives playlist rebuilds by name, unpins on delete. The pinned texture is exempt from ring eviction so the flip never decodes. Split view demoted to an optional phase 2 reusing the same pin state; a future squoosh-style export preview can ride the same toggle seam.",
         "status": "pending",
-        "priority": "low",
+        "priority": "high",
         "dependencies": [],
-        "subtasks": []
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Core semantics + tests (TDD)",
+            "description": "Action::{CompareToggle, ComparePin} (ids compare_toggle/compare_pin, OneShot); compare_pin/compare_return/compare_pin_name on AppCore; dispatch arms per the plan; delete index-fixup + rebuild re-resolution; headless AppCore unit tests first.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "Residency: pin exempt from eviction",
+            "description": "plan_residency keeps the pinned index (callers append to targets, deduped); request_prefetch includes it; pb-core property tests (pin always survives, capacity respected, capacity-1 prefers current).",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "View carry on same-dimension flips",
+            "description": "Copy outgoing zoom/pan/scale-mode to the incoming photo when pixel dimensions match; rotations stay per-image.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "Toasts + thumbtack icon",
+            "description": "Vendor FA solid thumbtack.svg into pb-hud/icons + icon::assets; toasts: Pinned for compare / Unpinned. No flip toast in v1.",
+            "status": "pending"
+          },
+          {
+            "id": 5,
+            "title": "Surfaces: keymap, editor, help, menus",
+            "description": "Defaults Y/Shift+Y; EDITOR_GROUPS; help overlay row; Image menu + context menu on both shells (muda + MenuBar.swift, same Action ids); MenuState(+Ffi) enable flag; badges pick up live bindings automatically.",
+            "status": "pending"
+          },
+          {
+            "id": 6,
+            "title": "CHANGELOG + owner smoke",
+            "description": "Unreleased > Added entry; run the smoke checklist at the end of compare-mode-plan.md.",
+            "status": "pending"
+          }
+        ]
       },
       {
         "id": 44,
         "title": "AI image description (on-device / local models only)",
-        "description": "Describe the current image with a vision model, on demand. Two backends behind one seam: (1) macOS 27+ Foundation Models framework — image input (NSImage/CGImage/pixel buffer) to the on-device model, shipped with the OS, fully private; (2) a user-configured OpenAI-compatible local endpoint (LM Studio / llama.cpp server / Ollama) for Windows and power users — Qwen3-VL-8B or Qwen 3.6-27B class models run well on an RTX 5090 (32 GB). Design constraints (privacy ADR-018): NEVER cloud, NEVER automatic — on-demand only (P-to-play pattern: a rebindable key + menu item, inference off-thread), description is RAM-only and dropped on navigation/exit, no sidecars or caches. Endpoint URL is the only persisted config (settings.toml). Rendered in a HUD panel (and optionally spoken — the accessibility story). Prerequisite: pb-hud font-fallback cascade, since model output is arbitrary text (long sentences, possibly non-Latin) the single-font rasterizer can't draw.",
-        "status": "deferred",
+        "description": "DETAILED PLAN: .taskmaster/docs/ai-descriptions-plan.md (2026-07-03). Describe the current image with a vision model. Trigger: `D` (rebindable; menu + context menu), result overlaid where the detailed info panel goes; optional auto-describe when the user PARKS on an image >500 ms (EAGER_PREP_DELAY pattern) — cancelled on advance (generation counter), results cached RAM-only per image (meta_cache pattern), dropped on exit. Auto mode is an opt-in toggle: fine by construction on the Apple on-device backend, but a configured endpoint could be remote, and passive sends must be a deliberate choice. Two backends behind one core-owned seam/policy: (1) macOS 27+ Foundation Models framework (on-device, image input, ships with the OS); (2) an OpenAI-compatible local endpoint (LM Studio / llama.cpp / Ollama — Qwen3-VL-8B or 27B-class on an RTX 5090) for Windows and power users. One-shot v1 (streaming later if slow; expected 1–5 s). Prompt built in core so both backends match: salient EXIF (capture time, camera/lens, raw GPS coords — offline reverse-geocoder is a LATER upgrade), filename + parent folder; all context framed as UNVERIFIED (trust-the-pixels instruction — hallucination guard) with epoch-default junk dates filtered out. Custom prompt template = advanced, settings.toml-only in v1 ({filename}/{folder}/{datetime}/{location}/{camera} placeholders). Optional TTS via CoreEffect::Speak — AVSpeechSynthesizer / Windows.Media.SpeechSynthesis, offline system voices, speech stops on navigation. New 'AI Descriptions' settings section (own tab on macOS): backend picker (Auto/Apple/Local), endpoint URL + model, auto-describe toggle, speak-aloud toggle. Privacy (ADR-018): never cloud, RAM-only, no sidecars/caches on disk; the endpoint URL + toggles are the only persisted config. v1 scope: on-disk stills (archive entries punted like Delete). Prerequisite: pb-hud font-fallback cascade — model output is arbitrary, possibly non-Latin prose. Additions from final discussion: 'Speak descriptions' is ALSO a menu toggle (Image menu, Mute-Live-Photo-Audio pattern, MenuState checkbox); the AI Descriptions settings section carries a short privacy blurb (custom endpoint = your images upload to that URL, incl. auto-describe — keep it local/trusted; online services may retain/train on images).",
+        "status": "pending",
         "priority": "low",
         "dependencies": [],
-        "subtasks": []
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "pb-hud font-fallback cascade",
+            "description": "Per-glyph fallback across 2-3 faces (UI font → CJK → symbol) so arbitrary model prose and non-Latin EXIF render on both platforms. Prerequisite for the description panel.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "Prompt/context builder in core",
+            "description": "Pure fn over meta_cache: salient EXIF + filename/folder, junk-date filtering, unverified-context framing, template with placeholders + settings.toml custom-template override.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "Describer seam + policy in AppCore",
+            "description": "Action::DescribeImage, state machine (idle/busy/shown/failed), dwell auto-describe (500 ms, opt-in), generation-counter cancel, RAM-only per-image cache, backend policy Auto→Apple→endpoint, image prep (downscale + JPEG re-encode from decoded RGBA).",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "Local endpoint backend (pure Rust)",
+            "description": "OpenAI-compatible /v1/chat/completions with base64 image, blocking ureq on a worker thread (no tokio), error taxonomy → user-facing messages. Works on both platforms.",
+            "status": "pending"
+          },
+          {
+            "id": 5,
+            "title": "Apple Foundation Models backend (Swift + FFI)",
+            "description": "Availability check (macOS 27+, Apple Intelligence on), FM session with image input (file URL handoff for on-disk stills), password-flow-style effect out / result FFI back.",
+            "status": "pending"
+          },
+          {
+            "id": 6,
+            "title": "HUD description panel",
+            "description": "Description overlay in the detailed-info position + busy indicator; wraps long prose; rebuilt on change only.",
+            "status": "pending"
+          },
+          {
+            "id": 7,
+            "title": "TTS: CoreEffect::Speak + platform impls",
+            "description": "AVSpeechSynthesizer (macOS) / Windows.Media.SpeechSynthesis or SAPI (Windows); speech cancels on navigation; speak-aloud toggle.",
+            "status": "pending"
+          },
+          {
+            "id": 8,
+            "title": "AI Descriptions settings UI (both shells)",
+            "description": "Own tab on macOS (per-tab sized), group card on egui: backend picker, endpoint URL + model name, auto-describe toggle, speak-aloud toggle.",
+            "status": "pending"
+          }
+        ]
+      },
+      {
+        "id": 45,
+        "title": "Copy Text from Image / Show Text (on-device OCR + QR codes)",
+        "description": "DETAILED PLAN: .taskmaster/docs/ai-descriptions-plan.md (OCR section, 2026-07-03). Tier 1 only: on-demand OCR of the current image — 'Copy Text from Image' in the Edit/context menus (clipboard + toast) and `T` to show recognized text in a HUD panel. Engines are OS-built-in and fully on-device: macOS Vision RecognizeTextRequest (NO macOS 27 dependency — available on the current floor; Swift-side via the same delegate/FFI shape as the FM describe backend) and Windows.Media.Ocr via the windows crate (worker thread, downscaled input ≤ OcrEngine.MaxImageDimension, language packs required). Shares task #44's state machine (busy/generation-cancel/RAM-only cache) and the ClipboardPayload::Text seam. Tier 2 (VisionKit Live Text overlay) and Tier 3 (cross-platform selection UI) deliberately punted — recorded in the plan doc. GARNISH: QR/barcode payloads via a pure-Rust decoder (rxing or rqrr) on BOTH platforms (Windows has no OS barcode API; one shared backend, no FFI, testable with generated QR PNGs). ⚠ Decode from FULL-RES RGBA, not the OCR downscale (pixels-per-module). Payloads list above the text in the T panel and ride the copy command — no new key/menu item.",
+        "status": "pending",
+        "priority": "low",
+        "dependencies": [],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Actions + shared analysis state",
+            "description": "Action::CopyImageText (menu/context, no default key) + Action::ShowImageText (T); generalize describe's busy/generation/cache machinery to analysis results; HUD text panel reuse.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "macOS Vision backend",
+            "description": "RecognizeTextRequest accurate mode, Swift-side, BeginRecognizeText effect out / ocr_finished FFI back (password-flow shape).",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "Windows.Media.Ocr backend",
+            "description": "windows-crate WinRT, blocking .get() on a worker thread, RGBA→SoftwareBitmap at ≤2600px, missing-language-pack error message.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "Clipboard + toast + panel wiring",
+            "description": "Copy via ClipboardPayload::Text with 'Copied N characters' / 'No text found' toasts; T panel shows joined lines; results cached RAM-only beside descriptions.",
+            "status": "pending"
+          },
+          {
+            "id": 5,
+            "title": "QR/barcode payloads in the analysis results",
+            "description": "Pure-Rust decode (rxing/rqrr) on full-res grayscale, payloads prepended to the T panel + included in Copy Text; 'Copied text + N QR codes' toast; QR-PNG unit tests.",
+            "status": "pending"
+          }
+        ]
       }
     ]
   }
