@@ -1,6 +1,11 @@
 # PhotoBlaze — Current Status (session handoff)
 
-_**MERGED TO MAIN 2026-07-02 night (86c7ec7, pushed)** — the de facto SwiftUI cutover: the
+_**CUTOVER OFFICIAL 2026-07-02 night: the SwiftUI host IS PhotoBlaze on macOS** — bundle id
+flipped to com.jdlien.PhotoBlaze (associations/TCC carry over from the egui beta, which is now
+retired as the Mac artifact; release.yml's macos-dmg lane still builds the egui bundle — flip it
+to `release-macos.sh --swift-host` when CI credits return, untestable until then). HDR verified
+by the owner after the potential-vs-current headroom fix; menu-state mirroring restored (Save
+Rotation et al). Earlier the same night: the
 app is named PhotoBlaze everywhere users see it (bundle id still com.jdlien.PhotoBlazeMac
 until the id flip), local sign+notarize works (dist/PhotoBlaze-<v>-swiftui.dmg), and the
 `swiftui` branch == main. The photoblaze-wt1 WORKTREE IS RETIRING — work on main in

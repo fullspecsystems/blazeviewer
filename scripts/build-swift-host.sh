@@ -6,8 +6,8 @@
 #   2. create-package                   → crates/pb-mac-ffi/PbMacFfi (xcframework Swift pkg)
 #   3. swift build --package-path mac   (the SwiftUI executable)
 #   4. assemble target/swift-host/<profile>/PhotoBlaze.app
-#      (user-visible name "PhotoBlaze" everywhere; only the BUNDLE ID stays
-#      com.jdlien.PhotoBlazeMac so it coexists with the egui beta until cutover)
+#      (the official Mac app since the 2026-07-02 cutover: name AND bundle id are
+#      PhotoBlaze / com.jdlien.PhotoBlaze — it replaces the egui beta on macOS)
 #
 # Usage:
 #   scripts/build-swift-host.sh [--debug|--release] [--run]   (default: --release)

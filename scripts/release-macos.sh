@@ -83,8 +83,9 @@ find_identity() {
 		| grep "Developer ID Application" | head -1 | awk '{print $2}'
 }
 
-# 1) Build the bundle if needed.
-[[ -d "$APP" ]] || $BUILD_CMD
+# 1) Always build fresh — a stale $APP dir from a prior run must never be silently
+#    re-signed/re-packaged (build-swift-host.sh already rm -rf's its own output).
+$BUILD_CMD
 [[ -d "$APP" ]] || { echo "error: $APP not found" >&2; exit 1; }
 # An interrupted codesign leaves a .cstemp beside the binary; a later BUNDLE sign then
 # fails on it ("invalid or unsupported format ... In subcomponent: *.cstemp"). Sweep.

@@ -7,6 +7,23 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Changed
+- **The Mac app is now a native SwiftUI/AppKit application** — the same fast Rust engine, with
+  the chrome rebuilt Mac-native: real menus with shortcut hints on every command, native dialogs
+  (Finder-style delete confirmation, password prompts for encrypted archives, progress for big
+  archives and folder scans), a native Settings window (⌘,) with a **keyboard-shortcut editor**
+  (every command rebindable, two slots each), a true borderless fullscreen that uses every pixel,
+  window position/size remembered across launches, and the title-bar proxy icon. It replaces the
+  previous Mac build under the same app identity, so file associations and permissions carry over.
+
+### Fixed
+- **macOS: HDR highlights now render at the panel's full brightness** (the previous build could
+  crush them toward SDR on launch), and the display's HDR headroom follows the window across
+  monitors — including HDR being toggled while the app is running.
+- **macOS: sharp/blurry rendering after launch or moving between displays with different scale
+  factors** (e.g. a 1x ultrawide and a Retina display) is fixed — the canvas now tracks backing-
+  scale changes immediately, so on-screen buttons stay crisp and clickable.
+
 ### Added
 - **Show the current photo in Finder / File Explorer.** A new **File ▸ Show in Finder** (macOS)
   / **Show in File Explorer** (Windows) command opens the photo's containing folder with the file
