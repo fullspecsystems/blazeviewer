@@ -813,14 +813,20 @@ impl Hud {
             (start, start + inner, start, total - (start + inner))
         };
 
-        // The three folder glyphs, rasterized once; every row's name starts after a
-        // fixed icon cell as wide as the widest, so names align per depth.
+        // The row glyphs, rasterized once; every row's name starts after a fixed
+        // icon cell as wide as the widest folder glyph, so names align per depth.
+        // The paging carets are dim (they match their marker text) and point the
+        // way the click pages — the affordance the plain ellipsis lacked.
         let icon_h = (px * tokens::TREE_ICON).round().max(1.0) as u32;
         let closed = crate::icon::rasterize(crate::icon::assets::FOLDER, icon_h, self.theme.text);
         let open =
             crate::icon::rasterize(crate::icon::assets::FOLDER_OPEN, icon_h, self.theme.text);
         let up_glyph =
             crate::icon::rasterize(crate::icon::assets::FOLDER_UP, icon_h, self.theme.text);
+        let caret_up =
+            crate::icon::rasterize(crate::icon::assets::CARET_UP, icon_h, self.theme.text_dim);
+        let caret_down =
+            crate::icon::rasterize(crate::icon::assets::CARET_DOWN, icon_h, self.theme.text_dim);
         let cell = closed
             .iter()
             .chain(open.iter())
@@ -833,12 +839,14 @@ impl Hud {
         let name_max = px * tokens::TREE_NAME_MAX;
         let count_px = (px * tokens::TREE_COUNT).max(6.0);
 
-        /// Which glyph a folder line draws.
+        /// Which glyph a line draws.
         #[derive(Clone, Copy)]
         enum Glyf {
             Closed,
             Open,
             Up,
+            CaretUp,
+            CaretDown,
         }
         // Lay out every visible line once, measuring the content width as we go.
         // A `None` icon slot is a "… n more" marker (dim, no glyph, no indent).
@@ -855,15 +863,20 @@ impl Hud {
         let mut content_w = 0i32;
         let mut count_w = 0i32; // widest count text among visible rows
         let push_marker = |lines: &mut Vec<Line>, content_w: &mut i32, n: usize, hit: TreeHit| {
-            // A plain ellipsis — U+22EF is missing from some UI fonts (SF Pro).
-            let (glyphs, adv) = self.layout(&format!("\u{2026} {n} more"), px, Weight::Regular);
-            *content_w = (*content_w).max(adv.ceil() as i32);
+            let (glyphs, adv) = self.layout(&format!("{n} more"), px, Weight::Regular);
+            let text_x = cell + icon_gap;
+            *content_w = (*content_w).max(text_x + adv.ceil() as i32);
+            let glyf = if hit == TreeHit::PageUp {
+                Glyf::CaretUp
+            } else {
+                Glyf::CaretDown
+            };
             lines.push(Line {
                 glyphs,
-                text_x: 0,
+                text_x,
                 rgb: self.theme.text_dim,
                 band: false,
-                icon: None,
+                icon: Some((glyf, 0)),
                 hit: Some(hit),
                 count: None,
             });
@@ -977,6 +990,8 @@ impl Hud {
                     Glyf::Closed => &closed,
                     Glyf::Open => &open,
                     Glyf::Up => &up_glyph,
+                    Glyf::CaretUp => &caret_up,
+                    Glyf::CaretDown => &caret_down,
                 };
                 if let Some((rgba, iw, ih)) = glyph {
                     // Right-align the glyph in its cell so folder fronts line up.
