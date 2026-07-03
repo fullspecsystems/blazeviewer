@@ -60,6 +60,10 @@ sed -e "s/__SHORT_VERSION__/$SHORT_VERSION/g" \
 printf 'APPL????' > "$APP_DIR/Contents/PkgInfo"
 cp "$BIN" "$APP_DIR/Contents/MacOS/PhotoBlazeMac"
 chmod +x "$APP_DIR/Contents/MacOS/PhotoBlazeMac"
+# The app icon: the prebuilt Liquid Glass Assets.car (Tahoe+, CFBundleIconName=AppIcon)
+# + the flat icns fallback (CFBundleIconFile=PhotoBlaze) — the same assets the egui
+# bundle ships. Regenerate via scripts/build-macos-icons.sh when the icon changes.
+cp packaging/macos/PhotoBlaze.icns packaging/macos/Assets.car "$APP_DIR/Contents/Resources/"
 
 echo "==> Done: $APP_DIR"
 if [[ "$RUN" == 1 ]]; then

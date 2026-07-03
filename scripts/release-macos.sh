@@ -18,20 +18,40 @@
 # Locally you can skip CSC_LINK: if a "Developer ID Application" identity is already in
 # your login keychain it's used directly (no base64 dance).
 #
-# Usage: scripts/release-macos.sh [--release|--debug]   (default: --release)
+# Usage: scripts/release-macos.sh [--release|--debug] [--swift-host]
+#   --swift-host  package the NS1 SwiftUI host (PhotoBlazeMac.app, built by
+#                 build-swift-host.sh) instead of the egui bundle. Runs fine LOCALLY
+#                 with a Developer ID identity in the login keychain + the three
+#                 APPLE_* env vars — no CI required (Actions credits are finite).
 set -euo pipefail
 
 PROFILE="release"
-[[ "${1:-}" == "--debug" ]] && PROFILE="debug"
+TARGET="egui"
+for a in "$@"; do
+	case "$a" in
+		--debug) PROFILE="debug" ;;
+		--release) PROFILE="release" ;;
+		--swift-host) TARGET="swift-host" ;;
+		*) echo "unknown arg: $a (usage: release-macos.sh [--release|--debug] [--swift-host])" >&2; exit 2 ;;
+	esac
+done
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-APP_NAME="PhotoBlaze"
-BIN_NAME="photoblaze"
-APP="target/$PROFILE/bundle/$APP_NAME.app"
 DIST="dist"
 SHORT_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/pb-app/Cargo.toml | head -1)"
+if [[ "$TARGET" == "swift-host" ]]; then
+	APP_NAME="PhotoBlazeMac"
+	BIN_NAME="PhotoBlazeMac"
+	APP="target/swift-host/$PROFILE/$APP_NAME.app"
+	BUILD_CMD="./scripts/build-swift-host.sh --$PROFILE"
+else
+	APP_NAME="PhotoBlaze"
+	BIN_NAME="photoblaze"
+	APP="target/$PROFILE/bundle/$APP_NAME.app"
+	BUILD_CMD="./scripts/bundle-macos.sh --$PROFILE"
+fi
 DMG="$DIST/$APP_NAME-$SHORT_VERSION.dmg"
 
 : "${CSC_LINK:=}"; : "${CSC_KEY_PASSWORD:=}"
@@ -51,8 +71,8 @@ find_identity() {
 		| grep "Developer ID Application" | head -1 | awk '{print $2}'
 }
 
-# 1) Build the bundle if needed (actool glass icon + flat .icns — see bundle-macos.sh).
-[[ -d "$APP" ]] || ./scripts/bundle-macos.sh "--$PROFILE"
+# 1) Build the bundle if needed.
+[[ -d "$APP" ]] || $BUILD_CMD
 [[ -d "$APP" ]] || { echo "error: $APP not found" >&2; exit 1; }
 
 mkdir -p "$DIST"
