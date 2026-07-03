@@ -44,6 +44,19 @@ pub enum ScrollAction {
     Zoom,
 }
 
+/// The viewer's light/dark preference (task #46): `System` (the default) follows the
+/// OS theme live; `Light` / `Dark` pin it. Drives the HUD color scheme
+/// (`pb_hud::hud::Theme`), which letterbox color fills the image view
+/// ([`Settings::letterbox_for`]), and the chrome dialogs' theme.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AppearanceMode {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
 /// How the viewer chooses windowed vs. fullscreen at launch.
 ///
 /// `Remember` (the default) restores whatever the window was last in — which is
@@ -100,8 +113,13 @@ pub struct Settings {
     pub scroll_action: ScrollAction,
     /// Default scale mode for a freshly shown photo.
     pub scale_mode: ScaleModePref,
-    /// Letterbox / background fill (sRGB) shown behind a non-filling image.
+    /// Light/dark preference (task #46): System follows the OS; Light/Dark pin it.
+    pub appearance_mode: AppearanceMode,
+    /// Letterbox / background fill (sRGB) shown behind a non-filling image, in **dark**
+    /// mode (the pre-#46 `letterbox` key, so existing files keep their chosen color).
     pub letterbox: [u8; 3],
+    /// The **light**-mode letterbox / background fill (task #46).
+    pub letterbox_light: [u8; 3],
     /// Info-panel background opacity, `0` (transparent) – `100` (opaque).
     pub info_opacity: u8,
     /// Default slideshow interval in seconds — the per-slide dwell a fresh session
@@ -147,8 +165,10 @@ impl Default for Settings {
             hold_delay_ms: 250,  // tap→repeat handoff; 200 made accidental flying too easy
             scroll_action: ScrollAction::Pan, // scroll pans; Ctrl+scroll zooms
             scale_mode: ScaleModePref::Fit,
-            letterbox: [10, 10, 12], // pb_render::LETTERBOX (rgb)
-            info_opacity: 60,        // hud::BG alpha 153/255 ≈ 60%
+            appearance_mode: AppearanceMode::System, // follow the OS light/dark theme
+            letterbox: [10, 10, 12],                 // pb_render::LETTERBOX (rgb)
+            letterbox_light: [240, 241, 245],        // the light-mode analog (#46)
+            info_opacity: 60,                        // hud::BG alpha 153/255 ≈ 60%
             slideshow_interval_secs: slideshow::DEFAULT_INTERVAL.as_secs_f64(), // 4.0
             window: None,
             picker_dir: None,       // start in the current photo's folder
@@ -183,6 +203,17 @@ impl Settings {
             self.slideshow_interval_secs.max(0.0),
         ))
         .as_secs_f64();
+    }
+
+    /// The letterbox / background fill for a **resolved** dark/light flag (task #46).
+    /// The caller resolves [`AppearanceMode`] against the live OS theme first
+    /// (`AppCore::effective_dark`); this just picks the matching color.
+    pub fn letterbox_for(&self, dark: bool) -> [u8; 3] {
+        if dark {
+            self.letterbox
+        } else {
+            self.letterbox_light
+        }
     }
 
     /// The effective "start fullscreen?" decision for this launch, resolving
@@ -427,6 +458,40 @@ mod tests {
         ] {
             assert_eq!(toml::from_str::<Settings>(text).unwrap().startup_mode, mode);
         }
+    }
+
+    #[test]
+    fn appearance_mode_round_trips_and_defaults_to_system() {
+        // Absent in old files → System (follow the OS, the pre-#46 behavior).
+        let s: Settings = toml::from_str("fullscreen = true\n").unwrap();
+        assert_eq!(s.appearance_mode, AppearanceMode::System);
+
+        for (text, mode) in [
+            ("appearance_mode = \"system\"", AppearanceMode::System),
+            ("appearance_mode = \"light\"", AppearanceMode::Light),
+            ("appearance_mode = \"dark\"", AppearanceMode::Dark),
+        ] {
+            assert_eq!(
+                toml::from_str::<Settings>(text).unwrap().appearance_mode,
+                mode
+            );
+        }
+    }
+
+    #[test]
+    fn letterbox_for_picks_the_theme_matching_fill() {
+        let s = Settings {
+            letterbox: [1, 2, 3],
+            letterbox_light: [201, 202, 203],
+            ..Settings::default()
+        };
+        assert_eq!(s.letterbox_for(true), [1, 2, 3]);
+        assert_eq!(s.letterbox_for(false), [201, 202, 203]);
+
+        // An old file (no letterbox_light) still gets the light default.
+        let s: Settings = toml::from_str("letterbox = [9, 9, 9]\n").unwrap();
+        assert_eq!(s.letterbox_for(true), [9, 9, 9]);
+        assert_eq!(s.letterbox_for(false), Settings::default().letterbox_light);
     }
 
     #[test]

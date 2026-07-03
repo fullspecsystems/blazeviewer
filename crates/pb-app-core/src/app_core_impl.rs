@@ -65,6 +65,8 @@ impl AppCore {
             mods: contract::Modifiers::NONE,
             esc_guard_until: None,
             persist_prefs: false, // headless/tests: never write the real settings.toml
+            os_dark: true,        // dark until the shell reports the OS theme (#46)
+            hud_dark: true,       // matches the Hud's default Theme::DARK
             fit: None,
             view: ViewTransform::default(),
             last_cursor: None,
@@ -515,6 +517,10 @@ impl AppCore {
             }
             // Focus loss can swallow the key-up (a known winit hazard) — clear the held set +
             // gesture accumulators so nav never sticks auto-advancing, and drop any stuck drag.
+            CoreEvent::OsThemeChanged { dark } => {
+                self.os_dark = dark;
+                self.refresh_theme();
+            }
             CoreEvent::FocusLost => {
                 self.held.clear();
                 self.hold_start = None;
@@ -1223,7 +1229,7 @@ impl AppCore {
         let Some(hud) = self.hud.as_ref() else {
             return;
         };
-        let Some((bitmap, w, h)) = hud.render_tree(&rows, px, pad, hud::BG, max_h) else {
+        let Some((bitmap, w, h)) = hud.render_tree(&rows, px, pad, hud.theme().bg, max_h) else {
             return;
         };
         if let Some(a) = self.renderer.as_mut() {
@@ -1949,34 +1955,72 @@ impl AppCore {
         }
     }
 
+    /// The **resolved** dark/light flag (task #46): the `Appearance` preference against
+    /// the live OS theme — `System` follows [`os_dark`](AppCore::os_dark) (kept current
+    /// by the shell's `OsThemeChanged` reports); `Light`/`Dark` pin it.
+    pub fn effective_dark(&self) -> bool {
+        match self.settings.appearance_mode {
+            settings::AppearanceMode::System => self.os_dark,
+            settings::AppearanceMode::Light => false,
+            settings::AppearanceMode::Dark => true,
+        }
+    }
+
+    /// The letterbox / background fill for the resolved theme (task #46) — what the
+    /// shells hand `Renderer::set_letterbox` when the renderer first stands up.
+    pub fn effective_letterbox(&self) -> [u8; 3] {
+        self.settings.letterbox_for(self.effective_dark())
+    }
+
+    /// Re-apply the resolved appearance (task #46): retint the HUD's color scheme, set
+    /// the effective letterbox fill, and — only when the resolved dark/light actually
+    /// flipped — rebuild every visible overlay bitmap (they were composited with the
+    /// old scheme) through the same invalidation a DPI change uses. Runs on
+    /// `OsThemeChanged`, inside [`apply_settings`](Self::apply_settings), and from the
+    /// shells right after the renderer stands up.
+    pub fn refresh_theme(&mut self) {
+        let dark = self.effective_dark();
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_letterbox(self.settings.letterbox_for(dark));
+        }
+        if let Some(h) = self.hud.as_mut() {
+            h.set_theme(hud::Theme::of(dark));
+        }
+        if dark != self.hud_dark {
+            self.hud_dark = dark;
+            // Pie / scan card / info panel / tree / open hint all re-rasterize with the
+            // new scheme. The transient toast keeps its old-scheme bitmap (it fades out
+            // within ~1.3 s and its source content isn't retained).
+            self.rescale_overlays();
+        }
+    }
+
     /// Apply the settings the user saved in the dialog: swap in the new model, apply
-    /// the parts that aren't read live (hold delay, letterbox color, default scale
-    /// mode), then persist to disk (an explicit user action — privacy #2). The nav-feel
-    /// rates (start speed / ramp / max) and the info-panel opacity are read live, so
-    /// swapping `self.settings` is enough for those.
+    /// the parts that aren't read live (hold delay, appearance + letterbox color,
+    /// default scale mode), then persist to disk (an explicit user action — privacy
+    /// #2). The nav-feel rates (start speed / ramp / max) and the info-panel opacity
+    /// are read live, so swapping `self.settings` is enough for those.
     pub fn apply_settings(&mut self, new: settings::Settings) {
         let old = std::mem::replace(&mut self.settings, new);
-        let s = &self.settings;
 
         // Held-key repeat delay is cached on the struct (the curve below reads the
         // rates live, but this one is a Duration captured at construction).
-        self.initial_delay = Duration::from_millis(s.hold_delay_ms as u64);
+        self.initial_delay = Duration::from_millis(self.settings.hold_delay_ms as u64);
 
         // Default slideshow interval → the live timer. A running slideshow's deadline is
         // `last_present + interval`, recomputed each tick, so this takes effect at once
         // (the `[`/`]` live override is just a different write to the same field).
-        self.slideshow.interval = Duration::from_secs_f64(s.slideshow_interval_secs);
+        self.slideshow.interval = Duration::from_secs_f64(self.settings.slideshow_interval_secs);
 
-        // Letterbox / background fill → renderer (takes effect on the next draw).
-        if let Some(a) = self.renderer.as_mut() {
-            a.set_letterbox(s.letterbox);
-        }
+        // Appearance + letterbox / background fill → HUD scheme + renderer (task #46);
+        // rebuilds the overlay bitmaps when the resolved theme flipped.
+        self.refresh_theme();
 
         // Default scale mode: apply live if it changed (re-frames + reloads at the new
         // fit). `set_scale_mode` redraws for us.
-        let scale_changed = old.scale_mode != s.scale_mode;
+        let scale_changed = old.scale_mode != self.settings.scale_mode;
         if scale_changed {
-            self.set_scale_mode(scale_mode_of(s.scale_mode));
+            self.set_scale_mode(scale_mode_of(self.settings.scale_mode));
         }
 
         // Persist the whole model (atomic write; best-effort).
@@ -2120,8 +2164,9 @@ impl AppCore {
         let px = (15.0 * self.viewport.scale_factor).max(8.0);
         let pad = (7.0 * self.viewport.scale_factor).round().max(2.0) as u32;
         // The info / EXIF panels honor the user's opacity setting; the help overlay
-        // keeps the standard translucency.
-        let info_bg = hud::bg_for_opacity(self.settings.info_opacity);
+        // keeps the standard translucency. Both take the active theme's panel color.
+        let theme = self.hud.as_ref().map_or(hud::Theme::DARK, |h| h.theme());
+        let info_bg = theme.bg_for_opacity(self.settings.info_opacity);
         // Resolve the Live Photo pairing (cached; one stat) up front so either panel can
         // label it — the basic line and the detailed table both read `is_live_photo`.
         if let Some(item) = self.displayed_item {
@@ -2164,7 +2209,7 @@ impl AppCore {
                 let Some(hud) = self.hud.as_ref() else {
                     return;
                 };
-                hud.render_shortcuts(&sections, help_px, hud::BG, max_h)
+                hud.render_shortcuts(&sections, help_px, theme.bg, max_h)
             }
         };
         let Some((bitmap, w, h)) = panel else {
@@ -3394,7 +3439,7 @@ impl AppCore {
             "Open Folder",
             &folder_key,
             px,
-            hud::BG,
+            hud.theme().bg,
             true, // shortcut hint a notch heavier (Semibold) so the dimmed text keeps presence
             self.open_hover == Some(OpenButton::File),
             self.open_hover == Some(OpenButton::Folder),
@@ -3420,7 +3465,7 @@ impl AppCore {
         // doesn't respond to hover/click while a Copy/Save/… toast is up.
         self.play_hint = None;
         if let Some(hud) = self.hud.as_ref() {
-            if let Some((rgba, w, h)) = hud.render_panel_icon(msg, px, pad, icon, hud::BG) {
+            if let Some((rgba, w, h)) = hud.render_panel_icon(msg, px, pad, icon, hud.theme().bg) {
                 self.toast = Some(Toast {
                     rgba,
                     w,
@@ -3448,7 +3493,7 @@ impl AppCore {
                 shortcut_semibold: true,
                 min_w: 0,
             };
-            hud.render_button(&spec, px, hud::BG, hovered)
+            hud.render_button(&spec, px, hud.theme().bg, hovered)
         });
         let (rgba, w, h) = built?;
         self.toast = Some(Toast {
@@ -3628,7 +3673,7 @@ impl AppCore {
                 icon::assets::STOP,
                 px,
                 width,
-                hud::BG,
+                hud.theme().bg,
                 self.chip_hovered,
             )
         });
@@ -4071,6 +4116,35 @@ mod tests {
         let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(vec![dir.join("b.png")]));
         core.rebuild_playlist(source, dir.join("x.zip"), None, false, 0);
         assert_eq!(core.settings.last_folder.as_deref(), Some(dir.as_path()));
+    }
+
+    #[test]
+    fn os_theme_resolves_through_the_appearance_preference() {
+        let mut core = test_core();
+        // Default: System, dark until the shell reports (the pre-#46 look).
+        assert!(core.effective_dark());
+        assert_eq!(core.effective_letterbox(), core.settings.letterbox);
+
+        // The OS flips to light → System follows, and refresh_theme tracks the flip.
+        core.handle(CoreEvent::OsThemeChanged { dark: false });
+        assert!(!core.effective_dark());
+        assert!(!core.hud_dark, "refresh_theme applied the resolved theme");
+        assert_eq!(core.effective_letterbox(), core.settings.letterbox_light);
+
+        // Forced Light / Dark ignore the OS theme entirely.
+        core.settings.appearance_mode = settings::AppearanceMode::Dark;
+        assert!(core.effective_dark());
+        assert_eq!(core.effective_letterbox(), core.settings.letterbox);
+        core.settings.appearance_mode = settings::AppearanceMode::Light;
+        core.os_dark = true;
+        assert!(!core.effective_dark());
+
+        // A redundant report is change-free (hud_dark only moves on a real flip).
+        core.settings.appearance_mode = settings::AppearanceMode::System;
+        core.refresh_theme();
+        assert!(core.hud_dark);
+        core.handle(CoreEvent::OsThemeChanged { dark: true });
+        assert!(core.hud_dark);
     }
 
     #[test]

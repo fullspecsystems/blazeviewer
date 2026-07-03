@@ -32,13 +32,24 @@ fn sp(logical: f32) -> f32 {
     logical * SCALE
 }
 
-/// Render the gallery to `out` as a PNG. Errors (no system font, encode/write failure) come
-/// back as a message for `main` to print.
+/// Render the gallery to `out` as a PNG — the dark sheet at the given path, plus the
+/// light-theme sheet (task #46) beside it as `<stem>-light.png`, so both schemes can be
+/// dialed in from one command. Errors (no system font, encode/write failure) come back
+/// as a message for `main` to print.
 pub fn write_sheet(out: &Path) -> Result<(), String> {
-    let hud = Hud::load().ok_or("no system UI font is available to render the HUD")?;
-    let sheet = build_sheet(&hud);
-    let png = encode_png(&sheet)?;
-    std::fs::write(out, png).map_err(|e| format!("writing {}: {e}", out.display()))?;
+    let mut hud = Hud::load().ok_or("no system UI font is available to render the HUD")?;
+    let write = |sheet: &Sheet, path: &Path| -> Result<(), String> {
+        let png = encode_png(sheet)?;
+        std::fs::write(path, png).map_err(|e| format!("writing {}: {e}", path.display()))
+    };
+    write(&build_sheet(&hud), out)?;
+    hud.set_theme(hud::Theme::LIGHT);
+    let stem = out
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("hud-gallery");
+    let light = out.with_file_name(format!("{stem}-light.png"));
+    write(&build_sheet(&hud), &light)?;
     Ok(())
 }
 
@@ -118,7 +129,7 @@ fn build_sheet(hud: &Hud) -> Sheet {
 
 /// Build the captioned catalog tiles — one per HUD component / variant.
 fn build_tiles(hud: &Hud) -> Vec<Tile> {
-    let bg = hud::BG;
+    let bg = hud.theme().bg;
     let info_pad = s(7.0) as u32;
     let toast_pad = s(12.0) as u32;
     // Match the scan card's button text size (heading 15 × CARD_SUB), so swatches read true.
@@ -154,15 +165,15 @@ fn build_tiles(hud: &Hud) -> Vec<Tile> {
     }
     // Keyboard-help overlay: sectioned, description-left / shortcut-right (dimmed). `max_h`
     // caps a column so a long list packs into multiple columns.
-    if let Some(b) = hud.render_shortcuts(&help_sections(), sp(15.0), hud::BG, s(360.0)) {
+    if let Some(b) = hud.render_shortcuts(&help_sections(), sp(15.0), hud.theme().bg, s(360.0)) {
         tiles.push(tile(hud, "Keyboard help (?)", b));
     }
     // Folder-tree overlay (Shift+F): parent / siblings / children, current highlighted.
-    if let Some(b) = hud.render_tree(&tree_rows(), sp(15.0), info_pad, hud::BG, s(360.0)) {
+    if let Some(b) = hud.render_tree(&tree_rows(), sp(15.0), info_pad, hud.theme().bg, s(360.0)) {
         tiles.push(tile(hud, "Folder tree (Shift+F)", b));
     }
     // The same tree windowed by a tight height budget: "⋯ n more" markers appear.
-    if let Some(b) = hud.render_tree(&tree_rows(), sp(15.0), info_pad, hud::BG, s(150.0)) {
+    if let Some(b) = hud.render_tree(&tree_rows(), sp(15.0), info_pad, hud.theme().bg, s(150.0)) {
         tiles.push(tile(hud, "Folder tree \u{2014} windowed", b));
     }
 
@@ -307,7 +318,7 @@ fn build_composite(hud: &Hud) -> Sheet {
     let inset = s(18.0);
     // A vertical sky→ground gradient stands in for a photo.
     let mut c = Sheet::gradient(w, h, [0x86, 0xa6, 0xcf], [0x24, 0x2b, 0x20], false);
-    let bg = hud::BG;
+    let bg = hud.theme().bg;
 
     // Info pill: bottom-right (the live `set_overlay` corner).
     if let Some((r, pw, ph)) = hud.render_panel(

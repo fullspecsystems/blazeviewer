@@ -99,6 +99,9 @@ struct ContentView: View {
             .onAppear {
                 // After SwiftUI has installed its own main menu, replace it with ours.
                 model.installMenuBarIfNeeded()
+                // A forced Light/Dark Theme preference (#46) overrides the app's
+                // appearance from the first frame; System leaves the OS in charge.
+                model.applyAppearancePreference()
                 model.openLaunchPathIfAny()
                 model.openSettingsAction = { openSettings() }
                 model.runFSmokeIfRequested()

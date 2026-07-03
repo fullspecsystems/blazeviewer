@@ -273,6 +273,11 @@ pub enum CoreEvent {
     KeyUp { key: PbKey },
     /// The window lost focus — the core clears held keys (the focus-loss release net).
     FocusLost,
+    /// The OS light/dark theme changed (winit `ThemeChanged` / AppKit
+    /// `viewDidChangeEffectiveAppearance`), or its initial value at startup. The core
+    /// re-resolves the `Appearance` preference (task #46) and re-themes the HUD +
+    /// letterbox when the effective theme actually flipped.
+    OsThemeChanged { dark: bool },
     /// A clock tick (held-key pacing / slideshow dwell are evaluated against it).
     Tick(Instant),
     /// The shell is about to draw and wants the core's current frame decision.

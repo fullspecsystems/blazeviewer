@@ -8,6 +8,12 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
+- **Light mode** — a new **Theme** setting under Settings ▸ Appearance: **System**
+  (default) follows your OS light/dark theme live, or pin **Light** / **Dark**. In light
+  mode the on-image overlays (info panels, toasts, help, folder tree, scan card) switch
+  to dark text on a translucent white panel, and the light and dark themes each get
+  their own background color around the photo (both pickable in Settings). Available on
+  Windows and Mac; on the Mac a pinned theme also restyles the menus and windows.
 - **Folder tree overlay (⇧F)** — press Shift+F for a "you are here" view in the top-left
   corner: the folder you opened at the top, the path down to the current photo's folder
   (very deep paths collapse in the middle), its sibling folders with the current one

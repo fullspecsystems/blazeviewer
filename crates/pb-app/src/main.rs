@@ -375,6 +375,8 @@ impl App {
                 mods: contract::Modifiers::NONE,
                 esc_guard_until: None,
                 persist_prefs: true, // a live shell persists the remembered last_folder
+                os_dark: true,       // dark until `resumed` reads the real window theme (#46)
+                hud_dark: true,      // matches the Hud's default Theme::DARK
                 fit: None,
                 // Start in the user's default scale mode (8/9/0 still switch it live).
                 view: ViewTransform {
@@ -2027,8 +2029,11 @@ impl ApplicationHandler for App {
             hdr,
             peak,
         );
-        // Apply the user's saved letterbox color before the first frame paints.
-        renderer.set_letterbox(self.core.settings.letterbox);
+        // Seed the OS theme before the first frame paints, so the Appearance preference
+        // resolves against the real desktop theme (#46; `None` = no OS signal → dark),
+        // then apply the user's saved letterbox color for that resolved theme.
+        self.core.os_dark = window.theme() != Some(winit::window::Theme::Light);
+        renderer.set_letterbox(self.core.effective_letterbox());
         let now = window.inner_size();
         if now != isz {
             self.core.fit = Some(FitBox {
@@ -2112,6 +2117,10 @@ impl ApplicationHandler for App {
 
         self.window = Some(window);
         self.core.renderer = Some(Box::new(renderer));
+        // Retint the HUD compositor for the resolved theme (#46) — it defaults to dark;
+        // a light desktop / forced-Light preference re-themes it (and the empty-state
+        // hint) here, before any overlay bitmap is built.
+        self.core.refresh_theme();
         self.core.request_prefetch();
 
         // Now that the window + engine are live, kick off any launch we deferred (an archive
@@ -2269,10 +2278,15 @@ impl ApplicationHandler for App {
             },
 
             // OS light↔dark theme switched at runtime: re-theme the native menu so
-            // it keeps matching the desktop (the window title bar is winit's).
-            WindowEvent::ThemeChanged(_) => {
+            // it keeps matching the desktop (the window title bar is winit's), and
+            // tell the core so `Appearance: System` re-resolves the HUD + letterbox
+            // live (#46).
+            WindowEvent::ThemeChanged(t) => {
                 #[cfg(windows)]
                 self.refresh_menu_theme();
+                self.core.handle(contract::CoreEvent::OsThemeChanged {
+                    dark: t == winit::window::Theme::Dark,
+                });
             }
 
             // Track the modifier state for chord building (Shift+R, Ctrl+R, Alt+Enter, ⌘…).

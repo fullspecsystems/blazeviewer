@@ -34,7 +34,7 @@ struct SettingsView: View {
                 .frame(width: 560, height: 510)
                 .tabItem { tabLabel("General", symbol: "gearshape") }
             appearancePane
-                .frame(width: 560, height: 240)
+                .frame(width: 560, height: 315)
                 .tabItem { tabLabel("Appearance", symbol: "paintbrush") }
             ShortcutsPane(model: model)
                 .frame(width: 560, height: 640)
@@ -188,13 +188,26 @@ struct SettingsView: View {
     private var appearancePane: some View {
         Form {
             Section("Appearance") {
+                // System/Light/Dark (#46): drives the HUD scheme, which background fills
+                // the view, and — via NSApp.appearance — the app's own chrome.
+                Picker("Theme", selection: $draft.appearanceMode) {
+                    Text("System").tag(0)
+                    Text("Light").tag(1)
+                    Text("Dark").tag(2)
+                }
+                .pickerStyle(.segmented)
                 Picker("Default scale", selection: $draft.scaleMode) {
                     Text("Fit").tag(0)
                     Text("Fill").tag(1)
                     Text("Original").tag(2)
                 }
                 .pickerStyle(.segmented)
-                ColorPicker("Background", selection: $draft.letterbox, supportsOpacity: false)
+                ColorPicker(
+                    "Background (dark)", selection: $draft.letterbox, supportsOpacity: false
+                )
+                ColorPicker(
+                    "Background (light)", selection: $draft.letterboxLight, supportsOpacity: false
+                )
                 labeledSlider(
                     "Info panel opacity", value: $draft.infoOpacity, in: 0...100, format: "%.0f%%"
                 )
@@ -455,7 +468,9 @@ struct SettingsDraft: Equatable {
     var scrollAction = 0
     var recursive = true
     var scaleMode = 0
+    var appearanceMode = 0
     var letterbox: Color = .black
+    var letterboxLight: Color = .white
     var infoOpacity: Double = 60
     var startupMode = 2
     var slideshowInterval: Double = 4
@@ -474,10 +489,16 @@ struct SettingsDraft: Equatable {
         scrollAction = Int(form.scroll_action)
         recursive = form.recursive
         scaleMode = Int(form.scale_mode)
+        appearanceMode = Int(form.appearance_mode)
         letterbox = Color(
             red: Double(form.letterbox_r) / 255.0,
             green: Double(form.letterbox_g) / 255.0,
             blue: Double(form.letterbox_b) / 255.0
+        )
+        letterboxLight = Color(
+            red: Double(form.letterbox_light_r) / 255.0,
+            green: Double(form.letterbox_light_g) / 255.0,
+            blue: Double(form.letterbox_light_b) / 255.0
         )
         infoOpacity = Double(form.info_opacity)
         startupMode = Int(form.startup_mode)
@@ -489,6 +510,7 @@ struct SettingsDraft: Equatable {
 
     func toForm() -> SettingsFormFfi {
         let rgb = NSColor(letterbox).usingColorSpace(.sRGB) ?? .black
+        let rgbLight = NSColor(letterboxLight).usingColorSpace(.sRGB) ?? .white
         return SettingsFormFfi(
             start_speed: Float(startSpeed),
             ramp_secs: Float(rampSecs),
@@ -498,9 +520,13 @@ struct SettingsDraft: Equatable {
             scroll_action: UInt8(scrollAction),
             recursive: recursive,
             scale_mode: UInt8(scaleMode),
+            appearance_mode: UInt8(appearanceMode),
             letterbox_r: UInt8((rgb.redComponent * 255).rounded().clamped(0, 255)),
             letterbox_g: UInt8((rgb.greenComponent * 255).rounded().clamped(0, 255)),
             letterbox_b: UInt8((rgb.blueComponent * 255).rounded().clamped(0, 255)),
+            letterbox_light_r: UInt8((rgbLight.redComponent * 255).rounded().clamped(0, 255)),
+            letterbox_light_g: UInt8((rgbLight.greenComponent * 255).rounded().clamped(0, 255)),
+            letterbox_light_b: UInt8((rgbLight.blueComponent * 255).rounded().clamped(0, 255)),
             info_opacity: UInt8(infoOpacity.rounded()),
             startup_mode: UInt8(startupMode),
             slideshow_interval_secs: slideshowInterval,

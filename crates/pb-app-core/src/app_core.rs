@@ -97,6 +97,14 @@ pub struct AppCore {
     /// decks never touch the user's config. Explicit Settings-dialog saves and the
     /// mute/geometry saves are unaffected (tests deliberately never drive those).
     pub persist_prefs: bool,
+    /// The **OS** light/dark theme, kept current by the shell (initial read + the
+    /// `OsThemeChanged` event). What `AppearanceMode::System` resolves to (task #46);
+    /// defaults to dark, matching the pre-#46 always-dark HUD, until the shell reports.
+    pub os_dark: bool,
+    /// The dark/light flag the HUD + letterbox were last themed for
+    /// ([`refresh_theme`](Self::refresh_theme)'s change detector, so a redundant OS
+    /// report doesn't rebuild every overlay bitmap).
+    pub hud_dark: bool,
 
     // --- View / geometry (NS0 5.2) ---
     /// Decode-to-fit target = the display size; photos are downscaled to it.

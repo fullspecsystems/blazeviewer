@@ -637,7 +637,30 @@ final class CoreModel {
     /// is a no-op, so the window's load echo and close-time flush cost nothing).
     func settingsEdited(_ form: SettingsFormFfi) {
         core.settings_edited(form)
+        // Keep the app-wide chrome (menus, Settings window, sheets) on the chosen
+        // theme too (#46) — the canvas re-reports the resulting effective appearance.
+        applyAppearancePreference()
         kick()
+        drainEffects()
+    }
+
+    /// Apply the Appearance preference (#46) to the whole app: forced Light/Dark set
+    /// an `NSApp.appearance` override (so native chrome matches the HUD); System
+    /// clears it, letting the OS theme through. The canvas's
+    /// `viewDidChangeEffectiveAppearance` then reports the resulting effective theme
+    /// back to the core, which keeps `Appearance: System` resolving live.
+    func applyAppearancePreference() {
+        switch core.settings_form().appearance_mode {
+        case 1: NSApp.appearance = NSAppearance(named: .aqua)
+        case 2: NSApp.appearance = NSAppearance(named: .darkAqua)
+        default: NSApp.appearance = nil
+        }
+    }
+
+    /// The effective light/dark appearance changed (OS switch, or our own override
+    /// landing) — the core re-resolves the preference and re-themes on a real flip.
+    func osThemeChanged(dark: Bool) {
+        core.os_theme_changed(dark)
         drainEffects()
     }
 

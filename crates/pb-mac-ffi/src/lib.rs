@@ -542,7 +542,7 @@ impl AppCoreHandle {
     /// The current settings as the flat form the Settings window binds to (NS2 item 5).
     /// `refresh_hz` rides along as the max-speed slider's ceiling (out-only).
     fn settings_form(&self) -> ffi::SettingsFormFfi {
-        use pb_app_core::settings::{ScaleModePref, ScrollAction, StartupMode};
+        use pb_app_core::settings::{AppearanceMode, ScaleModePref, ScrollAction, StartupMode};
         let s = &self.core.settings;
         let hz = self.core.refresh_hz().max(1);
         // An uncapped (0) or ≥refresh saved rate shows pinned at the ceiling (egui parity).
@@ -567,9 +567,17 @@ impl AppCoreHandle {
                 ScaleModePref::Fill => 1,
                 ScaleModePref::Original => 2,
             },
+            appearance_mode: match s.appearance_mode {
+                AppearanceMode::System => 0,
+                AppearanceMode::Light => 1,
+                AppearanceMode::Dark => 2,
+            },
             letterbox_r: s.letterbox[0],
             letterbox_g: s.letterbox[1],
             letterbox_b: s.letterbox[2],
+            letterbox_light_r: s.letterbox_light[0],
+            letterbox_light_g: s.letterbox_light[1],
+            letterbox_light_b: s.letterbox_light[2],
             info_opacity: s.info_opacity,
             startup_mode: match s.startup_mode {
                 StartupMode::Fullscreen => 0,
@@ -872,6 +880,14 @@ impl AppCoreHandle {
         self.core.handle(CoreEvent::FocusLost);
     }
 
+    /// The effective macOS appearance changed (or its initial value at attach) — the
+    /// host reports it from `viewDidChangeEffectiveAppearance`; the core re-resolves
+    /// the Appearance preference (#46) and re-themes the HUD + letterbox on a flip.
+    fn os_theme_changed(&mut self, dark: bool) {
+        self.core.now = Instant::now();
+        self.core.handle(CoreEvent::OsThemeChanged { dark });
+    }
+
     /// A frame / idle tick: drives held-key pacing, slideshow dwell, prefetch, and animation.
     /// The host calls this each frame it draws and on the scheduled wake deadlines returned
     /// via `SetWake` (a `MTKViewDelegate.draw(in:)` + timer, per the plan). Like the winit
@@ -991,7 +1007,9 @@ impl AppCoreHandle {
                 peak,
             )
         };
-        renderer.set_letterbox(self.core.settings.letterbox);
+        // The resolved theme's fill (#46) — the host reports the OS appearance just
+        // before attaching, so System resolves against the real desktop theme here.
+        renderer.set_letterbox(self.core.effective_letterbox());
         // Size the resident ring to the display and start filling it — navigation is a
         // rebind into this ring, never a decode (mirrors the winit `resumed`).
         let cap = engine::ring_capacity(self.core.slot_bytes_estimate());
@@ -1004,6 +1022,10 @@ impl AppCoreHandle {
         self.core.target_item = self.core.playlist.current();
         self.core.last_present = Some(Instant::now());
         self.core.renderer = Some(Box::new(renderer));
+        // Retint the HUD compositor for the resolved theme (#46) — it defaults to
+        // dark; a light desktop / forced-Light preference re-themes it here, before
+        // any overlay bitmap is built.
+        self.core.refresh_theme();
         self.core
             .effects
             .push(contract::CoreEffect::SetTitle(title));
@@ -1467,7 +1489,7 @@ fn fold_settings_form(
     form: &ffi::SettingsFormFfi,
     refresh_hz: u32,
 ) -> pb_app_core::settings::Settings {
-    use pb_app_core::settings::{ScaleModePref, ScrollAction, StartupMode};
+    use pb_app_core::settings::{AppearanceMode, ScaleModePref, ScrollAction, StartupMode};
     let mut s = base.clone();
     s.start_speed = form.start_speed;
     s.ramp_secs = form.ramp_secs;
@@ -1488,7 +1510,17 @@ fn fold_settings_form(
         2 => ScaleModePref::Original,
         _ => ScaleModePref::Fit,
     };
+    s.appearance_mode = match form.appearance_mode {
+        1 => AppearanceMode::Light,
+        2 => AppearanceMode::Dark,
+        _ => AppearanceMode::System,
+    };
     s.letterbox = [form.letterbox_r, form.letterbox_g, form.letterbox_b];
+    s.letterbox_light = [
+        form.letterbox_light_r,
+        form.letterbox_light_g,
+        form.letterbox_light_b,
+    ];
     s.info_opacity = form.info_opacity;
     s.startup_mode = match form.startup_mode {
         0 => StartupMode::Fullscreen,
@@ -1696,9 +1728,11 @@ mod ffi {
 
     // The Settings window's flat form — a mirror of pb_app_core::settings::Settings
     // (NS2 item 5). Encodings: scroll_action 0 pan / 1 zoom; scale_mode 0 fit / 1 fill /
-    // 2 original; startup_mode 0 fullscreen / 1 windowed / 2 remember. max_fps rides in
-    // [1, refresh_hz]; at the ceiling it means "uncapped" (stored 0). refresh_hz is
-    // out-only (the slider ceiling); picker_dir "" = none.
+    // 2 original; appearance_mode 0 system / 1 light / 2 dark (#46); startup_mode
+    // 0 fullscreen / 1 windowed / 2 remember. max_fps rides in [1, refresh_hz]; at the
+    // ceiling it means "uncapped" (stored 0). refresh_hz is out-only (the slider
+    // ceiling); picker_dir "" = none. letterbox is the dark-theme fill, letterbox_light
+    // the light-theme one (#46).
     #[swift_bridge(swift_repr = "struct")]
     struct SettingsFormFfi {
         start_speed: f32,
@@ -1709,9 +1743,13 @@ mod ffi {
         scroll_action: u8,
         recursive: bool,
         scale_mode: u8,
+        appearance_mode: u8,
         letterbox_r: u8,
         letterbox_g: u8,
         letterbox_b: u8,
+        letterbox_light_r: u8,
+        letterbox_light_g: u8,
+        letterbox_light_b: u8,
         info_opacity: u8,
         startup_mode: u8,
         slideshow_interval_secs: f64,
@@ -1757,6 +1795,7 @@ mod ffi {
         );
         fn key_up(&mut self, key: &str);
         fn focus_lost(&mut self);
+        fn os_theme_changed(&mut self, dark: bool);
         fn tick(&mut self);
         fn next_effect(&mut self) -> Option<CoreEffectFfi>;
         fn open_path(&mut self, path: &str);
@@ -2321,5 +2360,33 @@ mod tests {
             folded.fullscreen, h.core.settings.fullscreen,
             "unexposed field preserved"
         );
+    }
+
+    /// Task #46: the appearance preference + both letterbox fills cross the form both
+    /// ways, and an out-of-range appearance byte falls back to System.
+    #[test]
+    fn settings_form_carries_the_appearance_fields() {
+        use pb_app_core::settings::AppearanceMode;
+        let h = test_handle(800, 600, 1.0);
+        let mut form = h.settings_form();
+        assert_eq!(form.appearance_mode, 0, "default = System");
+
+        form.appearance_mode = 1; // light
+        form.letterbox_r = 5;
+        form.letterbox_light_r = 250;
+        let folded = fold_settings_form(&h.core.settings, &form, form.refresh_hz);
+        assert_eq!(folded.appearance_mode, AppearanceMode::Light);
+        assert_eq!(folded.letterbox[0], 5);
+        assert_eq!(folded.letterbox_light[0], 250);
+        // And back out through the getter.
+        let mut h2 = test_handle(800, 600, 1.0);
+        h2.core.settings = folded;
+        let out = h2.settings_form();
+        assert_eq!(out.appearance_mode, 1);
+        assert_eq!(out.letterbox_light_r, 250);
+
+        form.appearance_mode = 99; // garbage byte → System
+        let folded = fold_settings_form(&h.core.settings, &form, form.refresh_hz);
+        assert_eq!(folded.appearance_mode, AppearanceMode::System);
     }
 }

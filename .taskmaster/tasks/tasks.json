@@ -262,7 +262,7 @@
         "id": 46,
         "title": "Light mode support for the HUD (appearance preference: System/Light/Dark)",
         "description": "The HUD rasterizer (pb-hud/src/hud.rs) currently hardcodes always-white text ([255,255,255]) with a black shadow/outline (tokens::TEXT/TEXT_DIM/SHADOW, hud.rs ~30-38) and a translucent-black panel background (tokens::BG) - there is no color/theme parameter threaded through render_table/render_centered/render_panel today, only background alpha is parameterized. Add a user-facing Appearance preference (System/Light/Dark, defaulting to System = current dark-on-black look unchanged) that flips the HUD to black text with a white shadow/halo and a light translucent panel background when resolved-light. Reuse the existing OS theme detection already used for the egui dialog window (winit's Window::theme() in pb-app/src/dialog.rs:404, dark_ui = window.theme() != Some(Theme::Light)) rather than hand-rolling a new registry/NSAppearance check - it already covers Windows (AppsUseLightTheme/DWM) and macOS (NSApp.effectiveAppearance) portably. Settings storage follows the existing ScaleModePref/StartupMode enum pattern in pb-app-core/src/settings.rs (Copy/Default/Serialize/Deserialize, #[serde(rename_all = \"lowercase\")], #[default] variant, TOML-persisted, round-trip tested).",
-        "status": "pending",
+        "status": "review",
         "priority": "low",
         "dependencies": [],
         "subtasks": [
@@ -270,37 +270,37 @@
             "id": 1,
             "title": "Settings: AppearanceMode enum (System/Light/Dark)",
             "description": "New AppearanceMode { System, Light, Dark } in pb-app-core/src/settings.rs following the ScaleModePref/StartupMode shape (Copy, Default = System, Serialize/Deserialize, serde rename_all lowercase); Settings::appearance_mode field, Default impl, round-trip test.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 2,
             "title": "Resolve effective light/dark for the main window",
             "description": "Extend/reuse the OS-theme-detection already used for the dialog window (winit Window::theme() in dialog.rs:404) so the main viewer window can resolve an effective dark:bool too (System -> OS theme; Light/Dark -> forced). Handle live OS theme-change events if winit surfaces them, so System mode updates without a restart.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 3,
             "title": "Parameterize pb-hud text/outline/panel colors",
             "description": "Thread a resolved dark:bool (or a small Palette-style struct) through render_table/render_centered/render_panel/render_panel_icon instead of the hardcoded tokens::TEXT/TEXT_DIM/SHADOW/BG constants; light variant = black text fill, white shadow/halo, light translucent panel background. Keep dark variant pixel-identical to today's look (regression guard).",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 4,
             "title": "Wire resolved theme into every HUD call site",
             "description": "All existing HUD render call sites (toast, EXIF/info panel, help overlay, shortcuts, scan card, and the new folder-tree overlay if landed by then) pass the resolved theme through instead of relying on implicit constants.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 5,
             "title": "Settings UI + persistence",
             "description": "Add the Appearance choice to the Settings dialog (pb-ui component, e.g. a segmented control or toggle group per the existing pb-ui catalog) under an Appearance section; auto-saves like other Settings fields per the existing auto-save wiring.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 6,
             "title": "CHANGELOG + owner smoke",
             "description": "Unreleased > Added entry. Smoke: System mode matches OS light/OS dark on both platforms; forced Light/Dark override OS; switching OS theme live while System is selected updates the HUD without restart; dark-mode HUD is visually unchanged from before this task.",
-            "status": "pending"
+            "status": "in-progress"
           }
         ]
       },

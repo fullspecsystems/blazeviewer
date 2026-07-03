@@ -133,6 +133,9 @@ final class MetalCanvasNSView: NSView {
         metalLayer.contentsScale = scale
         attached = true
         model?.hostWindow = window
+        // Report the effective appearance BEFORE the renderer attaches, so the first
+        // frame's letterbox + HUD already resolve `Appearance: System` correctly (#46).
+        model?.osThemeChanged(dark: effectiveAppearance.isDarkAppearance)
         onAttach?(metalLayer, pixelSize(at: scale), scale)
         // Stand the display-synchronized frame pump up on this view (it tracks the view's
         // display for the refresh rate); the model paces it, we own its lifetime.
@@ -171,6 +174,15 @@ final class MetalCanvasNSView: NSView {
         onResize?(pixelSize(at: scale), scale)
     }
 
+    /// The effective light/dark appearance changed — an OS theme switch, or our own
+    /// `NSApp.appearance` override landing (the Theme preference, #46). Report it so
+    /// `Appearance: System` re-resolves the HUD + letterbox live, without a restart.
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        guard attached else { return }
+        model?.osThemeChanged(dark: effectiveAppearance.isDarkAppearance)
+    }
+
     /// Called by the representable's dismantle: drop the Rust renderer BEFORE this view
     /// (and its layer) dies — the FFI layer-lifetime contract. The pump goes first (it
     /// must not fire into a detached core).
@@ -192,6 +204,13 @@ final class MetalCanvasNSView: NSView {
             width: max(1, bounds.width * scale).rounded(),
             height: max(1, bounds.height * scale).rounded()
         )
+    }
+}
+
+extension NSAppearance {
+    /// Whether this appearance resolves dark (the core's `os_dark` currency, #46).
+    var isDarkAppearance: Bool {
+        bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
     }
 }
 

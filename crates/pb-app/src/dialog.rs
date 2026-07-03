@@ -93,11 +93,13 @@ struct SettingsDraft {
     hold_delay_ms: u32,
     scroll_action: usize, // 0 = Pan, 1 = Zoom (what a plain scroll does)
     recursive: bool,
-    scale_mode: usize,       // 0 = Fit, 1 = Fill, 2 = Original
-    letterbox: [f32; 3],     // 0..1 per channel (egui color picker)
-    info_opacity: u8,        // 0..100
-    startup_mode: usize,     // 0 = Fullscreen, 1 = Windowed, 2 = Remember
-    slideshow_interval: f64, // seconds (default slideshow dwell)
+    scale_mode: usize,         // 0 = Fit, 1 = Fill, 2 = Original
+    appearance: usize,         // 0 = System, 1 = Light, 2 = Dark (#46)
+    letterbox: [f32; 3],       // 0..1 per channel (egui color picker) — the dark fill
+    letterbox_light: [f32; 3], // the light-mode fill (#46)
+    info_opacity: u8,          // 0..100
+    startup_mode: usize,       // 0 = Fullscreen, 1 = Windowed, 2 = Remember
+    slideshow_interval: f64,   // seconds (default slideshow dwell)
     /// File-picker start: `false` = the current photo's folder, `true` = a pinned folder.
     picker_fixed: bool,
     /// The pinned folder (when `picker_fixed`); `None` until the user chooses one.
@@ -130,10 +132,20 @@ impl SettingsDraft {
                 settings::ScaleModePref::Fill => 1,
                 settings::ScaleModePref::Original => 2,
             },
+            appearance: match s.appearance_mode {
+                settings::AppearanceMode::System => 0,
+                settings::AppearanceMode::Light => 1,
+                settings::AppearanceMode::Dark => 2,
+            },
             letterbox: [
                 s.letterbox[0] as f32 / 255.0,
                 s.letterbox[1] as f32 / 255.0,
                 s.letterbox[2] as f32 / 255.0,
+            ],
+            letterbox_light: [
+                s.letterbox_light[0] as f32 / 255.0,
+                s.letterbox_light[1] as f32 / 255.0,
+                s.letterbox_light[2] as f32 / 255.0,
             ],
             info_opacity: s.info_opacity,
             startup_mode: match s.startup_mode {
@@ -170,10 +182,20 @@ impl SettingsDraft {
             2 => settings::ScaleModePref::Original,
             _ => settings::ScaleModePref::Fit,
         };
+        s.appearance_mode = match self.appearance {
+            1 => settings::AppearanceMode::Light,
+            2 => settings::AppearanceMode::Dark,
+            _ => settings::AppearanceMode::System,
+        };
         s.letterbox = [
             (self.letterbox[0] * 255.0).round().clamp(0.0, 255.0) as u8,
             (self.letterbox[1] * 255.0).round().clamp(0.0, 255.0) as u8,
             (self.letterbox[2] * 255.0).round().clamp(0.0, 255.0) as u8,
+        ];
+        s.letterbox_light = [
+            (self.letterbox_light[0] * 255.0).round().clamp(0.0, 255.0) as u8,
+            (self.letterbox_light[1] * 255.0).round().clamp(0.0, 255.0) as u8,
+            (self.letterbox_light[2] * 255.0).round().clamp(0.0, 255.0) as u8,
         ];
         s.info_opacity = self.info_opacity;
         s.startup_mode = match self.startup_mode {
@@ -401,7 +423,13 @@ impl DialogWindow {
         #[cfg(windows)]
         crate::apply_native_window_icon(&window);
         let size = window.inner_size();
-        let dark_ui = window.theme() != Some(Theme::Light);
+        // The dialog theme honors the Appearance preference (#46): System follows the
+        // OS-resolved window theme (the pre-#46 behavior); Light/Dark pin it.
+        let dark_ui = match settings.appearance_mode {
+            settings::AppearanceMode::Light => false,
+            settings::AppearanceMode::Dark => true,
+            settings::AppearanceMode::System => window.theme() != Some(Theme::Light),
+        };
 
         let instance = wgpu::Instance::default();
         let surface = instance.create_surface(window.clone()).ok()?;
@@ -1583,6 +1611,24 @@ fn display_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
             ui,
             p,
             None,
+            "Theme",
+            Some("HUD and background colors; System follows the OS"),
+            |ui| {
+                egui::ComboBox::from_id_salt("appearance_mode")
+                    .width(150.0)
+                    .selected_text(["System", "Light", "Dark"][d.appearance])
+                    .show_ui(ui, |ui| {
+                        pbui::apply_to_ui(ui, p.dark);
+                        ui.selectable_value(&mut d.appearance, 0, "System");
+                        ui.selectable_value(&mut d.appearance, 1, "Light");
+                        ui.selectable_value(&mut d.appearance, 2, "Dark");
+                    });
+            },
+        );
+        pbui::card_row(
+            ui,
+            p,
+            None,
             "Default scale mode",
             Some("How an image fits the window"),
             |ui| {
@@ -1603,10 +1649,20 @@ fn display_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
             ui,
             p,
             None,
-            "Letterbox color",
-            Some("Fills the screen around an image that doesn\u{2019}t cover it"),
+            "Letterbox color (dark)",
+            Some("Fills the screen around an image in the dark theme"),
             |ui| {
                 ui.color_edit_button_rgb(&mut d.letterbox);
+            },
+        );
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Letterbox color (light)",
+            Some("Fills the screen around an image in the light theme"),
+            |ui| {
+                ui.color_edit_button_rgb(&mut d.letterbox_light);
             },
         );
         pbui::card_row(

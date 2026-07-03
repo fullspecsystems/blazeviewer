@@ -139,16 +139,72 @@ pub mod tokens {
     pub const TREE_NAME_MAX: f32 = 16.0;
 }
 
-use tokens::{SHADOW, SHADOW_ALPHA, TEXT, TEXT_DIM};
+use tokens::SHADOW_ALPHA;
 
 /// Re-exported at the HUD root so existing `hud::BG` call sites keep resolving.
+/// This is the **dark** panel background — theme-aware callers should reach for
+/// [`Theme::of`]`(dark).bg` / [`Hud::theme`] instead.
 pub use tokens::BG;
 
 /// A panel background at `opacity_pct` (0–100) percent — black at the given alpha.
-/// Drives the "info panel opacity" setting for the info / EXIF panels.
+/// The dark-theme legacy helper; theme-aware callers use [`Theme::bg_for_opacity`].
 pub fn bg_for_opacity(opacity_pct: u8) -> [u8; 4] {
-    let a = ((opacity_pct.min(100) as f32 / 100.0) * 255.0).round() as u8;
-    [0, 0, 0, a]
+    Theme::DARK.bg_for_opacity(opacity_pct)
+}
+
+/// The HUD's resolved **color scheme** (task #46): the five color roles every overlay
+/// shares, in dark and light variants. Held on the [`Hud`] (set once by the app core's
+/// theme resolution), so every `render_*` call composites with the active scheme — the
+/// geometry tokens above stay theme-independent. [`Theme::DARK`] is pinned to the
+/// legacy `tokens` constants, so the dark HUD is pixel-identical to the pre-theme look.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Theme {
+    /// Standard panel background (toasts, help, tree, scan card, open buttons).
+    pub bg: [u8; 4],
+    /// Primary text + icon color.
+    pub text: [u8; 3],
+    /// Secondary/dim text on a panel (counts, shortcut hints, collapsed-tree markers).
+    pub text_dim: [u8; 3],
+    /// The legibility halo around glyphs and icons (dark: black; light: white).
+    pub shadow: [u8; 3],
+    /// The extra-dim " / " separator between paired shortcuts.
+    pub shortcut_sep: [u8; 3],
+}
+
+impl Theme {
+    /// The classic dark HUD: white outlined text on translucent black.
+    pub const DARK: Theme = Theme {
+        bg: tokens::BG,
+        text: tokens::TEXT,
+        text_dim: tokens::TEXT_DIM,
+        shadow: tokens::SHADOW,
+        shortcut_sep: tokens::SHORTCUT_SEP,
+    };
+    /// The light HUD: black text with a white halo on a translucent near-white panel.
+    /// The grays mirror the dark roles' contrast against their panel.
+    pub const LIGHT: Theme = Theme {
+        bg: [244, 245, 247, 153],
+        text: [0, 0, 0],
+        text_dim: [88, 92, 100],
+        shadow: [255, 255, 255],
+        shortcut_sep: [145, 148, 155],
+    };
+
+    /// The scheme for a resolved dark/light flag.
+    pub fn of(dark: bool) -> Theme {
+        if dark {
+            Theme::DARK
+        } else {
+            Theme::LIGHT
+        }
+    }
+
+    /// A panel background at `opacity_pct` (0–100) percent — this theme's panel color
+    /// at the given alpha. Drives the "info panel opacity" setting.
+    pub fn bg_for_opacity(&self, opacity_pct: u8) -> [u8; 4] {
+        let a = ((opacity_pct.min(100) as f32 / 100.0) * 255.0).round() as u8;
+        [self.bg[0], self.bg[1], self.bg[2], a]
+    }
 }
 
 /// A row of the table layout ([`Hud::render_table`]).
@@ -222,6 +278,9 @@ pub struct Hud {
     semibold: Option<Face>,
     /// The bold face (filename / titles); falls back to semibold then regular.
     bold: Option<Face>,
+    /// The active color scheme (task #46). Defaults to [`Theme::DARK`]; the app core's
+    /// theme resolution sets it, and every `render_*` call composites with it.
+    theme: Theme,
 }
 
 /// One laid-out glyph: its metrics, coverage bitmap, and pen x-offset on the line.
@@ -309,7 +368,20 @@ impl Hud {
             font,
             semibold,
             bold,
+            theme: Theme::DARK,
         })
+    }
+
+    /// The active color scheme — call sites read panel backgrounds off it
+    /// (`hud.theme().bg`, `hud.theme().bg_for_opacity(..)`).
+    pub fn theme(&self) -> Theme {
+        self.theme
+    }
+
+    /// Swap the color scheme (the app core's theme resolution). Cached overlay bitmaps
+    /// were composited with the old scheme — the caller rebuilds them.
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
     }
 
     /// The face for a given weight plus the faux-bold smear to apply, falling back
@@ -360,7 +432,7 @@ impl Hud {
     ) -> Option<(Vec<u8>, u32, u32)> {
         let line_h = self.line_height(px)?;
         let icon_h = (px * tokens::PILL_ICON).round().max(1.0) as u32;
-        let rasterized = icon.and_then(|svg| crate::icon::rasterize(svg, icon_h, TEXT));
+        let rasterized = icon.and_then(|svg| crate::icon::rasterize(svg, icon_h, self.theme.text));
 
         // Icon-only pill (empty message): a perfectly square rounded rect with the
         // icon centered on both axes — e.g. the rotate toasts. The side matches a
@@ -395,7 +467,14 @@ impl Hud {
             self.draw_icon(&mut canvas, rgba, *iw, *ih, pad_x as i32, iy, px);
         }
         let baseline = pad as f32 + self.ascent(px)?;
-        self.draw_line(&mut canvas, text_x as f32, baseline, &glyphs, TEXT, px);
+        self.draw_line(
+            &mut canvas,
+            text_x as f32,
+            baseline,
+            &glyphs,
+            self.theme.text,
+            px,
+        );
         Some((canvas.into_rgba(), pw, ph))
     }
 
@@ -460,11 +539,11 @@ impl Hud {
             let baseline = row_top + ascent;
             match item {
                 Laid::Span(g) => {
-                    self.draw_line(&mut canvas, pad_x, baseline, g, TEXT, px);
+                    self.draw_line(&mut canvas, pad_x, baseline, g, self.theme.text, px);
                 }
                 Laid::Pair(lg, vg) => {
-                    self.draw_line(&mut canvas, pad_x, baseline, lg, TEXT, px);
-                    self.draw_line(&mut canvas, value_x, baseline, vg, TEXT, px);
+                    self.draw_line(&mut canvas, pad_x, baseline, lg, self.theme.text, px);
+                    self.draw_line(&mut canvas, value_x, baseline, vg, self.theme.text, px);
                 }
             }
         }
@@ -586,7 +665,7 @@ impl Hud {
                 col_w + 2 * band_pad,
                 band_h,
                 (px * 0.25).round(),
-                TEXT,
+                self.theme.text,
                 tokens::SECTION_BAND_ALPHA,
             );
             // Section heading (semibold, white), vertically centered in the band.
@@ -595,19 +674,19 @@ impl Hud {
                 col_x as f32,
                 (top + title_pad) as f32 + asc,
                 &s.title,
-                TEXT,
+                self.theme.text,
                 px,
             );
             // Rows: description left (white), shortcut right-aligned (keys dimmed, "/" dimmer).
             for (i, r) in s.rows.iter().enumerate() {
                 let ry = (top + band_h + title_gap + i as i32 * line_h) as f32 + asc;
-                self.draw_line(&mut canvas, col_x as f32, ry, &r.desc, TEXT, px);
+                self.draw_line(&mut canvas, col_x as f32, ry, &r.desc, self.theme.text, px);
                 let mut sx = (col_x + col_w) as f32 - r.shortcut_w;
                 for (glyphs, w, is_sep) in &r.shortcut {
                     let rgb = if *is_sep {
-                        tokens::SHORTCUT_SEP
+                        self.theme.shortcut_sep
                     } else {
-                        TEXT_DIM
+                        self.theme.text_dim
                     };
                     self.draw_line(&mut canvas, sx, ry, glyphs, rgb, px);
                     sx += w;
@@ -649,7 +728,7 @@ impl Hud {
             let baseline = pad as f32 + i as f32 * line_h as f32 + ascent;
             // Center this line within the content box.
             let x = pad_x + (content_w - adv) * 0.5;
-            self.draw_line(&mut canvas, x, baseline, glyphs, TEXT, px);
+            self.draw_line(&mut canvas, x, baseline, glyphs, self.theme.text, px);
         }
         Some((canvas.into_rgba(), pw, ph))
     }
@@ -691,8 +770,9 @@ impl Hud {
         // The two folder glyphs, rasterized once; every row's name starts after a
         // fixed icon cell as wide as the wider (open) glyph, so names align per depth.
         let icon_h = (px * tokens::TREE_ICON).round().max(1.0) as u32;
-        let closed = crate::icon::rasterize(crate::icon::assets::FOLDER, icon_h, TEXT);
-        let open = crate::icon::rasterize(crate::icon::assets::FOLDER_OPEN, icon_h, TEXT);
+        let closed = crate::icon::rasterize(crate::icon::assets::FOLDER, icon_h, self.theme.text);
+        let open =
+            crate::icon::rasterize(crate::icon::assets::FOLDER_OPEN, icon_h, self.theme.text);
         let cell = closed
             .iter()
             .chain(open.iter())
@@ -721,7 +801,7 @@ impl Hud {
             lines.push(Line {
                 glyphs,
                 text_x: 0,
-                rgb: TEXT_DIM,
+                rgb: self.theme.text_dim,
                 band: false,
                 icon: None,
             });
@@ -745,7 +825,11 @@ impl Hud {
                 text_x,
                 // A marker row (collapsed ancestor levels) is dim and glyph-less,
                 // aligned with the name column at its depth.
-                rgb: if r.marker { TEXT_DIM } else { TEXT },
+                rgb: if r.marker {
+                    self.theme.text_dim
+                } else {
+                    self.theme.text
+                },
                 band: r.current,
                 icon: (!r.marker).then_some((r.open, x0)),
             });
@@ -772,7 +856,7 @@ impl Hud {
                     pw as i32 - 2 * inset,
                     line_h,
                     (px * 0.25).round(),
-                    TEXT,
+                    self.theme.text,
                     tokens::TREE_CURRENT_ALPHA,
                 );
             }
@@ -865,7 +949,7 @@ impl Hud {
             center(head_adv),
             y as f32 + head_asc,
             &head_g,
-            TEXT,
+            self.theme.text,
             px,
         );
         y += head_lh + gap_lines;
@@ -875,7 +959,7 @@ impl Hud {
                 center(path_adv),
                 y as f32 + sub_asc,
                 &path_g,
-                TEXT_DIM,
+                self.theme.text_dim,
                 px_sub,
             );
             y += sub_lh + gap_lines;
@@ -885,7 +969,7 @@ impl Hud {
             center(count_adv),
             y as f32 + sub_asc,
             &count_g,
-            TEXT_DIM,
+            self.theme.text_dim,
             px_sub,
         );
         y += sub_lh + gap_button;
@@ -934,9 +1018,9 @@ impl Hud {
         } else {
             (tokens::BUTTON_FILL_ALPHA, tokens::BUTTON_BORDER_ALPHA)
         };
-        canvas.fill_round_rect(x, y, b.w, b.h, r, TEXT, fill_a);
+        canvas.fill_round_rect(x, y, b.w, b.h, r, self.theme.text, fill_a);
         let t = (px * tokens::BUTTON_BORDER).round().max(1.0) as i32;
-        canvas.stroke_round_rect(x, y, b.w, b.h, r, t, TEXT, border_a);
+        canvas.stroke_round_rect(x, y, b.w, b.h, r, t, self.theme.text, border_a);
         let baseline = (y + b.pad_y) as f32 + asc;
         // With a shortcut hint the button is justified (label left, hint right) like a menu row;
         // without one the content block is centered when widened past its natural size (min_w).
@@ -950,11 +1034,11 @@ impl Hud {
             self.draw_icon(canvas, rgba, *iw, *ih, cx, iy, px);
             cx += *iw as i32 + b.icon_gap;
         }
-        self.draw_line(canvas, cx as f32, baseline, &b.glyphs, TEXT, px);
+        self.draw_line(canvas, cx as f32, baseline, &b.glyphs, self.theme.text, px);
         // Trailing shortcut hint: dimmed, right-aligned against the button's inner edge.
         if let Some((glyphs, adv)) = &b.shortcut {
             let sx = (x + b.w - b.pad_x) as f32 - adv;
-            self.draw_line(canvas, sx, baseline, glyphs, TEXT_DIM, px);
+            self.draw_line(canvas, sx, baseline, glyphs, self.theme.text_dim, px);
         }
         Some([
             x.max(0) as u32,
@@ -993,7 +1077,7 @@ impl Hud {
         let pad_y = (px * tokens::BUTTON_PAD_Y).round().max(2.0) as i32;
         let icon = spec.icon.and_then(|svg| {
             let h = (px * tokens::BUTTON_ICON).round().max(1.0) as u32;
-            crate::icon::rasterize(svg, h, TEXT)
+            crate::icon::rasterize(svg, h, self.theme.text)
         });
         let (icon_w, icon_gap) = match &icon {
             Some((_, w, _)) => (
@@ -1191,7 +1275,7 @@ impl Hud {
                     baseline,
                     dx,
                     dy,
-                    SHADOW,
+                    self.theme.shadow,
                     SHADOW_ALPHA,
                 );
             }
@@ -1217,7 +1301,15 @@ impl Hud {
     ) {
         let s = (px * tokens::OUTLINE).round().max(1.0) as i32; // outline thickness (matches text)
         for &(dx, dy) in &[(s, 0), (-s, 0), (0, s), (0, -s)] {
-            canvas.blit_silhouette(rgba, iw, ih, x0 + dx, y0 + dy, SHADOW, SHADOW_ALPHA);
+            canvas.blit_silhouette(
+                rgba,
+                iw,
+                ih,
+                x0 + dx,
+                y0 + dy,
+                self.theme.shadow,
+                SHADOW_ALPHA,
+            );
         }
         canvas.blit_rgba(rgba, iw, ih, x0, y0);
     }
@@ -1823,6 +1915,73 @@ mod tests {
                 "({x},{y}) should be inside the superellipse (a circle excludes it), got {cov}"
             );
         }
+    }
+
+    /// The dark theme is pinned to the legacy `tokens` constants and stays the default,
+    /// so pre-theme rendering is pixel-identical (task #46's regression guard).
+    #[test]
+    fn dark_theme_matches_legacy_constants_and_is_default() {
+        assert_eq!(Theme::DARK.bg, BG);
+        assert_eq!(Theme::DARK.text, tokens::TEXT);
+        assert_eq!(Theme::DARK.text_dim, tokens::TEXT_DIM);
+        assert_eq!(Theme::DARK.shadow, tokens::SHADOW);
+        assert_eq!(Theme::DARK.shortcut_sep, tokens::SHORTCUT_SEP);
+        assert_eq!(Theme::of(true), Theme::DARK);
+        assert_eq!(Theme::of(false), Theme::LIGHT);
+        if let Some(hud) = Hud::load() {
+            assert_eq!(hud.theme(), Theme::DARK, "dark is the default scheme");
+        }
+        // The legacy helper and the dark theme's agree on every opacity.
+        for pct in [0u8, 37, 60, 100] {
+            assert_eq!(bg_for_opacity(pct), Theme::DARK.bg_for_opacity(pct));
+        }
+        assert_eq!(Theme::LIGHT.bg_for_opacity(100)[3], 255);
+        assert_eq!(Theme::LIGHT.bg_for_opacity(0)[3], 0);
+    }
+
+    /// A light-themed panel composites inverted: a bright translucent background with
+    /// dark glyphs (vs. the dark theme's black panel + white glyphs).
+    #[test]
+    fn light_theme_flips_panel_colors() {
+        let Some(mut hud) = Hud::load() else {
+            return;
+        };
+        let render = |hud: &Hud| {
+            let bg = hud.theme().bg;
+            hud.render_panel("Theme probe", 20.0, 8, bg)
+                .expect("renders")
+        };
+        let (dark_px, w, h) = render(&hud);
+        hud.set_theme(Theme::LIGHT);
+        let (light_px, lw, lh) = render(&hud);
+        assert_eq!((w, h), (lw, lh), "geometry is theme-independent");
+        // Panel-corner-adjacent background pixel: dark theme ≈ black, light ≈ white.
+        let idx = ((h / 2) * w) as usize * 4 + 4; // left edge, mid height
+        assert!(dark_px[idx] < 60, "dark panel bg is near-black");
+        assert!(light_px[idx] > 200, "light panel bg is near-white");
+        // The glyph ink flips the other way: darkest pixel in light mode is near-black.
+        let min_rgb = |px: &[u8]| {
+            px.chunks_exact(4)
+                .filter(|c| c[3] > 200)
+                .map(|c| c[0])
+                .min()
+                .unwrap_or(255)
+        };
+        let max_rgb = |px: &[u8]| {
+            px.chunks_exact(4)
+                .filter(|c| c[3] > 200)
+                .map(|c| c[0])
+                .max()
+                .unwrap_or(0)
+        };
+        assert!(
+            max_rgb(&dark_px) > 200,
+            "dark theme has bright (white) glyph ink"
+        );
+        assert!(
+            min_rgb(&light_px) < 60,
+            "light theme has dark (black) glyph ink"
+        );
     }
 
     #[test]
