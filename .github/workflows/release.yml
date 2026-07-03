@@ -181,7 +181,8 @@ jobs:
             target/wix/*.msi
             target/wix/*.msi.sha256
 
-  # macOS: build the .app (Liquid Glass icon via actool + flat .icns), Developer ID
+  # macOS: build the SwiftUI-host .app (release-macos.sh's default since the 2026-07-02
+  # cutover — cargo staticlib → swift build via build-swift-host.sh), Developer ID
   # codesign under the hardened runtime, package a DMG, notarize + staple, attach to the
   # Release. All the codesign/DMG/notarize logic lives in scripts/release-macos.sh so it
   # runs identically on a dev machine. Signing+notarization are gated on the secrets — an
@@ -214,8 +215,9 @@ jobs:
 
       # No Xcode 26 / ImageMagick step: the icons (packaging/macos/{Assets.car,
       # PhotoBlaze.icns}) are prebuilt + committed (scripts/build-macos-icons.sh), so
-      # bundle-macos.sh just copies them. The runner's default Xcode supplies codesign +
-      # notarytool, which is all the release script needs.
+      # build-swift-host.sh just copies them. The runner's default Xcode supplies swift,
+      # codesign + notarytool, which is all the release script needs (the mac-swift CI
+      # lane already proves the same build-swift-host.sh chain on macos-15).
 
       - name: Detect signing configuration
         run: |

@@ -703,28 +703,85 @@ final class CoreModel {
 
     /// Honor the Startup setting (Fullscreen / Windowed / Remember) and the remembered
     /// windowed geometry — the settings the egui build honors that were dead here.
-    /// SwiftUI applies its own frame restoration during launch layout (the forensics
-    /// trace shows programmatic resizes right after attach), so the restore is applied
-    /// at attach AND re-asserted once after launch settles (skipped if the user is
-    /// already interacting).
+    ///
+    /// settings.toml is the ONLY frame restorer: SwiftUI's own frame persistence is
+    /// disabled below, because the two restorers fought — SwiftUI re-applied its
+    /// remembered size (off from ours by exactly the title-bar height, 32 pt) ~10 ms
+    /// after our restore, and the old 0.6 s re-assert then snapped it back in plain
+    /// sight (the owner-reported "opens, then shortens" glitch; trace 2026-07-03).
+    /// A short-lived resize guard now corrects any remaining clobber the moment it
+    /// lands — before the window is meaningfully visible — then retires.
     private func applyStartupWindowState() {
         guard let window = hostWindow else { return }
         window.isRestorable = false // settings.toml is the restorer here, not Cocoa
+        // Kill SwiftUI's frame persistence: stop future saves AND delete the already-
+        // stored value, so no stale remembered size re-applies on this or any later
+        // launch. (Empty name = SwiftUI used scene storage instead; the guard below
+        // still catches that clobber.)
+        let autosave = window.frameAutosaveName
+        if !autosave.isEmpty {
+            _ = window.setFrameAutosaveName("")
+            NSWindow.removeFrame(usingName: autosave)
+        }
         if core.startup_fullscreen() {
             setWindowMode(fullscreen: true)
             return
         }
         guard let frame = savedWindowFrame() else { return }
         window.setFrame(frame, display: true)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-            guard let self, let window = self.hostWindow,
-                  !self.speedModeFullscreen,
-                  NSEvent.pressedMouseButtons == 0,
-                  window.frame != frame
-            else { return }
-            window.setFrame(frame, display: true) // SwiftUI's launch layout clobbered it
+        beginLaunchFrameGuard(target: frame, window: window)
+    }
+
+    /// For the first ~2 s after the restore, snap any programmatic resize away from the
+    /// restored frame straight back (SwiftUI's launch layout re-applying its remembered
+    /// size). User interaction or fullscreen ends the guard — the user's intent wins —
+    /// and a correction cap keeps any unforeseen resize war finite.
+    private func beginLaunchFrameGuard(target: NSRect, window: NSWindow) {
+        launchFrameCorrections = 0
+        launchFrameGuard = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResizeNotification, object: window, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.enforceLaunchFrame(target) }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            self?.endLaunchFrameGuard()
         }
     }
+
+    private func enforceLaunchFrame(_ target: NSRect) {
+        guard let window = hostWindow else {
+            endLaunchFrameGuard()
+            return
+        }
+        // The user (or a fullscreen transition) owns the frame now — stand down.
+        if speedModeFullscreen || window.styleMask.contains(.fullScreen)
+            || window.inLiveResize || NSEvent.pressedMouseButtons != 0
+        {
+            endLaunchFrameGuard()
+            return
+        }
+        guard window.frame != target else { return }
+        launchFrameCorrections += 1
+        guard launchFrameCorrections <= 4 else {
+            log("launch frame guard: giving up after \(launchFrameCorrections) corrections")
+            endLaunchFrameGuard()
+            return
+        }
+        log(
+            "launch frame guard: \(Int(window.frame.width))×\(Int(window.frame.height))"
+                + " → snapping back to \(Int(target.width))×\(Int(target.height))")
+        window.setFrame(target, display: true)
+    }
+
+    private func endLaunchFrameGuard() {
+        if let g = launchFrameGuard {
+            NotificationCenter.default.removeObserver(g)
+            launchFrameGuard = nil
+        }
+    }
+
+    @ObservationIgnored private var launchFrameGuard: NSObjectProtocol?
+    @ObservationIgnored private var launchFrameCorrections = 0
 
     /// The saved geometry as an AppKit frame, or nil when absent / not meaningfully on
     /// any connected screen. Stored values use winit's convention (physical px,

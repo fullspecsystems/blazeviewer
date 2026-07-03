@@ -18,21 +18,23 @@
 # Locally you can skip CSC_LINK: if a "Developer ID Application" identity is already in
 # your login keychain it's used directly (no base64 dance).
 #
-# Usage: scripts/release-macos.sh [--release|--debug] [--swift-host]
-#   --swift-host  package the NS1 SwiftUI host (PhotoBlaze.app, built by
-#                 build-swift-host.sh) instead of the egui bundle. Runs fine LOCALLY
-#                 with a Developer ID identity in the login keychain + the three
-#                 APPLE_* env vars — no CI required (Actions credits are finite).
+# Usage: scripts/release-macos.sh [--release|--debug] [--egui]
+#   Default: the SwiftUI host (PhotoBlaze.app via build-swift-host.sh) — it IS
+#   PhotoBlaze on macOS since the 2026-07-02 cutover. Runs fine LOCALLY with a
+#   Developer ID identity in the login keychain + the three APPLE_* env vars —
+#   no CI required (Actions credits are finite).
+#   --egui        package the retired egui bundle instead (legacy escape hatch).
 set -euo pipefail
 
 PROFILE="release"
-TARGET="egui"
+TARGET="swift-host"
 for a in "$@"; do
 	case "$a" in
 		--debug) PROFILE="debug" ;;
 		--release) PROFILE="release" ;;
-		--swift-host) TARGET="swift-host" ;;
-		*) echo "unknown arg: $a (usage: release-macos.sh [--release|--debug] [--swift-host])" >&2; exit 2 ;;
+		--swift-host) TARGET="swift-host" ;; # accepted for compat; now the default
+		--egui) TARGET="egui" ;;
+		*) echo "unknown arg: $a (usage: release-macos.sh [--release|--debug] [--egui])" >&2; exit 2 ;;
 	esac
 done
 
@@ -46,13 +48,13 @@ if [[ "$TARGET" == "swift-host" ]]; then
 	BIN_NAME="PhotoBlaze"
 	APP="target/swift-host/$PROFILE/$APP_NAME.app"
 	BUILD_CMD="./scripts/build-swift-host.sh --$PROFILE"
-	DMG_SUFFIX="-swiftui" # dodge the egui artifact's name in dist/ until cutover
+	DMG_SUFFIX="" # the real artifact since the cutover
 else
 	APP_NAME="PhotoBlaze"
 	BIN_NAME="photoblaze"
 	APP="target/$PROFILE/bundle/$APP_NAME.app"
 	BUILD_CMD="./scripts/bundle-macos.sh --$PROFILE"
-	DMG_SUFFIX=""
+	DMG_SUFFIX="-egui" # retired legacy bundle; never collide with the real DMG name
 fi
 DMG="$DIST/$APP_NAME-$SHORT_VERSION$DMG_SUFFIX.dmg"
 

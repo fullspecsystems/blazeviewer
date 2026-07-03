@@ -314,7 +314,7 @@
         "id": 9,
         "title": "Recursive directory mode (R)",
         "description": "R toggles recursive mode: the playlist spans the current directory plus every subfolder, ordered so a folder's own photos show first, then each subfolder in order, recursively - i.e. roughly full-path order.",
-        "status": "pending",
+        "status": "done",
         "priority": "medium",
         "dependencies": [],
         "details": "When recursive mode is on, the scan walks the whole tree and rebuilds the playlist. ORDERING (confirm with owner): directory-grouped depth-first - within a directory its own images come first (natural/numeric sort so img2 < img10), then descend into each subdirectory in natural order, recursively. This differs subtly from a pure lexicographic full-path sort (where a file 'z.jpg' would sort after a subfolder 'a/'); the grouped traversal matches the owner's 'current dir's photos first, then each subfolder'. REBUILD: the app owns the ordered path list while pb-core Playlist holds count + index, so toggling re-scans, re-sorts, rebuilds Playlist (and its precomputed shuffle for the new length), and keeps the current photo by re-finding its new index. PRIVACY (Task 2): scanning reads directory entries only - no on-disk index is written. Use walkdir; skip unreadable dirs; guard against symlink loops. KEY CONFLICT: 'R' (Shift+R) was assigned to rotate-CCW in Task 1 - recommend recursive=R and moving rotate-CCW to another default (trivial via Task 8); confirm with owner. RESOLVED 2026-06-27 (owner): the recursion toggle is Ctrl+R (NOT R), leaving R/Shift+R for rotate (Task 1); and a folder opened via picker/drag-drop/association is recursive BY DEFAULT (Task 12), so this folder-grouped ordering function is the shared one those folder opens reuse.",
@@ -324,28 +324,28 @@
             "id": 1,
             "title": "Recursive image scan (walkdir)",
             "description": "Gather all image paths under the root, filtering by supported extensions; skip unreadable dirs and symlink loops.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 2,
             "title": "Path-ordering function (folder-grouped, natural sort)",
             "description": "Pure, tested ordering: a directory's files first, then its subdirectories, natural/numeric sort within each.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 3,
             "title": "Toggle R: rebuild playlist, keep current photo",
             "description": "Re-scan/re-sort, rebuild Playlist + precomputed shuffle for the new length, re-find the current photo's index.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 4,
             "title": "Resolve the R key conflict + privacy check",
             "description": "Pick the default binding (recommend recursive=R, move rotate-CCW); confirm the scan writes no on-disk index.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           }
         ]
@@ -531,7 +531,7 @@
         "id": 15,
         "title": "macOS delivery: .app bundle, Info.plist UTIs, openFiles, notarize + .dmg",
         "description": "Port PhotoBlaze to macOS at the delivery layer only - the pb-core open-request seam and the wgpu/Metal renderer already carry over. Bundle as a signed, notarized .app/.dmg with file-type associations.",
-        "status": "pending",
+        "status": "done",
         "priority": "low",
         "dependencies": [
           12
@@ -543,21 +543,21 @@
             "id": 1,
             "title": ".app bundle + Info.plist UTIs (cargo-bundle/packager)",
             "description": "Bundle the binary with document-type/UTI declarations for the image formats.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 2,
             "title": "openFiles Apple Event -> LaunchInput",
             "description": "Map the macOS open hand-off (and drag-drop) into the shared pb-core::open path.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 3,
             "title": "Developer ID signing + notarization + .dmg",
             "description": "Sign, notarize for Gatekeeper, and package a .dmg for distribution.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           }
         ]
@@ -751,7 +751,7 @@
         "id": 22,
         "title": "In-app settings/preferences UI (options + hotkey remapping)",
         "description": "A settings window - opened with Ctrl+, and a 'Settings...' menu item - that lets users change options (Blaze tuning, max photos/sec cap, recursive-by-default, default scale mode, etc.) and remap hotkeys to actions, applying live and persisting to config. Built as EGUI IN ITS OWN OS WINDOW (decided). This is the GUI FRONT-END over the config backends; it is the first deliberate user-driven disk write (preferences only - privacy Task 2 explicitly allows config).",
-        "status": "in-progress",
+        "status": "done",
         "priority": "medium",
         "dependencies": [
           8,
@@ -778,28 +778,28 @@
             "id": 3,
             "title": "Options panel (scan-speed cap, acceleration, recursive/windowed defaults, ...)",
             "description": "Grouped controls bound to the model with live apply; surfaces Task 19/20/12 and the existing prefs.",
-            "status": "in-progress",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 4,
             "title": "Hotkey remap: key-capture + conflict display + reset",
             "description": "Press-a-key capture assigns the next physical key to an action (Task 8 map); show duplicate/unknown conflicts; reset-to-defaults.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 5,
             "title": "Entry points + dismissal (menu 'Settings...', hotkey, Esc/Save/Cancel)",
             "description": "DECIDED: Settings lives under File > Settings (not Edit - that is for clipboard ops on Windows), with Ctrl+, (VS Code-style). Ctrl+, is already wired; the remaining bit is the File menu item. Pause hold-to-fly while open; reflect remaps in the help overlay + menu hints.",
-            "status": "in-progress",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 6,
             "title": "Persist preferences (atomic, best-effort) + privacy check",
             "description": "Write only preferences (Task 2 allows config) via atomic temp+rename; a failed write never breaks viewing; never persist photo-derived data.",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           }
         ]
@@ -1255,7 +1255,7 @@
         "id": 33,
         "title": "Real progress feedback while decompressing a large archive",
         "description": "Replace the uninformative indeterminate spinner shown while a large .7z decompresses with real, determinate progress (a percentage / entry count, ideally a progress bar). Today a big archive opens behind a generic 'Loading archive…' toast and the password path shows a jerky 'Checking…' spinner (owner, 2026-06-28) — neither conveys that work is happening or how much is left, so a multi-second/GB extract looks hung.",
-        "status": "pending",
+        "status": "done",
         "priority": "medium",
         "dependencies": [
           30
@@ -1267,14 +1267,14 @@
             "id": 1,
             "title": "Investigate sevenz-rust2 progress/streaming API",
             "description": "Determine whether sevenz-rust2 supports a progress callback or entry-by-entry decode. If not, prototype iterating entries ourselves (archive_probe already enumerates) to get incremental counts/bytes. Decide the progress granularity (entries vs bytes).",
-            "status": "pending",
+            "status": "done",
             "dependencies": []
           },
           {
             "id": 2,
             "title": "Thread incremental progress through the worker channel",
             "description": "Replace the result-only channel in begin_archive_open/poll_archive_load with an enum carrying Update{done,total,...} + Done(Result); worker emits updates as it decodes; event loop drains them per tick (keep the archive_gen supersede check; stay off the hot path). Unit-test the fraction math + superseded-drop.",
-            "status": "pending",
+            "status": "done",
             "dependencies": [
               1
             ]
@@ -1283,7 +1283,7 @@
             "id": 3,
             "title": "Determinate UI readout",
             "description": "Render real progress: feed the loading pie its true fraction (render_pie already takes 0..=1) and/or show 'Decompressing… N% (x/y)' via the centered message layer (set_message). Replace the generic 'Loading archive…' toast for the long case; keep the brief password 'Checking…' spinner distinct.",
-            "status": "pending",
+            "status": "done",
             "dependencies": [
               2
             ]
@@ -1294,7 +1294,7 @@
         "id": 34,
         "title": "macOS: borderless speed-mode fullscreen should cover the menu bar",
         "description": "On macOS our custom \"speed mode\" fullscreen (the F / Alt+Enter / F11 toggle — App::toggle_fullscreen — which sizes a borderless, decoration-less window to the monitor in the SAME Space, with no native toggleFullScreen: Spaces swoosh) leaves the system menu bar visible on top of the image. Owner (2026-06-29) wants it to cover the menu bar too, so the speed mode is genuinely edge-to-edge as the viewer intends, while keeping the no-transition, same-Space behavior (distinct from the separate native Ctrl+Cmd+F fullscreen).",
-        "status": "pending",
+        "status": "done",
         "priority": "low",
         "dependencies": [],
         "details": "WHERE: App::toggle_fullscreen (crates/pb-app/src/main.rs) is cross-platform — on entering speed mode it does window.set_fullscreen(None) + set_decorations(false) + sizes the window to current_monitor position/size; on exit it restores decorations + windowed geometry. On macOS a borderless window sized to the screen does NOT hide the menu bar (the bar stays drawn on top / the window does not extend under it), unlike Windows where the borderless resize is already edge-to-edge. FIX DIRECTION: while in macOS speed-mode fullscreen, set the app presentation options to auto-hide the menu bar (and Dock): NSApp setPresentationOptions = NSApplicationPresentationAutoHideMenuBar | NSApplicationPresentationAutoHideDock (AutoHide reveals them on hover at the top — typical fullscreen feel; the Hide* variants fully hide). Reset to NSApplicationPresentationDefault on exit. NOTE AutoHideMenuBar REQUIRES AutoHideDock (or HideDock) or AppKit throws — pair them. Implement behind a cfg(target_os = macos) helper (reuse the objc2 + ns_view_of / NSApp pattern from hdr_surface.rs) called from toggle_fullscreen, so the Windows path is untouched. EDGE CASES: ensure exiting speed mode (and quit / Esc teardown) restores Default so the menu bar is not left hidden; do not fight the separate native fullscreen item (native fullscreen manages its own presentation). VERIFY ON DEVICE (cannot be checked headless): the menu bar is auto-hidden when entering speed-mode fullscreen and returns on exit; the image now fills the full screen height.",
@@ -1305,7 +1305,7 @@
         "id": 35,
         "title": "Fix: opening a large nested folder beachballs then crashes (synchronous, unbounded recursive scan on the event-loop thread)",
         "description": "Opening a deep/large nested directory tree on macOS shows the spinning pinwheel (beachball) and then crashes. Root cause is structural, not macOS-specific in the code: the recursive image scan runs SYNCHRONOUSLY on the winit event-loop (main) thread, and the walk is UNBOUNDED RECURSION with no symlink-cycle guard. The long scan starves the run loop (→ macOS 'application not responding' beachball), and a deeply nested tree — or a symlink/alias cycle (common on macOS) — overflows the main thread's stack, which Rust turns into an uncatchable abort (the same class of hard crash noted for deep RAW decoders in CLAUDE.md). This violates the project norm 'Never block the event loop' — decode/I/O are off-thread, but the directory scan is not. Reported 2026-06-30 (owner). FIXED 2026-06-30: the recursive walk is now iterative + symlink-non-following + error-tolerant + cancellable (walkdir, replacing the hand-rolled recursion in collect_recursive → collect_images), and folder scans run OFF the event-loop thread (begin_dir_scan/poll_dir_scan, mirroring the async 7z path: thread::spawn + mpsc + scan_gen generation counter + shared cancel flag; the current view stays put, a slow scan flashes a deferred 'Scanning folder…' toast). Unit tests added: recursive_scan_walks_nested_subfolders, recursive_scan_does_not_follow_symlink_cycle (the crash regression), scan_honors_cancel_flag; the no-trace privacy tests still pass (the off-thread scan is read-only). REMAINING (status review): on-device confirmation that opening ~/Library no longer beachballs/crashes; and the macos_open.rs TEMP DEBUG that writes opened paths to /tmp/pb_openurls_dbg.txt is NOT yet removed — left untouched to avoid colliding with the other agent working in the macOS files (still a privacy-guarantee violation + must-remove-before-commit).",
-        "status": "review",
+        "status": "done",
         "priority": "high",
         "dependencies": [],
         "details": "ROOT CAUSE (confirmed by reading the code): App::open_input (crates/pb-app/src/main.rs ~1650) → resolve_playlist → resolve_source (~4505) → scan_images (~4341) → collect_recursive (~4321) all run on the event-loop thread. open_input is called from about_to_wait (drops ~4077, macOS openURLs ~4086), resumed (deferred launch ~3803), and the file picker (~2469) — every entry point is the main thread. Two distinct failure modes: (1) BEACHBALL: collect_recursive does a synchronous std::fs::read_dir walk of the whole tree (plus paths.sort()) before the playlist exists; for a large tree this blocks winit's run loop for seconds, and macOS shows the spinning-wait cursor / can flag the app unresponsive. (2) CRASH: collect_recursive (main.rs:4321) recurses once per directory depth with NO depth cap and NO visited/symlink-cycle protection — a deeply nested tree exhausts the ~8 MB main-thread stack, and a directory symlink/alias that points at an ancestor recurses infinitely → guaranteed stack overflow → process abort (uncatchable; catch_unwind does not help, exactly like the NEF stack-overflow caveat). PRECEDENT FOR THE FIX: the .7z archive open already solved the same 'slow open must not freeze the loop' problem — begin_archive_open (~1683) does a RAM pre-flight then std::thread::spawn's the heavy work, shows a determinate progress + Cancel dialog (DialogWindow / OpenProgress), and picks up the result in poll_archive_load via a channel, bumping archive_gen so a superseded open is discarded. FIX DIRECTION: (a) make the walk iterative + safe — replace the recursive collect_recursive with an explicit work-queue (VecDeque) walk, OR adopt the `walkdir` crate (iterative, follow_links=false by default, has loop detection); either way add a hard depth cap and/or a visited-canonical-path set so symlink/alias cycles can't loop forever. (b) move the scan OFF the event-loop thread for the large case (thread::spawn like the 7z path) so the loop stays responsive and the existing loading/Cancel dialog can show progress, with a generation counter to drop superseded scans; the current photo (if any) stays on screen until the scan lands. (c) consider streaming/cap: surface results incrementally or cap absurd counts with a toast rather than allocating a giant Vec<PathBuf> up front. Keep the simple non-recursive path synchronous (it's cheap). This is cross-platform hardening; it just manifests first on macOS. NOTE while in here: macos_open.rs currently has a TEMP DEBUG `dbg()` that appends opened file paths to /tmp/pb_openurls_dbg.txt — that both must be removed before commit and is a privacy-guarantee violation (a persisted trace of viewed paths, task #2); kill it.",
@@ -1459,7 +1459,7 @@
         "id": 41,
         "title": "Right-click context menu on the photo",
         "description": "A native secondary-click (right-click) context menu over the image exposing the most common per-photo commands, so the user can act on the current photo without the menu bar (which is gone in fullscreen speed-mode) or memorizing shortcuts. Home for Show in Finder/Explorer (#40) and other per-photo actions.",
-        "status": "review",
+        "status": "done",
         "priority": "medium",
         "dependencies": [],
         "details": "Show a native OS-drawn context menu at the cursor on right-click over the photo, dispatching through the SAME MenuAction->Action path the menu bar already uses (menu.rs action_for). Reuse muda's context-menu support (ContextMenu::show_context_menu_for_hwnd on Windows / show_context_menu_for_nsview on macOS) rather than hand-drawing one: native look, perf-neutral (built lazily only on right-click, never per frame, off the keypress hot path), and zero new dispatch code. Build a small DEDICATED menu (a curated subset), not the whole menu bar. INITIAL ITEMS (curated subset of existing actions): Copy, Copy File Path, Show in Finder/Explorer (#40), Rotate Right/Left, Save Rotation, Delete, Show Image Info. Enabled-state reuses the existing menu_state flags (can_save_rotation, the future can_reveal, archive-entry/empty-deck checks) so items grey out consistently with the menu bar. BIG WIN: works in fullscreen speed-mode too, where the menu bar is hidden -- the context menu becomes the only chrome-free pointer route to these commands. WIRING (effect/seam-based, consistent with NS0): winit delivers right-click via MouseInput(MouseButton::Right); the shell already routes MouseInput to core. Add a core handler that emits CoreEffect::ShowContextMenu { x, y } (cursor pos), and the shell drain builds+shows the muda context menu (a platform op, like SetMenuState); clicks come back through the existing MenuEvent channel -> action_for -> dispatch_action, so no parallel dispatch path. Keep the item list + which-are-enabled in a shared, testable place (mirror menu_state_from) so the NS1 Swift host can build an NSMenu from the same description. POLISH: suppress/ignore a right-click during active hold-to-fly so it can't stutter a fly; don't show over the empty deck (or show a reduced menu with just Open). See task #40 for the reveal action it will host.",
@@ -1485,7 +1485,7 @@
             "id": 3,
             "title": "Fullscreen support + polish",
             "description": "Verify it works in fullscreen speed-mode (where the menu bar is hidden); suppress a right-click during active hold-to-fly; sensible behavior over the empty deck; confirm perf-neutral (menu built lazily, off the hot path).",
-            "status": "pending",
+            "status": "done",
             "dependencies": [
               2
             ]
@@ -1496,7 +1496,7 @@
         "id": 42,
         "title": "macOS: closing in borderless fullscreen (F) restarts on the wrong monitor",
         "description": "On macOS, quitting PhotoBlaze while in the borderless fullscreen speed-mode (F / Opt+Return, NOT native Spaces fullscreen) makes the next launch open on the wrong monitor. The fullscreen monitor choice / saved window geometry is not being restored to the display the user was actually on.",
-        "status": "pending",
+        "status": "in-progress",
         "priority": "medium",
         "dependencies": [],
         "details": "Reported by owner 2026-07-01 on a multi-display Mac. Likely suspects: (a) the borderless mode sizes/positions to event_loop.primary_monitor() instead of the monitor the window occupied when the fullscreen pref was saved (see the resumed() window-attrs path in crates/pb-app/src/main.rs, which uses primary_monitor for the decoration-less mode); (b) apply_window_mode / the SetWindowMode handler snapshots windowed geometry but the fullscreen launch path never re-targets the saved monitor. Fix should persist which display the fullscreen window was on (e.g. monitor position/id in Settings alongside the fullscreen flag + windowed geometry) and, on launch, pick the matching winit MonitorHandle when it still exists (fall back to primary when unplugged). Verify the Windows borderless path keeps its current behavior.",
