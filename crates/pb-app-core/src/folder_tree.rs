@@ -261,6 +261,9 @@ pub(crate) fn subdirs(dir: &Path) -> Vec<String> {
                 if !e.file_type().ok()?.is_dir() {
                     return None;
                 }
+                if entry_hidden(&e) {
+                    return None;
+                }
                 let name = e.file_name().to_string_lossy().into_owned();
                 (!name.starts_with('.')).then_some(name)
             })
@@ -268,6 +271,41 @@ pub(crate) fn subdirs(dir: &Path) -> Vec<String> {
         })
         .unwrap_or_default();
     sort_names(v)
+}
+
+/// Windows hides folders by *attribute*, not by name — `$RECYCLE.BIN`, `System
+/// Volume Information`, `found.000` all carry FILE_ATTRIBUTE_HIDDEN/SYSTEM and
+/// never appear in Explorer, so they mustn't appear in the tree either (the
+/// dot-prefix filter above only covers the Unix convention).
+#[cfg(windows)]
+fn entry_hidden(e: &std::fs::DirEntry) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const HIDDEN: u32 = 0x2; // FILE_ATTRIBUTE_HIDDEN
+    const SYSTEM: u32 = 0x4; // FILE_ATTRIBUTE_SYSTEM
+    e.metadata()
+        .map(|m| m.file_attributes() & (HIDDEN | SYSTEM) != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn entry_hidden(_e: &std::fs::DirEntry) -> bool {
+    false
+}
+
+/// The rebuild identity of a photo's containing folder against the deck root:
+/// root-relative and forward-slashed when the photo lives under the root, the
+/// **absolute** parent path otherwise. The fallback matters on explicit
+/// multi-folder decks (two folders dropped at once — the root is only the first
+/// one): collapsing every out-of-root photo to `""` made the ⇧F tree's
+/// signature blind to folder changes, so it kept showing the wrong hierarchy.
+pub fn folder_identity(path: &Path, root: &Path) -> String {
+    match path.strip_prefix(root) {
+        Ok(rel) => folder_of(&rel.to_string_lossy().replace('\\', "/")).to_string(),
+        Err(_) => path
+            .parent()
+            .map(|d| d.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default(),
+    }
 }
 
 /// A path component's display name (falls back to the full path for a
@@ -419,6 +457,77 @@ fn rows_from_listings(
         model.push_up(&name_of(par), par.to_path_buf());
     }
     model
+}
+
+// ── Off-thread disk derivation ───────────────────────────────────────────────
+//
+// `rows_from_disk` / `subdirs` are the only disk I/O the tree does, and they
+// used to run inline on the event-loop thread — a spun-down drive or a dead
+// network share stalled the whole app for seconds on ⇧F ("never block the
+// event loop"). The callers now paint the no-I/O lite view immediately and hand
+// the `read_dir` work to a short-lived worker; `AppCore::tick` polls the
+// receiver (`work_pending` keeps the loop ticking) and installs the result when
+// it lands. A superseded job's receiver is simply dropped — the worker's send
+// fails and the thread exits.
+
+/// What a tree-io worker delivers back to `tick`.
+pub enum TreeIoResult {
+    /// The settled `read_dir` view for the folder whose rebuild signature is `sig`.
+    FullTree { sig: String, model: FolderTreeModel },
+    /// The Go ▸ previous/next sibling target (`None` = at the end / nothing to open).
+    Sibling(Option<PathBuf>),
+}
+
+/// An in-flight tree-io job: the receiver `tick` polls, plus the full-tree
+/// signature (`None` for a sibling job) so the settle-upgrade tick doesn't
+/// re-kick a derivation that's already running. (`pub` only because it rides a
+/// struct-literal-constructed `AppCore` field.)
+pub struct TreeIo {
+    pub full_sig: Option<String>,
+    pub rx: std::sync::mpsc::Receiver<TreeIoResult>,
+}
+
+/// Derive the full `read_dir` tree for (`root`, `dir`) off-thread.
+pub(crate) fn spawn_full_tree(
+    root: PathBuf,
+    dir: PathBuf,
+    counts: Option<std::sync::Arc<HashMap<PathBuf, u64>>>,
+    sig: String,
+) -> TreeIo {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let full_sig = Some(sig.clone());
+    std::thread::spawn(move || {
+        let model = rows_from_disk(&root, &dir, counts.as_deref());
+        let _ = tx.send(TreeIoResult::FullTree { sig, model });
+    });
+    TreeIo { full_sig, rx }
+}
+
+/// Resolve the Go ▸ previous/next (`step` = ∓1) sibling of `root` off-thread —
+/// the listing (and even the `is_dir` stat) can stall on a dead share.
+pub(crate) fn spawn_sibling(root: PathBuf, step: i32) -> TreeIo {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(TreeIoResult::Sibling(sibling_target(&root, step)));
+    });
+    TreeIo { full_sig: None, rx }
+}
+
+/// The adjacent sibling directory of `root` in its parent's sorted listing, or
+/// `None` at the ends / for an unlisted root.
+fn sibling_target(root: &Path, step: i32) -> Option<PathBuf> {
+    if !root.is_dir() {
+        return None;
+    }
+    let parent = root.parent().filter(|p| !p.as_os_str().is_empty())?;
+    let sibs = subdirs(parent);
+    let name = name_of(root);
+    let pos = sibs.iter().position(|s| *s == name)?;
+    let next = pos as i64 + step as i64;
+    if next < 0 || next as usize >= sibs.len() {
+        return None; // at the end of the row of folders — nothing to step to
+    }
+    Some(parent.join(&sibs[next as usize]))
 }
 
 #[cfg(test)]
@@ -644,6 +753,54 @@ mod tests {
         assert_eq!(counts, vec![None, Some(3), Some(2), Some(1), Some(1)]);
         let b = PathBuf::from("/r/a/b");
         assert_eq!(m.targets[3].as_deref(), Some(b.as_path()));
+    }
+
+    #[test]
+    fn folder_identity_distinguishes_out_of_root_folders() {
+        let root = Path::new("/deck/root");
+        // Under the root: relative, forward-slashed, file name dropped.
+        assert_eq!(
+            folder_identity(Path::new("/deck/root/a/b/x.jpg"), root),
+            "a/b"
+        );
+        assert_eq!(folder_identity(Path::new("/deck/root/x.jpg"), root), "");
+        // Out of root (multi-folder deck): the absolute parent, so two different
+        // folders never collapse to the same signature.
+        let a = folder_identity(Path::new("/other/one/x.jpg"), root);
+        let b = folder_identity(Path::new("/other/two/y.jpg"), root);
+        assert_ne!(a, b);
+        assert_eq!(a, "/other/one");
+    }
+
+    #[test]
+    fn sibling_target_steps_through_the_sorted_listing() {
+        let base = std::env::temp_dir().join(format!("pb-ftree-sib-{}", std::process::id()));
+        for d in ["alpha", "beta", "gamma"] {
+            std::fs::create_dir_all(base.join(d)).unwrap();
+        }
+        let beta = base.join("beta");
+        assert_eq!(sibling_target(&beta, 1), Some(base.join("gamma")));
+        assert_eq!(sibling_target(&beta, -1), Some(base.join("alpha")));
+        assert_eq!(sibling_target(&base.join("gamma"), 1), None);
+        assert_eq!(sibling_target(&base.join("alpha"), -1), None);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn subdirs_skips_attribute_hidden_folders() {
+        let base = std::env::temp_dir().join(format!("pb-ftree-hidden-{}", std::process::id()));
+        std::fs::create_dir_all(base.join("visible")).unwrap();
+        std::fs::create_dir_all(base.join("stealth")).unwrap();
+        // Set FILE_ATTRIBUTE_HIDDEN the supported-tooling way (std can't write attributes).
+        let status = std::process::Command::new("attrib")
+            .arg("+h")
+            .arg(base.join("stealth"))
+            .status()
+            .unwrap();
+        assert!(status.success(), "attrib +h failed");
+        assert_eq!(subdirs(&base), vec!["visible".to_string()]);
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

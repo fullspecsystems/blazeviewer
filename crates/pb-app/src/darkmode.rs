@@ -25,6 +25,10 @@ const ORD_FLUSH_MENU_THEMES: usize = 136;
 /// `PreferredAppMode::AllowDark` — "use dark mode where the system asks for it"
 /// (i.e. follow the OS), as opposed to forcing dark/light.
 const APPMODE_ALLOW_DARK: i32 = 1;
+/// `PreferredAppMode::ForceDark` / `ForceLight` — pin the app's menus to one
+/// scheme regardless of the OS setting (the Appearance = Dark/Light preference).
+const APPMODE_FORCE_DARK: i32 = 2;
+const APPMODE_FORCE_LIGHT: i32 = 3;
 
 /// Resolve an export from `uxtheme.dll` by ordinal. The library is loaded once and
 /// intentionally never freed (it lives for the process). `None` if it can't be
@@ -54,10 +58,24 @@ fn uxtheme_proc(ordinal: usize) -> FARPROC {
 /// flush cached menu themes so popup dropdowns pick it up. Idempotent — safe to
 /// call once at startup (and again on a theme change).
 pub fn init_app() {
+    set_app_mode(None);
+}
+
+/// Set the app's preferred menu scheme: `None` = follow the OS (`AllowDark`),
+/// `Some(true/false)` = force dark/light (the pinned Appearance preference —
+/// popup dropdowns are OS-drawn, so without this a pinned theme only restyled
+/// the bar while the popups kept following the desktop). Flushes cached menu
+/// themes so open state doesn't linger.
+pub fn set_app_mode(dark: Option<bool>) {
     if let Some(p) = uxtheme_proc(ORD_SET_PREFERRED_APP_MODE) {
         let set_preferred_app_mode: unsafe extern "system" fn(i32) -> i32 =
             unsafe { std::mem::transmute(p) };
-        unsafe { set_preferred_app_mode(APPMODE_ALLOW_DARK) };
+        let mode = match dark {
+            None => APPMODE_ALLOW_DARK,
+            Some(true) => APPMODE_FORCE_DARK,
+            Some(false) => APPMODE_FORCE_LIGHT,
+        };
+        unsafe { set_preferred_app_mode(mode) };
     }
     flush_menu_themes();
 }

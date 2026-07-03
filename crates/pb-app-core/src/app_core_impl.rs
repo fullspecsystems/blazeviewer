@@ -139,6 +139,7 @@ impl AppCore {
             folder_tree_sig: None,
             folder_tree_panel: None,
             folder_tree_counts: None,
+            tree_io: None,
             hud: None,
             renderer: None,
             undo_stack: Vec::new(),
@@ -197,6 +198,9 @@ impl AppCore {
             // `poll_anim_decode` picks it up promptly (active playback drives its own
             // precise next-frame wake via `tick_playback`, not this frame poll).
             || self.anim_decode.is_some()
+            // A tree-io job (the folder tree's read_dir derivation / a Go sibling
+            // lookup) keeps the loop polling so `tick` installs it when it lands.
+            || self.tree_io.is_some()
             || self.displayed_item != self.target_item
             || self
                 .targets
@@ -962,6 +966,29 @@ impl AppCore {
         // crossings can't eat the advance budget. An empty deck rebuilds too
         // (`@root`): the tree browses from the root itself, so a photo-less folder
         // is a navigation point rather than a dead end.
+        // Install a landed tree-io result first (the off-thread read_dir derivation,
+        // or a Go sibling target). A stale full-tree result (the folder moved on, or
+        // the tree closed) is dropped — the signature check below re-derives.
+        if let Some(io) = self.tree_io.as_ref() {
+            match io.rx.try_recv() {
+                Ok(crate::folder_tree::TreeIoResult::FullTree { sig, model }) => {
+                    self.tree_io = None;
+                    if self.folder_tree_open && self.hud.is_some() && self.folder_sig() == sig {
+                        self.push_folder_tree(model.rows, model.targets, 0, None);
+                        self.folder_tree_sig = Some(sig);
+                        self.update_tree_hover();
+                    }
+                }
+                Ok(crate::folder_tree::TreeIoResult::Sibling(target)) => {
+                    self.tree_io = None;
+                    if let Some(d) = target {
+                        self.open_dir(d);
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.tree_io = None,
+            }
+        }
         if self.folder_tree_open && self.hud.is_some() {
             let sig = self.folder_sig();
             let lite_sig = format!("{sig}|lite");
@@ -977,8 +1004,15 @@ impl AppCore {
                 }
             } else if !flying && stored == Some(lite_sig.as_str()) {
                 // Flight settled on a folder last drawn by the lite pass — upgrade
-                // to the full read_dir view (it adds photo-less folders).
-                self.show_folder_tree_mode(false);
+                // to the full read_dir view (it adds photo-less folders), unless
+                // that derivation is already in flight on the worker.
+                let pending = self
+                    .tree_io
+                    .as_ref()
+                    .is_some_and(|io| io.full_sig.as_deref() == Some(sig.as_str()));
+                if !pending {
+                    self.show_folder_tree_mode(false);
+                }
             }
         }
 
@@ -1200,14 +1234,16 @@ impl AppCore {
         }
     }
 
-    /// The displayed photo's containing folder as a root-relative forward-slashed
-    /// path (`""` = the root level) — the tree's cheap identity, no I/O.
+    /// The displayed photo's containing folder as a forward-slashed path — the
+    /// tree's cheap identity, no I/O. Root-relative (`""` = the root level) for
+    /// photos under the root; the **absolute** parent for out-of-root photos
+    /// (explicit multi-folder decks), so two different folders never collapse to
+    /// the same rebuild signature.
     fn current_folder_rel(&self, item: usize) -> String {
-        let rel = match self.source.path(item) {
-            Some(p) => rel_to_root(p, &self.root),
-            None => self.source.name(item).to_string(),
-        };
-        crate::folder_tree::folder_of(&rel).to_string()
+        match self.source.path(item) {
+            Some(p) => crate::folder_tree::folder_identity(p, &self.root),
+            None => crate::folder_tree::folder_of(self.source.name(item)).to_string(),
+        }
     }
 
     /// The drawn tree's rebuild signature: deck root + current folder (`@root` for
@@ -1238,61 +1274,6 @@ impl AppCore {
         map
     }
 
-    /// Derive the tree model for the current deck. Disk decks cost two read-only
-    /// `read_dir`s (siblings + children; the chain is path components); recursive
-    /// decks also decorate rows with the cached per-folder counts; archive decks
-    /// group their in-RAM entry names — no I/O — with counts for free. `lite` is
-    /// the **hold-to-fly** variant: sibling/child folders come from the cached
-    /// counts map instead of `read_dir`, so tracking the folder mid-flight costs
-    /// pure in-RAM work (photo-less folders appear when flight settles). An
-    /// **empty** deck (a photo-less folder — it must never strand you) browses from
-    /// the root itself. `None` = nothing to show (bare launch, no root).
-    fn folder_tree_model(&mut self, lite: bool) -> Option<crate::folder_tree::FolderTreeModel> {
-        match self.displayed_item {
-            Some(item) => match self.source.path(item) {
-                // Anchored at the opened root (never above it — the up row is the
-                // one deliberate exit).
-                Some(p) => {
-                    let dir = p.parent()?.to_path_buf();
-                    if lite {
-                        let counts = self.folder_counts();
-                        return Some(crate::folder_tree::rows_from_paths(
-                            &self.root, &dir, &counts,
-                        ));
-                    }
-                    let counts = self.recursive.then(|| self.folder_counts());
-                    Some(crate::folder_tree::rows_from_disk(
-                        &self.root,
-                        &dir,
-                        counts.as_deref(),
-                    ))
-                }
-                None => {
-                    // An archive deck: entry names carry the internal folder paths;
-                    // the archive file labels the root, and the up row opens the
-                    // folder on disk containing it. Rows aren't clickable until
-                    // prefix re-scoping lands.
-                    let container = self.source.container().unwrap_or(&self.root);
-                    let label = crate::folder_tree::name_of(container);
-                    let current = self.current_folder_rel(item);
-                    let names = (0..self.source.len()).map(|i| self.source.name(i));
-                    let mut m = crate::folder_tree::rows_from_names(names, &current, &label);
-                    if let Some(par) = container.parent().filter(|p| !p.as_os_str().is_empty()) {
-                        let par = par.to_path_buf();
-                        m.push_up(&crate::folder_tree::name_of(&par), par.clone());
-                    }
-                    Some(m)
-                }
-            },
-            None => {
-                // Empty deck: still show the tree, rooted at the opened folder, so
-                // an image-less open is a navigation point rather than a dead end.
-                (!self.root.as_os_str().is_empty() && self.root.is_dir())
-                    .then(|| crate::folder_tree::rows_from_disk(&self.root, &self.root, None))
-            }
-        }
-    }
-
     /// Derive + rasterize + draw the folder tree for the current deck state, and
     /// stamp [`folder_tree_sig`](crate::AppCore::folder_tree_sig). Hover and page
     /// state reset — this is the fresh-content path; transitions re-render through
@@ -1304,24 +1285,82 @@ impl AppCore {
     /// [`show_folder_tree`](Self::show_folder_tree) with the derivation choice:
     /// `lite` = the no-I/O flight variant (its signature is stamped `|lite`, so
     /// settling upgrades to the full `read_dir` view).
+    ///
+    /// Archive decks group their in-RAM entry names — no I/O, drawn right here.
+    /// Disk decks (and the empty deck, which browses from the root so a photo-less
+    /// folder never strands you) paint the **lite** view immediately — sibling and
+    /// child folders from the cached counts map, pure in-RAM — and, for the full
+    /// view, hand the `read_dir` derivation to an off-thread worker that `tick`
+    /// installs when it lands. The disk I/O never runs on this thread: a
+    /// spun-down drive or a dead network share must not stall the event loop.
     fn show_folder_tree_mode(&mut self, lite: bool) {
         // Check the cheap gates before deriving rows, so a font-less host doesn't
-        // pay the read_dirs on every retry tick.
+        // pay the derivation on every retry tick.
         if self.hud.is_none() {
             return;
         }
         let sig = self.folder_sig();
-        let stamp = if lite { format!("{sig}|lite") } else { sig };
-        let Some(model) = self.folder_tree_model(lite) else {
+        let lite_stamp = format!("{sig}|lite");
+
+        // An archive deck: entry names carry the internal folder paths; the
+        // archive file labels the root, and the up row opens the folder on disk
+        // containing it. Rows aren't clickable until prefix re-scoping lands.
+        if let Some(item) = self.displayed_item {
+            if self.source.path(item).is_none() {
+                let container = self.source.container().unwrap_or(&self.root);
+                let label = crate::folder_tree::name_of(container);
+                let current = self.current_folder_rel(item);
+                let names = (0..self.source.len()).map(|i| self.source.name(i));
+                let mut m = crate::folder_tree::rows_from_names(names, &current, &label);
+                if let Some(par) = container.parent().filter(|p| !p.as_os_str().is_empty()) {
+                    let par = par.to_path_buf();
+                    m.push_up(&crate::folder_tree::name_of(&par), par.clone());
+                }
+                self.push_folder_tree(m.rows, m.targets, 0, None);
+                self.folder_tree_sig = Some(sig);
+                return;
+            }
+        }
+
+        // A disk deck, anchored at the opened root (never above it — the up row is
+        // the one deliberate exit); an empty deck browses from the root itself.
+        let disk_dir: Option<PathBuf> = match self.displayed_item {
+            Some(item) => self
+                .source
+                .path(item)
+                .and_then(Path::parent)
+                .map(Path::to_path_buf),
+            None => {
+                (!self.root.as_os_str().is_empty() && self.root.is_dir()).then(|| self.root.clone())
+            }
+        };
+        let Some(dir) = disk_dir else {
             // Nothing to show (bare launch): drop any stale quad, remember why.
             if self.folder_tree_panel.is_some() {
                 self.hide_folder_tree();
             }
-            self.folder_tree_sig = Some(stamp);
+            self.folder_tree_sig = Some(if lite { lite_stamp } else { sig });
             return;
         };
-        self.push_folder_tree(model.rows, model.targets, 0, None);
-        self.folder_tree_sig = Some(stamp);
+        // Paint the lite view now — unless this folder's lite view is already up
+        // (the settle-upgrade path), so upgrading doesn't reset hover/page.
+        if self.folder_tree_sig.as_deref() != Some(lite_stamp.as_str()) {
+            let counts = self.folder_counts();
+            let model = crate::folder_tree::rows_from_paths(&self.root, &dir, &counts);
+            self.push_folder_tree(model.rows, model.targets, 0, None);
+        }
+        self.folder_tree_sig = Some(lite_stamp);
+        if !lite {
+            // The settled read_dir view (it adds photo-less folders) derives
+            // off-thread; the `|lite` stamp doubles as its "pending" marker.
+            let counts = self.recursive.then(|| self.folder_counts());
+            self.tree_io = Some(crate::folder_tree::spawn_full_tree(
+                self.root.clone(),
+                dir,
+                counts,
+                sig,
+            ));
+        }
     }
 
     /// Rasterize + upload the tree from prepared rows — the shared path for fresh
@@ -1493,28 +1532,18 @@ impl AppCore {
     /// Go ▸ previous / next folder (`dir` = ∓1; ⌘←/⌘→ / Alt+←/→): open the opened
     /// root's adjacent sibling directory in the parent's sorted listing. Silent
     /// no-op at the ends, with nothing open, or on an archive deck (sibling
-    /// stepping there lands with prefix re-scoping).
+    /// stepping there lands with prefix re-scoping). The listing (and even the
+    /// `is_dir` stat) is disk I/O, so it resolves on the tree-io worker — `tick`
+    /// opens the target when it lands; a rapid re-press supersedes the last.
     pub fn open_sibling_cmd(&mut self, dir: i32) {
         if self.source.container().is_some() {
             return;
         }
         let root = self.root.clone();
-        if root.as_os_str().is_empty() || !root.is_dir() {
+        if root.as_os_str().is_empty() {
             return;
         }
-        let Some(parent) = root.parent().filter(|p| !p.as_os_str().is_empty()) else {
-            return;
-        };
-        let sibs = crate::folder_tree::subdirs(parent);
-        let name = crate::folder_tree::name_of(&root);
-        let Some(pos) = sibs.iter().position(|s| *s == name) else {
-            return;
-        };
-        let next = pos as i64 + dir as i64;
-        if next < 0 || next as usize >= sibs.len() {
-            return; // at the end of the row of folders — nothing to step to
-        }
-        self.open_dir(parent.join(&sibs[next as usize]));
+        self.tree_io = Some(crate::folder_tree::spawn_sibling(root, dir));
     }
 
     /// Apply the keymap edited in the Settings dialog: swap it in live (every keypress
@@ -2260,9 +2289,16 @@ impl AppCore {
         if dark != self.hud_dark {
             self.hud_dark = dark;
             // Pie / scan card / info panel / tree / open hint all re-rasterize with the
-            // new scheme. The transient toast keeps its old-scheme bitmap (it fades out
-            // within ~1.3 s and its source content isn't retained).
+            // new scheme. A plain transient toast keeps its old-scheme bitmap (it fades
+            // out within ~1.3 s and its source content isn't retained) — but the play
+            // hint is hover-pinned (hovering resets its fade indefinitely), so it must
+            // re-rasterize like the persistent overlays.
             self.rescale_overlays();
+            if let Some(ph) = self.play_hint {
+                if let Some((w, h)) = self.build_play_hint(ph.icon, ph.hovered) {
+                    self.play_hint = Some(PlayHint { w, h, ..ph });
+                }
+            }
         }
     }
 
@@ -3902,7 +3938,7 @@ impl AppCore {
         let diameter = (PIE_DIAMETER * self.viewport.scale_factor)
             .round()
             .max(12.0) as u32;
-        let (mut rgba, w, h) = hud::render_pie(diameter, progress, glow);
+        let (mut rgba, w, h) = hud::render_pie(diameter, progress, glow, self.hud_dark);
         if alpha < 1.0 {
             rgba = scale_alpha(&rgba, alpha);
         }

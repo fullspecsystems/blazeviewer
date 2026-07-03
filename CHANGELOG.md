@@ -58,6 +58,27 @@ with any pre-release suffix carried only by the tag.
   window is sized to fit its content (long lists like Shortcuts scroll).
 
 ### Fixed
+- **The folder tree can no longer freeze the app on a slow drive.** Opening the tree
+  (⇧F), crossing into a new folder with it open, and the Previous/Next Folder commands
+  used to read the disk on the spot — on a network share or a spun-down external drive
+  that could hang the whole app for seconds. The tree now appears instantly from what's
+  already known and fills in folder listings in the background.
+- **Windows: hidden system folders no longer show in the folder tree.** `$RECYCLE.BIN`,
+  `System Volume Information`, and other attribute-hidden folders Explorer hides are now
+  filtered out.
+- **The folder tree tracks correctly when photos from more than one folder are open**
+  (e.g. two folders dropped together) — it used to stop updating as you moved between
+  the extra folders.
+- **Old zips with Windows-style folder names now show their folder structure.** Archives
+  written with backslash entry paths (some legacy Windows archivers) appeared flat, with
+  the folder tree unable to group or track them.
+- **Windows: a pinned Light or Dark theme now themes the whole window.** The title bar,
+  menu bar, and menu dropdowns follow the Theme setting instead of staying on the OS
+  scheme, so dialogs no longer render a light body under a dark title bar (or vice versa).
+- **Light mode consistency:** the loading pie now renders in the light scheme instead of
+  staying a dark disc; the "Press P to play" button re-themes even while hovered; and
+  launching on a light desktop no longer flashes the open screen in dark colors for the
+  first frame.
 - **Windows: installing a build over an existing install now actually replaces it.**
   Same-version installs (all betas carry the numeric version 0.1.0) used to pile up as
   separate entries in "Installed apps" while leaving the previously installed files in

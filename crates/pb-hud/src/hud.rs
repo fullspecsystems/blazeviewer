@@ -1754,13 +1754,17 @@ fn corner_distance(dx: f32, dy: f32) -> f32 {
     (dx * dx + dy * dy).sqrt()
 }
 
-/// Rasterize the "not-ready" loading pie: a clean translucent dark disc with a
-/// bright wedge that fills clockwise from 12 o'clock to `progress` (0..=1) — no
-/// outer ring. `glow` (0..=1) brightens it (the keypress flash when the UI can't
-/// service input yet). Edges are anti-aliased by `SS×SS` supersampling, so the
-/// disc rim and the wedge edge read smooth. Returns straight-alpha RGBA8
-/// `(pixels, diameter, diameter)`. No font needed, so it works without the HUD.
-pub fn render_pie(diameter: u32, progress: f32, glow: f32) -> (Vec<u8>, u32, u32) {
+/// Rasterize the "not-ready" loading pie: a translucent disc with a contrasting
+/// wedge that fills clockwise from 12 o'clock to `progress` (0..=1) — no outer
+/// ring. `dark` picks the scheme: the classic bright-wedge-on-dark-track disc, or
+/// its light-theme inverse (a near-black wedge on a translucent near-white track,
+/// mirroring [`Theme::LIGHT`]'s panel) — the pie is the one overlay built outside
+/// the `Hud` (no font needed), so it takes the flag instead of reading a theme.
+/// `glow` (0..=1) brightens it (the keypress flash when the UI can't service
+/// input yet). Edges are anti-aliased by `SS×SS` supersampling, so the disc rim
+/// and the wedge edge read smooth. Returns straight-alpha RGBA8
+/// `(pixels, diameter, diameter)`.
+pub fn render_pie(diameter: u32, progress: f32, glow: f32, dark: bool) -> (Vec<u8>, u32, u32) {
     let d = diameter.max(8);
     let di = d as i32;
     let mut px = vec![0u8; (d as usize) * (d as usize) * 4];
@@ -1768,8 +1772,10 @@ pub fn render_pie(diameter: u32, progress: f32, glow: f32) -> (Vec<u8>, u32, u32
     let r_outer = c - 1.0; // leave ~1px so the disc rim has room to feather
     let g = glow.clamp(0.0, 1.0);
     let sweep = progress.clamp(0.0, 1.0) * std::f32::consts::TAU;
-    // The wedge (white) sits on the translucent dark track (black); both fade in
-    // alpha at the edges via supersampling. `glow` lifts both a touch.
+    // The wedge sits on the translucent track; both fade in alpha at the edges
+    // via supersampling. `glow` lifts both a touch. Grayscale wedge/track colors
+    // per scheme (dark = the pre-theme white-on-black, bit-identical).
+    let (wedge_c, track_c) = if dark { (1.0, 0.0) } else { (0.08, 0.96) };
     let track_a = 0.42 + 0.18 * g;
     let fill_a = 0.85 + 0.15 * g;
     const SS: i32 = 4; // supersample grid (16 samples/pixel) for smooth edges
@@ -1777,8 +1783,8 @@ pub fn render_pie(diameter: u32, progress: f32, glow: f32) -> (Vec<u8>, u32, u32
     let inv = 1.0 / (SS * SS) as f32;
     for y in 0..di {
         for x in 0..di {
-            // Accumulate straight-alpha color premultiplied so the white wedge
-            // anti-aliases against the dark track and the transparent outside.
+            // Accumulate straight-alpha color premultiplied so the wedge
+            // anti-aliases against the track and the transparent outside.
             let (mut sr, mut sg, mut sb, mut sa) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
             for sy in 0..SS {
                 for sx in 0..SS {
@@ -1792,12 +1798,15 @@ pub fn render_pie(diameter: u32, progress: f32, glow: f32) -> (Vec<u8>, u32, u32
                         ang += std::f32::consts::TAU;
                     }
                     if ang <= sweep {
-                        sr += fill_a; // white wedge
-                        sg += fill_a;
-                        sb += fill_a;
+                        sr += wedge_c * fill_a;
+                        sg += wedge_c * fill_a;
+                        sb += wedge_c * fill_a;
                         sa += fill_a;
                     } else {
-                        sa += track_a; // black track contributes 0 to color
+                        sr += track_c * track_a;
+                        sg += track_c * track_a;
+                        sb += track_c * track_a;
+                        sa += track_a;
                     }
                 }
             }
@@ -2044,8 +2053,8 @@ mod tests {
 
     #[test]
     fn pie_fills_with_progress_and_is_round() {
-        let (p0, _, _) = render_pie(48, 0.0, 0.0);
-        let (p1, _, _) = render_pie(48, 1.0, 0.0);
+        let (p0, _, _) = render_pie(48, 0.0, 0.0, true);
+        let (p1, _, _) = render_pie(48, 1.0, 0.0, true);
         // The top-left corner is outside the disc → fully transparent.
         assert_eq!(p0[3], 0, "corner should be transparent (round, not square)");
         let bright = |px: &[u8]| {
@@ -2060,6 +2069,23 @@ mod tests {
         // The translucent track disc is drawn even at progress 0.
         let opaque = p0.chunks_exact(4).filter(|c| c[3] > 0).count();
         assert!(opaque > 0, "the track disc should be present at progress 0");
+    }
+
+    #[test]
+    fn light_pie_inverts_the_scheme() {
+        // Light theme: near-white track, near-black wedge — the full pie has
+        // *fewer* bright pixels than the empty (track-only) one.
+        let (p0, _, _) = render_pie(48, 0.0, 0.0, false);
+        let (p1, _, _) = render_pie(48, 1.0, 0.0, false);
+        let bright = |px: &[u8]| {
+            px.chunks_exact(4)
+                .filter(|c| c[3] > 0 && c[0] > 200)
+                .count()
+        };
+        assert!(
+            bright(&p0) > bright(&p1),
+            "the light track is bright; the light wedge is dark"
+        );
     }
 
     #[test]

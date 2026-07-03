@@ -301,7 +301,7 @@ impl ZipSource {
             if entry.is_dir() {
                 continue;
             }
-            let name = entry.name().to_string();
+            let name = normalize_entry_name(entry.name());
             if !is_supported(&ext_of(&name)) {
                 continue;
             }
@@ -651,7 +651,7 @@ impl SevenZSource {
                                         return Ok(false);
                                     }
                                     local.push(SevenZEntry {
-                                        name: entry.name().to_string(),
+                                        name: normalize_entry_name(entry.name()),
                                         bytes: buf,
                                     });
                                     if let Some(p) = progress {
@@ -749,6 +749,27 @@ fn display_name(p: &Path) -> String {
         .and_then(|n| n.to_str())
         .unwrap_or("?")
         .to_string()
+}
+
+/// Normalize a stored archive entry name for display and folder grouping:
+/// legacy Windows archivers wrote backslash separators (non-spec, but common in
+/// old zips), and `zip .`-style invocations prefix `./` — both defeat the
+/// `/`-based grouping (the ⇧F folder tree) and read wrong in the title/EXIF
+/// panel. Purely a *name* transformation: entries are only ever read from RAM
+/// by index, never extracted to a path, so this can't affect what's opened.
+fn normalize_entry_name(raw: &str) -> String {
+    let s = raw.replace('\\', "/");
+    let mut t = s.as_str();
+    loop {
+        if let Some(rest) = t.strip_prefix("./") {
+            t = rest;
+        } else if let Some(rest) = t.strip_prefix('/') {
+            t = rest;
+        } else {
+            break;
+        }
+    }
+    t.to_string()
 }
 
 /// The lowercased extension (no dot) of a name or path, or `""` if none. Uses
@@ -876,6 +897,31 @@ mod tests {
             64 * 1024,
             "exactly one chunk read before the cancel"
         );
+    }
+
+    #[test]
+    fn entry_names_normalize_legacy_separators() {
+        // The pure helper: backslashes → '/', leading "./" and '/' stripped.
+        assert_eq!(
+            normalize_entry_name(r"dir\sub\photo.jpg"),
+            "dir/sub/photo.jpg"
+        );
+        assert_eq!(normalize_entry_name("./dir/photo.jpg"), "dir/photo.jpg");
+        assert_eq!(normalize_entry_name("././x.png"), "x.png");
+        assert_eq!(normalize_entry_name("/abs/x.png"), "abs/x.png");
+        assert_eq!(normalize_entry_name("plain.jpg"), "plain.jpg");
+
+        // End to end: a legacy Windows-built zip with backslash entry names still
+        // groups into folders (the ⇧F tree splits on '/') and reads correctly.
+        let zip = write_zip(
+            "legacy-seps",
+            &[(r"dir\photo.jpg", b"A".as_slice()), ("./top.png", b"B")],
+            None,
+        );
+        let src = ZipSource::open(&zip, None, is_img).unwrap();
+        let names: Vec<&str> = (0..src.len()).map(|i| src.name(i)).collect();
+        assert_eq!(names, vec!["dir/photo.jpg", "top.png"]);
+        assert_eq!(src.bytes(0).unwrap(), b"A", "reads still go by index");
     }
 
     #[test]

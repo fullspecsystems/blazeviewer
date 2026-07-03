@@ -227,6 +227,11 @@ struct App {
     /// Whether the menu has been attached to the current window (`init_for_hwnd`),
     /// so fullscreen↔windowed toggles can show/hide it instead of re-initializing.
     menu_attached: bool,
+    /// The Appearance mode last pushed to the OS-drawn chrome (title bar + native
+    /// menu), so `apply_chrome_theme` (checked each `about_to_wait` turn) only
+    /// touches the window when the preference actually changes. `None` = not yet
+    /// applied.
+    applied_appearance: Option<settings::AppearanceMode>,
     /// The open egui dialog window (Settings / About), or `None`. At most one at a
     /// time; its events are routed by window id in `window_event`.
     dialog: Option<dialog::DialogWindow>,
@@ -453,6 +458,7 @@ impl App {
                 folder_tree_sig: None,
                 folder_tree_panel: None,
                 folder_tree_counts: None,
+                tree_io: None,
                 hud: Hud::load(),
                 renderer: None,
                 undo_stack: Vec::new(),
@@ -472,6 +478,7 @@ impl App {
             pending_drops: Vec::new(),
             #[cfg(target_os = "macos")]
             last_edr_headroom: 1.0,
+            applied_appearance: None,
             menu: None,
             #[cfg(target_os = "macos")]
             window_menu: None,
@@ -1373,22 +1380,58 @@ impl App {
     #[cfg(not(any(windows, target_os = "macos")))]
     fn apply_menu_for_mode(&mut self) {}
 
-    /// React to a runtime OS light↔dark theme change: re-flush the popup menu
-    /// themes and nudge muda to re-evaluate `Auto` and repaint the bar in the new
-    /// theme. (The bar usually repaints on its own; this also covers the popups.)
+    /// React to a runtime OS light↔dark theme change or an Appearance-preference
+    /// change: re-flush the popup menu themes and re-assert the bar's theme —
+    /// `Auto` when following the OS, pinned `Light`/`Dark` otherwise (#46).
     #[cfg(windows)]
     fn refresh_menu_theme(&self) {
         darkmode::flush_menu_themes();
         if !self.menu_attached || !self.core.windowed {
             return;
         }
+        let theme = match self.core.settings.appearance_mode {
+            settings::AppearanceMode::System => muda::MenuTheme::Auto,
+            settings::AppearanceMode::Light => muda::MenuTheme::Light,
+            settings::AppearanceMode::Dark => muda::MenuTheme::Dark,
+        };
         if let Some(a) = self.window.as_ref() {
             if let (Some(menu), Some(hwnd)) = (self.menu.as_ref(), hwnd_of(a)) {
                 // SAFETY: the menu is attached to this live window's valid handle.
                 unsafe {
-                    let _ = menu.set_theme_for_hwnd(hwnd, muda::MenuTheme::Auto);
+                    let _ = menu.set_theme_for_hwnd(hwnd, theme);
                 }
             }
+        }
+    }
+
+    /// Push the Appearance preference onto the **OS-drawn chrome** — the DWM title
+    /// bar (winit `set_theme`) and the native menu bar + its popup dropdowns — so a
+    /// pinned Light/Dark never renders a themed dialog/HUD under a mismatched bar
+    /// (`System` = follow the OS, the pre-#46 behavior). Checked every
+    /// `about_to_wait` turn behind a change guard (one enum compare), so it catches
+    /// a Settings save from any path.
+    fn apply_chrome_theme(&mut self) {
+        if self.window.is_none() {
+            return;
+        }
+        let mode = self.core.settings.appearance_mode;
+        if self.applied_appearance == Some(mode) {
+            return;
+        }
+        self.applied_appearance = Some(mode);
+        let theme = match mode {
+            settings::AppearanceMode::System => None,
+            settings::AppearanceMode::Light => Some(winit::window::Theme::Light),
+            settings::AppearanceMode::Dark => Some(winit::window::Theme::Dark),
+        };
+        if let Some(w) = self.window.as_ref() {
+            w.set_theme(theme);
+        }
+        #[cfg(windows)]
+        {
+            // Popup menus are OS-drawn app-wide: force/unforce their scheme too.
+            darkmode::set_app_mode(theme.map(|t| t == winit::window::Theme::Dark));
+            self.refresh_menu_theme();
         }
     }
 
@@ -2034,9 +2077,14 @@ impl ApplicationHandler for App {
         );
         // Seed the OS theme before the first frame paints, so the Appearance preference
         // resolves against the real desktop theme (#46; `None` = no OS signal → dark),
-        // then apply the user's saved letterbox color for that resolved theme.
+        // then apply the user's saved letterbox color for that resolved theme AND
+        // retint the HUD compositor now — the empty-state open panel is rasterized
+        // below, before the first present, and it must not flash the dark scheme on a
+        // light desktop. (`refresh_theme` skips the letterbox: `core.renderer` isn't
+        // installed yet, hence the direct set here.)
         self.core.os_dark = window.theme() != Some(winit::window::Theme::Light);
         renderer.set_letterbox(self.core.effective_letterbox());
+        self.core.refresh_theme();
         let now = window.inner_size();
         if now != isz {
             self.core.fit = Some(FitBox {
@@ -2120,10 +2168,12 @@ impl ApplicationHandler for App {
 
         self.window = Some(window);
         self.core.renderer = Some(Box::new(renderer));
-        // Retint the HUD compositor for the resolved theme (#46) — it defaults to dark;
-        // a light desktop / forced-Light preference re-themes it (and the empty-state
-        // hint) here, before any overlay bitmap is built.
+        // Re-run the theme application now that the renderer lives in the core (the
+        // early call above retinted the HUD; this one lands the letterbox through the
+        // core-owned path), and push the Appearance preference onto the OS chrome
+        // (title bar + menu) — a pinned Light/Dark must match from the first frame.
         self.core.refresh_theme();
+        self.apply_chrome_theme();
         self.core.request_prefetch();
 
         // Now that the window + engine are live, kick off any launch we deferred (an archive
@@ -2419,6 +2469,9 @@ impl ApplicationHandler for App {
         // instead of calling `Instant::now()`, so all timing this tick is consistent.
         self.core.now = Instant::now();
         let now = self.core.now;
+        // Keep the OS-drawn chrome (title bar, menu) on the Appearance preference;
+        // no-ops unless the preference changed (e.g. a Settings save this turn).
+        self.apply_chrome_theme();
         // 0. Native menu-bar clicks (windowed mode). Map each id to the same action
         // the keyboard triggers and dispatch it; an unknown/foreign id is ignored.
         while let Ok(ev) = muda::MenuEvent::receiver().try_recv() {

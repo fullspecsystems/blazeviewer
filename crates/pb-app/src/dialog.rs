@@ -424,7 +424,14 @@ impl DialogWindow {
         crate::apply_native_window_icon(&window);
         let size = window.inner_size();
         // The dialog theme honors the Appearance preference (#46): System follows the
-        // OS-resolved window theme (the pre-#46 behavior); Light/Dark pin it.
+        // OS-resolved window theme (the pre-#46 behavior); Light/Dark pin it — and the
+        // pin is pushed onto the window itself so the OS-drawn title bar matches the
+        // egui body instead of keeping the desktop's scheme.
+        window.set_theme(match settings.appearance_mode {
+            settings::AppearanceMode::Light => Some(Theme::Light),
+            settings::AppearanceMode::Dark => Some(Theme::Dark),
+            settings::AppearanceMode::System => None,
+        });
         let dark_ui = match settings.appearance_mode {
             settings::AppearanceMode::Light => false,
             settings::AppearanceMode::Dark => true,

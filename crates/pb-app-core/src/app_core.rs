@@ -308,6 +308,12 @@ pub struct AppCore {
     /// the count badges AND the no-I/O flight derivation read it, so neither ever
     /// re-walks the playlist while the deck is unchanged. RAM-only.
     pub folder_tree_counts: Option<FolderCounts>,
+    /// The in-flight tree-io worker (the settled `read_dir` derivation, or a Go
+    /// sibling lookup): the tree's disk I/O runs off-thread so a dead share can't
+    /// stall the event loop. `tick` polls it; `work_pending` keeps the loop ticking
+    /// while it runs; a new job supersedes the old by dropping its receiver.
+    /// (`pub` only because the shells build `AppCore` as a struct literal.)
+    pub tree_io: Option<crate::folder_tree::TreeIo>,
 
     // --- Rendering (NS0 5.4) ---
     /// The HUD text/overlay compositor (`pb-hud`), or `None` if no system font was found.

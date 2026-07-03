@@ -315,13 +315,14 @@ fn build_tiles(hud: &Hud) -> Vec<Tile> {
         }
     }
 
-    // Loading pie at a few fills.
+    // Loading pie at a few fills (scheme follows the sheet's theme).
+    let dark = hud.theme() == hud::Theme::DARK;
     for (progress, cap) in [
         (0.0_f32, "Loading pie \u{2014} 0%"),
         (0.42, "Loading pie \u{2014} ~40%"),
         (0.93, "Loading pie \u{2014} ~90% (cap)"),
     ] {
-        let b = hud::render_pie(s(46.0) as u32, progress, 0.0);
+        let b = hud::render_pie(s(46.0) as u32, progress, 0.0, dark);
         tiles.push(tile(hud, cap, b));
     }
 
@@ -372,7 +373,7 @@ fn build_composite(hud: &Hud) -> Sheet {
     ) {
         c.over(&(r, cw, ch), w - inset - cw as i32, inset);
     }
-    let pie = hud::render_pie(s(46.0) as u32, 0.62, 0.0);
+    let pie = hud::render_pie(s(46.0) as u32, 0.62, 0.0, hud.theme() == hud::Theme::DARK);
     c.over(&pie, (w - pie.1 as i32) / 2, inset);
     // Folder tree: top-left, the info panel's inset mirrored (the live placement).
     if let Some((r, tw, th, _)) = hud.render_tree(
