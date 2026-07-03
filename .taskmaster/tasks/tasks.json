@@ -377,6 +377,47 @@
         "details": "SETTLED DESIGN (owner + assistant, 2026-07-03): keyboard skips, clicks don't. (1) Scope: ⌘←/→ (PrevFolder/NextFolder) only — ⌘↑ can't hit this (parent opens recursively and the parent subtree ⊇ the current deck, so it can't scan empty while a photo is shown). (2) Skip = same-level siblings, stepping in the pressed direction past photo-less candidates via a dedicated early-exit recursive probe (a candidate counts as non-empty if ANY descendant has a supported image, matching the recursive open). (3) Terminal fallback on the keyboard path = a TOAST (not the modal): fires when nothing in that direction has photos (incl. plain end-of-row, today silent). The 'No supported images' modal stays for explicit opens (picker/drop/Finder/tree click) — clicks never redirect. (4) Probe hardening per prior scan.rs work: iterative walkdir, follow_links(false), error-tolerant, early-exit on first hit; hop cap AND an overall wall-clock budget (the expensive case is one huge photo-less subtree, which must be fully enumerated to conclude empty — a hop cap alone doesn't bound it); budget/cap exhaustion → toast. (5) Cancellation: TreeIo carries a cancel flag set on Drop, so a re-press SUPERSEDES the in-flight probe (no orphaned deep walks); checked per walk entry. (6) Stale-result guard: the Sibling result carries the origin root; tick drops it if the deck moved on. (7) Archives already correct for free: archive folder rows derive from image entry names, so photo-less archive folders can't exist — no skip needed there. Code surface: folder_tree.rs sibling_target/spawn_sibling (+TreeIo), scan.rs probe helper beside image_walker, app_core_impl.rs tick Sibling arm + open_sibling_cmd. OPTIONAL FOLLOW-UP (separate decision, not this task): tree-click on an empty folder still shows the modal because an empty scan never re-roots; re-rooting to an empty deck (nav-point, tree stays up) would honor the #47 promise better.",
         "testStrategy": "Unit tests (temp-dir fixtures, deterministic): probe finds a deep image / concludes empty / aborts on cancel + deadline; sibling search skips N empty siblings to the first non-empty one in each direction, exhausts to None at the row end, respects the hop cap (cap as a parameter so the test doesn't need 64 dirs) and a pre-set cancel flag; tick drops a Sibling result whose origin root no longer matches; a None result toasts. Manual: consecutive empty siblings (some with deep photo-less subtrees) hop straight to the next folder with photos, no dialog; rapid ⌘→ re-presses supersede cleanly (no thread pileup, no stall); all-empty direction toasts instead of dialog.",
         "subtasks": []
+      },
+      {
+        "id": 50,
+        "title": "Installer artwork: de-2003 the MSI wizard (owner artwork + WiX reskin)",
+        "description": "The MSI ships WiX's stock WixUI_FeatureTree chrome — including the default welcome-page bitmap with the CD-ROM-and-floppy clipart, unchanged since WiX 2 (owner, 2026-07-03: 'the nostalgia is heartwarming but... this is lame'). The fix is a skin, NOT a packaging change: MSIX stays parked per ADR-018 + the 2026-07-03 park (Store discovery is its only draw; the folder right-click verb would need a packaged IExplorerCommand COM handler). Replace the two stock bitmaps with PhotoBlaze-branded art and drop the feature-tree dialog set for a leaner one. The modern-install-experience angle beyond the skin is task #51 (Velopack).",
+        "status": "pending",
+        "priority": "low",
+        "dependencies": [],
+        "details": "Bitmap specs (classic WixUI, what cargo-wix's WiX3 pipeline consumes): banner 493×58 (top strip on interior pages, WixVariable WixUIBannerBmp) and dialog 493×312 (welcome/finish left panel, WixUIDialogBmp), 24-bit BMP. Source from the existing brand assets (the 1024 icon master / packaging art). Wiring in crates/pb-app/wix/main.wxs: two <WixVariable> elements beside the UIRef; switch <UIRef Id='WixUI_FeatureTree'/> → WixUI_InstallDir (or WixUI_Minimal — PhotoBlaze has no optional features worth a tree); delete the vestigial DiskPrompt/'CD-ROM #1' Media strings from the cargo-wix template. Rebuild locally with scripts/release-windows.ps1 (signs too), then click through every wizard page.",
+        "testStrategy": "Build the MSI via scripts/release-windows.ps1 and run it interactively: every page shows the branded banner/dialog art (no stock clipart anywhere), the feature-tree page is gone, install / same-version reinstall (AllowSameVersionUpgrades) / uninstall all still work, and signtool verify /pa passes on the signed MSI.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Owner: design the two branded bitmaps",
+            "description": "Banner 493×58 + dialog 493×312 BMPs from the PhotoBlaze brand assets — modern, dark, no clipart. (Optional stretch: refresh the .ico/ARP art while in the files.)",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "Wire the reskin into main.wxs",
+            "description": "WixUIBannerBmp/WixUIDialogBmp WixVariables → the new BMPs; WixUI_FeatureTree → WixUI_InstallDir or Minimal; remove the DiskPrompt vestiges.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "Rebuild, sign, click through",
+            "description": "scripts/release-windows.ps1, then walk the wizard end to end (fresh install + same-version reinstall + uninstall).",
+            "status": "pending"
+          }
+        ]
+      },
+      {
+        "id": 51,
+        "title": "Evaluate Velopack: modern install UX + auto-updates for the Windows channel",
+        "description": "Owner call (2026-07-03): 'auto updates are kinda non-optional in 2026.' Velopack (the maintained Squirrel successor, first-class Rust crate `velopack`) gives the Chrome/Discord install model — double-click, no wizard, installed + launched in seconds, per-user in %LocalAppData%, with built-in DELTA AUTO-UPDATES from a simple static feed (GitHub Releases works as the feed). This is an EVALUATION task, not a committed cutover: decide whether Velopack becomes the primary consumer channel (MSI kept for perMachine/enterprise), the beta channel only, or isn't a fit. Distinct from MSIX (still parked, ADR-018): Velopack is unpackaged Win32, so the registry integrations stay ordinary registry writes.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "details": "Questions the spike must answer: (1) Integration cost — the velopack crate wants a VelopackApp::build().run() hook at process start (fast-exit update hooks) in pb-app's main; measure its startup cost against the keypress→photon budget (should be ~0 when no update event, but MEASURE, per the prime directive). (2) File associations + the folder verb: Velopack installs per-user with a stable %LocalAppData% path — port the MSI's HKCR writes to HKCU\\Software\\Classes self-registration at install/update hook time (PhotoBlaze already has HKCU self-registration code from the 'Set default…' work, task #14.1) and confirm Open-with + Default-apps behave identically to the MSI install. (3) Update UX: silent background download + apply-on-restart (the viewer restarts in ms, so this fits) vs a toast offering restart-now; where the check runs (startup + daily?), and it must respect privacy #2 — an update CHECK is a network call, so it needs an off switch in Settings and must never phone home viewing data (it doesn't, but say so in the privacy notes). (4) Signing: vpk pack signs with signtool args — confirm Azure Trusted Signing /dlib flags pass through cleanly (same dlib/dmdf as release-windows.ps1). (5) Channel strategy: GitHub Releases as the update feed (vpk upload github), MSI + Velopack artifacts side by side on the same release; decide whether the MSI stays the website default. (6) Uninstall/upgrade coexistence: installing the Velopack build alongside an existing MSI install — define the migration story (likely: Velopack setup detects the MSI product and offers to remove it, or docs just say uninstall first). Output: a decisions.md ADR with the verdict + a working spike branch producing a signed Velopack setup.exe + one exercised delta update.",
+        "testStrategy": "Spike acceptance: a signed PhotoBlaze Velopack setup.exe installs per-user with working file associations; publishing a second version to a test GitHub release delivers a delta update that applies on restart; startup overhead of the Velopack hook measured and recorded (target: unmeasurable against the 8.3 ms frame budget); the update check has a Settings off switch; ADR written with the channel decision.",
+        "subtasks": []
       }
     ]
   }
