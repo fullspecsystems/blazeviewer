@@ -15,12 +15,28 @@ import PbMacFfi
 final class MenuBar: NSObject {
     private weak var model: CoreModel?
     private var items: [String: NSMenuItem] = [:]
+    /// The menu we installed, retained so `reassert` can recognize (and undo) a clobber.
+    private var menu: NSMenu?
 
     init(model: CoreModel) {
         self.model = model
         super.init()
-        NSApp.mainMenu = build()
+        let menu = build()
+        self.menu = menu
+        NSApp.mainMenu = menu
         refreshShortcutBadges()
+    }
+
+    /// Re-install our menu if something replaced it. SwiftUI rewrites `NSApp.mainMenu`
+    /// with its own default menu on scene updates — the F-mode toggle was the repro
+    /// (its observable `speedModeFullscreen` flip re-evaluates the window scene), and
+    /// the bar dropped to "PhotoBlaze / View / Window / Help" until relaunch. A pointer
+    /// compare makes this idempotent and cheap, so the model calls it from a KVO watch
+    /// on `mainMenu` plus the menu-state sync path. Callers must guard against open
+    /// menus (`menuTrackingDepth`) — swapping the main menu mid-tracking snaps them shut.
+    func reassert() {
+        guard let menu, NSApp.mainMenu !== menu else { return }
+        NSApp.mainMenu = menu
     }
 
     /// Right-aligned shortcut hints for the bare-key commands (Space, R, `[`, …) —

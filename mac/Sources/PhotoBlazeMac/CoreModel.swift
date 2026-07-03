@@ -214,9 +214,11 @@ final class CoreModel {
                     self.menuTrackingDepth = max(0, self.menuTrackingDepth - 1)
                     let title = (note.object as? NSMenu)?.title ?? "?"
                     self.log("menu didEndTracking \"\(title)\" depth=\(self.menuTrackingDepth)")
-                    // Apply any chrome clobber that arrived while the menu was open.
+                    // Apply any chrome / main-menu clobber that arrived while the
+                    // menu was open.
                     if self.menuTrackingDepth == 0 {
                         self.assertWindowChrome()
+                        self.reassertMenuBar()
                     }
                 }
             })
@@ -286,6 +288,28 @@ final class CoreModel {
         guard menuBar == nil else { return }
         menuBar = MenuBar(model: self)
         menuBar?.sync(core.menu_state())
+        // SwiftUI keeps rewriting NSApp.mainMenu on scene updates — not just at launch
+        // (the F-mode toggle was the repro: its observable flip re-evaluates the window
+        // scene and the bar reset to SwiftUI's default menu). Watch the property and
+        // win it back whenever someone else replaces it. The async hop keeps the KVO
+        // callback reentrancy-free; reassert's identity check makes our own write a
+        // no-op, so this converges.
+        mainMenuObservation = NSApp.observe(\.mainMenu) { [weak self] _, _ in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self?.reassertMenuBar() }
+            }
+        }
+    }
+
+    @ObservationIgnored private var mainMenuObservation: NSKeyValueObservation?
+
+    /// Re-assert the native menu bar unless a menu is open — replacing the main menu
+    /// mid-tracking snaps the open menu shut (the `assertWindowChrome` hazard, same
+    /// guard); a clobber that lands while a menu is up is re-applied by the
+    /// didEndTracking observer.
+    private func reassertMenuBar() {
+        guard menuTrackingDepth == 0 else { return }
+        menuBar?.reassert()
     }
 
     /// A native menu item fired (by stable Action id) — same dispatch as the keyboard.
@@ -1025,6 +1049,7 @@ final class CoreModel {
             hostWindow?.orderOut(nil)
         case .MenuStateChanged:
             menuBar?.sync(core.menu_state())
+            reassertMenuBar() // belt-and-braces beside the KVO watch
         case .ShowContextMenu(
             let hasImage, let hasMotion, let canReveal, let fullscreen,
             let comparePinned, let comparePinnedHere

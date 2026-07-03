@@ -45,6 +45,10 @@ with any pre-release suffix carried only by the tag.
   place — you had to uninstall by hand to really update. The installer now treats an
   equal-version install as a full upgrade: old entries are removed (including any
   duplicates already accumulated) and the new files land fresh.
+- **macOS: toggling fullscreen (F) no longer wipes the menu bar.** Entering or leaving the
+  borderless fullscreen mode could reset the menus to a bare default set (just PhotoBlaze /
+  View / Window / Help) until relaunch; the full File / Edit / Image / View menus now
+  survive the toggle — and anything else that tries to replace them.
 - **macOS: the Settings tab icons no longer shift upward on the first tab change.** The
   toolbar icons (General / Appearance / Shortcuts) used to render a touch too small and low
   when the window opened, then visibly snap into place on the first tab switch; they now
