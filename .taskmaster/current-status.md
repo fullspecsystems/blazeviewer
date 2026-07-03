@@ -479,7 +479,17 @@ menus/badges, **password sheet + loading bar ("look okay"; the blue `lock.fill` 
 reads slightly un-native — polish candidate, no decision yet)**. Not yet smoked: the Scanning
 sheet on a huge tree, error alerts, rebind-updates-menu-badges.
 
-**▶ FINALIZE (owner-approved order — the next work):**
+**▶ FINALIZE — ALL THREE LANDED (2026-07-02 late-late; owner halves remain):**
+1. ✅ EDR per-window + live re-poke (didChangeScreen + didChangeScreenParameters). OWNER:
+   the XDR visual check with WideGamut-*-HDR.avif.
+2. ✅ Startup mode + geometry honored/persisted (winit-convention coords; re-asserts once
+   after SwiftUI's launch layout — smoke-verified restoring 900×482 over SwiftUI's 514).
+3. ✅ Packaging: icon (Assets.car+icns) + doc types in the bundle;
+   `release-macos.sh --swift-host` = the local codesign→DMG→notarize→staple path. OWNER:
+   run it at the keyboard (keychain prompt + APPLE_* env), then check "Open With" +
+   Dock icon on a fresh copy.
+
+Original item detail (for reference):
 1. **EDR/HDR per-window correctness + XDR validation.** `configureEDR` reads
    `NSScreen.main` (TODO comment in CoreModel.swift) — the exact multi-display bug the winit
    port hit ("HDR looked totally broken"); must read the WINDOW's screen, re-poke on
