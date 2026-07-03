@@ -126,7 +126,7 @@ mod win {
         set_string(
             caps.0,
             w!("ApplicationDescription"),
-            "A fast, keyboard-driven photo viewer.",
+            "A fast, keyboard-driven image viewer.",
         )?;
 
         let assoc = create_key(

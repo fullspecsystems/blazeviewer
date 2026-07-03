@@ -919,7 +919,7 @@ fn about_ui(ui: &mut egui::Ui, icon: Option<&egui::TextureHandle>) {
             );
         }
         ui.add_space(10.0);
-        ui.label("An ultra-fast photo viewer");
+        ui.label("An ultra-fast image viewer");
         ui.add_space(8.0);
         ui.label("\u{00a9} JD Lien 2026");
         ui.add_space(12.0);
@@ -1396,7 +1396,7 @@ fn general_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
             p,
             None,
             "Start speed",
-            Some("Photos per second when you first hold a key"),
+            Some("Images per second when you first hold a key"),
             |ui| {
                 pbui::slider(ui, &mut d.start_speed, 1.0..=30.0, "/s");
             },
@@ -1457,7 +1457,7 @@ fn general_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
             p,
             None,
             "Slideshow interval",
-            Some("Seconds each photo shows. The [ and ] keys adjust it live."),
+            Some("Seconds each image shows. The [ and ] keys adjust it live."),
             |ui| {
                 pbui::slider_stepped(ui, &mut d.slideshow_interval, 0.1..=60.0, 0.1, 1, "s");
             },
@@ -1510,14 +1510,14 @@ fn general_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
                     .selected_text(if d.picker_fixed {
                         "A specific folder"
                     } else {
-                        "Current photo\u{2019}s folder"
+                        "Current image\u{2019}s folder"
                     })
                     .show_ui(ui, |ui| {
                         pbui::apply_to_ui(ui, p.dark);
                         ui.selectable_value(
                             &mut d.picker_fixed,
                             false,
-                            "Current photo\u{2019}s folder",
+                            "Current image\u{2019}s folder",
                         );
                         ui.selectable_value(&mut d.picker_fixed, true, "A specific folder");
                     });
@@ -1550,7 +1550,7 @@ fn general_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
             ui,
             p,
             None,
-            "Default photo viewer",
+            "Default image viewer",
             Some("Opens PhotoBlaze's page in Windows Default apps"),
             |ui| {
                 if pbui::secondary_button(ui, "Set default\u{2026}").clicked() {
@@ -1584,7 +1584,7 @@ fn display_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
             p,
             None,
             "Default scale mode",
-            Some("How a photo fits the window"),
+            Some("How an image fits the window"),
             |ui| {
                 egui::ComboBox::from_id_salt("scale_mode")
                     .width(150.0)
@@ -1604,7 +1604,7 @@ fn display_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
             p,
             None,
             "Letterbox color",
-            Some("Fills the screen around a photo that doesn\u{2019}t cover it"),
+            Some("Fills the screen around an image that doesn\u{2019}t cover it"),
             |ui| {
                 ui.color_edit_button_rgb(&mut d.letterbox);
             },
@@ -1614,7 +1614,7 @@ fn display_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
             p,
             None,
             "Info panel opacity",
-            Some("How solid the info and EXIF panels look over a photo"),
+            Some("How solid the info and EXIF panels look over an image"),
             |ui| {
                 pbui::slider(ui, &mut d.info_opacity, 0..=100, "%");
             },

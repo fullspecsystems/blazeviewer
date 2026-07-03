@@ -413,9 +413,9 @@ fn help_sections() -> Vec<hud::ShortcutSection> {
         sec(
             "Browse",
             &[
-                ("Next photo", "Space"),
-                ("Previous photo", "\u{232b}"),
-                ("Random photo", "Enter"),
+                ("Next image", "Space"),
+                ("Previous image", "\u{232b}"),
+                ("Random image", "Enter"),
                 ("Slideshow", "S"),
             ],
         ),

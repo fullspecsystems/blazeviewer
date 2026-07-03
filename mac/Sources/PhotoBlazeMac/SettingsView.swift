@@ -17,29 +17,33 @@ struct SettingsView: View {
     /// The editable General-tab draft (Swift value types for clean SwiftUI bindings).
     @State private var draft = SettingsDraft()
     @State private var loaded = false
+    /// The current image's containing folder at open ("" = nothing open) — shown,
+    /// grayed, as the unpinned "Open files in" default.
+    @State private var currentImageFolder = ""
     /// The pending debounced apply (trailing-edge, 250 ms) — see `scheduleApply`.
     @State private var applyTask: Task<Void, Never>?
 
     var body: some View {
+        // Each pane carries its own fixed size fit to ITS content, so the Settings
+        // scene auto-sizes the window per selected tab (the System Settings behavior).
+        // General's height is constant because the pinned-folder row never appears or
+        // disappears — it's disabled instead. USER-resizing remains punted (five
+        // failed attempts — see git history); don't re-attempt without new info.
         TabView {
             generalPane
-                .tabItem { Label("General", systemImage: "gearshape") }
+                .frame(width: 560, height: 510)
+                .tabItem { tabLabel("General", symbol: "gearshape") }
             appearancePane
-                .tabItem { Label("Appearance", systemImage: "paintbrush") }
+                .frame(width: 560, height: 240)
+                .tabItem { tabLabel("Appearance", symbol: "paintbrush") }
             ShortcutsPane(model: model)
-                .tabItem { Label("Shortcuts", systemImage: "keyboard") }
+                .frame(width: 560, height: 640)
+                .tabItem { tabLabel("Shortcuts", symbol: "keyboard") }
         }
-        // Fixed size, sized to the content: wide enough for the forms, tall enough
-        // for the General tab with the pinned-folder row expanded (the Shortcuts list
-        // scrolls). NOT resizable — vertical-only resizing was attempted five times
-        // (scene resizability modes, AppKit min/max pins, deferred re-asserts) and the
-        // SwiftUI Settings scene re-clobbered its window's sizing every time; a fixed
-        // fit-to-content window is the reliable, also-idiomatic outcome (owner call,
-        // 2026-07-03). Don't re-attempt without new information.
-        .frame(width: 560, height: 680)
         .onAppear {
             if !loaded {
                 draft = SettingsDraft(form: model.settingsForm())
+                currentImageFolder = model.currentImageFolder()
                 model.keymapBeginEdit()
                 loaded = true
             }
@@ -68,6 +72,29 @@ struct SettingsView: View {
         }
     }
 
+    /// A tab-bar label whose icon is a pre-configured NSImage symbol rather than
+    /// `Label(_, systemImage:)`. The SwiftUI form resolves the symbol's metrics from the
+    /// environment, which isn't final until the window is on screen — so the icons first
+    /// rendered slightly small/low and visibly snapped up ~1pt on the first re-render
+    /// (first tab switch or key-state change; window resizes never trip it). A fixed
+    /// NSImage has nothing left to re-resolve, so the first render is already the
+    /// settled one. `.medium` scale was measured pixel-identical to the rendering
+    /// AppKit itself settles on (screenshot-diff verified); `.large` sits 2pt taller.
+    private func tabLabel(_ title: String, symbol: String) -> some View {
+        Label {
+            Text(title)
+        } icon: {
+            Image(nsImage: Self.tabIcon(symbol))
+        }
+    }
+
+    private static func tabIcon(_ name: String) -> NSImage {
+        let img = NSImage(systemSymbolName: name, accessibilityDescription: nil)
+            ?? NSImage()
+        return img.withSymbolConfiguration(.init(pointSize: 0, weight: .regular, scale: .medium))
+            ?? img
+    }
+
     /// Trailing-edge debounce for the auto-apply: each change restarts a 250 ms timer;
     /// only the last state of a slider drag / color scrub reaches `settings_edited`.
     private func scheduleApply() {
@@ -87,12 +114,12 @@ struct SettingsView: View {
             Section("Navigation") {
                 labeledSlider(
                     "Start speed", value: $draft.startSpeed, in: 1...60,
-                    format: "%.0f photos/s"
+                    format: "%.0f images/s"
                 )
                 labeledSlider("Ramp up over", value: $draft.rampSecs, in: 0...30, format: "%.1f s")
                 labeledSlider(
                     "Max speed", value: $draft.maxFps, in: 1...draft.refreshHz,
-                    format: draft.maxFps >= draft.refreshHz ? "display refresh" : "%.0f photos/s"
+                    format: draft.maxFps >= draft.refreshHz ? "display refresh" : "%.0f images/s"
                 )
                 labeledSlider(
                     "Hold delay", value: $draft.holdDelayMs, in: 0...2000, format: "%.0f ms"
@@ -128,31 +155,35 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.segmented)
                 Toggle("Include subfolders when opening a folder", isOn: $draft.recursive)
-                // "Current photo's folder" is deliberately not "last used folder": the
+                // "Current image's folder" is deliberately not "last used folder": the
                 // dialog follows what you're *viewing* (archive → its containing folder,
-                // nothing open → Pictures) and never the OS's own last-browsed memory
-                // (a privacy trace) — see `engine::picker_start_dir`.
+                // nothing open → the last-used folder, then Pictures) and never the OS's
+                // own last-browsed memory (a privacy trace) — `engine::picker_start_dir`.
                 Picker("Open files in", selection: $draft.pickerFixed) {
-                    Text("Current photo's folder").tag(false)
+                    Text("Current image's folder").tag(false)
                     Text("A pinned folder").tag(true)
                 }
                 .pickerStyle(.radioGroup)
-                if draft.pickerFixed {
-                    HStack {
-                        Text(draft.pickerDir.isEmpty ? "No folder chosen" : draft.pickerDir)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .foregroundStyle(draft.pickerDir.isEmpty ? .secondary : .primary)
-                        Spacer()
-                        Button("Choose…") { choosePinnedFolder() }
-                    }
+                // Always present — a row that appears/disappears would change the
+                // pane's fixed height. Unpinned, it shows (grayed, Choose… disabled)
+                // the current image's folder the picker will actually use.
+                HStack {
+                    Text(pickerFolderDisplay)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .foregroundStyle(
+                            draft.pickerFixed && !draft.pickerDir.isEmpty
+                                ? .primary : .secondary)
+                    Spacer()
+                    Button("Choose…") { choosePinnedFolder() }
+                        .disabled(!draft.pickerFixed)
                 }
             }
         }
         .formStyle(.grouped)
     }
 
-    /// The Appearance tab — egui's Display tab mirrored: how a photo is framed and how
+    /// The Appearance tab — egui's Display tab mirrored: how an image is framed and how
     /// the chrome around it looks.
     private var appearancePane: some View {
         Form {
@@ -170,6 +201,15 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    /// The folder line under "Open files in": pinned → the chosen folder (or a
+    /// placeholder), unpinned → the current image's folder the picker will use.
+    private var pickerFolderDisplay: String {
+        if draft.pickerFixed {
+            return draft.pickerDir.isEmpty ? "No folder chosen" : draft.pickerDir
+        }
+        return currentImageFolder.isEmpty ? "No image open" : currentImageFolder
     }
 
     /// The slideshow-interval field, clamped on commit to the same 0.1–60 s range the
