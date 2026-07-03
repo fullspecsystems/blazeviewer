@@ -101,6 +101,7 @@ struct ContentView: View {
                 model.installMenuBarIfNeeded()
                 model.openLaunchPathIfAny()
                 model.openSettingsAction = { openSettings() }
+                model.runFSmokeIfRequested()
             }
             // Password / Loading / Scanning ride one item-driven sheet. The binding's
             // nil-write is the *user* dismissal signal (Esc/etc. beyond the buttons);

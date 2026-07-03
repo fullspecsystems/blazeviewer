@@ -15,28 +15,54 @@ import PbMacFfi
 final class MenuBar: NSObject {
     private weak var model: CoreModel?
     private var items: [String: NSMenuItem] = [:]
-    /// The menu we installed, retained so `reassert` can recognize (and undo) a clobber.
+    /// The menu we installed, retained so `reassert` can recognize a clobber.
     private var menu: NSMenu?
+    /// A top-level item we created (the File holder) — the clobber canary. SwiftUI's
+    /// scene updates gut the installed menu **in place** (verified with --pb-f-smoke:
+    /// `NSApp.mainMenu` keeps its identity while our items vanish), so only a
+    /// content check can detect it: if this item is no longer in our menu, SwiftUI
+    /// rewrote the bar.
+    private var sentinel: NSMenuItem?
 
     init(model: CoreModel) {
         self.model = model
         super.init()
-        let menu = build()
+        install(build())
+    }
+
+    /// The currently installed menu object — the model's clobber observer filters
+    /// `NSMenu.didRemoveItemNotification` to exactly this instance.
+    var currentMenu: NSMenu? { menu }
+
+    /// Whether the main menu is still ours AND still intact (SwiftUI guts the object
+    /// in place, so pointer identity alone lies).
+    var isInstalled: Bool {
+        guard let menu, NSApp.mainMenu === menu else { return false }
+        return sentinel?.menu === menu
+    }
+
+    private func install(_ menu: NSMenu) {
         self.menu = menu
+        // Not items[0]: SwiftUI's default bar also starts with an app menu, so the
+        // File holder is the item its rewrite can never legitimately preserve.
+        sentinel = menu.items.count > 1 ? menu.items[1] : menu.items.first
         NSApp.mainMenu = menu
         refreshShortcutBadges()
     }
 
-    /// Re-install our menu if something replaced it. SwiftUI rewrites `NSApp.mainMenu`
-    /// with its own default menu on scene updates — the F-mode toggle was the repro
-    /// (its observable `speedModeFullscreen` flip re-evaluates the window scene), and
-    /// the bar dropped to "PhotoBlaze / View / Window / Help" until relaunch. A pointer
-    /// compare makes this idempotent and cheap, so the model calls it from a KVO watch
-    /// on `mainMenu` plus the menu-state sync path. Callers must guard against open
-    /// menus (`menuTrackingDepth`) — swapping the main menu mid-tracking snaps them shut.
-    func reassert() {
-        guard let menu, NSApp.mainMenu !== menu else { return }
-        NSApp.mainMenu = menu
+    /// Rebuild + re-install our menu if SwiftUI rewrote the bar. Its scene updates
+    /// (the F-mode toggle was the repro — the observable `speedModeFullscreen` flip
+    /// re-evaluates the window scene) remove our items from the installed menu IN
+    /// PLACE and insert its default set, which also orphans our item tree — so a
+    /// clobber means rebuilding from scratch, not re-pointing `NSApp.mainMenu`.
+    /// Intact = no-op, so this is cheap to call often. Callers must guard against
+    /// open menus (`menuTrackingDepth`) — swapping the main menu mid-tracking snaps
+    /// them shut. Returns whether a re-install happened (the model re-syncs state).
+    @discardableResult
+    func reassert() -> Bool {
+        guard !isInstalled else { return false }
+        install(build())
+        return true
     }
 
     /// Right-aligned shortcut hints for the bare-key commands (Space, R, `[`, …) —

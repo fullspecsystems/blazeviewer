@@ -288,12 +288,29 @@ final class CoreModel {
         guard menuBar == nil else { return }
         menuBar = MenuBar(model: self)
         menuBar?.sync(core.menu_state())
-        // SwiftUI keeps rewriting NSApp.mainMenu on scene updates — not just at launch
+        // SwiftUI keeps rewriting the menu bar on scene updates — not just at launch
         // (the F-mode toggle was the repro: its observable flip re-evaluates the window
-        // scene and the bar reset to SwiftUI's default menu). Watch the property and
-        // win it back whenever someone else replaces it. The async hop keeps the KVO
-        // callback reentrancy-free; reassert's identity check makes our own write a
-        // no-op, so this converges.
+        // scene). Crucially it guts the installed NSMenu IN PLACE (--pb-f-smoke showed
+        // NSApp.mainMenu keeping its identity while our items vanished), so the
+        // reliable signal is our menu losing items — watch for that and win the bar
+        // back. The async hop defers past SwiftUI's in-flight mutation; reassert's
+        // intact check makes the re-install converge (our own build only ADDS items).
+        menuClobberObserver = NotificationCenter.default.addObserver(
+            forName: NSMenu.didRemoveItemNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            MainActor.assumeIsolated {
+                guard let self, let menu = note.object as? NSMenu,
+                    menu === self.menuBar?.currentMenu
+                else { return }
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated { self.reassertMenuBar() }
+                }
+            }
+        }
+        // Belt-and-braces for the other clobber mechanism (a wholesale replacement of
+        // NSApp.mainMenu, should some SwiftUI version switch to it).
         mainMenuObservation = NSApp.observe(\.mainMenu) { [weak self] _, _ in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated { self?.reassertMenuBar() }
@@ -302,6 +319,7 @@ final class CoreModel {
     }
 
     @ObservationIgnored private var mainMenuObservation: NSKeyValueObservation?
+    @ObservationIgnored private var menuClobberObserver: NSObjectProtocol?
 
     /// Re-assert the native menu bar unless a menu is open — replacing the main menu
     /// mid-tracking snaps the open menu shut (the `assertWindowChrome` hazard, same
@@ -309,8 +327,56 @@ final class CoreModel {
     /// didEndTracking observer.
     private func reassertMenuBar() {
         guard menuTrackingDepth == 0 else { return }
-        menuBar?.reassert()
+        if menuBar?.reassert() == true {
+            // The rebuild starts from defaults — re-apply the live checks/enables.
+            menuBar?.sync(core.menu_state())
+            log("main menu was clobbered — rebuilt + reinstalled ours")
+        }
     }
+
+    /// `--pb-f-smoke` (dev diagnostics): drive the F-mode round trip from inside the
+    /// app — toggle borderless fullscreen on, off, then dump the REAL state of
+    /// `NSApp.mainMenu` (identity + top-level titles) at each step and quit. Exercises
+    /// the exact scene-update path of the owner-reported menu-bar reset without
+    /// needing synthetic key events or Accessibility permission.
+    func runFSmokeIfRequested() {
+        guard ProcessInfo.processInfo.arguments.contains("--pb-f-smoke"),
+            !fSmokeStarted // onAppear refires on scene updates — arm exactly once
+        else { return }
+        fSmokeStarted = true
+        func dump(_ tag: String) {
+            // A top-level holder's own title is often empty — display comes from the
+            // submenu's title, so print that.
+            let titles = (NSApp.mainMenu?.items ?? [])
+                .map { $0.submenu?.title ?? $0.title }
+                .joined(separator: " | ")
+            log(
+                "F-SMOKE \(tag): ours=\(menuBar?.isInstalled ?? false) items=[\(titles)]")
+        }
+        func after(_ secs: Double, _ body: @escaping @MainActor () -> Void) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + secs) {
+                MainActor.assumeIsolated(body)
+            }
+        }
+        dump("start")
+        after(1.5) { [self] in
+            log("F-SMOKE toggling F on")
+            menuAction("fullscreen")
+            dump("after-on-sync")
+            after(1.5) { [self] in
+                dump("in-fullscreen")
+                log("F-SMOKE toggling F off")
+                menuAction("fullscreen")
+                dump("after-off-sync")
+                after(1.5) { [self] in
+                    dump("final")
+                    NSApp.terminate(nil)
+                }
+            }
+        }
+    }
+
+    @ObservationIgnored private var fSmokeStarted = false
 
     /// A native menu item fired (by stable Action id) — same dispatch as the keyboard.
     func menuAction(_ id: String) {
