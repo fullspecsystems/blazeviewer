@@ -1,8 +1,10 @@
 # PhotoBlaze — Current Status (session handoff)
 
-_Last updated: 2026-07-02 (**NS2 native dialogs code-complete except the NS2.6 shortcut
-editor** — Confirm/Message/Password/Loading/Scanning + the Settings scene all landed, awaiting
-the owner smoke; NS1 complete + owner-smoked; see **▶ Resume** → the NS2 block)._
+_Last updated: 2026-07-02 late (**NS2 FEATURE-COMPLETE incl. the Shortcuts editor, plus a
+post-NS2 polish evening** — superellipse HUD corners, true borderless F mode, menu badges,
+Finder-parity delete, DPI-race fix; most of it owner-smoked live. **NEXT: the three ▶ FINALIZE
+items** in the Resume section — EDR-per-window + XDR check, startup/geometry settings,
+local packaging. CI Actions credits are exhausted — build releases locally.)_
 
 ## 🪟 Windows session 2026-07-01→02 — CI green again + Live Photos + HEIC ships parallel
 
@@ -432,12 +434,76 @@ clamp-oversized-window-on-monitor-change (shrink-only, drag-settle-aware; the OS
 window management resizes windows cross-display on its own — resize forensics logging is in
 the debug build), and CI cost policy (main+PR+dispatch only — a full run bills ~260 min).
 
-**Owner smoke for NS2.6:** ⌘, → Shortcuts tab: rebind Next to a bare key (steal note appears),
-capture ⌘-chords, Clear/Add secondary slots, Reset to defaults, Save → new binding drives the
-viewer + persists across relaunch; Cancel discards; typing in Settings no longer moves photos.
-**After NS2: NS3** (Mac-assed polish + cutover — window restoration, appearance tracking,
-accessibility, gestures as recognizers, EDR/P3 validation through the SwiftUI host, then flip
-the default Mac target and retire egui-on-Mac).
+**The post-NS2 polish evening (2026-07-02, all committed to `swiftui`, owner-in-the-loop):**
+- **Settings window resizable** (`windowResizability(.contentMinSize)`, min 520×480).
+- **Finder-parity delete confirm**: NSAlert `.critical` (caution triangle + app-icon badge) +
+  Finder's exact wording, composed Rust-side as `headline\ninformative` (the host splits).
+- **Launch race fixed — blurry/unclickable Open buttons**: the canvas attached with a stale
+  backing scale (the owner runs THREE DPI contexts: 1x ultrawide main, 2x Studio, 2x Screen
+  Sharing) and a bare scale flip never re-runs `layout()` → new
+  `viewDidChangeBackingProperties` override routes it through the resize path. On any
+  blurry/missed-click report, check the `PB:` trace's "canvas attached (W×H @Sx)" line first.
+- **HUD corners are superellipses on macOS** (`pb-hud/hud.rs`): `corner_distance` = n-norm
+  gauge, **n = 2.2** (the first pick n=5 was measurably wrong — an n=5 corner silhouettes
+  like a much smaller circle: "still too sharp"), and buttons derive radius from HEIGHT
+  (`BUTTON_RADIUS_OF_HEIGHT = 0.33`, owner-tuned; `BUTTON_RADIUS` is the non-mac token —
+  the file docs now say which is which after the owner edited the wrong one).
+- **True borderless F mode**: `class_replaceMethod` makes the window's CLASS answer
+  `canBecomeKeyWindow` (⚠ NEVER `object_setClass` a SwiftUI window — KVO isa corruption →
+  segfault in the next setStyleMask, crash-report-verified), then drop `.titled` → square
+  corners, every pixel; `assertWindowChrome()` re-asserts per drain (SwiftUI clobbers
+  chrome) + `.toolbarBackground(.hidden)` + `.ignoresSafeArea()`; shadow off in F.
+- **Cross-monitor window clamp** (shrink-only, drag-settle-aware via pressedMouseButtons
+  polling — window-drag events never reach the app). Note: **Tahoe itself resizes windows
+  across displays** (community-confirmed); DEBUG builds log every programmatic resize
+  (`inLiveResize == false` filter) to tell our clamp from the OS.
+- **Menu parity**: `NSMenuItemBadge` shortcut hints on every bare-key item, sourced from the
+  LIVE keymap (`keymap_slot_display`), refreshed after Settings save — the pill look is the
+  badge control's own style (owner: "better than the alternatives we've tried"); native
+  Enter Full Screen (⌃⌘F, self-titling); `allowsAutomaticWindowTabbing = false` (kills Show
+  Tab Bar — which accidentally sparked a compare-photos idea → **task #43**); **Copy Image
+  Details now in Edit** (was context-menu-only; an FFI test proves the full chain).
+- **The stale-pair trap** (bit twice tonight): `build-swift-host.sh` defaults to RELEASE;
+  `--debug` builds debug only — `open` the profile you built. When handing the owner a
+  change, build BOTH.
+- **CI cost policy**: ci.yml now main+PR+workflow_dispatch only, paths-ignore on docs,
+  cancel-in-progress, job timeouts (a full run bills ~260 min; 13 branch pushes burned ~2k
+  minutes in a day). **The owner's Actions credits are EXHAUSTED → releases must build
+  LOCALLY for now** (finalize item 3).
+- **Double-Esc**: never root-caused; Esc gate tracing lives in DEBUG builds; quiet since the
+  key-monitor isKeyWindow gate landed.
+
+**Owner-smoked so far:** photos/nav/fly/drag-drop (NS1 item 10), F mode incl. borderless,
+proxy icon, Settings incl. the Shortcuts editor + resizable window, delete confirm,
+menus/badges, **password sheet + loading bar ("look okay"; the blue `lock.fill` SF Symbol
+reads slightly un-native — polish candidate, no decision yet)**. Not yet smoked: the Scanning
+sheet on a huge tree, error alerts, rebind-updates-menu-badges.
+
+**▶ FINALIZE (owner-approved order — the next work):**
+1. **EDR/HDR per-window correctness + XDR validation.** `configureEDR` reads
+   `NSScreen.main` (TODO comment in CoreModel.swift) — the exact multi-display bug the winit
+   port hit ("HDR looked totally broken"); must read the WINDOW's screen, re-poke on
+   `didChangeScreen` (an observer already exists for the clamp) +
+   `NSApplication.didChangeScreenParametersNotification`. Then the deferred owner check:
+   `~/Downloads/test-images/WideGamut-*-HDR.avif` on the XDR (trust the panel, not
+   screenshots — they clip EDR).
+2. **Startup mode + window geometry are DEAD SETTINGS on the Swift host** (grep-verified: no
+   `start_fullscreen`/`settings.window` use in pb-mac-ffi or mac/). Honor
+   `start_fullscreen()` at launch, restore `settings.window` (via `geometry_on_screen`
+   against live monitor rects), and write the frame back (winit's `track_windowed_geometry`
+   equivalent). SwiftUI's own frame restoration will fight — ours must win.
+3. **Local redistributable packaging** (CI credits exhausted → local, not a CI lane): the
+   bundle has NO icon and NO `CFBundleDocumentTypes` (empty Resources/, grep-verified).
+   Reuse the egui pipeline's assets/muscle: `packaging/macos/` icns + Assets.car +
+   Info.plist doc-types, `scripts/release-macos.sh` (codesign → DMG → notarytool → stapler)
+   adapted to the Swift host, run locally. Bundle id decision pending: keep
+   `com.jdlien.PhotoBlazeMac` (coexists with the egui beta) until the NS3 cutover renames to
+   the real identity.
+
+After those: Settings polish (owner-deferred to last), the Shortcuts editor's missing actions
+(Slideshow/CopyPath/CopyImageDetails/Reveal — same gap as egui; its "every action" comment is
+stale), VoiceOver on the canvas overlays, then the cutover itself (default Mac target, retire
+egui-on-Mac).
 
 **Host-launch note:** the `AppDelegate` sets the activation policy in
 `applicationWillFinishLaunching` so bare-binary launches (`swift run` / the executable straight
