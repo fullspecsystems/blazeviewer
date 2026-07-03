@@ -168,12 +168,42 @@ fn build_tiles(hud: &Hud) -> Vec<Tile> {
     if let Some(b) = hud.render_shortcuts(&help_sections(), sp(15.0), hud.theme().bg, s(360.0)) {
         tiles.push(tile(hud, "Keyboard help (?)", b));
     }
-    // Folder-tree overlay (Shift+F): parent / siblings / children, current highlighted.
-    if let Some(b) = hud.render_tree(&tree_rows(), sp(15.0), info_pad, hud.theme().bg, s(360.0)) {
-        tiles.push(tile(hud, "Folder tree (Shift+F)", b));
+    // Folder-tree overlay (Shift+F): up affordance / chain / siblings / children,
+    // current highlighted, indent guides, capsule photo-count badges.
+    let tree = |max_h: i32, hovered: Option<hud::TreeHit>, counts: hud::TreeCounts| {
+        hud.render_tree(
+            &tree_rows(),
+            sp(15.0),
+            info_pad,
+            hud.theme().bg,
+            max_h,
+            0,
+            hovered,
+            counts,
+        )
+        .map(|(r, w, h, _)| (r, w, h))
+    };
+    if let Some(b) = tree(s(360.0), None, hud::TreeCounts::Capsule) {
+        tiles.push(tile(
+            hud,
+            "Folder tree (Shift+F) \u{2014} capsule counts",
+            b,
+        ));
     }
-    // The same tree windowed by a tight height budget: "⋯ n more" markers appear.
-    if let Some(b) = hud.render_tree(&tree_rows(), sp(15.0), info_pad, hud.theme().bg, s(150.0)) {
+    // The A/B alternative: dim trailing counts (the Mail/Finder sidebar idiom).
+    if let Some(b) = tree(s(360.0), None, hud::TreeCounts::Trailing) {
+        tiles.push(tile(hud, "Folder tree \u{2014} trailing counts", b));
+    }
+    // Hover: the lighter band on a clickable row (here the second sibling).
+    if let Some(b) = tree(
+        s(360.0),
+        Some(hud::TreeHit::Row(5)),
+        hud::TreeCounts::Capsule,
+    ) {
+        tiles.push(tile(hud, "Folder tree \u{2014} row hovered", b));
+    }
+    // Windowed by a tight height budget: clickable "… n more" paging markers.
+    if let Some(b) = tree(s(150.0), None, hud::TreeCounts::Capsule) {
         tiles.push(tile(hud, "Folder tree \u{2014} windowed", b));
     }
 
@@ -345,9 +375,16 @@ fn build_composite(hud: &Hud) -> Sheet {
     let pie = hud::render_pie(s(46.0) as u32, 0.62, 0.0);
     c.over(&pie, (w - pie.1 as i32) / 2, inset);
     // Folder tree: top-left, the info panel's inset mirrored (the live placement).
-    if let Some((r, tw, th)) =
-        hud.render_tree(&tree_rows(), sp(15.0), s(7.0) as u32, bg, h - 2 * inset)
-    {
+    if let Some((r, tw, th, _)) = hud.render_tree(
+        &tree_rows(),
+        sp(15.0),
+        s(7.0) as u32,
+        bg,
+        h - 2 * inset,
+        0,
+        None,
+        hud::TreeCounts::Capsule,
+    ) {
         c.over(&(r, tw, th), inset, inset);
     }
     if let Some((r, tw, th)) = hud.render_panel_icon(
@@ -414,31 +451,46 @@ fn text(hud: &Hud, s: &str, px: f32) -> Bitmap {
 /// "…" marker, the ancestor chain, then siblings with the current folder highlighted
 /// (open glyph) and its children nested one level deeper.
 fn tree_rows() -> Vec<hud::TreeRow> {
-    let row = |depth: u32, name: &str, open: bool, current: bool| hud::TreeRow {
-        depth,
-        name: name.to_string(),
-        open,
-        current,
-        marker: false,
-    };
+    let row =
+        |depth: u32, name: &str, open: bool, current: bool, count: Option<u64>| hud::TreeRow {
+            depth,
+            name: name.to_string(),
+            open,
+            current,
+            marker: false,
+            up: false,
+            count,
+        };
     let marker = |depth: u32| hud::TreeRow {
         depth,
         name: "\u{2026}".to_string(),
         open: false,
         current: false,
         marker: true,
+        up: false,
+        count: None,
+    };
+    let up = hud::TreeRow {
+        depth: 0,
+        name: "Pictures".to_string(),
+        open: false,
+        current: false,
+        marker: false,
+        up: true,
+        count: None,
     };
     vec![
-        row(0, "Photos", true, false),
+        up,
+        row(0, "Photos", true, false, Some(8_230)),
         marker(1),
-        row(2, "Vacation 2024", true, false),
-        row(3, "Day 1 \u{2014} Arrival", false, false),
-        row(3, "Day 2 \u{2014} Mountains", false, false),
-        row(3, "Day 3 \u{2014} Coast", true, true),
-        row(4, "Drone", false, false),
-        row(4, "Underwater", false, false),
-        row(3, "Day 4 \u{2014} Old Town", false, false),
-        row(3, "Day 5 \u{2014} Departure", false, false),
+        row(2, "Vacation 2024", true, false, Some(1_204)),
+        row(3, "Day 1 \u{2014} Arrival", false, false, Some(86)),
+        row(3, "Day 2 \u{2014} Mountains", false, false, Some(311)),
+        row(3, "Day 3 \u{2014} Coast", true, true, Some(128)),
+        row(4, "Drone", false, false, Some(24)),
+        row(4, "Underwater", false, false, Some(17)),
+        row(3, "Day 4 \u{2014} Old Town", false, false, Some(203)),
+        row(3, "Day 5 \u{2014} Departure", false, false, Some(42)),
     ]
 }
 

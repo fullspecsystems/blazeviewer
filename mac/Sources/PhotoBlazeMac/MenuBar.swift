@@ -229,6 +229,28 @@ final class MenuBar: NSObject {
             sep(),
             item("info", "Show Image Info"),
             item("full_exif", "Show All EXIF Info"),
+            item("folder_tree", "Show Folder Tree"),
+        ]))
+
+        // Go — folder navigation (Finder's chords: ⌘↑ Enclosing Folder; ⌘←/⌘→ step
+        // between sibling folders — PhotoBlaze has no back/forward history to shadow).
+        main.addItem(submenu("Go", [
+            {
+                let up = item("open_parent", "Enclosing Folder", key: "\u{F700}")
+                up.keyEquivalentModifierMask = [.command]
+                return up
+            }(),
+            sep(),
+            {
+                let prev = item("prev_folder", "Previous Folder", key: "\u{F702}")
+                prev.keyEquivalentModifierMask = [.command]
+                return prev
+            }(),
+            {
+                let next = item("next_folder", "Next Folder", key: "\u{F703}")
+                next.keyEquivalentModifierMask = [.command]
+                return next
+            }(),
         ]))
 
         main.addItem(submenu("Image", [

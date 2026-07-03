@@ -344,8 +344,14 @@
           },
           {
             "id": 6,
-            "title": "Phase 2: interactive navigation (design fork — owner input)",
-            "description": "Keyboard selection (↑/↓ + Enter) and/or click to open the highlighted folder via the existing open plumbing; parent-level nav; archive re-scoping. Open questions in the plan doc (scoped rebuild vs position move; single vs multi level) need owner direction from phase-1 usage.",
+            "title": "Phase 2: clickable navigation (disk) — IMPLEMENTED 2026-07-03",
+            "description": "Landed: clickable rows (full Open Folder via pb_core::open::plan), hover band + pointer cursor, up row (parent's real name, folder-arrow-up), clickable '… n more' paging markers, Go actions (open_parent Alt+Up/⌘↑ menu, prev/next_folder Alt+←→/⌘←→, new Go menu on both shells), photo-count badges (capsule live; trailing variant A/B'd in --hud-gallery — owner to pick), hairline indent guides, empty-deck tree (browses from the root, so photo-less folders never strand), and live tracking during hold-to-fly (no-I/O playlist derivation via a per-deck cached counts map + 100 ms rebuild throttle; full read_dir view restored on settle). Owner smoke pending.",
+            "status": "review"
+          },
+          {
+            "id": 7,
+            "title": "Phase 3: archive folder navigation (prefix re-scoping)",
+            "description": "Make archive rows clickable: ClickTarget::ArchiveScope(prefix), a ScopedSource PhotoSource wrapper (index map over entries under the prefix, pure RAM, zip+7z identical) rebuilt via rebuild_playlist; tree keeps deriving from the UNSCOPED source so out-of-scope siblings stay clickable; sibling Go commands step between prefixes. Design pinned in folder-tree-plan.md; planning session next.",
             "status": "pending"
           }
         ]

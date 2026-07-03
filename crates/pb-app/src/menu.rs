@@ -67,6 +67,10 @@ pub mod ids {
     pub const SLIDESHOW_SLOWER: &str = "slideshow_slower";
     pub const INFO: &str = "info";
     pub const FULL_EXIF: &str = "full_exif";
+    pub const FOLDER_TREE: &str = "folder_tree";
+    pub const OPEN_PARENT: &str = "open_parent";
+    pub const PREV_FOLDER: &str = "prev_folder";
+    pub const NEXT_FOLDER: &str = "next_folder";
 
     pub const NEXT: &str = "next";
     pub const PREVIOUS: &str = "previous";
@@ -115,6 +119,10 @@ pub enum MenuAction {
     SlideshowSlower,
     Info,
     FullExif,
+    FolderTree,
+    OpenParent,
+    PrevFolder,
+    NextFolder,
     Next,
     Previous,
     Random,
@@ -162,6 +170,10 @@ impl MenuAction {
             MenuAction::SlideshowSlower => Action::SlideshowSlower,
             MenuAction::Info => Action::Info,
             MenuAction::FullExif => Action::FullExif,
+            MenuAction::FolderTree => Action::FolderTree,
+            MenuAction::OpenParent => Action::OpenParent,
+            MenuAction::PrevFolder => Action::PrevFolder,
+            MenuAction::NextFolder => Action::NextFolder,
             MenuAction::Next => Action::Next,
             MenuAction::Previous => Action::Prev,
             MenuAction::Random => Action::Random,
@@ -210,6 +222,10 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         SLIDESHOW_SLOWER => MenuAction::SlideshowSlower,
         INFO => MenuAction::Info,
         FULL_EXIF => MenuAction::FullExif,
+        FOLDER_TREE => MenuAction::FolderTree,
+        OPEN_PARENT => MenuAction::OpenParent,
+        PREV_FOLDER => MenuAction::PrevFolder,
+        NEXT_FOLDER => MenuAction::NextFolder,
         NEXT => MenuAction::Next,
         PREVIOUS => MenuAction::Previous,
         RANDOM => MenuAction::Random,
@@ -415,6 +431,28 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
         &sep(),
         &info,
         &full_exif,
+        &item(
+            ids::FOLDER_TREE,
+            &labeled(keymap, "Show Folder Tree", Action::FolderTree),
+        ),
+    ]);
+
+    // Go — folder navigation (Explorer's Alt+↑/←/→ idioms; hints from the live keymap).
+    let go = Submenu::new("&Go", true);
+    let _ = go.append_items(&[
+        &item(
+            ids::OPEN_PARENT,
+            &labeled(keymap, "Parent Folder", Action::OpenParent),
+        ),
+        &sep(),
+        &item(
+            ids::PREV_FOLDER,
+            &labeled(keymap, "Previous Folder", Action::PrevFolder),
+        ),
+        &item(
+            ids::NEXT_FOLDER,
+            &labeled(keymap, "Next Folder", Action::NextFolder),
+        ),
     ]);
 
     // Compare (task #43): both start disabled (empty deck at launch);
@@ -477,7 +515,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
         &item(ids::ABOUT, "About PhotoBlaze"),
     ]);
 
-    for sub in [&file, &edit, &view, &image, &help] {
+    for sub in [&file, &edit, &view, &go, &image, &help] {
         if let Err(e) = menu.append(sub) {
             eprintln!("menu: failed to append submenu: {e}");
         }

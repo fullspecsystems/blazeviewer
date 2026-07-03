@@ -2,7 +2,28 @@
 //! [`AppCore`](crate::AppCore). The Hud *rasterizer* (the "how to draw" — CPU text/pill
 //! compositing) stays shell-side (`pb-app`'s `hud.rs`) with the renderer for now.
 
+use pb_hud::hud::{TreeHit, TreeRow};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
+
+/// The folder-tree overlay's interactive state while shown: the bitmap size +
+/// margin (its on-screen rect is derived from the live window at hit-test time —
+/// resize/DPI-proof, like [`OpenPanel`]), the hit rects **within the bitmap**,
+/// each row's click target, the cached display rows (so hover/page re-renders
+/// skip the derivation and its `read_dir`s entirely), the hovered hit, and the
+/// windowing page offset (the clickable "… n more" markers). RAM-only.
+pub struct TreePanel {
+    pub w: u32,
+    pub h: u32,
+    pub margin: u32,
+    pub hits: Vec<(TreeHit, [u32; 4])>,
+    pub targets: Vec<Option<PathBuf>>,
+    pub rows: Vec<TreeRow>,
+    pub hovered: Option<TreeHit>,
+    pub page: i32,
+    /// When this bitmap was rasterized — rate-limits mid-flight rebuilds.
+    pub built: Instant,
+}
 
 /// Which info overlay is active (`i` basic / `Shift+I` full EXIF / `?` help / off).
 #[derive(Clone, Copy, PartialEq, Eq)]

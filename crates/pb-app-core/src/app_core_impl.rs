@@ -137,6 +137,8 @@ impl AppCore {
             play_hint: None,
             folder_tree_open: false,
             folder_tree_sig: None,
+            folder_tree_panel: None,
+            folder_tree_counts: None,
             hud: None,
             renderer: None,
             undo_stack: Vec::new(),
@@ -244,6 +246,9 @@ impl AppCore {
             Action::FullExif => self.toggle_info(true),
             Action::Help => self.toggle_help(),
             Action::FolderTree => self.toggle_folder_tree(),
+            Action::OpenParent => self.open_parent_cmd(),
+            Action::PrevFolder => self.open_sibling_cmd(-1),
+            Action::NextFolder => self.open_sibling_cmd(1),
             Action::SlideshowToggle => self.toggle_slideshow(),
             Action::SlideshowFaster => self.adjust_slideshow(-1),
             Action::SlideshowSlower => self.adjust_slideshow(1),
@@ -547,6 +552,7 @@ impl AppCore {
                 self.update_chip_hover();
                 self.update_open_hover();
                 self.update_play_hint_hover();
+                self.update_tree_hover();
                 self.refresh_cursor();
             }
             // Trackpad pinch (macOS): magnify about the cursor (+ spread in / − pinch out).
@@ -947,17 +953,32 @@ impl AppCore {
             }
         }
 
-        // 4a″. Folder tree (⇧F): keep it tracking the displayed photo's folder. The
-        // per-tick check is string ops on the signature; a rebuild (with its two
-        // read_dirs on a disk deck) runs only when the folder actually changes — and
-        // never while flying, so hold-to-fly across folders can't jank the loop.
-        if self.folder_tree_open && !flying && self.hud.is_some() {
-            if let Some(item) = self.displayed_item {
-                if self.folder_tree_sig.as_deref() != Some(self.folder_sig(item).as_str()) {
-                    self.show_folder_tree();
+        // 4a″. Folder tree (⇧F): keep it tracking the displayed photo's folder — the
+        // whole point is "you are here", so it tracks **during hold-to-fly too**
+        // (owner call, 2026-07-03). The per-tick check is string ops on the
+        // signature; a settled rebuild (with its two read_dirs on a disk deck) runs
+        // only when the folder actually changes; a mid-flight rebuild uses the
+        // no-I/O playlist derivation and is rate-limited so folder-per-frame
+        // crossings can't eat the advance budget. An empty deck rebuilds too
+        // (`@root`): the tree browses from the root itself, so a photo-less folder
+        // is a navigation point rather than a dead end.
+        if self.folder_tree_open && self.hud.is_some() {
+            let sig = self.folder_sig();
+            let lite_sig = format!("{sig}|lite");
+            let stored = self.folder_tree_sig.as_deref();
+            if stored != Some(sig.as_str()) && stored != Some(lite_sig.as_str()) {
+                let throttled = flying
+                    && self
+                        .folder_tree_panel
+                        .as_ref()
+                        .is_some_and(|p| now.duration_since(p.built) < Self::TREE_FLY_REBUILD);
+                if !throttled {
+                    self.show_folder_tree_mode(flying);
                 }
-            } else if self.folder_tree_sig.is_some() {
-                self.hide_folder_tree(); // deck emptied under the open overlay
+            } else if !flying && stored == Some(lite_sig.as_str()) {
+                // Flight settled on a folder last drawn by the lite pass — upgrade
+                // to the full read_dir view (it adds photo-less folders).
+                self.show_folder_tree_mode(false);
             }
         }
 
@@ -1159,9 +1180,17 @@ impl AppCore {
         }
     }
 
-    /// Toggle the folder-tree overlay (`Shift+F`, phase 1: render-only): the current
-    /// photo's folder in its hierarchy — parent, siblings, children — along the left
-    /// edge. See `.taskmaster/docs/folder-tree-plan.md`.
+    /// Minimum interval between mid-flight folder-tree rebuilds: crossing a folder
+    /// boundary every frame at full fly speed re-rasterizes at most ~10×/s (a ~1 ms
+    /// CPU composite each), so the tree tracks live without denting the one-frame-
+    /// per-vsync advance budget.
+    pub const TREE_FLY_REBUILD: Duration = Duration::from_millis(100);
+
+    /// Toggle the folder-tree overlay (`Shift+F`): the current photo's folder in its
+    /// hierarchy — up affordance, root, ancestor chain, siblings, children — in the
+    /// top-left corner. Rows are clickable (full Open Folder semantics) and the
+    /// "… n more" windowing markers page the list. See
+    /// `.taskmaster/docs/folder-tree-plan.md`.
     pub fn toggle_folder_tree(&mut self) {
         self.folder_tree_open = !self.folder_tree_open;
         if self.folder_tree_open {
@@ -1181,47 +1210,130 @@ impl AppCore {
         crate::folder_tree::folder_of(&rel).to_string()
     }
 
-    /// The drawn tree's rebuild signature: deck root + current folder. Compared per
-    /// tick while the overlay is open (string ops only — the `read_dir`s in
+    /// The drawn tree's rebuild signature: deck root + current folder (`@root` for
+    /// an empty deck, which browses from the root itself). Compared per tick while
+    /// the overlay is open (string ops only — the `read_dir`s in
     /// [`show_folder_tree`](Self::show_folder_tree) run only when this changes).
-    fn folder_sig(&self, item: usize) -> String {
-        format!("{}|{}", self.root.display(), self.current_folder_rel(item))
+    fn folder_sig(&self) -> String {
+        match self.displayed_item {
+            Some(item) => format!("{}|{}", self.root.display(), self.current_folder_rel(item)),
+            None => format!("{}|@root", self.root.display()),
+        }
     }
 
-    /// Rasterize + draw the folder tree for the displayed photo's folder, and stamp
-    /// [`folder_tree_sig`](crate::AppCore::folder_tree_sig). Disk sources cost two
-    /// read-only `read_dir`s here (parent + folder); archive sources group their
-    /// in-RAM entry list — no I/O.
+    /// The per-deck folder-counts map (`disk_counts` over the playlist), cached by
+    /// (root, deck length) so the badges and the flight fast path never re-walk an
+    /// unchanged deck. One O(n) pass when the deck (or a streaming batch) changes.
+    fn folder_counts(&mut self) -> Arc<std::collections::HashMap<PathBuf, u64>> {
+        if let Some((r, n, map)) = &self.folder_tree_counts {
+            if *r == self.root && *n == self.source.len() {
+                return map.clone();
+            }
+        }
+        let map = Arc::new(crate::folder_tree::disk_counts(
+            (0..self.source.len()).filter_map(|i| self.source.path(i)),
+            &self.root,
+        ));
+        self.folder_tree_counts = Some((self.root.clone(), self.source.len(), map.clone()));
+        map
+    }
+
+    /// Derive the tree model for the current deck. Disk decks cost two read-only
+    /// `read_dir`s (siblings + children; the chain is path components); recursive
+    /// decks also decorate rows with the cached per-folder counts; archive decks
+    /// group their in-RAM entry names — no I/O — with counts for free. `lite` is
+    /// the **hold-to-fly** variant: sibling/child folders come from the cached
+    /// counts map instead of `read_dir`, so tracking the folder mid-flight costs
+    /// pure in-RAM work (photo-less folders appear when flight settles). An
+    /// **empty** deck (a photo-less folder — it must never strand you) browses from
+    /// the root itself. `None` = nothing to show (bare launch, no root).
+    fn folder_tree_model(&mut self, lite: bool) -> Option<crate::folder_tree::FolderTreeModel> {
+        match self.displayed_item {
+            Some(item) => match self.source.path(item) {
+                // Anchored at the opened root (never above it — the up row is the
+                // one deliberate exit).
+                Some(p) => {
+                    let dir = p.parent()?.to_path_buf();
+                    if lite {
+                        let counts = self.folder_counts();
+                        return Some(crate::folder_tree::rows_from_paths(
+                            &self.root, &dir, &counts,
+                        ));
+                    }
+                    let counts = self.recursive.then(|| self.folder_counts());
+                    Some(crate::folder_tree::rows_from_disk(
+                        &self.root,
+                        &dir,
+                        counts.as_deref(),
+                    ))
+                }
+                None => {
+                    // An archive deck: entry names carry the internal folder paths;
+                    // the archive file labels the root, and the up row opens the
+                    // folder on disk containing it. Rows aren't clickable until
+                    // prefix re-scoping lands.
+                    let container = self.source.container().unwrap_or(&self.root);
+                    let label = crate::folder_tree::name_of(container);
+                    let current = self.current_folder_rel(item);
+                    let names = (0..self.source.len()).map(|i| self.source.name(i));
+                    let mut m = crate::folder_tree::rows_from_names(names, &current, &label);
+                    if let Some(par) = container.parent().filter(|p| !p.as_os_str().is_empty()) {
+                        let par = par.to_path_buf();
+                        m.push_up(&crate::folder_tree::name_of(&par), par.clone());
+                    }
+                    Some(m)
+                }
+            },
+            None => {
+                // Empty deck: still show the tree, rooted at the opened folder, so
+                // an image-less open is a navigation point rather than a dead end.
+                (!self.root.as_os_str().is_empty() && self.root.is_dir())
+                    .then(|| crate::folder_tree::rows_from_disk(&self.root, &self.root, None))
+            }
+        }
+    }
+
+    /// Derive + rasterize + draw the folder tree for the current deck state, and
+    /// stamp [`folder_tree_sig`](crate::AppCore::folder_tree_sig). Hover and page
+    /// state reset — this is the fresh-content path; transitions re-render through
+    /// [`push_folder_tree`](Self::push_folder_tree) from the cached rows instead.
     pub fn show_folder_tree(&mut self) {
+        self.show_folder_tree_mode(false);
+    }
+
+    /// [`show_folder_tree`](Self::show_folder_tree) with the derivation choice:
+    /// `lite` = the no-I/O flight variant (its signature is stamped `|lite`, so
+    /// settling upgrades to the full `read_dir` view).
+    fn show_folder_tree_mode(&mut self, lite: bool) {
         // Check the cheap gates before deriving rows, so a font-less host doesn't
         // pay the read_dirs on every retry tick.
         if self.hud.is_none() {
             return;
         }
-        let Some(item) = self.displayed_item else {
+        let sig = self.folder_sig();
+        let stamp = if lite { format!("{sig}|lite") } else { sig };
+        let Some(model) = self.folder_tree_model(lite) else {
+            // Nothing to show (bare launch): drop any stale quad, remember why.
+            if self.folder_tree_panel.is_some() {
+                self.hide_folder_tree();
+            }
+            self.folder_tree_sig = Some(stamp);
             return;
         };
-        let rows = match self.source.path(item) {
-            // Anchored at the opened root (never above it); the ancestor chain
-            // comes from the path itself, so the disk cost stays two read_dirs.
-            Some(p) => match p.parent() {
-                Some(dir) => crate::folder_tree::rows_from_disk(&self.root, dir),
-                None => Vec::new(),
-            },
-            None => {
-                // An archive deck: entry names carry the internal folder paths; the
-                // archive file itself labels the root level.
-                let container = self.source.container().unwrap_or(&self.root);
-                let label = container
-                    .file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| container.display().to_string());
-                let current = self.current_folder_rel(item);
-                let names = (0..self.source.len()).map(|i| self.source.name(i));
-                crate::folder_tree::rows_from_names(names, &current, &label)
-            }
-        };
-        let sig = self.folder_sig(item);
+        self.push_folder_tree(model.rows, model.targets, 0, None);
+        self.folder_tree_sig = Some(stamp);
+    }
+
+    /// Rasterize + upload the tree from prepared rows — the shared path for fresh
+    /// derivations, hover transitions, and paging (the latter two reuse the cached
+    /// rows, so they never re-derive and never touch the disk).
+    fn push_folder_tree(
+        &mut self,
+        rows: Vec<hud::TreeRow>,
+        targets: Vec<Option<PathBuf>>,
+        page: i32,
+        hovered: Option<hud::TreeHit>,
+    ) {
         let px = (15.0 * self.viewport.scale_factor).max(8.0);
         let pad = (7.0 * self.viewport.scale_factor).round().max(2.0) as u32;
         let margin = self.overlay_margin();
@@ -1229,24 +1341,180 @@ impl AppCore {
         let Some(hud) = self.hud.as_ref() else {
             return;
         };
-        let Some((bitmap, w, h)) = hud.render_tree(&rows, px, pad, hud.theme().bg, max_h) else {
+        let Some((bitmap, w, h, hits)) = hud.render_tree(
+            &rows,
+            px,
+            pad,
+            hud.theme().bg,
+            max_h,
+            page,
+            hovered,
+            hud::TreeCounts::Capsule,
+        ) else {
             return;
         };
         if let Some(a) = self.renderer.as_mut() {
             a.set_tree(Some((&bitmap, w, h)), margin);
         }
-        self.folder_tree_sig = Some(sig);
+        self.folder_tree_panel = Some(crate::overlay::TreePanel {
+            w,
+            h,
+            margin,
+            hits,
+            targets,
+            rows,
+            hovered,
+            page,
+            built: self.now,
+        });
         self.draw();
     }
 
-    /// Hide the folder tree (clears its quad). The open/closed *state* stays with the
-    /// caller — [`toggle_folder_tree`](Self::toggle_folder_tree) flips it.
+    /// Hide the folder tree (clears its quad + interactive state). The open/closed
+    /// *state* stays with the caller — [`toggle_folder_tree`](Self::toggle_folder_tree)
+    /// flips it.
     pub fn hide_folder_tree(&mut self) {
         if let Some(a) = self.renderer.as_mut() {
             a.set_tree(None, 0);
         }
         self.folder_tree_sig = None;
+        self.folder_tree_panel = None;
         self.draw();
+    }
+
+    /// The interactive tree hit under a physical-px cursor point: a clickable folder
+    /// row (one with a target) or a paging marker. The panel sits `margin` px in
+    /// from the top-left, so screen rects derive from the live geometry — resize-
+    /// and DPI-proof, like the other interactive overlays.
+    pub fn folder_tree_hit(&self, x: f32, y: f32) -> Option<hud::TreeHit> {
+        if !self.folder_tree_open {
+            return None;
+        }
+        let p = self.folder_tree_panel.as_ref()?;
+        let (x0, y0) = (p.margin as f32, p.margin as f32);
+        for (hit, r) in &p.hits {
+            let rect = [
+                x0 + r[0] as f32,
+                y0 + r[1] as f32,
+                x0 + (r[0] + r[2]) as f32,
+                y0 + (r[1] + r[3]) as f32,
+            ];
+            if point_in_rect(rect, x, y) {
+                return match hit {
+                    hud::TreeHit::Row(i) => p.targets.get(*i)?.is_some().then_some(*hit),
+                    _ => Some(*hit),
+                };
+            }
+        }
+        None
+    }
+
+    /// Track the pointer over the tree: on a hover **transition** (enter/leave/move
+    /// between hits), re-render the panel from its cached rows so the hovered row's
+    /// band lights up — the chip-hover pattern; nothing runs per-move or per-frame.
+    pub fn update_tree_hover(&mut self) {
+        let hovered = self
+            .last_cursor
+            .and_then(|[x, y]| self.folder_tree_hit(x, y));
+        let Some(panel) = self.folder_tree_panel.as_ref() else {
+            return;
+        };
+        if panel.hovered == hovered {
+            return;
+        }
+        let Some(panel) = self.folder_tree_panel.take() else {
+            return;
+        };
+        self.push_folder_tree(panel.rows, panel.targets, panel.page, hovered);
+    }
+
+    /// A left-press over the folder tree: a "… n more" marker pages the window; a
+    /// folder row opens that folder — full Open Folder semantics, the same plan the
+    /// picker/drop path builds. Returns whether the press was consumed (the shells'
+    /// click ladders fall through to drag-to-pan otherwise).
+    pub fn folder_tree_click(&mut self) -> bool {
+        let Some(hit) = self
+            .last_cursor
+            .and_then(|[x, y]| self.folder_tree_hit(x, y))
+        else {
+            return false;
+        };
+        match hit {
+            hud::TreeHit::PageUp | hud::TreeHit::PageDown => {
+                let delta = if hit == hud::TreeHit::PageUp { -1 } else { 1 };
+                let Some(panel) = self.folder_tree_panel.take() else {
+                    return true;
+                };
+                // Render the new page without hover; the immediate re-check lights
+                // whatever now sits under the still cursor.
+                self.push_folder_tree(panel.rows, panel.targets, panel.page + delta, None);
+                self.update_tree_hover();
+                true
+            }
+            hud::TreeHit::Row(i) => {
+                let target = self
+                    .folder_tree_panel
+                    .as_ref()
+                    .and_then(|p| p.targets.get(i).cloned().flatten());
+                if let Some(dir) = target {
+                    self.open_dir(dir);
+                }
+                true
+            }
+        }
+    }
+
+    /// Open `dir` exactly like choosing it in the Open Folder picker or dropping it
+    /// on the window — the shared plan (recursive per the launch policy), so tree
+    /// clicks and the Go commands can't drift from the canonical open path.
+    pub fn open_dir(&mut self, dir: PathBuf) {
+        let plan = pb_core::open::plan(pb_core::open::LaunchInput::Directory(dir));
+        self.open_plan(plan.source, plan.cursor);
+    }
+
+    /// Go ▸ parent folder (⌘↑ / Alt+↑ — Finder's Enclosing Folder idiom): open the
+    /// deck anchor's parent. A disk deck's anchor is the opened root; an archive
+    /// deck's is the archive file itself, so "up" opens its containing folder.
+    /// Silent no-op with nothing open or at a filesystem root.
+    pub fn open_parent_cmd(&mut self) {
+        let anchor = self
+            .source
+            .container()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.root.clone());
+        if anchor.as_os_str().is_empty() {
+            return;
+        }
+        if let Some(par) = anchor.parent().filter(|p| !p.as_os_str().is_empty()) {
+            self.open_dir(par.to_path_buf());
+        }
+    }
+
+    /// Go ▸ previous / next folder (`dir` = ∓1; ⌘←/⌘→ / Alt+←/→): open the opened
+    /// root's adjacent sibling directory in the parent's sorted listing. Silent
+    /// no-op at the ends, with nothing open, or on an archive deck (sibling
+    /// stepping there lands with prefix re-scoping).
+    pub fn open_sibling_cmd(&mut self, dir: i32) {
+        if self.source.container().is_some() {
+            return;
+        }
+        let root = self.root.clone();
+        if root.as_os_str().is_empty() || !root.is_dir() {
+            return;
+        }
+        let Some(parent) = root.parent().filter(|p| !p.as_os_str().is_empty()) else {
+            return;
+        };
+        let sibs = crate::folder_tree::subdirs(parent);
+        let name = crate::folder_tree::name_of(&root);
+        let Some(pos) = sibs.iter().position(|s| *s == name) else {
+            return;
+        };
+        let next = pos as i64 + dir as i64;
+        if next < 0 || next as usize >= sibs.len() {
+            return; // at the end of the row of folders — nothing to step to
+        }
+        self.open_dir(parent.join(&sibs[next as usize]));
     }
 
     /// Apply the keymap edited in the Settings dialog: swap it in live (every keypress
@@ -1676,7 +1944,10 @@ impl AppCore {
     pub fn refresh_cursor(&mut self) {
         let over_button = self.last_cursor.is_some_and(|[x, y]| self.chip_hit(x, y))
             || self.open_hovered_button().is_some()
-            || self.play_hint_hit();
+            || self.play_hint_hit()
+            || self
+                .last_cursor
+                .is_some_and(|[x, y]| self.folder_tree_hit(x, y).is_some());
         let kind = if self.dragging {
             contract::CursorKind::Grabbing
         } else if over_button {
@@ -2147,6 +2418,11 @@ impl AppCore {
                     row("Info panel", sc(Action::Info)),
                     row("Detailed info panel", sc(Action::FullExif)),
                     row("Folder tree", sc(Action::FolderTree)),
+                    row("Parent folder", sc(Action::OpenParent)),
+                    row(
+                        "Previous / next folder",
+                        two(Action::PrevFolder, Action::NextFolder),
+                    ),
                     row("Settings", sc(Action::Settings)),
                     row("Quit", self.keymap_shortcut(Action::Quit)),
                     // Curated: the two real keys are "/" and "?" — `two()` would render

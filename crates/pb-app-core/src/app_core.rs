@@ -29,10 +29,15 @@ use crate::contract::CoreEffect;
 use crate::decode_pool::{DecodePool, Outcome};
 use crate::keymap::Keymap;
 use crate::metrics::StageTimes;
-use crate::overlay::{InfoMode, OpenButton, OpenPanel, PlayHint, Toast};
+use crate::overlay::{InfoMode, OpenButton, OpenPanel, PlayHint, Toast, TreePanel};
 use crate::settings::Settings;
 use crate::undo::UndoAction;
 use crate::{Action, Modifiers, PbKey, PhotoMeta, Slideshow};
+
+/// The per-deck folder-counts cache entry: the deck identity it was built for
+/// (root + length, so streaming batches refresh it) and the shared map —
+/// `disk_counts` keyed by absolute folder path.
+pub type FolderCounts = (PathBuf, usize, Arc<HashMap<PathBuf, u64>>);
 
 /// A navigation move: forward (`space`/`→`), backward (`backspace`/`←`), a
 /// precomputed-random jump (`enter`), or a step back through the random walk
@@ -296,6 +301,13 @@ pub struct AppCore {
     /// the current folder or the deck changes — never per frame, never per photo
     /// within the same folder. `None` = nothing drawn.
     pub folder_tree_sig: Option<String>,
+    /// The drawn tree's interactive state (hit rects, click targets, cached rows,
+    /// hover, page), or `None` while nothing is drawn. RAM-only.
+    pub folder_tree_panel: Option<TreePanel>,
+    /// Per-deck folder-counts cache (`disk_counts` keyed by root + deck length):
+    /// the count badges AND the no-I/O flight derivation read it, so neither ever
+    /// re-walks the playlist while the deck is unchanged. RAM-only.
+    pub folder_tree_counts: Option<FolderCounts>,
 
     // --- Rendering (NS0 5.4) ---
     /// The HUD text/overlay compositor (`pb-hud`), or `None` if no system font was found.

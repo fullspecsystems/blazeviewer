@@ -107,6 +107,16 @@ visually distinct, for both a real directory and a photo opened from inside a
 `.zip`, and ⇧F/Esc closes it. No regressions to nav/prefetch (existing
 property tests unaffected — nothing in `pb-core` changes in this phase).
 
+> **Status (2026-07-03, later): phase 2 IMPLEMENTED for disk decks** (tasks.json
+> #47.6, in review). Everything below landed as designed, plus two owner calls
+> made during the build: **the tree tracks the current folder during
+> hold-to-fly** (a no-I/O `rows_from_paths` derivation over a per-deck cached
+> `disk_counts` map, throttled to one rebuild per 100 ms, upgraded to the full
+> `read_dir` view on settle — the `|lite` signature stamp) and **both count
+> looks shipped for the A/B** (capsule is live in the app; trailing renders in
+> `--hud-gallery`; flipping is the one `TreeCounts` argument in
+> `push_folder_tree`). Archive prefix re-scoping is phase 3 (#47.7).
+
 ## Phase 2 — clickable navigation (owner-approved design, 2026-07-03)
 
 Phase 1's "no mouse in the overlay" assumption is obsolete: the scan chip's

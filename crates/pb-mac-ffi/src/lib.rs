@@ -234,6 +234,9 @@ impl AppCoreHandle {
             self.cancel_dir_scan();
             self.core.request_prefetch();
             self.core.show_toast("Scan stopped");
+        } else if pressed && self.core.folder_tree_click() {
+            // A folder-tree row opened a folder / a "… n more" marker paged; the
+            // open plan's Begin* effects drain below like any other press.
         } else {
             self.core.dragging = pressed;
             self.core.refresh_cursor();
@@ -2367,9 +2370,13 @@ mod tests {
     #[test]
     fn settings_form_carries_the_appearance_fields() {
         use pb_app_core::settings::AppearanceMode;
-        let h = test_handle(800, 600, 1.0);
+        let mut h = test_handle(800, 600, 1.0);
+        // Pin the field: `new_host` loads the REAL settings.toml, so asserting the
+        // shipped default here would fail on any machine where the owner has picked
+        // a theme (it did — the 2026-07-03 light-mode smoke).
+        h.core.settings.appearance_mode = AppearanceMode::System;
         let mut form = h.settings_form();
-        assert_eq!(form.appearance_mode, 0, "default = System");
+        assert_eq!(form.appearance_mode, 0, "System crosses the form as 0");
 
         form.appearance_mode = 1; // light
         form.letterbox_r = 5;

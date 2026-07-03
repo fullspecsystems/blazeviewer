@@ -451,6 +451,8 @@ impl App {
                 play_hint: None,
                 folder_tree_open: false,
                 folder_tree_sig: None,
+                folder_tree_panel: None,
+                folder_tree_counts: None,
                 hud: Hud::load(),
                 renderer: None,
                 undo_stack: Vec::new(),
@@ -1895,6 +1897,7 @@ impl App {
         self.core.pie_glow_started = None;
         self.core.folder_tree_open = false;
         self.core.folder_tree_sig = None;
+        self.core.folder_tree_panel = None;
         // Drop any on-demand animation playback + in-flight decode (RAM-only — #2).
         self.core.stop_playback();
     }
@@ -2319,13 +2322,14 @@ impl ApplicationHandler for App {
                 });
             }
 
-            // Pointer left the window: drop any Cancel Scan / open-button / play-hint hover so
-            // they don't stay lit.
+            // Pointer left the window: drop any Cancel Scan / open-button / play-hint /
+            // folder-tree hover so they don't stay lit.
             WindowEvent::CursorLeft { .. } => {
                 self.core.last_cursor = None;
                 self.core.update_chip_hover();
                 self.core.update_open_hover();
                 self.core.update_play_hint_hover();
+                self.core.update_tree_hover();
             }
 
             // Left button toggles drag-to-pan (the cross-platform pan gesture).
@@ -2355,6 +2359,8 @@ impl ApplicationHandler for App {
                         .is_some_and(|[cx, cy]| self.core.chip_hit(cx, cy))
                 {
                     self.cancel_scan_command();
+                } else if pressed && self.core.folder_tree_click() {
+                    // A folder-tree row opened a folder / a "… n more" marker paged.
                 } else {
                     self.core.dragging = pressed;
                     self.core.refresh_cursor();

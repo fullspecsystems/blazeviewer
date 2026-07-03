@@ -230,6 +230,9 @@ pub const EDITOR_GROUPS: &[(&str, &[Action])] = &[
             Action::FullExif,
             Action::Help,
             Action::FolderTree,
+            Action::OpenParent,
+            Action::PrevFolder,
+            Action::NextFolder,
             Action::Fullscreen,
             Action::Recursive,
         ],
@@ -532,6 +535,12 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         (Action::Help, vec![p("/"), p("Shift+/")]),
         // The folder-tree overlay — Shift+F beside bare-F fullscreen (distinct chords).
         one(Action::FolderTree, "Shift+F"),
+        // Go commands — the Explorer idioms (Alt+↑ up, Alt+←/→ between siblings; no
+        // back/forward history to collide with). macOS also gets ⌘↑/⌘←/⌘→ as native
+        // menu accelerators (MenuBar.swift), Finder-style.
+        one(Action::OpenParent, "Alt+Up"),
+        one(Action::PrevFolder, "Alt+Left"),
+        one(Action::NextFolder, "Alt+Right"),
         // Fullscreen is a core action, so it's worth a few bindings: F11 (Windows
         // convention), Alt+Enter / Option+Enter (the discoverable-by-habit one), and
         // bare `F` (the most memorable — and the only one that's discoverable at all).

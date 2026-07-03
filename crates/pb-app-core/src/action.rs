@@ -77,9 +77,20 @@ pub enum Action {
     FullExif,
     Help,
     /// Toggle the folder-tree overlay (`Shift+F`): the current photo's folder in its
-    /// hierarchy (parent, siblings, children), drawn along the left edge. Phase 1 is
-    /// render-only — no selection yet (see `.taskmaster/docs/folder-tree-plan.md`).
+    /// hierarchy (up affordance, root, ancestors, siblings, children), drawn in the
+    /// top-left corner. Rows click-to-open; the "… n more" markers page the window
+    /// (see `.taskmaster/docs/folder-tree-plan.md`).
     FolderTree,
+    /// Go up: open the deck root's parent folder (⌘↑ on macOS — Finder's Enclosing
+    /// Folder chord, via the menu accelerator; Alt+↑ on Windows — Explorer's up).
+    /// On an archive deck, opens the folder containing the archive.
+    OpenParent,
+    /// Go to the previous sibling folder — open the folder before the deck root in
+    /// its parent's sorted listing (⌘← / Alt+←; PhotoBlaze has no back/forward
+    /// history, so the chords are free).
+    PrevFolder,
+    /// Go to the next sibling folder (⌘→ / Alt+→).
+    NextFolder,
     Fullscreen,
     Recursive,
     /// Stop an in-flight folder scan, keeping whatever has streamed in so far. Only
@@ -138,6 +149,9 @@ impl Action {
         Action::FullExif,
         Action::Help,
         Action::FolderTree,
+        Action::OpenParent,
+        Action::PrevFolder,
+        Action::NextFolder,
         Action::Fullscreen,
         Action::Recursive,
         Action::CancelScan,
@@ -188,6 +202,9 @@ impl Action {
             Action::FullExif => "full_exif",
             Action::Help => "help",
             Action::FolderTree => "folder_tree",
+            Action::OpenParent => "open_parent",
+            Action::PrevFolder => "prev_folder",
+            Action::NextFolder => "next_folder",
             Action::Fullscreen => "fullscreen",
             Action::Recursive => "recursive",
             Action::CancelScan => "cancel_scan",
@@ -260,6 +277,9 @@ impl Action {
             Action::FullExif => "Detailed info panel",
             Action::Help => "Keyboard help",
             Action::FolderTree => "Folder tree",
+            Action::OpenParent => "Open parent folder",
+            Action::PrevFolder => "Previous folder",
+            Action::NextFolder => "Next folder",
             Action::Fullscreen => "Toggle fullscreen",
             Action::Recursive => "Recursive (current folder)",
             Action::CancelScan => "Stop scanning",

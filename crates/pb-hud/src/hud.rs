@@ -135,8 +135,17 @@ pub mod tokens {
     pub const TREE_ICON_GAP: f32 = 0.40;
     /// Translucent-white highlight band behind the current folder's row.
     pub const TREE_CURRENT_ALPHA: f32 = 0.14;
+    /// Highlight band behind the hovered clickable row — lighter than the current
+    /// band (the two layer when the current row is hovered, so it still reads).
+    pub const TREE_HOVER_ALPHA: f32 = 0.10;
     /// Max width of a folder name before it's tail-elided, in text heights.
     pub const TREE_NAME_MAX: f32 = 16.0;
+    /// Photo-count text size, relative to the row text.
+    pub const TREE_COUNT: f32 = 0.72;
+    /// Capsule badge fill alpha (behind a [`super::TreeCounts::Capsule`] count).
+    pub const TREE_BADGE_ALPHA: f32 = 0.14;
+    /// Indent guide hairline alpha (the 1px vertical lines tracing the hierarchy).
+    pub const TREE_GUIDE_ALPHA: f32 = 0.16;
 }
 
 use tokens::SHADOW_ALPHA;
@@ -229,7 +238,9 @@ pub struct ShortcutSection {
 /// indent levels. `open` rows draw the open-folder glyph (the current folder and its
 /// ancestors); `current` marks the folder containing the on-screen photo (highlight
 /// band + semibold); a `marker` row is a dim, glyph-less stand-in for collapsed
-/// levels (a deep ancestor chain's "…"). Pure data, so the app core can build and
+/// levels (a deep ancestor chain's "…"); an `up` row is the "open the parent"
+/// affordance above the root (folder-with-up-arrow glyph); `count` is an optional
+/// photo count rendered per [`TreeCounts`]. Pure data, so the app core can build and
 /// unit-test row lists without touching the rasterizer.
 pub struct TreeRow {
     pub depth: u32,
@@ -237,7 +248,32 @@ pub struct TreeRow {
     pub open: bool,
     pub current: bool,
     pub marker: bool,
+    pub up: bool,
+    pub count: Option<u64>,
 }
+
+/// What a point in the folder-tree panel hits: a folder row (an index into the
+/// caller's row list — the caller decides clickability from its click targets), or
+/// one of the "… n more" windowing markers, which **page** the visible window.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TreeHit {
+    Row(usize),
+    PageUp,
+    PageDown,
+}
+
+/// How a row's photo `count` renders — two candidate looks A/B'd in the gallery.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TreeCounts {
+    /// A small capsule badge just left of the folder glyph.
+    Capsule,
+    /// Dim right-aligned numbers at the panel's right edge (the sidebar idiom).
+    Trailing,
+}
+
+/// The rasterized folder tree: `(rgba, w, h)` plus the interactive hit rects —
+/// `[x, y, w, h]` **within the bitmap**; the caller offsets them to screen px.
+pub type TreeBitmap = (Vec<u8>, u32, u32, Vec<(TreeHit, [u32; 4])>);
 
 /// Font weight to render a run of text in.
 #[derive(Clone, Copy)]
@@ -735,11 +771,15 @@ impl Hud {
 
     /// Rasterize the **folder-tree overlay** (`Shift+F`): an indented list of folder
     /// rows, each with a Font Awesome folder glyph (open for the current folder and
-    /// its ancestors, closed otherwise) and the current folder highlighted by a
-    /// translucent band + semibold name. When the full list would exceed `max_h`,
-    /// the rows are windowed around the current folder and the hidden runs collapse
-    /// into dim "⋯ n more" marker lines, so the current folder always stays visible.
-    /// Returns `(rgba, w, h)`; `None` on an empty list / no font.
+    /// its ancestors, up-arrow for the parent affordance, closed otherwise), hairline
+    /// indent guides, optional photo counts (`counts` picks the look), the current
+    /// folder highlighted by a translucent band + semibold name, and the `hovered`
+    /// hit lit by a lighter band (the click affordance). When the full list would
+    /// exceed `max_h`, the rows are windowed around the current folder shifted by
+    /// `page`, and the hidden runs collapse into clickable "… n more" markers that
+    /// page the window. Returns the bitmap plus the hit rects; `None` on an empty
+    /// list / no font.
+    #[allow(clippy::too_many_arguments)]
     pub fn render_tree(
         &self,
         rows: &[TreeRow],
@@ -747,15 +787,19 @@ impl Hud {
         pad: u32,
         bg: [u8; 4],
         max_h: i32,
-    ) -> Option<(Vec<u8>, u32, u32)> {
+        page: i32,
+        hovered: Option<TreeHit>,
+        counts: TreeCounts,
+    ) -> Option<TreeBitmap> {
         if rows.is_empty() {
             return None;
         }
         let line_h = self.line_height(px)? as i32;
         let ascent = self.ascent(px)?;
 
-        // Window the rows to what fits in `max_h`, keeping the current row centered.
-        // When windowing, two lines are reserved for the "⋯ n more" markers.
+        // Window the rows to what fits in `max_h`: centered on the current row, then
+        // shifted by `page` windows (the clickable "… n more" markers), clamped.
+        // When windowing, two lines are reserved for the markers.
         let avail = (((max_h - 2 * pad as i32) / line_h).max(3)) as usize;
         let total = rows.len();
         let (start, end, above, below) = if total <= avail {
@@ -763,38 +807,55 @@ impl Hud {
         } else {
             let inner = avail.saturating_sub(2).max(1);
             let cur = rows.iter().position(|r| r.current).unwrap_or(0);
-            let start = cur.saturating_sub(inner / 2).min(total - inner);
+            let auto = cur.saturating_sub(inner / 2).min(total - inner) as i64;
+            let start =
+                (auto + page as i64 * inner as i64).clamp(0, (total - inner) as i64) as usize;
             (start, start + inner, start, total - (start + inner))
         };
 
-        // The two folder glyphs, rasterized once; every row's name starts after a
-        // fixed icon cell as wide as the wider (open) glyph, so names align per depth.
+        // The three folder glyphs, rasterized once; every row's name starts after a
+        // fixed icon cell as wide as the widest, so names align per depth.
         let icon_h = (px * tokens::TREE_ICON).round().max(1.0) as u32;
         let closed = crate::icon::rasterize(crate::icon::assets::FOLDER, icon_h, self.theme.text);
         let open =
             crate::icon::rasterize(crate::icon::assets::FOLDER_OPEN, icon_h, self.theme.text);
+        let up_glyph =
+            crate::icon::rasterize(crate::icon::assets::FOLDER_UP, icon_h, self.theme.text);
         let cell = closed
             .iter()
             .chain(open.iter())
+            .chain(up_glyph.iter())
             .map(|(_, w, _)| *w as i32)
             .max()
             .unwrap_or(0);
         let icon_gap = (px * tokens::TREE_ICON_GAP).round().max(3.0) as i32;
         let indent = (px * tokens::TREE_INDENT).round() as i32;
         let name_max = px * tokens::TREE_NAME_MAX;
+        let count_px = (px * tokens::TREE_COUNT).max(6.0);
 
+        /// Which glyph a folder line draws.
+        #[derive(Clone, Copy)]
+        enum Glyf {
+            Closed,
+            Open,
+            Up,
+        }
         // Lay out every visible line once, measuring the content width as we go.
-        // A `None` icon slot is a "⋯ n more" marker (dim, no glyph, no indent).
+        // A `None` icon slot is a "… n more" marker (dim, no glyph, no indent).
         struct Line {
             glyphs: Vec<Glyph>,
             text_x: i32,
             rgb: [u8; 3],
             band: bool,
-            icon: Option<(bool, i32)>, // (open glyph?, icon x)
+            icon: Option<(Glyf, i32)>, // (glyph, icon x before the badge shift)
+            hit: Option<TreeHit>,
+            depth: u32,
+            count: Option<(Vec<Glyph>, f32)>, // laid-out count text + advance
         }
         let mut lines: Vec<Line> = Vec::with_capacity(end - start + 2);
         let mut content_w = 0i32;
-        let push_marker = |lines: &mut Vec<Line>, content_w: &mut i32, n: usize| {
+        let mut count_w = 0i32; // widest count text among visible rows
+        let push_marker = |lines: &mut Vec<Line>, content_w: &mut i32, n: usize, hit: TreeHit| {
             // A plain ellipsis — U+22EF is missing from some UI fonts (SF Pro).
             let (glyphs, adv) = self.layout(&format!("\u{2026} {n} more"), px, Weight::Regular);
             *content_w = (*content_w).max(adv.ceil() as i32);
@@ -804,12 +865,15 @@ impl Hud {
                 rgb: self.theme.text_dim,
                 band: false,
                 icon: None,
+                hit: Some(hit),
+                depth: 0,
+                count: None,
             });
         };
         if above > 0 {
-            push_marker(&mut lines, &mut content_w, above);
+            push_marker(&mut lines, &mut content_w, above, TreeHit::PageUp);
         }
-        for r in &rows[start..end] {
+        for (idx, r) in rows.iter().enumerate().take(end).skip(start) {
             let weight = if r.current {
                 Weight::Semibold
             } else {
@@ -820,6 +884,18 @@ impl Hud {
             let (glyphs, adv) = self.layout(&name, px, weight);
             let text_x = x0 + cell + icon_gap;
             content_w = content_w.max(text_x + adv.ceil() as i32);
+            let count = r.count.map(|n| {
+                let (g, a) = self.layout(&format_thousands(n), count_px, Weight::Regular);
+                count_w = count_w.max(a.ceil() as i32);
+                (g, a)
+            });
+            let glyf = if r.up {
+                Glyf::Up
+            } else if r.open {
+                Glyf::Open
+            } else {
+                Glyf::Closed
+            };
             lines.push(Line {
                 glyphs,
                 text_x,
@@ -831,22 +907,61 @@ impl Hud {
                     self.theme.text
                 },
                 band: r.current,
-                icon: (!r.marker).then_some((r.open, x0)),
+                icon: (!r.marker).then_some((glyf, x0)),
+                hit: (!r.marker).then_some(TreeHit::Row(idx)),
+                depth: r.depth,
+                count,
             });
         }
         if below > 0 {
-            push_marker(&mut lines, &mut content_w, below);
+            push_marker(&mut lines, &mut content_w, below, TreeHit::PageDown);
         }
+
+        // Count-badge geometry. Capsule: a fixed cell left of every icon (rows shift
+        // right, badges right-align against the icons). Trailing: the panel widens to
+        // the right and counts right-align at its edge.
+        let has_counts = count_w > 0;
+        let badge_pad = (count_px * 0.45).round().max(2.0) as i32;
+        let badge_h = (count_px * 1.25).round() as i32;
+        let badge_gap = (count_px * 0.5).round().max(3.0) as i32;
+        let badge_cell = match counts {
+            TreeCounts::Capsule if has_counts => count_w + 2 * badge_pad + badge_gap,
+            _ => 0,
+        };
+        let trail_w = match counts {
+            TreeCounts::Trailing if has_counts => count_w + badge_gap * 2,
+            _ => 0,
+        };
 
         // Wider left/right inset than the vertical `pad` (the line box pads top/bottom
         // for free; the sides don't). See `PAD_X`.
         let pad_x = ((pad as f32) * tokens::PAD_X).round() as i32;
-        let pw = (content_w + 2 * pad_x) as u32;
+        let left = pad_x + badge_cell; // where indent level 0's icon column starts
+        let pw = (badge_cell + content_w + trail_w + 2 * pad_x) as u32;
         let ph = (lines.len() as i32 * line_h + 2 * pad as i32) as u32;
         let mut canvas = Canvas::new(pw, ph, bg, (px * tokens::RADIUS_PANEL).round());
 
+        let mut hits: Vec<(TreeHit, [u32; 4])> = Vec::new();
+        let count_ascent = self.ascent(count_px).unwrap_or(count_px * 0.8);
         for (i, line) in lines.iter().enumerate() {
             let row_top = pad as i32 + i as i32 * line_h;
+            if let Some(hit) = line.hit {
+                hits.push((hit, [0, row_top.max(0) as u32, pw, line_h as u32]));
+                if hovered == Some(hit) {
+                    // The hover affordance: a lighter band than the current row's
+                    // (they layer when the current row itself is hovered).
+                    let inset = (px * 0.35).round() as i32;
+                    canvas.fill_round_rect(
+                        inset,
+                        row_top,
+                        pw as i32 - 2 * inset,
+                        line_h,
+                        (px * 0.25).round(),
+                        self.theme.text,
+                        tokens::TREE_HOVER_ALPHA,
+                    );
+                }
+            }
             if line.band {
                 // Highlight band across the panel, inset a hair from the edges.
                 let inset = (px * 0.35).round() as i32;
@@ -860,25 +975,81 @@ impl Hud {
                     tokens::TREE_CURRENT_ALPHA,
                 );
             }
-            if let Some((is_open, x0)) = line.icon {
-                let glyph = if is_open { &open } else { &closed };
+            // Hairline indent guides: a 1px vertical line under each ancestor level's
+            // icon column, so deep hierarchies read at a glance. Skip windowing
+            // markers (depth 0, no icon).
+            if line.icon.is_some() || line.depth > 0 {
+                for a in 1..=line.depth {
+                    let gx = left + (a as i32 - 1) * indent + cell / 2;
+                    canvas.fill_round_rect(
+                        gx,
+                        row_top,
+                        1,
+                        line_h,
+                        0.0,
+                        self.theme.text,
+                        tokens::TREE_GUIDE_ALPHA,
+                    );
+                }
+            }
+            if let Some((glyf, x0)) = line.icon {
+                let glyph = match glyf {
+                    Glyf::Closed => &closed,
+                    Glyf::Open => &open,
+                    Glyf::Up => &up_glyph,
+                };
                 if let Some((rgba, iw, ih)) = glyph {
                     // Right-align the glyph in its cell so folder fronts line up.
-                    let ix = pad_x + x0 + cell - *iw as i32;
+                    let ix = left + x0 + cell - *iw as i32;
                     let iy = row_top + (line_h - *ih as i32) / 2;
                     self.draw_icon(&mut canvas, rgba, *iw, *ih, ix, iy, px);
+                }
+                if let Some((cg, ca)) = &line.count {
+                    match counts {
+                        TreeCounts::Capsule => {
+                            // Capsule badge right-aligned against the icon column.
+                            let bw = ca.ceil() as i32 + 2 * badge_pad;
+                            let bx = left + x0 - badge_gap - bw;
+                            let by = row_top + (line_h - badge_h) / 2;
+                            canvas.fill_round_rect(
+                                bx,
+                                by,
+                                bw,
+                                badge_h,
+                                badge_h as f32 / 2.0,
+                                self.theme.text,
+                                tokens::TREE_BADGE_ALPHA,
+                            );
+                            let ty = by as f32 + (badge_h as f32 - count_px) / 2.0 + count_ascent;
+                            self.draw_line(
+                                &mut canvas,
+                                (bx + badge_pad) as f32,
+                                ty,
+                                cg,
+                                self.theme.text_dim,
+                                count_px,
+                            );
+                        }
+                        TreeCounts::Trailing => {
+                            // Dim numbers right-aligned at the panel's edge.
+                            let tx = pw as f32 - pad_x as f32 - ca;
+                            let ty =
+                                row_top as f32 + (line_h as f32 - count_px) / 2.0 + count_ascent;
+                            self.draw_line(&mut canvas, tx, ty, cg, self.theme.text_dim, count_px);
+                        }
+                    }
                 }
             }
             self.draw_line(
                 &mut canvas,
-                (pad_x + line.text_x) as f32,
+                (left + line.text_x) as f32,
                 row_top as f32 + ascent,
                 &line.glyphs,
                 line.rgb,
                 px,
             );
         }
-        Some((canvas.into_rgba(), pw, ph))
+        Some((canvas.into_rgba(), pw, ph, hits))
     }
 
     /// Rasterize the **scan status card** — the ambient overlay shown while a folder streams
@@ -2013,8 +2184,13 @@ mod tests {
         assert!(h >= folder[1] + folder[3], "panel is tall enough for both");
     }
 
+    /// Shared shorthand: render with no paging/hover, capsule counts.
+    fn tree(hud: &Hud, rows: &[TreeRow], max_h: i32, page: i32) -> Option<TreeBitmap> {
+        hud.render_tree(rows, 15.0, 7, BG, max_h, page, None, TreeCounts::Capsule)
+    }
+
     #[test]
-    fn render_tree_windows_around_the_current_row() {
+    fn render_tree_windows_around_the_current_row_and_pages() {
         let Some(hud) = Hud::load() else {
             return;
         };
@@ -2025,45 +2201,72 @@ mod tests {
                 open: i == 20,
                 current: i == 20,
                 marker: false,
+                up: false,
+                count: None,
             })
             .collect();
-        // Generous height → every row renders, no markers.
-        let (rgba, w, h) = hud
-            .render_tree(&rows, 15.0, 7, BG, 10_000)
-            .expect("renders");
+        // Generous height → every row renders, no markers, one hit rect per row.
+        let (rgba, w, h, hits) = tree(&hud, &rows, 10_000, 0).expect("renders");
         assert!(w > 0 && h > 0);
         assert_eq!(rgba.len(), (w * h * 4) as usize, "buffer matches w*h*4");
-        // A tight height windows the list: far fewer lines, so a much shorter panel.
-        let (_, _, h2) = hud.render_tree(&rows, 15.0, 7, BG, 200).expect("renders");
+        assert_eq!(hits.len(), 40, "every folder row is a hit target");
+        assert!(hits.iter().all(|(t, _)| matches!(t, TreeHit::Row(_))));
+        // A tight height windows the list: far fewer lines, a much shorter panel,
+        // and both paging markers among the hits.
+        let (_, _, h2, hits2) = tree(&hud, &rows, 200, 0).expect("renders");
         assert!(h2 < h / 2, "tight max_h windows the rows: {h2} vs {h}");
-        // The panel never exceeds the given budget.
         assert!((h2 as i32) <= 200, "windowed panel fits max_h, got {h2}");
+        assert!(hits2.iter().any(|(t, _)| *t == TreeHit::PageUp));
+        assert!(hits2.iter().any(|(t, _)| *t == TreeHit::PageDown));
+        // Paging far down clamps to the tail: the PageDown marker disappears and
+        // the last row becomes visible.
+        let (_, _, _, hits3) = tree(&hud, &rows, 200, 100).expect("renders");
+        assert!(!hits3.iter().any(|(t, _)| *t == TreeHit::PageDown));
+        assert!(hits3.iter().any(|(t, _)| *t == TreeHit::Row(39)));
+        // Hit rects span the panel width and don't overlap vertically.
+        for pair in hits2.windows(2) {
+            let (a, b) = (pair[0].1, pair[1].1);
+            assert!(a[1] + a[3] <= b[1], "rects stack without overlap");
+        }
     }
 
     #[test]
-    fn render_tree_indents_deeper_rows() {
+    fn render_tree_indents_counts_and_variants() {
         let Some(hud) = Hud::load() else {
             return;
         };
-        let row = |depth: u32, marker: bool| TreeRow {
+        let row = |depth: u32, marker: bool, up: bool, count: Option<u64>| TreeRow {
             depth,
             name: "aaa".into(),
             open: false,
             current: false,
             marker,
+            up,
+            count,
         };
-        let (_, w0, _) = hud
-            .render_tree(&[row(0, false)], 15.0, 7, BG, 10_000)
-            .expect("renders");
-        let (_, w3, _) = hud
-            .render_tree(&[row(3, false)], 15.0, 7, BG, 10_000)
-            .expect("renders");
+        let (_, w0, ..) = tree(&hud, &[row(0, false, false, None)], 10_000, 0).expect("renders");
+        let (_, w3, ..) = tree(&hud, &[row(3, false, false, None)], 10_000, 0).expect("renders");
         assert!(w3 > w0, "depth widens the panel: {w3} vs {w0}");
-        // A collapsed-levels marker row renders too (dim, no glyph).
-        assert!(hud
-            .render_tree(&[row(0, false), row(1, true)], 15.0, 7, BG, 10_000)
-            .is_some());
-        assert!(hud.render_tree(&[], 15.0, 7, BG, 10_000).is_none());
+        // A count widens the panel in either style; the two styles both render.
+        let counted = [row(0, false, false, Some(1_234))];
+        let (_, wc, ..) = hud
+            .render_tree(&counted, 15.0, 7, BG, 10_000, 0, None, TreeCounts::Capsule)
+            .expect("renders");
+        let (_, wt, ..) = hud
+            .render_tree(&counted, 15.0, 7, BG, 10_000, 0, None, TreeCounts::Trailing)
+            .expect("renders");
+        assert!(wc > w0 && wt > w0, "counts widen: {wc}/{wt} vs {w0}");
+        // A collapsed-levels marker renders and is NOT a hit target; an up row is.
+        let (_, _, _, hits) = tree(
+            &hud,
+            &[row(0, false, true, None), row(1, true, false, None)],
+            10_000,
+            0,
+        )
+        .expect("renders");
+        assert_eq!(hits.len(), 1, "marker rows aren't hits");
+        assert_eq!(hits[0].0, TreeHit::Row(0));
+        assert!(tree(&hud, &[], 10_000, 0).is_none());
     }
 
     #[test]

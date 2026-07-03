@@ -17,9 +17,18 @@ with any pre-release suffix carried only by the tag.
 - **Folder tree overlay (⇧F)** — press Shift+F for a "you are here" view in the top-left
   corner: the folder you opened at the top, the path down to the current photo's folder
   (very deep paths collapse in the middle), its sibling folders with the current one
-  highlighted, and the folders inside it. Works the same inside a `.zip`/`.7z` (the
-  archive's internal folders). First cut is display-only — browsing into a folder from the
-  tree is coming next; press ⇧F again to dismiss.
+  highlighted, and the folders inside it — each with a photo-count badge where the count
+  is already known. **Click a folder to open it** (exactly like Open Folder), including
+  the topmost row — the parent of what you opened — to go up; rows light up on hover.
+  Long lists show "… n more" rows — click them to page. The tree keeps tracking the
+  current folder even while you hold a key and fly, works over an *empty* folder (so a
+  photo-less folder is a navigation point, not a dead end), and shows an archive's
+  internal folders for a `.zip`/`.7z` (clicking those comes next). Press ⇧F again to
+  dismiss.
+- **Go commands** — walk the folder hierarchy without the picker: **Parent Folder**
+  (⌘↑ on Mac, Finder's chord; Alt+↑ on Windows, Explorer's) plus **Previous / Next
+  Folder** (⌘←/⌘→ / Alt+←/→) to step between sibling folders — the fast way to review
+  a folder-per-day library. In the new Go menu, rebindable in Settings ▸ Shortcuts.
 
 ### Changed
 - **The Mac app is now a native SwiftUI/AppKit application** — the same fast Rust engine, with
