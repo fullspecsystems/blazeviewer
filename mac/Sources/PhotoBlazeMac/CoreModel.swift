@@ -612,16 +612,27 @@ final class CoreModel {
     /// owns the layer, so it's plain Swift: an fp16 scRGB surface needs the layer tagged
     /// extended-linear-sRGB (+ EDR on), and the roll-off needs the panel's real headroom
     /// (macOS hard-clips above it; Windows' DWM tone-maps for you).
+    ///
+    /// Headroom comes from **the window's actual screen** — the winit port's known
+    /// multi-display bug: reading `NSScreen.main` made HDR "look totally broken" whenever
+    /// the main display was an SDR panel. Re-poked on every screen change and on display
+    /// parameter changes (HDR toggled on the same display — the winit build's leftover).
     private func configureEDR(on layer: CAMetalLayer) {
         canvasLayer = layer
         guard core.wants_edr() else { return }
         layer.colorspace = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)
         layer.wantsExtendedDynamicRangeContent = true
-        // NSScreen.main for now; tracking the WINDOW's actual screen (the winit shell's
-        // Moved handler — the multi-display bug the port already hit once) comes with the
-        // window plumbing in a later slice.
-        let headroom = Float(NSScreen.main?.maximumExtendedDynamicRangeColorComponentValue ?? 1.0)
+        let screen = hostWindow?.screen ?? NSScreen.main
+        let headroom = Float(screen?.maximumExtendedDynamicRangeColorComponentValue ?? 1.0)
         core.set_edr_headroom(max(1.0, headroom))
+    }
+
+    /// Re-assert the EDR colorspace + headroom for the window's current screen, then
+    /// repaint (the highlight roll-off changes with the headroom).
+    private func refreshEDR() {
+        guard let layer = canvasLayer else { return }
+        configureEDR(on: layer)
+        core.render()
     }
 
     /// The attached canvas layer, kept weakly-by-convention (the view owns it; cleared in
@@ -802,6 +813,7 @@ final class CoreModel {
     }
 
     @ObservationIgnored private var screenChangeObserver: NSObjectProtocol?
+    @ObservationIgnored private var screenParamsObserver: NSObjectProtocol?
     @ObservationIgnored private var dragSettleTimer: Timer?
 
     /// Clamp-on-screen-change: dragging the window from a wide monitor to a narrower one
@@ -821,11 +833,28 @@ final class CoreModel {
             NotificationCenter.default.removeObserver(old)
             resizeTraceObserver = nil
         }
+        if let old = screenParamsObserver {
+            NotificationCenter.default.removeObserver(old)
+            screenParamsObserver = nil
+        }
         guard let window = hostWindow else { return }
         screenChangeObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didChangeScreenNotification, object: window, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.clampToScreenWhenSettled() }
+            MainActor.assumeIsolated {
+                // EDR first (immediate — an XDR↔SDR hop changes the roll-off headroom),
+                // then the size clamp (deferred until the drag settles).
+                self?.refreshEDR()
+                self?.clampToScreenWhenSettled()
+            }
+        }
+        // HDR toggled / display re-configured without the window moving — the case the
+        // winit build couldn't catch (it re-checks only on window move).
+        screenParamsObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshEDR() }
         }
         // DEBUG forensics for the owner-reported cross-monitor size weirdness: log every
         // PROGRAMMATIC resize (a hand drag has inLiveResize == true — skip those). Our
