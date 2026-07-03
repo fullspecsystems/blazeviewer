@@ -843,6 +843,38 @@ impl AppCoreHandle {
         self.poll_dir_scan();
         self.poll_archive_load();
         self.core.handle(CoreEvent::Tick(self.core.now));
+        self.apply_menu_state();
+    }
+
+    /// Mirror the live menu check/enabled state — the winit shell's `apply_menu_state`,
+    /// which pushes `SetMenuState` per tick when something changed. This was MISSING on
+    /// this host: nothing ever produced the effect, so the Swift menu bar sat on
+    /// `MenuState::default()` forever — Save Rotation permanently disabled (the
+    /// owner-reported "not implemented"), stale checkmarks everywhere. Compare-gated:
+    /// nothing is pushed when nothing moved.
+    fn apply_menu_state(&mut self) {
+        let next = AppCore::menu_state_from(
+            self.core.view.mode,
+            self.core.info,
+            self.core.recursive,
+            !self.core.windowed, // `windowed` is the inverse of the fullscreen checkbox
+            self.core.slideshow.on,
+            self.core.settings.mute_live_audio,
+            self.core.can_save_rotation(),
+            self.core.can_reveal(),
+            self.dir_scan.is_some(),
+            self.core
+                .undo_stack
+                .last()
+                .map(pb_app_core::UndoAction::menu_label),
+            false, // native (Spaces) fullscreen: AppKit manages that item's title itself
+        );
+        if self.last_menu_state == next {
+            return;
+        }
+        self.core
+            .effects
+            .push(contract::CoreEffect::SetMenuState(next));
     }
 
     /// Attach the host's **retained `CAMetalLayer`** (passed as its raw pointer bits — the
@@ -1844,6 +1876,42 @@ mod tests {
         let out = h.saved_geometry();
         assert!(out.present);
         assert_eq!((out.x, out.y, out.w, out.h), (10, 20, 800, 600));
+    }
+
+    /// Owner report: "Save Rotation not implemented on the Mac version." Prove the FFI
+    /// chain — rotate via the menu id, save via the menu id, and the JPEG's bytes on
+    /// disk actually change (the pure core arm from NS0 5.6 writes the EXIF orientation).
+    #[test]
+    fn save_rotation_writes_the_exif_orientation() {
+        let (mut h, file) = handle_with_photo("saverot");
+        let before = std::fs::read(&file).unwrap();
+
+        h.menu_action("rotate_cw");
+        // The next tick must notice the unsaved rotation and re-mirror the menu state
+        // (Save Rotation enables) — the missing half of the owner's report: the item sat
+        // on MenuState::default() (disabled) because nothing ever emitted SetMenuState.
+        h.tick();
+        let effects = drain(&mut h);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, ffi::CoreEffectFfi::MenuStateChanged)),
+            "a rotation should re-mirror the menu state"
+        );
+        assert!(
+            h.menu_state().save_rotation_enabled,
+            "Save Rotation should enable once a rotation is pending"
+        );
+
+        h.menu_action("save_rotation");
+        let _ = drain(&mut h);
+
+        let after = std::fs::read(&file).unwrap();
+        assert_ne!(
+            before, after,
+            "the JPEG on disk should carry the new orientation"
+        );
+        std::fs::remove_dir_all(file.parent().unwrap()).ok();
     }
 
     #[test]
