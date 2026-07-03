@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   Bundle metadata for the NS1 SwiftUI host (ADR-021) — the strangler-fig target that will
-  become the default Mac app at the NS3 cutover. Assembled into PhotoBlazeMac.app by
+  become the default Mac app at the NS3 cutover. Assembled into PhotoBlaze.app by
   scripts/build-swift-host.sh (which substitutes the version placeholders from the pb-app
   crate version and copies the icon assets into Resources). Distinct bundle id from the
   shipping egui beta (com.jdlien.PhotoBlaze) so the two coexist until the cutover renames
@@ -11,13 +11,13 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleName</key>
-	<string>PhotoBlazeMac</string>
+	<string>PhotoBlaze</string>
 	<key>CFBundleDisplayName</key>
-	<string>PhotoBlaze (SwiftUI)</string>
+	<string>PhotoBlaze</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.jdlien.PhotoBlazeMac</string>
 	<key>CFBundleExecutable</key>
-	<string>PhotoBlazeMac</string>
+	<string>PhotoBlaze</string>
 	<!-- Modern (Tahoe+): the Liquid Glass icon from Assets.car; legacy: the flat icns —
 	     the same prebuilt assets the egui bundle ships (packaging/macos/). -->
 	<key>CFBundleIconName</key>

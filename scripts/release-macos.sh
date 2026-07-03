@@ -19,7 +19,7 @@
 # your login keychain it's used directly (no base64 dance).
 #
 # Usage: scripts/release-macos.sh [--release|--debug] [--swift-host]
-#   --swift-host  package the NS1 SwiftUI host (PhotoBlazeMac.app, built by
+#   --swift-host  package the NS1 SwiftUI host (PhotoBlaze.app, built by
 #                 build-swift-host.sh) instead of the egui bundle. Runs fine LOCALLY
 #                 with a Developer ID identity in the login keychain + the three
 #                 APPLE_* env vars — no CI required (Actions credits are finite).
@@ -42,17 +42,19 @@ cd "$REPO_ROOT"
 DIST="dist"
 SHORT_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/pb-app/Cargo.toml | head -1)"
 if [[ "$TARGET" == "swift-host" ]]; then
-	APP_NAME="PhotoBlazeMac"
-	BIN_NAME="PhotoBlazeMac"
+	APP_NAME="PhotoBlaze"
+	BIN_NAME="PhotoBlaze"
 	APP="target/swift-host/$PROFILE/$APP_NAME.app"
 	BUILD_CMD="./scripts/build-swift-host.sh --$PROFILE"
+	DMG_SUFFIX="-swiftui" # dodge the egui artifact's name in dist/ until cutover
 else
 	APP_NAME="PhotoBlaze"
 	BIN_NAME="photoblaze"
 	APP="target/$PROFILE/bundle/$APP_NAME.app"
 	BUILD_CMD="./scripts/bundle-macos.sh --$PROFILE"
+	DMG_SUFFIX=""
 fi
-DMG="$DIST/$APP_NAME-$SHORT_VERSION.dmg"
+DMG="$DIST/$APP_NAME-$SHORT_VERSION$DMG_SUFFIX.dmg"
 
 # Local credentials, two ways (CI keeps using repo-secret env vars):
 #   a) PREFERRED — a notarytool keychain profile (secrets never touch disk). One-time:

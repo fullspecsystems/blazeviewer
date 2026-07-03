@@ -5,7 +5,9 @@
 #   1. cargo build -p pb-mac-ffi        (staticlib; build.rs regenerates generated/ glue)
 #   2. create-package                   → crates/pb-mac-ffi/PbMacFfi (xcframework Swift pkg)
 #   3. swift build --package-path mac   (the SwiftUI executable)
-#   4. assemble target/swift-host/<profile>/PhotoBlazeMac.app
+#   4. assemble target/swift-host/<profile>/PhotoBlaze.app
+#      (user-visible name "PhotoBlaze" everywhere; only the BUNDLE ID stays
+#      com.jdlien.PhotoBlazeMac so it coexists with the egui beta until cutover)
 #
 # Usage:
 #   scripts/build-swift-host.sh [--debug|--release] [--run]   (default: --release)
@@ -50,7 +52,7 @@ BIN="$(swift build --package-path mac -c "$PROFILE" --show-bin-path)/PhotoBlazeM
 
 # Version in lockstep with the app crate, like bundle-macos.sh.
 SHORT_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/pb-app/Cargo.toml | head -1)"
-APP_DIR="target/swift-host/$PROFILE/PhotoBlazeMac.app"
+APP_DIR="target/swift-host/$PROFILE/PhotoBlaze.app"
 echo "==> Assembling $APP_DIR (v$SHORT_VERSION)"
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
@@ -58,8 +60,8 @@ sed -e "s/__SHORT_VERSION__/$SHORT_VERSION/g" \
 	-e "s/__VERSION__/$SHORT_VERSION/g" \
 	packaging/macos/Info-swift-host.plist > "$APP_DIR/Contents/Info.plist"
 printf 'APPL????' > "$APP_DIR/Contents/PkgInfo"
-cp "$BIN" "$APP_DIR/Contents/MacOS/PhotoBlazeMac"
-chmod +x "$APP_DIR/Contents/MacOS/PhotoBlazeMac"
+cp "$BIN" "$APP_DIR/Contents/MacOS/PhotoBlaze"
+chmod +x "$APP_DIR/Contents/MacOS/PhotoBlaze"
 # The app icon: the prebuilt Liquid Glass Assets.car (Tahoe+, CFBundleIconName=AppIcon)
 # + the flat icns fallback (CFBundleIconFile=PhotoBlaze) — the same assets the egui
 # bundle ships. Regenerate via scripts/build-macos-icons.sh when the icon changes.
