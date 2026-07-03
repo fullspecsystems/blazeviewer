@@ -10,18 +10,23 @@
 # separate lane — the workspace it builds from is the same code the Windows
 # job compiles, and release.yml builds the Mac DMG.
 #
-# ── Cost policy (2026-07-02, after burning ~2 000 billable min in a day) ──
-# A full run ≈ 260 BILLABLE minutes (windows ~29 min × 2, macos ~20 min × 10,
-# linux ~0.5 min × 1 — macOS is 78% of the bill), so CI does NOT run on every
-# feature-branch push anymore:
-#   • push: main only (the merge gate — this is where cross-platform breakage
-#     must be caught; the Windows lane finds clippy errors invisible from macOS)
-#   • pull_request: as before
-#   • workflow_dispatch: on-demand for a branch you want checked BEFORE merging,
-#     e.g.  gh workflow run ci --ref swiftui
+# ── Runners (2026-07-03): SELF-HOSTED — the owner's own machines ──
+# The hosted-minute bill (~260 billable min/run, 78% of it the macOS 10×
+# multiplier) exhausted the Actions credits during the NS0–NS2 push, so the
+# windows and mac-swift lanes now run on self-hosted runners registered on the
+# dev machines themselves (free, unmetered, and they're the *real* target
+# hardware). Setup lives in .taskmaster/docs/self-hosted-runners.md. Notes:
+#   • The runners persist state between runs, so the GitHub cache actions
+#     (Swatinem/rust-cache, actions/cache) are gone from those lanes — the
+#     _work tree keeps cargo's target warm, and libheif is built once on disk.
+#   • core-linux stays on ubuntu-latest (bills ~0.5 min at 1×) but is
+#     continue-on-error until the account's billing works again — a hosted
+#     lane must not redden the self-hosted signal it can't gate.
+#   • Trigger policy stays main+PR+dispatch: runs are free now, but they
+#     compete for CPU with whoever is using the machine.
 # Docs-only changes (*.md, .taskmaster/) skip CI entirely; superseded runs on
-# the same ref are cancelled; every job has a timeout so a hang can't burn the
-# 6-hour default (a hung windows job alone would bill 720 min).
+# the same ref are cancelled; every job keeps a timeout so a hang can't pin a
+# dev machine's CPU for 6 hours.
 
 name: ci
 
@@ -48,11 +53,11 @@ env:
 
 jobs:
   windows:
-    runs-on: windows-latest
+    runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 60
     env:
-      # Fixed vcpkg location so the libheif cache key, setup-libheif.ps1, and
-      # pb-decode/build.rs all agree (build.rs reads VCPKG_ROOT).
+      # Fixed vcpkg location so setup-libheif.ps1 and pb-decode/build.rs agree
+      # (build.rs reads VCPKG_ROOT). The runner machine keeps this tree on disk.
       VCPKG_ROOT: C:\vcpkg-pb
     steps:
       - uses: actions/checkout@v4
@@ -60,7 +65,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
       - name: Format check
         run: cargo fmt --all -- --check
       - name: Clippy (deny warnings)
@@ -69,18 +73,16 @@ jobs:
         run: cargo test --workspace
       # The `libheif` feature ships in the release MSI (tasks.json #16), so CI must
       # keep it compiling — it's cfg'd out of the default build and would otherwise
-      # rot invisibly. Cache shared with release.yml (same key); only the first run
-      # after a cache eviction pays the ~15 min vcpkg C build.
-      - name: Cache libheif (vcpkg installed tree)
-        id: libheif-cache
-        uses: actions/cache@v4
-        with:
-          path: C:\vcpkg-pb\installed
-          key: libheif-${{ runner.os }}-x64-windows-static-md-v1
-      - name: Build libheif (vcpkg, cache miss only)
-        if: steps.libheif-cache.outputs.cache-hit != 'true'
+      # rot invisibly. The vcpkg tree persists on the runner machine; only a brand-new
+      # machine pays the ~15 min vcpkg C build.
+      - name: Ensure libheif (vcpkg, first run on a new machine only)
         shell: pwsh
-        run: pwsh scripts/setup-libheif.ps1
+        run: |
+          if (-not (Test-Path "$env:VCPKG_ROOT\installed\x64-windows-static-md\lib\heif.lib")) {
+            pwsh scripts/setup-libheif.ps1
+          } else {
+            Write-Host "libheif already present at $env:VCPKG_ROOT"
+          }
       - name: Clippy with libheif (deny warnings)
         run: cargo clippy -p pb-decode -p pb-app --features libheif --all-targets -- -D warnings
       - name: Test with libheif
@@ -89,6 +91,10 @@ jobs:
   core-linux:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Advisory while the account's hosted billing is broken (jobs refuse to start):
+    # a hosted lane must not fail runs the self-hosted lanes have passed. Flip this
+    # back to a hard gate once billing works — it bills ~0.5 min/run at 1×.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust (stable)
@@ -101,13 +107,12 @@ jobs:
   # Kept lean (macOS minutes are pricey): the FFI bridge tests + the whole host build
   # chain — which is also the only CI compile of the macOS-gated Rust (imageio, ffi, …).
   mac-swift:
-    runs-on: macos-15
+    runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
       - name: Test the FFI bridge (round-trip + the open flow, no GPU needed)
         run: cargo test -p pb-mac-ffi -p pb-app-core
       - name: Build the SwiftUI host (.app)
