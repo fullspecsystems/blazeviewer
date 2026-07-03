@@ -43,7 +43,7 @@ pub mod timing;
 pub mod undo;
 
 pub use action::{Action, ActionKind};
-pub use app_core::{AppCore, Nav, Viewport};
+pub use app_core::{AppCore, ArchiveScope, Nav, Viewport};
 pub use config::config_dir;
 pub use contract::{CoreEffect, CoreEvent, KeyResolution, MenuState, Modifiers};
 pub use keymap::{KeyChord, Keymap};

@@ -39,6 +39,17 @@ use crate::{Action, Modifiers, PbKey, PhotoMeta, Slideshow};
 /// `disk_counts` keyed by absolute folder path.
 pub type FolderCounts = (PathBuf, usize, Arc<HashMap<PathBuf, u64>>);
 
+/// An archive deck's scoping state: the full source as opened, and the
+/// forward-slashed internal-folder prefix the deck is currently scoped to
+/// (`""` = the whole archive). The ⇧F tree's archive rows and the Go commands
+/// re-scope by wrapping `full` in a `pb_source::ScopedSource` — never by
+/// re-opening the archive file.
+#[derive(Clone)]
+pub struct ArchiveScope {
+    pub full: Arc<dyn PhotoSource>,
+    pub prefix: String,
+}
+
 /// A navigation move: forward (`space`/`→`), backward (`backspace`/`←`), a
 /// precomputed-random jump (`enter`), or a step back through the random walk
 /// (`shift+enter`). All are gated + self-paced + prefetchable the same way (random
@@ -186,6 +197,13 @@ pub struct AppCore {
     // --- Nav / playlist (NS0 5.3) ---
     /// The photo source (filesystem / ZIP / 7z) behind the current playlist.
     pub source: Arc<dyn PhotoSource>,
+    /// Archive decks only: the **unscoped** just-opened source plus the active
+    /// internal-folder scope (see [`ArchiveScope`]). `None` for disk decks.
+    /// Re-scoping (⇧F tree click, Go commands) filters `full` through a
+    /// `ScopedSource` instead of re-opening the file — a solid 7z's eager
+    /// decode is paid once, and an unlocked encrypted archive stays unlocked.
+    /// RAM-only (privacy #2).
+    pub archive_scope: Option<ArchiveScope>,
     /// Pure navigation state: cursor + precomputed shuffle order.
     pub playlist: Playlist,
     /// The current prefetch want-list (priority order), used as eviction `keep`.

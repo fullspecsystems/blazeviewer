@@ -2,8 +2,8 @@
 //! [`AppCore`](crate::AppCore). The Hud *rasterizer* (the "how to draw" — CPU text/pill
 //! compositing) stays shell-side (`pb-app`'s `hud.rs`) with the renderer for now.
 
+use crate::folder_tree::TreeTarget;
 use pb_hud::hud::{TreeHit, TreeRow};
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// The folder-tree overlay's interactive state while shown: the bitmap size +
@@ -17,7 +17,7 @@ pub struct TreePanel {
     pub h: u32,
     pub margin: u32,
     pub hits: Vec<(TreeHit, [u32; 4])>,
-    pub targets: Vec<Option<PathBuf>>,
+    pub targets: Vec<Option<TreeTarget>>,
     pub rows: Vec<TreeRow>,
     pub hovered: Option<TreeHit>,
     pub page: i32,

@@ -709,6 +709,68 @@ impl PhotoSource for SevenZSource {
     }
 }
 
+/// A prefix-scoped view of another source — the deck for one internal archive
+/// folder (the ⇧F tree's archive navigation). Wraps the **already-open** source
+/// rather than re-opening the file, so re-scoping a solid 7z never re-pays its
+/// eager decompression and an unlocked encrypted archive stays unlocked. Serves
+/// the subset of entries whose folder chain sits at or under `prefix`,
+/// boundary-aware (`a/b` matches `a/b/x.jpg` and `a/b/c/y.jpg`, never
+/// `a/bc/z.jpg`). Names stay full archive-relative paths, so folder grouping,
+/// the title, and the info panel read unchanged. RAM-only, like everything here.
+pub struct ScopedSource {
+    inner: Arc<dyn PhotoSource>,
+    index: Vec<usize>,
+}
+
+impl ScopedSource {
+    /// Scope `inner` to the entries under the forward-slashed folder `prefix`
+    /// (`""` = everything). One pass over the in-RAM name list — no I/O.
+    pub fn new(inner: Arc<dyn PhotoSource>, prefix: &str) -> Self {
+        let index = (0..inner.len())
+            .filter(|&i| name_in_scope(inner.name(i), prefix))
+            .collect();
+        Self { inner, index }
+    }
+}
+
+impl PhotoSource for ScopedSource {
+    fn len(&self) -> usize {
+        self.index.len()
+    }
+
+    fn name(&self, i: usize) -> &str {
+        self.index.get(i).map_or("", |&j| self.inner.name(j))
+    }
+
+    fn path(&self, i: usize) -> Option<&Path> {
+        self.inner.path(*self.index.get(i)?)
+    }
+
+    fn container(&self) -> Option<&Path> {
+        self.inner.container()
+    }
+
+    fn bytes(&self, i: usize) -> io::Result<Vec<u8>> {
+        let &j = self.index.get(i).ok_or_else(out_of_range)?;
+        self.inner.bytes(j)
+    }
+
+    fn random_access(&self) -> bool {
+        self.inner.random_access()
+    }
+}
+
+/// Whether entry `name` lives at or under the folder `prefix` — i.e. `name` is
+/// `prefix` + `/` + anything. The required separator is what makes the match
+/// boundary-aware (and excludes a *file* named exactly `prefix`).
+fn name_in_scope(name: &str, prefix: &str) -> bool {
+    if prefix.is_empty() {
+        return true;
+    }
+    name.strip_prefix(prefix)
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
 /// Refuse a single archived image larger than this — a sanity ceiling against a
 /// decompression bomb or a bogus entry that would otherwise reserve/read gigabytes
 /// before the decoder ever sees it. Generous: real encoded photos are far smaller
@@ -922,6 +984,46 @@ mod tests {
         let names: Vec<&str> = (0..src.len()).map(|i| src.name(i)).collect();
         assert_eq!(names, vec!["dir/photo.jpg", "top.png"]);
         assert_eq!(src.bytes(0).unwrap(), b"A", "reads still go by index");
+    }
+
+    #[test]
+    fn scoped_source_serves_the_subtree_boundary_aware() {
+        let zip = write_zip(
+            "scope",
+            &[
+                ("a/b/one.jpg", b"1".as_slice()),
+                ("a/b/c/two.jpg", b"2"),
+                ("a/bc/three.jpg", b"3"), // `a/bc` must NOT match the scope `a/b`
+                ("a/four.jpg", b"4"),
+                ("top.png", b"5"),
+            ],
+            None,
+        );
+        let full: Arc<dyn PhotoSource> = Arc::new(ZipSource::open(&zip, None, is_img).unwrap());
+
+        let scoped = ScopedSource::new(Arc::clone(&full), "a/b");
+        let names: Vec<&str> = (0..scoped.len()).map(|i| scoped.name(i)).collect();
+        assert_eq!(
+            names,
+            vec!["a/b/c/two.jpg", "a/b/one.jpg"],
+            "direct + nested entries, full archive-relative names, boundary-aware"
+        );
+        // Delegation: bytes by remapped index, container passthrough, no fs path.
+        assert_eq!(scoped.bytes(1).unwrap(), b"1");
+        assert_eq!(scoped.bytes(0).unwrap(), b"2");
+        assert!(scoped.bytes(2).is_err(), "out-of-range read errors");
+        assert_eq!(scoped.container(), Some(zip.as_path()));
+        assert!(scoped.path(0).is_none());
+        assert_eq!(scoped.name(99), "", "out-of-range name is empty");
+        assert!(scoped.random_access());
+
+        // The empty prefix is the whole archive; a bogus prefix is empty.
+        assert_eq!(ScopedSource::new(Arc::clone(&full), "").len(), full.len());
+        assert!(ScopedSource::new(Arc::clone(&full), "nope").is_empty());
+        // A prefix that names a file (not a folder) matches nothing.
+        assert!(ScopedSource::new(Arc::clone(&full), "top.png").is_empty());
+
+        let _ = std::fs::remove_file(&zip);
     }
 
     #[test]

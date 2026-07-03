@@ -27,12 +27,20 @@ with any pre-release suffix carried only by the tag.
   Long lists show "… n more" rows — click them to page. The tree keeps tracking the
   current folder even while you hold a key and fly, works over an *empty* folder (so a
   photo-less folder is a navigation point, not a dead end), and shows an archive's
-  internal folders for a `.zip`/`.7z` (clicking those comes next). Press ⇧F again to
-  dismiss.
+  internal folders for a `.zip`/`.7z`. Press ⇧F again to dismiss.
+- **Folder navigation inside archives** — the ⇧F tree's rows are clickable for
+  `.zip`/`.7z` decks too: click an internal folder to view just that folder, and click
+  the archive's own row to bring the whole archive back. Switching folders is instant
+  even for a huge solid `.7z` — the archive is never re-read or re-decompressed, and an
+  unlocked encrypted archive never re-asks for its password. Nothing is ever extracted
+  to disk.
 - **Go commands** — walk the folder hierarchy without the picker: **Parent Folder**
   (⌘↑ on Mac, Finder's chord; Alt+↑ on Windows, Explorer's) plus **Previous / Next
   Folder** (⌘←/⌘→ / Alt+←/→) to step between sibling folders — the fast way to review
   a folder-per-day library. In the new Go menu, rebindable in Settings ▸ Shortcuts.
+  They work inside archives too: Parent Folder steps back out one folder level at a
+  time (then to the folder on disk containing the archive), and Previous/Next Folder
+  step between the archive's sibling folders.
 
 ### Changed
 - **The Mac app is now a native SwiftUI/AppKit application** — the same fast Rust engine, with

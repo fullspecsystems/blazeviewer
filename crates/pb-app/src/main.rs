@@ -71,8 +71,8 @@ mod reveal;
 // paths in the winit shell modules (and the `use action::…` lines below) keep
 // resolving unchanged.
 use pb_app_core::{
-    action, contract, keymap, pb_key, slideshow, AppCore, InfoMode, Nav, OpenButton, OpenPanel,
-    UndoAction, Viewport,
+    action, contract, keymap, pb_key, slideshow, AppCore, ArchiveScope, InfoMode, Nav, OpenButton,
+    OpenPanel, UndoAction, Viewport,
 };
 // The HUD CPU compositor (info panel / toasts / pie / chip) and its Font Awesome icon
 // rasterizer now live in the shell-neutral `pb-hud` crate (NS0). Re-export them at the
@@ -415,6 +415,12 @@ impl App {
                 full_requested_at: HashMap::new(),
                 live_motion_cache: HashMap::new(),
                 metrics,
+                // A launch straight onto an archive (the resolve_playlist
+                // safety-net path) starts unscoped, like apply_archive stamps.
+                archive_scope: source.container().is_some().then(|| ArchiveScope {
+                    full: Arc::clone(&source),
+                    prefix: String::new(),
+                }),
                 source,
                 playlist,
                 targets: Vec::new(),

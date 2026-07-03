@@ -97,6 +97,7 @@ impl AppCore {
             live_motion_cache: std::collections::HashMap::new(),
             metrics: crate::metrics::StageTimes::default(),
             source,
+            archive_scope: None,
             playlist: Playlist::new(0, 0),
             targets: Vec::new(),
             last_nav: Nav::Forward,
@@ -752,6 +753,7 @@ impl AppCore {
     /// cases (empty / password-required / cancelled / error) stay host-side.
     fn apply_archive(&mut self, resolved: crate::scan::Resolved) {
         self.password_archive = None;
+        let full = Arc::clone(&resolved.source);
         self.rebuild_playlist(
             resolved.source,
             resolved.root,
@@ -759,6 +761,15 @@ impl AppCore {
             resolved.recursive,
             resolved.start,
         );
+        // A fresh archive deck starts unscoped; the ⇧F tree / Go commands
+        // re-scope by filtering this full source (never re-opening the file).
+        // Stamp only if the rebuild actually installed (it refuses an empty deck).
+        if Arc::ptr_eq(&self.source, &full) {
+            self.archive_scope = Some(crate::ArchiveScope {
+                full,
+                prefix: String::new(),
+            });
+        }
     }
 
     /// Route an opened source (NS0 5.6 Step 3c) — the entry point the picker / drag-drop / a
@@ -1304,13 +1315,22 @@ impl AppCore {
 
         // An archive deck: entry names carry the internal folder paths; the
         // archive file labels the root, and the up row opens the folder on disk
-        // containing it. Rows aren't clickable until prefix re-scoping lands.
+        // containing it. The derivation reads the **full** (unscoped) source, so
+        // a deck scoped to one internal folder still shows the whole archive
+        // around it — the archive analog of the disk tree anchoring above the
+        // opened root; clicking a row re-scopes to its prefix (the root row =
+        // back to everything).
         if let Some(item) = self.displayed_item {
             if self.source.path(item).is_none() {
+                let full = self
+                    .archive_scope
+                    .as_ref()
+                    .map(|s| Arc::clone(&s.full))
+                    .unwrap_or_else(|| Arc::clone(&self.source));
                 let container = self.source.container().unwrap_or(&self.root);
                 let label = crate::folder_tree::name_of(container);
                 let current = self.current_folder_rel(item);
-                let names = (0..self.source.len()).map(|i| self.source.name(i));
+                let names = (0..full.len()).map(|i| full.name(i));
                 let mut m = crate::folder_tree::rows_from_names(names, &current, &label);
                 if let Some(par) = container.parent().filter(|p| !p.as_os_str().is_empty()) {
                     let par = par.to_path_buf();
@@ -1369,7 +1389,7 @@ impl AppCore {
     fn push_folder_tree(
         &mut self,
         rows: Vec<hud::TreeRow>,
-        targets: Vec<Option<PathBuf>>,
+        targets: Vec<Option<crate::folder_tree::TreeTarget>>,
         page: i32,
         hovered: Option<hud::TreeHit>,
     ) {
@@ -1495,8 +1515,12 @@ impl AppCore {
                     .folder_tree_panel
                     .as_ref()
                     .and_then(|p| p.targets.get(i).cloned().flatten());
-                if let Some(dir) = target {
-                    self.open_dir(dir);
+                match target {
+                    Some(crate::folder_tree::TreeTarget::Dir(dir)) => self.open_dir(dir),
+                    Some(crate::folder_tree::TreeTarget::Scope(prefix)) => {
+                        self.rescope_archive(prefix)
+                    }
+                    None => {}
                 }
                 true
             }
@@ -1511,11 +1535,52 @@ impl AppCore {
         self.open_plan(plan.source, plan.cursor);
     }
 
+    /// Re-scope the archive deck to the entries under the internal folder
+    /// `prefix` (`""` = back to the whole archive) — the archive analog of
+    /// [`open_dir`](Self::open_dir), sharing its rebuild semantics (cursor to
+    /// the first item, caches dropped). Pure in-RAM: the full source is wrapped
+    /// in a `ScopedSource` (one pass over the resident name list), never
+    /// re-opened — a solid 7z's eager decode is paid once, and an unlocked
+    /// encrypted archive stays unlocked. Silent no-op on a disk deck.
+    pub fn rescope_archive(&mut self, prefix: String) {
+        let Some(scope) = self.archive_scope.clone() else {
+            return;
+        };
+        let source: Arc<dyn PhotoSource> = if prefix.is_empty() {
+            Arc::clone(&scope.full)
+        } else {
+            Arc::new(pb_source::ScopedSource::new(
+                Arc::clone(&scope.full),
+                &prefix,
+            ))
+        };
+        // A scope only ever comes from a tree row / sibling step, which derive
+        // from the entry names — so it can't be empty; the guard is belt and
+        // braces (rebuild_playlist refuses an empty deck anyway, un-stamped).
+        if source.is_empty() {
+            return;
+        }
+        self.rebuild_playlist(source, self.root.clone(), None, false, 0);
+        self.archive_scope = Some(crate::ArchiveScope {
+            full: scope.full,
+            prefix,
+        });
+    }
+
     /// Go ▸ parent folder (⌘↑ / Alt+↑ — Finder's Enclosing Folder idiom): open the
-    /// deck anchor's parent. A disk deck's anchor is the opened root; an archive
-    /// deck's is the archive file itself, so "up" opens its containing folder.
-    /// Silent no-op with nothing open or at a filesystem root.
+    /// deck anchor's parent. A disk deck's anchor is the opened root. An archive
+    /// deck scoped to an internal folder steps the scope up one level first
+    /// (`a/b` → `a` → the whole archive); from the archive root, "up" opens the
+    /// folder on disk containing the archive file. Silent no-op with nothing
+    /// open or at a filesystem root.
     pub fn open_parent_cmd(&mut self) {
+        if let Some(scope) = &self.archive_scope {
+            if !scope.prefix.is_empty() {
+                let parent = crate::folder_tree::folder_of(&scope.prefix).to_string();
+                self.rescope_archive(parent);
+                return;
+            }
+        }
         let anchor = self
             .source
             .container()
@@ -1530,12 +1595,23 @@ impl AppCore {
     }
 
     /// Go ▸ previous / next folder (`dir` = ∓1; ⌘←/⌘→ / Alt+←/→): open the opened
-    /// root's adjacent sibling directory in the parent's sorted listing. Silent
-    /// no-op at the ends, with nothing open, or on an archive deck (sibling
-    /// stepping there lands with prefix re-scoping). The listing (and even the
-    /// `is_dir` stat) is disk I/O, so it resolves on the tree-io worker — `tick`
-    /// opens the target when it lands; a rapid re-press supersedes the last.
+    /// root's adjacent sibling directory in the parent's sorted listing. On an
+    /// archive deck scoped to an internal folder, step to the adjacent sibling
+    /// *prefix* in the same sorted row the tree shows — pure in-RAM (the names
+    /// are resident), so unlike the disk path it needs no tree-io worker. Silent
+    /// no-op at the ends, with nothing open, or on an unscoped archive (the
+    /// whole archive has no siblings inside itself). The disk listing (and even
+    /// the `is_dir` stat) is disk I/O, so it resolves on the tree-io worker —
+    /// `tick` opens the target when it lands; a rapid re-press supersedes the last.
     pub fn open_sibling_cmd(&mut self, dir: i32) {
+        if let Some(scope) = &self.archive_scope {
+            let full = Arc::clone(&scope.full);
+            let names = (0..full.len()).map(|i| full.name(i));
+            if let Some(sib) = crate::folder_tree::sibling_scope(names, &scope.prefix, dir) {
+                self.rescope_archive(sib);
+            }
+            return;
+        }
         if self.source.container().is_some() {
             return;
         }
@@ -1650,6 +1726,9 @@ impl AppCore {
         let start = start.min(source.len() - 1);
         self.pending_delete = None; // any rebuild supersedes a deferred delete-advance
         self.stop_playback(); // a new source drops any playback of the old one (#2)
+                              // A rebuild is a new deck: drop any archive scoping. The archive paths
+                              // (`apply_archive`, `rescope_archive`) re-stamp it right after this call.
+        self.archive_scope = None;
         self.source = source;
         self.root = root;
         self.scan_root = scan_root;
@@ -4428,6 +4507,150 @@ mod tests {
         let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(vec![dir.join("b.png")]));
         core.rebuild_playlist(source, dir.join("x.zip"), None, false, 0);
         assert_eq!(core.settings.last_folder.as_deref(), Some(dir.as_path()));
+    }
+
+    /// A fake archive source: named entries with no fs paths and a container —
+    /// exactly what a Zip/SevenZSource looks like to the core, without disk.
+    struct FakeArchive {
+        names: Vec<String>,
+        container: PathBuf,
+    }
+
+    impl PhotoSource for FakeArchive {
+        fn len(&self) -> usize {
+            self.names.len()
+        }
+        fn name(&self, i: usize) -> &str {
+            self.names.get(i).map(String::as_str).unwrap_or("")
+        }
+        fn container(&self) -> Option<&Path> {
+            Some(&self.container)
+        }
+        fn bytes(&self, i: usize) -> std::io::Result<Vec<u8>> {
+            self.names
+                .get(i)
+                .map(|_| vec![0u8])
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "oob"))
+        }
+    }
+
+    /// A headless core over a fake archive deck, installed the way a real
+    /// archive open lands ([`AppCore::apply_archive`]).
+    fn archive_core(names: &[&str]) -> AppCore {
+        let mut core = test_core();
+        let container = std::env::temp_dir().join("deck.zip");
+        let source: Arc<dyn PhotoSource> = Arc::new(FakeArchive {
+            names: names.iter().map(|s| s.to_string()).collect(),
+            container: container.clone(),
+        });
+        core.apply_archive(crate::scan::Resolved {
+            root: container,
+            source,
+            scan_root: None,
+            recursive: false,
+            start: 0,
+        });
+        core
+    }
+
+    const ARCHIVE: &[&str] = &[
+        "a/b/one.jpg",
+        "a/b/c/two.jpg",
+        "a/bc/three.jpg", // `a/bc` must never match a scope of `a/b`
+        "a/four.jpg",
+        "top.jpg",
+    ];
+
+    fn deck_names(core: &AppCore) -> Vec<&str> {
+        (0..core.source.len())
+            .map(|i| core.source.name(i))
+            .collect()
+    }
+
+    #[test]
+    fn apply_archive_stamps_the_unscoped_scope() {
+        let core = archive_core(ARCHIVE);
+        let scope = core.archive_scope.as_ref().expect("archive decks scope");
+        assert_eq!(scope.prefix, "");
+        assert!(
+            Arc::ptr_eq(&scope.full, &core.source),
+            "unscoped: the deck IS the full source, no wrapper"
+        );
+        assert_eq!(core.source.len(), ARCHIVE.len());
+    }
+
+    #[test]
+    fn rescope_filters_the_deck_and_parent_steps_back_up() {
+        let mut core = archive_core(ARCHIVE);
+        core.rescope_archive("a/b".to_string());
+        assert_eq!(deck_names(&core), vec!["a/b/one.jpg", "a/b/c/two.jpg"]);
+        assert_eq!(core.archive_scope.as_ref().unwrap().prefix, "a/b");
+        assert_eq!(core.displayed_item, Some(0), "cursor resets to the first");
+        assert_eq!(
+            core.source.container().map(crate::folder_tree::name_of),
+            Some("deck.zip".to_string()),
+            "the scoped deck still knows its archive (title, up row, Go anchor)"
+        );
+
+        // ⌘↑ steps the scope up one level at a time: a/b → a → the whole archive.
+        core.open_parent_cmd();
+        assert_eq!(core.archive_scope.as_ref().unwrap().prefix, "a");
+        assert_eq!(core.source.len(), 4);
+        core.open_parent_cmd();
+        let scope = core.archive_scope.as_ref().unwrap();
+        assert_eq!(scope.prefix, "");
+        assert!(
+            Arc::ptr_eq(&scope.full, &core.source),
+            "back to the whole archive = the original source, unwrapped"
+        );
+
+        // From the archive root, ⌘↑ exits to the folder on disk containing the
+        // archive — the pre-scoping behavior, now one level further up the ladder.
+        core.effects.clear();
+        core.open_parent_cmd();
+        assert!(
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::BeginDirScan { .. })),
+            "the containing folder opens as a normal dir scan"
+        );
+    }
+
+    #[test]
+    fn sibling_cmd_steps_scopes_in_ram_without_a_worker() {
+        let mut core = archive_core(ARCHIVE);
+        // Unscoped: the whole archive has no siblings inside itself — silent no-op.
+        core.open_sibling_cmd(1);
+        assert_eq!(core.archive_scope.as_ref().unwrap().prefix, "");
+        assert!(core.tree_io.is_none(), "no disk worker for archive decks");
+
+        core.rescope_archive("a/b".to_string());
+        core.open_sibling_cmd(1);
+        assert_eq!(core.archive_scope.as_ref().unwrap().prefix, "a/bc");
+        assert_eq!(deck_names(&core), vec!["a/bc/three.jpg"]);
+        core.open_sibling_cmd(1);
+        assert_eq!(
+            core.archive_scope.as_ref().unwrap().prefix,
+            "a/bc",
+            "at the end of the sorted row — nothing to step to"
+        );
+        core.open_sibling_cmd(-1);
+        assert_eq!(core.archive_scope.as_ref().unwrap().prefix, "a/b");
+        assert!(core.tree_io.is_none());
+    }
+
+    #[test]
+    fn a_disk_rebuild_clears_the_archive_scope() {
+        let mut core = archive_core(ARCHIVE);
+        core.rescope_archive("a".to_string());
+        assert!(core.archive_scope.is_some());
+        let dir = std::env::temp_dir();
+        let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(vec![dir.join("a.png")]));
+        core.rebuild_playlist(source, dir.clone(), Some(dir), true, 0);
+        assert!(
+            core.archive_scope.is_none(),
+            "a disk deck must not keep the old archive resident"
+        );
     }
 
     #[test]

@@ -24,9 +24,10 @@
 //! - **Entry names** ([`rows_from_names`]): archive sources (`.zip`/`.7z`)
 //!   carry each entry's forward-slashed relative path in `name(i)`, so the
 //!   whole tree — including every count — groups out of the already-in-RAM
-//!   list with no I/O at all. Archive rows aren't clickable yet (`targets` =
-//!   `None`; prefix re-scoping is the planned follow-up), but the up row the
-//!   caller prepends can open the folder on disk containing the archive.
+//!   list with no I/O at all. Every row is clickable: folder rows carry the
+//!   [`TreeTarget::Scope`] prefix the deck re-scopes to (the root row `""`,
+//!   back to the whole archive), and the up row the caller prepends opens the
+//!   folder on disk containing the archive.
 //!
 //! Pure data in/out (the disk half isolated in one function), so the grouping
 //! logic is unit-tested without a filesystem.
@@ -41,18 +42,30 @@ use std::path::{Path, PathBuf};
 /// pathological nesting is noise.
 const MAX_ANCESTORS: usize = 4;
 
+/// What clicking a tree row opens: a folder on disk (full Open Folder
+/// semantics — re-roots the deck at it), or an internal archive folder as a
+/// forward-slashed entry-name prefix the deck **re-scopes** to (`""` = back to
+/// the whole archive). The prefix stays a plain string because it is not a
+/// filesystem path — nothing is ever extracted to open it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum TreeTarget {
+    Dir(PathBuf),
+    Scope(String),
+}
+
 /// The derived tree: display rows plus, index-aligned, what clicking each row
-/// opens (`None` = not clickable: collapse markers, and archive rows until
-/// prefix re-scoping lands).
+/// opens (`None` = not clickable: the "…" collapse markers).
 pub struct FolderTreeModel {
     pub rows: Vec<TreeRow>,
-    pub targets: Vec<Option<PathBuf>>,
+    pub targets: Vec<Option<TreeTarget>>,
 }
 
 impl FolderTreeModel {
     /// Prepend the "up to the parent" affordance row — the parent's real name
-    /// with the folder-up glyph. `target` is what clicking it opens (the parent
-    /// directory; for an archive deck, the folder containing the archive).
+    /// with the folder-up glyph. `target` is the directory clicking it opens
+    /// (the grandparent for a disk deck; the folder containing the archive for
+    /// an archive deck — stepping back *inside* a scoped archive is the root
+    /// row's job, which re-scopes to `""`).
     pub fn push_up(&mut self, name: &str, target: PathBuf) {
         self.rows.insert(
             0,
@@ -66,7 +79,7 @@ impl FolderTreeModel {
                 count: None,
             },
         );
-        self.targets.insert(0, Some(target));
+        self.targets.insert(0, Some(TreeTarget::Dir(target)));
     }
 }
 
@@ -204,8 +217,9 @@ fn emit(
 /// archive's `name(i)` list, already in RAM — no I/O, and every row gets its
 /// under-prefix photo count for free). `current` is the current photo's
 /// containing folder (`""` = the archive root); `root_label` is the display
-/// name for the root level (the archive's file name). Rows aren't clickable
-/// (`targets` all `None`) until archive re-scoping lands.
+/// name for the root level (the archive's file name). Every folder row is
+/// clickable: its target is the [`TreeTarget::Scope`] prefix the deck re-scopes
+/// to — the root row carries `""`, the way back to the whole archive.
 pub fn rows_from_names<'a>(
     names: impl Iterator<Item = &'a str>,
     current: &str,
@@ -244,10 +258,63 @@ pub fn rows_from_names<'a>(
             Role::At { level, index } => level_counts[*level].get(&lists[*level][*index]).copied(),
         };
     }
-    FolderTreeModel {
-        targets: vec![None; rows.len()],
-        rows,
+    let targets = roles
+        .iter()
+        .map(|role| match role {
+            Role::Root => Some(TreeTarget::Scope(String::new())),
+            Role::Marker => None,
+            Role::At { level, index } => {
+                // The row's entry-name prefix: the on-path chain down to its
+                // level, then its own name (`chain[..level]` is always intact —
+                // only sibling *lists* collapse into the "…" marker).
+                let mut p = chain[..*level].join("/");
+                if !p.is_empty() {
+                    p.push('/');
+                }
+                p.push_str(&lists[*level][*index]);
+                Some(TreeTarget::Scope(p))
+            }
+        })
+        .collect();
+    FolderTreeModel { rows, targets }
+}
+
+/// The adjacent sibling folder-prefix of `prefix` (`step` = ±1) within an
+/// archive's entry names — the Go ▸ previous/next analog of
+/// [`sibling_target`], over the same sorted sibling row the tree shows.
+/// Pure and in-RAM (the names are already resident), so unlike the disk
+/// version it needs no off-thread worker. `None` at the ends of the row, or
+/// for the archive root (`""` has no siblings inside the archive).
+pub fn sibling_scope<'a>(
+    names: impl Iterator<Item = &'a str>,
+    prefix: &str,
+    step: i32,
+) -> Option<String> {
+    if prefix.is_empty() {
+        return None;
     }
+    let parent = folder_of(prefix);
+    let mut sibs: Vec<String> = Vec::new();
+    for n in names {
+        if let Some(seg) = child_segment(folder_of(n), parent) {
+            if !sibs.iter().any(|s| s == seg) {
+                sibs.push(seg.to_string());
+            }
+        }
+    }
+    let sibs = sort_names(sibs);
+    let own = prefix.rsplit('/').next()?;
+    let pos = sibs.iter().position(|s| s == own)?;
+    let next = pos as i64 + step as i64;
+    if next < 0 || next as usize >= sibs.len() {
+        return None; // at the end of the row of folders — nothing to step to
+    }
+    let name = &sibs[next as usize];
+    Some(if parent.is_empty() {
+        name.clone()
+    } else {
+        format!("{parent}/{name}")
+    })
 }
 
 /// The non-hidden subdirectory names of `dir`, display-sorted. Read-only; a
@@ -439,18 +506,23 @@ fn rows_from_listings(
         lists[i] = l;
     }
     let (rows, roles) = assemble(&name_of(anchor), &lists, &chain);
-    let targets: Vec<Option<PathBuf>> = roles
+    let targets: Vec<Option<TreeTarget>> = roles
         .iter()
         .map(|role| match role {
-            Role::Root => Some(anchor.to_path_buf()),
+            Role::Root => Some(TreeTarget::Dir(anchor.to_path_buf())),
             Role::Marker => None,
-            Role::At { level, index } => Some(level_dirs[*level].join(&lists[*level][*index])),
+            Role::At { level, index } => Some(TreeTarget::Dir(
+                level_dirs[*level].join(&lists[*level][*index]),
+            )),
         })
         .collect();
     let mut model = FolderTreeModel { rows, targets };
     if let Some(map) = counts {
         for (row, target) in model.rows.iter_mut().zip(&model.targets) {
-            row.count = target.as_ref().and_then(|t| map.get(t)).copied();
+            row.count = match target {
+                Some(TreeTarget::Dir(d)) => map.get(d).copied(),
+                _ => None,
+            };
         }
     }
     if let Some(par) = anchor.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -540,6 +612,14 @@ mod tests {
             .collect()
     }
 
+    /// The disk path a row opens, if it is a disk target.
+    fn dir_of(t: &Option<TreeTarget>) -> Option<&Path> {
+        match t {
+            Some(TreeTarget::Dir(d)) => Some(d.as_path()),
+            _ => None,
+        }
+    }
+
     #[test]
     fn folder_of_splits_on_the_last_slash() {
         assert_eq!(folder_of("a/b/c.jpg"), "a/b");
@@ -577,8 +657,27 @@ mod tests {
             counts,
             vec![Some(6), Some(5), Some(3), Some(1), Some(1), Some(1)]
         );
-        // Archive rows aren't clickable yet.
-        assert!(m.targets.iter().all(Option::is_none));
+        // Every row re-scopes the deck to its entry-name prefix; the root row
+        // is the way back to the whole archive.
+        let scopes: Vec<Option<&str>> = m
+            .targets
+            .iter()
+            .map(|t| match t {
+                Some(TreeTarget::Scope(p)) => Some(p.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            scopes,
+            vec![
+                Some(""),
+                Some("a"),
+                Some("a/b"),
+                Some("a/b/c"),
+                Some("a/b/x"),
+                Some("a/d"),
+            ]
+        );
     }
 
     #[test]
@@ -615,6 +714,48 @@ mod tests {
         );
         assert!(m.rows[1].marker, "the collapse row is a marker");
         assert_eq!(m.rows.iter().filter(|r| r.marker).count(), 1);
+        // Scope prefixes stay full paths even below the collapsed levels — the
+        // chain is intact, only the sibling lists folded into the marker.
+        let scopes: Vec<Option<&str>> = m
+            .targets
+            .iter()
+            .map(|t| match t {
+                Some(TreeTarget::Scope(p)) => Some(p.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            scopes,
+            vec![
+                Some(""),
+                None, // the "…" marker stays unclickable
+                Some("l1/l2/l3/l4"),
+                Some("l1/l2/l3/l4/l5"),
+                Some("l1/l2/l3/l4/l5/l6"),
+                Some("l1/l2/l3/l4/l5/l6/deep"),
+            ]
+        );
+    }
+
+    #[test]
+    fn sibling_scope_steps_through_the_sorted_folder_row() {
+        let entries = [
+            "trip/Alpha/1.jpg",
+            "trip/beta/2.jpg",
+            "trip/Gamma/3.jpg",
+            "other/x.jpg",
+        ];
+        let sib = |p: &str, step| sibling_scope(entries.iter().copied(), p, step);
+        // Case-insensitive display order: Alpha, beta, Gamma.
+        assert_eq!(sib("trip/beta", 1), Some("trip/Gamma".to_string()));
+        assert_eq!(sib("trip/beta", -1), Some("trip/Alpha".to_string()));
+        assert_eq!(sib("trip/Gamma", 1), None, "at the end of the row");
+        assert_eq!(sib("trip/Alpha", -1), None);
+        // Top-level scopes step among the root's folders (parent = "").
+        assert_eq!(sib("other", 1), Some("trip".to_string()));
+        assert_eq!(sib("trip", -1), Some("other".to_string()));
+        // The archive root has no siblings inside the archive.
+        assert_eq!(sib("", 1), None);
     }
 
     #[test]
@@ -640,12 +781,12 @@ mod tests {
         // expanded among its siblings (adjacent hops stay one click away after a
         // re-root); the up row exits to the grandparent.
         assert!(m.rows[0].up, "the up affordance leads");
-        assert_eq!(m.targets[0].as_deref(), base.parent());
+        assert_eq!(dir_of(&m.targets[0]), base.parent());
         assert!(
             m.rows[1].name.starts_with("pb-ftree-"),
             "heading = the root's parent"
         );
-        assert_eq!(m.targets[1].as_deref(), Some(base.as_path()));
+        assert_eq!(dir_of(&m.targets[1]), Some(base.as_path()));
         assert_eq!(
             names(&m.rows)[2..],
             vec![
@@ -667,7 +808,7 @@ mod tests {
             root.join("parent/sib-b"),
         ];
         for (i, want) in expect.iter().enumerate() {
-            assert_eq!(m.targets[i + 2].as_deref(), Some(want.as_path()), "row {i}");
+            assert_eq!(dir_of(&m.targets[i + 2]), Some(want.as_path()), "row {i}");
         }
     }
 
@@ -682,18 +823,18 @@ mod tests {
         std::fs::remove_dir_all(&base).unwrap();
         assert_eq!(m.rows.len(), 4);
         assert!(m.rows[0].up, "up exits to the grandparent");
-        assert_eq!(m.targets[0].as_deref(), base.parent());
-        assert_eq!(m.targets[1].as_deref(), Some(base.as_path()));
+        assert_eq!(dir_of(&m.targets[0]), base.parent());
+        assert_eq!(dir_of(&m.targets[1]), Some(base.as_path()));
         assert!(
             m.rows[2].current && m.rows[2].open,
             "the opened root is current"
         );
         assert_eq!(m.rows[2].name, "Trips");
-        assert_eq!(m.targets[2].as_deref(), Some(root.as_path()));
+        assert_eq!(dir_of(&m.targets[2]), Some(root.as_path()));
         assert_eq!(m.rows[3].name, "inner");
         assert_eq!(m.rows[3].depth, 2);
         let inner = root.join("inner");
-        assert_eq!(m.targets[3].as_deref(), Some(inner.as_path()));
+        assert_eq!(dir_of(&m.targets[3]), Some(inner.as_path()));
     }
 
     #[test]
@@ -752,7 +893,7 @@ mod tests {
         let counts: Vec<Option<u64>> = m.rows.iter().map(|r| r.count).collect();
         assert_eq!(counts, vec![None, Some(3), Some(2), Some(1), Some(1)]);
         let b = PathBuf::from("/r/a/b");
-        assert_eq!(m.targets[3].as_deref(), Some(b.as_path()));
+        assert_eq!(dir_of(&m.targets[3]), Some(b.as_path()));
     }
 
     #[test]
