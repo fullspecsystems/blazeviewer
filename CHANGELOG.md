@@ -31,6 +31,12 @@ with any pre-release suffix carried only by the tag.
   window is sized to fit its content (long lists like Shortcuts scroll).
 
 ### Fixed
+- **Windows: installing a build over an existing install now actually replaces it.**
+  Same-version installs (all betas carry the numeric version 0.1.0) used to pile up as
+  separate entries in "Installed apps" while leaving the previously installed files in
+  place — you had to uninstall by hand to really update. The installer now treats an
+  equal-version install as a full upgrade: old entries are removed (including any
+  duplicates already accumulated) and the new files land fresh.
 - **macOS: quitting in borderless fullscreen no longer restarts the app on the wrong
   monitor.** Launching back into fullscreen now lands on the display you were using, exiting
   fullscreen restores your last windowed spot (not a default frame), and the fullscreen state

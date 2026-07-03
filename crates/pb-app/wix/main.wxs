@@ -43,7 +43,16 @@
             SummaryCodepage='1252'
             />
 
+        <!-- AllowSameVersionUpgrades: betas all ship the same numeric ProductVersion
+             (0.1.0; the -beta.N rides only on the git tag), and Windows Installer's
+             default upgrade detection matches strictly-LOWER versions only. Without
+             this flag every same-version install piled up as a separate ARP entry
+             and left the previously installed files in place (equal file versions
+             are never replaced). With it, an equal-version install is a real major
+             upgrade: all older-or-equal products are removed first, files land
+             fresh. WiX emits ICE61 for this — expected, ignore it. -->
         <MajorUpgrade
+            AllowSameVersionUpgrades='yes'
             Schedule='afterInstallInitialize'
             DowngradeErrorMessage='A newer version of [ProductName] is already installed. Setup will now exit.'/>
 
