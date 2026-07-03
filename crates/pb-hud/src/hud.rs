@@ -861,7 +861,20 @@ impl Hud {
         }
         let mut lines: Vec<Line> = Vec::with_capacity(end - start + 2);
         let mut content_w = 0i32;
-        let mut count_w = 0i32; // widest count text among visible rows
+        // The count column's width comes from ALL rows (not the visible window) and
+        // is floored at a four-digit count, so the panel doesn't shift horizontally
+        // as clicking/paging changes which counts are in view — it only widens for
+        // genuine five-digit-plus outliers.
+        let count_w = match rows.iter().filter_map(|r| r.count).max() {
+            Some(widest_count) => {
+                let widest = self
+                    .layout(&format_thousands(widest_count), count_px, Weight::Regular)
+                    .1;
+                let floor = self.layout("9,999", count_px, Weight::Regular).1;
+                widest.max(floor).ceil() as i32
+            }
+            None => 0,
+        };
         let push_marker = |lines: &mut Vec<Line>, content_w: &mut i32, n: usize, hit: TreeHit| {
             let (glyphs, adv) = self.layout(&format!("{n} more"), px, Weight::Regular);
             let text_x = cell + icon_gap;
@@ -895,11 +908,9 @@ impl Hud {
             let (glyphs, adv) = self.layout(&name, px, weight);
             let text_x = x0 + cell + icon_gap;
             content_w = content_w.max(text_x + adv.ceil() as i32);
-            let count = r.count.map(|n| {
-                let (g, a) = self.layout(&format_thousands(n), count_px, Weight::Regular);
-                count_w = count_w.max(a.ceil() as i32);
-                (g, a)
-            });
+            let count = r
+                .count
+                .map(|n| self.layout(&format_thousands(n), count_px, Weight::Regular));
             let glyf = if r.up {
                 Glyf::Up
             } else if r.open {
@@ -2253,6 +2264,22 @@ mod tests {
             .render_tree(&counted, 15.0, 7, BG, 10_000, 0, None, TreeCounts::Trailing)
             .expect("renders");
         assert!(wc > w0 && wt > w0, "counts widen: {wc}/{wt} vs {w0}");
+        // The count column is floored at four digits, so a small count reserves
+        // the same width as a large one — no horizontal shift while clicking
+        // between folders whose counts differ (owner smoke, 2026-07-03).
+        let (_, wc_small, ..) = hud
+            .render_tree(
+                &[row(0, false, false, Some(5))],
+                15.0,
+                7,
+                BG,
+                10_000,
+                0,
+                None,
+                TreeCounts::Capsule,
+            )
+            .expect("renders");
+        assert_eq!(wc_small, wc, "1-digit and 4-digit counts share a width");
         // A collapsed-levels marker renders and is NOT a hit target; an up row is.
         let (_, _, _, hits) = tree(
             &hud,
