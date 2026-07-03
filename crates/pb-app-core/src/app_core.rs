@@ -196,6 +196,11 @@ pub struct AppCore {
     /// rebuild (delete-advance, recursive toggle) re-resolves the pin — and a
     /// genuinely new deck, which can't match, clears it.
     pub compare_pin_id: Option<String>,
+    /// A zoom/pan staged by `compare_jump`, consumed by the very next `view_for` so
+    /// the flip's FIRST presented frame already carries the view — presenting at the
+    /// reset (fit) view and re-imposing afterwards drew two frames and flashed the
+    /// incoming photo centered for one of them (owner-reported flicker).
+    pub compare_carry: Option<(f32, [f32; 2])>,
     /// Geometry generation; bumped on resize / fit toggle. Stale-epoch decodes are discarded
     /// so an old-size result can't land on screen.
     pub epoch: u64,

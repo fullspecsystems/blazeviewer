@@ -103,6 +103,7 @@ impl AppCore {
             compare_pin: None,
             compare_return: None,
             compare_pin_id: None,
+            compare_carry: None,
             epoch: 1,
             root: PathBuf::new(),
             scan_root: None,
@@ -1519,20 +1520,18 @@ impl AppCore {
         if self.displayed_item != self.target_item {
             return;
         }
-        let carry = self.compare_carry_view(item);
+        // Stage the carried zoom/pan for `view_for` to consume, so the flip's FIRST
+        // presented frame already has the view — one set_view + one draw. (The first
+        // cut presented at the reset view and re-imposed the carry afterwards: two
+        // draws, and the incoming photo flashed centered for a frame.)
+        self.compare_carry = self.compare_carry_view(item);
         self.stop_playback();
         self.playlist.jump_to(item);
         self.target_item = self.playlist.current();
-        if self.try_present_target() {
-            if let Some((zoom, pan)) = carry {
-                // `present_item` reset the view to fit — re-impose the carried
-                // zoom/pan (a second renderer set_view, still no decode/upload).
-                self.view.zoom = zoom;
-                self.view.pan = pan;
-                self.push_view();
-                self.draw();
-            }
-        }
+        self.try_present_target();
+        // Not consumed (a ring miss / failed target): drop it rather than let some
+        // later unrelated present inherit a stale view.
+        self.compare_carry = None;
         self.request_prefetch();
     }
 
@@ -2389,12 +2388,19 @@ impl AppCore {
     }
 
     /// Load the per-photo view state for `item`: rotation from the RAM override
-    /// map (upright if absent), zoom/pan reset to a fresh framing. Returns the
+    /// map (upright if absent), zoom/pan reset to a fresh framing — unless a compare
+    /// flip staged a carry (`compare_carry`), consumed here so the flip's first
+    /// frame lands already positioned (no reset-then-snap flicker). Returns the
     /// view to push to the renderer. (Scaling mode is global and left unchanged.)
     pub fn view_for(&mut self, item: usize) -> ViewTransform {
         self.view.rotation = self.rotations.get(&item).copied().unwrap_or_default();
-        self.view.zoom = 1.0;
-        self.view.pan = [0.0, 0.0];
+        if let Some((zoom, pan)) = self.compare_carry.take() {
+            self.view.zoom = zoom;
+            self.view.pan = pan;
+        } else {
+            self.view.zoom = 1.0;
+            self.view.pan = [0.0, 0.0];
+        }
         self.view
     }
 
@@ -4125,6 +4131,42 @@ mod tests {
         core.view.zoom = 1.0;
         core.view.pan = [0.0, 0.0];
         assert_eq!(core.compare_carry_view(0), None);
+    }
+
+    #[test]
+    fn compare_carry_is_staged_for_the_flips_first_frame_and_is_one_shot() {
+        // The owner-reported flicker: presenting at the reset view and re-imposing the
+        // carry afterwards flashed the incoming photo centered for one frame. The carry
+        // is now staged for `view_for` to consume, so the FIRST present lands
+        // positioned — and it must be one-shot, never leaking into a later present.
+        use crate::meta::PhotoMeta;
+        let meta = |w: u32, h: u32| PhotoMeta {
+            rel: String::new(),
+            w,
+            h,
+            codec: "PNG",
+            animated: None,
+        };
+        let mut core = compare_core(3);
+        core.meta_cache.insert(0, meta(100, 80));
+        core.meta_cache.insert(2, meta(100, 80));
+        core.dispatch_action(Action::CompareToggle); // pin = 0
+        core.failed.clear(); // cmp_0's launch decode failed; make the flip a clean MISS
+        settle_at(&mut core, 2);
+        core.view.zoom = 2.0;
+        core.view.pan = [5.0, 6.0];
+        core.dispatch_action(Action::CompareToggle); // flip stages the carry...
+                                                     // ...but headless the present missed (no ring): the stash must be dropped so a
+                                                     // later unrelated present resets instead of inheriting a stale view.
+        assert_eq!(core.compare_carry, None);
+        let v = core.view_for(2);
+        assert_eq!((v.zoom, v.pan), (1.0, [0.0, 0.0]));
+        // A staged carry is consumed by exactly ONE view_for (the flip's present).
+        core.compare_carry = Some((2.0, [5.0, 6.0]));
+        let v = core.view_for(0);
+        assert_eq!((v.zoom, v.pan), (2.0, [5.0, 6.0]), "first frame carries");
+        let v = core.view_for(0);
+        assert_eq!((v.zoom, v.pan), (1.0, [0.0, 0.0]), "the carry is one-shot");
     }
 
     #[test]

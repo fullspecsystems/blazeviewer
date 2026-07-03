@@ -417,6 +417,7 @@ impl App {
                 compare_pin: None,
                 compare_return: None,
                 compare_pin_id: None,
+                compare_carry: None,
                 epoch: 1,
                 root,
                 scan_root,
