@@ -421,14 +421,14 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
     // `apply_menu_to_native` drives enabled/checked from `MenuState`.
     let compare_pin = CheckMenuItem::with_id(
         ids::COMPARE_PIN,
-        &labeled(keymap, "Pin for Compare", Action::ComparePin),
+        labeled(keymap, "Pin for Compare", Action::ComparePin),
         false,
         false,
         None,
     );
     let compare_toggle = MenuItem::with_id(
         ids::COMPARE_TOGGLE,
-        &labeled(keymap, "Compare with Pinned", Action::CompareToggle),
+        labeled(keymap, "Compare with Pinned", Action::CompareToggle),
         false,
         None,
     );
