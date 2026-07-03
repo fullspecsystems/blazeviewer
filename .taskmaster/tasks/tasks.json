@@ -106,21 +106,19 @@
         ]
       },
       {
-        "id": 42,
-        "title": "macOS: closing in borderless fullscreen (F) restarts on the wrong monitor",
-        "description": "On macOS, quitting PhotoBlaze while in the borderless fullscreen speed-mode (F / Opt+Return, NOT native Spaces fullscreen) makes the next launch open on the wrong monitor. The fullscreen monitor choice / saved window geometry is not being restored to the display the user was actually on. FIXED 2026-07-03 (commit 9700c91), three cooperating defects on the Swift host: (1) launch-into-F ignored the remembered monitor (now places the window at the saved windowed frame before entering F, which also fixes the exit-F restore target); (2) mixed-DPI geometry restore divided by the launch screen scale (now per-screen hypothesis conversion); (3) the F toggle never persisted settings on the Swift host (the FFI SetWindowMode drain arm now saves, persist_prefs-gated; new unit test). REMAINING (status review): owner smoke on the real multi-monitor 1x/2x setup — quit in F on the non-main display, relaunch, confirm it opens fullscreen on that display; exit F and confirm the windowed frame restores to the remembered spot.",
-        "status": "review",
-        "priority": "medium",
-        "dependencies": [],
-        "details": "Reported by owner 2026-07-01 on a multi-display Mac. Likely suspects: (a) the borderless mode sizes/positions to event_loop.primary_monitor() instead of the monitor the window occupied when the fullscreen pref was saved (see the resumed() window-attrs path in crates/pb-app/src/main.rs, which uses primary_monitor for the decoration-less mode); (b) apply_window_mode / the SetWindowMode handler snapshots windowed geometry but the fullscreen launch path never re-targets the saved monitor. Fix should persist which display the fullscreen window was on (e.g. monitor position/id in Settings alongside the fullscreen flag + windowed geometry) and, on launch, pick the matching winit MonitorHandle when it still exists (fall back to primary when unplugged). Verify the Windows borderless path keeps its current behavior.",
-        "testStrategy": "Manual on a multi-display Mac: move the app to the secondary monitor, enter borderless fullscreen (F), quit (Esc/Cmd-Q), relaunch -> it must reopen fullscreen on the same (secondary) monitor; unplug that monitor and relaunch -> falls back to the primary without a crash. Unit: pure monitor-matching helper (saved position -> best MonitorHandle) if one is extracted.",
-        "subtasks": []
-      },
-      {
         "id": 43,
         "title": "Compare mode: view two photos side by side",
         "description": "Owner idea (2026-07-02, sparked by the accidental window-tab bar): compare two photos for culling. NOT wired today — the app is strictly single-engine (one AppCoreHandle/playlist/ring/renderer; a second window fights over it). Two designs to weigh: (a) true multi-window/tab = one engine per window + a SHARED decode pool seam + VRAM budget split + key-window input routing; (b) likely cheaper + closer to the culling workflow: a split-view compare mode in ONE window — two panes, one engine, two cursors into the same playlist, focus-pane keyboard nav. Prime-directive check: pane decode traffic must not degrade single-view fly speed.",
         "status": "pending",
+        "priority": "low",
+        "dependencies": [],
+        "subtasks": []
+      },
+      {
+        "id": 44,
+        "title": "AI image description (on-device / local models only)",
+        "description": "Describe the current image with a vision model, on demand. Two backends behind one seam: (1) macOS 27+ Foundation Models framework — image input (NSImage/CGImage/pixel buffer) to the on-device model, shipped with the OS, fully private; (2) a user-configured OpenAI-compatible local endpoint (LM Studio / llama.cpp server / Ollama) for Windows and power users — Qwen3-VL-8B or Qwen 3.6-27B class models run well on an RTX 5090 (32 GB). Design constraints (privacy ADR-018): NEVER cloud, NEVER automatic — on-demand only (P-to-play pattern: a rebindable key + menu item, inference off-thread), description is RAM-only and dropped on navigation/exit, no sidecars or caches. Endpoint URL is the only persisted config (settings.toml). Rendered in a HUD panel (and optionally spoken — the accessibility story). Prerequisite: pb-hud font-fallback cascade, since model output is arbitrary text (long sentences, possibly non-Latin) the single-font rasterizer can't draw.",
+        "status": "deferred",
         "priority": "low",
         "dependencies": [],
         "subtasks": []
