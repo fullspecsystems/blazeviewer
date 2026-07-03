@@ -2,14 +2,15 @@
 //! **clicking** each row opens and (where free) per-folder photo counts.
 //!
 //! Builds the [`FolderTreeModel`] the HUD rasterizes and the click handler
-//! consumes, anchored at **the root PhotoBlaze has open** (the opened folder /
-//! scan root / archive) — never above it: an "up to the parent" affordance row,
-//! the root heading, then **every folder at every level along the path** down
-//! to the current photo's folder, with the on-path folder expanding in place
-//! (the tree-view shape — so a recursive open that lands deep still leaves the
-//! root's other folders one click away), the current folder highlighted, and
-//! its children one level deeper. A path deeper than [`MAX_ANCESTORS`] + 1
-//! levels folds its shallow levels into one dim "…" marker row.
+//! consumes. For disk decks the display anchors one level **above** the opened
+//! root: the parent is the heading and the root sits expanded among its
+//! siblings — so clicking a sibling (which re-roots the deck) still leaves the
+//! new root's neighbours one click away — then **every folder at every level
+//! along the path** down to the current photo's folder, with the on-path folder
+//! expanding in place, the current folder highlighted, and its children one
+//! level deeper. The "up" affordance row exits one more level. A path deeper
+//! than [`MAX_ANCESTORS`] + 1 levels folds its shallow levels into one dim "…"
+//! marker row.
 //!
 //! Two derivations, one shape:
 //! - **Disk** ([`rows_from_disk`]): the path levels come from the path
@@ -321,15 +322,16 @@ pub fn rows_from_paths(root: &Path, dir: &Path, counts: &HashMap<PathBuf, u64>) 
     rows_from_listings(root, dir, names_under, Some(counts))
 }
 
-/// Build the tree for a real on-disk photo whose containing folder is `dir`,
-/// anchored at `root` (the folder PhotoBlaze opened — the tree never walks
-/// above it; the "up" row is the one deliberate exit): the ancestor chain is
-/// `dir`'s components below `root` (no I/O), siblings come from one `read_dir`
-/// on `dir`'s parent, children from one on `dir` itself. When `dir` *is* the
-/// root (a plain non-recursive open, or an empty deck) — or isn't under it (an
-/// explicit file list) — the tree is `dir` + its subfolders. Every row is
-/// clickable (`targets` = the folder's absolute path); `counts` decorates rows
-/// where the caller has them (see [`disk_counts`]).
+/// Build the tree for a real on-disk photo whose containing folder is `dir`:
+/// the display is anchored one level **above** the opened `root` — the parent
+/// is the heading and the root sits expanded among its siblings, so clicking a
+/// sibling (which re-roots the deck at it) still leaves the *new* root's
+/// neighbours one click away. Below the root, every level down to `dir` lists
+/// all its folders with the on-path one expanding in place. Levels come from
+/// one `read_dir` each; the "up" row exits one more level (the grandparent).
+/// Every row is clickable (`targets` = the folder's absolute path); `counts`
+/// decorates rows where the caller has them (see [`disk_counts`]) — the
+/// parent-level rows sit outside the deck, so they carry none.
 pub fn rows_from_disk(
     root: &Path,
     dir: &Path,
@@ -360,6 +362,23 @@ fn rows_from_listings(
     } else {
         root
     };
+    // Hoist the display one level above the deck root (owner catch, 2026-07-03):
+    // clicking a sibling re-roots the deck at it, and without the parent's level
+    // the NEW root's siblings vanished — adjacent hops needed a round trip
+    // through "up" (which re-opens the parent and lands deep again). With the
+    // parent as the heading and the root expanded among its siblings, adjacent
+    // folders stay one click away after every hop. Deck semantics are untouched;
+    // sibling rows are outside the deck, so they simply carry no counts. The up
+    // row then exits to the grandparent.
+    let (head, chain): (PathBuf, Vec<String>) =
+        match anchor.parent().filter(|p| !p.as_os_str().is_empty()) {
+            Some(par) => (
+                par.to_path_buf(),
+                std::iter::once(name_of(anchor)).chain(chain).collect(),
+            ),
+            None => (anchor.to_path_buf(), chain),
+        };
+    let anchor = head.as_path();
     let k = chain.len();
     // The directory each level lists (level i = folders under the prefix of length i).
     let level_dirs: Vec<PathBuf> = (0..=k)
@@ -508,18 +527,25 @@ mod tests {
         }
         let m = rows_from_disk(&root, &cur, None);
         std::fs::remove_dir_all(&base).unwrap();
-        // Up row first (the base dir), then root → chain → siblings/children.
+        // Display hoisted one level: heading = the root's PARENT, with the root
+        // expanded among its siblings (adjacent hops stay one click away after a
+        // re-root); the up row exits to the grandparent.
         assert!(m.rows[0].up, "the up affordance leads");
-        assert_eq!(m.targets[0].as_deref(), Some(base.as_path()));
+        assert_eq!(m.targets[0].as_deref(), base.parent());
+        assert!(
+            m.rows[1].name.starts_with("pb-ftree-"),
+            "heading = the root's parent"
+        );
+        assert_eq!(m.targets[1].as_deref(), Some(base.as_path()));
         assert_eq!(
-            names(&m.rows)[1..],
+            names(&m.rows)[2..],
             vec![
-                (0, "Photos", true, false),
-                (1, "parent", true, false),
-                (2, "current", true, true),
-                (3, "kid", false, false),
-                (2, "sib-a", false, false),
-                (2, "sib-b", false, false),
+                (1, "Photos", true, false),
+                (2, "parent", true, false),
+                (3, "current", true, true),
+                (4, "kid", false, false),
+                (3, "sib-a", false, false),
+                (3, "sib-b", false, false),
             ]
         );
         // Every folder row opens its absolute path.
@@ -532,7 +558,7 @@ mod tests {
             root.join("parent/sib-b"),
         ];
         for (i, want) in expect.iter().enumerate() {
-            assert_eq!(m.targets[i + 1].as_deref(), Some(want.as_path()), "row {i}");
+            assert_eq!(m.targets[i + 2].as_deref(), Some(want.as_path()), "row {i}");
         }
     }
 
@@ -541,18 +567,24 @@ mod tests {
         let base = std::env::temp_dir().join(format!("pb-ftree-root-{}", std::process::id()));
         let root = base.join("Trips");
         std::fs::create_dir_all(root.join("inner")).unwrap();
-        // dir == root: the tree never walks above what PhotoBlaze opened — except
-        // the explicit up affordance.
+        // dir == root: the display still hoists to the parent, so the opened root
+        // sits current among its siblings with its subfolders below.
         let m = rows_from_disk(&root, &root, None);
         std::fs::remove_dir_all(&base).unwrap();
-        assert_eq!(m.rows.len(), 3);
-        assert!(m.rows[0].up);
-        assert_eq!(m.targets[0].as_deref(), Some(base.as_path()));
-        assert!(m.rows[1].current && m.rows[1].open, "root is current");
-        assert_eq!(m.targets[1].as_deref(), Some(root.as_path()));
-        assert_eq!(m.rows[2].name, "inner");
+        assert_eq!(m.rows.len(), 4);
+        assert!(m.rows[0].up, "up exits to the grandparent");
+        assert_eq!(m.targets[0].as_deref(), base.parent());
+        assert_eq!(m.targets[1].as_deref(), Some(base.as_path()));
+        assert!(
+            m.rows[2].current && m.rows[2].open,
+            "the opened root is current"
+        );
+        assert_eq!(m.rows[2].name, "Trips");
+        assert_eq!(m.targets[2].as_deref(), Some(root.as_path()));
+        assert_eq!(m.rows[3].name, "inner");
+        assert_eq!(m.rows[3].depth, 2);
         let inner = root.join("inner");
-        assert_eq!(m.targets[2].as_deref(), Some(inner.as_path()));
+        assert_eq!(m.targets[3].as_deref(), Some(inner.as_path()));
     }
 
     #[test]
@@ -591,20 +623,25 @@ mod tests {
         let paths = ["/r/a/1.jpg", "/r/a/b/2.jpg", "/r/c/3.jpg"].map(PathBuf::from);
         let map = disk_counts(paths.iter().map(|p| p.as_path()), &root);
         let m = rows_from_paths(&root, Path::new("/r/a"), &map);
-        // Up row (the filesystem root), then r → siblings (a current, c) → child b,
-        // all with under-prefix counts, no read_dir anywhere.
-        assert!(m.rows[0].up);
+        // Hoisted heading = "/" (the root's parent — no up row above a filesystem
+        // root), then r → siblings (a current, c) → child b, with under-prefix
+        // counts where the deck knows them, no read_dir anywhere.
+        assert!(
+            !m.rows.iter().any(|r| r.up),
+            "a filesystem-root heading has no up row"
+        );
         assert_eq!(
-            names(&m.rows)[1..],
+            names(&m.rows),
             vec![
-                (0, "r", true, false),
-                (1, "a", true, true),
-                (2, "b", false, false),
-                (1, "c", false, false),
+                (0, "/", true, false),
+                (1, "r", true, false),
+                (2, "a", true, true),
+                (3, "b", false, false),
+                (2, "c", false, false),
             ]
         );
-        let counts: Vec<Option<u64>> = m.rows[1..].iter().map(|r| r.count).collect();
-        assert_eq!(counts, vec![Some(3), Some(2), Some(1), Some(1)]);
+        let counts: Vec<Option<u64>> = m.rows.iter().map(|r| r.count).collect();
+        assert_eq!(counts, vec![None, Some(3), Some(2), Some(1), Some(1)]);
         let b = PathBuf::from("/r/a/b");
         assert_eq!(m.targets[3].as_deref(), Some(b.as_path()));
     }

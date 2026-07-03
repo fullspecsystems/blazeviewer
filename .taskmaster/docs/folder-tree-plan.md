@@ -129,6 +129,13 @@ property tests unaffected — nothing in `pb-core` changes in this phase).
 > zero I/O. Also from that smoke: indent hairlines removed (intersected the
 > badges), and the capsule badges went contrasty (theme *shadow* fill at 0.85
 > — near-black pill on dark, white on light — with full-strength digits).
+> Two follow-on owner smokes the same day: the paging markers now lead with
+> dim FA **caret-up/-down** glyphs (clickable + directional where "…" read as
+> passive; the non-clickable ancestor-collapse row keeps its ellipsis), and
+> the disk display **hoists one level above the deck root** — the parent is
+> the heading with the root expanded among its siblings, so clicking a
+> sibling (which re-roots the deck) still leaves the new root's neighbours
+> one click away; the up row exits to the grandparent.
 
 ## Phase 2 — clickable navigation (owner-approved design, 2026-07-03)
 
