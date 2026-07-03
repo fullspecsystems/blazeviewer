@@ -102,7 +102,7 @@ pub mod tokens {
     /// deliberately NOT a capsule. Sits near the nominal ⅓ (0.40 probe-matched the
     /// reference, but read a touch large in situ; the n = 2.2 gauge in
     /// `corner_distance` cuts slightly less than a circle at equal radius).
-    pub const BUTTON_RADIUS_OF_HEIGHT: f32 = 0.34;
+    pub const BUTTON_RADIUS_OF_HEIGHT: f32 = 0.33;
     /// Button border thickness (floored at 1px).
     pub const BUTTON_BORDER: f32 = 0.1;
     /// Button background fill alpha (a barely-there wash).
