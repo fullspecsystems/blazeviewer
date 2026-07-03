@@ -355,6 +355,17 @@
             "status": "pending"
           }
         ]
+      },
+      {
+        "id": 48,
+        "title": "macOS: Cmd+W leaves the app in a dead state (window closed, Open/Open Folder do nothing)",
+        "description": "Cmd+W closes the WindowGroup's only window (default SwiftUI behavior: app stays running, no applicationShouldTerminateAfterLastWindowClosed override in PhotoBlazeMacApp.swift). The app is then stuck: no visible window, and File > Open / Open Folder (and the application(_:open:) Finder-open delegate) don't bring a window back, because ContentView's .onAppear wiring (model.installMenuBarIfNeeded, openLaunchPathIfAny, openSettingsAction, the AppCore FFI bridge) never re-runs. Reopening from the Dock likely has the same problem (no applicationShouldHandleReopen override). Two candidate fixes: (1) mac-idiomatic — implement applicationShouldHandleReopen(hasVisibleWindows:) + make Open/Open Folder recreate the window if closed, matching apps like Preview/TextEdit; (2) simpler — override applicationShouldTerminateAfterLastWindowClosed to return true, so Cmd+W becomes equivalent to Esc (same RAM-teardown quit path already implemented and tested, see the no-trace-on-teardown work). Leaning toward (2): PhotoBlaze is explicitly a single-window app by design (no multi-window command anywhere), and (1) requires safely tearing down/recreating the AppCore FFI bridge + Metal canvas mid-process, an untested path in the same fragile window-lifecycle territory as the argv[1] windowless-launch bug already chased once (see PhotoBlazeMacApp.swift's launch-gotcha comment).",
+        "status": "done",
+        "priority": "medium",
+        "dependencies": [],
+        "details": "Files: mac/Sources/PhotoBlazeMac/PhotoBlazeMacApp.swift (AppDelegate, WindowGroup scene), CoreModel.swift (model.onAppear wiring, openLaunchPathIfAny). Owner decision needed on (1) vs (2) before implementing — see task description for the tradeoff. If (2) is chosen: add `func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }` to AppDelegate and verify it routes through the same clean-teardown path as Esc (no disk writes, RAM caches dropped). If (1) is chosen: implement applicationShouldHandleReopen for the Dock-icon case, and make the Open/Open Folder menu commands + application(_:open:) recreate the WindowGroup scene when no window exists, re-running the .onAppear wiring exactly once.",
+        "testStrategy": "Manual on the physical console (per owner-display-setup memory): launch PhotoBlaze, hit Cmd+W, then try File > Open, Open Folder, and clicking the Dock icon. Confirm the chosen behavior (app quits cleanly, or a window reliably reopens with menu/FFI wiring intact) with no leftover process or dead window state.",
+        "subtasks": []
       }
     ]
   }

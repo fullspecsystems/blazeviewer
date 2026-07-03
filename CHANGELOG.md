@@ -95,6 +95,11 @@ with any pre-release suffix carried only by the tag.
   render in their final position from the start.
 - **macOS: ⌘W closes the frontmost window again** (Settings, About, or the viewer) — a
   standard Close Window item is back in the File menu.
+- **macOS: closing the last window now quits the app.** ⌘W on the viewer used to leave
+  PhotoBlaze running with no window and no way to get one back — File ▸ Open and
+  Open Folder silently did nothing. PhotoBlaze is a single-window app, so closing that
+  window now exits cleanly (the same no-trace teardown as Esc); ⌘W on Settings or About
+  still just closes that window.
 - **macOS: quitting in borderless fullscreen no longer restarts the app on the wrong
   monitor.** Launching back into fullscreen now lands on the display you were using, exiting
   fullscreen restores your last windowed spot (not a default frame), and the fullscreen state

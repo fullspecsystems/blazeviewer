@@ -38,6 +38,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate()
     }
 
+    /// PhotoBlaze is a single-window app by design (task #48, owner call): once the last
+    /// window closes there is nothing left to interact with — ContentView's `.onAppear`
+    /// wiring (menu bar, FFI bridge, open handlers) never re-runs, so the alternative is
+    /// a dead windowless process where File ▸ Open silently does nothing. Quitting routes
+    /// through the exact `NSApp.terminate` path Esc already uses: RAM caches drop with the
+    /// process, no flush-to-disk step exists (the no-trace guarantee). ⌘W on Settings or
+    /// About while the viewer is open still just closes that window — this only fires for
+    /// the *last* one.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        true
+    }
+
     func application(_ application: NSApplication, open urls: [URL]) {
         MainActor.assumeIsolated {
             if let handler = Self.openHandler {
