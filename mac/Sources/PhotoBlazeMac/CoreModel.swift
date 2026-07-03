@@ -436,10 +436,12 @@ final class CoreModel {
     }
 
     /// Settings Save: validate/clamp Rust-side and apply + persist through the core.
+    /// A saved keymap re-labels the menu bar's shortcut badges too.
     func settingsSave(_ form: SettingsFormFfi) {
         core.submit_settings(form)
         kick()
         drainEffects()
+        menuBar?.refreshShortcutBadges()
     }
 
     /// Settings Cancel (buttons or the window's close button) — discard the draft

@@ -20,6 +20,23 @@ final class MenuBar: NSObject {
         self.model = model
         super.init()
         NSApp.mainMenu = build()
+        refreshShortcutBadges()
+    }
+
+    /// Right-aligned shortcut hints for the bare-key commands (Space, R, `[`, …) —
+    /// egui-menu parity, where every item shows its key. These keys belong to the
+    /// viewer's keymap, so they must NOT be NSMenu key-equivalents (the menu would
+    /// steal them from hold-to-fly, and would fire while another window is key); an
+    /// `NSMenuItemBadge` renders the hint without registering anything. Reads the
+    /// LIVE keymap's primary slot (the same display the Shortcuts editor shows), so a
+    /// rebind updates the menu bar too — called again after a Settings save.
+    func refreshShortcutBadges() {
+        guard let model else { return }
+        for (id, item) in items {
+            guard item.keyEquivalent.isEmpty else { continue } // ⌘-items keep the native column
+            let hint = model.keymapSlotDisplay(id: id, slot: 0)
+            item.badge = hint.isEmpty ? nil : NSMenuItemBadge(string: hint)
+        }
     }
 
     @objc private func fire(_ sender: NSMenuItem) {
@@ -139,6 +156,17 @@ final class MenuBar: NSObject {
             item("zoom_out", "Zoom Out"),
             sep(),
             item("fullscreen", "Fullscreen"),
+            // Native (Spaces) fullscreen — the ⌃⌘F / green-button behavior, a deliberate
+            // alternative to the borderless speed mode above (winit-menu parity). AppKit
+            // manages the Enter/Exit title itself for toggleFullScreen: items, and
+            // providing one stops it auto-injecting a duplicate at the end of View.
+            {
+                let fs = system(
+                    "Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), key: "f"
+                )
+                fs.keyEquivalentModifierMask = [.command, .control]
+                return fs
+            }(),
             item("recursive", "Recursive (This Folder)"),
             item("slideshow", "Slideshow"),
             item("slideshow_faster", "Slideshow Faster"),

@@ -29,6 +29,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        // A single-window viewer: no window tabs — this also stops AppKit auto-injecting
+        // "Show Tab Bar"/"Show All Tabs" atop our View menu (winit-menu parity).
+        NSWindow.allowsAutomaticWindowTabbing = false
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
