@@ -692,7 +692,13 @@ final class CoreModel {
         layer.colorspace = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)
         layer.wantsExtendedDynamicRangeContent = true
         let screen = hostWindow?.screen ?? NSScreen.main
-        let headroom = Float(screen?.maximumExtendedDynamicRangeColorComponentValue ?? 1.0)
+        // POTENTIAL, not current: maximumExtendedDynamicRangeColorComponentValue sits at
+        // ~1.0 until EDR content is already on screen (it ramps up after), so reading it
+        // at attach rolled every highlight off toward SDR — the owner-reported "old
+        // build showed brighter highlights" regression vs winit's hdr_surface.rs, which
+        // reads the panel's potential capability. Match it.
+        let headroom = Float(
+            screen?.maximumPotentialExtendedDynamicRangeColorComponentValue ?? 1.0)
         core.set_edr_headroom(max(1.0, headroom))
     }
 
