@@ -151,6 +151,21 @@ final class MetalCanvasNSView: NSView {
         onResize?(pixelSize(at: scale), scale)
     }
 
+    /// The backing scale changed with no bounds change — a bare scale flip does NOT
+    /// re-run `layout()`, so this is the only hook that catches it. Two real cases:
+    /// the launch race where attach reads the window's scale before it settles on its
+    /// final screen (the owner-reported blurry / unclickable Open buttons, stuck until
+    /// a manual resize forced layout), and dragging the window between 1x and 2x
+    /// displays. Re-reporting through the standard resize path re-sizes the surface,
+    /// re-rasterizes the overlays, and re-aligns the hit-test coordinates.
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        guard attached else { return }
+        let scale = backingScale
+        layer?.contentsScale = scale
+        onResize?(pixelSize(at: scale), scale)
+    }
+
     /// Called by the representable's dismantle: drop the Rust renderer BEFORE this view
     /// (and its layer) dies — the FFI layer-lifetime contract. The pump goes first (it
     /// must not fire into a detached core).
