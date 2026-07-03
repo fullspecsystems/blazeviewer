@@ -330,13 +330,19 @@ final class CoreModel {
         }
     }
 
-    /// The delete Confirm (`ShowDialog("confirm")`): a native warning sheet, Delete as the
-    /// destructive default, Cancel on Esc. The answer returns via `dialog_confirm_answered`
-    /// and the core runs (or forgets) the armed permanent delete.
+    /// The delete Confirm (`ShowDialog("confirm")`), styled for Finder parity (owner
+    /// request): `.critical` = the caution triangle badged with the app icon, the
+    /// message's first line as the bold headline and the rest as the informative text,
+    /// destructive Delete + Cancel on Esc. The answer returns via
+    /// `dialog_confirm_answered` and the core runs (or forgets) the armed delete.
     private func presentConfirmAlert(_ message: String) {
         let alert = NSAlert()
-        alert.messageText = message
-        alert.alertStyle = .warning
+        let lines = message.split(separator: "\n", maxSplits: 1)
+        alert.messageText = lines.first.map(String.init) ?? message
+        if lines.count > 1 {
+            alert.informativeText = String(lines[1])
+        }
+        alert.alertStyle = .critical
         alert.addButton(withTitle: "Delete").hasDestructiveAction = true
         alert.addButton(withTitle: "Cancel")
         presentAlert(alert) { [weak self] response in

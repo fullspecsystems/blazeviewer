@@ -692,7 +692,13 @@ impl AppCoreHandle {
         }
         let name = engine::file_name_of(self.core.source.name(item));
         self.core.pending_confirm_delete = Some(item);
-        self.dialog_message = format!("Permanently delete \u{2018}{name}\u{2019}?");
+        // Finder's exact delete-immediately wording (owner request): headline on the
+        // first line, the informative sentence after the newline — the host splits
+        // them into NSAlert's messageText/informativeText.
+        self.dialog_message = format!(
+            "Are you sure you want to delete \u{201c}{name}\u{201d}?\n\
+             This item will be deleted immediately. You can\u{2019}t undo this action."
+        );
         self.core.effects.push(contract::CoreEffect::ShowDialog(
             contract::DialogKind::Confirm,
         ));
