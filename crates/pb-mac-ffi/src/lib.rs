@@ -369,6 +369,56 @@ impl AppCoreHandle {
         }
     }
 
+    // ---- Startup window state + geometry persistence (finalize item 2): the core owns
+    // the debounced save (`geometry_save_at` → tick 4e flushes `settings.save()`); the
+    // host captures/restores real frames, in winit's stored convention (PHYSICAL px,
+    // top-left virtual-desktop origin — the same settings.toml the egui build writes).
+
+    /// Resolve the startup window mode from settings (`StartupMode` + the remembered
+    /// last mode) — call once right after attach. `true` = enter the borderless speed
+    /// mode; the core's `windowed` mirror is set here WITHOUT re-saving settings (this
+    /// restores state, unlike the F toggle which changes it).
+    fn startup_fullscreen(&mut self) -> bool {
+        let fs = self.core.settings.start_fullscreen();
+        self.core.windowed = !fs;
+        fs
+    }
+
+    /// The saved windowed geometry (`present == false` when none was ever saved).
+    fn saved_geometry(&self) -> ffi::WindowGeometryFfi {
+        match self.core.settings.window {
+            Some(g) => ffi::WindowGeometryFfi {
+                present: true,
+                x: g.x,
+                y: g.y,
+                w: g.w,
+                h: g.h,
+            },
+            None => ffi::WindowGeometryFfi {
+                present: false,
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            },
+        }
+    }
+
+    /// The host's Moved/Resized tracker — winit's `track_windowed_geometry` mirrored:
+    /// refresh the remembered geometry and arm the debounced save (the core tick
+    /// flushes it once the user stops; a drag isn't a write storm). No-op in
+    /// fullscreen — that geometry is the monitor, not a user-chosen spot.
+    fn note_window_geometry(&mut self, x: i32, y: i32, w: u32, h: u32) {
+        if !self.core.windowed {
+            return;
+        }
+        let g = pb_app_core::settings::WindowGeometry { x, y, w, h };
+        if self.core.settings.window != Some(g) {
+            self.core.settings.window = Some(g);
+            self.core.geometry_save_at = Some(Instant::now() + std::time::Duration::from_millis(500));
+        }
+    }
+
     // ---- The NS2 dialog seam: `ShowDialog`/`CloseDialog`/`SetDialogChecking` effects out
     // (with the text payload stashed — see `dialog_message`), `DialogResolved` results in.
     // Each entry point maps one user gesture in a native dialog to the shell-neutral
@@ -1489,6 +1539,17 @@ mod ffi {
         Other,
     }
 
+    // The saved windowed geometry (settings.window): physical px, top-left
+    // virtual-desktop origin (winit's convention — shared with the egui build's writes).
+    #[swift_bridge(swift_repr = "struct")]
+    struct WindowGeometryFfi {
+        present: bool,
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+    }
+
     // A live progress snapshot for the shown dialog — poll via dialog_progress() each
     // pump while a Loading (fraction 0..1) or Scanning (found + current_dir) sheet is up.
     #[swift_bridge(swift_repr = "struct")]
@@ -1628,6 +1689,11 @@ mod ffi {
         fn keymap_reset_defaults(&mut self);
         fn keymap_is_dirty(&self) -> bool;
 
+        // Startup window state + geometry persistence (finalize item 2).
+        fn startup_fullscreen(&mut self) -> bool;
+        fn saved_geometry(&self) -> WindowGeometryFfi;
+        fn note_window_geometry(&mut self, x: i32, y: i32, w: u32, h: u32);
+
         // The canvas surface (NS1 item 2). `layer_ptr` = the retained CAMetalLayer's
         // pointer bits (swift-bridge has no raw-pointer type; usize crosses as UInt).
         fn attach_layer(&mut self, layer_ptr: usize, width: u32, height: u32, scale: f32);
@@ -1748,6 +1814,37 @@ mod tests {
     /// NS2: DeletePermanent is intercepted Rust-side — it arms the pending item and opens
     /// the confirm dialog (question carries the file name); No keeps the file, Yes runs the
     /// permanent delete. The whole loop through `handle_dialog_resolved`, no Swift.
+    #[test]
+    fn startup_mode_and_geometry_notes_are_honored() {
+        // ⚠ This test must never tick past the 500 ms debounce — the core's tick 4e
+        // would flush settings.save() to the user's REAL settings.toml.
+        let mut h = AppCoreHandle::new(800, 600, 1.0);
+
+        // Remember + last-mode-fullscreen → start fullscreen; the core mirror flips
+        // without a settings write.
+        h.core.settings.fullscreen = true;
+        h.core.settings.startup_mode = pb_app_core::settings::StartupMode::Remember;
+        assert!(h.startup_fullscreen());
+        assert!(!h.core.windowed);
+
+        // Fullscreen → geometry notes are ignored (the monitor isn't a user spot).
+        // (new_host loaded the REAL settings.toml, which may carry a saved geometry —
+        // clear it so the assertion tests the note, not the user's config.)
+        h.core.settings.window = None;
+        h.note_window_geometry(1, 2, 300, 200);
+        assert!(h.core.settings.window.is_none());
+
+        // Windowed → the note lands + arms the debounced save.
+        h.core.windowed = true;
+        h.note_window_geometry(10, 20, 800, 600);
+        let g = h.core.settings.window.expect("geometry noted");
+        assert_eq!((g.x, g.y, g.w, g.h), (10, 20, 800, 600));
+        assert!(h.core.geometry_save_at.is_some(), "debounced save armed");
+        let out = h.saved_geometry();
+        assert!(out.present);
+        assert_eq!((out.x, out.y, out.w, out.h), (10, 20, 800, 600));
+    }
+
     #[test]
     fn copy_image_details_lands_exif_text_on_the_clipboard_seam() {
         // Owner report "doesn't seem to be implemented" — prove the whole chain:

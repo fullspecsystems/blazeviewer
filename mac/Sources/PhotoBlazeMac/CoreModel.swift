@@ -590,6 +590,75 @@ final class CoreModel {
         core.render()
         log("canvas attached (\(Int(pixelSize.width))×\(Int(pixelSize.height)) @\(scale)x)")
         drainEffects()
+        applyStartupWindowState()
+    }
+
+    // MARK: - Startup window state + geometry persistence (finalize item 2)
+
+    /// Honor the Startup setting (Fullscreen / Windowed / Remember) and the remembered
+    /// windowed geometry — the settings the egui build honors that were dead here.
+    /// SwiftUI applies its own frame restoration during launch layout (the forensics
+    /// trace shows programmatic resizes right after attach), so the restore is applied
+    /// at attach AND re-asserted once after launch settles (skipped if the user is
+    /// already interacting).
+    private func applyStartupWindowState() {
+        guard let window = hostWindow else { return }
+        window.isRestorable = false // settings.toml is the restorer here, not Cocoa
+        if core.startup_fullscreen() {
+            setWindowMode(fullscreen: true)
+            return
+        }
+        guard let frame = savedWindowFrame() else { return }
+        window.setFrame(frame, display: true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            guard let self, let window = self.hostWindow,
+                  !self.speedModeFullscreen,
+                  NSEvent.pressedMouseButtons == 0,
+                  window.frame != frame
+            else { return }
+            window.setFrame(frame, display: true) // SwiftUI's launch layout clobbered it
+        }
+    }
+
+    /// The saved geometry as an AppKit frame, or nil when absent / not meaningfully on
+    /// any connected screen. Stored values use winit's convention (physical px,
+    /// top-left virtual-desktop origin — shared with the egui build); AppKit wants
+    /// points with a bottom-left origin relative to the primary screen.
+    private func savedWindowFrame() -> NSRect? {
+        guard let window = hostWindow else { return nil }
+        let g = core.saved_geometry()
+        guard g.present else { return nil }
+        let scale = window.backingScaleFactor
+        let primaryTop = NSScreen.screens.first?.frame.maxY ?? 0
+        let size = NSSize(width: CGFloat(g.w) / scale, height: CGFloat(g.h) / scale)
+        let origin = NSPoint(
+            x: CGFloat(g.x) / scale,
+            y: primaryTop - CGFloat(g.y) / scale - size.height
+        )
+        let frame = NSRect(origin: origin, size: size)
+        // Only restore a frame meaningfully visible on a connected screen (the
+        // geometry_on_screen intent, evaluated in AppKit space).
+        let visible = NSScreen.screens.contains { screen in
+            let overlap = screen.visibleFrame.intersection(frame)
+            return overlap.width >= 100 && overlap.height >= 40
+        }
+        return visible ? frame : nil
+    }
+
+    /// Window moved/resized: refresh the remembered geometry (winit's
+    /// `track_windowed_geometry` — the core dedupes and owns the debounced save).
+    private func noteWindowGeometry() {
+        guard !speedModeFullscreen, let window = hostWindow else { return }
+        let scale = window.backingScaleFactor
+        let primaryTop = NSScreen.screens.first?.frame.maxY ?? 0
+        let f = window.frame
+        core.note_window_geometry(
+            Int32((f.minX * scale).rounded()),
+            Int32(((primaryTop - f.maxY) * scale).rounded()),
+            UInt32((f.width * scale).rounded()),
+            UInt32((f.height * scale).rounded())
+        )
+        kick() // the core tick flushes the debounced save once the user stops
     }
 
     func canvasResized(pixelSize: CGSize, scale: CGFloat) {
@@ -814,6 +883,7 @@ final class CoreModel {
 
     @ObservationIgnored private var screenChangeObserver: NSObjectProtocol?
     @ObservationIgnored private var screenParamsObserver: NSObjectProtocol?
+    @ObservationIgnored private var geometryObservers: [NSObjectProtocol] = []
     @ObservationIgnored private var dragSettleTimer: Timer?
 
     /// Clamp-on-screen-change: dragging the window from a wide monitor to a narrower one
@@ -837,6 +907,10 @@ final class CoreModel {
             NotificationCenter.default.removeObserver(old)
             screenParamsObserver = nil
         }
+        for old in geometryObservers {
+            NotificationCenter.default.removeObserver(old)
+        }
+        geometryObservers.removeAll()
         guard let window = hostWindow else { return }
         screenChangeObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didChangeScreenNotification, object: window, queue: .main
@@ -855,6 +929,15 @@ final class CoreModel {
             object: nil, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshEDR() }
+        }
+        // Remember the windowed frame across moves/resizes (#1 — the debounced save
+        // lives in the core; a drag is not a write storm).
+        for name in [NSWindow.didMoveNotification, NSWindow.didResizeNotification] {
+            geometryObservers.append(NotificationCenter.default.addObserver(
+                forName: name, object: window, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.noteWindowGeometry() }
+            })
         }
         // DEBUG forensics for the owner-reported cross-monitor size weirdness: log every
         // PROGRAMMATIC resize (a hand drag has inLiveResize == true — skip those). Our
