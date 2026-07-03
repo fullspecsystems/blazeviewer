@@ -61,6 +61,13 @@ jobs:
       VCPKG_ROOT: C:\vcpkg-pb
     steps:
       - uses: actions/checkout@v4
+      # Self-hosted Windows: `shell: bash` must resolve to Git Bash. Without this,
+      # the WindowsApps WSL `bash.EXE` shim wins the PATH lookup and chokes on the
+      # runner's Windows-style temp-script paths. Prepending via GITHUB_PATH scopes
+      # the fix to this job (and is a no-op on hosted runners).
+      - name: Prefer Git Bash for shell:bash steps
+        shell: pwsh
+        run: Add-Content $env:GITHUB_PATH "C:\Program Files\Git\bin"
       - name: Install Rust (stable + rustfmt + clippy)
         uses: dtolnay/rust-toolchain@stable
         with:
