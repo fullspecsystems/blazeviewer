@@ -107,45 +107,79 @@ visually distinct, for both a real directory and a photo opened from inside a
 `.zip`, and ⇧F/Esc closes it. No regressions to nav/prefetch (existing
 property tests unaffected — nothing in `pb-core` changes in this phase).
 
-## Phase 2 — interactive selection (follow-up, not this pass)
+## Phase 2 — clickable navigation (owner-approved design, 2026-07-03)
 
-- **Highlight cursor:** ↑/↓ moves a highlighted index within the open sibling
-  list (RAM-only, part of `folder_tree_cache`, not `pb-core::Playlist`).
-- **Commit:** Enter / → on the highlighted folder re-opens into it — reuses
-  the existing `open::plan` / `Action::OpenFolder` plumbing (entering a
-  subfolder is "open with a new root," which the app can already do from the
-  Open dialog), so `scan.rs`/`Source::Scan` need no new variant for the common
-  case.
-- **Up a level:** Cmd+↑ (macOS) / Alt+↑ (Windows — matches Explorer's existing
-  "up one level" idiom; do **not** use Ctrl+↑, it isn't an established Windows
-  convention) navigates to the parent's sibling list.
-- **Archive parity:** entering a "folder" inside a `.zip`/`.7z` re-scopes the
-  view to that path prefix within the same archive source — no re-open of the
-  archive itself, no disk I/O.
-- **Open questions for phase 2 (owner input needed):**
-  - Does entering a folder rebuild the *whole* playlist scoped to that
-    folder (losing recursive-across-siblings browsing), or does it just move
-    the "current position" within an already-recursive scan? These have very
-    different `pb-core`/`scan.rs` implications and should be decided with
-    real usage data from phase 1, not guessed now.
-  - Multi-level tree (grandparent/grandchild) vs. single-level "current +
-    siblings" — start single-level; expand only if phase-1 usage shows it's
-    needed.
-  - Should the overlay remember scroll/expand position across toggles within
-    a session (RAM only) — likely yes, trivial, but not required for phase 1.
+Phase 1's "no mouse in the overlay" assumption is obsolete: the scan chip's
+Cancel button and the open-screen buttons established the full interactive-
+overlay pattern (bitmap-internal rects from the rasterizer, on-screen rects
+derived from the live window at hit-test time, hover re-rasterizing only on
+enter/leave, `PointerMoved` + the shells' mouse-left ladders, pointer cursor
+via `refresh_cursor`). Phase 2 rides that pattern; keyboard *selection*
+(↑/↓/Enter) is deferred — arrows pan, and re-purposing them needs a focus-mode
+design that ⌘-chords make unnecessary for now.
 
-## Non-goals (v1)
+**Decisions (owner, 2026-07-03):**
+- **Click = full Open Folder** (new root, new scan, recursive per the current
+  setting) — not a position-move within the existing deck. Single click, no
+  selection state. The tree stays open across the open (the signature-gated
+  rebuild re-roots it), so it behaves like a navigator.
+- **Hover highlight** on clickable rows: a lighter sibling of the current-row
+  band (theme-relative — lands on top of #46's `Theme` roles), plus the
+  pointer cursor via the existing `refresh_cursor` over-button set.
+- **"Up" row above the root** — the parent folder's *real name* (not `..`)
+  with the FA `folder-arrow-up` glyph (vendored), only when the root has a
+  parent. Keeps the invariant "every row is a folder; clicking opens it."
+- **"… n more" windowing markers are clickable — they page the window** (an
+  offset in the panel state, re-rendered from cached rows, no re-derivation).
+  Without this, rows hidden by the height budget are unreachable by mouse, so
+  the overlay silently fails on large folders. Wheel-scrolling the panel is
+  explicitly rejected (fights the pan/zoom wheel routing).
+- **Go commands, first-class actions** (work with the tree open or closed):
+  *Open parent folder* (macOS ⌘↑ via a menu key-equivalent — Finder's
+  Enclosing Folder chord; Windows Alt+↑ via the keymap) and *previous / next
+  sibling folder* (⌘← / ⌘→; Windows Alt+← / Alt+→ — PhotoBlaze has no
+  back/forward history, so the Explorer chords are free). Stop at the ends.
+  Menu placement: a small "Go" group.
+- **Archives navigate too — no dimmed second-class rows** (owner: make it
+  *work* rather than styling the gap). Click targets are an enum:
+  `Dir(PathBuf)` | `ArchiveScope(String prefix)`. Opening a scope wraps the
+  **original** archive source in a `ScopedSource` (a PhotoSource delegating
+  through an index map of entries under the prefix — pure RAM, zip + 7z
+  identical) and rebuilds via the existing `rebuild_playlist`. The tree keeps
+  deriving from the *unscoped* source's names, so out-of-scope siblings stay
+  visible/clickable; "up" from the archive root opens the folder on disk
+  containing the archive (`container()`).
+- **Empty decks still show the tree** (owner catch: a photo-less root
+  stranded you). With no `displayed_item` but a root present, derive from the
+  root itself (`rows_from_disk(root, root)`) — the tree becomes a folder
+  browser over the empty state, so you can drill into or out of an image-less
+  folder entirely from the overlay.
+- **Per-folder photo counts, only where free** (archive/recursive decks —
+  derived from the in-RAM entry list, zero I/O; plain-disk siblings omit
+  them). Two candidate looks to be A/B'd in `--hud-gallery` before wiring:
+  a small capsule badge left of the folder glyph (owner suggestion) vs
+  trailing right-aligned dim numbers (the Mail/Finder idiom). Owner picks by
+  eye; drop the feature if both read as clutter.
+- **Hairline indent guides** per depth level (1px, existing rect primitive) —
+  polish, judged in the gallery.
 
-- No mouse/click support in the overlay (no hit-testing infra exists in the
-  HUD rasterizer; keyboard-only is consistent with the rest of the app).
+## Non-goals (unchanged)
+
 - No persisted tree/expand state on disk (privacy guarantee — RAM-only,
   cleared on Esc teardown like everything else in the inventory).
-- No full multi-level expand/collapse tree in phase 1 — current-folder +
-  siblings only.
+- No keyboard row-selection (↑/↓/Enter) yet — see above; ⌘↑/⌘←/⌘→ cover the
+  keyboard story without a focus mode.
+- No wheel/trackpad scrolling of the panel (the paging markers cover it).
 - No OS-native tree control (`NSOutlineView`/Win32 `SysTreeView32`) — the main
   window has no native-control layer to host one in; the HUD/egui-in-a-
   second-window split is the established pattern and this stays consistent
   with it.
+
+**Sequencing note:** phase 2 builds on task #46's HUD `Theme` (in flight in a
+parallel session as of 2026-07-03) — the hover band and badges take theme
+roles, and `render_tree`'s signature changes land after that session's
+token→theme sweep to avoid a two-writer collision in `hud.rs` /
+`app_core_impl.rs`.
 
 ## Implementation order (each step green: tests, clippy -D warnings, fmt)
 

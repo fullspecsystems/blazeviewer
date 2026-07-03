@@ -51,6 +51,8 @@ pub mod assets {
     pub const FOLDER: &str = include_str!("../icons/folder.svg");
     /// Open folder — the folder-tree overlay's current/ancestor rows.
     pub const FOLDER_OPEN: &str = include_str!("../icons/folder-open.svg");
+    /// Folder with an up arrow — the folder-tree overlay's "up to the parent" row.
+    pub const FOLDER_UP: &str = include_str!("../icons/folder-arrow-up.svg");
     // Status icons for the dialogs (lock/warning/trash) now live in the `pb-ui` icon
     // system (white-rasterized + tinted), not here — this set is only the HUD toasts.
 }
