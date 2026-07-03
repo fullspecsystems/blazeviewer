@@ -54,8 +54,18 @@ else
 fi
 DMG="$DIST/$APP_NAME-$SHORT_VERSION.dmg"
 
+# Local credentials, two ways (CI keeps using repo-secret env vars):
+#   a) PREFERRED — a notarytool keychain profile (secrets never touch disk). One-time:
+#        xcrun notarytool store-credentials photoblaze-notary \
+#          --apple-id you@example.com --team-id TEAMID   (prompts for the app password)
+#      The script auto-uses it when the APPLE_* env vars are absent.
+#   b) .env.release at the repo root (gitignored; see .env.release.example) — sourced
+#      here so `./scripts/release-macos.sh --swift-host` just works.
+[[ -f .env.release ]] && source .env.release
+
 : "${CSC_LINK:=}"; : "${CSC_KEY_PASSWORD:=}"
 : "${APPLE_ID:=}"; : "${APPLE_APP_SPECIFIC_PASSWORD:=}"; : "${APPLE_TEAM_ID:=}"
+: "${NOTARY_PROFILE:=photoblaze-notary}"
 
 TMP="$(mktemp -d)"
 KEYCHAIN=""
@@ -74,6 +84,9 @@ find_identity() {
 # 1) Build the bundle if needed.
 [[ -d "$APP" ]] || $BUILD_CMD
 [[ -d "$APP" ]] || { echo "error: $APP not found" >&2; exit 1; }
+# An interrupted codesign leaves a .cstemp beside the binary; a later BUNDLE sign then
+# fails on it ("invalid or unsupported format ... In subcomponent: *.cstemp"). Sweep.
+find "$APP" -name "*.cstemp" -delete
 
 mkdir -p "$DIST"
 rm -f "$DMG" "$DMG.sha256"
@@ -124,21 +137,33 @@ ln -s /Applications "$STAGING/Applications"
 hdiutil create -volname "$APP_NAME" -srcfolder "$STAGING" -ov -format UDZO "$DMG" >/dev/null
 [[ $SIGNED == 1 ]] && codesign --force --timestamp --sign "$IDENTITY" "$DMG"
 
-# 4) Notarize + staple (needs a signed DMG + the Apple credentials).
-if [[ $SIGNED == 1 && -n "$APPLE_ID" && -n "$APPLE_APP_SPECIFIC_PASSWORD" && -n "$APPLE_TEAM_ID" ]]; then
-	echo "==> Notarizing $DMG (notarytool submit --wait; this can take a few minutes)"
-	xcrun notarytool submit "$DMG" \
-		--apple-id "$APPLE_ID" \
-		--password "$APPLE_APP_SPECIFIC_PASSWORD" \
-		--team-id "$APPLE_TEAM_ID" \
-		--wait
+# 4) Notarize + staple (a signed DMG + credentials: the APPLE_* env vars, or the
+#    stored keychain profile for local runs).
+NOTARIZED=0
+if [[ $SIGNED == 1 ]]; then
+	if [[ -n "$APPLE_ID" && -n "$APPLE_APP_SPECIFIC_PASSWORD" && -n "$APPLE_TEAM_ID" ]]; then
+		echo "==> Notarizing $DMG (env credentials; --wait can take a few minutes)"
+		xcrun notarytool submit "$DMG" \
+			--apple-id "$APPLE_ID" \
+			--password "$APPLE_APP_SPECIFIC_PASSWORD" \
+			--team-id "$APPLE_TEAM_ID" \
+			--wait
+		NOTARIZED=1
+	elif xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1; then
+		echo "==> Notarizing $DMG (keychain profile '$NOTARY_PROFILE'; --wait can take a few minutes)"
+		xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
+		NOTARIZED=1
+	fi
+fi
+if [[ $NOTARIZED == 1 ]]; then
 	xcrun stapler staple "$DMG"
 	xcrun stapler validate "$DMG"
 	# Gatekeeper assessment of the stapled DMG (informational).
 	spctl -a -t open --context context:primary-signature -vv "$DMG" 2>&1 || true
 	echo "==> Notarized + stapled."
 else
-	echo "==> Notarization SKIPPED (need a signed app + APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID)"
+	echo "==> Notarization SKIPPED (need a signed app + APPLE_* env vars, a .env.release,"
+	echo "    or a stored profile: xcrun notarytool store-credentials $NOTARY_PROFILE ...)"
 fi
 
 # 5) Checksum sidecar (integrity independent of the signature).

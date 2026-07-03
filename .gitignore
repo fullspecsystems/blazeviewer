@@ -23,3 +23,6 @@ Thumbs.db
 
 # NOTE: Cargo.lock IS committed — this workspace produces a binary, so we want
 # reproducible builds.
+
+# Local release credentials (scripts/release-macos.sh sources this; see .env.release.example)
+.env.release
