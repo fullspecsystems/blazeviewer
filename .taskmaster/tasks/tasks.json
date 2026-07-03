@@ -8,10 +8,10 @@
     "tasks": [
       {
         "id": 14,
-        "title": "Windows polish: 'Set as default' deep-link, single-instance, optional MSIX/Store",
-        "description": "Quality-of-life after the installer lands: an in-app 'Set as default photo viewer' button (deep-links Windows Settings), optional single-instance window reuse, and - only if discovery/monetization ever matters - an MSIX/Store package.",
+        "title": "Windows: single-instance window reuse + Explorer multi-select as one playlist",
+        "description": "Make Windows match the macOS open idiom (LaunchServices already gives the Mac one instance + one openURLs batch). Today each Explorer double-click/Open spawns a FULL new process (decode pool + resident VRAM ring each; settings.toml write races), and multi-select Open invokes one process per file (Explorer blocks >15 selections by default — MultipleInvokePromptMinimum — so the blast radius is capped at ~15 processes, but that is still bad). Plan: (a) accept multiple CLI path args -> classify_inputs (the Vec<PathBuf> -> LaunchInput::Files machinery already serves drag-drop/picker); (b) MultiSelectModel=Player on the ProgID (MSI AppRegistration component + the HKCU self-registration fallback in default_app.rs) so a multi-select arrives as ONE invocation; (c) single-instance: named mutex, loser forwards its paths via WM_COPYDATA to the running instance (-> open_paths -> open_plan) and exits, winner comes to front (AllowSetForegroundWindow) — this also merges the multiple invocations Explorer emits when a huge selection overflows the ~32K command line. Compare-two-photos is NOT this task: thats #43 (or a future explicit File > New Window command, which the mutex design must not preclude — e.g. a --new-window flag bypass). MSIX/Store evaluation moved out to decisions.md (revisit only if monetizing). Windows machine required.",
         "status": "pending",
-        "priority": "low",
+        "priority": "high",
         "dependencies": [
           13
         ],
@@ -20,24 +20,33 @@
         "subtasks": [
           {
             "id": 1,
-            "title": "'Set as default' deep-link button/action",
-            "description": "Open ms-settings:defaultapps so the user can one-click confirm the default. DONE 2026-07-01: deep-links ms-settings:defaultapps?registeredApp{Machine,User}=PhotoBlaze via pb-app/src/default_app.rs; HKCU self-registration fallback for pre-registration installs; MSI now writes HKLM RegisteredApplications+Capabilities (AppRegistration component).",
-            "status": "done",
-            "dependencies": []
+            "title": "Set as default deep-link button/action",
+            "description": "DONE 2026-07-01: ms-settings:defaultapps?registeredApp{Machine,User}=PhotoBlaze via pb-app/src/default_app.rs; HKCU self-registration fallback; MSI AppRegistration component.",
+            "status": "done"
           },
           {
             "id": 2,
-            "title": "Single-instance window reuse (optional)",
-            "description": "Forward a new path to the running instance instead of a second window.",
-            "status": "pending",
-            "dependencies": []
+            "title": "Multi-file CLI args -> explicit-list playlist",
+            "description": "main.rs currently treats argv as a single launch path; feed all non-flag args through classify_inputs (Files list already supported).",
+            "status": "pending"
           },
           {
             "id": 3,
-            "title": "Evaluate MSIX/Store if/when monetizing (deferred)",
-            "description": "Re-open the MSIX/Store decision only when discovery or paid distribution matters.",
-            "status": "pending",
-            "dependencies": []
+            "title": "MultiSelectModel=Player on the ProgID",
+            "description": "MSI AppRegistration + HKCU self-registration fallback, so Explorer multi-select Open = one invocation with all files on the command line.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "Single-instance mutex + WM_COPYDATA forward",
+            "description": "Named mutex at startup; second instance forwards its paths to the first (hidden message window), first opens them (open_paths -> open_plan) + comes to front; merges command-line-overflow split invocations. Leave a --new-window bypass seam for a future explicit multi-window command.",
+            "status": "pending"
+          },
+          {
+            "id": 5,
+            "title": "Verify: Ctrl+A a big folder -> one window, one playlist",
+            "description": "2, 15, 100, and 500-file selections; cold launch and while running; confirm no second process survives and the playlist matches the selection.",
+            "status": "pending"
           }
         ]
       },

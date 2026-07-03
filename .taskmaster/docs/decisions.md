@@ -261,6 +261,15 @@ zero-copy, a high-MP stress test (45/60/100 MP + progressive/odd-chroma/large-IC
 orientation) measuring p50/p95/p99 decode·upload·ready-miss·keypress→photon, and a
 faithful end-to-end upload run — all reflected in the roadmap.
 
+### Parked — 2026-07-03: MSIX / Microsoft Store packaging
+Moved out of the task list (was #14.3). Re-open **only if discovery or paid
+distribution ever matters** — the signed MSI covers direct distribution fully.
+Same date, single-instance decision: **Windows adopts single-instance window
+reuse + `MultiSelectModel=Player`** (Explorer multi-select → one invocation →
+one playlist), matching the macOS LaunchServices behavior; compare-two-photos
+is task #43's split-view (or a future explicit File ▸ New Window), never
+accidental process stacking (task #14, re-scoped).
+
 ---
 
 ## Naming & domain (checked 2026-06-26)
