@@ -1240,8 +1240,10 @@ impl Canvas {
 }
 
 /// Coverage (0..=1) of pixel `(x, y)` inside a `w×h` rectangle with `r`-px rounded
-/// corners — 1.0 everywhere except the four corner arcs, where it feathers over
-/// ~1px for anti-aliasing.
+/// corners — 1.0 everywhere except the four corners, where it feathers over ~1px for
+/// anti-aliasing. The corner *shape* comes from [`corner_distance`]'s norm (circular
+/// arcs on Windows, superellipse on macOS); fills and the button border stroke both
+/// build on this, so every HUD surface gets the same corner family.
 fn corner_coverage(x: i32, y: i32, w: i32, h: i32, r: f32) -> f32 {
     if r <= 0.0 {
         return 1.0;
@@ -1251,12 +1253,36 @@ fn corner_coverage(x: i32, y: i32, w: i32, h: i32, r: f32) -> f32 {
                                                      // to it is 0 except in the corner regions.
     let cx = fx.clamp(r, w as f32 - r);
     let cy = fy.clamp(r, h as f32 - r);
-    let d = ((fx - cx).powi(2) + (fy - cy).powi(2)).sqrt();
+    let d = corner_distance(fx - cx, fy - cy);
     if d <= 0.0 {
         1.0
     } else {
         (r - d + 0.5).clamp(0.0, 1.0)
     }
+}
+
+/// The corner gauge: the offset from the arc-center rect measured in an **n-norm**,
+/// whose level sets are superellipses — the exponent picks the corner family.
+///
+/// **macOS: n = 5**, matching the platform's continuous ("squircle") corner
+/// curvature — next to Tahoe's superelliptical chrome, circular arcs read visibly
+/// flat (owner request). Apple's true continuous corner also blends ~1.5·r into the
+/// straight edges; this superellipse stays inside the r×r corner box (identical
+/// layout + hit-rect metrics) and reads equivalently at HUD pill sizes. The n-norm's
+/// gradient dips to ~0.8 on the diagonal, so the AA band narrows a hair there —
+/// imperceptible at 1px. Off the hot path either way: pills rebuild on change, never
+/// per frame.
+#[cfg(target_os = "macos")]
+fn corner_distance(dx: f32, dy: f32) -> f32 {
+    const N: f32 = 5.0;
+    (dx.abs().powf(N) + dy.abs().powf(N)).powf(1.0 / N)
+}
+
+/// **Elsewhere: n = 2** — the Euclidean norm, i.e. conventional circular arcs
+/// (Windows 11's own corner family), bit-identical to the pre-superellipse behavior.
+#[cfg(not(target_os = "macos"))]
+fn corner_distance(dx: f32, dy: f32) -> f32 {
+    (dx * dx + dy * dy).sqrt()
 }
 
 /// Rasterize the "not-ready" loading pie: a clean translucent dark disc with a
@@ -1570,7 +1596,8 @@ mod tests {
     #[test]
     fn corner_coverage_rounds_only_the_corners() {
         let r = 10.0;
-        // Interior and straight edges are fully covered.
+        // Interior and straight edges are fully covered (in ANY n-norm: on-axis the
+        // n-norm equals the Euclidean one, so these hold on every platform).
         assert!((corner_coverage(50, 50, 100, 100, r) - 1.0).abs() < 1e-6);
         assert!((corner_coverage(50, 0, 100, 100, r) - 1.0).abs() < 1e-6); // top edge
         assert!((corner_coverage(0, 50, 100, 100, r) - 1.0).abs() < 1e-6); // left edge
@@ -1579,6 +1606,25 @@ mod tests {
         assert_eq!(corner_coverage(99, 99, 100, 100, r), 0.0);
         // Radius 0 → no rounding anywhere.
         assert_eq!(corner_coverage(0, 0, 100, 100, 0.0), 1.0);
+    }
+
+    /// The macOS corner is a superellipse: on the corner diagonal it is *fuller* than a
+    /// circular arc — pixel (2,2) at r=10 sits outside the circle (Euclidean distance
+    /// ≈ 10.6 from the arc center) but comfortably inside the n=5 superellipse
+    /// (n-norm ≈ 8.6). All four corners agree by symmetry.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_corners_are_superelliptical() {
+        let r = 10.0;
+        for (x, y) in [(2, 2), (97, 2), (2, 97), (97, 97)] {
+            let cov = corner_coverage(x, y, 100, 100, r);
+            assert!(
+                cov > 0.9,
+                "({x},{y}) should be inside the squircle corner, got {cov}"
+            );
+        }
+        // But the shape still rounds: the extreme corner pixel stays transparent
+        // (asserted in `corner_coverage_rounds_only_the_corners`).
     }
 
     #[test]
