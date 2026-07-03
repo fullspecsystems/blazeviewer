@@ -92,8 +92,15 @@ pub mod tokens {
     pub const BUTTON_ICON: f32 = 0.95;
     /// Gap between the button's icon and label (floored at 2px).
     pub const BUTTON_ICON_GAP: f32 = 0.38;
-    /// Button corner radius.
+    /// Button corner radius, as a fraction of the button's text size (non-macOS).
     pub const BUTTON_RADIUS: f32 = 0.45;
+    /// macOS button corner radius, as a fraction of the button's HEIGHT — Tahoe's
+    /// concentric principle (radii derive from control geometry, not point values).
+    /// ≈⅓ height matches the platform's bordered utility buttons (the
+    /// screenshot-editor "Done" — the owner's reference): visibly rounder than
+    /// classic AppKit, deliberately NOT a capsule. Pairs with the superelliptical
+    /// corner gauge in `corner_distance`.
+    pub const BUTTON_RADIUS_OF_HEIGHT: f32 = 0.33;
     /// Button border thickness (floored at 1px).
     pub const BUTTON_BORDER: f32 = 0.1;
     /// Button background fill alpha (a barely-there wash).
@@ -744,7 +751,7 @@ impl Hud {
     ) -> Option<[u32; 4]> {
         let b = self.layout_button(spec, px)?;
         let asc = self.ascent(px)?;
-        let r = (px * tokens::BUTTON_RADIUS).round();
+        let r = button_radius(px, b.h as f32);
         let (fill_a, border_a) = if hovered {
             (
                 tokens::BUTTON_FILL_ALPHA_HOVER,
@@ -795,7 +802,7 @@ impl Hud {
         hovered: bool,
     ) -> Option<(Vec<u8>, u32, u32)> {
         let (w, h) = self.button_size(spec, px)?;
-        let mut canvas = Canvas::new(w, h, bg, (px * tokens::BUTTON_RADIUS).round());
+        let mut canvas = Canvas::new(w, h, bg, button_radius(px, h as f32));
         self.draw_button(&mut canvas, 0, 0, spec, px, hovered)?;
         Some((canvas.into_rgba(), w, h))
     }
@@ -902,17 +909,17 @@ impl Hud {
         let (fh, dh) = (fh as i32, dh as i32);
         let w = bw;
         let h = fh + gap + dh;
-        let r = (px * tokens::BUTTON_RADIUS).round();
         let pill = [bg[0], bg[1], bg[2]];
         let pill_a = bg[3] as f32 / 255.0;
 
-        // A fully transparent canvas: each button paints its own dark pill, so the gap between
-        // them (and around them) stays clear for the photo to show through.
+        // A fully transparent canvas: each button paints its own dark pill (radius from
+        // its own height, matching the button drawn over it), so the gap between them
+        // (and around them) stays clear for the photo to show through.
         let mut canvas = Canvas::new(w as u32, h as u32, [0, 0, 0, 0], 0.0);
-        canvas.fill_round_rect(0, 0, bw, fh, r, pill, pill_a);
+        canvas.fill_round_rect(0, 0, bw, fh, button_radius(px, fh as f32), pill, pill_a);
         let file_rect = self.draw_button(&mut canvas, 0, 0, &file, px, file_hovered)?;
         let y2 = fh + gap;
-        canvas.fill_round_rect(0, y2, bw, dh, r, pill, pill_a);
+        canvas.fill_round_rect(0, y2, bw, dh, button_radius(px, dh as f32), pill, pill_a);
         let folder_rect = self.draw_button(&mut canvas, 0, y2, &folder, px, folder_hovered)?;
         Some((
             canvas.into_rgba(),
@@ -1236,6 +1243,22 @@ impl Canvas {
                 );
             }
         }
+    }
+}
+
+/// The corner radius for a button of text size `px` and pixel height `h`: macOS derives
+/// it from the height (Tahoe's concentric principle — see
+/// [`tokens::BUTTON_RADIUS_OF_HEIGHT`]); elsewhere it stays the text-relative
+/// [`tokens::BUTTON_RADIUS`], keeping Windows rendering unchanged.
+#[allow(unused_variables)]
+fn button_radius(px: f32, h: f32) -> f32 {
+    #[cfg(target_os = "macos")]
+    {
+        (h * tokens::BUTTON_RADIUS_OF_HEIGHT).round()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        (px * tokens::BUTTON_RADIUS).round()
     }
 }
 
