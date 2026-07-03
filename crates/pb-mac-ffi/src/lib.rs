@@ -1749,6 +1749,26 @@ mod tests {
     /// the confirm dialog (question carries the file name); No keeps the file, Yes runs the
     /// permanent delete. The whole loop through `handle_dialog_resolved`, no Swift.
     #[test]
+    fn copy_image_details_lands_exif_text_on_the_clipboard_seam() {
+        // Owner report "doesn't seem to be implemented" — prove the whole chain:
+        // menu id → dispatch → core copy_image_details → WriteClipboard marker →
+        // the pull accessor the Swift pasteboard writer uses.
+        let (mut h, file) = handle_with_photo("copydetails");
+        h.menu_action("copy_image_details");
+        let effects = drain(&mut h);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, ffi::CoreEffectFfi::WriteClipboard)),
+            "copy_image_details should emit the clipboard marker"
+        );
+        let text = h.take_clipboard_text();
+        assert!(text.contains("one.jpg"), "filename line present: {text:?}");
+        assert!(text.contains("Dimensions:"), "metadata present: {text:?}");
+        std::fs::remove_dir_all(file.parent().unwrap()).ok();
+    }
+
+    #[test]
     fn delete_permanent_confirms_then_deletes() {
         let (mut h, file) = handle_with_photo("delete");
 

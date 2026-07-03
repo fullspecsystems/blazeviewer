@@ -145,6 +145,9 @@ final class MenuBar: NSObject {
             sep(),
             item("copy", "Copy", key: "c"),
             item("copy_path", "Copy File Path", key: "C", mods: [.command, .shift]),
+            // Owner request: also reachable here, not just the photo context menu
+            // (copies filename/dimensions/codec/size + all non-blob EXIF as text).
+            item("copy_image_details", "Copy Image Details"),
         ]))
 
         main.addItem(submenu("View", [
