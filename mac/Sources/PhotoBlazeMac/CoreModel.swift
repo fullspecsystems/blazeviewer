@@ -723,21 +723,34 @@ final class CoreModel {
             _ = window.setFrameAutosaveName("")
             NSWindow.removeFrame(usingName: autosave)
         }
+        let saved = savedWindowFrame()
         if core.startup_fullscreen() {
+            // Land F mode on the monitor the user was on: place the window at the
+            // remembered windowed frame FIRST, so setWindowMode fullscreens that
+            // screen — and captures the right frame to restore on an F exit — instead
+            // of whatever screen SwiftUI created the window on (task #42).
+            if let frame = saved {
+                window.setFrame(frame, display: false)
+            }
             setWindowMode(fullscreen: true)
+            beginLaunchFrameGuard(target: window.frame, window: window, expectFullscreen: true)
             return
         }
-        guard let frame = savedWindowFrame() else { return }
+        guard let frame = saved else { return }
         window.setFrame(frame, display: true)
         beginLaunchFrameGuard(target: frame, window: window)
     }
 
     /// For the first ~2 s after the restore, snap any programmatic resize away from the
     /// restored frame straight back (SwiftUI's launch layout re-applying its remembered
-    /// size). User interaction or fullscreen ends the guard — the user's intent wins —
-    /// and a correction cap keeps any unforeseen resize war finite.
-    private func beginLaunchFrameGuard(target: NSRect, window: NSWindow) {
+    /// size). User interaction or a mode change ends the guard — the user's intent wins —
+    /// and a correction cap keeps any unforeseen resize war finite. A launch into the F
+    /// speed mode guards its fullscreen frame the same way (`expectFullscreen`).
+    private func beginLaunchFrameGuard(
+        target: NSRect, window: NSWindow, expectFullscreen: Bool = false
+    ) {
         launchFrameCorrections = 0
+        launchFrameExpectsFullscreen = expectFullscreen
         launchFrameGuard = NotificationCenter.default.addObserver(
             forName: NSWindow.didResizeNotification, object: window, queue: .main
         ) { [weak self] _ in
@@ -753,8 +766,10 @@ final class CoreModel {
             endLaunchFrameGuard()
             return
         }
-        // The user (or a fullscreen transition) owns the frame now — stand down.
-        if speedModeFullscreen || window.styleMask.contains(.fullScreen)
+        // The user (a mode toggle, a native-fullscreen transition, a drag) owns the
+        // frame now — stand down.
+        if speedModeFullscreen != launchFrameExpectsFullscreen
+            || window.styleMask.contains(.fullScreen)
             || window.inLiveResize || NSEvent.pressedMouseButtons != 0
         {
             endLaunchFrameGuard()
@@ -782,30 +797,41 @@ final class CoreModel {
 
     @ObservationIgnored private var launchFrameGuard: NSObjectProtocol?
     @ObservationIgnored private var launchFrameCorrections = 0
+    @ObservationIgnored private var launchFrameExpectsFullscreen = false
 
     /// The saved geometry as an AppKit frame, or nil when absent / not meaningfully on
     /// any connected screen. Stored values use winit's convention (physical px,
-    /// top-left virtual-desktop origin — shared with the egui build); AppKit wants
-    /// points with a bottom-left origin relative to the primary screen.
+    /// top-left virtual-desktop origin, scaled by the monitor the window was on —
+    /// shared with the egui build); AppKit wants points with a bottom-left origin
+    /// relative to the primary screen.
+    ///
+    /// The source monitor's scale isn't recorded, so each connected screen's scale is
+    /// hypothesized in turn and a candidate accepted when it lands meaningfully on the
+    /// screen whose scale produced it. Dividing by the *launch* window's backing scale
+    /// (the old behavior) restored a frame saved on a different-DPI monitor to the
+    /// wrong place entirely on a mixed-DPI setup (1x ultrawide + 2x Studio — the #42
+    /// "restarts on the wrong monitor" mechanism: the mis-scaled frame failed the
+    /// visibility check and silently fell back to SwiftUI's default screen).
     private func savedWindowFrame() -> NSRect? {
-        guard let window = hostWindow else { return nil }
         let g = core.saved_geometry()
         guard g.present else { return nil }
-        let scale = window.backingScaleFactor
         let primaryTop = NSScreen.screens.first?.frame.maxY ?? 0
-        let size = NSSize(width: CGFloat(g.w) / scale, height: CGFloat(g.h) / scale)
-        let origin = NSPoint(
-            x: CGFloat(g.x) / scale,
-            y: primaryTop - CGFloat(g.y) / scale - size.height
-        )
-        let frame = NSRect(origin: origin, size: size)
-        // Only restore a frame meaningfully visible on a connected screen (the
-        // geometry_on_screen intent, evaluated in AppKit space).
-        let visible = NSScreen.screens.contains { screen in
+        for screen in NSScreen.screens {
+            let scale = screen.backingScaleFactor
+            let size = NSSize(width: CGFloat(g.w) / scale, height: CGFloat(g.h) / scale)
+            let origin = NSPoint(
+                x: CGFloat(g.x) / scale,
+                y: primaryTop - CGFloat(g.y) / scale - size.height
+            )
+            let frame = NSRect(origin: origin, size: size)
+            // Meaningfully visible on the hypothesized screen (the geometry_on_screen
+            // intent, evaluated in AppKit space).
             let overlap = screen.visibleFrame.intersection(frame)
-            return overlap.width >= 100 && overlap.height >= 40
+            if overlap.width >= 100 && overlap.height >= 40 {
+                return frame
+            }
         }
-        return visible ? frame : nil
+        return nil
     }
 
     /// Window moved/resized: refresh the remembered geometry (winit's

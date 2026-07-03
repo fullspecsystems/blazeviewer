@@ -31,6 +31,12 @@ with any pre-release suffix carried only by the tag.
   window is sized to fit its content (long lists like Shortcuts scroll).
 
 ### Fixed
+- **macOS: quitting in borderless fullscreen no longer restarts the app on the wrong
+  monitor.** Launching back into fullscreen now lands on the display you were using, exiting
+  fullscreen restores your last windowed spot (not a default frame), and the fullscreen state
+  itself is now reliably remembered across launches. Restoring a window saved on a display
+  with a different scale factor (e.g. a 1x ultrawide vs. a Retina display) also lands
+  correctly now instead of falling back to the default screen.
 - **macOS: opening a huge folder tree no longer blocks browsing behind the Scanning
   dialog.** The progress sheet now disappears the moment the first photo is found (you can
   start flicking immediately), and the corner **scan chip** — `Scanning "Folder" — N images

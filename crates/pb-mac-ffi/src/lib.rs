@@ -1118,6 +1118,19 @@ impl AppCoreHandle {
                     self.last_menu_state = state;
                     return Some(ffi::CoreEffectFfi::MenuStateChanged);
                 }
+                // The F toggle persists the remembered mode + windowed geometry together
+                // (the winit shell's `apply_window_mode` twin — task #42's missing save;
+                // `settings.window` is already fresh via `note_window_geometry`). Startup
+                // restore never passes here (the host calls its setWindowMode directly),
+                // so this only fires on a real user toggle. `persist_prefs` keeps unit
+                // tests from writing the real settings.toml.
+                C::SetWindowMode(mode) => {
+                    self.core.geometry_save_at = None;
+                    if self.core.persist_prefs {
+                        self.core.settings.save();
+                    }
+                    return Some(map_effect(C::SetWindowMode(mode)));
+                }
                 other => return Some(map_effect(other)),
             }
         }
@@ -2005,6 +2018,35 @@ mod tests {
         let out = h.saved_geometry();
         assert!(out.present);
         assert_eq!((out.x, out.y, out.w, out.h), (10, 20, 800, 600));
+    }
+
+    /// Task #42's missing persistence: the F toggle is the explicit action that persists
+    /// the remembered mode + windowed geometry (the winit shell's `apply_window_mode`
+    /// twin). The drain arm must surface `SetWindowMode` to the host AND disarm the
+    /// debounced geometry save (it persists now — on a live host; the write itself is
+    /// gated off here by `persist_prefs = false`).
+    #[test]
+    fn fullscreen_toggle_surfaces_set_window_mode_and_disarms_the_debounce() {
+        let mut h = test_handle(800, 600, 1.0);
+        h.core.windowed = true;
+        h.core.settings.window = None; // new_host loaded the REAL settings.toml
+        h.note_window_geometry(10, 20, 800, 600);
+        assert!(h.core.geometry_save_at.is_some(), "debounced save armed");
+
+        h.menu_action("fullscreen");
+        let effects = drain(&mut h);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, ffi::CoreEffectFfi::SetWindowMode(true))),
+            "the F toggle should surface SetWindowMode(fullscreen) to the host"
+        );
+        assert!(!h.core.windowed);
+        assert!(h.core.settings.fullscreen, "the remembered last mode flips");
+        assert!(
+            h.core.geometry_save_at.is_none(),
+            "the toggle owns the save — the debounce must not fire later"
+        );
     }
 
     /// Owner report: "Save Rotation not implemented on the Mac version." Prove the FFI
