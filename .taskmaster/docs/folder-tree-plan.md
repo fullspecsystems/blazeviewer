@@ -116,6 +116,19 @@ property tests unaffected — nothing in `pb-core` changes in this phase).
 > looks shipped for the A/B** (capsule is live in the app; trailing renders in
 > `--hud-gallery`; flipping is the one `TreeCounts` argument in
 > `push_folder_tree`). Archive prefix re-scoping is phase 3 (#47.7).
+>
+> **Same-day rework from the first smoke:** the display is now a true
+> **level tree** — every folder at every level along the path shows, with the
+> on-path folder expanding in place (`folder_tree::assemble` over per-level
+> lists + `emit`). The trigger was ~/Pictures: a recursive open lands on a
+> deep first photo, and with only the current level listed, the root's other
+> folders were unreachable by click. Changing click semantics was rejected
+> (parallel behaviors); the display generalization keeps one semantic and
+> costs one `read_dir` per visible level (≤ MAX_ANCESTORS + 2), still only on
+> folder change — the fly path derives level lists from the counts map, still
+> zero I/O. Also from that smoke: indent hairlines removed (intersected the
+> badges), and the capsule badges went contrasty (theme *shadow* fill at 0.85
+> — near-black pill on dark, white on light — with full-strength digits).
 
 ## Phase 2 — clickable navigation (owner-approved design, 2026-07-03)
 
@@ -170,8 +183,8 @@ design that ⌘-chords make unnecessary for now.
   a small capsule badge left of the folder glyph (owner suggestion) vs
   trailing right-aligned dim numbers (the Mail/Finder idiom). Owner picks by
   eye; drop the feature if both read as clutter.
-- **Hairline indent guides** per depth level (1px, existing rect primitive) —
-  polish, judged in the gallery.
+- ~~Hairline indent guides~~ — tried, then removed at owner smoke: they
+  intersected the count badges and added noise without earning it.
 
 ## Non-goals (unchanged)
 

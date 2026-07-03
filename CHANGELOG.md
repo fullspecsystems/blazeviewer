@@ -15,10 +15,13 @@ with any pre-release suffix carried only by the tag.
   their own background color around the photo (both pickable in Settings). Available on
   Windows and Mac; on the Mac a pinned theme also restyles the menus and windows.
 - **Folder tree overlay (⇧F)** — press Shift+F for a "you are here" view in the top-left
-  corner: the folder you opened at the top, the path down to the current photo's folder
-  (very deep paths collapse in the middle), its sibling folders with the current one
-  highlighted, and the folders inside it — each with a photo-count badge where the count
-  is already known. **Click a folder to open it** (exactly like Open Folder), including
+  corner: the folder you opened at the top, then **every folder at every level** down the
+  path to the current photo's folder — the path expands in place, tree-style, so even
+  when opening a big library lands you deep in its first folder, all the top-level
+  folders stay one click away (very deep paths collapse in the middle). The current
+  folder is highlighted, its subfolders nest below it, and rows carry a photo-count
+  badge where the count is already known. **Click a folder to open it** (exactly like
+  Open Folder), including
   the topmost row — the parent of what you opened — to go up; rows light up on hover.
   Long lists show "… n more" rows — click them to page. The tree keeps tracking the
   current folder even while you hold a key and fly, works over an *empty* folder (so a

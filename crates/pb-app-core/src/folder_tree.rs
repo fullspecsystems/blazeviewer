@@ -4,20 +4,22 @@
 //! Builds the [`FolderTreeModel`] the HUD rasterizes and the click handler
 //! consumes, anchored at **the root PhotoBlaze has open** (the opened folder /
 //! scan root / archive) — never above it: an "up to the parent" affordance row,
-//! the root heading, the **ancestor chain** down to the current photo's folder
-//! (the "you are here" path; a chain deeper than [`MAX_ANCESTORS`] collapses its
-//! middle into one dim "…" marker row), then the current folder's **siblings**
-//! (current highlighted) and its **children** one level deeper.
+//! the root heading, then **every folder at every level along the path** down
+//! to the current photo's folder, with the on-path folder expanding in place
+//! (the tree-view shape — so a recursive open that lands deep still leaves the
+//! root's other folders one click away), the current folder highlighted, and
+//! its children one level deeper. A path deeper than [`MAX_ANCESTORS`] + 1
+//! levels folds its shallow levels into one dim "…" marker row.
 //!
 //! Two derivations, one shape:
-//! - **Disk** ([`rows_from_disk`]): the ancestor chain comes from the path
-//!   components between the root and the current folder (no I/O); the sibling
-//!   and child lists cost two `read_dir`s (parent + current folder),
-//!   directories only. Read-only, and only ever run on the explicit `Shift+F`
-//!   toggle or when the current folder changes while the overlay is open —
-//!   never on the view/decode path (privacy #2). Counts come from the caller's
-//!   optional [`disk_counts`] map (recursive decks — free from the in-RAM
-//!   playlist; plain decks pass `None` rather than pay a `read_dir` per row).
+//! - **Disk** ([`rows_from_disk`]): the path levels come from the path
+//!   components between the root and the current folder (no I/O); each visible
+//!   level's folder list costs one `read_dir` (≤ [`MAX_ANCESTORS`] + 2 of
+//!   them), directories only. Read-only, and only ever run on the explicit
+//!   `Shift+F` toggle or when the current folder changes while the overlay is
+//!   open — never on the view/decode path (privacy #2). Counts come from the
+//!   caller's optional [`disk_counts`] map (recursive decks — free from the
+//!   in-RAM playlist; plain decks pass `None`).
 //! - **Entry names** ([`rows_from_names`]): archive sources (`.zip`/`.7z`)
 //!   carry each entry's forward-slashed relative path in `name(i)`, so the
 //!   whole tree — including every count — groups out of the already-in-RAM
@@ -118,32 +120,45 @@ fn folder(depth: u32, name: &str, open: bool, current: bool) -> TreeRow {
 enum Role {
     Root,
     Marker,
-    /// Index into the FULL ancestors list (pre-collapse).
-    Ancestor(usize),
-    /// Index into the sorted sibling list.
-    Sibling(usize),
-    /// Index into the sorted child list.
-    Child(usize),
+    /// `lists[level][index]` — a folder at `level` (0 = directly under the root).
+    At {
+        level: usize,
+        index: usize,
+    },
 }
 
-/// Assemble the display rows: the root heading, the ancestor chain (`ancestors`
-/// is every folder strictly between the root and the current one, shallowest
-/// first; collapsed past [`MAX_ANCESTORS`]), the current folder's `siblings`
-/// (with `current` marked open + highlighted), and its `children` one level
-/// deeper. Returns each row's [`Role`] alongside.
+/// Where the level walk starts: with a path longer than this allows, the
+/// shallow levels (and their sibling lists) fold into the dim "…" marker row,
+/// bounding both the row count and the indent of a pathological nesting. `k` =
+/// the path length root → current; the marker appears once more than
+/// [`MAX_ANCESTORS`] named levels would show.
+fn collapse_start(k: usize) -> usize {
+    if k > MAX_ANCESTORS + 1 {
+        k - MAX_ANCESTORS
+    } else {
+        0
+    }
+}
+
+/// Assemble the display rows from the level structure: `lists[i]` holds the
+/// sorted folder names at level `i` (directly under the path prefix of length
+/// `i`; `lists.len() == chain.len() + 1`, the last being the current folder's
+/// children) and `chain[i]` names the on-path folder within `lists[i]`. **All**
+/// folders at every visible level show, with the "you are here" path expanding
+/// in place — the owner's ~/Pictures catch (2026-07-03): a recursive open lands
+/// on a deep first photo, and with only the current level listed, the root's
+/// other folders were unreachable. Levels shallower than [`collapse_start`]
+/// fold into the "…" marker. An empty chain = the current folder IS the root.
 fn assemble(
     root_label: &str,
-    ancestors: &[String],
-    siblings: &[String],
-    current: &str,
-    children: &[String],
+    lists: &[Vec<String>],
+    chain: &[String],
 ) -> (Vec<TreeRow>, Vec<Role>) {
-    let mut rows = Vec::with_capacity(2 + ancestors.len() + siblings.len() + children.len());
-    let mut roles = Vec::with_capacity(rows.capacity());
-    rows.push(folder(0, root_label, true, false));
-    roles.push(Role::Root);
+    let mut rows = vec![folder(0, root_label, true, chain.is_empty())];
+    let mut roles = vec![Role::Root];
+    let start = collapse_start(chain.len());
     let mut depth = 1u32;
-    let shown: Vec<usize> = if ancestors.len() > MAX_ANCESTORS {
+    if start > 0 {
         rows.push(TreeRow {
             depth,
             name: "\u{2026}".to_string(),
@@ -155,41 +170,33 @@ fn assemble(
         });
         roles.push(Role::Marker);
         depth += 1;
-        // The marker plus the nearest (MAX_ANCESTORS - 1) keep the block at the cap.
-        (ancestors.len() - (MAX_ANCESTORS - 1)..ancestors.len()).collect()
-    } else {
-        (0..ancestors.len()).collect()
-    };
-    for i in shown {
-        rows.push(folder(depth, &ancestors[i], true, false));
-        roles.push(Role::Ancestor(i));
-        depth += 1;
     }
-    for (si, s) in siblings.iter().enumerate() {
-        let is_cur = s == current;
-        rows.push(folder(depth, s, is_cur, is_cur));
-        roles.push(Role::Sibling(si));
-        if is_cur {
-            for (ci, c) in children.iter().enumerate() {
-                rows.push(folder(depth + 1, c, false, false));
-                roles.push(Role::Child(ci));
-            }
-        }
-    }
+    emit(lists, chain, start, depth, &mut rows, &mut roles);
     (rows, roles)
 }
 
-/// The degenerate top-of-hierarchy shape (the photo lives at the root itself,
-/// or the deck is empty): the root as the current heading, its folders nested
-/// one level in.
-fn assemble_root(root_label: &str, children: &[String]) -> (Vec<TreeRow>, Vec<Role>) {
-    let mut rows = vec![folder(0, root_label, true, true)];
-    let mut roles = vec![Role::Root];
-    for (ci, c) in children.iter().enumerate() {
-        rows.push(folder(1, c, false, false));
-        roles.push(Role::Child(ci));
+/// Recursive level walk: emit every folder at `level`; the on-path one expands
+/// into the next level immediately after its own row (the tree-view order).
+fn emit(
+    lists: &[Vec<String>],
+    chain: &[String],
+    level: usize,
+    depth: u32,
+    rows: &mut Vec<TreeRow>,
+    roles: &mut Vec<Role>,
+) {
+    let Some(names_at) = lists.get(level) else {
+        return;
+    };
+    for (index, name) in names_at.iter().enumerate() {
+        let on_path = chain.get(level).map(String::as_str) == Some(name.as_str());
+        let current = on_path && level + 1 == chain.len();
+        rows.push(folder(depth, name, on_path, current));
+        roles.push(Role::At { level, index });
+        if on_path {
+            emit(lists, chain, level + 1, depth + 1, rows, roles);
+        }
     }
-    (rows, roles)
 }
 
 /// Build the tree from a flat list of forward-slashed relative entry paths (an
@@ -203,71 +210,37 @@ pub fn rows_from_names<'a>(
     current: &str,
     root_label: &str,
 ) -> FolderTreeModel {
-    let parent = folder_of(current);
-    // The ancestor chain (all folders strictly between root and current) and its
-    // cumulative prefixes, for per-ancestor counts.
     let chain: Vec<String> = if current.is_empty() {
         Vec::new()
     } else {
         current.split('/').map(str::to_string).collect()
     };
-    let (cur_name, ancestors) = match chain.split_last() {
-        Some((c, a)) => (c.clone(), a.to_vec()),
-        None => (String::new(), Vec::new()),
-    };
-    let anc_prefixes: Vec<String> = (0..ancestors.len())
-        .map(|i| ancestors[..=i].join("/"))
-        .collect();
-
+    let k = chain.len();
+    let start = collapse_start(k);
+    // One path prefix per visible level (`""` for level 0, `"a"`, `"a/b"`, …);
+    // a single pass over the entries fills every level's folder set + counts.
+    let prefixes: Vec<String> = (start..=k).map(|i| chain[..i].join("/")).collect();
     let mut total = 0u64;
-    let mut anc_counts = vec![0u64; ancestors.len()];
-    let mut sibling_counts: HashMap<String, u64> = HashMap::new();
-    let mut child_counts: HashMap<String, u64> = HashMap::new();
+    let mut level_counts: Vec<HashMap<String, u64>> = vec![HashMap::new(); k + 1];
     for n in names {
         total += 1;
         let dir = folder_of(n);
-        if let Some(seg) = child_segment(dir, parent) {
-            *sibling_counts.entry(seg.to_string()).or_insert(0) += 1;
-        }
-        if !current.is_empty() {
-            if let Some(seg) = child_segment(dir, current) {
-                *child_counts.entry(seg.to_string()).or_insert(0) += 1;
-            }
-        }
-        for (i, p) in anc_prefixes.iter().enumerate() {
-            if dir == p
-                || dir
-                    .strip_prefix(p.as_str())
-                    .is_some_and(|r| r.starts_with('/'))
-            {
-                anc_counts[i] += 1;
+        for (j, p) in prefixes.iter().enumerate() {
+            if let Some(seg) = child_segment(dir, p) {
+                *level_counts[start + j].entry(seg.to_string()).or_insert(0) += 1;
             }
         }
     }
-
-    let siblings = sort_names(sibling_counts.keys().cloned().collect());
-    let children = sort_names(child_counts.keys().cloned().collect());
-    let (mut rows, roles) = if current.is_empty() {
-        // `siblings` here are the root's own folders (base == "").
-        assemble_root(root_label, &siblings)
-    } else {
-        assemble(root_label, &ancestors, &siblings, &cur_name, &children)
-    };
+    let lists: Vec<Vec<String>> = level_counts
+        .iter()
+        .map(|m| sort_names(m.keys().cloned().collect()))
+        .collect();
+    let (mut rows, roles) = assemble(root_label, &lists, &chain);
     for (row, role) in rows.iter_mut().zip(&roles) {
         row.count = match role {
             Role::Root => Some(total),
             Role::Marker => None,
-            Role::Ancestor(i) => Some(anc_counts[*i]),
-            // At the root level the "children" of assemble_root came from the
-            // sibling grouping (base == ""), so counts come from that map too.
-            Role::Sibling(i) => sibling_counts.get(&siblings[*i]).copied(),
-            Role::Child(i) => {
-                if current.is_empty() {
-                    sibling_counts.get(&siblings[*i]).copied()
-                } else {
-                    child_counts.get(&children[*i]).copied()
-                }
-            }
+            Role::At { level, index } => level_counts[*level].get(&lists[*level][*index]).copied(),
         };
     }
     FolderTreeModel {
@@ -374,7 +347,6 @@ fn rows_from_listings(
     list: impl Fn(&Path) -> Vec<String>,
     counts: Option<&HashMap<PathBuf, u64>>,
 ) -> FolderTreeModel {
-    let children = list(dir);
     let chain: Vec<String> = match dir.strip_prefix(root) {
         Ok(rel) => rel
             .components()
@@ -388,51 +360,36 @@ fn rows_from_listings(
     } else {
         root
     };
-    let (rows, targets) = match chain.split_last() {
-        None => {
-            let (rows, roles) = assemble_root(&name_of(anchor), &children);
-            let targets: Vec<Option<PathBuf>> = roles
+    let k = chain.len();
+    // The directory each level lists (level i = folders under the prefix of length i).
+    let level_dirs: Vec<PathBuf> = (0..=k)
+        .map(|i| {
+            chain[..i]
                 .iter()
-                .map(|role| match role {
-                    Role::Root => Some(anchor.to_path_buf()),
-                    Role::Child(i) => Some(anchor.join(&children[*i])),
-                    _ => None,
-                })
-                .collect();
-            let _ = roles;
-            (rows, targets)
-        }
-        Some((cur, ancestors)) => {
-            let parent = dir.parent().unwrap_or(root);
-            let mut siblings = list(parent);
-            // A hidden or unreadable parent listing must still show where we are.
-            if !siblings.contains(cur) {
-                siblings.push(cur.clone());
-                siblings = sort_names(siblings);
+                .fold(anchor.to_path_buf(), |p, s| p.join(s))
+        })
+        .collect();
+    let mut lists: Vec<Vec<String>> = vec![Vec::new(); k + 1];
+    for i in collapse_start(k)..=k {
+        let mut l = list(&level_dirs[i]);
+        // A hidden or unreadable listing must still show where we are.
+        if let Some(on_path) = chain.get(i) {
+            if !l.contains(on_path) {
+                l.push(on_path.clone());
+                l = sort_names(l);
             }
-            // Each ancestor's absolute path (cumulative joins below the root).
-            let anc_paths: Vec<PathBuf> = (0..ancestors.len())
-                .map(|i| {
-                    ancestors[..=i]
-                        .iter()
-                        .fold(root.to_path_buf(), |p, s| p.join(s))
-                })
-                .collect();
-            let (rows, roles) = assemble(&name_of(root), ancestors, &siblings, cur, &children);
-            let targets: Vec<Option<PathBuf>> = roles
-                .iter()
-                .map(|role| match role {
-                    Role::Root => Some(root.to_path_buf()),
-                    Role::Marker => None,
-                    Role::Ancestor(i) => Some(anc_paths[*i].clone()),
-                    Role::Sibling(i) => Some(parent.join(&siblings[*i])),
-                    Role::Child(i) => Some(dir.join(&children[*i])),
-                })
-                .collect();
-            let _ = roles;
-            (rows, targets)
         }
-    };
+        lists[i] = l;
+    }
+    let (rows, roles) = assemble(&name_of(anchor), &lists, &chain);
+    let targets: Vec<Option<PathBuf>> = roles
+        .iter()
+        .map(|role| match role {
+            Role::Root => Some(anchor.to_path_buf()),
+            Role::Marker => None,
+            Role::At { level, index } => Some(level_dirs[*level].join(&lists[*level][*index])),
+        })
+        .collect();
     let mut model = FolderTreeModel { rows, targets };
     if let Some(map) = counts {
         for (row, target) in model.rows.iter_mut().zip(&model.targets) {
@@ -596,6 +553,36 @@ mod tests {
         assert_eq!(m.rows[2].name, "inner");
         let inner = root.join("inner");
         assert_eq!(m.targets[2].as_deref(), Some(inner.as_path()));
+    }
+
+    #[test]
+    fn every_level_lists_all_its_folders() {
+        // The ~/Pictures repro (owner, 2026-07-03): a recursive open lands on a
+        // deep first photo, and with only the current level listed, the root's
+        // other folders (2000s/2010s) were invisible — unreachable by click.
+        let entries = [
+            "1990s/1990-12-24/a.jpg",
+            "1990s/1990-12-25/b.jpg",
+            "2000s/x.jpg",
+            "2010s/y/z.jpg",
+        ];
+        let m = rows_from_names(entries.iter().copied(), "1990s/1990-12-24", "Pictures");
+        assert_eq!(
+            names(&m.rows),
+            vec![
+                (0, "Pictures", true, false),
+                (1, "1990s", true, false),
+                (2, "1990-12-24", true, true),
+                (2, "1990-12-25", false, false),
+                (1, "2000s", false, false),
+                (1, "2010s", false, false),
+            ]
+        );
+        let counts: Vec<Option<u64>> = m.rows.iter().map(|r| r.count).collect();
+        assert_eq!(
+            counts,
+            vec![Some(4), Some(2), Some(1), Some(1), Some(1), Some(1)]
+        );
     }
 
     #[test]

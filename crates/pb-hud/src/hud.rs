@@ -142,10 +142,10 @@ pub mod tokens {
     pub const TREE_NAME_MAX: f32 = 16.0;
     /// Photo-count text size, relative to the row text.
     pub const TREE_COUNT: f32 = 0.72;
-    /// Capsule badge fill alpha (behind a [`super::TreeCounts::Capsule`] count).
-    pub const TREE_BADGE_ALPHA: f32 = 0.14;
-    /// Indent guide hairline alpha (the 1px vertical lines tracing the hierarchy).
-    pub const TREE_GUIDE_ALPHA: f32 = 0.16;
+    /// Capsule badge fill alpha. The fill is the theme's **shadow** color (near-
+    /// solid black on the dark panel, white on light), so the badge reads as its
+    /// own contrasty pill rather than a faint wash (owner call, 2026-07-03).
+    pub const TREE_BADGE_ALPHA: f32 = 0.85;
 }
 
 use tokens::SHADOW_ALPHA;
@@ -849,7 +849,6 @@ impl Hud {
             band: bool,
             icon: Option<(Glyf, i32)>, // (glyph, icon x before the badge shift)
             hit: Option<TreeHit>,
-            depth: u32,
             count: Option<(Vec<Glyph>, f32)>, // laid-out count text + advance
         }
         let mut lines: Vec<Line> = Vec::with_capacity(end - start + 2);
@@ -866,7 +865,6 @@ impl Hud {
                 band: false,
                 icon: None,
                 hit: Some(hit),
-                depth: 0,
                 count: None,
             });
         };
@@ -909,7 +907,6 @@ impl Hud {
                 band: r.current,
                 icon: (!r.marker).then_some((glyf, x0)),
                 hit: (!r.marker).then_some(TreeHit::Row(idx)),
-                depth: r.depth,
                 count,
             });
         }
@@ -975,23 +972,6 @@ impl Hud {
                     tokens::TREE_CURRENT_ALPHA,
                 );
             }
-            // Hairline indent guides: a 1px vertical line under each ancestor level's
-            // icon column, so deep hierarchies read at a glance. Skip windowing
-            // markers (depth 0, no icon).
-            if line.icon.is_some() || line.depth > 0 {
-                for a in 1..=line.depth {
-                    let gx = left + (a as i32 - 1) * indent + cell / 2;
-                    canvas.fill_round_rect(
-                        gx,
-                        row_top,
-                        1,
-                        line_h,
-                        0.0,
-                        self.theme.text,
-                        tokens::TREE_GUIDE_ALPHA,
-                    );
-                }
-            }
             if let Some((glyf, x0)) = line.icon {
                 let glyph = match glyf {
                     Glyf::Closed => &closed,
@@ -1007,7 +987,9 @@ impl Hud {
                 if let Some((cg, ca)) = &line.count {
                     match counts {
                         TreeCounts::Capsule => {
-                            // Capsule badge right-aligned against the icon column.
+                            // Capsule badge right-aligned against the icon column: a
+                            // near-solid pill in the theme's shadow color (black on
+                            // dark, white on light) so the count pops off the panel.
                             let bw = ca.ceil() as i32 + 2 * badge_pad;
                             let bx = left + x0 - badge_gap - bw;
                             let by = row_top + (line_h - badge_h) / 2;
@@ -1017,7 +999,7 @@ impl Hud {
                                 bw,
                                 badge_h,
                                 badge_h as f32 / 2.0,
-                                self.theme.text,
+                                self.theme.shadow,
                                 tokens::TREE_BADGE_ALPHA,
                             );
                             let ty = by as f32 + (badge_h as f32 - count_px) / 2.0 + count_ascent;
@@ -1026,7 +1008,7 @@ impl Hud {
                                 (bx + badge_pad) as f32,
                                 ty,
                                 cg,
-                                self.theme.text_dim,
+                                self.theme.text,
                                 count_px,
                             );
                         }

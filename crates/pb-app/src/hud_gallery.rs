@@ -169,7 +169,7 @@ fn build_tiles(hud: &Hud) -> Vec<Tile> {
         tiles.push(tile(hud, "Keyboard help (?)", b));
     }
     // Folder-tree overlay (Shift+F): up affordance / chain / siblings / children,
-    // current highlighted, indent guides, capsule photo-count badges.
+    // current highlighted, capsule photo-count badges.
     let tree = |max_h: i32, hovered: Option<hud::TreeHit>, counts: hud::TreeCounts| {
         hud.render_tree(
             &tree_rows(),
