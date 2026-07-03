@@ -1947,6 +1947,9 @@ impl App {
         self.core.folder_tree_open = false;
         self.core.folder_tree_sig = None;
         self.core.folder_tree_panel = None;
+        // The full archive source (a solid 7z holds its decompressed bytes) is a
+        // RAM cache like the rest — drop it with them.
+        self.core.archive_scope = None;
         // Drop any on-demand animation playback + in-flight decode (RAM-only — #2).
         self.core.stop_playback();
     }

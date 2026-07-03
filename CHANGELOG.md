@@ -66,6 +66,15 @@ with any pre-release suffix carried only by the tag.
   window is sized to fit its content (long lists like Shortcuts scroll).
 
 ### Fixed
+- **Previous/Next Folder (⌘←/⌘→, Alt on Windows) now skip folders with no photos.**
+  Stepping into an empty sibling folder used to stop everything with a "No supported
+  images in that selection." dialog — and since the deck never moved, every re-press
+  hit the same folder again. The commands now hop straight to the nearest sibling
+  folder that actually contains photos (each candidate is checked only until its first
+  image, in the background, bounded so one enormous photo-less tree can't stall a
+  keypress); if nothing in that direction has photos, a quiet "No more folders with
+  photos" toast says so. Explicitly opening an empty folder (the picker, a tree click,
+  drag-drop) still reports it — clicks never get redirected.
 - **The folder tree can no longer freeze the app on a slow drive.** Opening the tree
   (⇧F), crossing into a new folder with it open, and the Previous/Next Folder commands
   used to read the disk on the spot — on a network share or a spun-down external drive

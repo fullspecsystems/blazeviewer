@@ -35,6 +35,7 @@
 use pb_hud::hud::TreeRow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// Cap on ancestor rows shown between the root and the current folder. A deeper
 /// chain collapses its *middle* into one dim "…" marker row, keeping the root
@@ -281,10 +282,12 @@ pub fn rows_from_names<'a>(
 
 /// The adjacent sibling folder-prefix of `prefix` (`step` = ±1) within an
 /// archive's entry names — the Go ▸ previous/next analog of
-/// [`sibling_target`], over the same sorted sibling row the tree shows.
+/// [`sibling_with_photos`], over the same sorted sibling row the tree shows.
 /// Pure and in-RAM (the names are already resident), so unlike the disk
-/// version it needs no off-thread worker. `None` at the ends of the row, or
-/// for the archive root (`""` has no siblings inside the archive).
+/// version it needs no off-thread worker — and no photo probe either: archive
+/// folders derive from image entry names, so a photo-less one can't exist.
+/// `None` at the ends of the row, or for the archive root (`""` has no
+/// siblings inside the archive).
 pub fn sibling_scope<'a>(
     names: impl Iterator<Item = &'a str>,
     prefix: &str,
@@ -546,17 +549,46 @@ fn rows_from_listings(
 pub enum TreeIoResult {
     /// The settled `read_dir` view for the folder whose rebuild signature is `sig`.
     FullTree { sig: String, model: FolderTreeModel },
-    /// The Go ▸ previous/next sibling target (`None` = at the end / nothing to open).
-    Sibling(Option<PathBuf>),
+    /// The Go ▸ previous/next resolution: the deck root the search started from
+    /// (so a result that outlives its deck is dropped, not opened — the probe
+    /// can run for seconds on a slow share) and the first sibling **with
+    /// photos** in that direction (`None` = nothing that way → the host
+    /// toasts).
+    Sibling {
+        from_root: PathBuf,
+        target: Option<PathBuf>,
+    },
 }
 
 /// An in-flight tree-io job: the receiver `tick` polls, plus the full-tree
 /// signature (`None` for a sibling job) so the settle-upgrade tick doesn't
-/// re-kick a derivation that's already running. (`pub` only because it rides a
+/// re-kick a derivation that's already running. Dropping it (a superseding
+/// job, teardown) flips the cancel flag the sibling skip-search checks per
+/// walk entry — a rapid re-press *aborts* the old probe instead of orphaning
+/// a potentially deep walk. (`pub` only because it rides a
 /// struct-literal-constructed `AppCore` field.)
 pub struct TreeIo {
     pub full_sig: Option<String>,
     pub rx: std::sync::mpsc::Receiver<TreeIoResult>,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for TreeIo {
+    fn drop(&mut self) {
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Test seam: a [`TreeIo`] over a hand-fed channel, so core tests can inject
+/// worker results without threads or a filesystem.
+#[cfg(test)]
+pub(crate) fn tree_io_for_tests(rx: std::sync::mpsc::Receiver<TreeIoResult>) -> TreeIo {
+    TreeIo {
+        full_sig: None,
+        rx,
+        cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    }
 }
 
 /// Derive the full `read_dir` tree for (`root`, `dir`) off-thread.
@@ -572,22 +604,59 @@ pub(crate) fn spawn_full_tree(
         let model = rows_from_disk(&root, &dir, counts.as_deref());
         let _ = tx.send(TreeIoResult::FullTree { sig, model });
     });
-    TreeIo { full_sig, rx }
+    TreeIo {
+        full_sig,
+        rx,
+        cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    }
 }
 
-/// Resolve the Go ▸ previous/next (`step` = ∓1) sibling of `root` off-thread —
-/// the listing (and even the `is_dir` stat) can stall on a dead share.
+/// How many photo-less sibling candidates one ⌘←/→ press will probe before
+/// giving up (a folder with thousands of empty siblings must not turn a
+/// keypress into an unbounded search)…
+const SIBLING_HOP_CAP: usize = 64;
+/// …and the wall-clock ceiling across the whole search. The cap alone doesn't
+/// bound the expensive case — ONE huge photo-less subtree must be enumerated
+/// to conclude "empty" — so the deadline cuts that off too. Exhaustion of
+/// either reports "nothing that way" (the toast), never a wrong answer.
+const SIBLING_BUDGET: Duration = Duration::from_secs(3);
+
+/// Resolve the Go ▸ previous/next (`step` = ∓1) target of `root` off-thread —
+/// the listing (and even the `is_dir` stat) can stall on a dead share, and the
+/// per-candidate photo probes (#49) can walk entire subtrees.
 pub(crate) fn spawn_sibling(root: PathBuf, step: i32) -> TreeIo {
     let (tx, rx) = std::sync::mpsc::channel();
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = std::sync::Arc::clone(&cancel);
     std::thread::spawn(move || {
-        let _ = tx.send(TreeIoResult::Sibling(sibling_target(&root, step)));
+        let deadline = Instant::now() + SIBLING_BUDGET;
+        let target = sibling_with_photos(&root, step, &seen, SIBLING_HOP_CAP, deadline);
+        let _ = tx.send(TreeIoResult::Sibling {
+            from_root: root,
+            target,
+        });
     });
-    TreeIo { full_sig: None, rx }
+    TreeIo {
+        full_sig: None,
+        rx,
+        cancel,
+    }
 }
 
-/// The adjacent sibling directory of `root` in its parent's sorted listing, or
-/// `None` at the ends / for an unlisted root.
-fn sibling_target(root: &Path, step: i32) -> Option<PathBuf> {
+/// The nearest sibling directory of `root` **containing at least one photo**
+/// (anywhere under it — matching what the recursive open would find), stepping
+/// through the parent's sorted listing in `step`'s direction and skipping
+/// photo-less candidates (#49: an empty folder must not dead-end ⌘←/→ behind
+/// a modal). `None` at the row's end, for an unlisted root, or when the hop
+/// cap / deadline / `cancel` cuts the search short — never a folder without
+/// photos, so the caller's open can't hit "No supported images".
+fn sibling_with_photos(
+    root: &Path,
+    step: i32,
+    cancel: &std::sync::atomic::AtomicBool,
+    cap: usize,
+    deadline: Instant,
+) -> Option<PathBuf> {
     if !root.is_dir() {
         return None;
     }
@@ -595,11 +664,19 @@ fn sibling_target(root: &Path, step: i32) -> Option<PathBuf> {
     let sibs = subdirs(parent);
     let name = name_of(root);
     let pos = sibs.iter().position(|s| *s == name)?;
-    let next = pos as i64 + step as i64;
-    if next < 0 || next as usize >= sibs.len() {
-        return None; // at the end of the row of folders — nothing to step to
+    let mut i = pos as i64 + step as i64;
+    let mut hops = 0usize;
+    while i >= 0 && (i as usize) < sibs.len() && hops < cap {
+        let candidate = parent.join(&sibs[i as usize]);
+        match crate::scan::dir_has_image(&candidate, cancel, deadline) {
+            crate::scan::Probe::Found => return Some(candidate),
+            crate::scan::Probe::Empty => {} // skip it — keep stepping
+            crate::scan::Probe::Aborted => return None,
+        }
+        i += step as i64;
+        hops += 1;
     }
-    Some(parent.join(&sibs[next as usize]))
+    None // the row's end (or the cap) — nothing with photos that way
 }
 
 #[cfg(test)]
@@ -914,16 +991,48 @@ mod tests {
     }
 
     #[test]
-    fn sibling_target_steps_through_the_sorted_listing() {
+    fn sibling_search_skips_photo_less_folders() {
+        use std::sync::atomic::AtomicBool;
         let base = std::env::temp_dir().join(format!("pb-ftree-sib-{}", std::process::id()));
-        for d in ["alpha", "beta", "gamma"] {
-            std::fs::create_dir_all(base.join(d)).unwrap();
-        }
-        let beta = base.join("beta");
-        assert_eq!(sibling_target(&beta, 1), Some(base.join("gamma")));
-        assert_eq!(sibling_target(&beta, -1), Some(base.join("alpha")));
-        assert_eq!(sibling_target(&base.join("gamma"), 1), None);
-        assert_eq!(sibling_target(&base.join("alpha"), -1), None);
+        // alpha: photo deep inside (a candidate counts if ANY descendant has
+        // one, matching the recursive open) / beta: a nested photo-less
+        // subtree / gamma: photo at the top / delta: truly empty.
+        std::fs::create_dir_all(base.join("alpha/deep")).unwrap();
+        std::fs::write(base.join("alpha/deep/a.jpg"), b"x").unwrap();
+        std::fs::create_dir_all(base.join("beta/nested/empty")).unwrap();
+        std::fs::write(base.join("beta/nested/notes.txt"), b"x").unwrap();
+        std::fs::create_dir_all(base.join("gamma")).unwrap();
+        std::fs::write(base.join("gamma/g.png"), b"x").unwrap();
+        std::fs::create_dir_all(base.join("delta")).unwrap();
+
+        let live = AtomicBool::new(false);
+        let far = Instant::now() + Duration::from_secs(60);
+        let sib = |from: &str, step, cancel: &AtomicBool, cap| {
+            sibling_with_photos(&base.join(from), step, cancel, cap, far)
+        };
+        // beta is photo-less → skipped in both directions.
+        assert_eq!(sib("alpha", 1, &live, 64), Some(base.join("gamma")));
+        assert_eq!(sib("gamma", -1, &live, 64), Some(base.join("alpha")));
+        // Past gamma there is only photo-less delta, then the row ends.
+        assert_eq!(sib("gamma", 1, &live, 64), None);
+        assert_eq!(sib("alpha", -1, &live, 64), None);
+        // The hop cap bounds the probing (cap 1 = only beta) — the answer is
+        // "nothing found", never a photo-less folder.
+        assert_eq!(sib("alpha", 1, &live, 1), None);
+        // A pre-set cancel flag (a superseding press, teardown) aborts cleanly.
+        let cancelled = AtomicBool::new(true);
+        assert_eq!(sib("alpha", 1, &cancelled, 64), None);
+        // An expired deadline likewise aborts rather than mislabeling.
+        assert_eq!(
+            sibling_with_photos(
+                &base.join("alpha"),
+                1,
+                &live,
+                64,
+                Instant::now() - Duration::from_secs(1)
+            ),
+            None
+        );
         std::fs::remove_dir_all(&base).unwrap();
     }
 

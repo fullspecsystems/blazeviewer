@@ -990,10 +990,19 @@ impl AppCore {
                         self.update_tree_hover();
                     }
                 }
-                Ok(crate::folder_tree::TreeIoResult::Sibling(target)) => {
+                Ok(crate::folder_tree::TreeIoResult::Sibling { from_root, target }) => {
                     self.tree_io = None;
-                    if let Some(d) = target {
+                    if from_root != self.root {
+                        // The deck moved on while the probe ran (it can take
+                        // seconds on a slow share) — a stale result must not
+                        // yank navigation somewhere the user already left.
+                    } else if let Some(d) = target {
                         self.open_dir(d);
+                    } else {
+                        // Nothing with photos in that direction (or the search
+                        // hit its cap/budget): non-blocking feedback, never the
+                        // modal — that stays for explicit opens (#49).
+                        self.show_toast("No more folders with photos");
                     }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
@@ -1594,21 +1603,26 @@ impl AppCore {
         }
     }
 
-    /// Go ▸ previous / next folder (`dir` = ∓1; ⌘←/⌘→ / Alt+←/→): open the opened
-    /// root's adjacent sibling directory in the parent's sorted listing. On an
-    /// archive deck scoped to an internal folder, step to the adjacent sibling
-    /// *prefix* in the same sorted row the tree shows — pure in-RAM (the names
-    /// are resident), so unlike the disk path it needs no tree-io worker. Silent
-    /// no-op at the ends, with nothing open, or on an unscoped archive (the
-    /// whole archive has no siblings inside itself). The disk listing (and even
-    /// the `is_dir` stat) is disk I/O, so it resolves on the tree-io worker —
-    /// `tick` opens the target when it lands; a rapid re-press supersedes the last.
+    /// Go ▸ previous / next folder (`dir` = ∓1; ⌘←/⌘→ / Alt+←/→): open the nearest
+    /// sibling directory **with photos** in that direction — photo-less siblings
+    /// are skipped (#49: name-adjacency dead-ended behind a "No supported images"
+    /// modal, and since a failed open never moves the root, re-pressing retried
+    /// the same empty folder forever). The search runs on the tree-io worker
+    /// (per-candidate probes can walk entire subtrees, and even the `is_dir`
+    /// stat can stall on a dead share); `tick` opens the target when it lands,
+    /// or toasts when nothing that way has photos. A rapid re-press supersedes
+    /// AND cancels the in-flight search. On an archive deck scoped to an
+    /// internal folder, step to the adjacent sibling *prefix* in the same
+    /// sorted row the tree shows — pure in-RAM, no worker, and never photo-less
+    /// by construction (archive folders derive from image entry names); the
+    /// row's ends toast the same way. Silent no-op with nothing open.
     pub fn open_sibling_cmd(&mut self, dir: i32) {
         if let Some(scope) = &self.archive_scope {
             let full = Arc::clone(&scope.full);
             let names = (0..full.len()).map(|i| full.name(i));
-            if let Some(sib) = crate::folder_tree::sibling_scope(names, &scope.prefix, dir) {
-                self.rescope_archive(sib);
+            match crate::folder_tree::sibling_scope(names, &scope.prefix, dir) {
+                Some(sib) => self.rescope_archive(sib),
+                None => self.show_toast("No more folders with photos"),
             }
             return;
         }
@@ -1679,6 +1693,7 @@ impl AppCore {
         self.pending_delete = None;
         self.stop_playback(); // the deleted photo may have been playing (#37)
         self.source = Arc::new(FsSource::new(Vec::new()));
+        self.archive_scope = None; // the empty deck is not an archive
         self.playlist = Playlist::new(0, 0);
         self.rotations.clear();
         self.meta_cache.clear();
@@ -4637,6 +4652,50 @@ mod tests {
         core.open_sibling_cmd(-1);
         assert_eq!(core.archive_scope.as_ref().unwrap().prefix, "a/b");
         assert!(core.tree_io.is_none());
+    }
+
+    #[test]
+    fn sibling_results_are_stale_guarded_and_only_matches_navigate() {
+        let opened_dir = |core: &AppCore| {
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::BeginDirScan { .. }))
+        };
+        let feed = |core: &mut AppCore, from_root: PathBuf, target: Option<PathBuf>| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            tx.send(crate::folder_tree::TreeIoResult::Sibling { from_root, target })
+                .unwrap();
+            core.tree_io = Some(crate::folder_tree::tree_io_for_tests(rx));
+            core.effects.clear();
+            let t = core.now;
+            core.handle(CoreEvent::Tick(t));
+        };
+
+        let mut core = compare_core(2);
+        // A result computed for a deck the user already left: dropped — it must
+        // not yank navigation somewhere the user moved away from.
+        feed(
+            &mut core,
+            PathBuf::from("/somewhere/else"),
+            Some(PathBuf::from("/somewhere/else/next")),
+        );
+        assert!(!opened_dir(&core), "stale sibling results are dropped");
+        assert!(core.tree_io.is_none(), "the finished job is released");
+
+        // Nothing with photos in that direction: no navigation (the host shows
+        // the toast — HUD-gated, so asserted in the live smoke, not here).
+        let root = core.root.clone();
+        feed(&mut core, root, None);
+        assert!(
+            !opened_dir(&core),
+            "an exhausted search must not open anything"
+        );
+
+        // A live match opens exactly like Open Folder — the shared plan.
+        let root = core.root.clone();
+        let target = root.join("next-door");
+        feed(&mut core, root, Some(target));
+        assert!(opened_dir(&core), "a found sibling opens as a dir scan");
     }
 
     #[test]

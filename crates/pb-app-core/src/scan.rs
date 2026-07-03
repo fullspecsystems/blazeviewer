@@ -142,6 +142,37 @@ pub fn image_walker(root: &Path, recursive: bool) -> walkdir::WalkDir {
         .follow_links(false)
 }
 
+/// What [`dir_has_image`] concluded — `Aborted` is distinct from `Empty` so a
+/// cancelled or over-budget probe never mislabels a folder as photo-less.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Probe {
+    Found,
+    Empty,
+    Aborted,
+}
+
+/// Early-exit "does this folder contain at least one supported image anywhere
+/// under it?" — the per-candidate check of the ⌘←/→ empty-folder skip (#49).
+/// Deliberately NOT the streaming scan: it stops at the **first** hit, drives
+/// no playlist/dialog machinery, and bails at `cancel`/`deadline` (checked per
+/// entry, so a dead share aborts within one entry's latency). Shares
+/// [`image_walker`]'s hostile-tree hardening: iterative, symlinks never
+/// followed, unreadable entries skipped rather than fatal.
+pub fn dir_has_image(dir: &Path, cancel: &AtomicBool, deadline: Instant) -> Probe {
+    for entry in image_walker(dir, true) {
+        if cancel.load(Ordering::Relaxed) || Instant::now() > deadline {
+            return Probe::Aborted;
+        }
+        let Ok(entry) = entry else {
+            continue; // permission-denied / vanished mid-walk — skip, don't abort
+        };
+        if entry.file_type().is_file() && is_supported_image(entry.path()) {
+            return Probe::Found;
+        }
+    }
+    Probe::Empty
+}
+
 /// Walk `dir` for supported images, appending them to `out` (unsorted — the caller
 /// sorts once across all roots). `recursive` descends every subfolder; otherwise only
 /// the immediate children are listed.
