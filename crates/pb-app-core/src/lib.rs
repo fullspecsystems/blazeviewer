@@ -29,6 +29,7 @@ pub mod contract;
 pub mod decode_pool;
 pub mod delete;
 pub mod engine;
+pub mod folder_tree;
 pub mod keymap;
 pub mod meta;
 pub mod metrics;

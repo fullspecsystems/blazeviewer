@@ -281,6 +281,13 @@ pub struct AppCore {
     pub open_hover: Option<OpenButton>,
     /// The interactive play hint riding the toast layer, or `None`.
     pub play_hint: Option<PlayHint>,
+    /// Whether the folder-tree overlay (`Shift+F`) is open. RAM-only (privacy #2) —
+    /// the tree is a view of the deck, never persisted.
+    pub folder_tree_open: bool,
+    /// Signature of the drawn tree (`root|current-folder`), so it rebuilds only when
+    /// the current folder or the deck changes — never per frame, never per photo
+    /// within the same folder. `None` = nothing drawn.
+    pub folder_tree_sig: Option<String>,
 
     // --- Rendering (NS0 5.4) ---
     /// The HUD text/overlay compositor (`pb-hud`), or `None` if no system font was found.

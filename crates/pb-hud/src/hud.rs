@@ -125,6 +125,18 @@ pub mod tokens {
     // ── Open-screen call to action (two stacked buttons) ──────────────────────────────
     /// Vertical gap between the stacked "Open File" / "Open Folder" buttons (floored at 4px).
     pub const OPEN_BUTTON_GAP: f32 = 0.45;
+
+    // ── Folder-tree overlay (`Shift+F`) ──────────────────────────────────────────────
+    /// Horizontal indent per tree depth level.
+    pub const TREE_INDENT: f32 = 1.15;
+    /// Folder icon height, relative to the text.
+    pub const TREE_ICON: f32 = 0.85;
+    /// Gap between a row's folder icon and its name (floored at 3px).
+    pub const TREE_ICON_GAP: f32 = 0.40;
+    /// Translucent-white highlight band behind the current folder's row.
+    pub const TREE_CURRENT_ALPHA: f32 = 0.14;
+    /// Max width of a folder name before it's tail-elided, in text heights.
+    pub const TREE_NAME_MAX: f32 = 16.0;
 }
 
 use tokens::{SHADOW, SHADOW_ALPHA, TEXT, TEXT_DIM};
@@ -155,6 +167,20 @@ pub enum Row {
 pub struct ShortcutSection {
     pub title: String,
     pub rows: Vec<(String, String)>,
+}
+
+/// One row of the folder-tree overlay ([`Hud::render_tree`]): a folder name at `depth`
+/// indent levels. `open` rows draw the open-folder glyph (the current folder and its
+/// ancestors); `current` marks the folder containing the on-screen photo (highlight
+/// band + semibold); a `marker` row is a dim, glyph-less stand-in for collapsed
+/// levels (a deep ancestor chain's "…"). Pure data, so the app core can build and
+/// unit-test row lists without touching the rasterizer.
+pub struct TreeRow {
+    pub depth: u32,
+    pub name: String,
+    pub open: bool,
+    pub current: bool,
+    pub marker: bool,
 }
 
 /// Font weight to render a run of text in.
@@ -624,6 +650,149 @@ impl Hud {
             // Center this line within the content box.
             let x = pad_x + (content_w - adv) * 0.5;
             self.draw_line(&mut canvas, x, baseline, glyphs, TEXT, px);
+        }
+        Some((canvas.into_rgba(), pw, ph))
+    }
+
+    /// Rasterize the **folder-tree overlay** (`Shift+F`): an indented list of folder
+    /// rows, each with a Font Awesome folder glyph (open for the current folder and
+    /// its ancestors, closed otherwise) and the current folder highlighted by a
+    /// translucent band + semibold name. When the full list would exceed `max_h`,
+    /// the rows are windowed around the current folder and the hidden runs collapse
+    /// into dim "⋯ n more" marker lines, so the current folder always stays visible.
+    /// Returns `(rgba, w, h)`; `None` on an empty list / no font.
+    pub fn render_tree(
+        &self,
+        rows: &[TreeRow],
+        px: f32,
+        pad: u32,
+        bg: [u8; 4],
+        max_h: i32,
+    ) -> Option<(Vec<u8>, u32, u32)> {
+        if rows.is_empty() {
+            return None;
+        }
+        let line_h = self.line_height(px)? as i32;
+        let ascent = self.ascent(px)?;
+
+        // Window the rows to what fits in `max_h`, keeping the current row centered.
+        // When windowing, two lines are reserved for the "⋯ n more" markers.
+        let avail = (((max_h - 2 * pad as i32) / line_h).max(3)) as usize;
+        let total = rows.len();
+        let (start, end, above, below) = if total <= avail {
+            (0, total, 0, 0)
+        } else {
+            let inner = avail.saturating_sub(2).max(1);
+            let cur = rows.iter().position(|r| r.current).unwrap_or(0);
+            let start = cur.saturating_sub(inner / 2).min(total - inner);
+            (start, start + inner, start, total - (start + inner))
+        };
+
+        // The two folder glyphs, rasterized once; every row's name starts after a
+        // fixed icon cell as wide as the wider (open) glyph, so names align per depth.
+        let icon_h = (px * tokens::TREE_ICON).round().max(1.0) as u32;
+        let closed = crate::icon::rasterize(crate::icon::assets::FOLDER, icon_h, TEXT);
+        let open = crate::icon::rasterize(crate::icon::assets::FOLDER_OPEN, icon_h, TEXT);
+        let cell = closed
+            .iter()
+            .chain(open.iter())
+            .map(|(_, w, _)| *w as i32)
+            .max()
+            .unwrap_or(0);
+        let icon_gap = (px * tokens::TREE_ICON_GAP).round().max(3.0) as i32;
+        let indent = (px * tokens::TREE_INDENT).round() as i32;
+        let name_max = px * tokens::TREE_NAME_MAX;
+
+        // Lay out every visible line once, measuring the content width as we go.
+        // A `None` icon slot is a "⋯ n more" marker (dim, no glyph, no indent).
+        struct Line {
+            glyphs: Vec<Glyph>,
+            text_x: i32,
+            rgb: [u8; 3],
+            band: bool,
+            icon: Option<(bool, i32)>, // (open glyph?, icon x)
+        }
+        let mut lines: Vec<Line> = Vec::with_capacity(end - start + 2);
+        let mut content_w = 0i32;
+        let push_marker = |lines: &mut Vec<Line>, content_w: &mut i32, n: usize| {
+            // A plain ellipsis — U+22EF is missing from some UI fonts (SF Pro).
+            let (glyphs, adv) = self.layout(&format!("\u{2026} {n} more"), px, Weight::Regular);
+            *content_w = (*content_w).max(adv.ceil() as i32);
+            lines.push(Line {
+                glyphs,
+                text_x: 0,
+                rgb: TEXT_DIM,
+                band: false,
+                icon: None,
+            });
+        };
+        if above > 0 {
+            push_marker(&mut lines, &mut content_w, above);
+        }
+        for r in &rows[start..end] {
+            let weight = if r.current {
+                Weight::Semibold
+            } else {
+                Weight::Regular
+            };
+            let x0 = r.depth as i32 * indent;
+            let name = self.fit_text(&r.name, px, weight, name_max, Keep::Start);
+            let (glyphs, adv) = self.layout(&name, px, weight);
+            let text_x = x0 + cell + icon_gap;
+            content_w = content_w.max(text_x + adv.ceil() as i32);
+            lines.push(Line {
+                glyphs,
+                text_x,
+                // A marker row (collapsed ancestor levels) is dim and glyph-less,
+                // aligned with the name column at its depth.
+                rgb: if r.marker { TEXT_DIM } else { TEXT },
+                band: r.current,
+                icon: (!r.marker).then_some((r.open, x0)),
+            });
+        }
+        if below > 0 {
+            push_marker(&mut lines, &mut content_w, below);
+        }
+
+        // Wider left/right inset than the vertical `pad` (the line box pads top/bottom
+        // for free; the sides don't). See `PAD_X`.
+        let pad_x = ((pad as f32) * tokens::PAD_X).round() as i32;
+        let pw = (content_w + 2 * pad_x) as u32;
+        let ph = (lines.len() as i32 * line_h + 2 * pad as i32) as u32;
+        let mut canvas = Canvas::new(pw, ph, bg, (px * tokens::RADIUS_PANEL).round());
+
+        for (i, line) in lines.iter().enumerate() {
+            let row_top = pad as i32 + i as i32 * line_h;
+            if line.band {
+                // Highlight band across the panel, inset a hair from the edges.
+                let inset = (px * 0.35).round() as i32;
+                canvas.fill_round_rect(
+                    inset,
+                    row_top,
+                    pw as i32 - 2 * inset,
+                    line_h,
+                    (px * 0.25).round(),
+                    TEXT,
+                    tokens::TREE_CURRENT_ALPHA,
+                );
+            }
+            if let Some((is_open, x0)) = line.icon {
+                let glyph = if is_open { &open } else { &closed };
+                if let Some((rgba, iw, ih)) = glyph {
+                    // Right-align the glyph in its cell so folder fronts line up.
+                    let ix = pad_x + x0 + cell - *iw as i32;
+                    let iy = row_top + (line_h - *ih as i32) / 2;
+                    self.draw_icon(&mut canvas, rgba, *iw, *ih, ix, iy, px);
+                }
+            }
+            self.draw_line(
+                &mut canvas,
+                (pad_x + line.text_x) as f32,
+                row_top as f32 + ascent,
+                &line.glyphs,
+                line.rgb,
+                px,
+            );
         }
         Some((canvas.into_rgba(), pw, ph))
     }
@@ -1683,6 +1852,59 @@ mod tests {
         // The folder button is stacked strictly below the file button, within the bitmap.
         assert!(folder[1] >= file[1] + file[3], "folder sits below file");
         assert!(h >= folder[1] + folder[3], "panel is tall enough for both");
+    }
+
+    #[test]
+    fn render_tree_windows_around_the_current_row() {
+        let Some(hud) = Hud::load() else {
+            return;
+        };
+        let rows: Vec<TreeRow> = (0..40)
+            .map(|i| TreeRow {
+                depth: 1,
+                name: format!("folder-{i:02}"),
+                open: i == 20,
+                current: i == 20,
+                marker: false,
+            })
+            .collect();
+        // Generous height → every row renders, no markers.
+        let (rgba, w, h) = hud
+            .render_tree(&rows, 15.0, 7, BG, 10_000)
+            .expect("renders");
+        assert!(w > 0 && h > 0);
+        assert_eq!(rgba.len(), (w * h * 4) as usize, "buffer matches w*h*4");
+        // A tight height windows the list: far fewer lines, so a much shorter panel.
+        let (_, _, h2) = hud.render_tree(&rows, 15.0, 7, BG, 200).expect("renders");
+        assert!(h2 < h / 2, "tight max_h windows the rows: {h2} vs {h}");
+        // The panel never exceeds the given budget.
+        assert!((h2 as i32) <= 200, "windowed panel fits max_h, got {h2}");
+    }
+
+    #[test]
+    fn render_tree_indents_deeper_rows() {
+        let Some(hud) = Hud::load() else {
+            return;
+        };
+        let row = |depth: u32, marker: bool| TreeRow {
+            depth,
+            name: "aaa".into(),
+            open: false,
+            current: false,
+            marker,
+        };
+        let (_, w0, _) = hud
+            .render_tree(&[row(0, false)], 15.0, 7, BG, 10_000)
+            .expect("renders");
+        let (_, w3, _) = hud
+            .render_tree(&[row(3, false)], 15.0, 7, BG, 10_000)
+            .expect("renders");
+        assert!(w3 > w0, "depth widens the panel: {w3} vs {w0}");
+        // A collapsed-levels marker row renders too (dim, no glyph).
+        assert!(hud
+            .render_tree(&[row(0, false), row(1, true)], 15.0, 7, BG, 10_000)
+            .is_some());
+        assert!(hud.render_tree(&[], 15.0, 7, BG, 10_000).is_none());
     }
 
     #[test]

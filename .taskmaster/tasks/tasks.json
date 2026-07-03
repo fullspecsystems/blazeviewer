@@ -303,6 +303,52 @@
             "status": "pending"
           }
         ]
+      },
+      {
+        "id": 47,
+        "title": "Folder hierarchy overlay (Shift+F): render-only phase 1, interactive nav phase 2",
+        "description": "Owner ask (2026-07-03): Shift+F shows the current photo's folder in its hierarchy along the LEFT side of the screen, FA solid folder/folder-open glyphs; first draft is display-only to judge the look, then phase 2 makes it interactive (click/keyboard a folder to open it without the file picker). Plan: .taskmaster/docs/folder-tree-plan.md. Phase 1 implemented 2026-07-03: pb-hud render_tree (TreeRow rows, indent + folder glyphs + highlight band on the current folder, windows around the current row with '… n more' markers when taller than max_h; gallery tiles + composite placement in --hud-gallery); a new top-left renderer layer (Renderer::set_tree + top_left_quad_vertices in pb-render — the info panel's overlay_margin inset mirrored to the top-left corner — own OverlayDraw slot, re-placed on resize); Action::FolderTree (id folder_tree, default Shift+F — verified free — View group in EDITOR_GROUPS, listed in the ? help overlay); pb-app-core/folder_tree.rs derives rows anchored at the OPENED ROOT (never above it; owner direction 2026-07-03): root heading, the ancestor chain down to the current folder (middles deeper than 4 collapse into a dim '…' marker row), siblings of the current folder (highlighted) + its children — disk decks: two read-only read_dirs (the chain is pure path components); archive decks: grouped from the in-RAM entry-name paths, zero I/O — unit-tested pure; AppCore folder_tree_open/folder_tree_sig (root|folder signature: rebuilt only on folder/deck/DPI/resize change, never per frame, never while flying), cleared in the winit Esc teardown. RAM-only, nothing persisted (privacy #2).",
+        "status": "review",
+        "priority": "medium",
+        "dependencies": [],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Phase 1: HUD tree renderer (pb-hud render_tree)",
+            "description": "TreeRow + render_tree: indent per depth, FA folder/folder-open glyphs (vendored), semibold + translucent band on the current row, tail-elided names, windowing around the current row with '… n more' markers. Unit tests + gallery tiles.",
+            "status": "done"
+          },
+          {
+            "id": 2,
+            "title": "Phase 1: top-left renderer layer (set_tree)",
+            "description": "Renderer::set_tree + top_left_quad_vertices (margin in from the top-left — the info panel's bottom-right inset, mirrored), own OverlayDraw slot, re-placed on resize — the first left-side HUD layer.",
+            "status": "done"
+          },
+          {
+            "id": 3,
+            "title": "Phase 1: Action::FolderTree + Shift+F + editor/help wiring",
+            "description": "New action (id folder_tree), default binding Shift+F, View group in EDITOR_GROUPS (mac Shortcuts editor auto-populates), row in the ? help overlay.",
+            "status": "done"
+          },
+          {
+            "id": 4,
+            "title": "Phase 1: folder derivation + AppCore state/tick",
+            "description": "pb-app-core/folder_tree.rs (root-anchored: opened root + ancestor chain w/ '…' collapse + siblings + children; pure grouping for archives, two-read_dir disk path, unit-tested); AppCore folder_tree_open/folder_tree_sig, per-tick signature gate (skipped while flying), DPI/resize invalidation, Esc-teardown clear.",
+            "status": "done"
+          },
+          {
+            "id": 5,
+            "title": "Phase 1: owner smoke (look + feel)",
+            "description": "Judge the draft look per the plan's checklist: plain folder, inside a .zip and a .7z, recursive scan, toggle during slideshow, no nav cost while closed. Decide styling tweaks before phase 2.",
+            "status": "pending"
+          },
+          {
+            "id": 6,
+            "title": "Phase 2: interactive navigation (design fork — owner input)",
+            "description": "Keyboard selection (↑/↓ + Enter) and/or click to open the highlighted folder via the existing open plumbing; parent-level nav; archive re-scoping. Open questions in the plan doc (scoped rebuild vs position move; single vs multi level) need owner direction from phase-1 usage.",
+            "status": "pending"
+          }
+        ]
       }
     ]
   }

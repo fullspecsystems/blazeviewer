@@ -47,6 +47,10 @@ pub mod assets {
     pub const THUMBTACK: &str = include_str!("../icons/thumbtack.svg");
     /// Thumbtack with a slash — the "Unpinned" toast (compare pin cleared).
     pub const THUMBTACK_SLASH: &str = include_str!("../icons/thumbtack-slash.svg");
+    /// Closed folder — a row of the folder-tree overlay (`Shift+F`).
+    pub const FOLDER: &str = include_str!("../icons/folder.svg");
+    /// Open folder — the folder-tree overlay's current/ancestor rows.
+    pub const FOLDER_OPEN: &str = include_str!("../icons/folder-open.svg");
     // Status icons for the dialogs (lock/warning/trash) now live in the `pb-ui` icon
     // system (white-rasterized + tinted), not here — this set is only the HUD toasts.
 }

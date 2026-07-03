@@ -76,6 +76,10 @@ pub enum Action {
     Info,
     FullExif,
     Help,
+    /// Toggle the folder-tree overlay (`Shift+F`): the current photo's folder in its
+    /// hierarchy (parent, siblings, children), drawn along the left edge. Phase 1 is
+    /// render-only — no selection yet (see `.taskmaster/docs/folder-tree-plan.md`).
+    FolderTree,
     Fullscreen,
     Recursive,
     /// Stop an in-flight folder scan, keeping whatever has streamed in so far. Only
@@ -133,6 +137,7 @@ impl Action {
         Action::Info,
         Action::FullExif,
         Action::Help,
+        Action::FolderTree,
         Action::Fullscreen,
         Action::Recursive,
         Action::CancelScan,
@@ -182,6 +187,7 @@ impl Action {
             Action::Info => "info",
             Action::FullExif => "full_exif",
             Action::Help => "help",
+            Action::FolderTree => "folder_tree",
             Action::Fullscreen => "fullscreen",
             Action::Recursive => "recursive",
             Action::CancelScan => "cancel_scan",
@@ -253,6 +259,7 @@ impl Action {
             Action::Info => "Info panel",
             Action::FullExif => "Detailed info panel",
             Action::Help => "Keyboard help",
+            Action::FolderTree => "Folder tree",
             Action::Fullscreen => "Toggle fullscreen",
             Action::Recursive => "Recursive (current folder)",
             Action::CancelScan => "Stop scanning",

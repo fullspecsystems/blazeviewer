@@ -5,8 +5,9 @@
 //!
 //! Two regions: a **catalog** of captioned tiles (each component in isolation) over a warm→cool
 //! gradient so translucency reads, and a **real-layout composite** — the overlays placed where
-//! they actually appear on screen (info pill top-left, scan card + loading pie top-right, toast
-//! bottom-center) over a photo-ish gradient, to judge how the layers coexist.
+//! they actually appear on screen (folder tree top-left, scan card + loading pie top-right,
+//! info pill bottom-right, toast bottom-center) over a photo-ish gradient, to judge how the
+//! layers coexist.
 //!
 //! Everything is laid out in *logical* px and scaled by [`SCALE`] (acting as a Retina
 //! `scale_factor`), so the sheet's proportions match a real high-DPI display while staying
@@ -156,6 +157,14 @@ fn build_tiles(hud: &Hud) -> Vec<Tile> {
     if let Some(b) = hud.render_shortcuts(&help_sections(), sp(15.0), hud::BG, s(360.0)) {
         tiles.push(tile(hud, "Keyboard help (?)", b));
     }
+    // Folder-tree overlay (Shift+F): parent / siblings / children, current highlighted.
+    if let Some(b) = hud.render_tree(&tree_rows(), sp(15.0), info_pad, hud::BG, s(360.0)) {
+        tiles.push(tile(hud, "Folder tree (Shift+F)", b));
+    }
+    // The same tree windowed by a tight height budget: "⋯ n more" markers appear.
+    if let Some(b) = hud.render_tree(&tree_rows(), sp(15.0), info_pad, hud::BG, s(150.0)) {
+        tiles.push(tile(hud, "Folder tree \u{2014} windowed", b));
+    }
 
     // Toasts: icon + text, status text, and an icon-only square pill.
     if let Some(b) = hud.render_panel_icon(
@@ -290,8 +299,8 @@ fn build_tiles(hud: &Hud) -> Vec<Tile> {
 }
 
 /// Build the real-layout composite: a faux 700×360 (logical) "screen" with the overlays where
-/// they live on screen — info pill top-left, loading pie top-center, scan card top-right, a
-/// command toast bottom-center.
+/// they live on screen — folder tree top-left, loading pie top-center, scan card top-right,
+/// info pill bottom-right, a command toast bottom-center.
 fn build_composite(hud: &Hud) -> Sheet {
     let w = s(700.0);
     let h = s(360.0);
@@ -300,13 +309,14 @@ fn build_composite(hud: &Hud) -> Sheet {
     let mut c = Sheet::gradient(w, h, [0x86, 0xa6, 0xcf], [0x24, 0x2b, 0x20], false);
     let bg = hud::BG;
 
+    // Info pill: bottom-right (the live `set_overlay` corner).
     if let Some((r, pw, ph)) = hud.render_panel(
         "DSC_0421.jpg \u{00b7} 6000\u{00d7}4000 \u{00b7} JPEG",
         sp(15.0),
         s(7.0) as u32,
         bg,
     ) {
-        c.over(&(r, pw, ph), inset, inset);
+        c.over(&(r, pw, ph), w - inset - pw as i32, h - inset - ph as i32);
     }
     if let Some((r, cw, ch, _)) = hud.render_scan_card(
         "Scanning \u{201c}Vacation 2024\u{201d}",
@@ -323,6 +333,12 @@ fn build_composite(hud: &Hud) -> Sheet {
     }
     let pie = hud::render_pie(s(46.0) as u32, 0.62, 0.0);
     c.over(&pie, (w - pie.1 as i32) / 2, inset);
+    // Folder tree: top-left, the info panel's inset mirrored (the live placement).
+    if let Some((r, tw, th)) =
+        hud.render_tree(&tree_rows(), sp(15.0), s(7.0) as u32, bg, h - 2 * inset)
+    {
+        c.over(&(r, tw, th), inset, inset);
+    }
     if let Some((r, tw, th)) = hud.render_panel_icon(
         "Copied to clipboard",
         sp(20.0),
@@ -330,7 +346,9 @@ fn build_composite(hud: &Hud) -> Sheet {
         Some(assets::CLIPBOARD),
         bg,
     ) {
-        c.over(&(r, tw, th), (w - tw as i32) / 2, h - inset - th as i32);
+        // The live toast rides 64 logical px up from the bottom edge (push_toast),
+        // clear of the bottom-right info pill.
+        c.over(&(r, tw, th), (w - tw as i32) / 2, h - s(64.0) - th as i32);
     }
     c
 }
@@ -379,6 +397,38 @@ fn tile(hud: &Hud, caption: &str, body: Bitmap) -> Tile {
 fn text(hud: &Hud, s: &str, px: f32) -> Bitmap {
     hud.render_panel(s, px, (2.0 * SCALE).round() as u32, [0, 0, 0, 0])
         .unwrap_or((vec![0; 4], 1, 1))
+}
+
+/// Sample rows for the folder-tree overlay tile: the opened root, a collapsed-levels
+/// "…" marker, the ancestor chain, then siblings with the current folder highlighted
+/// (open glyph) and its children nested one level deeper.
+fn tree_rows() -> Vec<hud::TreeRow> {
+    let row = |depth: u32, name: &str, open: bool, current: bool| hud::TreeRow {
+        depth,
+        name: name.to_string(),
+        open,
+        current,
+        marker: false,
+    };
+    let marker = |depth: u32| hud::TreeRow {
+        depth,
+        name: "\u{2026}".to_string(),
+        open: false,
+        current: false,
+        marker: true,
+    };
+    vec![
+        row(0, "Photos", true, false),
+        marker(1),
+        row(2, "Vacation 2024", true, false),
+        row(3, "Day 1 \u{2014} Arrival", false, false),
+        row(3, "Day 2 \u{2014} Mountains", false, false),
+        row(3, "Day 3 \u{2014} Coast", true, true),
+        row(4, "Drone", false, false),
+        row(4, "Underwater", false, false),
+        row(3, "Day 4 \u{2014} Old Town", false, false),
+        row(3, "Day 5 \u{2014} Departure", false, false),
+    ]
 }
 
 fn exif_rows() -> Vec<Row> {

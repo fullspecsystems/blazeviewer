@@ -135,6 +135,11 @@ pub trait Renderer {
     /// hint). Its own overlay layer, centered on both axes; persists until a photo is
     /// shown (`set_image` / `present_slot` clear it).
     fn set_message(&mut self, panel: Option<(&[u8], u32, u32)>);
+    /// Set or clear the **folder-tree panel** (`Shift+F`): an RGBA8 bitmap drawn
+    /// alpha-blended `margin` px in from the **top-left corner** — the info
+    /// panel's bottom-right inset, mirrored, so the two panels frame the photo
+    /// concentrically. Its own overlay layer. `None` hides it.
+    fn set_tree(&mut self, panel: Option<(&[u8], u32, u32)>, margin: u32);
 
     /// The currently displayed image's texture dimensions (for pan-clamp math).
     fn image_size(&self) -> (u32, u32);

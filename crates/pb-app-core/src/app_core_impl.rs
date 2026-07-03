@@ -133,6 +133,8 @@ impl AppCore {
             open_panel: None,
             open_hover: None,
             play_hint: None,
+            folder_tree_open: false,
+            folder_tree_sig: None,
             hud: None,
             renderer: None,
             undo_stack: Vec::new(),
@@ -239,6 +241,7 @@ impl AppCore {
             Action::Info => self.toggle_info(false),
             Action::FullExif => self.toggle_info(true),
             Action::Help => self.toggle_help(),
+            Action::FolderTree => self.toggle_folder_tree(),
             Action::SlideshowToggle => self.toggle_slideshow(),
             Action::SlideshowFaster => self.adjust_slideshow(-1),
             Action::SlideshowSlower => self.adjust_slideshow(1),
@@ -938,6 +941,20 @@ impl AppCore {
             }
         }
 
+        // 4a″. Folder tree (⇧F): keep it tracking the displayed photo's folder. The
+        // per-tick check is string ops on the signature; a rebuild (with its two
+        // read_dirs on a disk deck) runs only when the folder actually changes — and
+        // never while flying, so hold-to-fly across folders can't jank the loop.
+        if self.folder_tree_open && !flying && self.hud.is_some() {
+            if let Some(item) = self.displayed_item {
+                if self.folder_tree_sig.as_deref() != Some(self.folder_sig(item).as_str()) {
+                    self.show_folder_tree();
+                }
+            } else if self.folder_tree_sig.is_some() {
+                self.hide_folder_tree(); // deck emptied under the open overlay
+            }
+        }
+
         // 4b. Transient status toast: hold then fade; clears itself when expired.
         let toast_active = self.tick_toast(now);
 
@@ -957,6 +974,10 @@ impl AppCore {
                 // otherwise leaves it jammed in the corner — #3).
                 if self.overlay_shown {
                     self.show_overlay();
+                }
+                // The tree's height budget (max_h) tracks the surface too.
+                if self.folder_tree_open {
+                    self.folder_tree_sig = None; // rebuild against the settled size next tick
                 }
                 false
             }
@@ -1130,6 +1151,96 @@ impl AppCore {
         } else {
             self.show_overlay();
         }
+    }
+
+    /// Toggle the folder-tree overlay (`Shift+F`, phase 1: render-only): the current
+    /// photo's folder in its hierarchy — parent, siblings, children — along the left
+    /// edge. See `.taskmaster/docs/folder-tree-plan.md`.
+    pub fn toggle_folder_tree(&mut self) {
+        self.folder_tree_open = !self.folder_tree_open;
+        if self.folder_tree_open {
+            self.show_folder_tree();
+        } else {
+            self.hide_folder_tree();
+        }
+    }
+
+    /// The displayed photo's containing folder as a root-relative forward-slashed
+    /// path (`""` = the root level) — the tree's cheap identity, no I/O.
+    fn current_folder_rel(&self, item: usize) -> String {
+        let rel = match self.source.path(item) {
+            Some(p) => rel_to_root(p, &self.root),
+            None => self.source.name(item).to_string(),
+        };
+        crate::folder_tree::folder_of(&rel).to_string()
+    }
+
+    /// The drawn tree's rebuild signature: deck root + current folder. Compared per
+    /// tick while the overlay is open (string ops only — the `read_dir`s in
+    /// [`show_folder_tree`](Self::show_folder_tree) run only when this changes).
+    fn folder_sig(&self, item: usize) -> String {
+        format!("{}|{}", self.root.display(), self.current_folder_rel(item))
+    }
+
+    /// Rasterize + draw the folder tree for the displayed photo's folder, and stamp
+    /// [`folder_tree_sig`](crate::AppCore::folder_tree_sig). Disk sources cost two
+    /// read-only `read_dir`s here (parent + folder); archive sources group their
+    /// in-RAM entry list — no I/O.
+    pub fn show_folder_tree(&mut self) {
+        // Check the cheap gates before deriving rows, so a font-less host doesn't
+        // pay the read_dirs on every retry tick.
+        if self.hud.is_none() {
+            return;
+        }
+        let Some(item) = self.displayed_item else {
+            return;
+        };
+        let rows = match self.source.path(item) {
+            // Anchored at the opened root (never above it); the ancestor chain
+            // comes from the path itself, so the disk cost stays two read_dirs.
+            Some(p) => match p.parent() {
+                Some(dir) => crate::folder_tree::rows_from_disk(&self.root, dir),
+                None => Vec::new(),
+            },
+            None => {
+                // An archive deck: entry names carry the internal folder paths; the
+                // archive file itself labels the root level.
+                let container = self.source.container().unwrap_or(&self.root);
+                let label = container
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| container.display().to_string());
+                let current = self.current_folder_rel(item);
+                let names = (0..self.source.len()).map(|i| self.source.name(i));
+                crate::folder_tree::rows_from_names(names, &current, &label)
+            }
+        };
+        let sig = self.folder_sig(item);
+        let px = (15.0 * self.viewport.scale_factor).max(8.0);
+        let pad = (7.0 * self.viewport.scale_factor).round().max(2.0) as u32;
+        let margin = self.overlay_margin();
+        let max_h = (self.viewport.height as i32 - 2 * margin as i32).max(1);
+        let Some(hud) = self.hud.as_ref() else {
+            return;
+        };
+        let Some((bitmap, w, h)) = hud.render_tree(&rows, px, pad, hud::BG, max_h) else {
+            return;
+        };
+        if let Some(a) = self.renderer.as_mut() {
+            a.set_tree(Some((&bitmap, w, h)), margin);
+        }
+        self.folder_tree_sig = Some(sig);
+        self.draw();
+    }
+
+    /// Hide the folder tree (clears its quad). The open/closed *state* stays with the
+    /// caller — [`toggle_folder_tree`](Self::toggle_folder_tree) flips it.
+    pub fn hide_folder_tree(&mut self) {
+        if let Some(a) = self.renderer.as_mut() {
+            a.set_tree(None, 0);
+        }
+        self.folder_tree_sig = None;
+        self.draw();
     }
 
     /// Apply the keymap edited in the Settings dialog: swap it in live (every keypress
@@ -1323,6 +1434,9 @@ impl AppCore {
         self.chip_sig = None; // re-rasterize the scan card next tick
         if self.overlay_shown {
             self.overlay_item = None; // force the info/EXIF/help panel to re-show next tick
+        }
+        if self.folder_tree_open {
+            self.folder_tree_sig = None; // re-rasterize the folder tree next tick
         }
         if self.source.is_empty() {
             self.show_open_hint(); // re-rasterize the "Press O to open" hint
@@ -1988,6 +2102,7 @@ impl AppCore {
                     row("Recursive (this folder)", sc(Action::Recursive)),
                     row("Info panel", sc(Action::Info)),
                     row("Detailed info panel", sc(Action::FullExif)),
+                    row("Folder tree", sc(Action::FolderTree)),
                     row("Settings", sc(Action::Settings)),
                     row("Quit", self.keymap_shortcut(Action::Quit)),
                     // Curated: the two real keys are "/" and "?" — `two()` would render
@@ -3924,6 +4039,20 @@ mod tests {
             height: 1,
             scale_factor: 1.0,
         })
+    }
+
+    #[test]
+    fn folder_tree_action_toggles_the_open_state() {
+        let mut core = test_core();
+        assert!(!core.folder_tree_open);
+        core.dispatch_action(Action::FolderTree);
+        assert!(core.folder_tree_open, "Shift+F opens the tree");
+        core.dispatch_action(Action::FolderTree);
+        assert!(!core.folder_tree_open, "Shift+F again closes it");
+        assert!(
+            core.folder_tree_sig.is_none(),
+            "nothing drawn on a headless core (no HUD/renderer), so no signature"
+        );
     }
 
     #[test]

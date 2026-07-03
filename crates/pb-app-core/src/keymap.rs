@@ -229,6 +229,7 @@ pub const EDITOR_GROUPS: &[(&str, &[Action])] = &[
             Action::Info,
             Action::FullExif,
             Action::Help,
+            Action::FolderTree,
             Action::Fullscreen,
             Action::Recursive,
         ],
@@ -529,6 +530,8 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         one(Action::Info, "I"),
         one(Action::FullExif, "Shift+I"),
         (Action::Help, vec![p("/"), p("Shift+/")]),
+        // The folder-tree overlay — Shift+F beside bare-F fullscreen (distinct chords).
+        one(Action::FolderTree, "Shift+F"),
         // Fullscreen is a core action, so it's worth a few bindings: F11 (Windows
         // convention), Alt+Enter / Option+Enter (the discoverable-by-habit one), and
         // bare `F` (the most memorable — and the only one that's discoverable at all).

@@ -667,6 +667,45 @@ fn center_quad_vertices(panel_w: u32, panel_h: u32, screen_w: u32, screen_h: u32
     ]
 }
 
+/// The four corners of the top-left tree quad: `panel_w`×`panel_h` px, placed
+/// `margin` px in from the top and left edges — the folder-tree panel's corner,
+/// mirroring the info panel's bottom-right inset.
+fn top_left_quad_vertices(
+    panel_w: u32,
+    panel_h: u32,
+    screen_w: u32,
+    screen_h: u32,
+    margin: u32,
+) -> [Vertex; 4] {
+    let (sw, sh) = (screen_w as f32, screen_h as f32);
+    let x0 = margin as f32;
+    let x1 = x0 + panel_w as f32;
+    let y0 = margin as f32;
+    let y1 = y0 + panel_h as f32;
+    let x0n = (x0 / sw) * 2.0 - 1.0;
+    let x1n = (x1 / sw) * 2.0 - 1.0;
+    let y_top = 1.0 - (y0 / sh) * 2.0;
+    let y_bot = 1.0 - (y1 / sh) * 2.0;
+    [
+        Vertex {
+            pos: [x0n, y_top],
+            uv: [0.0, 0.0],
+        },
+        Vertex {
+            pos: [x1n, y_top],
+            uv: [1.0, 0.0],
+        },
+        Vertex {
+            pos: [x1n, y_bot],
+            uv: [1.0, 1.0],
+        },
+        Vertex {
+            pos: [x0n, y_bot],
+            uv: [0.0, 1.0],
+        },
+    ]
+}
+
 /// The four corners of the top-right pie quad: `panel_w`×`panel_h` px, placed
 /// `margin` px in from the top and right edges (the "loading" affordance corner).
 fn top_right_quad_vertices(
@@ -1047,6 +1086,9 @@ pub struct WgpuRenderer {
     /// hint shown over the blank background. Its own layer; cleared the moment a
     /// photo is shown (`set_image` / `present_slot`).
     message: Option<OverlayDraw>,
+    /// The folder-tree panel (`Shift+F`), anchored `margin` px in from the
+    /// top-left corner (the info panel's inset, mirrored). Its own layer.
+    tree: Option<OverlayDraw>,
     upload: Box<dyn UploadStrategy>,
     /// Resident texture ring (Phase 3). Empty until `reserve_ring`; each `Some`
     /// slot holds a pre-uploaded photo. `present_slot` selects which one draws.
@@ -1262,6 +1304,7 @@ impl WgpuRenderer {
             letterbox: [LETTERBOX[0], LETTERBOX[1], LETTERBOX[2]],
             blank: false,
             message: None,
+            tree: None,
         }
     }
 
@@ -1591,6 +1634,15 @@ impl Renderer for WgpuRenderer {
                 bytemuck::cast_slice(&center_quad_vertices(m.panel_w, m.panel_h, width, height)),
             );
         }
+        if let Some(t) = &self.tree {
+            self.queue.write_buffer(
+                &t.vbuf,
+                0,
+                bytemuck::cast_slice(&top_left_quad_vertices(
+                    t.panel_w, t.panel_h, width, height, t.margin,
+                )),
+            );
+        }
     }
 
     fn clear_image(&mut self) {
@@ -1681,6 +1733,50 @@ impl Renderer for WgpuRenderer {
                     .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("overlay-vbuf"),
                         contents: bytemuck::cast_slice(&overlay_quad_vertices(
+                            w,
+                            h,
+                            self.config.width,
+                            self.config.height,
+                            margin,
+                        )),
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    });
+                Some(OverlayDraw {
+                    bind_group,
+                    vbuf,
+                    panel_w: w,
+                    panel_h: h,
+                    margin,
+                    margin_top: 0,
+                })
+            }
+            None => None,
+        };
+    }
+
+    /// Set or clear the folder-tree panel (`Shift+F`): drawn `margin` px in from the
+    /// top and left edges. Its own overlay layer, drawn like the info panel.
+    fn set_tree(&mut self, panel: Option<(&[u8], u32, u32)>, margin: u32) {
+        self.tree = match panel {
+            Some((rgba, w, h)) => {
+                let scale = self.scene_scale(false);
+                let bind_group = upload_image(
+                    &self.device,
+                    &self.queue,
+                    &self.bgl,
+                    self.upload.as_mut(),
+                    rgba,
+                    w,
+                    h,
+                    &ColorTransform::srgb(),
+                    false,
+                    scale,
+                );
+                let vbuf = self
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("tree-vbuf"),
+                        contents: bytemuck::cast_slice(&top_left_quad_vertices(
                             w,
                             h,
                             self.config.width,
@@ -1843,6 +1939,29 @@ impl Renderer for WgpuRenderer {
             rp.set_pipeline(&self.overlay_pipeline);
             rp.set_bind_group(0, &ov.bind_group, &[]);
             rp.set_vertex_buffer(0, ov.vbuf.slice(..));
+            rp.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint16);
+            rp.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+        }
+        // Pass 2a′: the folder-tree panel (top-left corner), its own layer beside
+        // the info panel.
+        if let Some(t) = &self.tree {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("tree"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &intermediate_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rp.set_pipeline(&self.overlay_pipeline);
+            rp.set_bind_group(0, &t.bind_group, &[]);
+            rp.set_vertex_buffer(0, t.vbuf.slice(..));
             rp.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint16);
             rp.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
         }

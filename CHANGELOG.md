@@ -7,6 +7,14 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Added
+- **Folder tree overlay (⇧F)** — press Shift+F for a "you are here" view in the top-left
+  corner: the folder you opened at the top, the path down to the current photo's folder
+  (very deep paths collapse in the middle), its sibling folders with the current one
+  highlighted, and the folders inside it. Works the same inside a `.zip`/`.7z` (the
+  archive's internal folders). First cut is display-only — browsing into a folder from the
+  tree is coming next; press ⇧F again to dismiss.
+
 ### Changed
 - **The Mac app is now a native SwiftUI/AppKit application** — the same fast Rust engine, with
   the chrome rebuilt Mac-native: real menus with shortcut hints on every command, native dialogs

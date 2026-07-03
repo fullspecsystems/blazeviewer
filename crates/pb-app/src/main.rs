@@ -447,6 +447,8 @@ impl App {
                 open_panel: None,
                 open_hover: None,
                 play_hint: None,
+                folder_tree_open: false,
+                folder_tree_sig: None,
                 hud: Hud::load(),
                 renderer: None,
                 undo_stack: Vec::new(),
@@ -1889,6 +1891,8 @@ impl App {
         self.core.wait_started = None;
         self.core.pie_finish = None;
         self.core.pie_glow_started = None;
+        self.core.folder_tree_open = false;
+        self.core.folder_tree_sig = None;
         // Drop any on-demand animation playback + in-flight decode (RAM-only — #2).
         self.core.stop_playback();
     }
