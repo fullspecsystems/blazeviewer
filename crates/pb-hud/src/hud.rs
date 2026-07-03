@@ -96,11 +96,12 @@ pub mod tokens {
     pub const BUTTON_RADIUS: f32 = 0.45;
     /// macOS button corner radius, as a fraction of the button's HEIGHT — Tahoe's
     /// concentric principle (radii derive from control geometry, not point values).
-    /// ≈⅓ height matches the platform's bordered utility buttons (the
-    /// screenshot-editor "Done" — the owner's reference): visibly rounder than
-    /// classic AppKit, deliberately NOT a capsule. Pairs with the superelliptical
-    /// corner gauge in `corner_distance`.
-    pub const BUTTON_RADIUS_OF_HEIGHT: f32 = 0.33;
+    /// Matches the platform's bordered utility buttons (the screenshot-editor
+    /// "Done" — the owner's reference): visibly rounder than classic AppKit,
+    /// deliberately NOT a capsule. 0.40 rather than the nominal ⅓ because the
+    /// n = 2.2 gauge in `corner_distance` cuts slightly less than a circle at equal
+    /// radius — together they land on the reference silhouette (probe-verified).
+    pub const BUTTON_RADIUS_OF_HEIGHT: f32 = 0.40;
     /// Button border thickness (floored at 1px).
     pub const BUTTON_BORDER: f32 = 0.1;
     /// Button background fill alpha (a barely-there wash).
@@ -1287,17 +1288,18 @@ fn corner_coverage(x: i32, y: i32, w: i32, h: i32, r: f32) -> f32 {
 /// The corner gauge: the offset from the arc-center rect measured in an **n-norm**,
 /// whose level sets are superellipses — the exponent picks the corner family.
 ///
-/// **macOS: n = 5**, matching the platform's continuous ("squircle") corner
-/// curvature — next to Tahoe's superelliptical chrome, circular arcs read visibly
-/// flat (owner request). Apple's true continuous corner also blends ~1.5·r into the
-/// straight edges; this superellipse stays inside the r×r corner box (identical
-/// layout + hit-rect metrics) and reads equivalently at HUD pill sizes. The n-norm's
-/// gradient dips to ~0.8 on the diagonal, so the AA band narrows a hair there —
-/// imperceptible at 1px. Off the hot path either way: pills rebuild on change, never
-/// per frame.
+/// **macOS: n = 2.2** — just above circular, matching the *fullness* of Apple's
+/// continuous corners with a gently softened entry into the straight edges. The
+/// first attempt used n = 5 ("the squircle exponent"), which was measurably wrong:
+/// an n=5 corner hugs its box so tightly that a 25 px radius silhouettes like a
+/// ~10 px circle — the owner-reported "still too sharp". Apple's curve is nearly
+/// circular in how much it cuts away; its character comes from the smooth curvature
+/// transition, so a low exponent (+ the height-derived radius in [`button_radius`])
+/// is the faithful in-box approximation. Tuned visually against Tahoe's bordered
+/// buttons; this exponent and `BUTTON_RADIUS_OF_HEIGHT` are the two knobs.
 #[cfg(target_os = "macos")]
 fn corner_distance(dx: f32, dy: f32) -> f32 {
-    const N: f32 = 5.0;
+    const N: f32 = 2.2;
     (dx.abs().powf(N) + dy.abs().powf(N)).powf(1.0 / N)
 }
 
@@ -1631,10 +1633,12 @@ mod tests {
         assert_eq!(corner_coverage(0, 0, 100, 100, 0.0), 1.0);
     }
 
-    /// The macOS corner is a superellipse: on the corner diagonal it is *fuller* than a
-    /// circular arc — pixel (2,2) at r=10 sits outside the circle (Euclidean distance
-    /// ≈ 10.6 from the arc center) but comfortably inside the n=5 superellipse
-    /// (n-norm ≈ 8.6). All four corners agree by symmetry.
+    /// The macOS corner is a (mild, n = 2.2) superellipse: on the corner diagonal it
+    /// is *fuller* than a circular arc — pixel (2,2) at r=10 sits fully outside the
+    /// circle (Euclidean distance ≈ 10.6 from the arc center → coverage exactly 0)
+    /// but partially inside the n=2.2 gauge (norm ≈ 10.3 → coverage > 0). All four
+    /// corners agree by symmetry; the extreme corner pixel still rounds away
+    /// (asserted in `corner_coverage_rounds_only_the_corners`).
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_corners_are_superelliptical() {
@@ -1642,12 +1646,10 @@ mod tests {
         for (x, y) in [(2, 2), (97, 2), (2, 97), (97, 97)] {
             let cov = corner_coverage(x, y, 100, 100, r);
             assert!(
-                cov > 0.9,
-                "({x},{y}) should be inside the squircle corner, got {cov}"
+                cov > 0.0,
+                "({x},{y}) should be inside the superellipse (a circle excludes it), got {cov}"
             );
         }
-        // But the shape still rounds: the extreme corner pixel stays transparent
-        // (asserted in `corner_coverage_rounds_only_the_corners`).
     }
 
     #[test]
