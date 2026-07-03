@@ -1502,6 +1502,15 @@
         "details": "Reported by owner 2026-07-01 on a multi-display Mac. Likely suspects: (a) the borderless mode sizes/positions to event_loop.primary_monitor() instead of the monitor the window occupied when the fullscreen pref was saved (see the resumed() window-attrs path in crates/pb-app/src/main.rs, which uses primary_monitor for the decoration-less mode); (b) apply_window_mode / the SetWindowMode handler snapshots windowed geometry but the fullscreen launch path never re-targets the saved monitor. Fix should persist which display the fullscreen window was on (e.g. monitor position/id in Settings alongside the fullscreen flag + windowed geometry) and, on launch, pick the matching winit MonitorHandle when it still exists (fall back to primary when unplugged). Verify the Windows borderless path keeps its current behavior.",
         "testStrategy": "Manual on a multi-display Mac: move the app to the secondary monitor, enter borderless fullscreen (F), quit (Esc/Cmd-Q), relaunch -> it must reopen fullscreen on the same (secondary) monitor; unplug that monitor and relaunch -> falls back to the primary without a crash. Unit: pure monitor-matching helper (saved position -> best MonitorHandle) if one is extracted.",
         "subtasks": []
+      },
+      {
+        "id": 43,
+        "title": "Compare mode: view two photos side by side",
+        "description": "Owner idea (2026-07-02, sparked by the accidental window-tab bar): compare two photos for culling. NOT wired today — the app is strictly single-engine (one AppCoreHandle/playlist/ring/renderer; a second window fights over it). Two designs to weigh: (a) true multi-window/tab = one engine per window + a SHARED decode pool seam + VRAM budget split + key-window input routing; (b) likely cheaper + closer to the culling workflow: a split-view compare mode in ONE window — two panes, one engine, two cursors into the same playlist, focus-pane keyboard nav. Prime-directive check: pane decode traffic must not degrade single-view fly speed.",
+        "status": "pending",
+        "priority": "low",
+        "dependencies": [],
+        "subtasks": []
       }
     ]
   }
