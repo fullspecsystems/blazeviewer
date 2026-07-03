@@ -64,6 +64,7 @@ impl AppCore {
             slideshow: slideshow::Slideshow::default(),
             mods: contract::Modifiers::NONE,
             esc_guard_until: None,
+            persist_prefs: false, // headless/tests: never write the real settings.toml
             fit: None,
             view: ViewTransform::default(),
             last_cursor: None,
@@ -171,6 +172,7 @@ impl AppCore {
         core.keymap = Keymap::load();
         core.settings = settings;
         core.hud = hud::Hud::load();
+        core.persist_prefs = true; // a live host persists the remembered last_folder
         core
     }
 
@@ -613,6 +615,16 @@ impl AppCore {
             // Settings: Save applies + persists the edited model; Cancel/Esc discard.
             R::SettingsSaved { settings, keymap } => {
                 self.effects.push(E::CloseDialog);
+                if let Some(new) = settings {
+                    self.apply_settings(new);
+                }
+                if let Some(km) = keymap {
+                    self.apply_keymap(km);
+                }
+            }
+            // A live edit from an auto-saving Settings window: apply + persist like Save,
+            // but the window stays open — no CloseDialog.
+            R::SettingsEdited { settings, keymap } => {
                 if let Some(new) = settings {
                     self.apply_settings(new);
                 }
@@ -1214,6 +1226,20 @@ impl AppCore {
         self.root = root;
         self.scan_root = scan_root;
         self.recursive = recursive;
+        // Remember the opened folder as the Open dialog's default start on a fresh
+        // launch (settings::last_folder — the owner-approved exception to the
+        // no-viewing-trace rule; it never auto-opens anything). Only folder-backed
+        // opens record (an archive has no folder), only on an actual change, and the
+        // write rides this explicit open action — never the view path. Gated by
+        // `persist_prefs` so unit tests never write the real settings.toml.
+        if let Some(dir) = &self.scan_root {
+            if self.settings.last_folder.as_deref() != Some(dir.as_path()) {
+                self.settings.last_folder = Some(dir.clone());
+                if self.persist_prefs {
+                    self.settings.save();
+                }
+            }
+        }
         self.playlist = Playlist::new(self.source.len(), 0).with_cursor(start);
         // Indices are reassigned — drop everything keyed by item index.
         self.rotations.clear();
@@ -1730,6 +1756,14 @@ impl AppCore {
         if let Some(chord) = crate::keymap::macos_menu_chord(action) {
             return chord.mac_symbol();
         }
+        self.keymap_shortcut(action)
+    }
+
+    /// The primary *keymap* binding for an action (numpad alternates skipped), bypassing
+    /// [`help_shortcut`](Self::help_shortcut)'s menu-accelerator preference. For the help
+    /// rows that teach the viewer's bare-key habits — Open O / ⇧O, Quit Esc — where the
+    /// ⌘-chord is the one every Mac user already knows (owner call, 2026-07-03).
+    pub fn keymap_shortcut(&self, action: Action) -> String {
         self.keymap
             .bindings_for(action)
             .iter()
@@ -1800,8 +1834,11 @@ impl AppCore {
             section(
                 "Files & App",
                 vec![
-                    row("Open file", sc(Action::OpenFile)),
-                    row("Open folder", sc(Action::OpenFolder)),
+                    // Open and Quit show the *keymap* keys (O / ⇧O / Esc), not the menu's
+                    // ⌘-chords `sc` would prefer — the bare keys are the ones this help
+                    // exists to teach; every Mac user already knows ⌘O and ⌘Q.
+                    row("Open file", self.keymap_shortcut(Action::OpenFile)),
+                    row("Open folder", self.keymap_shortcut(Action::OpenFolder)),
                     row("Copy image", sc(Action::Copy)),
                     row("Copy file path", sc(Action::CopyPath)),
                     row("Save rotation", sc(Action::SaveRotation)),
@@ -1810,9 +1847,13 @@ impl AppCore {
                     row("Delete permanently", sc(Action::DeletePermanent)),
                     row("Recursive (this folder)", sc(Action::Recursive)),
                     row("Info panel", sc(Action::Info)),
-                    row("Full EXIF panel", sc(Action::FullExif)),
+                    row("Detailed info panel", sc(Action::FullExif)),
                     row("Settings", sc(Action::Settings)),
-                    row("Quit", sc(Action::Quit)),
+                    row("Quit", self.keymap_shortcut(Action::Quit)),
+                    // Curated: the two real keys are "/" and "?" — `two()` would render
+                    // the ⇧/ chord, and the keymap's names can't say "?" (the renderer
+                    // dims only the spaced " / " separator, so the "/" key stays bright).
+                    row("Help", "/ / ?".to_string()),
                 ],
             ),
         ]
@@ -2723,6 +2764,7 @@ impl AppCore {
             self.source.container(),
             self.scan_root.as_deref(),
             &self.root,
+            self.settings.last_folder.as_deref(),
             &fallback,
         );
         // If the chosen folder no longer exists (e.g. a pinned folder was deleted or
@@ -3721,6 +3763,24 @@ mod tests {
             height: 1,
             scale_factor: 1.0,
         })
+    }
+
+    #[test]
+    fn rebuild_playlist_records_last_folder_but_only_for_folder_backed_opens() {
+        let mut core = test_core();
+        assert!(
+            !core.persist_prefs,
+            "test cores must never write the real settings.toml"
+        );
+        let dir = std::env::temp_dir();
+        let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(vec![dir.join("a.png")]));
+        core.rebuild_playlist(source, dir.clone(), Some(dir.clone()), true, 0);
+        assert_eq!(core.settings.last_folder.as_deref(), Some(dir.as_path()));
+
+        // An archive-style rebuild (no scan_root) must not clobber the remembered folder.
+        let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(vec![dir.join("b.png")]));
+        core.rebuild_playlist(source, dir.join("x.zip"), None, false, 0);
+        assert_eq!(core.settings.last_folder.as_deref(), Some(dir.as_path()));
     }
 
     #[test]

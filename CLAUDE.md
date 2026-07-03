@@ -240,7 +240,12 @@ them.** The app's own *existence* on disk is fine — the MSI's registry writes
 (ProgID, file associations, folder verb), a Start-menu shortcut, and read-only
 config (the future task #8) are all explicitly in-bounds. What's forbidden is a
 trace of the *viewing*: no thumbnail DB or pixel cache, no recent-files/MRU of
-photo paths, no decoded-pixel temp files, no log of viewed paths.
+photo paths, no decoded-pixel temp files, no log of viewed paths. **One deliberate
+exception (ADR-022, owner 2026-07-02):** `settings::last_folder` remembers the single
+most-recent *folder* (never file names) as the Open dialog's default start on a fresh
+launch — it never auto-opens anything (owner call 2026-07-03 reversed the brief
+reopen-on-launch behavior); it's written on the explicit open action, and unit tests
+can't write it (`AppCore::persist_prefs`).
 
 **Explicit user edits are a separate, allowed category** — not an exception to be
 minimized. Deleting a photo, saving a rotation (an EXIF Orientation write back to

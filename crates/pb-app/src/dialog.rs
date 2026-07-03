@@ -1381,7 +1381,7 @@ fn settings_tab_bar(ui: &mut egui::Ui, current: &mut SettingsTab) {
         pbui::PAGE_MARGIN,
         &[
             (SettingsTab::General, "General"),
-            (SettingsTab::Display, "Display"),
+            (SettingsTab::Display, "Appearance"),
             (SettingsTab::Shortcuts, "Shortcuts"),
         ],
     );

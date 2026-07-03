@@ -117,6 +117,15 @@ pub struct Settings {
     /// the no-trace boundary. Pinning a folder also stops the OS dialog from surfacing its
     /// own last-folder memory on the next launch.
     pub picker_dir: Option<PathBuf>,
+    /// The folder of the most recent folder/file open — the Open dialog's default
+    /// start on a fresh launch (nothing open yet), so the picker lands back in your
+    /// library. It never auto-opens anything (owner call, 2026-07-03: a bare launch
+    /// shows the empty open screen; the brief reopen-last-folder behavior is gone).
+    /// A pinned `picker_dir` takes precedence. **A deliberate, owner-approved
+    /// exception (2026-07-02) to the no-viewing-trace rule:** one folder path — never
+    /// file names — updated only when the opened folder changes, written by the same
+    /// explicit open action that loads it (never passively while viewing).
+    pub last_folder: Option<PathBuf>,
     /// Play a Live Photo's audio when its motion plays (#38). Muted via `M` / the Image
     /// menu; persisted so the choice sticks. Default on (audio plays).
     pub mute_live_audio: bool,
@@ -135,7 +144,7 @@ impl Default for Settings {
             start_speed: 2.0,    // photos/sec the ramp starts from (#19)
             ramp_secs: 5.0,      // seconds to reach the ceiling (#19)
             max_advance_rate: 0, // uncapped → display refresh is the ceiling (#20)
-            hold_delay_ms: 200,  // snappy tap→repeat handoff (main.rs initial_delay)
+            hold_delay_ms: 250,  // tap→repeat handoff; 200 made accidental flying too easy
             scroll_action: ScrollAction::Pan, // scroll pans; Ctrl+scroll zooms
             scale_mode: ScaleModePref::Fit,
             letterbox: [10, 10, 12], // pb_render::LETTERBOX (rgb)
@@ -143,6 +152,7 @@ impl Default for Settings {
             slideshow_interval_secs: slideshow::DEFAULT_INTERVAL.as_secs_f64(), // 4.0
             window: None,
             picker_dir: None,       // start in the current photo's folder
+            last_folder: None,      // no folder to reopen until the first open
             mute_live_audio: false, // Live Photo audio plays by default (#38)
         }
     }

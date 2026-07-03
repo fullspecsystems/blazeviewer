@@ -92,6 +92,20 @@ impl KeyChord {
     /// word-style [`Display`](fmt::Display) drives menus and text.
     #[cfg(target_os = "macos")]
     pub fn mac_symbol(&self) -> String {
+        self.mac_symbol_styled(false)
+    }
+
+    /// The Shortcuts editor's variant of [`mac_symbol`](Self::mac_symbol): identical
+    /// except Escape renders as its ⎋ glyph — the editor's chord buttons speak the
+    /// glyph language (⌫ ⏎ ⌅ →), while the help overlay keeps the teaching-friendly
+    /// "Esc" (owner call, 2026-07-03: Esc-quits is the habit the help exists to teach).
+    #[cfg(target_os = "macos")]
+    pub fn mac_symbol_editor(&self) -> String {
+        self.mac_symbol_styled(true)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn mac_symbol_styled(&self, editor: bool) -> String {
         let mut mods = String::new();
         if self.ctrl {
             mods.push('\u{2303}'); // ⌃ Control
@@ -105,7 +119,11 @@ impl KeyChord {
         if self.logo {
             mods.push('\u{2318}'); // ⌘ Command
         }
-        let key = key_symbol(self.code);
+        let key = if editor && self.code == PbKey::Escape {
+            "\u{238b}" // ⎋ (in SFNS too, so it would be HUD-safe — the split is by choice)
+        } else {
+            key_symbol(self.code)
+        };
         if mods.is_empty() {
             key.to_string()
         } else {
@@ -114,18 +132,49 @@ impl KeyChord {
     }
 }
 
-/// A key's macOS glyph where one is conventional (the arrow keys + erase-left), else its
-/// spelled-out [`PbKey::as_str`] name — the key half of a shortcut hint. Only these are
-/// substituted (they're safe in the UI font); other keys stay spelled out. Used by
-/// [`KeyChord::mac_symbol`].
+/// A key's macOS glyph where one is conventional (Apple's own menu/HIG symbols), or a
+/// compact `Num x` for the glyph-less numpad cluster, else its spelled-out
+/// [`PbKey::as_str`] name — the key half of a shortcut hint. Display-only: the config
+/// format and chord parsing always use the `as_str` names. Used by
+/// [`KeyChord::mac_symbol`]; keeping every label short is what lets the Shortcuts
+/// editor's chord buttons share one fixed column width without truncating.
+///
+/// ⚠ Every glyph here must exist in `/System/Library/Fonts/SFNS.ttf` — the HUD help
+/// overlay rasterizes through that single file with **no font-fallback cascade**
+/// (`pb-hud`/fontdue), so a missing glyph draws as notdef bars on screen. That rules
+/// out the classic ↩ Return (U+21A9), ⇥ Tab, and ⇞/⇟ page glyphs — SFNS doesn't
+/// carry them (verified via CoreText against the file); Return uses ⏎ instead and
+/// Tab/PageUp/PageDown stay spelled out. Escape stays "Esc" by choice, not coverage:
+/// ⎋ is too obscure for the one key the help overlay exists to teach (Esc = quit) —
+/// the Shortcuts editor opts back into the glyph via [`KeyChord::mac_symbol_editor`].
 #[cfg(target_os = "macos")]
 fn key_symbol(code: PbKey) -> &'static str {
     match code {
-        PbKey::ArrowLeft => "\u{2190}",  // ←
-        PbKey::ArrowRight => "\u{2192}", // →
-        PbKey::ArrowUp => "\u{2191}",    // ↑
-        PbKey::ArrowDown => "\u{2193}",  // ↓
-        PbKey::Backspace => "\u{232b}",  // ⌫ (erase-left; the Mac "delete" key, ⌘⌫ trash chord)
+        PbKey::ArrowLeft => "\u{2190}",   // ←
+        PbKey::ArrowRight => "\u{2192}",  // →
+        PbKey::ArrowUp => "\u{2191}",     // ↑
+        PbKey::ArrowDown => "\u{2193}",   // ↓
+        PbKey::Backspace => "\u{232b}",   // ⌫ (erase-left; the Mac "delete" key, ⌘⌫ trash chord)
+        PbKey::Enter => "\u{23ce}",       // ⏎ (Return; ↩ is absent from SFNS — see above)
+        PbKey::NumpadEnter => "\u{2305}", // ⌅ (Apple's glyph for the numpad Enter key)
+        PbKey::Delete => "\u{2326}",      // ⌦ (erase-right; the forward-delete key)
+        PbKey::Home => "\u{2196}",        // ↖
+        PbKey::End => "\u{2198}",         // ↘
+        PbKey::NumpadAdd => "Num +",
+        PbKey::NumpadSubtract => "Num -",
+        PbKey::NumpadMultiply => "Num *",
+        PbKey::NumpadDivide => "Num /",
+        PbKey::NumpadDecimal => "Num .",
+        PbKey::Numpad0 => "Num 0",
+        PbKey::Numpad1 => "Num 1",
+        PbKey::Numpad2 => "Num 2",
+        PbKey::Numpad3 => "Num 3",
+        PbKey::Numpad4 => "Num 4",
+        PbKey::Numpad5 => "Num 5",
+        PbKey::Numpad6 => "Num 6",
+        PbKey::Numpad7 => "Num 7",
+        PbKey::Numpad8 => "Num 8",
+        PbKey::Numpad9 => "Num 9",
         _ => code.as_str(),
     }
 }

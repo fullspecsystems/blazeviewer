@@ -369,6 +369,7 @@ impl App {
                 },
                 mods: contract::Modifiers::NONE,
                 esc_guard_until: None,
+                persist_prefs: true, // a live shell persists the remembered last_folder
                 fit: None,
                 // Start in the user's default scale mode (8/9/0 still switch it live).
                 view: ViewTransform {
@@ -759,6 +760,12 @@ impl App {
                     // The core filters mid-scan deletes, bootstraps the first non-empty batch
                     // (`scan_bootstrapped`), and extends the rest — see `AppCore::apply_scan_batch`.
                     self.core.handle(contract::CoreEvent::ScanBatch(resolved));
+                    // A photo is on screen now — a revealed Scanning dialog has served its
+                    // purpose; drop it so browsing starts at the first image, not the end
+                    // of the walk (the scan-count chip takes over as progress).
+                    if self.core.scan_bootstrapped {
+                        self.close_scanning_dialog();
+                    }
                 }
                 Ok((generation, ScanUpdate::Done)) => {
                     if generation != cur_gen {
@@ -2783,6 +2790,9 @@ fn main() {
         .filter(|a| !a.starts_with('-'))
         .map(PathBuf::from)
         .collect();
+    // A bare launch (no path) opens the empty state — nothing is auto-opened (owner
+    // call, 2026-07-03: reversed from the brief reopen-last-folder behavior). The
+    // remembered `settings::last_folder` only seeds the Open dialog's start folder.
     let mut plan = open::plan(classify_inputs(positional));
     if let Source::Scan { recursive, .. } = &mut plan.source {
         // Default from the saved preference; an explicit CLI flag overrides it.

@@ -16,7 +16,29 @@ with any pre-release suffix carried only by the tag.
   window position/size remembered across launches, and the title-bar proxy icon. It replaces the
   previous Mac build under the same app identity, so file associations and permissions carry over.
 
+- **The Open dialog now starts in your last-used folder.** On a fresh launch with nothing
+  open yet, pressing O opens the picker in the folder you last viewed, so you're back in
+  your library in one keystroke — the bare launch itself stays on the empty open screen and
+  never auto-opens anything. Pinning a folder in Settings makes the picker always start
+  there instead; once photos are open, the picker follows the current photo's folder.
+- **Holding a key waits a touch longer (250 ms) before it starts flying**, so a slow tap on
+  next/previous no longer skips ahead by accident (new-install default; an existing hold-delay
+  setting is unchanged).
+- **macOS: the About panel now shows the full app details** — the build stamp (git commit)
+  alongside the version, the tagline, a clickable link to the GitHub page, and the copyright.
+- **macOS: Settings now save automatically** — every change (including shortcut edits) applies
+  and persists the moment you make it, the Mac way; the Save and Cancel buttons are gone. The
+  window is sized to fit its content (long lists like Shortcuts scroll).
+
 ### Fixed
+- **macOS: opening a huge folder tree no longer blocks browsing behind the Scanning
+  dialog.** The progress sheet now disappears the moment the first photo is found (you can
+  start flicking immediately), and the corner **scan chip** — `Scanning "Folder" — N images
+  found`, with a Cancel button — now shows on macOS while the rest of the tree streams in,
+  matching Windows.
+- **macOS: a keypress landing right after a dialog, menu, or panel closed could be silently
+  ignored** (most visibly as "Esc needs pressing twice to quit") — keys aimed at the viewer
+  window now register even before macOS finishes handing keyboard focus back to it.
 - **macOS: HDR highlights now render at the panel's full brightness** (the previous build could
   crush them toward SDR on launch), and the display's HDR headroom follows the window across
   monitors — including HDR being toggled while the app is running.

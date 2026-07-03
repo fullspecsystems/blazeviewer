@@ -91,6 +91,12 @@ pub struct AppCore {
     /// Briefly guards Esc-to-quit after a modal (picker / dialog) closes, so its stray Esc
     /// leak can't also quit the app.
     pub esc_guard_until: Option<Instant>,
+    /// Whether preference changes made as a side effect of normal use (the remembered
+    /// `last_folder`) may be written to the real `settings.toml`. `true` on a live host
+    /// (`new_host` / the winit shell), `false` in `headless` so unit tests that open
+    /// decks never touch the user's config. Explicit Settings-dialog saves and the
+    /// mute/geometry saves are unaffected (tests deliberately never drive those).
+    pub persist_prefs: bool,
 
     // --- View / geometry (NS0 5.2) ---
     /// Decode-to-fit target = the display size; photos are downscaled to it.

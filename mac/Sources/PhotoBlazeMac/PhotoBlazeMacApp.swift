@@ -64,9 +64,10 @@ struct PhotoBlazeMacApp: App {
         Settings {
             SettingsView(model: model)
         }
-        // Settings windows default to rigid content-size; let this one resize from the
-        // content minimums up (the Shortcuts tab is a long list).
-        .windowResizability(.contentMinSize)
+        // The window exactly fits SettingsView's fixed frame — not resizable (a
+        // deliberate punt after five failed attempts at vertical-only resizing; see
+        // the note on SettingsView's frame).
+        .windowResizability(.contentSize)
     }
 }
 

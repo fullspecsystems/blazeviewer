@@ -331,14 +331,17 @@ pub fn scale_mode_of(p: ScaleModePref) -> ScaleMode {
 /// for an **archive** source, the folder that *contains* the archive — never the archive
 /// itself: the OS file dialog can't browse inside a `.zip`/`.7z`, and an *encrypted* one
 /// errors outright ("Windows cannot open the folder…"). Else the current photo's folder
-/// (the scanned folder, then the display root). When all of those are empty — a bare
-/// launch with nothing open — fall back to `fallback` (the user's Pictures/home), so the
-/// dialog never falls back to *Windows'* own last-folder memory (a privacy trace).
+/// (the scanned folder, then the display root). When all of those are empty — a fresh
+/// launch with nothing open — `last` (the remembered `settings::last_folder`) starts the
+/// dialog back in the user's library, and only then `fallback` (the user's Pictures/
+/// home), so the dialog never falls back to the *OS's* own last-folder memory (a
+/// privacy trace).
 pub fn picker_start_dir(
     fixed: Option<&Path>,
     container: Option<&Path>,
     scan_root: Option<&Path>,
     root: &Path,
+    last: Option<&Path>,
     fallback: &Path,
 ) -> PathBuf {
     let non_empty = |p: Option<&Path>| {
@@ -353,6 +356,7 @@ pub fn picker_start_dir(
     }
     non_empty(scan_root)
         .or_else(|| non_empty(Some(root)))
+        .or_else(|| non_empty(last))
         .unwrap_or_else(|| fallback.to_path_buf())
 }
 
@@ -554,12 +558,12 @@ mod tests {
         // and an encrypted one errors). Holds for zip + 7z, encrypted or not.
         let fb = Path::new("fallback");
         let archive = Path::new("photos/trips/spain.7z");
-        let got = picker_start_dir(None, Some(archive), None, archive, fb);
+        let got = picker_start_dir(None, Some(archive), None, archive, None, fb);
         assert_eq!(got, Path::new("photos/trips"));
 
         let zip = Path::new("albums/2015.zip");
         assert_eq!(
-            picker_start_dir(None, Some(zip), None, zip, fb),
+            picker_start_dir(None, Some(zip), None, zip, None, fb),
             Path::new("albums")
         );
     }
@@ -570,12 +574,12 @@ mod tests {
         let fb = Path::new("fallback");
         let folder = Path::new("photos/trips");
         assert_eq!(
-            picker_start_dir(None, None, Some(folder), folder, fb),
+            picker_start_dir(None, None, Some(folder), folder, None, fb),
             folder
         );
 
         let root = Path::new("photos");
-        assert_eq!(picker_start_dir(None, None, None, root, fb), root);
+        assert_eq!(picker_start_dir(None, None, None, root, None, fb), root);
     }
 
     #[test]
@@ -585,7 +589,7 @@ mod tests {
         let pinned = Path::new("D:/AlwaysHere");
         let archive = Path::new("photos/trips/spain.7z");
         assert_eq!(
-            picker_start_dir(Some(pinned), Some(archive), None, archive, fb),
+            picker_start_dir(Some(pinned), Some(archive), None, archive, None, fb),
             pinned
         );
         assert_eq!(
@@ -594,6 +598,7 @@ mod tests {
                 None,
                 Some(Path::new("photos")),
                 Path::new("photos"),
+                None,
                 fb
             ),
             pinned
@@ -602,12 +607,34 @@ mod tests {
 
     #[test]
     fn picker_falls_back_when_there_is_no_current_folder() {
-        // Bare launch: empty scan_root + empty root → the safe fallback, NOT an empty
+        // Fresh launch: empty scan_root + empty root → the safe fallback, NOT an empty
         // path (which would let Windows surface its own remembered last folder).
         let fb = Path::new("fallback");
         let empty = Path::new("");
-        assert_eq!(picker_start_dir(None, None, None, empty, fb), fb);
-        assert_eq!(picker_start_dir(None, None, Some(empty), empty, fb), fb);
+        assert_eq!(picker_start_dir(None, None, None, empty, None, fb), fb);
+        assert_eq!(
+            picker_start_dir(None, None, Some(empty), empty, None, fb),
+            fb
+        );
+    }
+
+    #[test]
+    fn picker_starts_in_the_last_folder_when_nothing_is_open() {
+        // Fresh launch with a remembered last_folder: the dialog starts back in the
+        // user's library — but anything actually open (scan root / display root)
+        // still wins, since "where you are" beats "where you were".
+        let fb = Path::new("fallback");
+        let empty = Path::new("");
+        let last = Path::new("photos/library");
+        assert_eq!(
+            picker_start_dir(None, None, None, empty, Some(last), fb),
+            last
+        );
+        let open_root = Path::new("photos/trip");
+        assert_eq!(
+            picker_start_dir(None, None, None, open_root, Some(last), fb),
+            open_root
+        );
     }
 
     /// Live Photo pairing: a still finds its same-stem sibling `.mov`; a still with no

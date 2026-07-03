@@ -50,6 +50,14 @@ final class CoreModel {
     @ObservationIgnored private var keyMonitor: Any?
     @ObservationIgnored private var focusObserver: NSObjectProtocol?
     @ObservationIgnored private var keyLossObserver: NSObjectProtocol?
+    @ObservationIgnored private var menuTrackObservers: [NSObjectProtocol] = []
+    /// Open menus being tracked (menu bar or context menu). While non-zero,
+    /// `assertWindowChrome` must not touch the window — a `styleMask` write during menu
+    /// tracking makes AppKit dismiss the open menu, and the pump runs in `.common` mode
+    /// so a drain can land mid-tracking. (Defensive: the 2026-07-02 "menus snap shut"
+    /// report turned out to be macOS High Performance Screen Sharing doing this to every
+    /// app — but the styleMask hazard is real, so the guard stays.)
+    @ObservationIgnored private var menuTrackingDepth = 0
     /// The display-synchronized frame pump (owned by the canvas view, which creates and
     /// invalidates it with the layer). Nil until the canvas attaches.
     @ObservationIgnored var framePump: FramePump?
@@ -97,6 +105,9 @@ final class CoreModel {
             log("open_path(\(path))")
             drainEffects()
         }
+        // A bare launch opens the empty state — nothing is auto-opened (owner call,
+        // 2026-07-03: reversed from the brief reopen-last-folder behavior). The
+        // remembered last_folder only seeds the Open dialog's start (core-side).
     }
 
     @ObservationIgnored private var launchPathOpened = false
@@ -117,16 +128,26 @@ final class CoreModel {
                 self.log(
                     "Esc \(event.type == .keyDown ? "dn" : "up") repeat=\(event.isARepeat) "
                         + "gate: panel=\(self.panelOpen) alert=\(self.alertUp) "
-                        + "sheet=\(self.activeSheet?.rawValue ?? "none")"
+                        + "sheet=\(self.activeSheet?.rawValue ?? "none") "
+                        + "key=\(self.hostWindow?.isKeyWindow == true) "
+                        + "target=\(event.window === self.hostWindow)"
                 )
             }
-            // Keys drive the viewer only while the VIEWER window is key. A native panel
-            // (NSOpenPanel), an alert, or a dialog sheet owns the keyboard while it's up
-            // (don't swallow the password field's typing!) — and so does any other key
-            // window: without the isKeyWindow gate, typing Space in the Settings window
-            // advanced the photo behind it (the monitor is app-wide).
-            if self.panelOpen || self.alertUp || self.activeSheet != nil
-                || self.hostWindow?.isKeyWindow != true {
+            // Keys drive the viewer only while a native panel (NSOpenPanel), an alert, or
+            // a dialog sheet doesn't own the keyboard (don't swallow the password field's
+            // typing!) …
+            if self.panelOpen || self.alertUp || self.activeSheet != nil {
+                return event
+            }
+            // … and only when the event is aimed at the VIEWER window. Gate on the event's
+            // target window, NOT on `isKeyWindow`: key-status restoration after a panel /
+            // menu / About-panel close is asynchronous, so for a moment the host window
+            // isn't key while key events still target it — an `isKeyWindow` gate ate that
+            // press (the owner-reported "first Esc ignored, second quits"). The target-
+            // window gate still keeps other key windows to themselves: typing Space in the
+            // Settings window must not advance the photo behind it (the monitor is
+            // app-wide, and events there target the Settings window, not the host).
+            guard let host = self.hostWindow, event.window === host else {
                 return event
             }
             if event.type == .keyDown {
@@ -154,15 +175,51 @@ final class CoreModel {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.forwardFocusLost() }
+            MainActor.assumeIsolated { self?.forwardFocusLost("app didResignActive") }
         }
         keyLossObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didResignKeyNotification,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.forwardFocusLost() }
+        ) { [weak self] note in
+            MainActor.assumeIsolated {
+                self?.forwardFocusLost(
+                    "window didResignKey (\((note.object as? NSWindow)?.title ?? "?"))")
+            }
         }
+
+        // Menu tracking guard: window-chrome writes are deferred while any menu is open
+        // (see menuTrackingDepth), then re-asserted once it closes.
+        menuTrackObservers.append(
+            NotificationCenter.default.addObserver(
+                forName: NSMenu.didBeginTrackingNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] note in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.menuTrackingDepth += 1
+                    let title = (note.object as? NSMenu)?.title ?? "?"
+                    self.log("menu didBeginTracking \"\(title)\" depth=\(self.menuTrackingDepth)")
+                }
+            })
+        menuTrackObservers.append(
+            NotificationCenter.default.addObserver(
+                forName: NSMenu.didEndTrackingNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] note in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.menuTrackingDepth = max(0, self.menuTrackingDepth - 1)
+                    let title = (note.object as? NSMenu)?.title ?? "?"
+                    self.log("menu didEndTracking \"\(title)\" depth=\(self.menuTrackingDepth)")
+                    // Apply any chrome clobber that arrived while the menu was open.
+                    if self.menuTrackingDepth == 0 {
+                        self.assertWindowChrome()
+                    }
+                }
+            })
 
         // Finder / Dock / "Open with" URLs (application:open:) — route through the same
         // classify-and-open path as a drop. Buffered by AppDelegate if they arrive before
@@ -172,7 +229,8 @@ final class CoreModel {
         }
     }
 
-    private func forwardFocusLost() {
+    private func forwardFocusLost(_ why: String) {
+        log("focusLost ← \(why)")
         core.focus_lost()
         drainEffects()
     }
@@ -299,10 +357,11 @@ final class CoreModel {
     /// payload rides in `dialog_message()` (pull-after-marker). Re-delivery of the same
     /// kind updates the sheet in place (a scanning re-point, a wrong-password retry).
     private func showDialog(_ kind: String) {
+        log("ShowDialog(\(kind))")
         switch kind {
         case "about":
             NSApp.activate()
-            NSApp.orderFrontStandardAboutPanel(nil)
+            NSApp.orderFrontStandardAboutPanel(options: Self.aboutPanelOptions())
         case "settings":
             openSettingsAction?()
         case "confirm":
@@ -328,6 +387,38 @@ final class CoreModel {
         default:
             log("ShowDialog(\(kind)) — unknown kind")
         }
+    }
+
+    /// Extras for the standard About panel, matching the egui About card's content:
+    /// the git build stamp (PBBuildID from Info.plist, stamped by build-swift-host.sh)
+    /// shown as "Version X.Y.Z (hash)", and a credits block with the tagline and a
+    /// clickable GitHub link. Name, icon, version, and copyright come from the bundle.
+    private static func aboutPanelOptions() -> [NSApplication.AboutPanelOptionKey: Any] {
+        var options: [NSApplication.AboutPanelOptionKey: Any] = [:]
+        if let build = Bundle.main.object(forInfoDictionaryKey: "PBBuildID") as? String,
+            !build.isEmpty
+        {
+            options[.version] = build
+        }
+        let center = NSMutableParagraphStyle()
+        center.alignment = .center
+        let credits = NSMutableAttributedString(
+            string: "An ultra-fast photo viewer\n\n",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+                .foregroundColor: NSColor.labelColor,
+                .paragraphStyle: center,
+            ])
+        credits.append(
+            NSAttributedString(
+                string: "github.com/jdlien/photoblaze",
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+                    .link: URL(string: "https://github.com/jdlien/photoblaze")!,
+                    .paragraphStyle: center,
+                ]))
+        options[.credits] = credits
+        return options
     }
 
     /// The delete Confirm (`ShowDialog("confirm")`), styled for Finder parity (owner
@@ -435,19 +526,20 @@ final class CoreModel {
         core.settings_form()
     }
 
-    /// Settings Save: validate/clamp Rust-side and apply + persist through the core.
-    /// A saved keymap re-labels the menu bar's shortcut badges too.
-    func settingsSave(_ form: SettingsFormFfi) {
-        core.submit_settings(form)
+    /// A live edit from the auto-saving Settings window: fold + clamp Rust-side; the
+    /// core applies + persists only when something actually changed (an unchanged form
+    /// is a no-op, so the window's load echo and close-time flush cost nothing).
+    func settingsEdited(_ form: SettingsFormFfi) {
+        core.settings_edited(form)
         kick()
         drainEffects()
-        menuBar?.refreshShortcutBadges()
     }
 
-    /// Settings Cancel (buttons or the window's close button) — discard the draft
-    /// (both the form edits and the Shortcuts draft, dropped Rust-side).
-    func settingsCancel() {
-        core.settings_cancelled()
+    /// The Settings window closed (⌘W / traffic light / Esc). Edits were already
+    /// applied live; this clears the core's dialog-open state and drops the
+    /// Shortcuts draft.
+    func settingsClosed() {
+        core.settings_closed()
         drainEffects()
     }
 
@@ -456,6 +548,9 @@ final class CoreModel {
     struct ShortcutCommand: Identifiable {
         let id: String
         let label: String
+        /// The menu bar's own ⌘-accelerator ("" = none) — shown as a read-only hint;
+        /// it lives in the menu, not the keymap, so the editor can't rebind it.
+        let menuChord: String
     }
 
     struct ShortcutGroup: Identifiable {
@@ -475,9 +570,11 @@ final class CoreModel {
             ShortcutGroup(
                 title: core.keymap_group_title(UInt(g)).toString(),
                 commands: (0..<Int(core.keymap_group_len(UInt(g)))).map { i in
-                    ShortcutCommand(
-                        id: core.keymap_action_id(UInt(g), UInt(i)).toString(),
-                        label: core.keymap_action_label(UInt(g), UInt(i)).toString()
+                    let id = core.keymap_action_id(UInt(g), UInt(i)).toString()
+                    return ShortcutCommand(
+                        id: id,
+                        label: core.keymap_action_label(UInt(g), UInt(i)).toString(),
+                        menuChord: core.keymap_menu_chord(id).toString()
                     )
                 }
             )
@@ -507,6 +604,15 @@ final class CoreModel {
 
     func keymapResetDefaults() {
         core.keymap_reset_defaults()
+    }
+
+    /// Commit the draft live (auto-save): apply + persist if a binding actually changed,
+    /// and re-label the menu bar's shortcut badges to match. Called after each editor
+    /// gesture (capture / clear / reset).
+    func keymapCommit() {
+        core.keymap_commit()
+        drainEffects()
+        menuBar?.refreshShortcutBadges()
     }
 
     /// Open dropped / Finder-opened paths (multi-select aware — the launch policy classifies).
@@ -762,6 +868,7 @@ final class CoreModel {
         case .CloseDialog:
             // Programmatic close (the answer was processed / the op finished). Setting
             // activeSheet directly never routes through userDismissedSheet().
+            log("CloseDialog (sheet was \(activeSheet?.rawValue ?? "none"))")
             activeSheet = nil
             dialogChecking = false
             passwordEntry = ""
@@ -790,6 +897,7 @@ final class CoreModel {
         case .ResumeLiveAudio:
             liveAudio?.play()
         case .SetWindowMode(let fullscreen):
+            log("SetWindowMode(fullscreen: \(fullscreen))")
             setWindowMode(fullscreen: fullscreen)
         case .HideWindow:
             hostWindow?.orderOut(nil)
@@ -811,7 +919,8 @@ final class CoreModel {
     /// terminal launch (`swift run`, the dev build-run loop) still sees the trace.
     private func log(_ text: String) {
         #if DEBUG
-            print("PB: \(text)")
+            // Uptime-stamped (ms precision) so event ordering around a bug is readable.
+            print("PB[\(String(format: "%10.3f", ProcessInfo.processInfo.systemUptime))]: \(text)")
         #endif
     }
 
@@ -1194,14 +1303,20 @@ final class CoreModel {
     /// cheaply re-asserted after every drain, compare-before-set — the same
     /// defeat-the-framework pattern the winit shell uses for per-tick menu state.
     private func assertWindowChrome() {
+        // Never mutate the window while a menu is open — a styleMask (or stoplight)
+        // write cancels the tracking session, closing the menu in the user's face.
+        // The didEndTracking observer re-runs this the moment the menu closes.
+        guard menuTrackingDepth == 0 else { return }
         guard let window = hostWindow else { return }
         let fs = speedModeFullscreen
         if fs, borderlessOK {
             // True borderless mode: keep it that way if SwiftUI re-adds `.titled`.
             if window.styleMask.contains(.titled) {
+                log("chrome: styleMask ← [.borderless, .fullSizeContentView] (SwiftUI re-added .titled)")
                 window.styleMask = [.borderless, .fullSizeContentView]
             }
         } else if window.styleMask.contains(.fullSizeContentView) != fs {
+            log("chrome: styleMask.fullSizeContentView ← \(fs)")
             if fs {
                 window.styleMask.insert(.fullSizeContentView)
             } else {
@@ -1210,21 +1325,26 @@ final class CoreModel {
         }
         // No shadow in F mode — its rim highlight reads as a border at the screen edge.
         if window.hasShadow != !fs {
+            log("chrome: hasShadow ← \(!fs)")
             window.hasShadow = !fs
         }
         if window.titlebarAppearsTransparent != fs {
+            log("chrome: titlebarAppearsTransparent ← \(fs)")
             window.titlebarAppearsTransparent = fs
         }
         let vis: NSWindow.TitleVisibility = fs ? .hidden : .visible
         if window.titleVisibility != vis {
+            log("chrome: titleVisibility ← \(fs ? "hidden" : "visible")")
             window.titleVisibility = vis
         }
         let sep: NSTitlebarSeparatorStyle = fs ? .none : .automatic
         if window.titlebarSeparatorStyle != sep {
+            log("chrome: titlebarSeparatorStyle ← \(fs ? "none" : "automatic")")
             window.titlebarSeparatorStyle = sep
         }
         for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
             if let button = window.standardWindowButton(kind), button.isHidden != fs {
+                log("chrome: stoplight \(kind.rawValue) isHidden ← \(fs)")
                 button.isHidden = fs
             }
         }

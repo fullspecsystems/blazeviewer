@@ -31,6 +31,11 @@
 	<string>__SHORT_VERSION__</string>
 	<key>CFBundleVersion</key>
 	<string>__VERSION__</string>
+	<!-- Git build stamp (short hash, -dirty when the tree had changes), shown in the
+	     About panel as "Version X.Y.Z (hash)". Stamped by build-swift-host.sh; empty
+	     for a build outside git (source tarball). -->
+	<key>PBBuildID</key>
+	<string>__BUILD_ID__</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>NSHighResolutionCapable</key>
@@ -42,7 +47,7 @@
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSHumanReadableCopyright</key>
-	<string>© JD Lien</string>
+	<string>© JD Lien 2026</string>
 
 	<!-- File associations — the same Viewer/Alternate stance as the egui bundle (a
 	     candidate "Open With" handler, never silently the default). Delivered via

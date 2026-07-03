@@ -140,6 +140,11 @@ final class MetalCanvasNSView: NSView {
             let pump = FramePump(view: self, model: model)
             self.pump = pump
             model.framePump = pump
+            // A launch-opened folder/archive (`--pb-open`, a cold Finder open) resolved
+            // BEFORE this pump existed — tick once now so its scan worker gets polled
+            // immediately (and `updatePacing` takes over), rather than waiting for the
+            // display link's first fire.
+            model.pump()
         }
     }
 

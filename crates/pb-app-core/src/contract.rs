@@ -225,7 +225,16 @@ pub enum DialogResult {
         settings: Option<crate::settings::Settings>,
         keymap: Option<Keymap>,
     },
-    /// Settings dialog's Cancel (its Esc goes through [`DialogResult::Dismissed`]).
+    /// A live edit from an auto-saving Settings window (the macOS idiom — no Save
+    /// button): apply + persist the payload immediately, but the window stays open,
+    /// so — unlike [`DialogResult::SettingsSaved`] — no `CloseDialog` is emitted.
+    SettingsEdited {
+        settings: Option<crate::settings::Settings>,
+        keymap: Option<Keymap>,
+    },
+    /// Settings dialog's Cancel, or the window closing in an auto-saving shell (where
+    /// edits were already applied live, so "cancel" only clears the dialog-open state).
+    /// Its Esc goes through [`DialogResult::Dismissed`].
     SettingsCancelled,
     /// The archive "Opening…" dialog's Cancel.
     LoadingCancelled,

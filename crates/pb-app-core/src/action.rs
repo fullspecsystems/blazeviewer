@@ -210,7 +210,9 @@ impl Action {
             Action::ZoomOut => "Zoom out",
             Action::ScaleFit => "Fit to screen",
             Action::ScaleFill => "Crop to fill",
-            Action::ScaleOriginal => "Original size",
+            // "(1:1)" ties it to ToggleOriginal's "Toggle 1:1 and fit" and the macOS
+            // View menu's "Original 1:1" — three surfaces, one vocabulary.
+            Action::ScaleOriginal => "Original size (1:1)",
             Action::ToggleOriginal => "Toggle 1:1 and fit",
             Action::RotateCw => "Rotate clockwise",
             Action::RotateCcw => "Rotate counter-clockwise",
@@ -236,7 +238,7 @@ impl Action {
             Action::OpenFile => "Open file",
             Action::OpenFolder => "Open folder",
             Action::Info => "Info panel",
-            Action::FullExif => "Full EXIF panel",
+            Action::FullExif => "Detailed info panel",
             Action::Help => "Keyboard help",
             Action::Fullscreen => "Toggle fullscreen",
             Action::Recursive => "Recursive (current folder)",

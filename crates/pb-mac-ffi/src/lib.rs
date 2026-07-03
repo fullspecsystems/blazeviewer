@@ -44,6 +44,10 @@ use pb_render::Renderer as _;
 /// `SCAN_DIALOG_DELAY`.
 const SCAN_DIALOG_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// Content-refresh throttle for the scan-count chip (folder line + count) — the software
+/// composite stays off the hot path. Mirrors the winit shell's `SCAN_CARD_REFRESH`.
+const SCAN_CARD_REFRESH: std::time::Duration = std::time::Duration::from_millis(120);
+
 /// An in-flight streaming folder walk — the mirror of the winit shell's `DirScan`
 /// (worker thread + generation guard + the Scanning dialog's display name/reveal timer).
 struct DirScan {
@@ -101,8 +105,8 @@ pub struct AppCoreHandle {
     /// pulled via `dialog_password_error()` with each `ShowDialog("password")`.
     password_error: String,
     /// The Shortcuts editor's draft keymap (NS2.6) — begun when the Settings window
-    /// opens, edited via `keymap_capture`/`keymap_clear_slot`, folded into
-    /// `SettingsSaved` by `submit_settings` when dirty, dropped on cancel.
+    /// opens, edited via `keymap_capture`/`keymap_clear_slot`, applied live by
+    /// `keymap_commit` after each edit gesture (auto-save), dropped when the window closes.
     keymap_draft: Option<pb_app_core::keymap::Keymap>,
     keymap_dirty: bool,
     /// The transient editor note ("Moved ⌘C from Copy Image") — pulled after a capture.
@@ -496,9 +500,10 @@ impl AppCoreHandle {
         ));
     }
 
-    /// The Settings window's Cancel (its Esc goes through `dialog_dismissed`).
-    /// Discards the Shortcuts draft along with the form edits.
-    fn settings_cancelled(&mut self) {
+    /// The Settings window closed. Edits were already applied live (`settings_edited` /
+    /// `keymap_commit`), so this only drops the Shortcuts draft and clears the core's
+    /// dialog-open state (the Cancel reaction — close, nothing further to apply).
+    fn settings_closed(&mut self) {
         self.core.now = Instant::now();
         self.keymap_draft = None;
         self.keymap_dirty = false;
@@ -579,25 +584,21 @@ impl AppCoreHandle {
         }
     }
 
-    /// Settings Save: fold the edited form onto the current settings and hand the result
-    /// to the core (`SettingsSaved` applies + persists it), along with the Shortcuts
-    /// draft when a binding actually changed (egui parity: an untouched keymap crosses
-    /// as `None` so `apply_keymap` isn't re-run for nothing).
-    fn submit_settings(&mut self, form: ffi::SettingsFormFfi) {
+    /// A live edit from the auto-saving Settings window (macOS idiom — no Save button):
+    /// fold the form onto the current settings and, when something actually changed,
+    /// hand it to the core to apply + persist (`SettingsEdited`, window stays open).
+    /// The unchanged case is a hard no-op, so the window's initial load echo and the
+    /// close-time flush never touch disk.
+    fn settings_edited(&mut self, form: ffi::SettingsFormFfi) {
         self.core.now = Instant::now();
         let s = fold_settings_form(&self.core.settings, &form, self.core.refresh_hz());
-        let keymap = if self.keymap_dirty {
-            self.keymap_draft.take()
-        } else {
-            self.keymap_draft = None;
-            None
-        };
-        self.keymap_dirty = false;
-        self.keymap_note.clear();
+        if s == self.core.settings {
+            return;
+        }
         self.core.handle(CoreEvent::DialogResolved(
-            contract::DialogResult::SettingsSaved {
+            contract::DialogResult::SettingsEdited {
                 settings: Some(s),
-                keymap,
+                keymap: None,
             },
         ));
     }
@@ -609,7 +610,8 @@ impl AppCoreHandle {
     // edit lands here so the model/steal semantics can't drift between shells.
 
     /// Start (or restart) editing: draft = the live keymap. Call when the Settings
-    /// window opens; Save folds the draft via `submit_settings`, Cancel drops it.
+    /// window opens; each edit gesture then lands via `keymap_commit` (auto-save)
+    /// and closing the window drops the draft.
     fn keymap_begin_edit(&mut self) {
         self.keymap_draft = Some(self.core.keymap.clone());
         self.keymap_dirty = false;
@@ -653,14 +655,26 @@ impl AppCoreHandle {
     }
 
     /// The chord in `slot` (0 primary / 1 secondary) of `action_id`, as macOS glyphs
-    /// (`⌃⇧ R`, `→`, "" = unbound) — read from the draft while editing.
+    /// (`⌃⇧ R`, `→`, "" = unbound; the editor style, so Esc shows ⎋) — read from the
+    /// draft while editing.
     fn keymap_slot_display(&self, action_id: &str, slot: usize) -> String {
         let Some(action) = Action::from_id(action_id) else {
             return String::new();
         };
         let map = self.keymap_draft.as_ref().unwrap_or(&self.core.keymap);
         map.slot(action, slot)
-            .map(|c| c.mac_symbol())
+            .map(|c| c.mac_symbol_editor())
+            .unwrap_or_default()
+    }
+
+    /// The macOS menu bar's own accelerator for this action ("" = none) — the Shortcuts
+    /// editor shows it as a read-only hint beside the editable slots. ⌘-chords live in
+    /// the menu (not the keymap: its defaults keep real-Ctrl chords), so without this
+    /// the editor implies the ⌃ alternate is the only shortcut when e.g. ⌘C also copies.
+    fn keymap_menu_chord(&self, action_id: &str) -> String {
+        Action::from_id(action_id)
+            .and_then(pb_app_core::keymap::macos_menu_chord)
+            .map(|c| c.mac_symbol_editor())
             .unwrap_or_default()
     }
 
@@ -692,7 +706,7 @@ impl AppCoreHandle {
             .map(|a| {
                 format!(
                     "Moved {} from \u{201c}{}\u{201d}",
-                    chord.mac_symbol(),
+                    chord.mac_symbol_editor(),
                     a.label()
                 )
             })
@@ -726,6 +740,28 @@ impl AppCoreHandle {
 
     fn keymap_is_dirty(&self) -> bool {
         self.keymap_dirty
+    }
+
+    /// Commit the Shortcuts draft live (auto-save): when a binding actually changed,
+    /// apply + persist the draft as the live keymap (`SettingsEdited`, window stays
+    /// open). The draft itself stays put so further edits continue from it; the
+    /// not-dirty case is a hard no-op (never touches keymap.toml). The draft edits
+    /// themselves stay pure — the host calls this after each successful gesture.
+    fn keymap_commit(&mut self) {
+        if !self.keymap_dirty {
+            return;
+        }
+        let Some(km) = self.keymap_draft.clone() else {
+            return;
+        };
+        self.keymap_dirty = false;
+        self.core.now = Instant::now();
+        self.core.handle(CoreEvent::DialogResolved(
+            contract::DialogResult::SettingsEdited {
+                settings: None,
+                keymap: Some(km),
+            },
+        ));
     }
 
     /// `ShellFlowAction(DeletePermanent)` intercepted — the winit shell's
@@ -843,7 +879,43 @@ impl AppCoreHandle {
         self.poll_dir_scan();
         self.poll_archive_load();
         self.core.handle(CoreEvent::Tick(self.core.now));
+        self.tick_chip();
         self.apply_menu_state();
+    }
+
+    /// Keep the in-canvas scan-count chip in sync (the winit shell's `tick_chip`, which was
+    /// MISSING on this host — `chip_hit` handled the Cancel click but nothing ever *drew*
+    /// the chip): while a bootstrapped scan is still streaming past [`SCAN_DIALOG_DELAY`],
+    /// show `Scanning "Folder" — N images found` + Cancel in the corner; clear it when the
+    /// walk ends. Show/hide is immediate; a content tick (folder/count) is throttled by
+    /// [`SCAN_CARD_REFRESH`] so the software composite stays off the hot path.
+    fn tick_chip(&mut self) {
+        let want = match (self.dir_scan.as_ref(), self.core.displayed_item) {
+            (Some(scan), Some(_))
+                if self.core.scan_bootstrapped && scan.started.elapsed() >= SCAN_DIALOG_DELAY =>
+            {
+                // Current folder being walked; hide it while it's just the root (it would
+                // duplicate the heading).
+                let cur = scan.progress.current();
+                let path = if cur == scan.name { String::new() } else { cur };
+                Some((scan.name.clone(), path, self.core.source.len()))
+            }
+            _ => None,
+        };
+        if want == self.core.chip_sig {
+            return;
+        }
+        // Show/hide is immediate; a content tick (folder/count) is throttled.
+        let toggling = want.is_some() != self.core.chip_sig.is_some();
+        if !toggling && self.core.chip_built.elapsed() < SCAN_CARD_REFRESH {
+            return;
+        }
+        match &want {
+            Some((name, path, count)) => self.core.push_chip(name, path, *count),
+            None => self.core.clear_chip(),
+        }
+        self.core.chip_sig = want;
+        self.core.chip_built = Instant::now();
     }
 
     /// Mirror the live menu check/enabled state — the winit shell's `apply_menu_state`,
@@ -1165,6 +1237,13 @@ impl AppCoreHandle {
                         continue; // superseded by a newer open
                     }
                     self.core.handle(CoreEvent::ScanBatch(resolved));
+                    // A photo is on screen now — a revealed Scanning sheet has served its
+                    // purpose, and on this host it blocks every key while it's up. Drop it
+                    // so browsing starts at the FIRST image, not the end of the walk; the
+                    // scan-count chip takes over as the (non-blocking) progress display.
+                    if self.core.scan_bootstrapped {
+                        self.close_dialog_kinds(&[contract::DialogKind::Scanning]);
+                    }
                 }
                 Ok((generation, ScanUpdate::Done)) => {
                     if generation != cur_gen {
@@ -1693,10 +1772,10 @@ mod ffi {
         fn password_cancelled(&mut self);
         fn loading_cancelled(&mut self);
         fn scanning_cancelled(&mut self);
-        fn settings_cancelled(&mut self);
+        fn settings_closed(&mut self);
         fn dialog_progress(&self) -> DialogProgressFfi;
         fn settings_form(&self) -> SettingsFormFfi;
-        fn submit_settings(&mut self, form: SettingsFormFfi);
+        fn settings_edited(&mut self, form: SettingsFormFfi);
 
         // The Shortcuts editor (NS2.6): a Rust-side draft keymap; rows by (group, index),
         // edits by stable action id; chords display as macOS glyphs.
@@ -1707,6 +1786,7 @@ mod ffi {
         fn keymap_action_id(&self, group: usize, index: usize) -> String;
         fn keymap_action_label(&self, group: usize, index: usize) -> String;
         fn keymap_slot_display(&self, action_id: &str, slot: usize) -> String;
+        fn keymap_menu_chord(&self, action_id: &str) -> String;
         fn keymap_capture(
             &mut self,
             action_id: &str,
@@ -1721,6 +1801,7 @@ mod ffi {
         fn keymap_clear_slot(&mut self, action_id: &str, slot: usize);
         fn keymap_reset_defaults(&mut self);
         fn keymap_is_dirty(&self) -> bool;
+        fn keymap_commit(&mut self);
 
         // Startup window state + geometry persistence (finalize item 2).
         fn startup_fullscreen(&mut self) -> bool;
@@ -1742,6 +1823,16 @@ mod ffi {
 mod tests {
     use super::*;
 
+    /// The FFI constructor with test hygiene applied: `AppCoreHandle::new` builds a real
+    /// host (`persist_prefs = true`), so a test that opens a deck would write the
+    /// developer's actual settings.toml (`last_folder`). Every test constructs through
+    /// here instead.
+    fn test_handle(width: u32, height: u32, scale: f32) -> AppCoreHandle {
+        let mut h = AppCoreHandle::new(width, height, scale);
+        h.core.persist_prefs = false;
+        h
+    }
+
     /// Pull the queue dry, as the Swift host's drain loop does.
     fn drain(h: &mut AppCoreHandle) -> Vec<ffi::CoreEffectFfi> {
         std::iter::from_fn(|| h.next_effect()).collect()
@@ -1754,7 +1845,7 @@ mod tests {
     /// the host runs the quit teardown), even on a headless core with no photos.
     #[test]
     fn event_in_produces_effects_out() {
-        let mut h = AppCoreHandle::new(1920, 1080, 2.0);
+        let mut h = test_handle(1920, 1080, 2.0);
         h.key_down("Escape", false, false, false, false, false);
         let effects = drain(&mut h);
         assert!(
@@ -1773,7 +1864,7 @@ mod tests {
     /// what it forwards.
     #[test]
     fn unknown_key_name_is_ignored() {
-        let mut h = AppCoreHandle::new(800, 600, 1.0);
+        let mut h = test_handle(800, 600, 1.0);
         h.key_down("NotAKey", false, false, false, false, false);
         assert!(drain(&mut h).is_empty());
     }
@@ -1790,7 +1881,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("one.jpg"), FIXTURE).unwrap();
 
-        let mut h = AppCoreHandle::new(800, 600, 1.0);
+        let mut h = test_handle(800, 600, 1.0);
         h.open_path(dir.to_str().unwrap());
         let _ = drain(&mut h); // executes the intercepted BeginDirScan (spawns the worker)
         assert!(h.dir_scan.is_some(), "the scan worker should be in flight");
@@ -1807,6 +1898,44 @@ mod tests {
             "the scan should bootstrap the playlist on the fixture image"
         );
         assert_eq!(h.core.source.len(), 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A Scanning dialog that revealed (slow walk, nothing on screen yet) must close the
+    /// moment the first image lands — the sheet blocks every key on the Swift host, so
+    /// leaving it up until `ScanDone` blocked browsing for the whole walk (the owner-
+    /// reported "blocking wait spinner" regression). The chip takes over as progress.
+    #[test]
+    fn first_scan_batch_closes_a_revealed_scanning_dialog() {
+        const FIXTURE: &[u8] = include_bytes!("../../pb-app-core/tests/fixtures/orient6.jpg");
+        let dir = std::env::temp_dir().join(format!("pb-mac-ffi-reveal-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("one.jpg"), FIXTURE).unwrap();
+
+        let mut h = test_handle(800, 600, 1.0);
+        h.open_path(dir.to_str().unwrap());
+        let _ = drain(&mut h); // executes the intercepted BeginDirScan (spawns the worker)
+                               // Pretend the walk outlasted the reveal delay before finding anything: the
+                               // Scanning dialog is up, exactly as the host would show it.
+        h.shown_dialog = Some(contract::DialogKind::Scanning);
+
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        let mut effects = Vec::new();
+        while !h.core.scan_bootstrapped && Instant::now() < deadline {
+            h.tick();
+            effects.extend(drain(&mut h));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(h.core.scan_bootstrapped, "fixture image should bootstrap");
+        assert!(
+            has_close(&effects),
+            "the first batch must emit CloseDialog for the revealed Scanning sheet"
+        );
+        assert_eq!(
+            h.shown_dialog, None,
+            "the Scanning dialog must be gone as soon as a photo is on screen"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1831,7 +1960,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("one.jpg");
         std::fs::write(&file, FIXTURE).unwrap();
-        let mut h = AppCoreHandle::new(800, 600, 1.0);
+        let mut h = test_handle(800, 600, 1.0);
         h.open_path(dir.to_str().unwrap());
         let _ = drain(&mut h);
         let deadline = Instant::now() + std::time::Duration::from_secs(10);
@@ -1851,7 +1980,7 @@ mod tests {
     fn startup_mode_and_geometry_notes_are_honored() {
         // ⚠ This test must never tick past the 500 ms debounce — the core's tick 4e
         // would flush settings.save() to the user's REAL settings.toml.
-        let mut h = AppCoreHandle::new(800, 600, 1.0);
+        let mut h = test_handle(800, 600, 1.0);
 
         // Remember + last-mode-fullscreen → start fullscreen; the core mirror flips
         // without a settings write.
@@ -1965,7 +2094,7 @@ mod tests {
     /// archive entry — no file) reports "".
     #[test]
     fn current_photo_path_names_the_displayed_file() {
-        let h = AppCoreHandle::new(800, 600, 1.0);
+        let h = test_handle(800, 600, 1.0);
         assert_eq!(h.current_photo_path(), "", "empty deck → no proxy icon");
 
         let (h, file) = handle_with_photo("proxy");
@@ -1979,7 +2108,7 @@ mod tests {
     /// prompt closes and the error surfaces natively).
     #[test]
     fn password_required_prompts_and_a_submit_rechecks() {
-        let mut h = AppCoreHandle::new(800, 600, 1.0);
+        let mut h = test_handle(800, 600, 1.0);
         let path = PathBuf::from("/nonexistent/locked.7z");
 
         h.finish_archive_open(Err(ArchiveOpenError::PasswordRequired), false, path.clone());
@@ -2023,7 +2152,7 @@ mod tests {
     /// into quit).
     #[test]
     fn dismissing_the_shown_dialog_closes_and_guards() {
-        let mut h = AppCoreHandle::new(800, 600, 1.0);
+        let mut h = test_handle(800, 600, 1.0);
         h.shown_dialog = Some(contract::DialogKind::Scanning);
         h.core.dialog_open = true;
 
@@ -2037,15 +2166,25 @@ mod tests {
 
     /// NS2.6: the Shortcuts-editor draft — capture binds (with the steal note when the
     /// chord had another owner), clear unbinds, dirty tracks edits, and none of it
-    /// touches the live keymap until Save. Pure draft ops — no keymap.toml I/O.
+    /// touches the live keymap until `keymap_commit`. Pure draft ops — no keymap.toml
+    /// I/O (the commit itself applies + persists REAL config, so it's never exercised
+    /// here; only its clean no-op path is).
     #[test]
     fn keymap_draft_captures_steals_and_clears() {
-        let mut h = AppCoreHandle::new(800, 600, 1.0);
+        let mut h = test_handle(800, 600, 1.0);
         h.keymap_begin_edit();
         assert!(!h.keymap_is_dirty());
         assert!(h.keymap_group_count() > 0);
         assert_eq!(h.keymap_group_title(0), "Navigation");
         assert_eq!(h.keymap_action_id(0, 0), "next");
+
+        // Hermetic: the draft opens as a clone of the LIVE keymap — on a dev machine
+        // that's the real keymap.toml, which the auto-saving editor now rewrites
+        // freely. Reset the draft to the built-in defaults so the steal/clear
+        // assertions never depend on whatever the developer last bound in the app.
+        h.keymap_reset_defaults();
+        let next = Action::from_id("next").unwrap();
+        let live_next_before = h.core.keymap.slot(next, 0);
 
         // Space is Next's default primary → binding it to Prev steals it (note names Next).
         assert!(h.keymap_capture("prev", 0, "Space", false, false, false, false));
@@ -2063,19 +2202,42 @@ mod tests {
         h.keymap_clear_slot("prev", 0);
         assert_eq!(h.keymap_slot_display("prev", 0), "");
 
-        // The LIVE keymap is untouched throughout (draft-only until Save).
-        assert_eq!(
-            h.core
-                .keymap
-                .slot(Action::from_id("next").unwrap(), 0)
-                .map(|c| c.mac_symbol()),
-            Some("Space".to_string())
-        );
+        // The LIVE keymap is untouched throughout (draft-only until commit).
+        assert_eq!(h.core.keymap.slot(next, 0), live_next_before);
 
         // Reset restores defaults in the draft.
         h.keymap_reset_defaults();
         assert_eq!(h.keymap_slot_display("next", 0), "Space");
         assert!(h.keymap_is_dirty());
+    }
+
+    /// Auto-save guards: an unchanged Settings form and a clean Shortcuts draft are hard
+    /// no-ops — no `SettingsEdited` event, no effects, nothing applied. This is what keeps
+    /// the window's initial `onChange` echo and the close-time flush from touching disk.
+    /// (The *changed* path applies + persists the REAL settings.toml/keymap.toml, so it's
+    /// deliberately not exercised end-to-end; the fold itself is covered below.)
+    #[test]
+    fn unchanged_settings_and_clean_keymap_commit_are_noops() {
+        let mut h = test_handle(800, 600, 1.0);
+        // Pin known-good settings so the form→fold round-trip is exact regardless of
+        // whatever the dev machine's real settings.toml contains.
+        h.core.settings = pb_app_core::settings::Settings::default();
+        let before = h.core.settings.clone();
+
+        h.settings_edited(h.settings_form());
+        assert_eq!(h.core.settings, before, "unchanged form applies nothing");
+        assert!(drain(&mut h).is_empty(), "unchanged form emits no effects");
+
+        h.keymap_begin_edit();
+        h.keymap_commit(); // not dirty → no-op
+        assert!(
+            drain(&mut h).is_empty(),
+            "clean draft commit emits no effects"
+        );
+        assert!(
+            h.keymap_draft.is_some(),
+            "draft stays open for further edits"
+        );
     }
 
     /// NS2 item 5: the Settings form fold — encodings map both ways, out-of-range values
@@ -2084,7 +2246,7 @@ mod tests {
     #[test]
     fn settings_form_folds_back_with_clamps() {
         use pb_app_core::settings::ScrollAction;
-        let h = AppCoreHandle::new(800, 600, 1.0);
+        let h = test_handle(800, 600, 1.0);
         let mut form = h.settings_form();
 
         form.recursive = !form.recursive;

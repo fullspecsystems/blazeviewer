@@ -214,6 +214,25 @@ implicit "egui everywhere" of `macos-port-plan` for the Mac chrome only. **Param
   (tagline + GitHub link) — maps the current egui About 1:1, native, ~no custom UI.
   A bespoke SwiftUI About is a deferred NS3 nicety.
 
+### ADR-022 — Remembered `last_folder` seeds the Open dialog; bare launch stays empty
+*Decided 2026-07-02 (owner); amended 2026-07-03 (owner).* The app remembers the most
+recent folder open as `settings::last_folder`. **As originally decided, a bare launch
+auto-reopened that folder; the owner reversed that on 2026-07-03 after living with it**
+— auto-opening a whole folder nobody asked for felt wrong. Now a bare launch (no CLI
+path, no opened document) always lands on the empty "Press O" state, and `last_folder`
+only decides where the Open dialog *starts* when nothing is open yet (priority: pinned
+`picker_dir` → current photo's folder → `last_folder` → Pictures; see
+`engine::picker_start_dir`). The recording mechanics are unchanged: written in
+`AppCore::rebuild_playlist` for folder-backed opens only (archives don't update it),
+only when the folder *changes*, on the explicit open action — save-on-open rather than
+save-on-exit, because opens funnel through one shared choke point, exit has many
+teardown paths, "Esc teardown writes nothing" (task #6) stays true, and it survives a
+crash. **Privacy (amends the ADR-018 re-scope):** this is a deliberate, owner-approved
+exception to "no record of viewed paths" — one folder path, never file names, and still
+nothing derived from photo content. Unit tests are kept honest by
+`AppCore::persist_prefs` (false in `headless`, true only on live hosts), so opening a
+deck in a test never writes the real `settings.toml`.
+
 ---
 
 ## Owner decisions (resolved 2026-06-26)

@@ -492,12 +492,15 @@ impl Hud {
             let mut rows = Vec::with_capacity(s.rows.len());
             for (desc, sc) in &s.rows {
                 let (dg, dw) = self.layout(desc, px, Weight::Regular);
-                // Split a combined "a / b" shortcut on "/" so the slash is its own dim run.
+                // Split a combined "a / b" shortcut on its spaced " / " separator so the
+                // slash is its own dim run. Splitting on the spaced form (never a bare
+                // '/') lets "/" itself be a key: the Help row's "/ / ?" is slash key,
+                // dim separator, question-mark key.
                 let mut shortcut = Vec::new();
                 let mut sw = 0.0f32;
-                for (i, part) in sc.split('/').enumerate() {
+                for (i, part) in sc.split(" / ").enumerate() {
                     if i > 0 {
-                        let (g, w) = self.layout("/", px, Weight::Semibold);
+                        let (g, w) = self.layout(" / ", px, Weight::Semibold);
                         sw += w;
                         shortcut.push((g, w, true));
                     }

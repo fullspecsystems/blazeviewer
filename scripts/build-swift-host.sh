@@ -52,12 +52,19 @@ BIN="$(swift build --package-path mac -c "$PROFILE" --show-bin-path)/PhotoBlazeM
 
 # Version in lockstep with the app crate, like bundle-macos.sh.
 SHORT_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/pb-app/Cargo.toml | head -1)"
+# Build stamp for the About panel (PBBuildID) — same format as pb-app's PB_BUILD_ID
+# (build.rs): short commit hash, "-dirty" when the tree has changes. Empty outside git.
+BUILD_ID="$(git rev-parse --short HEAD 2>/dev/null || true)"
+if [[ -n "$BUILD_ID" ]] && [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+	BUILD_ID="$BUILD_ID-dirty"
+fi
 APP_DIR="target/swift-host/$PROFILE/PhotoBlaze.app"
-echo "==> Assembling $APP_DIR (v$SHORT_VERSION)"
+echo "==> Assembling $APP_DIR (v$SHORT_VERSION${BUILD_ID:+, build $BUILD_ID})"
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 sed -e "s/__SHORT_VERSION__/$SHORT_VERSION/g" \
 	-e "s/__VERSION__/$SHORT_VERSION/g" \
+	-e "s/__BUILD_ID__/$BUILD_ID/g" \
 	packaging/macos/Info-swift-host.plist > "$APP_DIR/Contents/Info.plist"
 printf 'APPL????' > "$APP_DIR/Contents/PkgInfo"
 cp "$BIN" "$APP_DIR/Contents/MacOS/PhotoBlaze"
