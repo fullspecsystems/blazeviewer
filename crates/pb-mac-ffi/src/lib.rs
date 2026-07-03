@@ -415,7 +415,8 @@ impl AppCoreHandle {
         let g = pb_app_core::settings::WindowGeometry { x, y, w, h };
         if self.core.settings.window != Some(g) {
             self.core.settings.window = Some(g);
-            self.core.geometry_save_at = Some(Instant::now() + std::time::Duration::from_millis(500));
+            self.core.geometry_save_at =
+                Some(Instant::now() + std::time::Duration::from_millis(500));
         }
     }
 
