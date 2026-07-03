@@ -149,6 +149,12 @@ pub struct MenuState {
     pub slideshow: bool,
     /// Image ▸ Mute Live Photo Audio — checked when Live Photo audio is muted (#38).
     pub mute_live_audio: bool,
+    /// Image ▸ Pin for Compare — enabled with a photo on screen (task #43).
+    pub compare_pin_enabled: bool,
+    /// Image ▸ Pin for Compare — checked while the current photo IS the pin.
+    pub compare_pinned_here: bool,
+    /// Image ▸ Compare with Pinned — enabled once a pin exists (the `Y` flip).
+    pub compare_toggle_enabled: bool,
     /// File ▸ Save Rotation — enabled only with an unsaved rotation on a writable file.
     pub save_rotation_enabled: bool,
     /// File ▸ Show in Finder/Explorer — enabled only for a real on-disk file (not an
@@ -185,6 +191,11 @@ pub struct ContextMenuState {
     /// "Exit Fullscreen" (else "Enter Fullscreen"). Especially useful in fullscreen, where
     /// the menu bar is hidden and the only other way out is a keyboard shortcut.
     pub fullscreen: bool,
+    /// A compare pin exists (task #43) → include "Compare with Pinned" (the `Y` flip).
+    /// "Pin for Compare" is always offered (it reads "Unpin" when `pinned_here`).
+    pub compare_pinned: bool,
+    /// The displayed photo IS the pin → the pin item reads "Unpin from Compare".
+    pub compare_pinned_here: bool,
 }
 
 /// What to write to the system clipboard — the shell-neutral payload of

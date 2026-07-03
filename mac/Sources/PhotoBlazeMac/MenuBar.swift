@@ -58,6 +58,9 @@ final class MenuBar: NSObject {
         check("fullscreen", s.fullscreen)
         check("slideshow", s.slideshow)
         check("mute_live_audio", s.mute_live_audio)
+        check("compare_pin", s.compare_pinned_here)
+        items["compare_pin"]?.isEnabled = s.compare_pin_enabled
+        items["compare_toggle"]?.isEnabled = s.compare_toggle_enabled
         items["save_rotation"]?.isEnabled = s.save_rotation_enabled
         items["reveal"]?.isEnabled = s.reveal_enabled
         items["cancel_scan"]?.isEnabled = s.cancel_scan_enabled
@@ -131,6 +134,13 @@ final class MenuBar: NSObject {
             item("open_folder", "Open Folder…", key: "O", mods: [.command, .shift]),
             item("cancel_scan", "Stop Scanning", enabled: false),
             sep(),
+            // Standard ⌘W: closes the key window (Settings, About, the viewer). Routed
+            // through the responder chain via performClose:, so it targets whichever
+            // window is key — the custom NSMenu replaced SwiftUI's default File menu,
+            // which had supplied this for free (its absence is why ⌘W stopped closing
+            // Settings). Placed after the Open group per convention (Preview, TextEdit).
+            system("Close Window", #selector(NSWindow.performClose(_:)), key: "w"),
+            sep(),
             item("save_rotation", "Save Rotation", key: "s", enabled: false),
             item("reveal", "Show in Finder", enabled: false),
             sep(),
@@ -187,6 +197,11 @@ final class MenuBar: NSObject {
             sep(),
             item("rotate_cw", "Rotate Right"),
             item("rotate_ccw", "Rotate Left"),
+            sep(),
+            // Flicker compare (task #43): bare keys (Y / ⇧Y) — badges, never
+            // key-equivalents. SetMenuState drives enabled + the pin's checkmark.
+            item("compare_pin", "Pin for Compare", enabled: false),
+            item("compare_toggle", "Compare with Pinned", enabled: false),
             sep(),
             item("play_pause", "Play/Pause Animation"),
             item("frame_next", "Next Frame"),

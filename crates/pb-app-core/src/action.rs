@@ -47,6 +47,13 @@ pub enum Action {
     // Rotate.
     RotateCw,
     RotateCcw,
+    /// Pin the current photo for flicker comparison — or unpin it if it's already the
+    /// pin (task #43). The whole pin-management surface.
+    ComparePin,
+    /// Flip between the pinned photo and the current one (full-screen A/B flicker —
+    /// the culling tool). With nothing pinned, pins the current photo instead, so a
+    /// single key drives the whole feature.
+    CompareToggle,
     // File operations.
     Copy,
     CopyPath,
@@ -111,6 +118,8 @@ impl Action {
         Action::ToggleOriginal,
         Action::RotateCw,
         Action::RotateCcw,
+        Action::ComparePin,
+        Action::CompareToggle,
         Action::Copy,
         Action::CopyPath,
         Action::CopyImageDetails,
@@ -158,6 +167,8 @@ impl Action {
             Action::ToggleOriginal => "toggle_original",
             Action::RotateCw => "rotate_cw",
             Action::RotateCcw => "rotate_ccw",
+            Action::ComparePin => "compare_pin",
+            Action::CompareToggle => "compare_toggle",
             Action::Copy => "copy",
             Action::CopyPath => "copy_path",
             Action::CopyImageDetails => "copy_image_details",
@@ -198,10 +209,10 @@ impl Action {
     /// drift. Sentence-case, plain wording (no em-dashes).
     pub fn label(self) -> &'static str {
         match self {
-            Action::Next => "Next photo",
-            Action::Prev => "Previous photo",
-            Action::Random => "Random photo",
-            Action::RandomPrev => "Previous random photo",
+            Action::Next => "Next image",
+            Action::Prev => "Previous image",
+            Action::Random => "Random image",
+            Action::RandomPrev => "Previous random image",
             Action::PanLeft => "Pan left",
             Action::PanRight => "Pan right",
             Action::PanUp => "Pan up",
@@ -216,6 +227,8 @@ impl Action {
             Action::ToggleOriginal => "Toggle 1:1 and fit",
             Action::RotateCw => "Rotate clockwise",
             Action::RotateCcw => "Rotate counter-clockwise",
+            Action::ComparePin => "Pin for compare",
+            Action::CompareToggle => "Compare with pinned",
             Action::Copy => "Copy image",
             Action::CopyPath => "Copy file path",
             Action::CopyImageDetails => "Copy image details",

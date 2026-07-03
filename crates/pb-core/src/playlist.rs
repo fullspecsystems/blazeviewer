@@ -228,6 +228,18 @@ impl Playlist {
         self.cursor = self.shuffle.at(self.shuffle_pos).expect("pos in range") as usize;
         self.last_dir = Direction::Random;
     }
+
+    /// Jump the cursor straight to `index` — absolute navigation (the flicker-compare
+    /// flip, task #43). Out of range is a no-op. `last_dir` is deliberately left
+    /// untouched: a jump is not a browse direction, so the direction-biased prefetch
+    /// keeps favoring the way the user was actually flying. Like sequential `next`/
+    /// `prev`, it doesn't reseat `shuffle_pos` — the random walk continues from where
+    /// it left off (`extend` already reseats when the deck regrows).
+    pub fn jump_to(&mut self, index: usize) {
+        if index < self.len {
+            self.cursor = index;
+        }
+    }
 }
 
 /// Move `cur` by `delta` within `[0, len)`, wrapping or clamping at the ends.
@@ -423,6 +435,31 @@ mod tests {
             seen.insert(pl.current().unwrap());
         }
         assert_eq!(seen.len(), 20);
+    }
+
+    #[test]
+    fn jump_to_moves_the_cursor_and_keeps_direction_state() {
+        let mut pl = Playlist::new(10, 7);
+        pl.next();
+        let dir = pl.last_direction();
+        pl.jump_to(7);
+        assert_eq!(pl.current(), Some(7));
+        assert_eq!(pl.last_direction(), dir, "a jump is not a browse direction");
+        // Sequential nav continues from the jump target.
+        pl.next();
+        assert_eq!(pl.current(), Some(8));
+    }
+
+    #[test]
+    fn jump_to_out_of_range_is_a_noop() {
+        let mut pl = Playlist::new(3, 0);
+        pl.jump_to(1);
+        assert_eq!(pl.current(), Some(1));
+        pl.jump_to(3); // == len — out of range
+        assert_eq!(pl.current(), Some(1));
+        let mut empty = Playlist::new(0, 0);
+        empty.jump_to(0);
+        assert_eq!(empty.current(), None);
     }
 
     #[test]

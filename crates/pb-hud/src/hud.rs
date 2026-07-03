@@ -1694,8 +1694,8 @@ mod tests {
             ShortcutSection {
                 title: "Browse".into(),
                 rows: vec![
-                    ("Next photo".into(), "Space".into()),
-                    ("Previous photo".into(), "\u{232b}".into()),
+                    ("Next image".into(), "Space".into()),
+                    ("Previous image".into(), "\u{232b}".into()),
                 ],
             },
             ShortcutSection {

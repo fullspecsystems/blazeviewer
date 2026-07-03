@@ -100,6 +100,9 @@ impl AppCore {
             last_nav: Nav::Forward,
             displayed_item: None,
             target_item: None,
+            compare_pin: None,
+            compare_return: None,
+            compare_pin_id: None,
             epoch: 1,
             root: PathBuf::new(),
             scan_root: None,
@@ -224,6 +227,8 @@ impl AppCore {
             }
             Action::RotateCw => self.rotate(false),
             Action::RotateCcw => self.rotate(true),
+            Action::ComparePin => self.compare_pin_cmd(),
+            Action::CompareToggle => self.compare_toggle_cmd(),
             Action::Copy => self.copy_image(),
             Action::CopyPath => self.copy_path(),
             Action::CopyImageDetails => self.copy_image_details(),
@@ -1052,6 +1057,8 @@ impl AppCore {
         cancel_scan_enabled: bool,
         undo: Option<&'static str>,
         native_fullscreen_engaged: bool,
+        displayed_item: Option<usize>,
+        compare_pin: Option<usize>,
     ) -> contract::MenuState {
         contract::MenuState {
             scale: match scale {
@@ -1070,6 +1077,11 @@ impl AppCore {
             fullscreen,
             slideshow,
             mute_live_audio,
+            // Compare (task #43): both raw states cross so the derivation lives HERE,
+            // the one choke point, instead of drifting per shell.
+            compare_pin_enabled: displayed_item.is_some(),
+            compare_pinned_here: displayed_item.is_some() && displayed_item == compare_pin,
+            compare_toggle_enabled: compare_pin.is_some() && displayed_item.is_some(),
             save_rotation_enabled,
             reveal_enabled,
             cancel_scan_enabled,
@@ -1189,6 +1201,7 @@ impl AppCore {
         self.invalidate_geometry();
         self.displayed_item = None;
         self.target_item = None;
+        self.clear_compare_pin();
         self.current = None;
         if let Some(r) = self.renderer.as_mut() {
             r.clear_image();
@@ -1241,6 +1254,18 @@ impl AppCore {
             }
         }
         self.playlist = Playlist::new(self.source.len(), 0).with_cursor(start);
+        // Re-resolve the compare pin by identity against the new source: it survives a
+        // same-deck rebuild (delete-advance, recursive toggle — same paths, new
+        // indices); a genuinely new deck can't match, so the pin clears silently. The
+        // return position is transient and always drops with the old indices.
+        self.compare_return = None;
+        self.compare_pin = self
+            .compare_pin_id
+            .as_ref()
+            .and_then(|id| (0..self.source.len()).find(|&i| &self.compare_identity(i) == id));
+        if self.compare_pin.is_none() {
+            self.compare_pin_id = None;
+        }
         // Indices are reassigned — drop everything keyed by item index.
         self.rotations.clear();
         self.meta_cache.clear();
@@ -1412,6 +1437,118 @@ impl AppCore {
         // previous frame while the decode (fit-sized or full-res) lands.
         self.try_present_target();
         self.request_prefetch();
+    }
+
+    // --- Flicker compare (task #43): pin one photo, `Y` flips between it and the
+    // current one at full resolution — change detection at a fixed gaze point, the
+    // culling tool. The pin rides the prefetch want-list at top-2 priority
+    // (`request_prefetch`), so both directions of the flip are ring rebinds.
+
+    /// `⇧Y` / Image ▸ Pin for Compare — pin the current photo, or unpin when it's
+    /// already the pin. The whole pin-management surface.
+    pub fn compare_pin_cmd(&mut self) {
+        let Some(item) = self.displayed_item else {
+            return; // empty state — nothing to pin
+        };
+        if self.compare_pin == Some(item) {
+            self.clear_compare_pin();
+            self.show_toast_icon("Unpinned", Some(icon::assets::THUMBTACK_SLASH));
+        } else {
+            self.set_compare_pin(item);
+        }
+    }
+
+    /// `Y` / Image ▸ Compare with Pinned — flip between the pinned photo and the
+    /// current one. With nothing pinned yet, pins the current photo instead, so a
+    /// single key drives the whole feature.
+    pub fn compare_toggle_cmd(&mut self) {
+        let Some(current) = self.displayed_item else {
+            return;
+        };
+        let Some(pin) = self.compare_pin else {
+            self.set_compare_pin(current);
+            return;
+        };
+        if current == pin {
+            // Viewing the pin: flip back to the remembered position. No return point
+            // yet (pinned, never flipped) → nothing to do.
+            if let Some(ret) = self.compare_return {
+                if ret != pin && ret < self.source.len() {
+                    self.compare_jump(ret);
+                }
+            }
+        } else {
+            self.compare_return = Some(current);
+            self.compare_jump(pin);
+        }
+    }
+
+    fn set_compare_pin(&mut self, item: usize) {
+        self.compare_pin = Some(item);
+        self.compare_pin_id = Some(self.compare_identity(item));
+        self.compare_return = None;
+        self.show_toast_icon("Pinned for compare", Some(icon::assets::THUMBTACK));
+        // Re-issue the want-list so the pin's eviction exemption takes effect now.
+        self.request_prefetch();
+    }
+
+    /// Drop the pin and its bookkeeping (deleting the pinned photo, a new deck).
+    pub fn clear_compare_pin(&mut self) {
+        self.compare_pin = None;
+        self.compare_return = None;
+        self.compare_pin_id = None;
+    }
+
+    /// The pinned item's rebuild-stable identity: the full path where one exists,
+    /// else the archive-entry name.
+    fn compare_identity(&self, item: usize) -> String {
+        match self.source.path(item) {
+            Some(p) => p.to_string_lossy().into_owned(),
+            None => self.source.name(item).to_string(),
+        }
+    }
+
+    /// Jump the cursor to an absolute index and present it — `advance`'s gated engine
+    /// path for the compare flip. The live zoom/pan carries across the flip when both
+    /// photos share dimensions and rotation (the 100%-crop sharpness workflow: the
+    /// same crop of the other frame lands under your gaze).
+    fn compare_jump(&mut self, item: usize) {
+        self.flush_pending_delete();
+        // Never jump while the previous target is still pending (a miss in flight) —
+        // mirroring `advance`, so a photo is never silently skipped.
+        if self.displayed_item != self.target_item {
+            return;
+        }
+        let carry = self.compare_carry_view(item);
+        self.stop_playback();
+        self.playlist.jump_to(item);
+        self.target_item = self.playlist.current();
+        if self.try_present_target() {
+            if let Some((zoom, pan)) = carry {
+                // `present_item` reset the view to fit — re-impose the carried
+                // zoom/pan (a second renderer set_view, still no decode/upload).
+                self.view.zoom = zoom;
+                self.view.pan = pan;
+                self.push_view();
+                self.draw();
+            }
+        }
+        self.request_prefetch();
+    }
+
+    /// The live zoom/pan to carry across a flip to `to`, or `None` when the view is
+    /// the default or the two photos don't share geometry (same pixel dimensions AND
+    /// the same rotation override — otherwise the crop wouldn't map anyway).
+    fn compare_carry_view(&self, to: usize) -> Option<(f32, [f32; 2])> {
+        if self.view.zoom == 1.0 && self.view.pan == [0.0, 0.0] {
+            return None; // default view — nothing worth carrying
+        }
+        let from = self.displayed_item?;
+        let a = self.meta_cache.get(&from)?;
+        let b = self.meta_cache.get(&to)?;
+        let rot_a = self.rotations.get(&from).copied().unwrap_or_default();
+        let rot_b = self.rotations.get(&to).copied().unwrap_or_default();
+        ((a.w, a.h) == (b.w, b.h) && rot_a == rot_b).then_some((self.view.zoom, self.view.pan))
     }
 
     /// Reflect the pan affordance in the pointer: a pointing hand over the Cancel Scan button,
@@ -1794,9 +1931,9 @@ impl AppCore {
             section(
                 "Browse",
                 vec![
-                    row("Next photo", sc(Action::Next)),
-                    row("Previous photo", sc(Action::Prev)),
-                    row("Random photo", sc(Action::Random)),
+                    row("Next image", sc(Action::Next)),
+                    row("Previous image", sc(Action::Prev)),
+                    row("Random image", sc(Action::Random)),
                     row("Previous random", sc(Action::RandomPrev)),
                     row("Slideshow", sc(Action::SlideshowToggle)),
                     row(
@@ -1816,6 +1953,10 @@ impl AppCore {
                     row(
                         "Rotate right / left",
                         two(Action::RotateCw, Action::RotateCcw),
+                    ),
+                    row(
+                        "Pin / flip compare",
+                        two(Action::ComparePin, Action::CompareToggle),
                     ),
                     row("Fullscreen", sc(Action::Fullscreen)),
                 ],
@@ -2077,6 +2218,18 @@ impl AppCore {
         } else {
             prefetch_targets(&self.playlist, self.ahead, self.behind)
         };
+        // The compare pin rides every want-list at top-2 priority — below only the
+        // current target. `targets` is the ring's eviction keep-list (priority =
+        // position), so this both exempts the pin from eviction as the window
+        // recenters far away AND queues its decode if it was ever lost: the `Y`
+        // flip must stay a rebind, never a decode (task #43). At capacity 1 the
+        // current photo still wins (the pin ranks second) — the planned edge.
+        if let Some(pin) = self.compare_pin {
+            if self.targets.first() != Some(&pin) {
+                self.targets.retain(|&t| t != pin);
+                self.targets.insert(1.min(self.targets.len()), pin);
+            }
+        }
         let fit = self.decode_fit();
         // Drop tier bookkeeping for items no longer resident (evicted).
         self.preview_resident
@@ -2395,6 +2548,8 @@ impl AppCore {
             has_motion: self.has_motion(item),
             can_reveal: self.source.path(item).is_some(),
             fullscreen: !self.windowed,
+            compare_pinned: self.compare_pin.is_some(),
+            compare_pinned_here: self.compare_pin == Some(item),
         };
         self.effects
             .push(contract::CoreEffect::ShowContextMenu(state));
@@ -3801,6 +3956,175 @@ mod tests {
             core.pending_delete.is_none(),
             "a Tick at/past the deadline must flush the pending delete"
         );
+    }
+
+    /// A headless core over an n-item deck of (nonexistent) temp paths — decode
+    /// failures are tolerated everywhere off the hot path, and the compare tests
+    /// assert on cursor/target/pin state, not on presentation.
+    fn compare_core(n: usize) -> AppCore {
+        let mut core = test_core();
+        let dir = std::env::temp_dir();
+        let paths: Vec<PathBuf> = (0..n).map(|i| dir.join(format!("cmp_{i}.png"))).collect();
+        let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(paths));
+        core.rebuild_playlist(source, dir.clone(), Some(dir), true, 0);
+        core
+    }
+
+    /// Move the cursor to `i` and mark it settled (headless: no decode ever lands,
+    /// so the `displayed == target` gate is satisfied by hand).
+    fn settle_at(core: &mut AppCore, i: usize) {
+        core.playlist.jump_to(i);
+        core.target_item = Some(i);
+        core.displayed_item = Some(i);
+    }
+
+    #[test]
+    fn compare_toggle_pins_first_then_flips_and_returns() {
+        let mut core = compare_core(5);
+        // First Y with nothing pinned: pins the current photo, no navigation.
+        core.dispatch_action(Action::CompareToggle);
+        assert_eq!(core.compare_pin, Some(0));
+        assert_eq!(core.target_item, Some(0), "pinning must not navigate");
+        // Browse to 3, then Y: flips to the pin, remembering where we were.
+        settle_at(&mut core, 3);
+        core.dispatch_action(Action::CompareToggle);
+        assert_eq!(core.target_item, Some(0), "Y flips to the pin");
+        assert_eq!(core.compare_return, Some(3));
+        // Y again from the pin: returns to the remembered position.
+        core.displayed_item = core.target_item;
+        core.dispatch_action(Action::CompareToggle);
+        assert_eq!(core.target_item, Some(3), "Y on the pin returns");
+        assert_eq!(core.compare_pin, Some(0), "the pin itself stays fixed");
+    }
+
+    #[test]
+    fn compare_pin_moves_and_unpins() {
+        let mut core = compare_core(4);
+        core.dispatch_action(Action::ComparePin);
+        assert_eq!(core.compare_pin, Some(0));
+        // ⇧Y elsewhere moves the pin (and resets the return point).
+        settle_at(&mut core, 2);
+        core.compare_return = Some(1);
+        core.dispatch_action(Action::ComparePin);
+        assert_eq!(core.compare_pin, Some(2));
+        assert_eq!(core.compare_return, None, "re-pin resets the return point");
+        // ⇧Y on the pinned photo unpins.
+        core.dispatch_action(Action::ComparePin);
+        assert_eq!(core.compare_pin, None);
+        assert_eq!(core.compare_pin_id, None);
+    }
+
+    #[test]
+    fn compare_flip_never_interrupts_a_pending_target() {
+        let mut core = compare_core(5);
+        core.dispatch_action(Action::CompareToggle); // pin = 0
+                                                     // The launch decode of (nonexistent) cmp_0 failed, and a failed target
+                                                     // auto-settles via `present_failed` — clear it so the flip is a genuine
+                                                     // ring MISS that stays pending, which is what this test is about.
+        core.failed.clear();
+        settle_at(&mut core, 3);
+        core.dispatch_action(Action::CompareToggle); // flip to the pin...
+        assert_eq!(core.target_item, Some(0));
+        // ...but the present hasn't landed (displayed still 3). A second Y must not
+        // clobber the in-flight target (mirrors `advance`'s never-skip gate).
+        core.dispatch_action(Action::CompareToggle);
+        assert_eq!(core.target_item, Some(0));
+        assert_eq!(core.displayed_item, Some(3));
+    }
+
+    #[test]
+    fn compare_pin_survives_a_same_deck_rebuild_and_clears_on_a_new_deck() {
+        let dir = std::env::temp_dir();
+        let mut core = compare_core(4);
+        settle_at(&mut core, 2);
+        core.dispatch_action(Action::ComparePin); // pin = cmp_2 at index 2
+                                                  // The delete-advance shape: same paths minus cmp_1 → cmp_2 shifts to index 1.
+        let remaining: Vec<PathBuf> = [0usize, 2, 3]
+            .iter()
+            .map(|i| dir.join(format!("cmp_{i}.png")))
+            .collect();
+        let src: Arc<dyn PhotoSource> = Arc::new(FsSource::new(remaining));
+        core.rebuild_playlist(src, dir.clone(), Some(dir.clone()), true, 0);
+        assert_eq!(
+            core.compare_pin,
+            Some(1),
+            "the pin re-resolves by path across a same-deck rebuild"
+        );
+        assert_eq!(core.compare_return, None, "the return point never survives");
+        // A genuinely new deck has no matching identity — the pin clears.
+        let other: Vec<PathBuf> = (0..3).map(|i| dir.join(format!("other_{i}.png"))).collect();
+        let src: Arc<dyn PhotoSource> = Arc::new(FsSource::new(other));
+        core.rebuild_playlist(src, dir.clone(), Some(dir), true, 0);
+        assert_eq!(core.compare_pin, None);
+        assert_eq!(core.compare_pin_id, None);
+    }
+
+    #[test]
+    fn compare_pin_rides_the_prefetch_want_list_at_top_two() {
+        let mut core = compare_core(50);
+        core.dispatch_action(Action::ComparePin); // pin = 0
+        settle_at(&mut core, 40);
+        core.request_prefetch();
+        assert_eq!(
+            core.targets.first(),
+            Some(&40),
+            "current target stays first"
+        );
+        assert_eq!(
+            core.targets.get(1),
+            Some(&0),
+            "the pin rides at top-2 priority so eviction can never drop it"
+        );
+        assert_eq!(
+            core.targets.iter().filter(|&&t| t == 0).count(),
+            1,
+            "the pin appears exactly once"
+        );
+    }
+
+    #[test]
+    fn deleting_down_to_the_empty_state_clears_the_pin() {
+        let mut core = compare_core(1);
+        core.dispatch_action(Action::ComparePin);
+        assert!(core.compare_pin.is_some());
+        core.enter_empty_state();
+        assert_eq!(core.compare_pin, None);
+        assert_eq!(core.compare_pin_id, None);
+    }
+
+    #[test]
+    fn compare_carry_applies_only_to_matching_geometry() {
+        use crate::meta::PhotoMeta;
+        let meta = |w: u32, h: u32| PhotoMeta {
+            rel: String::new(),
+            w,
+            h,
+            codec: "PNG",
+            animated: None,
+        };
+        let mut core = compare_core(3);
+        core.meta_cache.insert(0, meta(100, 80));
+        core.meta_cache.insert(2, meta(100, 80));
+        settle_at(&mut core, 2);
+        core.view.zoom = 3.0;
+        core.view.pan = [10.0, -4.0];
+        assert_eq!(
+            core.compare_carry_view(0),
+            Some((3.0, [10.0, -4.0])),
+            "same dims + same rotation → the crop carries"
+        );
+        // A rotation override on one side breaks the mapping.
+        core.rotations.insert(0, Rotation::default().cw());
+        assert_eq!(core.compare_carry_view(0), None);
+        core.rotations.clear();
+        // Dimension mismatch → no carry.
+        core.meta_cache.insert(0, meta(99, 80));
+        assert_eq!(core.compare_carry_view(0), None);
+        // Default view → nothing worth carrying.
+        core.meta_cache.insert(0, meta(100, 80));
+        core.view.zoom = 1.0;
+        core.view.pan = [0.0, 0.0];
+        assert_eq!(core.compare_carry_view(0), None);
     }
 
     #[test]

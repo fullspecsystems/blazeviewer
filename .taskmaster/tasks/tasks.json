@@ -117,8 +117,8 @@
       {
         "id": 43,
         "title": "Flicker compare mode: pin (Shift+Y) + instant A/B toggle (Y)",
-        "description": "Owner-approved 2026-07-03 — full design + implementation order in .taskmaster/docs/compare-mode-plan.md. Y pins the current photo, then flips instantly between the pin and wherever you are (full-screen flicker comparison — perceptually better than side-by-side for culling, and a keypress-is-a-rebind cheap in this engine). Shift+Y moves/clears the pin. Zoom/pan carries across same-dimension flips (the 100%-crop sharpness workflow). Pin is RAM-only (privacy ADR-018), survives playlist rebuilds by name, unpins on delete. The pinned texture is exempt from ring eviction so the flip never decodes. Split view demoted to an optional phase 2 reusing the same pin state; a future squoosh-style export preview can ride the same toggle seam.",
-        "status": "pending",
+        "description": "Owner-approved 2026-07-03 — full design + implementation order in .taskmaster/docs/compare-mode-plan.md. Y pins the current photo, then flips instantly between the pin and wherever you are (full-screen flicker comparison — perceptually better than side-by-side for culling, and a keypress-is-a-rebind cheap in this engine). Shift+Y moves/clears the pin. Zoom/pan carries across same-dimension flips (the 100%-crop sharpness workflow). Pin is RAM-only (privacy ADR-018), survives playlist rebuilds by name, unpins on delete. The pinned texture is exempt from ring eviction so the flip never decodes. Split view demoted to an optional phase 2 reusing the same pin state; a future squoosh-style export preview can ride the same toggle seam. IMPLEMENTED 2026-07-03: all five build subtasks landed in one session, workspace green (150+ tests incl. 7 new compare semantics tests + 2 playlist jump_to tests), clippy -D warnings, fmt, swift host builds. Live-smoked on the corpus: pin 1/15, browse, Y flips 1<->3 then 1<->4 (return point follows) — trace-verified.",
+        "status": "review",
         "priority": "high",
         "dependencies": [],
         "subtasks": [
@@ -126,37 +126,37 @@
             "id": 1,
             "title": "Core semantics + tests (TDD)",
             "description": "Action::{CompareToggle, ComparePin} (ids compare_toggle/compare_pin, OneShot); compare_pin/compare_return/compare_pin_name on AppCore; dispatch arms per the plan; delete index-fixup + rebuild re-resolution; headless AppCore unit tests first.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 2,
             "title": "Residency: pin exempt from eviction",
             "description": "plan_residency keeps the pinned index (callers append to targets, deduped); request_prefetch includes it; pb-core property tests (pin always survives, capacity respected, capacity-1 prefers current).",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 3,
             "title": "View carry on same-dimension flips",
             "description": "Copy outgoing zoom/pan/scale-mode to the incoming photo when pixel dimensions match; rotations stay per-image.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 4,
             "title": "Toasts + thumbtack icon",
             "description": "Vendor FA solid thumbtack.svg into pb-hud/icons + icon::assets; toasts: Pinned for compare / Unpinned. No flip toast in v1.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 5,
             "title": "Surfaces: keymap, editor, help, menus",
             "description": "Defaults Y/Shift+Y; EDITOR_GROUPS; help overlay row; Image menu + context menu on both shells (muda + MenuBar.swift, same Action ids); MenuState(+Ffi) enable flag; badges pick up live bindings automatically.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 6,
             "title": "CHANGELOG + owner smoke",
-            "description": "Unreleased > Added entry; run the smoke checklist at the end of compare-mode-plan.md.",
-            "status": "pending"
+            "description": "Unreleased > Added entry; run the smoke checklist at the end of compare-mode-plan.md. CHANGELOG entry landed; the owner smoke checklist in compare-mode-plan.md remains (zoom-carry on a burst pair, pin inside a .zip, delete-the-pin, rebind-updates-badges). Pin/flip/return already owner-exercised live on the corpus (trace 2026-07-03).",
+            "status": "in-progress"
           }
         ]
       },
@@ -254,6 +254,52 @@
             "id": 5,
             "title": "QR/barcode payloads in the analysis results",
             "description": "Pure-Rust decode (rxing/rqrr) on full-res grayscale, payloads prepended to the T panel + included in Copy Text; 'Copied text + N QR codes' toast; QR-PNG unit tests.",
+            "status": "pending"
+          }
+        ]
+      },
+      {
+        "id": 46,
+        "title": "Light mode support for the HUD (appearance preference: System/Light/Dark)",
+        "description": "The HUD rasterizer (pb-hud/src/hud.rs) currently hardcodes always-white text ([255,255,255]) with a black shadow/outline (tokens::TEXT/TEXT_DIM/SHADOW, hud.rs ~30-38) and a translucent-black panel background (tokens::BG) - there is no color/theme parameter threaded through render_table/render_centered/render_panel today, only background alpha is parameterized. Add a user-facing Appearance preference (System/Light/Dark, defaulting to System = current dark-on-black look unchanged) that flips the HUD to black text with a white shadow/halo and a light translucent panel background when resolved-light. Reuse the existing OS theme detection already used for the egui dialog window (winit's Window::theme() in pb-app/src/dialog.rs:404, dark_ui = window.theme() != Some(Theme::Light)) rather than hand-rolling a new registry/NSAppearance check - it already covers Windows (AppsUseLightTheme/DWM) and macOS (NSApp.effectiveAppearance) portably. Settings storage follows the existing ScaleModePref/StartupMode enum pattern in pb-app-core/src/settings.rs (Copy/Default/Serialize/Deserialize, #[serde(rename_all = \"lowercase\")], #[default] variant, TOML-persisted, round-trip tested).",
+        "status": "pending",
+        "priority": "low",
+        "dependencies": [],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Settings: AppearanceMode enum (System/Light/Dark)",
+            "description": "New AppearanceMode { System, Light, Dark } in pb-app-core/src/settings.rs following the ScaleModePref/StartupMode shape (Copy, Default = System, Serialize/Deserialize, serde rename_all lowercase); Settings::appearance_mode field, Default impl, round-trip test.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "Resolve effective light/dark for the main window",
+            "description": "Extend/reuse the OS-theme-detection already used for the dialog window (winit Window::theme() in dialog.rs:404) so the main viewer window can resolve an effective dark:bool too (System -> OS theme; Light/Dark -> forced). Handle live OS theme-change events if winit surfaces them, so System mode updates without a restart.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "Parameterize pb-hud text/outline/panel colors",
+            "description": "Thread a resolved dark:bool (or a small Palette-style struct) through render_table/render_centered/render_panel/render_panel_icon instead of the hardcoded tokens::TEXT/TEXT_DIM/SHADOW/BG constants; light variant = black text fill, white shadow/halo, light translucent panel background. Keep dark variant pixel-identical to today's look (regression guard).",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "Wire resolved theme into every HUD call site",
+            "description": "All existing HUD render call sites (toast, EXIF/info panel, help overlay, shortcuts, scan card, and the new folder-tree overlay if landed by then) pass the resolved theme through instead of relying on implicit constants.",
+            "status": "pending"
+          },
+          {
+            "id": 5,
+            "title": "Settings UI + persistence",
+            "description": "Add the Appearance choice to the Settings dialog (pb-ui component, e.g. a segmented control or toggle group per the existing pb-ui catalog) under an Appearance section; auto-saves like other Settings fields per the existing auto-save wiring.",
+            "status": "pending"
+          },
+          {
+            "id": 6,
+            "title": "CHANGELOG + owner smoke",
+            "description": "Unreleased > Added entry. Smoke: System mode matches OS light/OS dark on both platforms; forced Light/Dark override OS; switching OS theme live while System is selected updates the HUD without restart; dark-mode HUD is visually unchanged from before this task.",
             "status": "pending"
           }
         ]

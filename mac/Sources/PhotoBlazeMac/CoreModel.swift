@@ -309,7 +309,8 @@ final class CoreModel {
     /// `CoreEffect::ShowContextMenu` — the curated per-photo popup (task #41), mirroring
     /// menu.rs `build_context_menu`. Items dispatch by the same Action ids as the menu bar.
     fileprivate func popContextMenu(
-        hasImage: Bool, hasMotion: Bool, canReveal: Bool, fullscreen: Bool
+        hasImage: Bool, hasMotion: Bool, canReveal: Bool, fullscreen: Bool,
+        comparePinned: Bool, comparePinnedHere: Bool
     ) {
         guard hasImage, let (event, view) = pendingContextMenuEvent else { return }
         let menu = NSMenu()
@@ -329,6 +330,13 @@ final class CoreModel {
         menu.addItem(.separator())
         add("rotate_ccw", "Rotate Left")
         add("rotate_cw", "Rotate Right")
+        menu.addItem(.separator())
+        // Flicker compare (task #43): the pin item flips to its unpin reading on the
+        // pinned photo; the flip appears only once a pin exists (menu-bar parity).
+        add("compare_pin", comparePinnedHere ? "Unpin from Compare" : "Pin for Compare")
+        if comparePinned {
+            add("compare_toggle", "Compare with Pinned")
+        }
         if hasMotion {
             add("play_pause", "Play/Pause")
         }
@@ -1017,10 +1025,14 @@ final class CoreModel {
             hostWindow?.orderOut(nil)
         case .MenuStateChanged:
             menuBar?.sync(core.menu_state())
-        case .ShowContextMenu(let hasImage, let hasMotion, let canReveal, let fullscreen):
+        case .ShowContextMenu(
+            let hasImage, let hasMotion, let canReveal, let fullscreen,
+            let comparePinned, let comparePinnedHere
+        ):
             popContextMenu(
                 hasImage: hasImage, hasMotion: hasMotion,
-                canReveal: canReveal, fullscreen: fullscreen
+                canReveal: canReveal, fullscreen: fullscreen,
+                comparePinned: comparePinned, comparePinnedHere: comparePinnedHere
             )
         case .ShowDialog(let kind):
             showDialog(kind.toString())

@@ -43,6 +43,10 @@ pub mod assets {
     /// Speaker with a slash — the "Live Photo audio muted" toast (mute). Mirrors the Mac
     /// keyboard's mute key (#38).
     pub const VOLUME_SLASH: &str = include_str!("../icons/volume-slash.svg");
+    /// Thumbtack — the "Pinned for compare" toast (task #43's flicker compare).
+    pub const THUMBTACK: &str = include_str!("../icons/thumbtack.svg");
+    /// Thumbtack with a slash — the "Unpinned" toast (compare pin cleared).
+    pub const THUMBTACK_SLASH: &str = include_str!("../icons/thumbtack-slash.svg");
     // Status icons for the dialogs (lock/warning/trash) now live in the `pb-ui` icon
     // system (white-rasterized + tinted), not here — this set is only the HUD toasts.
 }

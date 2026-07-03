@@ -31,6 +31,12 @@ with any pre-release suffix carried only by the tag.
   window is sized to fit its content (long lists like Shortcuts scroll).
 
 ### Fixed
+- **macOS: the Settings tab icons no longer shift upward on the first tab change.** The
+  toolbar icons (General / Appearance / Shortcuts) used to render a touch too small and low
+  when the window opened, then visibly snap into place on the first tab switch; they now
+  render in their final position from the start.
+- **macOS: ⌘W closes the frontmost window again** (Settings, About, or the viewer) — a
+  standard Close Window item is back in the File menu.
 - **macOS: quitting in borderless fullscreen no longer restarts the app on the wrong
   monitor.** Launching back into fullscreen now lands on the display you were using, exiting
   fullscreen restores your last windowed spot (not a default frame), and the fullscreen state
@@ -53,6 +59,16 @@ with any pre-release suffix carried only by the tag.
   scale changes immediately, so on-screen buttons stay crisp and clickable.
 
 ### Added
+- **Flicker compare mode — pin a photo, then flip.** Press **Y** to pin the photo you're on
+  ("Pinned for compare"), browse anywhere, then press **Y** to flip between the pinned photo
+  and where you are — full screen, at full resolution, instantly (the pinned photo stays
+  ready on the GPU no matter how far away you fly). It's the blink-comparator way to pick
+  the best of a burst: your eye catches what *changes*, which side-by-side can't do. Zoom
+  into a detail first and the same crop carries across the flip (for same-size photos, like
+  a burst pair). **Shift+Y** moves the pin to the current photo — or unpins, if it's already
+  the pin. Both commands live in the Image menu and the right-click menu, both keys are
+  rebindable in Settings ▸ Shortcuts, and the pin is forgotten when the app closes (nothing
+  is ever written to disk).
 - **Show the current photo in Finder / File Explorer.** A new **File ▸ Show in Finder** (macOS)
   / **Show in File Explorer** (Windows) command opens the photo's containing folder with the file
   selected, so you can jump from the viewer straight to the file on disk. It's greyed out for

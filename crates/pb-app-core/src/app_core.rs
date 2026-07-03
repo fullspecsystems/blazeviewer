@@ -184,6 +184,18 @@ pub struct AppCore {
     pub displayed_item: Option<usize>,
     /// The item we're trying to show (== `displayed_item` once caught up).
     pub target_item: Option<usize>,
+    /// Flicker-compare pin (task #43): the pinned photo's playlist index. `Y` flips
+    /// between it and the current photo; the pin rides the prefetch want-list at
+    /// top-2 priority so the flip is always a ring rebind, never a decode. RAM-only
+    /// (privacy #2) — a pin is a viewing trace; it dies with the session.
+    pub compare_pin: Option<usize>,
+    /// Where the `Y` flip returns to from the pin — the last non-pin position the
+    /// user flipped away from. Index-keyed and transient (dropped on rebuild).
+    pub compare_return: Option<usize>,
+    /// The pinned item's identity (full path, or archive-entry name) so a playlist
+    /// rebuild (delete-advance, recursive toggle) re-resolves the pin — and a
+    /// genuinely new deck, which can't match, clears it.
+    pub compare_pin_id: Option<String>,
     /// Geometry generation; bumped on resize / fit toggle. Stale-epoch decodes are discarded
     /// so an old-size result can't land on screen.
     pub epoch: u64,

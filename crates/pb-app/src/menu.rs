@@ -74,6 +74,8 @@ pub mod ids {
     pub const RANDOM_PREV: &str = "random_prev";
     pub const ROTATE_RIGHT: &str = "rotate_right";
     pub const ROTATE_LEFT: &str = "rotate_left";
+    pub const COMPARE_PIN: &str = "compare_pin";
+    pub const COMPARE_TOGGLE: &str = "compare_toggle";
     pub const PLAY_PAUSE: &str = "play_pause";
     pub const FRAME_NEXT: &str = "frame_next";
     pub const FRAME_PREV: &str = "frame_prev";
@@ -119,6 +121,8 @@ pub enum MenuAction {
     RandomPrev,
     RotateRight,
     RotateLeft,
+    ComparePin,
+    CompareToggle,
     PlayPause,
     FrameNext,
     FramePrev,
@@ -164,6 +168,8 @@ impl MenuAction {
             MenuAction::RandomPrev => Action::RandomPrev,
             MenuAction::RotateRight => Action::RotateCw,
             MenuAction::RotateLeft => Action::RotateCcw,
+            MenuAction::ComparePin => Action::ComparePin,
+            MenuAction::CompareToggle => Action::CompareToggle,
             MenuAction::PlayPause => Action::PlayPause,
             MenuAction::FrameNext => Action::FrameNext,
             MenuAction::FramePrev => Action::FramePrev,
@@ -210,6 +216,8 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         RANDOM_PREV => MenuAction::RandomPrev,
         ROTATE_RIGHT => MenuAction::RotateRight,
         ROTATE_LEFT => MenuAction::RotateLeft,
+        COMPARE_PIN => MenuAction::ComparePin,
+        COMPARE_TOGGLE => MenuAction::CompareToggle,
         PLAY_PAUSE => MenuAction::PlayPause,
         FRAME_NEXT => MenuAction::FrameNext,
         FRAME_PREV => MenuAction::FramePrev,
@@ -305,6 +313,12 @@ pub struct BuiltMenu {
     /// ("Undo" → "Undo Save Rotation") to mirror the top of the undo stack (see
     /// `App::refresh_undo_menu_item`). Starts disabled (nothing to undo at launch).
     pub undo: MenuItem,
+    /// Image ▸ Pin for Compare (task #43). Checkable — checked while the displayed
+    /// photo IS the pin; enabled only with a photo on screen. Starts disabled.
+    pub compare_pin: CheckMenuItem,
+    /// Image ▸ Compare with Pinned — the `Y` flip. Enabled once a pin exists.
+    /// Starts disabled.
+    pub compare_toggle: MenuItem,
     pub checks: ViewChecks,
     /// macOS-only: the **Window** submenu (Minimize ⌘M / Zoom / Bring All to Front).
     /// Returned so the app can call [`Submenu::set_as_windows_menu_for_nsapp`] on it —
@@ -403,6 +417,22 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
         &full_exif,
     ]);
 
+    // Compare (task #43): both start disabled (empty deck at launch);
+    // `apply_menu_to_native` drives enabled/checked from `MenuState`.
+    let compare_pin = CheckMenuItem::with_id(
+        ids::COMPARE_PIN,
+        &labeled(keymap, "Pin for Compare", Action::ComparePin),
+        false,
+        false,
+        None,
+    );
+    let compare_toggle = MenuItem::with_id(
+        ids::COMPARE_TOGGLE,
+        &labeled(keymap, "Compare with Pinned", Action::CompareToggle),
+        false,
+        None,
+    );
+
     let image = Submenu::new("&Image", true);
     let _ = image.append_items(&[
         &item(ids::NEXT, &labeled(keymap, "Next", Action::Next)),
@@ -421,6 +451,9 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
             ids::ROTATE_LEFT,
             &labeled(keymap, "Rotate Left", Action::RotateCcw),
         ),
+        &sep(),
+        &compare_pin,
+        &compare_toggle,
         &sep(),
         &item(
             ids::PLAY_PAUSE,
@@ -455,6 +488,8 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
         reveal,
         cancel_scan,
         undo,
+        compare_pin,
+        compare_toggle,
         checks: ViewChecks {
             fit,
             fill,
@@ -621,6 +656,12 @@ pub fn build_menu(_keymap: &Keymap) -> BuiltMenu {
     // right-aligns a `\t` hint in the accelerator column — a literal hint in an NSMenuItem
     // title just renders as stray whitespace. So the Mac items show a plain label (the
     // idiomatic choice for a shortcut macOS can't express as a key-equivalent).
+    // Compare (task #43): bare keys (Y / ⇧Y) live in the keymap, so like the other
+    // Image items these carry no key-equivalent. Start disabled (empty deck).
+    let compare_pin =
+        CheckMenuItem::with_id(ids::COMPARE_PIN, "Pin for Compare", false, false, None);
+    let compare_toggle = MenuItem::with_id(ids::COMPARE_TOGGLE, "Compare with Pinned", false, None);
+
     let image = Submenu::new("Image", true);
     let _ = image.append_items(&[
         &item(ids::NEXT, "Next"),
@@ -630,6 +671,9 @@ pub fn build_menu(_keymap: &Keymap) -> BuiltMenu {
         &sep(),
         &item(ids::ROTATE_RIGHT, "Rotate Right"),
         &item(ids::ROTATE_LEFT, "Rotate Left"),
+        &sep(),
+        &compare_pin,
+        &compare_toggle,
         &sep(),
         &item(ids::PLAY_PAUSE, "Play/Pause Animation"),
         &item(ids::FRAME_NEXT, "Next Frame"),
@@ -667,6 +711,8 @@ pub fn build_menu(_keymap: &Keymap) -> BuiltMenu {
         reveal,
         cancel_scan,
         undo,
+        compare_pin,
+        compare_toggle,
         checks: ViewChecks {
             fit,
             fill,
@@ -705,6 +751,17 @@ pub fn build_context_menu(state: &crate::contract::ContextMenuState) -> Menu {
         &item(ids::ROTATE_LEFT, "Rotate Left"),
         &item(ids::ROTATE_RIGHT, "Rotate Right"),
     ]);
+    // Compare (task #43): the pin item flips to its unpin reading on the pinned photo;
+    // the flip appears only once a pin exists (matching the menu bar's enable gate).
+    let pin_label = if state.compare_pinned_here {
+        "Unpin from Compare"
+    } else {
+        "Pin for Compare"
+    };
+    let _ = menu.append_items(&[&sep(), &item(ids::COMPARE_PIN, pin_label)]);
+    if state.compare_pinned {
+        let _ = menu.append(&item(ids::COMPARE_TOGGLE, "Compare with Pinned"));
+    }
     // Play/Pause only for a photo with a motion component (animated / Live Photo).
     if state.has_motion {
         let _ = menu.append(&item(ids::PLAY_PAUSE, "Play/Pause"));

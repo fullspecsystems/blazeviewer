@@ -209,6 +209,11 @@ struct App {
     /// The Edit ▸ Undo menu item, kept so its title + enabled state can mirror the top of
     /// the undo stack at runtime.
     undo_item: Option<muda::MenuItem>,
+    /// Image ▸ Pin for Compare (task #43): enabled with a photo shown; checked while the
+    /// displayed photo IS the pin.
+    compare_pin_item: Option<muda::CheckMenuItem>,
+    /// Image ▸ Compare with Pinned (the `Y` flip): enabled once a pin exists.
+    compare_toggle_item: Option<muda::MenuItem>,
     /// The View-menu checkable items (scale mode / recursive / fullscreen / info), kept
     /// so their checked state can mirror the live app state at runtime.
     view_checks: Option<menu::ViewChecks>,
@@ -409,6 +414,9 @@ impl App {
                 last_nav: Nav::Forward,
                 displayed_item: None,
                 target_item: None,
+                compare_pin: None,
+                compare_return: None,
+                compare_pin_id: None,
                 epoch: 1,
                 root,
                 scan_root,
@@ -466,6 +474,8 @@ impl App {
             proxy_icon_path: None,
             save_rotation_item: None,
             reveal_item: None,
+            compare_pin_item: None,
+            compare_toggle_item: None,
             cancel_scan_item: None,
             undo_item: None,
             view_checks: None,
@@ -1112,6 +1122,8 @@ impl App {
             self.reveal_item = Some(built.reveal);
             self.cancel_scan_item = Some(built.cancel_scan);
             self.undo_item = Some(built.undo);
+            self.compare_pin_item = Some(built.compare_pin);
+            self.compare_toggle_item = Some(built.compare_toggle);
             self.view_checks = Some(built.checks);
             #[cfg(target_os = "macos")]
             {
@@ -1160,6 +1172,8 @@ impl App {
             // `None` = nothing to undo (disabled "Undo"); `Some(label)` = enabled w/ label.
             self.core.undo_stack.last().map(UndoAction::menu_label),
             native_fullscreen,
+            self.core.displayed_item,
+            self.core.compare_pin,
         );
         // Only sync when the state actually changed — kept off the per-tick path (nothing is
         // pushed when nothing moved). The shell applies it in the drain via
@@ -1207,6 +1221,15 @@ impl App {
         // File ▸ Stop Scanning enabled state.
         if let Some(it) = self.cancel_scan_item.as_ref() {
             it.set_enabled(state.cancel_scan_enabled);
+        }
+        // Image ▸ compare pair (task #43): the pin item enables with a photo shown and
+        // checks while the displayed photo IS the pin; the flip enables once a pin exists.
+        if let Some(it) = self.compare_pin_item.as_ref() {
+            it.set_enabled(state.compare_pin_enabled);
+            it.set_checked(state.compare_pinned_here);
+        }
+        if let Some(it) = self.compare_toggle_item.as_ref() {
+            it.set_enabled(state.compare_toggle_enabled);
         }
         // Edit ▸ Undo title + enabled state (Windows appends the `\tCtrl+Z` hint; macOS
         // shows the real ⌘Z key-equivalent the item already carries).
@@ -2822,7 +2845,9 @@ fn main() {
         _ => {
             println!("PhotoBlaze: {} image(s)", resolved.source.len());
             if resolved.source.is_empty() {
-                eprintln!("(no images - drop a photo or folder on the window, or press O to open)");
+                eprintln!(
+                    "(no images - drop an image or folder on the window, or press O to open)"
+                );
             }
         }
     }
@@ -3434,6 +3459,8 @@ mod tests {
             false, // cancel_scan_enabled
             None,
             false,
+            None, // displayed_item
+            None, // compare_pin
         )
     }
 
@@ -3452,6 +3479,8 @@ mod tests {
                 false, // cancel_scan_enabled
                 None,
                 false,
+                None,
+                None,
             )
             .scale
         };
@@ -3475,6 +3504,8 @@ mod tests {
                 false, // cancel_scan_enabled
                 None,
                 false,
+                None,
+                None,
             )
             .info
         };
@@ -3502,6 +3533,8 @@ mod tests {
             false, // cancel_scan_enabled
             Some("Undo Save Rotation"),
             false,
+            None,
+            None,
         );
         assert_eq!(with_undo.undo, Some("Undo Save Rotation"));
     }
@@ -3520,7 +3553,9 @@ mod tests {
             true, // reveal_enabled
             true, // cancel_scan_enabled
             None,
-            true, // native_fullscreen_engaged
+            true,    // native_fullscreen_engaged
+            Some(0), // displayed_item
+            Some(0), // compare_pin (the displayed photo IS the pin)
         );
         assert!(all_on.recursive);
         assert!(all_on.fullscreen);
@@ -3530,6 +3565,9 @@ mod tests {
         assert!(all_on.reveal_enabled);
         assert!(all_on.cancel_scan_enabled);
         assert!(all_on.native_fullscreen_engaged);
+        assert!(all_on.compare_pin_enabled);
+        assert!(all_on.compare_pinned_here);
+        assert!(all_on.compare_toggle_enabled);
 
         // The baseline leaves them all off.
         let b = base_menu_state();
@@ -3542,7 +3580,43 @@ mod tests {
                 && !b.reveal_enabled
                 && !b.cancel_scan_enabled
                 && !b.native_fullscreen_engaged
+                && !b.compare_pin_enabled
+                && !b.compare_pinned_here
+                && !b.compare_toggle_enabled
         );
+    }
+
+    #[test]
+    fn menu_state_derives_the_compare_flags() {
+        let state = |displayed: Option<usize>, pin: Option<usize>| {
+            AppCore::menu_state_from(
+                ScaleMode::Fit,
+                InfoMode::Off,
+                false,
+                false,
+                false,
+                false, // mute_live_audio
+                false, // save_rotation_enabled
+                false, // reveal_enabled
+                false, // cancel_scan_enabled
+                None,
+                false,
+                displayed,
+                pin,
+            )
+        };
+        // Photo shown, no pin: Pin enabled/unchecked, Compare disabled.
+        let s = state(Some(3), None);
+        assert!(s.compare_pin_enabled && !s.compare_pinned_here && !s.compare_toggle_enabled);
+        // Pin elsewhere: both enabled, Pin unchecked.
+        let s = state(Some(3), Some(0));
+        assert!(s.compare_pin_enabled && !s.compare_pinned_here && s.compare_toggle_enabled);
+        // Viewing the pin: Pin checked.
+        let s = state(Some(0), Some(0));
+        assert!(s.compare_pinned_here);
+        // Empty deck: everything off, even with a stale pin index.
+        let s = state(None, Some(0));
+        assert!(!s.compare_pin_enabled && !s.compare_pinned_here && !s.compare_toggle_enabled);
     }
 
     #[test]
@@ -3564,6 +3638,8 @@ mod tests {
             false, // cancel_scan_enabled
             None,
             false,
+            None,
+            None,
         );
         assert_ne!(a, changed);
     }

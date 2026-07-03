@@ -238,6 +238,8 @@ pub const EDITOR_GROUPS: &[(&str, &[Action])] = &[
         &[
             Action::RotateCw,
             Action::RotateCcw,
+            Action::CompareToggle,
+            Action::ComparePin,
             Action::Copy,
             Action::SaveRotation,
             Action::Delete,
@@ -503,6 +505,10 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         (Action::ScaleOriginal, vec![]),
         one(Action::RotateCw, "R"),
         one(Action::RotateCcw, "Shift+R"),
+        // Flicker compare (task #43): one bare key flips, its shifted twin manages
+        // the pin — mirroring the R / Shift+R rotate pairing.
+        one(Action::CompareToggle, "Y"),
+        one(Action::ComparePin, "Shift+Y"),
         one(Action::Copy, "Ctrl+C"),
         // Copy the current file's path to the clipboard. Shift+Ctrl+C on Windows; on
         // macOS the menu's ⇧⌘C accelerator drives it (this real-Control chord also works).

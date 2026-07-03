@@ -365,6 +365,9 @@ impl AppCoreHandle {
             fullscreen: s.fullscreen,
             slideshow: s.slideshow,
             mute_live_audio: s.mute_live_audio,
+            compare_pin_enabled: s.compare_pin_enabled,
+            compare_pinned_here: s.compare_pinned_here,
+            compare_toggle_enabled: s.compare_toggle_enabled,
             save_rotation_enabled: s.save_rotation_enabled,
             reveal_enabled: s.reveal_enabled,
             cancel_scan_enabled: s.cancel_scan_enabled,
@@ -940,6 +943,8 @@ impl AppCoreHandle {
                 .last()
                 .map(pb_app_core::UndoAction::menu_label),
             false, // native (Spaces) fullscreen: AppKit manages that item's title itself
+            self.core.displayed_item,
+            self.core.compare_pin,
         );
         if self.last_menu_state == next {
             return;
@@ -1591,9 +1596,14 @@ fn map_effect(e: contract::CoreEffect) -> ffi::CoreEffectFfi {
         }
         // The right-click photo context menu (task #41): the host builds the popup from
         // these flags (has_image, has_motion, can_reveal, fullscreen).
-        C::ShowContextMenu(s) => {
-            E::ShowContextMenu(s.has_image, s.has_motion, s.can_reveal, s.fullscreen)
-        }
+        C::ShowContextMenu(s) => E::ShowContextMenu(
+            s.has_image,
+            s.has_motion,
+            s.can_reveal,
+            s.fullscreen,
+            s.compare_pinned,
+            s.compare_pinned_here,
+        ),
         // The password sheet's "Checking…" state while a submitted entry re-opens the
         // archive. (CloseDialog is handled in `next_effect` — it updates the shown-dialog
         // mirror there.)
@@ -1646,7 +1656,7 @@ mod ffi {
         MenuStateChanged,
         // Pop the photo context menu at the cursor: (has_image, has_motion, can_reveal,
         // fullscreen) — the curated item set mirrors menu.rs build_context_menu.
-        ShowContextMenu(bool, bool, bool, bool),
+        ShowContextMenu(bool, bool, bool, bool, bool, bool),
         // Present a chrome dialog by kind ("about" | "settings" | "confirm" | "message" |
         // "password" | "loading" | "scanning"). "about" = the standard NSApp panel;
         // "settings" opens the Settings window; the rest carry their text via
@@ -1720,6 +1730,9 @@ mod ffi {
         fullscreen: bool,
         slideshow: bool,
         mute_live_audio: bool,
+        compare_pin_enabled: bool,
+        compare_pinned_here: bool,
+        compare_toggle_enabled: bool,
         save_rotation_enabled: bool,
         reveal_enabled: bool,
         cancel_scan_enabled: bool,
