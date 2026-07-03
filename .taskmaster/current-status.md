@@ -1,5 +1,14 @@
 # PhotoBlaze — Current Status (session handoff)
 
+_**MERGED TO MAIN 2026-07-02 night (86c7ec7, pushed)** — the de facto SwiftUI cutover: the
+app is named PhotoBlaze everywhere users see it (bundle id still com.jdlien.PhotoBlazeMac
+until the id flip), local sign+notarize works (dist/PhotoBlaze-<v>-swiftui.dmg), and the
+`swiftui` branch == main. The photoblaze-wt1 WORKTREE IS RETIRING — work on main in
+~/code/photoblaze from now on (remove with `git worktree remove ../photoblaze-wt1` once no
+session is using it). CI didn't gate this merge (Actions credits exhausted) — local gates
+ran instead (fmt, clippy -D warnings, full workspace tests); re-green via workflow_dispatch
+when credits reset._
+
 _Last updated: 2026-07-02 late (**NS2 FEATURE-COMPLETE incl. the Shortcuts editor, plus a
 post-NS2 polish evening** — superellipse HUD corners, true borderless F mode, menu badges,
 Finder-parity delete, DPI-race fix; most of it owner-smoked live. **NEXT: the three ▶ FINALIZE
