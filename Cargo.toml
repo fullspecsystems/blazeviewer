@@ -52,8 +52,9 @@ pb-app-core = { path = "crates/pb-app-core" }
 # derived AES key across blocks (upstream re-derives it per block — 2^19 SHA-256
 # rounds, ~10–40 ms — which dominates a non-solid encrypted archive with one block
 # per file: measured 3.9 s → 0.09 s on a 3000-file stored+encrypted archive; 7-Zip
-# itself caches the key the same way). Candidate for an upstream PR; drop this
-# patch when a release ships an equivalent cache. Vendored verbatim from
+# itself caches the key the same way). Submitted upstream 2026-07-03:
+# https://github.com/hasenbanck/sevenz-rust2/pull/118 — drop this vendored copy
+# (and this [patch] block) when a release ships it. Vendored verbatim from
 # crates.io 0.21.1 otherwise (Apache-2.0, license file kept).
 [patch.crates-io]
 sevenz-rust2 = { path = "vendor/sevenz-rust2" }
