@@ -2,6 +2,7 @@ import AppKit
 import AVFoundation
 import Observation
 import PbMacFfi
+import QuartzCore
 import UniformTypeIdentifiers
 
 /// Which NS2 dialog is presented as a SwiftUI sheet over the canvas. Confirm/Message are
@@ -764,6 +765,10 @@ final class CoreModel {
     /// tick (held-key pacing, slideshow, prefetch pump, animation, worker polls) → drain →
     /// re-decide the pacing. The winit `about_to_wait` equivalent.
     func pump() {
+        // Pull-based size guard: heal any missed/mistimed AppKit size or scale callback
+        // BEFORE ticking, so a frame is never rendered — or left composited — at a stale
+        // surface size (a no-op compare on the overwhelmingly common path).
+        canvasView?.reconcileSizeIfNeeded()
         core.tick()
         drainEffects()
         // Refresh the shown progress sheet from the Rust-side handles (a cheap read; the
@@ -1004,6 +1009,7 @@ final class CoreModel {
     }
 
     func canvasResized(pixelSize: CGSize, scale: CGFloat) {
+        pbTrace("canvasResized px=\(Int(pixelSize.width))x\(Int(pixelSize.height)) scale=\(scale)")
         core.resized(UInt32(pixelSize.width), UInt32(pixelSize.height), Float(scale))
         if let layer = canvasLayer {
             // A surface reconfigure can reset the layer's colorspace — re-assert, exactly
@@ -1012,6 +1018,11 @@ final class CoreModel {
         }
         core.render()
         drainEffects()
+        // The render above can be DROPPED by the surface (Lost/Outdated/Timeout —
+        // routine mid resize/fullscreen churn); the core flags it (`redraw_pending` →
+        // `work_pending`) and the tick loop retries. Wake the pump so that retry runs
+        // even from idle — it re-pauses itself once the engine goes quiet.
+        kick()
     }
 
     func detachCanvas() {
@@ -1055,6 +1066,9 @@ final class CoreModel {
     /// The attached canvas layer, kept weakly-by-convention (the view owns it; cleared in
     /// `detachCanvas`) so resize can re-assert the EDR colorspace.
     @ObservationIgnored private weak var canvasLayer: CAMetalLayer?
+    /// The canvas view, so a window-mode transition can re-report its settled pixel size
+    /// (`reportSizeNow`) when AppKit doesn't re-fire the view's `layout()` on its own.
+    @ObservationIgnored weak var canvasView: MetalCanvasNSView?
 
     // MARK: - Effects out
 
@@ -1087,14 +1101,14 @@ final class CoreModel {
             requestedWakeDelay = nil
         case .Quit:
             log("Quit → NSApp.terminate")
-            NSApp.terminate(nil)
+            terminateNow()
         case .ShellFlowAction(let id):
             // A host-side flow command by stable Action id. Esc arrives HERE (the keymap
             // resolves Escape → Action::Quit → a host-side flow action), not as .Quit.
             let action = id.toString()
             log("ShellFlowAction(\"\(action)\")")
             if action == "quit" {
-                NSApp.terminate(nil)
+                terminateNow()
             }
         case .ReportError(let msg):
             // A user-facing error (bad open, refused archive, …) — a native alert.
@@ -1158,6 +1172,22 @@ final class CoreModel {
 
     /// Dev diagnostics. The NS1 on-screen effect log retired with the NS2 dialogs; a
     /// terminal launch (`swift run`, the dev build-run loop) still sees the trace.
+    /// Quit with a zombie watchdog. `NSApp.terminate` is a *request*: SwiftUI's
+    /// termination machinery (or a modal session in flight) can silently defer or
+    /// absorb it — and because the quit path hides the window first (`HideWindow`
+    /// drains before the terminate), a swallowed terminate leaves an invisible live
+    /// process. LaunchServices then "reopens" that zombie on every `open`, which is
+    /// how a freshly built app can appear stale. The Esc teardown writes nothing to
+    /// disk by design (privacy #2 — there is no flush step to lose), so if we're
+    /// still alive shortly after asking nicely, exiting hard forfeits nothing.
+    private func terminateNow() {
+        NSApp.terminate(nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            NSLog("PhotoBlaze: NSApp.terminate was deferred — hard exit (zombie watchdog)")
+            exit(0)
+        }
+    }
+
     private func log(_ text: String) {
         #if DEBUG
             // Uptime-stamped (ms precision) so event ordering around a bug is readable.
@@ -1458,6 +1488,7 @@ final class CoreModel {
     /// bespoke window treatment.
     private func setWindowMode(fullscreen: Bool) {
         guard let window = hostWindow else { return }
+        pbTrace("setWindowMode fullscreen=\(fullscreen) frame=\(window.frame)")
         speedModeFullscreen = fullscreen
         refreshProxyIcon() // no title bar in the speed mode → clear; restore on exit
         if fullscreen {
@@ -1478,7 +1509,22 @@ final class CoreModel {
             }
             NSApp.presentationOptions = [.autoHideMenuBar, .autoHideDock]
             if let screen = window.screen ?? NSScreen.main {
-                window.setFrame(screen.frame, display: true)
+                // Grow to the screen and render the fullscreen-sized frame *inside one
+                // CoreAnimation transaction*, so the small windowed drawable is never
+                // stretched up to fill the enlarged layer for a frame — the "buttons
+                // balloon" flash. The CAMetalLayer's default `.resize` gravity would
+                // scale the stale contents to the new bounds; `display: false` suppresses
+                // AppKit's immediate stretched composite, and `reportSizeNow` reads the
+                // settled bounds to resize the surface + redraw before the commit.
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                window.setFrame(screen.frame, display: false)
+                // Settle the SwiftUI-driven canvas bounds *synchronously* so `reportSizeNow`
+                // reads the new (fullscreen) size, not the stale windowed one — otherwise it
+                // would render a small frame that the layer then stretches up to fill.
+                window.contentView?.layoutSubtreeIfNeeded()
+                canvasView?.reportSizeNow()
+                CATransaction.commit()
             }
             window.makeKeyAndOrderFront(nil)
         } else {
@@ -1487,6 +1533,15 @@ final class CoreModel {
                 window.styleMask = mask
             }
             borderlessOK = false
+            // Shrink back to the windowed frame and redraw at the new size inside one
+            // CoreAnimation transaction: `display: false` + a synchronous `reportSizeNow`
+            // means the fullscreen drawable is never squeezed into the smaller layer for a
+            // frame, and — because `reportSizeNow` reads the settled bounds directly rather
+            // than waiting for AppKit to re-fire the canvas view's `layout()` — the
+            // empty-state Open panel re-centers immediately instead of staying placed for
+            // the old (fullscreen) surface until a manual resize or hover.
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
             if let frame = savedFrame {
                 // Belt-and-braces: re-fit the remembered windowed frame to the window's
                 // current screen before restoring, so an F exit can never re-impose a
@@ -1495,9 +1550,24 @@ final class CoreModel {
                 let visible = (window.screen ?? NSScreen.main)?.visibleFrame
                 window.setFrame(
                     visible.map { Self.shrunkToFit(frame, in: $0) } ?? frame,
-                    display: true
+                    display: false
                 )
             }
+            // Settle the SwiftUI-driven canvas bounds *synchronously* before rendering:
+            // on the shrink (+ restoring the titled style mask) the canvas view's bounds
+            // don't update in-line with `setFrame`, so without this `reportSizeNow` reads
+            // the stale fullscreen size and the layer squeezes that frame into the smaller
+            // window — the shrunken-buttons regression.
+            window.contentView?.layoutSubtreeIfNeeded()
+            canvasView?.reportSizeNow()
+            CATransaction.commit()
+        }
+        // The in-transaction report above read the bounds `layoutSubtreeIfNeeded` settled;
+        // when SwiftUI instead defers the canvas layout to a later runloop pass, this
+        // reconcile (and the per-tick one in `pump()`) re-reports the drifted size then —
+        // a no-op when the synchronous path already got it right.
+        DispatchQueue.main.async { [weak self] in
+            self?.canvasView?.reconcileSizeIfNeeded()
         }
         assertWindowChrome()
     }

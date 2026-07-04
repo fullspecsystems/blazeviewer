@@ -269,6 +269,12 @@ pub struct AppCore {
     /// `archive_load.is_some()`, synced at each tick) — keeps `work_pending` true so the loop
     /// keeps polling for the finished open. NS0 5.5 Phase C2.
     pub archive_loading: bool,
+    /// The last `draw()` was **dropped** by the surface (Lost/Outdated/Timeout — routine
+    /// during window-resize/fullscreen churn): nothing reached the screen, so the stale
+    /// frame is still composited. Keeps `work_pending` true so the host pump stays awake,
+    /// and `tick` retries the draw next frame (2026-07-04, the Mac "unfilled background
+    /// after a fullscreen toggle" bug — a one-shot render with no retry).
+    pub redraw_pending: bool,
     /// Whether the in-flight directory scan has applied its first non-empty batch (the first photo
     /// is shown). The `ScanBatch` handler bootstraps the playlist while this is false, then extends
     /// it; the host reads it to gate the Scanning-dialog reveal / the scan-count chip. Reset to

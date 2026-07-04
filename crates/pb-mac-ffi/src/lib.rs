@@ -1077,9 +1077,13 @@ impl AppCoreHandle {
     }
 
     /// Draw a frame into the attached layer. No-op when no layer is attached.
+    /// Routes through `AppCore::draw` (not the renderer directly) so a frame the
+    /// surface DROPS (Lost/Outdated/Timeout — routine mid resize/fullscreen churn)
+    /// sets `redraw_pending` and gets retried by the tick loop, instead of leaving
+    /// the stale frame composited forever (the "unfilled background" bug, 2026-07-04).
     fn render(&mut self) {
-        if let Some(r) = self.core.renderer.as_mut() {
-            let _ = r.render();
+        if self.core.renderer.is_some() {
+            self.core.draw();
         }
     }
 

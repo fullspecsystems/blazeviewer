@@ -442,6 +442,7 @@ impl App {
                 launching: false,
                 dialog_open: false,
                 archive_loading: false,
+                redraw_pending: false,
                 scan_bootstrapped: false,
                 password_archive: None,
                 pending_delete: None,
@@ -1045,6 +1046,56 @@ impl App {
     /// Alt+Enter has a brief flip-model resize artifact (the photo stretches for a frame as the
     /// compositor scales the old buffer); the DWM-cloak fix regressed the taskbar so it's accepted
     /// (tasks.json #21).
+    /// Core + shell response to a new client size: update the core (viewport / fit /
+    /// swapchain reconfigure / debounced crisp re-decode), re-assert the macOS EDR surface
+    /// when the fit changed, redraw, and remember the windowed geometry. Shared by the
+    /// `Resized` event and the *synchronous*-resize path in `apply_window_mode`: winit
+    /// returns `Some(new_size)` and emits **no** `Resized` event when the OS satisfies a
+    /// `request_inner_size` immediately, so a fullscreen→windowed restore would otherwise
+    /// never tell the core its new size — leaving the empty-state Open panel centered for
+    /// the old surface until a manual resize or hover re-centered it.
+    fn handle_resized(&mut self, width: u32, height: u32) {
+        // Compute the fit-change *before* `handle` updates the core's fit, so the shell can
+        // gate its GPU/window bits (the macOS EDR re-assert + the redraw) on the same
+        // signal without recomputing it inside the core.
+        let new_fit = FitBox {
+            max_width: width.max(1),
+            max_height: height.max(1),
+        };
+        let fit_changed = Some(new_fit) != self.core.fit;
+        // Core: viewport + fit + swapchain reconfigure + the debounced crisp re-decode.
+        self.core.handle(contract::CoreEvent::Resized {
+            width,
+            height,
+            scale: self.core.viewport.scale_factor,
+        });
+        if fit_changed {
+            // macOS: the swapchain reconfigure (`renderer.resize`, just done by the core)
+            // can reset the CAMetalLayer's colorspace/EDR, so re-assert them here — after
+            // the reconfigure, before the redraw — to keep P3/HDR alive across a resize /
+            // fullscreen toggle / move to a display with different EDR headroom. Needs the
+            // window, so it stays shell-side.
+            #[cfg(target_os = "macos")]
+            if self
+                .core
+                .renderer
+                .as_ref()
+                .is_some_and(|r| r.hdr_surface_wants_edr().is_some())
+            {
+                if let Some(w) = self.window.as_ref() {
+                    let headroom = hdr_surface::configure(w);
+                    self.last_edr_headroom = headroom;
+                    if let Some(r) = self.core.renderer.as_mut() {
+                        r.set_edr_headroom(headroom);
+                    }
+                }
+            }
+            self.core.draw();
+        }
+        // Remember the new windowed size so it can be restored later (#1).
+        self.track_windowed_geometry();
+    }
+
     fn apply_window_mode(&mut self) {
         // Clone the window handle (an Arc) so it can be driven while `self` is still borrowed
         // mutably below (the menu attach needs `&mut self`).
@@ -1073,7 +1124,12 @@ impl App {
             window.set_decorations(false);
             if let Some(mon) = window.current_monitor() {
                 window.set_outer_position(mon.position());
-                let _ = window.request_inner_size(mon.size());
+                // If winit applied the resize synchronously it returns the new size and
+                // emits no `Resized` event — feed it to the core ourselves (see
+                // `handle_resized`), else overlays stay placed for the old surface.
+                if let Some(new) = window.request_inner_size(mon.size()) {
+                    self.handle_resized(new.width, new.height);
+                }
             }
         }
         // macOS: auto-hide the menu bar + Dock in borderless fullscreen so it reclaims
@@ -1093,13 +1149,22 @@ impl App {
             // connected monitor; otherwise fall back to the default size at the
             // OS-chosen spot (so a stale off-screen position can't strand the window).
             let rects = collect_monitor_rects(window.available_monitors());
+            // A synchronously-applied resize returns `Some(new)` and fires no `Resized`
+            // event, so drive the core directly (see `handle_resized`) — otherwise the
+            // fullscreen→windowed restore leaves the empty-state Open panel centered for
+            // the old (fullscreen) surface until a manual resize or hover.
             match self.core.windowed_restore(&rects) {
                 Some(g) => {
-                    let _ = window.request_inner_size(PhysicalSize::new(g.w, g.h));
+                    let applied = window.request_inner_size(PhysicalSize::new(g.w, g.h));
                     window.set_outer_position(PhysicalPosition::new(g.x, g.y));
+                    if let Some(new) = applied {
+                        self.handle_resized(new.width, new.height);
+                    }
                 }
                 None => {
-                    let _ = window.request_inner_size(PhysicalSize::new(1280, 800));
+                    if let Some(new) = window.request_inner_size(PhysicalSize::new(1280, 800)) {
+                        self.handle_resized(new.width, new.height);
+                    }
                 }
             }
         }
@@ -2229,45 +2294,7 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => self.begin_exit(),
 
             WindowEvent::Resized(size) => {
-                // Compute the fit-change *before* `handle` updates the core's fit, so the shell can
-                // gate its GPU/window bits (the macOS EDR re-assert + the redraw) on the same
-                // signal without recomputing it inside the core.
-                let new_fit = FitBox {
-                    max_width: size.width.max(1),
-                    max_height: size.height.max(1),
-                };
-                let fit_changed = Some(new_fit) != self.core.fit;
-                // Core: viewport + fit + swapchain reconfigure + the debounced crisp re-decode.
-                self.core.handle(contract::CoreEvent::Resized {
-                    width: size.width,
-                    height: size.height,
-                    scale: self.core.viewport.scale_factor,
-                });
-                if fit_changed {
-                    // macOS: the swapchain reconfigure (`renderer.resize`, just done by the core)
-                    // can reset the CAMetalLayer's colorspace/EDR, so re-assert them here — after
-                    // the reconfigure, before the redraw — to keep P3/HDR alive across a resize /
-                    // fullscreen toggle / move to a display with different EDR headroom. Needs the
-                    // window, so it stays shell-side.
-                    #[cfg(target_os = "macos")]
-                    if self
-                        .core
-                        .renderer
-                        .as_ref()
-                        .is_some_and(|r| r.hdr_surface_wants_edr().is_some())
-                    {
-                        if let Some(w) = self.window.as_ref() {
-                            let headroom = hdr_surface::configure(w);
-                            self.last_edr_headroom = headroom;
-                            if let Some(r) = self.core.renderer.as_mut() {
-                                r.set_edr_headroom(headroom);
-                            }
-                        }
-                    }
-                    self.core.draw();
-                }
-                // Remember the new windowed size so it can be restored later (#1).
-                self.track_windowed_geometry();
+                self.handle_resized(size.width, size.height);
             }
 
             // The window's backing scale factor changed — a move to a monitor with a

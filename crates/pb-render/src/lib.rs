@@ -155,8 +155,13 @@ pub trait Renderer {
     /// texture). Call once per frame so rapid navigation doesn't let GPU memory pile up.
     fn poll(&self);
 
-    /// Draw and present one frame.
-    fn render(&mut self) -> Result<(), RenderError>;
+    /// Draw and present one frame. `Ok(true)` = a frame was presented. `Ok(false)` =
+    /// the frame was **dropped** (surface Lost/Outdated/Timeout — routine during
+    /// window-resize/fullscreen-transition churn): the surface was reconfigured or
+    /// skipped and nothing reached the screen, so the caller must schedule a retry —
+    /// otherwise the compositor keeps showing the previous frame indefinitely (the
+    /// Mac host's "unfilled background after a fullscreen toggle" bug, 2026-07-04).
+    fn render(&mut self) -> Result<bool, RenderError>;
 }
 
 /// A renderer error the app layer can handle without depending on wgpu.

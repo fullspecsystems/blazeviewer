@@ -92,6 +92,14 @@ with any pre-release suffix carried only by the tag.
   window is sized to fit its content (long lists like Shortcuts scroll).
 
 ### Fixed
+- **Toggling fullscreen (F) on the Mac no longer stretches what's on screen or leaves
+  it the wrong size.** The transition used to briefly balloon/squeeze the current
+  photo — or the "Open File" / "Open Folder" buttons on the empty start screen — for a
+  frame, and returning to a window could leave the buttons stuck mis-sized until you
+  nudged the window or moved the mouse. Content now holds its natural size through the
+  transition and settles to the new window within a frame; if the app ever misses a
+  size change (e.g. moving between displays with different scales), it now self-corrects
+  immediately instead of staying stuck.
 - **Previous/Next Folder (⌘←/⌘→, Alt on Windows) now skip folders with no photos.**
   Stepping into an empty sibling folder used to stop everything with a "No supported
   images in that selection." dialog — and since the deck never moved, every re-press

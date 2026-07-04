@@ -14,7 +14,9 @@
 #
 # This is the strangler-fig target: the shippable egui-on-Mac beta
 # (scripts/bundle-macos.sh) is untouched and never gated on this build.
-# Reminder: `open` won't relaunch an app that's already running — quit it first (⌘Q).
+# `--run` quits any running PhotoBlaze first: `open` never relaunches a live app
+# (LaunchServices activates the existing instance by bundle id — even an installed
+# /Applications copy), which otherwise silently tests a stale build.
 set -euo pipefail
 
 PROFILE=release
@@ -76,5 +78,18 @@ cp packaging/macos/PhotoBlaze.icns packaging/macos/Assets.car "$APP_DIR/Contents
 
 echo "==> Done: $APP_DIR"
 if [[ "$RUN" == 1 ]]; then
+	# `open` will NOT relaunch an already-running app — LaunchServices just activates
+	# the live instance (matched by bundle id, so even an installed /Applications copy
+	# shadows this fresh build). That's the classic "why am I testing a stale build"
+	# trap; quit any running PhotoBlaze first and wait for it to exit.
+	if pgrep -qf 'PhotoBlaze.app/Contents/MacOS/PhotoBlaze'; then
+		echo "==> Quitting running PhotoBlaze (stale-instance guard)"
+		osascript -e 'quit app id "com.jdlien.PhotoBlaze"' >/dev/null 2>&1 || true
+		for _ in 1 2 3 4 5 6 7 8 9 10; do
+			pgrep -qf 'PhotoBlaze.app/Contents/MacOS/PhotoBlaze' || break
+			sleep 0.5
+		done
+		pkill -f 'PhotoBlaze.app/Contents/MacOS/PhotoBlaze' 2>/dev/null || true
+	fi
 	open "$APP_DIR"
 fi

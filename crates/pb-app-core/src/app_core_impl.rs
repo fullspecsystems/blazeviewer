@@ -33,6 +33,13 @@ use crate::{
     Toast, UndoAction,
 };
 
+/// `PB_TRACE=1` → present/draw diagnostics to stderr (dev-only; zero cost when off
+/// after the first check). Pairs with the Swift host's `pbTrace` size reports.
+fn pb_trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("PB_TRACE").is_some())
+}
+
 impl AppCore {
     /// A **headless** `AppCore`: an empty photo source, a 1-worker no-op decode pool, no
     /// renderer / HUD / window, default keymap + settings. This is the construction seam the
@@ -118,6 +125,7 @@ impl AppCore {
             launching: false,
             dialog_open: false,
             archive_loading: false,
+            redraw_pending: false,
             scan_bootstrapped: false,
             password_archive: None,
             pending_delete: None,
@@ -193,7 +201,11 @@ impl AppCore {
 
     /// Whether prefetch/upload work is still outstanding (keep polling if so).
     pub fn work_pending(&self) -> bool {
-        self.archive_loading
+        // A dropped frame (surface Lost/Outdated/Timeout) keeps the pump awake so the
+        // retry in `tick` actually runs — without this, an idle host (empty screen,
+        // paused pump) composites the stale frame forever.
+        self.redraw_pending
+            || self.archive_loading
             // A streaming dir scan keeps the loop polling too, so `poll_dir_scan` picks up
             // batches (and the delayed Scanning-dialog reveal) even when the event queue is
             // quiet — without this, a slow walk on an idle app waits for the next OS event.
@@ -882,6 +894,13 @@ impl AppCore {
     /// dialog-repaint clock; the scan-count chip + dialog egui clock stay host-side.
     pub fn tick(&mut self) {
         let now = self.now;
+        // 0a. Retry a dropped frame (surface Lost/Outdated/Timeout during resize/
+        // fullscreen churn): the previous `draw` reconfigured the surface but nothing
+        // reached the screen. One retry per tick — vsync-paced by the host pump, so a
+        // persistently failing surface never spins.
+        if self.redraw_pending {
+            self.draw();
+        }
         // 0. Deferred delete-advance: once the trash icon has shown for a beat, drop the
         // item. In the core (not the host) so every host that drives `Tick` gets it —
         // the wake condition below already polls while one is pending.
@@ -4404,16 +4423,31 @@ impl AppCore {
     pub fn draw(&mut self) {
         let t0 = Instant::now();
         let mut fatal = false;
+        let mut presented = false;
         let drew = if let Some(a) = self.renderer.as_mut() {
-            if let Err(e) = a.render() {
-                eprintln!("fatal render error: {e:?}");
-                fatal = true;
+            match a.render() {
+                Ok(p) => presented = p,
+                Err(e) => {
+                    eprintln!("fatal render error: {e:?}");
+                    fatal = true;
+                }
             }
             a.poll();
             true
         } else {
             false
         };
+        // A dropped frame (`Ok(false)`) leaves the stale frame on screen — flag it so
+        // `work_pending`/`tick` retry next frame; a presented frame clears any backlog.
+        self.redraw_pending = drew && !fatal && !presented;
+        // PB_TRACE=1: present-outcome diagnostics to stderr (dev-only; pairs with the
+        // Swift host's pbTrace size reports when chasing resize/transition races).
+        if pb_trace() {
+            eprintln!(
+                "PB draw presented={presented} viewport={}x{}",
+                self.viewport.width, self.viewport.height
+            );
+        }
         // Push after the `self.renderer` borrow ends (can't touch `self.effects` inside it).
         if fatal {
             self.effects.push(contract::CoreEffect::Quit);

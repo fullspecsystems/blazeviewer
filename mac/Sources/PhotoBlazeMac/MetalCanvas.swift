@@ -2,6 +2,20 @@ import AppKit
 import QuartzCore
 import SwiftUI
 
+/// `PB_TRACE=1` → size/present diagnostics to stderr (dev-only; zero-ish cost when
+/// off). stderr rather than NSLog: it's visible when launching the executable
+/// directly (`.app/Contents/MacOS/PhotoBlaze 2> trace.log`), and cheap enough not
+/// to perturb the resize-race timing it exists to observe — NSLog's latency masked
+/// exactly the race we were chasing (2026-07-04).
+let pbTraceEnabled = ProcessInfo.processInfo.environment["PB_TRACE"] != nil
+
+@inline(__always)
+func pbTrace(_ message: @autoclosure () -> String) {
+    guard pbTraceEnabled else { return }
+    let t = String(format: "%.3f", ProcessInfo.processInfo.systemUptime)
+    FileHandle.standardError.write(Data("PB[\(t)] \(message())\n".utf8))
+}
+
 /// The wgpu canvas: a plain layer-hosting NSView whose backing layer is a `CAMetalLayer`
 /// the Rust renderer draws into. Deliberately **not** `MTKView` — wgpu owns the drawable
 /// loop (`nextDrawable`/present), and MTKView's own drawable management would fight it.
@@ -18,15 +32,58 @@ final class MetalCanvasNSView: NSView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
+        // Never stretch stale contents on a resize. For a layer-BACKED view AppKit owns
+        // the backing layer's `contentsGravity`: it derives it from these two view
+        // properties and re-asserts it on frame changes — so setting gravity on the
+        // CAMetalLayer alone gets clobbered back to the stretching default
+        // (`.scaleAxesIndependently`) at exactly the moment it matters. `.never`
+        // because wgpu pushes frames itself (AppKit must not mark the layer for
+        // redraw); `.center` so a not-yet-refreshed frame composites unscaled —
+        // centered content holds its size for the one racy composite of a window
+        // resize (wgpu presents out-of-band from the CA transaction that moves the
+        // bounds) instead of ballooning/squeezing until the next render lands.
+        layerContentsRedrawPolicy = .never
+        layerContentsPlacement = .center
         // Finder file drops onto the photo canvas (the winit shell's DroppedPaths).
         registerForDraggedTypes([.fileURL])
+        // The definitive size signal. SwiftUI sizes this representable on its own
+        // deferred update cycle — after `layoutSubtreeIfNeeded` returns, after any
+        // post-transition runloop hop — and a window-mode change doesn't reliably
+        // re-fire `layout()` at all. The frame pump reconciles per tick, but it is
+        // *paused when idle*, so a fullscreen toggle on a static screen could strand
+        // the surface at the old size until the next input kicked the pump. This
+        // notification posts synchronously whenever the view's frame is actually
+        // set, whoever sets it and whenever that lands — the event the callbacks
+        // above all only approximate.
+        postsFrameChangedNotifications = true
+        frameObserver = NotificationCenter.default.addObserver(
+            forName: NSView.frameDidChangeNotification, object: self, queue: nil
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reconcileSizeIfNeeded() }
+        }
     }
+
+    /// The frame-did-change observation token; removed on detach.
+    private var frameObserver: NSObjectProtocol?
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("not from a nib") }
 
     override func makeBackingLayer() -> CALayer {
-        CAMetalLayer()
+        let layer = CAMetalLayer()
+        // Never stretch stale contents. When the window jumps size in one step (the F
+        // fullscreen toggle), there is inevitably one composite where the layer already
+        // has its new bounds but still shows the previous drawable: wgpu presents
+        // out-of-band from the CoreAnimation transaction that moves the bounds
+        // (`presentsWithTransaction` is off, and wgpu 22 exposes no safe way to enable
+        // it), so no shell-side sequencing can make {new bounds, new frame} atomic.
+        // The default `.resize` gravity ballooned/squeezed that stale frame; `.center`
+        // composites it unscaled instead — the centered Open panel stays pixel-identical
+        // and a photo briefly reveals letterbox at the edges — until the next pump frame
+        // (≤1 refresh) lands the correctly sized render. (Verified: wgpu's configure()
+        // never touches contentsGravity, so setting it once here holds.)
+        layer.contentsGravity = .center
+        return layer
     }
 
     // MARK: - Pointer + gestures → the core (winit conventions: physical px, top-left origin)
@@ -136,6 +193,8 @@ final class MetalCanvasNSView: NSView {
         // Report the effective appearance BEFORE the renderer attaches, so the first
         // frame's letterbox + HUD already resolve `Appearance: System` correctly (#46).
         model?.osThemeChanged(dark: effectiveAppearance.isDarkAppearance)
+        lastReported = (pixelSize(at: scale), scale) // attach reports this same geometry
+        pbTrace("attach px=\(Int(lastReported.size.width))x\(Int(lastReported.size.height)) scale=\(scale)")
         onAttach?(metalLayer, pixelSize(at: scale), scale)
         // Stand the display-synchronized frame pump up on this view (it tracks the view's
         // display for the refresh rate); the model paces it, we own its lifetime.
@@ -151,12 +210,27 @@ final class MetalCanvasNSView: NSView {
         }
     }
 
-    override func layout() {
-        super.layout()
-        guard attached else { return }
+    /// The last geometry actually reported to the model — the baseline
+    /// `reconcileSizeIfNeeded` compares against.
+    private var lastReported: (size: CGSize, scale: CGFloat) = (.zero, 0)
+
+    /// The single funnel every size/scale report goes through, so `lastReported`
+    /// always matches what the core was told.
+    private func report() {
         let scale = backingScale
         layer?.contentsScale = scale
-        onResize?(pixelSize(at: scale), scale)
+        let size = pixelSize(at: scale)
+        lastReported = (size, scale)
+        pbTrace("report px=\(Int(size.width))x\(Int(size.height)) scale=\(scale) bounds=\(Int(bounds.width))x\(Int(bounds.height)) onResize=\(onResize != nil)")
+        onResize?(size, scale)
+    }
+
+    override func layout() {
+        super.layout()
+        // Reconcile (not an unconditional report): the frame-did-change notification
+        // usually fired for this same change already, and re-reporting an unchanged
+        // size would re-render a full frame per live-resize step for nothing.
+        reconcileSizeIfNeeded()
     }
 
     /// The backing scale changed with no bounds change — a bare scale flip does NOT
@@ -168,10 +242,33 @@ final class MetalCanvasNSView: NSView {
     /// re-rasterizes the overlays, and re-aligns the hit-test coordinates.
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
+        // Reconcile: the scale compare catches a bare scale flip; a same-geometry
+        // re-fire (AppKit posts this liberally) stays a no-op.
+        reconcileSizeIfNeeded()
+    }
+
+    /// Re-report the current pixel size through the standard resize path, without waiting
+    /// for AppKit to re-fire `layout()`. The fullscreen↔windowed transition
+    /// (`setWindowMode`) changes the window frame but doesn't reliably drive a fresh
+    /// `layout()` → `onResize` with the settled size; the transition path calls this
+    /// once AppKit has applied the new frame.
+    func reportSizeNow() {
+        guard attached else { return }
+        report()
+    }
+
+    /// The pull half of size tracking: compare the live geometry against what was last
+    /// reported and re-report on drift. Called at the top of every pump tick (and once
+    /// after a window-mode transition), so a missed or mistimed AppKit layout callback
+    /// can strand the surface at a stale size/scale for at most one frame — the invariant
+    /// that ends the "stuck at the wrong size" class of bug (fullscreen toggles, 1x↔2x
+    /// display moves) rather than patching its instances callback by callback.
+    func reconcileSizeIfNeeded() {
         guard attached else { return }
         let scale = backingScale
-        layer?.contentsScale = scale
-        onResize?(pixelSize(at: scale), scale)
+        if pixelSize(at: scale) != lastReported.size || scale != lastReported.scale {
+            report()
+        }
     }
 
     /// The effective light/dark appearance changed — an OS theme switch, or our own
@@ -189,6 +286,10 @@ final class MetalCanvasNSView: NSView {
     func detachNow() {
         guard attached else { return }
         attached = false
+        if let frameObserver {
+            NotificationCenter.default.removeObserver(frameObserver)
+            self.frameObserver = nil
+        }
         pump?.invalidate()
         pump = nil
         model?.framePump = nil
@@ -221,6 +322,9 @@ struct MetalCanvas: NSViewRepresentable {
     func makeNSView(context: Context) -> MetalCanvasNSView {
         let view = MetalCanvasNSView(frame: .zero)
         view.model = model
+        // The model re-reports the canvas size through this view after a fullscreen→windowed
+        // restore (see `setWindowMode`), where AppKit doesn't reliably re-fire `layout()`.
+        model.canvasView = view
         view.onAttach = { layer, size, scale in
             model.attachCanvas(layer: layer, pixelSize: size, scale: scale)
         }

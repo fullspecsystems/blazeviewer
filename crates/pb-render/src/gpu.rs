@@ -1868,14 +1868,22 @@ impl Renderer for WgpuRenderer {
         );
     }
 
-    fn render(&mut self) -> Result<(), RenderError> {
+    fn render(&mut self) -> Result<bool, RenderError> {
         let frame = match self.surface.get_current_texture() {
             Ok(f) => f,
+            // Dropped frames (`Ok(false)`) are NOT silent successes: nothing reached
+            // the screen, and the caller must retry or the compositor keeps the stale
+            // frame up indefinitely. The eprintln is deliberate — this is rare, and
+            // its absence from a trace cost a debugging session (2026-07-04).
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                eprintln!("render: surface lost/outdated — reconfigured, frame dropped");
                 self.surface.configure(&self.device, &self.config);
-                return Ok(());
+                return Ok(false);
             }
-            Err(wgpu::SurfaceError::Timeout) => return Ok(()),
+            Err(wgpu::SurfaceError::Timeout) => {
+                eprintln!("render: drawable timeout — frame dropped");
+                return Ok(false);
+            }
             Err(wgpu::SurfaceError::OutOfMemory) => return Err(RenderError::OutOfMemory),
         };
         let view = frame
@@ -2066,7 +2074,7 @@ impl Renderer for WgpuRenderer {
         );
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
-        Ok(())
+        Ok(true)
     }
 }
 
