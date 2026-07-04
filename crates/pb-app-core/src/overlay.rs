@@ -25,13 +25,17 @@ pub struct TreePanel {
     pub built: Instant,
 }
 
-/// Which info overlay is active (`i` basic / `Shift+I` full EXIF / `?` help / off).
+/// Which info overlay is active (`i` basic / `Shift+I` full EXIF / `?` help /
+/// `T` recognized text / off). One shared overlay slot, so they replace each other.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum InfoMode {
     Off,
     Basic,
     Full,
     Help,
+    /// The "text in image" panel (task #45): OCR lines + QR payloads for the
+    /// displayed photo, or its busy/error state while the scan runs.
+    Text,
 }
 
 /// A transient bottom-center status toast (e.g. "Recursive folders: on"): a pill

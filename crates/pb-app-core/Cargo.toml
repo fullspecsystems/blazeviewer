@@ -43,13 +43,31 @@ trash = { version = "5", default-features = false, features = [
 # Iterative, symlink-safe directory walk for the scan resolvers migrated off the shell (NS0 5.6
 # Step 2b). Same crate the shell used; already in the lockfile.
 walkdir = "2"
+# QR-code payload decode for "text in image" (task #45) — pure Rust (no OS barcode API on
+# Windows; one shared backend on every platform, testable with generated QR bitmaps).
+rqrr = "0.10"
+
+[dev-dependencies]
+# Generate QR bitmaps for the image_text decode tests (never shipped). Default features
+# pull the `image` crate; we only need the raw module colors.
+qrcode = { version = "0.14", default-features = false }
 
 # Physical-RAM query for the 7z eager-decompress pre-flight (archive.rs), migrated off the shell
 # (NS0 5.6 Step 2c). Platform syscalls isolated in that one module; already in the workspace lock.
+# The WinRT features (Media_Ocr + SoftwareBitmap plumbing) drive the on-device OCR backend
+# (image_text.rs, task #45) — the same OS-codec posture as WIC: no model shipped, no network.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_System_SystemInformation",
+    "Win32_System_Com",
+    "Foundation",
+    "Foundation_Collections",
+    "Globalization",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Storage_Streams",
+    "Security_Cryptography",
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

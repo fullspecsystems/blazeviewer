@@ -160,6 +160,16 @@ pub struct AppCore {
     /// Per-item on-demand full-EXIF read (`Shift+I`): `(mtime, key/value pairs)`, so a
     /// re-open of the same unchanged file is instant. RAM-only (privacy #2).
     pub exif_cache: HashMap<usize, (u64, Vec<(String, String)>)>,
+    /// Per-item "text in image" results (`T` / Copy Text from Image, task #45):
+    /// on-device OCR lines + QR payloads, cached so a revisit is instant. RAM-only
+    /// (privacy #2) — dropped on rebuild and exit, never written anywhere.
+    pub recognized_text: HashMap<usize, crate::image_text::ImageText>,
+    /// The in-flight off-thread text scan, or `None`. Polled by the tick
+    /// (`poll_text_scan`); superseded by replacing it (the old receiver drops).
+    pub text_scan: Option<crate::image_text::TextScan>,
+    /// Text-scan generation: bumped whenever playlist indices are reassigned so a
+    /// late scan result can't cache under a recycled index.
+    pub text_gen: u64,
 
     // --- Prefetch / decode / residency (NS0 5.3) ---
     /// Off-thread priority decode pool — decode + I/O never block the event loop.

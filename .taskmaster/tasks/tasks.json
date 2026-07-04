@@ -221,40 +221,40 @@
       {
         "id": 45,
         "title": "Copy Text from Image / Show Text (on-device OCR + QR codes)",
-        "description": "DETAILED PLAN: .taskmaster/docs/ai-descriptions-plan.md (OCR section, 2026-07-03). Tier 1 only: on-demand OCR of the current image — 'Copy Text from Image' in the Edit/context menus (clipboard + toast) and `T` to show recognized text in a HUD panel. Engines are OS-built-in and fully on-device: macOS Vision RecognizeTextRequest (NO macOS 27 dependency — available on the current floor; Swift-side via the same delegate/FFI shape as the FM describe backend) and Windows.Media.Ocr via the windows crate (worker thread, downscaled input ≤ OcrEngine.MaxImageDimension, language packs required). Shares task #44's state machine (busy/generation-cancel/RAM-only cache) and the ClipboardPayload::Text seam. Tier 2 (VisionKit Live Text overlay) and Tier 3 (cross-platform selection UI) deliberately punted — recorded in the plan doc. GARNISH: QR/barcode payloads via a pure-Rust decoder (rxing or rqrr) on BOTH platforms (Windows has no OS barcode API; one shared backend, no FFI, testable with generated QR PNGs). ⚠ Decode from FULL-RES RGBA, not the OCR downscale (pixels-per-module). Payloads list above the text in the T panel and ride the copy command — no new key/menu item.",
-        "status": "pending",
+        "description": "DETAILED PLAN: .taskmaster/docs/ai-descriptions-plan.md (OCR section, 2026-07-03). Tier 1 only: on-demand OCR of the current image — 'Copy Text from Image' in the Edit/context menus (clipboard + toast) and `T` to show recognized text in a HUD panel. Engines are OS-built-in and fully on-device: macOS Vision RecognizeTextRequest (NO macOS 27 dependency — available on the current floor; Swift-side via the same delegate/FFI shape as the FM describe backend) and Windows.Media.Ocr via the windows crate (worker thread, downscaled input ≤ OcrEngine.MaxImageDimension, language packs required). Shares task #44's state machine (busy/generation-cancel/RAM-only cache) and the ClipboardPayload::Text seam. Tier 2 (VisionKit Live Text overlay) and Tier 3 (cross-platform selection UI) deliberately punted — recorded in the plan doc. GARNISH: QR/barcode payloads via a pure-Rust decoder (rxing or rqrr) on BOTH platforms (Windows has no OS barcode API; one shared backend, no FFI, testable with generated QR PNGs). ⚠ Decode from FULL-RES RGBA, not the OCR downscale (pixels-per-module). Payloads list above the text in the T panel and ride the copy command — no new key/menu item. IMPLEMENTED 2026-07-04 (Windows + shared core; #44 not started, so the analysis state machine was built fresh in pb-app-core/image_text.rs for #44 to generalize later): Action::CopyImageText (id copy_text) + Action::ShowImageText (id show_text, default T); InfoMode::Text panel via new pb-hud render_paragraph (word-wrap block, first in the crate); TextScan worker (anim_decode shape: full-res decode + baked rotation -> rqrr QR on full-res gray -> Lanczos cap -> Windows.Media.Ocr via blocking IAsyncOperation::join(), first in tree — windows-future calls it join, not get); ClipboardPayload::Text grew an optional core-supplied toast (winit shell honors it; pb-mac-ffi clipboard_text_toast() accessor ready for Swift); archive entries WORK (pixel-based, no path needed). Deck-gen guard drops post-rebuild results; navigate-away results still cache (item-keyed). Caches cleared in enter_empty_state/rebuild_playlist/clear_session_state; rotate evicts per-item. 15 new unit tests + dev example image_text_probe (live-smoked: 1200x500 PNG, 4/4 lines in 29 ms; app T+Esc clean-exit smoke). Remaining: subtask 2 (Mac Vision behind image_text::platform stub + MenuBar.swift item + adopt clipboard_text_toast) and owner visual smoke.",
+        "status": "review",
         "priority": "low",
         "dependencies": [],
         "subtasks": [
           {
             "id": 1,
             "title": "Actions + shared analysis state",
-            "description": "Action::CopyImageText (menu/context, no default key) + Action::ShowImageText (T); generalize describe's busy/generation/cache machinery to analysis results; HUD text panel reuse.",
-            "status": "pending"
+            "description": "DONE 2026-07-04: Action::CopyImageText (menu/context, no default key) + Action::ShowImageText (T); busy/generation/cache machinery built fresh in image_text.rs (ImageText/TextScan — #44's describe generalizes FROM this); InfoMode::Text panel on the shared overlay slot; 8 headless AppCore tests.",
+            "status": "done"
           },
           {
             "id": 2,
             "title": "macOS Vision backend",
-            "description": "RecognizeTextRequest accurate mode, Swift-side, BeginRecognizeText effect out / ocr_finished FFI back (password-flow shape).",
+            "description": "RecognizeTextRequest accurate mode. The seam landed differently than sketched: implement behind image_text::platform::ocr_lines (cfg(not(windows)) stub currently returns a plain 'not available yet' error; QR already works on mac). Also: MenuBar.swift Edit item emitting action id copy_text, and adopt the new clipboard_text_toast() FFI accessor for the custom copy toast. Needs a Mac session.",
             "status": "pending"
           },
           {
             "id": 3,
             "title": "Windows.Media.Ocr backend",
-            "description": "windows-crate WinRT, blocking .get() on a worker thread, RGBA→SoftwareBitmap at ≤2600px, missing-language-pack error message.",
-            "status": "pending"
+            "description": "DONE 2026-07-04: windows-crate WinRT (features Media_Ocr/Graphics_Imaging/Storage_Streams/Security_Cryptography/...), blocking IAsyncOperation::join() on the scan worker (windows-future 0.3 names it join, not .get()), RGBA→BGRA→SoftwareBitmap capped to OcrEngine.MaxImageDimension via new pb_decode::downscale_rgba8, missing-language-pack message. Live-smoked via examples/image_text_probe: 4/4 lines in 29 ms.",
+            "status": "done"
           },
           {
             "id": 4,
             "title": "Clipboard + toast + panel wiring",
-            "description": "Copy via ClipboardPayload::Text with 'Copied N characters' / 'No text found' toasts; T panel shows joined lines; results cached RAM-only beside descriptions.",
-            "status": "pending"
+            "description": "DONE 2026-07-04: ClipboardPayload::Text grew { text, toast: Option<String> } (core-supplied 'Copied N characters' / 'Copied text + N QR codes'; 'No text found' toasts core-side without a write); T panel renders via new pb-hud render_paragraph (greedy word-wrap + hard-split for URLs + '… N more lines' cap); Edit menu (both builds) + context menu items; help-overlay row; EDITOR_GROUPS.",
+            "status": "done"
           },
           {
             "id": 5,
             "title": "QR/barcode payloads in the analysis results",
-            "description": "Pure-Rust decode (rxing/rqrr) on full-res grayscale, payloads prepended to the T panel + included in Copy Text; 'Copied text + N QR codes' toast; QR-PNG unit tests.",
-            "status": "pending"
+            "description": "DONE 2026-07-04: rqrr (QR-only, pure Rust; rxing passed over as too heavy — revisit only if 1D barcodes are asked for) on full-res grayscale before the OCR downscale; payloads above the text in the T panel and first in the copied text; qrcode dev-dep generates the round-trip test bitmaps.",
+            "status": "done"
           }
         ]
       },
@@ -422,11 +422,11 @@
       {
         "id": 52,
         "title": "Upstream the AES key-derivation cache to sevenz-rust2, then drop the vendored copy",
-        "description": "PhotoBlaze vendors sevenz-rust2 0.21.1 (vendor/sevenz-rust2, wired via [patch.crates-io]) with one patch: encryption/aes.rs caches the derived AES key across blocks. Upstream re-derives the key (2^num_cycles_power SHA-256 rounds, ~10-40 ms at the standard cycles=19, scaling with password length) for EVERY block, and 7-Zip writes one salt per archive — so a non-solid stored+encrypted archive (one block per file) re-derives the identical key thousands of times. Measured: 3,000-file stored+encrypted archive with a 50-char password opened in 3.88 s vs 0.15 s for 7z t; with the cache, 0.08 s (48x). Owner's real 10 GB archive: 24 s -> ~4 s. 7-Zip itself caches the key the same way. Submit this upstream so the vendored copy can be deleted.",
-        "status": "pending",
+        "description": "PhotoBlaze vendors sevenz-rust2 0.21.1 (vendor/sevenz-rust2, wired via [patch.crates-io]) with one patch: encryption/aes.rs caches the derived AES key across blocks. Upstream re-derives the key (2^num_cycles_power SHA-256 rounds, ~10-40 ms at the standard cycles=19, scaling with password length) for EVERY block, and 7-Zip writes one salt per archive — so a non-solid stored+encrypted archive (one block per file) re-derives the identical key thousands of times. Measured: 3,000-file stored+encrypted archive with a 50-char password opened in 3.88 s vs 0.15 s for 7z t; with the cache, 0.08 s (48x). Owner's real 10 GB archive: 24 s -> ~4 s. 7-Zip itself caches the key the same way. STATUS: PR submitted AND MERGED (hasenbanck/sevenz-rust2#118, merged 2026-07-04). Remaining: wait for the next crates.io release (latest is still 0.21.2, pre-merge), then drop the vendored copy.",
+        "status": "in-progress",
         "priority": "medium",
         "dependencies": [],
-        "details": "The patch is derive_key_cached() in vendor/sevenz-rust2/src/encryption/aes.rs (marked 'PhotoBlaze patch'): a single-entry process-global cache keyed by a SHA-256 fingerprint of (num_cycles_power, salt, password), so no raw password bytes are retained; concurrent first misses derive redundantly in parallel (bounded by thread count, benign — last write wins) rather than serializing behind a lock during derivation. Steps: (1) Fork https://github.com/hasenbanck/sevenz-rust2, port the patch onto their main branch (the file may have moved/changed past 0.21.x; latest published was 0.21.2 when vendored 2026-07-03). (2) Consider upstream-friendly generalizations the maintainer may prefer: a small LRU (2-4 entries) instead of single-entry for multi-archive users of the library, and/or a feature flag if they object to the static; present the measured numbers (3.88 s -> 0.08 s on 3,000 files) in the PR description — the repro recipe is in the PhotoBlaze session notes: N small files, 7z a -mx0 -mhe=on -p<long password>. (3) Mind their no_std support: the cache uses std::sync::Mutex — gate it on the std feature (no_std builds keep the uncached path). (4) When a release ships with the cache: bump the workspace dep, delete vendor/sevenz-rust2 and the [patch.crates-io] section in the root Cargo.toml (its comment documents this exact plan), and verify with the pb-source tests + archive_probe on a many-file encrypted archive that the speed held.",
+        "details": "PR #118 is merged upstream — steps (1)-(3) are DONE. What remains is the teardown when a release ships (watch https://crates.io/crates/sevenz-rust2 or the repo's releases page for the first version after 0.21.2): (a) confirm the release actually contains the cache (check its CHANGELOG/diff — a patch release could ship without it); (b) bump the workspace dep to that version (crates/pb-source/Cargo.toml and the pb-app dev-dep), delete vendor/sevenz-rust2 and the [patch.crates-io] block in the root Cargo.toml (its comment documents this exact plan); (c) verify: cargo tree shows no path override, all pb-source tests pass (encrypted round-trip + wrong-password tests), and archive_probe on a many-file stored+encrypted long-password archive still opens fast (repro recipe: N small files, 7z a -mx0 -mhe=on -p<long password>; pre-cache baseline was 3.88 s / 3,000 files, cached 0.08 s). NOTE: upstream may have evolved the implementation during review (LRU instead of single-entry, std-feature gating) — the behavior contract to verify is 'derivation cost paid once per archive, wrong password still fails', not the exact patch shape.",
         "testStrategy": "PR accepted upstream (or an equivalent cache lands independently); after switching back to the crates.io release: cargo tree shows no path override for sevenz-rust2, vendor/ is gone, all pb-source tests pass (including the encrypted round-trip + wrong-password tests), and archive_probe on a 3,000-file stored+encrypted long-password archive still opens in well under 0.5 s.",
         "subtasks": []
       }

@@ -8,6 +8,14 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
+- **Copy Text from Image + text panel (T)** — read and copy the text visible in a
+  photo, entirely on your machine. Press **T** to see the recognized text (and any
+  QR-code contents, listed on top) in an on-image panel, or use **Edit ▸ Copy Text
+  from Image** / the right-click menu to put it straight on the clipboard — the toast
+  confirms what you got ("Copied 214 characters", "Copied text + 1 QR code"). Works
+  on rotated photos and inside archives; results are kept in RAM only and nothing is
+  ever uploaded. Text recognition uses Windows' built-in on-device OCR (the Mac
+  version is coming; QR codes are read on both already).
 - **Light mode** — a new **Theme** setting under Settings ▸ Appearance: **System**
   (default) follows your OS light/dark theme live, or pin **Light** / **Dark**. In light
   mode the on-image overlays (info panels, toasts, help, folder tree, scan card) switch

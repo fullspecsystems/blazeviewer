@@ -228,6 +228,7 @@ pub const EDITOR_GROUPS: &[(&str, &[Action])] = &[
             Action::ToggleOriginal,
             Action::Info,
             Action::FullExif,
+            Action::ShowImageText,
             Action::Help,
             Action::FolderTree,
             Action::OpenParent,
@@ -245,6 +246,7 @@ pub const EDITOR_GROUPS: &[(&str, &[Action])] = &[
             Action::CompareToggle,
             Action::ComparePin,
             Action::Copy,
+            Action::CopyImageText,
             Action::SaveRotation,
             Action::Delete,
             Action::DeletePermanent,
@@ -519,6 +521,11 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         one(Action::CopyPath, "Shift+Ctrl+C"),
         // Copy the photo's details as text — context-menu only by default.
         (Action::CopyImageDetails, vec![]),
+        // Copy the text recognized *in* the photo (OCR + QR, task #45) — menu/context
+        // menu by default; a user can bind a key in Settings.
+        (Action::CopyImageText, vec![]),
+        // Show the recognized text in a HUD panel — read before copying.
+        one(Action::ShowImageText, "T"),
         // Reveal in Finder / File Explorer — menu-only by default (no obvious cross-platform
         // key; ⇧⌘R is taken by other apps on macOS). A user can bind one in Settings.
         (Action::RevealInFileManager, vec![]),

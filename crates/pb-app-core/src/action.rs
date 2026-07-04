@@ -62,6 +62,14 @@ pub enum Action {
     /// rather than "EXIF" since not every format carries EXIF (a PNG still has
     /// dimensions/codec/size).
     CopyImageDetails,
+    /// Copy the text *visible in* the current photo (on-device OCR + any QR-code
+    /// payloads, task #45) to the clipboard. Menu/context-menu by default (no key);
+    /// runs the scan on demand if the result isn't already cached.
+    CopyImageText,
+    /// Show the text recognized in the current photo (plus QR payloads) in a HUD
+    /// panel (`T`, task #45) — read before copying. Same on-device scan and RAM-only
+    /// cache as [`Action::CopyImageText`].
+    ShowImageText,
     /// Reveal the current photo in the OS file manager (macOS Finder / Windows File
     /// Explorer), with its containing folder open and the file selected. Only real
     /// on-disk files can be revealed (an archive entry / the empty deck cannot).
@@ -138,6 +146,8 @@ impl Action {
         Action::Copy,
         Action::CopyPath,
         Action::CopyImageDetails,
+        Action::CopyImageText,
+        Action::ShowImageText,
         Action::RevealInFileManager,
         Action::SaveRotation,
         Action::Delete,
@@ -191,6 +201,8 @@ impl Action {
             Action::Copy => "copy",
             Action::CopyPath => "copy_path",
             Action::CopyImageDetails => "copy_image_details",
+            Action::CopyImageText => "copy_text",
+            Action::ShowImageText => "show_text",
             Action::RevealInFileManager => "reveal",
             Action::SaveRotation => "save_rotation",
             Action::Delete => "delete",
@@ -255,6 +267,8 @@ impl Action {
             Action::Copy => "Copy image",
             Action::CopyPath => "Copy file path",
             Action::CopyImageDetails => "Copy image details",
+            Action::CopyImageText => "Copy text from image",
+            Action::ShowImageText => "Show text in image",
             // The platform-idiomatic name (Finder on macOS, File Explorer elsewhere) —
             // the menu bar sets its own label too; this feeds the keybindings editor / help.
             Action::RevealInFileManager => {

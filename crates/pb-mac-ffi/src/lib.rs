@@ -302,10 +302,22 @@ impl AppCoreHandle {
     // the `WriteClipboard` marker: try `take_clipboard_text()` first; if empty, read the
     // image dimensions/file and `take_clipboard_image()`.
 
+    /// The pending text payload's custom toast ("" = none; the host derives its
+    /// default). Read BEFORE `take_clipboard_text` — taking the payload consumes
+    /// both. Set by the recognized-text copy (task #45, "Copied 214 characters" /
+    /// "Copied text + 1 QR code"); the Swift host adopts it when the mac backend
+    /// lands (until then its generic toast stands).
+    fn clipboard_text_toast(&self) -> String {
+        match &self.pending_clipboard {
+            Some(contract::ClipboardPayload::Text { toast: Some(t), .. }) => t.clone(),
+            _ => String::new(),
+        }
+    }
+
     /// The pending text payload ("" if none / it's an image). Consumes it.
     fn take_clipboard_text(&mut self) -> String {
         match self.pending_clipboard.take() {
-            Some(contract::ClipboardPayload::Text(t)) => t,
+            Some(contract::ClipboardPayload::Text { text, .. }) => text,
             other => {
                 self.pending_clipboard = other; // put a non-text payload back
                 String::new()
@@ -1823,6 +1835,8 @@ mod ffi {
         fn current_photo_path(&self) -> String;
 
         // The WriteClipboard payload accessors (marker effect + pull — see the field doc).
+        // clipboard_text_toast BEFORE take_clipboard_text (the take consumes both).
+        fn clipboard_text_toast(&self) -> String;
         fn take_clipboard_text(&mut self) -> String;
         fn clipboard_image_width(&self) -> u32;
         fn clipboard_image_height(&self) -> u32;

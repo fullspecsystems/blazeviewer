@@ -82,6 +82,9 @@ impl AppCore {
             meta_cache: std::collections::HashMap::new(),
             current: None,
             exif_cache: std::collections::HashMap::new(),
+            recognized_text: std::collections::HashMap::new(),
+            text_scan: None,
+            text_gen: 0,
             pool,
             results,
             ring: ResidentRing::new(0),
@@ -202,6 +205,9 @@ impl AppCore {
             // A tree-io job (the folder tree's read_dir derivation / a Go sibling
             // lookup) keeps the loop polling so `tick` installs it when it lands.
             || self.tree_io.is_some()
+            // An off-thread text scan (OCR + QR, task #45) keeps polling so
+            // `poll_text_scan` picks up the result promptly.
+            || self.text_scan.is_some()
             || self.displayed_item != self.target_item
             || self
                 .targets
@@ -244,6 +250,8 @@ impl AppCore {
             Action::Copy => self.copy_image(),
             Action::CopyPath => self.copy_path(),
             Action::CopyImageDetails => self.copy_image_details(),
+            Action::CopyImageText => self.copy_image_text(),
+            Action::ShowImageText => self.toggle_image_text(),
             Action::RevealInFileManager => self.reveal_in_file_manager(),
             Action::OpenFile => self.open_picker(false),
             Action::OpenFolder => self.open_picker(true),
@@ -887,6 +895,10 @@ impl AppCore {
         // install playback — never on the still/keypress hot path (#37).
         self.poll_anim_decode();
 
+        // 1c. Pick up a finished off-thread text scan (OCR + QR, task #45): cache it,
+        // refresh the `T` panel's busy state, run a deferred copy.
+        self.poll_text_scan();
+
         // 2. Continuous zoom/pan while their keys are held (accelerating ramp).
         let transforming = self.apply_view_holds(now);
 
@@ -1172,9 +1184,9 @@ impl AppCore {
             info: match info {
                 InfoMode::Basic => contract::InfoOverlay::Basic,
                 InfoMode::Full => contract::InfoOverlay::FullExif,
-                // Help and Off both leave the two info checkmarks off (the menu can't
-                // distinguish them — this is the faithful collapse of the 4-state enum).
-                InfoMode::Help | InfoMode::Off => contract::InfoOverlay::Hidden,
+                // Help, the text panel, and Off all leave the two info checkmarks off
+                // (the menu tracks only the info pair — the faithful collapse).
+                InfoMode::Help | InfoMode::Text | InfoMode::Off => contract::InfoOverlay::Hidden,
             },
             recursive,
             fullscreen,
@@ -1698,6 +1710,9 @@ impl AppCore {
         self.rotations.clear();
         self.meta_cache.clear();
         self.exif_cache.clear();
+        self.recognized_text.clear();
+        self.text_scan = None;
+        self.text_gen += 1;
         self.live_motion_cache.clear();
         self.failed.clear();
         self.preview_resident.clear();
@@ -1779,6 +1794,9 @@ impl AppCore {
         self.rotations.clear();
         self.meta_cache.clear();
         self.exif_cache.clear();
+        self.recognized_text.clear();
+        self.text_scan = None;
+        self.text_gen += 1;
         self.live_motion_cache.clear();
         self.failed.clear();
         self.preview_resident.clear();
@@ -2547,6 +2565,7 @@ impl AppCore {
                     row("Recursive (this folder)", sc(Action::Recursive)),
                     row("Info panel", sc(Action::Info)),
                     row("Detailed info panel", sc(Action::FullExif)),
+                    row("Text in image", sc(Action::ShowImageText)),
                     row("Folder tree", sc(Action::FolderTree)),
                     row("Parent folder", sc(Action::OpenParent)),
                     row(
@@ -2616,6 +2635,25 @@ impl AppCore {
                     return;
                 };
                 hud.render_shortcuts(&sections, help_px, theme.bg, max_h)
+            }
+            InfoMode::Text => {
+                if self.current.is_none() {
+                    return;
+                }
+                // The panel tracks the displayed photo while open, so settling on a
+                // new item kicks its scan here (no-op when cached / already running).
+                self.ensure_text_scan();
+                let lines = self.text_panel_lines();
+                let margin = self.overlay_margin();
+                // Cap the paragraph width to a readable column, and never wider than
+                // the window allows at this margin.
+                let max_w = ((self.viewport.width as i32 - 2 * margin as i32).max(1) as u32)
+                    .min((440.0 * self.viewport.scale_factor) as u32);
+                let max_h = (self.viewport.height as i32 - 2 * margin as i32).max(1);
+                let Some(hud) = self.hud.as_ref() else {
+                    return;
+                };
+                hud.render_paragraph(&lines, px, pad, info_bg, max_w, max_h)
             }
         };
         let Some((bitmap, w, h)) = panel else {
@@ -2983,6 +3021,16 @@ impl AppCore {
         } else {
             self.rotations.insert(item, new);
         }
+        // The text scan reads the pixels as displayed — a rotation changes them, so
+        // drop this item's cached result (and any in-flight scan); an open `T` panel
+        // rebuilds (and re-kicks the scan) on the next settled tick.
+        self.recognized_text.remove(&item);
+        if self.text_scan.as_ref().is_some_and(|s| s.item == item) {
+            self.text_scan = None;
+        }
+        if self.info == InfoMode::Text {
+            self.overlay_shown = false;
+        }
         self.view.rotation = new;
         self.push_view();
         // Flash a directional rotate icon (icon-only pill) as feedback.
@@ -3041,7 +3089,7 @@ impl AppCore {
         // The shell writes the text and reports the success/failure toast (it can recover
         // the file name from `text` for the "Copied …" message).
         self.effects.push(contract::CoreEffect::WriteClipboard(
-            contract::ClipboardPayload::Text(text),
+            contract::ClipboardPayload::Text { text, toast: None },
         ));
     }
 
@@ -3102,8 +3150,170 @@ impl AppCore {
             return;
         }
         self.effects.push(contract::CoreEffect::WriteClipboard(
-            contract::ClipboardPayload::Text(lines.join("\n")),
+            contract::ClipboardPayload::Text {
+                text: lines.join("\n"),
+                toast: None,
+            },
         ));
+    }
+
+    /// **Copy Text from Image** (Edit / context menu, task #45): put the text
+    /// recognized *in* the displayed photo — on-device OCR lines plus QR-code
+    /// payloads — on the clipboard. Uses the cached scan when present; otherwise
+    /// kicks the off-thread scan and copies when it lands (`copy_when_done`). An
+    /// explicit user command; the scan never leaves the machine and the result is
+    /// RAM-only (privacy #2).
+    pub fn copy_image_text(&mut self) {
+        let Some(item) = self.displayed_item else {
+            self.show_toast("Nothing to copy");
+            return;
+        };
+        if self.recognized_text.contains_key(&item) {
+            self.copy_recognized(item);
+            return;
+        }
+        self.ensure_text_scan();
+        if let Some(scan) = self.text_scan.as_mut() {
+            if scan.item == item {
+                scan.copy_when_done = true;
+                // Feedback that a scan is running; the result toast replaces it.
+                self.show_toast("Reading text…");
+            }
+        }
+    }
+
+    /// **Show text in image** (`T`, task #45): toggle the recognized-text HUD panel.
+    /// Shares the single overlay slot with the info/EXIF/help panels, so it replaces
+    /// whichever was showing (and `I` / `Shift+I` replace it right back).
+    pub fn toggle_image_text(&mut self) {
+        self.info = if self.info == InfoMode::Text {
+            InfoMode::Off
+        } else {
+            InfoMode::Text
+        };
+        if self.info == InfoMode::Off {
+            self.hide_overlay();
+        } else {
+            self.show_overlay();
+        }
+    }
+
+    /// Kick the off-thread text scan for the displayed photo unless its result is
+    /// already cached or that same scan is already in flight. Replacing a stale
+    /// in-flight scan (another item's) drops its receiver — the worker's send fails
+    /// and its thread exits quietly. Decode + OCR + QR all run on the worker; the
+    /// event loop never blocks.
+    fn ensure_text_scan(&mut self) {
+        let Some(item) = self.displayed_item else {
+            return;
+        };
+        if self.recognized_text.contains_key(&item)
+            || self.text_scan.as_ref().is_some_and(|s| s.item == item)
+        {
+            return;
+        }
+        let gen = self.text_gen;
+        let source = Arc::clone(&self.source);
+        // Bake the in-RAM rotation override: OCR wants the pixels upright as shown.
+        let rot = self.rotations.get(&item).copied().unwrap_or_default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::image_text::scan_job(source.as_ref(), item, rot));
+        });
+        self.text_scan = Some(crate::image_text::TextScan {
+            gen,
+            item,
+            copy_when_done: false,
+            rx,
+        });
+    }
+
+    /// Pick up a finished text scan (called each tick). A result from before a
+    /// playlist rebuild is dropped — the indices were reassigned — but a result for
+    /// an item the user merely navigated away from still caches (it's item-keyed, so
+    /// the revisit is instant).
+    pub fn poll_text_scan(&mut self) {
+        use std::sync::mpsc::TryRecvError;
+        let outcome = {
+            let Some(s) = self.text_scan.as_ref() else {
+                return;
+            };
+            match s.rx.try_recv() {
+                Ok(result) => Some((s.gen, s.item, s.copy_when_done, result)),
+                Err(TryRecvError::Empty) => return, // still scanning
+                Err(TryRecvError::Disconnected) => None, // worker died
+            }
+        };
+        self.text_scan = None;
+        let Some((gen, item, copy, result)) = outcome else {
+            return;
+        };
+        if gen != self.text_gen {
+            return; // deck rebuilt while scanning — stale indices
+        }
+        self.recognized_text.insert(item, result);
+        // The `T` panel may be sitting on its "Reading text…" state for this item.
+        if self.info == InfoMode::Text && self.displayed_item == Some(item) {
+            self.show_overlay();
+        }
+        if copy {
+            self.copy_recognized(item);
+        }
+    }
+
+    /// Push a cached scan result to the clipboard seam with its specific toast
+    /// ("Copied 214 characters" / "Copied text + 1 QR code"), or toast why there is
+    /// nothing to copy.
+    fn copy_recognized(&mut self, item: usize) {
+        let Some(r) = self.recognized_text.get(&item) else {
+            return;
+        };
+        if r.is_empty() {
+            let msg = r
+                .ocr_error
+                .clone()
+                .unwrap_or_else(|| "No text found".to_string());
+            self.show_toast(&msg);
+            return;
+        }
+        self.effects.push(contract::CoreEffect::WriteClipboard(
+            contract::ClipboardPayload::Text {
+                text: r.clipboard_text(),
+                toast: Some(r.copy_toast()),
+            },
+        ));
+    }
+
+    /// The `T` panel's display lines `(text, semibold)` for the current state: the
+    /// cached result (QR payloads first, then the recognized lines), the in-flight
+    /// "Reading text…" state, or the OCR error.
+    fn text_panel_lines(&self) -> Vec<(String, bool)> {
+        let mut lines = vec![("Text in image".to_string(), true)];
+        let Some(item) = self.displayed_item else {
+            return lines;
+        };
+        match self.recognized_text.get(&item) {
+            Some(r) => {
+                for qr in &r.qr {
+                    lines.push((format!("QR code → {qr}"), false));
+                }
+                if !r.qr.is_empty() && !r.lines.is_empty() {
+                    lines.push((String::new(), false));
+                }
+                for l in &r.lines {
+                    lines.push((l.clone(), false));
+                }
+                if r.lines.is_empty() {
+                    if let Some(e) = &r.ocr_error {
+                        lines.push((e.clone(), false));
+                    } else if r.qr.is_empty() {
+                        lines.push(("No text found".to_string(), false));
+                    }
+                }
+            }
+            None => lines.push(("Reading text…".to_string(), false)),
+        }
+        lines
     }
 
     /// Right-click over the photo (task #41): ask the shell to pop up the **photo context
@@ -4522,6 +4732,143 @@ mod tests {
         let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(vec![dir.join("b.png")]));
         core.rebuild_playlist(source, dir.join("x.zip"), None, false, 0);
         assert_eq!(core.settings.last_folder.as_deref(), Some(dir.as_path()));
+    }
+
+    // --- "Text in image" state machine (task #45): drive `poll_text_scan` with a
+    // hand-fed channel — the worker/OCR backend stays out of these tests entirely.
+
+    fn text_result(qr: &[&str], lines: &[&str]) -> crate::image_text::ImageText {
+        crate::image_text::ImageText {
+            qr: qr.iter().map(|s| s.to_string()).collect(),
+            lines: lines.iter().map(|s| s.to_string()).collect(),
+            ocr_error: None,
+        }
+    }
+
+    /// Install an in-flight scan whose result is already sitting in the channel.
+    fn feed_scan(core: &mut AppCore, item: usize, copy: bool, r: crate::image_text::ImageText) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(r).unwrap();
+        core.text_scan = Some(crate::image_text::TextScan {
+            gen: core.text_gen,
+            item,
+            copy_when_done: copy,
+            rx,
+        });
+    }
+
+    fn clipboard_text_effects(core: &AppCore) -> Vec<(String, Option<String>)> {
+        core.effects
+            .iter()
+            .filter_map(|e| match e {
+                contract::CoreEffect::WriteClipboard(contract::ClipboardPayload::Text {
+                    text,
+                    toast,
+                }) => Some((text.clone(), toast.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn show_image_text_toggles_the_panel_mode() {
+        let mut core = test_core();
+        core.dispatch_action(Action::ShowImageText);
+        assert!(matches!(core.info, InfoMode::Text), "T opens the panel");
+        core.dispatch_action(Action::ShowImageText);
+        assert!(matches!(core.info, InfoMode::Off), "T again closes it");
+        // And the info panels replace it (one shared slot).
+        core.dispatch_action(Action::ShowImageText);
+        core.dispatch_action(Action::Info);
+        assert!(matches!(core.info, InfoMode::Basic));
+    }
+
+    #[test]
+    fn text_scan_result_caches_by_item() {
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        feed_scan(&mut core, 0, false, text_result(&[], &["Hello"]));
+        core.poll_text_scan();
+        assert!(core.text_scan.is_none(), "job consumed");
+        assert_eq!(core.recognized_text[&0].lines, vec!["Hello"]);
+        assert!(
+            clipboard_text_effects(&core).is_empty(),
+            "no copy was requested"
+        );
+    }
+
+    #[test]
+    fn a_result_from_before_a_rebuild_is_dropped() {
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        feed_scan(&mut core, 0, false, text_result(&[], &["stale"]));
+        core.text_gen += 1; // the deck was rebuilt while the scan ran
+        core.poll_text_scan();
+        assert!(
+            core.recognized_text.is_empty(),
+            "stale-generation result must not cache under a recycled index"
+        );
+    }
+
+    #[test]
+    fn a_result_for_a_left_item_still_caches_for_the_revisit() {
+        let mut core = test_core();
+        core.displayed_item = Some(3); // user moved on mid-scan
+        feed_scan(&mut core, 0, false, text_result(&[], &["kept"]));
+        core.poll_text_scan();
+        assert_eq!(
+            core.recognized_text[&0].lines,
+            vec!["kept"],
+            "item-keyed result is still valid — revisits are instant"
+        );
+    }
+
+    #[test]
+    fn copy_image_text_uses_the_cache_and_carries_the_specific_toast() {
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        core.recognized_text
+            .insert(0, text_result(&["https://x"], &["Hello"]));
+        core.dispatch_action(Action::CopyImageText);
+        let got = clipboard_text_effects(&core);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "https://x\nHello", "QR payloads above the text");
+        assert_eq!(got[0].1.as_deref(), Some("Copied text + 1 QR code"));
+    }
+
+    #[test]
+    fn copy_requested_mid_scan_copies_when_the_result_lands() {
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        feed_scan(&mut core, 0, true, text_result(&[], &["late"]));
+        core.poll_text_scan();
+        let got = clipboard_text_effects(&core);
+        assert_eq!(got.len(), 1, "deferred copy fired on landing");
+        assert_eq!(got[0].0, "late");
+    }
+
+    #[test]
+    fn an_empty_scan_result_never_writes_the_clipboard() {
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        feed_scan(&mut core, 0, true, text_result(&[], &[]));
+        core.poll_text_scan();
+        assert!(
+            clipboard_text_effects(&core).is_empty(),
+            "nothing found → toast only, no clipboard write"
+        );
+    }
+
+    #[test]
+    fn rebuild_playlist_drops_text_results_and_bumps_the_generation() {
+        let mut core = test_core();
+        core.recognized_text.insert(0, text_result(&[], &["old"]));
+        let gen = core.text_gen;
+        let dir = std::env::temp_dir();
+        let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(vec![dir.join("a.png")]));
+        core.rebuild_playlist(source, dir.clone(), Some(dir), true, 0);
+        assert!(core.recognized_text.is_empty());
+        assert!(core.text_gen > gen);
     }
 
     /// A fake archive source: named entries with no fs paths and a container —

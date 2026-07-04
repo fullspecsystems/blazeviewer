@@ -137,6 +137,20 @@ pub struct FitBox {
     pub max_height: u32,
 }
 
+/// Downscale a tightly-packed RGBA8 buffer to fit within `fit` (aspect preserved,
+/// Lanczos3; never upscales — the input comes back unchanged when it already fits).
+/// The decode paths use this internally via `finalize`; it's public for consumers
+/// that post-process already-decoded pixels, e.g. capping OCR input to the engine's
+/// max dimension (task #45).
+pub fn downscale_rgba8(
+    pixels: Vec<u8>,
+    w: u32,
+    h: u32,
+    fit: FitBox,
+) -> Result<(Vec<u8>, u32, u32), DecodeError> {
+    common::downscale_to_fit(pixels, w, h, fit)
+}
+
 /// A unit of decode work.
 #[derive(Debug, Clone, Copy)]
 pub struct DecodeRequest<'a> {

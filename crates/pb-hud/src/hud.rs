@@ -769,6 +769,76 @@ impl Hud {
         Some((canvas.into_rgba(), pw, ph))
     }
 
+    /// Rasterize a left-aligned, **word-wrapped paragraph panel** — arbitrary prose,
+    /// unlike the pre-split single lines every other renderer takes. Used by the
+    /// recognized-text (`T`) panel (task #45); the future AI-description panel (#44)
+    /// rides the same block. Each input line is `(text, semibold)`; an empty line is
+    /// a paragraph gap. Long lines wrap greedily to `max_w` (unbreakable runs — a
+    /// URL — hard-split); when the block exceeds `max_h` the tail collapses into a
+    /// final "… N more lines" marker. Returns `(rgba, w, h)`; `None` if no font.
+    pub fn render_paragraph(
+        &self,
+        lines: &[(String, bool)],
+        px: f32,
+        pad: u32,
+        bg: [u8; 4],
+        max_w: u32,
+        max_h: i32,
+    ) -> Option<(Vec<u8>, u32, u32)> {
+        if lines.is_empty() {
+            return None;
+        }
+        let line_h = self.line_height(px)?;
+        let ascent = self.ascent(px)?;
+        let pad_x = ((pad as f32) * tokens::PAD_X).round();
+        let content_max = (max_w as f32 - 2.0 * pad_x).max(px);
+
+        // Wrap everything to the content width first.
+        let mut wrapped: Vec<(String, Weight)> = Vec::new();
+        for (text, semi) in lines {
+            let weight = if *semi {
+                Weight::Semibold
+            } else {
+                Weight::Regular
+            };
+            if text.trim().is_empty() {
+                wrapped.push((String::new(), Weight::Regular));
+                continue;
+            }
+            let measure = |s: &str| self.layout(s, px, weight).1;
+            for piece in wrap_line_with(text, content_max, &measure) {
+                wrapped.push((piece, weight));
+            }
+        }
+        // Cap to the height budget; excess collapses into the marker line.
+        let cap = ((max_h - 2 * pad as i32) / line_h as i32).max(2) as usize;
+        if wrapped.len() > cap {
+            let hidden = wrapped.len() - (cap - 1);
+            wrapped.truncate(cap - 1);
+            wrapped.push((format!("… {hidden} more lines"), Weight::Regular));
+        }
+
+        let laid: Vec<(Vec<Glyph>, f32)> = wrapped
+            .iter()
+            .map(|(t, w)| self.layout(t, px, *w))
+            .collect();
+        // The widest wrapped line sets the panel width (a short result gets a snug
+        // pill, not a fixed-width slab); wrapping already capped it to `content_max`.
+        let content_w = laid
+            .iter()
+            .map(|(_, adv)| *adv)
+            .fold(0.0f32, f32::max)
+            .min(content_max);
+        let pw = content_w.ceil() as u32 + 2 * pad_x as u32;
+        let ph = wrapped.len() as u32 * line_h + 2 * pad;
+        let mut canvas = Canvas::new(pw, ph, bg, (px * tokens::RADIUS_PANEL).round());
+        for (i, (glyphs, _)) in laid.iter().enumerate() {
+            let baseline = pad as f32 + i as f32 * line_h as f32 + ascent;
+            self.draw_line(&mut canvas, pad_x, baseline, glyphs, self.theme.text, px);
+        }
+        Some((canvas.into_rgba(), pw, ph))
+    }
+
     /// Rasterize the **folder-tree overlay** (`Shift+F`): an indented list of folder
     /// rows, each with a Font Awesome folder glyph (open for the current folder and
     /// its ancestors, up-arrow for the parent affordance, closed otherwise), hairline
@@ -1843,6 +1913,56 @@ pub fn format_thousands(n: u64) -> String {
     String::from_utf8(out).expect("digits and commas are ASCII")
 }
 
+/// Greedy word-wrap of one logical line to `max_w`, measuring candidate runs with
+/// `width` (the caller's layout advance, injected so this stays testable without
+/// loading a font). A word that alone exceeds `max_w` — a long URL in a QR payload —
+/// hard-splits by character rather than eliding: the paragraph panel exists to let
+/// the user *read* the text. Multiple interior spaces collapse (word-based rebuild).
+fn wrap_line_with(text: &str, max_w: f32, width: &dyn Fn(&str) -> f32) -> Vec<String> {
+    if width(text) <= max_w {
+        return vec![text.to_string()];
+    }
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for word in text.split_whitespace() {
+        let cand = if cur.is_empty() {
+            word.to_string()
+        } else {
+            format!("{cur} {word}")
+        };
+        if width(&cand) <= max_w {
+            cur = cand;
+            continue;
+        }
+        if !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+        }
+        if width(word) <= max_w {
+            cur = word.to_string();
+        } else {
+            // Hard-split the overlong word: grow a piece until it overflows, emit,
+            // continue from the overflowing character.
+            let mut piece = String::new();
+            for ch in word.chars() {
+                piece.push(ch);
+                if width(&piece) > max_w && piece.chars().count() > 1 {
+                    piece.pop();
+                    out.push(std::mem::replace(&mut piece, ch.to_string()));
+                }
+            }
+            cur = piece;
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    if out.is_empty() {
+        vec![String::new()]
+    } else {
+        out
+    }
+}
+
 /// Faux-bold a coverage bitmap by horizontal dilation — `out[x] = max(src[x-extra..=x])`
 /// — widening the glyph `extra` px to the right (advance bumped to match, so spacing
 /// holds). Done at layout time, before the outline pass, so the legibility halo wraps
@@ -2039,6 +2159,47 @@ mod tests {
         let (_, out) = embolden_glyph(&m, &bitmap, 1);
         // out[x] = max(src[x-1], src[x]); trailing col picks the last source pixel.
         assert_eq!(out, vec![200, 200, 100, 100]);
+    }
+
+    /// A fake monospace measure: 10.0 per char — wrap math without loading a font.
+    fn mono(s: &str) -> f32 {
+        s.chars().count() as f32 * 10.0
+    }
+
+    #[test]
+    fn wrap_keeps_a_fitting_line_whole() {
+        assert_eq!(
+            wrap_line_with("hello world", 200.0, &mono),
+            vec!["hello world"]
+        );
+    }
+
+    #[test]
+    fn wrap_breaks_at_word_boundaries() {
+        // 15 chars max per line (150.0 / 10.0).
+        assert_eq!(
+            wrap_line_with("the quick brown fox jumps", 150.0, &mono),
+            vec!["the quick brown", "fox jumps"]
+        );
+    }
+
+    #[test]
+    fn wrap_hard_splits_an_overlong_word() {
+        // A 12-char "URL" against an 8-char budget: split mid-word, nothing lost.
+        let out = wrap_line_with("https_module", 80.0, &mono);
+        assert_eq!(out, vec!["https_mo", "dule"]);
+        assert_eq!(out.join(""), "https_module", "no characters dropped");
+    }
+
+    #[test]
+    fn wrap_mixes_words_and_hard_splits() {
+        let out = wrap_line_with("go to https_module now", 80.0, &mono);
+        // Every piece fits the budget and nothing is lost.
+        assert!(out.iter().all(|p| mono(p) <= 80.0), "{out:?}");
+        assert_eq!(
+            out.join(" ").replace("https_mo dule", "https_module"),
+            "go to https_module now"
+        );
     }
 
     #[test]

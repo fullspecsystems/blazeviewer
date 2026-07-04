@@ -47,6 +47,8 @@ pub mod ids {
     pub const COPY: &str = "copy";
     pub const COPY_PATH: &str = "copy_path";
     pub const COPY_IMAGE_DETAILS: &str = "copy_image_details";
+    /// Matches `Action::CopyImageText.id()` so the Mac host's raw-id path agrees.
+    pub const COPY_IMAGE_TEXT: &str = "copy_text";
 
     pub const FIT: &str = "fit";
     pub const FILL: &str = "fill";
@@ -107,6 +109,7 @@ pub enum MenuAction {
     Copy,
     CopyPath,
     CopyImageDetails,
+    CopyImageText,
     Fit,
     Fill,
     Original,
@@ -158,6 +161,7 @@ impl MenuAction {
             MenuAction::Copy => Action::Copy,
             MenuAction::CopyPath => Action::CopyPath,
             MenuAction::CopyImageDetails => Action::CopyImageDetails,
+            MenuAction::CopyImageText => Action::CopyImageText,
             MenuAction::Fit => Action::ScaleFit,
             MenuAction::Fill => Action::ScaleFill,
             MenuAction::Original => Action::ScaleOriginal,
@@ -210,6 +214,7 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         COPY => MenuAction::Copy,
         COPY_PATH => MenuAction::CopyPath,
         COPY_IMAGE_DETAILS => MenuAction::CopyImageDetails,
+        COPY_IMAGE_TEXT => MenuAction::CopyImageText,
         FIT => MenuAction::Fit,
         FILL => MenuAction::Fill,
         ORIGINAL => MenuAction::Original,
@@ -400,6 +405,12 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
         &PredefinedMenuItem::separator(),
         &item(ids::COPY, "Copy\tCtrl+C"),
         &item(ids::COPY_PATH, "Copy File Path\tShift+Ctrl+C"),
+        // On-device OCR + QR payloads (task #45). Unbound by default; the hint
+        // column picks up a user binding via the live keymap.
+        &item(
+            ids::COPY_IMAGE_TEXT,
+            &labeled(keymap, "Copy Text from Image", Action::CopyImageText),
+        ),
     ]);
 
     // Scale mode is a one-of-three group; recursive/fullscreen are toggles. All five
@@ -642,6 +653,10 @@ pub fn build_menu(_keymap: &Keymap) -> BuiltMenu {
             CMD.union(Modifiers::SHIFT),
             Code::KeyC,
         ),
+        // On-device OCR + QR payloads (task #45); bare-key/unbound, so NO
+        // accelerator (an NSMenu key-equivalent would steal the key — see the
+        // menu-accelerator note at the top of this file).
+        &item(ids::COPY_IMAGE_TEXT, "Copy Text from Image"),
     ]);
 
     let fit = check_item(ids::FIT, "Fit");
@@ -812,6 +827,7 @@ pub fn build_context_menu(state: &crate::contract::ContextMenuState) -> Menu {
         &item(ids::COPY, "Copy Image"),
         &item(ids::COPY_PATH, "Copy File Path"),
         &item(ids::COPY_IMAGE_DETAILS, "Copy Image Details"),
+        &item(ids::COPY_IMAGE_TEXT, "Copy Text from Image"),
     ]);
     // Reveal only for a real on-disk file (archive entries have no path). The label follows
     // the platform idiom, matching the File-menu item.
@@ -895,6 +911,10 @@ mod tests {
         assert_eq!(
             action_for(ids::COPY_IMAGE_DETAILS),
             Some(MenuAction::CopyImageDetails)
+        );
+        assert_eq!(
+            action_for(ids::COPY_IMAGE_TEXT),
+            Some(MenuAction::CopyImageText)
         );
         assert_eq!(action_for(ids::FIT), Some(MenuAction::Fit));
         assert_eq!(action_for(ids::FILL), Some(MenuAction::Fill));

@@ -212,8 +212,11 @@ pub enum ClipboardPayload {
         h: u32,
         file: Option<PathBuf>,
     },
-    /// Plain text — a file path or (for an archive entry) its name.
-    Text(String),
+    /// Plain text — a file path, an archive entry's name, or text recognized in the
+    /// photo (task #45). `toast` overrides the shell's default "Copied …" feedback
+    /// when the core knows better (e.g. "Copied text + 1 QR code"); `None` keeps the
+    /// shell's path-based heuristic.
+    Text { text: String, toast: Option<String> },
 }
 
 /// What the user did in a chrome dialog — the shell-neutral result the host hands the core

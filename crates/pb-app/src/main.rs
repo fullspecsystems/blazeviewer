@@ -401,6 +401,9 @@ impl App {
                 meta_cache: HashMap::new(),
                 current: None,
                 exif_cache: HashMap::new(),
+                recognized_text: HashMap::new(),
+                text_scan: None,
+                text_gen: 0,
                 pool,
                 results,
                 ring: ResidentRing::new(0),
@@ -1702,15 +1705,19 @@ impl App {
                     }
                 }
             }
-            contract::ClipboardPayload::Text(text) => {
-                // A single-line payload is a file path → name it in the toast ("Copied IMG…").
-                // A multi-line payload is the EXIF blob (Copy EXIF Data) → a generic toast, since
-                // its "filename" is meaningless. A path never contains a newline, so this is safe.
-                let toast = if text.contains('\n') {
-                    "Copied to clipboard".to_string()
-                } else {
-                    format!("Copied {}", file_name_of(&text))
-                };
+            contract::ClipboardPayload::Text { text, toast } => {
+                // The core supplies the toast when it knows better (recognized text:
+                // "Copied 214 characters" / "+ 1 QR code"). Otherwise: a single-line
+                // payload is a file path → name it ("Copied IMG…"); a multi-line one
+                // is the EXIF blob → generic, since its "filename" is meaningless. A
+                // path never contains a newline, so this is safe.
+                let toast = toast.unwrap_or_else(|| {
+                    if text.contains('\n') {
+                        "Copied to clipboard".to_string()
+                    } else {
+                        format!("Copied {}", file_name_of(&text))
+                    }
+                });
                 match arboard::Clipboard::new().and_then(|mut c| c.set_text(text)) {
                     Ok(()) => self.core.show_toast(&toast),
                     Err(e) => {
@@ -1938,6 +1945,10 @@ impl App {
         self.core.pending_uploads.clear();
         self.core.meta_cache.clear();
         self.core.exif_cache.clear();
+        // Recognized text (OCR + QR, task #45) is pixel-derived — drop it with the
+        // other RAM caches, along with any scan still in flight.
+        self.core.recognized_text.clear();
+        self.core.text_scan = None;
         self.core.live_motion_cache.clear();
         self.core.rotations.clear();
         self.core.failed.clear();
