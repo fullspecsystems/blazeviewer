@@ -48,6 +48,16 @@ pb-ui = { path = "crates/pb-ui" }
 pb-hud = { path = "crates/pb-hud" }
 pb-app-core = { path = "crates/pb-app-core" }
 
+# Vendored sevenz-rust2 with one PhotoBlaze patch: `encryption/aes.rs` caches the
+# derived AES key across blocks (upstream re-derives it per block — 2^19 SHA-256
+# rounds, ~10–40 ms — which dominates a non-solid encrypted archive with one block
+# per file: measured 3.9 s → 0.09 s on a 3000-file stored+encrypted archive; 7-Zip
+# itself caches the key the same way). Candidate for an upstream PR; drop this
+# patch when a release ships an equivalent cache. Vendored verbatim from
+# crates.io 0.21.1 otherwise (Apache-2.0, license file kept).
+[patch.crates-io]
+sevenz-rust2 = { path = "vendor/sevenz-rust2" }
+
 # Dev profile: keep OUR crates at a light opt-level (fast incremental compiles,
 # debuggable) but build every *dependency* with full optimization. The image
 # decoders (zune-jpeg, image, jxl-oxide, imagepipe/rawloader, fast_image_resize)

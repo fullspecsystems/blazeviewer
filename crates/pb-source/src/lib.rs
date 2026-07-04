@@ -40,7 +40,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use sevenz_rust2::{Archive as SevenZArchive, BlockDecoder, Password as SevenZPassword};
+use sevenz_rust2::{
+    Archive as SevenZArchive, BlockDecoder, EncoderMethod, Password as SevenZPassword,
+};
 use zip::ZipArchive;
 
 /// A uniform, read-only source of encoded image bytes addressed by item index.
@@ -496,12 +498,16 @@ impl SevenZSource {
     /// [`OpenError::OutOfMemory`] instead of aborting the process. Pair this with
     /// [`seven_z_projected_bytes`] up front — once decompression starts, the
     /// `try_reserve` backstop can't cover the decoder's own internal allocations.
+    ///
+    /// This convenience passes `mt_headroom = 0` (never any within-block
+    /// multithreading); see [`open_with_progress`](SevenZSource::open_with_progress)
+    /// for the solid-archive speedup and what the headroom buys.
     pub fn open(
         path: impl Into<PathBuf>,
         password: Option<String>,
         is_supported: impl Fn(&str) -> bool + Sync,
     ) -> Result<Self, OpenError> {
-        Self::open_with_progress(path, password, is_supported, None)
+        Self::open_with_progress(path, password, is_supported, None, 0)
     }
 
     /// Like [`open`](SevenZSource::open), but reports streaming progress and honors
@@ -513,19 +519,35 @@ impl SevenZSource {
     /// UI asked to stop. Cancel latency is at most one block per worker thread (a single
     /// image for a non-solid archive). Pass `None` for a plain, non-cancellable open.
     ///
-    /// **Parallel.** A 7z block is self-contained and seekable, so independent blocks are
-    /// decoded concurrently across the cores (each worker with its own file handle) — the
-    /// way 7-Zip stays fast. This is decisive for a *non-solid* archive (one block per
-    /// image), where every block also pays a full AES key derivation: ~28 ms × N images
-    /// serially (minutes to an hour) collapses to seconds fanned across the cores
-    /// (measured ~19× on a 3036-image encrypted archive). A *solid* archive is one big
-    /// block — a single task, decoded on one thread (fastest for already-compressed
-    /// photos, and memory-bounded).
+    /// **Parallel, two levels.** A 7z block is self-contained and seekable, so
+    /// independent blocks are decoded concurrently across the cores (each worker with
+    /// its own file handle) — the way 7-Zip stays fast. This is decisive for a
+    /// *non-solid* archive (one block per image), where every block also pays a full
+    /// AES key derivation: ~28 ms × N images serially (minutes to an hour) collapses
+    /// to seconds fanned across the cores (measured ~19× on a 3036-image encrypted
+    /// archive). A *solid* archive is the opposite shape — one giant LZMA2 block —
+    /// so the across-blocks fan-out has nothing to chew on and the open would run on
+    /// a single core (measured ~320 MB/s; ~25 s for a 10 GB archive). For that case
+    /// the leftover cores go *inside* the block: `lzma-rust2`'s multithreaded reader
+    /// decodes the independent (dictionary-reset) chunks that 7-Zip's own
+    /// multithreaded compressor emits (measured ~3×, plateauing at
+    /// [`MT_INNER_CAP`] workers).
+    ///
+    /// **`mt_headroom` is the RAM gate for that within-block multithreading.** The MT
+    /// reader holds decoded-ahead chunks in flight, and — the worst case — a stream
+    /// *without* reset chunks (a single-threaded compressor wrote it) degenerates to
+    /// buffering one whole block, compressed + decompressed, before entries stream
+    /// out. A true allocation failure aborts uncatchably in Rust, so prediction is
+    /// the only real defense (same reasoning as [`seven_z_projected_bytes`]): within-
+    /// block MT is enabled only when that whole-block worst case fits under
+    /// `mt_headroom` (transient bytes the caller can spare *beyond* the resident
+    /// entries). `0` always keeps the proven one-thread-per-block path.
     pub fn open_with_progress(
         path: impl Into<PathBuf>,
         password: Option<String>,
         is_supported: impl Fn(&str) -> bool + Sync,
         progress: Option<&OpenProgress>,
+        mt_headroom: u64,
     ) -> Result<Self, OpenError> {
         let path = path.into();
         let pw = match &password {
@@ -571,14 +593,35 @@ impl SevenZSource {
             p.set_total(total);
         }
 
+        // Within-block thread count (see the `mt_headroom` docs above). Worth >1 only
+        // when the image blocks are too few to saturate the cores (the solid-archive
+        // shape) AND the caller's headroom covers the MT reader's worst-case transient
+        // (each candidate block held compressed + decompressed). Non-LZMA2 blocks
+        // ignore the count (only LZMA2 has an MT decoder), so they're excluded from
+        // the worst-case sum.
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let image_blocks = image_block.iter().filter(|b| **b).count();
+        let mt_worst: u64 = (0..block_count)
+            .filter(|&bi| image_block[bi] && block_is_lzma2(&archive, bi))
+            .map(|bi| block_pack_size(&archive, bi) + archive.blocks[bi].get_unpack_size())
+            .sum();
+        let inner: u32 = if image_blocks > 0
+            && cores >= image_blocks * 2
+            && mt_worst > 0
+            && mt_worst <= mt_headroom
+        {
+            (cores / image_blocks).min(MT_INNER_CAP) as u32
+        } else {
+            1
+        };
+
         // Decode blocks in parallel: a shared atomic cursor hands each worker the next
         // block; each worker has its own buffered file handle (the `BlockDecoder` seeks
-        // per block and needs `&mut`). The within-block thread count is 1 — already
-        // measured fastest for incompressible photos, and it keeps per-block memory small.
-        let threads = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
-            .min(block_count.max(1));
+        // per block and needs `&mut`). Outer workers shrink as inner threads grow so
+        // the total stays at the core count.
+        let threads = (cores / inner as usize).clamp(1, block_count.max(1));
         let next = AtomicUsize::new(0);
         let oom = AtomicBool::new(false);
         let cancel_hit = AtomicBool::new(false);
@@ -615,7 +658,7 @@ impl SevenZSource {
                                 continue;
                             }
                             let cancel = || progress.is_some_and(|p| p.is_cancelled());
-                            let res = BlockDecoder::new(1, bi, &archive, &pw, &mut f)
+                            let res = BlockDecoder::new(inner, bi, &archive, &pw, &mut f)
                                 .for_each_entries(&mut |entry, rd| {
                                     if entry.is_directory() || !entry.has_stream() {
                                         return Ok(true);
@@ -769,6 +812,30 @@ fn name_in_scope(name: &str, prefix: &str) -> bool {
     }
     name.strip_prefix(prefix)
         .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// Ceiling on within-block decoder threads. Measured on a 2 GB solid LZMA2 photo
+/// archive (32-core machine): 4 workers → 2.6×, 8 → 2.9×, 16 → 3.0×, 32 → no
+/// further gain — the stream's independent-chunk count, not the cores, is the
+/// limit. More workers past the plateau only hold more chunks in RAM.
+const MT_INNER_CAP: usize = 16;
+
+/// Whether block `bi`'s coder chain includes LZMA2 — the only codec with a
+/// multithreaded decoder (`BlockDecoder`'s thread count is ignored by the rest).
+fn block_is_lzma2(archive: &SevenZArchive, bi: usize) -> bool {
+    archive.blocks[bi]
+        .coders
+        .iter()
+        .any(|c| c.encoder_method_id() == EncoderMethod::ID_LZMA2)
+}
+
+/// Compressed (packed) bytes of block `bi` — the sum of its pack streams.
+fn block_pack_size(archive: &SevenZArchive, bi: usize) -> u64 {
+    let firsts = archive.stream_map.block_first_pack_stream_index();
+    let sizes = archive.pack_sizes();
+    let start = firsts[bi];
+    let end = firsts.get(bi + 1).copied().unwrap_or(sizes.len());
+    sizes[start..end].iter().sum()
 }
 
 /// Refuse a single archived image larger than this — a sanity ceiling against a
@@ -1228,7 +1295,7 @@ mod tests {
             &[("a.jpg", b"AAAA"), ("b.png", b"BBBBBB"), ("c.webp", b"CC")],
         );
         let progress = OpenProgress::new();
-        let src = SevenZSource::open_with_progress(&z, None, is_img, Some(&progress)).unwrap();
+        let src = SevenZSource::open_with_progress(&z, None, is_img, Some(&progress), 0).unwrap();
         assert_eq!(src.len(), 3);
         // Total = sum of every streamed entry; done reached it; fraction is full.
         assert_eq!(
@@ -1252,11 +1319,73 @@ mod tests {
         // nothing is decoded and the open reports Cancelled (not a corrupt/IO error).
         let progress = OpenProgress::new();
         progress.request_cancel();
-        match SevenZSource::open_with_progress(&z, None, is_img, Some(&progress)) {
+        match SevenZSource::open_with_progress(&z, None, is_img, Some(&progress), 0) {
             Err(OpenError::Cancelled) => {}
             other => panic!("expected Cancelled, got {:?}", other.err()),
         }
         assert_eq!(progress.done(), 0, "cancelled before any entry decoded");
+        let _ = std::fs::remove_file(&z);
+    }
+
+    #[test]
+    fn seven_z_open_with_mt_headroom_reads_identically() {
+        // The sevenz-rust2 writer emits NO dictionary-reset chunks, so a huge
+        // headroom routes these through the MT reader's degenerate whole-block
+        // fallback — the correctness (not speed) risk of the within-block MT path.
+        // Entries big enough to span several 64 KiB read_cancellable chunks.
+        let files: Vec<(String, Vec<u8>)> = (0..6)
+            .map(|i| {
+                let bytes = (0..200_000 + i)
+                    .map(|j| (j % 251) as u8 ^ i as u8)
+                    .collect();
+                (format!("img{i}.jpg"), bytes)
+            })
+            .collect();
+        let refs: Vec<(&str, &[u8])> = files
+            .iter()
+            .map(|(n, b)| (n.as_str(), b.as_slice()))
+            .collect();
+        let z = write_7z("mt", &refs);
+
+        let plain = SevenZSource::open(&z, None, is_img).unwrap();
+        let progress = OpenProgress::new();
+        let mt =
+            SevenZSource::open_with_progress(&z, None, is_img, Some(&progress), u64::MAX).unwrap();
+        assert_eq!(plain.len(), mt.len());
+        for i in 0..plain.len() {
+            assert_eq!(plain.name(i), mt.name(i));
+            assert_eq!(plain.bytes(i).unwrap(), mt.bytes(i).unwrap(), "entry {i}");
+        }
+        assert_eq!(progress.done(), progress.total());
+        let _ = std::fs::remove_file(&z);
+    }
+
+    #[test]
+    fn seven_z_encrypted_open_with_mt_headroom_reads_identically() {
+        // AES + LZMA2 coder chain with within-block MT enabled — the decrypt layer
+        // feeds the MT LZMA2 reader; bytes must round-trip exactly.
+        let files: Vec<(String, Vec<u8>)> = (0..4)
+            .map(|i| {
+                let bytes = (0..150_000 + i)
+                    .map(|j| (j % 241) as u8 ^ i as u8)
+                    .collect();
+                (format!("img{i}.png"), bytes)
+            })
+            .collect();
+        let refs: Vec<(&str, &[u8])> = files
+            .iter()
+            .map(|(n, b)| (n.as_str(), b.as_slice()))
+            .collect();
+        let z = write_encrypted_7z("mt_enc", &refs, "hunter2");
+
+        let plain = SevenZSource::open(&z, Some("hunter2".into()), is_img).unwrap();
+        let mt =
+            SevenZSource::open_with_progress(&z, Some("hunter2".into()), is_img, None, u64::MAX)
+                .unwrap();
+        assert_eq!(plain.len(), mt.len());
+        for i in 0..plain.len() {
+            assert_eq!(plain.bytes(i).unwrap(), mt.bytes(i).unwrap(), "entry {i}");
+        }
         let _ = std::fs::remove_file(&z);
     }
 

@@ -449,10 +449,11 @@ pub fn open_archive(
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("7z"));
     if is_7z {
-        seven_z_preflight(path, password.as_deref())?;
+        let projected = seven_z_preflight(path, password.as_deref())?;
+        let mt_headroom = crate::archive::ram_budget().saturating_sub(projected);
         // Synchronous safety-net path (the interactive paths use the async, cancellable
         // `begin_archive_open`): a throwaway progress handle no UI reads.
-        load_seven_z(path, password, &pb_source::OpenProgress::new())
+        load_seven_z(path, password, &pb_source::OpenProgress::new(), mt_headroom)
     } else {
         let has_password = password.is_some();
         let zs = ZipSource::open(path, password, is_supported_extension)?;
@@ -477,10 +478,14 @@ pub fn open_archive(
 /// rejected instantly rather than aborting partway in. `password` is only needed
 /// for a header-encrypted archive (else the header reads without one); a wrong /
 /// missing one surfaces as `PasswordRequired` here, routing to the prompt.
+///
+/// On success returns the projected resident bytes, so the caller can hand the
+/// *unused* budget to [`load_seven_z`] as MT headroom without a second header read
+/// (an encrypted header pays a full AES key derivation per read).
 pub fn seven_z_preflight(
     path: &Path,
     password: Option<&str>,
-) -> Result<(), crate::archive::ArchiveOpenError> {
+) -> Result<u64, crate::archive::ArchiveOpenError> {
     seven_z_preflight_within(path, password, crate::archive::ram_budget())
 }
 
@@ -493,25 +498,36 @@ pub fn seven_z_preflight_within(
     path: &Path,
     password: Option<&str>,
     budget: u64,
-) -> Result<(), crate::archive::ArchiveOpenError> {
+) -> Result<u64, crate::archive::ArchiveOpenError> {
     let needed = seven_z_projected_bytes(path, password, is_supported_extension)?;
     if needed > budget {
         return Err(crate::archive::ArchiveOpenError::TooLarge { needed, budget });
     }
-    Ok(())
+    Ok(needed)
 }
 
 /// Eager-decompress a 7z into a [`Resolved`] (no pre-flight here — the caller runs
 /// [`seven_z_preflight`] first). This is the slow step the runtime path runs on a
 /// background thread (see `App::begin_archive_open`). `password` decrypts an
 /// encrypted archive; a wrong one fails decode and surfaces as `PasswordRequired`.
+///
+/// `mt_headroom` is the transient RAM (beyond the resident entries) the open may
+/// spend on within-block multithreaded LZMA2 decode — the solid-archive speedup
+/// (see `SevenZSource::open_with_progress`). Callers pass the budget the pre-flight
+/// left unused (`ram_budget() - projected`); `0` keeps the single-threaded path.
 pub fn load_seven_z(
     path: &Path,
     password: Option<String>,
     progress: &pb_source::OpenProgress,
+    mt_headroom: u64,
 ) -> Result<Resolved, crate::archive::ArchiveOpenError> {
-    let src =
-        SevenZSource::open_with_progress(path, password, is_supported_extension, Some(progress))?;
+    let src = SevenZSource::open_with_progress(
+        path,
+        password,
+        is_supported_extension,
+        Some(progress),
+        mt_headroom,
+    )?;
     if src.is_empty() {
         return Err(crate::archive::ArchiveOpenError::Empty);
     }

@@ -43,6 +43,22 @@ with any pre-release suffix carried only by the tag.
   step between the archive's sibling folders.
 
 ### Changed
+- **Encrypted 7z archives with many files open dramatically faster.** The AES key was
+  being re-derived from the password for every file in the archive (tens of
+  milliseconds each, slower still with a long password), which dominated the whole
+  open on stored, per-file-encrypted archives — the kind 7-Zip makes with "Store"
+  compression plus a password. The key is now derived once and reused, the same way
+  7-Zip does it: a 3,000-file encrypted archive drops from about 4 s to under 0.1 s,
+  and a many-thousand-photo archive that took ~24 s now opens in the time it takes to
+  read it from disk.
+
+- **Solid 7z archives open about 2.5–3× faster.** A solid archive packs everything into
+  one compressed block, which used to decode on a single core. When enough RAM is free,
+  PhotoBlaze now decodes the block's independent chunks across many cores (a 10 GB
+  archive drops from roughly 30 s to about 10 s). Non-solid archives already decoded in
+  parallel and are unchanged, and on machines without the spare RAM the open simply
+  works as before.
+
 - **The Mac app is now a native SwiftUI/AppKit application** — the same fast Rust engine, with
   the chrome rebuilt Mac-native: real menus with shortcut hints on every command, native dialogs
   (Finder-style delete confirmation, password prompts for encrypted archives, progress for big

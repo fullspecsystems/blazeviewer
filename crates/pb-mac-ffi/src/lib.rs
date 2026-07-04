@@ -1364,10 +1364,16 @@ impl AppCoreHandle {
             self.finish_archive_open(result, was_password_attempt, path);
             return;
         }
-        if let Err(e) = scan::seven_z_preflight(&path, password.as_deref()) {
-            self.finish_archive_open(Err(e), was_password_attempt, path);
-            return;
-        }
+        let projected = match scan::seven_z_preflight(&path, password.as_deref()) {
+            Ok(projected) => projected,
+            Err(e) => {
+                self.finish_archive_open(Err(e), was_password_attempt, path);
+                return;
+            }
+        };
+        // The budget the resident entries won't use is what the open may spend
+        // transiently on within-block MT decode (the solid-archive ~3x speedup).
+        let mt_headroom = pb_app_core::archive::ram_budget().saturating_sub(projected);
         self.archive_gen += 1;
         let generation = self.archive_gen;
         let progress = pb_source::OpenProgress::new();
@@ -1375,7 +1381,7 @@ impl AppCoreHandle {
         let worker_path = path.clone();
         let worker_progress = progress.clone();
         std::thread::spawn(move || {
-            let result = scan::load_seven_z(&worker_path, password, &worker_progress);
+            let result = scan::load_seven_z(&worker_path, password, &worker_progress, mt_headroom);
             let _ = tx.send((generation, result));
         });
         // The determinate "Opening…" progress + Cancel dialog. If the password prompt is
