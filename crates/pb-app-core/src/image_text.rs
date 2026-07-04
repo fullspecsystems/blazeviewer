@@ -3,10 +3,11 @@
 //! blocks. `T` shows the result in a HUD panel; "Copy Text from Image" puts it on
 //! the clipboard.
 //!
-//! Engines are OS-built-in and fully on-device — Windows.Media.Ocr here, Apple
-//! Vision on macOS (a follow-up; the non-Windows path reports unavailable for now)
-//! — and QR decode is pure Rust (`rqrr`) on every platform, because Windows has no
-//! OS barcode API. Nothing is downloaded, nothing leaves the machine.
+//! Engines are OS-built-in and fully on-device — Windows.Media.Ocr on Windows, Apple
+//! Vision (`VNRecognizeTextRequest`) on macOS — and QR decode is pure Rust (`rqrr`) on
+//! every platform, because Windows has no OS barcode API. Nothing is downloaded, nothing
+//! leaves the machine. Recognized lines are regrouped into paragraphs ([`group_paragraphs`])
+//! so copied text flows as blocks rather than hard-broken lines.
 //!
 //! Privacy (task #2 / ADR-018): results are RAM-only — cached per item beside the
 //! other index-keyed caches, dropped on playlist rebuild and exit, never written to
@@ -30,7 +31,8 @@ use crate::engine::{decode_item, rotate_rgba8, to_clipboard_rgba8};
 pub struct ImageText {
     /// Decoded QR payloads, listed above the text in the panel and the clipboard.
     pub qr: Vec<String>,
-    /// Recognized text lines, top-to-bottom (trimmed, consecutive duplicates collapsed).
+    /// Recognized text, grouped into paragraphs in top-to-bottom reading order (each entry
+    /// is one paragraph; see [`group_paragraphs`]).
     pub lines: Vec<String>,
     /// Why OCR produced nothing, when it failed outright (`None` = it ran fine).
     pub ocr_error: Option<String>,
@@ -126,7 +128,7 @@ pub fn analyze_rgba(rgba: Vec<u8>, w: u32, h: u32) -> ImageText {
         (Vec::new(), Some("Text recognition failed".to_string()))
     } else {
         match platform::ocr_lines(&rgba, w, h) {
-            Ok(lines) => (clean_lines(lines), None),
+            Ok(lines) => (group_paragraphs(lines), None),
             Err(e) => (Vec::new(), Some(e)),
         }
     };
@@ -135,6 +137,17 @@ pub fn analyze_rgba(rgba: Vec<u8>, w: u32, h: u32) -> ImageText {
         lines,
         ocr_error,
     }
+}
+
+/// One recognized text line plus its bounding box — the currency the OCR backends hand back
+/// so [`group_paragraphs`] can reconstruct paragraphs. The box is **normalized** to the OCR
+/// input (each component 0..1), **top-left origin, y increasing downward** — the backends
+/// convert into this one convention (Windows word rects are pixels; Vision's box is
+/// bottom-left normalized), so the grouping heuristic is resolution- and platform-independent.
+pub(crate) struct OcrLineBox {
+    pub text: String,
+    /// `[x, y, w, h]`, normalized, top-left origin.
+    pub bbox: [f32; 4],
 }
 
 /// RGBA8 → 8-bit luma (integer Rec.601 weights). QR decode wants grayscale.
@@ -162,9 +175,8 @@ fn qr_payloads(gray: &[u8], w: u32, h: u32) -> Vec<String> {
         .collect()
 }
 
-/// Tidy the OCR engine's lines: trim whitespace, drop empties, collapse consecutive
-/// duplicates (engines occasionally emit a line twice). No cleverness beyond that —
-/// v1 keeps the raw reading order.
+/// Tidy a list of text lines: trim whitespace, drop empties, collapse consecutive
+/// duplicates (engines occasionally emit a line twice). No cleverness beyond that.
 fn clean_lines(lines: Vec<String>) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
     for line in lines {
@@ -177,6 +189,71 @@ fn clean_lines(lines: Vec<String>) -> Vec<String> {
         }
     }
     out
+}
+
+/// A vertical gap larger than this fraction of the line height starts a new paragraph — i.e.
+/// roughly a blank line between text blocks. Tuned for single-column bodies; deliberately
+/// tolerant (values well under 1.0 keep tight line spacing together).
+const PARAGRAPH_GAP_RATIO: f32 = 0.6;
+
+/// Reassemble the OCR engine's per-line output into **paragraphs** so copied text reads as
+/// flowing blocks instead of hard-broken lines (owner request 2026-07-04): sort the boxes
+/// into reading order (top-to-bottom, then left-to-right), then break to a new paragraph
+/// whenever the vertical gap to the previous line exceeds [`PARAGRAPH_GAP_RATIO`] of the line
+/// height — a blank-line-sized gap. Lines inside one paragraph join with a single space.
+///
+/// Platform-neutral: both backends feed [`OcrLineBox`] in the same normalized, top-left space,
+/// so this improves Windows and macOS identically and stays unit-testable with synthetic
+/// boxes. v1 assumes a single column (multi-column layout — the job of macOS 26's
+/// `RecognizeDocumentsRequest` — is out of scope); degenerate/zero boxes simply never trigger
+/// a break, so the output gracefully falls back to the raw line order.
+fn group_paragraphs(lines: Vec<OcrLineBox>) -> Vec<String> {
+    // Trim + drop blank lines up front so an empty box can't fabricate a paragraph break.
+    let mut lines: Vec<OcrLineBox> = lines
+        .into_iter()
+        .filter_map(|mut l| {
+            let t = l.text.trim();
+            if t.is_empty() {
+                return None;
+            }
+            l.text = t.to_string();
+            Some(l)
+        })
+        .collect();
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    // Reading order: top edge, then left edge. Engines usually emit this already, but a sort
+    // makes the grouping robust to ones that don't (and keeps the heuristic deterministic).
+    lines.sort_by(|a, b| {
+        a.bbox[1]
+            .total_cmp(&b.bbox[1])
+            .then(a.bbox[0].total_cmp(&b.bbox[0]))
+    });
+
+    let mut paragraphs: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut prev: Option<[f32; 4]> = None;
+    for line in &lines {
+        let starts_paragraph = prev.is_some_and(|p| {
+            let prev_bottom = p[1] + p[3];
+            let gap = line.bbox[1] - prev_bottom;
+            let line_h = line.bbox[3].max(p[3]).max(f32::EPSILON);
+            gap > PARAGRAPH_GAP_RATIO * line_h
+        });
+        if starts_paragraph {
+            paragraphs.push(std::mem::take(&mut current));
+        } else if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(&line.text);
+        prev = Some(line.bbox);
+    }
+    if !current.is_empty() {
+        paragraphs.push(current);
+    }
+    // Collapse an engine's occasional duplicate emission at the paragraph level.
+    clean_lines(paragraphs)
 }
 
 /// The Windows on-device engine: `Windows.Media.Ocr` on the user's installed
@@ -195,7 +272,7 @@ mod platform {
         OcrEngine::MaxImageDimension().unwrap_or(2600)
     }
 
-    pub fn ocr_lines(rgba: &[u8], w: u32, h: u32) -> Result<Vec<String>, String> {
+    pub fn ocr_lines(rgba: &[u8], w: u32, h: u32) -> Result<Vec<super::OcrLineBox>, String> {
         // Same tolerant per-call init as the WIC decoder: S_FALSE / RPC_E_CHANGED_MODE
         // both mean "usable apartment", so the HRESULT is deliberately ignored.
         unsafe {
@@ -225,23 +302,163 @@ mod platform {
             .map_err(err)?
             .join()
             .map_err(err)?;
+        // `OcrLine` carries no rect of its own — union its words' pixel `BoundingRect`s, then
+        // normalize to the [0,1] top-left space `group_paragraphs` expects. A line with no
+        // words (shouldn't happen) yields a zero box, which never triggers a paragraph break.
+        let (fw, fh) = (w.max(1) as f32, h.max(1) as f32);
         let mut out = Vec::new();
         for line in result.Lines().map_err(err)? {
-            out.push(line.Text().map_err(err)?.to_string_lossy());
+            let text = line.Text().map_err(err)?.to_string_lossy();
+            let (mut min_x, mut min_y) = (f32::MAX, f32::MAX);
+            let (mut max_x, mut max_y) = (f32::MIN, f32::MIN);
+            for word in line.Words().map_err(err)? {
+                let r = word.BoundingRect().map_err(err)?;
+                min_x = min_x.min(r.X);
+                min_y = min_y.min(r.Y);
+                max_x = max_x.max(r.X + r.Width);
+                max_y = max_y.max(r.Y + r.Height);
+            }
+            let bbox = if max_x >= min_x && max_y >= min_y {
+                [
+                    min_x / fw,
+                    min_y / fh,
+                    (max_x - min_x) / fw,
+                    (max_y - min_y) / fh,
+                ]
+            } else {
+                [0.0, 0.0, 0.0, 0.0]
+            };
+            out.push(super::OcrLineBox { text, bbox });
         }
         Ok(out)
     }
 }
 
-/// Non-Windows: OCR arrives with the macOS Vision backend (same seam); until then
-/// the panel reports it plainly. QR decode above works everywhere already.
-#[cfg(not(windows))]
+/// The macOS on-device engine: Apple **Vision** `VNRecognizeTextRequest` (accurate mode) —
+/// the twin of the Windows.Media.Ocr backend above. Fully on-device (no model shipped, no
+/// network) and, like the Windows path, it runs on the scan worker thread: Vision's
+/// `performRequests:` blocks until recognition finishes, which is exactly why this must
+/// never run on the event loop. Typed `objc2` bindings mirror the `windows` crate's WinRT
+/// posture on the other platform.
+#[cfg(target_os = "macos")]
+mod platform {
+    use objc2::rc::autoreleasepool;
+    use objc2::AnyThread;
+    use objc2_core_foundation::{CFData, CFRetained};
+    use objc2_core_graphics::{
+        CGBitmapInfo, CGColorRenderingIntent, CGColorSpace, CGDataProvider, CGImage,
+        CGImageAlphaInfo,
+    };
+    use objc2_foundation::{NSArray, NSDictionary};
+    use objc2_vision::{
+        VNImageRequestHandler, VNRecognizeTextRequest, VNRequest, VNRequestTextRecognitionLevel,
+    };
+
+    /// Vision has no fixed input cap like Windows' `OcrEngine.MaxImageDimension` (it
+    /// down-samples internally), but keeping the shared 2600 means both platforms feed the
+    /// engine a bounded image and exercise the same Lanczos downscale path — QR already ran
+    /// on the full-resolution pixels before this.
+    pub fn max_dimension() -> u32 {
+        2600
+    }
+
+    pub fn ocr_lines(rgba: &[u8], w: u32, h: u32) -> Result<Vec<super::OcrLineBox>, String> {
+        if w == 0 || h == 0 || rgba.len() != (w as usize) * (h as usize) * 4 {
+            return Err("Text recognition failed (bad image)".to_string());
+        }
+        // Vision + Foundation vend autoreleased temporaries; the scan worker thread has no
+        // ambient autorelease pool, so wrap the whole call in one (deterministic, leak-free).
+        autoreleasepool(|_| {
+            let image = cg_image(rgba, w, h).ok_or("Text recognition failed (image build)")?;
+            // Empty options dict (no camera-intrinsics hints); typed to the handler's key.
+            let options = NSDictionary::new();
+            // SAFETY: `image` is a valid CGImage that outlives the handler and the request
+            // below (all dropped at the end of this scope, after `performRequests` returns).
+            let handler = unsafe {
+                VNImageRequestHandler::initWithCGImage_options(
+                    VNImageRequestHandler::alloc(),
+                    &image,
+                    &options,
+                )
+            };
+            let request = VNRecognizeTextRequest::new();
+            request.setRecognitionLevel(VNRequestTextRecognitionLevel::Accurate);
+            request.setUsesLanguageCorrection(true);
+
+            // `performRequests:` takes `NSArray<VNRequest>`; upcast the concrete request.
+            let req_ref: &VNRequest = &request;
+            let requests = NSArray::from_slice(&[req_ref]);
+            handler
+                .performRequests_error(&requests)
+                .map_err(|e| format!("Text recognition failed ({e})"))?;
+
+            // `VNRecognizeTextRequest::results()` is already typed as recognized-text
+            // observations — no downcast — one block per line, top-to-bottom.
+            let mut out = Vec::new();
+            if let Some(results) = request.results() {
+                for obs in results.iter() {
+                    // The single most-confident candidate for this block (v1: no alternates).
+                    let Some(best) = obs.topCandidates(1).iter().next() else {
+                        continue;
+                    };
+                    // Vision's `boundingBox` is normalized with the origin at the image's
+                    // LOWER-left; flip Y so the box matches `group_paragraphs`' top-left space.
+                    // SAFETY: `obs` is a live observation for the duration of this pool.
+                    let r = unsafe { obs.boundingBox() };
+                    let bbox = [
+                        r.origin.x as f32,
+                        1.0 - (r.origin.y + r.size.height) as f32,
+                        r.size.width as f32,
+                        r.size.height as f32,
+                    ];
+                    out.push(super::OcrLineBox {
+                        text: best.string().to_string(),
+                        bbox,
+                    });
+                }
+            }
+            Ok(out)
+        })
+    }
+
+    /// Build a `CGImage` from the straight-alpha RGBA8 buffer (8bpc / 32bpp / alpha-last /
+    /// device-RGB — the same layout the clipboard copy uses). `CFData` copies the bytes, so
+    /// the image owns its pixels and there's no borrow of `rgba` to keep alive past here.
+    fn cg_image(rgba: &[u8], w: u32, h: u32) -> Option<CFRetained<CGImage>> {
+        // SAFETY: `rgba` is a valid slice of `len` bytes; CFDataCreate copies from it.
+        let data = unsafe { CFData::new(None, rgba.as_ptr(), rgba.len() as isize) }?;
+        let provider = CGDataProvider::with_cf_data(Some(&data))?;
+        let space = CGColorSpace::new_device_rgb()?;
+        let bitmap = CGBitmapInfo(CGImageAlphaInfo::Last.0);
+        // SAFETY: width/height/stride are consistent with `data`'s length (checked by the
+        // caller); `decode` is null (identity) and every reference outlives the call.
+        unsafe {
+            CGImage::new(
+                w as usize,
+                h as usize,
+                8,
+                32,
+                (w as usize) * 4,
+                Some(&space),
+                bitmap,
+                Some(&provider),
+                std::ptr::null(),
+                false,
+                CGColorRenderingIntent::RenderingIntentDefault,
+            )
+        }
+    }
+}
+
+/// Other non-Windows, non-macOS platforms (Linux/BSD): no OS OCR engine is wired. QR decode
+/// above still works everywhere; the panel reports OCR unavailable.
+#[cfg(not(any(windows, target_os = "macos")))]
 mod platform {
     pub fn max_dimension() -> u32 {
         2600
     }
 
-    pub fn ocr_lines(_rgba: &[u8], _w: u32, _h: u32) -> Result<Vec<String>, String> {
+    pub fn ocr_lines(_rgba: &[u8], _w: u32, _h: u32) -> Result<Vec<super::OcrLineBox>, String> {
         Err("Text recognition isn't available on this platform yet".to_string())
     }
 }
@@ -300,6 +517,62 @@ mod tests {
             "Hello".to_string(),
         ];
         assert_eq!(clean_lines(raw), vec!["Hello", "World", "Hello"]);
+    }
+
+    /// A synthetic OCR line box: `text` at normalized `(x, y)` with size `(w, h)`.
+    fn lbox(text: &str, x: f32, y: f32, w: f32, h: f32) -> OcrLineBox {
+        OcrLineBox {
+            text: text.to_string(),
+            bbox: [x, y, w, h],
+        }
+    }
+
+    #[test]
+    fn group_paragraphs_joins_tightly_spaced_lines_into_one_block() {
+        // Two lines a fraction of a line-height apart → one flowing paragraph.
+        let lines = vec![
+            lbox("The quick brown", 0.1, 0.10, 0.5, 0.04),
+            lbox("fox jumps.", 0.1, 0.15, 0.5, 0.04),
+        ];
+        assert_eq!(group_paragraphs(lines), vec!["The quick brown fox jumps."]);
+    }
+
+    #[test]
+    fn group_paragraphs_breaks_on_a_blank_line_sized_gap() {
+        // A title, a blank-line-sized gap, then a two-line body block.
+        let lines = vec![
+            lbox("Title", 0.1, 0.05, 0.3, 0.04),
+            lbox("Body line one", 0.1, 0.30, 0.5, 0.04),
+            lbox("body line two", 0.1, 0.35, 0.5, 0.04),
+        ];
+        assert_eq!(
+            group_paragraphs(lines),
+            vec![
+                "Title".to_string(),
+                "Body line one body line two".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn group_paragraphs_sorts_into_reading_order_and_drops_blanks() {
+        // Fed out of order and with a blank line; output is top-to-bottom, blank ignored.
+        let lines = vec![
+            lbox("second", 0.1, 0.20, 0.4, 0.04),
+            lbox("   ", 0.1, 0.14, 0.4, 0.04),
+            lbox("first", 0.1, 0.10, 0.4, 0.04),
+        ];
+        // 'first' (y=.10) then 'second' (y=.20): gap .06 > 0.6*.04 → two paragraphs.
+        assert_eq!(
+            group_paragraphs(lines),
+            vec!["first".to_string(), "second".to_string()]
+        );
+    }
+
+    #[test]
+    fn group_paragraphs_empty_input_is_empty() {
+        assert!(group_paragraphs(Vec::new()).is_empty());
+        assert!(group_paragraphs(vec![lbox("  ", 0.0, 0.0, 0.1, 0.02)]).is_empty());
     }
 
     /// Render a QR code to a grayscale bitmap (quiet zone + integer scale) — the

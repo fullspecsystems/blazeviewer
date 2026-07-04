@@ -14,8 +14,10 @@ with any pre-release suffix carried only by the tag.
   from Image** / the right-click menu to put it straight on the clipboard — the toast
   confirms what you got ("Copied 214 characters", "Copied text + 1 QR code"). Works
   on rotated photos and inside archives; results are kept in RAM only and nothing is
-  ever uploaded. Text recognition uses Windows' built-in on-device OCR (the Mac
-  version is coming; QR codes are read on both already).
+  ever uploaded. Recognized text is grouped back into **paragraphs**, so copied text
+  reads as flowing blocks instead of hard-broken lines. Text recognition uses your
+  operating system's built-in on-device OCR — Windows OCR on Windows, Apple Vision on
+  the Mac — and QR codes are read on both.
 - **Light mode** — a new **Theme** setting under Settings ▸ Appearance: **System**
   (default) follows your OS light/dark theme live, or pin **Light** / **Dark**. In light
   mode the on-image overlays (info panels, toasts, help, folder tree, scan card) switch

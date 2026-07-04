@@ -72,3 +72,40 @@ windows = { version = "0.62", features = [
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
+# On-device OCR via Apple **Vision** (task #45.2) — the macOS twin of the Windows.Media.Ocr
+# backend (image_text.rs). Typed `objc2` bindings, the same OS-codec posture as the `windows`
+# crate above: no model shipped, no network, fully on-device. `VNRecognizeTextRequest` runs
+# over a `CGImage` built from the displayed pixels; `performRequests:` blocks on the scan
+# worker thread (never the event loop). `default-features = false` because every objc2
+# framework crate's default set enables its ENTIRE API surface (62 Vision requests, all of
+# Foundation, all of CoreGraphics) — we opt into just the handful of gated types we touch.
+objc2 = { version = "0.6", default-features = false, features = ["std"] }
+objc2-vision = { version = "0.3", default-features = false, features = [
+    "std",
+    "VNRequest",
+    "VNRequestHandler",
+    "VNRecognizeTextRequest",
+    "VNObservation",
+    "objc2-core-graphics",
+    # Gates `VNDetectedObjectObservation::boundingBox` (a `CGRect`), which we read per line to
+    # group the recognized lines into paragraphs (image_text::group_paragraphs).
+    "objc2-core-foundation",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSString",
+    "NSDictionary",
+    "NSEnumerator",
+] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = [
+    "std",
+    "CGImage",
+    "CGColorSpace",
+    "CGDataProvider",
+] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "CFBase",
+    "CFData",
+] }

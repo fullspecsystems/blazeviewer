@@ -200,6 +200,9 @@ final class MenuBar: NSObject {
             // Owner request: also reachable here, not just the photo context menu
             // (copies filename/dimensions/codec/size + all non-blob EXIF as text).
             item("copy_image_details", "Copy Image Details"),
+            // On-device OCR (Apple Vision) + QR payloads (task #45). Unbound by default; the
+            // core keymap owns any user binding (`T` shows the same text in the HUD panel).
+            item("copy_text", "Copy Text from Image"),
         ]))
 
         main.addItem(submenu("View", [

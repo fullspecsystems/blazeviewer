@@ -30,6 +30,10 @@ let package = Package(
                 .linkedFramework("Foundation"),
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("CoreMedia"),
+                // On-device OCR: pb-app-core's Apple Vision text-recognition backend
+                // (image_text.rs, task #45) references VNImageRequestHandler /
+                // VNRecognizeTextRequest — the class symbols live in Vision.framework.
+                .linkedFramework("Vision"),
                 .linkedLibrary("objc"),
             ]
         )

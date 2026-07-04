@@ -3300,7 +3300,12 @@ impl AppCore {
                 if !r.qr.is_empty() && !r.lines.is_empty() {
                     lines.push((String::new(), false));
                 }
-                for l in &r.lines {
+                // Each entry is a paragraph (image_text::group_paragraphs); a blank line
+                // between them keeps the wrapped blocks visually distinct in the panel.
+                for (i, l) in r.lines.iter().enumerate() {
+                    if i > 0 {
+                        lines.push((String::new(), false));
+                    }
                     lines.push((l.clone(), false));
                 }
                 if r.lines.is_empty() {

@@ -436,6 +436,7 @@ final class CoreModel {
         add("copy", "Copy Image")
         add("copy_path", "Copy File Path")
         add("copy_image_details", "Copy Image Details")
+        add("copy_text", "Copy Text from Image")
         if canReveal {
             add("reveal", "Show in Finder")
         }
@@ -1396,13 +1397,20 @@ final class CoreModel {
     /// CF_DIBV5 + CF_HDROP pairing. The host toasts afterwards (winit-shell parity).
     private func writeClipboard() {
         let pb = NSPasteboard.general
+        // A core-supplied toast (recognized-image text, task #45: "Copied 214 characters" /
+        // "Copied text + 1 QR code") wins over the generic fallback. Read it BEFORE taking
+        // the payload — `take_clipboard_text` consumes both. "" = none (e.g. Copy File Path).
+        let coreToast = core.clipboard_text_toast().toString()
         let text = core.take_clipboard_text().toString()
         if !text.isEmpty {
             pb.clearContents()
             pb.setString(text, forType: .string)
-            let toastMsg = text.contains("\n")
-                ? "Copied to clipboard"
-                : "Copied \((text as NSString).lastPathComponent)"
+            let toastMsg =
+                !coreToast.isEmpty
+                ? coreToast
+                : (text.contains("\n")
+                    ? "Copied to clipboard"
+                    : "Copied \((text as NSString).lastPathComponent)")
             core.toast(toastMsg)
             return
         }
