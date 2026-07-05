@@ -341,6 +341,16 @@ pub struct AppCore {
     pub native_open: bool,
     /// The last empty-state visibility the tick signalled a marker for.
     pub last_open_visible: bool,
+    /// The host presents the **Inspector** (Details/Text/Describe tabs) natively (task
+    /// #54, mac-first): the core suppresses those tabs' HUD rasterization and signals via
+    /// [`CoreEffect::PanelsChanged`] on visibility / tab / content change — so async OCR
+    /// and describe results re-signal the host to re-pull. Default `false` (winit keeps
+    /// the CPU panel). The macOS host sets it at construction.
+    pub native_inspector: bool,
+    /// The last Inspector snapshot the tick emitted a marker for — visibility + tab +
+    /// content — so the marker fires on a real change (open/close, tab switch, or an
+    /// async result landing), never per tick. `None` = the Inspector was hidden.
+    pub last_inspector_snap: Option<crate::panels::InspectorSnapshot>,
     /// Whether the info panel is currently drawn.
     pub overlay_shown: bool,
     /// Which item the drawn panel was built for; when it differs from `displayed_item` the

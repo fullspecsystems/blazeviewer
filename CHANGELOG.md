@@ -8,6 +8,11 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
+- **Native Inspector panel on macOS** — Details, Text, and Describe are now one tabbed
+  macOS panel (an inspector on the trailing edge) instead of three separate on-image
+  overlays: crisp native text, a segmented **Details / Text / Describe** tab bar to switch
+  facets, selectable values you can copy, and a **✕** to close. It stays live — switching
+  photos, or waiting on OCR / an AI description, updates the open panel in place.
 - **Redesigned welcome screen on macOS** — with no photos open, the window shows clean
   **Open File** / **Open Folder** buttons (each with its shortcut key), a few essential
   keys (Next / Previous / Random), and a **Show Shortcuts** link that opens the keyboard

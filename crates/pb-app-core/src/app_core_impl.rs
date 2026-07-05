@@ -156,6 +156,8 @@ impl AppCore {
             last_help_visible: false,
             native_open: false,
             last_open_visible: false,
+            native_inspector: false,
+            last_inspector_snap: None,
             overlay_shown: false,
             overlay_item: None,
             toast: None,
@@ -1070,6 +1072,30 @@ impl AppCore {
             let vis = self.open_panel_visible();
             if vis != self.last_open_visible {
                 self.last_open_visible = vis;
+                self.emit_panels_changed();
+            }
+        }
+        if self.native_inspector {
+            // Kick the active tab's scan (no-op when cached / already running): the panel
+            // tracks the displayed photo, and on this native path `show_overlay`'s HUD
+            // branch — which normally kicks these — is suppressed.
+            if self.inspector_panel_visible() && self.current.is_some() {
+                match self.panels.inspector {
+                    Some(InspectorTab::Text) => self.ensure_text_scan(),
+                    Some(InspectorTab::Describe) if self.settings.describe_auto => {
+                        self.ensure_describe_scan(None)
+                    }
+                    _ => {}
+                }
+            }
+            // Re-signal on any visibility / tab / content change — async OCR and describe
+            // results land in the caches by now (the polls ran above), so the snapshot
+            // diff catches them without a per-tick marker.
+            let snap = self
+                .inspector_panel_visible()
+                .then(|| self.inspector_snapshot());
+            if snap != self.last_inspector_snap {
+                self.last_inspector_snap = snap;
                 self.emit_panels_changed();
             }
         }
@@ -2780,10 +2806,35 @@ impl AppCore {
     }
 
     /// Whether the current overlay-slot content is presented **natively** by the host
-    /// (so the core suppresses its HUD rasterization). For now only Help, and only when
-    /// the host declared `native_help`. The tree/Inspector join as they go native.
+    /// (so the core suppresses its HUD rasterization): Help when `native_help`, and any
+    /// Inspector tab when `native_inspector`. The tree joins as it goes native.
     fn slot_is_native(&self) -> bool {
-        self.native_help && self.slot_content() == Some(SlotContent::Help)
+        match self.slot_content() {
+            Some(SlotContent::Help) => self.native_help,
+            Some(SlotContent::Details | SlotContent::Text | SlotContent::Describe) => {
+                self.native_inspector
+            }
+            None => false,
+        }
+    }
+
+    /// Whether the **native** Inspector panel should be visible right now — the signal the
+    /// mac host reads (via FFI) to show/hide its SwiftUI Inspector: the Inspector is open
+    /// on some tab, not `Tab`-hidden, and the host presents it natively.
+    pub fn inspector_panel_visible(&self) -> bool {
+        self.native_inspector && self.panels.inspector.is_some() && !self.panels.hidden
+    }
+
+    /// A content snapshot of the Inspector's active tab (task #54) — for the tick's
+    /// change diff and (indirectly) the host's re-pull. Details when the Inspector is
+    /// closed (only read while visible, i.e. on some tab).
+    pub fn inspector_snapshot(&self) -> crate::panels::InspectorSnapshot {
+        use crate::panels::InspectorSnapshot;
+        match self.panels.inspector {
+            Some(InspectorTab::Text) => InspectorSnapshot::Text(self.text_panel()),
+            Some(InspectorTab::Describe) => InspectorSnapshot::Describe(self.describe_panel()),
+            _ => InspectorSnapshot::Details(self.details_panel()),
+        }
     }
 
     /// Whether the **native** Help panel should be visible right now — the signal the
@@ -5380,6 +5431,52 @@ mod tests {
             .effects
             .iter()
             .any(|e| matches!(e, contract::CoreEffect::PanelsChanged)));
+    }
+
+    #[test]
+    fn native_inspector_suppresses_the_hud_and_signals_on_tab_and_content() {
+        use crate::overlay::InspectorTab;
+        use crate::panels::InspectorSnapshot;
+        let mut core = test_core();
+        core.native_inspector = true;
+        // Closed → not visible, no snapshot.
+        assert!(!core.inspector_panel_visible());
+        // Open the Details tab: visible, and the tick signals the host.
+        core.panels.open_inspector(InspectorTab::Details);
+        assert!(core.inspector_panel_visible());
+        assert!(matches!(
+            core.inspector_snapshot(),
+            InspectorSnapshot::Details(_)
+        ));
+        core.effects.clear();
+        core.handle(CoreEvent::Tick(std::time::Instant::now()));
+        assert!(
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::PanelsChanged)),
+            "opening the Inspector signals the host"
+        );
+        // Switching tabs changes the snapshot → re-signals.
+        core.panels.open_inspector(InspectorTab::Text);
+        assert!(matches!(
+            core.inspector_snapshot(),
+            InspectorSnapshot::Text(_)
+        ));
+        core.effects.clear();
+        core.handle(CoreEvent::Tick(std::time::Instant::now()));
+        assert!(
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::PanelsChanged)),
+            "a tab switch re-signals"
+        );
+        // Tab-hidden → not visible (the master switch wins).
+        core.panels.hidden = true;
+        assert!(!core.inspector_panel_visible());
+        // Winit (native_inspector off) never treats it as native-visible.
+        core.panels.hidden = false;
+        core.native_inspector = false;
+        assert!(!core.inspector_panel_visible());
     }
 
     #[test]

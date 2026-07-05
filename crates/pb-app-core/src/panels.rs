@@ -6,6 +6,18 @@
 //! (`details_panel` / `help_panel` / `text_panel` / `describe_panel`); the interim
 //! `lines()` projections feed the HUD's paragraph renderer and retire with it.
 
+/// A content snapshot of the Inspector's **active** tab, for the native host's
+/// change-detection (task #54): the tick builds this each frame the Inspector is
+/// natively visible and re-signals [`crate::contract::CoreEffect::PanelsChanged`] when it
+/// differs from the last — so a tab switch, a photo change, and an async OCR / describe
+/// result landing all re-pull the SwiftUI panel, without a per-tick marker storm.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum InspectorSnapshot {
+    Details(DetailsPanel),
+    Text(TextPanel),
+    Describe(DescribePanel),
+}
+
 /// One row of the Details (full-EXIF) table — mirrors the HUD's table shapes so the
 /// interim renderer is a 1:1 map, but owned here so presenters and copy payloads
 /// never depend on the rasterizer crate.

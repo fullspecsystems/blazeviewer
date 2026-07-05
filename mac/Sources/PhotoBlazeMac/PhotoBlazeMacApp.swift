@@ -128,6 +128,22 @@ struct ContentView: View {
                     .transition(.opacity)
                 }
             }
+            // The Inspector rides the trailing edge like a sidebar (Help is mutually
+            // exclusive with it in the core, so they never co-show). GeometryReader hands
+            // it the available height for fit-to-content-then-scroll.
+            .overlay {
+                if model.inspectorVisible {
+                    GeometryReader { geo in
+                        InspectorPanelView(model: model, maxHeight: geo.size.height - 48)
+                            .frame(
+                                maxWidth: .infinity, maxHeight: .infinity,
+                                alignment: .trailing
+                            )
+                            .padding(.trailing, 24)
+                    }
+                    .transition(.opacity)
+                }
+            }
             // SwiftUI owns the WindowGroup titlebar surface and repaints it over the
             // AppKit-side transparency during its own update passes — hide it through
             // SwiftUI itself while the F speed mode is on (the AppKit props are also

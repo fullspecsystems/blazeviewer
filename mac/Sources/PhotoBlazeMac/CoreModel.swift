@@ -55,6 +55,12 @@ final class CoreModel {
     /// Whether the native empty-state Open panel (the welcome surface) should show —
     /// true when no photos are loaded. Refreshed on the same `PanelsChanged` marker.
     private(set) var openPanelVisible = false
+    /// The native Inspector panel (Details/Text/Describe tabs) — visibility, selected
+    /// tab (0/1/2), and the active tab's rows, all refreshed on `PanelsChanged`
+    /// (`refreshInspector`). The core re-signals on async OCR / describe results too.
+    private(set) var inspectorVisible = false
+    private(set) var inspectorTab = 0
+    private(set) var inspectorRows: [InspectorRow] = []
     /// An NSAlert sheet (confirm/message) is up — gates the key monitor like `panelOpen`.
     @ObservationIgnored private var alertUp = false
     /// Opens the SwiftUI Settings scene — injected by the root view (`openSettings` is an
@@ -446,6 +452,45 @@ final class CoreModel {
     /// state stays in the core (and the menu checkmark follows).
     func closeHelp() {
         menuAction("help")
+    }
+
+    /// Re-pull the native Inspector after a `PanelsChanged` marker: visibility, the
+    /// selected tab, and (when visible) the active tab's rows flattened by the core.
+    private func refreshInspector() {
+        inspectorVisible = core.inspector_visible()
+        guard inspectorVisible else {
+            inspectorRows = []
+            return
+        }
+        inspectorTab = Int(core.inspector_tab())
+        core.inspector_refresh()
+        let n = Int(core.inspector_row_count())
+        var rows: [InspectorRow] = []
+        rows.reserveCapacity(n)
+        for i in 0..<n {
+            let idx = UInt(i)
+            rows.append(
+                InspectorRow(
+                    id: i,
+                    kind: Int(core.inspector_row_kind(idx)),
+                    a: core.inspector_row_a(idx).toString(),
+                    b: core.inspector_row_b(idx).toString()
+                ))
+        }
+        inspectorRows = rows
+    }
+
+    /// Switch the Inspector to a tab from its tab bar (0 Details / 1 Text / 2 Describe).
+    /// Opens it there (never toggles closed); `kick()` runs a tick so the change signals.
+    func showInspectorTab(_ tab: Int) {
+        core.inspector_show_tab(UInt8(tab))
+        kick()
+    }
+
+    /// Close the Inspector from its ✕ button.
+    func closeInspector() {
+        core.inspector_close()
+        kick()
     }
 
     // MARK: - Empty-state panel actions (task #54)
@@ -1256,10 +1301,12 @@ final class CoreModel {
             menuBar?.sync(core.menu_state())
             reassertMenuBar() // belt-and-braces beside the KVO watch
         case .PanelsChanged:
-            // A natively-presented panel changed — re-pull the Help model + visibility
-            // and the empty-state Open panel's visibility.
+            // A natively-presented panel changed — re-pull the Help model + visibility,
+            // the empty-state Open panel's visibility, and the Inspector (visibility +
+            // tab + rows; async OCR / describe results re-signal here too).
             refreshHelp()
             openPanelVisible = core.open_panel_visible()
+            refreshInspector()
         case .ShowContextMenu(
             let hasImage, let hasMotion, let canReveal, let fullscreen,
             let comparePinned, let comparePinnedHere

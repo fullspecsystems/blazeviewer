@@ -115,6 +115,12 @@ pub struct AppCoreHandle {
     /// indexed `help_row_*` accessors — the keymap-editor pull pattern, avoiding a
     /// `Vec<struct>` FFI return. The native SwiftUI Help view renders from it.
     help_snapshot: Vec<(bool, String, String)>,
+    /// Flattened Inspector rows `(kind, a, b)` for the active tab (task #54): `kind` is
+    /// 0 header, 1 label/value pair, 2 body paragraph, 3 status/muted; `a`/`b` are the
+    /// text (pair = label/value, else `a` = text, `b` = ""). Snapshotted by
+    /// `inspector_refresh` on a `PanelsChanged` marker, read by the indexed
+    /// `inspector_row_*` accessors — same pull pattern as `help_snapshot`.
+    inspector_snapshot: Vec<(u8, String, String)>,
 }
 
 impl AppCoreHandle {
@@ -134,6 +140,7 @@ impl AppCoreHandle {
         // native presenters land.
         core.native_help = true;
         core.native_open = true;
+        core.native_inspector = true;
         AppCoreHandle {
             core,
             dir_scan: None,
@@ -149,6 +156,7 @@ impl AppCoreHandle {
             keymap_dirty: false,
             keymap_note: String::new(),
             help_snapshot: Vec::new(),
+            inspector_snapshot: Vec::new(),
         }
     }
 
@@ -209,6 +217,126 @@ impl AppCoreHandle {
 
     fn help_row_shortcut(&self, i: usize) -> String {
         self.help_snapshot
+            .get(i)
+            .map(|r| r.2.clone())
+            .unwrap_or_default()
+    }
+
+    // ---- Inspector (Details / Text / Describe tabs) — the tabbed content panel (task
+    // #54). Same pull pattern as Help: `PanelsChanged` → `inspector_refresh` → indexed
+    // `inspector_row_*`. `inspector_visible` / `inspector_tab` drive the SwiftUI panel's
+    // presence + selected segment; `inspector_show_tab` / `inspector_close` are the
+    // tab-bar / ✕ actions.
+
+    /// Whether the native SwiftUI Inspector should be shown (open on some tab, not hidden).
+    fn inspector_visible(&self) -> bool {
+        self.core.inspector_panel_visible()
+    }
+
+    /// The active tab: 0 = Details, 1 = Text, 2 = Describe (Details when closed).
+    fn inspector_tab(&self) -> u8 {
+        match self.core.panels.inspector {
+            Some(pb_app_core::overlay::InspectorTab::Text) => 1,
+            Some(pb_app_core::overlay::InspectorTab::Describe) => 2,
+            _ => 0,
+        }
+    }
+
+    /// Switch the Inspector to a tab (tab-bar click) — *opens* it there, never toggles
+    /// closed (unlike the T / D / ⇧I keys), so clicking the active tab is a no-op. The
+    /// next tick kicks that tab's scan and signals the host.
+    fn inspector_show_tab(&mut self, tab: u8) {
+        self.core.now = Instant::now();
+        let t = match tab {
+            1 => pb_app_core::overlay::InspectorTab::Text,
+            2 => pb_app_core::overlay::InspectorTab::Describe,
+            _ => pb_app_core::overlay::InspectorTab::Details,
+        };
+        self.core.panels.open_inspector(t);
+    }
+
+    /// Close the Inspector (its ✕ button). The tick's visibility diff signals the host.
+    fn inspector_close(&mut self) {
+        self.core.panels.inspector = None;
+    }
+
+    /// Snapshot the active tab's content into `inspector_snapshot` for the indexed
+    /// accessors — call on a `PanelsChanged` marker before reading `inspector_row_*`.
+    fn inspector_refresh(&mut self) {
+        use pb_app_core::overlay::InspectorTab;
+        use pb_app_core::panels::{DescribeBody, DetailRow, TextBody};
+        let mut rows: Vec<(u8, String, String)> = Vec::new();
+        match self.core.panels.inspector {
+            // Text / Describe don't repeat a title row — the tab bar already labels them;
+            // Details leads with the filename (its first Span).
+            Some(InspectorTab::Text) => match self.core.text_panel().body {
+                TextBody::NoPhoto => {}
+                TextBody::Scanning => rows.push((3, "Reading text…".into(), String::new())),
+                TextBody::Ready {
+                    qr,
+                    paragraphs,
+                    ocr_error,
+                } => {
+                    for q in &qr {
+                        rows.push((2, format!("QR code → {q}"), String::new()));
+                    }
+                    for p in &paragraphs {
+                        rows.push((2, p.clone(), String::new()));
+                    }
+                    if paragraphs.is_empty() {
+                        if let Some(e) = ocr_error {
+                            rows.push((3, e, String::new()));
+                        } else if qr.is_empty() {
+                            rows.push((3, "No text found".into(), String::new()));
+                        }
+                    }
+                }
+            },
+            Some(InspectorTab::Describe) => {
+                rows.push((0, "Description".into(), String::new()));
+                match self.core.describe_panel().body {
+                    DescribeBody::NoPhoto => {}
+                    DescribeBody::Idle => {
+                        rows.push((3, "Press D to describe this photo.".into(), String::new()))
+                    }
+                    DescribeBody::Busy => rows.push((3, "Describing…".into(), String::new())),
+                    DescribeBody::Ready(text) => rows.push((2, text, String::new())),
+                    DescribeBody::Error(msg) => rows.push((3, msg, String::new())),
+                }
+            }
+            // Details (and the closed fallback, never read while closed).
+            _ => {
+                for r in self.core.details_panel().rows {
+                    match r {
+                        DetailRow::Span { text, .. } => rows.push((0, text, String::new())),
+                        DetailRow::Pair { label, value } => rows.push((1, label, value)),
+                    }
+                }
+            }
+        }
+        self.inspector_snapshot = rows;
+    }
+
+    fn inspector_row_count(&self) -> usize {
+        self.inspector_snapshot.len()
+    }
+
+    /// Row kind: 0 header, 1 label/value pair, 2 body paragraph, 3 status/muted.
+    fn inspector_row_kind(&self, i: usize) -> u8 {
+        self.inspector_snapshot.get(i).map(|r| r.0).unwrap_or(0)
+    }
+
+    /// Primary text: pair label, else the row's text.
+    fn inspector_row_a(&self, i: usize) -> String {
+        self.inspector_snapshot
+            .get(i)
+            .map(|r| r.1.clone())
+            .unwrap_or_default()
+    }
+
+    /// Secondary text: pair value (empty for non-pairs).
+    fn inspector_row_b(&self, i: usize) -> String {
+        self.inspector_snapshot
             .get(i)
             .map(|r| r.2.clone())
             .unwrap_or_default()
@@ -2060,6 +2188,17 @@ mod ffi {
         // shortcut lookup by Action id for the welcome surface's tips.
         fn open_panel_visible(&self) -> bool;
         fn action_shortcut(&self, id: &str) -> String;
+
+        // The native Inspector (Details / Text / Describe tabs, task #54).
+        fn inspector_visible(&self) -> bool;
+        fn inspector_tab(&self) -> u8;
+        fn inspector_show_tab(&mut self, tab: u8);
+        fn inspector_close(&mut self);
+        fn inspector_refresh(&mut self);
+        fn inspector_row_count(&self) -> usize;
+        fn inspector_row_kind(&self, i: usize) -> u8;
+        fn inspector_row_a(&self, i: usize) -> String;
+        fn inspector_row_b(&self, i: usize) -> String;
 
         // The NS2 dialog seam: payload pulls (after a ShowDialog marker), the
         // DialogResolved results (one entry point per user gesture), the live progress
