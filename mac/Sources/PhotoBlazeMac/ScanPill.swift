@@ -13,18 +13,24 @@ import SwiftUI
 
 struct ScanPillView: View {
     let model: CoreModel
+    @Environment(\.colorScheme) private var scheme
 
     /// Fixed width of the middle text column — the whole reason the spinner + Cancel stay put.
     private let textWidth: CGFloat = 300
+
+    /// The folder-tree icon's secondary gray, but resolved from SwiftUI's `colorScheme`
+    /// instead of a dynamic `NSColor`: inside the pill's material the dynamic one resolved to
+    /// its *light-mode* value even in dark mode, which made this text near-invisible and the
+    /// spinner black-on-black. (Slightly brighter in dark so it clearly reads over a photo.)
+    private var secondary: Color {
+        scheme == .dark ? Color(white: 0.7) : Color(white: 0.4)
+    }
 
     var body: some View {
         HStack(spacing: 12) {
             ProgressView()
                 .controlSize(.small)
-                // The default spinner is nearly invisible on a dark material — tint it to the
-                // same legible adaptive gray as the secondary text (light in dark mode, dark in
-                // light mode) so it reads in both.
-                .tint(Color.panelSecondary)
+                .tint(secondary)
                 .frame(width: 16, height: 16)
 
             VStack(alignment: .leading, spacing: 2) {
@@ -37,7 +43,7 @@ struct ScanPillView: View {
                     // Right-anchored, monospaced — a growing count never shoves the layout.
                     Text("\(model.scanPillFound) found")
                         .monospacedDigit()
-                        .foregroundStyle(Color.panelSecondary)
+                        .foregroundStyle(secondary)
                         .layoutPriority(1)
                 }
                 .font(.callout)
@@ -46,21 +52,29 @@ struct ScanPillView: View {
                 // when it's blank (still at the root), so the pill doesn't grow/shrink a line.
                 Text(model.scanPillCurrent.isEmpty ? "\u{00A0}" : model.scanPillCurrent)
                     .font(.caption)
-                    .foregroundStyle(Color.panelSecondary)
+                    .foregroundStyle(secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
             .frame(width: textWidth, alignment: .leading)
 
-            // Native accent text button (blue), like a notification action — no divider.
+            // A subtle grooved rule (the inspector/tree heading divider, run vertically) —
+            // not the pure-black default `Divider()`.
+            Rectangle()
+                .fill(Color.primary.opacity(0.12))
+                .frame(width: 1, height: 26)
+
+            // A real, clickable accent action — reads as a macOS blue link, not disabled gray.
             Button("Cancel") { model.scanPillCancel() }
-                .buttonStyle(.borderless)
+                .buttonStyle(.plain)
+                .font(.callout.weight(.medium))
+                .foregroundStyle(Color.accentColor)
                 .help("Stop scanning — keeps what's already loaded")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         // A thick material reads more like a macOS notification/HUD and keeps the secondary
-        // text legible over a bright photo (the translucent-faint problem on `.regularMaterial`).
+        // text legible over a bright photo.
         .background(.thickMaterial, in: RoundedRectangle(cornerRadius: 14))
         .overlay(
             RoundedRectangle(cornerRadius: 14)
