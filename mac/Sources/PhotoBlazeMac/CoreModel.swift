@@ -52,6 +52,9 @@ final class CoreModel {
     /// Help's HUD rasterization while this host presents it, so there's no double-draw.
     private(set) var helpVisible = false
     private(set) var helpSections: [HelpSection] = []
+    /// Whether the native empty-state Open panel (the welcome surface) should show —
+    /// true when no photos are loaded. Refreshed on the same `PanelsChanged` marker.
+    private(set) var openPanelVisible = false
     /// An NSAlert sheet (confirm/message) is up — gates the key monitor like `panelOpen`.
     @ObservationIgnored private var alertUp = false
     /// Opens the SwiftUI Settings scene — injected by the root view (`openSettings` is an
@@ -443,6 +446,21 @@ final class CoreModel {
     /// state stays in the core (and the menu checkmark follows).
     func closeHelp() {
         menuAction("help")
+    }
+
+    // MARK: - Empty-state panel actions (task #54)
+
+    /// Open File / Open Folder from the welcome surface — the same commands as the menu
+    /// and the O / ⇧O keys (open state stays in the core).
+    func openFile() { menuAction("open_file") }
+    func openFolder() { menuAction("open_folder") }
+    /// The welcome surface's "See all shortcuts" link toggles the Help panel.
+    func showAllShortcuts() { menuAction("help") }
+
+    /// The user-facing key label for an action by id ("next", "open_file", …) — for the
+    /// welcome surface's shortcut tips. A generic lookup, so new tips need no new FFI.
+    func shortcut(_ id: String) -> String {
+        core.action_shortcut(id).toString()
     }
 
     /// Right-click over the photo: ask the core for the context-menu description; the
@@ -1238,8 +1256,10 @@ final class CoreModel {
             menuBar?.sync(core.menu_state())
             reassertMenuBar() // belt-and-braces beside the KVO watch
         case .PanelsChanged:
-            // A natively-presented panel (Help) changed — re-pull its model + visibility.
+            // A natively-presented panel changed — re-pull the Help model + visibility
+            // and the empty-state Open panel's visibility.
             refreshHelp()
+            openPanelVisible = core.open_panel_visible()
         case .ShowContextMenu(
             let hasImage, let hasMotion, let canReveal, let fullscreen,
             let comparePinned, let comparePinnedHere

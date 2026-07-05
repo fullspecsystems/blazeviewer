@@ -463,6 +463,8 @@ impl App {
                 panels: pb_app_core::Panels::default(),
                 native_help: false,
                 last_help_visible: false,
+                native_open: false,
+                last_open_visible: false,
                 overlay_shown: false,
                 overlay_item: None,
                 toast: None,

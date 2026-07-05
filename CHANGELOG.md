@@ -8,6 +8,10 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
+- **Redesigned welcome screen on macOS** — with no photos open, the window shows clean
+  **Open File** / **Open Folder** buttons (each with its shortcut key), a few essential
+  keys (Next / Previous / Random), and a **Show Shortcuts** link that opens the keyboard
+  help. Dragging images onto the window still works.
 - **Native keyboard-shortcuts panel on macOS** — the **?** help panel is now a real
   macOS panel: crisp native text, keys shown as little keycaps (with plain separators
   so a `/` key never reads as "or"), two columns per section for a compact scan, and a
@@ -33,9 +37,10 @@ with any pre-release suffix carried only by the tag.
   Description** (and the right-click menu) puts the text on the clipboard. Configure it
   under **Settings ▸ AI**: point it at any OpenAI-compatible local model server (LM
   Studio, Ollama, llama.cpp — on this machine or your own network), pick a response
-  length, and customize the prompt. **Test & list models** confirms the server is
-  reachable and fills a **model picker** with what it's serving — vision-capable models
-  listed first — so you choose from a list instead of typing an exact model name. Optional **auto-describe** describes each
+  length, and customize the prompt. Opening the tab fills a **model picker** with what
+  the server is already serving — vision-capable models listed first — so you choose
+  from a list instead of typing an exact model name; **Test & list models** re-checks
+  it after starting a different model. Optional **auto-describe** describes each
   photo as you move to it while the panel is open. The prompt includes salient photo
   metadata (time, camera, location) framed as *unverified* so the model trusts what it
   sees. Nothing is uploaded except to the endpoint you configure; results are kept in

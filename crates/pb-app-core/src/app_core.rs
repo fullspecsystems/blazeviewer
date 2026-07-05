@@ -333,6 +333,14 @@ pub struct AppCore {
     /// The last Help visibility the tick emitted a [`CoreEffect::PanelsChanged`] for,
     /// so the marker fires only on a real show/hide (not per tick).
     pub last_help_visible: bool,
+    /// The host presents the **empty-state Open panel** natively (task #54, mac-first):
+    /// the "no photos — open a file/folder" welcome surface. When set, the core
+    /// suppresses its HUD rasterization (so its buttons aren't hit-tested beneath a
+    /// native panel — fixes the cursor-through-Help glitch) and signals visibility via
+    /// [`CoreEffect::PanelsChanged`]. Default `false` (winit keeps the HUD panel).
+    pub native_open: bool,
+    /// The last empty-state visibility the tick signalled a marker for.
+    pub last_open_visible: bool,
     /// Whether the info panel is currently drawn.
     pub overlay_shown: bool,
     /// Which item the drawn panel was built for; when it differs from `displayed_item` the

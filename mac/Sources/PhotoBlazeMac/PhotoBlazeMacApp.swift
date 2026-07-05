@@ -100,6 +100,15 @@ struct ContentView: View {
             // excludes the titlebar there, so there's no inset to ignore).
             .ignoresSafeArea()
             .frame(minWidth: 520, minHeight: 360)
+            // The empty-state welcome surface (task #54): shown when no photos are
+            // loaded; hidden while Help is up (Help takes the center). A native view, so
+            // its buttons own their hover/click — no HUD hit-rect leaks under a panel.
+            .overlay(alignment: .center) {
+                if model.openPanelVisible && !model.helpVisible {
+                    EmptyStateView(model: model)
+                        .transition(.opacity)
+                }
+            }
             // Native rich panels (task #54, mac-first) layer over the canvas here. The
             // core suppresses their HUD rasterization, so there's no double-draw; the
             // panel receives its own pointer/scroll (SwiftUI hit-tests it above the

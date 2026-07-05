@@ -52,16 +52,29 @@ empty-state Open/Open-Folder buttons *through* an open Help panel — a SwiftUI 
 blocks clicks but not the canvas's `mouseMoved` tracking, so the HUD open-buttons under it
 still drive the cursor. Fixed by construction when those buttons go native (below).
 
+## Native empty-state Open panel — IMPLEMENTED (subtask 54.6, owner smoke pending)
+
+The empty-state CTA is now a native SwiftUI **welcome surface** (`EmptyStateView`): app
+icon + name, Open File (prominent) / Open Folder (bordered) buttons, essential-keys tips
+(Next/Previous/Random) reusing the Help keycaps, and a "See all shortcuts" link that opens
+Help. Same `native_open` suppress seam + `PanelsChanged` signal; adds the click-dispatch
+path (`menu_action` → `Action::OpenFile`/`OpenFolder`). **The cursor-through-panel glitch
+is fixed by construction** — `show_open_hint` no longer rasterizes a HUD panel on mac, so
+there's no open-button hit-rect under a native panel. New generic `action_shortcut(id)` FFI
+primitive so future welcome tips need no bespoke accessor. 546 tests, clippy, fmt, builds.
+
 ## Next (priority order)
 
-1. **macOS native empty-state Open panel** (subtask 54.6, owner call — the next native
-   element): the "Press O to open" + Open File / Open Folder buttons become a SwiftUI view
-   over the canvas via the same `native_*` seam + `PanelsChanged` signal, adding the
-   **click-dispatch path** (button → `Action::OpenFile`/`OpenFolder` via `menu_action`).
-   Fixes the cursor glitch; a good warm-up before the tree.
-2. **Replay harness** (finishes Phase 1): a headless `CoreEvent` replay over the corpus that
+1. **Replay harness** (finishes Phase 1): a headless `CoreEvent` replay over the corpus that
    dumps `StageTimes` p50/p95/p99 for hidden / panel-open+idle / panel-open+fly.
-3. **Phase 2:** the macOS folder tree as a flat SwiftUI `List` over `FolderTreePanel`, reusing
+2. **Phase 2:** the macOS folder tree as a flat SwiftUI `List` over `FolderTreePanel`, reusing
    the suppress-HUD seam + `PanelsChanged` (add `native_tree`) — and the general pointer-gating
-   (presenter reports its frame; canvas suppresses `pointerMoved` inside it). Then Phase 3
-   Inspector tabs. Plan: `.taskmaster/docs/hud-panels-plan.md`.
+   (presenter reports its frame; canvas suppresses `pointerMoved` inside it, so hovering a panel
+   over a zoomed photo doesn't show the grab cursor). Then Phase 3 Inspector tabs (input gating +
+   drag chrome). Plan: `.taskmaster/docs/hud-panels-plan.md`.
+
+## Welcome-surface growth ideas (owner-aligned, deferred)
+
+`EmptyStateView` is architected to grow (owner steer): a **Reopen [last folder]** quick action
+(via `settings.last_folder`, ADR-022 — a folder name is in-bounds), more/rotating tips, recent
+items. The `action_shortcut(id)` FFI already makes adding shortcut tips trivial.

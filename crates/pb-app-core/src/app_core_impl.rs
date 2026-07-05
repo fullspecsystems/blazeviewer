@@ -154,6 +154,8 @@ impl AppCore {
             panels: Panels::default(),
             native_help: false,
             last_help_visible: false,
+            native_open: false,
+            last_open_visible: false,
             overlay_shown: false,
             overlay_item: None,
             toast: None,
@@ -1054,13 +1056,20 @@ impl AppCore {
                 self.show_overlay();
             }
         }
-        // 4b. Native-panel visibility marker (task #54, mac-first): fire only on a real
-        // show/hide of the natively-presented Help panel, so the host re-pulls its model
-        // and shows/hides its SwiftUI view. Winit (`native_help == false`) never enters.
+        // 4b. Native-panel visibility markers (task #54, mac-first): fire only on a real
+        // show/hide of a natively-presented panel, so the host re-pulls its model and
+        // shows/hides its SwiftUI view. Winit (all `native_* == false`) never enters.
         if self.native_help {
             let vis = self.help_panel_visible();
             if vis != self.last_help_visible {
                 self.last_help_visible = vis;
+                self.emit_panels_changed();
+            }
+        }
+        if self.native_open {
+            let vis = self.open_panel_visible();
+            if vis != self.last_open_visible {
+                self.last_open_visible = vis;
                 self.emit_panels_changed();
             }
         }
@@ -1985,6 +1994,13 @@ impl AppCore {
         if self.scanning || self.launching {
             return;
         }
+        // The mac host presents the empty-state panel natively — don't rasterize the HUD
+        // one (and leave `open_panel` = None, so its buttons are never hit-tested under a
+        // native panel). The tick's visibility diff signals the host to show/hide it.
+        if self.native_open {
+            self.emit_panels_changed();
+            return;
+        }
         let Some((bitmap, w, h, file, folder)) = self.open_panel_bitmap() else {
             self.open_panel = None;
             return;
@@ -2775,6 +2791,14 @@ impl AppCore {
     /// `Tab`-hidden, and the host presents it natively.
     pub fn help_panel_visible(&self) -> bool {
         self.native_help && self.panels.help && !self.panels.hidden
+    }
+
+    /// Whether the **native** empty-state Open panel should be visible — the welcome
+    /// surface shown when no photos are loaded (and no scan is bootstrapping). The mac
+    /// host reads this (via FFI) to show/hide its SwiftUI view. Mirrors the HUD's
+    /// `open_hint_active` condition, gated on the native flag.
+    pub fn open_panel_visible(&self) -> bool {
+        self.native_open && self.source.is_empty() && !self.scanning && !self.launching
     }
 
     /// Push the [`CoreEffect::PanelsChanged`] marker so the host re-pulls the native
@@ -5356,6 +5380,32 @@ mod tests {
             .effects
             .iter()
             .any(|e| matches!(e, contract::CoreEffect::PanelsChanged)));
+    }
+
+    #[test]
+    fn native_open_suppresses_the_hud_and_signals() {
+        let mut core = test_core(); // headless → empty source
+        core.native_open = true;
+        assert!(
+            core.open_panel_visible(),
+            "an empty deck shows the native welcome surface"
+        );
+        // show_open_hint must not rasterize a HUD panel (so its buttons are never
+        // hit-tested beneath a native panel — the cursor fix).
+        core.show_open_hint();
+        assert!(core.open_panel.is_none(), "no HUD open panel was built");
+        // A tick signals the host on the visibility transition.
+        core.effects.clear();
+        core.handle(CoreEvent::Tick(std::time::Instant::now()));
+        assert!(
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::PanelsChanged)),
+            "the empty-state visibility change signals the host"
+        );
+        // With native_open off (winit), the same deck is not a native-visible panel.
+        core.native_open = false;
+        assert!(!core.open_panel_visible());
     }
 
     #[test]

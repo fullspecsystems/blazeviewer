@@ -32,7 +32,6 @@ use std::time::Instant;
 use pb_app_core::archive::ArchiveOpenError;
 use pb_app_core::contract::{self, CoreEvent, Modifiers};
 use pb_app_core::engine;
-use pb_app_core::overlay::OpenPanel;
 use pb_app_core::scan::{self, Resolved, ScanProgress, ScanUpdate};
 use pb_app_core::{Action, AppCore, PbKey, Viewport};
 use pb_core::open::{self, Cursor, LaunchInput, Source};
@@ -129,10 +128,12 @@ impl AppCoreHandle {
             height,
             scale_factor: scale,
         });
-        // This host presents the Help panel natively (task #54, mac-first): the core
-        // suppresses Help's HUD rasterization and signals via PanelsChanged. The tree
-        // and Inspector opt in with their own flags as their native presenters land.
+        // This host presents the Help panel + the empty-state Open panel natively
+        // (task #54, mac-first): the core suppresses their HUD rasterization and signals
+        // via PanelsChanged. The tree and Inspector opt in with their own flags as their
+        // native presenters land.
         core.native_help = true;
+        core.native_open = true;
         AppCoreHandle {
             core,
             dir_scan: None,
@@ -170,6 +171,22 @@ impl AppCoreHandle {
     /// Whether the native SwiftUI Help view should be shown (Help open, not Tab-hidden).
     fn help_visible(&self) -> bool {
         self.core.help_panel_visible()
+    }
+
+    /// Whether the native empty-state Open panel should be shown (no photos loaded).
+    fn open_panel_visible(&self) -> bool {
+        self.core.open_panel_visible()
+    }
+
+    /// The user-facing shortcut label for an action by its stable id (`"open_file"`,
+    /// `"next"`, `"help"`, …) — the mac-symbol form (e.g. "⇧ O"), or "" if the id is
+    /// unknown or the action is unbound. A generic primitive so native panels can show
+    /// any binding (the empty-state welcome tips, and future surfaces) without a
+    /// bespoke accessor each.
+    fn action_shortcut(&self, id: &str) -> String {
+        Action::from_id(id)
+            .map(|a| self.core.help_shortcut(a))
+            .unwrap_or_default()
     }
 
     fn help_row_count(&self) -> usize {
@@ -1131,17 +1148,16 @@ impl AppCoreHandle {
             .effects
             .push(contract::CoreEffect::SetTitle(title));
         self.core.request_prefetch();
-        // Empty deck (bare launch): blank letterbox + the centered Open File / Open
-        // Folder call to action.
+        // Empty deck (bare launch): blank letterbox + the Open File / Open Folder call
+        // to action. `show_open_hint` suppresses the HUD panel and signals the native
+        // welcome surface when the host presents it natively (native_open, task #54),
+        // else draws the HUD panel — so attach never leaves a ghost HUD panel under the
+        // native view.
         if self.core.playlist.current().is_none() {
-            let panel = self.core.open_panel_bitmap();
             if let Some(r) = self.core.renderer.as_mut() {
                 r.clear_image();
-                if let Some((bitmap, w, h, file, folder)) = panel {
-                    r.set_message(Some((&bitmap, w, h)));
-                    self.core.open_panel = Some(OpenPanel { w, h, file, folder });
-                }
             }
+            self.core.show_open_hint();
         }
     }
 
@@ -2039,6 +2055,11 @@ mod ffi {
         fn help_row_is_header(&self, i: usize) -> bool;
         fn help_row_text(&self, i: usize) -> String;
         fn help_row_shortcut(&self, i: usize) -> String;
+
+        // The native empty-state Open panel (task #54): its visibility, plus a generic
+        // shortcut lookup by Action id for the welcome surface's tips.
+        fn open_panel_visible(&self) -> bool;
+        fn action_shortcut(&self, id: &str) -> String;
 
         // The NS2 dialog seam: payload pulls (after a ShowDialog marker), the
         // DialogResolved results (one entry point per user gesture), the live progress
