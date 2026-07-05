@@ -223,9 +223,6 @@ struct SettingsView: View {
                     "Background (light)", selection: $draft.letterboxLight, supportsOpacity: false
                 )
                 labeledSlider(
-                    "Info panel opacity", value: $draft.infoOpacity, in: 0...100, format: "%.0f%%"
-                )
-                labeledSlider(
                     "Panel opacity", value: $draft.panelOpacity, in: 50...100, format: "%.0f%%"
                 )
                 Picker("File info position", selection: $draft.infoLineAlign) {
