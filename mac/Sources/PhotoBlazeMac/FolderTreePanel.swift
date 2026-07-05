@@ -42,9 +42,16 @@ struct FolderTreePanelView: View {
                 Text("Folders")
                     .font(.headline)
                 Spacer()
+                Button(action: { model.closeTree() }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                        .imageScale(.large)
+                }
+                .buttonStyle(.plain)
+                .help("Close (⇧F)")
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 11)
+            .padding(.vertical, 10)
 
             Rectangle()
                 .fill(Color.primary.opacity(0.08))

@@ -11,13 +11,13 @@ with any pre-release suffix carried only by the tag.
 - **Native folder tree on macOS** — the **⇧F** folder tree (the current photo's folder in
   its hierarchy — up, root, ancestors, siblings, children) is now a native SwiftUI list on
   the left edge instead of an on-image overlay: crisp text, folder icons, photo-count
-  badges, the current folder highlighted, and it scrolls — so a big folder shows every
-  entry (no more "… n more" paging). Click any folder to jump there.
+  badges, the current folder highlighted, a **✕** to close, and it scrolls — so a big
+  folder shows every entry (no more "… n more" paging). Click any folder to jump there.
 - **Native Inspector panel on macOS** — Details, Text, and Describe are now one tabbed
-  macOS panel (an inspector on the trailing edge) instead of three separate on-image
-  overlays: crisp native text, a segmented **Details / Text / Describe** tab bar to switch
-  facets, selectable values you can copy, and a **✕** to close. It stays live — switching
-  photos, or waiting on OCR / an AI description, updates the open panel in place.
+  macOS panel (top-right, parallel to the folder tree) instead of three separate on-image
+  overlays: crisp native text, an **icon + label** tab bar for Details / Text / Describe,
+  selectable values you can copy, and a **✕** to close. AI descriptions render **Markdown**.
+  It stays live — switching photos, or waiting on OCR / an AI description, updates in place.
 - **Redesigned welcome screen on macOS** — with no photos open, the window shows clean
   **Open File** / **Open Folder** buttons (each with its shortcut key), a few essential
   keys (Next / Previous / Random), and a **Show Shortcuts** link that opens the keyboard

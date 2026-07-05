@@ -137,8 +137,8 @@ pub enum DescribeBody {
     Idle,
     /// The vision backend is generating.
     Busy,
-    /// The description (or the Ask answer) — plain prose after the interim
-    /// `markdown_to_plain` stopgap; Markdown rendering arrives with the presenter.
+    /// The description (or the Ask answer) — the model's raw text, which may be
+    /// Markdown. The native presenter renders it as Markdown; the HUD shows it as-is.
     Ready(String),
     /// The backend failed (misconfigured endpoint, refusal, transport error).
     /// Pressing `D` again retries — a cached error is cleared on the explicit key.

@@ -531,6 +531,11 @@ final class CoreModel {
         kick()
     }
 
+    /// Close the folder tree from its ✕ — the same toggle ⇧F drives (menu checkmark follows).
+    func closeTree() {
+        menuAction("folder_tree")
+    }
+
     // MARK: - Empty-state panel actions (task #54)
 
     /// Open File / Open Folder from the welcome surface — the same commands as the menu

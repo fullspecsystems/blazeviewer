@@ -128,8 +128,9 @@ struct ContentView: View {
                     .transition(.opacity)
                 }
             }
-            // The Inspector rides the trailing edge like a sidebar (Help is mutually
-            // exclusive with it in the core, so they never co-show). GeometryReader hands
+            // The Inspector rides the top-trailing corner (parallel to the folder tree,
+            // and top-anchored so switching tabs doesn't shift it). Help is mutually
+            // exclusive with it in the core, so they never co-show. GeometryReader hands
             // it the available height for fit-to-content-then-scroll.
             .overlay {
                 if model.inspectorVisible {
@@ -137,9 +138,10 @@ struct ContentView: View {
                         InspectorPanelView(model: model, maxHeight: geo.size.height - 48)
                             .frame(
                                 maxWidth: .infinity, maxHeight: .infinity,
-                                alignment: .trailing
+                                alignment: .topTrailing
                             )
                             .padding(.trailing, 24)
+                            .padding(.top, 24)
                     }
                     .transition(.opacity)
                 }

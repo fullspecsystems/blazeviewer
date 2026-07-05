@@ -1,15 +1,16 @@
 // The native Inspector panel (task #54, ADR-023) — the single tabbed content panel that
 // replaces the HUD's separate Info / Text / Describe overlays: Details (full EXIF), Text
-// (recognized text + QR), Describe (the AI description). The core owns the state machine
-// (which tab, when to scan) and the semantic rows; this view renders the active tab's
-// rows (flattened over FFI as typed `(kind, a, b)` rows) with the same chrome + keycap
-// language as the Help panel. Tab switches and ✕ close route back to the core, which
-// re-signals `PanelsChanged` — including when an async OCR / describe result lands.
+// (recognized text + QR), Describe (the AI description, rendered as Markdown). The core
+// owns the state machine (which tab, when to scan) and the semantic rows; this view
+// renders the active tab's rows (flattened over FFI as typed `(kind, a, b)` rows). The
+// tab bar doubles as the header (no redundant "Inspector" title) with an inline ✕; tab
+// switches and ✕ route back to the core, which re-signals `PanelsChanged` — including when
+// an async OCR / describe result lands.
 
 import SwiftUI
 
 /// Measures the content's natural height so the panel fits its content up to the window's
-/// available height, then scrolls (mirrors the Help panel).
+/// available height, then scrolls.
 private struct InspectorContentHeight: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
@@ -18,9 +19,9 @@ private struct InspectorContentHeight: PreferenceKey {
 }
 
 /// One flattened Inspector row. `kind`: 0 header (bold span — filename / section title),
-/// 1 label/value pair (metadata), 2 body paragraph (OCR / description prose), 3 status
-/// (muted — "Reading text…", "Press D to describe", errors). `a` = header/body/status
-/// text or the pair label; `b` = the pair value (empty otherwise).
+/// 1 label/value pair (metadata), 2 body paragraph (OCR text, or Describe prose rendered
+/// as Markdown), 3 status (muted — "Reading text…", "Press D to describe", errors). `a` =
+/// header/body/status text or the pair label; `b` = the pair value (empty otherwise).
 struct InspectorRow: Identifiable {
     let id: Int
     let kind: Int
@@ -28,9 +29,9 @@ struct InspectorRow: Identifiable {
     let b: String
 }
 
-/// The floating Inspector card: a titled panel with a segmented tab bar (Details / Text /
-/// Describe) over the active tab's scrollable rows. Sits on the trailing edge like an
-/// inspector sidebar; its content is selectable so any value can be copied.
+/// The floating Inspector card: a custom icon+text tab bar (Details / Text / Describe)
+/// with an inline ✕, over the active tab's scrollable rows. Top-right anchored (parallel
+/// to the folder tree, no layout shift on tab switch); content is selectable.
 struct InspectorPanelView: View {
     let model: CoreModel
     /// The available height the overlay grants (window height minus insets). The panel
@@ -39,8 +40,8 @@ struct InspectorPanelView: View {
 
     @State private var contentHeight: CGFloat = 0
 
-    /// Title bar + tab bar + grooves — subtracted from `maxHeight` for the scroll budget.
-    private let chromeHeight: CGFloat = 92
+    /// Tab bar + groove — subtracted from `maxHeight` for the scroll budget.
+    private let chromeHeight: CGFloat = 54
 
     private var scrollHeight: CGFloat {
         let available = max(140, maxHeight - chromeHeight)
@@ -48,17 +49,14 @@ struct InspectorPanelView: View {
         return min(content, available)
     }
 
-    private var tabSelection: Binding<Int> {
-        Binding(get: { model.inspectorTab }, set: { model.showInspectorTab($0) })
-    }
-
     var body: some View {
         VStack(spacing: 0) {
-            // Title bar with the in-band ✕ dismiss.
-            HStack {
-                Text("Inspector")
-                    .font(.headline)
-                Spacer()
+            // The tab bar is the header: three facets + an inline ✕ dismiss.
+            HStack(spacing: 4) {
+                tab(0, "Details", "info.circle")
+                tab(1, "Text", "text.viewfinder")
+                tab(2, "Describe", "sparkles")
+                Spacer(minLength: 4)
                 Button(action: { model.closeInspector() }) {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundStyle(.secondary)
@@ -67,20 +65,8 @@ struct InspectorPanelView: View {
                 .buttonStyle(.plain)
                 .help("Close")
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 12)
-            .padding(.bottom, 10)
-
-            // Tab bar: the three facets of "tell me about this image".
-            Picker("", selection: tabSelection) {
-                Text("Details").tag(0)
-                Text("Text").tag(1)
-                Text("Describe").tag(2)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding(.horizontal, 16)
-            .padding(.bottom, 12)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
 
             Rectangle()
                 .fill(Color.primary.opacity(0.08))
@@ -121,6 +107,32 @@ struct InspectorPanelView: View {
         .shadow(radius: 24, y: 8)
     }
 
+    /// A tab: icon + label, the selected one lifted with a translucent accent tint (a
+    /// material-friendly pill, not a solid segmented-control track) so it blends with the
+    /// panel's material.
+    private func tab(_ index: Int, _ label: String, _ icon: String) -> some View {
+        let selected = model.inspectorTab == index
+        return Button(action: { model.showInspectorTab(index) }) {
+            HStack(spacing: 5) {
+                Image(systemName: icon)
+                Text(label)
+            }
+            .font(.callout)
+            .fontWeight(selected ? .semibold : .regular)
+            .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background {
+                if selected {
+                    RoundedRectangle(cornerRadius: 7)
+                        .fill(Color.accentColor.opacity(0.15))
+                }
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain)
+    }
+
     @ViewBuilder
     private func rowView(_ row: InspectorRow) -> some View {
         switch row.kind {
@@ -150,11 +162,24 @@ struct InspectorPanelView: View {
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         default:
-            // A body paragraph (OCR text / description prose).
-            Text(row.a)
+            // A body paragraph. Describe prose is Markdown; OCR text is literal.
+            bodyText(row.a)
                 .font(.callout)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)
         }
+    }
+
+    /// The Describe tab renders its prose as Markdown (inline emphasis + preserved
+    /// paragraph breaks); every other body (OCR text) stays literal.
+    private func bodyText(_ s: String) -> Text {
+        guard model.inspectorTab == 2,
+            let attributed = try? AttributedString(
+                markdown: s,
+                options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
+        else {
+            return Text(s)
+        }
+        return Text(attributed)
     }
 }
