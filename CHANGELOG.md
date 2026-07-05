@@ -106,6 +106,10 @@ with any pre-release suffix carried only by the tag.
   step between the archive's sibling folders.
 
 ### Changed
+- **Scanning a large folder no longer blocks you with a modal dialog.** On macOS a slow
+  folder walk used to pop a modal "Scanning…" dialog. Now a compact, non-blocking pill sits
+  at the top-center — "Scanning *Folder* · N found" plus the sub-folder being walked, with a
+  **Cancel** — so you keep browsing the photos already streaming in while the rest scans.
 - **A folder's own photos now come before its subfolders' photos** (files-before-folders),
   instead of interleaving them by name. So browsing — and previous/next folder (⌘←/→) —
   finishes a folder's photos and *then* descends into its subfolders, reading the way the

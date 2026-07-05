@@ -45,6 +45,15 @@ final class CoreModel {
     private(set) var scanFound = 0
     private(set) var scanCurrentDir = ""
 
+    /// The ambient scan pill (task #54, ④): a non-blocking, top-center progress element that
+    /// replaces the modal Scanning dialog and the old in-canvas chip — you keep browsing the
+    /// photos already streaming in while the rest of a big folder scans. Refreshed each pump
+    /// (a scan keeps the pump running) from the Rust worker handle.
+    private(set) var scanPillVisible = false
+    private(set) var scanPillName = ""
+    private(set) var scanPillFound = 0
+    private(set) var scanPillCurrent = ""
+
     // MARK: - Native rich panels (task #54, mac-first) — the first is Help
 
     /// Whether the native SwiftUI Help panel should show, and its sections — refreshed
@@ -832,6 +841,14 @@ final class CoreModel {
         drainEffects()
     }
 
+    /// The ambient scan pill's (④) Cancel — stop the walk but keep everything that already
+    /// streamed in (a "Scan stopped" toast confirms). Refresh so the pill hides at once.
+    func scanPillCancel() {
+        core.scan_pill_cancel()
+        scanPillVisible = false
+        drainEffects()
+    }
+
     // MARK: - Settings (NS2 item 5)
 
     /// The current settings as the flat form the Settings window binds to.
@@ -991,6 +1008,17 @@ final class CoreModel {
             progressFraction = Double(p.fraction)
             scanFound = Int(p.found)
             scanCurrentDir = p.current_dir.toString()
+        }
+        // The ambient scan pill (④): mirror the in-flight walk's live progress. Cheap reads
+        // off the worker handle; `scanPillVisible` gates them (false when no scan is running).
+        let pillVisible = core.scan_pill_visible()
+        if pillVisible {
+            scanPillName = core.scan_pill_name().toString()
+            scanPillFound = Int(core.scan_pill_found())
+            scanPillCurrent = core.scan_pill_current().toString()
+        }
+        if pillVisible != scanPillVisible {
+            withAnimation(.easeInOut(duration: 0.2)) { scanPillVisible = pillVisible }
         }
         updatePacing()
     }

@@ -929,6 +929,58 @@ impl AppCoreHandle {
         ));
     }
 
+    // ── The ambient scan pill (④): a non-blocking, top-center native progress element that
+    // replaces the modal Scanning dialog AND the in-canvas HUD chip on this host. The host
+    // polls these each pump while a scan is in flight; they read the Rust-side worker handle
+    // directly (no core state), and cover both the pre- and post-bootstrap phases. ──
+
+    /// Whether the ambient scan pill should show: a walk is in flight and has outlasted the
+    /// reveal delay (a fast folder never flashes a pill).
+    fn scan_pill_visible(&self) -> bool {
+        self.dir_scan
+            .as_ref()
+            .is_some_and(|s| s.started.elapsed() >= SCAN_DIALOG_DELAY)
+    }
+
+    /// The scanned folder's display name (the pill's headline).
+    fn scan_pill_name(&self) -> String {
+        self.dir_scan
+            .as_ref()
+            .map(|s| s.name.clone())
+            .unwrap_or_default()
+    }
+
+    /// Images found so far (the pill's live count).
+    fn scan_pill_found(&self) -> i64 {
+        self.dir_scan
+            .as_ref()
+            .map(|s| s.progress.found() as i64)
+            .unwrap_or(0)
+    }
+
+    /// The sub-folder currently being walked (blank while it's still the root, which would
+    /// just duplicate the headline).
+    fn scan_pill_current(&self) -> String {
+        match self.dir_scan.as_ref() {
+            Some(s) => {
+                let cur = s.progress.current();
+                if cur == s.name {
+                    String::new()
+                } else {
+                    cur
+                }
+            }
+            None => String::new(),
+        }
+    }
+
+    /// The pill's Cancel — stop the walk but **keep what streamed in** (File ▸ Stop Scanning's
+    /// path: cancel, resume prefetch, "Scan stopped" toast). Never blanks the current view.
+    fn scan_pill_cancel(&mut self) {
+        self.core.now = Instant::now();
+        self.cancel_scan_command();
+    }
+
     /// The Settings window closed. Edits were already applied live (`settings_edited` /
     /// `keymap_commit`), so this only drops the Shortcuts draft and clears the core's
     /// dialog-open state (the Cancel reaction — close, nothing further to apply).
@@ -1354,18 +1406,11 @@ impl AppCoreHandle {
     /// walk ends. Show/hide is immediate; a content tick (folder/count) is throttled by
     /// [`SCAN_CARD_REFRESH`] so the software composite stays off the hot path.
     fn tick_chip(&mut self) {
-        let want = match (self.dir_scan.as_ref(), self.core.displayed_item) {
-            (Some(scan), Some(_))
-                if self.core.scan_bootstrapped && scan.started.elapsed() >= SCAN_DIALOG_DELAY =>
-            {
-                // Current folder being walked; hide it while it's just the root (it would
-                // duplicate the heading).
-                let cur = scan.progress.current();
-                let path = if cur == scan.name { String::new() } else { cur };
-                Some((scan.name.clone(), path, self.core.source.len()))
-            }
-            _ => None,
-        };
+        // ④ The ambient scan pill (native SwiftUI, top-center) replaces the in-canvas HUD
+        // scan chip on this host, and it covers both the pre- and post-bootstrap phases —
+        // so never build the chip here. Keep the clear path so any previously-drawn chip
+        // (e.g. from before this landed in a session) is torn down.
+        let want: Option<(String, String, usize)> = None;
         if want == self.core.chip_sig {
             return;
         }
@@ -1762,25 +1807,10 @@ impl AppCoreHandle {
                     return;
                 }
                 Err(TryRecvError::Empty) => {
-                    // Still scanning with nothing on screen yet: once the walk has
-                    // outlasted the reveal delay, show the Scanning dialog (live count +
-                    // current folder + Cancel) — winit's deferred reveal, same gates: never
-                    // over an already-shown photo, never stealing another dialog.
-                    let reveal = !self.core.scan_bootstrapped
-                        && self.shown_dialog.is_none()
-                        && self
-                            .dir_scan
-                            .as_ref()
-                            .is_some_and(|s| s.started.elapsed() >= SCAN_DIALOG_DELAY);
-                    if reveal {
-                        if let Some(s) = self.dir_scan.as_ref() {
-                            self.dialog_message =
-                                format!("Scanning \u{201c}{}\u{201d}\u{2026}", s.name);
-                            self.core.effects.push(contract::CoreEffect::ShowDialog(
-                                contract::DialogKind::Scanning,
-                            ));
-                        }
-                    }
+                    // Nothing more queued this tick. The ambient scan pill (④, native
+                    // top-center) shows non-blocking progress instead of a modal Scanning
+                    // dialog — it's driven by the `scan_pill_*` accessors + the Swift pump,
+                    // so there's nothing to reveal here.
                     return;
                 }
                 Err(TryRecvError::Disconnected) => {
@@ -2439,6 +2469,11 @@ mod ffi {
         fn ask_submitted(&mut self, question: String);
         fn loading_cancelled(&mut self);
         fn scanning_cancelled(&mut self);
+        fn scan_pill_visible(&self) -> bool;
+        fn scan_pill_name(&self) -> String;
+        fn scan_pill_found(&self) -> i64;
+        fn scan_pill_current(&self) -> String;
+        fn scan_pill_cancel(&mut self);
         fn settings_closed(&mut self);
         fn dialog_progress(&self) -> DialogProgressFfi;
         fn settings_form(&self) -> SettingsFormFfi;

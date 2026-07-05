@@ -155,6 +155,17 @@ struct ContentView: View {
                     .transition(.opacity)
                 }
             }
+            // The ambient scan pill (④) rides the top-center, above the canvas and the
+            // corner panels but below Help — non-blocking, so you browse the streamed-in
+            // photos while it walks. Shown only past the reveal delay (no flash on a fast
+            // folder). Ignores the safe area so it clears the transparent titlebar strip.
+            .overlay(alignment: .top) {
+                if model.scanPillVisible {
+                    ScanPillView(model: model)
+                        .padding(.top, 16)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
             // Help last = topmost: it's an ephemeral reference sheet centered over the
             // photo, so it should occlude the tree/inspector (which it overlaps) rather
             // than slide under them.
