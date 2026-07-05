@@ -26,8 +26,9 @@ struct EmptyStateView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Primary actions — equal-weight (neither emphasized), each carrying its key.
-            HStack(spacing: 12) {
+            // Primary actions — equal-weight (neither emphasized), each carrying its key;
+            // stacked vertically so the two pills line up.
+            VStack(spacing: 10) {
                 openButton("Open File", icon: "doc", key: model.shortcut("open_file")) {
                     model.openFile()
                 }
