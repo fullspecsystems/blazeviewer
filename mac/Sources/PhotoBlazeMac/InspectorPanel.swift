@@ -52,14 +52,20 @@ struct InspectorPanelView: View {
     var body: some View {
         VStack(spacing: 0) {
             // The tab bar is the header: three facets + an inline ✕ dismiss.
-            HStack(spacing: 4) {
-                tab(0, "Details", "info.circle")
-                tab(1, "Text", "text.viewfinder")
-                tab(2, "Describe", "sparkles")
-                Spacer(minLength: 4)
+            HStack(spacing: 10) {
+                // A segmented control: equal-width segments in a subtle track, the
+                // selected one filled solid-accent with white text (the idiomatic macOS
+                // selected-segment look — high contrast, and the fill can't wash out).
+                HStack(spacing: 2) {
+                    tab(0, "Details", "info.circle")
+                    tab(1, "Text", "text.viewfinder")
+                    tab(2, "Describe", "sparkles")
+                }
+                .padding(2)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
                 Button(action: { model.closeInspector() }) {
                     Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.primary)
+                        .foregroundStyle(Color.panelSecondary)
                         .imageScale(.large)
                 }
                 .buttonStyle(.plain)
@@ -108,30 +114,26 @@ struct InspectorPanelView: View {
         .arrowCursorOnHover()
     }
 
-    /// A tab: icon + label, the selected one lifted with a translucent accent tint (a
-    /// material-friendly pill, not a solid segmented-control track) so it blends with the
-    /// panel's material.
+    /// One segment: icon + label, equal-width. Selected → solid-accent fill + white text
+    /// (idiomatic, high contrast); unselected → the dim panel-secondary. Constant weight,
+    /// so the segment never resizes when it becomes active.
     private func tab(_ index: Int, _ label: String, _ icon: String) -> some View {
         let selected = model.inspectorTab == index
-        // Constant weight (no bold-on-select) so the tab doesn't resize when active — the
-        // accent color + pill carry the selection. Solid colors so labels/icons stay
-        // legible over the panel material with bright content behind it.
         return Button(action: { model.showInspectorTab(index) }) {
-            HStack(spacing: 5) {
+            HStack(spacing: 4) {
                 Image(systemName: icon)
                 Text(label)
             }
             .font(.callout)
-            .foregroundStyle(selected ? Color.accentColor : Color.primary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
+            .foregroundStyle(selected ? Color.white : Color.panelSecondary)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 4)
             .background {
                 if selected {
-                    RoundedRectangle(cornerRadius: 7)
-                        .fill(Color.accentColor.opacity(0.15))
+                    RoundedRectangle(cornerRadius: 6).fill(Color.accentColor)
                 }
             }
-            .contentShape(RoundedRectangle(cornerRadius: 7))
+            .contentShape(RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.plain)
     }
@@ -151,7 +153,7 @@ struct InspectorPanelView: View {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(row.a)
                     .font(.callout)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.panelSecondary)
                     .frame(width: 116, alignment: .leading)
                 Text(row.b)
                     .font(.callout)
@@ -162,7 +164,7 @@ struct InspectorPanelView: View {
             // A muted status line (scanning / idle / error).
             Text(row.a)
                 .font(.callout)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.panelSecondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         default:
             // A body paragraph. Describe prose is Markdown; OCR text is literal.

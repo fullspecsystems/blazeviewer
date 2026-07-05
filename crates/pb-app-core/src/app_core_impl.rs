@@ -4799,16 +4799,19 @@ impl AppCore {
                 });
             }
         }
-        // Cap to what fits the screen height (~1.5x the font size per line).
-        if let Some(fit) = self.fit {
-            let line_h = ((15.0 * self.viewport.scale_factor).max(8.0) * 1.5).max(1.0);
-            let max_rows = (((fit.max_height as f32) - 40.0) / line_h).max(1.0) as usize;
-            if rows.len() > max_rows {
-                rows.truncate(max_rows.saturating_sub(1));
-                rows.push(DetailRow::Span {
-                    text: "…".to_string(),
-                    bold: false,
-                });
+        // Cap to what fits the screen height (~1.5x the font size per line) — for the
+        // fixed-height HUD table only. The native Inspector scrolls, so it shows every row.
+        if !self.native_inspector {
+            if let Some(fit) = self.fit {
+                let line_h = ((15.0 * self.viewport.scale_factor).max(8.0) * 1.5).max(1.0);
+                let max_rows = (((fit.max_height as f32) - 40.0) / line_h).max(1.0) as usize;
+                if rows.len() > max_rows {
+                    rows.truncate(max_rows.saturating_sub(1));
+                    rows.push(DetailRow::Span {
+                        text: "…".to_string(),
+                        bold: false,
+                    });
+                }
             }
         }
         rows

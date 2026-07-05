@@ -385,8 +385,12 @@ impl AppCoreHandle {
         let mut rows: Vec<TreeRowFfi> = Vec::new();
         if self.core.tree_is_fs() {
             // A leading "up to <parent>" row (climbs a level on click), when not at the
-            // filesystem root — the in-list affordance replacing a header button.
-            if let Some(parent) = self.core.fs_tree_parent_name() {
+            // filesystem root — the in-list affordance replacing a header button. It sits
+            // at depth 0 (a level *above* the root), so the root + its subtree shift one
+            // indent right, reflecting the hierarchy.
+            let parent = self.core.fs_tree_parent_name();
+            let shift = if parent.is_some() { 1 } else { 0 };
+            if let Some(parent) = parent {
                 rows.push(TreeRowFfi {
                     name: parent,
                     depth: 0,
@@ -403,7 +407,7 @@ impl AppCoreHandle {
             for r in self.core.fs_tree_rows() {
                 rows.push(TreeRowFfi {
                     name: r.name,
-                    depth: r.depth,
+                    depth: r.depth + shift,
                     is_current: r.is_current,
                     count: r.count.map(|c| c as i64).unwrap_or(-1),
                     has_children: r.has_children,

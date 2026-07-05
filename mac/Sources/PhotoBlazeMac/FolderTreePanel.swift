@@ -46,7 +46,7 @@ struct FolderTreePanelView: View {
                 Spacer()
                 Button(action: { model.closeTree() }) {
                     Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.primary)
+                        .foregroundStyle(Color.panelSecondary)
                         .imageScale(.large)
                 }
                 .buttonStyle(.plain)
@@ -100,7 +100,7 @@ struct FolderTreePanelView: View {
                     // Solid (not `.secondary`) so folder glyphs stay legible over the
                     // translucent panel material when bright photo content is behind it.
                     Image(systemName: icon(row))
-                        .foregroundStyle(row.isCurrent ? Color.accentColor : .primary)
+                        .foregroundStyle(row.isCurrent ? Color.accentColor : Color.panelSecondary)
                         .frame(width: 16)
                     Text(row.name)
                         .lineLimit(1)
@@ -138,7 +138,7 @@ struct FolderTreePanelView: View {
             Button(action: { model.toggleTreeRow(row.id) }) {
                 Image(systemName: "chevron.right")
                     .font(.caption2)
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(Color.panelSecondary)
                     .rotationEffect(.degrees(row.expanded ? 90 : 0))
                     .frame(width: 16, height: 16)
                     .contentShape(Rectangle())
