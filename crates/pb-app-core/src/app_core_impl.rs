@@ -2069,6 +2069,9 @@ impl AppCore {
     /// by construction (archive folders derive from image entry names); the
     /// row's ends toast the same way. Silent no-op with nothing open.
     pub fn open_sibling_cmd(&mut self, dir: i32) {
+        // Stepping to a sibling folder ends an Open-Parent (⌘↑) climb — the next ⌘↑ restarts
+        // from the folder you land on, not the stale climb rung.
+        self.climb_anchor = None;
         if let Some(scope) = &self.archive_scope {
             let full = Arc::clone(&scope.full);
             let names = (0..full.len()).map(|i| full.name(i));
@@ -2470,6 +2473,11 @@ impl AppCore {
     /// Advance one photo (sequential or random). The gated engine path: present on
     /// a ring hit, else hold the previous frame + prefetch while the decode lands.
     pub fn advance(&mut self, nav: Nav) {
+        // Any in-deck navigation ends an Open-Parent (⌘↑) climb: the next ⌘↑ must restart
+        // from the folder you navigated to, not resume from the stale climb rung (which would
+        // surprise-jump to a near-root folder). All photo nav — Next/Prev/Random and the
+        // hold-to-fly re-advance — funnels through here.
+        self.climb_anchor = None;
         // Settle a deferred delete-advance before navigating, so a keypress during the
         // brief post-delete delay lands cleanly on the rebuilt playlist (no yank-back).
         self.flush_pending_delete();
@@ -6655,7 +6663,14 @@ mod tests {
         );
         assert_eq!(core.climb_anchor, Some(base.join("a")));
 
-        // Any other open resets the climb — the next ⌘↑ starts from the current folder again.
+        // In-deck navigation ends the climb too (not just an explicit open): a stale rung
+        // would surprise-jump ⌘↑ to a near-root folder after the user browsed elsewhere.
+        assert_eq!(core.climb_anchor, Some(base.join("a")));
+        core.advance(Nav::Forward);
+        assert_eq!(core.climb_anchor, None, "a photo advance ends the climb");
+
+        // And an explicit open resets it as well — the next ⌘↑ starts from the current folder.
+        core.climb_anchor = Some(base.join("a"));
         core.open_plan(
             pb_core::open::Source::Explicit(vec![deep.join("1.png")]),
             pb_core::open::Cursor::First,
