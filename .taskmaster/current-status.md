@@ -48,15 +48,18 @@ RAM-only `FsTree`. Up-affordance row (outdented parent). Siblings at every level
   browse the streamed-in photos while it scans). Confirmed scope = the folder/archive open
   scan (not the Inspector's OCR/describe states). Pairs with ③.
 
-## ⚠ Needs a design rethink (owner, 2026-07-05): ⌘←/⌘→ folder nav
+## ⌘←/⌘→ folder nav — REDESIGNED (owner, 2026-07-05)
 
-The deck-root-anchor **bug** is fixed (`3f9dff1`) — it now anchors on the current folder and
-jumps within the deck to the adjacent **peer** folder's first photo. But the owner still finds
-the behavior "very weird" and wants to **put real thought into what ⌘←/→ should do**. Open
-questions: peer-only (same parent) vs. traverse-all-folders-in-deck-order; how it interacts
-with the tree's highlight; the single-folder / edge fallback (currently a disk re-root). Do
-**not** just tweak — redesign with the owner. Code: `open_sibling_cmd` /
-`adjacent_sibling_item` in `app_core_impl.rs`.
+Two root causes found + fixed: (1) it anchored on the deck **root**, not the current folder
+(`3f9dff1`); (2) the scan sorted **case-sensitively** (raw bytes), so the deck order desynced
+from the tree (`2a495a3` — now case-insensitive `ci_path_cmp`, matching the tree/Finder).
+Then the **model** was reworked to the owner's mental model (`78764d5`): **"next photo, but by
+folder"** — step to the next/previous folder **boundary in the deck's tree-ordered sequence**
+(enter subfolders, walk siblings, climb up), landing on that folder's first photo. In-deck,
+instant, can't dead-end. `adjacent_folder_item` in `app_core_impl.rs`; single-folder decks
+fall back to the disk sibling search. **Still open (minor, owner to eyeball):** the ⌘←
+"start of previous run" convention (vs. "rewind to current folder's start first"); and
+**natural/numeric sort** (img2 before img10) is a separate deferred enhancement.
 
 ## Known follow-ups (deferred, not lost)
 
