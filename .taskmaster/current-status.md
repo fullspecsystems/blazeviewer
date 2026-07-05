@@ -45,14 +45,20 @@ RAM-only `FsTree`. Up-affordance row (outdented parent). Siblings at every level
 - **② Wire behind native path — DONE**: `AppCore::fs_tree` + `fs_tree_io`; tick kicks
   off-thread reads + installs; FFI snapshot (`tree_uses_fs`, `tree_toggle`, chevron rows);
   SwiftUI outline. Disk decks only; archive/empty keep the v1 flat scoped list.
-- **③ Keep-deck-until-photos — TODO**: opening a folder still tears the current deck down
-  immediately (brief empty gap during its scan). Keep the current deck alive until the new
-  folder yields its first frame; empty → "No photos in *Foo*" toast, deck intact. This is the
-  anti-"stuck" safety.
-- **④ Ambient cancellable scan pill — TODO**: the folder/archive open scan becomes a
-  non-blocking **top-center** SwiftUI element with a **Cancel** (owner: not a blocking modal —
-  browse the streamed-in photos while it scans). Confirmed scope = the folder/archive open
-  scan (not the Inspector's OCR/describe states). Pairs with ③.
+- **③ Keep-deck-until-photos — DONE** (`94a7e8d`): the deck was *already* kept (nothing blanks
+  the current photo at scan start; it holds until the new folder's first batch). The real
+  friction was macOS raising a **blocking "No supported images" NSAlert** on an empty folder
+  (winit just logged). New core `scan_found_no_photos` → a non-modal **"No photos in *Foo*"
+  toast** when a deck is up (quiet on a bare launch → the open hint covers it); both shells'
+  scan-`Done` arms call it. A mis-click into an empty/deep folder no longer interrupts.
+- **④ Ambient cancellable scan pill — DONE** (`c16a54c`, mac only): replaced the blocking
+  Scanning modal **and** the in-canvas HUD chip with one native **top-center pill** —
+  "Scanning *Folder* · N found" + sub-folder + **Cancel** (keeps the partial). Non-blocking;
+  shown only past the reveal delay. FFI `scan_pill_*` accessors off the `dir_scan` handle;
+  `poll_dir_scan` no longer reveals the modal; `tick_chip` neutralized. Winit keeps its
+  modal+chip. _Archive (7z) load stays a modal Loading sheet — it's eager decode-to-RAM with
+  no random access, so there's nothing to browse mid-load; a ZIP-streaming pill is a possible
+  follow-up._
 
 ## ⌘←/⌘→ folder nav — REDESIGNED (owner, 2026-07-05)
 
