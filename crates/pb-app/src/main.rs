@@ -472,6 +472,9 @@ impl App {
                 overlay_shown: false,
                 overlay_item: None,
                 toast: None,
+                native_toast: false,
+                toast_native: None,
+                toast_seq: 0,
                 wait_started: None,
                 pie_finish: None,
                 pie_glow_started: None,
@@ -1808,7 +1811,7 @@ impl App {
                 };
                 match wrote {
                     // Icon-only pill (the clipboard glyph says it all).
-                    Ok(()) => self.core.show_toast_icon("", Some(icon::assets::CLIPBOARD)),
+                    Ok(()) => self.core.show_toast_icon("", pb_app_core::ToastIcon::Copy),
                     Err(e) => {
                         eprintln!("copy: clipboard write failed: {e}");
                         self.core.show_toast("Copy failed");

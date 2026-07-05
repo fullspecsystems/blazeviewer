@@ -167,6 +167,18 @@ struct ContentView: View {
                 }
             }
             .animation(.easeInOut(duration: 0.2), value: model.scanPillVisible)
+            // The unified native toast rides the bottom-center, above where the info line
+            // sits, and topmost so transient feedback (copy, rotate, "Scan stopped", …) is
+            // never occluded by a panel. Non-interactive; it fades itself out.
+            .overlay(alignment: .bottom) {
+                if model.toastVisible {
+                    ToastView(model: model)
+                        .padding(.bottom, 54)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .allowsHitTesting(false)
+                }
+            }
+            .animation(.easeOut(duration: 0.22), value: model.toastVisible)
             // Help last = topmost: it's an ephemeral reference sheet centered over the
             // photo, so it should occlude the tree/inspector (which it overlaps) rather
             // than slide under them.

@@ -158,6 +158,43 @@ impl Panels {
     }
 }
 
+/// The **semantic** icon for a status toast — the HUD maps it to a Font Awesome glyph, the
+/// native macOS shell maps it to an SF Symbol, so a toast stays shell-neutral (one call site,
+/// each shell picks its own art). The discriminant is the stable FFI wire value.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ToastIcon {
+    #[default]
+    None = 0,
+    Mute = 1,
+    Unmute = 2,
+    Save = 3,
+    Undo = 4,
+    Delete = 5,
+    Recycle = 6,
+    Pin = 7,
+    Unpin = 8,
+    RotateLeft = 9,
+    RotateRight = 10,
+    Copy = 11,
+}
+
+impl ToastIcon {
+    /// The stable FFI wire value (the native host maps it to an SF Symbol).
+    pub fn to_u8(self) -> u8 {
+        self as u8
+    }
+}
+
+/// A native toast's data (message + [`ToastIcon`] + start), held for the shell to render when
+/// the CPU rasterizer is suppressed (`native_toast`). `seq` increments per toast so the shell
+/// re-triggers its entrance animation even when the same message fires twice in a row.
+pub struct NativeToast {
+    pub message: String,
+    pub icon: ToastIcon,
+    pub started: Instant,
+    pub seq: u64,
+}
+
 /// A transient bottom-center status toast (e.g. "Recursive folders: on"): a pill
 /// rasterized once, held briefly at full opacity, then faded out by re-uploading the
 /// bitmap with scaled alpha. Command feedback with no other on-screen cue — deliberately

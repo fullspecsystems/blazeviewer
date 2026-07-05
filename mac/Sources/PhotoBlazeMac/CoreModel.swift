@@ -54,6 +54,14 @@ final class CoreModel {
     private(set) var scanPillFound = 0
     private(set) var scanPillCurrent = ""
 
+    /// The unified native toast (every `show_toast` fires one now that the core suppresses the
+    /// HUD raster) — a bottom-center SwiftUI pill. `toastSeq` increments per toast so the view
+    /// re-animates even for a repeated message; the core expires it (`toastVisible` → false).
+    private(set) var toastVisible = false
+    private(set) var toastMessage = ""
+    private(set) var toastIcon = 0
+    private(set) var toastSeq: UInt64 = 0
+
     // MARK: - Native rich panels (task #54, mac-first) — the first is Help
 
     /// Whether the native SwiftUI Help panel should show, and its sections — refreshed
@@ -873,6 +881,31 @@ final class CoreModel {
         drainEffects()
     }
 
+    /// Show a native toast (the shell renders it). Wakes the pump so it appears even from idle.
+    func toast(_ msg: String) {
+        core.toast(msg)
+        kick()
+    }
+
+    /// Map the core's semantic toast icon (0 = none, see `ToastIcon`) to an SF Symbol, or nil
+    /// for a text-only toast.
+    func toastSymbol(_ icon: Int) -> String? {
+        switch icon {
+        case 1: return "speaker.slash.fill"  // Mute
+        case 2: return "speaker.wave.2.fill"  // Unmute
+        case 3: return "square.and.arrow.down"  // Save (rotation)
+        case 4: return "arrow.uturn.backward"  // Undo
+        case 5: return "trash.fill"  // Delete (permanent)
+        case 6: return "trash"  // Recycle (recoverable)
+        case 7: return "pin.fill"  // Pin
+        case 8: return "pin.slash.fill"  // Unpin
+        case 9: return "rotate.left"  // Rotate CCW
+        case 10: return "rotate.right"  // Rotate CW
+        case 11: return "doc.on.doc"  // Copy
+        default: return nil  // None
+        }
+    }
+
     // MARK: - Settings (NS2 item 5)
 
     /// The current settings as the flat form the Settings window binds to.
@@ -1049,6 +1082,17 @@ final class CoreModel {
         }
         if pillVisible != scanPillVisible {
             scanPillVisible = pillVisible
+        }
+        // The unified native toast — mirror the core's transient toast (cheap reads; the
+        // core keeps the pump ticking while one is live, then expires it).
+        let toastVis = core.toast_visible()
+        if toastVis {
+            toastMessage = core.toast_message().toString()
+            toastIcon = Int(core.toast_icon())
+            toastSeq = core.toast_seq()
+        }
+        if toastVis != toastVisible {
+            toastVisible = toastVis
         }
         updatePacing()
     }
@@ -1720,7 +1764,7 @@ final class CoreModel {
                 : (text.contains("\n")
                     ? "Copied to clipboard"
                     : "Copied \((text as NSString).lastPathComponent)")
-            core.toast(toastMsg)
+            toast(toastMsg)
             return
         }
         let w = Int(core.clipboard_image_width())
@@ -1744,7 +1788,7 @@ final class CoreModel {
                   intent: .defaultIntent
               )
         else {
-            core.toast("Copy failed")
+            toast("Copy failed")
             return
         }
         let image = NSImage(cgImage: cg, size: NSSize(width: w, height: h))
@@ -1757,7 +1801,7 @@ final class CoreModel {
             item.setString(URL(fileURLWithPath: file).absoluteString, forType: .fileURL)
         }
         pb.writeObjects([item])
-        core.toast("Copied")
+        toast("Copied")
     }
 
     /// `CoreEffect::SetWindowMode` — the borderless fullscreen **speed mode** (F), NOT

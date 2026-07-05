@@ -161,6 +161,7 @@ impl AppCoreHandle {
         core.native_open = true;
         core.native_inspector = true;
         core.native_tree = true;
+        core.native_toast = true;
         AppCoreHandle {
             core,
             dir_scan: None,
@@ -1021,6 +1022,39 @@ impl AppCoreHandle {
     /// the shared `panelBackground` so a live slider drag updates the panels immediately.
     fn panel_opacity(&self) -> u8 {
         self.core.settings.panel_opacity
+    }
+
+    // ── The unified native toast (④-style pill for every `show_toast`): the core holds the
+    // data (native_toast suppresses the HUD raster); the host polls these each pump and draws
+    // a SwiftUI pill. `toast_seq` re-triggers the entrance even for a repeated message. ──
+
+    /// Whether a toast is currently live.
+    fn toast_visible(&self) -> bool {
+        self.core.toast_native.is_some()
+    }
+
+    /// The toast message (may be empty for an icon-only pill, e.g. rotate).
+    fn toast_message(&self) -> String {
+        self.core
+            .toast_native
+            .as_ref()
+            .map(|t| t.message.clone())
+            .unwrap_or_default()
+    }
+
+    /// The toast's semantic icon (0 = none) — the host maps it to an SF Symbol.
+    fn toast_icon(&self) -> u8 {
+        self.core
+            .toast_native
+            .as_ref()
+            .map(|t| t.icon.to_u8())
+            .unwrap_or(0)
+    }
+
+    /// Monotonic per-toast counter — the host keys its entrance animation off a change here,
+    /// so an identical message firing twice still re-animates.
+    fn toast_seq(&self) -> u64 {
+        self.core.toast_native.as_ref().map(|t| t.seq).unwrap_or(0)
     }
 
     /// The current settings as the flat form the Settings window binds to (NS2 item 5).
@@ -2486,6 +2520,10 @@ mod ffi {
         fn settings_closed(&mut self);
         fn dialog_progress(&self) -> DialogProgressFfi;
         fn panel_opacity(&self) -> u8;
+        fn toast_visible(&self) -> bool;
+        fn toast_message(&self) -> String;
+        fn toast_icon(&self) -> u8;
+        fn toast_seq(&self) -> u64;
         fn settings_form(&self) -> SettingsFormFfi;
         fn settings_edited(&mut self, form: SettingsFormFfi);
 

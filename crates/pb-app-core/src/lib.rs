@@ -53,7 +53,10 @@ pub use config::config_dir;
 pub use contract::{CoreEffect, CoreEvent, KeyResolution, MenuState, Modifiers};
 pub use keymap::{KeyChord, Keymap};
 pub use meta::PhotoMeta;
-pub use overlay::{InspectorTab, OpenButton, OpenPanel, Panels, PlayHint, SlotContent, Toast};
+pub use overlay::{
+    InspectorTab, NativeToast, OpenButton, OpenPanel, Panels, PlayHint, SlotContent, Toast,
+    ToastIcon,
+};
 pub use pb_key::PbKey;
 pub use slideshow::Slideshow;
 pub use undo::UndoAction;

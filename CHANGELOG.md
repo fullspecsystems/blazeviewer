@@ -114,6 +114,11 @@ with any pre-release suffix carried only by the tag.
   step between the archive's sibling folders.
 
 ### Changed
+- **All transient notifications are now native on macOS.** Every toast — Copied, rotate,
+  Saved rotation, Pinned/Unpinned, muted/unmuted, deleted, "Scan stopped", "No photos in
+  *Foo*", "Recursive folders: on", … — is one consistent **bottom-center SwiftUI pill**
+  (matching the panel chrome) instead of the old CPU-rasterized HUD overlay, with a fitting
+  icon (or icon-only for rotate/mute/save). One notification surface for the whole app.
 - **Scanning a large folder no longer blocks you with a modal dialog.** On macOS a slow
   folder walk used to pop a modal "Scanning…" dialog. Now a compact, non-blocking pill sits
   at the top-center — "Scanning *Folder* · N found" plus the sub-folder being walked, with a

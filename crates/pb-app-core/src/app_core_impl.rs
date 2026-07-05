@@ -33,8 +33,8 @@ use crate::panels::{
 };
 use crate::pb_key::PbKey;
 use crate::{
-    settings, slideshow, timing, Action, AppCore, InspectorTab, Nav, OpenButton, OpenPanel, Panels,
-    PlayHint, SlotContent, Toast, UndoAction,
+    settings, slideshow, timing, Action, AppCore, InspectorTab, NativeToast, Nav, OpenButton,
+    OpenPanel, Panels, PlayHint, SlotContent, Toast, ToastIcon, UndoAction,
 };
 
 /// Interim adapter (task #54 Phase 0): a core [`DetailRow`] to the HUD table row it
@@ -163,6 +163,9 @@ impl AppCore {
             overlay_shown: false,
             overlay_item: None,
             toast: None,
+            native_toast: false,
+            toast_native: None,
+            toast_seq: 0,
             wait_started: None,
             pie_finish: None,
             pie_glow_started: None,
@@ -338,7 +341,7 @@ impl AppCore {
                 if muted {
                     // Silence any playing clip now; a slashed-speaker icon pill = muted.
                     self.effects.push(contract::CoreEffect::StopLiveAudio);
-                    self.show_toast_icon("", Some(icon::assets::VOLUME_SLASH));
+                    self.show_toast_icon("", ToastIcon::Mute);
                 } else {
                     // Unmuting mid-playback: resume audio at the motion's current position.
                     if let (Some(pb), Some(item)) = (self.playback.as_ref(), self.displayed_item) {
@@ -352,7 +355,7 @@ impl AppCore {
                         }
                     }
                     // A speaker-with-waves icon pill = now audible.
-                    self.show_toast_icon("", Some(icon::assets::VOLUME));
+                    self.show_toast_icon("", ToastIcon::Unmute);
                 }
             }
             // Open the About / Settings chrome dialog (NS0 5.6, inverted): a payload-free
@@ -467,7 +470,7 @@ impl AppCore {
                     path: path.clone(),
                     prev,
                 });
-                self.show_toast_icon("", Some(icon::assets::FLOPPY));
+                self.show_toast_icon("", ToastIcon::Save);
             }
             Err(e) => {
                 eprintln!("save rotation failed: {}: {e}", path.display());
@@ -498,7 +501,7 @@ impl AppCore {
                         self.load_current_sync();
                         self.target_item = self.playlist.current();
                         self.request_prefetch();
-                        self.show_toast_icon("Rotation undone", Some(icon::assets::UNDO));
+                        self.show_toast_icon("Rotation undone", ToastIcon::Undo);
                     }
                     Err(e) => {
                         eprintln!("undo rotation failed: {}: {e}", path.display());
@@ -551,11 +554,11 @@ impl AppCore {
         self.stop_playback();
         // Recycle-bin icon for the recoverable delete, trash for a permanent one.
         let icon = if permanent {
-            icon::assets::TRASH
+            ToastIcon::Delete
         } else {
-            icon::assets::RECYCLE
+            ToastIcon::Recycle
         };
-        self.show_toast_icon("", Some(icon));
+        self.show_toast_icon("", icon);
         self.pending_delete = Some((self.now + DELETE_ADVANCE_DELAY, item));
     }
 
@@ -2538,7 +2541,7 @@ impl AppCore {
         };
         if self.compare_pin == Some(item) {
             self.clear_compare_pin();
-            self.show_toast_icon("Unpinned", Some(icon::assets::THUMBTACK_SLASH));
+            self.show_toast_icon("Unpinned", ToastIcon::Unpin);
         } else {
             self.set_compare_pin(item);
         }
@@ -2573,7 +2576,7 @@ impl AppCore {
         self.compare_pin = Some(item);
         self.compare_pin_id = Some(self.compare_identity(item));
         self.compare_return = None;
-        self.show_toast_icon("Pinned for compare", Some(icon::assets::THUMBTACK));
+        self.show_toast_icon("Pinned for compare", ToastIcon::Pin);
         // Re-issue the want-list so the pin's eviction exemption takes effect now.
         self.request_prefetch();
     }
@@ -3857,11 +3860,11 @@ impl AppCore {
         self.push_view();
         // Flash a directional rotate icon (icon-only pill) as feedback.
         let ico = if ccw {
-            icon::assets::ROTATE_LEFT
+            ToastIcon::RotateLeft
         } else {
-            icon::assets::ROTATE_RIGHT
+            ToastIcon::RotateRight
         };
-        self.show_toast_icon("", Some(ico));
+        self.show_toast_icon("", ico);
     }
 
     /// Copy the current photo to the OS clipboard (`Ctrl+C` / Edit ▸ Copy, task #27).
@@ -5103,22 +5106,48 @@ impl AppCore {
     /// commands that otherwise give no visual feedback, e.g. the recursion toggle.
     /// A new toast replaces any current one.
     pub fn show_toast(&mut self, msg: &str) {
-        self.show_toast_icon(msg, None);
+        self.show_toast_icon(msg, ToastIcon::None);
     }
 
-    /// Like [`show_toast`] but with an optional leading duotone icon (an SVG source
-    /// from [`icon::assets`]) — e.g. the clipboard glyph on the Copy toast, or an
-    /// icon-only pill (empty `msg`) for the rotate toasts. Always redraws, so a
-    /// caller that also changed the view (e.g. `rotate`) renders even when there's
-    /// no system font to build a toast from.
-    pub fn show_toast_icon(&mut self, msg: &str, icon: Option<&str>) {
-        let px = (26.0 * self.viewport.scale_factor).max(16.0);
-        let pad = (12.0 * self.viewport.scale_factor).round().max(4.0) as u32;
+    /// Like [`show_toast`] but with a leading semantic [`ToastIcon`] — e.g. the save glyph, or
+    /// an icon-only pill (empty `msg`) for the rotate toasts. Each shell picks its own art:
+    /// the HUD rasterizes a Font Awesome glyph; the native macOS shell (`native_toast`) instead
+    /// gets the message + icon as data and draws a SwiftUI pill. Always redraws (HUD path), so a
+    /// caller that also changed the view (e.g. `rotate`) renders even without a system font.
+    pub fn show_toast_icon(&mut self, msg: &str, kind: ToastIcon) {
         // A passive toast is not the interactive play hint — drop any play-hint state so it
         // doesn't respond to hover/click while a Copy/Save/… toast is up.
         self.play_hint = None;
+        // Native shell: hand the shell the data and let it render the pill; no CPU raster.
+        if self.native_toast {
+            self.toast_seq = self.toast_seq.wrapping_add(1);
+            self.toast_native = Some(NativeToast {
+                message: msg.to_string(),
+                icon: kind,
+                started: self.now,
+                seq: self.toast_seq,
+            });
+            return;
+        }
+        let px = (26.0 * self.viewport.scale_factor).max(16.0);
+        let pad = (12.0 * self.viewport.scale_factor).round().max(4.0) as u32;
+        // Map the semantic icon to the HUD's Font Awesome glyph.
+        let fa = match kind {
+            ToastIcon::None => None,
+            ToastIcon::Mute => Some(icon::assets::VOLUME_SLASH),
+            ToastIcon::Unmute => Some(icon::assets::VOLUME),
+            ToastIcon::Save => Some(icon::assets::FLOPPY),
+            ToastIcon::Undo => Some(icon::assets::UNDO),
+            ToastIcon::Delete => Some(icon::assets::TRASH),
+            ToastIcon::Recycle => Some(icon::assets::RECYCLE),
+            ToastIcon::Pin => Some(icon::assets::THUMBTACK),
+            ToastIcon::Unpin => Some(icon::assets::THUMBTACK_SLASH),
+            ToastIcon::RotateLeft => Some(icon::assets::ROTATE_LEFT),
+            ToastIcon::RotateRight => Some(icon::assets::ROTATE_RIGHT),
+            ToastIcon::Copy => Some(icon::assets::CLIPBOARD),
+        };
         if let Some(hud) = self.hud.as_ref() {
-            if let Some((rgba, w, h)) = hud.render_panel_icon(msg, px, pad, icon, hud.theme().bg) {
+            if let Some((rgba, w, h)) = hud.render_panel_icon(msg, px, pad, fa, hud.theme().bg) {
                 self.toast = Some(Toast {
                     rgba,
                     w,
@@ -5183,6 +5212,17 @@ impl AppCore {
     /// event loop keeps ticking). Re-uploads only on a meaningful alpha change;
     /// clears the layer once expired.
     pub fn tick_toast(&mut self, now: Instant) -> bool {
+        // Native path: the shell draws the pill and animates its own fade-out on removal — the
+        // core just expires the data after the hold+fade window and keeps the pump ticking
+        // (returning `true`) while it's live so the expiry actually fires.
+        if self.native_toast {
+            if let Some(t) = &self.toast_native {
+                if now.saturating_duration_since(t.started) > Toast::HOLD + Toast::FADE {
+                    self.toast_native = None;
+                }
+            }
+            return self.toast_native.is_some();
+        }
         // A hovered play hint pauses the fade: keep its toast pinned in the full-opacity hold
         // window, so the button never vanishes out from under the pointer.
         if self.play_hint.is_some_and(|ph| ph.hovered) {
