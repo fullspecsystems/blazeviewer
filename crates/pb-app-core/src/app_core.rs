@@ -351,6 +351,14 @@ pub struct AppCore {
     /// content — so the marker fires on a real change (open/close, tab switch, or an
     /// async result landing), never per tick. `None` = the Inspector was hidden.
     pub last_inspector_snap: Option<crate::panels::InspectorSnapshot>,
+    /// The host presents the **folder tree** (⇧F) natively (task #54, mac-first): the
+    /// core skips rasterizing the tree quad and instead stores the derived rows/targets
+    /// for the shell to read, signalling [`CoreEffect::PanelsChanged`] on change. A
+    /// native list scrolls, so the HUD's windowing / "… n more" paging is dropped.
+    /// Default `false` (winit keeps the CPU tree). The macOS host sets it at construction.
+    pub native_tree: bool,
+    /// The last folder-tree visibility the tick emitted a marker for.
+    pub last_tree_visible: bool,
     /// Whether the info panel is currently drawn.
     pub overlay_shown: bool,
     /// Which item the drawn panel was built for; when it differs from `displayed_item` the

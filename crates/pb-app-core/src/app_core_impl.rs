@@ -158,6 +158,8 @@ impl AppCore {
             last_open_visible: false,
             native_inspector: false,
             last_inspector_snap: None,
+            native_tree: false,
+            last_tree_visible: false,
             overlay_shown: false,
             overlay_item: None,
             toast: None,
@@ -1099,6 +1101,15 @@ impl AppCore {
                 self.emit_panels_changed();
             }
         }
+        if self.native_tree {
+            // Visibility (open/close, Tab-hide) — content changes are signalled by
+            // `push_folder_tree` as the folder is navigated.
+            let vis = self.tree_panel_visible();
+            if vis != self.last_tree_visible {
+                self.last_tree_visible = vis;
+                self.emit_panels_changed();
+            }
+        }
 
         // 4a″. Folder tree (⇧F): keep it tracking the displayed photo's folder — the
         // whole point is "you are here", so it tracks **during hold-to-fly too**
@@ -1575,6 +1586,25 @@ impl AppCore {
         page: i32,
         hovered: Option<hud::TreeHit>,
     ) {
+        // Native host (task #54): don't rasterize — store the full rows/targets for the
+        // SwiftUI list (which scrolls, so no HUD windowing / paging markers or hit rects)
+        // and signal the shell to re-pull. Reached only on a real derivation change
+        // (hover/paging are HUD-only and never fire on this path), so we always emit.
+        if self.native_tree {
+            self.folder_tree_panel = Some(crate::overlay::TreePanel {
+                w: 0,
+                h: 0,
+                margin: 0,
+                hits: Vec::new(),
+                targets,
+                rows,
+                hovered: None,
+                page: 0,
+                built: self.now,
+            });
+            self.emit_panels_changed();
+            return;
+        }
         let px = (15.0 * self.viewport.scale_factor).max(8.0);
         let pad = (7.0 * self.viewport.scale_factor).round().max(2.0) as u32;
         let margin = self.overlay_margin();
@@ -1626,6 +1656,28 @@ impl AppCore {
             built: self.now,
         });
         self.draw();
+    }
+
+    /// Whether the **native** folder tree should be visible — the signal the mac host
+    /// reads to show/hide its SwiftUI list: the tree is open, not `Tab`-hidden, and the
+    /// host presents it natively.
+    pub fn tree_panel_visible(&self) -> bool {
+        self.native_tree && self.panels.tree_visible(self.folder_tree_open)
+    }
+
+    /// Activate a native tree row by index (a SwiftUI list click): navigate its target —
+    /// open the folder, or re-scope the archive — exactly like the HUD tree's row click.
+    /// Rows without a target (the current folder, a bare label) are inert.
+    pub fn tree_activate(&mut self, index: usize) {
+        let target = self
+            .folder_tree_panel
+            .as_ref()
+            .and_then(|p| p.targets.get(index).cloned().flatten());
+        match target {
+            Some(crate::folder_tree::TreeTarget::Dir(dir)) => self.open_dir(dir),
+            Some(crate::folder_tree::TreeTarget::Scope(prefix)) => self.rescope_archive(prefix),
+            None => {}
+        }
     }
 
     /// Hide the folder tree (clears its quad + interactive state). The open/closed
@@ -5477,6 +5529,33 @@ mod tests {
         core.panels.hidden = false;
         core.native_inspector = false;
         assert!(!core.inspector_panel_visible());
+    }
+
+    #[test]
+    fn native_tree_visibility_and_safe_activate() {
+        let mut core = test_core();
+        assert!(!core.tree_panel_visible(), "off by default");
+        core.native_tree = true;
+        assert!(!core.tree_panel_visible(), "closed → not visible");
+        core.folder_tree_open = true;
+        assert!(core.tree_panel_visible(), "open + native → visible");
+        core.panels.hidden = true;
+        assert!(!core.tree_panel_visible(), "Tab-hidden → not visible");
+        core.panels.hidden = false;
+        // A tick signals the host on the visibility transition (no hud needed for the diff).
+        core.effects.clear();
+        core.handle(CoreEvent::Tick(std::time::Instant::now()));
+        assert!(
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::PanelsChanged)),
+            "the tree's visibility change signals the host"
+        );
+        // Activate with nothing derived is a safe no-op (no target).
+        core.tree_activate(0);
+        // Winit (native_tree off) is never native-visible.
+        core.native_tree = false;
+        assert!(!core.tree_panel_visible());
     }
 
     #[test]

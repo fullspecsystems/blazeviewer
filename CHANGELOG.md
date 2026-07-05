@@ -8,6 +8,11 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
+- **Native folder tree on macOS** — the **⇧F** folder tree (the current photo's folder in
+  its hierarchy — up, root, ancestors, siblings, children) is now a native SwiftUI list on
+  the left edge instead of an on-image overlay: crisp text, folder icons, photo-count
+  badges, the current folder highlighted, and it scrolls — so a big folder shows every
+  entry (no more "… n more" paging). Click any folder to jump there.
 - **Native Inspector panel on macOS** — Details, Text, and Describe are now one tabbed
   macOS panel (an inspector on the trailing edge) instead of three separate on-image
   overlays: crisp native text, a segmented **Details / Text / Describe** tab bar to switch

@@ -467,6 +467,8 @@ impl App {
                 last_open_visible: false,
                 native_inspector: false,
                 last_inspector_snap: None,
+                native_tree: false,
+                last_tree_visible: false,
                 overlay_shown: false,
                 overlay_item: None,
                 toast: None,

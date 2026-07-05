@@ -141,6 +141,7 @@ impl AppCoreHandle {
         core.native_help = true;
         core.native_open = true;
         core.native_inspector = true;
+        core.native_tree = true;
         AppCoreHandle {
             core,
             dir_scan: None,
@@ -340,6 +341,92 @@ impl AppCoreHandle {
             .get(i)
             .map(|r| r.2.clone())
             .unwrap_or_default()
+    }
+
+    // ---- Folder tree (⇧F) — the native list of the current photo's folder in its
+    // hierarchy (task #54). The core derives the rows/targets (unchanged from the HUD
+    // tree) and stores them; these read directly from `folder_tree_panel` (no snapshot
+    // copy needed — the rows are already resident). A native list scrolls, so the HUD's
+    // windowing / "… n more" paging is gone; every derived row shows.
+
+    /// Whether the native SwiftUI folder tree should be shown (open, not Tab-hidden).
+    fn tree_visible(&self) -> bool {
+        self.core.tree_panel_visible()
+    }
+
+    fn tree_row_count(&self) -> usize {
+        self.core
+            .folder_tree_panel
+            .as_ref()
+            .map(|p| p.rows.len())
+            .unwrap_or(0)
+    }
+
+    /// A row's indent depth in the hierarchy (0 = root).
+    fn tree_row_depth(&self, i: usize) -> u32 {
+        self.core
+            .folder_tree_panel
+            .as_ref()
+            .and_then(|p| p.rows.get(i))
+            .map(|r| r.depth)
+            .unwrap_or(0)
+    }
+
+    fn tree_row_name(&self, i: usize) -> String {
+        self.core
+            .folder_tree_panel
+            .as_ref()
+            .and_then(|p| p.rows.get(i))
+            .map(|r| r.name.clone())
+            .unwrap_or_default()
+    }
+
+    /// The current folder ("you are here") — the row is highlighted, not clickable.
+    fn tree_row_is_current(&self, i: usize) -> bool {
+        self.core
+            .folder_tree_panel
+            .as_ref()
+            .and_then(|p| p.rows.get(i))
+            .map(|r| r.current)
+            .unwrap_or(false)
+    }
+
+    /// The leading "up to parent" affordance row (shown a level-up glyph).
+    fn tree_row_is_up(&self, i: usize) -> bool {
+        self.core
+            .folder_tree_panel
+            .as_ref()
+            .and_then(|p| p.rows.get(i))
+            .map(|r| r.up)
+            .unwrap_or(false)
+    }
+
+    /// The photo-count badge, or -1 when the row has none.
+    fn tree_row_count_badge(&self, i: usize) -> i64 {
+        self.core
+            .folder_tree_panel
+            .as_ref()
+            .and_then(|p| p.rows.get(i))
+            .and_then(|r| r.count)
+            .map(|c| c as i64)
+            .unwrap_or(-1)
+    }
+
+    /// Whether the row is clickable (has a navigation target).
+    fn tree_row_has_target(&self, i: usize) -> bool {
+        self.core
+            .folder_tree_panel
+            .as_ref()
+            .and_then(|p| p.targets.get(i))
+            .map(|t| t.is_some())
+            .unwrap_or(false)
+    }
+
+    /// Activate a row (a list click) — open its folder / re-scope the archive. `kick`s a
+    /// tick so the navigation and the tree's re-derivation flow through.
+    fn tree_activate(&mut self, i: usize) {
+        self.core.now = Instant::now();
+        self.core.tree_activate(i);
     }
 
     /// A native menu item fired, by stable [`Action`] id (`"open_file"`, `"rotate_cw"`, …)
@@ -2199,6 +2286,17 @@ mod ffi {
         fn inspector_row_kind(&self, i: usize) -> u8;
         fn inspector_row_a(&self, i: usize) -> String;
         fn inspector_row_b(&self, i: usize) -> String;
+
+        // The native folder tree (⇧F, task #54).
+        fn tree_visible(&self) -> bool;
+        fn tree_row_count(&self) -> usize;
+        fn tree_row_depth(&self, i: usize) -> u32;
+        fn tree_row_name(&self, i: usize) -> String;
+        fn tree_row_is_current(&self, i: usize) -> bool;
+        fn tree_row_is_up(&self, i: usize) -> bool;
+        fn tree_row_count_badge(&self, i: usize) -> i64;
+        fn tree_row_has_target(&self, i: usize) -> bool;
+        fn tree_activate(&mut self, i: usize);
 
         // The NS2 dialog seam: payload pulls (after a ShowDialog marker), the
         // DialogResolved results (one entry point per user gesture), the live progress

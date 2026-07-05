@@ -61,6 +61,11 @@ final class CoreModel {
     private(set) var inspectorVisible = false
     private(set) var inspectorTab = 0
     private(set) var inspectorRows: [InspectorRow] = []
+    /// The native folder tree (⇧F) — visibility and the current photo's folder hierarchy
+    /// as a flat, depth-indented row list, refreshed on `PanelsChanged` (`refreshTree`).
+    /// A native list scrolls, so every derived row shows (no HUD paging).
+    private(set) var treeVisible = false
+    private(set) var treeRows: [FolderTreeRow] = []
     /// An NSAlert sheet (confirm/message) is up — gates the key monitor like `panelOpen`.
     @ObservationIgnored private var alertUp = false
     /// Opens the SwiftUI Settings scene — injected by the root view (`openSettings` is an
@@ -490,6 +495,39 @@ final class CoreModel {
     /// Close the Inspector from its ✕ button.
     func closeInspector() {
         core.inspector_close()
+        kick()
+    }
+
+    /// Re-pull the native folder tree after a `PanelsChanged` marker: visibility and (when
+    /// visible) the current folder's hierarchy rows, as derived by the core.
+    private func refreshTree() {
+        treeVisible = core.tree_visible()
+        guard treeVisible else {
+            treeRows = []
+            return
+        }
+        let n = Int(core.tree_row_count())
+        var rows: [FolderTreeRow] = []
+        rows.reserveCapacity(n)
+        for i in 0..<n {
+            let idx = UInt(i)
+            rows.append(
+                FolderTreeRow(
+                    id: i,
+                    depth: Int(core.tree_row_depth(idx)),
+                    name: core.tree_row_name(idx).toString(),
+                    isCurrent: core.tree_row_is_current(idx),
+                    isUp: core.tree_row_is_up(idx),
+                    count: Int(core.tree_row_count_badge(idx)),
+                    hasTarget: core.tree_row_has_target(idx)
+                ))
+        }
+        treeRows = rows
+    }
+
+    /// Activate a folder-tree row (a list click): open the folder / re-scope the archive.
+    func activateTreeRow(_ i: Int) {
+        core.tree_activate(UInt(i))
         kick()
     }
 
@@ -1307,6 +1345,7 @@ final class CoreModel {
             refreshHelp()
             openPanelVisible = core.open_panel_visible()
             refreshInspector()
+            refreshTree()
         case .ShowContextMenu(
             let hasImage, let hasMotion, let canReveal, let fullscreen,
             let comparePinned, let comparePinnedHere

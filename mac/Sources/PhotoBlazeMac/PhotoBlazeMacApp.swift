@@ -144,6 +144,21 @@ struct ContentView: View {
                     .transition(.opacity)
                 }
             }
+            // The folder tree rides the leading edge (where the HUD tree sat), top-aligned.
+            .overlay {
+                if model.treeVisible {
+                    GeometryReader { geo in
+                        FolderTreePanelView(model: model, maxHeight: geo.size.height - 48)
+                            .frame(
+                                maxWidth: .infinity, maxHeight: .infinity,
+                                alignment: .topLeading
+                            )
+                            .padding(.leading, 24)
+                            .padding(.top, 24)
+                    }
+                    .transition(.opacity)
+                }
+            }
             // SwiftUI owns the WindowGroup titlebar surface and repaints it over the
             // AppKit-side transparency during its own update passes — hide it through
             // SwiftUI itself while the F speed mode is on (the AppKit props are also
