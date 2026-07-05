@@ -166,12 +166,12 @@ struct InspectorPanelView: View {
         .buttonStyle(.plain)
     }
 
-    /// Copy the active tab, then flip the button to a checkmark for ~1s as confirmation.
+    /// Copy the active tab, then briefly flip the button to a checkmark as confirmation.
     private func copyTab() {
         model.copyInspectorTab()
-        withAnimation(.easeInOut(duration: 0.2)) { copied = true }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            withAnimation(.easeInOut(duration: 0.25)) { copied = false }
+        withAnimation(.easeInOut(duration: 0.12)) { copied = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
+            withAnimation(.easeInOut(duration: 0.15)) { copied = false }
         }
     }
 
