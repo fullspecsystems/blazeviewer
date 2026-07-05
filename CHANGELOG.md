@@ -117,10 +117,12 @@ with any pre-release suffix carried only by the tag.
   All EXIF Info** — both can be checked at once.
 
 ### Fixed
-- **Open Parent (⌘↑, or `P`) now goes up from the folder you're *viewing*.** It went up from
-  the folder you originally *opened*, so after a recursive open it climbed toward `/Users` or
-  `/` — a place with nothing to do with the photo on screen. Now it opens the immediate parent
-  of the current photo's folder, which always still contains that photo (never an empty jump).
+- **Open Parent (⌘↑, or `P`) now climbs one level at a time from the folder you're viewing.**
+  It went up from the folder you originally *opened*, so after a recursive open it jumped
+  toward `/Users` or `/`. It also used to **get stuck**: when a parent had no photos of its
+  own, opening it re-landed you in the same deep subfolder, so the next ⌘↑ went nowhere. Now
+  it steps up from the current photo's folder and each further press continues up from the
+  last, so repeated presses walk cleanly up the tree instead of oscillating.
 - **Folders now sort case-insensitively (like Finder), not by raw byte order.** A recursive
   open landed on whatever subfolder sorted first by ASCII — where *every* uppercase letter
   beats *every* lowercase one, so `Screenshots` came before `onlinethumbnailcache` and the

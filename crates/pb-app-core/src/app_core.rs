@@ -423,6 +423,12 @@ pub struct AppCore {
     /// while it runs; a new job supersedes the old by dropping its receiver.
     /// (`pub` only because the shells build `AppCore` as a struct literal.)
     pub tree_io: Option<crate::folder_tree::TreeIo>,
+    /// The last folder **Open Parent** (⌘↑) climbed to, so repeated presses walk up one
+    /// level at a time from *there* — not from the current photo's folder, which always sits
+    /// at the deepest level (a parent with no direct photos re-lands it there), so a naive
+    /// current-folder anchor would get stuck oscillating. Cleared by any other open (via
+    /// `open_plan`); `None` restarts the climb from the current folder. RAM-only.
+    pub climb_anchor: Option<PathBuf>,
     /// The **Finder-style** resident folder browser (task #54, native path only): a
     /// persistent, lazily-populated [`FsTree`](crate::fs_tree::FsTree) that decouples
     /// browsing (expand/collapse) from loading photos, built for disk decks when

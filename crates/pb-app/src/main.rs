@@ -492,6 +492,7 @@ impl App {
                 tree_io: None,
                 fs_tree: None,
                 fs_tree_io: None,
+                climb_anchor: None,
                 hud: Hud::load(),
                 renderer: None,
                 undo_stack: Vec::new(),
@@ -3226,7 +3227,10 @@ mod tests {
         // Spell out the load-bearing boundary: a folder's own photos come before anything in
         // its subfolders — so the root files `a.jpg` / `z.jpg` precede the subfolder photos.
         let pos = |rel: &str| got.iter().position(|p| p == &dir.join(rel)).unwrap();
-        assert!(pos("a.jpg") < pos("a/b.jpg"), "root a.jpg before subfolder a/b.jpg");
+        assert!(
+            pos("a.jpg") < pos("a/b.jpg"),
+            "root a.jpg before subfolder a/b.jpg"
+        );
         assert!(
             pos("z.jpg") < pos("a_subdir/x.jpg"),
             "root z.jpg before subfolder a_subdir/x.jpg"

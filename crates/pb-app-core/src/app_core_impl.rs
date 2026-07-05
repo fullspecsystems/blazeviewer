@@ -183,6 +183,7 @@ impl AppCore {
             fs_tree: None,
             fs_tree_io: None,
             tree_io: None,
+            climb_anchor: None,
             hud: None,
             renderer: None,
             undo_stack: Vec::new(),
@@ -849,6 +850,9 @@ impl AppCore {
     /// A finite **explicit list** has no directory walk, so it resolves inline and installs now.
     pub fn open_plan(&mut self, source: pb_core::open::Source, cursor: pb_core::open::Cursor) {
         use pb_core::open::Source;
+        // Any explicit open breaks an Open-Parent climb — the next ⌘↑ restarts from the
+        // current folder. `open_parent_cmd` re-sets the anchor *after* it calls through here.
+        self.climb_anchor = None;
         match source {
             Source::Archive(path) => {
                 self.effects.push(contract::CoreEffect::BeginArchiveOpen {
@@ -2028,22 +2032,26 @@ impl AppCore {
                 return;
             }
         }
-        // An archive deck at its root goes up to the disk folder *containing* the archive
-        // (its container). A normal disk deck goes up **one level from the current photo's
-        // folder** — not the deck root, which would climb from wherever you opened (e.g. up
-        // toward /Users or /). Going up one level always re-includes the current subtree, so
-        // it can never land on an empty folder or walk off toward the filesystem root.
+        // An archive deck at its root goes up to the disk folder *containing* the archive.
+        // A normal disk deck **climbs one level per press**: the first ⌘↑ goes up from the
+        // current photo's folder; each subsequent ⌘↑ continues up from the folder the last
+        // one opened (`climb_anchor`) — not the current photo's folder, which stays at the
+        // deepest level (a parent with no direct photos re-lands it there), so anchoring on
+        // it would get stuck oscillating. The climb resets the moment any other open happens.
         let anchor = self
             .source
             .container()
             .map(Path::to_path_buf)
+            .or_else(|| self.climb_anchor.clone())
             .or_else(|| self.current_folder_abs())
             .unwrap_or_else(|| self.root.clone());
         if anchor.as_os_str().is_empty() {
             return;
         }
         if let Some(par) = anchor.parent().filter(|p| !p.as_os_str().is_empty()) {
-            self.open_dir(par.to_path_buf());
+            let par = par.to_path_buf();
+            self.open_dir(par.clone()); // clears climb_anchor (via open_plan)…
+            self.climb_anchor = Some(par); // …then remembers this rung for the next ⌘↑.
         }
     }
 
@@ -6590,6 +6598,69 @@ mod tests {
         core.open_sibling_cmd(-1);
         assert_eq!(core.target_item, Some(0), "⌘← → start of the a run");
         assert!(core.tree_io.is_none(), "all in-deck — no disk worker");
+    }
+
+    #[test]
+    fn open_parent_climbs_one_level_per_press_without_sticking() {
+        let mut core = test_core();
+        // Photos live deep (/base/a/b/c/*), and a, b, c have no direct photos — so every
+        // re-root re-lands the current photo in c. A current-folder anchor would stick.
+        let base = std::env::temp_dir().join("pb_climb_test");
+        let deep = base.join("a/b/c");
+        let deck = |root: PathBuf| -> (Arc<dyn PhotoSource>, PathBuf) {
+            (Arc::new(FsSource::new(vec![deep.join("1.png")])), root)
+        };
+        let (src, root) = deck(deep.clone());
+        core.rebuild_playlist(src, root.clone(), Some(root), true, 0);
+        assert_eq!(core.current_folder_abs(), Some(deep.clone()));
+
+        // The folder the most recent BeginDirScan targets.
+        let scanned = |core: &AppCore| -> Option<PathBuf> {
+            core.effects.iter().rev().find_map(|e| match e {
+                contract::CoreEffect::BeginDirScan {
+                    source: pb_core::open::Source::Scan { roots, .. },
+                    ..
+                } => roots.first().cloned(),
+                _ => None,
+            })
+        };
+
+        // ⌘↑ #1: up from the current folder /base/a/b/c → /base/a/b.
+        core.effects.clear();
+        core.open_parent_cmd();
+        assert_eq!(scanned(&core), Some(base.join("a/b")));
+        assert_eq!(core.climb_anchor, Some(base.join("a/b")));
+
+        // The scan lands: the new deck (rooted at a/b) still lands the photo deep in c.
+        let (src2, root2) = deck(base.join("a/b"));
+        core.rebuild_playlist(src2, root2.clone(), Some(root2), true, 0);
+        assert_eq!(
+            core.current_folder_abs(),
+            Some(deep.clone()),
+            "photo still deep in c"
+        );
+        assert_eq!(
+            core.climb_anchor,
+            Some(base.join("a/b")),
+            "the scan doesn't reset the climb"
+        );
+
+        // ⌘↑ #2: continues up from the climb anchor (a/b) → /base/a — NOT back down to c's parent.
+        core.effects.clear();
+        core.open_parent_cmd();
+        assert_eq!(
+            scanned(&core),
+            Some(base.join("a")),
+            "climbs, never oscillates"
+        );
+        assert_eq!(core.climb_anchor, Some(base.join("a")));
+
+        // Any other open resets the climb — the next ⌘↑ starts from the current folder again.
+        core.open_plan(
+            pb_core::open::Source::Explicit(vec![deep.join("1.png")]),
+            pb_core::open::Cursor::First,
+        );
+        assert_eq!(core.climb_anchor, None, "an explicit open breaks the climb");
     }
 
     #[test]
