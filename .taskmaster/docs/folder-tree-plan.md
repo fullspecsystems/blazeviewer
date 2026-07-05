@@ -32,6 +32,19 @@ owner's ask to see it rendering before building selection._
 > escalating to AppKit `NSOutlineView` only if the SwiftUI version does not feel
 > Finder-like enough.
 
+> **⚠ SUPERSEDED for macOS (2026-07-05): the auto-path model below is replaced by the
+> Finder browser.** Everything in this doc describes the **auto-derived "where am I" path**
+> (root → ancestor chain → current + siblings → children, ancestors past 4 collapsed into a
+> dead "…"). The owner reframed that as a *jail*: it re-derives per photo, folds ancestors
+> into a non-navigable "…", and couples browsing to loading (click = re-root). The macOS tree
+> is now a real **Finder browser** — expand/collapse chevrons (off-thread `read_dir`, no
+> scan) decoupled from name-click open (load photos), an outdented up-to-parent row, siblings
+> at every level, over a **new resident `pb-app-core/src/fs_tree.rs` model** (persistent,
+> incremental, RAM-only). Increments: ① model DONE, ② native wiring DONE, ③ keep-deck-until-
+> photos TODO, ④ ambient cancellable scan pill TODO. The **winit HUD keeps this auto-path
+> derivation** until the egui phase (task #54 Phase 4); `fs_tree.rs` is shell-neutral, so egui
+> reuses it then. See `hud-panels-plan.md` Phase 2 for the current status of record.
+
 ## The feature in one paragraph
 
 Today the playlist is a single flat, alphabetically-sorted index —

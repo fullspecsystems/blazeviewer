@@ -467,9 +467,9 @@
           },
           {
             "id": 3,
-            "title": "macOS folder tree (flat SwiftUI List)",
-            "description": "Build the Mac folder presenter over FolderTreePanel as a FLAT SwiftUI List rendering the model rows directly (depth -> indentation, .badge counts, native scroll/hover/VoiceOver, .scrollContentBackground(.hidden) inside the panel chrome) — the model is flat-with-depth and click = re-root (navigator), so List(children:)/OutlineGroup would fight disclosure state for no gain. Row click -> PanelAction::OpenTreeTarget -> the same core open/rescope path as the HUD tree; ARCHIVES navigate identically (opaque TreeTarget Dir|ArchiveScope). Wheel scrolls the list (… n more pagers retire). NSOutlineView escalation only if SwiftUI fails the owner smoke on feel/selection/keyboard/counts. Retire pb-hud render_tree ON macOS ONLY (suppress seam); winit keeps it until the egui phase. || IMPLEMENTED 2026-07-05 (commit 8b6d5bc, owner smoke pending). AppCore::native_tree makes push_folder_tree store the full derived rows/targets and emit PanelsChanged instead of rasterizing (existing derivation + navigation reused untouched); a native list scrolls so HUD windowing/'… n more' paging is dropped. tree_activate(index) drives a row click; tick diffs tree visibility. FFI: tree_visible + indexed tree_row_* (depth/name/current/up/count/has_target) + tree_activate. Swift: FolderTreePanelView (leading edge, depth-indent, folder icons, count badges, current highlighted). DEFERRED: pointer-gating, drag-to-move, position persistence.",
-            "status": "review"
+            "title": "macOS Finder folder browser (fs_tree)",
+            "description": "The ⇧F macOS tree is a real Finder browser (owner redesign 2026-07-05): chevron expand/collapse (off-thread read_dir, no scan) DECOUPLED from name-click open (load photos), outdented up-to-parent row, siblings at every level, over a resident RAM-only pb-app-core/src/fs_tree.rs model (persistent, incremental, shell-neutral). Increments: (1) FsTree model DONE (7acc91c, 6 tests); (2) native wiring DONE (b599b0a) — AppCore::fs_tree + off-thread read channel, FFI snapshot/tree_uses_fs/tree_toggle, SwiftUI outline, disk decks only (archive/empty keep v1 folder_tree.rs flat list); (3) keep-deck-until-photos TODO — don't tear down the current deck until the opened folder yields its first frame (empty -> toast, deck intact; anti-'stuck' safety); (4) ambient cancellable scan pill TODO — folder/archive open scan becomes a non-blocking top-center SwiftUI element with Cancel. RELATED OPEN UX: cmd-left/right folder nav (open_sibling_cmd) — deck-root-anchor bug fixed (3f9dff1, in-deck peer jump) but owner wants a from-scratch rethink of the behavior (peer-only vs all-folders-in-order, edge fallback) — redesign, don't patch. The winit HUD keeps the old folder_tree.rs auto-path derivation until the egui phase.",
+            "status": "in-progress"
           },
           {
             "id": 4,
@@ -490,6 +490,19 @@
             "status": "review"
           }
         ]
+      },
+      {
+        "id": 55,
+        "title": "Togglable mouse toolbar — nav buttons + panel toggles",
+        "description": "Owner idea (2026-07-05): a togglable toolbar for mouse-driven control — next/previous/random navigation buttons, toggles for the Inspector and folder-tree panels, and other frequently-used actions (rotate? delete? open?). This is a discoverability/mouse-affordance layer on top of the existing keyboard-driven core, not a new set of behaviors — every button should just fire an existing Action/PanelAction (Next/Previous/Random, ShowInspectorTab, ToggleTree, TogglePanels, etc.) through the same CoreEvent path a keypress uses today. Tension to resolve with the owner before implementation: CLAUDE.md's prime directive is a borderless, chrome-less window — an always-visible toolbar would contradict that, so 'togglable' likely means hidden by default and revealed on demand (a hotkey, and/or reveal-on-mouse-move-to-edge like fullscreen video players), never persistent chrome that eats into the fit-to-screen image area.",
+        "status": "pending",
+        "priority": "low",
+        "dependencies": [
+          54
+        ],
+        "details": "Open questions for a design pass before coding: (1) Reveal mechanism — a dedicated toggle key, auto-hide after idle + reveal-on-mouse-near-edge, or both; must not create a hidden repaint wake that keeps the frame pump alive when hidden (prime-directive-safe, same constraint task #54 already enforces for panels). (2) Placement + platform — top or bottom edge, overlapping the image (like the existing HUD/Inspector) vs a reserved strip that insets fit_rect; macOS likely wants a native SwiftUI HStack/toolbar-style bar (consistent with the native panel work in #54), Windows can piggyback on the egui presenter track (#54 subtask 5) once it lands, so this probably shouldn't start on Windows before that seam exists. (3) Contents — confirm the button set with the owner beyond nav + Inspector/tree toggles (rotate, delete, open, settings?) and whether it should show current panel-open state (pressed/active toggle look) via the same PanelsChanged/MenuState signals the menu bar already consumes. (4) Icons — reuse the Font Awesome solid icon pipeline (pb-ui::icon for egui, the vendored SF/FA icons already used by the native Inspector tab bar) rather than inventing new glyphs. (5) No new core logic: pb-app-core should gain zero new state beyond 'toolbar visible' + maybe hover/pressed styling — button clicks dispatch through the existing action_shortcut/menu_action FFI primitives already built for the empty-state Open buttons (#54 subtask 6), so this is presenter-layer work, not a new orchestration seam.",
+        "testStrategy": "Design/owner sign-off first (reveal mechanism + button set + placement) since this trades against the chrome-less prime directive. Once scoped: unit tests in pb-app-core for any new visibility state (mirroring panels_hidden-style tests), a scripted keypress/click replay confirming toolbar-hidden keypress→photon timing is unchanged from before this feature existed, and an owner smoke test on both platforms confirming every button reaches the same effect as its keyboard equivalent.",
+        "subtasks": []
       }
     ]
   }

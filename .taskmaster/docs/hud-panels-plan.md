@@ -473,34 +473,55 @@ scan chip) is never suppressed** — it stays a CPU quad on both shells.
 - Smoke fullscreen/resize + 1×↔2× backing-scale transitions with the panel open against the
   fresh compositing fixes (commit 0effc66).
 
-### Phase 2 — macOS folder tree (flat SwiftUI `List`)
+### Phase 2 — macOS folder tree → the **Finder browser** redesign
 
-Build the Mac folder presenter over the `FolderTreePanel` model as a **flat SwiftUI `List`
-rendering the model's rows directly** (depth → indentation, `.badge` counts, native
-scroll/hover/VoiceOver, `.scrollContentBackground(.hidden)` inside the panel chrome) — the
-model is already flat-with-depth and click means re-root, not expand, so a disclosure tree
-(`List(..., children:)` / `OutlineGroup`) would fight the control's expansion state for no
-gain. Row click dispatches `PanelAction::OpenTreeTarget` → the same core open/rescope path
-the HUD tree uses today; **archives navigate identically** (the row's `TreeTarget` is opaque
-— `Dir` or `ArchiveScope`). Wheel/trackpad scrolls the list (the "… n more" pagers retire).
-Escalate to AppKit `NSOutlineView` only if the SwiftUI version fails the owner smoke on feel,
-selection, keyboard, or counts. Retire `pb-hud render_tree` **on macOS only** (the suppress
-seam); winit keeps it until the egui phase.
+> **DONE + REDESIGNED (2026-07-05).** Phase 2 first shipped a flat SwiftUI `List` over the v1
+> `folder_tree.rs` rows (`8b6d5bc`). The owner then reframed it: the auto-derived "where am
+> I" path (folds ancestors into a dead "…", re-derives per photo, click = re-root) is a
+> **jail**, and browsing should be **decoupled from loading**. It's now a real Finder-style
+> browser over a new resident model. See `folder-tree-plan.md` for the full design; the
+> increments:
+>
+> - **① Resident `FsTree` model — DONE** (`fs_tree.rs`, `7acc91c`): pure, RAM-only,
+>   lazily-populated nodes (expanded / children / count); `rows()` flatten; `set_current`
+>   reveal+mark; `extend_root_up`. Shell-neutral (the egui phase reuses it — this **replaces**
+>   `FolderTreePanel`/`render_tree` as the durable tree model on both shells).
+> - **② Wire behind native path — DONE** (`b599b0a`): `AppCore::fs_tree` + off-thread
+>   `read_dir` channel; chevron expand/collapse (browse) decoupled from name-click open
+>   (load); up-affordance row; FFI snapshot + `tree_uses_fs`; SwiftUI outline. **Disk decks
+>   only** — archive/empty decks keep the v1 flat scoped list (`folder_tree.rs`) for now.
+> - **③ Keep-deck-until-photos — TODO**: opening a folder must not tear the current deck down
+>   until the new folder yields its first frame (empty → toast, deck intact). The anti-"stuck"
+>   safety, paired with ④.
+> - **④ Ambient cancellable scan pill — TODO**: the folder/archive open scan becomes a
+>   non-blocking top-center SwiftUI element with Cancel (owner: not a blocking modal).
+> - **⚠ Related open UX — ⌘←/⌘→ folder nav**: the deck-root-anchor bug is fixed (`3f9dff1`,
+>   now in-deck peer jump) but the owner wants a **from-scratch rethink** of what it should do
+>   (peer-only vs all-folders-in-order, edge fallback). Redesign with the owner; don't patch.
+>
+> Retired `render_tree` **on macOS** (the suppress seam) for disk decks; winit keeps the whole
+> `folder_tree.rs` path until the egui phase. `NSOutlineView` escalation was **not** needed —
+> the SwiftUI outline feels Finder-like.
 
 ### Phase 3 — macOS Inspector tabs
 
-Migrate the Inspector tab by tab as native SwiftUI views over the same core models:
+> **DONE (2026-07-05)** (`53a553b`, `f1cbac5`, `40af0af`). One native tabbed panel (top-right),
+> segmented tab bar (blue-fill selection + white text, icon+label), selectable values, ✕,
+> resizable. Live-updates on async OCR/describe via a per-tick `InspectorSnapshot` diff.
+> Retired `render_*` for the three tabs on macOS.
 
-1. **Details (EXIF)** — scroll, row copy, copy full details, no truncation in copy payload.
-2. **Text/OCR** — selectable recognized text + QR payloads, copy full text; ⌘C
-   first-responder-aware so panel selection beats Copy Image.
-3. **Describe/Ask** — native `AttributedString(markdown:)` (remote images stripped — the
-   privacy rule below), selectable text, copy full answer, Speak/VoiceOver-friendly. Ask
-   input stays a sheet (the Esc rule), reachable via `PanelAction::AskImage`.
+Native SwiftUI views over the core models (`panels.rs`):
 
-Retire each `pb-hud render_*` **on macOS** as its tab lands. Keep `render_panel` (the `i`
-line), toasts, play/rotate hints, scan chip, tooltips, and empty-state CTA in `pb-hud` on
-both shells.
+1. **Details (EXIF)** — scroll, selectable rows, **no "…" cap** (full table; the cap is
+   winit-HUD-only). _TODO: ⌘C copy-full-details + row copy._
+2. **Text/OCR** — selectable recognized text + QR payloads. _TODO: ⌘C first-responder-aware so
+   panel selection beats Copy Image; copy-full-text._
+3. **Describe/Ask** — **`AttributedString(markdown:)`** DONE (inline syntax; block lists /
+   headings not styled yet). Selectable. _TODO: copy-full-answer, Speak/VoiceOver, Ask sheet
+   via `PanelAction::AskImage`._
+
+Kept `render_panel` (the `i` line), toasts, play/rotate hints, scan chip (until ④), tooltips,
+and empty-state CTA in `pb-hud` on both shells (welcome CTA is native on macOS via `native_open`).
 
 ### Phase 4 — Windows egui presenter track
 
