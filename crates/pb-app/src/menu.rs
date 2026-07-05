@@ -74,6 +74,7 @@ pub mod ids {
     pub const INFO: &str = "info";
     pub const FULL_EXIF: &str = "full_exif";
     pub const FOLDER_TREE: &str = "folder_tree";
+    pub const TOGGLE_PANELS: &str = "toggle_panels";
     pub const OPEN_PARENT: &str = "open_parent";
     pub const PREV_FOLDER: &str = "prev_folder";
     pub const NEXT_FOLDER: &str = "next_folder";
@@ -130,6 +131,7 @@ pub enum MenuAction {
     Info,
     FullExif,
     FolderTree,
+    TogglePanels,
     OpenParent,
     PrevFolder,
     NextFolder,
@@ -185,6 +187,7 @@ impl MenuAction {
             MenuAction::Info => Action::Info,
             MenuAction::FullExif => Action::FullExif,
             MenuAction::FolderTree => Action::FolderTree,
+            MenuAction::TogglePanels => Action::TogglePanels,
             MenuAction::OpenParent => Action::OpenParent,
             MenuAction::PrevFolder => Action::PrevFolder,
             MenuAction::NextFolder => Action::NextFolder,
@@ -241,6 +244,7 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         INFO => MenuAction::Info,
         FULL_EXIF => MenuAction::FullExif,
         FOLDER_TREE => MenuAction::FolderTree,
+        TOGGLE_PANELS => MenuAction::TogglePanels,
         OPEN_PARENT => MenuAction::OpenParent,
         PREV_FOLDER => MenuAction::PrevFolder,
         NEXT_FOLDER => MenuAction::NextFolder,
@@ -327,6 +331,9 @@ pub struct ViewChecks {
     /// exactly one — or neither — is checked, mirroring `App::info`.
     pub info: CheckMenuItem,
     pub full_exif: CheckMenuItem,
+    /// View ▸ Hide Panels (task #54): checked while rich panels are Tab-hidden;
+    /// enabled only with a panel open (mirrors the core's `hide_panels_enabled`).
+    pub toggle_panels: CheckMenuItem,
     /// Checked when Live Photo audio is muted (#38), mirroring `settings.mute_live_audio`.
     pub mute_live_audio: CheckMenuItem,
 }
@@ -426,8 +433,14 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
         ),
         // AI image description (task #44).
         &PredefinedMenuItem::separator(),
-        &item(ids::DESCRIBE, &labeled(keymap, "Describe Image", Action::DescribeImage)),
-        &item(ids::ASK_IMAGE, &labeled(keymap, "Ask About Image…", Action::AskImage)),
+        &item(
+            ids::DESCRIBE,
+            &labeled(keymap, "Describe Image", Action::DescribeImage),
+        ),
+        &item(
+            ids::ASK_IMAGE,
+            &labeled(keymap, "Ask About Image…", Action::AskImage),
+        ),
         &item(
             ids::COPY_DESCRIPTION,
             &labeled(keymap, "Copy AI Description", Action::CopyDescription),
@@ -444,6 +457,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
     let slideshow = check_item(ids::SLIDESHOW, "Slideshow\tS");
     let info = check_item(ids::INFO, "Show Image Info\tI");
     let full_exif = check_item(ids::FULL_EXIF, "Show All EXIF Info\tShift+I");
+    let toggle_panels = check_item(ids::TOGGLE_PANELS, "Hide Panels\tTab");
     let mute_live_audio = check_item(ids::MUTE_LIVE_AUDIO, "Mute Live Photo Audio\tM");
 
     let view = Submenu::new("&View", true);
@@ -467,6 +481,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
             ids::FOLDER_TREE,
             &labeled(keymap, "Show Folder Tree", Action::FolderTree),
         ),
+        &toggle_panels,
     ]);
 
     // Go — folder navigation (Explorer's Alt+↑/←/→ idioms; hints from the live keymap).
@@ -569,6 +584,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
             slideshow,
             info,
             full_exif,
+            toggle_panels,
             mute_live_audio,
         },
     }
@@ -688,6 +704,7 @@ pub fn build_menu(_keymap: &Keymap) -> BuiltMenu {
     let slideshow = check_item(ids::SLIDESHOW, "Slideshow");
     let info = check_item(ids::INFO, "Show Image Info");
     let full_exif = check_item(ids::FULL_EXIF, "Show All EXIF Info");
+    let toggle_panels = check_item(ids::TOGGLE_PANELS, "Hide Panels");
     let mute_live_audio = check_item(ids::MUTE_LIVE_AUDIO, "Mute Live Photo Audio");
     // Native (Spaces) fullscreen. Its title flips to "Exit Full Screen" while engaged
     // (Mac convention — no checkmark), driven by `App::refresh_native_fullscreen_label`.
@@ -722,6 +739,7 @@ pub fn build_menu(_keymap: &Keymap) -> BuiltMenu {
         &sep(),
         &info,
         &full_exif,
+        &toggle_panels,
     ]);
 
     // No accelerators / no hint text: these are bare-key bindings (Space / R / , / . / …)
@@ -796,6 +814,7 @@ pub fn build_menu(_keymap: &Keymap) -> BuiltMenu {
             slideshow,
             info,
             full_exif,
+            toggle_panels,
             mute_live_audio,
         },
         window,
@@ -962,6 +981,10 @@ mod tests {
         );
         assert_eq!(action_for(ids::INFO), Some(MenuAction::Info));
         assert_eq!(action_for(ids::FULL_EXIF), Some(MenuAction::FullExif));
+        assert_eq!(
+            action_for(ids::TOGGLE_PANELS),
+            Some(MenuAction::TogglePanels)
+        );
         assert_eq!(action_for(ids::NEXT), Some(MenuAction::Next));
         assert_eq!(action_for(ids::PREVIOUS), Some(MenuAction::Previous));
         assert_eq!(action_for(ids::RANDOM), Some(MenuAction::Random));

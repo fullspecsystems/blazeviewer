@@ -100,6 +100,11 @@ pub enum Action {
     /// top-left corner. Rows click-to-open; the "… n more" markers page the window
     /// (see `.taskmaster/docs/folder-tree-plan.md`).
     FolderTree,
+    /// Toggle rich-panel visibility (`Tab`, task #54 — the Photoshop idiom): hides the
+    /// Inspector/Help/folder-tree panels without closing them; pressing again (or any
+    /// panel toggle) reveals. No-op with no panel open. The ephemeral HUD (toasts,
+    /// basic info line, hints) is unaffected.
+    TogglePanels,
     /// Go up: open the deck root's parent folder (⌘↑ on macOS — Finder's Enclosing
     /// Folder chord, via the menu accelerator; Alt+↑ on Windows — Explorer's up).
     /// On an archive deck, opens the folder containing the archive.
@@ -173,6 +178,7 @@ impl Action {
         Action::FullExif,
         Action::Help,
         Action::FolderTree,
+        Action::TogglePanels,
         Action::OpenParent,
         Action::PrevFolder,
         Action::NextFolder,
@@ -231,6 +237,7 @@ impl Action {
             Action::FullExif => "full_exif",
             Action::Help => "help",
             Action::FolderTree => "folder_tree",
+            Action::TogglePanels => "toggle_panels",
             Action::OpenParent => "open_parent",
             Action::PrevFolder => "prev_folder",
             Action::NextFolder => "next_folder",
@@ -311,6 +318,7 @@ impl Action {
             Action::FullExif => "Detailed info panel",
             Action::Help => "Keyboard help",
             Action::FolderTree => "Folder tree",
+            Action::TogglePanels => "Hide/show panels",
             Action::OpenParent => "Open parent folder",
             Action::PrevFolder => "Previous folder",
             Action::NextFolder => "Next folder",

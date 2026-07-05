@@ -29,7 +29,7 @@ use crate::contract::CoreEffect;
 use crate::decode_pool::{DecodePool, Outcome};
 use crate::keymap::Keymap;
 use crate::metrics::StageTimes;
-use crate::overlay::{InfoMode, OpenButton, OpenPanel, PlayHint, Toast, TreePanel};
+use crate::overlay::{OpenButton, OpenPanel, Panels, PlayHint, Toast, TreePanel};
 use crate::settings::Settings;
 use crate::undo::UndoAction;
 use crate::{Action, Modifiers, PbKey, PhotoMeta, Slideshow};
@@ -303,8 +303,36 @@ pub struct AppCore {
     pub password_archive: Option<std::path::PathBuf>,
 
     // --- HUD / overlay state (NS0 5.3e; the Hud rasterizer stays shell-side for 5.4) ---
-    /// Which info overlay is active (`i` basic / `Shift+I` full EXIF / `?` help / off).
-    pub info: InfoMode,
+    /// The basic `i` info line (filename · resolution · format): the **ephemeral**
+    /// glanceable readout, fully decoupled from the rich panels (task #54) — its own
+    /// permanent bottom-right layer, so it coexists with a rich panel (which lifts
+    /// above its strip) and is unaffected by `Tab`/`panels.hidden`. This is the
+    /// user's on/off preference; `info_line_shown` is the actual drawn state.
+    pub info_line: bool,
+    /// Whether the info line is currently *drawn* (hidden while flying / with no
+    /// photo, even when `info_line` is on) — mirrors `overlay_shown`.
+    pub info_line_shown: bool,
+    /// Which item the drawn info line was built for; a mismatch with `displayed_item`
+    /// means it's stale and the tick rebuilds it (mirrors `overlay_item`).
+    pub info_line_item: Option<usize>,
+    /// The physical-px size of the last-rasterized info-line bitmap. Height drives
+    /// how far a colliding panel reserves; width + the alignment give the line's
+    /// horizontal span, so a panel reserves only when it actually overlaps the line
+    /// (a wide centered line on a narrow window can hit both corner panels).
+    pub info_line_w: u32,
+    pub info_line_h: u32,
+    /// Rich-panel open/visibility state (task #54): the tabbed Inspector
+    /// (Details/Text/Describe), Help, and the `Tab` master-visibility flag.
+    pub panels: Panels,
+    /// The host presents the **Help** panel natively (task #54, mac-first): the core
+    /// then suppresses Help's HUD rasterization and emits [`CoreEffect::PanelsChanged`]
+    /// on visibility/content change so the shell pulls the model. Default `false` (the
+    /// winit shell keeps the CPU-quad Help). The macOS host sets it at construction.
+    /// The tree and Inspector follow with their own flags as they go native.
+    pub native_help: bool,
+    /// The last Help visibility the tick emitted a [`CoreEffect::PanelsChanged`] for,
+    /// so the marker fires only on a real show/hide (not per tick).
+    pub last_help_visible: bool,
     /// Whether the info panel is currently drawn.
     pub overlay_shown: bool,
     /// Which item the drawn panel was built for; when it differs from `displayed_item` the

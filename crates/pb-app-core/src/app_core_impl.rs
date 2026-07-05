@@ -27,11 +27,24 @@ use crate::contract;
 use crate::decode_pool::Outcome;
 use crate::engine::*;
 use crate::keymap::Keymap;
+use crate::panels::{
+    DescribeBody, DescribePanel, DetailRow, DetailsPanel, HelpPanel, HelpSection, TextBody,
+    TextPanel,
+};
 use crate::pb_key::PbKey;
 use crate::{
-    settings, slideshow, timing, Action, AppCore, InfoMode, Nav, OpenButton, OpenPanel, PlayHint,
-    Toast, UndoAction,
+    settings, slideshow, timing, Action, AppCore, InspectorTab, Nav, OpenButton, OpenPanel, Panels,
+    PlayHint, SlotContent, Toast, UndoAction,
 };
+
+/// Interim adapter (task #54 Phase 0): a core [`DetailRow`] to the HUD table row it
+/// projects onto. Retires with the HUD's Details tab.
+fn hud_row(r: DetailRow) -> Row {
+    match r {
+        DetailRow::Span { text, bold } => Row::Span { text, bold },
+        DetailRow::Pair { label, value } => Row::Pair { label, value },
+    }
+}
 
 /// `PB_TRACE=1` → present/draw diagnostics to stderr (dev-only; zero cost when off
 /// after the first check). Pairs with the Swift host's `pbTrace` size reports.
@@ -133,7 +146,14 @@ impl AppCore {
             password_archive: None,
             pending_delete: None,
             pending_confirm_delete: None,
-            info: InfoMode::Off,
+            info_line: false,
+            info_line_shown: false,
+            info_line_item: None,
+            info_line_w: 0,
+            info_line_h: 0,
+            panels: Panels::default(),
+            native_help: false,
+            last_help_visible: false,
             overlay_shown: false,
             overlay_item: None,
             toast: None,
@@ -280,6 +300,7 @@ impl AppCore {
             Action::FullExif => self.toggle_info(true),
             Action::Help => self.toggle_help(),
             Action::FolderTree => self.toggle_folder_tree(),
+            Action::TogglePanels => self.toggle_panels(),
             Action::OpenParent => self.open_parent_cmd(),
             Action::PrevFolder => self.open_sibling_cmd(-1),
             Action::NextFolder => self.open_sibling_cmd(1),
@@ -677,7 +698,7 @@ impl AppCore {
             R::SettingsSaved { settings, keymap } => {
                 self.effects.push(E::CloseDialog);
                 if let Some(new) = settings {
-                    self.apply_settings(new);
+                    self.apply_settings(*new);
                 }
                 if let Some(km) = keymap {
                     self.apply_keymap(km);
@@ -687,7 +708,7 @@ impl AppCore {
             // but the window stays open — no CloseDialog.
             R::SettingsEdited { settings, keymap } => {
                 if let Some(new) = settings {
-                    self.apply_settings(new);
+                    self.apply_settings(*new);
                 }
                 if let Some(km) = keymap {
                     self.apply_keymap(km);
@@ -1004,17 +1025,43 @@ impl AppCore {
         let flying = nav.is_some() && past_delay;
         // 4a′. Flash the "Press P to play" hint once on settling on an animated still.
         self.maybe_show_anim_hint(flying);
-        if self.info != InfoMode::Off {
+        // 4a. The basic info line (`i`) — its own ephemeral layer, so it runs before
+        // the rich panel (whose bottom lift reads the line's shown state). Same
+        // fly-hide + settle-track behavior as the panel, but never needs Help's
+        // static exception since the line always describes a photo.
+        if self.info_line {
+            if flying {
+                if self.info_line_shown {
+                    self.hide_info_line();
+                }
+            } else if !transforming
+                && self.current.is_some()
+                && (!self.info_line_shown || self.info_line_item != self.displayed_item)
+            {
+                self.show_info_line();
+            }
+        }
+        if let Some(slot) = self.slot_content() {
             if flying {
                 if self.overlay_shown {
                     self.hide_overlay();
                 }
             } else if !transforming
                 // Help is static; the info panels need a photo.
-                && (self.info == InfoMode::Help || self.current.is_some())
+                && (slot == SlotContent::Help || self.current.is_some())
                 && (!self.overlay_shown || self.overlay_item != self.displayed_item)
             {
                 self.show_overlay();
+            }
+        }
+        // 4b. Native-panel visibility marker (task #54, mac-first): fire only on a real
+        // show/hide of the natively-presented Help panel, so the host re-pulls its model
+        // and shows/hides its SwiftUI view. Winit (`native_help == false`) never enters.
+        if self.native_help {
+            let vis = self.help_panel_visible();
+            if vis != self.last_help_visible {
+                self.last_help_visible = vis;
+                self.emit_panels_changed();
             }
         }
 
@@ -1034,7 +1081,10 @@ impl AppCore {
             match io.rx.try_recv() {
                 Ok(crate::folder_tree::TreeIoResult::FullTree { sig, model }) => {
                     self.tree_io = None;
-                    if self.folder_tree_open && self.hud.is_some() && self.folder_sig() == sig {
+                    if self.panels.tree_visible(self.folder_tree_open)
+                        && self.hud.is_some()
+                        && self.folder_sig() == sig
+                    {
                         self.push_folder_tree(model.rows, model.targets, 0, None);
                         self.folder_tree_sig = Some(sig);
                         self.update_tree_hover();
@@ -1059,7 +1109,7 @@ impl AppCore {
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => self.tree_io = None,
             }
         }
-        if self.folder_tree_open && self.hud.is_some() {
+        if self.panels.tree_visible(self.folder_tree_open) && self.hud.is_some() {
             let sig = self.folder_sig();
             let lite_sig = format!("{sig}|lite");
             let stored = self.folder_tree_sig.as_deref();
@@ -1193,14 +1243,18 @@ impl AppCore {
 
     /// Build the [`contract::MenuState`] for the given live state — the pure mapping from
     /// the app's view/edit state to the shell-neutral menu model. Takes no `self` and
-    /// touches no muda, so it's unit-tested directly (`menu_state_*` tests). The two enum
-    /// mappings it owns are the only non-trivial logic: `pb_render::ScaleMode` → the View
-    /// scale group, and the 4-state [`InfoMode`] → the two info checkmarks (both `Help`
-    /// and `Off` show *neither*, exactly as the menu does today).
+    /// touches no muda, so it's unit-tested directly (`menu_state_*` tests). The
+    /// mappings it owns are the only non-trivial logic: `pb_render::ScaleMode` → the
+    /// View scale group, and the panel state → the info checkmarks (the basic line and
+    /// the Inspector's Details tab check independently — they decoupled in task #54)
+    /// plus the Hide Panels toggle (checked while hidden, enabled only with a panel
+    /// open — matching the `Tab` no-op).
     #[allow(clippy::too_many_arguments)]
     pub fn menu_state_from(
         scale: ScaleMode,
-        info: InfoMode,
+        info_line: bool,
+        panels: Panels,
+        tree_open: bool,
         recursive: bool,
         fullscreen: bool,
         slideshow: bool,
@@ -1219,15 +1273,12 @@ impl AppCore {
                 ScaleMode::Fill => contract::ScaleMode::Fill,
                 ScaleMode::Original => contract::ScaleMode::Original,
             },
-            info: match info {
-                InfoMode::Basic => contract::InfoOverlay::Basic,
-                InfoMode::Full => contract::InfoOverlay::FullExif,
-                // Help, the text/describe panels, and Off all leave the two info checkmarks
-                // off (the menu tracks only the info pair — the faithful collapse).
-                InfoMode::Help | InfoMode::Text | InfoMode::Describe | InfoMode::Off => {
-                    contract::InfoOverlay::Hidden
-                }
-            },
+            info_basic: info_line,
+            // The Details tab checks whether visible or Tab-hidden — hidden ≠ closed,
+            // and the Hide Panels checkmark explains the invisibility.
+            info_full: panels.inspector == Some(InspectorTab::Details),
+            panels_hidden: panels.hidden,
+            hide_panels_enabled: panels.any_open(tree_open),
             recursive,
             fullscreen,
             slideshow,
@@ -1271,18 +1322,43 @@ impl AppCore {
         self.draw();
     }
 
-    /// Toggle the keybindings help overlay (`/` or `?`). Shares the single overlay
-    /// with the info panels, so it replaces whichever was showing.
+    /// Toggle the keybindings help panel (`/` or `?`). Shares the single HUD overlay
+    /// slot with the Inspector (interim), so opening it replaces whichever tab was
+    /// showing; while `Tab`-hidden it reveals instead of closing (the reveal rule).
     pub fn toggle_help(&mut self) {
-        self.info = if self.info == InfoMode::Help {
-            InfoMode::Off
-        } else {
-            InfoMode::Help
-        };
-        if self.info == InfoMode::Off {
-            self.hide_overlay();
-        } else {
+        self.panels.toggle_help();
+        self.refresh_slot();
+    }
+
+    /// Toggle rich-panel visibility (`Tab`, task #54): hide the Inspector/Help/tree
+    /// without closing them, or reveal them all. No-op when nothing is open. The
+    /// ephemeral layer (toasts, the basic `i` line, hints) is unaffected — the basic
+    /// line may re-claim the overlay slot while panels hide.
+    pub fn toggle_panels(&mut self) {
+        if !self.panels.toggle_hidden(self.folder_tree_open) {
+            return;
+        }
+        self.refresh_tree_visibility();
+        self.refresh_slot();
+    }
+
+    /// Re-render or clear the shared overlay slot after panel state changed.
+    fn refresh_slot(&mut self) {
+        if self.slot_content().is_some() {
             self.show_overlay();
+        } else {
+            self.hide_overlay();
+        }
+    }
+
+    /// Apply the tree's visibility after a hide/reveal: clear the bitmap when hidden,
+    /// force a rebuild against fresh state when revealed (the signature gate re-runs
+    /// the derivation next tick).
+    fn refresh_tree_visibility(&mut self) {
+        if self.panels.tree_visible(self.folder_tree_open) {
+            self.folder_tree_sig = None; // rebuild + re-upload next tick
+        } else {
+            self.hide_folder_tree();
         }
     }
 
@@ -1298,6 +1374,15 @@ impl AppCore {
     /// "… n more" windowing markers page the list. See
     /// `.taskmaster/docs/folder-tree-plan.md`.
     pub fn toggle_folder_tree(&mut self) {
+        if self.panels.reveal() {
+            // ⇧F while Tab-hidden reveals first and only ever *shows* (the reveal
+            // rule): the tree opens/re-draws and any hidden Inspector/Help panel
+            // comes back with it — `hidden` is one master flag, the Photoshop idiom.
+            self.folder_tree_open = true;
+            self.show_folder_tree();
+            self.refresh_slot();
+            return;
+        }
         self.folder_tree_open = !self.folder_tree_open;
         if self.folder_tree_open {
             self.show_folder_tree();
@@ -1367,8 +1452,9 @@ impl AppCore {
     /// spun-down drive or a dead network share must not stall the event loop.
     fn show_folder_tree_mode(&mut self, lite: bool) {
         // Check the cheap gates before deriving rows, so a font-less host doesn't
-        // pay the derivation on every retry tick.
-        if self.hud.is_none() {
+        // pay the derivation on every retry tick. A Tab-hidden tree derives nothing
+        // either — reveal forces the rebuild via the cleared signature.
+        if self.hud.is_none() || !self.panels.tree_visible(self.folder_tree_open) {
             return;
         }
         let sig = self.folder_sig();
@@ -1457,22 +1543,39 @@ impl AppCore {
         let px = (15.0 * self.viewport.scale_factor).max(8.0);
         let pad = (7.0 * self.viewport.scale_factor).round().max(2.0) as u32;
         let margin = self.overlay_margin();
-        let max_h = (self.viewport.height as i32 - 2 * margin as i32).max(1);
+        let full_max_h = (self.viewport.height as i32 - 2 * margin as i32).max(1);
+        let render = |hud: &pb_hud::hud::Hud, max_h: i32| {
+            hud.render_tree(
+                &rows,
+                px,
+                pad,
+                hud.theme().bg,
+                max_h,
+                page,
+                hovered,
+                hud::TreeCounts::Capsule,
+            )
+        };
         let Some(hud) = self.hud.as_ref() else {
             return;
         };
-        let Some((bitmap, w, h, hits)) = hud.render_tree(
-            &rows,
-            px,
-            pad,
-            hud.theme().bg,
-            max_h,
-            page,
-            hovered,
-            hud::TreeCounts::Capsule,
-        ) else {
+        let Some((mut bitmap, mut w, mut h, mut hits)) = render(hud, full_max_h) else {
             return;
         };
+        // The tree is top-left-anchored and a full-height one reaches the bottom strip;
+        // if the info line overlaps the tree's column `[margin, margin + w]`, cap the
+        // height by the line strip and re-render so a tall tree pages one row shorter
+        // and leaves the line room (task #54). Only left/center/wide lines trigger this
+        // — the default right line clears a normal tree column, so no re-render.
+        let reserve = self.info_line_reserve_for(margin as f32, margin as f32 + w as f32);
+        if reserve > 0 {
+            let capped = (full_max_h - reserve as i32).max(1);
+            if let Some(hud) = self.hud.as_ref() {
+                if let Some(re) = render(hud, capped) {
+                    (bitmap, w, h, hits) = re;
+                }
+            }
+        }
         if let Some(a) = self.renderer.as_mut() {
             a.set_tree(Some((&bitmap, w, h)), margin);
         }
@@ -1695,8 +1798,13 @@ impl AppCore {
     pub fn apply_keymap(&mut self, keymap: Keymap) {
         self.keymap = keymap;
         self.keymap.save();
-        if self.overlay_shown && self.info == InfoMode::Help {
+        if self.overlay_shown && self.slot_content() == Some(SlotContent::Help) {
             self.show_overlay();
+        }
+        // The Help panel's shortcut labels just changed — nudge a native Help view to
+        // re-pull (visibility didn't change, so the tick diff wouldn't catch it).
+        if self.help_panel_visible() {
+            self.emit_panels_changed();
         }
     }
 
@@ -1769,7 +1877,8 @@ impl AppCore {
         self.current = None;
         if let Some(r) = self.renderer.as_mut() {
             r.clear_image();
-            r.set_overlay(None, 0);
+            r.set_overlay(None, 0, 0);
+            r.set_info_line(None, 0, pb_render::HAlign::Right);
         }
         self.effects
             .push(contract::CoreEffect::SetTitle("PhotoBlaze".to_string()));
@@ -1777,6 +1886,11 @@ impl AppCore {
         self.show_open_hint();
         self.overlay_shown = false;
         self.overlay_item = None;
+        // Keep the `i` enabled preference; just drop the drawn strip (no photo to
+        // describe). The tick re-shows it once a new photo lands.
+        self.info_line_shown = false;
+        self.info_line_item = None;
+        self.info_line_h = 0;
         self.draw();
     }
 
@@ -2326,7 +2440,7 @@ impl AppCore {
                 // detailed panel is open, refresh it so the frame count/rate/loop appear.
                 AnimWant::Eager => {
                     self.prepared = Some(Prepared { item, anim });
-                    if self.overlay_shown && self.info == InfoMode::Full {
+                    if self.overlay_shown && self.slot_content() == Some(SlotContent::Details) {
                         self.show_overlay();
                     }
                 }
@@ -2391,25 +2505,22 @@ impl AppCore {
         }
     }
 
-    /// Toggle an info panel: the one-line basic panel with `i`, or the full-EXIF
-    /// "nerd" table with `Shift+I`. Selecting the mode that's already showing hides
-    /// it. When shown it appears immediately (idle); after navigation it reappears
-    /// once you stop (see `about_to_wait`).
+    /// `i` (the basic one-line info readout) or `Shift+I` (the Inspector's Details
+    /// tab). Fully independent (task #54): the line is its own layer, so `i` never
+    /// touches a rich panel and `Shift+I` never touches the line — the two can be on
+    /// at once, the line sitting below the panel. When shown the line appears
+    /// immediately (idle); after navigation it reappears once you stop (see the tick).
     pub fn toggle_info(&mut self, full: bool) {
-        let target = if full {
-            InfoMode::Full
+        if full {
+            self.panels.toggle_inspector(InspectorTab::Details);
+            self.refresh_slot();
         } else {
-            InfoMode::Basic
-        };
-        self.info = if self.info == target {
-            InfoMode::Off
-        } else {
-            target
-        };
-        if self.info == InfoMode::Off {
-            self.hide_overlay();
-        } else {
-            self.show_overlay();
+            self.info_line = !self.info_line;
+            if self.info_line {
+                self.show_info_line();
+            } else {
+                self.hide_info_line();
+            }
         }
     }
 
@@ -2491,6 +2602,12 @@ impl AppCore {
         // Persist the whole model (atomic write; best-effort).
         self.settings.save();
 
+        // A new info-line alignment (or opacity/theme) re-places the line at once, which
+        // re-lifts/re-caps its colliders (panel + tree) for the new span.
+        if old.info_line_align != self.settings.info_line_align && self.info_line_shown {
+            self.show_info_line();
+        }
+
         // Redraw so the new letterbox shows even when the scale mode didn't change,
         // and rebuild the info panel so a new opacity takes effect immediately.
         if self.overlay_shown {
@@ -2531,10 +2648,11 @@ impl AppCore {
             .unwrap_or_default()
     }
 
-    /// The keyboard-help overlay as grouped sections (description + shortcut), sourced from the
-    /// live keymap / menu so customized bindings and platform symbols stay correct. Drives
-    /// [`hud::Hud::render_shortcuts`].
-    pub fn help_sections(&self) -> Vec<hud::ShortcutSection> {
+    /// The Help panel model (task #54): grouped sections (description + shortcut),
+    /// sourced from the live keymap / menu so customized bindings and platform
+    /// symbols stay correct. The HUD projects it via `render_shortcuts`; presenters
+    /// consume it directly.
+    pub fn help_panel(&self) -> HelpPanel {
         let sc = |a: Action| self.help_shortcut(a);
         let two =
             |a: Action, b: Action| format!("{} / {}", self.help_shortcut(a), self.help_shortcut(b));
@@ -2545,11 +2663,11 @@ impl AppCore {
         #[cfg(not(target_os = "macos"))]
         let trash = "Delete to Recycle Bin";
 
-        let section = |title: &str, rows: Vec<(String, String)>| hud::ShortcutSection {
+        let section = |title: &str, rows: Vec<(String, String)>| HelpSection {
             title: title.to_string(),
             rows,
         };
-        vec![
+        let sections = vec![
             section(
                 "Browse",
                 vec![
@@ -2613,6 +2731,7 @@ impl AppCore {
                     row("Detailed info panel", sc(Action::FullExif)),
                     row("Text in image", sc(Action::ShowImageText)),
                     row("Folder tree", sc(Action::FolderTree)),
+                    row("Hide/show panels", sc(Action::TogglePanels)),
                     row("Parent folder", sc(Action::OpenParent)),
                     row(
                         "Previous / next folder",
@@ -2626,82 +2745,173 @@ impl AppCore {
                     row("Help", "/ / ?".to_string()),
                 ],
             ),
-        ]
+        ];
+        HelpPanel { sections }
     }
 
-    /// Rasterize the active overlay (info panel or help) and draw it. The help
-    /// overlay uses a larger font than the info panels.
+    /// What the single **rich-panel** overlay slot shows right now, priority-resolved:
+    /// Help > the Inspector's active tab. `None` = no rich panel (everything closed or
+    /// `Tab`-hidden). The basic `i` line is a separate layer — see `info_line`.
+    pub fn slot_content(&self) -> Option<SlotContent> {
+        use crate::overlay::PanelContent;
+        match self.panels.content() {
+            Some(PanelContent::Help) => Some(SlotContent::Help),
+            Some(PanelContent::Tab(InspectorTab::Details)) => Some(SlotContent::Details),
+            Some(PanelContent::Tab(InspectorTab::Text)) => Some(SlotContent::Text),
+            Some(PanelContent::Tab(InspectorTab::Describe)) => Some(SlotContent::Describe),
+            None => None,
+        }
+    }
+
+    /// Whether the current overlay-slot content is presented **natively** by the host
+    /// (so the core suppresses its HUD rasterization). For now only Help, and only when
+    /// the host declared `native_help`. The tree/Inspector join as they go native.
+    fn slot_is_native(&self) -> bool {
+        self.native_help && self.slot_content() == Some(SlotContent::Help)
+    }
+
+    /// Whether the **native** Help panel should be visible right now — the signal the
+    /// mac host reads (via FFI) to show/hide its SwiftUI Help view. Help open, not
+    /// `Tab`-hidden, and the host presents it natively.
+    pub fn help_panel_visible(&self) -> bool {
+        self.native_help && self.panels.help && !self.panels.hidden
+    }
+
+    /// Push the [`CoreEffect::PanelsChanged`] marker so the host re-pulls the native
+    /// panel model — deduped (the drain can pull once for several mutations in a tick).
+    fn emit_panels_changed(&mut self) {
+        if !self
+            .effects
+            .iter()
+            .any(|e| matches!(e, contract::CoreEffect::PanelsChanged))
+        {
+            self.effects.push(contract::CoreEffect::PanelsChanged);
+        }
+    }
+
+    /// The Inspector ▸ Text tab model (task #54): the semantic scan state for the
+    /// displayed photo, read from the RAM-only caches. Pure projection — building
+    /// it kicks nothing off (the show path calls `ensure_text_scan` separately).
+    pub fn text_panel(&self) -> TextPanel {
+        let body = match self.displayed_item {
+            None => TextBody::NoPhoto,
+            Some(item) => match self.recognized_text.get(&item) {
+                Some(r) => TextBody::Ready {
+                    qr: r.qr.clone(),
+                    paragraphs: r.lines.clone(),
+                    ocr_error: r.ocr_error.clone(),
+                },
+                None => TextBody::Scanning,
+            },
+        };
+        TextPanel { body }
+    }
+
+    /// The Inspector ▸ Describe tab model (task #54): the semantic describe state
+    /// for the displayed photo. Pure projection of the RAM-only caches.
+    pub fn describe_panel(&self) -> DescribePanel {
+        let body = match self.displayed_item {
+            None => DescribeBody::NoPhoto,
+            Some(item) => match self.descriptions.get(&item) {
+                Some(Ok(text)) => DescribeBody::Ready(text.clone()),
+                Some(Err(msg)) => DescribeBody::Error(msg.clone()),
+                None if self.describe_scan.as_ref().is_some_and(|s| s.item == item) => {
+                    DescribeBody::Busy
+                }
+                None => DescribeBody::Idle,
+            },
+        };
+        DescribePanel { body }
+    }
+
+    /// The Inspector ▸ Details tab model (task #54): the full metadata table.
+    pub fn details_panel(&self) -> DetailsPanel {
+        DetailsPanel {
+            rows: self.exif_rows(),
+        }
+    }
+
+    /// Rasterize the active **rich panel** (Inspector tab or Help) and draw it,
+    /// lifted above the info-line strip if that line shares the corner. The help
+    /// overlay uses a larger font than the info panels. The basic `i` line is drawn
+    /// separately by [`show_info_line`](Self::show_info_line).
     pub fn show_overlay(&mut self) {
+        // A natively-presented panel (Help on the mac host) is drawn by the shell, not
+        // the HUD — suppress the CPU rasterization entirely. Clear any HUD panel left
+        // from a previous slot (e.g. switching Details → Help) so it doesn't linger
+        // under the native view; the tick's visibility diff emits the marker.
+        if self.slot_is_native() {
+            if self.overlay_shown {
+                self.hide_overlay();
+            }
+            return;
+        }
         let px = (15.0 * self.viewport.scale_factor).max(8.0);
         let pad = (7.0 * self.viewport.scale_factor).round().max(2.0) as u32;
         // The info / EXIF panels honor the user's opacity setting; the help overlay
         // keeps the standard translucency. Both take the active theme's panel color.
         let theme = self.hud.as_ref().map_or(hud::Theme::DARK, |h| h.theme());
         let info_bg = theme.bg_for_opacity(self.settings.info_opacity);
-        // Resolve the Live Photo pairing (cached; one stat) up front so either panel can
-        // label it — the basic line and the detailed table both read `is_live_photo`.
+        // Resolve the Live Photo pairing (cached; one stat) so the detailed table can
+        // label it.
         if let Some(item) = self.displayed_item {
             self.live_motion_path(item);
         }
-        let is_live = self.displayed_item.is_some_and(|i| self.is_live_photo(i));
-        let panel = match self.info {
-            InfoMode::Off => return,
-            InfoMode::Basic => {
-                let (Some(hud), Some(meta)) = (self.hud.as_ref(), self.current.as_ref()) else {
-                    return;
-                };
-                let mut text = format!("{} · {}×{} · {}", meta.rel, meta.w, meta.h, meta.codec);
-                if is_live {
-                    text.push_str(" · Live"); // a Live Photo's motion is playable (P)
-                }
-                hud.render_panel(&text, px, pad, info_bg)
-            }
-            InfoMode::Full => {
+        // Cap the paragraph panels to a readable column, never wider than the window
+        // allows at this margin.
+        let margin = self.overlay_margin();
+        let para_max_w = ((self.viewport.width as i32 - 2 * margin as i32).max(1) as u32)
+            .min((440.0 * self.viewport.scale_factor) as u32);
+        let max_h = (self.viewport.height as i32 - 2 * margin as i32).max(1);
+        let panel = match self.slot_content() {
+            None => return,
+            Some(SlotContent::Details) => {
                 // Warm the EXIF read once so the table build (and its per-frame rebuilds
                 // during playback) never re-read the file.
                 if let Some(item) = self.displayed_item {
                     self.ensure_exif_cached(item);
                 }
-                let rows = self.exif_rows();
+                let model = self.details_panel();
                 let Some(hud) = self.hud.as_ref() else {
                     return;
                 };
-                if rows.is_empty() {
+                if model.rows.is_empty() {
                     return;
                 }
+                // Interim HUD projection: core rows → the rasterizer's table rows.
+                let rows: Vec<Row> = model.rows.into_iter().map(hud_row).collect();
                 hud.render_table(&rows, px, pad, info_bg)
             }
-            InfoMode::Help => {
+            Some(SlotContent::Help) => {
                 let help_px = (15.0 * self.viewport.scale_factor).max(10.0);
-                let sections = self.help_sections();
-                let margin = self.overlay_margin();
-                let win_h = self.viewport.height;
-                let max_h = (win_h as i32 - 2 * margin as i32).max(1);
+                let model = self.help_panel();
                 let Some(hud) = self.hud.as_ref() else {
                     return;
                 };
+                let sections: Vec<hud::ShortcutSection> = model
+                    .sections
+                    .into_iter()
+                    .map(|s| hud::ShortcutSection {
+                        title: s.title,
+                        rows: s.rows,
+                    })
+                    .collect();
                 hud.render_shortcuts(&sections, help_px, theme.bg, max_h)
             }
-            InfoMode::Text => {
+            Some(SlotContent::Text) => {
                 if self.current.is_none() {
                     return;
                 }
                 // The panel tracks the displayed photo while open, so settling on a
                 // new item kicks its scan here (no-op when cached / already running).
                 self.ensure_text_scan();
-                let lines = self.text_panel_lines();
-                let margin = self.overlay_margin();
-                // Cap the paragraph width to a readable column, and never wider than
-                // the window allows at this margin.
-                let max_w = ((self.viewport.width as i32 - 2 * margin as i32).max(1) as u32)
-                    .min((440.0 * self.viewport.scale_factor) as u32);
-                let max_h = (self.viewport.height as i32 - 2 * margin as i32).max(1);
+                let lines = self.text_panel().lines();
                 let Some(hud) = self.hud.as_ref() else {
                     return;
                 };
-                hud.render_paragraph(&lines, px, pad, info_bg, max_w, max_h)
+                hud.render_paragraph(&lines, px, pad, info_bg, para_max_w, max_h)
             }
-            InfoMode::Describe => {
+            Some(SlotContent::Describe) => {
                 if self.current.is_none() {
                     return;
                 }
@@ -2713,27 +2923,134 @@ impl AppCore {
                 if self.settings.describe_auto {
                     self.ensure_describe_scan(None);
                 }
-                let lines = self.describe_panel_lines();
-                let margin = self.overlay_margin();
-                let max_w = ((self.viewport.width as i32 - 2 * margin as i32).max(1) as u32)
-                    .min((440.0 * self.viewport.scale_factor) as u32);
-                let max_h = (self.viewport.height as i32 - 2 * margin as i32).max(1);
+                let lines = self.describe_panel().lines();
                 let Some(hud) = self.hud.as_ref() else {
                     return;
                 };
-                hud.render_paragraph(&lines, px, pad, info_bg, max_w, max_h)
+                hud.render_paragraph(&lines, px, pad, info_bg, para_max_w, max_h)
             }
         };
         let Some((bitmap, w, h)) = panel else {
             return;
         };
-        let margin = self.overlay_margin();
+        // Lift the panel above the info line only when the line actually overlaps this
+        // panel's horizontal span (task #54). The rich panel is bottom-right-anchored:
+        // its span is `[sw - margin - w, sw - margin]`. Right inset stays `margin`.
+        let sw = self.viewport.width as f32;
+        let px1 = sw - margin as f32;
+        let bottom = margin + self.info_line_reserve_for(px1 - w as f32, px1);
         if let Some(a) = self.renderer.as_mut() {
-            a.set_overlay(Some((&bitmap, w, h)), margin);
+            a.set_overlay(Some((&bitmap, w, h)), margin, bottom);
         }
         self.overlay_shown = true;
         self.overlay_item = self.displayed_item;
         self.draw();
+    }
+
+    /// The info line's horizontal span `[x0, x1]` in physical px when it's drawn,
+    /// from its alignment + rasterized width + the corner margin. `None` when the
+    /// line isn't shown. The core-owned footprint every colliding layer reserves
+    /// against (and, later, what the native presenters inset their layout by).
+    fn info_line_span(&self) -> Option<(f32, f32)> {
+        if !self.info_line_shown || self.info_line_w == 0 {
+            return None;
+        }
+        let sw = self.viewport.width as f32;
+        let w = self.info_line_w as f32;
+        let m = self.overlay_margin() as f32;
+        let x0 = match self.settings.info_line_align {
+            settings::InfoLineAlign::Left => m,
+            settings::InfoLineAlign::Center => ((sw - w) * 0.5).max(0.0),
+            settings::InfoLineAlign::Right => (sw - m - w).max(0.0),
+        };
+        Some((x0, x0 + w))
+    }
+
+    /// The vertical strip (line height + gap) a layer must yield to clear the info
+    /// line **iff** its horizontal `[px0, px1]` span overlaps the line's — so a panel
+    /// on the opposite side reserves nothing, but a wide centered line that spans the
+    /// whole width pushes both corner panels *and* the toast. `0` when there's no
+    /// overlap or the line is hidden.
+    fn info_line_reserve_for(&self, px0: f32, px1: f32) -> u32 {
+        let Some((lx0, lx1)) = self.info_line_span() else {
+            return 0;
+        };
+        // A small gap so touching (not overlapping) edges don't trigger a reserve.
+        let gap = 6.0 * self.viewport.scale_factor;
+        if px0 < lx1 + gap && lx0 < px1 + gap {
+            self.info_line_h + gap.round() as u32
+        } else {
+            0
+        }
+    }
+
+    /// The info line's alignment as the renderer's [`pb_render::HAlign`].
+    fn info_line_halign(&self) -> pb_render::HAlign {
+        match self.settings.info_line_align {
+            settings::InfoLineAlign::Left => pb_render::HAlign::Left,
+            settings::InfoLineAlign::Center => pb_render::HAlign::Center,
+            settings::InfoLineAlign::Right => pb_render::HAlign::Right,
+        }
+    }
+
+    /// Rasterize + upload the basic info line (`i`) into its own bottom-anchored layer
+    /// at the configured alignment, then re-place any colliding panel/tree/toast above
+    /// it. A no-op without a font/photo (the tick retries on settle). Mirrors
+    /// [`show_overlay`](Self::show_overlay) but for the ephemeral line.
+    pub fn show_info_line(&mut self) {
+        let (Some(hud), Some(meta)) = (self.hud.as_ref(), self.current.as_ref()) else {
+            return;
+        };
+        let px = (15.0 * self.viewport.scale_factor).max(8.0);
+        let pad = (7.0 * self.viewport.scale_factor).round().max(2.0) as u32;
+        let theme = hud.theme();
+        let info_bg = theme.bg_for_opacity(self.settings.info_opacity);
+        let is_live = self.displayed_item.is_some_and(|i| self.is_live_photo(i));
+        let mut text = format!("{} · {}×{} · {}", meta.rel, meta.w, meta.h, meta.codec);
+        if is_live {
+            text.push_str(" · Live"); // a Live Photo's motion is playable (P)
+        }
+        let Some((bitmap, w, h)) = hud.render_panel(&text, px, pad, info_bg) else {
+            return;
+        };
+        let margin = self.overlay_margin();
+        let align = self.info_line_halign();
+        if let Some(a) = self.renderer.as_mut() {
+            a.set_info_line(Some((&bitmap, w, h)), margin, align);
+        }
+        self.info_line_shown = true;
+        self.info_line_item = self.displayed_item;
+        self.info_line_w = w;
+        self.info_line_h = h;
+        self.replace_colliders(); // re-lift the panel / re-cap the tree if they overlap
+    }
+
+    /// Clear the info-line layer and drop any reservation it was causing.
+    pub fn hide_info_line(&mut self) {
+        if let Some(a) = self.renderer.as_mut() {
+            a.set_info_line(None, 0, pb_render::HAlign::Right);
+        }
+        self.info_line_shown = false;
+        self.info_line_item = None;
+        self.info_line_w = 0;
+        self.info_line_h = 0;
+        self.replace_colliders();
+    }
+
+    /// Re-place the layers that reserve space against the info line — the rich panel
+    /// (lifts) and the folder tree (caps its height) — after the line's presence,
+    /// size, or alignment changed. The toast re-reads the reserve on its next build
+    /// (it's transient). A redraw covers the case where nothing needed re-placing.
+    fn replace_colliders(&mut self) {
+        if self.overlay_shown {
+            self.show_overlay();
+        }
+        if self.folder_tree_panel.is_some() {
+            self.folder_tree_sig = None; // force a rebuild at the new tree height budget
+        }
+        if !self.overlay_shown {
+            self.draw();
+        }
     }
 
     /// Install a decoded animation as active playback and show its first (or stepped)
@@ -2769,7 +3086,7 @@ impl AppCore {
         // Keep a shown detailed-EXIF panel's live "Frame X / N" in sync as the frame
         // changes. Off the hot path (only during user-engaged playback/stepping), and
         // the EXIF read is memoized so this never re-reads the file per frame.
-        if self.overlay_shown && self.info == InfoMode::Full {
+        if self.overlay_shown && self.slot_content() == Some(SlotContent::Details) {
             self.show_overlay(); // rebuilds the table + draws
         } else {
             self.draw();
@@ -3101,7 +3418,10 @@ impl AppCore {
         if self.describe_scan.as_ref().is_some_and(|s| s.item == item) {
             self.describe_scan = None;
         }
-        if self.info == InfoMode::Text || self.info == InfoMode::Describe {
+        if matches!(
+            self.slot_content(),
+            Some(SlotContent::Text) | Some(SlotContent::Describe)
+        ) {
             self.overlay_shown = false;
         }
         self.view.rotation = new;
@@ -3255,20 +3575,12 @@ impl AppCore {
         }
     }
 
-    /// **Show text in image** (`T`, task #45): toggle the recognized-text HUD panel.
-    /// Shares the single overlay slot with the info/EXIF/help panels, so it replaces
-    /// whichever was showing (and `I` / `Shift+I` replace it right back).
+    /// **Show text in image** (`T`, task #45): toggle the Inspector's Text tab.
+    /// Opens the Inspector on Text, switches to Text if it's open elsewhere, closes
+    /// it if Text is already showing; while `Tab`-hidden it reveals (never closes).
     pub fn toggle_image_text(&mut self) {
-        self.info = if self.info == InfoMode::Text {
-            InfoMode::Off
-        } else {
-            InfoMode::Text
-        };
-        if self.info == InfoMode::Off {
-            self.hide_overlay();
-        } else {
-            self.show_overlay();
-        }
+        self.panels.toggle_inspector(InspectorTab::Text);
+        self.refresh_slot();
     }
 
     /// Kick the off-thread text scan for the displayed photo unless its result is
@@ -3326,7 +3638,7 @@ impl AppCore {
         }
         self.recognized_text.insert(item, result);
         // The `T` panel may be sitting on its "Reading text…" state for this item.
-        if self.info == InfoMode::Text && self.displayed_item == Some(item) {
+        if self.slot_content() == Some(SlotContent::Text) && self.displayed_item == Some(item) {
             self.show_overlay();
         }
         if copy {
@@ -3357,56 +3669,22 @@ impl AppCore {
         ));
     }
 
-    /// The `T` panel's display lines `(text, semibold)` for the current state: the
-    /// cached result (QR payloads first, then the recognized lines), the in-flight
-    /// "Reading text…" state, or the OCR error.
-    fn text_panel_lines(&self) -> Vec<(String, bool)> {
-        let mut lines = vec![("Text in image".to_string(), true)];
-        let Some(item) = self.displayed_item else {
-            return lines;
-        };
-        match self.recognized_text.get(&item) {
-            Some(r) => {
-                for qr in &r.qr {
-                    lines.push((format!("QR code → {qr}"), false));
-                }
-                if !r.qr.is_empty() && !r.lines.is_empty() {
-                    lines.push((String::new(), false));
-                }
-                // Each entry is a paragraph (image_text::group_paragraphs); a blank line
-                // between them keeps the wrapped blocks visually distinct in the panel.
-                for (i, l) in r.lines.iter().enumerate() {
-                    if i > 0 {
-                        lines.push((String::new(), false));
-                    }
-                    lines.push((l.clone(), false));
-                }
-                if r.lines.is_empty() {
-                    if let Some(e) = &r.ocr_error {
-                        lines.push((e.clone(), false));
-                    } else if r.qr.is_empty() {
-                        lines.push(("No text found".to_string(), false));
-                    }
-                }
-            }
-            None => lines.push(("Reading text…".to_string(), false)),
-        }
-        lines
-    }
+    // (The `T` panel's display lines moved to `panels::TextPanel::lines` — the
+    // shell-neutral model owns the projection; see `Self::text_panel`.)
 
     // --- AI image description (task #44) ------------------------------------------
 
-    /// **Describe image** (`D`, task #44): toggle the AI-description HUD panel. Shares the
-    /// single overlay slot with the info/EXIF/text/help panels. Showing it kicks the
-    /// vision-model describe for the displayed photo (no-op when cached / already running);
-    /// pressing `D` again hides it.
+    /// **Describe image** (`D`, task #44): toggle the Inspector's Describe tab.
+    /// Showing it kicks the vision-model describe for the displayed photo (no-op
+    /// when cached / already running); `D` on an already-showing Describe tab closes
+    /// the Inspector; while `Tab`-hidden it reveals (never closes).
     pub fn describe_image(&mut self) {
-        if self.info == InfoMode::Describe {
-            self.info = InfoMode::Off;
-            self.hide_overlay();
+        let was_showing = self.slot_content() == Some(SlotContent::Describe);
+        self.panels.toggle_inspector(InspectorTab::Describe);
+        if was_showing {
+            self.refresh_slot(); // closed it
             return;
         }
-        self.info = InfoMode::Describe;
         // An explicit `D` retries a previously-failed describe (the endpoint may have come up,
         // or Local Network permission was just granted) — a cached *error* is cleared so the
         // scan re-runs; a cached success stays put (revisits are instant). This is why a
@@ -3449,7 +3727,8 @@ impl AppCore {
                 self.describe_scan = None;
             }
         }
-        self.info = InfoMode::Describe;
+        // Showing an answer never *closes* the panel — open, not toggle.
+        self.panels.open_inspector(InspectorTab::Describe);
         self.ensure_describe_scan(Some(q));
         self.show_overlay();
     }
@@ -3522,7 +3801,7 @@ impl AppCore {
         // Store the description, or the backend error as a one-line user message.
         self.descriptions
             .insert(item, result.map_err(|e| e.user_message()));
-        if self.info == InfoMode::Describe && self.displayed_item == Some(item) {
+        if self.slot_content() == Some(SlotContent::Describe) && self.displayed_item == Some(item) {
             self.show_overlay();
         }
         // A deferred Copy AI description: copy the text now, or toast the error.
@@ -3624,23 +3903,8 @@ impl AppCore {
         }
     }
 
-    /// The describe panel's display lines `(text, semibold)`: the cached description, the
-    /// backend error, the in-flight "Describing…" state, or a hint to press `D`.
-    fn describe_panel_lines(&self) -> Vec<(String, bool)> {
-        let mut lines = vec![("Description".to_string(), true)];
-        let Some(item) = self.displayed_item else {
-            return lines;
-        };
-        match self.descriptions.get(&item) {
-            Some(Ok(text)) => lines.push((text.clone(), false)),
-            Some(Err(msg)) => lines.push((msg.clone(), false)),
-            None if self.describe_scan.as_ref().is_some_and(|s| s.item == item) => {
-                lines.push(("Describing…".to_string(), false));
-            }
-            None => lines.push(("Press D to describe this photo.".to_string(), false)),
-        }
-        lines
-    }
+    // (The Describe panel's display lines moved to `panels::DescribePanel::lines` —
+    // the shell-neutral model owns the projection; see `Self::describe_panel`.)
 
     /// Right-click over the photo (task #41): ask the shell to pop up the **photo context
     /// menu** at the cursor. Fills a shell-neutral [`contract::ContextMenuState`] from live
@@ -3712,14 +3976,22 @@ impl AppCore {
             "{name} ({}/{total}) - decode error",
             item + 1
         )));
-        // The info panel belonged to the previous photo — drop it (and redraw to
-        // remove it). Only touch the renderer if a panel was actually showing.
-        if self.overlay_shown {
+        // The info panel + line belonged to the previous photo — drop them (and redraw
+        // to remove them). Only touch the renderer if something was actually showing.
+        if self.overlay_shown || self.info_line_shown {
             if let Some(r) = self.renderer.as_mut() {
-                r.set_overlay(None, 0);
+                if self.overlay_shown {
+                    r.set_overlay(None, 0, 0);
+                }
+                if self.info_line_shown {
+                    r.set_info_line(None, 0, pb_render::HAlign::Right);
+                }
             }
             self.overlay_shown = false;
             self.overlay_item = None;
+            self.info_line_shown = false;
+            self.info_line_item = None;
+            self.info_line_h = 0;
             self.draw();
         }
     }
@@ -3956,11 +4228,17 @@ impl AppCore {
                         is_hdr(&img),
                         img.peak,
                     );
-                    r.set_overlay(None, 0);
+                    r.set_overlay(None, 0, 0);
+                    r.set_info_line(None, 0, pb_render::HAlign::Right);
                 }
                 self.effects.push(contract::CoreEffect::SetTitle(title));
                 self.overlay_shown = false;
                 self.overlay_item = None;
+                // New photo/size: clear the line and let the tick rebuild it fresh
+                // (the dims in its text may have changed), like the panel above.
+                self.info_line_shown = false;
+                self.info_line_item = None;
+                self.info_line_h = 0;
                 self.displayed_item = Some(idx);
             }
             Err(e) => {
@@ -4128,7 +4406,7 @@ impl AppCore {
     /// header (spanning both columns), then a two-column table of dimensions,
     /// codec, exact byte size, and every EXIF tag. Read on-demand from RAM
     /// (privacy task #2: nothing cached to disk). Capped to fit the screen height.
-    pub fn exif_rows(&self) -> Vec<Row> {
+    pub fn exif_rows(&self) -> Vec<DetailRow> {
         let Some(item) = self.displayed_item else {
             return Vec::new();
         };
@@ -4136,7 +4414,7 @@ impl AppCore {
         let mut rows = Vec::new();
         // Identity header: filename (bold) over its folder (the filename is already
         // shown above, so the path row is the parent directory only).
-        rows.push(Row::Span {
+        rows.push(DetailRow::Span {
             text: file_name_of(name),
             bold: true,
         });
@@ -4165,17 +4443,17 @@ impl AppCore {
                 .map(|d| d.to_string_lossy().replace('\\', "/")),
         };
         if let Some(location) = location {
-            rows.push(Row::Span {
+            rows.push(DetailRow::Span {
                 text: location,
                 bold: false,
             });
         }
         if let Some(meta) = &self.current {
-            rows.push(Row::Pair {
+            rows.push(DetailRow::Pair {
                 label: "Dimensions".to_string(),
                 value: format!("{} × {}", meta.w, meta.h),
             });
-            rows.push(Row::Pair {
+            rows.push(DetailRow::Pair {
                 label: "Codec".to_string(),
                 value: meta.codec.to_uppercase(),
             });
@@ -4186,7 +4464,7 @@ impl AppCore {
         // File size + EXIF from the memoized read (populated by `ensure_exif_cached`
         // before this is called; a cold miss simply omits them until the next rebuild).
         if let Some((size, fields)) = self.exif_cache.get(&item) {
-            rows.push(Row::Pair {
+            rows.push(DetailRow::Pair {
                 label: "File Size".to_string(),
                 value: format!("{} bytes", hud::format_thousands(*size)),
             });
@@ -4197,7 +4475,7 @@ impl AppCore {
                 if is_exif_blob(tag, val) {
                     continue;
                 }
-                rows.push(Row::Pair {
+                rows.push(DetailRow::Pair {
                     label: tag.clone(),
                     value: truncate_exif_value(val),
                 });
@@ -4209,7 +4487,7 @@ impl AppCore {
             let max_rows = (((fit.max_height as f32) - 40.0) / line_h).max(1.0) as usize;
             if rows.len() > max_rows {
                 rows.truncate(max_rows.saturating_sub(1));
-                rows.push(Row::Span {
+                rows.push(DetailRow::Span {
                     text: "…".to_string(),
                     bold: false,
                 });
@@ -4235,7 +4513,7 @@ impl AppCore {
     /// decoded (playing, or eagerly prepped) it reports the live current frame, the
     /// average frame rate, the duration, and the loop count; before that, just a hint
     /// that `P` will play it. The codec/format is already shown by the Codec row above.
-    pub fn animation_rows(&self, item: usize) -> Vec<Row> {
+    pub fn animation_rows(&self, item: usize) -> Vec<DetailRow> {
         // A Live Photo (its pairing is resolved into `live_motion_cache` when the panel
         // opens) or an animated container. Neither → nothing to add.
         let is_live = self.is_live_photo(item);
@@ -4269,20 +4547,20 @@ impl AppCore {
         // A Live Photo names itself + its frame count (the Codec row shows the still's
         // format); an animation's count lives in the Frame row below.
         if is_live {
-            rows.push(Row::Pair {
+            rows.push(DetailRow::Pair {
                 label: "Live Photo".to_string(),
                 value: detail.map_or(PENDING.to_string(), |(_, count, _, _)| {
                     format!("{count} frames")
                 }),
             });
         }
-        rows.push(Row::Pair {
+        rows.push(DetailRow::Pair {
             label: "Frame".to_string(),
             value: detail.map_or(PENDING.to_string(), |(idx, count, _, _)| {
                 format!("{} / {}", idx + 1, count)
             }),
         });
-        rows.push(Row::Pair {
+        rows.push(DetailRow::Pair {
             label: "Frame Rate".to_string(),
             value: detail.map_or(PENDING.to_string(), |(_, count, total, _)| {
                 let secs = total.as_secs_f64();
@@ -4293,7 +4571,7 @@ impl AppCore {
                 }
             }),
         });
-        rows.push(Row::Pair {
+        rows.push(DetailRow::Pair {
             label: "Duration".to_string(),
             value: detail.map_or(PENDING.to_string(), |(_, _, total, _)| {
                 format!("{:.2} s", total.as_secs_f64())
@@ -4302,7 +4580,7 @@ impl AppCore {
         // A Live Photo always plays once; the loop count is only meaningful for a
         // GIF/APNG/WebP loop.
         if !is_live {
-            rows.push(Row::Pair {
+            rows.push(DetailRow::Pair {
                 label: "Loop".to_string(),
                 value: detail.map_or(PENDING.to_string(), |(_, _, _, loops)| {
                     if loops == 0 {
@@ -4339,10 +4617,11 @@ impl AppCore {
         (short_edge * 0.015).max(floor).round().max(1.0) as u32
     }
 
-    /// Hide the info panel (clears the overlay quad).
+    /// Hide the rich panel (clears the overlay quad). The info line, a separate
+    /// layer, is untouched.
     pub fn hide_overlay(&mut self) {
         if let Some(a) = self.renderer.as_mut() {
-            a.set_overlay(None, 0);
+            a.set_overlay(None, 0, 0);
         }
         self.overlay_shown = false;
         self.overlay_item = None;
@@ -4459,6 +4738,9 @@ impl AppCore {
             t.uploaded_alpha = alpha;
             (scale_alpha(&t.rgba, alpha), t.w, t.h)
         };
+        // The toast rides a fixed 64px bottom margin — always well above the info line
+        // (which sits at the small `overlay_margin` inset), so the two never collide
+        // vertically even when both are centered. No line reserve needed here.
         let margin = (64.0 * self.viewport.scale_factor).round().max(8.0) as u32;
         if let Some(a) = self.renderer.as_mut() {
             a.set_toast(Some((&faded, w, h)), margin);
@@ -5044,6 +5326,109 @@ mod tests {
     }
 
     #[test]
+    fn native_help_suppresses_the_hud_and_signals_visibility() {
+        let mut core = test_core();
+        core.native_help = true;
+        // Opening Help does not rasterize a HUD overlay (the shell draws it).
+        core.dispatch_action(Action::Help);
+        assert!(core.panels.help, "Help is open in the model");
+        assert!(!core.overlay_shown, "…but nothing is rasterized to the HUD");
+        assert!(
+            core.help_panel_visible(),
+            "the native Help view should show"
+        );
+        // A tick emits the PanelsChanged marker on the show transition.
+        core.effects.clear();
+        core.handle(CoreEvent::Tick(std::time::Instant::now()));
+        assert!(
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::PanelsChanged)),
+            "the tick signals the host to re-pull the panel model"
+        );
+        // Tab-hide hides the native view without closing it; a tick re-signals.
+        core.dispatch_action(Action::TogglePanels);
+        assert!(core.panels.help && core.panels.hidden);
+        assert!(!core.help_panel_visible(), "hidden → the native view hides");
+        core.effects.clear();
+        core.handle(CoreEvent::Tick(std::time::Instant::now()));
+        assert!(core
+            .effects
+            .iter()
+            .any(|e| matches!(e, contract::CoreEffect::PanelsChanged)));
+    }
+
+    #[test]
+    fn winit_keeps_help_on_the_hud_no_native_signal() {
+        // With native_help off (the winit shell), Help is a HUD panel and never a
+        // native-visible one, and the marker never fires.
+        let mut core = test_core();
+        core.dispatch_action(Action::Help);
+        assert!(core.panels.help);
+        assert!(
+            !core.help_panel_visible(),
+            "no native presentation on winit"
+        );
+        core.effects.clear();
+        core.handle(CoreEvent::Tick(std::time::Instant::now()));
+        assert!(!core
+            .effects
+            .iter()
+            .any(|e| matches!(e, contract::CoreEffect::PanelsChanged)));
+    }
+
+    #[test]
+    fn info_line_reserve_follows_the_horizontal_overlap() {
+        let mut core = test_core();
+        core.viewport = Viewport {
+            width: 1000,
+            height: 800,
+            scale_factor: 1.0,
+        };
+        core.info_line_shown = true;
+        core.info_line_w = 300;
+        core.info_line_h = 30;
+        let m = core.overlay_margin() as f32;
+        // Panel spans for a right-anchored Inspector and a left-anchored tree — narrow
+        // columns near the edges, so a short centered line clears both.
+        let right_panel = (1000.0 - m - 200.0, 1000.0 - m); // bottom-right, 200px wide
+        let left_tree = (m, m + 200.0); // top-left, 200px column
+
+        // Right-aligned line: overlaps the right panel, clears the left tree.
+        core.settings.info_line_align = settings::InfoLineAlign::Right;
+        assert!(core.info_line_reserve_for(right_panel.0, right_panel.1) > 0);
+        assert_eq!(core.info_line_reserve_for(left_tree.0, left_tree.1), 0);
+
+        // Left-aligned line: overlaps the tree, clears the right panel.
+        core.settings.info_line_align = settings::InfoLineAlign::Left;
+        assert!(core.info_line_reserve_for(left_tree.0, left_tree.1) > 0);
+        assert_eq!(core.info_line_reserve_for(right_panel.0, right_panel.1), 0);
+
+        // Narrow, short centered line: reaches neither corner.
+        core.settings.info_line_align = settings::InfoLineAlign::Center;
+        core.info_line_w = 200;
+        assert_eq!(core.info_line_reserve_for(left_tree.0, left_tree.1), 0);
+        assert_eq!(core.info_line_reserve_for(right_panel.0, right_panel.1), 0);
+
+        // The narrow-window case the owner flagged: a wide centered line (a long
+        // filename spanning most of the width) overlaps BOTH corner panels.
+        core.info_line_w = 900;
+        assert!(
+            core.info_line_reserve_for(left_tree.0, left_tree.1) > 0,
+            "a wide centered line reaches the left tree"
+        );
+        assert!(
+            core.info_line_reserve_for(right_panel.0, right_panel.1) > 0,
+            "…and the right panel too"
+        );
+
+        // Hidden line reserves nothing regardless of alignment.
+        core.info_line_shown = false;
+        assert_eq!(core.info_line_reserve_for(left_tree.0, left_tree.1), 0);
+        assert_eq!(core.info_line_reserve_for(right_panel.0, right_panel.1), 0);
+    }
+
+    #[test]
     fn folder_tree_action_toggles_the_open_state() {
         let mut core = test_core();
         assert!(!core.folder_tree_open);
@@ -5115,13 +5500,82 @@ mod tests {
     fn show_image_text_toggles_the_panel_mode() {
         let mut core = test_core();
         core.dispatch_action(Action::ShowImageText);
-        assert!(matches!(core.info, InfoMode::Text), "T opens the panel");
+        assert_eq!(
+            core.panels.inspector,
+            Some(InspectorTab::Text),
+            "T opens the Inspector on Text"
+        );
         core.dispatch_action(Action::ShowImageText);
-        assert!(matches!(core.info, InfoMode::Off), "T again closes it");
-        // And the info panels replace it (one shared slot).
+        assert_eq!(core.panels.inspector, None, "T again closes it");
+        // The basic `i` line is now fully independent (task #54 decouple): pressing
+        // `i` while the Text panel is open turns the line on WITHOUT closing the
+        // panel — they coexist, the line sitting below the panel.
         core.dispatch_action(Action::ShowImageText);
         core.dispatch_action(Action::Info);
-        assert!(matches!(core.info, InfoMode::Basic));
+        assert!(core.info_line, "i turns the line on");
+        assert_eq!(
+            core.panels.inspector,
+            Some(InspectorTab::Text),
+            "…and the Text panel stays open — no longer mutually exclusive"
+        );
+        assert_eq!(core.slot_content(), Some(SlotContent::Text));
+    }
+
+    #[test]
+    fn info_line_and_inspector_are_independent() {
+        // The bug the decouple fixes: i, Shift+I, i again used to be a dead no-op
+        // (the line was occluded by the panel and i toggled its hidden state). Now
+        // each press has a visible, independent effect.
+        let mut core = test_core();
+        core.dispatch_action(Action::Info); // line on
+        assert!(core.info_line);
+        core.dispatch_action(Action::FullExif); // Details on — line stays on
+        assert!(core.info_line, "Shift+I does not touch the line");
+        assert_eq!(core.panels.inspector, Some(InspectorTab::Details));
+        core.dispatch_action(Action::Info); // i again — turns the LINE off
+        assert!(!core.info_line, "i toggles only the line");
+        assert_eq!(
+            core.panels.inspector,
+            Some(InspectorTab::Details),
+            "…and leaves the Details panel open"
+        );
+        // Shift+I again closes the panel; the line is independent and stays off.
+        core.dispatch_action(Action::FullExif);
+        assert_eq!(core.panels.inspector, None);
+        assert!(!core.info_line);
+    }
+
+    #[test]
+    fn tab_hides_and_panel_toggles_reveal() {
+        let mut core = test_core();
+        core.dispatch_action(Action::TogglePanels);
+        assert!(!core.panels.hidden, "Tab with nothing open is a no-op");
+        core.dispatch_action(Action::ShowImageText);
+        core.dispatch_action(Action::TogglePanels);
+        assert!(core.panels.hidden, "Tab hides…");
+        assert_eq!(
+            core.panels.inspector,
+            Some(InspectorTab::Text),
+            "…without closing"
+        );
+        assert_eq!(core.slot_content(), None, "hidden panels draw nothing");
+        // T while hidden reveals and keeps the panel open — never closes.
+        core.dispatch_action(Action::ShowImageText);
+        assert!(!core.panels.hidden);
+        assert_eq!(core.panels.inspector, Some(InspectorTab::Text));
+        // The basic line ignores Tab-hide: it is a separate ephemeral layer, so its
+        // enabled flag flips regardless of `panels.hidden`.
+        core.dispatch_action(Action::TogglePanels);
+        assert!(core.panels.hidden);
+        core.dispatch_action(Action::Info);
+        assert!(
+            core.info_line,
+            "i toggles the line even while panels are hidden"
+        );
+        assert!(
+            core.panels.hidden,
+            "…and does not disturb the hidden panels"
+        );
     }
 
     #[test]
@@ -5236,15 +5690,23 @@ mod tests {
         let mut core = test_core();
         core.displayed_item = Some(0);
         // Pre-cache so `D` is a pure toggle (no worker/network kicked).
-        core.descriptions.insert(0, Ok("A cat on a sofa.".to_string()));
+        core.descriptions
+            .insert(0, Ok("A cat on a sofa.".to_string()));
         core.dispatch_action(Action::DescribeImage);
-        assert!(matches!(core.info, InfoMode::Describe), "D opens the panel");
+        assert_eq!(
+            core.panels.inspector,
+            Some(InspectorTab::Describe),
+            "D opens the Inspector on Describe"
+        );
         core.dispatch_action(Action::DescribeImage);
-        assert!(matches!(core.info, InfoMode::Off), "D again closes it");
-        // The info panels replace it (one shared slot).
+        assert_eq!(core.panels.inspector, None, "D again closes it");
+        // The basic line is independent — `i` while Describe is open turns the line
+        // on and the panel stays (task #54 decouple).
         core.dispatch_action(Action::DescribeImage);
         core.dispatch_action(Action::Info);
-        assert!(matches!(core.info, InfoMode::Basic));
+        assert!(core.info_line);
+        assert_eq!(core.panels.inspector, Some(InspectorTab::Describe));
+        assert_eq!(core.slot_content(), Some(SlotContent::Describe));
     }
 
     #[test]
@@ -5274,7 +5736,11 @@ mod tests {
     fn describe_backend_error_caches_a_one_line_user_message() {
         let mut core = test_core();
         core.displayed_item = Some(0);
-        feed_describe(&mut core, 0, Err(crate::describe::DescribeError::Unreachable));
+        feed_describe(
+            &mut core,
+            0,
+            Err(crate::describe::DescribeError::Unreachable),
+        );
         core.poll_describe_scan();
         let msg = core.descriptions[&0].as_ref().unwrap_err();
         assert!(msg.contains("model server"), "actionable message: {msg}");
@@ -5288,7 +5754,10 @@ mod tests {
         core.dispatch_action(Action::DescribeImage);
         assert!(core.describe_scan.is_none(), "no worker kicked");
         let msg = core.descriptions[&0].as_ref().unwrap_err();
-        assert!(msg.contains("backend is set up"), "points at Settings: {msg}");
+        assert!(
+            msg.contains("backend is set up"),
+            "points at Settings: {msg}"
+        );
     }
 
     #[test]
@@ -5296,12 +5765,12 @@ mod tests {
         let mut core = test_core();
         core.displayed_item = Some(0);
         core.settings.describe_endpoint = String::new(); // keep it thread-free
-        // A stale failure is cached (e.g. from before Local Network permission was granted).
+                                                         // A stale failure is cached (e.g. from before Local Network permission was granted).
         core.descriptions
             .insert(0, Err("network error from before".to_string()));
         // Panel is closed → D opens it and must clear + retry the cached error.
         core.dispatch_action(Action::DescribeImage);
-        assert!(matches!(core.info, InfoMode::Describe));
+        assert_eq!(core.panels.inspector, Some(InspectorTab::Describe));
         let msg = core.descriptions[&0].as_ref().unwrap_err();
         assert!(
             msg.contains("backend is set up"),
@@ -5329,7 +5798,9 @@ mod tests {
         // Nothing cached → the copy arms `copy_when_done` on the in-flight scan.
         core.dispatch_action(Action::CopyDescription);
         assert!(
-            core.describe_scan.as_ref().is_some_and(|s| s.copy_when_done),
+            core.describe_scan
+                .as_ref()
+                .is_some_and(|s| s.copy_when_done),
             "copy is deferred to the scan result"
         );
         // Simulate the result landing.
@@ -5360,8 +5831,11 @@ mod tests {
         core.handle(CoreEvent::DialogResolved(
             contract::DialogResult::AskSubmitted("What year is this?".to_string()),
         ));
-        assert!(matches!(core.info, InfoMode::Describe));
-        assert!(core.descriptions[&0].is_err(), "the question re-ran the describe");
+        assert_eq!(core.panels.inspector, Some(InspectorTab::Describe));
+        assert!(
+            core.descriptions[&0].is_err(),
+            "the question re-ran the describe"
+        );
     }
 
     #[test]
@@ -5369,7 +5843,8 @@ mod tests {
         let mut core = test_core();
         core.displayed_item = Some(0);
         core.settings.describe_endpoint = String::new(); // keep it thread-free
-        core.descriptions.insert(0, Ok("old general description".to_string()));
+        core.descriptions
+            .insert(0, Ok("old general description".to_string()));
         core.ask_describe("What year is this?".to_string());
         // The cached general description was dropped and a fresh run attempted (which,
         // with no endpoint, resolves to the setup hint rather than the stale text).
@@ -5377,7 +5852,7 @@ mod tests {
             core.descriptions[&0].is_err(),
             "the question re-ran instead of returning the cached description"
         );
-        assert!(matches!(core.info, InfoMode::Describe));
+        assert_eq!(core.panels.inspector, Some(InspectorTab::Describe));
     }
 
     /// A fake archive source: named entries with no fs paths and a container —

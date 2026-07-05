@@ -107,7 +107,9 @@ impl DescribeError {
             DescribeError::BadStatus(code) => {
                 format!("The endpoint returned an error (HTTP {code}).")
             }
-            DescribeError::BadResponse(why) => format!("Couldn't read the endpoint's reply ({why})."),
+            DescribeError::BadResponse(why) => {
+                format!("Couldn't read the endpoint's reply ({why}).")
+            }
             DescribeError::Prep(why) => format!("Couldn't prepare the image ({why})."),
             DescribeError::Backend(why) => why.clone(),
         }
@@ -312,9 +314,19 @@ pub fn sort_models_vision_first(mut models: Vec<String>) -> Vec<String> {
 /// just suppresses a hint, never blocks a describe).
 pub fn looks_like_vision_model(id: &str) -> bool {
     let id = id.to_ascii_lowercase();
-    ["vl", "vision", "llava", "pixtral", "moondream", "-vlm", "bakllava", "cogvlm", "internvl"]
-        .iter()
-        .any(|k| id.contains(k))
+    [
+        "vl",
+        "vision",
+        "llava",
+        "pixtral",
+        "moondream",
+        "-vlm",
+        "bakllava",
+        "cogvlm",
+        "internvl",
+    ]
+    .iter()
+    .any(|k| id.contains(k))
 }
 
 /// Pull the assistant's text out of a chat-completions reply. Accepts the usual string
@@ -346,7 +358,11 @@ fn parse_chat_response(text: &str) -> Result<String, DescribeError> {
             .join("")
             .trim()
             .to_string(),
-        _ => return Err(DescribeError::BadResponse("content wasn't text".to_string())),
+        _ => {
+            return Err(DescribeError::BadResponse(
+                "content wasn't text".to_string(),
+            ))
+        }
     };
     if out.is_empty() {
         return Err(DescribeError::BadResponse("empty description".to_string()));
@@ -411,7 +427,10 @@ mod tests {
     fn chat_url_leaves_a_full_endpoint_url_alone() {
         let full = "http://host:9/v1/chat/completions";
         assert_eq!(chat_url(full), full);
-        assert_eq!(chat_url("  http://host:9/v1  "), "http://host:9/v1/chat/completions");
+        assert_eq!(
+            chat_url("  http://host:9/v1  "),
+            "http://host:9/v1/chat/completions"
+        );
     }
 
     // --- build_chat_request --------------------------------------------------------
@@ -424,7 +443,10 @@ mod tests {
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[0]["text"], "Describe it.");
         assert_eq!(content[1]["type"], "image_url");
-        assert_eq!(content[1]["image_url"]["url"], "data:image/jpeg;base64,AAAA");
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            "data:image/jpeg;base64,AAAA"
+        );
         assert_eq!(req["max_tokens"], 512);
         assert_eq!(req["stream"], false);
     }
@@ -435,7 +457,10 @@ mod tests {
         assert_eq!(req["model"], "qwen2-vl");
         assert_eq!(req["max_tokens"], 1024);
         // A zero cap falls back to the built-in default.
-        assert_eq!(build_chat_request("", "hi", "data:,", 0)["max_tokens"], MAX_TOKENS);
+        assert_eq!(
+            build_chat_request("", "hi", "data:,", 0)["max_tokens"],
+            MAX_TOKENS
+        );
     }
 
     #[test]
@@ -448,7 +473,12 @@ mod tests {
         ];
         assert_eq!(
             sort_models_vision_first(models),
-            vec!["qwen2.5-vl-32b", "llava-7b", "meta-llama-3.1-70b", "gpt-oss-20b"],
+            vec![
+                "qwen2.5-vl-32b",
+                "llava-7b",
+                "meta-llama-3.1-70b",
+                "gpt-oss-20b"
+            ],
             "vision models first, original order preserved within each group"
         );
     }
@@ -519,7 +549,7 @@ mod tests {
     #[test]
     fn prepare_image_rejects_a_bad_buffer() {
         assert!(matches!(
-            prepare_image(vec![0; 3], 10, 10, ),
+            prepare_image(vec![0; 3], 10, 10,),
             Err(DescribeError::Prep(_))
         ));
     }
@@ -532,7 +562,10 @@ mod tests {
             map_ureq_error(ureq::Error::StatusCode(404)),
             DescribeError::BadStatus(404)
         );
-        assert_eq!(map_ureq_error(ureq::Error::HostNotFound), DescribeError::Unreachable);
+        assert_eq!(
+            map_ureq_error(ureq::Error::HostNotFound),
+            DescribeError::Unreachable
+        );
         let refused = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
         assert_eq!(
             map_ureq_error(ureq::Error::Io(refused)),
@@ -545,7 +578,10 @@ mod tests {
         let unreachable = DescribeError::Unreachable.user_message();
         assert!(unreachable.contains("model server"));
         #[cfg(target_os = "macos")]
-        assert!(unreachable.contains("Local Network"), "hints at the macOS permission");
+        assert!(
+            unreachable.contains("Local Network"),
+            "hints at the macOS permission"
+        );
         assert!(DescribeError::BadStatus(500).user_message().contains("500"));
         assert_eq!(
             DescribeError::Backend("custom".to_string()).user_message(),
@@ -558,7 +594,9 @@ mod tests {
         let d = FakeDescriber {
             reply: Ok("hello".to_string()),
         };
-        let img = PreparedImage { jpeg: vec![0xFF, 0xD8, 0xFF, 0xD9] };
+        let img = PreparedImage {
+            jpeg: vec![0xFF, 0xD8, 0xFF, 0xD9],
+        };
         assert_eq!(d.describe(&img, "prompt").unwrap(), "hello");
     }
 
@@ -566,6 +604,12 @@ mod tests {
     fn probe_endpoint_reports_unreachable_fast_for_a_dead_host() {
         // A closed port on localhost refuses immediately — the Test button's fail path.
         let r = probe_endpoint("http://127.0.0.1:1/v1");
-        assert!(matches!(r, Err(DescribeError::Unreachable | DescribeError::Backend(_))), "{r:?}");
+        assert!(
+            matches!(
+                r,
+                Err(DescribeError::Unreachable | DescribeError::Backend(_))
+            ),
+            "{r:?}"
+        );
     }
 }

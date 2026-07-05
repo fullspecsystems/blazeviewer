@@ -44,6 +44,14 @@ final class CoreModel {
     /// Scanning sheet: supported images found so far / the folder being walked.
     private(set) var scanFound = 0
     private(set) var scanCurrentDir = ""
+
+    // MARK: - Native rich panels (task #54, mac-first) — the first is Help
+
+    /// Whether the native SwiftUI Help panel should show, and its sections — refreshed
+    /// from the core on a `PanelsChanged` marker (`refreshHelp`). The core suppresses
+    /// Help's HUD rasterization while this host presents it, so there's no double-draw.
+    private(set) var helpVisible = false
+    private(set) var helpSections: [HelpSection] = []
     /// An NSAlert sheet (confirm/message) is up — gates the key monitor like `panelOpen`.
     @ObservationIgnored private var alertUp = false
     /// Opens the SwiftUI Settings scene — injected by the root view (`openSettings` is an
@@ -386,6 +394,55 @@ final class CoreModel {
         core.menu_action(id)
         kick()
         drainEffects()
+    }
+
+    /// Re-pull the native Help panel model after a `PanelsChanged` marker: its
+    /// visibility and (when visible) its rows, flattened from the core's live keymap.
+    private func refreshHelp() {
+        core.help_refresh()
+        helpVisible = core.help_visible()
+        guard helpVisible else {
+            helpSections = []
+            return
+        }
+        // The core hands rows as a flat (isHeader, text, shortcut) list; regroup into
+        // sections (a header starts a new one) for the two-column section layout.
+        let n = Int(core.help_row_count())
+        var sections: [HelpSection] = []
+        var title = ""
+        var items: [HelpItem] = []
+        var open = false
+        var itemId = 0
+        func flush() {
+            if open {
+                sections.append(HelpSection(id: sections.count, title: title, items: items))
+            }
+        }
+        for i in 0..<n {
+            let idx = UInt(i)
+            if core.help_row_is_header(idx) {
+                flush()
+                title = core.help_row_text(idx).toString()
+                items = []
+                open = true
+            } else {
+                items.append(
+                    HelpItem(
+                        id: itemId,
+                        label: core.help_row_text(idx).toString(),
+                        shortcut: core.help_row_shortcut(idx).toString()
+                    ))
+                itemId += 1
+            }
+        }
+        flush()
+        helpSections = sections
+    }
+
+    /// Close the Help panel from its ✕ button — the same toggle the `?` key drives, so
+    /// state stays in the core (and the menu checkmark follows).
+    func closeHelp() {
+        menuAction("help")
     }
 
     /// Right-click over the photo: ask the core for the context-menu description; the
@@ -1180,6 +1237,9 @@ final class CoreModel {
         case .MenuStateChanged:
             menuBar?.sync(core.menu_state())
             reassertMenuBar() // belt-and-braces beside the KVO watch
+        case .PanelsChanged:
+            // A natively-presented panel (Help) changed — re-pull its model + visibility.
+            refreshHelp()
         case .ShowContextMenu(
             let hasImage, let hasMotion, let canReveal, let fullscreen,
             let comparePinned, let comparePinnedHere

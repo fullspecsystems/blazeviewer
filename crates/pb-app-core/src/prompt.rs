@@ -126,7 +126,10 @@ pub fn build_prompt(ctx: &DescribeContext, template: Option<&str>) -> String {
             if ctx.is_empty() {
                 DEFAULT_INSTRUCTION.to_string()
             } else {
-                format!("{DEFAULT_INSTRUCTION}\n\n{CONTEXT_PREAMBLE}\n{}", ctx.block())
+                format!(
+                    "{DEFAULT_INSTRUCTION}\n\n{CONTEXT_PREAMBLE}\n{}",
+                    ctx.block()
+                )
             }
         }
     }
@@ -209,8 +212,7 @@ fn parse_exif_datetime(raw: &str) -> Option<(i32, u32, u32, u32, u32, u32)> {
 /// `now` (a mis-set clock — a photo can't be taken after today).
 fn is_junk_datetime(dt: (i32, u32, u32, u32, u32, u32), now: Option<(i32, u32, u32)>) -> bool {
     let (y, mo, d, h, mi, s) = dt;
-    let epoch_default =
-        (mo, d, h, mi, s) == (1, 1, 0, 0, 0) && matches!(y, 1970 | 1980 | 2000);
+    let epoch_default = (mo, d, h, mi, s) == (1, 1, 0, 0, 0) && matches!(y, 1970 | 1980 | 2000);
     let future = now.is_some_and(|n| (y, mo, d) > n);
     epoch_default || future
 }
@@ -226,7 +228,10 @@ fn salient_camera(exif: &[(String, String)]) -> Option<String> {
             // make's first token (case-insensitive), since the make is often the verbose
             // legal name ("NIKON CORPORATION") while the model uses the brand ("NIKON D850").
             let brand = make.split_whitespace().next().unwrap_or(make);
-            if model.to_ascii_lowercase().starts_with(&brand.to_ascii_lowercase()) {
+            if model
+                .to_ascii_lowercase()
+                .starts_with(&brand.to_ascii_lowercase())
+            {
                 model.to_string()
             } else {
                 format!("{make} {model}")
@@ -285,10 +290,7 @@ fn coord_to_decimal(value: &str, hemisphere: &str) -> Option<f64> {
     if !deg.is_finite() || deg.abs() > 180.0 {
         return None;
     }
-    let sign = if matches!(
-        hemisphere.trim().to_ascii_uppercase().as_str(),
-        "S" | "W"
-    ) {
+    let sign = if matches!(hemisphere.trim().to_ascii_uppercase().as_str(), "S" | "W") {
         -1.0
     } else {
         1.0
@@ -349,7 +351,11 @@ mod tests {
 
     #[test]
     fn datetime_drops_epoch_default_stamps() {
-        for junk in ["1970:01:01 00:00:00", "1980:01:01 00:00:00", "2000:01:01 00:00:00"] {
+        for junk in [
+            "1970:01:01 00:00:00",
+            "1980:01:01 00:00:00",
+            "2000:01:01 00:00:00",
+        ] {
             let e = ex(&[("DateTimeOriginal", junk)]);
             assert_eq!(salient_datetime(&e, None), None, "should drop {junk}");
         }
@@ -418,7 +424,10 @@ mod tests {
             ("GPSLongitudeRef", "W"),
         ]);
         // 43 + 39/60 + 8.9/3600 = 43.65247…; west longitude is negative.
-        assert_eq!(salient_location(&e), Some("43.65247, -79.38767".to_string()));
+        assert_eq!(
+            salient_location(&e),
+            Some("43.65247, -79.38767".to_string())
+        );
     }
 
     #[test]
@@ -429,7 +438,10 @@ mod tests {
             ("GPSLongitude", "79.3877"),
             ("GPSLongitudeRef", "W"),
         ]);
-        assert_eq!(salient_location(&e), Some("43.65250, -79.38770".to_string()));
+        assert_eq!(
+            salient_location(&e),
+            Some("43.65250, -79.38770".to_string())
+        );
     }
 
     #[test]

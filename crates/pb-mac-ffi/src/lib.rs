@@ -111,6 +111,11 @@ pub struct AppCoreHandle {
     keymap_dirty: bool,
     /// The transient editor note ("Moved ⌘C from Copy Image") — pulled after a capture.
     keymap_note: String,
+    /// Flattened Help-panel rows `(is_header, text, shortcut)` (task #54, mac-first):
+    /// snapshotted by `help_refresh` on a `PanelsChanged` marker, then read by the
+    /// indexed `help_row_*` accessors — the keymap-editor pull pattern, avoiding a
+    /// `Vec<struct>` FFI return. The native SwiftUI Help view renders from it.
+    help_snapshot: Vec<(bool, String, String)>,
 }
 
 impl AppCoreHandle {
@@ -119,12 +124,17 @@ impl AppCoreHandle {
     /// scale factor) — see [`AppCore::new_host`]. The deck starts empty; `open_path` /
     /// `attach_layer` bring photos + the surface.
     fn new(width: u32, height: u32, scale: f32) -> AppCoreHandle {
+        let mut core = AppCore::new_host(Viewport {
+            width,
+            height,
+            scale_factor: scale,
+        });
+        // This host presents the Help panel natively (task #54, mac-first): the core
+        // suppresses Help's HUD rasterization and signals via PanelsChanged. The tree
+        // and Inspector opt in with their own flags as their native presenters land.
+        core.native_help = true;
         AppCoreHandle {
-            core: AppCore::new_host(Viewport {
-                width,
-                height,
-                scale_factor: scale,
-            }),
+            core,
             dir_scan: None,
             scan_gen: 0,
             archive_load: None,
@@ -137,7 +147,54 @@ impl AppCoreHandle {
             keymap_draft: None,
             keymap_dirty: false,
             keymap_note: String::new(),
+            help_snapshot: Vec::new(),
         }
+    }
+
+    /// Snapshot the Help-panel model into `help_snapshot` for the indexed accessors —
+    /// call on a `PanelsChanged` marker before reading `help_row_*`. Flattens the core's
+    /// sections into header + shortcut rows.
+    fn help_refresh(&mut self) {
+        self.help_snapshot = self
+            .core
+            .help_panel()
+            .sections
+            .into_iter()
+            .flat_map(|s| {
+                std::iter::once((true, s.title, String::new()))
+                    .chain(s.rows.into_iter().map(|(desc, sc)| (false, desc, sc)))
+            })
+            .collect();
+    }
+
+    /// Whether the native SwiftUI Help view should be shown (Help open, not Tab-hidden).
+    fn help_visible(&self) -> bool {
+        self.core.help_panel_visible()
+    }
+
+    fn help_row_count(&self) -> usize {
+        self.help_snapshot.len()
+    }
+
+    /// A Help row is either a section header (`is_header`, `text` = section title) or a
+    /// command row (`text` = description, `shortcut` = the key label). Out-of-range → a
+    /// blank non-header row (defensive, like the keymap accessors).
+    fn help_row_is_header(&self, i: usize) -> bool {
+        self.help_snapshot.get(i).map(|r| r.0).unwrap_or(false)
+    }
+
+    fn help_row_text(&self, i: usize) -> String {
+        self.help_snapshot
+            .get(i)
+            .map(|r| r.1.clone())
+            .unwrap_or_default()
+    }
+
+    fn help_row_shortcut(&self, i: usize) -> String {
+        self.help_snapshot
+            .get(i)
+            .map(|r| r.2.clone())
+            .unwrap_or_default()
     }
 
     /// A native menu item fired, by stable [`Action`] id (`"open_file"`, `"rotate_cw"`, …)
@@ -371,11 +428,10 @@ impl AppCoreHandle {
                 contract::ScaleMode::Fill => 1,
                 contract::ScaleMode::Original => 2,
             },
-            info: match s.info {
-                contract::InfoOverlay::Hidden => 0,
-                contract::InfoOverlay::Basic => 1,
-                contract::InfoOverlay::FullExif => 2,
-            },
+            info_basic: s.info_basic,
+            info_full: s.info_full,
+            panels_hidden: s.panels_hidden,
+            hide_panels_enabled: s.hide_panels_enabled,
             recursive: s.recursive,
             fullscreen: s.fullscreen,
             slideshow: s.slideshow,
@@ -567,7 +623,8 @@ impl AppCoreHandle {
     /// `refresh_hz` rides along as the max-speed slider's ceiling (out-only).
     fn settings_form(&self) -> ffi::SettingsFormFfi {
         use pb_app_core::settings::{
-            AppearanceMode, DescribeBackend, ScaleModePref, ScrollAction, StartupMode,
+            AppearanceMode, DescribeBackend, InfoLineAlign, ScaleModePref, ScrollAction,
+            StartupMode,
         };
         let s = &self.core.settings;
         let hz = self.core.refresh_hz().max(1);
@@ -597,6 +654,11 @@ impl AppCoreHandle {
                 AppearanceMode::System => 0,
                 AppearanceMode::Light => 1,
                 AppearanceMode::Dark => 2,
+            },
+            info_line_align: match s.info_line_align {
+                InfoLineAlign::Left => 0,
+                InfoLineAlign::Center => 1,
+                InfoLineAlign::Right => 2,
             },
             letterbox_r: s.letterbox[0],
             letterbox_g: s.letterbox[1],
@@ -645,7 +707,7 @@ impl AppCoreHandle {
         }
         self.core.handle(CoreEvent::DialogResolved(
             contract::DialogResult::SettingsEdited {
-                settings: Some(s),
+                settings: Some(Box::new(s)),
                 keymap: None,
             },
         ));
@@ -983,7 +1045,9 @@ impl AppCoreHandle {
     fn apply_menu_state(&mut self) {
         let next = AppCore::menu_state_from(
             self.core.view.mode,
-            self.core.info,
+            self.core.info_line,
+            self.core.panels,
+            self.core.folder_tree_open,
             self.core.recursive,
             !self.core.windowed, // `windowed` is the inverse of the fullscreen checkbox
             self.core.slideshow.on,
@@ -1186,6 +1250,9 @@ impl AppCoreHandle {
                     self.last_menu_state = state;
                     return Some(ffi::CoreEffectFfi::MenuStateChanged);
                 }
+                // A natively-presented panel changed (task #54) — the host calls
+                // `help_refresh()` + `help_visible()` and updates its SwiftUI view.
+                C::PanelsChanged => return Some(ffi::CoreEffectFfi::PanelsChanged),
                 // The F toggle persists the remembered mode + windowed geometry together
                 // (the winit shell's `apply_window_mode` twin — task #42's missing save;
                 // `settings.window` is already fresh via `note_window_geometry`). Startup
@@ -1537,7 +1604,7 @@ fn fold_settings_form(
     refresh_hz: u32,
 ) -> pb_app_core::settings::Settings {
     use pb_app_core::settings::{
-        AppearanceMode, DescribeBackend, ScaleModePref, ScrollAction, StartupMode,
+        AppearanceMode, DescribeBackend, InfoLineAlign, ScaleModePref, ScrollAction, StartupMode,
     };
     let mut s = base.clone();
     s.start_speed = form.start_speed;
@@ -1563,6 +1630,11 @@ fn fold_settings_form(
         1 => AppearanceMode::Light,
         2 => AppearanceMode::Dark,
         _ => AppearanceMode::System,
+    };
+    s.info_line_align = match form.info_line_align {
+        0 => InfoLineAlign::Left,
+        1 => InfoLineAlign::Center,
+        _ => InfoLineAlign::Right,
     };
     s.letterbox = [form.letterbox_r, form.letterbox_g, form.letterbox_b];
     s.letterbox_light = [
@@ -1789,6 +1861,9 @@ mod ffi {
         HideWindow,
         // The menu check/enabled state changed — pull the new one via menu_state().
         MenuStateChanged,
+        // A natively-presented rich panel (Help) changed visibility/content — call
+        // help_refresh() then read help_visible() + help_row_* and update the view.
+        PanelsChanged,
         // Pop the photo context menu at the cursor: (has_image, has_motion, can_reveal,
         // fullscreen) — the curated item set mirrors menu.rs build_context_menu.
         ShowContextMenu(bool, bool, bool, bool, bool, bool),
@@ -1847,6 +1922,8 @@ mod ffi {
         recursive: bool,
         scale_mode: u8,
         appearance_mode: u8,
+        // 0 left / 1 center / 2 right (task #54).
+        info_line_align: u8,
         letterbox_r: u8,
         letterbox_g: u8,
         letterbox_b: u8,
@@ -1886,7 +1963,10 @@ mod ffi {
     #[swift_bridge(swift_repr = "struct")]
     struct MenuStateFfi {
         scale: u8,
-        info: u8,
+        info_basic: bool,
+        info_full: bool,
+        panels_hidden: bool,
+        hide_panels_enabled: bool,
         recursive: bool,
         fullscreen: bool,
         slideshow: bool,
@@ -1949,6 +2029,16 @@ mod ffi {
         fn menu_action(&mut self, id: &str);
         fn menu_state(&self) -> MenuStateFfi;
         fn context_menu(&mut self);
+
+        // The native Help panel (task #54, mac-first): on a PanelsChanged marker call
+        // help_refresh(), then read help_visible() and the indexed help_row_* accessors
+        // to (re)build the SwiftUI Help view.
+        fn help_refresh(&mut self);
+        fn help_visible(&self) -> bool;
+        fn help_row_count(&self) -> usize;
+        fn help_row_is_header(&self, i: usize) -> bool;
+        fn help_row_text(&self, i: usize) -> String;
+        fn help_row_shortcut(&self, i: usize) -> String;
 
         // The NS2 dialog seam: payload pulls (after a ShowDialog marker), the
         // DialogResolved results (one entry point per user gesture), the live progress
@@ -2546,7 +2636,11 @@ mod tests {
         assert_eq!(folded.describe_backend, DescribeBackend::LocalEndpoint);
         assert_eq!(folded.describe_endpoint, "http://gremlin:1234/v1");
         assert_eq!(folded.describe_model, "qwen2.5-vl");
-        assert_eq!(folded.describe_prompt.as_deref(), Some("Custom prompt"), "trimmed");
+        assert_eq!(
+            folded.describe_prompt.as_deref(),
+            Some("Custom prompt"),
+            "trimmed"
+        );
         assert_eq!(folded.describe_max_tokens, 1024);
         assert!(folded.describe_auto);
 

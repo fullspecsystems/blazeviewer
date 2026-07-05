@@ -94,8 +94,10 @@ final class MenuBar: NSObject {
         check("scale_fit", s.scale == 0)
         check("scale_fill", s.scale == 1)
         check("scale_original", s.scale == 2)
-        check("info", s.info == 1)
-        check("full_exif", s.info == 2)
+        check("info", s.info_basic)
+        check("full_exif", s.info_full)
+        check("toggle_panels", s.panels_hidden)
+        items["toggle_panels"]?.isEnabled = s.hide_panels_enabled
         check("recursive", s.recursive)
         check("fullscreen", s.fullscreen)
         check("slideshow", s.slideshow)
@@ -239,6 +241,7 @@ final class MenuBar: NSObject {
             item("info", "Show Image Info"),
             item("full_exif", "Show All EXIF Info"),
             item("folder_tree", "Show Folder Tree"),
+            item("toggle_panels", "Hide Panels"),
         ]))
 
         // Go — folder navigation (Finder's chords: ⌘↑ Enclosing Folder; ⌘←/⌘→ step

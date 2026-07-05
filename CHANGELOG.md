@@ -8,6 +8,23 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
+- **Native keyboard-shortcuts panel on macOS** — the **?** help panel is now a real
+  macOS panel: crisp native text, keys shown as little keycaps (with plain separators
+  so a `/` key never reads as "or"), two columns per section for a compact scan, and a
+  **✕ close button** so you can dismiss it without hunting for the key. (First of the
+  on-image panels to go native on Mac; the rest follow.)
+- **File info position (Left / Center / Right)** — choose where the one-line info
+  readout (**I**) sits along the bottom edge, under **Settings ▸ Appearance**.
+  Whatever it shares a corner with gets out of the way: the detailed panel lifts
+  above it, the folder tree shortens, and even a long filename spanning the width on
+  a narrow window pushes both aside — so the info never overlaps another panel.
+  Defaults to the right (unchanged).
+- **Hide Panels (Tab)** — press **Tab** to hide every on-image panel (the detailed
+  info / text / description panel, keyboard help, and the folder tree) without
+  closing them, and Tab again to bring them all back — the Photoshop-style
+  "unclutter my view" toggle. Any panel shortcut pressed while hidden reveals the
+  panels instead of appearing to do nothing. Also in **View ▸ Hide Panels**. Toasts
+  and the one-line info readout are unaffected.
 - **AI image descriptions (D) + Ask about an image (⇧D)** — describe the current
   photo with a vision model, entirely on hardware you control. Press **D** for a
   description in an on-image panel (press **D** again to retry if it failed), or **⇧D**
@@ -68,6 +85,16 @@ with any pre-release suffix carried only by the tag.
   step between the archive's sibling folders.
 
 ### Changed
+- The one-line info readout (**I**) is now fully independent of the bigger panels:
+  it has its own spot in the bottom-right corner and can be shown **at the same time**
+  as the detailed info, text, or description panel (which now sits just above it)
+  rather than replacing it. Its View-menu checkmark tracks independently of **Show
+  All EXIF Info** — both can be checked at once.
+
+### Fixed
+- Pressing **I**, then **⇧I**, then **I** again now does what you'd expect (turns the
+  one-line readout off) instead of appearing to do nothing — the line and the detailed
+  panel are no longer entangled.
 - **Encrypted 7z archives with many files open dramatically faster.** The AES key was
   being re-derived from the password for every file in the archive (tens of
   milliseconds each, slower still with a long password), which dominated the whole

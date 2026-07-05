@@ -50,6 +50,17 @@ impl Default for ColorTransform {
     }
 }
 
+/// Horizontal placement of a bottom-anchored overlay layer (the info line's three
+/// positions). `margin` is the inset from the chosen edge; `Center` ignores it
+/// horizontally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HAlign {
+    Left,
+    Center,
+    #[default]
+    Right,
+}
+
 /// How the image is sized to the viewport (the base scale of a [`ViewTransform`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScaleMode {
@@ -86,9 +97,24 @@ pub trait Renderer {
     fn clear_image(&mut self);
     /// Set the per-photo view transform (scaling mode + rotation + zoom + pan).
     fn set_view(&mut self, view: ViewTransform);
-    /// Set or clear the corner info-panel overlay: an RGBA8 bitmap (`w*h*4`)
-    /// drawn alpha-blended `margin` px in from the bottom-right. `None` hides it.
-    fn set_overlay(&mut self, panel: Option<(&[u8], u32, u32)>, margin: u32);
+    /// Set or clear the corner **rich-panel** overlay (Inspector / Help): an RGBA8
+    /// bitmap (`w*h*4`) drawn alpha-blended in from the bottom-right, `right_margin`
+    /// px from the right edge and `bottom_margin` px from the bottom. The two insets
+    /// are independent so the panel can lift above the [info-line](Renderer::set_info_line)
+    /// strip when it shares the corner (task #54). `None` hides it.
+    fn set_overlay(
+        &mut self,
+        panel: Option<(&[u8], u32, u32)>,
+        right_margin: u32,
+        bottom_margin: u32,
+    );
+
+    /// Set or clear the **basic info line** (`i`): the one-line filename · resolution ·
+    /// format readout, its own permanent overlay layer anchored `margin` px in from the
+    /// bottom edge, horizontally placed by `align` (left / center / right). Ephemeral
+    /// (a CPU quad forever — it never migrates to a presenter), and independent of the
+    /// rich-panel slot, so the two can coexist (task #54). `None` hides it.
+    fn set_info_line(&mut self, panel: Option<(&[u8], u32, u32)>, margin: u32, align: HAlign);
 
     /// Allocate a resident texture ring of `capacity` slots (Phase 3). `slot_w`/
     /// `slot_h` are the intended slot size for the fixed-size variant; the v1

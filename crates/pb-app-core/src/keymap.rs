@@ -231,6 +231,7 @@ pub const EDITOR_GROUPS: &[(&str, &[Action])] = &[
             Action::ShowImageText,
             Action::Help,
             Action::FolderTree,
+            Action::TogglePanels,
             Action::OpenParent,
             Action::PrevFolder,
             Action::NextFolder,
@@ -548,6 +549,9 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         (Action::Help, vec![p("/"), p("Shift+/")]),
         // The folder-tree overlay — Shift+F beside bare-F fullscreen (distinct chords).
         one(Action::FolderTree, "Shift+F"),
+        // Hide/show all rich panels without closing them (the Photoshop idiom) —
+        // bare Tab (task #54); a no-op when no panel is open.
+        one(Action::TogglePanels, "Tab"),
         // Go commands — the Explorer idioms (Alt+↑ up, Alt+←/→ between siblings; no
         // back/forward history to collide with). macOS also gets ⌘↑/⌘←/⌘→ as native
         // menu accelerators (MenuBar.swift), Finder-style.

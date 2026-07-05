@@ -132,6 +132,7 @@ struct SettingsDraft {
     recursive: bool,
     scale_mode: usize,         // 0 = Fit, 1 = Fill, 2 = Original
     appearance: usize,         // 0 = System, 1 = Light, 2 = Dark (#46)
+    info_line_align: usize,    // 0 = Left, 1 = Center, 2 = Right (task #54)
     letterbox: [f32; 3],       // 0..1 per channel (egui color picker) — the dark fill
     letterbox_light: [f32; 3], // the light-mode fill (#46)
     info_opacity: u8,          // 0..100
@@ -182,6 +183,11 @@ impl SettingsDraft {
                 settings::AppearanceMode::System => 0,
                 settings::AppearanceMode::Light => 1,
                 settings::AppearanceMode::Dark => 2,
+            },
+            info_line_align: match s.info_line_align {
+                settings::InfoLineAlign::Left => 0,
+                settings::InfoLineAlign::Center => 1,
+                settings::InfoLineAlign::Right => 2,
             },
             letterbox: [
                 s.letterbox[0] as f32 / 255.0,
@@ -243,6 +249,11 @@ impl SettingsDraft {
             1 => settings::AppearanceMode::Light,
             2 => settings::AppearanceMode::Dark,
             _ => settings::AppearanceMode::System,
+        };
+        s.info_line_align = match self.info_line_align {
+            0 => settings::InfoLineAlign::Left,
+            1 => settings::InfoLineAlign::Center,
+            _ => settings::InfoLineAlign::Right,
         };
         s.letterbox = [
             (self.letterbox[0] * 255.0).round().clamp(0.0, 255.0) as u8,
@@ -1845,7 +1856,11 @@ fn render_conn_test(
     match conn_test {
         ConnTest::Idle => {}
         ConnTest::Testing(_) => {
-            ui.label(egui::RichText::new("Testing…").color(p.text_secondary).size(12.5));
+            ui.label(
+                egui::RichText::new("Testing…")
+                    .color(p.text_secondary)
+                    .size(12.5),
+            );
         }
         ConnTest::Done { ok, msg } => {
             let color = if *ok { p.accent } else { p.danger };
@@ -2112,6 +2127,24 @@ fn display_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
             Some("How solid the info and EXIF panels look over an image"),
             |ui| {
                 pbui::slider(ui, &mut d.info_opacity, 0..=100, "%");
+            },
+        );
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "File info position",
+            Some("Where the one-line info readout (I) sits along the bottom"),
+            |ui| {
+                egui::ComboBox::from_id_salt("info_line_align")
+                    .width(150.0)
+                    .selected_text(["Left", "Center", "Right"][d.info_line_align])
+                    .show_ui(ui, |ui| {
+                        pbui::apply_to_ui(ui, p.dark);
+                        ui.selectable_value(&mut d.info_line_align, 0, "Left");
+                        ui.selectable_value(&mut d.info_line_align, 1, "Center");
+                        ui.selectable_value(&mut d.info_line_align, 2, "Right");
+                    });
             },
         );
     });

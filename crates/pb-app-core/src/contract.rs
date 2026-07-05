@@ -61,16 +61,6 @@ pub enum ScaleMode {
     Original,
 }
 
-/// The info overlay state — the two mutually-exclusive View-menu toggles
-/// (`Show Image Info` / `Show All EXIF Info`); at most one is on.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum InfoOverlay {
-    #[default]
-    Hidden,
-    Basic,
-    FullExif,
-}
-
 /// The window presentation mode the shell should apply. `Fullscreen` is the
 /// borderless chrome-free "speed mode" (distinct from macOS's native Spaces
 /// fullscreen, which the shell tracks separately).
@@ -136,14 +126,23 @@ pub enum DialogKind {
 /// its check/enabled marks in sync without the core knowing the menu's mechanism.
 ///
 /// Models *semantics*, not menu widgets: the one-of-three scale group is a
-/// [`ScaleMode`], the two info toggles an [`InfoOverlay`] — the shell maps those onto
-/// its individual items.
+/// [`ScaleMode`]; the info/panel toggles are independent booleans (the basic line
+/// and the Inspector's Details tab decoupled in task #54) — the shell maps those
+/// onto its individual items.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct MenuState {
     /// View ▸ scale group (exactly one checked).
     pub scale: ScaleMode,
-    /// View ▸ info overlays (at most one checked).
-    pub info: InfoOverlay,
+    /// View ▸ Show Image Info — the ephemeral basic `i` line.
+    pub info_basic: bool,
+    /// View ▸ Show All EXIF Info — the Inspector open on its Details tab (checked
+    /// even while `Tab`-hidden: hidden ≠ closed, and Hide Panels explains it).
+    pub info_full: bool,
+    /// View ▸ Hide Panels — checked while rich panels are `Tab`-hidden (task #54).
+    pub panels_hidden: bool,
+    /// View ▸ Hide Panels — enabled only with a rich panel open (matches the
+    /// `Tab` no-op with nothing to hide).
+    pub hide_panels_enabled: bool,
     /// View ▸ Recursive (This Folder).
     pub recursive: bool,
     /// View ▸ Fullscreen (the borderless speed mode checkbox).
@@ -240,16 +239,19 @@ pub enum DialogResult {
     /// An ask-about-image question was submitted (task #44): run it through the describe
     /// backend for the current photo. Empty/whitespace is ignored by the core.
     AskSubmitted(String),
-    /// Settings saved, carrying the (optionally) edited settings + keymap.
+    /// Settings saved, carrying the (optionally) edited settings + keymap. The
+    /// settings payload is boxed: it rides inside [`CoreEvent`], which travels on
+    /// every keypress — the rare dialog result pays the indirection so the hot
+    /// event stays small (clippy `large_enum_variant`).
     SettingsSaved {
-        settings: Option<crate::settings::Settings>,
+        settings: Option<Box<crate::settings::Settings>>,
         keymap: Option<Keymap>,
     },
     /// A live edit from an auto-saving Settings window (the macOS idiom — no Save
     /// button): apply + persist the payload immediately, but the window stays open,
     /// so — unlike [`DialogResult::SettingsSaved`] — no `CloseDialog` is emitted.
     SettingsEdited {
-        settings: Option<crate::settings::Settings>,
+        settings: Option<Box<crate::settings::Settings>>,
         keymap: Option<Keymap>,
     },
     /// Settings dialog's Cancel, or the window closing in an auto-saving shell (where
@@ -391,6 +393,12 @@ pub enum CoreEffect {
     CancelArchiveLoad,
     /// Sync the native menu's check/enabled marks.
     SetMenuState(MenuState),
+    /// A **natively-presented** rich panel's visibility or content changed (task #54,
+    /// mac-first): a marker telling the host to re-pull the panel model (`help_rows` /
+    /// `help_visible`, etc.) and update its native view. Emitted only when the host has
+    /// declared it presents that panel natively (so the core suppressed the panel's HUD
+    /// rasterization); the winit shell, which keeps the HUD panels, never sees it.
+    PanelsChanged,
     /// Surface a user-facing error (message dialog / toast).
     ReportError(String),
     /// Write an image or text payload to the system clipboard (an explicit user Copy /
@@ -543,7 +551,8 @@ mod tests {
         // handles start (Save Rotation / Stop Scanning / Undo all disabled).
         let m = MenuState::default();
         assert_eq!(m.scale, ScaleMode::Fit);
-        assert_eq!(m.info, InfoOverlay::Hidden);
+        assert!(!m.info_basic && !m.info_full);
+        assert!(!m.panels_hidden && !m.hide_panels_enabled);
         assert!(!m.recursive && !m.fullscreen && !m.slideshow);
         assert!(!m.save_rotation_enabled && !m.cancel_scan_enabled && !m.reveal_enabled);
         assert_eq!(m.undo, None);

@@ -156,12 +156,7 @@ pub fn downscale_rgba8(
 /// opaque, already-tone-mapped sRGB8 pixels, so there's nothing to composite. Used only to
 /// shrink an image for an OpenAI-compatible endpoint's base64 data URI — never on the view
 /// path (privacy #2: an explicit describe command, not a passive byproduct of viewing).
-pub fn encode_jpeg_rgba8(
-    rgba: &[u8],
-    w: u32,
-    h: u32,
-    quality: u8,
-) -> Result<Vec<u8>, DecodeError> {
+pub fn encode_jpeg_rgba8(rgba: &[u8], w: u32, h: u32, quality: u8) -> Result<Vec<u8>, DecodeError> {
     let expected = (w as usize) * (h as usize) * 4;
     if w == 0 || h == 0 || rgba.len() != expected {
         return Err(DecodeError::Corrupt(format!(

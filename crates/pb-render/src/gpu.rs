@@ -558,8 +558,8 @@ fn make_intermediate(
     (tex, bind_group)
 }
 
-/// The four corners of the overlay panel quad: `panel_w`×`panel_h` pixels, placed
-/// `margin` px in from the bottom-right of the screen.
+/// The four corners of an overlay panel quad: `panel_w`×`panel_h` pixels, placed
+/// `margin` px in from the bottom-right of the screen (equal right + bottom insets).
 fn overlay_quad_vertices(
     panel_w: u32,
     panel_h: u32,
@@ -567,11 +567,68 @@ fn overlay_quad_vertices(
     screen_h: u32,
     margin: u32,
 ) -> [Vertex; 4] {
+    bottom_right_quad_xy(panel_w, panel_h, screen_w, screen_h, margin, margin)
+}
+
+/// Bottom-right anchored quad with **independent** right + bottom insets — lets the
+/// rich panel lift above the info-line strip (`bottom_margin`) while keeping its right
+/// edge fixed (`right_margin`), the mirror of [`top_right_quad_xy`].
+fn bottom_right_quad_xy(
+    panel_w: u32,
+    panel_h: u32,
+    screen_w: u32,
+    screen_h: u32,
+    right_margin: u32,
+    bottom_margin: u32,
+) -> [Vertex; 4] {
     let (sw, sh) = (screen_w as f32, screen_h as f32);
-    let m = margin as f32;
-    let x1 = sw - m;
+    let x1 = sw - right_margin as f32;
     let x0 = x1 - panel_w as f32;
-    let y1 = sh - m;
+    let y1 = sh - bottom_margin as f32;
+    let y0 = y1 - panel_h as f32;
+    let x0n = (x0 / sw) * 2.0 - 1.0;
+    let x1n = (x1 / sw) * 2.0 - 1.0;
+    let y_top = 1.0 - (y0 / sh) * 2.0;
+    let y_bot = 1.0 - (y1 / sh) * 2.0;
+    [
+        Vertex {
+            pos: [x0n, y_top],
+            uv: [0.0, 0.0],
+        },
+        Vertex {
+            pos: [x1n, y_top],
+            uv: [1.0, 0.0],
+        },
+        Vertex {
+            pos: [x1n, y_bot],
+            uv: [1.0, 1.0],
+        },
+        Vertex {
+            pos: [x0n, y_bot],
+            uv: [0.0, 1.0],
+        },
+    ]
+}
+
+/// The four corners of a bottom-anchored quad placed `margin` px up from the bottom,
+/// horizontally left / center / right by `align` — the info line's three positions.
+fn bottom_aligned_quad(
+    panel_w: u32,
+    panel_h: u32,
+    screen_w: u32,
+    screen_h: u32,
+    margin: u32,
+    align: crate::HAlign,
+) -> [Vertex; 4] {
+    let (sw, sh) = (screen_w as f32, screen_h as f32);
+    let pw = panel_w as f32;
+    let x0 = match align {
+        crate::HAlign::Left => margin as f32,
+        crate::HAlign::Center => ((sw - pw) * 0.5).max(0.0),
+        crate::HAlign::Right => sw - margin as f32 - pw,
+    };
+    let x1 = x0 + pw;
+    let y1 = sh - margin as f32;
     let y0 = y1 - panel_h as f32;
     let x0n = (x0 / sw) * 2.0 - 1.0;
     let x1n = (x1 / sw) * 2.0 - 1.0;
@@ -1073,6 +1130,9 @@ pub struct WgpuRenderer {
     /// Per-photo view transform (scaling mode + rotation + zoom + pan).
     view: ViewTransform,
     overlay: Option<OverlayDraw>,
+    /// The basic info line (`i`), its own bottom-right layer, independent of the
+    /// rich-panel `overlay` slot so the two coexist (task #54).
+    info_line: Option<OverlayDraw>,
     /// The transient bottom-center status toast, drawn as its own overlay layer
     /// (independent of the info panel) — e.g. "Recursive folders: on".
     toast: Option<OverlayDraw>,
@@ -1295,6 +1355,7 @@ impl WgpuRenderer {
             sdr_scale,
             view,
             overlay: None,
+            info_line: None,
             toast: None,
             pie: None,
             chip: None,
@@ -1710,10 +1771,15 @@ impl Renderer for WgpuRenderer {
         );
     }
 
-    fn set_overlay(&mut self, panel: Option<(&[u8], u32, u32)>, margin: u32) {
+    fn set_overlay(
+        &mut self,
+        panel: Option<(&[u8], u32, u32)>,
+        right_margin: u32,
+        bottom_margin: u32,
+    ) {
         self.overlay = match panel {
             Some((rgba, w, h)) => {
-                // Overlays (info panel / help) are sRGB UI bitmaps, composited into
+                // Overlays (Inspector / help) are sRGB UI bitmaps, composited into
                 // the linear intermediate; scaled to SDR white on an HDR surface.
                 let scale = self.scene_scale(false);
                 let bind_group = upload_image(
@@ -1732,12 +1798,64 @@ impl Renderer for WgpuRenderer {
                     .device
                     .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("overlay-vbuf"),
-                        contents: bytemuck::cast_slice(&overlay_quad_vertices(
+                        contents: bytemuck::cast_slice(&bottom_right_quad_xy(
+                            w,
+                            h,
+                            self.config.width,
+                            self.config.height,
+                            right_margin,
+                            bottom_margin,
+                        )),
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    });
+                Some(OverlayDraw {
+                    bind_group,
+                    vbuf,
+                    panel_w: w,
+                    panel_h: h,
+                    margin: right_margin,
+                    margin_top: bottom_margin,
+                })
+            }
+            None => None,
+        };
+    }
+
+    /// Set or clear the basic info line — its own bottom-anchored layer (`align`:
+    /// left / center / right), so it coexists with the rich-panel `overlay` slot.
+    /// Drawn like the info panel: an sRGB UI bitmap composited into the intermediate.
+    fn set_info_line(
+        &mut self,
+        panel: Option<(&[u8], u32, u32)>,
+        margin: u32,
+        align: crate::HAlign,
+    ) {
+        self.info_line = match panel {
+            Some((rgba, w, h)) => {
+                let scale = self.scene_scale(false);
+                let bind_group = upload_image(
+                    &self.device,
+                    &self.queue,
+                    &self.bgl,
+                    self.upload.as_mut(),
+                    rgba,
+                    w,
+                    h,
+                    &ColorTransform::srgb(),
+                    false,
+                    scale,
+                );
+                let vbuf = self
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("info-line-vbuf"),
+                        contents: bytemuck::cast_slice(&bottom_aligned_quad(
                             w,
                             h,
                             self.config.width,
                             self.config.height,
                             margin,
+                            align,
                         )),
                         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                     });
@@ -1947,6 +2065,29 @@ impl Renderer for WgpuRenderer {
             rp.set_pipeline(&self.overlay_pipeline);
             rp.set_bind_group(0, &ov.bind_group, &[]);
             rp.set_vertex_buffer(0, ov.vbuf.slice(..));
+            rp.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint16);
+            rp.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+        }
+        // Pass 2a: the basic info line (bottom-right), its own layer so it sits
+        // alongside the rich panel (which lifts above it) rather than replacing it.
+        if let Some(l) = &self.info_line {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("info-line"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &intermediate_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rp.set_pipeline(&self.overlay_pipeline);
+            rp.set_bind_group(0, &l.bind_group, &[]);
+            rp.set_vertex_buffer(0, l.vbuf.slice(..));
             rp.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint16);
             rp.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
         }

@@ -25,21 +25,137 @@ pub struct TreePanel {
     pub built: Instant,
 }
 
-/// Which info overlay is active (`i` basic / `Shift+I` full EXIF / `?` help /
-/// `T` recognized text / off). One shared overlay slot, so they replace each other.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum InfoMode {
-    Off,
-    Basic,
-    Full,
-    Help,
-    /// The "text in image" panel (task #45): OCR lines + QR payloads for the
-    /// displayed photo, or its busy/error state while the scan runs.
+/// Which tab of the **Inspector** — the single tabbed rich-content panel (task #54,
+/// ADR-023): Details (the full EXIF table), Text (recognized text + QR payloads,
+/// task #45), Describe (the AI description/answer, task #44). One panel, three
+/// facets of "tell me about this image" — tabs make the old single-slot replacement
+/// behavior legible instead of silent.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum InspectorTab {
+    Details,
     Text,
-    /// The AI-description panel (task #44): the vision model's description (or answer to
-    /// a typed question) for the displayed photo, or its busy/error state while the
-    /// backend runs. Shares the overlay slot with the others.
     Describe,
+}
+
+/// What the rich layer contributes to the shared HUD overlay slot: Help, or the
+/// Inspector's active tab. (The basic `i` info line is the ephemeral layer's —
+/// see [`SlotContent`].)
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PanelContent {
+    Help,
+    Tab(InspectorTab),
+}
+
+/// What the single **rich-panel** overlay slot shows, priority-resolved by
+/// `AppCore::slot_content` (help > inspector tab). The basic `i` info line is NOT
+/// here — it is a separate permanent layer (task #54), so it can coexist with a
+/// rich panel rather than replace it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SlotContent {
+    Details,
+    Text,
+    Describe,
+    Help,
+}
+
+/// Rich-panel open/visibility state (task #54, owner decisions 2026-07-05). Pure
+/// state + semantics, unit-tested without an `AppCore`.
+///
+/// - The **Inspector** (tabbed content panel) and **Help** are mutually exclusive
+///   *on screen* for now — they share the single HUD overlay slot until the
+///   egui/native presenters land — so opening one closes the other.
+/// - `hidden` is the Photoshop-style `Tab` master switch: **hidden ≠ closed** (the
+///   open set survives), any panel toggle while hidden **reveals first** and only
+///   ever *shows* (otherwise the keypress would appear to do nothing), and `Tab`
+///   with nothing open is a no-op.
+/// - The basic `i` info line is deliberately NOT here: it is the ephemeral HUD
+///   layer (`AppCore::info_line`), unaffected by panels or `Tab`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Panels {
+    /// The Inspector: `None` = closed, `Some(tab)` = open on that tab. Survives
+    /// `hidden` (that's the point of hidden ≠ closed).
+    pub inspector: Option<InspectorTab>,
+    /// The keyboard-help panel (`/` / `?`).
+    pub help: bool,
+    /// The `Tab` master visibility flag: panels stay open but draw nothing.
+    pub hidden: bool,
+}
+
+impl Panels {
+    /// `Shift+I` / `T` / `D`: open the Inspector at `tab`, switch to it if the
+    /// Inspector is open on another tab, close the Inspector if already on it.
+    /// While hidden: reveal + ensure open — never close (the reveal rule).
+    pub fn toggle_inspector(&mut self, tab: InspectorTab) {
+        if self.hidden {
+            self.hidden = false;
+            self.inspector = Some(tab);
+        } else if self.inspector == Some(tab) {
+            self.inspector = None;
+        } else {
+            self.inspector = Some(tab);
+        }
+        self.help = false; // shared HUD slot: the Inspector replaces Help
+    }
+
+    /// Open the Inspector at `tab` unconditionally (the describe/ask flows: showing
+    /// a result must never *close* the panel). Reveals if hidden.
+    pub fn open_inspector(&mut self, tab: InspectorTab) {
+        self.hidden = false;
+        self.inspector = Some(tab);
+        self.help = false;
+    }
+
+    /// `/` / `?`: toggle Help. While hidden: reveal + ensure open, never close.
+    pub fn toggle_help(&mut self) {
+        if self.hidden {
+            self.hidden = false;
+            self.help = true;
+        } else {
+            self.help = !self.help;
+        }
+        if self.help {
+            self.inspector = None; // shared HUD slot: Help replaces the Inspector
+        }
+    }
+
+    /// `Tab`: flip master visibility. Returns `false` (no-op) when nothing is open —
+    /// flipping invisible state would only set a trap for the next panel toggle.
+    /// `tree_open` counts: the folder tree is a rich panel too.
+    pub fn toggle_hidden(&mut self, tree_open: bool) -> bool {
+        if !self.any_open(tree_open) {
+            return false;
+        }
+        self.hidden = !self.hidden;
+        true
+    }
+
+    /// Reveal (clear `hidden`), returning whether anything changed. The folder-tree
+    /// toggle and every panel-opening path call this first.
+    pub fn reveal(&mut self) -> bool {
+        std::mem::take(&mut self.hidden)
+    }
+
+    /// Whether any rich panel is open (regardless of `hidden`).
+    pub fn any_open(&self, tree_open: bool) -> bool {
+        self.inspector.is_some() || self.help || tree_open
+    }
+
+    /// What the rich layer shows in the shared HUD slot right now (`None` when
+    /// everything is closed or hidden — the basic line may still claim the slot).
+    pub fn content(&self) -> Option<PanelContent> {
+        if self.hidden {
+            return None;
+        }
+        if self.help {
+            return Some(PanelContent::Help);
+        }
+        self.inspector.map(PanelContent::Tab)
+    }
+
+    /// Whether the folder tree (open-ness tracked by the caller) should draw.
+    pub fn tree_visible(&self, tree_open: bool) -> bool {
+        tree_open && !self.hidden
+    }
 }
 
 /// A transient bottom-center status toast (e.g. "Recursive folders: on"): a pill
@@ -104,4 +220,104 @@ pub struct OpenPanel {
     pub h: u32,
     pub file: [u32; 4],
     pub folder: [u32; 4],
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use InspectorTab::*;
+
+    #[test]
+    fn inspector_toggle_opens_switches_and_closes() {
+        let mut p = Panels::default();
+        p.toggle_inspector(Details);
+        assert_eq!(p.inspector, Some(Details), "opens on the pressed tab");
+        p.toggle_inspector(Text);
+        assert_eq!(p.inspector, Some(Text), "switches tabs while open");
+        p.toggle_inspector(Text);
+        assert_eq!(p.inspector, None, "same tab again closes");
+    }
+
+    #[test]
+    fn inspector_and_help_share_the_slot() {
+        let mut p = Panels::default();
+        p.toggle_help();
+        assert!(p.help);
+        p.toggle_inspector(Describe);
+        assert!(!p.help, "opening the Inspector replaces Help");
+        assert_eq!(p.inspector, Some(Describe));
+        p.toggle_help();
+        assert!(p.help, "opening Help replaces the Inspector");
+        assert_eq!(p.inspector, None);
+    }
+
+    #[test]
+    fn tab_hides_without_closing_and_is_a_noop_when_nothing_open() {
+        let mut p = Panels::default();
+        assert!(!p.toggle_hidden(false), "nothing open → no-op");
+        assert!(!p.hidden);
+        p.toggle_inspector(Details);
+        assert!(p.toggle_hidden(false));
+        assert!(p.hidden, "Tab hides…");
+        assert_eq!(p.inspector, Some(Details), "…but the panel stays open");
+        assert_eq!(p.content(), None, "hidden panels draw nothing");
+        assert!(p.toggle_hidden(false));
+        assert!(!p.hidden, "Tab again reveals");
+        assert_eq!(p.content(), Some(PanelContent::Tab(Details)));
+    }
+
+    #[test]
+    fn tab_counts_the_folder_tree_as_open() {
+        let mut p = Panels::default();
+        assert!(p.toggle_hidden(true), "tree open → Tab works");
+        assert!(p.hidden);
+        assert!(!p.tree_visible(true), "hidden tree draws nothing");
+        assert!(p.toggle_hidden(true));
+        assert!(p.tree_visible(true));
+    }
+
+    #[test]
+    fn panel_toggles_while_hidden_reveal_and_never_close() {
+        let mut p = Panels::default();
+        p.toggle_inspector(Text);
+        p.toggle_hidden(false);
+        assert!(p.hidden);
+        // Same tab pressed while hidden: reveal + keep open (NOT close).
+        p.toggle_inspector(Text);
+        assert!(!p.hidden, "toggle while hidden reveals first");
+        assert_eq!(p.inspector, Some(Text), "…and only ever shows, never hides");
+        // Help while hidden likewise reveals and opens (even if already open).
+        p.toggle_help();
+        p.toggle_hidden(false);
+        p.toggle_help();
+        assert!(!p.hidden);
+        assert!(p.help, "help toggle while hidden reveals, not closes");
+    }
+
+    #[test]
+    fn open_inspector_never_closes() {
+        let mut p = Panels::default();
+        p.open_inspector(Describe);
+        p.open_inspector(Describe);
+        assert_eq!(
+            p.inspector,
+            Some(Describe),
+            "open is idempotent, not a toggle"
+        );
+        p.toggle_hidden(false);
+        p.open_inspector(Describe);
+        assert!(!p.hidden, "open reveals");
+    }
+
+    #[test]
+    fn content_priority_is_help_over_inspector() {
+        let mut p = Panels {
+            inspector: Some(Details),
+            help: true,    // not reachable via the toggles (they're exclusive), but the
+            hidden: false, // priority must still be deterministic if state ever allows it
+        };
+        assert_eq!(p.content(), Some(PanelContent::Help));
+        p.help = false;
+        assert_eq!(p.content(), Some(PanelContent::Tab(Details)));
+    }
 }

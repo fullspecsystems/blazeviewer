@@ -26,7 +26,9 @@ fn main() {
         eprintln!("usage: describe_probe <image> [endpoint] [model] [prompt]");
         std::process::exit(2);
     };
-    let endpoint = args.next().unwrap_or_else(|| "http://localhost:1234/v1".to_string());
+    let endpoint = args
+        .next()
+        .unwrap_or_else(|| "http://localhost:1234/v1".to_string());
     let model = args.next().unwrap_or_default();
     let custom_prompt = args.next();
 
@@ -43,16 +45,33 @@ fn main() {
     };
 
     println!("endpoint: {endpoint}");
-    println!("model:    {}", if model.is_empty() { "(server default)" } else { &model });
+    println!(
+        "model:    {}",
+        if model.is_empty() {
+            "(server default)"
+        } else {
+            &model
+        }
+    );
     println!("prompt:\n{prompt}\n---");
 
     let source = pb_source::FsSource::new(vec![path.clone().into()]);
     let backend = LocalEndpoint::new(endpoint, model, 512);
     let t0 = Instant::now();
-    match describe_job(&source, 0, pb_render::Rotation::default(), &prompt, &backend) {
+    match describe_job(
+        &source,
+        0,
+        pb_render::Rotation::default(),
+        &prompt,
+        &backend,
+    ) {
         Ok(text) => println!("described in {:?}:\n\n{text}", t0.elapsed()),
         Err(e) => {
-            eprintln!("describe failed after {:?}: {}", t0.elapsed(), e.user_message());
+            eprintln!(
+                "describe failed after {:?}: {}",
+                t0.elapsed(),
+                e.user_message()
+            );
             std::process::exit(1);
         }
     }

@@ -57,6 +57,19 @@ pub enum AppearanceMode {
     Dark,
 }
 
+/// Horizontal placement of the basic info line (`i`) along the bottom edge
+/// (task #54). `Right` (the default) keeps today's behavior and shares the corner
+/// with the Inspector, which lifts above it; `Left` shares with the folder tree
+/// (which caps its height); `Center` shares with the toast (which stacks above).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InfoLineAlign {
+    Left,
+    Center,
+    #[default]
+    Right,
+}
+
 /// How the viewer chooses windowed vs. fullscreen at launch.
 ///
 /// `Remember` (the default) restores whatever the window was last in — which is
@@ -128,6 +141,9 @@ pub struct Settings {
     pub scale_mode: ScaleModePref,
     /// Light/dark preference (task #46): System follows the OS; Light/Dark pin it.
     pub appearance_mode: AppearanceMode,
+    /// Where the basic info line (`i`) sits along the bottom edge (task #54).
+    /// Default `Right` (today's placement).
+    pub info_line_align: InfoLineAlign,
     /// Letterbox / background fill (sRGB) shown behind a non-filling image, in **dark**
     /// mode (the pre-#46 `letterbox` key, so existing files keep their chosen color).
     pub letterbox: [u8; 3],
@@ -182,6 +198,17 @@ pub struct Settings {
     /// (Brief 256 / Standard 512 / Detailed 1024); a hand-set value is honored and snaps
     /// to the nearest preset in the picker. Clamped to a sane range.
     pub describe_max_tokens: u32,
+    /// Floating-panel positions (task #54): where the user last dragged each rich
+    /// panel, in **logical points**, top-left origin, `None` = the panel's default
+    /// home. Written on drag-end (an explicit user gesture) once the presenters land;
+    /// clamped back on-screen at restore ([`clamp_panel_pos`]). Layout is app
+    /// footprint, not a viewing trace (ADR-018) — open/closed state is deliberately
+    /// NOT persisted, so a fresh launch always starts clean.
+    pub panel_pos_inspector: Option<(f32, f32)>,
+    /// The folder-tree panel's dragged position (see `panel_pos_inspector`).
+    pub panel_pos_tree: Option<(f32, f32)>,
+    /// The Help panel's dragged position (see `panel_pos_inspector`).
+    pub panel_pos_help: Option<(f32, f32)>,
 }
 
 impl Default for Settings {
@@ -201,6 +228,7 @@ impl Default for Settings {
             scroll_action: ScrollAction::Pan, // scroll pans; Ctrl+scroll zooms
             scale_mode: ScaleModePref::Fit,
             appearance_mode: AppearanceMode::System, // follow the OS light/dark theme
+            info_line_align: InfoLineAlign::Right,   // today's bottom-right placement
             letterbox: [10, 10, 12],                 // pb_render::LETTERBOX (rgb)
             letterbox_light: [240, 241, 245],        // the light-mode analog (#46)
             info_opacity: 60,                        // hud::BG alpha 153/255 ≈ 60%
@@ -217,6 +245,9 @@ impl Default for Settings {
             speak_descriptions: false,
             describe_prompt: None,     // built-in accessibility instruction
             describe_max_tokens: 512,  // "Standard" length preset
+            panel_pos_inspector: None, // default homes until the user drags (task #54)
+            panel_pos_tree: None,
+            panel_pos_help: None,
         }
     }
 }
@@ -344,6 +375,21 @@ pub fn geometry_on_screen(
     })
 }
 
+/// Clamp a persisted floating-panel position so the whole panel stays inside the
+/// window (task #54): a spot saved on a bigger window / different backing scale must
+/// come back grabbable, never off-screen. All values are logical points, top-left
+/// origin; `panel` is the panel's current size, `win` the window's client size. A
+/// panel larger than the window pins to the top-left (the title bar stays reachable).
+/// Pure and total, so restore-time safety is unit-testable.
+pub fn clamp_panel_pos(pos: (f32, f32), panel: (f32, f32), win: (f32, f32)) -> (f32, f32) {
+    // A hand-edited/garbage coordinate (NaN/∞) resets to the origin, like
+    // `Settings::clamp` does for other non-finite floats.
+    let sane = |v: f32| if v.is_finite() { v } else { 0.0 };
+    let max_x = (win.0 - panel.0).max(0.0);
+    let max_y = (win.1 - panel.1).max(0.0);
+    (sane(pos.0).clamp(0.0, max_x), sane(pos.1).clamp(0.0, max_y))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,6 +400,48 @@ mod tests {
         let text = toml::to_string_pretty(&s).unwrap();
         let back: Settings = toml::from_str(&text).unwrap();
         assert_eq!(s, back);
+    }
+
+    #[test]
+    fn panel_positions_round_trip_and_default_to_none() {
+        let mut s = Settings::default();
+        assert_eq!(s.panel_pos_inspector, None);
+        s.panel_pos_inspector = Some((120.5, 40.0));
+        s.panel_pos_tree = Some((0.0, 0.0));
+        let text = toml::to_string_pretty(&s).unwrap();
+        let back: Settings = toml::from_str(&text).unwrap();
+        assert_eq!(back.panel_pos_inspector, Some((120.5, 40.0)));
+        assert_eq!(back.panel_pos_tree, Some((0.0, 0.0)));
+        assert_eq!(back.panel_pos_help, None);
+    }
+
+    #[test]
+    fn clamp_panel_pos_keeps_the_panel_inside_the_window() {
+        // In-bounds passes through untouched.
+        assert_eq!(
+            clamp_panel_pos((100.0, 50.0), (300.0, 200.0), (1000.0, 800.0)),
+            (100.0, 50.0)
+        );
+        // Saved on a bigger window: pulled back so the whole panel fits.
+        assert_eq!(
+            clamp_panel_pos((900.0, 700.0), (300.0, 200.0), (1000.0, 800.0)),
+            (700.0, 600.0)
+        );
+        // Negative (dragged off the top-left on some setups): pinned to origin.
+        assert_eq!(
+            clamp_panel_pos((-50.0, -10.0), (300.0, 200.0), (1000.0, 800.0)),
+            (0.0, 0.0)
+        );
+        // Panel larger than the window: top-left, title bar reachable.
+        assert_eq!(
+            clamp_panel_pos((100.0, 100.0), (2000.0, 900.0), (1000.0, 800.0)),
+            (0.0, 0.0)
+        );
+        // Garbage coordinates reset to the origin instead of poisoning the layout.
+        assert_eq!(
+            clamp_panel_pos((f32::NAN, f32::INFINITY), (300.0, 200.0), (1000.0, 800.0)),
+            (0.0, 0.0)
+        );
     }
 
     #[test]

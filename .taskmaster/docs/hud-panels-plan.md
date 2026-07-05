@@ -132,9 +132,42 @@ Keymap: `Shift+I` / `T` / `D` open the Inspector at that tab, switch to it if th
 is open on another tab, and close the Inspector if already on it. `?` and `⇧F` keep toggling
 Help and the tree.
 
+### The basic info line is fully independent (owner, 2026-07-04; IMPLEMENTED)
+
 The **basic info line** (`i` — filename · resolution · format) is explicitly *not* part of
-this: it is a glanceable ephemeral readout, stays on the CPU HUD quad, and is untouched by
-all panel work.
+the Inspector and *not* a shared-slot occupant. It is a **glanceable ephemeral readout on its
+own permanent CPU-quad layer** (bottom-right), so `i` and `Shift+I`/`T`/`D` are fully
+independent — the line and a rich panel can be on at once. When both share the bottom-right
+corner, the **panel reserves a strip at the bottom for the line and anchors above it** (the
+line's height + a gap); this is a one-way rule (line state → panel bottom inset), no reflow
+engine. The line never migrates to a presenter — a CPU quad is exactly right for it forever —
+so building it its own layer now is the permanent end-state, not scaffolding.
+
+This replaced an earlier half-coupling where `i` shared the single overlay slot with the rich
+panels (turning `i` on closed the panel; the line was occluded while a panel showed). That
+produced a real dead-input bug (`i`, `⇧I`, `i` again did nothing visible) and was the trigger
+for the full decouple. Implemented in `pb-render` (a dedicated `set_info_line` layer +
+independent bottom inset on `set_overlay` so the panel lifts) and `pb-app-core`
+(`info_line`/`info_line_shown`/`info_line_item`/`info_line_h` state, `show_info_line`/
+`hide_info_line`, the tick running the line before the panel so the panel's lift reads a
+current line state).
+
+**Line-alignment preference — IMPLEMENTED (2026-07-04).** Settings ▸ Appearance ▸ *File
+info position* (Left / Center / Right; default Right = today's placement), backed by
+`settings::InfoLineAlign` and rendered via `pb_render::HAlign` on the line's own quad. The
+reserve is **geometry-aware, not a fixed per-alignment rule**: the core owns the line's
+horizontal span (`info_line_span`, from align + rasterized width + margin), and each
+bottom-anchored layer reserves against it **only when their spans actually overlap**
+(`info_line_reserve_for`). So the default right line lifts the bottom-right Inspector but
+leaves the left tree full-height; a left line caps the tree but not the Inspector; and — the
+case that killed the naive "one alignment → one panel" model — a **wide centered line (a long
+filename on a narrow window) overlaps and reserves *both* corner panels at once.** The tree
+(top-left, opaque, drawn over the line) caps its height budget by the line strip and re-renders
+only when it actually overlaps (a single conditional re-render, off the hot path). The
+**toast is not a collider**: it rides a fixed ~64px bottom margin, always clearing the line's
+small `overlay_margin` inset (verified 9–29px across scales), so no toast reserve exists. This
+core-owned footprint is exactly what the native SwiftUI/egui presenters will inset their
+layout by later — not throwaway HUD math.
 
 ### Esc always quits (owner)
 
@@ -294,6 +327,30 @@ When a rich panel is open, input must be routed by ownership:
 This is not optional. Without a first-refusal input gate, selectable text will fight
 drag-to-pan and copy-image shortcuts.
 
+> **Pointer-under-panel note (2026-07-05, from the Help pilot smoke).** A SwiftUI overlay
+> over the `MetalCanvas` blocks *clicks* (SwiftUI hit-tests the panel above the canvas) but
+> **not `mouseMoved`** — the canvas NSView's tracking area still fires under the panel, so
+> the core's pointer hit-test keeps driving the cursor for whatever HUD interactive element
+> sits beneath (observed: the empty-state Open/Open-Folder buttons show the pointer cursor
+> through an open Help panel). Read-only Help needs no *keyboard* gating, but it does want
+> *pointer* gating. Two fixes, both real: (a) the presenter reports its frame so the canvas
+> suppresses `pointerMoved` forwarding inside it (the general fix, lands with the interactive
+> panels); (b) migrate the empty-state Open panel to native SwiftUI buttons so there's no HUD
+> hit-test under the panel at all — see the next slice below.
+
+### Next slice: the empty-state Open panel goes native (reclassified)
+
+The **empty-state CTA** ("Press O to open" + **Open File** / **Open Folder** buttons) was
+listed above as "ephemeral, keep in the CPU quad." That holds for its *text*, but its
+**interactive buttons** are exactly what conflicts with a native panel on top (the cursor
+note) and what benefits from being real controls (hover, click, accessibility). So on the mac
+host it becomes a **SwiftUI view over the canvas** — the same `native_*` suppress seam + a
+`PanelsChanged`-style signal, but this pilot adds the **click-dispatch path** (a button fires
+`Action::OpenFile` / `Action::OpenFolder` via `menu_action`), which the read-only Help pilot
+didn't exercise. It's a smaller, self-contained step than the folder tree and fixes the cursor
+glitch by construction; winit keeps the HUD open panel (`render_open_panel`) until its egui
+phase. Owner call 2026-07-05.
+
 ## Hot-path safety
 
 The performance contract is concrete:
@@ -321,6 +378,24 @@ before/after in three states: panels hidden, panel open + idle, panel open + hol
 
 ### Phase 0 — extract panel models
 
+> **Status (2026-07-04): IMPLEMENTED** (task #54.1) — owner smoke pending.
+> `overlay::Panels`/`InspectorTab` (pure state + semantics, 8 unit tests),
+> `pb-app-core/src/panels.rs` (DetailsPanel/HelpPanel/TextPanel/DescribePanel models
+> + interim `lines()` projections, 5 tests), `InfoMode` deleted (rich-slot priority =
+> Help > Inspector tab via `AppCore::slot_content`), `Action::TogglePanels` on `Tab` +
+> View ▸ Hide Panels in both shells' menus, `MenuState` reshaped (`info_basic`/
+> `info_full`/`panels_hidden`/`hide_panels_enabled` — `InfoOverlay` removed across
+> contract/FFI/Swift), panel-position settings + `clamp_panel_pos`, `Settings` dialog
+> payload boxed (keeps `CoreEvent` small).
+>
+> **The basic-`i`-line full decouple also landed** (2026-07-04, owner call — see "The
+> basic info line is fully independent" above): its own permanent `pb-render`
+> `set_info_line` layer, `set_overlay` grew an independent bottom inset so a shared-corner
+> rich panel lifts above the line strip, and the tick runs the line before the panel.
+> Fixes the `i`/`⇧I`/`i` dead-input bug; the line and any rich panel now coexist. Workspace
+> green: 542 tests (incl. an `info_line_and_inspector_are_independent` regression test),
+> clippy `-D warnings`, fmt, Swift host builds.
+
 Before any presenter work:
 
 1. Add typed rich-panel model/accessor methods in `pb-app-core`.
@@ -340,61 +415,107 @@ Before any presenter work:
 Exit criteria: current HUD panels still render, but the renderer consumes a semantic model
 rather than ad hoc display rows wherever practical.
 
-### Phase 1 — Windows egui overlay seam
+### Re-sequenced macOS-first (owner, 2026-07-04)
 
-Stand up the winit egui viewport overlay with **Help as the pilot panel** — read-only, so
-it exercises scroll, chrome (title / ✕ / drag), Tab-hide, and input gating with zero
-actions before the tree adds them:
+The original order did the Windows egui seam first (front-load the riskiest engineering). We
+flipped to **macOS-native presenters first** because: the owner develops and smokes on macOS
+(tight iteration where you sit); the Mac path has **no render-seam work at all** (SwiftUI
+panels are views in a ZStack over the Metal canvas — no offscreen texture, no color-pipeline
+integration, no repaint pump); and a real native presenter consuming the Phase 0 models
+through FFI is the best early test that the shared contract is shaped right. Windows loses
+nothing meanwhile — its HUD panels keep working exactly as today until the egui phase. The
+presenter *strategy* section above is unchanged (egui on Windows, native on macOS); only the
+build order moved.
 
-- hidden overlay costs zero in the headless replay harness (built in this phase);
-- panel input has first refusal; key releases still reach the held tracker;
-- photo interactions fall through outside the panel;
-- resize/DPI/theme changes remain correct (test 1×↔2× scale transitions);
-- the egui pass is part of the same surface/present path, not a second window;
-- the committed offscreen-texture seam is color-correct on both SDR and HDR desktops.
+**New cross-cutting piece this order surfaces: the per-shell "present panels natively" seam.**
+The moment macOS draws a panel as a real view, the core must **stop rasterizing that panel's
+HUD bitmap on macOS** while keeping it for winit/Windows. So the host declares a capability
+("I present rich panels natively"); the core then suppresses the corresponding `pb-hud`
+`render_*`/`set_*` for that panel and instead emits a **panel-state-changed marker**, and the
+Swift side pulls the semantic model via the established NS2 stash-pull FFI (flattened rows +
+a generation counter). This was always required the instant either platform got ahead; it
+just lands now instead of at the end. The **ephemeral layer (toasts, the `i` line, hints,
+scan chip) is never suppressed** — it stays a CPU quad on both shells.
 
-### Phase 2 — folder tree pilot on Windows
+### Phase 1 — macOS presenter seam + Help pilot + replay harness
 
-Use the folder tree because it exercises interaction:
+> **Status (2026-07-04): seam + Help pilot IMPLEMENTED** (task #54.2) — owner smoke
+> pending; the replay harness is the remaining Phase 1 item. Landed: the **suppress-HUD
+> seam** (`AppCore::native_help` set by the mac host at construction; `show_overlay`
+> early-returns for a natively-presented slot, clearing any leftover HUD panel; the tick
+> emits `CoreEffect::PanelsChanged` only on a real Help show/hide; `apply_keymap` re-emits
+> on a content change). **FFI**: `PanelsChanged` marker + `help_refresh`/`help_visible` +
+> indexed `help_row_*` accessors (the keymap-editor pull pattern — no `Vec<struct>` return).
+> **Swift**: `CoreModel.helpVisible`/`helpRows` refreshed on the marker; a `HelpPanelView`
+> SwiftUI card (title bar + ✕ close + scroll, native `.regularMaterial`) layered
+> `.overlay(alignment: .center)` over the `MetalCanvas` — the panel hit-tests above the
+> canvas so its scroll/click are its own while the rest falls through. The winit shell is
+> untouched (`native_help == false`; its exhaustive drain match gets a no-op arm). 545
+> tests (incl. `native_help_suppresses_the_hud_and_signals_visibility` +
+> `winit_keeps_help_on_the_hud_no_native_signal`), clippy `-D warnings`, fmt, Swift host
+> builds. **Input gating deferred by design:** Help is read-only (no first responder), so
+> `?`/`/` still toggle it and Esc still quits with no monitor change — the first-responder
+> gate + ⌘C-beats-Copy-Image land with the Inspector (selectable text). Drag-to-move also
+> deferred (Help centers); it comes with the shared panel chrome.
 
-- render `FolderTreePanel` in a scrollable egui panel with the standard panel chrome
-  (title bar, ✕, drag-to-move);
-- row click dispatches `PanelAction::OpenTreeTarget` and calls the same core open/rescope path
-  the HUD tree uses today;
-- keep collapsed-ancestor markers where they represent real model state;
-- drop the old "… n more" paging markers unless row count proves virtualization is needed;
-- counts render as badges or trailing text.
+- **Suppress-HUD-per-shell seam:** the host capability flag + core suppression of the rich
+  panel's HUD rasterization + the panel-state-changed marker + the flattened-model FFI pull.
+- **Help as the pilot panel** — read-only, so it exercises the seam, the ZStack-over-canvas
+  layering, chrome (title / ✕ / drag), Tab-hide of a native view, and input gating with zero
+  actions before the tree adds them.
+- **Input gating (macOS specifics):** extend the NSEvent keyboard-monitor gate
+  (`panelOpen || alertUp || activeSheet`) with "a rich panel owns first responder"; **key
+  releases always reach the core held tracker** (a swallowed KeyUp on a held nav key is a
+  stuck fly); panel focus fires the `FocusLost` clear.
+- **Build the headless replay harness here** (shell-neutral: pumps `CoreEvent::KeyDown`/`Tick`
+  at `AppCore`, dumps `StageTimes` p50/p95/p99). Measure hidden / open+idle / open+fly — it
+  also guards the suppress-HUD refactor.
+- Smoke fullscreen/resize + 1×↔2× backing-scale transitions with the panel open against the
+  fresh compositing fixes (commit 0effc66).
 
-Exit criteria: Windows tree is done, current HUD `render_tree` is retired for winit, and no new
-navigation logic exists in the presenter.
+### Phase 2 — macOS folder tree (flat SwiftUI `List`)
 
-### Phase 3 — native macOS folder presenter
+Build the Mac folder presenter over the `FolderTreePanel` model as a **flat SwiftUI `List`
+rendering the model's rows directly** (depth → indentation, `.badge` counts, native
+scroll/hover/VoiceOver, `.scrollContentBackground(.hidden)` inside the panel chrome) — the
+model is already flat-with-depth and click means re-root, not expand, so a disclosure tree
+(`List(..., children:)` / `OutlineGroup`) would fight the control's expansion state for no
+gain. Row click dispatches `PanelAction::OpenTreeTarget` → the same core open/rescope path
+the HUD tree uses today; **archives navigate identically** (the row's `TreeTarget` is opaque
+— `Dir` or `ArchiveScope`). Wheel/trackpad scrolls the list (the "… n more" pagers retire).
+Escalate to AppKit `NSOutlineView` only if the SwiftUI version fails the owner smoke on feel,
+selection, keyboard, or counts. Retire `pb-hud render_tree` **on macOS only** (the suppress
+seam); winit keeps it until the egui phase.
 
-Build the Mac folder presenter over the same `FolderTreePanel` model, starting with a
-**flat SwiftUI `List` rendering the model's rows directly** (depth → indentation,
-`.badge` counts, native scroll/hover/VoiceOver) — the model is already flat-with-depth and
-click means re-root, not expand, so a disclosure tree (`List(..., children:)` /
-`OutlineGroup`) would fight the control's expansion state for no gain. Escalate to AppKit
-`NSOutlineView` only if the SwiftUI version fails the owner smoke on feel, selection,
-keyboard behavior, or count presentation.
+### Phase 3 — macOS Inspector tabs
 
-This deliberately replaces the earlier "build a macOS egui RawInput bridge" pilot. The bridge
-is deferred until there is a concrete need.
-
-### Phase 4 — migrate the Inspector, one tab at a time
-
-Help already landed as the Phase 1 pilot (sections sourced from the live keymap/menu
-model). The Inspector migrates tab by tab:
+Migrate the Inspector tab by tab as native SwiftUI views over the same core models:
 
 1. **Details (EXIF)** — scroll, row copy, copy full details, no truncation in copy payload.
-2. **Text/OCR** — selectable recognized text + QR payloads, copy full text.
-3. **Describe/Ask** — Markdown display where useful (see the Markdown rule below),
-   selectable text, copy full answer, Speak/VoiceOver-friendly on macOS. Ask input stays a
-   dialog/sheet (the Esc rule), reachable from the panel via `PanelAction::AskImage`.
+2. **Text/OCR** — selectable recognized text + QR payloads, copy full text; ⌘C
+   first-responder-aware so panel selection beats Copy Image.
+3. **Describe/Ask** — native `AttributedString(markdown:)` (remote images stripped — the
+   privacy rule below), selectable text, copy full answer, Speak/VoiceOver-friendly. Ask
+   input stays a sheet (the Esc rule), reachable via `PanelAction::AskImage`.
 
-Retire the matching `pb-hud render_*` method as each panel/tab lands (`render_shortcuts`
-with Phase 1, `render_table` and `render_paragraph`'s rich uses here). Keep `render_panel`,
-toasts, play/rotate hints, scan chip, tooltips, and empty-state CTA in `pb-hud`.
+Retire each `pb-hud render_*` **on macOS** as its tab lands. Keep `render_panel` (the `i`
+line), toasts, play/rotate hints, scan chip, tooltips, and empty-state CTA in `pb-hud` on
+both shells.
+
+### Phase 4 — Windows egui presenter track
+
+Now the Windows side, over the same models and the same suppress-HUD seam (the winit host
+sets the capability flag). This is the originally-Phase-1 work:
+
+- **egui overlay seam:** the committed offscreen `Rgba8Unorm` texture composited by the
+  existing overlay pipeline into the fp16 intermediate (color-correct on SDR + HDR; retained
+  across nav frames; shares the main device/queue — do **not** crib `dialog.rs`). egui's
+  repaint deadline feeds `SetWake`/`work_pending`. Verify premultiplied-alpha vs the overlay
+  blend state. Enable the bundled AccessKit for Narrator/NVDA.
+- **Help pilot → folder tree → Inspector tabs**, mirroring Phases 1–3 but in egui, reusing
+  `pb-ui` tokens/components. Markdown = the in-house `LayoutJob` subset (no remote fetch).
+- Retire each winit `pb-hud render_*` as its egui panel lands. The replay harness (from
+  Phase 1) reruns hidden / open+idle / open+fly on Windows.
 
 ## Interim stopgap (task #44)
 

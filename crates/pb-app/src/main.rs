@@ -71,8 +71,8 @@ mod reveal;
 // paths in the winit shell modules (and the `use action::…` lines below) keep
 // resolving unchanged.
 use pb_app_core::{
-    action, contract, keymap, pb_key, slideshow, AppCore, ArchiveScope, InfoMode, Nav, OpenButton,
-    OpenPanel, UndoAction, Viewport,
+    action, contract, keymap, pb_key, slideshow, AppCore, ArchiveScope, Nav, OpenButton, OpenPanel,
+    UndoAction, Viewport,
 };
 // The HUD CPU compositor (info panel / toasts / pie / chip) and its Font Awesome icon
 // rasterizer now live in the shell-neutral `pb-hud` crate (NS0). Re-export them at the
@@ -455,7 +455,14 @@ impl App {
                 password_archive: None,
                 pending_delete: None,
                 pending_confirm_delete: None,
-                info: InfoMode::Off,
+                info_line: false,
+                info_line_shown: false,
+                info_line_item: None,
+                info_line_w: 0,
+                info_line_h: 0,
+                panels: pb_app_core::Panels::default(),
+                native_help: false,
+                last_help_visible: false,
                 overlay_shown: false,
                 overlay_item: None,
                 toast: None,
@@ -1263,7 +1270,9 @@ impl App {
 
         let next = AppCore::menu_state_from(
             self.core.view.mode,
-            self.core.info,
+            self.core.info_line,
+            self.core.panels,
+            self.core.folder_tree_open,
             self.core.recursive,
             !self.core.windowed, // `windowed` is the inverse of the fullscreen checkbox
             self.core.slideshow.on,
@@ -1307,10 +1316,10 @@ impl App {
             c.fullscreen.set_checked(state.fullscreen);
             c.slideshow.set_checked(state.slideshow);
             c.mute_live_audio.set_checked(state.mute_live_audio);
-            c.info
-                .set_checked(state.info == contract::InfoOverlay::Basic);
-            c.full_exif
-                .set_checked(state.info == contract::InfoOverlay::FullExif);
+            c.info.set_checked(state.info_basic);
+            c.full_exif.set_checked(state.info_full);
+            c.toggle_panels.set_checked(state.panels_hidden);
+            c.toggle_panels.set_enabled(state.hide_panels_enabled);
         }
         // File ▸ Save Rotation enabled state.
         if let Some(it) = self.save_rotation_item.as_ref() {
@@ -1700,10 +1709,7 @@ impl App {
                 contract::DialogResult::AskSubmitted(q.unwrap_or_default())
             }
             DialogOutcome::SettingsSaved { settings, keymap } => {
-                contract::DialogResult::SettingsSaved {
-                    settings: settings.map(|b| *b),
-                    keymap,
-                }
+                contract::DialogResult::SettingsSaved { settings, keymap }
             }
             DialogOutcome::SettingsCancelled => contract::DialogResult::SettingsCancelled,
             DialogOutcome::LoadingCancelled => contract::DialogResult::LoadingCancelled,
@@ -1852,6 +1858,10 @@ impl App {
                     contract::CoreEffect::SetMenuState(state) => {
                         self.apply_menu_to_native(&state);
                     }
+                    // Native-panel marker (task #54, mac-first): the winit shell keeps the
+                    // HUD panels (`native_help == false`), so the core never emits this here.
+                    // Matched explicitly (no wildcard) to keep new variants a compile error.
+                    contract::CoreEffect::PanelsChanged => {}
                     contract::CoreEffect::SetWindowMode(_mode) => {
                         self.apply_window_mode();
                     }
@@ -3607,7 +3617,9 @@ mod tests {
     fn base_menu_state() -> contract::MenuState {
         AppCore::menu_state_from(
             ScaleMode::Fit,
-            InfoMode::Off,
+            false, // info_line
+            pb_app_core::Panels::default(),
+            false, // tree_open
             false,
             false,
             false,
@@ -3627,7 +3639,9 @@ mod tests {
         let scale = |m| {
             AppCore::menu_state_from(
                 m,
-                InfoMode::Off,
+                false, // info_line
+                pb_app_core::Panels::default(),
+                false, // tree_open
                 false,
                 false,
                 false,
@@ -3648,11 +3662,14 @@ mod tests {
     }
 
     #[test]
-    fn menu_state_collapses_info_mode_to_the_two_checkmarks() {
-        let info = |i| {
+    fn menu_state_maps_the_info_and_panel_checkmarks() {
+        use pb_app_core::{InspectorTab, Panels};
+        let state = |line: bool, panels: Panels, tree: bool| {
             AppCore::menu_state_from(
                 ScaleMode::Fit,
-                i,
+                line,
+                panels,
+                tree,
                 false,
                 false,
                 false,
@@ -3665,14 +3682,49 @@ mod tests {
                 None,
                 None,
             )
-            .info
         };
-        assert_eq!(info(InfoMode::Basic), contract::InfoOverlay::Basic);
-        assert_eq!(info(InfoMode::Full), contract::InfoOverlay::FullExif);
-        // The menu has no glyph for Help or Off — both leave *neither* box checked, the
-        // exact behavior of the old `info == Basic` / `info == Full` checkmark tests.
-        assert_eq!(info(InfoMode::Help), contract::InfoOverlay::Hidden);
-        assert_eq!(info(InfoMode::Off), contract::InfoOverlay::Hidden);
+        // The basic line and the Details tab check independently (task #54 decouple).
+        let s = state(true, Panels::default(), false);
+        assert!(s.info_basic && !s.info_full);
+        let details = Panels {
+            inspector: Some(InspectorTab::Details),
+            ..Default::default()
+        };
+        let s = state(true, details, false);
+        assert!(
+            s.info_basic && s.info_full,
+            "both can be checked at once now"
+        );
+        // Other tabs / Help leave the EXIF checkmark off.
+        for panels in [
+            Panels {
+                inspector: Some(InspectorTab::Text),
+                ..Default::default()
+            },
+            Panels {
+                help: true,
+                ..Default::default()
+            },
+        ] {
+            assert!(!state(false, panels, false).info_full);
+        }
+        // Hide Panels: checked while hidden, enabled only with something open
+        // (the tree counts).
+        let s = state(false, Panels::default(), false);
+        assert!(!s.panels_hidden && !s.hide_panels_enabled);
+        let s = state(false, Panels::default(), true);
+        assert!(s.hide_panels_enabled, "an open tree makes Tab meaningful");
+        let hidden = Panels {
+            inspector: Some(InspectorTab::Details),
+            hidden: true,
+            ..Default::default()
+        };
+        let s = state(false, hidden, false);
+        assert!(s.panels_hidden && s.hide_panels_enabled);
+        assert!(
+            s.info_full,
+            "Details stays checked while hidden: hidden != closed"
+        );
     }
 
     #[test]
@@ -3681,7 +3733,9 @@ mod tests {
         assert_eq!(base_menu_state().undo, None);
         let with_undo = AppCore::menu_state_from(
             ScaleMode::Fit,
-            InfoMode::Off,
+            false, // info_line
+            pb_app_core::Panels::default(),
+            false, // tree_open
             false,
             false,
             false,
@@ -3702,14 +3756,16 @@ mod tests {
         // Each toggle/enabled input lands on its own field (no crossed wires).
         let all_on = AppCore::menu_state_from(
             ScaleMode::Fit,
-            InfoMode::Off,
-            true, // recursive
-            true, // fullscreen
-            true, // slideshow
-            true, // mute_live_audio
-            true, // save_rotation_enabled
-            true, // reveal_enabled
-            true, // cancel_scan_enabled
+            false, // info_line
+            pb_app_core::Panels::default(),
+            false, // tree_open
+            true,  // recursive
+            true,  // fullscreen
+            true,  // slideshow
+            true,  // mute_live_audio
+            true,  // save_rotation_enabled
+            true,  // reveal_enabled
+            true,  // cancel_scan_enabled
             None,
             true,    // native_fullscreen_engaged
             Some(0), // displayed_item
@@ -3749,7 +3805,9 @@ mod tests {
         let state = |displayed: Option<usize>, pin: Option<usize>| {
             AppCore::menu_state_from(
                 ScaleMode::Fit,
-                InfoMode::Off,
+                false, // info_line
+                pb_app_core::Panels::default(),
+                false, // tree_open
                 false,
                 false,
                 false,
@@ -3786,7 +3844,9 @@ mod tests {
         assert_eq!(a, b);
         let changed = AppCore::menu_state_from(
             ScaleMode::Fit,
-            InfoMode::Off,
+            false, // info_line
+            pb_app_core::Panels::default(),
+            false, // tree_open
             false,
             false,
             true,  // slideshow flipped

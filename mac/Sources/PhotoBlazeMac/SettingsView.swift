@@ -222,6 +222,12 @@ struct SettingsView: View {
                 labeledSlider(
                     "Info panel opacity", value: $draft.infoOpacity, in: 0...100, format: "%.0f%%"
                 )
+                Picker("File info position", selection: $draft.infoLineAlign) {
+                    Text("Left").tag(0)
+                    Text("Center").tag(1)
+                    Text("Right").tag(2)
+                }
+                .pickerStyle(.segmented)
             }
         }
         .formStyle(.grouped)
@@ -248,26 +254,13 @@ struct SettingsView: View {
                     TextField(
                         "Endpoint URL", text: $draft.describeEndpoint,
                         prompt: Text("http://localhost:1234/v1"))
-                    HStack(spacing: 6) {
-                        TextField(
-                            "Model", text: $draft.describeModel, prompt: Text("(loaded model)"))
-                        // The picker fills from the last probe; picking sets the field.
-                        Menu {
-                            Button("(loaded model)") { draft.describeModel = "" }
-                            ForEach(describeModels, id: \.self) { m in
-                                Button(Self.isLikelyVisionModel(m) ? "\(m)  ◆ vision" : m) {
-                                    draft.describeModel = m
-                                }
-                            }
-                            if describeModels.isEmpty {
-                                Text("Run Test to list models").disabled(true)
-                            }
-                        } label: {
-                            Image(systemName: "chevron.down")
-                        }
-                        .menuStyle(.borderlessButton)
-                        .fixedSize()
-                    }
+                    // The dropdown fills from the last probe; picking a row sets the field.
+                    ComboBox(
+                        text: $draft.describeModel,
+                        placeholder: "(loaded model)",
+                        options: [Self.comboClearRow] + describeModels.map(Self.comboRowLabel),
+                        resolve: Self.resolveComboSelection
+                    )
                     HStack(spacing: 8) {
                         Button("Test & list models") { runConnTest() }
                             .disabled(connTesting || draft.describeEndpoint.isEmpty)
@@ -318,6 +311,21 @@ struct SettingsView: View {
         let s = id.lowercased()
         return ["vl", "vision", "llava", "pixtral", "moondream", "vlm", "bakllava", "cogvlm",
                 "internvl"].contains { s.contains($0) }
+    }
+
+    /// The Model combo box's reset-to-default row and the vision badge — `ComboBox` itself
+    /// is a plain native combo box with no notion of either; only this one call site does.
+    private static let comboClearRow = "(loaded model)"
+    private static let comboVisionBadge = "  ◆ vision"
+
+    private static func comboRowLabel(for id: String) -> String {
+        isLikelyVisionModel(id) ? id + comboVisionBadge : id
+    }
+
+    private static func resolveComboSelection(_ row: String) -> String {
+        if row == comboClearRow { return "" }
+        if row.hasSuffix(comboVisionBadge) { return String(row.dropLast(comboVisionBadge.count)) }
+        return row
     }
 
     /// Run the Test-connection probe off the main thread (the FFI call blocks on a socket),
@@ -591,6 +599,7 @@ struct SettingsDraft: Equatable {
     var recursive = true
     var scaleMode = 0
     var appearanceMode = 0
+    var infoLineAlign = 2  // 0 left / 1 center / 2 right (task #54)
     var letterbox: Color = .black
     var letterboxLight: Color = .white
     var infoOpacity: Double = 60
@@ -621,6 +630,7 @@ struct SettingsDraft: Equatable {
         recursive = form.recursive
         scaleMode = Int(form.scale_mode)
         appearanceMode = Int(form.appearance_mode)
+        infoLineAlign = Int(form.info_line_align)
         letterbox = Color(
             red: Double(form.letterbox_r) / 255.0,
             green: Double(form.letterbox_g) / 255.0,
@@ -671,6 +681,7 @@ struct SettingsDraft: Equatable {
             recursive: recursive,
             scale_mode: UInt8(scaleMode),
             appearance_mode: UInt8(appearanceMode),
+            info_line_align: UInt8(infoLineAlign),
             letterbox_r: UInt8((rgb.redComponent * 255).rounded().clamped(0, 255)),
             letterbox_g: UInt8((rgb.greenComponent * 255).rounded().clamped(0, 255)),
             letterbox_b: UInt8((rgb.blueComponent * 255).rounded().clamped(0, 255)),

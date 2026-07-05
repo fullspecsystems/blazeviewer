@@ -100,6 +100,25 @@ struct ContentView: View {
             // excludes the titlebar there, so there's no inset to ignore).
             .ignoresSafeArea()
             .frame(minWidth: 520, minHeight: 360)
+            // Native rich panels (task #54, mac-first) layer over the canvas here. The
+            // core suppresses their HUD rasterization, so there's no double-draw; the
+            // panel receives its own pointer/scroll (SwiftUI hit-tests it above the
+            // canvas) while the rest falls through to pan/zoom/nav. Help is the pilot.
+            .overlay {
+                if model.helpVisible {
+                    // GeometryReader gives the panel the window's available height so it
+                    // sizes to its content up to that, then scrolls; centered within.
+                    GeometryReader { geo in
+                        HelpPanelView(
+                            sections: model.helpSections,
+                            onClose: { model.closeHelp() },
+                            maxHeight: geo.size.height - 48
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    }
+                    .transition(.opacity)
+                }
+            }
             // SwiftUI owns the WindowGroup titlebar surface and repaints it over the
             // AppKit-side transparency during its own update passes — hide it through
             // SwiftUI itself while the F speed mode is on (the AppKit props are also

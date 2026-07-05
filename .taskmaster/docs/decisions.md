@@ -295,6 +295,22 @@ no-remote-fetch rule (ADR-018), the AccessKit correction (Windows egui accessibi
 nearly free), and the verification fix — the scripted-workload runner does not exist yet,
 so Phase 1 builds a minimal headless `CoreEvent` replay dumping `StageTimes` percentiles.
 
+**Update — 2026-07-04 (Phase 0 done; two owner course-corrections):** (1) The basic `i`
+info line is now **fully independent**, not a shared-slot occupant — its own permanent
+`pb-render` layer (bottom-right), so `i` and `⇧I`/`T`/`D` are orthogonal and the line coexists
+below whatever rich panel is open (the panel reserves a bottom strip and lifts above it).
+This supersedes the earlier "basic line shares the overlay slot" note above; it fixes a real
+`i`/`⇧I`/`i` dead-input bug and matches the idiom that the panels are their own things. A
+line-**alignment** preference (left/center/right) is a recorded later garnish (centered will
+need a toast-stacks-above rule). (2) The remaining phases are **re-sequenced macOS-first**:
+native SwiftUI presenters (Help pilot → folder tree → Inspector tabs) before the Windows egui
+seam, because the Mac path needs no render-seam work and the owner smokes on macOS. This
+surfaces the **per-shell "present panels natively" seam** now (host capability flag → core
+suppresses that panel's HUD rasterization + emits a state-changed marker → Swift pulls the
+flattened model over FFI); the ephemeral layer is never suppressed. Windows keeps today's HUD
+panels until the egui phase. Phase 0 + the info-line decouple are implemented and green (542
+tests); see [`hud-panels-plan.md`](hud-panels-plan.md).
+
 ---
 
 ## Owner decisions (resolved 2026-06-26)
