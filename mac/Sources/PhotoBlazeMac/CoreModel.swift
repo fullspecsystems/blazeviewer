@@ -413,7 +413,7 @@ final class CoreModel {
                 log("F-SMOKE toggling F off")
                 menuAction("fullscreen")
                 dump("after-off-sync")
-                after(1.5) { [self] in
+                after(1.5) {
                     dump("final")
                     NSApp.terminate(nil)
                 }
