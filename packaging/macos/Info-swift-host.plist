@@ -53,7 +53,9 @@
 	     current photo to an OpenAI-compatible model server the user configures — typically
 	     on this Mac (localhost) or their own LAN. macOS 15+ gates local-network connections
 	     behind this permission; declaring it lets the system show a meaningful prompt on
-	     first use. No network access happens unless the user runs Describe / Ask. -->
+	     first use. No network access happens unless the endpoint field in Settings ▸ AI is
+	     non-empty — opening that tab probes it once (to fill the Model picker), and
+	     Describe/Ask send the photo itself; nothing else in the app touches the network. -->
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>PhotoBlaze connects to the local AI model server you configure in Settings to describe images on your own machine or network.</string>
 

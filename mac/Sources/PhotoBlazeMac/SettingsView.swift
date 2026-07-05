@@ -27,6 +27,9 @@ struct SettingsView: View {
     @State private var connResult: ConnResult?
     /// Models the last probe listed (vision-capable first) — fills the Model picker.
     @State private var describeModels: [String] = []
+    /// Whether the reactivate-and-retry (see `autoListModelsIfNeeded`) has already fired
+    /// once this Settings-window session — a single follow-up attempt, not a poll.
+    @State private var retriedModelsOnActivate = false
 
     /// A finished Test-connection probe: `ok` colors the summary line.
     private struct ConnResult { let ok: Bool; let message: String }
@@ -303,6 +306,19 @@ struct SettingsView: View {
         .formStyle(.grouped)
         // A fresh endpoint invalidates the last probe result.
         .onChange(of: draft.describeEndpoint) { connResult = nil }
+        // Fires once, the first time this tab is actually looked at — not on every
+        // Settings open — so the local-network permission prompt has a legible cause
+        // ("I opened AI settings") instead of ambushing a General/Shortcuts visit.
+        .onAppear { autoListModelsIfNeeded() }
+        // macOS's Local Network permission has no live "just granted" callback for a
+        // plain socket connection (only Apple's Network.framework gets that). Coming
+        // back to the app is the closest proxy — the user likely just answered the
+        // system prompt, or went to System Settings to flip it on — so retry once.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            guard !retriedModelsOnActivate else { return }
+            retriedModelsOnActivate = true
+            autoListModelsIfNeeded()
+        }
     }
 
     /// Display-only marker mirroring the Rust `looks_like_vision_model` heuristic (the fetched
@@ -326,6 +342,16 @@ struct SettingsView: View {
         if row == comboClearRow { return "" }
         if row.hasSuffix(comboVisionBadge) { return String(row.dropLast(comboVisionBadge.count)) }
         return row
+    }
+
+    /// Fires the Test-connection probe once, right after the draft loads, so opening the AI
+    /// tab with a local endpoint already configured shows its model list immediately —
+    /// without this, a first-time user has to open the Model dropdown, find it empty, and
+    /// only then discover "Test & list models" separately fills it.
+    private func autoListModelsIfNeeded() {
+        guard describeModels.isEmpty, draft.describeBackend != 1, !draft.describeEndpoint.isEmpty
+        else { return }
+        runConnTest()
     }
 
     /// Run the Test-connection probe off the main thread (the FFI call blocks on a socket),
