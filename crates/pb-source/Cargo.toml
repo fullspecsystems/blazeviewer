@@ -16,4 +16,4 @@ zip = { version = "2", default-features = false, features = ["deflate", "aes-cry
 # (LZMA/LZMA2 via lzma-rust2, bzip2 via libbz2-rs-sys, PPMd via ppmd-rust), so no C
 # build risk. Default features kept (compress + aes256 + bzip2 + ppmd + util) for
 # codec coverage; all pure Rust.
-sevenz-rust2 = "0.21.1"
+sevenz-rust2 = "0.21.3"

@@ -127,7 +127,7 @@ windows = { version = "0.62", features = [
 # pb-source uses; their writers come with the base crates (pure Rust).
 [dev-dependencies]
 zip = { version = "2", default-features = false, features = ["deflate"] }
-sevenz-rust2 = "0.21"
+sevenz-rust2 = "0.21.3"
 
 # Embeds the .exe icon + version metadata on Windows (build.rs). Best-effort: if
 # the resource compiler is absent the build still succeeds (see build.rs).
