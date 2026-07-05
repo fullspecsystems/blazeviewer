@@ -129,6 +129,7 @@ struct ContentView: View {
             ) { kind in
                 switch kind {
                 case .password: PasswordSheetView(model: model)
+                case .ask: AskSheetView(model: model)
                 case .loading: LoadingSheetView(model: model)
                 case .scanning: ScanningSheetView(model: model)
                 }

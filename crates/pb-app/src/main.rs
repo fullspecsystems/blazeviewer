@@ -312,9 +312,14 @@ enum DialogOutcome {
     PasswordSubmitted(Option<String>),
     /// The password prompt's Cancel — abandon the pending archive.
     PasswordCancelled,
-    /// Settings saved, carrying the (optionally) edited settings + keymap.
+    /// The "Ask about image" question submitted (task #44). `None` shouldn't happen on Ask
+    /// but folds to an empty question the core ignores.
+    AskSubmitted(Option<String>),
+    /// Settings saved, carrying the (optionally) edited settings + keymap. `settings` is
+    /// boxed to keep this variant small (the struct grew with the AI-describe fields — else
+    /// `clippy::large_enum_variant`).
     SettingsSaved {
-        settings: Option<settings::Settings>,
+        settings: Option<Box<settings::Settings>>,
         keymap: Option<Keymap>,
     },
     /// Settings dialog's Cancel (its Esc goes through [`DialogOutcome::Dismissed`]).
@@ -404,6 +409,9 @@ impl App {
                 recognized_text: HashMap::new(),
                 text_scan: None,
                 text_gen: 0,
+                descriptions: HashMap::new(),
+                describe_scan: None,
+                describe_gen: 0,
                 pool,
                 results,
                 ring: ResidentRing::new(0),
@@ -1653,11 +1661,18 @@ impl App {
                     )
                 }
                 Some(dialog::DialogKind::Password) => DialogOutcome::PasswordCancelled,
+                Some(dialog::DialogKind::AskImage) if confirmed => DialogOutcome::AskSubmitted(
+                    self.dialog.as_mut().and_then(|d| d.take_ask_result()),
+                ),
+                Some(dialog::DialogKind::AskImage) => DialogOutcome::Closed, // Ask cancel = close
                 Some(dialog::DialogKind::Settings) if confirmed => {
                     let (settings, keymap) = self.dialog.as_mut().map_or((None, None), |d| {
                         (d.take_settings_result(), d.take_keymap_result())
                     });
-                    DialogOutcome::SettingsSaved { settings, keymap }
+                    DialogOutcome::SettingsSaved {
+                        settings: settings.map(Box::new),
+                        keymap,
+                    }
                 }
                 Some(dialog::DialogKind::Settings) => DialogOutcome::SettingsCancelled,
                 Some(dialog::DialogKind::Loading) => DialogOutcome::LoadingCancelled,
@@ -1681,8 +1696,14 @@ impl App {
             }
             DialogOutcome::PasswordSubmitted(pw) => contract::DialogResult::PasswordSubmitted(pw),
             DialogOutcome::PasswordCancelled => contract::DialogResult::PasswordCancelled,
+            DialogOutcome::AskSubmitted(q) => {
+                contract::DialogResult::AskSubmitted(q.unwrap_or_default())
+            }
             DialogOutcome::SettingsSaved { settings, keymap } => {
-                contract::DialogResult::SettingsSaved { settings, keymap }
+                contract::DialogResult::SettingsSaved {
+                    settings: settings.map(|b| *b),
+                    keymap,
+                }
             }
             DialogOutcome::SettingsCancelled => contract::DialogResult::SettingsCancelled,
             DialogOutcome::LoadingCancelled => contract::DialogResult::LoadingCancelled,
@@ -2014,6 +2035,10 @@ impl App {
         // other RAM caches, along with any scan still in flight.
         self.core.recognized_text.clear();
         self.core.text_scan = None;
+        // AI descriptions (task #44) are likewise pixel-derived — drop them + any
+        // in-flight describe (privacy #2: nothing viewing-derived survives teardown).
+        self.core.descriptions.clear();
+        self.core.describe_scan = None;
         self.core.live_motion_cache.clear();
         self.core.rotations.clear();
         self.core.failed.clear();
@@ -2634,6 +2659,7 @@ fn shell_dialog_kind(kind: contract::DialogKind) -> dialog::DialogKind {
         contract::DialogKind::Confirm => dialog::DialogKind::Confirm,
         contract::DialogKind::Message => dialog::DialogKind::Message,
         contract::DialogKind::Password => dialog::DialogKind::Password,
+        contract::DialogKind::AskImage => dialog::DialogKind::AskImage,
         contract::DialogKind::Loading => dialog::DialogKind::Loading,
         contract::DialogKind::Scanning => dialog::DialogKind::Scanning,
     }
@@ -2649,6 +2675,7 @@ fn core_dialog_kind(kind: dialog::DialogKind) -> contract::DialogKind {
         dialog::DialogKind::Confirm => contract::DialogKind::Confirm,
         dialog::DialogKind::Message => contract::DialogKind::Message,
         dialog::DialogKind::Password => contract::DialogKind::Password,
+        dialog::DialogKind::AskImage => contract::DialogKind::AskImage,
         dialog::DialogKind::Loading => contract::DialogKind::Loading,
         dialog::DialogKind::Scanning => contract::DialogKind::Scanning,
     }

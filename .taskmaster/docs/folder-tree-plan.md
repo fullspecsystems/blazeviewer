@@ -23,6 +23,15 @@ owner's ask to see it rendering before building selection._
 > `root|folder` signature per tick, skipped while flying. Overflow windows
 > around the current row with "… n more" markers. Preview: `--hud-gallery`.
 
+> **Update (2026-07-05): future interactive work moves to task #54.** The HUD tree
+> remains the render-only/current implementation and an input-model reference, but do
+> **not** deepen `pb-hud` into a richer tree widget. The durable path is
+> `.taskmaster/docs/hud-panels-plan.md`: extract a shared `FolderTreePanel` model in
+> `pb-app-core`, render it with egui in the Windows/winit viewport, and render it
+> natively on macOS with SwiftUI `List(..., children:)` / `OutlineGroup` first,
+> escalating to AppKit `NSOutlineView` only if the SwiftUI version does not feel
+> Finder-like enough.
+
 ## The feature in one paragraph
 
 Today the playlist is a single flat, alphabetically-sorted index —
@@ -43,7 +52,7 @@ a keypress that opens the overlay costs one `read_dir` at most, and normal
 photo nav/prefetch is completely unaffected whether the overlay is open or
 closed.
 
-## Why the HUD, not egui
+## Historical rationale: why the HUD for phase 1
 
 Confirmed (this session's investigation): `pb-hud`'s rasterizer already has
 generic multi-line layout (`render_table` for row lists, `render_centered` for

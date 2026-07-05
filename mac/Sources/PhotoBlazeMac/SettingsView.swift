@@ -22,6 +22,14 @@ struct SettingsView: View {
     @State private var currentImageFolder = ""
     /// The pending debounced apply (trailing-edge, 250 ms) — see `scheduleApply`.
     @State private var applyTask: Task<Void, Never>?
+    /// AI tab: the Test-connection probe state (runs off the main thread).
+    @State private var connTesting = false
+    @State private var connResult: ConnResult?
+    /// Models the last probe listed (vision-capable first) — fills the Model picker.
+    @State private var describeModels: [String] = []
+
+    /// A finished Test-connection probe: `ok` colors the summary line.
+    private struct ConnResult { let ok: Bool; let message: String }
 
     var body: some View {
         // Each pane carries its own fixed size fit to ITS content, so the Settings
@@ -36,6 +44,9 @@ struct SettingsView: View {
             appearancePane
                 .frame(width: 560, height: 315)
                 .tabItem { tabLabel("Appearance", symbol: "paintbrush") }
+            aiPane
+                .frame(width: 560, height: 680)
+                .tabItem { tabLabel("AI", symbol: "sparkles") }
             ShortcutsPane(model: model)
                 .frame(width: 560, height: 640)
                 .tabItem { tabLabel("Shortcuts", symbol: "keyboard") }
@@ -214,6 +225,117 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    /// The **AI** tab (task #44): the description backend, endpoint/model, prompt, response
+    /// length, and the auto-describe / speak toggles, plus a Test-connection probe. Mirrors
+    /// the egui shell's AI tab. Off + local by default (privacy #2 / ADR-018).
+    private var aiPane: some View {
+        Form {
+            Section("Image Descriptions") {
+                Picker("Backend", selection: $draft.describeBackend) {
+                    Text("Auto").tag(0)
+                    Text("Apple on-device").tag(1)
+                    Text("Local endpoint").tag(2)
+                }
+                .pickerStyle(.segmented)
+                if draft.describeBackend == 1 {
+                    // Apple Foundation Models isn't wired yet (needs macOS 27 + subtask 5).
+                    Text("Apple's on-device model needs macOS 27 + Apple Intelligence — not "
+                        + "available yet. Choose Auto or Local endpoint.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    TextField(
+                        "Endpoint URL", text: $draft.describeEndpoint,
+                        prompt: Text("http://localhost:1234/v1"))
+                    HStack(spacing: 6) {
+                        TextField(
+                            "Model", text: $draft.describeModel, prompt: Text("(loaded model)"))
+                        // The picker fills from the last probe; picking sets the field.
+                        Menu {
+                            Button("(loaded model)") { draft.describeModel = "" }
+                            ForEach(describeModels, id: \.self) { m in
+                                Button(Self.isLikelyVisionModel(m) ? "\(m)  ◆ vision" : m) {
+                                    draft.describeModel = m
+                                }
+                            }
+                            if describeModels.isEmpty {
+                                Text("Run Test to list models").disabled(true)
+                            }
+                        } label: {
+                            Image(systemName: "chevron.down")
+                        }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                    }
+                    HStack(spacing: 8) {
+                        Button("Test & list models") { runConnTest() }
+                            .disabled(connTesting || draft.describeEndpoint.isEmpty)
+                        if connTesting { ProgressView().controlSize(.small) }
+                        if let r = connResult {
+                            Text(r.message)
+                                .font(.caption)
+                                .foregroundStyle(r.ok ? Color.accentColor : Color.red)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer()
+                    }
+                }
+                Picker("Response length", selection: $draft.describeLength) {
+                    Text("Brief").tag(0)
+                    Text("Standard").tag(1)
+                    Text("Detailed").tag(2)
+                }
+                .pickerStyle(.segmented)
+                Toggle("Auto-describe while the panel is open", isOn: $draft.describeAuto)
+                Toggle("Speak descriptions", isOn: $draft.speakDescriptions)
+            }
+            Section("Prompt") {
+                TextEditor(text: $draft.describePrompt)
+                    .frame(minHeight: 84)
+                    .font(.body)
+                Text("Leave blank to use the built-in instruction. Placeholders: {filename} "
+                    + "{folder} {datetime} {camera} {location} {context}")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section {
+                Text("Images are sent to the model server you set above, so keep it local "
+                    + "(this Mac or your own network) and one you trust — with auto-describe "
+                    + "on, each photo is sent automatically. Online services may keep images "
+                    + "and use them to train. Apple's on-device model (coming later) will run "
+                    + "here with no server.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+        // A fresh endpoint invalidates the last probe result.
+        .onChange(of: draft.describeEndpoint) { connResult = nil }
+    }
+
+    /// Display-only marker mirroring the Rust `looks_like_vision_model` heuristic (the fetched
+    /// list is already vision-first sorted by the core; this just badges the usable ones).
+    private static func isLikelyVisionModel(_ id: String) -> Bool {
+        let s = id.lowercased()
+        return ["vl", "vision", "llava", "pixtral", "moondream", "vlm", "bakllava", "cogvlm",
+                "internvl"].contains { s.contains($0) }
+    }
+
+    /// Run the Test-connection probe off the main thread (the FFI call blocks on a socket),
+    /// then land the result on the main actor. Extracts primitives inside the detached task
+    /// so nothing non-`Sendable` crosses the boundary.
+    private func runConnTest() {
+        let url = draft.describeEndpoint
+        connTesting = true
+        connResult = nil
+        Task {
+            let result = await Task.detached(priority: .userInitiated) { () -> (Bool, String, String) in
+                let r = probe_describe_endpoint(RustString(url))
+                return (r.ok, r.message.toString(), r.models.toString())
+            }.value
+            connTesting = false
+            connResult = ConnResult(ok: result.0, message: result.1)
+            describeModels = result.2.split(separator: "\n").map(String.init)
+        }
     }
 
     /// The folder line under "Open files in": pinned → the chosen folder (or a
@@ -477,6 +599,15 @@ struct SettingsDraft: Equatable {
     var pickerFixed = false
     var pickerDir = ""
     var muteLiveAudio = false
+    // AI image descriptions (task #44). backend 0 Auto / 1 Apple / 2 Local; length is a
+    // preset index (0 Brief / 1 Standard / 2 Detailed) into `describeLengthPresets`.
+    var describeBackend = 0
+    var describeEndpoint = "http://localhost:1234/v1"
+    var describeModel = ""
+    var describePrompt = ""
+    var describeLength = 1
+    var describeAuto = false
+    var speakDescriptions = false
 
     init() {}
 
@@ -506,6 +637,25 @@ struct SettingsDraft: Equatable {
         pickerDir = form.picker_dir.toString()
         pickerFixed = form.picker_fixed
         muteLiveAudio = form.mute_live_audio
+        describeBackend = Int(form.describe_backend)
+        describeEndpoint = form.describe_endpoint.toString()
+        describeModel = form.describe_model.toString()
+        describePrompt = form.describe_prompt.toString()
+        describeLength = SettingsDraft.lengthPresetIndex(form.describe_max_tokens)
+        describeAuto = form.describe_auto
+        speakDescriptions = form.speak_descriptions
+    }
+
+    /// Response-length presets (max_tokens) shown as Brief / Standard / Detailed — mirrors
+    /// the egui shell's `LEN_PRESETS`.
+    static let describeLengthPresets: [UInt32] = [256, 512, 1024]
+
+    /// Nearest preset index for a saved `max_tokens` (a hand-set value snaps).
+    static func lengthPresetIndex(_ maxTokens: UInt32) -> Int {
+        describeLengthPresets
+            .enumerated()
+            .min { abs(Int($0.element) - Int(maxTokens)) < abs(Int($1.element) - Int(maxTokens)) }?
+            .offset ?? 1
     }
 
     func toForm() -> SettingsFormFfi {
@@ -532,7 +682,15 @@ struct SettingsDraft: Equatable {
             slideshow_interval_secs: slideshowInterval,
             picker_fixed: pickerFixed,
             picker_dir: RustString(pickerDir),
-            mute_live_audio: muteLiveAudio
+            mute_live_audio: muteLiveAudio,
+            describe_backend: UInt8(describeBackend),
+            describe_endpoint: RustString(describeEndpoint),
+            describe_model: RustString(describeModel),
+            describe_prompt: RustString(describePrompt),
+            describe_max_tokens: SettingsDraft.describeLengthPresets[
+                Swift.min(Swift.max(describeLength, 0), 2)],
+            describe_auto: describeAuto,
+            speak_descriptions: speakDescriptions
         )
     }
 }

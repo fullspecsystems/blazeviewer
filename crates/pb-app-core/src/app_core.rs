@@ -170,6 +170,16 @@ pub struct AppCore {
     /// Text-scan generation: bumped whenever playlist indices are reassigned so a
     /// late scan result can't cache under a recycled index.
     pub text_gen: u64,
+    /// Per-item AI description (task #44, `D` / Ask): the vision model's text, or a
+    /// user-facing error message. Cached so a revisit is instant; RAM-only (privacy #2),
+    /// dropped on rebuild and exit, never written anywhere.
+    pub descriptions: HashMap<usize, Result<String, String>>,
+    /// The in-flight off-thread describe job, or `None`. Polled by the tick
+    /// (`poll_describe_scan`); superseded by replacing it (the old receiver drops).
+    pub describe_scan: Option<crate::describe::DescribeScan>,
+    /// Describe generation: bumped with `text_gen` on index reassignment so a late
+    /// describe result can't cache under a recycled index.
+    pub describe_gen: u64,
 
     // --- Prefetch / decode / residency (NS0 5.3) ---
     /// Off-thread priority decode pool — decode + I/O never block the event loop.

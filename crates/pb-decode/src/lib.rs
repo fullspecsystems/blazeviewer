@@ -151,6 +151,36 @@ pub fn downscale_rgba8(
     common::downscale_to_fit(pixels, w, h, fit)
 }
 
+/// Encode a tightly-packed RGBA8 buffer to baseline JPEG at `quality` (1–100). Alpha is
+/// dropped — JPEG has none, and the caller (the AI-describe image prep, task #44) feeds
+/// opaque, already-tone-mapped sRGB8 pixels, so there's nothing to composite. Used only to
+/// shrink an image for an OpenAI-compatible endpoint's base64 data URI — never on the view
+/// path (privacy #2: an explicit describe command, not a passive byproduct of viewing).
+pub fn encode_jpeg_rgba8(
+    rgba: &[u8],
+    w: u32,
+    h: u32,
+    quality: u8,
+) -> Result<Vec<u8>, DecodeError> {
+    let expected = (w as usize) * (h as usize) * 4;
+    if w == 0 || h == 0 || rgba.len() != expected {
+        return Err(DecodeError::Corrupt(format!(
+            "encode_jpeg_rgba8: {w}x{h} needs {expected} bytes, got {}",
+            rgba.len()
+        )));
+    }
+    // RGBA → RGB (JPEG is 3-channel); the describe pixels are opaque.
+    let mut rgb = Vec::with_capacity((w as usize) * (h as usize) * 3);
+    for px in rgba.chunks_exact(4) {
+        rgb.extend_from_slice(&px[..3]);
+    }
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality.clamp(1, 100))
+        .encode(&rgb, w, h, image::ExtendedColorType::Rgb8)
+        .map_err(|e| DecodeError::Corrupt(format!("jpeg encode failed: {e}")))?;
+    Ok(out)
+}
+
 /// A unit of decode work.
 #[derive(Debug, Clone, Copy)]
 pub struct DecodeRequest<'a> {
@@ -449,6 +479,32 @@ pub fn is_supported_extension(ext: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encode_jpeg_rgba8_produces_a_valid_jpeg_and_round_trips() {
+        // A 4×4 solid mid-gray tile.
+        let (w, h) = (4u32, 4u32);
+        let rgba: Vec<u8> = std::iter::repeat_n([128u8, 130, 132, 255], (w * h) as usize)
+            .flatten()
+            .collect();
+        let jpeg = encode_jpeg_rgba8(&rgba, w, h, 85).expect("encode");
+        // JPEG SOI/EOI markers frame a real JFIF stream.
+        assert_eq!(&jpeg[..2], &[0xFF, 0xD8], "SOI");
+        assert_eq!(&jpeg[jpeg.len() - 2..], &[0xFF, 0xD9], "EOI");
+        // Decodes back to the same dimensions (colors shift under lossy compression).
+        let back = zune_jpeg::JpegDecoder::new(&jpeg);
+        let mut back = back;
+        let px = back.decode().expect("decode back");
+        let info = back.info().expect("info");
+        assert_eq!((info.width as u32, info.height as u32), (w, h));
+        assert!(!px.is_empty());
+    }
+
+    #[test]
+    fn encode_jpeg_rgba8_rejects_a_size_mismatch() {
+        assert!(encode_jpeg_rgba8(&[0; 3], 4, 4, 85).is_err());
+        assert!(encode_jpeg_rgba8(&[], 0, 0, 85).is_err());
+    }
 
     #[test]
     fn supported_extension_is_case_insensitive_and_covers_formats() {

@@ -72,6 +72,19 @@ pub enum StartupMode {
     Remember,
 }
 
+/// Which backend generates AI image descriptions (task #44). `Auto` (the default)
+/// prefers Apple's on-device Foundation Models when the host reports it available
+/// (macOS 27+, Apple Intelligence on), else falls back to a configured local endpoint;
+/// `AppleOnDevice` / `LocalEndpoint` pin one explicitly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DescribeBackend {
+    #[default]
+    Auto,
+    AppleOnDevice,
+    LocalEndpoint,
+}
+
 /// The last windowed-mode geometry: the window's outer (decorated) top-left and its
 /// inner (client) size, in physical pixels, in the virtual-desktop coordinate space.
 /// Persisted so toggling back to windowed — and the next launch — restore where the
@@ -147,6 +160,28 @@ pub struct Settings {
     /// Play a Live Photo's audio when its motion plays (#38). Muted via `M` / the Image
     /// menu; persisted so the choice sticks. Default on (audio plays).
     pub mute_live_audio: bool,
+    /// Which backend generates AI image descriptions (task #44). Default `Auto`.
+    pub describe_backend: DescribeBackend,
+    /// The OpenAI-compatible endpoint base URL for the `LocalEndpoint` backend
+    /// (LM Studio default). Only ever contacted on an explicit describe/ask command
+    /// (or opt-in dwell) — never on the view path.
+    pub describe_endpoint: String,
+    /// Model name to request from the endpoint; empty = the endpoint's loaded model.
+    pub describe_model: String,
+    /// Describe automatically after the user parks on an image (opt-in — a passive
+    /// send must be a deliberate election, since the endpoint could be remote). Default off.
+    pub describe_auto: bool,
+    /// Speak the description aloud via the platform TTS when it arrives (task #44,
+    /// subtask 7). Default off. Toggled from the Image menu.
+    pub speak_descriptions: bool,
+    /// A custom prompt template. `None` (empty in the UI) uses the built-in accessibility
+    /// instruction. Placeholders: `{context}` / `{filename}` / `{folder}` / `{datetime}` /
+    /// `{camera}` / `{location}` (see `prompt::build_prompt`).
+    pub describe_prompt: Option<String>,
+    /// Response length cap for the endpoint backend (max tokens). The UI offers presets
+    /// (Brief 256 / Standard 512 / Detailed 1024); a hand-set value is honored and snaps
+    /// to the nearest preset in the picker. Clamped to a sane range.
+    pub describe_max_tokens: u32,
 }
 
 impl Default for Settings {
@@ -174,6 +209,14 @@ impl Default for Settings {
             picker_dir: None,       // start in the current photo's folder
             last_folder: None,      // no folder to reopen until the first open
             mute_live_audio: false, // Live Photo audio plays by default (#38)
+            describe_backend: DescribeBackend::Auto,
+            // LM Studio's default; a bare install of Ollama uses :11434 instead.
+            describe_endpoint: "http://localhost:1234/v1".to_string(),
+            describe_model: String::new(), // the endpoint's loaded model
+            describe_auto: false,          // opt-in (privacy: passive send is deliberate)
+            speak_descriptions: false,
+            describe_prompt: None,     // built-in accessibility instruction
+            describe_max_tokens: 512,  // "Standard" length preset
         }
     }
 }
@@ -194,6 +237,9 @@ impl Settings {
         self.max_advance_rate = self.max_advance_rate.min(1000);
         self.hold_delay_ms = self.hold_delay_ms.min(2000);
         self.info_opacity = self.info_opacity.min(100);
+        // Keep the response cap sane (a stray 0 would ask for an empty reply; a huge value
+        // could stall the panel). Covers the presets 256/512/1024 with headroom.
+        self.describe_max_tokens = self.describe_max_tokens.clamp(16, 4096);
         if !self.slideshow_interval_secs.is_finite() {
             self.slideshow_interval_secs = d.slideshow_interval_secs;
         }

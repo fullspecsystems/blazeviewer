@@ -31,6 +31,45 @@ and power users — Qwen3-VL-8B/27B-class runs well on the owner's RTX 5090).
   wherever that URL points; keep it local / trust it (cloud services may retain
   images and train on them).
 
+## WWDC26 confirmation — Apple FM image input is real (2026-07-04)
+
+Watched **"What's new in the Foundation Models framework"** ([WWDC26 session
+241](https://developer.apple.com/videos/play/wwdc2026/241/)). This validates the
+Apple-FM backend's load-bearing assumption and sharpens two things:
+
+- **Image input is NEW in the 2026 release (macOS 27), not the macOS 26 floor.** The
+  2025 framework was text-only; the on-device model "is also gaining Vision
+  capabilities" in 27. So the Apple backend (subtask 5) is genuinely macOS-27-gated —
+  but the *feature* is not, because the local-endpoint backend ships it everywhere
+  today (see the backend policy). The dev Mac is on 26.5 / Xcode 26.5, so subtask 5
+  waits on the 27 SDK; subtasks 1–4, 6–8 don't.
+- **The API is exactly the plan's shape** — dead simple, no model download, no setup:
+  ```swift
+  let response = try await session.respond {
+      "Describe this image…"           // any prompt, incl. a user question (VQA)
+      Attachment(NSImage(contentsOf: fileURL)!)   // file-URL handoff = subtask 5's design
+  }
+  ```
+  Attachments accept `NSImage` / `CGImage` / `CIImage` / `CVPixelBuffer` / **file
+  URLs**, any size and aspect ratio (no crop/pad). That confirms `CoreEffect::
+  BeginDescribe { path, … }` can hand a file URL straight over — no pixel marshaling.
+- **VQA is explicit** — the model answers *arbitrary questions* about an image, not
+  just canned captions ("What animal is this?" + an image attachment). This is the
+  seed of the **"Ask about this image"** extension (tasks.json #44 subtask 9): once
+  describe works, a text-input affordance feeds a typed question through the *same*
+  image-prep + `Describer` seam + panel. On-device FM makes it zero-setup / zero-cost
+  / fully private; the local endpoint serves it on Windows. Post-v1.
+
+- ⚠ **The "2M downloads" caveat is about Private Cloud Compute, not the on-device
+  model — and we don't use PCC.** PCC is Apple's *cloud* escalation for heavier
+  requests; it's free to developers under 2M first-time downloads (higher for iCloud+
+  users). But **PCC is cloud**, so per ADR-018 (never cloud by our hand) the Apple
+  backend must request the **on-device** model *only* and never fall through to PCC.
+  The on-device path has no such cap, so the download threshold doesn't constrain
+  PhotoBlaze. (Third-party server models — Anthropic/Google — also plug into the FM
+  framework, billed per-token; not our path either.) **Action for subtask 5:** pin
+  the session to on-device inference; do not opt into `PrivateCloudComputeLanguageModel`.
+
 ## Privacy stance (extends ADR-018)
 
 - **Never cloud by our hand.** We ship no cloud backend. Apple FM is on-device; the
@@ -67,7 +106,7 @@ menu / context menu  ──┘        │       ▲                ├─ LocalE
                generation cancel,       │                └─ AppleFM (delegate to host:
                RAM cache per item)      │                    CoreEffect::BeginDescribe →
                                         │                    Swift FM session →
-              HUD panel + CoreEffect::Speak                  describe_finished/_failed FFI)
+              rich panel + CoreEffect::Speak                 describe_finished/_failed FFI)
 ```
 
 ### Backend policy (core-owned, owner-accepted)
@@ -178,17 +217,22 @@ placeholder substitution, template override.
   (checkbox, `MenuState`) + AI settings. When speak is on and a description
   arrives (manual or auto), speak it.
 
-## HUD (subtask 6, after subtask 1)
+## Description panel (subtask 6, after subtask 1)
 
-- **Subtask 1 — font-fallback cascade in pb-hud — is a prerequisite**: model output
-  is arbitrary prose (and fixes non-Latin EXIF values today). Per-glyph fallback
-  across 2–3 faces: UI font → a CJK face → a symbol face; per-platform face lists
-  like the existing `font_faces()` tables.
-- Description panel renders in the detailed-info position: wrapped paragraph text
-  (pb-hud needs a wrap-to-width paragraph block — the scan card wraps a line;
-  generalize), busy state ("Describing…" + the loading-pie affordance), error state
-  (one line). Rebuild-on-change only, single quad — HUD discipline unchanged.
-- Panel and info/EXIF panels are mutually exclusive (same slot); `I`/`⇧I` replace it.
+Task #44 can use the current `pb-hud` paragraph panel as an interim consumer, but
+the durable target is task #54's rich-panel contract:
+
+- `pb-app-core` owns a `DescriptionPanel` model: Markdown/plain source, busy/error/
+  not-configured states, copy payload, and Ask/answer state.
+- Windows/winit renders it in the future egui viewport overlay.
+- macOS renders it natively once the SwiftUI/AppKit presenter exists, which gives
+  selectable text, native copy, VoiceOver, and normal macOS text behavior.
+- Until that lands, keep the disposable pure `markdown_to_plain` stopgap so model
+  output reads cleanly in the HUD paragraph renderer.
+
+The font-fallback cascade is still useful for the interim HUD and for non-Latin EXIF/text
+values while rich panels migrate, but it is no longer the final answer for selectable
+description text.
 
 ## Settings UI (subtask 8)
 
@@ -216,8 +260,8 @@ placeholder substitution, template override.
    builder, TDD). Land independently; both improve the app today.
 2. **M2 — feature works end-to-end vs LM Studio:** subtask 3 (seam/policy/state,
    unit-tested with a fake describer) + subtask 4 (endpoint backend) + subtask 6
-   (HUD panel). Fully testable on the 5090 box (or the Mac + LM Studio) with zero
-   Swift written.
+   (current HUD paragraph stopgap plus the `DescriptionPanel` model). Fully testable on
+   the 5090 box (or the Mac + LM Studio) with zero Swift written.
 3. **M3 — productize:** subtask 8 (settings UI + blurb) + menu/keymap wiring.
 4. **M4 — Apple backend:** subtask 5 (needs Xcode 27 SDK on the dev Mac).
 5. **M5 — speech + auto polish:** subtask 7 (TTS) + auto-describe dwell tuning.
@@ -241,7 +285,8 @@ placeholder substitution, template override.
 Extract the text visible in the current image — arguably more useful day-to-day
 than descriptions, and it shares the describe feature's entire worker/effect
 skeleton. **Tier 1 only in v1** (owner-accepted): OCR on demand → clipboard and/or
-a HUD panel. No selection UI.
+a readable Text panel. The current HUD paragraph panel is an interim display; task #54
+makes the durable panel selectable/copyable without requiring image-space text selection.
 
 ## Owner decisions (2026-07-03)
 
@@ -249,7 +294,8 @@ a HUD panel. No selection UI.
   Details precedent): runs OCR, puts all recognized text on the clipboard, toasts
   a confirmation ("Copied 214 characters" / "No text found").
 - **`T`** (rebindable; currently unbound in defaults) shows the recognized text in
-  a HUD panel (the description-panel slot/machinery) to read before copying.
+  the Text panel (currently the shared HUD paragraph slot; later task #54's rich
+  `TextPanel`) to read before copying.
 - Same privacy posture and it's *stronger* here: both engines are OS-built-in and
   fully on-device — no endpoint, no model download, nothing configurable to leak.
   Results RAM-only (cache alongside descriptions), dropped on exit.
@@ -289,7 +335,9 @@ a HUD panel. No selection UI.
   data detectors, but must continuously track our fit/zoom/pan transform, ignores
   our rotation, and needs careful key/mouse-monitor gating — a bounded but real
   adventure. Revisit only if the clipboard-dump version leaves the owner wanting.
-- **Tier 3 — cross-platform selection in the wgpu/HUD layer (hard):** we own the
+- **Tier 3 — cross-platform selection directly on the image (hard):** selecting text
+  in the Text panel is covered by task #54. This tier is the harder Live-Text-style
+  interaction where the user drags over text on the photo itself. We own the
   image→screen transform (highlight quads would be trivial and even rotation-aware,
   which VisionKit can't do), but a selection engine that *feels* right is weeks of
   work. Flagship-feature territory only.

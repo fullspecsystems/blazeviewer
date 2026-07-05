@@ -9,7 +9,7 @@ import UniformTypeIdentifiers
 /// NSAlert sheets (native buttons + Return/Esc for free); About is the standard NSApp
 /// panel; Settings is its own window — none of those ride through here.
 enum SheetKind: String, Identifiable {
-    case password, loading, scanning
+    case password, ask, loading, scanning
     var id: String { rawValue }
 }
 
@@ -35,6 +35,8 @@ final class CoreModel {
     private(set) var passwordError = ""
     /// The password field's live contents (view-bound; scrubbed on submit/close).
     var passwordEntry = ""
+    /// The "Ask about image" question field's live contents (task #44; view-bound).
+    var askEntry = ""
     /// The password sheet's "Checking…" state while a submitted entry is verified.
     private(set) var dialogChecking = false
     /// Loading sheet: decompressed fraction (0 until the archive header sets a total).
@@ -438,6 +440,10 @@ final class CoreModel {
         add("copy_path", "Copy File Path")
         add("copy_image_details", "Copy Image Details")
         add("copy_text", "Copy Text from Image")
+        menu.addItem(.separator())
+        add("describe", "Describe Image")
+        add("ask_image", "Ask About Image…")
+        add("copy_description", "Copy AI Description")
         if canReveal {
             add("reveal", "Show in Finder")
         }
@@ -474,6 +480,9 @@ final class CoreModel {
             passwordEntry = "" // fresh prompt or wrong-attempt retry: field starts empty
             dialogChecking = false
             activeSheet = .password
+        case "ask_image":
+            askEntry = "" // each Ask starts blank
+            activeSheet = .ask
         case "loading":
             dialogMessage = core.dialog_message().toString()
             progressFraction = 0
@@ -604,6 +613,23 @@ final class CoreModel {
     func passwordCancel() {
         passwordEntry = ""
         core.password_cancelled()
+        drainEffects()
+    }
+
+    /// Ask / ⌘Return: submit the question; the core runs it through the describe backend and
+    /// shows the answer in the description panel (the CloseDialog effect dismisses the sheet).
+    func askSubmit() {
+        let q = askEntry.trimmingCharacters(in: .whitespacesAndNewlines)
+        askEntry = ""
+        guard !q.isEmpty else { return }
+        core.ask_submitted(q)
+        drainEffects()
+    }
+
+    /// Ask Cancel / Esc: close the prompt without asking.
+    func askCancel() {
+        askEntry = ""
+        core.dialog_dismissed()
         drainEffects()
     }
 

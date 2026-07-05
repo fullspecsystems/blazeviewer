@@ -526,6 +526,12 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         (Action::CopyImageText, vec![]),
         // Show the recognized text in a HUD panel — read before copying.
         one(Action::ShowImageText, "T"),
+        // Describe the photo with a vision model (task #44); Shift+D asks a specific
+        // question about it (the "detailed" companion the plan reserved ⇧D for).
+        one(Action::DescribeImage, "D"),
+        one(Action::AskImage, "Shift+D"),
+        // Copy the AI description — menu / context-menu only by default.
+        (Action::CopyDescription, vec![]),
         // Reveal in Finder / File Explorer — menu-only by default (no obvious cross-platform
         // key; ⇧⌘R is taken by other apps on macOS). A user can bind one in Settings.
         (Action::RevealInFileManager, vec![]),
@@ -725,7 +731,8 @@ mod tests {
         assert_eq!(km.action_for(&chord("Ctrl+R")), Some(Action::Recursive));
         assert_eq!(km.action_for(&chord("Alt+Enter")), Some(Action::Fullscreen));
         assert_eq!(km.action_for(&chord("Space")), Some(Action::Next));
-        assert_eq!(km.action_for(&chord("D")), None); // unbound
+        assert_eq!(km.action_for(&chord("D")), Some(Action::DescribeImage));
+        assert_eq!(km.action_for(&chord("Shift+D")), Some(Action::AskImage));
     }
 
     #[test]

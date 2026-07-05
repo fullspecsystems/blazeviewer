@@ -49,6 +49,14 @@
 	<key>NSHumanReadableCopyright</key>
 	<string>© JD Lien 2026</string>
 
+	<!-- Local Network access (task #44): the AI image-description feature can send the
+	     current photo to an OpenAI-compatible model server the user configures — typically
+	     on this Mac (localhost) or their own LAN. macOS 15+ gates local-network connections
+	     behind this permission; declaring it lets the system show a meaningful prompt on
+	     first use. No network access happens unless the user runs Describe / Ask. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>PhotoBlaze connects to the local AI model server you configure in Settings to describe images on your own machine or network.</string>
+
 	<!-- File associations — the same Viewer/Alternate stance as the egui bundle (a
 	     candidate "Open With" handler, never silently the default). Delivered via
 	     application:open: (AppDelegate) → the classify-and-open path. JPEG-2000 is

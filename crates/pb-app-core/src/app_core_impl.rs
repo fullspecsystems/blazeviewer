@@ -92,6 +92,9 @@ impl AppCore {
             recognized_text: std::collections::HashMap::new(),
             text_scan: None,
             text_gen: 0,
+            descriptions: std::collections::HashMap::new(),
+            describe_scan: None,
+            describe_gen: 0,
             pool,
             results,
             ring: ResidentRing::new(0),
@@ -220,6 +223,9 @@ impl AppCore {
             // An off-thread text scan (OCR + QR, task #45) keeps polling so
             // `poll_text_scan` picks up the result promptly.
             || self.text_scan.is_some()
+            // An off-thread describe (task #44) keeps polling so `poll_describe_scan`
+            // installs the result promptly.
+            || self.describe_scan.is_some()
             || self.displayed_item != self.target_item
             || self
                 .targets
@@ -264,6 +270,9 @@ impl AppCore {
             Action::CopyImageDetails => self.copy_image_details(),
             Action::CopyImageText => self.copy_image_text(),
             Action::ShowImageText => self.toggle_image_text(),
+            Action::DescribeImage => self.describe_image(),
+            Action::AskImage => self.ask_image(),
+            Action::CopyDescription => self.copy_description(),
             Action::RevealInFileManager => self.reveal_in_file_manager(),
             Action::OpenFile => self.open_picker(false),
             Action::OpenFolder => self.open_picker(true),
@@ -658,6 +667,12 @@ impl AppCore {
                 self.effects.push(E::CloseDialog);
                 self.password_archive = None;
             }
+            // Ask about image (task #44): close the dialog, then run the question through the
+            // describe backend for the current photo (a blank question is a no-op close).
+            R::AskSubmitted(question) => {
+                self.effects.push(E::CloseDialog);
+                self.ask_describe(question);
+            }
             // Settings: Save applies + persists the edited model; Cancel/Esc discard.
             R::SettingsSaved { settings, keymap } => {
                 self.effects.push(E::CloseDialog);
@@ -917,6 +932,10 @@ impl AppCore {
         // 1c. Pick up a finished off-thread text scan (OCR + QR, task #45): cache it,
         // refresh the `T` panel's busy state, run a deferred copy.
         self.poll_text_scan();
+
+        // 1d. Pick up a finished off-thread AI describe (task #44): cache it and refresh
+        // the description panel's busy state.
+        self.poll_describe_scan();
 
         // 2. Continuous zoom/pan while their keys are held (accelerating ramp).
         let transforming = self.apply_view_holds(now);
@@ -1203,9 +1222,11 @@ impl AppCore {
             info: match info {
                 InfoMode::Basic => contract::InfoOverlay::Basic,
                 InfoMode::Full => contract::InfoOverlay::FullExif,
-                // Help, the text panel, and Off all leave the two info checkmarks off
-                // (the menu tracks only the info pair — the faithful collapse).
-                InfoMode::Help | InfoMode::Text | InfoMode::Off => contract::InfoOverlay::Hidden,
+                // Help, the text/describe panels, and Off all leave the two info checkmarks
+                // off (the menu tracks only the info pair — the faithful collapse).
+                InfoMode::Help | InfoMode::Text | InfoMode::Describe | InfoMode::Off => {
+                    contract::InfoOverlay::Hidden
+                }
             },
             recursive,
             fullscreen,
@@ -1732,6 +1753,9 @@ impl AppCore {
         self.recognized_text.clear();
         self.text_scan = None;
         self.text_gen += 1;
+        self.descriptions.clear();
+        self.describe_scan = None;
+        self.describe_gen += 1;
         self.live_motion_cache.clear();
         self.failed.clear();
         self.preview_resident.clear();
@@ -1816,6 +1840,9 @@ impl AppCore {
         self.recognized_text.clear();
         self.text_scan = None;
         self.text_gen += 1;
+        self.descriptions.clear();
+        self.describe_scan = None;
+        self.describe_gen += 1;
         self.live_motion_cache.clear();
         self.failed.clear();
         self.preview_resident.clear();
@@ -2674,6 +2701,28 @@ impl AppCore {
                 };
                 hud.render_paragraph(&lines, px, pad, info_bg, max_w, max_h)
             }
+            InfoMode::Describe => {
+                if self.current.is_none() {
+                    return;
+                }
+                // Auto-describe (opt-in, `describe_auto`): only while the panel is already
+                // open (this arm), so it's never a passive background send — the user chose
+                // to be looking at descriptions. Off by default for privacy + token cost; on,
+                // settling on a new photo describes it without another `D`. (This is a settle
+                // path, not a per-frame one, so hold-to-fly doesn't machine-gun the backend.)
+                if self.settings.describe_auto {
+                    self.ensure_describe_scan(None);
+                }
+                let lines = self.describe_panel_lines();
+                let margin = self.overlay_margin();
+                let max_w = ((self.viewport.width as i32 - 2 * margin as i32).max(1) as u32)
+                    .min((440.0 * self.viewport.scale_factor) as u32);
+                let max_h = (self.viewport.height as i32 - 2 * margin as i32).max(1);
+                let Some(hud) = self.hud.as_ref() else {
+                    return;
+                };
+                hud.render_paragraph(&lines, px, pad, info_bg, max_w, max_h)
+            }
         };
         let Some((bitmap, w, h)) = panel else {
             return;
@@ -3047,7 +3096,12 @@ impl AppCore {
         if self.text_scan.as_ref().is_some_and(|s| s.item == item) {
             self.text_scan = None;
         }
-        if self.info == InfoMode::Text {
+        // Same for the AI description — the rotated pixels are a different image.
+        self.descriptions.remove(&item);
+        if self.describe_scan.as_ref().is_some_and(|s| s.item == item) {
+            self.describe_scan = None;
+        }
+        if self.info == InfoMode::Text || self.info == InfoMode::Describe {
             self.overlay_shown = false;
         }
         self.view.rotation = new;
@@ -3336,6 +3390,254 @@ impl AppCore {
                 }
             }
             None => lines.push(("Reading text…".to_string(), false)),
+        }
+        lines
+    }
+
+    // --- AI image description (task #44) ------------------------------------------
+
+    /// **Describe image** (`D`, task #44): toggle the AI-description HUD panel. Shares the
+    /// single overlay slot with the info/EXIF/text/help panels. Showing it kicks the
+    /// vision-model describe for the displayed photo (no-op when cached / already running);
+    /// pressing `D` again hides it.
+    pub fn describe_image(&mut self) {
+        if self.info == InfoMode::Describe {
+            self.info = InfoMode::Off;
+            self.hide_overlay();
+            return;
+        }
+        self.info = InfoMode::Describe;
+        // An explicit `D` retries a previously-failed describe (the endpoint may have come up,
+        // or Local Network permission was just granted) — a cached *error* is cleared so the
+        // scan re-runs; a cached success stays put (revisits are instant). This is why a
+        // failure is never a dead end: press D again.
+        if let Some(item) = self.displayed_item {
+            if matches!(self.descriptions.get(&item), Some(Err(_))) {
+                self.descriptions.remove(&item);
+            }
+        }
+        self.ensure_describe_scan(None); // default (accessibility) prompt
+        self.show_overlay();
+    }
+
+    /// **Ask about image** (`Shift+D`, task #44 subtask 9): open the text-input dialog for a
+    /// question about the current photo. The shell collects the (multi-line) text and returns
+    /// it as [`contract::DialogResult::AskSubmitted`], which drives [`Self::ask_describe`].
+    /// Nothing to ask about on the empty deck.
+    pub fn ask_image(&mut self) {
+        if self.displayed_item.is_none() {
+            self.show_toast("Nothing to ask about");
+            return;
+        }
+        self.effects.push(contract::CoreEffect::ShowDialog(
+            contract::DialogKind::AskImage,
+        ));
+    }
+
+    /// Run a describe for the displayed photo with a caller-supplied question (from the
+    /// Ask dialog). Bypasses the general-description cache so each question re-runs, and
+    /// shows the answer in the same panel.
+    pub fn ask_describe(&mut self, question: String) {
+        let q = question.trim().to_string();
+        if q.is_empty() {
+            return;
+        }
+        if let Some(item) = self.displayed_item {
+            // Force a fresh run for the question, replacing any cached general description.
+            self.descriptions.remove(&item);
+            if self.describe_scan.as_ref().is_some_and(|s| s.item == item) {
+                self.describe_scan = None;
+            }
+        }
+        self.info = InfoMode::Describe;
+        self.ensure_describe_scan(Some(q));
+        self.show_overlay();
+    }
+
+    /// Kick the off-thread describe for the displayed photo unless its result is cached or
+    /// that same describe is already running. `prompt_override` is the Ask question; `None`
+    /// builds the default accessibility prompt from salient EXIF (`prompt::build_prompt`).
+    /// A misconfigured backend caches a one-line error rather than a description.
+    fn ensure_describe_scan(&mut self, prompt_override: Option<String>) {
+        let Some(item) = self.displayed_item else {
+            return;
+        };
+        if self.descriptions.contains_key(&item)
+            || self.describe_scan.as_ref().is_some_and(|s| s.item == item)
+        {
+            return;
+        }
+        let Some(describer) = self.describer_from_settings() else {
+            self.descriptions.insert(
+                item,
+                Err("No description backend is set up (Settings ▸ AI Descriptions).".to_string()),
+            );
+            return;
+        };
+        let prompt = prompt_override.unwrap_or_else(|| self.default_describe_prompt(item));
+        let gen = self.describe_gen;
+        let source = Arc::clone(&self.source);
+        // Bake the in-RAM rotation override: the model should see the pixels upright.
+        let rot = self.rotations.get(&item).copied().unwrap_or_default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::describe::describe_job(
+                source.as_ref(),
+                item,
+                rot,
+                &prompt,
+                describer.as_ref(),
+            ));
+        });
+        self.describe_scan = Some(crate::describe::DescribeScan {
+            gen,
+            item,
+            copy_when_done: false,
+            rx,
+        });
+    }
+
+    /// Pick up a finished describe (called each tick). A result from before a playlist
+    /// rebuild is dropped (indices reassigned); a result for an item merely navigated away
+    /// from still caches (item-keyed, so a revisit is instant).
+    pub fn poll_describe_scan(&mut self) {
+        use std::sync::mpsc::TryRecvError;
+        let outcome = {
+            let Some(s) = self.describe_scan.as_ref() else {
+                return;
+            };
+            match s.rx.try_recv() {
+                Ok(result) => Some((s.gen, s.item, s.copy_when_done, result)),
+                Err(TryRecvError::Empty) => return, // still describing
+                Err(TryRecvError::Disconnected) => None, // worker died
+            }
+        };
+        self.describe_scan = None;
+        let Some((gen, item, copy, result)) = outcome else {
+            return;
+        };
+        if gen != self.describe_gen {
+            return; // deck rebuilt while describing — stale indices
+        }
+        // Store the description, or the backend error as a one-line user message.
+        self.descriptions
+            .insert(item, result.map_err(|e| e.user_message()));
+        if self.info == InfoMode::Describe && self.displayed_item == Some(item) {
+            self.show_overlay();
+        }
+        // A deferred Copy AI description: copy the text now, or toast the error.
+        if copy {
+            match self.descriptions.get(&item) {
+                Some(Ok(text)) => {
+                    self.effects.push(contract::CoreEffect::WriteClipboard(
+                        contract::ClipboardPayload::Text {
+                            text: text.clone(),
+                            toast: Some("Copied description".to_string()),
+                        },
+                    ));
+                }
+                Some(Err(msg)) => {
+                    let msg = msg.clone();
+                    self.show_toast(&msg);
+                }
+                None => {}
+            }
+        }
+    }
+
+    /// Build the describer from settings. Apple Foundation Models (Auto-when-available /
+    /// AppleOnDevice) is delegated to the Swift host via a `CoreEffect` (subtask 5), so on
+    /// this build the local endpoint is the only in-core backend and `Auto` resolves to it.
+    /// `None` when no endpoint is configured — the caller surfaces the "set up a backend"
+    /// message.
+    fn describer_from_settings(&self) -> Option<Box<dyn crate::describe::Describer>> {
+        use crate::settings::DescribeBackend;
+        match self.settings.describe_backend {
+            // Apple-only with no FM host wired yet → nothing in-core can serve it.
+            DescribeBackend::AppleOnDevice => None,
+            DescribeBackend::Auto | DescribeBackend::LocalEndpoint => {
+                let url = self.settings.describe_endpoint.trim();
+                if url.is_empty() {
+                    return None;
+                }
+                Some(Box::new(crate::describe::LocalEndpoint::new(
+                    url.to_string(),
+                    self.settings.describe_model.clone(),
+                    self.settings.describe_max_tokens,
+                )))
+            }
+        }
+    }
+
+    /// The default describe prompt for `item`: salient EXIF + filename/folder framed as
+    /// unverified (`prompt::build_prompt`), honoring a `describe_prompt` custom template.
+    fn default_describe_prompt(&mut self, item: usize) -> String {
+        self.ensure_exif_cached(item);
+        let name = self.source.name(item).to_string();
+        let exif: &[(String, String)] = self
+            .exif_cache
+            .get(&item)
+            .map(|(_, f)| f.as_slice())
+            .unwrap_or(&[]);
+        // No calendar clock in the pure core → skip future-date filtering (the epoch-default
+        // junk filter still applies); a stray future date is harmless (metadata is unverified).
+        let ctx = crate::prompt::build_context(&name, exif, None);
+        crate::prompt::build_prompt(&ctx, self.settings.describe_prompt.as_deref())
+    }
+
+    /// **Copy AI description** (Edit / context menu, task #44): put the current photo's
+    /// description on the clipboard. Uses the cached description when present; otherwise
+    /// kicks the describe off-thread and copies when it lands (`copy_when_done`, the
+    /// Copy-Text-from-Image shape). A cached *error* is cleared and retried (conditions may
+    /// have changed). An explicit user command; the result is RAM-only (privacy #2).
+    pub fn copy_description(&mut self) {
+        let Some(item) = self.displayed_item else {
+            self.show_toast("Nothing to copy");
+            return;
+        };
+        if let Some(Ok(text)) = self.descriptions.get(&item) {
+            self.effects.push(contract::CoreEffect::WriteClipboard(
+                contract::ClipboardPayload::Text {
+                    text: text.clone(),
+                    toast: Some("Copied description".to_string()),
+                },
+            ));
+            return;
+        }
+        // No usable description yet (never generated, or a stale error) — generate one and
+        // copy when it lands.
+        self.descriptions.remove(&item);
+        self.ensure_describe_scan(None);
+        match self.describe_scan.as_mut() {
+            Some(scan) if scan.item == item => {
+                scan.copy_when_done = true;
+                self.show_toast("Describing…");
+            }
+            // No backend → `ensure_describe_scan` cached the setup-hint error instead of
+            // spawning; surface it rather than leaving the user without feedback.
+            _ => {
+                if let Some(Err(msg)) = self.descriptions.get(&item) {
+                    let msg = msg.clone();
+                    self.show_toast(&msg);
+                }
+            }
+        }
+    }
+
+    /// The describe panel's display lines `(text, semibold)`: the cached description, the
+    /// backend error, the in-flight "Describing…" state, or a hint to press `D`.
+    fn describe_panel_lines(&self) -> Vec<(String, bool)> {
+        let mut lines = vec![("Description".to_string(), true)];
+        let Some(item) = self.displayed_item else {
+            return lines;
+        };
+        match self.descriptions.get(&item) {
+            Some(Ok(text)) => lines.push((text.clone(), false)),
+            Some(Err(msg)) => lines.push((msg.clone(), false)),
+            None if self.describe_scan.as_ref().is_some_and(|s| s.item == item) => {
+                lines.push(("Describing…".to_string(), false));
+            }
+            None => lines.push(("Press D to describe this photo.".to_string(), false)),
         }
         lines
     }
@@ -4908,6 +5210,174 @@ mod tests {
         core.rebuild_playlist(source, dir.clone(), Some(dir), true, 0);
         assert!(core.recognized_text.is_empty());
         assert!(core.text_gen > gen);
+    }
+
+    // --- AI describe state machine (task #44): drive `poll_describe_scan` with a
+    // hand-fed channel; the worker/HTTP backend stays out of these tests entirely. The
+    // endpoint is blanked so nothing can spawn a real network thread.
+
+    fn feed_describe(
+        core: &mut AppCore,
+        item: usize,
+        r: Result<String, crate::describe::DescribeError>,
+    ) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(r).unwrap();
+        core.describe_scan = Some(crate::describe::DescribeScan {
+            gen: core.describe_gen,
+            item,
+            copy_when_done: false,
+            rx,
+        });
+    }
+
+    #[test]
+    fn describe_image_toggles_the_panel_mode() {
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        // Pre-cache so `D` is a pure toggle (no worker/network kicked).
+        core.descriptions.insert(0, Ok("A cat on a sofa.".to_string()));
+        core.dispatch_action(Action::DescribeImage);
+        assert!(matches!(core.info, InfoMode::Describe), "D opens the panel");
+        core.dispatch_action(Action::DescribeImage);
+        assert!(matches!(core.info, InfoMode::Off), "D again closes it");
+        // The info panels replace it (one shared slot).
+        core.dispatch_action(Action::DescribeImage);
+        core.dispatch_action(Action::Info);
+        assert!(matches!(core.info, InfoMode::Basic));
+    }
+
+    #[test]
+    fn describe_result_caches_by_item() {
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        feed_describe(&mut core, 0, Ok("A red bicycle.".to_string()));
+        core.poll_describe_scan();
+        assert!(core.describe_scan.is_none(), "job consumed");
+        assert_eq!(core.descriptions[&0].as_deref(), Ok("A red bicycle."));
+    }
+
+    #[test]
+    fn describe_result_from_before_a_rebuild_is_dropped() {
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        feed_describe(&mut core, 0, Ok("stale".to_string()));
+        core.describe_gen += 1; // deck rebuilt while describing
+        core.poll_describe_scan();
+        assert!(
+            core.descriptions.is_empty(),
+            "stale-generation result must not cache under a recycled index"
+        );
+    }
+
+    #[test]
+    fn describe_backend_error_caches_a_one_line_user_message() {
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        feed_describe(&mut core, 0, Err(crate::describe::DescribeError::Unreachable));
+        core.poll_describe_scan();
+        let msg = core.descriptions[&0].as_ref().unwrap_err();
+        assert!(msg.contains("model server"), "actionable message: {msg}");
+    }
+
+    #[test]
+    fn describe_with_no_endpoint_caches_the_setup_hint_without_spawning() {
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        core.settings.describe_endpoint = String::new(); // no backend resolvable
+        core.dispatch_action(Action::DescribeImage);
+        assert!(core.describe_scan.is_none(), "no worker kicked");
+        let msg = core.descriptions[&0].as_ref().unwrap_err();
+        assert!(msg.contains("backend is set up"), "points at Settings: {msg}");
+    }
+
+    #[test]
+    fn pressing_d_retries_a_previously_failed_describe() {
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        core.settings.describe_endpoint = String::new(); // keep it thread-free
+        // A stale failure is cached (e.g. from before Local Network permission was granted).
+        core.descriptions
+            .insert(0, Err("network error from before".to_string()));
+        // Panel is closed → D opens it and must clear + retry the cached error.
+        core.dispatch_action(Action::DescribeImage);
+        assert!(matches!(core.info, InfoMode::Describe));
+        let msg = core.descriptions[&0].as_ref().unwrap_err();
+        assert!(
+            msg.contains("backend is set up"),
+            "the stale error was cleared and the describe re-ran (got: {msg})"
+        );
+    }
+
+    #[test]
+    fn copy_description_uses_the_cache_and_carries_a_toast() {
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        core.descriptions.insert(0, Ok("A calico cat.".to_string()));
+        core.dispatch_action(Action::CopyDescription);
+        let got = clipboard_text_effects(&core);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "A calico cat.");
+        assert_eq!(got[0].1.as_deref(), Some("Copied description"));
+    }
+
+    #[test]
+    fn copy_description_defers_the_copy_until_the_describe_lands() {
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        core.settings.describe_endpoint = "http://localhost:1234/v1".to_string();
+        // Nothing cached → the copy arms `copy_when_done` on the in-flight scan.
+        core.dispatch_action(Action::CopyDescription);
+        assert!(
+            core.describe_scan.as_ref().is_some_and(|s| s.copy_when_done),
+            "copy is deferred to the scan result"
+        );
+        // Simulate the result landing.
+        feed_describe(&mut core, 0, Ok("A late description.".to_string()));
+        core.describe_scan.as_mut().unwrap().copy_when_done = true;
+        core.poll_describe_scan();
+        let got = clipboard_text_effects(&core);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "A late description.");
+        assert_eq!(got[0].1.as_deref(), Some("Copied description"));
+    }
+
+    #[test]
+    fn ask_image_opens_the_dialog_and_submit_runs_the_question() {
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        core.dispatch_action(Action::AskImage);
+        assert!(
+            core.effects.iter().any(|e| matches!(
+                e,
+                contract::CoreEffect::ShowDialog(contract::DialogKind::AskImage)
+            )),
+            "Shift+D opens the ask dialog"
+        );
+        // The submitted question runs through describe (empty endpoint → setup hint, no thread).
+        core.effects.clear();
+        core.settings.describe_endpoint = String::new();
+        core.handle(CoreEvent::DialogResolved(
+            contract::DialogResult::AskSubmitted("What year is this?".to_string()),
+        ));
+        assert!(matches!(core.info, InfoMode::Describe));
+        assert!(core.descriptions[&0].is_err(), "the question re-ran the describe");
+    }
+
+    #[test]
+    fn ask_describe_bypasses_the_general_description_cache() {
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        core.settings.describe_endpoint = String::new(); // keep it thread-free
+        core.descriptions.insert(0, Ok("old general description".to_string()));
+        core.ask_describe("What year is this?".to_string());
+        // The cached general description was dropped and a fresh run attempted (which,
+        // with no endpoint, resolves to the setup hint rather than the stale text).
+        assert!(
+            core.descriptions[&0].is_err(),
+            "the question re-ran instead of returning the cached description"
+        );
+        assert!(matches!(core.info, InfoMode::Describe));
     }
 
     /// A fake archive source: named entries with no fs paths and a container —

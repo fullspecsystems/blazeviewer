@@ -14,7 +14,9 @@ kamadak-exif = "0.6"
 # Decode-to-fit: high-quality SIMD downscale to the display size, so large photos
 # aren't minified (grainy/aliased) on the GPU. (zune-jpeg has no scaled decode.)
 fast_image_resize = "5"
-image = { version = "0.25.10", default-features = false, features = ["png", "gif", "bmp", "ico", "tiff", "webp", "tga", "qoi", "pnm", "hdr", "exr", "ff", "dds"] }
+# `jpeg` here is for ENCODING only (`encode_jpeg_rgba8`, the AI-describe image prep, task
+# #44) — decoding still routes through zune-jpeg via the ImageDecoder seam.
+image = { version = "0.25.10", default-features = false, features = ["png", "gif", "bmp", "ico", "tiff", "webp", "tga", "qoi", "pnm", "hdr", "exr", "ff", "dds", "jpeg"] }
 jxl-oxide = "0.12.6"
 # ICC color management: parse the source profile to a 3x3 (source primaries ->
 # sRGB) + transfer curve, applied in-shader by pb-render. Pure Rust; already in

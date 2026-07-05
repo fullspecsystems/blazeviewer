@@ -203,6 +203,12 @@ final class MenuBar: NSObject {
             // On-device OCR (Apple Vision) + QR payloads (task #45). Unbound by default; the
             // core keymap owns any user binding (`T` shows the same text in the HUD panel).
             item("copy_text", "Copy Text from Image"),
+            // AI image description (task #44). Keys (D / ⇧D) live in the core keymap, so no
+            // ⌘-accelerator here; these are for discoverability.
+            .separator(),
+            item("describe", "Describe Image"),
+            item("ask_image", "Ask About Image…"),
+            item("copy_description", "Copy AI Description"),
         ]))
 
         main.addItem(submenu("View", [

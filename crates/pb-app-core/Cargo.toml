@@ -46,6 +46,15 @@ walkdir = "2"
 # QR-code payload decode for "text in image" (task #45) — pure Rust (no OS barcode API on
 # Windows; one shared backend on every platform, testable with generated QR bitmaps).
 rqrr = "0.10"
+# AI image-description local-endpoint backend (task #44, subtask 4): a blocking POST to an
+# OpenAI-compatible /v1/chat/completions on a worker thread (decode-pool discipline — never
+# tokio, never the event loop). `json` pulls serde_json integration; TLS ships by default so
+# a user-configured https endpoint works, though the LM Studio / Ollama default is localhost
+# http. The request/response building + parsing are pure fns (unit-tested without live HTTP).
+ureq = { version = "3", features = ["json"] }
+serde_json = "1"
+# base64 the JPEG-encoded, downscaled image into the endpoint's data URI (already in the lock).
+base64 = "0.22"
 
 [dev-dependencies]
 # Generate QR bitmaps for the image_text decode tests (never shipped). Default features

@@ -121,6 +121,9 @@ pub enum DialogKind {
     Message,
     /// Password entry (e.g. an encrypted archive).
     Password,
+    /// Ask-about-image text entry (task #44): a multi-line question about the current
+    /// photo, answered by the describe backend.
+    AskImage,
     /// Indeterminate "opening…" progress.
     Loading,
     /// Determinate folder-scan progress.
@@ -234,6 +237,9 @@ pub enum DialogResult {
     PasswordSubmitted(Option<String>),
     /// The password prompt's Cancel — abandon the pending archive.
     PasswordCancelled,
+    /// An ask-about-image question was submitted (task #44): run it through the describe
+    /// backend for the current photo. Empty/whitespace is ignored by the core.
+    AskSubmitted(String),
     /// Settings saved, carrying the (optionally) edited settings + keymap.
     SettingsSaved {
         settings: Option<crate::settings::Settings>,
@@ -577,9 +583,9 @@ mod tests {
     #[test]
     fn resolve_key_down_ignores_unbound_and_repeats() {
         let km = Keymap::defaults();
-        // Unbound bare key.
+        // Unbound bare key (J has no default binding; D is now Describe).
         assert_eq!(
-            resolve_key_down(&km, PbKey::KeyD, Modifiers::NONE, false),
+            resolve_key_down(&km, PbKey::KeyJ, Modifiers::NONE, false),
             KeyResolution::Ignore,
         );
         // OS auto-repeat is ignored even for a bound key (held actions self-repeat).

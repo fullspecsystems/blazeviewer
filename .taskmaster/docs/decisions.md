@@ -233,6 +233,68 @@ nothing derived from photo content. Unit tests are kept honest by
 `AppCore::persist_prefs` (false in `headless`, true only on live hosts), so opening a
 deck in a test never writes the real `settings.toml`.
 
+### ADR-023 — HUD split: keep the CPU compositor for ephemeral overlays; move rich panels to real UI presenters
+*Decided 2026-07-04 (owner); revised 2026-07-05 after plan review. Execution plan: [`hud-panels-plan.md`](hud-panels-plan.md).*
+`pb-hud` is a CPU software compositor — it rasterizes text/panels into one RGBA8 bitmap
+drawn as a single alpha-blended quad. That is exactly right for **ephemeral, non-interactive**
+overlays (toasts, the basic info line, play/rotate hints, scan chip, tooltips, empty-state
+CTA) but it has grown into a **mini UI toolkit** for panels it was never meant to host —
+EXIF/details (cut off, no real scroll), the folder tree (bad scroll, hand-rolled hit rects),
+keyboard help (long, unscrollable), recognized text, and AI descriptions/answers. These are
+content the user may want to read, scroll, select, or copy. **Decision:** split the HUD into
+two layers. (1) The CPU-quad HUD **stays** for the ephemeral layer. (2) Rich panels move to
+real retained UI presenters over a shared, shell-neutral panel model in `pb-app-core`.
+
+The load-bearing boundary is **semantic panel data + actions**, not a generic widget schema:
+`pb-app-core` owns row order, labels, values, copy payloads, Markdown/plain source, folder
+targets, loading/error states, and `PanelAction`s; presenters own layout, scroll, selection,
+focus, styling, and native accessibility. Windows/winit gets an in-viewport **egui** presenter
+because Windows has no native toolkit in this app and `pb-ui` already covers the egui design
+system. This work is not throwaway. macOS should instead consume the same models through FFI
+and render them with **SwiftUI/AppKit** by default. The earlier idea of a macOS egui
+`RawInput` bridge is demoted to a fallback for a concrete short-term parity need, not a
+speculative hedge.
+
+Rationale: a Markdown library alone would still not give the HUD scroll, selection, copy, or
+hit testing; building our own layout/scroll/selection toolkit reinvents egui/AppKit badly;
+and a cross-toolkit widget abstraction would become a third UI framework. Dual presenters are
+acceptable only because they are thin: egui on Windows, native SwiftUI/AppKit on macOS, both
+driven by the same `pb-app-core` models. The viewport was never a native control — it is a
+custom wgpu photo renderer — so this is a chrome-layer correction, not a rewrite of the photo
+path.
+
+**Prime directive safe:** with no rich panel visible, no egui/SwiftUI panel render runs, no
+hidden-panel repaint wakes the frame pump, and the resident-ring present path is untouched.
+Verification must include the scripted keypress workload with every rich panel hidden and
+report p50/p95/p99 before/after. **Pilot sequence:** extract panel models first while keeping
+`pb-hud` as the initial consumer; stand up the Windows egui overlay seam; migrate the Windows
+folder tree; build the macOS folder presenter natively (SwiftUI `List(..., children:)` /
+`OutlineGroup` first, AppKit `NSOutlineView` only if needed); then move EXIF/details, Help,
+Text/OCR, and Description/Ask one at a time, retiring each rich `pb-hud render_*` as it lands.
+Task #44 keeps an interim pure `markdown_to_plain` stopgap until Description reaches a rich
+presenter.
+
+**Update — 2026-07-05 (owner design review; plan doc revised in step):** panels get real
+chrome and a placement paradigm. **Esc stays unconditional quit** (owner: insta-quit is a
+priority feature) — panels close via an in-band ✕, their hotkey, the menu, or Tab-hide;
+corollary: no inline text inputs in panels (Ask stays a dialog/sheet where Esc means
+dismiss). **Details/Text/Describe become tabs of one floating Inspector panel** — the
+existing single-content-slot semantics made visible instead of silently replacing each
+other; the basic `i` info line stays on the ephemeral HUD. At most three floating panels
+(Inspector, folder tree, Help), each with a title bar, ✕, drag-to-move, and copy-all where
+useful; free overlap, last-interacted-on-top; no resize/snap/dock in v1 (docked mode is
+deferred and shares the photo-sub-rect concept with task #43's demoted split view).
+**`Tab` toggles global panel visibility** (Photoshop idiom): hidden ≠ closed, and any panel
+action while hidden reveals first. Panel **positions** persist (footprint, not trace —
+ADR-018); open state is session-only. Render seam committed: egui draws to an offscreen
+`Rgba8Unorm` texture composited by the existing overlay pipeline into the fp16 intermediate
+(color-pipeline-correct on HDR, texture retained across nav frames, shared device/queue).
+Also recorded in the plan: key releases always reach the held-key tracker (stuck-fly
+guard), the wheel-routing reversal vs the folder-tree plan, the Markdown
+no-remote-fetch rule (ADR-018), the AccessKit correction (Windows egui accessibility is
+nearly free), and the verification fix — the scripted-workload runner does not exist yet,
+so Phase 1 builds a minimal headless `CoreEvent` replay dumping `StageTimes` percentiles.
+
 ---
 
 ## Owner decisions (resolved 2026-06-26)

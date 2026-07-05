@@ -49,6 +49,10 @@ pub mod ids {
     pub const COPY_IMAGE_DETAILS: &str = "copy_image_details";
     /// Matches `Action::CopyImageText.id()` so the Mac host's raw-id path agrees.
     pub const COPY_IMAGE_TEXT: &str = "copy_text";
+    // AI image description (task #44) — ids match the corresponding `Action::*.id()`.
+    pub const DESCRIBE: &str = "describe";
+    pub const ASK_IMAGE: &str = "ask_image";
+    pub const COPY_DESCRIPTION: &str = "copy_description";
 
     pub const FIT: &str = "fit";
     pub const FILL: &str = "fill";
@@ -110,6 +114,9 @@ pub enum MenuAction {
     CopyPath,
     CopyImageDetails,
     CopyImageText,
+    DescribeImage,
+    AskImage,
+    CopyDescription,
     Fit,
     Fill,
     Original,
@@ -162,6 +169,9 @@ impl MenuAction {
             MenuAction::CopyPath => Action::CopyPath,
             MenuAction::CopyImageDetails => Action::CopyImageDetails,
             MenuAction::CopyImageText => Action::CopyImageText,
+            MenuAction::DescribeImage => Action::DescribeImage,
+            MenuAction::AskImage => Action::AskImage,
+            MenuAction::CopyDescription => Action::CopyDescription,
             MenuAction::Fit => Action::ScaleFit,
             MenuAction::Fill => Action::ScaleFill,
             MenuAction::Original => Action::ScaleOriginal,
@@ -215,6 +225,9 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         COPY_PATH => MenuAction::CopyPath,
         COPY_IMAGE_DETAILS => MenuAction::CopyImageDetails,
         COPY_IMAGE_TEXT => MenuAction::CopyImageText,
+        DESCRIBE => MenuAction::DescribeImage,
+        ASK_IMAGE => MenuAction::AskImage,
+        COPY_DESCRIPTION => MenuAction::CopyDescription,
         FIT => MenuAction::Fit,
         FILL => MenuAction::Fill,
         ORIGINAL => MenuAction::Original,
@@ -410,6 +423,14 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
         &item(
             ids::COPY_IMAGE_TEXT,
             &labeled(keymap, "Copy Text from Image", Action::CopyImageText),
+        ),
+        // AI image description (task #44).
+        &PredefinedMenuItem::separator(),
+        &item(ids::DESCRIBE, &labeled(keymap, "Describe Image", Action::DescribeImage)),
+        &item(ids::ASK_IMAGE, &labeled(keymap, "Ask About Image…", Action::AskImage)),
+        &item(
+            ids::COPY_DESCRIPTION,
+            &labeled(keymap, "Copy AI Description", Action::CopyDescription),
         ),
     ]);
 
@@ -828,6 +849,13 @@ pub fn build_context_menu(state: &crate::contract::ContextMenuState) -> Menu {
         &item(ids::COPY_PATH, "Copy File Path"),
         &item(ids::COPY_IMAGE_DETAILS, "Copy Image Details"),
         &item(ids::COPY_IMAGE_TEXT, "Copy Text from Image"),
+    ]);
+    // AI image description (task #44).
+    let _ = menu.append_items(&[
+        &sep(),
+        &item(ids::DESCRIBE, "Describe Image"),
+        &item(ids::ASK_IMAGE, "Ask About Image…"),
+        &item(ids::COPY_DESCRIPTION, "Copy AI Description"),
     ]);
     // Reveal only for a real on-disk file (archive entries have no path). The label follows
     // the platform idiom, matching the File-menu item.

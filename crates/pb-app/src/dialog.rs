@@ -52,6 +52,14 @@ pub enum DialogKind {
     /// [`take_confirm_result`]: DialogWindow::take_confirm_result
     /// [`take_submitted_password`]: DialogWindow::take_submitted_password
     Password,
+    /// The "Ask about image" prompt (task #44): a sparkles icon + a **multi-line** text
+    /// field for a question about the current photo, and an Ask/Cancel bar. Ask surfaces as
+    /// [`take_confirm_result`] `Some(true)` with the text via [`take_ask_result`]; the core
+    /// runs it through the describe backend. Cancel / Esc close it.
+    ///
+    /// [`take_confirm_result`]: DialogWindow::take_confirm_result
+    /// [`take_ask_result`]: DialogWindow::take_ask_result
+    AskImage,
     /// An archive-loading progress view: a message, a determinate progress bar driven
     /// by a [`pb_source::OpenProgress`] handle, the bytes/percent done, and a single
     /// **Cancel** button. Cancel (or Esc) requests cancellation of the in-flight eager
@@ -77,7 +85,36 @@ enum SettingsTab {
     #[default]
     General,
     Display,
+    Ai,
     Shortcuts,
+}
+
+/// Response-length presets for the AI describe backend (`describe_max_tokens`), shown as
+/// Brief / Standard / Detailed. A hand-set value snaps to the nearest on open.
+const LEN_PRESETS: [u32; 3] = [256, 512, 1024];
+
+/// Nearest response-length preset index for a saved `max_tokens`.
+fn len_preset_index(max_tokens: u32) -> usize {
+    LEN_PRESETS
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, v)| v.abs_diff(max_tokens))
+        .map(|(i, _)| i)
+        .unwrap_or(1)
+}
+
+/// The Test-connection state for the AI tab: the probe runs off-thread so the dialog stays
+/// responsive, and the result is shown inline.
+#[derive(Default)]
+enum ConnTest {
+    #[default]
+    Idle,
+    Testing(std::sync::mpsc::Receiver<Result<Vec<String>, String>>),
+    /// A finished probe: `ok` colors the line (green/amber/red), `msg` is the summary.
+    Done {
+        ok: bool,
+        msg: String,
+    },
 }
 
 /// The egui-facing edit state for the Settings form — the same fields as
@@ -104,6 +141,15 @@ struct SettingsDraft {
     picker_fixed: bool,
     /// The pinned folder (when `picker_fixed`); `None` until the user chooses one.
     picker_dir: Option<PathBuf>,
+    // --- AI descriptions (task #44) ---
+    describe_backend: usize, // 0 = Auto, 1 = Apple on-device, 2 = Local endpoint
+    describe_endpoint: String,
+    describe_model: String,
+    /// Custom prompt; empty = the built-in accessibility instruction.
+    describe_prompt: String,
+    describe_length: usize, // index into LEN_PRESETS (Brief / Standard / Detailed)
+    describe_auto: bool,
+    speak_descriptions: bool,
 }
 
 impl SettingsDraft {
@@ -156,6 +202,17 @@ impl SettingsDraft {
             slideshow_interval: s.slideshow_interval_secs,
             picker_fixed: s.picker_dir.is_some(),
             picker_dir: s.picker_dir.clone(),
+            describe_backend: match s.describe_backend {
+                settings::DescribeBackend::Auto => 0,
+                settings::DescribeBackend::AppleOnDevice => 1,
+                settings::DescribeBackend::LocalEndpoint => 2,
+            },
+            describe_endpoint: s.describe_endpoint.clone(),
+            describe_model: s.describe_model.clone(),
+            describe_prompt: s.describe_prompt.clone().unwrap_or_default(),
+            describe_length: len_preset_index(s.describe_max_tokens),
+            describe_auto: s.describe_auto,
+            speak_descriptions: s.speak_descriptions,
         }
     }
 
@@ -211,6 +268,19 @@ impl SettingsDraft {
         } else {
             None
         };
+        s.describe_backend = match self.describe_backend {
+            1 => settings::DescribeBackend::AppleOnDevice,
+            2 => settings::DescribeBackend::LocalEndpoint,
+            _ => settings::DescribeBackend::Auto,
+        };
+        s.describe_endpoint = self.describe_endpoint.trim().to_string();
+        s.describe_model = self.describe_model.trim().to_string();
+        // Empty custom prompt → None (use the built-in instruction).
+        let prompt = self.describe_prompt.trim();
+        s.describe_prompt = (!prompt.is_empty()).then(|| prompt.to_string());
+        s.describe_max_tokens = LEN_PRESETS[self.describe_length.min(LEN_PRESETS.len() - 1)];
+        s.describe_auto = self.describe_auto;
+        s.speak_descriptions = self.speak_descriptions;
         s.clamp();
         s
     }
@@ -297,8 +367,12 @@ pub struct DialogWindow {
     cap_logo: bool,
     /// A transient note for the keybinding editor (e.g. a "moved from …" message).
     keymap_note: Option<String>,
-    /// Which Settings tab (General / Display / Shortcuts) is showing.
+    /// Which Settings tab (General / Appearance / AI / Shortcuts) is showing.
     settings_tab: SettingsTab,
+    /// The AI tab's Test-connection state (probe runs off the UI thread).
+    conn_test: ConnTest,
+    /// Models the last probe listed (vision-capable first) — fills the Model picker.
+    describe_models: Vec<String>,
     /// The edited keymap committed with **Save** (only set when it actually changed),
     /// taken by [`take_keymap_result`].
     ///
@@ -328,6 +402,14 @@ pub struct DialogWindow {
     ///
     /// [`take_submitted_password`]: DialogWindow::take_submitted_password
     submitted_password: Option<String>,
+    /// The "Ask about image" question field's live contents (a [`DialogKind::AskImage`]
+    /// dialog); cleared on close so each Ask starts blank.
+    ask_input: String,
+    /// The question the user just submitted (Ask / ⌘Enter), taken by [`take_ask_result`]
+    /// during the answering frame. `None` until then.
+    ///
+    /// [`take_ask_result`]: DialogWindow::take_ask_result
+    submitted_ask: Option<String>,
     /// One-shot: request keyboard focus for the password field on the next render
     /// (set on open and after a wrong attempt). Done once per request rather than
     /// every frame — re-grabbing focus each frame suppresses the field's Enter-driven
@@ -378,6 +460,7 @@ impl DialogWindow {
             DialogKind::Confirm => (450.0, 172.0, false, "Confirm Delete"),
             DialogKind::Message => (470.0, 185.0, false, "PhotoBlaze"),
             DialogKind::Password => (500.0, 250.0, false, "Password Required"),
+            DialogKind::AskImage => (500.0, 320.0, false, "Ask About Image"),
             DialogKind::Loading => (500.0, 210.0, false, "Opening Archive"),
             // A touch taller than Loading for the extra current-folder line under the count.
             DialogKind::Scanning => (500.0, 220.0, false, "Scanning Folder"),
@@ -515,14 +598,19 @@ impl DialogWindow {
             cap_logo: false,
             keymap_note: None,
             settings_tab: SettingsTab::default(),
+            conn_test: ConnTest::default(),
+            describe_models: Vec::new(),
             submitted_keymap: None,
             confirm_msg: message.to_string(),
             confirm_result: None,
             password_input: String::new(),
+            ask_input: String::new(),
+            submitted_ask: None,
             password_error: None,
             checking: false,
             submitted_password: None,
-            focus_password: matches!(kind, DialogKind::Password),
+            // Focus the text field on open for the two text-entry dialogs.
+            focus_password: matches!(kind, DialogKind::Password | DialogKind::AskImage),
             next_repaint: None,
             progress: None,
             scan_progress: None,
@@ -560,6 +648,13 @@ impl DialogWindow {
     /// The caller pairs this with a `take_confirm_result()` of `Some(true)`.
     pub fn take_submitted_password(&mut self) -> Option<String> {
         self.submitted_password.take()
+    }
+
+    /// Take the question the user just submitted on a [`DialogKind::AskImage`] dialog
+    /// (Ask / ⌘Enter), set during the answering frame. `None` until then. The caller pairs
+    /// this with a `take_confirm_result()` of `Some(true)`.
+    pub fn take_ask_result(&mut self) -> Option<String> {
+        self.submitted_ask.take()
     }
 
     /// Take the edited settings the user committed with **Save** on a
@@ -738,6 +833,7 @@ impl DialogWindow {
         let scan_progress = self.scan_progress.clone();
         let draft = &mut self.draft;
         let password_input = &mut self.password_input;
+        let ask_input = &mut self.ask_input;
         let mut kb = KbEdit {
             keymap: &mut self.keymap_draft,
             capturing: &mut self.capturing,
@@ -745,6 +841,8 @@ impl DialogWindow {
             note: &mut self.keymap_note,
         };
         let settings_tab = &mut self.settings_tab;
+        let conn_test = &mut self.conn_test;
+        let describe_models = &mut self.describe_models;
         let mut confirm_click: Option<bool> = None;
         let full_output = ctx.run(raw_input, |ctx| match kind {
             DialogKind::About => {
@@ -756,7 +854,9 @@ impl DialogWindow {
                 confirm_click = settings_button_bar(ctx);
                 egui::CentralPanel::default()
                     .frame(egui::Frame::default().fill(ctx.style().visuals.panel_fill))
-                    .show(ctx, |ui| settings_ui(ui, draft, &mut kb, settings_tab));
+                    .show(ctx, |ui| {
+                        settings_ui(ui, draft, &mut kb, settings_tab, conn_test, describe_models)
+                    });
             }
             DialogKind::Confirm => {
                 confirm_click = confirm_dialog(ctx, &msg);
@@ -773,6 +873,9 @@ impl DialogWindow {
                     checking,
                     take_focus,
                 );
+            }
+            DialogKind::AskImage => {
+                confirm_click = ask_dialog(ctx, ask_input, take_focus);
             }
             DialogKind::Loading => {
                 confirm_click = loading_dialog(ctx, &msg, progress.as_ref());
@@ -797,6 +900,10 @@ impl DialogWindow {
             // On Unlock/Enter, snapshot the entered text for the app to validate.
             if confirm_click == Some(true) && kind == DialogKind::Password {
                 self.submitted_password = Some(self.password_input.clone());
+            }
+            // On Ask, snapshot the typed question for the core to run through describe.
+            if confirm_click == Some(true) && kind == DialogKind::AskImage {
+                self.submitted_ask = Some(self.ask_input.clone());
             }
             // On Save, fold the edited draft onto the open-time base for the app to apply.
             if confirm_click == Some(true) && kind == DialogKind::Settings {
@@ -1170,6 +1277,56 @@ fn password_dialog(
     result
 }
 
+/// The "Ask about image" dialog (task #44): a **multi-line** question field + an Ask/Cancel
+/// bar. Plain Enter inserts a newline (it's a real textarea); ⌘/Ctrl+Enter or the Ask button
+/// submits. The core runs the question through the describe backend for the current photo.
+fn ask_dialog(ctx: &egui::Context, input: &mut String, take_focus: bool) -> Option<bool> {
+    let mut result = None;
+    let p = pbui::Palette::new(ctx.style().visuals.dark_mode);
+    button_bar(ctx, "ask_bar", |ui| {
+        if pbui::secondary_button(ui, "Cancel").clicked() {
+            result = Some(false);
+        }
+        let ask = ui
+            .add_enabled_ui(!input.trim().is_empty(), |ui| {
+                pbui::primary_button(ui, &p, "Ask")
+            })
+            .inner;
+        if ask.clicked() {
+            result = Some(true);
+        }
+    });
+    egui::CentralPanel::default()
+        .frame(dialog_frame(ctx))
+        .show(ctx, |ui| {
+            ui.label(egui::RichText::new("Ask a question about this photo:").size(MSG_SIZE));
+            ui.add_space(12.0);
+            let resp = ui.add(
+                egui::TextEdit::multiline(input)
+                    .hint_text("e.g. What products are visible? What year does this look like?")
+                    .desired_rows(4)
+                    .desired_width(f32::INFINITY),
+            );
+            if take_focus {
+                resp.request_focus();
+            }
+            // ⌘/Ctrl+Enter submits; plain Enter adds a newline (multi-line field).
+            let submit_chord = ui.input(|i| {
+                i.key_pressed(egui::Key::Enter) && (i.modifiers.command || i.modifiers.ctrl)
+            });
+            if resp.has_focus() && submit_chord && !input.trim().is_empty() {
+                result = Some(true);
+            }
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("⌘Enter to ask")
+                    .size(12.0)
+                    .color(p.text_secondary),
+            );
+        });
+    result
+}
+
 /// The archive-loading view: a message (the file being opened), a determinate progress
 /// bar with a `NN%  X / Y` caption, and a single bottom-right **Cancel** button. Cancel
 /// requests cancellation of the in-flight eager 7z decode and answers `Some(false)` so
@@ -1371,7 +1528,14 @@ fn settings_button_bar(ctx: &egui::Context) -> Option<bool> {
 /// settings share one card under a semibold heading (far less scrolling than a card per
 /// setting). Built on the `pbui` design system. The controls edit `d`, a draft built
 /// from the live settings on open; Save folds it back via [`SettingsDraft::to_settings`].
-fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft, kb: &mut KbEdit, tab: &mut SettingsTab) {
+fn settings_ui(
+    ui: &mut egui::Ui,
+    d: &mut SettingsDraft,
+    kb: &mut KbEdit,
+    tab: &mut SettingsTab,
+    conn_test: &mut ConnTest,
+    models: &mut Vec<String>,
+) {
     let p = pbui::Palette::new(ui.visuals().dark_mode);
 
     // Key capture belongs to the Shortcuts tab only; leaving it cancels any armed slot.
@@ -1398,6 +1562,7 @@ fn settings_ui(ui: &mut egui::Ui, d: &mut SettingsDraft, kb: &mut KbEdit, tab: &
                     match *tab {
                         SettingsTab::General => general_tab(ui, &p, d),
                         SettingsTab::Display => display_tab(ui, &p, d),
+                        SettingsTab::Ai => ai_tab(ui, &p, d, conn_test, models),
                         SettingsTab::Shortcuts => keybindings_ui(ui, &p, kb),
                     }
                 });
@@ -1417,9 +1582,276 @@ fn settings_tab_bar(ui: &mut egui::Ui, current: &mut SettingsTab) {
         &[
             (SettingsTab::General, "General"),
             (SettingsTab::Display, "Appearance"),
+            (SettingsTab::Ai, "AI"),
             (SettingsTab::Shortcuts, "Shortcuts"),
         ],
     );
+}
+
+/// The **AI** tab (task #44): the image-description backend, model, prompt, and the
+/// auto-describe / speak toggles, plus a Test-connection probe. Off by default and
+/// entirely local unless the user points it at a server (privacy #2 / ADR-018).
+fn ai_tab(
+    ui: &mut egui::Ui,
+    p: &pbui::Palette,
+    d: &mut SettingsDraft,
+    conn_test: &mut ConnTest,
+    models: &mut Vec<String>,
+) {
+    pbui::group_card(ui, p, Some("Image Descriptions"), |ui| {
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Backend",
+            Some("Auto uses Apple's on-device model when available, else your endpoint."),
+            |ui| {
+                egui::ComboBox::from_id_salt("describe_backend")
+                    .width(160.0)
+                    .selected_text(
+                        ["Auto", "Apple on-device", "Local endpoint"][d.describe_backend.min(2)],
+                    )
+                    .show_ui(ui, |ui| {
+                        pbui::apply_to_ui(ui, p.dark);
+                        ui.selectable_value(&mut d.describe_backend, 0, "Auto");
+                        // Apple FM is not wired yet (needs macOS 27 + subtask 5) — offered
+                        // but disabled so the choice is honest and forward-compatible.
+                        ui.add_enabled_ui(false, |ui| {
+                            ui.selectable_value(&mut d.describe_backend, 1, "Apple on-device");
+                        })
+                        .response
+                        .on_hover_text("Requires macOS 27 + Apple Intelligence");
+                        ui.selectable_value(&mut d.describe_backend, 2, "Local endpoint");
+                    });
+            },
+        );
+        // Endpoint / model / Test are meaningful only for the endpoint backends.
+        let endpoint_used = d.describe_backend != 1;
+        ui.add_enabled_ui(endpoint_used, |ui| {
+            pbui::card_row(
+                ui,
+                p,
+                None,
+                "Endpoint URL",
+                Some("OpenAI-compatible server: LM Studio, Ollama, or llama.cpp."),
+                |ui| {
+                    ui.add(
+                        pbui::text_field(&mut d.describe_endpoint, "http://localhost:1234/v1")
+                            .desired_width(230.0),
+                    );
+                },
+            );
+            pbui::card_row(
+                ui,
+                p,
+                None,
+                "Model",
+                Some("Blank = the server's loaded model. Pick from the list after Test."),
+                |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            pbui::text_field(&mut d.describe_model, "(loaded model)")
+                                .desired_width(150.0),
+                        );
+                        // The picker fills from the last probe; picking sets the field.
+                        let current = if d.describe_model.is_empty() {
+                            "(loaded model)".to_string()
+                        } else {
+                            d.describe_model.clone()
+                        };
+                        egui::ComboBox::from_id_salt("describe_model_pick")
+                            .selected_text(current)
+                            .width(72.0)
+                            .show_ui(ui, |ui| {
+                                pbui::apply_to_ui(ui, p.dark);
+                                ui.selectable_value(
+                                    &mut d.describe_model,
+                                    String::new(),
+                                    "(loaded model)",
+                                );
+                                for m in models.iter() {
+                                    // Mark the vision-capable ones — the usable choices.
+                                    let label = if pb_app_core::describe::looks_like_vision_model(m)
+                                    {
+                                        format!("{m}  ◆ vision")
+                                    } else {
+                                        m.clone()
+                                    };
+                                    ui.selectable_value(&mut d.describe_model, m.clone(), label);
+                                }
+                                if models.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new("Run Test to list models")
+                                            .color(p.text_secondary)
+                                            .size(12.0),
+                                    );
+                                }
+                            });
+                    });
+                },
+            );
+            pbui::card_row(ui, p, None, "Connection", None, |ui| {
+                if pbui::secondary_button(ui, "Test & list models").clicked() {
+                    start_conn_test(conn_test, &d.describe_endpoint);
+                }
+            });
+            render_conn_test(ui, p, conn_test, models);
+        });
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Response length",
+            Some("How much the model writes about each image."),
+            |ui| {
+                egui::ComboBox::from_id_salt("describe_length")
+                    .width(140.0)
+                    .selected_text(["Brief", "Standard", "Detailed"][d.describe_length.min(2)])
+                    .show_ui(ui, |ui| {
+                        pbui::apply_to_ui(ui, p.dark);
+                        ui.selectable_value(&mut d.describe_length, 0, "Brief");
+                        ui.selectable_value(&mut d.describe_length, 1, "Standard");
+                        ui.selectable_value(&mut d.describe_length, 2, "Detailed");
+                    });
+            },
+        );
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Auto-describe while open",
+            Some("With the description panel up, describe each photo you move to — no extra D."),
+            |ui| {
+                pbui::toggle(ui, p, &mut d.describe_auto);
+            },
+        );
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Speak descriptions",
+            Some("Read the description aloud with the system voice."),
+            |ui| {
+                pbui::toggle(ui, p, &mut d.speak_descriptions);
+            },
+        );
+    });
+    ui.add_space(pbui::GAP);
+
+    // Custom prompt — full-width multiline (the built-in instruction is the placeholder).
+    pbui::group_card(ui, p, Some("Prompt"), |ui| {
+        ui.add(
+            egui::TextEdit::multiline(&mut d.describe_prompt)
+                .hint_text(pb_app_core::prompt::DEFAULT_INSTRUCTION)
+                .desired_rows(4)
+                .desired_width(f32::INFINITY),
+        );
+        ui.add_space(pbui::SPACE_2);
+        ui.label(
+            egui::RichText::new(
+                "Leave blank to use the built-in instruction. Placeholders: {filename} {folder} \
+                 {datetime} {camera} {location} {context}",
+            )
+            .color(p.text_secondary)
+            .size(12.5),
+        );
+    });
+    ui.add_space(pbui::GAP);
+
+    // Privacy note (ADR-018): the honest caveat — images go to the configured endpoint.
+    ui.label(
+        egui::RichText::new(
+            "Images are sent to the model server you set above, so keep it local (this Mac or \
+             your own network) and one you trust — with auto-describe on, each photo is sent \
+             automatically. Online services may keep images and use them to train. Apple's \
+             on-device model (coming later) will run here with no server.",
+        )
+        .color(p.text_secondary)
+        .size(12.5),
+    );
+}
+
+/// Kick the Test-connection probe on a worker thread (keeps the dialog responsive) and
+/// park the receiver in `conn_test`; [`render_conn_test`] polls it.
+fn start_conn_test(conn_test: &mut ConnTest, endpoint: &str) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let url = endpoint.trim().to_string();
+    std::thread::spawn(move || {
+        let _ = tx.send(pb_app_core::describe::probe_endpoint(&url).map_err(|e| e.user_message()));
+    });
+    *conn_test = ConnTest::Testing(rx);
+}
+
+/// Poll + render the Test-connection status line: reachability, model count, and a warning
+/// when no served model looks vision-capable (the describe path needs a VLM). On success it
+/// also fills `models` (vision-first) for the Model picker.
+fn render_conn_test(
+    ui: &mut egui::Ui,
+    p: &pbui::Palette,
+    conn_test: &mut ConnTest,
+    models: &mut Vec<String>,
+) {
+    // Poll a running probe without holding the borrow across the reassignment.
+    let landed = if let ConnTest::Testing(rx) = conn_test {
+        match rx.try_recv() {
+            Ok(result) => Some(Some(result)),
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ui.ctx().request_repaint(); // keep the frame loop polling
+                None
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(None),
+        }
+    } else {
+        None
+    };
+    if let Some(outcome) = landed {
+        // Capture the fetched models (vision-first) for the picker before summarizing.
+        if let Some(Ok(list)) = &outcome {
+            *models = pb_app_core::describe::sort_models_vision_first(list.clone());
+        }
+        *conn_test = match outcome {
+            Some(Ok(models)) if models.is_empty() => ConnTest::Done {
+                ok: false,
+                msg: "Reachable, but no models are loaded.".to_string(),
+            },
+            Some(Ok(models)) => {
+                let n = models.len();
+                let plural = if n == 1 { "" } else { "s" };
+                if models
+                    .iter()
+                    .any(|m| pb_app_core::describe::looks_like_vision_model(m))
+                {
+                    ConnTest::Done {
+                        ok: true,
+                        msg: format!("Reachable · {n} model{plural} · vision model present"),
+                    }
+                } else {
+                    ConnTest::Done {
+                        ok: false,
+                        msg: format!(
+                            "Reachable · {n} model{plural}, but none look vision-capable — \
+                             describe needs a VLM (e.g. qwen2.5-vl)."
+                        ),
+                    }
+                }
+            }
+            Some(Err(msg)) => ConnTest::Done { ok: false, msg },
+            None => ConnTest::Done {
+                ok: false,
+                msg: "Test failed.".to_string(),
+            },
+        };
+    }
+    match conn_test {
+        ConnTest::Idle => {}
+        ConnTest::Testing(_) => {
+            ui.label(egui::RichText::new("Testing…").color(p.text_secondary).size(12.5));
+        }
+        ConnTest::Done { ok, msg } => {
+            let color = if *ok { p.accent } else { p.danger };
+            ui.label(egui::RichText::new(msg.as_str()).color(color).size(12.5));
+        }
+    }
 }
 
 /// The **General** tab: hold-to-fly tuning, startup defaults, and system actions.

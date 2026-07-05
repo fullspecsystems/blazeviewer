@@ -494,6 +494,15 @@ impl AppCoreHandle {
         ));
     }
 
+    /// The "Ask about image" dialog submitted a question (task #44): the core runs it through
+    /// the describe backend for the current photo and shows the answer in the description panel.
+    fn ask_submitted(&mut self, question: String) {
+        self.core.now = Instant::now();
+        self.core.handle(CoreEvent::DialogResolved(
+            contract::DialogResult::AskSubmitted(question),
+        ));
+    }
+
     /// The password prompt's Cancel — abandon the pending archive.
     fn password_cancelled(&mut self) {
         self.core.now = Instant::now();
@@ -557,7 +566,9 @@ impl AppCoreHandle {
     /// The current settings as the flat form the Settings window binds to (NS2 item 5).
     /// `refresh_hz` rides along as the max-speed slider's ceiling (out-only).
     fn settings_form(&self) -> ffi::SettingsFormFfi {
-        use pb_app_core::settings::{AppearanceMode, ScaleModePref, ScrollAction, StartupMode};
+        use pb_app_core::settings::{
+            AppearanceMode, DescribeBackend, ScaleModePref, ScrollAction, StartupMode,
+        };
         let s = &self.core.settings;
         let hz = self.core.refresh_hz().max(1);
         // An uncapped (0) or ≥refresh saved rate shows pinned at the ceiling (egui parity).
@@ -607,6 +618,17 @@ impl AppCoreHandle {
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             mute_live_audio: s.mute_live_audio,
+            describe_backend: match s.describe_backend {
+                DescribeBackend::Auto => 0,
+                DescribeBackend::AppleOnDevice => 1,
+                DescribeBackend::LocalEndpoint => 2,
+            },
+            describe_endpoint: s.describe_endpoint.clone(),
+            describe_model: s.describe_model.clone(),
+            describe_prompt: s.describe_prompt.clone().unwrap_or_default(),
+            describe_max_tokens: s.describe_max_tokens,
+            describe_auto: s.describe_auto,
+            speak_descriptions: s.speak_descriptions,
         }
     }
 
@@ -1514,7 +1536,9 @@ fn fold_settings_form(
     form: &ffi::SettingsFormFfi,
     refresh_hz: u32,
 ) -> pb_app_core::settings::Settings {
-    use pb_app_core::settings::{AppearanceMode, ScaleModePref, ScrollAction, StartupMode};
+    use pb_app_core::settings::{
+        AppearanceMode, DescribeBackend, ScaleModePref, ScrollAction, StartupMode,
+    };
     let mut s = base.clone();
     s.start_speed = form.start_speed;
     s.ramp_secs = form.ramp_secs;
@@ -1560,8 +1584,61 @@ fn fold_settings_form(
         None
     };
     s.mute_live_audio = form.mute_live_audio;
+    s.describe_backend = match form.describe_backend {
+        1 => DescribeBackend::AppleOnDevice,
+        2 => DescribeBackend::LocalEndpoint,
+        _ => DescribeBackend::Auto,
+    };
+    s.describe_endpoint = form.describe_endpoint.trim().to_string();
+    s.describe_model = form.describe_model.trim().to_string();
+    let prompt = form.describe_prompt.trim();
+    s.describe_prompt = (!prompt.is_empty()).then(|| prompt.to_string());
+    s.describe_max_tokens = form.describe_max_tokens;
+    s.describe_auto = form.describe_auto;
+    s.speak_descriptions = form.speak_descriptions;
     s.clamp();
     s
+}
+
+/// The AI settings tab's **Test connection** probe (task #44): GET the endpoint's model
+/// list, summarize reachability + model count, and warn when no served model looks
+/// vision-capable (describe needs a VLM). Stateless + blocking — Swift calls it off the
+/// main thread. Mirrors the egui shell's `render_conn_test` wording.
+fn probe_describe_endpoint(url: String) -> ffi::ProbeResultFfi {
+    match pb_app_core::describe::probe_endpoint(&url) {
+        Ok(models) if models.is_empty() => ffi::ProbeResultFfi {
+            ok: false,
+            message: "Reachable, but no models are loaded.".to_string(),
+            models: String::new(),
+        },
+        Ok(models) => {
+            let n = models.len();
+            let plural = if n == 1 { "" } else { "s" };
+            let has_vision = models
+                .iter()
+                .any(|m| pb_app_core::describe::looks_like_vision_model(m));
+            // Vision-first, newline-joined for the host to split into the Model picker.
+            let list = pb_app_core::describe::sort_models_vision_first(models).join("\n");
+            let message = if has_vision {
+                format!("Reachable · {n} model{plural} · vision model present")
+            } else {
+                format!(
+                    "Reachable · {n} model{plural}, but none look vision-capable — \
+                     describe needs a VLM (e.g. qwen2.5-vl)."
+                )
+            };
+            ffi::ProbeResultFfi {
+                ok: has_vision,
+                message,
+                models: list,
+            }
+        }
+        Err(e) => ffi::ProbeResultFfi {
+            ok: false,
+            message: e.user_message(),
+            models: String::new(),
+        },
+    }
 }
 
 /// Is this path a viewable archive (`.zip` / `.7z`)? Mirrors the winit shell's helper.
@@ -1645,6 +1722,7 @@ fn map_effect(e: contract::CoreEffect) -> ffi::CoreEffectFfi {
                     D::Confirm => "confirm",
                     D::Message => "message",
                     D::Password => "password",
+                    D::AskImage => "ask_image",
                     D::Loading => "loading",
                     D::Scanning => "scanning",
                 }
@@ -1781,6 +1859,26 @@ mod ffi {
         picker_fixed: bool,
         picker_dir: String,
         mute_live_audio: bool,
+        // AI image description (task #44). `describe_backend`: 0 Auto / 1 Apple / 2 Local.
+        // `describe_prompt` empty = the built-in instruction.
+        describe_backend: u8,
+        describe_endpoint: String,
+        describe_model: String,
+        describe_prompt: String,
+        describe_max_tokens: u32,
+        describe_auto: bool,
+        speak_descriptions: bool,
+    }
+
+    // The Test-connection result for the AI settings tab: reachability + a one-line
+    // summary (model count, or the reason it failed). `ok` colors the line. `models` is the
+    // served model ids (vision-capable first), newline-joined — the host splits it to fill
+    // the Model picker (a plain String avoids a Vec across swift-bridge).
+    #[swift_bridge(swift_repr = "struct")]
+    struct ProbeResultFfi {
+        ok: bool,
+        message: String,
+        models: String,
     }
 
     // The native menu's check/enabled state — the mirror of contract::MenuState (scale:
@@ -1862,12 +1960,18 @@ mod ffi {
         fn dialog_confirm_answered(&mut self, confirmed: bool);
         fn password_submitted(&mut self, password: String);
         fn password_cancelled(&mut self);
+        fn ask_submitted(&mut self, question: String);
         fn loading_cancelled(&mut self);
         fn scanning_cancelled(&mut self);
         fn settings_closed(&mut self);
         fn dialog_progress(&self) -> DialogProgressFfi;
         fn settings_form(&self) -> SettingsFormFfi;
         fn settings_edited(&mut self, form: SettingsFormFfi);
+
+        // The AI tab's Test-connection probe (task #44). A free function — stateless (just
+        // an HTTP GET /models), so it's safe to call from a Swift background task without
+        // touching the core. Blocking; the caller runs it off the main thread.
+        fn probe_describe_endpoint(url: String) -> ProbeResultFfi;
 
         // The Shortcuts editor (NS2.6): a Rust-side draft keymap; rows by (group, index),
         // edits by stable action id; chords display as macOS glyphs.
@@ -2419,5 +2523,44 @@ mod tests {
         form.appearance_mode = 99; // garbage byte → System
         let folded = fold_settings_form(&h.core.settings, &form, form.refresh_hz);
         assert_eq!(folded.appearance_mode, AppearanceMode::System);
+    }
+
+    /// Task #44: the AI-describe fields cross the FFI form and fold back — the backend enum
+    /// encoding, the endpoint/model/prompt strings (empty prompt → `None`), and the response
+    /// cap. Pure — never touches settings.toml.
+    #[test]
+    fn settings_form_carries_the_describe_fields() {
+        use pb_app_core::settings::DescribeBackend;
+        let mut h = test_handle(800, 600, 1.0);
+        h.core.settings.describe_backend = DescribeBackend::Auto;
+        let mut form = h.settings_form();
+        assert_eq!(form.describe_backend, 0, "Auto crosses as 0");
+
+        form.describe_backend = 2; // local endpoint
+        form.describe_endpoint = "http://gremlin:1234/v1".to_string();
+        form.describe_model = "qwen2.5-vl".to_string();
+        form.describe_prompt = "  Custom prompt  ".to_string();
+        form.describe_max_tokens = 1024;
+        form.describe_auto = true;
+        let folded = fold_settings_form(&h.core.settings, &form, form.refresh_hz);
+        assert_eq!(folded.describe_backend, DescribeBackend::LocalEndpoint);
+        assert_eq!(folded.describe_endpoint, "http://gremlin:1234/v1");
+        assert_eq!(folded.describe_model, "qwen2.5-vl");
+        assert_eq!(folded.describe_prompt.as_deref(), Some("Custom prompt"), "trimmed");
+        assert_eq!(folded.describe_max_tokens, 1024);
+        assert!(folded.describe_auto);
+
+        // Empty prompt folds to None (use the built-in instruction).
+        form.describe_prompt = "   ".to_string();
+        let folded = fold_settings_form(&h.core.settings, &form, form.refresh_hz);
+        assert_eq!(folded.describe_prompt, None);
+
+        // Round-trips back out through the getter.
+        let mut h2 = test_handle(800, 600, 1.0);
+        h2.core.settings = folded;
+        let out = h2.settings_form();
+        assert_eq!(out.describe_backend, 2);
+        assert_eq!(out.describe_endpoint, "http://gremlin:1234/v1");
+        assert_eq!(out.describe_prompt, "", "None crosses as empty");
     }
 }

@@ -8,6 +8,21 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
+- **AI image descriptions (D) + Ask about an image (⇧D)** — describe the current
+  photo with a vision model, entirely on hardware you control. Press **D** for a
+  description in an on-image panel (press **D** again to retry if it failed), or **⇧D**
+  to type your own multi-line question — *"What products are visible?"*, *"What year
+  does this look like?"* — and get an answer in the same panel. **Edit ▸ Copy AI
+  Description** (and the right-click menu) puts the text on the clipboard. Configure it
+  under **Settings ▸ AI**: point it at any OpenAI-compatible local model server (LM
+  Studio, Ollama, llama.cpp — on this machine or your own network), pick a response
+  length, and customize the prompt. **Test & list models** confirms the server is
+  reachable and fills a **model picker** with what it's serving — vision-capable models
+  listed first — so you choose from a list instead of typing an exact model name. Optional **auto-describe** describes each
+  photo as you move to it while the panel is open. The prompt includes salient photo
+  metadata (time, camera, location) framed as *unverified* so the model trusts what it
+  sees. Nothing is uploaded except to the endpoint you configure; results are kept in
+  RAM only. Available on Windows and Mac.
 - **Copy Text from Image + text panel (T)** — read and copy the text visible in a
   photo, entirely on your machine. Press **T** to see the recognized text (and any
   QR-code contents, listed on top) in an on-image panel, or use **Edit ▸ Copy Text

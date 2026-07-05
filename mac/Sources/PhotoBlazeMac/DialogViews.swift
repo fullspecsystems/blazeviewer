@@ -54,6 +54,47 @@ struct PasswordSheetView: View {
     }
 }
 
+/// The "Ask about image" sheet (task #44): a sparkles icon + a **multi-line** `TextEditor`
+/// for a question about the current photo, and an Ask/Cancel bar. Plain Return inserts a
+/// newline (real textarea); ⌘Return or the Ask button submits. Mirrors the egui `ask_dialog`.
+struct AskSheetView: View {
+    @Bindable var model: CoreModel
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "sparkles")
+                    .font(.title)
+                    .foregroundStyle(.tint)
+                Text("Ask a question about this photo:")
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            TextEditor(text: $model.askEntry)
+                .font(.body)
+                .frame(minHeight: 90)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6).stroke(.secondary.opacity(0.3))
+                )
+                .focused($focused)
+            Text("⌘Return to ask")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Spacer()
+                Button("Cancel") { model.askCancel() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Ask") { model.askSubmit() }
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .disabled(model.askEntry.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
+        .onAppear { focused = true }
+    }
+}
+
 /// The archive "Opening…" sheet: determinate once the header publishes a total (a spinner
 /// until then) + Cancel. The fraction refreshes each pump from the Rust-side handle.
 struct LoadingSheetView: View {

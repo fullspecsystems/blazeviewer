@@ -36,6 +36,10 @@ pub enum InfoMode {
     /// The "text in image" panel (task #45): OCR lines + QR payloads for the
     /// displayed photo, or its busy/error state while the scan runs.
     Text,
+    /// The AI-description panel (task #44): the vision model's description (or answer to
+    /// a typed question) for the displayed photo, or its busy/error state while the
+    /// backend runs. Shares the overlay slot with the others.
+    Describe,
 }
 
 /// A transient bottom-center status toast (e.g. "Recursive folders: on"): a pill

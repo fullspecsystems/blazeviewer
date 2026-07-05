@@ -70,6 +70,17 @@ pub enum Action {
     /// panel (`T`, task #45) — read before copying. Same on-device scan and RAM-only
     /// cache as [`Action::CopyImageText`].
     ShowImageText,
+    /// Describe the current photo with a vision model (`D`, task #44) — on-device
+    /// (Apple Foundation Models) or a local endpoint — shown in the HUD panel. RAM-only
+    /// per-image cache, dropped on exit (privacy #2).
+    DescribeImage,
+    /// Ask the vision model a specific question about the current photo (task #44,
+    /// subtask 9): opens a text field, then runs the answer through the same describe
+    /// backend + panel. E.g. "What products are visible?" / "What year is this?".
+    AskImage,
+    /// Copy the current photo's AI description to the clipboard (task #44). Menu /
+    /// context-menu (no default key); generates one on demand if not already cached.
+    CopyDescription,
     /// Reveal the current photo in the OS file manager (macOS Finder / Windows File
     /// Explorer), with its containing folder open and the file selected. Only real
     /// on-disk files can be revealed (an archive entry / the empty deck cannot).
@@ -148,6 +159,9 @@ impl Action {
         Action::CopyImageDetails,
         Action::CopyImageText,
         Action::ShowImageText,
+        Action::DescribeImage,
+        Action::AskImage,
+        Action::CopyDescription,
         Action::RevealInFileManager,
         Action::SaveRotation,
         Action::Delete,
@@ -203,6 +217,9 @@ impl Action {
             Action::CopyImageDetails => "copy_image_details",
             Action::CopyImageText => "copy_text",
             Action::ShowImageText => "show_text",
+            Action::DescribeImage => "describe",
+            Action::AskImage => "ask_image",
+            Action::CopyDescription => "copy_description",
             Action::RevealInFileManager => "reveal",
             Action::SaveRotation => "save_rotation",
             Action::Delete => "delete",
@@ -269,6 +286,9 @@ impl Action {
             Action::CopyImageDetails => "Copy image details",
             Action::CopyImageText => "Copy text from image",
             Action::ShowImageText => "Show text in image",
+            Action::DescribeImage => "Describe image",
+            Action::AskImage => "Ask about image",
+            Action::CopyDescription => "Copy AI description",
             // The platform-idiomatic name (Finder on macOS, File Explorer elsewhere) —
             // the menu bar sets its own label too; this feeds the keybindings editor / help.
             Action::RevealInFileManager => {
