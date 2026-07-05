@@ -166,6 +166,7 @@ struct ContentView: View {
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
             }
+            .animation(.easeInOut(duration: 0.2), value: model.scanPillVisible)
             // Help last = topmost: it's an ephemeral reference sheet centered over the
             // photo, so it should occlude the tree/inspector (which it overlaps) rather
             // than slide under them.

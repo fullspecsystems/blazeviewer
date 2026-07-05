@@ -1018,7 +1018,7 @@ final class CoreModel {
             scanPillCurrent = core.scan_pill_current().toString()
         }
         if pillVisible != scanPillVisible {
-            withAnimation(.easeInOut(duration: 0.2)) { scanPillVisible = pillVisible }
+            scanPillVisible = pillVisible
         }
         updatePacing()
     }
