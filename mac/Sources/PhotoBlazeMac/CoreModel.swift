@@ -893,7 +893,7 @@ final class CoreModel {
         switch icon {
         case 1: return "speaker.slash.fill"  // Mute
         case 2: return "speaker.wave.2.fill"  // Unmute
-        case 3: return "square.and.arrow.down"  // Save (rotation)
+        case 3: return "photo.badge.checkmark"  // Save (rotation)
         case 4: return "arrow.uturn.backward"  // Undo
         case 5: return "trash.fill"  // Delete (permanent)
         case 6: return "trash"  // Recycle (recoverable)
@@ -1763,7 +1763,7 @@ final class CoreModel {
                 ? coreToast
                 : (text.contains("\n")
                     ? "Copied to clipboard"
-                    : "Copied \((text as NSString).lastPathComponent)")
+                    : "Copied \u{201c}\((text as NSString).lastPathComponent)\u{201d}")
             toast(toastMsg)
             return
         }
@@ -1801,7 +1801,7 @@ final class CoreModel {
             item.setString(URL(fileURLWithPath: file).absoluteString, forType: .fileURL)
         }
         pb.writeObjects([item])
-        toast("Copied")
+        toast("Copied image")
     }
 
     /// `CoreEffect::SetWindowMode` — the borderless fullscreen **speed mode** (F), NOT

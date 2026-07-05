@@ -470,7 +470,7 @@ impl AppCore {
                     path: path.clone(),
                     prev,
                 });
-                self.show_toast_icon("", ToastIcon::Save);
+                self.show_toast_icon("Saved rotation", ToastIcon::Save);
             }
             Err(e) => {
                 eprintln!("save rotation failed: {}: {e}", path.display());
@@ -3977,7 +3977,7 @@ impl AppCore {
         self.effects.push(contract::CoreEffect::WriteClipboard(
             contract::ClipboardPayload::Text {
                 text: lines.join("\n"),
-                toast: None,
+                toast: Some("Copied details".to_string()),
             },
         ));
     }
@@ -5127,6 +5127,9 @@ impl AppCore {
                 started: self.now,
                 seq: self.toast_seq,
             });
+            // Still redraw: some callers (e.g. `rotate`) change the *view* and rely on this to
+            // render it — and it wakes the shell so the toast pill appears from idle.
+            self.draw();
             return;
         }
         let px = (26.0 * self.viewport.scale_factor).max(16.0);

@@ -10,21 +10,31 @@ import SwiftUI
 struct ToastView: View {
     let model: CoreModel
 
+    private var symbol: String? { model.toastSymbol(model.toastIcon) }
+    private var message: String { model.toastMessage }
+
     var body: some View {
-        HStack(spacing: 8) {
-            if let symbol = model.toastSymbol(model.toastIcon) {
-                Image(systemName: symbol)
-                    .font(.body)
-                    .foregroundStyle(.primary)
+        content
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 11)
+            .panelBackground(cornerRadius: 12, opacity: model.panelOpacity)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if let symbol, !message.isEmpty {
+            // Icon + label → a vertical confirmation card: prominent glyph above the label.
+            VStack(spacing: 5) {
+                Image(systemName: symbol).font(.system(size: 26, weight: .medium))
+                Text(message).font(.callout.weight(.medium))
             }
-            if !model.toastMessage.isEmpty {
-                Text(model.toastMessage)
-                    .font(.callout.weight(.medium))
-                    .foregroundStyle(.primary)
-            }
+        } else if let symbol {
+            // Icon only (e.g. rotate) — the glyph is the whole message, so make it big.
+            Image(systemName: symbol).font(.system(size: 32, weight: .medium))
+        } else {
+            // Text only (e.g. "Copied image").
+            Text(message).font(.callout.weight(.medium))
         }
-        .padding(.horizontal, 15)
-        .padding(.vertical, 9)
-        .panelBackground(cornerRadius: 11, opacity: model.panelOpacity)
     }
 }
