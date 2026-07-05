@@ -2067,11 +2067,11 @@ impl AppCore {
         if self.source.container().is_some() {
             return;
         }
-        // Prefer an in-deck jump to the adjacent sibling folder's first photo — instant,
-        // no re-scan, and it can never hit "No photos" (only folders that are in the deck,
-        // which by definition have photos). The common recursive-library case: the deck
-        // spans the current folder's peers, so ⌘←/→ flows between them.
-        if let Some(idx) = self.adjacent_sibling_item(dir) {
+        // "Next/previous photo, but by folder": jump within the deck to the next/previous
+        // folder *boundary* in the deck's (tree-order) sequence — entering subfolders,
+        // stepping siblings, or climbing back up, exactly as the traversal runs. Instant,
+        // and it can never hit "No photos" (every jump lands on a real deck item).
+        if let Some(idx) = self.adjacent_folder_item(dir) {
             self.stop_playback();
             self.playlist.jump_to(idx);
             self.target_item = self.playlist.current();
@@ -2079,11 +2079,14 @@ impl AppCore {
             self.request_prefetch();
             return;
         }
-        // No sibling with photos in the deck that way — search the disk for the current
-        // folder's adjacent sibling *with photos* (a single-folder deck opens the next
-        // folder; the recursive-deck edge finds nothing and toasts). Anchored on the
-        // current photo's folder, **not the deck root** — so it steps the peer you see in
-        // the tree, never a sibling of some far-up opened root (the old bug).
+        // No adjacent folder in the deck. A multi-folder deck means you're at its first /
+        // last folder — toast (HUD-gated, so the host shows it). A single-folder deck opens
+        // the next folder *on disk* (the disk sibling of the current folder, skipping
+        // photo-less ones), so ⌘←/→ still browses when the deck is just one folder.
+        if self.deck_spans_multiple_folders() {
+            self.show_toast("No more folders");
+            return;
+        }
         let anchor = self
             .current_folder_abs()
             .unwrap_or_else(|| self.root.clone());
@@ -2093,33 +2096,48 @@ impl AppCore {
         self.tree_io = Some(crate::folder_tree::spawn_sibling(anchor, dir));
     }
 
-    /// The source index of the first photo in the adjacent (±`dir`) **in-deck** sibling
-    /// folder of the current photo's folder, or `None` when there's no such folder that
-    /// way (the row's end, or a single-folder deck). Pure, RAM-only — no disk I/O; the
-    /// sibling set + sort mirror what the folder tree shows.
-    fn adjacent_sibling_item(&self, dir: i32) -> Option<usize> {
-        let current = self.current_folder_abs()?;
-        let parent = current.parent()?;
-        let mut sibs: Vec<PathBuf> = Vec::new();
+    /// The source index at the next (`dir > 0`) / previous folder **boundary** in the deck
+    /// sequence: forward → the first item after the current whose folder differs (the start
+    /// of the next folder-run); backward → the start of the previous folder-run. `None` at
+    /// the deck's last / first folder. Pure, RAM-only — the deck is already tree-ordered.
+    fn adjacent_folder_item(&self, dir: i32) -> Option<usize> {
+        let n = self.source.len();
+        let c = self.displayed_item.filter(|&c| c < n)?;
+        let folder = |i: usize| self.source.path(i).and_then(Path::parent);
+        let cur = folder(c)?.to_path_buf();
+        if dir > 0 {
+            (c + 1..n).find(|&i| folder(i) != Some(cur.as_path()))
+        } else {
+            // Walk back to the start of the current run, then to the start of the one before.
+            let mut s = c;
+            while s > 0 && folder(s - 1) == Some(cur.as_path()) {
+                s -= 1;
+            }
+            if s == 0 {
+                return None; // already in the deck's first folder-run
+            }
+            let prev = folder(s - 1)?.to_path_buf();
+            let mut p = s - 1;
+            while p > 0 && folder(p - 1) == Some(prev.as_path()) {
+                p -= 1;
+            }
+            Some(p)
+        }
+    }
+
+    /// Whether the deck's photos span more than one folder (early-exits on the second).
+    fn deck_spans_multiple_folders(&self) -> bool {
+        let mut first: Option<&Path> = None;
         for i in 0..self.source.len() {
-            if let Some(folder) = self.source.path(i).and_then(Path::parent) {
-                if folder.parent() == Some(parent) && !sibs.iter().any(|s| s == folder) {
-                    sibs.push(folder.to_path_buf());
+            if let Some(f) = self.source.path(i).and_then(Path::parent) {
+                match first {
+                    None => first = Some(f),
+                    Some(f0) if f0 != f => return true,
+                    _ => {}
                 }
             }
         }
-        let key = |p: &Path| {
-            p.file_name()
-                .map(|n| n.to_string_lossy().to_lowercase())
-                .unwrap_or_default()
-        };
-        sibs.sort_by(|a, b| key(a).cmp(&key(b)).then_with(|| a.cmp(b)));
-        let pos = sibs.iter().position(|p| *p == current)?;
-        let target = sibs
-            .get(usize::try_from(pos as i64 + dir as i64).ok()?)?
-            .clone();
-        (0..self.source.len())
-            .find(|&i| self.source.path(i).and_then(Path::parent) == Some(target.as_path()))
+        false
     }
 
     /// Apply the keymap edited in the Settings dialog: swap it in live (every keypress
@@ -6535,6 +6553,37 @@ mod tests {
         core.open_sibling_cmd(-1);
         assert_eq!(core.target_item, Some(2), "⌘← back to bravo");
         assert!(core.tree_io.is_none());
+    }
+
+    #[test]
+    fn cmd_folder_traverses_by_boundaries_entering_subfolders() {
+        let mut core = test_core();
+        let base = std::env::temp_dir().join("pb_folder_traverse");
+        // Deck order (case-insensitive path sort): a/1, a/2, a/sub/3, b/4.
+        let paths = vec![
+            base.join("a/1.png"),
+            base.join("a/2.png"),
+            base.join("a/sub/3.png"),
+            base.join("b/4.png"),
+        ];
+        let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(paths));
+        core.rebuild_playlist(source, base.clone(), Some(base.clone()), true, 0);
+        // From a (index 0), ⌘→ enters the subfolder a/sub — the next different folder.
+        core.open_sibling_cmd(1);
+        assert_eq!(core.target_item, Some(2), "⌘→ enters a/sub");
+        // From a/sub, ⌘→ climbs to b.
+        core.displayed_item = Some(2);
+        core.open_sibling_cmd(1);
+        assert_eq!(core.target_item, Some(3), "⌘→ → b");
+        // ⌘← from b returns to a/sub.
+        core.displayed_item = Some(3);
+        core.open_sibling_cmd(-1);
+        assert_eq!(core.target_item, Some(2), "⌘← → a/sub");
+        // ⌘← from a/sub returns to the *start* of the a run (index 0, not 1).
+        core.displayed_item = Some(2);
+        core.open_sibling_cmd(-1);
+        assert_eq!(core.target_item, Some(0), "⌘← → start of the a run");
+        assert!(core.tree_io.is_none(), "all in-deck — no disk worker");
     }
 
     #[test]

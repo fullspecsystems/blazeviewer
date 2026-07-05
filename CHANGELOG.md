@@ -116,11 +116,12 @@ with any pre-release suffix carried only by the tag.
   first photo showed up somewhere unexpected. Now folders and files order the way you'd
   expect (and the way the folder tree already showed them), so the first photo is in the
   first folder alphabetically — and ⌘←/→ lines up with the tree.
-- **Previous/next folder (⌘← / ⌘→, Alt+← / →) now steps the folder you're actually in.**
-  It anchored on the *opened* folder, so after a recursive open it jumped to a sibling of
-  that far-up root — a seemingly random subtree. Now it moves within the current deck to
-  the previous/next **peer** folder's first photo: instant, no re-scan, and it skips
-  folders with no photos so you never dead-end. (A single-folder deck still opens the next
+- **Previous/next folder (⌘← / ⌘→, Alt+← / →) is now "next photo, but by folder."** It used
+  to jump to a sibling of the *opened* folder — after a recursive open, a seemingly random
+  far-away subtree. Now it steps to the next/previous **folder boundary in the deck's
+  sequence**: it enters subfolders, walks siblings, and climbs back up exactly as you'd
+  traverse the tree — landing on that folder's first photo. Instant, no re-scan, and it can't
+  dead-end (every jump lands on a real photo). (A single-folder deck still opens the next
   folder on disk.)
 - Pressing **I**, then **⇧I**, then **I** again now does what you'd expect (turns the
   one-line readout off) instead of appearing to do nothing — the line and the detailed
