@@ -151,6 +151,10 @@ pub struct Settings {
     pub letterbox_light: [u8; 3],
     /// Info-panel background opacity, `0` (transparent) – `100` (opaque).
     pub info_opacity: u8,
+    /// Native rich-panel (folder tree / inspector / scan pill / toast) background opacity,
+    /// `50`–`100` — lets the user see more of the photo through the chrome. Defaults high to
+    /// preserve contrast (roughly the pre-slider look). Only the macOS native panels read it.
+    pub panel_opacity: u8,
     /// Default slideshow interval in seconds — the per-slide dwell a fresh session
     /// starts at (#31). Clamped to the slideshow's own `[MIN, MAX]_INTERVAL`; the
     /// `[` / `]` keys still adjust it live for the session without rewriting this.
@@ -232,6 +236,7 @@ impl Default for Settings {
             letterbox: [10, 10, 12],                 // pb_render::LETTERBOX (rgb)
             letterbox_light: [240, 241, 245],        // the light-mode analog (#46)
             info_opacity: 60,                        // hud::BG alpha 153/255 ≈ 60%
+            panel_opacity: 92,                       // conservative-high (≈ today's material look)
             slideshow_interval_secs: slideshow::DEFAULT_INTERVAL.as_secs_f64(), // 4.0
             window: None,
             picker_dir: None,       // start in the current photo's folder
@@ -268,6 +273,7 @@ impl Settings {
         self.max_advance_rate = self.max_advance_rate.min(1000);
         self.hold_delay_ms = self.hold_delay_ms.min(2000);
         self.info_opacity = self.info_opacity.min(100);
+        self.panel_opacity = self.panel_opacity.clamp(50, 100);
         // Keep the response cap sane (a stray 0 would ask for an empty reply; a huge value
         // could stall the panel). Covers the presets 256/512/1024 with headroom.
         self.describe_max_tokens = self.describe_max_tokens.clamp(16, 4096);

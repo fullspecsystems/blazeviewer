@@ -8,6 +8,11 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
+- **A "Panel opacity" slider** (Settings ▸ Appearance) sets how much of the photo shows
+  through the native panels — the folder tree, inspector, and scan pill. It defaults high to
+  keep text crisp, and you can dial it down to ~50% to see more of the image behind the
+  chrome. The panels now share one consistent backdrop (material, border, shadow), and the
+  scan pill's heavier blur is dialed back to match the rest.
 - **Finder-style folder browser on macOS** — the **⇧F** folder tree is now a real
   filesystem browser: **disclosure chevrons** expand/collapse folders (pure browsing — no
   scan), so you can walk through photo-less folders to *find* the one you want, then click a

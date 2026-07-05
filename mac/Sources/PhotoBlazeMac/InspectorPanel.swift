@@ -126,7 +126,7 @@ struct InspectorPanelView: View {
             .onPreferenceChange(InspectorContentHeight.self) { contentHeight = $0 }
         }
         .frame(width: min(model.inspectorWidth, maxWidth))
-        .panelBackground(cornerRadius: 12)
+        .panelBackground(cornerRadius: 12, opacity: model.panelOpacity)
         // Drag the leading edge to widen (360pt minimum).
         .overlay(alignment: .leading) {
             ResizeHandle(

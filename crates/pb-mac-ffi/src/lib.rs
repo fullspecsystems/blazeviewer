@@ -1017,6 +1017,12 @@ impl AppCoreHandle {
         }
     }
 
+    /// The native panels' background opacity setting (50–100) — the host polls this to feed
+    /// the shared `panelBackground` so a live slider drag updates the panels immediately.
+    fn panel_opacity(&self) -> u8 {
+        self.core.settings.panel_opacity
+    }
+
     /// The current settings as the flat form the Settings window binds to (NS2 item 5).
     /// `refresh_hz` rides along as the max-speed slider's ceiling (out-only).
     fn settings_form(&self) -> ffi::SettingsFormFfi {
@@ -1065,6 +1071,7 @@ impl AppCoreHandle {
             letterbox_light_g: s.letterbox_light[1],
             letterbox_light_b: s.letterbox_light[2],
             info_opacity: s.info_opacity,
+            panel_opacity: s.panel_opacity,
             startup_mode: match s.startup_mode {
                 StartupMode::Fullscreen => 0,
                 StartupMode::Windowed => 1,
@@ -2025,6 +2032,7 @@ fn fold_settings_form(
         form.letterbox_light_b,
     ];
     s.info_opacity = form.info_opacity;
+    s.panel_opacity = form.panel_opacity;
     s.startup_mode = match form.startup_mode {
         0 => StartupMode::Fullscreen,
         1 => StartupMode::Windowed,
@@ -2313,6 +2321,7 @@ mod ffi {
         letterbox_light_g: u8,
         letterbox_light_b: u8,
         info_opacity: u8,
+        panel_opacity: u8,
         startup_mode: u8,
         slideshow_interval_secs: f64,
         picker_fixed: bool,
@@ -2476,6 +2485,7 @@ mod ffi {
         fn scan_pill_cancel(&mut self);
         fn settings_closed(&mut self);
         fn dialog_progress(&self) -> DialogProgressFfi;
+        fn panel_opacity(&self) -> u8;
         fn settings_form(&self) -> SettingsFormFfi;
         fn settings_edited(&mut self, form: SettingsFormFfi);
 

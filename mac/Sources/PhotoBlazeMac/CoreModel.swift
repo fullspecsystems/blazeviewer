@@ -86,6 +86,10 @@ final class CoreModel {
     /// session-persistent (survive close/reopen) — disk persistence is a later slice.
     var treeWidth: CGFloat = 280
     var inspectorWidth: CGFloat = 360
+    /// The shared native-panel background opacity (0.5–1.0), from the Settings "Panel opacity"
+    /// slider — fed to `panelBackground`. Refreshed on load + on every settings edit so a
+    /// live slider drag updates the tree / inspector / scan pill / toast immediately.
+    private(set) var panelOpacity: Double = 0.92
     /// An NSAlert sheet (confirm/message) is up — gates the key monitor like `panelOpen`.
     @ObservationIgnored private var alertUp = false
     /// Opens the SwiftUI Settings scene — injected by the root view (`openSettings` is an
@@ -892,8 +896,14 @@ final class CoreModel {
         // Keep the app-wide chrome (menus, Settings window, sheets) on the chosen
         // theme too (#46) — the canvas re-reports the resulting effective appearance.
         applyAppearancePreference()
+        refreshPanelOpacity()  // a live "Panel opacity" drag updates the panels at once
         kick()
         drainEffects()
+    }
+
+    /// Pull the shared panel opacity from the core (0.5–1.0). Called on load + on settings edits.
+    func refreshPanelOpacity() {
+        panelOpacity = Double(core.panel_opacity()) / 100.0
     }
 
     /// Apply the Appearance preference (#46) to the whole app: forced Light/Dark set

@@ -95,7 +95,7 @@ struct FolderTreePanelView: View {
             }
         }
         .frame(width: min(model.treeWidth, maxWidth))
-        .panelBackground(cornerRadius: 12)
+        .panelBackground(cornerRadius: 12, opacity: model.panelOpacity)
         // Drag the trailing edge to widen (280pt minimum).
         .overlay(alignment: .trailing) {
             ResizeHandle(

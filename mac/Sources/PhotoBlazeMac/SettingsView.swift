@@ -225,6 +225,9 @@ struct SettingsView: View {
                 labeledSlider(
                     "Info panel opacity", value: $draft.infoOpacity, in: 0...100, format: "%.0f%%"
                 )
+                labeledSlider(
+                    "Panel opacity", value: $draft.panelOpacity, in: 50...100, format: "%.0f%%"
+                )
                 Picker("File info position", selection: $draft.infoLineAlign) {
                     Text("Left").tag(0)
                     Text("Center").tag(1)
@@ -629,6 +632,7 @@ struct SettingsDraft: Equatable {
     var letterbox: Color = .black
     var letterboxLight: Color = .white
     var infoOpacity: Double = 60
+    var panelOpacity: Double = 92
     var startupMode = 2
     var slideshowInterval: Double = 4
     var pickerFixed = false
@@ -668,6 +672,7 @@ struct SettingsDraft: Equatable {
             blue: Double(form.letterbox_light_b) / 255.0
         )
         infoOpacity = Double(form.info_opacity)
+        panelOpacity = Double(form.panel_opacity)
         startupMode = Int(form.startup_mode)
         slideshowInterval = form.slideshow_interval_secs
         pickerDir = form.picker_dir.toString()
@@ -715,6 +720,7 @@ struct SettingsDraft: Equatable {
             letterbox_light_g: UInt8((rgbLight.greenComponent * 255).rounded().clamped(0, 255)),
             letterbox_light_b: UInt8((rgbLight.blueComponent * 255).rounded().clamped(0, 255)),
             info_opacity: UInt8(infoOpacity.rounded()),
+            panel_opacity: UInt8(panelOpacity.rounded()),
             startup_mode: UInt8(startupMode),
             slideshow_interval_secs: slideshowInterval,
             picker_fixed: pickerFixed,

@@ -80,7 +80,7 @@ struct ScanPillView: View {
         // The shared panel backdrop (same material / border / shadow as the tree, inspector,
         // and toast) — was a heavier `.thickMaterial`; the secondary text + spinner now get
         // their contrast from the colorScheme-resolved gray, not the material.
-        .panelBackground(cornerRadius: 14)
+        .panelBackground(cornerRadius: 14, opacity: model.panelOpacity)
         .arrowCursorOnHover()
     }
 }

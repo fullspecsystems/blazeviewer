@@ -197,6 +197,7 @@ struct ContentView: View {
                 // A forced Light/Dark Theme preference (#46) overrides the app's
                 // appearance from the first frame; System leaves the OS in charge.
                 model.applyAppearancePreference()
+                model.refreshPanelOpacity()  // the saved "Panel opacity" for the chrome
                 model.openLaunchPathIfAny()
                 model.openSettingsAction = { openSettings() }
                 model.runFSmokeIfRequested()
