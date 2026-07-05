@@ -9,6 +9,7 @@
 // fixed width, the folder name is left-aligned (truncating tail), and the live count is
 // right-anchored + monospaced so its right edge never moves.
 
+import AppKit
 import SwiftUI
 
 struct ScanPillView: View {
@@ -28,11 +29,12 @@ struct ScanPillView: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            // A pure-SwiftUI spinner: the native `ProgressView` spinner is an AppKit
-            // `NSProgressIndicator` whose spoke color follows its own appearance — which, like
-            // `panelSecondary`, resolves to light-mode inside the pill's material, so it stayed
-            // dark-on-dark and `.tint` couldn't override it. This one's color we fully control.
-            ScanSpinner(color: scheme == .dark ? Color(white: 0.9) : Color(white: 0.35))
+            // The real macOS spinner, with its appearance pinned to the actual color scheme.
+            // Inside the pill's material (an NSVisualEffectView) an inherited-appearance control
+            // gets the *vibrant light* variant even in dark mode, so the native ProgressView
+            // drew dark-on-dark; forcing darkAqua/aqua fixes it while keeping the authentic
+            // static-spokes look (which .tint / a hand-rolled spinner couldn't match).
+            NativeSpinner(dark: scheme == .dark)
                 .frame(width: 16, height: 16)
 
             VStack(alignment: .leading, spacing: 2) {
@@ -87,32 +89,26 @@ struct ScanPillView: View {
     }
 }
 
-/// A small indeterminate spinner in the macOS fading-spokes style, drawn in pure SwiftUI so
-/// its color is exactly what we pass — the native `ProgressView` spinner rendered dark-on-dark
-/// inside the pill's material (its AppKit appearance resolved to light even in dark mode).
-private struct ScanSpinner: View {
-    let color: Color
-    private let spokes = 8
-    @State private var spinning = false
+/// The native macOS spinner (`NSProgressIndicator`, spinning style) — the authentic
+/// static-spokes-with-rotating-brightness look — with its `NSAppearance` **forced** to match
+/// the SwiftUI color scheme. Inside the pill's material (an `NSVisualEffectView`), a control
+/// left on the default *inherited* appearance gets the vibrant-light variant even in dark
+/// mode, so the spinner drew dark spokes on the dark pill; pinning darkAqua / aqua overrides
+/// that so it themes correctly in both. (See the "Dark Side of the Mac" appearance notes.)
+private struct NativeSpinner: NSViewRepresentable {
+    let dark: Bool
 
-    var body: some View {
-        ZStack {
-            ForEach(0..<spokes, id: \.self) { i in
-                Capsule()
-                    .fill(color)
-                    // A graduated trail: brightest leading spoke, fading behind it.
-                    .opacity(Double(i + 1) / Double(spokes))
-                    .frame(width: 1.6, height: 4.5)
-                    .offset(y: -4.5)
-                    .rotationEffect(.degrees(360.0 / Double(spokes) * Double(i)))
-            }
-        }
-        .frame(width: 15, height: 15)
-        .rotationEffect(.degrees(spinning ? 360 : 0))
-        .onAppear {
-            withAnimation(.linear(duration: 0.85).repeatForever(autoreverses: false)) {
-                spinning = true
-            }
-        }
+    func makeNSView(context: Context) -> NSProgressIndicator {
+        let p = NSProgressIndicator()
+        p.style = .spinning
+        p.controlSize = .small
+        p.isIndeterminate = true
+        p.isDisplayedWhenStopped = false
+        p.startAnimation(nil)
+        return p
+    }
+
+    func updateNSView(_ nsView: NSProgressIndicator, context: Context) {
+        nsView.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
     }
 }
