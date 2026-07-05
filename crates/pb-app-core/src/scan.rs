@@ -130,15 +130,48 @@ pub fn rel_display(path: &Path, root: &Path) -> String {
     }
 }
 
+/// Case-insensitive name comparison (lowercased, with a raw tiebreak for a total order),
+/// so folders/files order like Finder — and like the folder tree, which sorts the same way.
+/// Raw byte order (the old default) put every uppercase letter before every lowercase one,
+/// so `Screenshots` sorted before `onlinethumbnailcache` and the deck's first photo landed
+/// in a folder the tree listed much lower — disorienting, and it desynced ⌘←/→ from the tree.
+pub(crate) fn ci_name_cmp(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> std::cmp::Ordering {
+    let (al, bl) = (a.to_string_lossy(), b.to_string_lossy());
+    al.to_lowercase()
+        .cmp(&bl.to_lowercase())
+        .then_with(|| al.cmp(&bl))
+}
+
+/// The component-wise, case-insensitive path order — the global-sort analog of
+/// [`ci_name_cmp`], so a depth-first walk sorted per directory by name reproduces exactly
+/// what a single `sort_by(ci_path_cmp)` over all paths would produce.
+pub(crate) fn ci_path_cmp(a: &Path, b: &Path) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (mut ac, mut bc) = (a.components(), b.components());
+    loop {
+        match (ac.next(), bc.next()) {
+            (Some(x), Some(y)) => {
+                let c = ci_name_cmp(x.as_os_str(), y.as_os_str());
+                if c != Ordering::Equal {
+                    return c;
+                }
+            }
+            (Some(_), None) => return Ordering::Greater,
+            (None, Some(_)) => return Ordering::Less,
+            (None, None) => return Ordering::Equal,
+        }
+    }
+}
+
 /// The configured directory walker shared by the streaming scan and its tests: depth-first,
-/// each directory's entries **sorted by file name** — which reproduces `Vec<PathBuf>::sort()`
-/// order exactly (`Path`'s `Ord` is component-wise, not byte-string — verified), so streaming
-/// changes nothing about the order today's walk-then-`paths.sort()` produces. Symlinks are
-/// yielded but never followed, so the walk can't cycle. `recursive` sets the depth.
+/// each directory's entries **sorted case-insensitively by file name** ([`ci_name_cmp`]) —
+/// which reproduces `sort_by(ci_path_cmp)` order exactly (`Path`'s components sort the same
+/// way), so streaming changes nothing about the order the walk-then-sort produces. Symlinks
+/// are yielded but never followed, so the walk can't cycle. `recursive` sets the depth.
 pub fn image_walker(root: &Path, recursive: bool) -> walkdir::WalkDir {
     walkdir::WalkDir::new(root)
         .max_depth(if recursive { usize::MAX } else { 1 })
-        .sort_by_file_name()
+        .sort_by(|a, b| ci_name_cmp(a.file_name(), b.file_name()))
         .follow_links(false)
 }
 
@@ -241,7 +274,7 @@ pub fn resolve_source(
             for r in roots {
                 collect_images(r, *recursive, progress, &mut paths);
             }
-            paths.sort();
+            paths.sort_by(|a, b| ci_path_cmp(a, b));
             let root = roots.first().cloned().unwrap_or_else(|| PathBuf::from("."));
             (paths, root, roots.first().cloned(), *recursive)
         }
@@ -551,5 +584,55 @@ pub fn resolve_playlist(source: &Source, cursor: &open::Cursor) -> Resolved {
                 Resolved::empty()
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::{ci_name_cmp, ci_path_cmp};
+    use std::cmp::Ordering;
+    use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn case_insensitive_name_order_beats_raw_bytes() {
+        // The reported case: lowercase "onlinethumbnailcache" (o) sorts BEFORE uppercase
+        // "Screenshots" (S) — raw byte order (S=0x53 < o=0x6F) wrongly reverses them.
+        assert_eq!(
+            ci_name_cmp(
+                OsStr::new("onlinethumbnailcache"),
+                OsStr::new("Screenshots")
+            ),
+            Ordering::Less
+        );
+        // Deterministic tiebreak on exact-but-for-case names (total order).
+        assert_eq!(
+            ci_name_cmp(OsStr::new("Foo"), OsStr::new("foo")),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn ci_path_sort_orders_folders_like_finder() {
+        let mut v = [
+            PathBuf::from("d/Screenshots/1.jpg"),
+            PathBuf::from("d/apple/2.jpg"),
+            PathBuf::from("d/Banana/3.jpg"),
+        ];
+        v.sort_by(|a, b| ci_path_cmp(a, b));
+        let names: Vec<&str> = v
+            .iter()
+            .map(|p| p.parent().unwrap().file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(names, ["apple", "Banana", "Screenshots"]);
+    }
+
+    #[test]
+    fn ci_path_cmp_is_component_wise_not_string() {
+        // A shallower path sorts before a deeper one sharing its prefix.
+        assert_eq!(
+            ci_path_cmp(Path::new("a/b"), Path::new("a/b/c")),
+            Ordering::Less
+        );
     }
 }

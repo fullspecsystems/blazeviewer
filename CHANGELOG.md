@@ -110,6 +110,12 @@ with any pre-release suffix carried only by the tag.
   All EXIF Info** — both can be checked at once.
 
 ### Fixed
+- **Folders now sort case-insensitively (like Finder), not by raw byte order.** A recursive
+  open landed on whatever subfolder sorted first by ASCII — where *every* uppercase letter
+  beats *every* lowercase one, so `Screenshots` came before `onlinethumbnailcache` and the
+  first photo showed up somewhere unexpected. Now folders and files order the way you'd
+  expect (and the way the folder tree already showed them), so the first photo is in the
+  first folder alphabetically — and ⌘←/→ lines up with the tree.
 - **Previous/next folder (⌘← / ⌘→, Alt+← / →) now steps the folder you're actually in.**
   It anchored on the *opened* folder, so after a recursive open it jumped to a sibling of
   that far-up root — a seemingly random subtree. Now it moves within the current deck to
