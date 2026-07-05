@@ -545,12 +545,6 @@ final class CoreModel {
         kick()
     }
 
-    /// The Finder tree's up-affordance: re-root one level higher.
-    func extendTreeUp() {
-        core.tree_extend_up()
-        kick()
-    }
-
     /// Close the folder tree from its ✕ — the same toggle ⇧F drives (menu checkmark follows).
     func closeTree() {
         menuAction("folder_tree")

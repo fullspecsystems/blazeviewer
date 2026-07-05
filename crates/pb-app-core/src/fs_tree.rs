@@ -96,6 +96,15 @@ impl FsTree {
         &self.root
     }
 
+    /// The display name of the root's parent, or `None` at the filesystem root — the label
+    /// for the "up to parent" row (clicking it [`extend_root_up`](Self::extend_root_up)s).
+    pub fn parent_name(&self) -> Option<String> {
+        self.root
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(display_name)
+    }
+
     /// Whether `path`'s subfolders still need reading (expanded and unread) — the shell
     /// polls this to decide when to kick an off-thread `read_dir`.
     pub fn needs_children(&self, path: &Path) -> bool {

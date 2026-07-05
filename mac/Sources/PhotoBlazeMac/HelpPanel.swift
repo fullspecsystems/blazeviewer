@@ -64,7 +64,7 @@ struct HelpPanelView: View {
                 Spacer()
                 Button(action: onClose) {
                     Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.primary)
                         .imageScale(.large)
                 }
                 .buttonStyle(.plain)
@@ -103,6 +103,7 @@ struct HelpPanelView: View {
                 .strokeBorder(.separator, lineWidth: 0.5)
         )
         .shadow(radius: 24, y: 8)
+        .arrowCursorOnHover()
     }
 
     @ViewBuilder

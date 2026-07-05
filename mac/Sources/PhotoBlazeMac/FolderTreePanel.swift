@@ -44,17 +44,9 @@ struct FolderTreePanelView: View {
                 Text("Folders")
                     .font(.headline)
                 Spacer()
-                if model.treeUsesFs {
-                    Button(action: { model.extendTreeUp() }) {
-                        Image(systemName: "arrow.up")
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Up one level")
-                }
                 Button(action: { model.closeTree() }) {
                     Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.primary)
                         .imageScale(.large)
                 }
                 .buttonStyle(.plain)
@@ -92,6 +84,7 @@ struct FolderTreePanelView: View {
                 .strokeBorder(.separator, lineWidth: 0.5)
         )
         .shadow(radius: 24, y: 8)
+        .arrowCursorOnHover()
     }
 
     @ViewBuilder
@@ -104,8 +97,10 @@ struct FolderTreePanelView: View {
             // Icon + name — a name click opens the folder (loads its photos).
             Button(action: { model.activateTreeRow(row.id) }) {
                 HStack(spacing: 6) {
+                    // Solid (not `.secondary`) so folder glyphs stay legible over the
+                    // translucent panel material when bright photo content is behind it.
                     Image(systemName: icon(row))
-                        .foregroundStyle(row.isCurrent ? Color.accentColor : .secondary)
+                        .foregroundStyle(row.isCurrent ? Color.accentColor : .primary)
                         .frame(width: 16)
                     Text(row.name)
                         .lineLimit(1)
@@ -143,7 +138,7 @@ struct FolderTreePanelView: View {
             Button(action: { model.toggleTreeRow(row.id) }) {
                 Image(systemName: "chevron.right")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.primary)
                     .rotationEffect(.degrees(row.expanded ? 90 : 0))
                     .frame(width: 16, height: 16)
                     .contentShape(Rectangle())

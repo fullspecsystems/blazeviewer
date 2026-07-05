@@ -112,22 +112,8 @@ struct ContentView: View {
             // Native rich panels (task #54, mac-first) layer over the canvas here. The
             // core suppresses their HUD rasterization, so there's no double-draw; the
             // panel receives its own pointer/scroll (SwiftUI hit-tests it above the
-            // canvas) while the rest falls through to pan/zoom/nav. Help is the pilot.
-            .overlay {
-                if model.helpVisible {
-                    // GeometryReader gives the panel the window's available height so it
-                    // sizes to its content up to that, then scrolls; centered within.
-                    GeometryReader { geo in
-                        HelpPanelView(
-                            sections: model.helpSections,
-                            onClose: { model.closeHelp() },
-                            maxHeight: geo.size.height - 48
-                        )
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                    }
-                    .transition(.opacity)
-                }
-            }
+            // canvas) while the rest falls through to pan/zoom/nav.
+            //
             // The Inspector rides the top-trailing corner (parallel to the folder tree,
             // and top-anchored so switching tabs doesn't shift it). Help is mutually
             // exclusive with it in the core, so they never co-show. GeometryReader hands
@@ -157,6 +143,22 @@ struct ContentView: View {
                             )
                             .padding(.leading, 24)
                             .padding(.top, 24)
+                    }
+                    .transition(.opacity)
+                }
+            }
+            // Help last = topmost: it's an ephemeral reference sheet centered over the
+            // photo, so it should occlude the tree/inspector (which it overlaps) rather
+            // than slide under them.
+            .overlay {
+                if model.helpVisible {
+                    GeometryReader { geo in
+                        HelpPanelView(
+                            sections: model.helpSections,
+                            onClose: { model.closeHelp() },
+                            maxHeight: geo.size.height - 48
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                     }
                     .transition(.opacity)
                 }

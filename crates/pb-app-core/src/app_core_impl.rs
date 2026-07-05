@@ -1730,6 +1730,12 @@ impl AppCore {
         self.fs_tree.as_ref().map(|t| t.rows()).unwrap_or_default()
     }
 
+    /// The name of the Finder tree root's parent — the label for the "up to parent" row
+    /// (clicking it climbs a level). `None` at the filesystem root or when not built.
+    pub fn fs_tree_parent_name(&self) -> Option<String> {
+        self.fs_tree.as_ref().and_then(|t| t.parent_name())
+    }
+
     /// Build (or re-root) the resident tree for the current disk deck and mark the current
     /// folder. Kept persistent while the current folder stays under the tree root (so
     /// browsing/expansion survives photo navigation); re-rooted only when the deck opens

@@ -59,7 +59,7 @@ struct InspectorPanelView: View {
                 Spacer(minLength: 4)
                 Button(action: { model.closeInspector() }) {
                     Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.primary)
                         .imageScale(.large)
                 }
                 .buttonStyle(.plain)
@@ -105,6 +105,7 @@ struct InspectorPanelView: View {
                 .strokeBorder(.separator, lineWidth: 0.5)
         )
         .shadow(radius: 24, y: 8)
+        .arrowCursorOnHover()
     }
 
     /// A tab: icon + label, the selected one lifted with a translucent accent tint (a
@@ -112,14 +113,16 @@ struct InspectorPanelView: View {
     /// panel's material.
     private func tab(_ index: Int, _ label: String, _ icon: String) -> some View {
         let selected = model.inspectorTab == index
+        // Constant weight (no bold-on-select) so the tab doesn't resize when active — the
+        // accent color + pill carry the selection. Solid colors so labels/icons stay
+        // legible over the panel material with bright content behind it.
         return Button(action: { model.showInspectorTab(index) }) {
             HStack(spacing: 5) {
                 Image(systemName: icon)
                 Text(label)
             }
             .font(.callout)
-            .fontWeight(selected ? .semibold : .regular)
-            .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+            .foregroundStyle(selected ? Color.accentColor : Color.primary)
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
             .background {

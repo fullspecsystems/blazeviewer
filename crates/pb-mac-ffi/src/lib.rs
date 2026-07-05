@@ -384,6 +384,22 @@ impl AppCoreHandle {
     fn tree_refresh(&mut self) {
         let mut rows: Vec<TreeRowFfi> = Vec::new();
         if self.core.tree_is_fs() {
+            // A leading "up to <parent>" row (climbs a level on click), when not at the
+            // filesystem root — the in-list affordance replacing a header button.
+            if let Some(parent) = self.core.fs_tree_parent_name() {
+                rows.push(TreeRowFfi {
+                    name: parent,
+                    depth: 0,
+                    is_current: false,
+                    count: -1,
+                    has_children: false,
+                    expanded: false,
+                    loading: false,
+                    is_up: true,
+                    has_target: true,
+                    path: std::path::PathBuf::new(),
+                });
+            }
             for r in self.core.fs_tree_rows() {
                 rows.push(TreeRowFfi {
                     name: r.name,
@@ -483,11 +499,17 @@ impl AppCoreHandle {
             .unwrap_or(false)
     }
 
-    /// Open a row (a name click) — load its photos (Finder) or re-scope/open (v1).
+    /// Activate a row (a name click): the "up" row climbs a level; a Finder folder opens
+    /// (loads its photos); a v1 archive row re-scopes/opens.
     fn tree_activate(&mut self, i: usize) {
         self.core.now = Instant::now();
+        let Some(row) = self.tree_snapshot.get(i) else {
+            return;
+        };
         if self.core.tree_is_fs() {
-            if let Some(row) = self.tree_snapshot.get(i) {
+            if row.is_up {
+                self.core.fs_tree_extend_up();
+            } else {
                 let path = row.path.clone();
                 self.core.fs_tree_open(path);
             }
@@ -505,12 +527,6 @@ impl AppCoreHandle {
                 self.core.fs_tree_toggle(&path);
             }
         }
-    }
-
-    /// The up-affordance (Finder tree header): re-root one level higher.
-    fn tree_extend_up(&mut self) {
-        self.core.now = Instant::now();
-        self.core.fs_tree_extend_up();
     }
 
     /// A native menu item fired, by stable [`Action`] id (`"open_file"`, `"rotate_cw"`, …)
@@ -2387,7 +2403,6 @@ mod ffi {
         fn tree_row_has_target(&self, i: usize) -> bool;
         fn tree_activate(&mut self, i: usize);
         fn tree_toggle(&mut self, i: usize);
-        fn tree_extend_up(&mut self);
 
         // The NS2 dialog seam: payload pulls (after a ShowDialog marker), the
         // DialogResolved results (one entry point per user gesture), the live progress
