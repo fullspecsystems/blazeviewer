@@ -1742,15 +1742,22 @@ impl AppCoreHandle {
                     if generation != cur_gen {
                         continue;
                     }
+                    // Capture the scanned folder's name before dropping the handle — an empty
+                    // folder toasts with it (③) instead of the old blocking NSAlert.
+                    let scanned = self
+                        .dir_scan
+                        .as_ref()
+                        .map(|s| s.name.clone())
+                        .unwrap_or_default();
                     self.dir_scan = None;
                     let never_bootstrapped = !self.core.scan_bootstrapped;
                     self.core.handle(CoreEvent::ScanDone);
                     // Walk finished — drop the Scanning progress dialog (if it revealed).
                     self.close_dialog_kinds(&[contract::DialogKind::Scanning]);
                     if never_bootstrapped {
-                        self.core.effects.push(contract::CoreEffect::ReportError(
-                            "No supported images in that selection.".into(),
-                        ));
+                        // No images: keep whatever's on screen; a non-modal toast (never the
+                        // blocking alert) if a deck is already up (③ keep-deck-until-photos).
+                        self.core.scan_found_no_photos(&scanned);
                     }
                     return;
                 }

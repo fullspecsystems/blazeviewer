@@ -835,13 +835,22 @@ impl App {
                     if generation != cur_gen {
                         continue; // superseded
                     }
+                    // Capture the scanned folder's name before dropping the handle — an empty
+                    // folder toasts with it (③) instead of stranding / interrupting.
+                    let scanned = self
+                        .dir_scan
+                        .as_ref()
+                        .map(|s| s.name.clone())
+                        .unwrap_or_default();
                     self.dir_scan = None; // walk finished — drop the worker handle
                     let never_bootstrapped = !self.core.scan_bootstrapped;
                     // Core: resume normal prefetch + restore the open hint if the deck stayed empty.
                     self.core.handle(contract::CoreEvent::ScanDone);
                     self.close_scanning_dialog(); // walk finished — drop the progress dialog
                     if never_bootstrapped {
-                        eprintln!("PhotoBlaze: no supported images in that selection");
+                        // No images: keep whatever's on screen; a non-modal toast (never a
+                        // blocking alert) if a deck is already up (③ keep-deck-until-photos).
+                        self.core.scan_found_no_photos(&scanned);
                     }
                     return;
                 }

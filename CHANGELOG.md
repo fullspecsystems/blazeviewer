@@ -117,6 +117,10 @@ with any pre-release suffix carried only by the tag.
   All EXIF Info** — both can be checked at once.
 
 ### Fixed
+- **Opening a folder with no photos no longer interrupts you with a modal alert.** On macOS,
+  opening an empty folder popped a blocking "No supported images" dialog you had to dismiss.
+  Now it keeps the photos you were already viewing and shows a brief "No photos in *Foo*"
+  toast instead — a mis-click into an empty or deep folder never interrupts browsing.
 - **Open Parent (⌘↑, or `P`) now climbs one level at a time from the folder you're viewing.**
   It went up from the folder you originally *opened*, so after a recursive open it jumped
   toward `/Users` or `/`. It also used to **get stuck**: when a parent had no photos of its

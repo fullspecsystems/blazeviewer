@@ -818,6 +818,24 @@ impl AppCore {
         self.request_prefetch();
     }
 
+    /// The just-finished folder scan found **no** supported images. If a deck is already on
+    /// screen, keep it untouched and surface a non-modal **toast** — never a blocking alert
+    /// (③ keep-deck-until-photos, owner 2026-07-05): a mis-click into an empty or deep folder
+    /// shouldn't interrupt browsing. With nothing loaded (a bare launch onto an empty folder),
+    /// [`finish_scan`](Self::finish_scan) restores the "Press O to open" hint, so stay quiet
+    /// here. Called by each shell's scan-`Done` arm in place of the old stderr log / NSAlert.
+    pub fn scan_found_no_photos(&mut self, folder_name: &str) {
+        if self.source.is_empty() {
+            return; // the open hint (via finish_scan) covers the nothing-loaded case
+        }
+        let name = if folder_name.is_empty() {
+            "that folder"
+        } else {
+            folder_name
+        };
+        self.show_toast(&format!("No photos in \u{201c}{name}\u{201d}"));
+    }
+
     /// Install a resolved archive playlist ([`CoreEvent::ArchiveResolved`], NS0 5.6 Step 3): the
     /// open succeeded with a non-empty deck, so rebuild the playlist onto it and forget any pending
     /// password. The host closes the loading/password dialog (like the scan's Done); the failure
