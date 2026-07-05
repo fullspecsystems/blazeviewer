@@ -41,6 +41,8 @@ struct InspectorPanelView: View {
     let maxWidth: CGFloat
 
     @State private var contentHeight: CGFloat = 0
+    /// The copy button briefly swaps to a checkmark to confirm the copy landed.
+    @State private var copied = false
 
     /// Tab bar + groove — subtracted from `maxHeight` for the scroll budget.
     private let chromeHeight: CGFloat = 54
@@ -66,14 +68,18 @@ struct InspectorPanelView: View {
                 .padding(2)
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
                 // Copy the whole active tab (details / text / description) — one consistent
-                // action across all three, so you never have to hand-select the text.
-                Button(action: { model.copyInspectorTab() }) {
-                    Image(systemName: "doc.on.doc")
-                        .foregroundStyle(Color.panelSecondary)
+                // action across all three, so you never have to hand-select the text. It
+                // swaps to a checkmark for ~1s so you can see the copy landed (a clearer,
+                // in-place confirmation than the HUD toast).
+                Button(action: { copyTab() }) {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                        .foregroundStyle(copied ? Color.green : Color.panelSecondary)
                         .imageScale(.medium)
+                        .contentTransition(.symbolEffect(.replace))
                 }
                 .buttonStyle(.plain)
                 .help(model.inspectorCopyLabel)
+                .disabled(copied)
                 Button(action: { model.closeInspector() }) {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundStyle(Color.panelSecondary)
@@ -158,6 +164,15 @@ struct InspectorPanelView: View {
             .contentShape(RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.plain)
+    }
+
+    /// Copy the active tab, then flip the button to a checkmark for ~1s as confirmation.
+    private func copyTab() {
+        model.copyInspectorTab()
+        withAnimation(.easeInOut(duration: 0.2)) { copied = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            withAnimation(.easeInOut(duration: 0.25)) { copied = false }
+        }
     }
 
     @ViewBuilder
