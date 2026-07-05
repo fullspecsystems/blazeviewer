@@ -1160,10 +1160,15 @@ impl AppCore {
                 }
                 Ok(crate::folder_tree::TreeIoResult::Sibling { from_root, target }) => {
                     self.tree_io = None;
-                    if from_root != self.root {
-                        // The deck moved on while the probe ran (it can take
-                        // seconds on a slow share) — a stale result must not
-                        // yank navigation somewhere the user already left.
+                    // The probe is anchored on the folder the search started from (the
+                    // current photo's folder, or the deck root when there's none). If the
+                    // user has since navigated to a different folder, the result is stale —
+                    // it must not yank navigation somewhere they already left.
+                    let anchor = self
+                        .current_folder_abs()
+                        .unwrap_or_else(|| self.root.clone());
+                    if from_root != anchor {
+                        // Stale — the folder moved on while the probe ran.
                     } else if let Some(d) = target {
                         self.open_dir(d);
                     } else {
@@ -2062,11 +2067,59 @@ impl AppCore {
         if self.source.container().is_some() {
             return;
         }
-        let root = self.root.clone();
-        if root.as_os_str().is_empty() {
+        // Prefer an in-deck jump to the adjacent sibling folder's first photo — instant,
+        // no re-scan, and it can never hit "No photos" (only folders that are in the deck,
+        // which by definition have photos). The common recursive-library case: the deck
+        // spans the current folder's peers, so ⌘←/→ flows between them.
+        if let Some(idx) = self.adjacent_sibling_item(dir) {
+            self.stop_playback();
+            self.playlist.jump_to(idx);
+            self.target_item = self.playlist.current();
+            self.try_present_target();
+            self.request_prefetch();
             return;
         }
-        self.tree_io = Some(crate::folder_tree::spawn_sibling(root, dir));
+        // No sibling with photos in the deck that way — search the disk for the current
+        // folder's adjacent sibling *with photos* (a single-folder deck opens the next
+        // folder; the recursive-deck edge finds nothing and toasts). Anchored on the
+        // current photo's folder, **not the deck root** — so it steps the peer you see in
+        // the tree, never a sibling of some far-up opened root (the old bug).
+        let anchor = self
+            .current_folder_abs()
+            .unwrap_or_else(|| self.root.clone());
+        if anchor.as_os_str().is_empty() {
+            return;
+        }
+        self.tree_io = Some(crate::folder_tree::spawn_sibling(anchor, dir));
+    }
+
+    /// The source index of the first photo in the adjacent (±`dir`) **in-deck** sibling
+    /// folder of the current photo's folder, or `None` when there's no such folder that
+    /// way (the row's end, or a single-folder deck). Pure, RAM-only — no disk I/O; the
+    /// sibling set + sort mirror what the folder tree shows.
+    fn adjacent_sibling_item(&self, dir: i32) -> Option<usize> {
+        let current = self.current_folder_abs()?;
+        let parent = current.parent()?;
+        let mut sibs: Vec<PathBuf> = Vec::new();
+        for i in 0..self.source.len() {
+            if let Some(folder) = self.source.path(i).and_then(Path::parent) {
+                if folder.parent() == Some(parent) && !sibs.iter().any(|s| s == folder) {
+                    sibs.push(folder.to_path_buf());
+                }
+            }
+        }
+        let key = |p: &Path| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().to_lowercase())
+                .unwrap_or_default()
+        };
+        sibs.sort_by(|a, b| key(a).cmp(&key(b)).then_with(|| a.cmp(b)));
+        let pos = sibs.iter().position(|p| *p == current)?;
+        let target = sibs
+            .get(usize::try_from(pos as i64 + dir as i64).ok()?)?
+            .clone();
+        (0..self.source.len())
+            .find(|&i| self.source.path(i).and_then(Path::parent) == Some(target.as_path()))
     }
 
     /// Apply the keymap edited in the Settings dialog: swap it in live (every keypress
@@ -6447,6 +6500,41 @@ mod tests {
         let target = root.join("next-door");
         feed(&mut core, root, Some(target));
         assert!(opened_dir(&core), "a found sibling opens as a dir scan");
+    }
+
+    #[test]
+    fn cmd_folder_jumps_within_the_deck_between_sibling_folders() {
+        let mut core = test_core();
+        let base = std::env::temp_dir().join("pb_sibling_jump");
+        let paths = vec![
+            base.join("alpha/1.png"),
+            base.join("alpha/2.png"),
+            base.join("bravo/3.png"),
+            base.join("charlie/4.png"),
+        ];
+        let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(paths));
+        core.rebuild_playlist(source, base.clone(), Some(base.clone()), true, 0);
+        assert_eq!(core.current_folder_abs(), Some(base.join("alpha")));
+        // ⌘→ jumps within the deck to bravo's first photo — no disk worker, no re-scan.
+        core.effects.clear();
+        core.open_sibling_cmd(1);
+        assert_eq!(core.target_item, Some(2), "jumped to bravo/3.png");
+        assert!(core.tree_io.is_none(), "in-deck jump uses no disk worker");
+        assert!(
+            !core
+                .effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::BeginDirScan { .. })),
+            "an in-deck jump never re-roots the deck"
+        );
+        // The photo lands; ⌘→ again steps to charlie, and ⌘← steps back to bravo.
+        core.displayed_item = Some(2);
+        core.open_sibling_cmd(1);
+        assert_eq!(core.target_item, Some(3), "→ charlie/4.png");
+        core.displayed_item = Some(3);
+        core.open_sibling_cmd(-1);
+        assert_eq!(core.target_item, Some(2), "⌘← back to bravo");
+        assert!(core.tree_io.is_none());
     }
 
     #[test]

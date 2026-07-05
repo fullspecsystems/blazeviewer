@@ -110,6 +110,12 @@ with any pre-release suffix carried only by the tag.
   All EXIF Info** — both can be checked at once.
 
 ### Fixed
+- **Previous/next folder (⌘← / ⌘→, Alt+← / →) now steps the folder you're actually in.**
+  It anchored on the *opened* folder, so after a recursive open it jumped to a sibling of
+  that far-up root — a seemingly random subtree. Now it moves within the current deck to
+  the previous/next **peer** folder's first photo: instant, no re-scan, and it skips
+  folders with no photos so you never dead-end. (A single-folder deck still opens the next
+  folder on disk.)
 - Pressing **I**, then **⇧I**, then **I** again now does what you'd expect (turns the
   one-line readout off) instead of appearing to do nothing — the line and the detailed
   panel are no longer entangled.
