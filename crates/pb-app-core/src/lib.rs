@@ -31,6 +31,7 @@ pub mod delete;
 pub mod describe;
 pub mod engine;
 pub mod folder_tree;
+pub mod fs_tree;
 pub mod image_text;
 pub mod keymap;
 pub mod meta;
