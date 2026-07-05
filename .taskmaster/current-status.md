@@ -1,65 +1,61 @@
 # PhotoBlaze — Current Status (session handoff)
 
-_Last updated: 2026-07-05 (overnight). **Task #54 (ADR-023 rich-panel migration,
-mac-first): three native panels landed this session — welcome / Inspector / folder tree.**
-All build + 548 tests + clippy clean + Swift host builds. **NOT yet owner-smoked** (I can't
-run the macOS GUI) — please smoke, then refine._
+_Last updated: 2026-07-05. **Task #54 (ADR-023 rich-panel migration, mac-first).** Five
+native pieces landed + a folder-tree redesign started. All green: 554 tests, clippy clean,
+Swift host builds. Owner smoked the panels live and is iterating on the tree._
 
-## What landed this session (all on `main`, pushed)
+## Landed this session (all on `main`, pushed)
 
-Every panel uses the same seam as the Help pilot: a `native_*` flag → the core suppresses
-that panel's HUD rasterization → emits `CoreEffect::PanelsChanged` on change → the SwiftUI
-host re-pulls via indexed FFI accessors (no `Vec<struct>` returns).
+1. **Welcome surface** (`2585b33`) — native empty-state (equal-width Open buttons w/ keycaps,
+   drag hint, reference keys, Show Shortcuts). Fixed the cursor-through-panel glitch.
+2. **AI-settings auto-list** (`abd9528`) — owner's parallel work, committed separately.
+3. **Native Inspector** (`53a553b`, redesigned in `f1cbac5`) — Details/Text/Describe as one
+   panel, **top-right**; **icon+label tab bar** (translucent accent tint, no solid segmented
+   track), inline **✕**, selectable values, **Markdown** for Describe. Live-updates on async
+   OCR/describe via a per-tick `InspectorSnapshot` diff.
+4. **Native folder tree v1** (`8b6d5bc`) — ⇧F tree as a native scrolling list + **✕** close.
+   (Being replaced by the Finder redesign below.)
 
-1. **Welcome surface** (`EmptyStateView`, commit `2585b33`) — equal-width Open File / Open
-   Folder buttons (right-aligned keycaps), drag-and-drop hint, Next/Prev/Random reference
-   keys, Show Shortcuts link. Fixed the cursor-through-panel glitch by construction.
-2. **Inspector** (`InspectorPanelView`, commit `53a553b`) — Details / Text / Describe as one
-   tabbed panel on the **trailing** edge. Segmented tab bar, selectable values, ✕ close.
-   `native_inspector` + a per-tick `InspectorSnapshot` diff re-signals on **async** OCR /
-   describe results, so the open panel updates in place. Tab clicks = `open_inspector`
-   (never toggle-closed); the tick kicks the active tab's scan (OCR for Text; auto-describe
-   only when the setting is on).
-3. **Folder tree** (`FolderTreePanelView`, commit `8b6d5bc`) — ⇧F tree as a native list on
-   the **leading** edge: depth-indented rows, folder icons, count badges, current folder
-   highlighted, **scrolls** (no HUD "… n more" paging). `native_tree` makes
-   `push_folder_tree` store rows/targets + emit instead of rasterizing — reusing the
-   existing derivation + navigation untouched. `tree_activate(i)` drives a row click.
+## In progress: Finder-style folder browser (owner design 2026-07-05)
 
-## Please smoke (in priority order)
+**The problem with v1:** it's an auto-derived "where am I" path — folds deep ancestors into a
+dead "…" row, re-derives per photo, and couples browsing to loading (a click re-roots the
+deck). Owner wants a real **Finder tree**: expand/collapse chevrons, siblings at every level,
+browsing decoupled from loading.
 
-- **Inspector:** ⇧I (Details table), **T** (Text → OCR should populate in place when the
-  scan finishes), **D** (Describe). Tab-bar clicks switch facets; ✕ closes; values are
-  selectable (⌘C copies the selection). Switch photos with it open — it should track.
-- **Folder tree:** ⇧F. Click folders to navigate; current folder highlighted + badged;
-  long folders scroll. Try an archive (re-scope) if handy.
-- **Esc still quits** from all of these (panels never trap it); **Tab** hides/shows panels.
+**Aligned design:**
+- **Navigate ≠ load.** Chevron = expand/collapse (read_dir, no scan). Folder-name click =
+  open (load photos). So you can browse photo-less folders to find one.
+- **Persistent, incremental, RAM-only tree** — kept resident, updated as you navigate (no
+  per-photo re-walk). Privacy-clean (paths + counts in memory like `meta_cache`, never written).
+- **No jail:** up-affordance (real parent, `arrow.up.folder`, not "…") + expand anywhere.
+- **Stuck-proofing:** ① keep the current deck alive until the newly-opened folder yields its
+  first photo (mis-click into an empty/deep folder never strands you); ② off-thread read_dir
+  (a slow share never freezes a chevron); ③ the ambient cancellable scan pill.
 
-## Known limitations / things to refine (honest list)
+**Increments** (① done):
+- **① Resident model — DONE** (`7acc91c`): `pb-app-core/src/fs_tree.rs` — pure `FsTree`
+  (nodes: expanded / lazy children / count; `rows()` flatten; `set_current` reveal+mark;
+  `extend_root_up`). Shell does read_dir off-thread → `set_children`. 6 tests. Shell-neutral
+  (Windows egui reuses it).
+- **② Wire behind the native path** — core owns an `FsTree`; tick kicks off-thread read_dir
+  for `needs_children` folders + installs results; `set_current` on folder change; FFI
+  `tree_toggle`/`tree_open`/`tree_extend_up` + row accessors incl. `has_children`/`expanded`/
+  `depth`; SwiftUI outline (chevrons, indent, current highlight). Replaces the v1 native tree
+  (keep winit HUD on the old `folder_tree.rs` derivation until the egui track).
+- **③ Keep-deck-until-photos** — open a folder without tearing down the current deck until
+  the new scan's first frame; empty → "No photos in *Foo*" toast, deck intact.
+- **④ Ambient scan pill** — the folder/archive open scan becomes a non-blocking top-center
+  SwiftUI element with a Cancel (owner: not a blocking modal — browse while it scans).
 
-- **Pointer-gating not done** (same class as the old Help cursor bug): the panels hit-test
-  **clicks** above the canvas, but `mouseMoved` may still reach the canvas underneath, so
-  hovering a panel over a zoomed photo could show the grab cursor / drive hover. Clicks on
-  panel buttons *should* be consumed by SwiftUI, but **verify a tree/inspector click doesn't
-  also pan the photo** — if it does, that's the gating work (presenter reports its frame;
-  canvas suppresses pointer inside it). This is the top follow-up.
-- **Placement is provisional** — Inspector trailing, tree leading, both floating cards.
-  Drag-to-move + position persistence is a later slice (owner decision: persist positions).
-- **Inspector on an empty deck**: opening it with no photo shows "Nothing to show" and can
-  overlap the welcome surface — unlikely, unhandled; easy to gate on `current` if it bugs.
-- **No ⌘C-copy-all** in the Inspector yet (values are individually selectable). The
-  `DetailsPanel::copy_text` / `DescribePanel::copy_text` payloads exist for a copy button.
-- **Details rebuilds `exif_rows()` each tick** while open (for the change diff) — cache-only,
-  bounded, but could be signature-gated if it shows on a profile.
+## Known follow-ups / smoke notes
 
-## Next (priority order)
+- **Pointer-gating** still not done (panels hit-test clicks but `mouseMoved` may reach the
+  canvas underneath) — verify a tree/tab click doesn't also pan the photo. Top non-tree task.
+- Current-folder icon is `folder.fill` (SF has no open-folder glyph) — vendor FA `folder-open`
+  if the literal look is wanted.
+- Inspector Markdown uses inline-only syntax (bold/italic/links + paragraph breaks); block
+  lists/headings aren't styled yet.
 
-1. **Pointer-gating** for the native panels (canvas suppresses pointer inside a presenter's
-   reported frame) — makes hovering/clicking panels not leak to the photo.
-2. **Drag-to-move + position persistence** (shared panel chrome; `settings.panel_pos_*`
-   already exist).
-3. **Windows egui parity** for the three panels (the winit shell still uses the HUD).
-4. **Replay harness** (finishes Phase 1 perf validation).
-
-Plan: `.taskmaster/docs/hud-panels-plan.md`. Seam reference: `native_help`/`native_open`/
-`native_inspector`/`native_tree` in `app_core.rs`; FFI accessors in `pb-mac-ffi/src/lib.rs`.
+Plan: `.taskmaster/docs/hud-panels-plan.md` + `folder-tree-plan.md`. Seam refs:
+`native_*` flags in `app_core.rs`; FFI in `pb-mac-ffi/src/lib.rs`; new model in `fs_tree.rs`.
