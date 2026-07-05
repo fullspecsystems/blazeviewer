@@ -381,6 +381,9 @@ pub struct AppCore {
     /// (`toast_native`) for the shell to render natively (macOS SwiftUI pill). The winit shell
     /// leaves this false and keeps the CPU-composited toast.
     pub native_toast: bool,
+    /// When set, the one-line **info readout** (`i`) is not rasterized to the HUD — the shell
+    /// draws it natively (macOS SwiftUI). The core still owns the toggle state + content string.
+    pub native_info: bool,
     /// The current native toast's data (message + icon + timing), when `native_toast`.
     pub toast_native: Option<crate::overlay::NativeToast>,
     /// Monotonic toast counter — the shell keys its entrance animation off it, so an identical

@@ -62,6 +62,12 @@ final class CoreModel {
     private(set) var toastIcon = 0
     private(set) var toastSeq: UInt64 = 0
 
+    /// The one-line info readout (`i`) — the last HUD element to go native. `rel · W×H ·
+    /// CODEC[· Live]`, in a small bottom-corner pill; `align` is 0 left / 1 center / 2 right.
+    private(set) var infoLineVisible = false
+    private(set) var infoLineText = ""
+    private(set) var infoLineAlign = 2
+
     // MARK: - Native rich panels (task #54, mac-first) — the first is Help
 
     /// Whether the native SwiftUI Help panel should show, and its sections — refreshed
@@ -535,7 +541,7 @@ final class CoreModel {
     /// which writes the clipboard and shows the confirming toast.
     func copyInspectorTab() {
         switch inspectorTab {
-        case 1: menuAction("copy_image_text")
+        case 1: menuAction("copy_text")  // Action::CopyImageText's id is "copy_text"
         case 2: menuAction("copy_description")
         default: menuAction("copy_image_details")
         }
@@ -1093,6 +1099,15 @@ final class CoreModel {
         }
         if toastVis != toastVisible {
             toastVisible = toastVis
+        }
+        // The native one-line info readout.
+        let infoVis = core.info_line_visible()
+        if infoVis {
+            infoLineText = core.info_line_text().toString()
+            infoLineAlign = Int(core.info_line_align())
+        }
+        if infoVis != infoLineVisible {
+            infoLineVisible = infoVis
         }
         updatePacing()
     }
@@ -1758,13 +1773,9 @@ final class CoreModel {
         if !text.isEmpty {
             pb.clearContents()
             pb.setString(text, forType: .string)
-            let toastMsg =
-                !coreToast.isEmpty
-                ? coreToast
-                : (text.contains("\n")
-                    ? "Copied to clipboard"
-                    : "Copied \u{201c}\((text as NSString).lastPathComponent)\u{201d}")
-            toast(toastMsg)
+            // Every text copy now carries its own specific toast (details / text / path /
+            // description); this is just a safety net for any that doesn't.
+            toast(coreToast.isEmpty ? "Copied to clipboard" : coreToast)
             return
         }
         let w = Int(core.clipboard_image_width())

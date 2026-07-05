@@ -162,6 +162,7 @@ impl AppCoreHandle {
         core.native_inspector = true;
         core.native_tree = true;
         core.native_toast = true;
+        core.native_info = true;
         AppCoreHandle {
             core,
             dir_scan: None,
@@ -1055,6 +1056,29 @@ impl AppCoreHandle {
     /// so an identical message firing twice still re-animates.
     fn toast_seq(&self) -> u64 {
         self.core.toast_native.as_ref().map(|t| t.seq).unwrap_or(0)
+    }
+
+    // ── The native one-line info readout (`i`): the last HUD element to go native. The core
+    // owns the toggle + the content; the host draws a small bottom-corner SwiftUI pill. ──
+
+    /// Whether the info line should show (`i` on + a photo loaded).
+    fn info_line_visible(&self) -> bool {
+        self.core.info_line_visible()
+    }
+
+    /// The readout text: `rel · W×H · CODEC[· Live]`.
+    fn info_line_text(&self) -> String {
+        self.core.info_line_content().unwrap_or_default()
+    }
+
+    /// Horizontal placement from Settings: 0 = left, 1 = center, 2 = right (default).
+    fn info_line_align(&self) -> u8 {
+        use pb_app_core::settings::InfoLineAlign;
+        match self.core.settings.info_line_align {
+            InfoLineAlign::Left => 0,
+            InfoLineAlign::Center => 1,
+            InfoLineAlign::Right => 2,
+        }
     }
 
     /// The current settings as the flat form the Settings window binds to (NS2 item 5).
@@ -2524,6 +2548,9 @@ mod ffi {
         fn toast_message(&self) -> String;
         fn toast_icon(&self) -> u8;
         fn toast_seq(&self) -> u64;
+        fn info_line_visible(&self) -> bool;
+        fn info_line_text(&self) -> String;
+        fn info_line_align(&self) -> u8;
         fn settings_form(&self) -> SettingsFormFfi;
         fn settings_edited(&mut self, form: SettingsFormFfi);
 

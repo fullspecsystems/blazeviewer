@@ -164,6 +164,7 @@ impl AppCore {
             overlay_item: None,
             toast: None,
             native_toast: false,
+            native_info: false,
             toast_native: None,
             toast_seq: 0,
             wait_started: None,
@@ -3429,19 +3430,40 @@ impl AppCore {
     /// at the configured alignment, then re-place any colliding panel/tree/toast above
     /// it. A no-op without a font/photo (the tick retries on settle). Mirrors
     /// [`show_overlay`](Self::show_overlay) but for the ephemeral line.
+    /// The one-line info readout's text — `rel · W×H · CODEC[· Live]` — or `None` with no
+    /// photo. Shared by the HUD rasterizer and the native (macOS) shell, so both read the same.
+    pub fn info_line_content(&self) -> Option<String> {
+        let meta = self.current.as_ref()?;
+        let is_live = self.displayed_item.is_some_and(|i| self.is_live_photo(i));
+        let mut text = format!("{} · {}×{} · {}", meta.rel, meta.w, meta.h, meta.codec);
+        if is_live {
+            text.push_str(" · Live"); // a Live Photo's motion is playable (P)
+        }
+        Some(text)
+    }
+
+    /// Whether the native info readout should show: toggled on (`i`) with a photo loaded.
+    pub fn info_line_visible(&self) -> bool {
+        self.info_line && self.current.is_some()
+    }
+
     pub fn show_info_line(&mut self) {
-        let (Some(hud), Some(meta)) = (self.hud.as_ref(), self.current.as_ref()) else {
+        // Native shell draws the line — just track the toggle state; no HUD raster / colliders.
+        if self.native_info {
+            self.info_line_shown = self.current.is_some();
+            self.info_line_item = self.displayed_item;
+            return;
+        }
+        let Some(hud) = self.hud.as_ref() else {
+            return;
+        };
+        let Some(text) = self.info_line_content() else {
             return;
         };
         let px = (15.0 * self.viewport.scale_factor).max(8.0);
         let pad = (7.0 * self.viewport.scale_factor).round().max(2.0) as u32;
         let theme = hud.theme();
         let info_bg = theme.bg_for_opacity(self.settings.info_opacity);
-        let is_live = self.displayed_item.is_some_and(|i| self.is_live_photo(i));
-        let mut text = format!("{} · {}×{} · {}", meta.rel, meta.w, meta.h, meta.codec);
-        if is_live {
-            text.push_str(" · Live"); // a Live Photo's motion is playable (P)
-        }
         let Some((bitmap, w, h)) = hud.render_panel(&text, px, pad, info_bg) else {
             return;
         };
@@ -3459,6 +3481,12 @@ impl AppCore {
 
     /// Clear the info-line layer and drop any reservation it was causing.
     pub fn hide_info_line(&mut self) {
+        // Native shell: nothing to tear down — just clear the tracking state.
+        if self.native_info {
+            self.info_line_shown = false;
+            self.info_line_item = None;
+            return;
+        }
         if let Some(a) = self.renderer.as_mut() {
             a.set_info_line(None, 0, pb_render::HAlign::Right);
         }
@@ -3911,10 +3939,13 @@ impl AppCore {
             Some(p) => p.to_string_lossy().into_owned(),
             None => self.source.name(item).to_string(),
         };
-        // The shell writes the text and reports the success/failure toast (it can recover
-        // the file name from `text` for the "Copied …" message).
+        // A specific toast: it copies the **full path**, so "Copied file path" (not the bare
+        // file name the shell's single-line fallback would show, which read as a name copy).
         self.effects.push(contract::CoreEffect::WriteClipboard(
-            contract::ClipboardPayload::Text { text, toast: None },
+            contract::ClipboardPayload::Text {
+                text,
+                toast: Some("Copied file path".to_string()),
+            },
         ));
     }
 

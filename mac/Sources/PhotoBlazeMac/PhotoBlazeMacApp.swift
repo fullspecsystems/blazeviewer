@@ -167,6 +167,16 @@ struct ContentView: View {
                 }
             }
             .animation(.easeInOut(duration: 0.2), value: model.scanPillVisible)
+            // The native one-line info readout (`i`), in the bottom corner the Settings
+            // alignment picks (right by default). Non-interactive; the toast rides above it.
+            .overlay(alignment: infoLineAlignment(model.infoLineAlign)) {
+                if model.infoLineVisible {
+                    InfoLineView(model: model)
+                        .padding(.horizontal, 18)
+                        .padding(.bottom, 16)
+                        .allowsHitTesting(false)
+                }
+            }
             // The unified native toast rides the bottom-center, above where the info line
             // sits, and topmost so transient feedback (copy, rotate, "Scan stopped", …) is
             // never occluded by a panel. Non-interactive; it fades itself out.
@@ -230,5 +240,15 @@ struct ContentView: View {
                 case .scanning: ScanningSheetView(model: model)
                 }
             }
+    }
+}
+
+/// Bottom-corner placement for the native info line, from the Settings alignment
+/// (0 = left, 1 = center, 2 = right — the default).
+private func infoLineAlignment(_ align: Int) -> Alignment {
+    switch align {
+    case 0: return .bottomLeading
+    case 1: return .bottom
+    default: return .bottomTrailing
     }
 }
