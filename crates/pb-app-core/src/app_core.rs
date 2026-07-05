@@ -39,6 +39,17 @@ use crate::{Action, Modifiers, PbKey, PhotoMeta, Slideshow};
 /// `disk_counts` keyed by absolute folder path.
 pub type FolderCounts = (PathBuf, usize, Arc<HashMap<PathBuf, u64>>);
 
+/// The [`FsTree`](crate::fs_tree::FsTree)'s off-thread `read_dir` plumbing: the channel a
+/// short-lived worker sends `(folder, subfolders)` back on (polled by `tick`) and the set
+/// of folders whose read is in flight (so we don't re-kick). The `read_dir` runs off the
+/// event loop so a dead share can't freeze a chevron. (The tree re-roots when the current
+/// folder falls outside its root — no stored basis needed.)
+pub struct FsTreeIo {
+    pub tx: std::sync::mpsc::Sender<(PathBuf, Vec<PathBuf>)>,
+    pub rx: Receiver<(PathBuf, Vec<PathBuf>)>,
+    pub pending: HashSet<PathBuf>,
+}
+
 /// An archive deck's scoping state: the full source as opened, and the
 /// forward-slashed internal-folder prefix the deck is currently scoped to
 /// (`""` = the whole archive). The ⇧F tree's archive rows and the Go commands
@@ -412,6 +423,15 @@ pub struct AppCore {
     /// while it runs; a new job supersedes the old by dropping its receiver.
     /// (`pub` only because the shells build `AppCore` as a struct literal.)
     pub tree_io: Option<crate::folder_tree::TreeIo>,
+    /// The **Finder-style** resident folder browser (task #54, native path only): a
+    /// persistent, lazily-populated [`FsTree`](crate::fs_tree::FsTree) that decouples
+    /// browsing (expand/collapse) from loading photos, built for disk decks when
+    /// `native_tree` is set. RAM-only. `None` for archive/empty decks (they keep the v1
+    /// [`folder_tree_panel`](Self::folder_tree_panel)) and for the winit shell.
+    pub fs_tree: Option<crate::fs_tree::FsTree>,
+    /// The `FsTree`'s off-thread `read_dir` channel + in-flight set + the deck root it was
+    /// built for (a change re-roots it). Created with the tree; dropped when it clears.
+    pub fs_tree_io: Option<FsTreeIo>,
 
     // --- Rendering (NS0 5.4) ---
     /// The HUD text/overlay compositor (`pb-hud`), or `None` if no system font was found.

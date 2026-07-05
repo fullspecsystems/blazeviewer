@@ -66,6 +66,9 @@ final class CoreModel {
     /// A native list scrolls, so every derived row shows (no HUD paging).
     private(set) var treeVisible = false
     private(set) var treeRows: [FolderTreeRow] = []
+    /// Whether the Finder tree (chevron expand/collapse, name-to-open) is active — else
+    /// the flat v1 archive tree (click-to-activate). Drives the row rendering + actions.
+    private(set) var treeUsesFs = false
     /// An NSAlert sheet (confirm/message) is up — gates the key monitor like `panelOpen`.
     @ObservationIgnored private var alertUp = false
     /// Opens the SwiftUI Settings scene — injected by the root view (`openSettings` is an
@@ -506,6 +509,8 @@ final class CoreModel {
             treeRows = []
             return
         }
+        treeUsesFs = core.tree_uses_fs()
+        core.tree_refresh()
         let n = Int(core.tree_row_count())
         var rows: [FolderTreeRow] = []
         rows.reserveCapacity(n)
@@ -518,6 +523,9 @@ final class CoreModel {
                     name: core.tree_row_name(idx).toString(),
                     isCurrent: core.tree_row_is_current(idx),
                     isUp: core.tree_row_is_up(idx),
+                    hasChildren: core.tree_row_has_children(idx),
+                    expanded: core.tree_row_expanded(idx),
+                    loading: core.tree_row_loading(idx),
                     count: Int(core.tree_row_count_badge(idx)),
                     hasTarget: core.tree_row_has_target(idx)
                 ))
@@ -525,9 +533,21 @@ final class CoreModel {
         treeRows = rows
     }
 
-    /// Activate a folder-tree row (a list click): open the folder / re-scope the archive.
+    /// Open a folder-tree row (a name click): load its photos / re-scope the archive.
     func activateTreeRow(_ i: Int) {
         core.tree_activate(UInt(i))
+        kick()
+    }
+
+    /// Toggle a Finder-tree row's expansion (the chevron) — browsing only, no photo load.
+    func toggleTreeRow(_ i: Int) {
+        core.tree_toggle(UInt(i))
+        kick()
+    }
+
+    /// The Finder tree's up-affordance: re-root one level higher.
+    func extendTreeUp() {
+        core.tree_extend_up()
         kick()
     }
 

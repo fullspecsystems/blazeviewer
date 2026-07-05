@@ -180,6 +180,8 @@ impl AppCore {
             folder_tree_sig: None,
             folder_tree_panel: None,
             folder_tree_counts: None,
+            fs_tree: None,
+            fs_tree_io: None,
             tree_io: None,
             hud: None,
             renderer: None,
@@ -246,6 +248,12 @@ impl AppCore {
             // A tree-io job (the folder tree's read_dir derivation / a Go sibling
             // lookup) keeps the loop polling so `tick` installs it when it lands.
             || self.tree_io.is_some()
+            // An off-thread Finder-tree read_dir (expand / reveal) keeps the loop
+            // polling so `drive_fs_tree` installs its children promptly.
+            || self
+                .fs_tree_io
+                .as_ref()
+                .is_some_and(|io| !io.pending.is_empty())
             // An off-thread text scan (OCR + QR, task #45) keeps polling so
             // `poll_text_scan` picks up the result promptly.
             || self.text_scan.is_some()
@@ -1102,8 +1110,22 @@ impl AppCore {
             }
         }
         if self.native_tree {
-            // Visibility (open/close, Tab-hide) — content changes are signalled by
-            // `push_folder_tree` as the folder is navigated.
+            if self.tree_panel_visible() {
+                if self.tree_is_fs() {
+                    // Disk deck → the resident Finder tree drives itself (off-thread reads,
+                    // reveal, expansion). Content changes signal via `drive_fs_tree`.
+                    self.drive_fs_tree();
+                } else if !self.scanning {
+                    // A settled archive/empty deck → drop any resident tree so the v1
+                    // `folder_tree_panel` path (below) owns the display. During a scan
+                    // (`displayed_item` momentarily gone as a new folder opens) we hold the
+                    // tree so its expansion survives the open, then `drive_fs_tree` reveals
+                    // the newly-landed folder in place.
+                    self.fs_tree = None;
+                    self.fs_tree_io = None;
+                }
+            }
+            // Visibility (open/close, Tab-hide).
             let vis = self.tree_panel_visible();
             if vis != self.last_tree_visible {
                 self.last_tree_visible = vis;
@@ -1155,7 +1177,10 @@ impl AppCore {
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => self.tree_io = None,
             }
         }
-        if self.panels.tree_visible(self.folder_tree_open) && self.hud.is_some() {
+        if self.panels.tree_visible(self.folder_tree_open)
+            && self.hud.is_some()
+            && !self.tree_is_fs()
+        {
             let sig = self.folder_sig();
             let lite_sig = format!("{sig}|lite");
             let stored = self.folder_tree_sig.as_deref();
@@ -1499,8 +1524,12 @@ impl AppCore {
     fn show_folder_tree_mode(&mut self, lite: bool) {
         // Check the cheap gates before deriving rows, so a font-less host doesn't
         // pay the derivation on every retry tick. A Tab-hidden tree derives nothing
-        // either — reveal forces the rebuild via the cleared signature.
-        if self.hud.is_none() || !self.panels.tree_visible(self.folder_tree_open) {
+        // either — reveal forces the rebuild via the cleared signature. A disk deck on
+        // the native host uses the resident Finder tree (`drive_fs_tree`), not this.
+        if self.hud.is_none()
+            || !self.panels.tree_visible(self.folder_tree_open)
+            || self.tree_is_fs()
+        {
             return;
         }
         let sig = self.folder_sig();
@@ -1677,6 +1706,162 @@ impl AppCore {
             Some(crate::folder_tree::TreeTarget::Dir(dir)) => self.open_dir(dir),
             Some(crate::folder_tree::TreeTarget::Scope(prefix)) => self.rescope_archive(prefix),
             None => {}
+        }
+    }
+
+    // ── Finder-style resident folder browser (task #54, native disk decks) ──────────
+
+    /// The current photo's containing folder (absolute), or `None` on an archive/empty
+    /// deck (`source.path` is `None` for an archive entry). Gates the Finder tree.
+    pub fn current_folder_abs(&self) -> Option<PathBuf> {
+        let item = self.displayed_item?;
+        self.source.path(item)?.parent().map(Path::to_path_buf)
+    }
+
+    /// Whether the native **Finder** tree (the resident [`FsTree`]) applies right now:
+    /// the host presents the tree natively and the deck is a disk deck with a current
+    /// folder. Archive/empty decks fall back to the v1 `folder_tree_panel`.
+    pub fn tree_is_fs(&self) -> bool {
+        self.native_tree && self.current_folder_abs().is_some()
+    }
+
+    /// The Finder tree's visible rows (empty when not built).
+    pub fn fs_tree_rows(&self) -> Vec<crate::fs_tree::Row> {
+        self.fs_tree.as_ref().map(|t| t.rows()).unwrap_or_default()
+    }
+
+    /// Build (or re-root) the resident tree for the current disk deck and mark the current
+    /// folder. Kept persistent while the current folder stays under the tree root (so
+    /// browsing/expansion survives photo navigation); re-rooted only when the deck opens
+    /// somewhere outside it. Fresh trees root one level above the deck root (so the deck
+    /// root shows among its siblings).
+    fn ensure_fs_tree(&mut self) {
+        let Some(current) = self.current_folder_abs() else {
+            self.fs_tree = None;
+            self.fs_tree_io = None;
+            return;
+        };
+        let rebuild = self
+            .fs_tree
+            .as_ref()
+            .is_none_or(|t| current.strip_prefix(t.root()).is_err());
+        if rebuild {
+            let root = self
+                .root
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty() && current.starts_with(p))
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| self.root.clone());
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.fs_tree = Some(crate::fs_tree::FsTree::new(root));
+            self.fs_tree_io = Some(crate::app_core::FsTreeIo {
+                tx,
+                rx,
+                pending: std::collections::HashSet::new(),
+            });
+        }
+    }
+
+    /// Drive the resident tree each tick while it's shown: install finished off-thread
+    /// `read_dir` results, reveal + mark the current folder, kick reads for any expanded-
+    /// but-unread folder, and refresh count badges — signalling the host on change.
+    fn drive_fs_tree(&mut self) {
+        self.ensure_fs_tree();
+        if self.fs_tree.is_none() {
+            return;
+        }
+        let mut changed = false;
+        // 1. Install finished reads.
+        let done: Vec<(PathBuf, Vec<PathBuf>)> = self
+            .fs_tree_io
+            .as_ref()
+            .map(|io| io.rx.try_iter().collect())
+            .unwrap_or_default();
+        for (path, subdirs) in done {
+            if let Some(io) = self.fs_tree_io.as_mut() {
+                io.pending.remove(&path);
+            }
+            if let Some(t) = self.fs_tree.as_mut() {
+                t.set_children(&path, subdirs);
+            }
+            changed = true;
+        }
+        // 2. Reveal + mark the current folder (only when it moved).
+        if let Some(folder) = self.current_folder_abs() {
+            let moved = self
+                .fs_tree
+                .as_ref()
+                .and_then(|t| t.current().map(Path::to_path_buf))
+                != Some(folder.clone());
+            if moved {
+                if let Some(t) = self.fs_tree.as_mut() {
+                    t.set_current(folder);
+                }
+                changed = true;
+            }
+        }
+        // 3. Kick an off-thread read for each expanded-but-unread visible folder.
+        let to_read: Vec<PathBuf> = self
+            .fs_tree
+            .as_ref()
+            .map(|t| {
+                t.rows()
+                    .into_iter()
+                    .filter(|r| r.loading)
+                    .map(|r| r.path)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for path in to_read {
+            let in_flight = self
+                .fs_tree_io
+                .as_ref()
+                .is_some_and(|io| io.pending.contains(&path));
+            if in_flight {
+                continue;
+            }
+            if let Some(io) = self.fs_tree_io.as_mut() {
+                io.pending.insert(path.clone());
+                let tx = io.tx.clone();
+                std::thread::spawn(move || {
+                    let subs = crate::folder_tree::subdirs(&path)
+                        .into_iter()
+                        .map(|n| path.join(n))
+                        .collect();
+                    let _ = tx.send((path, subs));
+                });
+            }
+        }
+        // 4. Refresh count badges from the deck's folder-counts (cheap when cached).
+        if changed {
+            let counts = self.folder_counts();
+            if let Some(t) = self.fs_tree.as_mut() {
+                for (p, c) in counts.iter() {
+                    t.set_count(p, Some(*c));
+                }
+            }
+            self.emit_panels_changed();
+        }
+    }
+
+    /// Toggle a folder's expansion (the chevron) — browsing only, never loads photos.
+    pub fn fs_tree_toggle(&mut self, path: &Path) {
+        if let Some(t) = self.fs_tree.as_mut() {
+            t.toggle(path);
+            self.emit_panels_changed();
+        }
+    }
+
+    /// Open a folder from the tree (a name click) — load its photos (increment 3 adds the
+    /// keep-deck-until-photos safety; for now the shared recursive open).
+    pub fn fs_tree_open(&mut self, path: PathBuf) {
+        self.open_dir(path);
+    }
+
+    /// The up-affordance: re-root the tree one level higher (kicks its read next tick).
+    pub fn fs_tree_extend_up(&mut self) {
+        if self.fs_tree.as_mut().is_some_and(|t| t.extend_root_up()) {
+            self.emit_panels_changed();
         }
     }
 

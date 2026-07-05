@@ -121,6 +121,25 @@ pub struct AppCoreHandle {
     /// `inspector_refresh` on a `PanelsChanged` marker, read by the indexed
     /// `inspector_row_*` accessors — same pull pattern as `help_snapshot`.
     inspector_snapshot: Vec<(u8, String, String)>,
+    /// Flattened folder-tree rows (task #54): the Finder tree ([`FsTree`]) for disk decks,
+    /// or the v1 `folder_tree_panel` for archive/empty decks — snapshotted by `tree_refresh`
+    /// on a `PanelsChanged` marker so the indexed accessors + actions share one stable view.
+    tree_snapshot: Vec<TreeRowFfi>,
+}
+
+/// One flattened folder-tree row for the native list. `path` is the disk path (Finder
+/// tree) used by the toggle/open actions; empty for v1 archive rows, which act by index.
+struct TreeRowFfi {
+    name: String,
+    depth: u32,
+    is_current: bool,
+    count: i64,
+    has_children: bool,
+    expanded: bool,
+    loading: bool,
+    is_up: bool,
+    has_target: bool,
+    path: std::path::PathBuf,
 }
 
 impl AppCoreHandle {
@@ -158,6 +177,7 @@ impl AppCoreHandle {
             keymap_note: String::new(),
             help_snapshot: Vec::new(),
             inspector_snapshot: Vec::new(),
+            tree_snapshot: Vec::new(),
         }
     }
 
@@ -343,90 +363,154 @@ impl AppCoreHandle {
             .unwrap_or_default()
     }
 
-    // ---- Folder tree (⇧F) — the native list of the current photo's folder in its
-    // hierarchy (task #54). The core derives the rows/targets (unchanged from the HUD
-    // tree) and stores them; these read directly from `folder_tree_panel` (no snapshot
-    // copy needed — the rows are already resident). A native list scrolls, so the HUD's
-    // windowing / "… n more" paging is gone; every derived row shows.
+    // ---- Folder tree (⇧F, task #54) — the Finder-style resident browser (`FsTree`) for
+    // disk decks, falling back to the v1 `folder_tree_panel` for archive/empty decks.
+    // `tree_refresh` snapshots whichever is active into `tree_snapshot`; the indexed
+    // `tree_row_*` accessors read it, and the toggle/open/extend actions resolve through
+    // it. `tree_uses_fs` tells the host which interaction to render (chevrons vs flat).
 
     /// Whether the native SwiftUI folder tree should be shown (open, not Tab-hidden).
     fn tree_visible(&self) -> bool {
         self.core.tree_panel_visible()
     }
 
+    /// Whether the Finder tree (chevron expand/collapse, name-to-open) is active — else
+    /// the flat v1 archive tree (click-to-activate) is.
+    fn tree_uses_fs(&self) -> bool {
+        self.core.tree_is_fs()
+    }
+
+    /// Snapshot the active tree's rows — call on a `PanelsChanged` marker before reading.
+    fn tree_refresh(&mut self) {
+        let mut rows: Vec<TreeRowFfi> = Vec::new();
+        if self.core.tree_is_fs() {
+            for r in self.core.fs_tree_rows() {
+                rows.push(TreeRowFfi {
+                    name: r.name,
+                    depth: r.depth,
+                    is_current: r.is_current,
+                    count: r.count.map(|c| c as i64).unwrap_or(-1),
+                    has_children: r.has_children,
+                    expanded: r.expanded,
+                    loading: r.loading,
+                    is_up: false,
+                    has_target: true,
+                    path: r.path,
+                });
+            }
+        } else if let Some(p) = self.core.folder_tree_panel.as_ref() {
+            for (i, row) in p.rows.iter().enumerate() {
+                rows.push(TreeRowFfi {
+                    name: row.name.clone(),
+                    depth: row.depth,
+                    is_current: row.current,
+                    count: row.count.map(|c| c as i64).unwrap_or(-1),
+                    has_children: false,
+                    expanded: false,
+                    loading: false,
+                    is_up: row.up,
+                    has_target: p.targets.get(i).map(|t| t.is_some()).unwrap_or(false),
+                    path: std::path::PathBuf::new(),
+                });
+            }
+        }
+        self.tree_snapshot = rows;
+    }
+
     fn tree_row_count(&self) -> usize {
-        self.core
-            .folder_tree_panel
-            .as_ref()
-            .map(|p| p.rows.len())
-            .unwrap_or(0)
+        self.tree_snapshot.len()
     }
 
     /// A row's indent depth in the hierarchy (0 = root).
     fn tree_row_depth(&self, i: usize) -> u32 {
-        self.core
-            .folder_tree_panel
-            .as_ref()
-            .and_then(|p| p.rows.get(i))
-            .map(|r| r.depth)
-            .unwrap_or(0)
+        self.tree_snapshot.get(i).map(|r| r.depth).unwrap_or(0)
     }
 
     fn tree_row_name(&self, i: usize) -> String {
-        self.core
-            .folder_tree_panel
-            .as_ref()
-            .and_then(|p| p.rows.get(i))
+        self.tree_snapshot
+            .get(i)
             .map(|r| r.name.clone())
             .unwrap_or_default()
     }
 
-    /// The current folder ("you are here") — the row is highlighted, not clickable.
+    /// The current folder ("you are here") — highlighted.
     fn tree_row_is_current(&self, i: usize) -> bool {
-        self.core
-            .folder_tree_panel
-            .as_ref()
-            .and_then(|p| p.rows.get(i))
-            .map(|r| r.current)
+        self.tree_snapshot
+            .get(i)
+            .map(|r| r.is_current)
             .unwrap_or(false)
     }
 
-    /// The leading "up to parent" affordance row (shown a level-up glyph).
+    /// The v1 "up to parent" affordance row (archive tree only).
     fn tree_row_is_up(&self, i: usize) -> bool {
-        self.core
-            .folder_tree_panel
-            .as_ref()
-            .and_then(|p| p.rows.get(i))
-            .map(|r| r.up)
+        self.tree_snapshot.get(i).map(|r| r.is_up).unwrap_or(false)
+    }
+
+    /// Worth a disclosure chevron (Finder tree: has or may have subfolders).
+    fn tree_row_has_children(&self, i: usize) -> bool {
+        self.tree_snapshot
+            .get(i)
+            .map(|r| r.has_children)
+            .unwrap_or(false)
+    }
+
+    /// Expanded right now (Finder tree).
+    fn tree_row_expanded(&self, i: usize) -> bool {
+        self.tree_snapshot
+            .get(i)
+            .map(|r| r.expanded)
+            .unwrap_or(false)
+    }
+
+    /// Expanded but its children are still being read (show a spinner).
+    fn tree_row_loading(&self, i: usize) -> bool {
+        self.tree_snapshot
+            .get(i)
+            .map(|r| r.loading)
             .unwrap_or(false)
     }
 
     /// The photo-count badge, or -1 when the row has none.
     fn tree_row_count_badge(&self, i: usize) -> i64 {
-        self.core
-            .folder_tree_panel
-            .as_ref()
-            .and_then(|p| p.rows.get(i))
-            .and_then(|r| r.count)
-            .map(|c| c as i64)
-            .unwrap_or(-1)
+        self.tree_snapshot.get(i).map(|r| r.count).unwrap_or(-1)
     }
 
-    /// Whether the row is clickable (has a navigation target).
+    /// Whether the row is clickable / openable.
     fn tree_row_has_target(&self, i: usize) -> bool {
-        self.core
-            .folder_tree_panel
-            .as_ref()
-            .and_then(|p| p.targets.get(i))
-            .map(|t| t.is_some())
+        self.tree_snapshot
+            .get(i)
+            .map(|r| r.has_target)
             .unwrap_or(false)
     }
 
-    /// Activate a row (a list click) — open its folder / re-scope the archive. `kick`s a
-    /// tick so the navigation and the tree's re-derivation flow through.
+    /// Open a row (a name click) — load its photos (Finder) or re-scope/open (v1).
     fn tree_activate(&mut self, i: usize) {
         self.core.now = Instant::now();
-        self.core.tree_activate(i);
+        if self.core.tree_is_fs() {
+            if let Some(row) = self.tree_snapshot.get(i) {
+                let path = row.path.clone();
+                self.core.fs_tree_open(path);
+            }
+        } else {
+            self.core.tree_activate(i);
+        }
+    }
+
+    /// Toggle a row's expansion (the chevron) — Finder tree only; browsing, no load.
+    fn tree_toggle(&mut self, i: usize) {
+        self.core.now = Instant::now();
+        if self.core.tree_is_fs() {
+            if let Some(row) = self.tree_snapshot.get(i) {
+                let path = row.path.clone();
+                self.core.fs_tree_toggle(&path);
+            }
+        }
+    }
+
+    /// The up-affordance (Finder tree header): re-root one level higher.
+    fn tree_extend_up(&mut self) {
+        self.core.now = Instant::now();
+        self.core.fs_tree_extend_up();
     }
 
     /// A native menu item fired, by stable [`Action`] id (`"open_file"`, `"rotate_cw"`, …)
@@ -2287,16 +2371,23 @@ mod ffi {
         fn inspector_row_a(&self, i: usize) -> String;
         fn inspector_row_b(&self, i: usize) -> String;
 
-        // The native folder tree (⇧F, task #54).
+        // The native folder tree (⇧F, task #54) — Finder browser (disk) / v1 flat (archive).
         fn tree_visible(&self) -> bool;
+        fn tree_uses_fs(&self) -> bool;
+        fn tree_refresh(&mut self);
         fn tree_row_count(&self) -> usize;
         fn tree_row_depth(&self, i: usize) -> u32;
         fn tree_row_name(&self, i: usize) -> String;
         fn tree_row_is_current(&self, i: usize) -> bool;
         fn tree_row_is_up(&self, i: usize) -> bool;
+        fn tree_row_has_children(&self, i: usize) -> bool;
+        fn tree_row_expanded(&self, i: usize) -> bool;
+        fn tree_row_loading(&self, i: usize) -> bool;
         fn tree_row_count_badge(&self, i: usize) -> i64;
         fn tree_row_has_target(&self, i: usize) -> bool;
         fn tree_activate(&mut self, i: usize);
+        fn tree_toggle(&mut self, i: usize);
+        fn tree_extend_up(&mut self);
 
         // The NS2 dialog seam: payload pulls (after a ShowDialog marker), the
         // DialogResolved results (one entry point per user gesture), the live progress

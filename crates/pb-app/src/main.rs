@@ -490,6 +490,8 @@ impl App {
                 folder_tree_panel: None,
                 folder_tree_counts: None,
                 tree_io: None,
+                fs_tree: None,
+                fs_tree_io: None,
                 hud: Hud::load(),
                 renderer: None,
                 undo_stack: Vec::new(),
