@@ -28,9 +28,11 @@ struct ScanPillView: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            ProgressView()
-                .controlSize(.small)
-                .tint(secondary)
+            // A pure-SwiftUI spinner: the native `ProgressView` spinner is an AppKit
+            // `NSProgressIndicator` whose spoke color follows its own appearance — which, like
+            // `panelSecondary`, resolves to light-mode inside the pill's material, so it stayed
+            // dark-on-dark and `.tint` couldn't override it. This one's color we fully control.
+            ScanSpinner(color: scheme == .dark ? Color(white: 0.9) : Color(white: 0.35))
                 .frame(width: 16, height: 16)
 
             VStack(alignment: .leading, spacing: 2) {
@@ -82,5 +84,35 @@ struct ScanPillView: View {
         )
         .shadow(radius: 12, y: 3)
         .arrowCursorOnHover()
+    }
+}
+
+/// A small indeterminate spinner in the macOS fading-spokes style, drawn in pure SwiftUI so
+/// its color is exactly what we pass — the native `ProgressView` spinner rendered dark-on-dark
+/// inside the pill's material (its AppKit appearance resolved to light even in dark mode).
+private struct ScanSpinner: View {
+    let color: Color
+    private let spokes = 8
+    @State private var spinning = false
+
+    var body: some View {
+        ZStack {
+            ForEach(0..<spokes, id: \.self) { i in
+                Capsule()
+                    .fill(color)
+                    // A graduated trail: brightest leading spoke, fading behind it.
+                    .opacity(Double(i + 1) / Double(spokes))
+                    .frame(width: 1.6, height: 4.5)
+                    .offset(y: -4.5)
+                    .rotationEffect(.degrees(360.0 / Double(spokes) * Double(i)))
+            }
+        }
+        .frame(width: 15, height: 15)
+        .rotationEffect(.degrees(spinning ? 360 : 0))
+        .onAppear {
+            withAnimation(.linear(duration: 0.85).repeatForever(autoreverses: false)) {
+                spinning = true
+            }
+        }
     }
 }
