@@ -126,11 +126,7 @@ struct InspectorPanelView: View {
             .onPreferenceChange(InspectorContentHeight.self) { contentHeight = $0 }
         }
         .frame(width: min(model.inspectorWidth, maxWidth))
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(.separator, lineWidth: 0.5)
-        )
+        .panelBackground(cornerRadius: 12)
         // Drag the leading edge to widen (360pt minimum).
         .overlay(alignment: .leading) {
             ResizeHandle(
@@ -138,7 +134,6 @@ struct InspectorPanelView: View {
                     get: { model.inspectorWidth }, set: { model.inspectorWidth = $0 }),
                 minWidth: 360, maxWidth: maxWidth, sign: -1)
         }
-        .shadow(radius: 24, y: 8)
         .arrowCursorOnHover()
     }
 

@@ -95,18 +95,13 @@ struct FolderTreePanelView: View {
             }
         }
         .frame(width: min(model.treeWidth, maxWidth))
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(.separator, lineWidth: 0.5)
-        )
+        .panelBackground(cornerRadius: 12)
         // Drag the trailing edge to widen (280pt minimum).
         .overlay(alignment: .trailing) {
             ResizeHandle(
                 width: Binding(get: { model.treeWidth }, set: { model.treeWidth = $0 }),
                 minWidth: 280, maxWidth: maxWidth, sign: 1)
         }
-        .shadow(radius: 24, y: 8)
         .arrowCursorOnHover()
     }
 

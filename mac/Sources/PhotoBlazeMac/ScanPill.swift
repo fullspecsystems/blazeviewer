@@ -77,14 +77,10 @@ struct ScanPillView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        // A thick material reads more like a macOS notification/HUD and keeps the secondary
-        // text legible over a bright photo.
-        .background(.thickMaterial, in: RoundedRectangle(cornerRadius: 14))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14)
-                .strokeBorder(.separator, lineWidth: 0.5)
-        )
-        .shadow(radius: 12, y: 3)
+        // The shared panel backdrop (same material / border / shadow as the tree, inspector,
+        // and toast) — was a heavier `.thickMaterial`; the secondary text + spinner now get
+        // their contrast from the colorScheme-resolved gray, not the material.
+        .panelBackground(cornerRadius: 14)
         .arrowCursorOnHover()
     }
 }

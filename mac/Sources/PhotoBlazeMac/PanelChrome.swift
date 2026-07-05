@@ -16,6 +16,28 @@ extension Color {
         })
 }
 
+extension View {
+    /// The one shared translucent backdrop for every native panel (folder tree, inspector,
+    /// scan pill, toast) — a single place to tune the material (blur) and the user opacity, so
+    /// the panels stay consistent instead of each hard-coding its own material / border /
+    /// shadow (which is how the pill drifted to `.thick` while the others were `.regular`).
+    /// `.regularMaterial` is a notch less blur than the pill's old `.thick`; `opacity` (< 1)
+    /// lets more of the photo show through and is fed from Settings once the slider lands.
+    func panelBackground(cornerRadius: CGFloat = 12, opacity: Double = 1.0) -> some View {
+        self
+            .background(
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .fill(.regularMaterial)
+                    .opacity(opacity)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .strokeBorder(.separator, lineWidth: 0.5)
+            )
+            .shadow(radius: 18, y: 5)
+    }
+}
+
 /// A thin drag strip on a panel's inner edge that resizes its width. `sign` is +1 for a
 /// trailing edge (a leading-anchored panel — the folder tree — widens dragging right) or
 /// -1 for a leading edge (a trailing-anchored panel — the Inspector — widens dragging
