@@ -27,6 +27,12 @@ The macOS-first rich-panel migration (`hud-panels-plan.md`):
   z-order, arrow-cursor-on-hover stopgap, solid `panelSecondary` glyphs, constant-weight tabs.
 - **Resizable panels** (`002402f`): drag the tree's right / Inspector's left edge.
 - **⌘←/⌘→ folder nav fix** (`3f9dff1`): anchor on the current folder, in-deck jump.
+- **Folder-nav polish batch** (`2532121`): **files-before-folders** sort (a folder's photos
+  precede its subfolders' — deck reads like the tree); **⌘↑ Open Parent** anchors on the
+  current photo's folder (not the deck root — no more climbing toward `/`); tree
+  **auto-collapses** branches you've scrolled past (chevron-pinned ones stay, via
+  `Node.user_expanded`); tree **scrolls the current folder into view** (`tree_current_path`
+  FFI + `ScrollViewReader`).
 
 ## Finder folder browser — increment status
 
