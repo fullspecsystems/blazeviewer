@@ -608,6 +608,9 @@ pub fn macos_menu_chord(action: Action) -> Option<KeyChord> {
         Action::Copy => c("Cmd+C"),
         Action::CopyPath => c("Shift+Cmd+C"),
         Action::Undo => c("Cmd+Z"),
+        // The Mac convention for "show info" (Finder Get Info, Preview, Photos) — in
+        // addition to, not instead of, the cross-platform Shift+I in `default_bindings`.
+        Action::FullExif => c("Cmd+I"),
         Action::Delete => c("Cmd+Backspace"), // Move to Trash (⌘⌫)
         Action::DeletePermanent => c("Alt+Cmd+Backspace"), // Delete Immediately (⌥⌘⌫)
         Action::Settings => c("Cmd+,"),
