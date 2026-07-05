@@ -61,23 +61,38 @@ struct FolderTreePanelView: View {
                 .fill(Color.primary.opacity(0.08))
                 .frame(height: 1)
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 1) {
-                    ForEach(model.treeRows) { row in
-                        rowView(row)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 1) {
+                        ForEach(model.treeRows) { row in
+                            rowView(row)
+                                .id(row.id)
+                        }
+                    }
+                    .padding(.vertical, 6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        GeometryReader { g in
+                            Color.clear.preference(
+                                key: TreeContentHeight.self, value: g.size.height)
+                        }
+                    )
+                }
+                .frame(height: scrollHeight)
+                .onPreferenceChange(TreeContentHeight.self) { contentHeight = $0 }
+                // Advancing to a folder that scrolled out of view (⌘←/→ especially, on a
+                // short window) pulls it back — keyed on the current folder's path, so an
+                // unrelated expand/collapse never yanks the scroll. Nil anchor = the minimal
+                // scroll to reveal it, so an already-visible current row doesn't jump.
+                .onChange(of: model.currentTreePath, initial: true) { _, _ in
+                    guard let current = model.treeRows.first(where: { $0.isCurrent }) else {
+                        return
+                    }
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        proxy.scrollTo(current.id)
                     }
                 }
-                .padding(.vertical, 6)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    GeometryReader { g in
-                        Color.clear.preference(
-                            key: TreeContentHeight.self, value: g.size.height)
-                    }
-                )
             }
-            .frame(height: scrollHeight)
-            .onPreferenceChange(TreeContentHeight.self) { contentHeight = $0 }
         }
         .frame(width: min(model.treeWidth, maxWidth))
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))

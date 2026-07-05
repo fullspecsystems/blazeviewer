@@ -3189,11 +3189,11 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// The streaming walk (`sort_by_file_name`) must yield images in the **exact** order
-    /// today's full-walk-then-`paths.sort()` produces — so showing photos before the scan
-    /// finishes never reorders the playlist. Pins the boundary cases that motivated the
-    /// design discussion: `a/b.jpg` vs `a.jpg` (a subdir vs a same-stem file), a subdir vs a
-    /// later-named sibling file, and `img2` vs `img10` (stays byte-lexicographic, not natural).
+    /// The streaming walk must yield images in the **exact** order the full-walk-then-
+    /// `sort_by(ci_path_cmp)` produces — so showing photos before the scan finishes never
+    /// reorders the playlist. Pins the boundary cases: **files before subfolders** (a root
+    /// `a.jpg` / `z.jpg` before subfolder `a/b.jpg` / `a_subdir/x.jpg`), and `img2` vs `img10`
+    /// (stays byte-lexicographic, not natural — a deferred opt-in).
     #[test]
     fn streaming_walk_order_matches_paths_sort() {
         let dir = std::env::temp_dir().join(format!("pb_stream_order_{}", std::process::id()));
@@ -3215,20 +3215,21 @@ mod tests {
 
         let got = sorted_image_walk(&dir, true);
 
-        // Expected = exactly the images, in `Vec<PathBuf>::sort()` order (component-wise).
+        // Expected = exactly the images, in the deck's canonical order (`ci_path_cmp`:
+        // files-before-folders, case-insensitive).
         let mut expected: Vec<PathBuf> = images.iter().map(|r| dir.join(r)).collect();
-        expected.sort();
+        expected.sort_by(|a, b| scan::ci_path_cmp(a, b));
         assert_eq!(
             got, expected,
-            "streaming walk order must equal paths.sort() (and skip the .txt)"
+            "streaming walk order must equal the deck sort (ci_path_cmp), skipping the .txt"
         );
-        // Spell out the load-bearing boundary so a regression reads clearly: the subdir's
-        // `a/b.jpg` sorts before the file `a.jpg` (component-wise: \"a\" < \"a.jpg\").
+        // Spell out the load-bearing boundary: a folder's own photos come before anything in
+        // its subfolders — so the root files `a.jpg` / `z.jpg` precede the subfolder photos.
         let pos = |rel: &str| got.iter().position(|p| p == &dir.join(rel)).unwrap();
-        assert!(pos("a/b.jpg") < pos("a.jpg"), "a/b.jpg before a.jpg");
+        assert!(pos("a.jpg") < pos("a/b.jpg"), "root a.jpg before subfolder a/b.jpg");
         assert!(
-            pos("a_subdir/x.jpg") < pos("z.jpg"),
-            "a_subdir before z.jpg"
+            pos("z.jpg") < pos("a_subdir/x.jpg"),
+            "root z.jpg before subfolder a_subdir/x.jpg"
         );
         // Lexicographic, NOT natural: "img10" < "img2" because '1' < '2'. (Natural sort
         // would flip these; it's a deferred opt-in, so we pin today's behavior.)

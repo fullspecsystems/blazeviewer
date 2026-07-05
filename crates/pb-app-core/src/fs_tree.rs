@@ -34,8 +34,12 @@ use std::path::{Path, PathBuf};
 struct Node {
     /// The folder's subfolders, sorted for display — `None` until `read_dir` lands.
     children: Option<Vec<PathBuf>>,
-    /// Whether the user has expanded it (independent of whether children are loaded yet).
+    /// Whether it's expanded right now (independent of whether children are loaded yet).
     expanded: bool,
+    /// The user **pinned** it open via the chevron (vs. it being auto-revealed to show the
+    /// current folder). Auto-reveal collapses branches it opened once you leave them, but
+    /// never a pinned one — so a folder you deliberately opened stays open as you navigate.
+    user_expanded: bool,
     /// A photo count for the badge (may be stale; refreshed lazily by the shell).
     count: Option<u64>,
 }
@@ -144,24 +148,45 @@ impl FsTree {
         }
     }
 
-    /// Toggle a folder's expansion — the chevron action.
+    /// Toggle a folder's expansion — the **chevron action**, so it pins/unpins the folder:
+    /// opening marks it user-expanded (auto-reveal won't later collapse it), closing clears
+    /// that. This is the user's explicit intent, distinct from an auto-reveal.
     pub fn toggle(&mut self, path: &Path) {
         let n = self.nodes.entry(path.to_path_buf()).or_default();
         n.expanded = !n.expanded;
+        n.user_expanded = n.expanded;
     }
 
-    /// Mark `folder` as the current photo's folder and reveal it: expand every ancestor
-    /// from the root down to it (so the highlight is visible). A folder outside the root
-    /// is recorded but not revealed — the shell re-roots (or extends up) first.
+    /// Mark `folder` as the current photo's folder and reveal it, tidily: expand the root →
+    /// `folder` chain so the highlight is visible, and **auto-collapse any branch that was
+    /// only auto-revealed for a *previous* current folder** and is no longer on the path
+    /// (so scrolling through folders doesn't leave a trail of open ones). Folders the user
+    /// pinned open via the chevron are left alone. A folder outside the root is recorded but
+    /// not revealed — the shell re-roots (or extends up) first.
     pub fn set_current(&mut self, folder: PathBuf) {
         self.current = Some(folder.clone());
-        if let Ok(rel) = folder.strip_prefix(&self.root) {
-            let mut p = self.root.clone();
-            self.expand(&p.clone());
-            for comp in rel.components() {
-                p = p.join(comp);
-                self.expand(&p.clone());
+        let Ok(rel) = folder.strip_prefix(&self.root) else {
+            return;
+        };
+        // The reveal path: the root and every ancestor down to (and including) `folder`.
+        let mut on_path: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        let mut p = self.root.clone();
+        on_path.insert(p.clone());
+        for comp in rel.components() {
+            p = p.join(comp);
+            on_path.insert(p.clone());
+        }
+        // Collapse branches auto-revealed for an earlier current folder that we've now left
+        // (expanded, not user-pinned, off the current path). Never the root — it's the anchor.
+        for (path, node) in self.nodes.iter_mut() {
+            if *path != self.root && node.expanded && !node.user_expanded && !on_path.contains(path)
+            {
+                node.expanded = false;
             }
+        }
+        // Reveal the current path (auto-expand — doesn't pin, so it collapses again on leave).
+        for path in on_path {
+            self.nodes.entry(path).or_default().expanded = true;
         }
     }
 
@@ -294,6 +319,28 @@ mod tests {
         assert_eq!(names, ["a", "b", "c"]);
         assert!(rows[2].is_current, "the current folder is marked");
         assert!(!rows[0].is_current);
+    }
+
+    #[test]
+    fn set_current_auto_collapses_left_branches_but_keeps_pinned_ones() {
+        let mut t = FsTree::new(p("/a"));
+        t.set_children(&p("/a"), vec![p("/a/b"), p("/a/c")]);
+        t.set_children(&p("/a/b"), vec![p("/a/b/x")]);
+        t.set_children(&p("/a/c"), vec![p("/a/c/y")]);
+        let names = |t: &FsTree| t.rows().iter().map(|r| r.name.clone()).collect::<Vec<_>>();
+
+        // Into /a/b/x → reveals a→b→x; c stays collapsed.
+        t.set_current(p("/a/b/x"));
+        assert_eq!(names(&t), ["a", "b", "x", "c"]);
+
+        // Over to /a/c/y → b's auto-revealed branch is now off-path, so it collapses; c reveals.
+        t.set_current(p("/a/c/y"));
+        assert_eq!(names(&t), ["a", "b", "c", "y"]);
+
+        // The user *pins* /a/b open (chevron); navigating away no longer collapses it.
+        t.toggle(&p("/a/b"));
+        t.set_current(p("/a/c/y"));
+        assert_eq!(names(&t), ["a", "b", "x", "c", "y"]);
     }
 
     #[test]

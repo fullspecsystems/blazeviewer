@@ -14,7 +14,10 @@ with any pre-release suffix carried only by the tag.
   folder's **name** to open it. Siblings show at every level, the current folder is
   highlighted with a photo-count badge, an "up to *parent*" row climbs a level, and it
   scrolls. **Drag its right edge to widen it.** Reads happen off-thread, so a slow network
-  share never freezes a click. (Archives keep the simple scoped list.)
+  share never freezes a click. (Archives keep the simple scoped list.) As you navigate, the
+  tree **scrolls the current folder into view** and **auto-collapses branches you've moved
+  past** — while leaving any folder you expanded yourself open — so it stays tidy on a tall
+  tree or a short window.
 - **Native Inspector panel on macOS** — Details, Text, and Describe are now one tabbed
   macOS panel (top-right, parallel to the folder tree) instead of three separate on-image
   overlays: crisp native text, an **icon + label** tab bar for Details / Text / Describe,
@@ -103,6 +106,10 @@ with any pre-release suffix carried only by the tag.
   step between the archive's sibling folders.
 
 ### Changed
+- **A folder's own photos now come before its subfolders' photos** (files-before-folders),
+  instead of interleaving them by name. So browsing — and previous/next folder (⌘←/→) —
+  finishes a folder's photos and *then* descends into its subfolders, reading the way the
+  folder tree looks top-to-bottom, rather than bouncing in and out of subfolders mid-folder.
 - The one-line info readout (**I**) is now fully independent of the bigger panels:
   it has its own spot in the bottom-right corner and can be shown **at the same time**
   as the detailed info, text, or description panel (which now sits just above it)
@@ -110,6 +117,10 @@ with any pre-release suffix carried only by the tag.
   All EXIF Info** — both can be checked at once.
 
 ### Fixed
+- **Open Parent (⌘↑, or `P`) now goes up from the folder you're *viewing*.** It went up from
+  the folder you originally *opened*, so after a recursive open it climbed toward `/Users` or
+  `/` — a place with nothing to do with the photo on screen. Now it opens the immediate parent
+  of the current photo's folder, which always still contains that photo (never an empty jump).
 - **Folders now sort case-insensitively (like Finder), not by raw byte order.** A recursive
   open landed on whatever subfolder sorted first by ASCII — where *every* uppercase letter
   beats *every* lowercase one, so `Screenshots` came before `onlinethumbnailcache` and the

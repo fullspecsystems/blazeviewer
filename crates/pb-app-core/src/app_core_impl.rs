@@ -2028,10 +2028,16 @@ impl AppCore {
                 return;
             }
         }
+        // An archive deck at its root goes up to the disk folder *containing* the archive
+        // (its container). A normal disk deck goes up **one level from the current photo's
+        // folder** — not the deck root, which would climb from wherever you opened (e.g. up
+        // toward /Users or /). Going up one level always re-includes the current subtree, so
+        // it can never land on an empty folder or walk off toward the filesystem root.
         let anchor = self
             .source
             .container()
             .map(Path::to_path_buf)
+            .or_else(|| self.current_folder_abs())
             .unwrap_or_else(|| self.root.clone());
         if anchor.as_os_str().is_empty() {
             return;

@@ -142,18 +142,30 @@ pub(crate) fn ci_name_cmp(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> std::cmp:
         .then_with(|| al.cmp(&bl))
 }
 
-/// The component-wise, case-insensitive path order — the global-sort analog of
-/// [`ci_name_cmp`], so a depth-first walk sorted per directory by name reproduces exactly
-/// what a single `sort_by(ci_path_cmp)` over all paths would produce.
-pub(crate) fn ci_path_cmp(a: &Path, b: &Path) -> std::cmp::Ordering {
+/// The component-wise path order for the deck: **a folder's own photos come before anything
+/// in its subfolders** ("files before folders"), then case-insensitively by name. So the
+/// deck reads like the tree — you finish a folder's photos, then descend into its subfolders,
+/// instead of interleaving a folder's files with its subfolders' files by raw name (which
+/// made ⌘←/→ bounce in and out of subfolders and the current-folder highlight thrash).
+///
+/// At the first differing component, whichever path **terminates** there (a file directly in
+/// the shared parent) sorts before one that **descends** into a subfolder. This is the
+/// global-sort analog of [`image_walker`]'s per-directory "files before dirs" order, so the
+/// streaming walk reproduces exactly what a single `sort_by(ci_path_cmp)` would produce.
+pub fn ci_path_cmp(a: &Path, b: &Path) -> std::cmp::Ordering {
     use std::cmp::Ordering;
-    let (mut ac, mut bc) = (a.components(), b.components());
+    let (mut ac, mut bc) = (a.components().peekable(), b.components().peekable());
     loop {
         match (ac.next(), bc.next()) {
             (Some(x), Some(y)) => {
                 let c = ci_name_cmp(x.as_os_str(), y.as_os_str());
                 if c != Ordering::Equal {
-                    return c;
+                    // A file here (no further components) sorts before a subfolder descent.
+                    return match (ac.peek().is_none(), bc.peek().is_none()) {
+                        (true, false) => Ordering::Less,
+                        (false, true) => Ordering::Greater,
+                        _ => c,
+                    };
                 }
             }
             (Some(_), None) => return Ordering::Greater,
@@ -164,14 +176,20 @@ pub(crate) fn ci_path_cmp(a: &Path, b: &Path) -> std::cmp::Ordering {
 }
 
 /// The configured directory walker shared by the streaming scan and its tests: depth-first,
-/// each directory's entries **sorted case-insensitively by file name** ([`ci_name_cmp`]) —
-/// which reproduces `sort_by(ci_path_cmp)` order exactly (`Path`'s components sort the same
-/// way), so streaming changes nothing about the order the walk-then-sort produces. Symlinks
-/// are yielded but never followed, so the walk can't cycle. `recursive` sets the depth.
+/// each directory's entries **files before subdirectories, then case-insensitively by name**
+/// — so it yields a folder's photos, *then* recurses into its subfolders, reproducing
+/// `sort_by(ci_path_cmp)` order exactly. Symlinks are yielded but never followed, so the walk
+/// can't cycle. `recursive` sets the depth.
 pub fn image_walker(root: &Path, recursive: bool) -> walkdir::WalkDir {
     walkdir::WalkDir::new(root)
         .max_depth(if recursive { usize::MAX } else { 1 })
-        .sort_by(|a, b| ci_name_cmp(a.file_name(), b.file_name()))
+        .sort_by(
+            |a, b| match (a.file_type().is_dir(), b.file_type().is_dir()) {
+                (false, true) => std::cmp::Ordering::Less,
+                (true, false) => std::cmp::Ordering::Greater,
+                _ => ci_name_cmp(a.file_name(), b.file_name()),
+            },
+        )
         .follow_links(false)
 }
 
@@ -634,5 +652,19 @@ mod order_tests {
             ci_path_cmp(Path::new("a/b"), Path::new("a/b/c")),
             Ordering::Less
         );
+    }
+
+    #[test]
+    fn files_sort_before_subfolders_in_the_same_parent() {
+        // A folder's own photos — even "zebra" — come before anything in its subfolders,
+        // even a subfolder named "sub" (which would otherwise interleave by name).
+        let mut v = [
+            PathBuf::from("a/sub/1.jpg"),
+            PathBuf::from("a/zebra.jpg"),
+            PathBuf::from("a/apple.jpg"),
+        ];
+        v.sort_by(|x, y| ci_path_cmp(x, y));
+        let got: Vec<&str> = v.iter().map(|p| p.to_str().unwrap()).collect();
+        assert_eq!(got, ["a/apple.jpg", "a/zebra.jpg", "a/sub/1.jpg"]);
     }
 }

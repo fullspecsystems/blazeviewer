@@ -66,6 +66,10 @@ final class CoreModel {
     /// A native list scrolls, so every derived row shows (no HUD paging).
     private(set) var treeVisible = false
     private(set) var treeRows: [FolderTreeRow] = []
+    /// The current photo's folder path — the tree view scrolls the current row into view
+    /// when this changes (so advancing to an off-screen folder pulls it back into view),
+    /// keyed off the folder itself so an unrelated expand/collapse doesn't yank the scroll.
+    private(set) var currentTreePath = ""
     /// Whether the Finder tree (chevron expand/collapse, name-to-open) is active — else
     /// the flat v1 archive tree (click-to-activate). Drives the row rendering + actions.
     private(set) var treeUsesFs = false
@@ -511,9 +515,11 @@ final class CoreModel {
         treeVisible = core.tree_visible()
         guard treeVisible else {
             treeRows = []
+            currentTreePath = ""
             return
         }
         treeUsesFs = core.tree_uses_fs()
+        currentTreePath = core.tree_current_path().toString()
         core.tree_refresh()
         let n = Int(core.tree_row_count())
         var rows: [FolderTreeRow] = []

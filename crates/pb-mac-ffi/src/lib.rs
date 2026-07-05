@@ -503,6 +503,16 @@ impl AppCoreHandle {
             .unwrap_or(false)
     }
 
+    /// The current photo's folder path — the host keys "scroll the current row into view"
+    /// off changes to this, so it fires only when the folder actually changes (not on an
+    /// unrelated expand/collapse). Empty when nothing is loaded.
+    fn tree_current_path(&self) -> String {
+        self.core
+            .current_folder_abs()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
     /// Activate a row (a name click): the "up" row climbs a level; a Finder folder opens
     /// (loads its photos); a v1 archive row re-scopes/opens.
     fn tree_activate(&mut self, i: usize) {
@@ -2405,6 +2415,7 @@ mod ffi {
         fn tree_row_loading(&self, i: usize) -> bool;
         fn tree_row_count_badge(&self, i: usize) -> i64;
         fn tree_row_has_target(&self, i: usize) -> bool;
+        fn tree_current_path(&self) -> String;
         fn tree_activate(&mut self, i: usize);
         fn tree_toggle(&mut self, i: usize);
 
