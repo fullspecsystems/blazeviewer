@@ -16,6 +16,37 @@ extension Color {
         })
 }
 
+/// A thin drag strip on a panel's inner edge that resizes its width. `sign` is +1 for a
+/// trailing edge (a leading-anchored panel — the folder tree — widens dragging right) or
+/// -1 for a leading edge (a trailing-anchored panel — the Inspector — widens dragging
+/// left). Shows the horizontal-resize cursor; clamps to `[minWidth, maxWidth]`.
+struct ResizeHandle: View {
+    @Binding var width: CGFloat
+    let minWidth: CGFloat
+    let maxWidth: CGFloat
+    let sign: CGFloat
+    @State private var startWidth: CGFloat?
+
+    var body: some View {
+        Rectangle()
+            .fill(Color.clear)
+            .frame(width: 9)
+            .contentShape(Rectangle())
+            .onHover { inside in
+                if inside { NSCursor.resizeLeftRight.set() } else { NSCursor.arrow.set() }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { value in
+                        let base = startWidth ?? width
+                        if startWidth == nil { startWidth = width }
+                        width = min(max(base + sign * value.translation.width, minWidth), maxWidth)
+                    }
+                    .onEnded { _ in startWidth = nil }
+            )
+    }
+}
+
 extension View {
     /// Force the arrow cursor while the pointer is over this view. The photo canvas drives
     /// the cursor (a grab hand when zoomed) via `desiredCursor` and doesn't know a panel is

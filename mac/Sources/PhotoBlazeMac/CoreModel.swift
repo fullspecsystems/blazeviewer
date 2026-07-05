@@ -69,6 +69,10 @@ final class CoreModel {
     /// Whether the Finder tree (chevron expand/collapse, name-to-open) is active — else
     /// the flat v1 archive tree (click-to-activate). Drives the row rendering + actions.
     private(set) var treeUsesFs = false
+    /// User-resizable panel widths (drag the inner edge). The defaults are the minimums;
+    /// session-persistent (survive close/reopen) — disk persistence is a later slice.
+    var treeWidth: CGFloat = 280
+    var inspectorWidth: CGFloat = 360
     /// An NSAlert sheet (confirm/message) is up — gates the key monitor like `panelOpen`.
     @ObservationIgnored private var alertUp = false
     /// Opens the SwiftUI Settings scene — injected by the root view (`openSettings` is an

@@ -37,6 +37,8 @@ struct InspectorPanelView: View {
     /// The available height the overlay grants (window height minus insets). The panel
     /// grows to fit its content up to this, then scrolls.
     let maxHeight: CGFloat
+    /// The widest the panel may be dragged (the window minus a margin).
+    let maxWidth: CGFloat
 
     @State private var contentHeight: CGFloat = 0
 
@@ -104,12 +106,19 @@ struct InspectorPanelView: View {
             .frame(height: scrollHeight)
             .onPreferenceChange(InspectorContentHeight.self) { contentHeight = $0 }
         }
-        .frame(width: 360)
+        .frame(width: min(model.inspectorWidth, maxWidth))
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
         .overlay(
             RoundedRectangle(cornerRadius: 12)
                 .strokeBorder(.separator, lineWidth: 0.5)
         )
+        // Drag the leading edge to widen (360pt minimum).
+        .overlay(alignment: .leading) {
+            ResizeHandle(
+                width: Binding(
+                    get: { model.inspectorWidth }, set: { model.inspectorWidth = $0 }),
+                minWidth: 360, maxWidth: maxWidth, sign: -1)
+        }
         .shadow(radius: 24, y: 8)
         .arrowCursorOnHover()
     }

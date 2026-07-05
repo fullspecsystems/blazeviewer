@@ -12,14 +12,15 @@ with any pre-release suffix carried only by the tag.
   filesystem browser: **disclosure chevrons** expand/collapse folders (pure browsing — no
   scan), so you can walk through photo-less folders to *find* the one you want, then click a
   folder's **name** to open it. Siblings show at every level, the current folder is
-  highlighted with a photo-count badge, an **↑** button climbs a level, and it scrolls.
-  Reads happen off-thread, so a slow network share never freezes a click. (Archives keep the
-  simple scoped list.)
+  highlighted with a photo-count badge, an "up to *parent*" row climbs a level, and it
+  scrolls. **Drag its right edge to widen it.** Reads happen off-thread, so a slow network
+  share never freezes a click. (Archives keep the simple scoped list.)
 - **Native Inspector panel on macOS** — Details, Text, and Describe are now one tabbed
   macOS panel (top-right, parallel to the folder tree) instead of three separate on-image
   overlays: crisp native text, an **icon + label** tab bar for Details / Text / Describe,
   selectable values you can copy, and a **✕** to close. AI descriptions render **Markdown**.
-  It stays live — switching photos, or waiting on OCR / an AI description, updates in place.
+  **Drag its left edge to widen it.** It stays live — switching photos, or waiting on OCR /
+  an AI description, updates in place.
 - **Redesigned welcome screen on macOS** — with no photos open, the window shows clean
   **Open File** / **Open Folder** buttons (each with its shortcut key), a few essential
   keys (Next / Previous / Random), and a **Show Shortcuts** link that opens the keyboard

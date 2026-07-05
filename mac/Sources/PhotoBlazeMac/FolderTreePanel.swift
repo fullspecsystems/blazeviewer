@@ -27,6 +27,8 @@ struct FolderTreeRow: Identifiable {
 struct FolderTreePanelView: View {
     let model: CoreModel
     let maxHeight: CGFloat
+    /// The widest the panel may be dragged (the window minus a margin).
+    let maxWidth: CGFloat
 
     @State private var contentHeight: CGFloat = 0
 
@@ -77,12 +79,18 @@ struct FolderTreePanelView: View {
             .frame(height: scrollHeight)
             .onPreferenceChange(TreeContentHeight.self) { contentHeight = $0 }
         }
-        .frame(width: 280)
+        .frame(width: min(model.treeWidth, maxWidth))
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
         .overlay(
             RoundedRectangle(cornerRadius: 12)
                 .strokeBorder(.separator, lineWidth: 0.5)
         )
+        // Drag the trailing edge to widen (280pt minimum).
+        .overlay(alignment: .trailing) {
+            ResizeHandle(
+                width: Binding(get: { model.treeWidth }, set: { model.treeWidth = $0 }),
+                minWidth: 280, maxWidth: maxWidth, sign: 1)
+        }
         .shadow(radius: 24, y: 8)
         .arrowCursorOnHover()
     }

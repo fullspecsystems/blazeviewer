@@ -121,13 +121,17 @@ struct ContentView: View {
             .overlay {
                 if model.inspectorVisible {
                     GeometryReader { geo in
-                        InspectorPanelView(model: model, maxHeight: geo.size.height - 48)
-                            .frame(
-                                maxWidth: .infinity, maxHeight: .infinity,
-                                alignment: .topTrailing
-                            )
-                            .padding(.trailing, 24)
-                            .padding(.top, 24)
+                        InspectorPanelView(
+                            model: model,
+                            maxHeight: geo.size.height - 48,
+                            maxWidth: max(360, geo.size.width - 80)
+                        )
+                        .frame(
+                            maxWidth: .infinity, maxHeight: .infinity,
+                            alignment: .topTrailing
+                        )
+                        .padding(.trailing, 24)
+                        .padding(.top, 24)
                     }
                     .transition(.opacity)
                 }
@@ -136,13 +140,17 @@ struct ContentView: View {
             .overlay {
                 if model.treeVisible {
                     GeometryReader { geo in
-                        FolderTreePanelView(model: model, maxHeight: geo.size.height - 48)
-                            .frame(
-                                maxWidth: .infinity, maxHeight: .infinity,
-                                alignment: .topLeading
-                            )
-                            .padding(.leading, 24)
-                            .padding(.top, 24)
+                        FolderTreePanelView(
+                            model: model,
+                            maxHeight: geo.size.height - 48,
+                            maxWidth: max(280, geo.size.width - 80)
+                        )
+                        .frame(
+                            maxWidth: .infinity, maxHeight: .infinity,
+                            alignment: .topLeading
+                        )
+                        .padding(.leading, 24)
+                        .padding(.top, 24)
                     }
                     .transition(.opacity)
                 }
