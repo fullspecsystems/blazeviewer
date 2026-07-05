@@ -65,6 +65,15 @@ struct InspectorPanelView: View {
                 }
                 .padding(2)
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                // Copy the whole active tab (details / text / description) — one consistent
+                // action across all three, so you never have to hand-select the text.
+                Button(action: { model.copyInspectorTab() }) {
+                    Image(systemName: "doc.on.doc")
+                        .foregroundStyle(Color.panelSecondary)
+                        .imageScale(.medium)
+                }
+                .buttonStyle(.plain)
+                .help(model.inspectorCopyLabel)
                 Button(action: { model.closeInspector() }) {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundStyle(Color.panelSecondary)
@@ -96,6 +105,10 @@ struct InspectorPanelView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 14)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                // Enable selection at the container, not per row — so a drag selects across
+                // rows (the whole readout) instead of one value at a time. The ⧉ button is the
+                // one-click "copy everything" path; this is for grabbing a piece by hand.
+                .textSelection(.enabled)
                 .background(
                     GeometryReader { g in
                         Color.clear.preference(
@@ -156,7 +169,6 @@ struct InspectorPanelView: View {
                 .font(.headline)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 4)
-                .textSelection(.enabled)
         case 1:
             // A label / value metadata pair — label in a fixed leading column.
             HStack(alignment: .firstTextBaseline, spacing: 10) {
@@ -167,7 +179,6 @@ struct InspectorPanelView: View {
                 Text(row.b)
                     .font(.callout)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
             }
         case 3:
             // A muted status line (scanning / idle / error).
@@ -176,24 +187,16 @@ struct InspectorPanelView: View {
                 .foregroundStyle(Color.panelSecondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         default:
-            // A body paragraph. Describe prose is Markdown; OCR text is literal.
-            bodyText(row.a)
-                .font(.callout)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .textSelection(.enabled)
+            // A body paragraph. Describe = AI text → block-level Markdown (headings, lists,
+            // emphasis); Text/OCR stays literal.
+            if model.inspectorTab == 2 {
+                MarkdownBlocksView(text: row.a)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Text(row.a)
+                    .font(.callout)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
-    }
-
-    /// The Describe tab renders its prose as Markdown (inline emphasis + preserved
-    /// paragraph breaks); every other body (OCR text) stays literal.
-    private func bodyText(_ s: String) -> Text {
-        guard model.inspectorTab == 2,
-            let attributed = try? AttributedString(
-                markdown: s,
-                options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
-        else {
-            return Text(s)
-        }
-        return Text(attributed)
     }
 }

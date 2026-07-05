@@ -518,6 +518,26 @@ final class CoreModel {
         kick()
     }
 
+    /// Copy the whole active Inspector tab to the clipboard (the header ⧉ button) — routes to
+    /// the core's existing per-tab copy command (details / recognized text / description),
+    /// which writes the clipboard and shows the confirming toast.
+    func copyInspectorTab() {
+        switch inspectorTab {
+        case 1: menuAction("copy_image_text")
+        case 2: menuAction("copy_description")
+        default: menuAction("copy_image_details")
+        }
+    }
+
+    /// The active tab's copy tooltip / accessibility label.
+    var inspectorCopyLabel: String {
+        switch inspectorTab {
+        case 1: return "Copy all text"
+        case 2: return "Copy description"
+        default: return "Copy details"
+        }
+    }
+
     /// Re-pull the native folder tree after a `PanelsChanged` marker: visibility and (when
     /// visible) the current folder's hierarchy rows, as derived by the core.
     private func refreshTree() {

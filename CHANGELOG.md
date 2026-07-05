@@ -21,9 +21,12 @@ with any pre-release suffix carried only by the tag.
 - **Native Inspector panel on macOS** — Details, Text, and Describe are now one tabbed
   macOS panel (top-right, parallel to the folder tree) instead of three separate on-image
   overlays: crisp native text, an **icon + label** tab bar for Details / Text / Describe,
-  selectable values you can copy, and a **✕** to close. AI descriptions render **Markdown**.
-  **Drag its left edge to widen it.** It stays live — switching photos, or waiting on OCR /
-  an AI description, updates in place.
+  selectable values you can copy, and a **✕** to close. **Drag its left edge to widen it.**
+  It stays live — switching photos, or waiting on OCR / an AI description, updates in place.
+  A **Copy button** (⧉ in the header) copies the whole active tab — details, recognized
+  text, or the AI description — in one click, and you can now **drag-select across the whole
+  readout** instead of one value at a time. **AI descriptions render full Markdown** —
+  headings and bullet/numbered lists, not just inline bold/italic.
 - **Redesigned welcome screen on macOS** — with no photos open, the window shows clean
   **Open File** / **Open Folder** buttons (each with its shortcut key), a few essential
   keys (Next / Previous / Random), and a **Show Shortcuts** link that opens the keyboard
