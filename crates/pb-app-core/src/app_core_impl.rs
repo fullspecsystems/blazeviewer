@@ -989,6 +989,10 @@ impl AppCore {
         // 1. Absorb finished decodes (uploads; presents the target if it arrived).
         self.drain_results();
 
+        // 1a. Bound the regenerable per-item caches so browsing tens of thousands of photos
+        // can't grow them without limit. Cheap when under the high-water mark (length checks).
+        self.trim_caches();
+
         // 1b. Pick up a finished off-thread animation decode (kicked by `P` / frame-step) and
         // install playback — never on the still/keypress hot path (#37).
         self.poll_anim_decode();
@@ -1362,6 +1366,43 @@ impl AppCore {
             .flatten()
             .min();
         self.effects.push(contract::CoreEffect::SetWake(wake));
+    }
+
+    /// Bound the regenerable per-item caches (metadata / EXIF / OCR text / AI descriptions) so
+    /// browsing tens of thousands of photos in one session can't grow them without limit. Keeps
+    /// the entries **nearest the current photo** — the ones a fly-back or neighbor revisit will
+    /// want (and always the current item + the resident window, which is well inside the cap) —
+    /// and evicts the farthest. Deliberately does **not** touch `rotations` (unsaved user edits,
+    /// not a cache). An evicted entry simply regenerates on revisit (a re-read/-OCR, or a fresh
+    /// describe); with the cap this only happens for photos thousands of positions away.
+    fn trim_caches(&mut self) {
+        const CAP: usize = 4096;
+        const HIGH: usize = CAP + CAP / 4; // only trim once ~25% over → bursty, off the hot path
+        let Some(cur) = self.displayed_item else {
+            return;
+        };
+        Self::trim_nearest(&mut self.meta_cache, cur, CAP, HIGH);
+        Self::trim_nearest(&mut self.exif_cache, cur, CAP, HIGH);
+        Self::trim_nearest(&mut self.recognized_text, cur, CAP, HIGH);
+        Self::trim_nearest(&mut self.descriptions, cur, CAP, HIGH);
+    }
+
+    /// Evict entries farthest (by item index) from `cur` until `map` holds at most `cap` — but
+    /// only once it passes `high`, so the sort runs in bursts rather than every tick.
+    fn trim_nearest<V>(
+        map: &mut std::collections::HashMap<usize, V>,
+        cur: usize,
+        cap: usize,
+        high: usize,
+    ) {
+        if map.len() <= high {
+            return;
+        }
+        let mut keys: Vec<usize> = map.keys().copied().collect();
+        keys.sort_unstable_by_key(|&k| k.abs_diff(cur));
+        for k in keys.into_iter().skip(cap) {
+            map.remove(&k);
+        }
     }
 
     /// Build the [`contract::MenuState`] for the given live state — the pure mapping from
@@ -6015,6 +6056,42 @@ mod tests {
             height: 1,
             scale_factor: 1.0,
         })
+    }
+
+    #[test]
+    fn trim_caches_bounds_regenerable_caches_but_keeps_current_and_user_edits() {
+        use crate::meta::PhotoMeta;
+        let mut core = test_core();
+        core.displayed_item = Some(5000);
+        let meta = PhotoMeta {
+            rel: String::new(),
+            w: 1,
+            h: 1,
+            codec: "PNG",
+            animated: None,
+        };
+        // Fill a regenerable cache past the high-water mark, and a user-edit map alongside it.
+        for i in 0..6000 {
+            core.meta_cache.insert(i, meta.clone());
+            core.rotations.insert(i, Rotation::default().cw());
+        }
+        core.trim_caches();
+
+        // Capped, current + neighbor kept, farthest evicted.
+        assert!(core.meta_cache.len() <= 4096);
+        assert!(core.meta_cache.contains_key(&5000), "current item survives");
+        assert!(core.meta_cache.contains_key(&4999), "a neighbor survives");
+        assert!(!core.meta_cache.contains_key(&0), "the farthest is evicted");
+        // User edits (rotations) are never a cache — all 6000 survive.
+        assert_eq!(core.rotations.len(), 6000, "rotations are never evicted");
+
+        // Under the high-water mark → a no-op (doesn't churn while small).
+        core.meta_cache.clear();
+        for i in 0..100 {
+            core.meta_cache.insert(i, meta.clone());
+        }
+        core.trim_caches();
+        assert_eq!(core.meta_cache.len(), 100);
     }
 
     #[test]
