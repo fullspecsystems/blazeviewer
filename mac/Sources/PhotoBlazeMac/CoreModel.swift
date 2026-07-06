@@ -66,6 +66,7 @@ final class CoreModel {
     /// CODEC[· Live]`, in a small bottom-corner pill; `align` is 0 left / 1 center / 2 right.
     private(set) var infoLineVisible = false
     private(set) var infoLineText = ""
+    private(set) var infoLineCodec = ""
     private(set) var infoLineAlign = 2
 
     // MARK: - Native rich panels (task #54, mac-first) — the first is Help
@@ -1104,6 +1105,7 @@ final class CoreModel {
         let infoVis = core.info_line_visible()
         if infoVis {
             infoLineText = core.info_line_text().toString()
+            infoLineCodec = core.info_line_codec().toString()
             infoLineAlign = Int(core.info_line_align())
         }
         if infoVis != infoLineVisible {

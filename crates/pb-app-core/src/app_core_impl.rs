@@ -3447,6 +3447,26 @@ impl AppCore {
         self.info_line && self.current.is_some()
     }
 
+    /// The info readout's main text (native shell) — `rel · W×H[· Live]`, with the codec split
+    /// out so the shell can pill it separately (like the folder-tree count badges).
+    pub fn info_line_main(&self) -> Option<String> {
+        let meta = self.current.as_ref()?;
+        let is_live = self.displayed_item.is_some_and(|i| self.is_live_photo(i));
+        let mut text = format!("{} · {}×{}", meta.rel, meta.w, meta.h);
+        if is_live {
+            text.push_str(" · Live");
+        }
+        Some(text)
+    }
+
+    /// The current photo's codec label (e.g. `JPEG`) for the info readout's pill.
+    pub fn info_line_codec(&self) -> String {
+        self.current
+            .as_ref()
+            .map(|m| m.codec.to_string())
+            .unwrap_or_default()
+    }
+
     pub fn show_info_line(&mut self) {
         // Native shell draws the line — just track the toggle state; no HUD raster / colliders.
         if self.native_info {

@@ -9,13 +9,25 @@ struct InfoLineView: View {
     let model: CoreModel
 
     var body: some View {
-        Text(model.infoLineText)
-            .font(.caption)
-            .foregroundStyle(.primary)
-            .lineLimit(1)
-            .truncationMode(.middle)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .panelBackground(cornerRadius: 7, opacity: model.panelOpacity)
+        HStack(spacing: 8) {
+            Text(model.infoLineText)
+                .font(.callout)
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            // The codec sits in a small capsule (like the folder-tree count badges), nested
+            // neatly inside the pill.
+            if !model.infoLineCodec.isEmpty {
+                Text(model.infoLineCodec)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(.quaternary, in: Capsule())
+            }
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 6)
+        .panelBackground(cornerRadius: 9, opacity: model.panelOpacity)
     }
 }

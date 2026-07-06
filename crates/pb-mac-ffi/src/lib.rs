@@ -1066,9 +1066,14 @@ impl AppCoreHandle {
         self.core.info_line_visible()
     }
 
-    /// The readout text: `rel · W×H · CODEC[· Live]`.
+    /// The readout's main text: `rel · W×H[· Live]` (the codec is a separate pill).
     fn info_line_text(&self) -> String {
-        self.core.info_line_content().unwrap_or_default()
+        self.core.info_line_main().unwrap_or_default()
+    }
+
+    /// The codec label (e.g. `JPEG`) — the host renders it in a small capsule.
+    fn info_line_codec(&self) -> String {
+        self.core.info_line_codec()
     }
 
     /// Horizontal placement from Settings: 0 = left, 1 = center, 2 = right (default).
@@ -2550,6 +2555,7 @@ mod ffi {
         fn toast_seq(&self) -> u64;
         fn info_line_visible(&self) -> bool;
         fn info_line_text(&self) -> String;
+        fn info_line_codec(&self) -> String;
         fn info_line_align(&self) -> u8;
         fn settings_form(&self) -> SettingsFormFfi;
         fn settings_edited(&mut self, form: SettingsFormFfi);

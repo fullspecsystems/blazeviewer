@@ -123,7 +123,10 @@ struct ContentView: View {
                     GeometryReader { geo in
                         InspectorPanelView(
                             model: model,
-                            maxHeight: geo.size.height - 48,
+                            // Reserve room at the bottom for the info line so a tall panel
+                            // never collides with it (the old HUD collider logic, restored).
+                            maxHeight: geo.size.height - 48
+                                - (model.infoLineVisible ? 44 : 0),
                             maxWidth: max(360, geo.size.width - 80)
                         )
                         .frame(
@@ -142,7 +145,9 @@ struct ContentView: View {
                     GeometryReader { geo in
                         FolderTreePanelView(
                             model: model,
-                            maxHeight: geo.size.height - 48,
+                            // Clear the bottom info line too (see the Inspector above).
+                            maxHeight: geo.size.height - 48
+                                - (model.infoLineVisible ? 44 : 0),
                             maxWidth: max(280, geo.size.width - 80)
                         )
                         .frame(
