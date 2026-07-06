@@ -225,15 +225,44 @@ struct SettingsView: View {
                 labeledSlider(
                     "Panel opacity", value: $draft.panelOpacity, in: 50...100, format: "%.0f%%"
                 )
-                Picker("File info position", selection: $draft.infoLineAlign) {
+            }
+            // The one-line info readout (`i`): whether it starts shown, where it sits, and
+            // which fields it lists. `i` still toggles it live regardless of the default.
+            Section("Image Info") {
+                Toggle("Show image info by default", isOn: $draft.showImageInfo)
+                Picker("Position", selection: $draft.infoLineAlign) {
                     Text("Left").tag(0)
                     Text("Center").tag(1)
                     Text("Right").tag(2)
                 }
                 .pickerStyle(.segmented)
+                // Field toggles apply live; the last enabled one can't be turned off (an empty
+                // line reads as a bug), so there's always something to show.
+                Toggle("Filename", isOn: infoFieldBinding(\.infoShowFilename))
+                Toggle("Resolution", isOn: infoFieldBinding(\.infoShowResolution))
+                Toggle("Codec", isOn: infoFieldBinding(\.infoShowCodec))
             }
         }
         .formStyle(.grouped)
+    }
+
+    /// How many of the three info fields are on — used to forbid turning off the last one.
+    private var infoFieldsEnabledCount: Int {
+        (draft.infoShowFilename ? 1 : 0)
+            + (draft.infoShowResolution ? 1 : 0)
+            + (draft.infoShowCodec ? 1 : 0)
+    }
+
+    /// A toggle binding for one info field that refuses to turn off the last remaining field.
+    private func infoFieldBinding(_ keyPath: WritableKeyPath<SettingsDraft, Bool>) -> Binding<Bool>
+    {
+        Binding(
+            get: { draft[keyPath: keyPath] },
+            set: { on in
+                if !on && draft[keyPath: keyPath] && infoFieldsEnabledCount <= 1 { return }
+                draft[keyPath: keyPath] = on
+            }
+        )
     }
 
     /// The **AI** tab (task #44): the description backend, endpoint/model, prompt, response
@@ -626,6 +655,10 @@ struct SettingsDraft: Equatable {
     var scaleMode = 0
     var appearanceMode = 0
     var infoLineAlign = 2  // 0 left / 1 center / 2 right (task #54)
+    var showImageInfo = false  // info line's launch default (task #54)
+    var infoShowFilename = true
+    var infoShowResolution = true
+    var infoShowCodec = true
     var letterbox: Color = .black
     var letterboxLight: Color = .white
     var infoOpacity: Double = 60
@@ -658,6 +691,10 @@ struct SettingsDraft: Equatable {
         scaleMode = Int(form.scale_mode)
         appearanceMode = Int(form.appearance_mode)
         infoLineAlign = Int(form.info_line_align)
+        showImageInfo = form.show_image_info
+        infoShowFilename = form.info_show_filename
+        infoShowResolution = form.info_show_resolution
+        infoShowCodec = form.info_show_codec
         letterbox = Color(
             red: Double(form.letterbox_r) / 255.0,
             green: Double(form.letterbox_g) / 255.0,
@@ -710,6 +747,10 @@ struct SettingsDraft: Equatable {
             scale_mode: UInt8(scaleMode),
             appearance_mode: UInt8(appearanceMode),
             info_line_align: UInt8(infoLineAlign),
+            show_image_info: showImageInfo,
+            info_show_filename: infoShowFilename,
+            info_show_resolution: infoShowResolution,
+            info_show_codec: infoShowCodec,
             letterbox_r: UInt8((rgb.redComponent * 255).rounded().clamped(0, 255)),
             letterbox_g: UInt8((rgb.greenComponent * 255).rounded().clamped(0, 255)),
             letterbox_b: UInt8((rgb.blueComponent * 255).rounded().clamped(0, 255)),

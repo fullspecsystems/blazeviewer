@@ -1127,6 +1127,10 @@ impl AppCoreHandle {
                 InfoLineAlign::Center => 1,
                 InfoLineAlign::Right => 2,
             },
+            show_image_info: s.show_image_info,
+            info_show_filename: s.info_show_filename,
+            info_show_resolution: s.info_show_resolution,
+            info_show_codec: s.info_show_codec,
             letterbox_r: s.letterbox[0],
             letterbox_g: s.letterbox[1],
             letterbox_b: s.letterbox[2],
@@ -2088,6 +2092,10 @@ fn fold_settings_form(
         1 => InfoLineAlign::Center,
         _ => InfoLineAlign::Right,
     };
+    s.show_image_info = form.show_image_info;
+    s.info_show_filename = form.info_show_filename;
+    s.info_show_resolution = form.info_show_resolution;
+    s.info_show_codec = form.info_show_codec;
     s.letterbox = [form.letterbox_r, form.letterbox_g, form.letterbox_b];
     s.letterbox_light = [
         form.letterbox_light_r,
@@ -2377,6 +2385,11 @@ mod ffi {
         appearance_mode: u8,
         // 0 left / 1 center / 2 right (task #54).
         info_line_align: u8,
+        // Info line: launch default + which fields show (task #54).
+        show_image_info: bool,
+        info_show_filename: bool,
+        info_show_resolution: bool,
+        info_show_codec: bool,
         letterbox_r: u8,
         letterbox_g: u8,
         letterbox_b: u8,

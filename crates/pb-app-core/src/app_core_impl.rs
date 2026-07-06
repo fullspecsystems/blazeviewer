@@ -228,6 +228,7 @@ impl AppCore {
         core.initial_delay = Duration::from_millis(settings.hold_delay_ms as u64);
         core.slideshow.interval = Duration::from_secs_f64(settings.slideshow_interval_secs);
         core.view.mode = scale_mode_of(settings.scale_mode);
+        core.info_line = settings.show_image_info; // the info readout's launch default (task #54)
         core.keymap = Keymap::load();
         core.settings = settings;
         core.hud = hud::Hud::load();
@@ -3008,6 +3009,29 @@ impl AppCore {
             self.show_info_line();
         }
 
+        // The "show image info" default also applies live — flipping it in Settings shows or
+        // hides the current line, not just the next launch.
+        if old.show_image_info != self.settings.show_image_info {
+            self.info_line = self.settings.show_image_info;
+        }
+        // The field toggles (filename / resolution / codec) are read live by info_line_*(), so
+        // if the line is up, re-place it to reflect the new content — or hide it if the change
+        // left no fields on (info_line_visible now returns false).
+        let fields_changed = old.info_show_filename != self.settings.info_show_filename
+            || old.info_show_resolution != self.settings.info_show_resolution
+            || old.info_show_codec != self.settings.info_show_codec;
+        if self.info_line
+            && (fields_changed || old.show_image_info != self.settings.show_image_info)
+        {
+            if self.info_line_visible() {
+                self.show_info_line();
+            } else {
+                self.hide_info_line();
+            }
+        } else if !self.info_line && old.show_image_info != self.settings.show_image_info {
+            self.hide_info_line();
+        }
+
         // Redraw so the new letterbox shows even when the scale mode didn't change,
         // and rebuild the info panel so a new opacity takes effect immediately.
         if self.overlay_shown {
@@ -3430,37 +3454,64 @@ impl AppCore {
     /// at the configured alignment, then re-place any colliding panel/tree/toast above
     /// it. A no-op without a font/photo (the tick retries on settle). Mirrors
     /// [`show_overlay`](Self::show_overlay) but for the ephemeral line.
-    /// The one-line info readout's text — `rel · W×H · CODEC[· Live]` — or `None` with no
-    /// photo. Shared by the HUD rasterizer and the native (macOS) shell, so both read the same.
+    /// The full one-line readout — `rel · W×H · CODEC[· Live]`, each field gated by its
+    /// Settings toggle — or `None` with no photo. The HUD (winit) rasterizes this whole string;
+    /// the native shell instead reads `info_line_main` + `info_line_codec` (codec as a pill).
     pub fn info_line_content(&self) -> Option<String> {
         let meta = self.current.as_ref()?;
-        let is_live = self.displayed_item.is_some_and(|i| self.is_live_photo(i));
-        let mut text = format!("{} · {}×{} · {}", meta.rel, meta.w, meta.h, meta.codec);
-        if is_live {
-            text.push_str(" · Live"); // a Live Photo's motion is playable (P)
+        let mut parts = self.info_line_parts(meta);
+        if self.settings.info_show_codec {
+            parts.push(meta.codec.to_string());
         }
-        Some(text)
+        if self.displayed_item.is_some_and(|i| self.is_live_photo(i)) {
+            parts.push("Live".to_string()); // a Live Photo's motion is playable (P)
+        }
+        Some(parts.join(" · "))
     }
 
-    /// Whether the native info readout should show: toggled on (`i`) with a photo loaded.
+    /// The filename / resolution fields, each gated by its Settings toggle (shared by the full
+    /// HUD string and the native main text).
+    fn info_line_parts(&self, meta: &crate::meta::PhotoMeta) -> Vec<String> {
+        let mut parts = Vec::new();
+        if self.settings.info_show_filename {
+            parts.push(meta.rel.clone());
+        }
+        if self.settings.info_show_resolution {
+            parts.push(format!("{}×{}", meta.w, meta.h));
+        }
+        parts
+    }
+
+    /// Whether the info readout should show: toggled on (`i`), a photo loaded, and at least one
+    /// field enabled — an empty pill (all fields off) reads as a bug, so it hides instead.
     pub fn info_line_visible(&self) -> bool {
-        self.info_line && self.current.is_some()
+        self.info_line && self.current.is_some() && self.any_info_field()
     }
 
-    /// The info readout's main text (native shell) — `rel · W×H[· Live]`, with the codec split
-    /// out so the shell can pill it separately (like the folder-tree count badges).
+    /// True if any of the three info fields is enabled.
+    fn any_info_field(&self) -> bool {
+        self.settings.info_show_filename
+            || self.settings.info_show_resolution
+            || self.settings.info_show_codec
+    }
+
+    /// The info readout's main text (native shell) — `rel · W×H[· Live]`, codec split out so the
+    /// shell can pill it separately (like the folder-tree count badges). Each field is gated.
     pub fn info_line_main(&self) -> Option<String> {
         let meta = self.current.as_ref()?;
-        let is_live = self.displayed_item.is_some_and(|i| self.is_live_photo(i));
-        let mut text = format!("{} · {}×{}", meta.rel, meta.w, meta.h);
-        if is_live {
-            text.push_str(" · Live");
+        let mut parts = self.info_line_parts(meta);
+        if self.displayed_item.is_some_and(|i| self.is_live_photo(i)) {
+            parts.push("Live".to_string());
         }
-        Some(text)
+        Some(parts.join(" · "))
     }
 
-    /// The current photo's codec label (e.g. `JPEG`) for the info readout's pill.
+    /// The current photo's codec label (e.g. `JPEG`) for the info readout's pill — empty when
+    /// the codec field is toggled off (so the shell omits the badge).
     pub fn info_line_codec(&self) -> String {
+        if !self.settings.info_show_codec {
+            return String::new();
+        }
         self.current
             .as_ref()
             .map(|m| m.codec.to_string())
@@ -5849,6 +5900,49 @@ mod tests {
             height: 1,
             scale_factor: 1.0,
         })
+    }
+
+    #[test]
+    fn info_line_fields_respect_the_settings_toggles() {
+        use crate::meta::PhotoMeta;
+        let mut core = test_core();
+        core.current = Some(PhotoMeta {
+            rel: "folder/photo.jpg".to_string(),
+            w: 4032,
+            h: 3024,
+            codec: "JPEG",
+            animated: None,
+        });
+        core.info_line = true;
+
+        // All fields on (defaults): full HUD string, native main text, and codec pill.
+        assert_eq!(
+            core.info_line_content().as_deref(),
+            Some("folder/photo.jpg · 4032×3024 · JPEG")
+        );
+        assert_eq!(
+            core.info_line_main().as_deref(),
+            Some("folder/photo.jpg · 4032×3024")
+        );
+        assert_eq!(core.info_line_codec(), "JPEG");
+        assert!(core.info_line_visible());
+
+        // Codec off → dropped from the string, and the pill accessor goes empty.
+        core.settings.info_show_codec = false;
+        assert_eq!(
+            core.info_line_content().as_deref(),
+            Some("folder/photo.jpg · 4032×3024")
+        );
+        assert_eq!(core.info_line_codec(), "");
+
+        // Filename off too → only the resolution remains.
+        core.settings.info_show_filename = false;
+        assert_eq!(core.info_line_content().as_deref(), Some("4032×3024"));
+        assert_eq!(core.info_line_main().as_deref(), Some("4032×3024"));
+
+        // All three off → the line hides (empty-pill guard) even though `i` is on.
+        core.settings.info_show_resolution = false;
+        assert!(!core.info_line_visible());
     }
 
     #[test]

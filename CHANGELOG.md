@@ -8,6 +8,11 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
+- **The image info line is now configurable** (Settings ▸ Appearance ▸ *Image Info*): a
+  **"Show image info by default"** toggle sets whether the `i` readout starts shown on launch
+  (the `i` key still toggles it live), a **Position** picker places it, and per-field
+  checkboxes for **Filename**, **Resolution**, and **Codec** let you dial in exactly what it
+  lists. Field changes apply live, and at least one field always stays on.
 - **A "Panel opacity" slider** (Settings ▸ Appearance) sets how much of the photo shows
   through the native panels — the folder tree, inspector, and scan pill. It defaults high to
   keep text crisp, and you can dial it down to ~50% to see more of the image behind the

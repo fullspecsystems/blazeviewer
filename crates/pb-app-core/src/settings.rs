@@ -144,6 +144,14 @@ pub struct Settings {
     /// Where the basic info line (`i`) sits along the bottom edge (task #54).
     /// Default `Right` (today's placement).
     pub info_line_align: InfoLineAlign,
+    /// Whether the info line (`i`) starts shown on a fresh launch — the default state; the `i`
+    /// key still toggles it live, and flipping this in Settings applies at once (task #54).
+    pub show_image_info: bool,
+    /// Which fields the info line shows: file name, resolution (W×H), codec. Applied live. At
+    /// least one stays on — the line hides if somehow all are off (an empty pill reads as a bug).
+    pub info_show_filename: bool,
+    pub info_show_resolution: bool,
+    pub info_show_codec: bool,
     /// Letterbox / background fill (sRGB) shown behind a non-filling image, in **dark**
     /// mode (the pre-#46 `letterbox` key, so existing files keep their chosen color).
     pub letterbox: [u8; 3],
@@ -233,10 +241,14 @@ impl Default for Settings {
             scale_mode: ScaleModePref::Fit,
             appearance_mode: AppearanceMode::System, // follow the OS light/dark theme
             info_line_align: InfoLineAlign::Right,   // today's bottom-right placement
-            letterbox: [10, 10, 12],                 // pb_render::LETTERBOX (rgb)
-            letterbox_light: [240, 241, 245],        // the light-mode analog (#46)
-            info_opacity: 60,                        // hud::BG alpha 153/255 ≈ 60%
-            panel_opacity: 92,                       // conservative-high (≈ today's material look)
+            show_image_info: false,                  // off until opted in (unchanged launch)
+            info_show_filename: true,
+            info_show_resolution: true,
+            info_show_codec: true,
+            letterbox: [10, 10, 12],          // pb_render::LETTERBOX (rgb)
+            letterbox_light: [240, 241, 245], // the light-mode analog (#46)
+            info_opacity: 60,                 // hud::BG alpha 153/255 ≈ 60%
+            panel_opacity: 92,                // conservative-high (≈ today's material look)
             slideshow_interval_secs: slideshow::DEFAULT_INTERVAL.as_secs_f64(), // 4.0
             window: None,
             picker_dir: None,       // start in the current photo's folder
