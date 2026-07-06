@@ -3534,11 +3534,16 @@ impl AppCore {
     /// shell can pill it separately (like the folder-tree count badges). Each field is gated.
     pub fn info_line_main(&self) -> Option<String> {
         let meta = self.current.as_ref()?;
-        let mut parts = self.info_line_parts(meta);
-        if self.displayed_item.is_some_and(|i| self.is_live_photo(i)) {
-            parts.push("Live".to_string());
-        }
-        Some(parts.join(" · "))
+        // Note: no "Live" here — the native shell shows the livephoto *symbol* by the codec
+        // (`info_line_is_live`) instead of the word. The HUD string (`info_line_content`) keeps
+        // the text, since it can't draw a symbol.
+        Some(self.info_line_parts(meta).join(" · "))
+    }
+
+    /// Whether the current photo is a Live Photo — the native shell renders the livephoto mark
+    /// beside the codec in place of the "Live" text.
+    pub fn info_line_is_live(&self) -> bool {
+        self.current.is_some() && self.displayed_item.is_some_and(|i| self.is_live_photo(i))
     }
 
     /// The current photo's codec label (e.g. `JPEG`) for the info readout's pill — empty when

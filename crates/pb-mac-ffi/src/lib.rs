@@ -1077,6 +1077,12 @@ impl AppCoreHandle {
         self.core.info_line_codec()
     }
 
+    /// Whether the current photo is a Live Photo — the host shows the livephoto mark by the
+    /// codec instead of "Live" text.
+    fn info_line_is_live(&self) -> bool {
+        self.core.info_line_is_live()
+    }
+
     // ── The native play hint (▶/Live Photo on a motion item): the last HUD overlay to go
     // native. The core signals *when* to flash it (seq) + *what* it is (kind); the host owns
     // the pill, its 3s fade, hover-to-hold, and click-to-play (via menu_action "play_pause").──
@@ -2587,6 +2593,7 @@ mod ffi {
         fn info_line_visible(&self) -> bool;
         fn info_line_text(&self) -> String;
         fn info_line_codec(&self) -> String;
+        fn info_line_is_live(&self) -> bool;
         fn info_line_align(&self) -> u8;
         fn play_hint_kind(&self) -> u8;
         fn play_hint_seq(&self) -> u64;

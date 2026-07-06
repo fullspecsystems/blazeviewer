@@ -67,6 +67,7 @@ final class CoreModel {
     private(set) var infoLineVisible = false
     private(set) var infoLineText = ""
     private(set) var infoLineCodec = ""
+    private(set) var infoLineIsLive = false
     private(set) var infoLineAlign = 2
 
     /// The native play hint (▶ / Live Photo on a motion item) — the last on-image HUD overlay
@@ -1152,6 +1153,7 @@ final class CoreModel {
         if infoVis {
             infoLineText = core.info_line_text().toString()
             infoLineCodec = core.info_line_codec().toString()
+            infoLineIsLive = core.info_line_is_live()
             infoLineAlign = Int(core.info_line_align())
         }
         if infoVis != infoLineVisible {

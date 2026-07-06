@@ -23,6 +23,12 @@ struct InfoLineView: View {
                 .foregroundStyle(.primary)
                 .lineLimit(1)
                 .truncationMode(.middle)
+            // A Live Photo shows the livephoto mark by the codec instead of the word "Live".
+            if model.infoLineIsLive {
+                Image(systemName: "livephoto")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
             if hasCodec {
                 Text(model.infoLineCodec)
                     .font(.caption2)
