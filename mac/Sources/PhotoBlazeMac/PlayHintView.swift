@@ -35,13 +35,16 @@ struct PlayHintView: View {
         .padding(.leading, inset)
         .padding(.trailing, inset)
         .padding(.vertical, inset)
-        // Nudge the material ~10% more opaque on hover — a subtle "this is clickable" cue
-        // (macOS has no built-in hover style for a bespoke pill like this).
-        .panelBackground(
-            cornerRadius: pillRadius,
-            opacity: hovering ? min(1.0, model.panelOpacity + 0.1) : model.panelOpacity
-        )
-        .animation(.easeInOut(duration: 0.15), value: hovering)
+        .panelBackground(cornerRadius: pillRadius, opacity: model.panelOpacity)
+        // Make the *whole* pill (padding + material, not just the text) the hover/click region —
+        // without this the padded areas don't hit-test, so hover often never fires.
+        .contentShape(RoundedRectangle(cornerRadius: pillRadius))
+        // Hover cue that's actually visible: a subtle brightness lift + tiny grow (nudging the
+        // near-opaque material's opacity was imperceptible). macOS has no built-in hover style
+        // for a bespoke pill like this.
+        .brightness(hovering ? 0.08 : 0)
+        .scaleEffect(hovering ? 1.03 : 1.0)
+        .animation(.easeInOut(duration: 0.13), value: hovering)
         .onHover { inside in
             hovering = inside
             model.playHintHover(inside)
