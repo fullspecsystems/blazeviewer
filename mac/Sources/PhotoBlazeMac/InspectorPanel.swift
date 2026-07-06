@@ -67,17 +67,6 @@ struct InspectorPanelView: View {
                 }
                 .padding(2)
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
-                // On the Describe tab: a shortcut to the "Ask about image" dialog (the ⇧D
-                // interface) right there beside it, so you can ask a follow-up without the key.
-                if model.inspectorTab == 2 {
-                    Button(action: { model.menuAction("ask_image") }) {
-                        Image(systemName: "questionmark.bubble")
-                            .foregroundStyle(Color.panelSecondary)
-                            .imageScale(.medium)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Ask a question about this image")
-                }
                 // Copy the whole active tab (details / text / description) — one consistent
                 // action across all three, so you never have to hand-select the text. It
                 // swaps to a checkmark for ~1s so you can see the copy landed (a clearer,
@@ -185,11 +174,25 @@ struct InspectorPanelView: View {
     private func rowView(_ row: InspectorRow) -> some View {
         switch row.kind {
         case 0:
-            // A bold heading (the filename, or a Details section title).
-            Text(row.a)
-                .font(.headline)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.top, 4)
+            // A bold heading (the filename, or a Details section title). On the Describe tab
+            // the heading is the always-present "Description" title, so it carries the Ask
+            // button — a stable spot (the tab bar resized as the button showed/hid per tab).
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(row.a)
+                    .font(.headline)
+                if model.inspectorTab == 2 {
+                    Spacer(minLength: 8)
+                    Button(action: { model.menuAction("ask_image") }) {
+                        Label("Ask", systemImage: "questionmark.bubble")
+                            .font(.callout)
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Ask a question about this image")
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 4)
         case 1:
             // A label / value metadata pair — label in a fixed leading column.
             HStack(alignment: .firstTextBaseline, spacing: 10) {
