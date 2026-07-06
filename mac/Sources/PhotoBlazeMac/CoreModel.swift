@@ -1159,16 +1159,21 @@ final class CoreModel {
         if infoVis != infoLineVisible {
             infoLineVisible = infoVis
         }
-        // The native play hint: `kind` drives the icon + relevance (0 while playing / on a
-        // still); a `seq` bump is the "fresh motion item — flash it" trigger.
+        // The native play hint: kind 0 = playing / a still (hide), 1/2 = a motion item. A seq
+        // bump is the "fresh motion item — flash it" trigger.
         let phKind = Int(core.play_hint_kind())
-        if phKind != playHintKind { playHintKind = phKind }
         let phSeq = core.play_hint_seq()
         if phKind == 0 {
+            // Hide — but DON'T zero playHintKind: the icon must stay put while the pill fades
+            // out (clicking a Live Photo flips kind 1→0, and livephoto/play.fill differ in
+            // width, which shifted the layout mid-fade).
             if playHintVisible { hidePlayHint() }
-        } else if phSeq != playHintSeq {
-            playHintSeq = phSeq
-            showPlayHint()
+        } else {
+            if phKind != playHintKind { playHintKind = phKind }
+            if phSeq != playHintSeq {
+                playHintSeq = phSeq
+                showPlayHint()
+            }
         }
         updatePacing()
     }
