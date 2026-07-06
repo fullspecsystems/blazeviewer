@@ -339,14 +339,21 @@ fn info_pill_size(ctx: &egui::Context, info: &InfoLine) -> (f32, f32) {
 /// alignment setting, non-interactive, laid out by hand so everything shares one vertical center.
 fn info_line(ctx: &egui::Context, p: &Palette, alpha: u8, info: &InfoLine) {
     use pb_app_core::settings::InfoLineAlign as A;
-    let (anchor, offset) = match info.align {
-        A::Left => (Align2::LEFT_BOTTOM, egui::vec2(EDGE, -EDGE)),
-        A::Center => (Align2::CENTER_BOTTOM, egui::vec2(0.0, -EDGE)),
-        A::Right => (Align2::RIGHT_BOTTOM, egui::vec2(-EDGE, -EDGE)),
-    };
     let (w, pill_h) = info_pill_size(ctx, info);
+    // Position by an explicit `fixed_pos` from the *known* pill width — NOT `Area::anchor`,
+    // which positions off the previous frame's size (immediate-mode). Since the overlay is
+    // retained (re-renders once per photo) and the width changes per photo, a width-dependent
+    // anchor (center / right) would be placed using the *previous* photo's width and never
+    // correct — the info line bounced between photos. Matches `build`'s `info_span` x0 exactly.
+    let screen = ctx.screen_rect();
+    let x0 = match info.align {
+        A::Left => screen.left() + EDGE,
+        A::Center => (screen.center().x - w / 2.0).max(screen.left()),
+        A::Right => (screen.right() - EDGE - w).max(screen.left()),
+    };
+    let y0 = screen.bottom() - EDGE - pill_h;
     egui::Area::new(egui::Id::new("pb_info_line"))
-        .anchor(anchor, offset)
+        .fixed_pos(egui::pos2(x0, y0))
         .interactable(false)
         .order(egui::Order::Middle)
         .show(ctx, |ui| {

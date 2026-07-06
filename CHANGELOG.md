@@ -178,6 +178,9 @@ with any pre-release suffix carried only by the tag.
   buttons.
 
 ### Fixed
+- **Windows: the image info line no longer jumps around between photos** when it's centered or
+  right-aligned. It was positioned from the *previous* photo's width, so every photo landed it in a
+  slightly different spot; it's now pinned to the correct spot from each photo's own width.
 - **Random photo ([enter]) is actually random now.** The shuffle order was seeded with a fixed
   constant, so opening the same folder always produced the exact same "random" sequence — every
   launch, every day. Each open now draws a fresh seed, so the order varies from one open to the
