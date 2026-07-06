@@ -69,7 +69,10 @@ pub enum SlotContent {
 ///   ever *shows* (otherwise the keypress would appear to do nothing), and `Tab`
 ///   with nothing open is a no-op.
 /// - The basic `i` info line is deliberately NOT here: it is the ephemeral HUD
-///   layer (`AppCore::info_line`), unaffected by panels or `Tab`.
+///   layer (`AppCore::info_line`), and opening/closing it never touches a rich
+///   panel (or vice versa). It shares only `hidden` — `Tab` is a "declutter to see
+///   the clean photo" master switch, so it suppresses the line too — threaded into
+///   `any_open`/`toggle_hidden` as an external bool the same way `tree_open` is.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Panels {
     /// The Inspector: `None` = closed, `Some(tab)` = open on that tab. Survives
@@ -120,9 +123,11 @@ impl Panels {
 
     /// `Tab`: flip master visibility. Returns `false` (no-op) when nothing is open —
     /// flipping invisible state would only set a trap for the next panel toggle.
-    /// `tree_open` counts: the folder tree is a rich panel too.
-    pub fn toggle_hidden(&mut self, tree_open: bool) -> bool {
-        if !self.any_open(tree_open) {
+    /// `tree_open` counts: the folder tree is a rich panel too. `info_line` counts
+    /// too: the basic `i` line is owned outside `Panels` (`AppCore::info_line`), so
+    /// its on/off state is threaded in the same way `tree_open` is.
+    pub fn toggle_hidden(&mut self, tree_open: bool, info_line: bool) -> bool {
+        if !self.any_open(tree_open, info_line) {
             return false;
         }
         self.hidden = !self.hidden;
@@ -135,9 +140,10 @@ impl Panels {
         std::mem::take(&mut self.hidden)
     }
 
-    /// Whether any rich panel is open (regardless of `hidden`).
-    pub fn any_open(&self, tree_open: bool) -> bool {
-        self.inspector.is_some() || self.help || tree_open
+    /// Whether any rich panel — or the basic info line — is open (regardless of
+    /// `hidden`).
+    pub fn any_open(&self, tree_open: bool, info_line: bool) -> bool {
+        self.inspector.is_some() || self.help || tree_open || info_line
     }
 
     /// What the rich layer shows in the shared HUD slot right now (`None` when
@@ -291,14 +297,14 @@ mod tests {
     #[test]
     fn tab_hides_without_closing_and_is_a_noop_when_nothing_open() {
         let mut p = Panels::default();
-        assert!(!p.toggle_hidden(false), "nothing open → no-op");
+        assert!(!p.toggle_hidden(false, false), "nothing open → no-op");
         assert!(!p.hidden);
         p.toggle_inspector(Details);
-        assert!(p.toggle_hidden(false));
+        assert!(p.toggle_hidden(false, false));
         assert!(p.hidden, "Tab hides…");
         assert_eq!(p.inspector, Some(Details), "…but the panel stays open");
         assert_eq!(p.content(), None, "hidden panels draw nothing");
-        assert!(p.toggle_hidden(false));
+        assert!(p.toggle_hidden(false, false));
         assert!(!p.hidden, "Tab again reveals");
         assert_eq!(p.content(), Some(PanelContent::Tab(Details)));
     }
@@ -306,18 +312,30 @@ mod tests {
     #[test]
     fn tab_counts_the_folder_tree_as_open() {
         let mut p = Panels::default();
-        assert!(p.toggle_hidden(true), "tree open → Tab works");
+        assert!(p.toggle_hidden(true, false), "tree open → Tab works");
         assert!(p.hidden);
         assert!(!p.tree_visible(true), "hidden tree draws nothing");
-        assert!(p.toggle_hidden(true));
+        assert!(p.toggle_hidden(true, false));
         assert!(p.tree_visible(true));
+    }
+
+    #[test]
+    fn tab_counts_and_hides_the_info_line() {
+        let mut p = Panels::default();
+        assert!(
+            p.toggle_hidden(false, true),
+            "info line alone → Tab is not a no-op"
+        );
+        assert!(p.hidden, "Tab hides the line along with the rich panels");
+        assert!(p.toggle_hidden(false, true), "Tab again reveals");
+        assert!(!p.hidden);
     }
 
     #[test]
     fn panel_toggles_while_hidden_reveal_and_never_close() {
         let mut p = Panels::default();
         p.toggle_inspector(Text);
-        p.toggle_hidden(false);
+        p.toggle_hidden(false, false);
         assert!(p.hidden);
         // Same tab pressed while hidden: reveal + keep open (NOT close).
         p.toggle_inspector(Text);
@@ -325,7 +343,7 @@ mod tests {
         assert_eq!(p.inspector, Some(Text), "…and only ever shows, never hides");
         // Help while hidden likewise reveals and opens (even if already open).
         p.toggle_help();
-        p.toggle_hidden(false);
+        p.toggle_hidden(false, false);
         p.toggle_help();
         assert!(!p.hidden);
         assert!(p.help, "help toggle while hidden reveals, not closes");
@@ -341,7 +359,7 @@ mod tests {
             Some(Describe),
             "open is idempotent, not a toggle"
         );
-        p.toggle_hidden(false);
+        p.toggle_hidden(false, false);
         p.open_inspector(Describe);
         assert!(!p.hidden, "open reveals");
     }
