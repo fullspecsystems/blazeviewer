@@ -242,6 +242,20 @@ final class MenuBar: NSObject {
             item("full_exif", "Show All EXIF Info", key: "i"),
             item("folder_tree", "Show Folder Tree"),
             item("toggle_panels", "Hide Panels"),
+            sep(),
+            // The toolbar (task #55): the standard Mac affordances — AppKit toggles the
+            // "Hide/Show Toolbar" title itself and drives the item off the key window's
+            // toolbar (⌥⌘T is the system-wide chord). `runToolbarCustomizationPalette:`
+            // opens the drag-to-customize sheet. Both route through the responder chain to
+            // whichever window is key, so they're system(...) items with no Action id.
+            {
+                let hide = system(
+                    "Hide Toolbar", #selector(NSWindow.toggleToolbarShown(_:)), key: "t"
+                )
+                hide.keyEquivalentModifierMask = [.command, .option]
+                return hide
+            }(),
+            system("Customize Toolbar…", #selector(NSWindow.runToolbarCustomizationPalette(_:))),
         ]))
 
         // Go — folder navigation (Finder's chords: ⌘↑ Enclosing Folder; ⌘←/⌘→ step

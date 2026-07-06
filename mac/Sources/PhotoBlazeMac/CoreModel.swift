@@ -460,6 +460,67 @@ final class CoreModel {
         drainEffects()
     }
 
+    // MARK: - The window toolbar (task #55)
+
+    /// The mouse-driven toolbar (nav / view / panel affordances). AppKit, like the menu bar —
+    /// its buttons fire the same Action ids through `menuAction`, and `syncToolbar` mirrors
+    /// the live `MenuState` onto it. Installed once the window exists (`attachCanvas`).
+    @ObservationIgnored private var toolbarController: ToolbarController?
+
+    func installToolbarIfNeeded() {
+        guard toolbarController == nil, let window = hostWindow else { return }
+        let tc = ToolbarController(model: self)
+        toolbarController = tc
+        tc.install(on: window)
+        syncToolbar()
+    }
+
+    /// Push the live `MenuState` (+ the folder-tree visibility, which lives outside it) to the
+    /// toolbar — the toolbar twin of `menuBar?.sync`. Called on `MenuStateChanged` and
+    /// `PanelsChanged`, the same markers that re-sync the menu bar / panels.
+    private func syncToolbar() {
+        toolbarController?.sync(core.menu_state(), treeVisible: treeVisible)
+    }
+
+    /// Split the core's `name (idx/n)` window title into a clean filename title + an
+    /// "N of M" subtitle (the Preview-on-Tahoe unified-toolbar look). A title that doesn't
+    /// carry the trailing counter (the "PhotoBlaze" empty state) just sets the title and
+    /// clears the subtitle. The counter is matched only at the very end, so a filename that
+    /// itself contains " (…)" isn't mis-split.
+    private func applyWindowTitle(_ full: String) {
+        guard let window = hostWindow else { return }
+        if let m = Self.titleCounter.firstMatch(
+            in: full, range: NSRange(full.startIndex..., in: full)),
+            let nameRange = Range(m.range(at: 1), in: full),
+            let idxRange = Range(m.range(at: 2), in: full),
+            let nRange = Range(m.range(at: 3), in: full)
+        {
+            window.title = String(full[nameRange])
+            let idx = Self.grouped(String(full[idxRange]))
+            let n = Self.grouped(String(full[nRange]))
+            window.subtitle = "\(idx) of \(n)"
+        } else {
+            window.title = full
+            window.subtitle = ""
+        }
+    }
+
+    /// `^(.*) \((\d+)/(\d+)\)$` — matches the `engine::title_for` format, capturing the name,
+    /// the 1-based index, and the total.
+    private static let titleCounter = try! NSRegularExpression(pattern: #"^(.*) \((\d+)/(\d+)\)$"#)
+
+    /// A number string with the locale's thousands grouping ("1204" → "1,204").
+    private static func grouped(_ digits: String) -> String {
+        guard let value = Int(digits) else { return digits }
+        return Self.groupingFormatter.string(from: NSNumber(value: value)) ?? digits
+    }
+
+    private static let groupingFormatter: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        return f
+    }()
+
     /// Re-pull the native Help panel model after a `PanelsChanged` marker: its
     /// visibility and (when visible) its rows, flattened from the core's live keymap.
     private func refreshHelp() {
@@ -1230,6 +1291,9 @@ final class CoreModel {
         log("canvas attached (\(Int(pixelSize.width))×\(Int(pixelSize.height)) @\(scale)x)")
         drainEffects()
         applyStartupWindowState()
+        // The window exists now — stand the toolbar up on it (idempotent; a scene rebuild
+        // that re-attaches the canvas won't create a second controller).
+        installToolbarIfNeeded()
     }
 
     // MARK: - Startup window state + geometry persistence (finalize item 2)
@@ -1487,7 +1551,9 @@ final class CoreModel {
             log("RequestRender")
         case .SetTitle(let title):
             let t = title.toString()
-            hostWindow?.title = t
+            // Split `name (idx/n)` into a filename title + an "N of M" subtitle for the
+            // unified toolbar (the empty-state "PhotoBlaze" just sets the title).
+            applyWindowTitle(t)
             // SetTitle fires exactly when the displayed item changes — the right cadence
             // for the title-bar proxy icon too (hover the title bar to reveal/drag it;
             // hover-to-reveal is standard since macOS 11).
@@ -1552,6 +1618,7 @@ final class CoreModel {
         case .MenuStateChanged:
             menuBar?.sync(core.menu_state())
             reassertMenuBar() // belt-and-braces beside the KVO watch
+            syncToolbar()
         case .PanelsChanged:
             // A natively-presented panel changed — re-pull the Help model + visibility,
             // the empty-state Open panel's visibility, and the Inspector (visibility +
@@ -1560,6 +1627,7 @@ final class CoreModel {
             openPanelVisible = core.open_panel_visible()
             refreshInspector()
             refreshTree()
+            syncToolbar() // the folder-tree / inspector toggle state lives here, not MenuState
         case .ShowContextMenu(
             let hasImage, let hasMotion, let canReveal, let fullscreen,
             let comparePinned, let comparePinnedHere
@@ -2077,5 +2145,9 @@ final class CoreModel {
                 button.isHidden = fs
             }
         }
+        // Re-assert the toolbar if SwiftUI swapped its own in during a scene update — the
+        // same defeat-the-framework pattern used above (identity check preserves the user's
+        // Hide-Toolbar choice, which keeps *our* object, just hidden).
+        toolbarController?.reassertIfClobbered(on: window, speedMode: fs)
     }
 }

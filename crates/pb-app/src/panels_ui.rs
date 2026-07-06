@@ -354,6 +354,12 @@ fn info_line(ctx: &egui::Context, p: &Palette, alpha: u8, info: &InfoLine) {
     let y0 = screen.bottom() - EDGE - pill_h;
     egui::Area::new(egui::Id::new("pb_info_line"))
         .fixed_pos(egui::pos2(x0, y0))
+        // Authoritative fixed position. `constrain: true` (egui's default) re-clamps the area to
+        // the screen using the *previous* frame's stored size — so a right-aligned pill (right edge
+        // at the screen edge) whose line shrank vs the last photo got shoved left and bounced.
+        // Center never triggered the clamp (far from any edge), which is why only right/edge
+        // alignment was affected. We size the content to `w` ourselves, so no clamp is needed.
+        .constrain(false)
         .interactable(false)
         .order(egui::Order::Middle)
         .show(ctx, |ui| {
@@ -1891,4 +1897,71 @@ fn tree_pill(ui: &egui::Ui, p: &Palette, count: u64, right_x: f32, cy: f32) -> f
         .rect(pill, Rounding::same(pill_h / 2.0), bg, Stroke::NONE);
     paint_vtext(ui, pill.center().x - g.size().x / 2.0, cy, &g);
     pill_w
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pb_app_core::settings::InfoLineAlign;
+
+    fn info(main: &str, align: InfoLineAlign) -> InfoLine {
+        InfoLine {
+            main: main.to_owned(),
+            codec: String::new(),
+            is_live: false,
+            is_animated: false,
+            align,
+        }
+    }
+
+    /// Lay out just the info line in one egui frame at a fixed screen size.
+    fn run_info(ctx: &egui::Context, screen: egui::Rect, line: &InfoLine) {
+        let p = Palette::new(true);
+        let raw = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        let _ = ctx.run(raw, |ctx| info_line(ctx, &p, 255, line));
+    }
+
+    fn info_rect(ctx: &egui::Context) -> egui::Rect {
+        egui::AreaState::load(ctx, egui::Id::new("pb_info_line"))
+            .expect("info-line area laid out")
+            .rect()
+    }
+
+    /// Regression: a right-aligned info line must pin to the right edge on every photo,
+    /// independent of the *previous* photo's width. egui's default `Area` re-clamps the area to
+    /// the screen using the previous frame's stored size, so before `constrain(false)` a photo
+    /// whose line was narrower than the last got shoved left — the "bounce". (Center was immune
+    /// since it never sits near an edge, which is the asymmetry the fix targets.) The overlay is
+    /// retained, so a photo change is a *single* frame — reproduced here as one narrow frame after
+    /// settling on a wide one. Without the fix the narrow line's right edge lands ~377px inboard.
+    #[test]
+    fn right_aligned_info_line_pins_to_edge_regardless_of_previous_width() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(2000.0, 1000.0));
+        let want_right = screen.right() - EDGE;
+
+        // Settle on a wide line (egui's first frame for an area is a sizing pass).
+        let wide = info(
+            "2001-a-very-long-folder/a-long-name.heic \u{b7} 8192 \u{d7} 6144 extra width",
+            InfoLineAlign::Right,
+        );
+        run_info(&ctx, screen, &wide);
+        run_info(&ctx, screen, &wide);
+        assert!(
+            (info_rect(&ctx).right() - want_right).abs() < 2.0,
+            "wide line should already sit flush at the right edge"
+        );
+
+        // One narrow frame — exactly what a photo change does. Its right edge must stay flush,
+        // not shift left by the wide->narrow width delta.
+        run_info(&ctx, screen, &info("x", InfoLineAlign::Right));
+        let got = info_rect(&ctx).right();
+        assert!(
+            (got - want_right).abs() < 2.0,
+            "narrow line bounced: right edge {got}, expected {want_right}"
+        );
+    }
 }

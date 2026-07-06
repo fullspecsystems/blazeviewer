@@ -8,6 +8,17 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
+- **macOS: a window toolbar** (customizable, hideable) for mouse-driven control — a
+  discoverability layer over the keyboard-first core. The default set has **Previous / Next**
+  and **Random** buttons, a **Fit / Fill / 1:1** scale switch, **Rotate Left**, and toggles for
+  the **Info** panel, **Folders** tree, and **Slideshow** (the active ones light up). Every
+  button just fires the command its keyboard shortcut and menu item already do. It merges into
+  the title bar (which now shows the filename with an **"N of M"** counter as a subtitle), and
+  because it lives up there it doesn't eat into the image. **View ▸ Hide Toolbar** (⌥⌘T) turns
+  it off, **View ▸ Customize Toolbar…** lets you drag your own set of buttons in or out (Zoom,
+  Compare, Copy, Show in Finder, Delete, Describe, Open, Settings, and more are available), and
+  it auto-hides in full-screen — so power users can make the window completely chrome-less
+  again.
 - **Windows: the rich panels are now a real UI (egui).** On the Windows/winit build, the
   **Help** (`?`), **Inspector** (Details / Text / Describe — `⇧I`, `T`, `D`), and **folder
   tree** (`⇧F`) panels are drawn with a proper retained-mode UI over the photo instead of the
