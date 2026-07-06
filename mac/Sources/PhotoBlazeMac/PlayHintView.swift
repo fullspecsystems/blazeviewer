@@ -8,6 +8,7 @@ import SwiftUI
 
 struct PlayHintView: View {
     let model: CoreModel
+    @State private var hovering = false
 
     // Match InfoLineView's geometry so the "P" badge is concentric with the pill.
     private let pillRadius: CGFloat = 11
@@ -29,11 +30,22 @@ struct PlayHintView: View {
                 .padding(.vertical, 2)
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: pillRadius - inset))
         }
-        .padding(.leading, 11)
+        // The leading icon is inset the same as the top/bottom (it leads with a symbol, not
+        // text, so it doesn't need the info line's roomier text gutter).
+        .padding(.leading, inset)
         .padding(.trailing, inset)
         .padding(.vertical, inset)
-        .panelBackground(cornerRadius: pillRadius, opacity: model.panelOpacity)
-        .onHover { model.playHintHover($0) }
+        // Nudge the material ~10% more opaque on hover — a subtle "this is clickable" cue
+        // (macOS has no built-in hover style for a bespoke pill like this).
+        .panelBackground(
+            cornerRadius: pillRadius,
+            opacity: hovering ? min(1.0, model.panelOpacity + 0.1) : model.panelOpacity
+        )
+        .animation(.easeInOut(duration: 0.15), value: hovering)
+        .onHover { inside in
+            hovering = inside
+            model.playHintHover(inside)
+        }
         .onTapGesture { model.triggerPlay() }
     }
 }
