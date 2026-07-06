@@ -412,6 +412,13 @@ fn sample_frame(dark: bool, tab: InspectorTab) -> PanelFrame {
         help: Some(help),
         inspector: Some(inspector),
         tree: Some(tree),
+        info: Some(panels_ui::InfoLine {
+            main: "1990s/1990-12-24 · 6048 × 4024".into(),
+            codec: "HEIC → JPEG".into(),
+            is_live: true,
+            is_animated: false,
+            align: pb_app_core::settings::InfoLineAlign::Right,
+        }),
         dark,
         panel_alpha: 242, // ≈95% — the shot previews the panels near-opaque
     }

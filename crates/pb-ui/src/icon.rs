@@ -62,6 +62,10 @@ pub enum Icon {
     Sparkles,
     /// Ask-a-question (the Describe tab's Ask button — matches SF `questionmark.bubble`).
     MessageQuestion,
+    /// Live Photo mark (info readout — the concentric-ring glyph, matches SF `livephoto`).
+    LivePhoto,
+    /// Animated-image mark (GIF/APNG/… in the info readout) — a film strip.
+    Film,
 }
 
 /// A **theme-aware** icon color. `Neutral` is the quiet default (a gray that varies
@@ -117,6 +121,8 @@ fn svg(icon: Icon, family: Family) -> &'static str {
         Icon::Text => glyph!("text"),
         Icon::Sparkles => glyph!("sparkles"),
         Icon::MessageQuestion => glyph!("message-question"),
+        Icon::LivePhoto => glyph!("livephoto"),
+        Icon::Film => glyph!("film"),
     }
 }
 
@@ -255,6 +261,8 @@ mod tests {
             Icon::Text,
             Icon::Sparkles,
             Icon::MessageQuestion,
+            Icon::LivePhoto,
+            Icon::Film,
         ] {
             for family in [Family::Solid, Family::Regular] {
                 let img = rasterize_white(svg(icon, family), 32).expect("icon should rasterize");

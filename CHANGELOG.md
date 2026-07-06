@@ -16,8 +16,13 @@ with any pre-release suffix carried only by the tag.
   has a **tabbed** header, and long metadata / descriptions no longer get cut off. They track
   the OS light/dark theme and composite correctly on SDR and HDR displays, with no cost to
   the flick-through hot path (the panel is only redrawn when it changes). This brings the
-  Windows panels toward parity with the native macOS panels; drag-to-move, resize, and the
-  ephemeral toasts/info-line staying on the fast CPU layer are unchanged.
+  Windows panels toward parity with the native macOS panels; drag-to-move and resize are still
+  to come, and the toasts stay on the fast CPU layer.
+- **Windows: the image info line (`i`) is now a real UI too**, matching the panels: it shows
+  `folder/name · W×H`, a **Live-Photo** or **animation** mark, and a **codec badge**, and it
+  **auto-ducks** — the folder tree / inspector shrink so they never cover it. Its fields
+  (folder / filename / resolution / codec), position, and *show-by-default* are all in Settings
+  ▸ Appearance, and the *Info panel opacity* slider now drives the whole chrome.
 - **The image info line is now configurable** (Settings ▸ Appearance ▸ *Image Info*): a
   **"Show image info by default"** toggle sets whether the `i` readout starts shown on launch
   (the `i` key still toggles it live), a **Position** picker places it, and per-field

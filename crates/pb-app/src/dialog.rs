@@ -130,14 +130,20 @@ struct SettingsDraft {
     hold_delay_ms: u32,
     scroll_action: usize, // 0 = Pan, 1 = Zoom (what a plain scroll does)
     recursive: bool,
-    scale_mode: usize,         // 0 = Fit, 1 = Fill, 2 = Original
-    appearance: usize,         // 0 = System, 1 = Light, 2 = Dark (#46)
-    info_line_align: usize,    // 0 = Left, 1 = Center, 2 = Right (task #54)
-    letterbox: [f32; 3],       // 0..1 per channel (egui color picker) — the dark fill
+    scale_mode: usize,      // 0 = Fit, 1 = Fill, 2 = Original
+    appearance: usize,      // 0 = System, 1 = Light, 2 = Dark (#46)
+    info_line_align: usize, // 0 = Left, 1 = Center, 2 = Right (task #54)
+    // Image-info readout (`i`): the launch default + which fields it lists (task #54).
+    show_image_info: bool,
+    info_show_folder: bool,
+    info_show_filename: bool,
+    info_show_resolution: bool,
+    info_show_codec: bool,
+    letterbox: [f32; 3], // 0..1 per channel (egui color picker) — the dark fill
     letterbox_light: [f32; 3], // the light-mode fill (#46)
-    info_opacity: u8,          // 0..100
-    startup_mode: usize,       // 0 = Fullscreen, 1 = Windowed, 2 = Remember
-    slideshow_interval: f64,   // seconds (default slideshow dwell)
+    info_opacity: u8,    // 0..100
+    startup_mode: usize, // 0 = Fullscreen, 1 = Windowed, 2 = Remember
+    slideshow_interval: f64, // seconds (default slideshow dwell)
     /// File-picker start: `false` = the current photo's folder, `true` = a pinned folder.
     picker_fixed: bool,
     /// The pinned folder (when `picker_fixed`); `None` until the user chooses one.
@@ -189,6 +195,11 @@ impl SettingsDraft {
                 settings::InfoLineAlign::Center => 1,
                 settings::InfoLineAlign::Right => 2,
             },
+            show_image_info: s.show_image_info,
+            info_show_folder: s.info_show_folder,
+            info_show_filename: s.info_show_filename,
+            info_show_resolution: s.info_show_resolution,
+            info_show_codec: s.info_show_codec,
             letterbox: [
                 s.letterbox[0] as f32 / 255.0,
                 s.letterbox[1] as f32 / 255.0,
@@ -255,6 +266,11 @@ impl SettingsDraft {
             1 => settings::InfoLineAlign::Center,
             _ => settings::InfoLineAlign::Right,
         };
+        s.show_image_info = self.show_image_info;
+        s.info_show_folder = self.info_show_folder;
+        s.info_show_filename = self.info_show_filename;
+        s.info_show_resolution = self.info_show_resolution;
+        s.info_show_codec = self.info_show_codec;
         s.letterbox = [
             (self.letterbox[0] * 255.0).round().clamp(0.0, 255.0) as u8,
             (self.letterbox[1] * 255.0).round().clamp(0.0, 255.0) as u8,
@@ -2147,6 +2163,28 @@ fn display_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
                     });
             },
         );
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Show image info by default",
+            Some("Whether the one-line readout starts shown on launch (I still toggles it)"),
+            |ui| {
+                pbui::toggle(ui, p, &mut d.show_image_info);
+            },
+        );
+        pbui::card_row(ui, p, None, "Show folder", None, |ui| {
+            pbui::toggle(ui, p, &mut d.info_show_folder);
+        });
+        pbui::card_row(ui, p, None, "Show filename", None, |ui| {
+            pbui::toggle(ui, p, &mut d.info_show_filename);
+        });
+        pbui::card_row(ui, p, None, "Show resolution", None, |ui| {
+            pbui::toggle(ui, p, &mut d.info_show_resolution);
+        });
+        pbui::card_row(ui, p, None, "Show codec", None, |ui| {
+            pbui::toggle(ui, p, &mut d.info_show_codec);
+        });
     });
 }
 

@@ -14,6 +14,7 @@ use pb_app_core::panels::{
     DescribeBody, DescribePanel, DetailRow, DetailsPanel, HelpPanel, InspectorSnapshot, TextBody,
     TextPanel,
 };
+use pb_app_core::settings::InfoLineAlign;
 use pb_app_core::{fs_tree, AppCore, InspectorTab};
 use pb_ui::icon::{Icon, Tone};
 use pb_ui::Palette;
@@ -90,12 +91,23 @@ pub struct TreeFrame {
     pub parent_name: Option<String>,
 }
 
+/// The one-line info readout (`i`): `folder/name · W×H`, a codec badge, and a Live-Photo /
+/// animation mark — placed in a bottom corner per the alignment setting.
+pub struct InfoLine {
+    pub main: String,
+    pub codec: String,
+    pub is_live: bool,
+    pub is_animated: bool,
+    pub align: pb_app_core::settings::InfoLineAlign,
+}
+
 /// A pure snapshot of whichever rich panels are open — copied out of the core so the
 /// egui build closure borrows none of it.
 pub struct PanelFrame {
     pub help: Option<HelpPanel>,
     pub inspector: Option<InspectorFrame>,
     pub tree: Option<TreeFrame>,
+    pub info: Option<InfoLine>,
     pub dark: bool,
     /// The panel surface alpha (0–255), from Settings ▸ Appearance ▸ *Info panel opacity*
     /// (`info_opacity` — the old HUD opacity). The winit shell has no separate `panel_opacity`
@@ -116,10 +128,20 @@ impl PanelFrame {
             rows: core.fs_tree_rows(),
             parent_name: core.fs_tree_parent_name(),
         });
+        let info = core
+            .info_line_snapshot()
+            .map(|(main, codec, is_live, is_animated)| InfoLine {
+                main,
+                codec,
+                is_live,
+                is_animated,
+                align: core.settings.info_line_align,
+            });
         PanelFrame {
             help,
             inspector,
             tree,
+            info,
             dark: core.hud_dark,
             panel_alpha: opacity_to_alpha(core.settings.info_opacity),
         }
@@ -136,17 +158,192 @@ fn opacity_to_alpha(opacity: u8) -> u8 {
 pub fn build(ctx: &egui::Context, frame: &PanelFrame, actions: &mut Vec<PanelAction>) {
     let p = Palette::new(frame.dark);
     let alpha = frame.panel_alpha;
+    let screen = ctx.screen_rect();
+    // The info readout's bottom footprint `(x0, x1, height)` — panels above it that overlap
+    // its horizontal span **duck** (shrink their height) so they never cover it.
+    let info_span = frame.info.as_ref().map(|info| {
+        let (w, h) = info_pill_size(ctx, info);
+        let x0 = match info.align {
+            InfoLineAlign::Left => screen.left() + EDGE,
+            InfoLineAlign::Center => (screen.center().x - w / 2.0).max(screen.left()),
+            InfoLineAlign::Right => (screen.right() - EDGE - w).max(screen.left()),
+        };
+        (x0, x0 + w, h)
+    });
+    // How much a panel spanning `[px0, px1]` must yield to clear the info line: the pill height
+    // plus an `EDGE` gap — so the space between the panel and the line matches the line's own
+    // `EDGE` inset from the viewport bottom. Only when the spans overlap (a small horizontal
+    // tolerance); opposite-side panels don't move.
+    let duck = |px0: f32, px1: f32| -> f32 {
+        info_span.map_or(0.0, |(lx0, lx1, h)| {
+            let touch = 6.0; // horizontal overlap tolerance
+            if px0 < lx1 + touch && lx0 < px1 + touch {
+                h + EDGE
+            } else {
+                0.0
+            }
+        })
+    };
+
+    if let Some(info) = &frame.info {
+        info_line(ctx, &p, alpha, info);
+    }
     // The tree (top-left) and Inspector (top-right) can coexist; Help (centered) is
     // topmost — draw it last so it sits above the others (SwiftUI z-order).
     if let Some(tree) = &frame.tree {
-        tree_panel(ctx, &p, alpha, tree, actions);
+        let r = duck(screen.left() + EDGE, screen.left() + EDGE + TREE_WIDTH);
+        tree_panel(ctx, &p, alpha, r, tree, actions);
     }
     if let Some(insp) = &frame.inspector {
-        inspector_panel(ctx, &p, alpha, insp, actions);
+        let r = duck(
+            screen.right() - EDGE - INSPECTOR_WIDTH,
+            screen.right() - EDGE,
+        );
+        inspector_panel(ctx, &p, alpha, r, insp, actions);
     }
     if let Some(help) = &frame.help {
-        help_panel(ctx, &p, alpha, help, actions);
+        let r = duck(
+            screen.center().x - HELP_WIDTH / 2.0,
+            screen.center().x + HELP_WIDTH / 2.0,
+        );
+        help_panel(ctx, &p, alpha, r, help, actions);
     }
+}
+
+// ── Info readout (`i`) ───────────────────────────────────────────────────────
+
+/// The info-pill corner radius (SwiftUI 11).
+const INFO_RADIUS: f32 = 11.0;
+/// The codec badge's inset from the pill's top/right/bottom so its corners run concentric with
+/// the pill's (SwiftUI `inset`).
+const INFO_INSET: f32 = 6.0;
+/// The pill's leading (and no-badge trailing) padding.
+const INFO_PAD: f32 = 11.0;
+const INFO_TEXT_SIZE: f32 = 13.5;
+const INFO_CODEC_SIZE: f32 = 11.0;
+
+/// The info pill's `(width, height)` in points — used both to lay it out and to duck the panels
+/// above it. Measured from `ctx` fonts (no `Ui`), matching `info_line`'s hand layout exactly.
+fn info_pill_size(ctx: &egui::Context, info: &InfoLine) -> (f32, f32) {
+    let measure = |s: &str, size: f32| {
+        ctx.fonts(|f| {
+            f.layout_no_wrap(
+                s.to_owned(),
+                FontId::new(size, FontFamily::Proportional),
+                Color32::PLACEHOLDER,
+            )
+            .size()
+        })
+    };
+    let text = measure(&info.main, INFO_TEXT_SIZE);
+    let has_icon = info.is_live || info.is_animated;
+    let has_codec = !info.codec.is_empty();
+    let gap = 8.0;
+    let mut w = INFO_PAD + text.x;
+    if has_icon {
+        w += gap + INFO_TEXT_SIZE + 1.0; // icon column
+    }
+    w += if has_codec {
+        gap + measure(&info.codec, INFO_CODEC_SIZE).x + 12.0 + INFO_INSET
+    } else {
+        INFO_PAD
+    };
+    (w, text.y + 2.0 * INFO_INSET)
+}
+
+/// The one-line info readout: `folder/name · W×H`, an optional Live-Photo / animation mark, and
+/// an optional codec badge (a nested round-rect concentric with the pill). Bottom-corner per the
+/// alignment setting, non-interactive, laid out by hand so everything shares one vertical center.
+fn info_line(ctx: &egui::Context, p: &Palette, alpha: u8, info: &InfoLine) {
+    use pb_app_core::settings::InfoLineAlign as A;
+    let (anchor, offset) = match info.align {
+        A::Left => (Align2::LEFT_BOTTOM, egui::vec2(EDGE, -EDGE)),
+        A::Center => (Align2::CENTER_BOTTOM, egui::vec2(0.0, -EDGE)),
+        A::Right => (Align2::RIGHT_BOTTOM, egui::vec2(-EDGE, -EDGE)),
+    };
+    let (w, pill_h) = info_pill_size(ctx, info);
+    egui::Area::new(egui::Id::new("pb_info_line"))
+        .anchor(anchor, offset)
+        .interactable(false)
+        .order(egui::Order::Middle)
+        .show(ctx, |ui| {
+            let has_icon = info.is_live || info.is_animated;
+            let icon_sz = INFO_TEXT_SIZE + 1.0;
+            let gap = 8.0;
+            let text_g = galley(
+                ui,
+                &info.main,
+                FontId::new(INFO_TEXT_SIZE, FontFamily::Proportional),
+                p.text,
+                f32::INFINITY,
+            );
+            let text_w = text_g.size().x;
+            let (badge_bg, badge_fg) = badge_colors(p);
+            let codec_g = (!info.codec.is_empty()).then(|| {
+                galley(
+                    ui,
+                    &info.codec,
+                    FontId::new(INFO_CODEC_SIZE, FontFamily::Proportional),
+                    badge_fg,
+                    f32::INFINITY,
+                )
+            });
+            let badge_w = codec_g.as_ref().map_or(0.0, |g| g.size().x + 12.0);
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(w, pill_h), egui::Sense::hover());
+
+            // Pill: soft shadow, then the translucent surface + hairline border.
+            ui.painter().add(
+                egui::epaint::Shadow {
+                    offset: egui::vec2(0.0, 3.0),
+                    blur: 12.0,
+                    spread: 0.0,
+                    color: Color32::from_black_alpha(60),
+                }
+                .as_shape(rect, Rounding::same(INFO_RADIUS)),
+            );
+            let fill = panel_surface(p);
+            ui.painter().rect(
+                rect,
+                Rounding::same(INFO_RADIUS),
+                Color32::from_rgba_unmultiplied(fill.r(), fill.g(), fill.b(), alpha),
+                Stroke::new(0.5, separator(p)),
+            );
+
+            // Content, all on one vertical center.
+            let cy = rect.center().y;
+            let mut x = rect.left() + INFO_PAD;
+            paint_vtext(ui, x, cy, &text_g);
+            x += text_w + gap;
+            if has_icon {
+                let icon = if info.is_live {
+                    Icon::LivePhoto
+                } else {
+                    Icon::Film
+                };
+                pb_ui::icon::paint(
+                    ui,
+                    sq(x + icon_sz / 2.0, cy, icon_sz),
+                    icon,
+                    Tone::Neutral,
+                    p,
+                );
+                x += icon_sz + gap;
+            }
+            if let Some(cg) = codec_g {
+                let badge_h = pill_h - 2.0 * INFO_INSET;
+                let badge = egui::Rect::from_min_size(
+                    egui::pos2(x, cy - badge_h / 2.0),
+                    egui::vec2(badge_w, badge_h),
+                );
+                ui.painter().rect(
+                    badge,
+                    Rounding::same(INFO_RADIUS - INFO_INSET),
+                    badge_bg,
+                    Stroke::NONE,
+                );
+                paint_vtext(ui, badge.center().x - cg.size().x / 2.0, cy, &cg);
+            }
+        });
 }
 
 // ── Shared chrome ────────────────────────────────────────────────────────────
@@ -414,8 +611,8 @@ fn groove(ui: &mut egui::Ui, p: &Palette) {
 /// top+bottom edge insets. Applied as the `egui::Window`'s `max_height` (capping the
 /// *window*, not a ScrollArea inside an auto-sizing window — that mis-measures and leaves
 /// the panel far shorter than the space allows, task #54 #2).
-fn panel_max_height(ctx: &egui::Context, floor: f32) -> f32 {
-    (ctx.screen_rect().height() - 2.0 * EDGE).max(floor)
+fn panel_max_height(ctx: &egui::Context, floor: f32, duck: f32) -> f32 {
+    (ctx.screen_rect().height() - 2.0 * EDGE - duck).max(floor)
 }
 
 /// A scroll body that fits its content up to `max_h`, then scrolls — usable inside an
@@ -455,10 +652,11 @@ fn help_panel(
     ctx: &egui::Context,
     p: &Palette,
     alpha: u8,
+    duck: f32,
     help: &HelpPanel,
     actions: &mut Vec<PanelAction>,
 ) {
-    let max_h = panel_max_height(ctx, 220.0);
+    let max_h = panel_max_height(ctx, 220.0, duck);
     egui::Window::new("pb_help")
         .title_bar(false)
         .resizable(false)
@@ -654,10 +852,11 @@ fn inspector_panel(
     ctx: &egui::Context,
     p: &Palette,
     alpha: u8,
+    duck: f32,
     insp: &InspectorFrame,
     actions: &mut Vec<PanelAction>,
 ) {
-    let max_h = panel_max_height(ctx, 200.0);
+    let max_h = panel_max_height(ctx, 200.0, duck);
     egui::Window::new("pb_inspector")
         .title_bar(false)
         .resizable(false)
@@ -972,10 +1171,11 @@ fn tree_panel(
     ctx: &egui::Context,
     p: &Palette,
     alpha: u8,
+    duck: f32,
     tree: &TreeFrame,
     actions: &mut Vec<PanelAction>,
 ) {
-    let max_h = panel_max_height(ctx, 200.0);
+    let max_h = panel_max_height(ctx, 200.0, duck);
     egui::Window::new("pb_tree")
         .title_bar(false)
         .resizable(false)

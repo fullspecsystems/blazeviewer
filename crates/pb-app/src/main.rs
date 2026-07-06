@@ -497,7 +497,10 @@ impl App {
                 overlay_item: None,
                 toast: None,
                 native_toast: false,
-                native_info: false,
+                // The egui overlay draws the info readout (task #54 Phase 4) — suppress the CPU
+                // HUD line and let the shell render + duck it around the panels.
+                native_info: true,
+                last_info_snap: None,
                 native_play: false,
                 play_hint_seq: 0,
                 toast_native: None,
@@ -1114,6 +1117,14 @@ impl App {
             || self.core.tree_panel_visible()
     }
 
+    /// Whether the egui overlay has **any** content to composite — the interactive panels
+    /// *or* the non-interactive info readout (`i`). Drives overlay activation/render. (The
+    /// info line is deliberately absent from [`overlay_panel_visible`](Self::overlay_panel_visible),
+    /// which gates *pointer* routing: the readout must never intercept clicks meant for the photo.)
+    fn overlay_visible(&self) -> bool {
+        self.overlay_panel_visible() || self.core.info_line_visible()
+    }
+
     /// Recreate the overlay's offscreen target for a new surface size and force a
     /// re-render (the panels re-lay-out; the renderer is re-handed the new texture).
     fn resize_overlay(&mut self, w: u32, h: u32) {
@@ -1131,7 +1142,7 @@ impl App {
     /// Retained — a nav frame with a static panel open re-renders nothing. Returns egui's
     /// next timed-repaint deadline for the wake calc.
     fn update_overlay(&mut self, now: Instant) -> Option<Instant> {
-        if !self.overlay_panel_visible() {
+        if !self.overlay_visible() {
             // Nothing open: drop the composited layer once, on the visibility edge.
             if self.overlay_active {
                 if let Some(r) = self.core.renderer.as_mut() {

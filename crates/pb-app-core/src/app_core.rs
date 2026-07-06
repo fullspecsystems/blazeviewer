@@ -382,8 +382,13 @@ pub struct AppCore {
     /// leaves this false and keeps the CPU-composited toast.
     pub native_toast: bool,
     /// When set, the one-line **info readout** (`i`) is not rasterized to the HUD — the shell
-    /// draws it natively (macOS SwiftUI). The core still owns the toggle state + content string.
+    /// draws it natively (macOS SwiftUI, or the winit egui overlay). The core still owns the
+    /// toggle state + content string.
     pub native_info: bool,
+    /// The last info-line snapshot the tick emitted a marker for (main text, codec, live,
+    /// animated) — so a natively-drawn info line re-pulls when its content changes (a photo
+    /// swap), never per tick. `None` = the info line was hidden.
+    pub last_info_snap: Option<(String, String, bool, bool)>,
     /// When set, the **play hint** (▶/Live Photo, on a motion item) is not rasterized to the
     /// HUD — the shell draws it natively and owns its fade/hover. The core only signals *when*
     /// to flash it (`play_hint_seq`) and *what* it is (`play_hint_kind`).

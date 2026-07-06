@@ -165,6 +165,7 @@ impl AppCore {
             toast: None,
             native_toast: false,
             native_info: false,
+            last_info_snap: None,
             native_play: false,
             play_hint_seq: 0,
             toast_native: None,
@@ -1193,6 +1194,16 @@ impl AppCore {
             let vis = self.tree_panel_visible();
             if vis != self.last_tree_visible {
                 self.last_tree_visible = vis;
+                self.emit_panels_changed();
+            }
+        }
+        if self.native_info {
+            // The natively-drawn info readout re-pulls only on a real content change (a photo
+            // swap or a field toggle) — tracks during hold-to-fly like the tree, since the
+            // readout answers "which photo is this".
+            let snap = self.info_line_snapshot();
+            if snap != self.last_info_snap {
+                self.last_info_snap = snap;
                 self.emit_panels_changed();
             }
         }
@@ -3676,6 +3687,21 @@ impl AppCore {
             .as_ref()
             .map(|m| m.codec.to_string())
             .unwrap_or_default()
+    }
+
+    /// A change-detection snapshot of the natively-drawn info readout — `(main, codec, live,
+    /// animated)` when visible, `None` when hidden. The tick diffs it so a native info line
+    /// re-pulls on a real content change (a photo swap), never per tick. Alignment/opacity
+    /// changes come through `apply_settings` → `emit_panels_changed`.
+    pub fn info_line_snapshot(&self) -> Option<(String, String, bool, bool)> {
+        self.info_line_visible().then(|| {
+            (
+                self.info_line_main().unwrap_or_default(),
+                self.info_line_codec(),
+                self.info_line_is_live(),
+                self.info_line_is_animated(),
+            )
+        })
     }
 
     pub fn show_info_line(&mut self) {
