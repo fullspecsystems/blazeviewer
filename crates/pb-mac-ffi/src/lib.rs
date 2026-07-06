@@ -320,7 +320,7 @@ impl AppCoreHandle {
                 match self.core.describe_panel().body {
                     DescribeBody::NoPhoto => {}
                     DescribeBody::Idle => {
-                        rows.push((3, "Press D to describe this photo.".into(), String::new()))
+                        rows.push((3, "Press D to describe this image.".into(), String::new()))
                     }
                     DescribeBody::Busy => rows.push((3, "Describing…".into(), String::new())),
                     DescribeBody::Ready(text) => rows.push((2, text, String::new())),

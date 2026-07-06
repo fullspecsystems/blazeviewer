@@ -169,7 +169,7 @@ impl DescribePanel {
         match &self.body {
             DescribeBody::NoPhoto => {}
             DescribeBody::Idle => {
-                lines.push(("Press D to describe this photo.".to_string(), false))
+                lines.push(("Press D to describe this image.".to_string(), false))
             }
             DescribeBody::Busy => lines.push(("Describing…".to_string(), false)),
             DescribeBody::Ready(text) | DescribeBody::Error(text) => {
@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn describe_panel_lines_cover_all_states() {
         let line1 = |body: DescribeBody| DescribePanel { body }.lines()[1].0.clone();
-        assert_eq!(line1(DescribeBody::Idle), "Press D to describe this photo.");
+        assert_eq!(line1(DescribeBody::Idle), "Press D to describe this image.");
         assert_eq!(line1(DescribeBody::Busy), "Describing…");
         assert_eq!(line1(DescribeBody::Ready("text".into())), "text");
         assert_eq!(line1(DescribeBody::Error("oops".into())), "oops");

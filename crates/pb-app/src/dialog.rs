@@ -1310,7 +1310,7 @@ fn ask_dialog(ctx: &egui::Context, input: &mut String, take_focus: bool) -> Opti
     egui::CentralPanel::default()
         .frame(dialog_frame(ctx))
         .show(ctx, |ui| {
-            ui.label(egui::RichText::new("Ask a question about this photo:").size(MSG_SIZE));
+            ui.label(egui::RichText::new("Ask a question about this image:").size(MSG_SIZE));
             ui.add_space(12.0);
             let resp = ui.add(
                 egui::TextEdit::multiline(input)
@@ -1731,7 +1731,7 @@ fn ai_tab(
             p,
             None,
             "Auto-describe while open",
-            Some("With the description panel up, describe each photo you move to — no extra D."),
+            Some("With the description panel up, describe each image you move to — no extra D."),
             |ui| {
                 pbui::toggle(ui, p, &mut d.describe_auto);
             },

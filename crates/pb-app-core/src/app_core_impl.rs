@@ -838,7 +838,7 @@ impl AppCore {
         } else {
             folder_name
         };
-        self.show_toast(&format!("No photos in \u{201c}{name}\u{201d}"));
+        self.show_toast(&format!("No images in \u{201c}{name}\u{201d}"));
     }
 
     /// Install a resolved archive playlist ([`CoreEvent::ArchiveResolved`], NS0 5.6 Step 3): the
@@ -1202,7 +1202,7 @@ impl AppCore {
                         // Nothing with photos in that direction (or the search
                         // hit its cap/budget): non-blocking feedback, never the
                         // modal — that stays for explicit opens (#49).
-                        self.show_toast("No more folders with photos");
+                        self.show_toast("No more folders with images");
                     }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
@@ -2100,7 +2100,7 @@ impl AppCore {
             let names = (0..full.len()).map(|i| full.name(i));
             match crate::folder_tree::sibling_scope(names, &scope.prefix, dir) {
                 Some(sib) => self.rescope_archive(sib),
-                None => self.show_toast("No more folders with photos"),
+                None => self.show_toast("No more folders with images"),
             }
             return;
         }
