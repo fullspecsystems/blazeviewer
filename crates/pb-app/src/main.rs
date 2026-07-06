@@ -52,6 +52,8 @@ mod clipboard;
 mod darkmode;
 mod default_app;
 mod dialog;
+mod egui_overlay;
+mod egui_shot;
 #[cfg(target_os = "macos")]
 mod hdr_surface;
 mod hud_gallery;
@@ -61,6 +63,7 @@ mod macos_chrome;
 #[cfg(target_os = "macos")]
 mod macos_open;
 mod menu;
+mod panels_ui;
 mod pb_key_winit;
 #[cfg(target_os = "macos")]
 mod proxy_icon;
@@ -272,6 +275,22 @@ struct App {
     /// and min'd with the shell's own dialog-repaint deadline in `about_to_wait` for the
     /// event loop's control-flow. `None` = the core is idle.
     requested_wake: Option<Instant>,
+
+    /// The **egui rich-panel overlay** (task #54 Phase 4): Help, the Inspector, and the
+    /// folder tree drawn as a real retained-mode UI over the photo, sharing the main
+    /// renderer's device/queue. `None` until `resumed` creates the renderer. The winit
+    /// shell sets the `native_*` panel flags so the core suppresses the CPU-HUD versions
+    /// of these panels and drives this instead.
+    egui_overlay: Option<egui_overlay::EguiOverlay>,
+    /// Whether the egui panel texture needs re-rendering next turn — set on a panel
+    /// state/content change (`CoreEffect::PanelsChanged`), an egui-consumed event, or a
+    /// timed egui repaint. When clear and a panel is open, the retained texture is reused
+    /// (a nav frame costs no egui work — the hot-path contract).
+    overlay_dirty: bool,
+    /// Whether an egui panel texture is currently handed to the renderer (so the compositor
+    /// draws it). Tracks the last `set_egui_overlay(Some/None)` so we only re-hand on a
+    /// visibility edge, not every frame.
+    overlay_active: bool,
 }
 
 /// A deferred dialog open (see [`App::pending_dialog`]). Carries only what the opener
@@ -461,13 +480,17 @@ impl App {
                 info_line_w: 0,
                 info_line_h: 0,
                 panels: pb_app_core::Panels::default(),
-                native_help: false,
+                // The rich panels (Help / Inspector / folder tree) are presented by the
+                // egui overlay (task #54 Phase 4), so the core suppresses their CPU-HUD
+                // rasterization and emits `PanelsChanged` instead. The ephemeral layer
+                // (toasts, `i` line, play hint, empty-state) stays a CPU quad for now.
+                native_help: true,
                 last_help_visible: false,
                 native_open: false,
                 last_open_visible: false,
-                native_inspector: false,
+                native_inspector: true,
                 last_inspector_snap: None,
-                native_tree: false,
+                native_tree: true,
                 last_tree_visible: false,
                 overlay_shown: false,
                 overlay_item: None,
@@ -544,6 +567,9 @@ impl App {
             live_audio: None,
             pending_dialog: None,
             requested_wake: None,
+            egui_overlay: None,
+            overlay_dirty: false,
+            overlay_active: false,
         }
     }
 
@@ -1074,6 +1100,123 @@ impl App {
             self.last_edr_headroom = hr;
             self.core.draw();
         }
+    }
+
+    // ── egui rich-panel overlay (task #54 Phase 4) ──────────────────────────────
+
+    /// Whether any egui-presented rich panel (Help / Inspector / folder tree) is on
+    /// screen right now — the gate for feeding pointer events to egui and for running
+    /// the overlay frame.
+    fn overlay_panel_visible(&self) -> bool {
+        self.core.help_panel_visible()
+            || self.core.inspector_panel_visible()
+            || self.core.tree_panel_visible()
+    }
+
+    /// Recreate the overlay's offscreen target for a new surface size and force a
+    /// re-render (the panels re-lay-out; the renderer is re-handed the new texture).
+    fn resize_overlay(&mut self, w: u32, h: u32) {
+        if let Some(dev) = self.core.renderer.as_ref().map(|r| r.device()) {
+            if let Some(ov) = self.egui_overlay.as_mut() {
+                ov.resize(dev, w, h);
+            }
+        }
+        self.overlay_dirty = true;
+    }
+
+    /// Drive the egui rich-panel overlay each `about_to_wait` turn: (re)render the panels
+    /// into the offscreen texture when they changed (or an egui animation frame is due)
+    /// and hand it to the renderer, or clear the composited layer when nothing is open.
+    /// Retained — a nav frame with a static panel open re-renders nothing. Returns egui's
+    /// next timed-repaint deadline for the wake calc.
+    fn update_overlay(&mut self, now: Instant) -> Option<Instant> {
+        if !self.overlay_panel_visible() {
+            // Nothing open: drop the composited layer once, on the visibility edge.
+            if self.overlay_active {
+                if let Some(r) = self.core.renderer.as_mut() {
+                    r.set_egui_overlay(None);
+                }
+                self.overlay_active = false;
+                self.overlay_dirty = false;
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+            return None;
+        }
+        // A panel is open. Re-render egui only when it changed, an egui animation frame is
+        // due, or it just became visible — never per nav frame (retained texture).
+        let repaint_due = self
+            .egui_overlay
+            .as_ref()
+            .and_then(|o| o.repaint_at())
+            .is_some_and(|at| now >= at);
+        if self.overlay_dirty || repaint_due || !self.overlay_active {
+            self.render_overlay_frame();
+            self.overlay_dirty = false;
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+        }
+        self.egui_overlay
+            .as_ref()
+            .and_then(|o| o.repaint_at())
+            .filter(|&at| at > now)
+    }
+
+    /// Render one egui frame of the open panels into the overlay's offscreen texture and
+    /// hand it to the renderer. The panel data is snapshotted from the core so the egui
+    /// closure doesn't borrow it; panel actions collected during the frame are applied
+    /// afterward (once the egui borrows have ended).
+    fn render_overlay_frame(&mut self) {
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        let frame = panels_ui::PanelFrame::snapshot(&self.core);
+        let mut actions: Vec<panels_ui::PanelAction> = Vec::new();
+        {
+            let (device, queue) = match self.core.renderer.as_ref() {
+                Some(r) => (r.device(), r.queue()),
+                None => return,
+            };
+            if let Some(ov) = self.egui_overlay.as_mut() {
+                ov.run(&window, device, queue, |ctx| {
+                    panels_ui::build(ctx, &frame, &mut actions);
+                });
+            }
+        }
+        // Hand the (retained) texture to the renderer for compositing.
+        if let Some(ov) = self.egui_overlay.as_ref() {
+            let target = ov.target();
+            if let Some(r) = self.core.renderer.as_mut() {
+                r.set_egui_overlay(Some(target));
+            }
+        }
+        self.overlay_active = true;
+        for action in actions {
+            self.apply_panel_action(action);
+        }
+    }
+
+    /// Apply a panel interaction (a close/tab/copy/tree action from the egui frame) to
+    /// the core, then mark the overlay dirty so it reflects the new state next turn.
+    fn apply_panel_action(&mut self, action: panels_ui::PanelAction) {
+        use panels_ui::PanelAction as A;
+        match action {
+            A::CloseHelp => self.core.toggle_help(),
+            A::CloseInspector => self.core.panels.inspector = None,
+            A::CloseTree => self.core.toggle_folder_tree(),
+            A::SelectTab(tab) => self.core.panels.open_inspector(tab),
+            A::CopyDetails => self.core.dispatch_action(Action::CopyImageDetails),
+            A::CopyText => self.core.dispatch_action(Action::CopyImageText),
+            // TODO(egui-panels): a describe-copy action + the Ask dialog aren't wired to
+            // the winit shell yet (mac-only today); no-op until they land.
+            A::CopyDescribe | A::Ask => {}
+            A::TreeToggle(path) => self.core.fs_tree_toggle(&path),
+            A::TreeOpen(path) => self.core.fs_tree_open(path),
+            A::TreeExtendUp => self.core.fs_tree_extend_up(),
+        }
+        self.overlay_dirty = true;
     }
 
     /// Shell side of [`CoreEffect::SetWindowMode`]: apply the borderless-fullscreen ⇄ windowed
@@ -1882,10 +2025,14 @@ impl App {
                     contract::CoreEffect::SetMenuState(state) => {
                         self.apply_menu_to_native(&state);
                     }
-                    // Native-panel marker (task #54, mac-first): the winit shell keeps the
-                    // HUD panels (`native_help == false`), so the core never emits this here.
-                    // Matched explicitly (no wildcard) to keep new variants a compile error.
-                    contract::CoreEffect::PanelsChanged => {}
+                    // A rich panel's visibility / active tab / content changed (task #54):
+                    // the winit shell presents Help / Inspector / tree via the egui overlay
+                    // (`native_help`/`native_inspector`/`native_tree` are on), so re-render
+                    // the panel texture next turn. Matched explicitly (no wildcard) to keep
+                    // new variants a compile error.
+                    contract::CoreEffect::PanelsChanged => {
+                        self.overlay_dirty = true;
+                    }
                     contract::CoreEffect::SetWindowMode(_mode) => {
                         self.apply_window_mode();
                     }
@@ -2318,6 +2465,22 @@ impl ApplicationHandler for App {
 
         self.window = Some(window);
         self.core.renderer = Some(Box::new(renderer));
+        // Build the egui rich-panel overlay now the renderer (device/queue) exists: it
+        // shares the renderer's device and draws the panels into an offscreen texture the
+        // renderer composites over the photo (task #54 Phase 4).
+        if let Some(win) = self.window.clone() {
+            let size = win.inner_size();
+            let dark = self.core.hud_dark;
+            if let Some(dev) = self.core.renderer.as_ref().map(|r| r.device()) {
+                self.egui_overlay = Some(egui_overlay::EguiOverlay::new(
+                    &win,
+                    dev,
+                    dark,
+                    size.width,
+                    size.height,
+                ));
+            }
+        }
         // Re-run the theme application now that the renderer lives in the core (the
         // early call above retinted the HUD; this one lands the letterbox through the
         // core-owned path), and push the Appearance preference onto the OS chrome
@@ -2349,11 +2512,48 @@ impl ApplicationHandler for App {
             self.drain_effects(event_loop);
             return;
         }
+        // Feed the egui rich-panel overlay the events it needs. Two classes:
+        //   • pointer/scroll — only while a panel is open, and if egui takes it (the
+        //     pointer is over a panel) we swallow it so it interacts with the panel
+        //     instead of panning/zooming the photo;
+        //   • DPI/size changes — always, so egui's `pixels_per_point` + screen rect track
+        //     a monitor move (its own offscreen target is resized separately below).
+        // Keyboard is deliberately NOT routed to egui: nav keys, panel hotkeys, and
+        // Esc-quits stay with the app, and the held-key KeyUp net must never be swallowed
+        // (a stuck fly is the worst bug here). Panels have no inline text inputs (ADR-023),
+        // so egui needs no keyboard focus.
+        let panel_open = self.overlay_panel_visible();
+        let mut overlay_consumed = false;
+        if let (Some(ov), Some(win)) = (self.egui_overlay.as_mut(), self.window.clone()) {
+            let pointer = matches!(
+                &event,
+                WindowEvent::CursorMoved { .. }
+                    | WindowEvent::CursorLeft { .. }
+                    | WindowEvent::MouseInput { .. }
+                    | WindowEvent::MouseWheel { .. }
+            );
+            let track = matches!(
+                &event,
+                WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Resized(..)
+            );
+            if (panel_open && pointer) || track {
+                let resp = ov.on_window_event(&win, &event);
+                if resp.repaint {
+                    self.overlay_dirty = true;
+                }
+                overlay_consumed = panel_open && pointer && resp.consumed;
+            }
+        }
+        if overlay_consumed {
+            self.drain_effects(event_loop);
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => self.begin_exit(),
 
             WindowEvent::Resized(size) => {
                 self.handle_resized(size.width, size.height);
+                self.resize_overlay(size.width, size.height);
             }
 
             // The window's backing scale factor changed — a move to a monitor with a
@@ -2452,6 +2652,13 @@ impl ApplicationHandler for App {
                 self.core.handle(contract::CoreEvent::OsThemeChanged {
                     dark: t == winit::window::Theme::Dark,
                 });
+                // Re-theme the egui overlay to match (its panels track the OS scheme like
+                // the HUD + dialogs); the core resolves `hud_dark` from the same signal.
+                let dark = self.core.hud_dark;
+                if let Some(ov) = self.egui_overlay.as_mut() {
+                    ov.set_theme(dark);
+                }
+                self.overlay_dirty = true;
             }
 
             // Track the modifier state for chord building (Shift+R, Ctrl+R, Alt+Enter, ⌘…).
@@ -2666,9 +2873,16 @@ impl ApplicationHandler for App {
         // ShellFlowAction, redraws, …). Must run before we read `requested_wake`.
         self.drain_effects(event_loop);
 
-        // The event loop's next wake: the earliest of the core's requested wake and the shell's
-        // own dialog-repaint deadline; `None` = idle until a real event.
-        let wake = [self.requested_wake, dialog_wake]
+        // Drive the egui rich-panel overlay: (re)render the panels into the offscreen
+        // texture when they change (or an egui animation is due) and hand it to the
+        // renderer, or clear it when nothing is open. Retained — a nav frame with a static
+        // panel open re-renders nothing (the hot-path contract). Returns egui's next timed
+        // repaint deadline for the wake calc.
+        let overlay_wake = self.update_overlay(now);
+
+        // The event loop's next wake: the earliest of the core's requested wake, the shell's
+        // own dialog-repaint deadline, and the overlay's egui repaint; `None` = idle.
+        let wake = [self.requested_wake, dialog_wake, overlay_wake]
             .into_iter()
             .flatten()
             .min();
@@ -2976,6 +3190,32 @@ fn main() {
         match hud_gallery::write_sheet(Path::new(&out)) {
             Ok(()) => println!("PhotoBlaze: wrote HUD gallery \u{2192} {out}"),
             Err(e) => eprintln!("PhotoBlaze: HUD gallery failed: {e}"),
+        }
+        return;
+    }
+
+    // Hidden dev command: render the egui rich panels (Help / Inspector / folder tree)
+    // headlessly to a PNG and exit — the egui-overlay equivalent of `--hud-gallery`, for
+    // previewing the panels without a live window. `--egui-shot [out.png] [--light]
+    // [--tab=details|text|describe]`. See `egui_shot.rs`.
+    if let Some(i) = args
+        .iter()
+        .position(|a| a == "--egui-shot" || a.starts_with("--egui-shot="))
+    {
+        let out = args[i]
+            .split_once('=')
+            .map(|(_, v)| v.to_string())
+            .or_else(|| args.get(i + 1).filter(|a| !a.starts_with('-')).cloned())
+            .unwrap_or_else(|| "egui-shot.png".to_string());
+        let dark = !args.iter().any(|a| a == "--light");
+        let tab = match args.iter().find_map(|a| a.strip_prefix("--tab=")) {
+            Some("text") => pb_app_core::InspectorTab::Text,
+            Some("describe") => pb_app_core::InspectorTab::Describe,
+            _ => pb_app_core::InspectorTab::Details,
+        };
+        match egui_shot::write_shot(Path::new(&out), dark, tab) {
+            Ok(()) => println!("PhotoBlaze: wrote egui panels \u{2192} {out}"),
+            Err(e) => eprintln!("PhotoBlaze: egui shot failed: {e}"),
         }
         return;
     }

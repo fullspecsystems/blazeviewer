@@ -1,0 +1,377 @@
+//! Hidden dev command (`--egui-shot [out.png]`): render the egui rich panels (Help /
+//! Inspector / folder tree) **headlessly** to a PNG, composited over a gray gradient the
+//! way they sit over a photo — the egui-overlay equivalent of `--hud-gallery`. Lets the
+//! panels be previewed and iterated without the event loop or a live window (screen
+//! capture is unreliable on HDR / borderless-Metal surfaces). Dev-only; never a user path.
+//!
+//! The readback is faithful to the real pipeline: egui renders premultiplied into an
+//! `Rgba8UnormSrgb` texture (the exact format [`crate::egui_overlay`] uses), and the
+//! software composite here linearizes, blends premultiplied-over the background, and
+//! re-encodes sRGB — mirroring `pb-render`'s `fs_egui` pass + tone-map, so what the PNG
+//! shows is what the app composites.
+
+use std::path::Path;
+
+use egui_wgpu::wgpu;
+use pb_app_core::fs_tree;
+use pb_app_core::panels::{
+    DescribeBody, DescribePanel, DetailRow, DetailsPanel, HelpPanel, HelpSection,
+    InspectorSnapshot, TextBody, TextPanel,
+};
+use pb_app_core::InspectorTab;
+use resvg::tiny_skia;
+
+use crate::panels_ui::{self, InspectorFrame, PanelFrame, TreeFrame};
+
+/// Render the panels to `out` as a PNG. `dark` picks the theme; `tab` the Inspector tab.
+pub fn write_shot(out: &Path, dark: bool, tab: InspectorTab) -> Result<(), String> {
+    pollster::block_on(run(out, dark, tab))
+}
+
+async fn run(out: &Path, dark: bool, tab: InspectorTab) -> Result<(), String> {
+    let ppp = 2.0f32;
+    let (w, h) = (2400u32, 1400u32); // physical pixels
+
+    // Headless device (the golden-test path).
+    let instance = wgpu::Instance::default();
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions::default())
+        .await
+        .ok_or("no wgpu adapter")?;
+    let (device, queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor::default(), None)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // egui context + design system (same setup the overlay uses).
+    let ctx = egui::Context::default();
+    ctx.set_theme(if dark {
+        egui::ThemePreference::Dark
+    } else {
+        egui::ThemePreference::Light
+    });
+    pb_ui::install_fonts(&ctx);
+    pb_ui::apply_style(&ctx, dark);
+    ctx.set_pixels_per_point(ppp);
+    let mut renderer =
+        egui_wgpu::Renderer::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb, None, 1, false);
+
+    let frame = sample_frame(dark, tab);
+    let mut actions = Vec::new();
+    let raw = || egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(w as f32 / ppp, h as f32 / ppp),
+        )),
+        ..Default::default()
+    };
+    // egui is immediate-mode: the first frame lays out (Window sizes/positions settle);
+    // render the second so anchored panels are placed. (The dialog window primes two
+    // frames for the same reason.) The first frame also emits the font-atlas texture
+    // delta, so its `textures_delta` must be applied — else egui's draws reference a
+    // texture the renderer never got and render nothing.
+    // Two warm-up frames: the first run reports a bogus default `screen_rect`, so the
+    // anchored windows would cache a wrong size; a second settles them at the real size.
+    for _ in 0..2 {
+        let warm = ctx.run(raw(), |ctx| panels_ui::build(ctx, &frame, &mut actions));
+        for (id, d) in &warm.textures_delta.set {
+            renderer.update_texture(&device, &queue, *id, d);
+        }
+    }
+    let full = ctx.run(raw(), |ctx| panels_ui::build(ctx, &frame, &mut actions));
+    let jobs = ctx.tessellate(full.shapes, full.pixels_per_point);
+    let desc = egui_wgpu::ScreenDescriptor {
+        size_in_pixels: [w, h],
+        pixels_per_point: ppp,
+    };
+
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("egui-shot"),
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    for (id, d) in &full.textures_delta.set {
+        renderer.update_texture(&device, &queue, *id, d);
+    }
+    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("egui-shot"),
+    });
+    let cmd = renderer.update_buffers(&device, &queue, &mut enc, &jobs, &desc);
+    {
+        let mut rp = enc
+            .begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("egui-shot"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            })
+            .forget_lifetime();
+        renderer.render(&mut rp, &jobs, &desc);
+    }
+
+    // Read the texture back (rows padded to 256 bytes).
+    let bpp = 4u32;
+    let padded = (w * bpp).div_ceil(256) * 256;
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("egui-shot-readback"),
+        size: (padded * h) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    enc.copy_texture_to_buffer(
+        wgpu::ImageCopyTexture {
+            texture: &tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::ImageCopyBuffer {
+            buffer: &readback,
+            layout: wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(h),
+            },
+        },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(cmd.into_iter().chain(std::iter::once(enc.finish())));
+
+    let slice = readback.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    device.poll(wgpu::Maintain::Wait);
+    rx.recv()
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("{e:?}"))?;
+    let data = slice.get_mapped_range();
+
+    // Composite premultiplied-over a diagonal gray gradient, in linear light (the
+    // pipeline: sRGB-decode → blend → sRGB-encode). Opaque output → premultiplied ==
+    // straight, which is what tiny_skia's Pixmap wants.
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let si = (y * padded + x * bpp) as usize;
+            let (pr, pg, pb, pa) = (
+                srgb_to_lin(data[si]),
+                srgb_to_lin(data[si + 1]),
+                srgb_to_lin(data[si + 2]),
+                data[si + 3] as f32 / 255.0,
+            );
+            let t = (x as f32 / w as f32 + y as f32 / h as f32) * 0.5;
+            let bg = srgb_to_lin((60.0 + t * 90.0) as u8);
+            let out = |p: f32| lin_to_srgb(p + bg * (1.0 - pa));
+            let di = ((y * w + x) * 4) as usize;
+            px[di] = out(pr);
+            px[di + 1] = out(pg);
+            px[di + 2] = out(pb);
+            px[di + 3] = 255;
+        }
+    }
+    drop(data);
+    readback.unmap();
+
+    let size = tiny_skia::IntSize::from_wh(w, h).ok_or("invalid size")?;
+    let pixmap = tiny_skia::Pixmap::from_vec(px, size).ok_or("could not build pixmap")?;
+    let png = pixmap
+        .encode_png()
+        .map_err(|e| format!("PNG encode: {e}"))?;
+    std::fs::write(out, png).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn srgb_to_lin(u: u8) -> f32 {
+    let x = u as f32 / 255.0;
+    if x <= 0.04045 {
+        x / 12.92
+    } else {
+        ((x + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn lin_to_srgb(x: f32) -> u8 {
+    let x = x.clamp(0.0, 1.0);
+    let s = if x <= 0.0031308 {
+        12.92 * x
+    } else {
+        1.055 * x.powf(1.0 / 2.4) - 0.055
+    };
+    (s * 255.0).round() as u8
+}
+
+/// Representative panel data so every panel + row kind shows.
+fn sample_frame(dark: bool, tab: InspectorTab) -> PanelFrame {
+    let help = HelpPanel {
+        sections: vec![
+            HelpSection {
+                title: "Navigation".into(),
+                rows: vec![
+                    ("Next photo".into(), "Space / →".into()),
+                    ("Previous photo".into(), "⌫ / ←".into()),
+                    ("Random photo".into(), "Enter".into()),
+                    ("Quit".into(), "Esc".into()),
+                ],
+            },
+            HelpSection {
+                title: "Panels".into(),
+                rows: vec![
+                    ("Keyboard help".into(), "?".into()),
+                    ("Folder tree".into(), "⇧F".into()),
+                    ("Info panel".into(), "⇧I".into()),
+                    ("Hide panels".into(), "Tab".into()),
+                ],
+            },
+        ],
+    };
+
+    let snapshot = match tab {
+        InspectorTab::Details => InspectorSnapshot::Details(DetailsPanel {
+            rows: vec![
+                DetailRow::Span {
+                    text: "84F7A1BB-5877-49C7.jpeg".into(),
+                    bold: true,
+                },
+                DetailRow::Pair {
+                    label: "Dimensions".into(),
+                    value: "6048 × 4024".into(),
+                },
+                DetailRow::Pair {
+                    label: "Codec".into(),
+                    value: "HEIC → JPEG".into(),
+                },
+                DetailRow::Pair {
+                    label: "Camera".into(),
+                    value: "Apple iPhone 15 Pro".into(),
+                },
+                DetailRow::Pair {
+                    label: "Lens".into(),
+                    value: "Main Camera — 6.86mm f/1.78".into(),
+                },
+                DetailRow::Span {
+                    text: "Exposure".into(),
+                    bold: true,
+                },
+                DetailRow::Pair {
+                    label: "Shutter".into(),
+                    value: "1/120 s".into(),
+                },
+                DetailRow::Pair {
+                    label: "ISO".into(),
+                    value: "64".into(),
+                },
+            ],
+        }),
+        InspectorTab::Text => InspectorSnapshot::Text(TextPanel {
+            body: TextBody::Ready {
+                qr: vec!["https://photoblaze.app".into()],
+                paragraphs: vec![
+                    "OPEN HOUSE".into(),
+                    "Saturday 1–4 PM · 123 Condo Lane".into(),
+                ],
+                ocr_error: None,
+            },
+        }),
+        InspectorTab::Describe => InspectorSnapshot::Describe(DescribePanel {
+            body: DescribeBody::Ready(
+                "A bright, modern condo living room with floor-to-ceiling windows \
+                 overlooking the city. A grey sectional sofa faces a wall-mounted TV."
+                    .into(),
+            ),
+        }),
+    };
+    let inspector = InspectorFrame { tab, snapshot };
+
+    let row = |name: &str, depth: u32, cur: bool, exp: bool, kids: bool, count: Option<u64>| {
+        fs_tree::Row {
+            path: format!("/Users/jdlien/Pictures/{name}").into(),
+            name: name.into(),
+            depth,
+            expanded: exp,
+            loading: false,
+            has_children: kids,
+            is_current: cur,
+            count,
+        }
+    };
+    // Mirrors a real deck: nested years, long dated folder names (truncation), and a deep
+    // current folder — enough rows to overflow so scroll/height show.
+    let tree = TreeFrame {
+        parent_name: Some("jdlien".into()),
+        rows: vec![
+            row("Pictures", 0, false, true, true, None),
+            row("$RECYCLE.BIN", 1, false, false, true, None),
+            row("1990s", 1, false, true, true, None),
+            row(
+                "1990-12-24 - Christmas1990",
+                2,
+                false,
+                false,
+                false,
+                Some(11),
+            ),
+            row(
+                "1991-09-20 - Grade 5 School Photos",
+                2,
+                false,
+                false,
+                false,
+                Some(1),
+            ),
+            row(
+                "1999-06-01 - CCHS Grad 1999 Ceremony",
+                2,
+                true,
+                false,
+                false,
+                Some(1),
+            ),
+            row("2000", 1, false, false, true, Some(842)),
+            row("2001", 1, false, false, true, Some(1203)),
+            row("2002", 1, false, false, true, Some(978)),
+            row("2003", 1, false, false, true, Some(1544)),
+            row("2004", 1, false, false, true, Some(2011)),
+            row("2005", 1, false, false, true, Some(1766)),
+            row("2006", 1, false, false, true, Some(2450)),
+            row("2007", 1, false, false, true, Some(1889)),
+            row("2008", 1, false, false, true, Some(3102)),
+            row("2009", 1, false, false, true, Some(2733)),
+            row("2010", 1, false, false, true, Some(1998)),
+            row("2011", 1, false, false, true, Some(2560)),
+            row("2012", 1, false, false, true, Some(1580)),
+            row("2013", 1, false, false, true, Some(3989)),
+            row("Screenshots", 1, false, false, false, Some(27)),
+        ],
+    };
+
+    PanelFrame {
+        help: Some(help),
+        inspector: Some(inspector),
+        tree: Some(tree),
+        dark,
+    }
+}

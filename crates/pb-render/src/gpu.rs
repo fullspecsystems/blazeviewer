@@ -205,6 +205,48 @@ fn fs_overlay(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// egui-overlay pass: the shell renders the rich panels (Inspector / Help / folder
+/// tree) into an offscreen **`Rgba8UnormSrgb`** texture with `egui-wgpu`, which
+/// composites them in linear light with *premultiplied* alpha and stores sRGB. We
+/// sample that texture through an sRGB view (so the sampler decodes back to
+/// premultiplied **linear**) with a bufferless fullscreen triangle, lift it to the
+/// SDR-white level (`cx.scale.x`, matching the CPU overlays on an HDR surface), and
+/// blend it into the fp16 intermediate with a *premultiplied* blend state — so no
+/// double sRGB conversion happens and the panels sit at the right brightness on both
+/// SDR and HDR output paths. Reuses the scene bind-group layout (only `scale.x` of
+/// the color uniform is read).
+const EGUI_WGSL: &str = r#"
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_egui(@builtin(vertex_index) vi: u32) -> VsOut {
+    var o: VsOut;
+    let uv = vec2<f32>(f32((vi << 1u) & 2u), f32(vi & 2u));
+    o.uv = uv;
+    o.pos = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
+    return o;
+}
+
+@group(0) @binding(0) var tex: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+struct ColorXf {
+    r0: vec4<f32>, r1: vec4<f32>, r2: vec4<f32>,
+    p0: vec4<f32>, p1: vec4<f32>, scale: vec4<f32>,
+};
+@group(0) @binding(2) var<uniform> cx: ColorXf;
+
+@fragment
+fn fs_egui(in: VsOut) -> @location(0) vec4<f32> {
+    // The sRGB view decodes the store back to premultiplied linear; keep the alpha
+    // straight for the premultiplied-over blend. Scale only the (premultiplied) RGB.
+    let s = textureSample(tex, samp, in.uv);
+    return vec4<f32>(s.rgb * cx.scale.x, s.a);
+}
+"#;
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Vertex {
@@ -354,6 +396,9 @@ struct Pipelines {
     tonemap: wgpu::RenderPipeline,
     /// Overlay: sRGB UI bitmap → surface, alpha-blended on top.
     overlay: wgpu::RenderPipeline,
+    /// egui rich-panel overlay: an offscreen premultiplied-sRGB texture → the fp16
+    /// intermediate, premultiplied-blended (bufferless fullscreen).
+    egui: wgpu::RenderPipeline,
     /// Layout for the image (and overlay) bind groups: tex + sampler + color uniform.
     scene_bgl: wgpu::BindGroupLayout,
     /// Layout for the tone-map bind group: intermediate tex + sampler + peak uniform.
@@ -372,6 +417,10 @@ fn build_pipelines(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -
     let overlay_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("pb-overlay"),
         source: wgpu::ShaderSource::Wgsl(OVERLAY_WGSL.into()),
+    });
+    let egui_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("pb-egui"),
+        source: wgpu::ShaderSource::Wgsl(EGUI_WGSL.into()),
     });
 
     let scene_bgl = tex_sampler_uniform_bgl(device, "img-bgl");
@@ -476,10 +525,52 @@ fn build_pipelines(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -
         cache: None,
     });
 
+    // egui rich panels → the fp16 intermediate. Bufferless fullscreen triangle; the
+    // egui texture is premultiplied (linear after the sRGB-view decode), so the blend
+    // is premultiplied-over (src One), not the straight `ALPHA_BLENDING` the CPU
+    // overlays use. Reuses the scene bind-group layout.
+    let egui = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("pb-egui-pipeline"),
+        layout: Some(&scene_layout),
+        vertex: wgpu::VertexState {
+            module: &egui_mod,
+            entry_point: "vs_egui",
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &egui_mod,
+            entry_point: "fs_egui",
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: INTERMEDIATE_FORMAT,
+                blend: Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                }),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    });
+
     Pipelines {
         scene,
         tonemap,
         overlay,
+        egui,
         scene_bgl,
         tonemap_bgl,
     }
@@ -1103,6 +1194,7 @@ pub struct WgpuRenderer {
     scene_pipeline: wgpu::RenderPipeline,
     tonemap_pipeline: wgpu::RenderPipeline,
     overlay_pipeline: wgpu::RenderPipeline,
+    egui_pipeline: wgpu::RenderPipeline,
     /// Layout for image (and overlay) bind groups: tex + sampler + color uniform.
     bgl: wgpu::BindGroupLayout,
     /// Layout for the tone-map bind group (rebuilt with the intermediate on resize).
@@ -1149,6 +1241,12 @@ pub struct WgpuRenderer {
     /// The folder-tree panel (`Shift+F`), anchored `margin` px in from the
     /// top-left corner (the info panel's inset, mirrored). Its own layer.
     tree: Option<OverlayDraw>,
+    /// The egui rich-panel overlay's bind group over a shell-owned offscreen texture
+    /// (`Rgba8UnormSrgb`). Retained across nav frames — the shell only re-hands it on
+    /// (re)allocation / resize, and re-renders egui *into* the same texture when a
+    /// panel changes, so per-nav-frame egui cost is zero (task #54 Phase 4). Composited
+    /// bufferless-fullscreen, above the CPU overlay layers.
+    egui: Option<wgpu::BindGroup>,
     upload: Box<dyn UploadStrategy>,
     /// Resident texture ring (Phase 3). Empty until `reserve_ring`; each `Some`
     /// slot holds a pre-uploaded photo. `present_slot` selects which one draws.
@@ -1339,6 +1437,7 @@ impl WgpuRenderer {
             scene_pipeline: pipelines.scene,
             tonemap_pipeline: pipelines.tonemap,
             overlay_pipeline: pipelines.overlay,
+            egui_pipeline: pipelines.egui,
             bgl: pipelines.scene_bgl,
             tonemap_bgl: pipelines.tonemap_bgl,
             bind_group,
@@ -1366,6 +1465,7 @@ impl WgpuRenderer {
             blank: false,
             message: None,
             tree: None,
+            egui: None,
         }
     }
 
@@ -1589,6 +1689,59 @@ impl Renderer for WgpuRenderer {
             }
             None => None,
         };
+    }
+
+    fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
+    fn set_egui_overlay(&mut self, texture: Option<&wgpu::Texture>) {
+        self.egui = texture.map(|tex| {
+            // Sample through the texture's own (sRGB) format so the sampler decodes the
+            // store back to premultiplied linear; `fs_egui` then composites it straight.
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            });
+            // Only `scale.x` is read by `fs_egui` — the SDR-white lift on an HDR surface
+            // (1.0 on SDR), matching the CPU overlay layers.
+            let color_buf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("egui-color-uniform"),
+                    contents: bytemuck::bytes_of(&ColorUniform::new(
+                        &ColorTransform::srgb(),
+                        0.0,
+                        self.scene_scale(false),
+                    )),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("egui-bg"),
+                layout: &self.bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: color_buf.as_entire_binding(),
+                    },
+                ],
+            })
+        });
     }
 
     fn set_edr_headroom(&mut self, headroom: f32) {
@@ -2204,6 +2357,29 @@ impl Renderer for WgpuRenderer {
             rp.set_vertex_buffer(0, m.vbuf.slice(..));
             rp.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint16);
             rp.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+        }
+        // Pass 2e: the egui rich-panel overlay (Inspector / Help / folder tree), drawn
+        // last so it sits above every CPU layer. The shell-owned offscreen texture is
+        // already premultiplied; the bufferless fullscreen triangle stretches it 1:1
+        // over the viewport and `fs_egui` composites it with premultiplied blend.
+        if let Some(bg) = &self.egui {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("egui-overlay"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &intermediate_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rp.set_pipeline(&self.egui_pipeline);
+            rp.set_bind_group(0, bg, &[]);
+            rp.draw(0..3, 0..1);
         }
         // Pass 3: present the intermediate onto the surface (SDR tone-map+encode, or
         // HDR scRGB scale, per the present uniform).

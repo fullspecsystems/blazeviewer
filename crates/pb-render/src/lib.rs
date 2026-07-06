@@ -167,6 +167,25 @@ pub trait Renderer {
     /// concentrically. Its own overlay layer. `None` hides it.
     fn set_tree(&mut self, panel: Option<(&[u8], u32, u32)>, margin: u32);
 
+    /// The renderer's wgpu device, so the shell can build an `egui-wgpu` renderer that
+    /// **shares** this device (task #54 Phase 4: the egui rich-panel overlay renders
+    /// into a shell-owned offscreen texture and hands it back via
+    /// [`set_egui_overlay`](Renderer::set_egui_overlay), rather than spinning up a
+    /// second device like the dialog window does). Borrowed, since wgpu 22's `Device`
+    /// isn't `Clone`; the shell fetches it on demand.
+    fn device(&self) -> &wgpu::Device;
+    /// The renderer's wgpu queue. See [`device`](Renderer::device).
+    fn queue(&self) -> &wgpu::Queue;
+    /// Set or clear the **egui rich-panel overlay** (Inspector / Help / folder tree on
+    /// the winit shell): a full-window offscreen texture the shell rendered the panels
+    /// into with `egui-wgpu`, composited premultiplied over the photo (task #54 Phase
+    /// 4). The texture must be `Rgba8UnormSrgb` (premultiplied), sized to the surface.
+    /// Retained — the shell re-hands it only on (re)allocation/resize and re-renders
+    /// egui *into* the same texture on a panel change, so a nav frame costs nothing
+    /// extra. `None` hides it. Unlike the CPU overlays this takes an already-uploaded
+    /// GPU texture — no bitmap round-trip.
+    fn set_egui_overlay(&mut self, texture: Option<&wgpu::Texture>);
+
     /// The currently displayed image's texture dimensions (for pan-clamp math).
     fn image_size(&self) -> (u32, u32);
     /// Set the EDR highlight roll-off target (macOS) — the headroom of the screen the

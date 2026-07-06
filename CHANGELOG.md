@@ -8,6 +8,16 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
+- **Windows: the rich panels are now a real UI (egui).** On the Windows/winit build, the
+  **Help** (`?`), **Inspector** (Details / Text / Describe — `⇧I`, `T`, `D`), and **folder
+  tree** (`⇧F`) panels are drawn with a proper retained-mode UI over the photo instead of the
+  CPU-rasterized overlay — so they **scroll**, you can **select and copy** text, the folder
+  tree has **disclosure chevrons** (browse without loading) and count badges, the Inspector
+  has a **tabbed** header, and long metadata / descriptions no longer get cut off. They track
+  the OS light/dark theme and composite correctly on SDR and HDR displays, with no cost to
+  the flick-through hot path (the panel is only redrawn when it changes). This brings the
+  Windows panels toward parity with the native macOS panels; drag-to-move, resize, and the
+  ephemeral toasts/info-line staying on the fast CPU layer are unchanged.
 - **The image info line is now configurable** (Settings ▸ Appearance ▸ *Image Info*): a
   **"Show image info by default"** toggle sets whether the `i` readout starts shown on launch
   (the `i` key still toggles it live), a **Position** picker places it, and per-field

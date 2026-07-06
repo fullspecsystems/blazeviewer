@@ -54,6 +54,8 @@ pub enum Icon {
     Success,
     Help,
     Trash,
+    Folder,
+    FolderOpen,
 }
 
 /// A **theme-aware** icon color. `Neutral` is the quiet default (a gray that varies
@@ -104,6 +106,8 @@ fn svg(icon: Icon, family: Family) -> &'static str {
         Icon::Success => glyph!("circle-check"),
         Icon::Help => glyph!("circle-question"),
         Icon::Trash => glyph!("trash-can"),
+        Icon::Folder => glyph!("folder"),
+        Icon::FolderOpen => glyph!("folder-open"),
     }
 }
 
@@ -170,6 +174,19 @@ pub fn image(ui: &mut egui::Ui, icon: Icon, size: f32, tone: Tone, p: &Palette) 
     ui.add(egui::Image::new(src).tint(tone_color(tone, p)))
 }
 
+/// Paint `icon` tinted for `tone` **into `rect`** — for manual/computed layouts (e.g. a
+/// fixed-width icon column) that place icons at exact positions instead of flowing them.
+/// The sprite is square and centered, so pass a square `rect` (the glyph fits inside).
+/// Complements [`image`], which adds a flowing widget. Draws nothing new to the layout —
+/// pure painting — so the caller owns the geometry (and thus vertical centering).
+pub fn paint(ui: &egui::Ui, rect: egui::Rect, icon: Icon, tone: Tone, p: &Palette) {
+    let side = rect.width().max(rect.height());
+    let px = (side * ui.ctx().pixels_per_point()).round().max(1.0) as u32;
+    let tex = texture(ui.ctx(), icon, ACTIVE_FAMILY, px);
+    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+    ui.painter().image(tex.id(), rect, uv, tone_color(tone, p));
+}
+
 /// An icon **inline** with a single line of text — sized to the body text. Add it before
 /// a label in a horizontal row (egui centers it against the line).
 pub fn inline(ui: &mut egui::Ui, icon: Icon, tone: Tone, p: &Palette) -> egui::Response {
@@ -217,6 +234,8 @@ mod tests {
             Icon::Success,
             Icon::Help,
             Icon::Trash,
+            Icon::Folder,
+            Icon::FolderOpen,
         ] {
             for family in [Family::Solid, Family::Regular] {
                 let img = rasterize_white(svg(icon, family), 32).expect("icon should rasterize");
