@@ -8,26 +8,38 @@ import SwiftUI
 struct InfoLineView: View {
     let model: CoreModel
 
+    // The pill's geometry. The codec badge is inset from the pill by `inset` on the top,
+    // right, and bottom (it fills the row height, and the trailing padding drops to match the
+    // vertical one), so a badge radius of `pillRadius − inset` makes its corners *concentric*
+    // with the pill's — the curves run exactly parallel.
+    private let pillRadius: CGFloat = 9
+    private let inset: CGFloat = 6
+
     var body: some View {
+        let hasCodec = !model.infoLineCodec.isEmpty
         HStack(spacing: 8) {
             Text(model.infoLineText)
                 .font(.callout)
                 .foregroundStyle(.primary)
                 .lineLimit(1)
                 .truncationMode(.middle)
-            // The codec sits in a small rounded-rect badge (not a full pill) so its corners
-            // echo — and stay roughly concentric with — the info pill that contains it.
-            if !model.infoLineCodec.isEmpty {
+            if hasCodec {
                 Text(model.infoLineCodec)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 7)
-                    .padding(.vertical, 2)
-                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 5))
+                    .frame(maxHeight: .infinity)  // fill the row → equal top/bottom inset
+                    .background(
+                        .quaternary,
+                        in: RoundedRectangle(cornerRadius: pillRadius - inset)
+                    )
             }
         }
-        .padding(.horizontal, 11)
-        .padding(.vertical, 6)
-        .panelBackground(cornerRadius: 9, opacity: model.panelOpacity)
+        .padding(.leading, 11)
+        // Trailing padding collapses to the vertical inset when the badge is present, so it's
+        // spaced equally on all three exposed sides and the concentric corners line up.
+        .padding(.trailing, hasCodec ? inset : 11)
+        .padding(.vertical, inset)
+        .panelBackground(cornerRadius: pillRadius, opacity: model.panelOpacity)
     }
 }

@@ -107,8 +107,11 @@ struct ContentView: View {
     /// tolerance keeps a hairline touch from shrinking a panel (margin of error is fine here).
     private func overlapsInfoLine(_ panel: CGRect) -> Bool {
         guard model.infoLineVisible, !infoLineFrame.isEmpty, !panel.isEmpty else { return false }
-        let tol: CGFloat = 8
-        return panel.maxX > infoLineFrame.minX + tol && panel.minX < infoLineFrame.maxX - tol
+        // Fire the cap a little BEFORE the panel actually touches the info line — the measured
+        // frames don't fully account for the panel's border/shadow, so a small safety margin
+        // guarantees they never visibly overlap (cheaper than under-shrinking and touching).
+        let safety: CGFloat = 8
+        return panel.maxX > infoLineFrame.minX - safety && panel.minX < infoLineFrame.maxX + safety
     }
 
     /// A corner panel's max height: the full window height minus the top+bottom edge insets,
