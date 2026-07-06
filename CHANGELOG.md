@@ -38,10 +38,9 @@ with any pre-release suffix carried only by the tag.
   text, or the AI description — in one click, and you can now **drag-select across the whole
   readout** instead of one value at a time. **AI descriptions render full Markdown** —
   headings and bullet/numbered lists, not just inline bold/italic.
-- **Redesigned welcome screen on macOS** — with no photos open, the window shows clean
-  **Open File** / **Open Folder** buttons (each with its shortcut key), a few essential
-  keys (Next / Previous / Random), and a **Show Shortcuts** link that opens the keyboard
-  help. Dragging images onto the window still works.
+- **Redesigned welcome screen on macOS** — with no photos open, the window shows a clean
+  **Open File** / **Open Folder** pair (each with its shortcut key) and nothing else.
+  Dragging images onto the window still works.
 - **Native keyboard-shortcuts panel on macOS** — the **?** help panel is now a real
   macOS panel: crisp native text, keys shown as little keycaps (with plain separators
   so a `/` key never reads as "or"), two columns per section for a compact scan, and a
