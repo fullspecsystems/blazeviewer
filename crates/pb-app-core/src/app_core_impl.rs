@@ -1127,10 +1127,19 @@ impl AppCore {
             // pass, starving decode and stuttering the flight. Only kick when settled — the
             // current photo gets scanned the moment you stop (the HUD path gets this for free
             // via its fly-suppressed `show_overlay`; the native path needs the guard explicitly).
+            //
+            // Also hard-cap concurrency: only auto-kick when no scan is already in flight.
+            // Each scan `std::thread::spawn`s an uncancellable job that full-res-decodes +
+            // OCRs/describes (holding a whole image), so without this a fast walk — or a slow
+            // network volume where each job lives for seconds — piles up resident full-res
+            // decodes until OOM. Deferring (vs. superseding) keeps at most one auto job alive;
+            // the explicit Copy Text / D commands still supersede for responsiveness.
             if self.inspector_panel_visible() && self.current.is_some() && !flying {
                 match self.panels.inspector {
-                    Some(InspectorTab::Text) => self.ensure_text_scan(),
-                    Some(InspectorTab::Describe) if self.settings.describe_auto => {
+                    Some(InspectorTab::Text) if self.text_scan.is_none() => self.ensure_text_scan(),
+                    Some(InspectorTab::Describe)
+                        if self.settings.describe_auto && self.describe_scan.is_none() =>
+                    {
                         self.ensure_describe_scan(None)
                     }
                     _ => {}
