@@ -286,9 +286,12 @@ struct SettingsView: View {
                         + "available yet. Choose Auto or Local endpoint.")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
+                    // Rounded border so it doesn't read as a borderless label next to the
+                    // native-bezeled ComboBox below (same reasoning as the slideshow field).
                     TextField(
                         "Endpoint URL", text: $draft.describeEndpoint,
                         prompt: Text("http://localhost:1234/v1"))
+                        .textFieldStyle(.roundedBorder)
                     // The dropdown fills from the last probe; picking a row sets the field.
                     ComboBox(
                         text: $draft.describeModel,
