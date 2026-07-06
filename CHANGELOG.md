@@ -140,6 +140,15 @@ with any pre-release suffix carried only by the tag.
   All EXIF Info** — both can be checked at once.
 
 ### Fixed
+- **Flying through photos stays smooth with the Inspector's Text or Describe tab open.** OCR
+  and AI-description scans were being kicked on *every* photo you flew past — an OCR thread or a
+  describe network round-trip per frame — competing with decode and stuttering the flight. They
+  now wait until you settle, so the current photo is scanned the moment you stop, and nothing
+  expensive runs during a held fast scrub.
+- **Tab (Hide Panels) now also hides the basic info line, not just the folder tree and
+  Inspector/Help.** It stayed on screen after Tab, leaving one piece of chrome behind when
+  everything else was supposed to declutter. It comes back — along with anything else Tab had
+  hidden — the moment you press Tab again or **i**.
 - **Opening a folder with no photos no longer interrupts you with a modal alert.** On macOS,
   opening an empty folder popped a blocking "No supported images" dialog you had to dismiss.
   Now it keeps the photos you were already viewing and shows a brief "No photos in *Foo*"

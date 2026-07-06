@@ -1071,9 +1071,12 @@ impl AppCore {
         // 4a. The basic info line (`i`) — its own ephemeral layer, so it runs before
         // the rich panel (whose bottom lift reads the line's shown state). Same
         // fly-hide + settle-track behavior as the panel, but never needs Help's
-        // static exception since the line always describes a photo.
+        // static exception since the line always describes a photo. Also suppressed
+        // while `Tab`-hidden — the eager `refresh_info_line_visibility` applies that
+        // the instant `hidden` flips, but this tick keeps it from popping back on its
+        // own next-photo/settle logic while still hidden.
         if self.info_line {
-            if flying {
+            if flying || self.panels.hidden {
                 if self.info_line_shown {
                     self.hide_info_line();
                 }
@@ -1118,7 +1121,13 @@ impl AppCore {
             // Kick the active tab's scan (no-op when cached / already running): the panel
             // tracks the displayed photo, and on this native path `show_overlay`'s HUD
             // branch — which normally kicks these — is suppressed.
-            if self.inspector_panel_visible() && self.current.is_some() {
+            //
+            // NOT while flying: OCR and describe are expensive (a per-photo OCR thread, or a
+            // describe network round-trip), and at fly speed they'd fire on every photo you
+            // pass, starving decode and stuttering the flight. Only kick when settled — the
+            // current photo gets scanned the moment you stop (the HUD path gets this for free
+            // via its fly-suppressed `show_overlay`; the native path needs the guard explicitly).
+            if self.inspector_panel_visible() && self.current.is_some() && !flying {
                 match self.panels.inspector {
                     Some(InspectorTab::Text) => self.ensure_text_scan(),
                     Some(InspectorTab::Describe) if self.settings.describe_auto => {
@@ -1383,7 +1392,7 @@ impl AppCore {
             // and the Hide Panels checkmark explains the invisibility.
             info_full: panels.inspector == Some(InspectorTab::Details),
             panels_hidden: panels.hidden,
-            hide_panels_enabled: panels.any_open(tree_open),
+            hide_panels_enabled: panels.any_open(tree_open, info_line),
             recursive,
             fullscreen,
             slideshow,
@@ -1436,23 +1445,44 @@ impl AppCore {
     }
 
     /// Toggle rich-panel visibility (`Tab`, task #54): hide the Inspector/Help/tree
-    /// without closing them, or reveal them all. No-op when nothing is open. The
-    /// ephemeral layer (toasts, the basic `i` line, hints) is unaffected — the basic
-    /// line may re-claim the overlay slot while panels hide.
+    /// **and** the basic `i` info line without closing/un-toggling any of them, or
+    /// reveal them all. No-op when nothing is open (including the line). Toasts and
+    /// hints stay their own ephemeral layer, untouched by `Tab`.
     pub fn toggle_panels(&mut self) {
-        if !self.panels.toggle_hidden(self.folder_tree_open) {
+        if !self
+            .panels
+            .toggle_hidden(self.folder_tree_open, self.info_line)
+        {
             return;
         }
         self.refresh_tree_visibility();
         self.refresh_slot();
     }
 
-    /// Re-render or clear the shared overlay slot after panel state changed.
+    /// Re-render or clear the shared overlay slot after panel state changed, and sync
+    /// the info line's drawn state alongside it — both can flip on any action that
+    /// touches `panels.hidden`, and this is the one choke point nearly all of them
+    /// already call.
     fn refresh_slot(&mut self) {
         if self.slot_content().is_some() {
             self.show_overlay();
         } else {
             self.hide_overlay();
+        }
+        self.refresh_info_line_visibility();
+    }
+
+    /// Apply the info line's visibility after a hide/reveal: hide it while
+    /// `Tab`-hidden (state stays "on" for when panels reveal), draw it when revealed
+    /// — mirrors `refresh_tree_visibility`. Applied eagerly rather than left to the
+    /// next tick, since the app sleeps when idle and a tick may not run again soon.
+    fn refresh_info_line_visibility(&mut self) {
+        if self.info_line && !self.panels.hidden {
+            if !self.info_line_shown || self.info_line_item != self.displayed_item {
+                self.show_info_line();
+            }
+        } else if self.info_line_shown {
+            self.hide_info_line();
         }
     }
 
@@ -2916,13 +2946,20 @@ impl AppCore {
     }
 
     /// `i` (the basic one-line info readout) or `Shift+I` (the Inspector's Details
-    /// tab). Fully independent (task #54): the line is its own layer, so `i` never
-    /// touches a rich panel and `Shift+I` never touches the line — the two can be on
-    /// at once, the line sitting below the panel. When shown the line appears
-    /// immediately (idle); after navigation it reappears once you stop (see the tick).
+    /// tab). Independent (task #54): opening/closing one never touches the other —
+    /// the two can be on at once, the line sitting below the panel. When shown the
+    /// line appears immediately (idle); after navigation it reappears once you stop
+    /// (see the tick). `Tab`-hidden is the one thing they share (it's a single master
+    /// switch): `i` while hidden follows the same reveal rule as `Shift+I`/Help/tree —
+    /// reveal everything first, and only ever end up *shown*, never toggled off with
+    /// nothing visibly changing.
     pub fn toggle_info(&mut self, full: bool) {
         if full {
             self.panels.toggle_inspector(InspectorTab::Details);
+            self.refresh_slot();
+        } else if self.panels.reveal() {
+            self.info_line = true;
+            self.refresh_tree_visibility();
             self.refresh_slot();
         } else {
             self.info_line = !self.info_line;
@@ -4277,6 +4314,7 @@ impl AppCore {
         }
         self.ensure_describe_scan(None); // default (accessibility) prompt
         self.show_overlay();
+        self.refresh_info_line_visibility(); // Tab-hidden reveals with the panel
     }
 
     /// **Ask about image** (`Shift+D`, task #44 subtask 9): open the text-input dialog for a
@@ -4312,6 +4350,7 @@ impl AppCore {
         self.panels.open_inspector(InspectorTab::Describe);
         self.ensure_describe_scan(Some(q));
         self.show_overlay();
+        self.refresh_info_line_visibility(); // Tab-hidden reveals with the panel
     }
 
     /// Kick the off-thread describe for the displayed photo unless its result is cached or
@@ -6366,19 +6405,51 @@ mod tests {
         core.dispatch_action(Action::ShowImageText);
         assert!(!core.panels.hidden);
         assert_eq!(core.panels.inspector, Some(InspectorTab::Text));
-        // The basic line ignores Tab-hide: it is a separate ephemeral layer, so its
-        // enabled flag flips regardless of `panels.hidden`.
+        // `hidden` is one master flag shared with the basic line (task #54 follow-up):
+        // `i` while Tab-hidden follows the same reveal rule as `T`/Help/tree — it
+        // reveals everything (not just the line) and only ever ends up shown.
         core.dispatch_action(Action::TogglePanels);
         assert!(core.panels.hidden);
         core.dispatch_action(Action::Info);
+        assert!(core.info_line, "i turns the line on…");
+        assert!(
+            !core.panels.hidden,
+            "…and reveals the rest too — same shared flag as Tab"
+        );
+        assert_eq!(
+            core.panels.inspector,
+            Some(InspectorTab::Text),
+            "the Text panel comes back with it"
+        );
+    }
+
+    #[test]
+    fn tab_hides_the_drawn_info_line_and_reveal_restores_it() {
+        use crate::meta::PhotoMeta;
+        let mut core = test_core();
+        core.native_info = true; // so show/hide_info_line() flip `info_line_shown` deterministically
+        core.current = Some(PhotoMeta {
+            rel: "a.jpg".to_string(),
+            w: 100,
+            h: 100,
+            codec: "JPEG",
+            animated: None,
+        });
+        core.displayed_item = Some(0);
+        core.dispatch_action(Action::Info); // line on
+        assert!(core.info_line_shown, "the line is drawn");
+
+        core.dispatch_action(Action::TogglePanels); // Tab: nothing else open, but the line counts
+        assert!(core.panels.hidden);
+        assert!(!core.info_line_shown, "Tab hides the line too");
         assert!(
             core.info_line,
-            "i toggles the line even while panels are hidden"
+            "…without turning the toggle off (hidden ≠ closed)"
         );
-        assert!(
-            core.panels.hidden,
-            "…and does not disturb the hidden panels"
-        );
+
+        core.dispatch_action(Action::TogglePanels); // Tab again reveals
+        assert!(!core.panels.hidden);
+        assert!(core.info_line_shown, "revealed with the rest of the chrome");
     }
 
     #[test]
