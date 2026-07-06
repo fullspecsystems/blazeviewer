@@ -45,7 +45,7 @@ struct SettingsView: View {
                 .frame(width: 560, height: 510)
                 .tabItem { tabLabel("General", symbol: "gearshape") }
             appearancePane
-                .frame(width: 560, height: 520)
+                .frame(width: 560, height: 560)
                 .tabItem { tabLabel("Appearance", symbol: "paintbrush") }
             aiPane
                 .frame(width: 560, height: 645)
@@ -319,9 +319,18 @@ struct SettingsView: View {
                 Toggle("Speak descriptions", isOn: $draft.speakDescriptions)
             }
             Section("Prompt") {
+                // TextEditor has no macOS rounded-corner preset (RoundedBorderTextEditorStyle
+                // is iOS-only), so its default square-cornered fill clashes with the grouped
+                // Form's rounded card; clip it to a smaller nested radius instead — same
+                // .textBackgroundColor so this only changes the corners, not the color.
                 TextEditor(text: $draft.describePrompt)
                     .frame(minHeight: 84)
                     .font(.body)
+                    .scrollContentBackground(.hidden)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color(nsColor: .textBackgroundColor))
+                    )
                 Text("Leave blank to use the built-in instruction. Placeholders: {filename} "
                     + "{folder} {datetime} {camera} {location} {context}")
                     .font(.caption).foregroundStyle(.secondary)
