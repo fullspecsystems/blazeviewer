@@ -33,8 +33,8 @@ use crate::panels::{
 };
 use crate::pb_key::PbKey;
 use crate::{
-    settings, slideshow, timing, Action, AppCore, InspectorTab, NativeToast, Nav, OpenButton,
-    OpenPanel, Panels, PlayHint, SlotContent, Toast, ToastIcon, UndoAction,
+    settings, slideshow, timing, Action, AppCore, InspectorTab, NativeToast, Nav, Panels,
+    SlotContent, Toast, ToastIcon, UndoAction,
 };
 
 /// Interim adapter (task #54 Phase 0): a core [`DetailRow`] to the HUD table row it
@@ -178,11 +178,6 @@ impl AppCore {
             pie_pushed: None,
             chip_sig: None,
             chip_built: Instant::now(),
-            chip_rect: None,
-            chip_hovered: false,
-            open_panel: None,
-            open_hover: None,
-            play_hint: None,
             folder_tree_open: false,
             folder_tree_sig: None,
             folder_tree_panel: None,
@@ -617,8 +612,8 @@ impl AppCore {
             }
             CoreEvent::MenuAction(action) => self.dispatch_action(action),
             CoreEvent::KeymapSubmitted(keymap) => self.apply_keymap(keymap),
-            // Pointer moved: drag-to-pan (while the button is held) + refresh the on-image hover
-            // state (chip / open-panel buttons / play hint) + the cursor shape.
+            // Pointer moved: drag-to-pan (while the button is held) + refresh the folder-tree
+            // hover state + the cursor shape.
             CoreEvent::PointerMoved { x, y } => {
                 let p = [x, y];
                 if self.dragging {
@@ -627,9 +622,6 @@ impl AppCore {
                     }
                 }
                 self.last_cursor = Some(p);
-                self.update_chip_hover();
-                self.update_open_hover();
-                self.update_play_hint_hover();
                 self.update_tree_hover();
                 self.refresh_cursor();
             }
@@ -2470,9 +2462,10 @@ impl AppCore {
         self.effects.push(contract::CoreEffect::RequestRender);
     }
 
-    /// Show the empty-state open panel over the (blank) viewer — used when there are no images
-    /// to display. Rebuilt against the current scale + hover; the renderer re-centers it on
-    /// resize and drops it the moment a photo is shown. Records the button rects for hit-testing.
+    /// Signal the empty-state open panel — used when there are no images to display. Both
+    /// shells present it natively (the winit egui overlay / the macOS SwiftUI panel), so the
+    /// core only signals visibility here; the tick's visibility diff drives the host to
+    /// show/hide it.
     pub fn show_open_hint(&mut self) {
         // Suppress the panel while a folder scan is pending (deferred startup launch) or
         // streaming in — the first photo is about to bootstrap, so the call to action would
@@ -2481,21 +2474,7 @@ impl AppCore {
         if self.scanning || self.launching {
             return;
         }
-        // The mac host presents the empty-state panel natively — don't rasterize the HUD
-        // one (and leave `open_panel` = None, so its buttons are never hit-tested under a
-        // native panel). The tick's visibility diff signals the host to show/hide it.
-        if self.native_open {
-            self.emit_panels_changed();
-            return;
-        }
-        let Some((bitmap, w, h, file, folder)) = self.open_panel_bitmap() else {
-            self.open_panel = None;
-            return;
-        };
-        self.open_panel = Some(OpenPanel { w, h, file, folder });
-        if let Some(a) = self.renderer.as_mut() {
-            a.set_message(Some((&bitmap, w, h)));
-        }
+        self.emit_panels_changed();
     }
 
     /// A monitor/DPI change re-scaled the window (e.g. dragging from a 1× display to a 2×
@@ -2520,67 +2499,6 @@ impl AppCore {
             self.show_open_hint(); // re-rasterize the "Press O to open" hint
         }
         self.effects.push(contract::CoreEffect::RequestRender);
-    }
-
-    /// Whether the empty-state open panel is the active overlay, so its buttons are
-    /// hit-testable: the panel is built, no photo is loaded, and no scan is pending/streaming
-    /// (which would suppress it). Mirrors [`show_open_hint`]'s show condition.
-    ///
-    /// [`show_open_hint`]: App::show_open_hint
-    pub fn open_hint_active(&self) -> bool {
-        self.open_panel.is_some() && self.source.is_empty() && !self.scanning && !self.launching
-    }
-
-    /// The on-screen `[x0, y0, x1, y1]` rect (physical px) of an open-panel button, derived
-    /// from the live window size — the renderer centers the message layer, so this stays
-    /// correct across resizes and DPI changes without re-storing absolute coordinates. `None`
-    /// unless the open panel is the active overlay.
-    pub fn open_button_rect(&self, which: OpenButton) -> Option<[f32; 4]> {
-        if !self.open_hint_active() {
-            return None;
-        }
-        let panel = self.open_panel?;
-        let sz = self.viewport;
-        // Same centering the renderer applies (see `center_quad_vertices`): clamped to ≥ 0.
-        let x0 = ((sz.width as f32 - panel.w as f32) * 0.5).max(0.0);
-        let y0 = ((sz.height as f32 - panel.h as f32) * 0.5).max(0.0);
-        let [bx, by, bw, bh] = match which {
-            OpenButton::File => panel.file,
-            OpenButton::Folder => panel.folder,
-        }
-        .map(|v| v as f32);
-        Some([x0 + bx, y0 + by, x0 + bx + bw, y0 + by + bh])
-    }
-
-    /// Which open-panel button (if any) the pointer is currently over.
-    pub fn open_hovered_button(&self) -> Option<OpenButton> {
-        let [x, y] = self.last_cursor?;
-        [OpenButton::File, OpenButton::Folder]
-            .into_iter()
-            .find(|&b| {
-                self.open_button_rect(b)
-                    .is_some_and(|r| point_in_rect(r, x, y))
-            })
-    }
-
-    /// Update the open panel's hover "lit" state from the latest cursor position, re-rendering
-    /// the panel only when hover **changes** (one CPU composite on the enter/leave transition,
-    /// never per move). Mirrors [`update_chip_hover`] for the empty-state call to action.
-    ///
-    /// [`update_chip_hover`]: App::update_chip_hover
-    pub fn update_open_hover(&mut self) {
-        if !self.open_hint_active() {
-            return;
-        }
-        let hovered = self.open_hovered_button();
-        if hovered == self.open_hover {
-            return;
-        }
-        self.open_hover = hovered;
-        // Rebuild the panel with the new lit button (content is otherwise unchanged), re-upload
-        // it, and present so the change shows immediately.
-        self.show_open_hint();
-        self.draw();
     }
 
     /// Handle a nav keypress (space / backspace / enter). Tracks the held key for
@@ -2747,16 +2665,13 @@ impl AppCore {
         ((a.w, a.h) == (b.w, b.h) && rot_a == rot_b).then_some((self.view.zoom, self.view.pan))
     }
 
-    /// Reflect the pan affordance in the pointer: a pointing hand over the Cancel Scan button,
+    /// Reflect the pan affordance in the pointer: a pointing hand over the folder-tree,
     /// a closed hand while dragging, an open hand when the image is pannable, the default arrow
     /// otherwise.
     pub fn refresh_cursor(&mut self) {
-        let over_button = self.last_cursor.is_some_and(|[x, y]| self.chip_hit(x, y))
-            || self.open_hovered_button().is_some()
-            || self.play_hint_hit()
-            || self
-                .last_cursor
-                .is_some_and(|[x, y]| self.folder_tree_hit(x, y).is_some());
+        let over_button = self
+            .last_cursor
+            .is_some_and(|[x, y]| self.folder_tree_hit(x, y).is_some());
         let kind = if self.dragging {
             contract::CursorKind::Grabbing
         } else if over_button {
@@ -2804,34 +2719,11 @@ impl AppCore {
         }
         if self.has_motion(item) {
             self.anim_hint_shown_for = Some(item);
-            // Native shell: just flash-signal it (bump the seq); the shell renders + fades the
-            // pill and reads `play_hint_kind` for the icon. No HUD raster / colliders / cursor.
-            if self.native_play {
-                self.play_hint_seq = self.play_hint_seq.wrapping_add(1);
-                self.draw(); // wake the shell so it reads the new seq
-                return;
-            }
-            // A Live Photo gets the livephoto mark; an animated still gets the play ▶. Styled
-            // like the open-screen buttons: `▶ Play  P` with the shortcut dimmed at the right —
-            // and it's a real button: hovering holds it open, a click plays (see the click /
-            // hover wiring). Starts unhovered.
-            let icon = if self.is_live_photo(item) {
-                icon::assets::LIVE_PHOTO
-            } else {
-                icon::assets::PLAY
-            };
-            if let Some((w, h)) = self.build_play_hint(icon, false) {
-                self.play_hint = Some(PlayHint {
-                    w,
-                    h,
-                    icon,
-                    hovered: false,
-                });
-            }
-            self.draw();
-            // If the pointer already happens to sit over it, light it up (and hold it) at once.
-            self.update_play_hint_hover();
-            self.refresh_cursor();
+            // Both shells present the play hint natively (the winit egui overlay / the macOS
+            // SwiftUI pill): flash-signal it (bump the seq); the shell renders + fades the pill
+            // and reads `play_hint_kind` for the icon. No HUD raster / colliders / cursor.
+            self.play_hint_seq = self.play_hint_seq.wrapping_add(1);
+            self.draw(); // wake the shell so it reads the new seq
         }
     }
 
@@ -2988,17 +2880,6 @@ impl AppCore {
         self.framestep_last = None;
         self.live_revert_at = None;
         self.effects.push(contract::CoreEffect::StopLiveAudio); // dropping the player stops it
-                                                                // Leaving the animated still: drop the interactive play hint AND its toast **immediately**
-                                                                // (not a fade), so a stale/irrelevant button never lingers over the next photo — which
-                                                                // could even be a non-animated one. Only the play hint owns the toast here; a passive
-                                                                // status toast (Copy/Save/…) has `play_hint == None` and is left to fade normally.
-        if self.play_hint.take().is_some() {
-            self.toast = None;
-            if let Some(a) = self.renderer.as_mut() {
-                a.set_toast(None, 0);
-            }
-            self.draw();
-        }
     }
 
     /// Start the Live Photo's audio from the top (its `.mov` track), if `item` is a Live
@@ -3081,15 +2962,8 @@ impl AppCore {
             self.hud_dark = dark;
             // Pie / scan card / info panel / tree / open hint all re-rasterize with the
             // new scheme. A plain transient toast keeps its old-scheme bitmap (it fades
-            // out within ~1.3 s and its source content isn't retained) — but the play
-            // hint is hover-pinned (hovering resets its fade indefinitely), so it must
-            // re-rasterize like the persistent overlays.
+            // out within ~1.3 s and its source content isn't retained).
             self.rescale_overlays();
-            if let Some(ph) = self.play_hint {
-                if let Some((w, h)) = self.build_play_hint(ph.icon, ph.hovered) {
-                    self.play_hint = Some(PlayHint { w, h, ..ph });
-                }
-            }
         }
     }
 
@@ -3355,9 +3229,8 @@ impl AppCore {
     }
 
     /// Whether the **native** empty-state Open panel should be visible — the welcome
-    /// surface shown when no photos are loaded (and no scan is bootstrapping). The mac
-    /// host reads this (via FFI) to show/hide its SwiftUI view. Mirrors the HUD's
-    /// `open_hint_active` condition, gated on the native flag.
+    /// surface shown when no photos are loaded (and no scan is bootstrapping). The host
+    /// reads this to show/hide its native view, gated on the native flag.
     pub fn open_panel_visible(&self) -> bool {
         self.native_open && self.source.is_empty() && !self.scanning && !self.launching
     }
@@ -5385,33 +5258,6 @@ impl AppCore {
             .unwrap_or_default()
     }
 
-    /// Build the empty-state **open panel** — two centered, interactive buttons ("Open File" and
-    /// "Open Folder", each with its shortcut dimmed and right-aligned menu-style), lit per the
-    /// current [`open_hover`]. `None` if no system font loaded. Returns the owned bitmap plus
-    /// each button's bitmap-relative rect, so callers can apply it to a renderer they still own
-    /// (e.g. mid-setup) and record the click targets.
-    ///
-    /// [`open_hover`]: App::open_hover
-    pub fn open_panel_bitmap(&self) -> Option<hud::OpenPanelBitmap> {
-        let hud = self.hud.as_ref()?;
-        // A normal button size (like the scan card's Cancel button) — the call to action doesn't
-        // need to shout; it's white text on an empty gray screen.
-        let px = (16.0 * self.viewport.scale_factor).max(11.0);
-        let file_key = self.shortcut_for(Action::OpenFile);
-        let folder_key = self.shortcut_for(Action::OpenFolder);
-        hud.render_open_panel(
-            "Open File",
-            &file_key,
-            "Open Folder",
-            &folder_key,
-            px,
-            hud.theme().bg,
-            true, // shortcut hint a notch heavier (Semibold) so the dimmed text keeps presence
-            self.open_hover == Some(OpenButton::File),
-            self.open_hover == Some(OpenButton::Folder),
-        )
-    }
-
     /// Flash a transient status message at the bottom-center (tasks.json #10) — for
     /// commands that otherwise give no visual feedback, e.g. the recursion toggle.
     /// A new toast replaces any current one.
@@ -5425,9 +5271,6 @@ impl AppCore {
     /// gets the message + icon as data and draws a SwiftUI pill. Always redraws (HUD path), so a
     /// caller that also changed the view (e.g. `rotate`) renders even without a system font.
     pub fn show_toast_icon(&mut self, msg: &str, kind: ToastIcon) {
-        // A passive toast is not the interactive play hint — drop any play-hint state so it
-        // doesn't respond to hover/click while a Copy/Save/… toast is up.
-        self.play_hint = None;
         // Native shell: hand the shell the data and let it render the pill; no CPU raster.
         if self.native_toast {
             self.toast_seq = self.toast_seq.wrapping_add(1);
@@ -5474,34 +5317,6 @@ impl AppCore {
         self.draw();
     }
 
-    /// Build the **play hint** toast — the `▶ Play  P` button (leading icon, label, dimmed
-    /// shortcut), at `hovered` fill/border — and push it. Returns the bitmap `(w, h)` so the
-    /// caller can record the hit rect. Shared by the first flash and the hover re-render.
-    pub fn build_play_hint(&mut self, icon: &str, hovered: bool) -> Option<(u32, u32)> {
-        let px = (20.0 * self.viewport.scale_factor).max(13.0);
-        let shortcut = self.shortcut_for(Action::PlayPause);
-        let built = self.hud.as_ref().and_then(|hud| {
-            let spec = hud::ButtonSpec {
-                label: "Play",
-                icon: Some(icon),
-                shortcut: (!shortcut.is_empty()).then_some(shortcut.as_str()),
-                shortcut_semibold: true,
-                min_w: 0,
-            };
-            hud.render_button(&spec, px, hud.theme().bg, hovered)
-        });
-        let (rgba, w, h) = built?;
-        self.toast = Some(Toast {
-            rgba,
-            w,
-            h,
-            started: self.now,
-            uploaded_alpha: -1.0,
-        });
-        self.push_toast(1.0);
-        Some((w, h))
-    }
-
     /// Upload the current toast bitmap to the renderer at `alpha` (its alpha
     /// channel scaled), centered near the bottom.
     pub fn push_toast(&mut self, alpha: f32) {
@@ -5536,15 +5351,7 @@ impl AppCore {
             }
             return self.toast_native.is_some();
         }
-        // A hovered play hint pauses the fade: keep its toast pinned in the full-opacity hold
-        // window, so the button never vanishes out from under the pointer.
-        if self.play_hint.is_some_and(|ph| ph.hovered) {
-            if let Some(t) = self.toast.as_mut() {
-                t.started = now;
-            }
-        }
         let Some(alpha) = self.toast.as_ref().and_then(|t| t.alpha(now)) else {
-            self.play_hint = None;
             if self.toast.take().is_some() {
                 if let Some(a) = self.renderer.as_mut() {
                     a.set_toast(None, 0);
@@ -5658,134 +5465,6 @@ impl AppCore {
             self.pie_pushed = None;
             self.draw();
         }
-    }
-
-    /// Rasterize the scan status card and place it at the top-right with equal top/right insets.
-    /// Records the centered **Cancel Scan button's** physical-px rect (the only click target).
-    pub fn push_chip(&mut self, name: &str, path: &str, count: usize) {
-        let heading = format!("Scanning \u{201c}{name}\u{201d}");
-        let noun = if count == 1 { "image" } else { "images" };
-        let count_line = format!("{} {noun} found", hud::format_thousands(count as u64));
-        // Equal inset from the top and right edges; fixed card width, clamped to the window.
-        let margin = (PIE_MARGIN * self.viewport.scale_factor).round().max(4.0) as u32;
-        let win_w = self.viewport.width;
-        let width = ((SCAN_CARD_WIDTH * self.viewport.scale_factor).round())
-            .min((win_w as f32 - 2.0 * margin as f32).max(1.0))
-            .max(1.0) as u32;
-        let card = self.hud.as_ref().and_then(|hud| {
-            let px = (15.0 * self.viewport.scale_factor).max(10.0);
-            hud.render_scan_card(
-                &heading,
-                path,
-                &count_line,
-                "Cancel Scan",
-                icon::assets::STOP,
-                px,
-                width,
-                hud.theme().bg,
-                self.chip_hovered,
-            )
-        });
-        let Some((rgba, w, h, btn)) = card else {
-            self.chip_rect = None;
-            return;
-        };
-        // Card top-left in physical px (right edge inset by `margin`, top inset by `margin`),
-        // then the button rect offset within it → the click hit-target.
-        let card_x0 = self.viewport.width as f32 - margin as f32 - w as f32;
-        let card_y0 = margin as f32;
-        let [bx, by, bw, bh] = btn.map(|v| v as f32);
-        self.chip_rect = Some([
-            card_x0 + bx,
-            card_y0 + by,
-            card_x0 + bx + bw,
-            card_y0 + by + bh,
-        ]);
-        if let Some(a) = self.renderer.as_mut() {
-            a.set_chip(Some((&rgba, w, h)), margin, margin);
-        }
-        self.draw();
-    }
-
-    /// Clear the scan card layer if it's up (and redraw to remove it).
-    pub fn clear_chip(&mut self) {
-        if self.chip_sig.is_some() {
-            if let Some(a) = self.renderer.as_mut() {
-                a.set_chip(None, 0, 0);
-            }
-            self.chip_rect = None;
-            self.chip_hovered = false;
-            self.draw();
-        }
-    }
-
-    /// Hit-test a physical-px cursor position against the scan card's **Cancel Scan button**
-    /// rect. The reusable overlay-click primitive: store a rect when you draw an interactive
-    /// overlay, test it here before the click falls through to drag-to-pan. (Future EXIF copy
-    /// buttons will register their own rects the same way.)
-    pub fn chip_hit(&self, x: f32, y: f32) -> bool {
-        self.chip_rect.is_some_and(|rect| point_in_rect(rect, x, y))
-    }
-
-    /// Update the Cancel Scan button's hover "lit" state from the latest cursor position, and —
-    /// only when hover **changes** — re-rasterize the card so the button lights up / dims. This
-    /// runs on every cursor-move, but the rebuild fires just on the enter/leave transition (one
-    /// ~320px CPU composite), never per move or per frame, so it stays off the photo hot path.
-    pub fn update_chip_hover(&mut self) {
-        let hovered = self.last_cursor.is_some_and(|[x, y]| self.chip_hit(x, y));
-        if hovered == self.chip_hovered {
-            return;
-        }
-        self.chip_hovered = hovered;
-        // Re-render the card in the new hover state; its content (name/path/count) is unchanged,
-        // so this bypasses the content throttle and feels instant.
-        if let Some((name, path, count)) = self.chip_sig.clone() {
-            self.push_chip(&name, &path, count);
-        }
-    }
-
-    /// The interactive play hint's on-screen `[x0, y0, x1, y1]` rect (physical px), derived from
-    /// the live window size — the toast is bottom-center with a fixed margin, so this matches
-    /// the renderer's placement and survives resizes. `None` unless the play hint is the current
-    /// toast and still on screen.
-    pub fn play_hint_rect(&self) -> Option<[f32; 4]> {
-        let ph = self.play_hint?;
-        self.toast.as_ref()?; // only while its toast is actually up
-        let sz = self.viewport;
-        let margin = (64.0 * self.viewport.scale_factor).round().max(8.0);
-        let x0 = ((sz.width as f32 - ph.w as f32) * 0.5).max(0.0);
-        let y1 = sz.height as f32 - margin;
-        let y0 = y1 - ph.h as f32;
-        Some([x0, y0, x0 + ph.w as f32, y1])
-    }
-
-    /// Whether the pointer is over the interactive play hint.
-    pub fn play_hint_hit(&self) -> bool {
-        match (self.last_cursor, self.play_hint_rect()) {
-            (Some([x, y]), Some(rect)) => point_in_rect(rect, x, y),
-            _ => false,
-        }
-    }
-
-    /// Update the play hint's hover state from the cursor. On an enter/leave transition it
-    /// re-renders the button lit/unlit (the fade itself is paused while hovered — see
-    /// [`tick_toast`]). Cheap: one CPU composite per transition, never per move.
-    ///
-    /// [`tick_toast`]: App::tick_toast
-    pub fn update_play_hint_hover(&mut self) {
-        let hovered = self.play_hint_hit();
-        let Some(ph) = self.play_hint else {
-            return;
-        };
-        if ph.hovered == hovered {
-            return;
-        }
-        // Re-render at the new state (size is unchanged; keep the recorded w/h). Rebuilding
-        // resets the fade clock, which is what we want: hovering holds it at full, and leaving
-        // gives it a fresh hold before it fades.
-        self.build_play_hint(ph.icon, hovered);
-        self.play_hint = Some(PlayHint { hovered, ..ph });
-        self.draw();
     }
 
     /// Render one frame.
@@ -6354,7 +6033,6 @@ mod tests {
         // show_open_hint must not rasterize a HUD panel (so its buttons are never
         // hit-tested beneath a native panel — the cursor fix).
         core.show_open_hint();
-        assert!(core.open_panel.is_none(), "no HUD open panel was built");
         // A tick signals the host on the visibility transition.
         core.effects.clear();
         core.handle(CoreEvent::Tick(std::time::Instant::now()));

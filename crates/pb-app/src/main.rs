@@ -75,8 +75,7 @@ mod reveal;
 // paths in the winit shell modules (and the `use action::…` lines below) keep
 // resolving unchanged.
 use pb_app_core::{
-    action, contract, keymap, pb_key, slideshow, AppCore, ArchiveScope, Nav, OpenPanel, UndoAction,
-    Viewport,
+    action, contract, keymap, pb_key, slideshow, AppCore, ArchiveScope, Nav, UndoAction, Viewport,
 };
 // The HUD CPU compositor (info panel / toasts / pie / chip) and its Font Awesome icon
 // rasterizer now live in the shell-neutral `pb-hud` crate (NS0). Re-export them at the
@@ -539,11 +538,6 @@ impl App {
                 pie_pushed: None,
                 chip_sig: None,
                 chip_built: Instant::now(),
-                chip_rect: None,
-                chip_hovered: false,
-                open_panel: None,
-                open_hover: None,
-                play_hint: None,
                 folder_tree_open: false,
                 folder_tree_sig: None,
                 folder_tree_panel: None,
@@ -2566,18 +2560,10 @@ impl ApplicationHandler for App {
             self.last_edr_headroom = headroom;
         }
 
-        // Empty launch (no folder/file given): a blank background with the centered
-        // Open File / Open Folder call to action instead of an image. With `native_open`
-        // the egui overlay draws that welcome (on the first tick), so skip the CPU panel —
-        // otherwise both would show. The `!native_open` path keeps the CPU hint.
+        // Empty launch (no folder/file given): a blank background instead of an image.
+        // The egui overlay draws the Open File / Open Folder welcome (on the first tick).
         if self.core.playlist.current().is_none() {
             renderer.clear_image();
-            if !self.core.native_open {
-                if let Some((bitmap, w, h, file, folder)) = self.core.open_panel_bitmap() {
-                    renderer.set_message(Some((&bitmap, w, h)));
-                    self.core.open_panel = Some(OpenPanel { w, h, file, folder });
-                }
-            }
         }
 
         // Present the first frame WHILE HIDDEN, then reveal — no white startup gap.

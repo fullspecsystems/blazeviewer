@@ -153,14 +153,6 @@ pub trait Renderer {
     /// the caller animates the fill / fade by re-uploading. `margin` is the gap from
     /// the top and right edges.
     fn set_pie(&mut self, panel: Option<(&[u8], u32, u32)>, margin: u32);
-    /// Set or clear the top-right **scan-count chip** ("12 / 1234…"). `right_margin`
-    /// aligns its right edge with the pie; `top_margin` is its top inset. Its own
-    /// overlay layer, drawn like the pie.
-    fn set_chip(&mut self, panel: Option<(&[u8], u32, u32)>, right_margin: u32, top_margin: u32);
-    /// Set or clear the centered message panel (the empty-state "Press O to open…"
-    /// hint). Its own overlay layer, centered on both axes; persists until a photo is
-    /// shown (`set_image` / `present_slot` clear it).
-    fn set_message(&mut self, panel: Option<(&[u8], u32, u32)>);
     /// Set or clear the **folder-tree panel** (`Shift+F`): an RGBA8 bitmap drawn
     /// alpha-blended `margin` px in from the **top-left corner** — the info
     /// panel's bottom-right inset, mirrored, so the two panels frame the photo

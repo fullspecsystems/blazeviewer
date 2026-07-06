@@ -43,10 +43,6 @@ use pb_render::Renderer as _;
 /// `SCAN_DIALOG_DELAY`.
 const SCAN_DIALOG_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// Content-refresh throttle for the scan-count chip (folder line + count) — the software
-/// composite stays off the hot path. Mirrors the winit shell's `SCAN_CARD_REFRESH`.
-const SCAN_CARD_REFRESH: std::time::Duration = std::time::Duration::from_millis(120);
-
 /// An in-flight streaming folder walk — the mirror of the winit shell's `DirScan`
 /// (worker thread + generation guard + the Scanning dialog's display name/reveal timer).
 struct DirScan {
@@ -611,36 +607,12 @@ impl AppCoreHandle {
     }
 
     /// Left mouse button pressed/released — the winit shell's `MouseInput(Left)` arm
-    /// mirrored: a press on an interactive on-image control (an open-panel button, the play
-    /// hint, the scan-chip's Cancel) fires that control; anywhere else it toggles
-    /// drag-to-pan.
+    /// mirrored: a press on a folder-tree row fires that control (the open-panel / play-hint /
+    /// scan-pill affordances are native SwiftUI views and handle their own clicks); anywhere
+    /// else it toggles drag-to-pan.
     fn mouse_left(&mut self, pressed: bool) {
         self.core.now = Instant::now();
-        let open_hit = if pressed {
-            self.core.open_hovered_button()
-        } else {
-            None
-        };
-        if let Some(button) = open_hit {
-            match button {
-                pb_app_core::OpenButton::File => self.core.dispatch_action(Action::OpenFile),
-                pb_app_core::OpenButton::Folder => self.core.dispatch_action(Action::OpenFolder),
-            }
-        } else if pressed && self.core.play_hint_hit() {
-            // Click the play hint → play, and dismiss it (it's been used).
-            self.core.play_hint = None;
-            self.core.dispatch_action(Action::PlayPause);
-        } else if pressed
-            && self
-                .core
-                .last_cursor
-                .is_some_and(|[cx, cy]| self.core.chip_hit(cx, cy))
-        {
-            // The scan-count chip's Cancel: stop the walk, keep what streamed in.
-            self.cancel_dir_scan();
-            self.core.request_prefetch();
-            self.core.show_toast("Scan stopped");
-        } else if pressed && self.core.folder_tree_click() {
+        if pressed && self.core.folder_tree_click() {
             // A folder-tree row opened a folder / a "… n more" marker paged; the
             // open plan's Begin* effects drain below like any other press.
         } else {
@@ -1497,36 +1469,7 @@ impl AppCoreHandle {
         self.poll_dir_scan();
         self.poll_archive_load();
         self.core.handle(CoreEvent::Tick(self.core.now));
-        self.tick_chip();
         self.apply_menu_state();
-    }
-
-    /// Keep the in-canvas scan-count chip in sync (the winit shell's `tick_chip`, which was
-    /// MISSING on this host — `chip_hit` handled the Cancel click but nothing ever *drew*
-    /// the chip): while a bootstrapped scan is still streaming past [`SCAN_DIALOG_DELAY`],
-    /// show `Scanning "Folder" — N images found` + Cancel in the corner; clear it when the
-    /// walk ends. Show/hide is immediate; a content tick (folder/count) is throttled by
-    /// [`SCAN_CARD_REFRESH`] so the software composite stays off the hot path.
-    fn tick_chip(&mut self) {
-        // ④ The ambient scan pill (native SwiftUI, top-center) replaces the in-canvas HUD
-        // scan chip on this host, and it covers both the pre- and post-bootstrap phases —
-        // so never build the chip here. Keep the clear path so any previously-drawn chip
-        // (e.g. from before this landed in a session) is torn down.
-        let want: Option<(String, String, usize)> = None;
-        if want == self.core.chip_sig {
-            return;
-        }
-        // Show/hide is immediate; a content tick (folder/count) is throttled.
-        let toggling = want.is_some() != self.core.chip_sig.is_some();
-        if !toggling && self.core.chip_built.elapsed() < SCAN_CARD_REFRESH {
-            return;
-        }
-        match &want {
-            Some((name, path, count)) => self.core.push_chip(name, path, *count),
-            None => self.core.clear_chip(),
-        }
-        self.core.chip_sig = want;
-        self.core.chip_built = Instant::now();
     }
 
     /// Mirror the live menu check/enabled state — the winit shell's `apply_menu_state`,
@@ -1625,10 +1568,8 @@ impl AppCoreHandle {
             .push(contract::CoreEffect::SetTitle(title));
         self.core.request_prefetch();
         // Empty deck (bare launch): blank letterbox + the Open File / Open Folder call
-        // to action. `show_open_hint` suppresses the HUD panel and signals the native
-        // welcome surface when the host presents it natively (native_open, task #54),
-        // else draws the HUD panel — so attach never leaves a ghost HUD panel under the
-        // native view.
+        // to action. `show_open_hint` signals the native welcome surface (native_open,
+        // task #54); the host presents it as a SwiftUI view.
         if self.core.playlist.current().is_none() {
             if let Some(r) = self.core.renderer.as_mut() {
                 r.clear_image();

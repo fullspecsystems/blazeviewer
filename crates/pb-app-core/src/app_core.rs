@@ -29,7 +29,7 @@ use crate::contract::CoreEffect;
 use crate::decode_pool::{DecodePool, Outcome};
 use crate::keymap::Keymap;
 use crate::metrics::StageTimes;
-use crate::overlay::{OpenButton, OpenPanel, Panels, PlayHint, Toast, TreePanel};
+use crate::overlay::{Panels, Toast, TreePanel};
 use crate::settings::Settings;
 use crate::undo::UndoAction;
 use crate::{Action, Modifiers, PbKey, PhotoMeta, Slideshow};
@@ -417,16 +417,6 @@ pub struct AppCore {
     pub chip_sig: Option<(String, String, usize)>,
     /// When the current chip bitmap was built (for its fade/animation).
     pub chip_built: Instant,
-    /// The chip's on-screen rect `[x, y, w, h]`, for hover hit-testing.
-    pub chip_rect: Option<[f32; 4]>,
-    /// Whether the pointer is over the chip.
-    pub chip_hovered: bool,
-    /// The empty-state open panel's geometry while shown, or `None`.
-    pub open_panel: Option<OpenPanel>,
-    /// Which empty-state open button the pointer is over, or `None`.
-    pub open_hover: Option<OpenButton>,
-    /// The interactive play hint riding the toast layer, or `None`.
-    pub play_hint: Option<PlayHint>,
     /// Whether the folder-tree overlay (`Shift+F`) is open. RAM-only (privacy #2) —
     /// the tree is a view of the deck, never persisted.
     pub folder_tree_open: bool,
