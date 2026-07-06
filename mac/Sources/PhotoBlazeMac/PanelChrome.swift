@@ -3,6 +3,14 @@
 import AppKit
 import SwiftUI
 
+/// The single spacing knob the whole chrome is laid out on, so margins read as one intentional
+/// system rather than per-overlay guesses: panels inset from the window edges by `edge`, the
+/// info line sits `edge` off the bottom, and stacked overlays (panel → info line, toast → info
+/// line) keep the same `edge` gap between them.
+enum Layout {
+    static let edge: CGFloat = 24
+}
+
 extension Color {
     /// A solid, dimmer stand-in for `.secondary` on the panels — light gray in dark mode,
     /// dark gray in light mode. Opaque (unlike the translucent `.secondary`) so icons /

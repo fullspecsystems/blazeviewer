@@ -15,15 +15,15 @@ struct InfoLineView: View {
                 .foregroundStyle(.primary)
                 .lineLimit(1)
                 .truncationMode(.middle)
-            // The codec sits in a small capsule (like the folder-tree count badges), nested
-            // neatly inside the pill.
+            // The codec sits in a small rounded-rect badge (not a full pill) so its corners
+            // echo — and stay roughly concentric with — the info pill that contains it.
             if !model.infoLineCodec.isEmpty {
                 Text(model.infoLineCodec)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 2)
-                    .background(.quaternary, in: Capsule())
+                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 5))
             }
         }
         .padding(.horizontal, 11)

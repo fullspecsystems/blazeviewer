@@ -90,6 +90,42 @@ struct ContentView: View {
     let model: CoreModel
     @Environment(\.openSettings) private var openSettings
 
+    // Measured geometry (in the "content" coordinate space) that drives the shared-margin
+    // layout: the info line's pill frame, the two corner panels' frames, and the canvas size.
+    // The info line is measured independently of the panels, so using it to size/position them
+    // (and the toast) is a one-way dependency — no layout feedback loop.
+    @State private var contentSize: CGSize = .zero
+    @State private var infoLineFrame: CGRect = .zero
+    @State private var treeFrame: CGRect = .zero
+    @State private var inspectorFrame: CGRect = .zero
+
+    private static let contentSpace = "content"
+
+    /// A corner panel only reserves room above the info line if it *actually* overlaps it
+    /// horizontally (a wide tree + a right-aligned line don't; a narrow one leaves the line
+    /// alone). Vertical overlap is a given — the panel is exactly what we're capping. A small
+    /// tolerance keeps a hairline touch from shrinking a panel (margin of error is fine here).
+    private func overlapsInfoLine(_ panel: CGRect) -> Bool {
+        guard model.infoLineVisible, !infoLineFrame.isEmpty, !panel.isEmpty else { return false }
+        let tol: CGFloat = 8
+        return panel.maxX > infoLineFrame.minX + tol && panel.minX < infoLineFrame.maxX - tol
+    }
+
+    /// A corner panel's max height: the full window height minus the top+bottom edge insets,
+    /// but capped to stop `edge` above the info line when it would otherwise collide with it.
+    private func panelMaxHeight(_ panel: CGRect) -> CGFloat {
+        let full = max(120, contentSize.height - 2 * Layout.edge)
+        guard overlapsInfoLine(panel) else { return full }
+        return max(120, min(full, infoLineFrame.minY - 2 * Layout.edge))
+    }
+
+    /// The toast sits `edge` above the info line (or `edge` off the bottom when it's hidden),
+    /// so the toast→line and line→bottom gaps match.
+    private var toastBottomInset: CGFloat {
+        guard model.infoLineVisible, !infoLineFrame.isEmpty else { return Layout.edge }
+        return (contentSize.height - infoLineFrame.minY) + Layout.edge
+    }
+
     var body: some View {
         MetalCanvas(model: model)
             // The borderless speed mode (F) keeps `.titled` (a borderless NSWindow can't
@@ -100,6 +136,9 @@ struct ContentView: View {
             // excludes the titlebar there, so there's no inset to ignore).
             .ignoresSafeArea()
             .frame(minWidth: 520, minHeight: 360)
+            // The canvas fills the window, so its size is the layout's content size — the
+            // basis for every overlay's shared-margin math.
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { contentSize = $0 }
             // The empty-state welcome surface (task #54): shown when no photos are
             // loaded; hidden while Help is up (Help takes the center). A native view, so
             // its buttons own their hover/click — no HUD hit-rect leaks under a panel.
@@ -120,43 +159,40 @@ struct ContentView: View {
             // it the available height for fit-to-content-then-scroll.
             .overlay {
                 if model.inspectorVisible {
-                    GeometryReader { geo in
-                        InspectorPanelView(
-                            model: model,
-                            // Reserve room at the bottom for the info line so a tall panel
-                            // never collides with it (the old HUD collider logic, restored).
-                            maxHeight: geo.size.height - 48
-                                - (model.infoLineVisible ? 44 : 0),
-                            maxWidth: max(360, geo.size.width - 80)
-                        )
-                        .frame(
-                            maxWidth: .infinity, maxHeight: .infinity,
-                            alignment: .topTrailing
-                        )
-                        .padding(.trailing, 24)
-                        .padding(.top, 24)
-                    }
+                    InspectorPanelView(
+                        model: model,
+                        maxHeight: panelMaxHeight(inspectorFrame),
+                        maxWidth: max(360, contentSize.width - 80)
+                    )
+                    .onGeometryChange(for: CGRect.self) {
+                        $0.frame(in: .named(Self.contentSpace))
+                    } action: { inspectorFrame = $0 }
+                    .frame(
+                        maxWidth: .infinity, maxHeight: .infinity,
+                        alignment: .topTrailing
+                    )
+                    .padding(.trailing, Layout.edge)
+                    .padding(.top, Layout.edge)
                     .transition(.opacity)
                 }
             }
             // The folder tree rides the leading edge (where the HUD tree sat), top-aligned.
             .overlay {
                 if model.treeVisible {
-                    GeometryReader { geo in
-                        FolderTreePanelView(
-                            model: model,
-                            // Clear the bottom info line too (see the Inspector above).
-                            maxHeight: geo.size.height - 48
-                                - (model.infoLineVisible ? 44 : 0),
-                            maxWidth: max(280, geo.size.width - 80)
-                        )
-                        .frame(
-                            maxWidth: .infinity, maxHeight: .infinity,
-                            alignment: .topLeading
-                        )
-                        .padding(.leading, 24)
-                        .padding(.top, 24)
-                    }
+                    FolderTreePanelView(
+                        model: model,
+                        maxHeight: panelMaxHeight(treeFrame),
+                        maxWidth: max(280, contentSize.width - 80)
+                    )
+                    .onGeometryChange(for: CGRect.self) {
+                        $0.frame(in: .named(Self.contentSpace))
+                    } action: { treeFrame = $0 }
+                    .frame(
+                        maxWidth: .infinity, maxHeight: .infinity,
+                        alignment: .topLeading
+                    )
+                    .padding(.leading, Layout.edge)
+                    .padding(.top, Layout.edge)
                     .transition(.opacity)
                 }
             }
@@ -167,7 +203,7 @@ struct ContentView: View {
             .overlay(alignment: .top) {
                 if model.scanPillVisible {
                     ScanPillView(model: model)
-                        .padding(.top, 16)
+                        .padding(.top, Layout.edge)
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
             }
@@ -177,8 +213,11 @@ struct ContentView: View {
             .overlay(alignment: infoLineAlignment(model.infoLineAlign)) {
                 if model.infoLineVisible {
                     InfoLineView(model: model)
-                        .padding(.horizontal, 18)
-                        .padding(.bottom, 16)
+                        .onGeometryChange(for: CGRect.self) {
+                            $0.frame(in: .named(Self.contentSpace))
+                        } action: { infoLineFrame = $0 }
+                        .padding(.horizontal, Layout.edge)
+                        .padding(.bottom, Layout.edge)
                         .allowsHitTesting(false)
                 }
             }
@@ -188,28 +227,30 @@ struct ContentView: View {
             .overlay(alignment: .bottom) {
                 if model.toastVisible {
                     ToastView(model: model)
-                        .padding(.bottom, 54)
+                        .padding(.bottom, toastBottomInset)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                         .allowsHitTesting(false)
                 }
             }
             .animation(.easeOut(duration: 0.22), value: model.toastVisible)
+            .animation(.easeInOut(duration: 0.2), value: toastBottomInset)
             // Help last = topmost: it's an ephemeral reference sheet centered over the
             // photo, so it should occlude the tree/inspector (which it overlaps) rather
             // than slide under them.
             .overlay {
                 if model.helpVisible {
-                    GeometryReader { geo in
-                        HelpPanelView(
-                            sections: model.helpSections,
-                            onClose: { model.closeHelp() },
-                            maxHeight: geo.size.height - 48
-                        )
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                    }
+                    HelpPanelView(
+                        sections: model.helpSections,
+                        onClose: { model.closeHelp() },
+                        maxHeight: max(120, contentSize.height - 2 * Layout.edge)
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                     .transition(.opacity)
                 }
             }
+            // Frames above are measured in this space so the shared-margin math (panel caps,
+            // toast offset) is all in one consistent coordinate system.
+            .coordinateSpace(.named(Self.contentSpace))
             // SwiftUI owns the WindowGroup titlebar surface and repaints it over the
             // AppKit-side transparency during its own update passes — hide it through
             // SwiftUI itself while the F speed mode is on (the AppKit props are also
