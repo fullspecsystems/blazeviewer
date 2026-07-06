@@ -138,6 +138,10 @@ with any pre-release suffix carried only by the tag.
   as the detailed info, text, or description panel (which now sits just above it)
   rather than replacing it. Its View-menu checkmark tracks independently of **Show
   All EXIF Info** — both can be checked at once.
+- **The welcome screen's Open File / Open Folder buttons now share the play hint's on-image
+  hover cue** (a subtle glow + 1% grow) — one consistent "this floats on your photo and
+  responds to you" language for on-canvas controls, distinct from ordinary panel/dialog
+  buttons.
 
 ### Fixed
 - **Flying through photos stays smooth with the Inspector's Text or Describe tab open.** OCR
@@ -149,6 +153,10 @@ with any pre-release suffix carried only by the tag.
   Inspector/Help.** It stayed on screen after Tab, leaving one piece of chrome behind when
   everything else was supposed to declutter. It comes back — along with anything else Tab had
   hidden — the moment you press Tab again or **i**.
+- **The welcome screen's Open File / Open Folder buttons no longer stack up multiple file
+  pickers.** Clicking either button again (or clicking the other one) while an Open panel was
+  already up spawned a second one on top instead of doing nothing — both buttons now disable
+  while a panel is open.
 - **Opening a folder with no photos no longer interrupts you with a modal alert.** On macOS,
   opening an empty folder popped a blocking "No supported images" dialog you had to dismiss.
   Now it keeps the photos you were already viewing and shows a brief "No photos in *Foo*"

@@ -88,3 +88,44 @@ extension View {
         }
     }
 }
+
+extension View {
+    /// The hover cue for a control that floats **directly on the photo** (not a panel or
+    /// dialog control, which stay native mac — `.bordered`/system hover): a subtle brightness
+    /// lift + 1% grow, animated. macOS has no built-in hover style for a bespoke on-image
+    /// control (nudging the near-opaque panel material's opacity was imperceptible), so this
+    /// is the shared language for "this is alive, it responds to you" — originally the play
+    /// hint, now also the welcome screen's Open buttons.
+    ///
+    /// `extraActive` ORs in a caller-owned condition that should also read as lit (e.g. the
+    /// play hint holding its look through a click-triggered fade) without duplicating the
+    /// hover-tracking state. `onHoverChange` lets the caller observe hover too (instead of a
+    /// second stacked `.onHover`) for side effects like the play hint's hold-open timer.
+    func onImageHoverGlow(
+        extraActive: Bool = false,
+        onHoverChange: @escaping (Bool) -> Void = { _ in }
+    ) -> some View {
+        modifier(OnImageHoverGlow(extraActive: extraActive, onHoverChange: onHoverChange))
+    }
+}
+
+private struct OnImageHoverGlow: ViewModifier {
+    let extraActive: Bool
+    let onHoverChange: (Bool) -> Void
+    @State private var hovering = false
+    // A disabled control (e.g. an Open button while its panel is already up) shouldn't
+    // read as "alive" — read from the environment so callers don't have to gate manually.
+    @Environment(\.isEnabled) private var isEnabled
+
+    func body(content: Content) -> some View {
+        let active = isEnabled && (hovering || extraActive)
+        content
+            .brightness(active ? 0.08 : 0)
+            .scaleEffect(active ? 1.01 : 1.0)
+            .animation(.easeInOut(duration: 0.13), value: active)
+            .onHover { inside in
+                hovering = inside
+                onHoverChange(inside)
+            }
+    }
+}

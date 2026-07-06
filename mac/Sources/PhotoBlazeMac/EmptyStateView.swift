@@ -89,5 +89,13 @@ struct EmptyStateView: View {
             )
         }
         .buttonStyle(.bordered)
+        // These sit directly on the photo canvas (not a panel), so they get the on-image
+        // hover cue too — the same "alive" language as the play hint, not a panel's.
+        .onImageHoverGlow()
+        // Disable both while an NSOpenPanel is already up (either button spawns one) — else
+        // a fast double-click, or clicking the other button, stacked a second panel on top
+        // of the first. `.disabled` must come after `.onImageHoverGlow` so the environment
+        // reaches it and the glow doesn't light up a control that can't respond right now.
+        .disabled(model.panelOpen)
     }
 }

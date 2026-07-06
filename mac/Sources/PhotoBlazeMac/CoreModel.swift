@@ -1605,13 +1605,22 @@ final class CoreModel {
 
     /// Whether an NSOpenPanel is up — the key monitor passes events through untouched then,
     /// so typing in the panel (its search field, ⌘-shortcuts) isn't swallowed by the viewer.
-    @ObservationIgnored private(set) var panelOpen = false
+    /// Tracked (not `@ObservationIgnored`) so the welcome screen's Open buttons can disable
+    /// themselves while it's up — the empty-state view is the one place a view reads this.
+    private(set) var panelOpen = false
 
     /// The native open panel (`CoreEffect::OpenFilePanel`/`OpenFolderPanel`). Mirrors the
     /// winit shell's rfd usage: files default to the images+archives filter (a picked `.zip`
     /// opens as an archive), multi-select allowed; results feed `open_paths` — the same
-    /// classify-and-open path as a Finder drop.
+    /// classify-and-open path as a Finder drop. Guarded against re-entry: `open_file`/
+    /// `open_folder` have no menu/keyboard gating of their own, so without this, invoking
+    /// either again (⌘O, the menu, or — before they disabled — the welcome buttons) while
+    /// a panel is already up spawned a second `NSOpenPanel` stacked on the first.
     private func presentOpenPanel(startDir: String, choosingFolders: Bool) {
+        guard !panelOpen else {
+            log("presentOpenPanel: already up — ignoring duplicate request")
+            return
+        }
         let panel = NSOpenPanel()
         panel.canChooseFiles = !choosingFolders
         panel.canChooseDirectories = choosingFolders
