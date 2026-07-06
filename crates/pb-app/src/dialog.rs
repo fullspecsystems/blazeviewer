@@ -331,7 +331,7 @@ struct KbEdit<'a> {
 /// The keyboard-shortcut editor's command list — shared with the SwiftUI host's
 /// Shortcuts pane so the two editors can't drift (moved to `pb_app_core::keymap`
 /// for NS2.6). Every listed command is rebindable, including ones with no default
-/// key (their slots read "Set…"/"Add…").
+/// key (their slots read a dimmed "Set"/"Add" placeholder).
 const KB_GROUPS: &[(&str, &[Action])] = pb_app_core::keymap::EDITOR_GROUPS;
 
 /// Is this physical key a bare modifier? (Capture waits for a "real" key to combine
@@ -1596,6 +1596,52 @@ fn settings_ui(
         });
 }
 
+/// Dev-only (`--settings-shot`): render one Settings tab (the pinned tab strip + its card
+/// stack) into `ui` for a headless PNG preview — screen capture is unreliable on this host
+/// (TCC + borderless Metal), so this is the Settings equivalent of `--egui-shot`. Mirrors
+/// [`settings_body`] minus the window chrome. `tab` picks the tab; only the card-only tabs
+/// (General / Appearance) render content (the AI / Shortcuts tabs need live state — but the
+/// tab strip shows all four, so their icons preview here). Uses a default draft.
+pub(crate) fn settings_shot_body(ui: &mut egui::Ui, dark: bool, tab_name: &str) {
+    let p = pbui::Palette::new(dark);
+    let mut draft = SettingsDraft::from_settings(&settings::Settings::default(), 120);
+    let mut tab = match tab_name {
+        "appearance" => SettingsTab::Display,
+        "shortcuts" => SettingsTab::Shortcuts,
+        _ => SettingsTab::General,
+    };
+    settings_tab_bar(ui, &mut tab);
+    egui::Frame::none()
+        .inner_margin(egui::Margin {
+            left: pbui::PAGE_MARGIN,
+            right: pbui::PAGE_MARGIN,
+            top: pbui::SPACE_4,
+            bottom: pbui::SPACE_6,
+        })
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            match tab {
+                SettingsTab::Display => display_tab(ui, &p, &mut draft),
+                SettingsTab::Shortcuts => {
+                    // A default keymap shows both bound chords and the empty "Set"/"Add"
+                    // placeholder slots (some actions have no default binding).
+                    let mut keymap = crate::keymap::Keymap::defaults();
+                    let mut capturing = None;
+                    let mut dirty = false;
+                    let mut note = None;
+                    let mut kb = KbEdit {
+                        keymap: &mut keymap,
+                        capturing: &mut capturing,
+                        dirty: &mut dirty,
+                        note: &mut note,
+                    };
+                    keybindings_ui(ui, &p, &mut kb);
+                }
+                _ => general_tab(ui, &p, &mut draft),
+            }
+        });
+}
+
 /// The pinned tab strip atop the Settings dialog. A [`pbui::tab_bar`] pivot: the labels
 /// are inset to the page margin so they line up with the cards below, while its hairline
 /// (and the active tab's accent underline) span the full width.
@@ -1607,10 +1653,22 @@ fn settings_tab_bar(ui: &mut egui::Ui, current: &mut SettingsTab) {
         current,
         pbui::PAGE_MARGIN,
         &[
-            (SettingsTab::General, "General"),
-            (SettingsTab::Display, "Appearance"),
-            (SettingsTab::Ai, "AI"),
-            (SettingsTab::Shortcuts, "Shortcuts"),
+            (
+                SettingsTab::General,
+                "General",
+                Some(pbui::icon::Icon::Sliders),
+            ),
+            (
+                SettingsTab::Display,
+                "Appearance",
+                Some(pbui::icon::Icon::Brush),
+            ),
+            (SettingsTab::Ai, "AI", Some(pbui::icon::Icon::Sparkles)),
+            (
+                SettingsTab::Shortcuts,
+                "Shortcuts",
+                Some(pbui::icon::Icon::Keyboard),
+            ),
         ],
     );
 }
@@ -1763,7 +1821,7 @@ fn ai_tab(
             },
         );
     });
-    ui.add_space(pbui::GAP);
+    ui.add_space(pbui::SECTION_GAP);
 
     // Custom prompt — full-width multiline (the built-in instruction is the placeholder).
     pbui::group_card(ui, p, Some("Prompt"), |ui| {
@@ -1947,7 +2005,7 @@ fn general_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
             },
         );
     });
-    ui.add_space(pbui::GAP);
+    ui.add_space(pbui::SECTION_GAP);
 
     pbui::group_card(ui, p, Some("Slideshow"), |ui| {
         pbui::card_row(
@@ -1961,7 +2019,7 @@ fn general_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
             },
         );
     });
-    ui.add_space(pbui::GAP);
+    ui.add_space(pbui::SECTION_GAP);
 
     pbui::group_card(ui, p, Some("Startup"), |ui| {
         pbui::card_row(
@@ -1993,7 +2051,7 @@ fn general_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
             },
         );
     });
-    ui.add_space(pbui::GAP);
+    ui.add_space(pbui::SECTION_GAP);
 
     pbui::group_card(ui, p, Some("File Picker"), |ui| {
         pbui::card_row(
@@ -2041,7 +2099,7 @@ fn general_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
             });
         }
     });
-    ui.add_space(pbui::GAP);
+    ui.add_space(pbui::SECTION_GAP);
 
     pbui::group_card(ui, p, Some("System"), |ui| {
         pbui::card_row(
@@ -2214,7 +2272,7 @@ fn keybindings_ui(ui: &mut egui::Ui, p: &pbui::Palette, kb: &mut KbEdit) {
                 });
             }
         });
-        ui.add_space(pbui::GAP);
+        ui.add_space(pbui::SECTION_GAP);
     }
 
     if pbui::secondary_button(ui, "Reset shortcuts to defaults").clicked() {
@@ -2226,7 +2284,7 @@ fn keybindings_ui(ui: &mut egui::Ui, p: &pbui::Palette, kb: &mut KbEdit) {
 }
 
 /// One chord slot (primary or secondary) for a command. Idle: a button showing the
-/// bound chord, or "Set…"/"Add…" when empty — clicking it arms capture. Armed: a
+/// bound chord, or a dimmed "Set"/"Add" placeholder when empty — clicking it arms capture. Armed: a
 /// "Press a key…" prompt plus a Clear button that removes the binding.
 fn chord_slot(ui: &mut egui::Ui, p: &pbui::Palette, kb: &mut KbEdit, action: Action, slot: usize) {
     if *kb.capturing == Some((action, slot)) {
@@ -2239,12 +2297,13 @@ fn chord_slot(ui: &mut egui::Ui, p: &pbui::Palette, kb: &mut KbEdit, action: Act
         }
         return;
     }
-    let label = match kb.keymap.slot(action, slot) {
-        Some(c) => c.to_string(),
-        None if slot == 0 => "Set\u{2026}".to_string(),
-        None => "Add\u{2026}".to_string(),
+    // A bound slot shows its chord in the normal button style; an empty slot shows a dimmed
+    // "Set"/"Add" placeholder (no ellipsis) so it reads as "nothing here yet, click to bind".
+    let clicked = match kb.keymap.slot(action, slot) {
+        Some(c) => pbui::secondary_button(ui, &c.to_string()).clicked(),
+        None => pbui::placeholder_button(ui, p, if slot == 0 { "Set" } else { "Add" }).clicked(),
     };
-    if pbui::secondary_button(ui, &label).clicked() {
+    if clicked {
         *kb.capturing = Some((action, slot));
         *kb.note = None;
     }

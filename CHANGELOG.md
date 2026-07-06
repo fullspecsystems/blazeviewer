@@ -23,6 +23,11 @@ with any pre-release suffix carried only by the tag.
   **auto-ducks** — the folder tree / inspector shrink so they never cover it. Its fields
   (folder / filename / resolution / codec), position, and *show-by-default* are all in Settings
   ▸ Appearance, and the *Info panel opacity* slider now drives the whole chrome.
+- **Windows: the folder-scan progress is now an ambient pill**, matching the panels and the
+  macOS scan pill. When you open a large or deeply-nested folder, a top-center pill shows a
+  spinner, the folder name and a live **N found** count, the sub-folder currently being
+  scanned, and a **Cancel** button — so a slow scan is clearly in progress and stoppable
+  without ever blocking your browsing (whatever's already found stays put when you cancel).
 - **The image info line is now configurable** (Settings ▸ Appearance ▸ *Image Info*): a
   **"Show image info by default"** toggle sets whether the `i` readout starts shown on launch
   (the `i` key still toggles it live), a **Position** picker places it, and per-field
@@ -135,6 +140,12 @@ with any pre-release suffix carried only by the tag.
   step between the archive's sibling folders.
 
 ### Changed
+- **Settings polish.** The Settings tabs now have icons (General / Appearance / AI / Shortcuts),
+  each section's heading sits **above** its card (like macOS System Settings) with a clearer gap
+  grouping the heading to the settings it labels, and empty shortcut slots show a dimmed
+  **Set / Add** placeholder so it's obvious which keys aren't bound yet. Secondary text in the
+  panels (counts, sub-labels) is also a shade lighter in dark mode for better contrast over a
+  bright photo.
 - **All transient notifications are now native on macOS.** Every toast — Copied, rotate,
   Saved rotation, Pinned/Unpinned, muted/unmuted, deleted, "Scan stopped", "No photos in
   *Foo*", "Recursive folders: on", … — is one consistent **bottom-center SwiftUI pill**

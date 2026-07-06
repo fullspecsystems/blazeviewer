@@ -66,6 +66,12 @@ pub enum Icon {
     LivePhoto,
     /// Animated-image mark (GIF/APNG/… in the info readout) — a film strip.
     Film,
+    /// Settings ▸ General tab (matches SF `slider.horizontal.3`).
+    Sliders,
+    /// Settings ▸ Appearance tab (matches SF `paintbrush`).
+    Brush,
+    /// Settings ▸ Shortcuts tab (matches SF `keyboard`).
+    Keyboard,
 }
 
 /// A **theme-aware** icon color. `Neutral` is the quiet default (a gray that varies
@@ -123,6 +129,9 @@ fn svg(icon: Icon, family: Family) -> &'static str {
         Icon::MessageQuestion => glyph!("message-question"),
         Icon::LivePhoto => glyph!("livephoto"),
         Icon::Film => glyph!("film"),
+        Icon::Sliders => glyph!("sliders"),
+        Icon::Brush => glyph!("brush"),
+        Icon::Keyboard => glyph!("keyboard"),
     }
 }
 
@@ -263,6 +272,9 @@ mod tests {
             Icon::MessageQuestion,
             Icon::LivePhoto,
             Icon::Film,
+            Icon::Sliders,
+            Icon::Brush,
+            Icon::Keyboard,
         ] {
             for family in [Family::Solid, Family::Regular] {
                 let img = rasterize_white(svg(icon, family), 32).expect("icon should rasterize");

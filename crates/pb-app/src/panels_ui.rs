@@ -59,9 +59,10 @@ const CHEVRON_W: f32 = 16.0;
 const TREE_ICON_SIZE: f32 = 15.0;
 /// Folder-name (and up-row) type size — a touch smaller than body so the tree stays dense.
 const TREE_NAME_SIZE: f32 = 13.0;
-/// Pitch of one tree row (the 24px row + the 1px inter-row gap) — used to size the scroll
-/// region without egui's (circular) auto-measure. Matches the real pitch (a hair generous)
-/// so a fitting tree never clips its last row or shows a needless scrollbar.
+/// Height of one tree row (each `up_row` / `tree_row` allocates exactly this). The scroll
+/// region is sized from the row count without egui's (circular) auto-measure — using the
+/// pitch `TREE_ROW_H + 1` (this height + the 1px inter-row gap) so a fitting tree never clips
+/// its last row or shows a needless scrollbar.
 const TREE_ROW_H: f32 = 25.0;
 
 /// An interaction a panel produced this frame, applied to the core by the shell.
@@ -77,6 +78,9 @@ pub enum PanelAction {
     TreeToggle(PathBuf),
     TreeOpen(PathBuf),
     TreeExtendUp,
+    /// The scan pill's **Cancel** button — stop the in-flight folder scan (keeps what's
+    /// streamed in so far). Applied by the shell as `cancel_scan_command`.
+    CancelScan,
 }
 
 /// The Inspector's visible state for one frame.
@@ -101,6 +105,18 @@ pub struct InfoLine {
     pub align: pb_app_core::settings::InfoLineAlign,
 }
 
+/// The ambient folder-scan pill (top-center): a spinner, `Scanning <Name>` + `<N> found`,
+/// the sub-folder currently being walked, and a **Cancel** button — the egui equivalent of
+/// the macOS SwiftUI `ScanPillView`. Shown while a directory scan streams the deck in.
+pub struct ScanPill {
+    /// The scanned root's display name (the pill heading: `Scanning <name>`).
+    pub name: String,
+    /// Images found so far (the browsable deck length).
+    pub found: usize,
+    /// The sub-folder currently being walked (blank while it's just the root).
+    pub current: String,
+}
+
 /// A pure snapshot of whichever rich panels are open — copied out of the core so the
 /// egui build closure borrows none of it.
 pub struct PanelFrame {
@@ -108,6 +124,10 @@ pub struct PanelFrame {
     pub inspector: Option<InspectorFrame>,
     pub tree: Option<TreeFrame>,
     pub info: Option<InfoLine>,
+    /// The folder-scan pill, when a directory scan is streaming in. Owned by the shell
+    /// (scan state lives in `App::dir_scan`, not the core), so `snapshot` leaves it `None`
+    /// and the shell fills it in `render_overlay_frame`.
+    pub scan: Option<ScanPill>,
     pub dark: bool,
     /// The panel surface alpha (0–255), from Settings ▸ Appearance ▸ *Info panel opacity*
     /// (`info_opacity` — the old HUD opacity). The winit shell has no separate `panel_opacity`
@@ -142,6 +162,8 @@ impl PanelFrame {
             inspector,
             tree,
             info,
+            // Scan state is shell-owned; the shell sets this in `render_overlay_frame`.
+            scan: None,
             dark: core.hud_dark,
             panel_alpha: opacity_to_alpha(core.settings.info_opacity),
         }
@@ -200,6 +222,11 @@ pub fn build(ctx: &egui::Context, frame: &PanelFrame, actions: &mut Vec<PanelAct
             screen.right() - EDGE,
         );
         inspector_panel(ctx, &p, alpha, r, insp, actions);
+    }
+    // The scan pill rides the top-center, above the corner panels but below Help
+    // (SwiftUI z-order) — drawn before Help so Help composites over it.
+    if let Some(scan) = &frame.scan {
+        scan_pill(ctx, &p, alpha, scan, actions);
     }
     if let Some(help) = &frame.help {
         let r = duck(
@@ -346,6 +373,200 @@ fn info_line(ctx: &egui::Context, p: &Palette, alpha: u8, info: &InfoLine) {
         });
 }
 
+// ── Scan pill (folder-scan progress) ─────────────────────────────────────────
+
+/// The pill corner radius (SwiftUI `panelBackground(cornerRadius: 14)`).
+const SCAN_RADIUS: f32 = 14.0;
+/// The pill's inner padding (SwiftUI `.padding(.horizontal, 16).padding(.vertical, 10)`).
+const SCAN_PAD_H: f32 = 16.0;
+const SCAN_PAD_V: f32 = 10.0;
+/// Fixed width of the middle text column so the spinner + Cancel don't shift as the count /
+/// sub-folder tick (SwiftUI `textWidth: 300`).
+const SCAN_TEXT_W: f32 = 300.0;
+/// Spinner square (SwiftUI `frame(width: 16, height: 16)`).
+const SCAN_SPINNER: f32 = 16.0;
+/// Gap between the pill's columns (SwiftUI `HStack(spacing: 12)`).
+const SCAN_GAP: f32 = 12.0;
+/// Gap between the two text rows (SwiftUI `VStack(spacing: 2)`).
+const SCAN_LINE_GAP: f32 = 2.0;
+/// Type sizes: heading + count at `.callout` (~13.5), the sub-folder at `.caption` (~11.5).
+const SCAN_HEADING_SIZE: f32 = 13.5;
+const SCAN_COUNT_SIZE: f32 = 13.0;
+const SCAN_SUB_SIZE: f32 = 11.5;
+const SCAN_CANCEL_SIZE: f32 = 13.0;
+
+/// The pill's translucent background (SwiftUI `panelBackground`) — `panel_frame` with the
+/// pill's slightly larger radius and its own inner padding.
+fn scan_frame(p: &Palette, alpha: u8) -> egui::Frame {
+    panel_frame(p, alpha)
+        .rounding(Rounding::same(SCAN_RADIUS))
+        .inner_margin(egui::Margin::symmetric(SCAN_PAD_H, SCAN_PAD_V))
+}
+
+/// The ambient scan pill: a spinner, `Scanning <Name>` with the running count, the current
+/// sub-folder, and a **Cancel** button — hand-laid so the spinner, text, divider, and button
+/// share one vertical center (egui won't center a two-line column against a widget for us).
+fn scan_pill(
+    ctx: &egui::Context,
+    p: &Palette,
+    alpha: u8,
+    pill: &ScanPill,
+    actions: &mut Vec<PanelAction>,
+) {
+    let heading = format!("Scanning {}", pill.name);
+    // Group the count with thousands separators (like the Inspector's "1,234 bytes") — a deep
+    // recursive scan reaches six or seven digits, and "1232945 found" is hard to parse.
+    let count = format!("{} found", pb_hud::hud::format_thousands(pill.found as u64));
+
+    let head_font = FontId::new(SCAN_HEADING_SIZE, FontFamily::Name(pb_ui::SEMIBOLD.into()));
+    let count_font = FontId::new(SCAN_COUNT_SIZE, FontFamily::Proportional);
+    let sub_font = FontId::new(SCAN_SUB_SIZE, FontFamily::Proportional);
+    let cancel_font = FontId::new(SCAN_CANCEL_SIZE, FontFamily::Proportional);
+
+    // Measure row heights + the Cancel width off `ctx` (no `Ui`) so the pill can be sized
+    // before the window body. Always reserve both text rows (blank sub-folder → a held
+    // height) so the pill doesn't jump when the folder line appears/disappears.
+    let measure_h = |size: f32| {
+        ctx.fonts(|f| {
+            f.layout_no_wrap(
+                "Ag".to_owned(),
+                FontId::new(size, FontFamily::Proportional),
+                Color32::PLACEHOLDER,
+            )
+            .size()
+            .y
+        })
+    };
+    let line1_h = measure_h(SCAN_HEADING_SIZE);
+    let line2_h = measure_h(SCAN_SUB_SIZE);
+    let col_h = line1_h + SCAN_LINE_GAP + line2_h;
+    let content_h = col_h.max(SCAN_SPINNER);
+    let cancel_w = ctx.fonts(|f| {
+        f.layout_no_wrap(
+            "Cancel".to_owned(),
+            cancel_font.clone(),
+            Color32::PLACEHOLDER,
+        )
+        .size()
+        .x
+    });
+    let content_w = SCAN_SPINNER + SCAN_GAP + SCAN_TEXT_W + SCAN_GAP + 1.0 + SCAN_GAP + cancel_w;
+
+    egui::Window::new("pb_scan_pill")
+        .title_bar(false)
+        .resizable(false)
+        .collapsible(false)
+        .movable(false)
+        .anchor(Align2::CENTER_TOP, [0.0, EDGE])
+        .frame(scan_frame(p, alpha))
+        .show(ctx, |ui| {
+            ui.set_width(content_w);
+            let (rect, _) =
+                ui.allocate_exact_size(egui::vec2(content_w, content_h), egui::Sense::hover());
+            let cy = rect.center().y;
+            let mut x = rect.left();
+
+            // Spinner — hand-drawn (like the panel's other geometric glyphs) and advanced by
+            // frame time at a throttled ~30 fps, so it spins without `egui::Spinner`'s
+            // per-frame repaint churning the overlay for a whole large scan.
+            draw_spinner(
+                ui,
+                egui::pos2(x + SCAN_SPINNER / 2.0, cy),
+                SCAN_SPINNER / 2.0,
+                p,
+            );
+            x += SCAN_SPINNER + SCAN_GAP;
+
+            // Text column: line 1 = heading (left, truncated) + count (right); line 2 = the
+            // sub-folder being walked, both centered as a block on the pill's centerline.
+            let col_l = x;
+            let col_r = x + SCAN_TEXT_W;
+            let col_top = cy - col_h / 2.0;
+            let line1_cy = col_top + line1_h / 2.0;
+            let line2_cy = col_top + line1_h + SCAN_LINE_GAP + line2_h / 2.0;
+            let count_g = galley(ui, &count, count_font, panel_secondary(p), f32::INFINITY);
+            let count_w = count_g.size().x;
+            let head_max = (SCAN_TEXT_W - count_w - 8.0).max(24.0);
+            let head_g = galley(ui, &heading, head_font, p.text, head_max);
+            paint_vtext(ui, col_l, line1_cy, &head_g);
+            paint_vtext(ui, col_r - count_w, line1_cy, &count_g);
+            if !pill.current.is_empty() {
+                let sub_g = galley(ui, &pill.current, sub_font, panel_secondary(p), SCAN_TEXT_W);
+                paint_vtext(ui, col_l, line2_cy, &sub_g);
+            }
+            x = col_r + SCAN_GAP;
+
+            // Divider rule — spans the full pill height, edge to edge. It reaches into the
+            // pill's vertical padding, which `ui.painter()` would crop (that painter is clipped
+            // to the content rect, inside the inner margin), so paint it on the unclipped layer
+            // painter from the true pill top to bottom (content rect grown by the padding).
+            let div = egui::Rect::from_min_max(
+                egui::pos2(x, rect.top() - SCAN_PAD_V),
+                egui::pos2(x + 1.0, rect.bottom() + SCAN_PAD_V),
+            );
+            ui.ctx()
+                .layer_painter(ui.layer_id())
+                .rect_filled(div, Rounding::ZERO, separator(p));
+            x += 1.0 + SCAN_GAP;
+
+            // Cancel button — accent text, a full-height hit target, pointer cursor on hover.
+            let btn = egui::Rect::from_min_size(
+                egui::pos2(x, rect.top()),
+                egui::vec2(cancel_w, content_h),
+            );
+            let resp = ui.interact(btn, ui.id().with("scan_cancel"), egui::Sense::click());
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            let color = if resp.hovered() {
+                lighten(p.accent, 0.18)
+            } else {
+                p.accent
+            };
+            let cancel_g = galley(ui, "Cancel", cancel_font, color, f32::INFINITY);
+            paint_vtext(ui, x, cy, &cancel_g);
+            if resp.clicked() {
+                actions.push(PanelAction::CancelScan);
+            }
+        });
+}
+
+/// Blend `c` toward white by `t` (a subtle hover lift for the Cancel button).
+fn lighten(c: Color32, t: f32) -> Color32 {
+    let mix = |v: u8| (v as f32 + (255.0 - v as f32) * t).round() as u8;
+    Color32::from_rgb(mix(c.r()), mix(c.g()), mix(c.b()))
+}
+
+/// A rotating arc spinner centered on `center`, radius `r`, advanced by egui's frame time —
+/// a fading tail (full alpha at the head → transparent at the tail). Requests a throttled
+/// ~30 fps repaint so a long scan doesn't re-render the overlay every frame.
+fn draw_spinner(ui: &egui::Ui, center: egui::Pos2, r: f32, p: &Palette) {
+    use std::f32::consts::TAU;
+    let base = panel_secondary(p);
+    let t = ui.input(|i| i.time) as f32;
+    let head = (t * 3.2) % TAU; // angular speed
+    let sweep = TAU * 0.72; // ~260° visible arc
+    let segs = 20;
+    let painter = ui.painter();
+    for k in 0..segs {
+        let f = k as f32 / segs as f32;
+        let a0 = head - sweep * f;
+        let a1 = head - sweep * (k + 1) as f32 / segs as f32;
+        // Fade the tail so the leading end reads brightest (the spin direction).
+        let alpha = ((1.0 - f) * base.a() as f32).round() as u8;
+        let c = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), alpha);
+        painter.line_segment(
+            [
+                egui::pos2(center.x + r * a0.cos(), center.y + r * a0.sin()),
+                egui::pos2(center.x + r * a1.cos(), center.y + r * a1.sin()),
+            ],
+            Stroke::new(2.0, c),
+        );
+    }
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(33));
+}
+
 // ── Shared chrome ────────────────────────────────────────────────────────────
 
 /// The panel surface base fill (before translucency) — a frosted-material stand-in,
@@ -381,10 +602,12 @@ fn panel_frame(p: &Palette, alpha: u8) -> egui::Frame {
 }
 
 /// The opaque stand-in for `.secondary` used on icons / labels / ✕ so they stay legible
-/// over the translucent material (SwiftUI `Color.panelSecondary`).
+/// over the translucent material (SwiftUI `Color.panelSecondary`). The dark value is lifted
+/// (was 163 / white 0.64) so secondary text keeps enough contrast over a bright photo behind
+/// the translucent panels — the scan pill's count / sub-folder was the worst case.
 fn panel_secondary(p: &Palette) -> Color32 {
     if p.dark {
-        Color32::from_gray(163) // white 0.64
+        Color32::from_gray(190) // white 0.745
     } else {
         Color32::from_gray(107) // white 0.42
     }
@@ -1202,7 +1425,11 @@ fn tree_panel(
             // when it's short, scroll when it overflows.
             let rows = tree.rows.len() + tree.parent_name.is_some() as usize;
             let body_top = HEADER_H + 1.0; // header + groove
-            let est = rows as f32 * TREE_ROW_H + 12.0; // + the list's top/bottom padding
+                                           // Each row is `TREE_ROW_H` tall with a 1px inter-row gap (`item_spacing.y = 1`
+                                           // below), so the true per-row pitch is `TREE_ROW_H + 1`. Using the bare row height
+                                           // under-counted by ~1px/row and clipped the last row into a needless scroll even
+                                           // with space to spare. `+ 12` is the list's 6+6px top/bottom padding.
+            let est = rows as f32 * (TREE_ROW_H + 1.0) + 12.0;
             let body_h = est.min((max_h - body_top).max(80.0));
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])

@@ -158,7 +158,11 @@ impl Gallery {
             p,
             &mut self.tab,
             0.0,
-            &[(0, "General"), (1, "Display"), (2, "Shortcuts")],
+            &[
+                (0, "General", Some(pb_ui::icon::Icon::Sliders)),
+                (1, "Display", Some(pb_ui::icon::Icon::Brush)),
+                (2, "Shortcuts", Some(pb_ui::icon::Icon::Keyboard)),
+            ],
         );
 
         pb_ui::section_label(ui, p, "Toggle");

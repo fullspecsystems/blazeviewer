@@ -43,7 +43,7 @@ struct SettingsView: View {
         TabView {
             generalPane
                 .frame(width: 560, height: 510)
-                .tabItem { tabLabel("General", symbol: "gearshape") }
+                .tabItem { tabLabel("General", symbol: "slider.horizontal.3") }
             appearancePane
                 .frame(width: 560, height: 560)
                 .tabItem { tabLabel("Appearance", symbol: "paintbrush") }

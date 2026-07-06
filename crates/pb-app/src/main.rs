@@ -1115,6 +1115,10 @@ impl App {
         self.core.help_panel_visible()
             || self.core.inspector_panel_visible()
             || self.core.tree_panel_visible()
+            // The scan pill is interactive (its Cancel button), so it joins the pointer-routing
+            // gate — egui only *consumes* a click actually over the pill, so panning the photo
+            // elsewhere during a scan still works.
+            || self.scan_pill_visible()
     }
 
     /// Whether the egui overlay has **any** content to composite — the interactive panels
@@ -1184,7 +1188,10 @@ impl App {
         let Some(window) = self.window.clone() else {
             return;
         };
-        let frame = panels_ui::PanelFrame::snapshot(&self.core);
+        let mut frame = panels_ui::PanelFrame::snapshot(&self.core);
+        // Scan state is shell-owned (`dir_scan`), so the pill is filled in here rather than
+        // by `snapshot` (which only reaches the core).
+        frame.scan = self.scan_pill_frame();
         let mut actions: Vec<panels_ui::PanelAction> = Vec::new();
         {
             let (device, queue) = match self.core.renderer.as_ref() {
@@ -1228,6 +1235,7 @@ impl App {
             A::TreeToggle(path) => self.core.fs_tree_toggle(&path),
             A::TreeOpen(path) => self.core.fs_tree_open(path),
             A::TreeExtendUp => self.core.fs_tree_extend_up(),
+            A::CancelScan => self.cancel_scan_command(),
         }
         self.overlay_dirty = true;
     }
@@ -1909,34 +1917,54 @@ impl App {
     /// `found`). Deferred past [`SCAN_DIALOG_DELAY`] so a quick folder never flashes it;
     /// rebuilt only when its content changes and no faster than [`SCAN_CARD_REFRESH`] (the
     /// current-folder line changes per directory); cleared when the scan ends.
+    /// Whether the ambient scan pill should be on screen: a folder scan is streaming in, a
+    /// photo is up, and the walk has outlasted [`SCAN_DIALOG_DELAY`] (so a fast folder never
+    /// flashes it). The egui overlay draws it (the SwiftUI `ScanPillView` parity); the
+    /// pre-bootstrap slow-scan case is still the separate `DialogKind::Scanning` window.
+    fn scan_pill_visible(&self) -> bool {
+        self.core.displayed_item.is_some()
+            && self.core.scan_bootstrapped
+            && self
+                .dir_scan
+                .as_ref()
+                .is_some_and(|s| s.started.elapsed() >= SCAN_DIALOG_DELAY)
+    }
+
+    /// The scan pill's data for this overlay frame (heading name, browsable count, current
+    /// sub-folder), or `None` when no pill is shown. Scan state is shell-owned (`dir_scan`),
+    /// so the shell builds this rather than a core accessor.
+    fn scan_pill_frame(&self) -> Option<panels_ui::ScanPill> {
+        if !self.scan_pill_visible() {
+            return None;
+        }
+        let scan = self.dir_scan.as_ref()?;
+        // The current folder; blanked while it's just the root (it duplicates the heading).
+        let cur = scan.progress.current();
+        let current = if cur == scan.name { String::new() } else { cur };
+        Some(panels_ui::ScanPill {
+            name: scan.name.clone(),
+            found: self.core.source.len(),
+            current,
+        })
+    }
+
+    /// Drive the egui scan pill each tick: when its content (visibility / folder / count)
+    /// changes, mark the overlay dirty so it re-renders. Show/hide is immediate; a content
+    /// tick (folder/count) is throttled by [`SCAN_CARD_REFRESH`] so a fast-streaming deck
+    /// doesn't re-lay-out the overlay every batch. (The pill's own spinner already requests
+    /// per-frame repaints while visible, so the live count stays current between ticks.)
     fn tick_chip(&mut self) {
-        let want = match (self.dir_scan.as_ref(), self.core.displayed_item) {
-            (Some(scan), Some(_))
-                if self.core.scan_bootstrapped && scan.started.elapsed() >= SCAN_DIALOG_DELAY =>
-            {
-                // Current folder being walked; hide it while it's just the root (it would
-                // duplicate the heading).
-                let cur = scan.progress.current();
-                let path = if cur == scan.name { String::new() } else { cur };
-                Some((scan.name.clone(), path, self.core.source.len()))
-            }
-            _ => None,
-        };
+        let want = self.scan_pill_frame().map(|s| (s.name, s.current, s.found));
         if want == self.core.chip_sig {
             return;
         }
-        // Show/hide is immediate; a content tick (folder/count) is throttled so the software
-        // composite stays off the hot path.
         let toggling = want.is_some() != self.core.chip_sig.is_some();
         if !toggling && self.core.chip_built.elapsed() < SCAN_CARD_REFRESH {
             return;
         }
-        match &want {
-            Some((name, path, count)) => self.core.push_chip(name, path, *count),
-            None => self.core.clear_chip(),
-        }
         self.core.chip_sig = want;
         self.core.chip_built = Instant::now();
+        self.overlay_dirty = true;
     }
 
     /// Esc / window-close: shut down with a perceived-*instant* exit, writing
@@ -2704,11 +2732,10 @@ impl ApplicationHandler for App {
                 });
             }
 
-            // Pointer left the window: drop any Cancel Scan / open-button / play-hint /
-            // folder-tree hover so they don't stay lit.
+            // Pointer left the window: drop any open-button / play-hint / folder-tree hover
+            // so they don't stay lit. (The scan pill's Cancel hover is egui's now.)
             WindowEvent::CursorLeft { .. } => {
                 self.core.last_cursor = None;
-                self.core.update_chip_hover();
                 self.core.update_open_hover();
                 self.core.update_play_hint_hover();
                 self.core.update_tree_hover();
@@ -2721,9 +2748,10 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 let pressed = state == ElementState::Pressed;
-                // A press on an interactive on-image control (an open-panel button, the play
-                // hint, or the scan-count chip's Cancel button) fires that control and must NOT
-                // also start a drag-to-pan.
+                // A press on an interactive on-image control (an open-panel button or the play
+                // hint) fires that control and must NOT also start a drag-to-pan. (The scan
+                // pill's Cancel is an egui button, handled in the overlay, and a press over any
+                // egui panel is swallowed before this event by `overlay_consumed`.)
                 let open_hit = pressed.then(|| self.core.open_hovered_button()).flatten();
                 if let Some(button) = open_hit {
                     match button {
@@ -2734,13 +2762,6 @@ impl ApplicationHandler for App {
                     // Click the play hint → play, and dismiss it (it's been used).
                     self.core.play_hint = None;
                     self.core.dispatch_action(Action::PlayPause);
-                } else if pressed
-                    && self
-                        .core
-                        .last_cursor
-                        .is_some_and(|[cx, cy]| self.core.chip_hit(cx, cy))
-                {
-                    self.cancel_scan_command();
                 } else if pressed && self.core.folder_tree_click() {
                     // A folder-tree row opened a folder / a "… n more" marker paged.
                 } else {
@@ -3229,6 +3250,30 @@ fn main() {
         match egui_shot::write_shot(Path::new(&out), dark, tab) {
             Ok(()) => println!("PhotoBlaze: wrote egui panels \u{2192} {out}"),
             Err(e) => eprintln!("PhotoBlaze: egui shot failed: {e}"),
+        }
+        return;
+    }
+
+    // Hidden dev command: render a Settings tab headlessly to a PNG and exit — the Settings
+    // equivalent of `--egui-shot`. `--settings-shot [out.png] [--light]
+    // [--tab=general|appearance|shortcuts]`. See `egui_shot::write_settings_shot`.
+    if let Some(i) = args
+        .iter()
+        .position(|a| a == "--settings-shot" || a.starts_with("--settings-shot="))
+    {
+        let out = args[i]
+            .split_once('=')
+            .map(|(_, v)| v.to_string())
+            .or_else(|| args.get(i + 1).filter(|a| !a.starts_with('-')).cloned())
+            .unwrap_or_else(|| "settings-shot.png".to_string());
+        let dark = !args.iter().any(|a| a == "--light");
+        let tab = args
+            .iter()
+            .find_map(|a| a.strip_prefix("--tab="))
+            .unwrap_or("general");
+        match egui_shot::write_settings_shot(Path::new(&out), dark, tab) {
+            Ok(()) => println!("PhotoBlaze: wrote settings \u{2192} {out}"),
+            Err(e) => eprintln!("PhotoBlaze: settings shot failed: {e}"),
         }
         return;
     }

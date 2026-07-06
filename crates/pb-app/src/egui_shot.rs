@@ -28,6 +28,182 @@ pub fn write_shot(out: &Path, dark: bool, tab: InspectorTab) -> Result<(), Strin
     pollster::block_on(run(out, dark, tab))
 }
 
+/// Render a **Settings** tab's card stack to `out` as a PNG (`--settings-shot`) — the
+/// Settings equivalent of [`write_shot`], for previewing the dialog's cards headlessly
+/// (screen capture is unreliable on this host). `appearance` picks the Appearance tab over
+/// General. The page fills its own opaque background (`Palette::page` via a `CentralPanel`),
+/// so — unlike the panel shot — there's nothing to composite: the readback is written straight.
+pub fn write_settings_shot(out: &Path, dark: bool, tab: &str) -> Result<(), String> {
+    pollster::block_on(run_settings(out, dark, tab))
+}
+
+async fn run_settings(out: &Path, dark: bool, tab: &str) -> Result<(), String> {
+    let ppp = 2.0f32;
+    // 560pt wide = the real Settings window; tall enough that the General tab lays out
+    // without scrolling (cropped afterward).
+    let (w, h) = (1120u32, 2600u32);
+
+    let instance = wgpu::Instance::default();
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions::default())
+        .await
+        .ok_or("no wgpu adapter")?;
+    let (device, queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor::default(), None)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let ctx = egui::Context::default();
+    ctx.set_theme(if dark {
+        egui::ThemePreference::Dark
+    } else {
+        egui::ThemePreference::Light
+    });
+    pb_ui::install_fonts(&ctx);
+    pb_ui::apply_style(&ctx, dark);
+    ctx.set_pixels_per_point(ppp);
+    let mut renderer =
+        egui_wgpu::Renderer::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb, None, 1, false);
+
+    let page = pb_ui::Palette::new(dark).page;
+    let build = |ctx: &egui::Context| {
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().fill(page))
+            .show(ctx, |ui| {
+                crate::dialog::settings_shot_body(ui, dark, tab);
+            });
+    };
+    let raw = || egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(w as f32 / ppp, h as f32 / ppp),
+        )),
+        ..Default::default()
+    };
+    // Two warm-up frames settle the responsive card_row layout at the real width (the first
+    // run reports a default screen_rect); the third is the one we read back.
+    for _ in 0..2 {
+        let warm = ctx.run(raw(), build);
+        for (id, d) in &warm.textures_delta.set {
+            renderer.update_texture(&device, &queue, *id, d);
+        }
+    }
+    let full = ctx.run(raw(), build);
+    let jobs = ctx.tessellate(full.shapes, full.pixels_per_point);
+    let desc = egui_wgpu::ScreenDescriptor {
+        size_in_pixels: [w, h],
+        pixels_per_point: ppp,
+    };
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("settings-shot"),
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    for (id, d) in &full.textures_delta.set {
+        renderer.update_texture(&device, &queue, *id, d);
+    }
+    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("settings-shot"),
+    });
+    let cmd = renderer.update_buffers(&device, &queue, &mut enc, &jobs, &desc);
+    {
+        let mut rp = enc
+            .begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("settings-shot"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        // The CentralPanel fills the opaque page, so a transparent clear is fine.
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            })
+            .forget_lifetime();
+        renderer.render(&mut rp, &jobs, &desc);
+    }
+
+    let bpp = 4u32;
+    let padded = (w * bpp).div_ceil(256) * 256;
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("settings-shot-readback"),
+        size: (padded * h) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    enc.copy_texture_to_buffer(
+        wgpu::ImageCopyTexture {
+            texture: &tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::ImageCopyBuffer {
+            buffer: &readback,
+            layout: wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(h),
+            },
+        },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(cmd.into_iter().chain(std::iter::once(enc.finish())));
+
+    let slice = readback.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    device.poll(wgpu::Maintain::Wait);
+    rx.recv()
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("{e:?}"))?;
+    let data = slice.get_mapped_range();
+
+    // Opaque page → the sRGB readback is the final image; just drop the row padding + force
+    // alpha (any 1px transparent seam at the very edge reads as page).
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let si = (y * padded + x * bpp) as usize;
+            let di = ((y * w + x) * 4) as usize;
+            px[di] = data[si];
+            px[di + 1] = data[si + 1];
+            px[di + 2] = data[si + 2];
+            px[di + 3] = 255;
+        }
+    }
+    drop(data);
+    readback.unmap();
+
+    let size = tiny_skia::IntSize::from_wh(w, h).ok_or("invalid size")?;
+    let pixmap = tiny_skia::Pixmap::from_vec(px, size).ok_or("could not build pixmap")?;
+    let png = pixmap
+        .encode_png()
+        .map_err(|e| format!("PNG encode: {e}"))?;
+    std::fs::write(out, png).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 async fn run(out: &Path, dark: bool, tab: InspectorTab) -> Result<(), String> {
     let ppp = 2.0f32;
     let (w, h) = (2400u32, 1400u32); // physical pixels
@@ -418,6 +594,12 @@ fn sample_frame(dark: bool, tab: InspectorTab) -> PanelFrame {
             is_live: true,
             is_animated: false,
             align: pb_app_core::settings::InfoLineAlign::Right,
+        }),
+        // The ambient scan pill (top-center) — a long sub-folder to exercise truncation.
+        scan: Some(panels_ui::ScanPill {
+            name: "Pictures".into(),
+            found: 1232945,
+            current: "2013/2013-08-14 - Summer Road Trip Photos and Videos".into(),
         }),
         dark,
         panel_alpha: 242, // ≈95% — the shot previews the panels near-opaque

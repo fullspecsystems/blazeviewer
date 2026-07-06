@@ -52,6 +52,9 @@ pub const TAB_INDICATOR_H: f32 = 2.0;
 /// How far the [`tab_bar`] underline extends past each edge of its label, so the indicator
 /// reads as a deliberate marker rather than a too-tight rule clipped to the glyphs.
 pub const TAB_INDICATOR_OVERHANG: f32 = SPACE_1;
+/// A [`tab_bar`] label's optional leading icon size — a touch under the `SECTION_SIZE` label
+/// so the glyph reads as a peer of the text, not heavier than it.
+const TAB_ICON_SIZE: f32 = 15.0;
 /// Stable minimum width for a slider's value box. egui sizes the box to the formatted
 /// number, so it jitters as the digit count changes (3.0 → 11.7 → 400); pinning a
 /// minimum wide enough for the widest value keeps it a fixed width. See [`slider`].
@@ -80,14 +83,17 @@ pub const CARD_WRAP_WIDTH: f32 = 430.0;
 const CONTROL_RESERVE: f32 = 290.0;
 /// Minimum width the header block keeps in the wide layout before the row would stack.
 const HEADER_MIN: f32 = 140.0;
-/// Top inner padding of a [`group_card`] — tighter than the bottom so the semibold header
-/// (which reserves more cap-height leading) doesn't look like it's floating.
-const GROUP_PAD_TOP: f32 = 6.0;
 /// **The standard gap** between sibling blocks: between rows inside a [`group_card`],
 /// between cards on a page, and (via the dialog button bar) between buttons. One value so
 /// spacing reads consistent everywhere — the card's fill + border do the grouping, so no
 /// gap contrast or dividers are needed. The one knob to tune density.
 pub const GAP: f32 = 14.0;
+
+/// The larger gap **above a section heading** that follows a card — bigger than [`GAP`] so a
+/// [`group_card`] heading reads as belonging to the card *below* it, not floating equidistant
+/// between two cards. (The first heading on a page uses the page's top inset instead, and the
+/// heading→card gap stays a tight [`SPACE_2`], so grouping reads clearly.)
+pub const SECTION_GAP: f32 = 22.0;
 
 /// The resolved color roles for one theme. Built from a single `dark` flag so the
 /// whole palette stays internally consistent and tracks the OS setting.
@@ -409,35 +415,40 @@ pub fn card<R>(ui: &mut egui::Ui, p: &Palette, add: impl FnOnce(&mut egui::Ui) -
         .inner
 }
 
-/// A **grouped settings card**: an optional semibold `header` inside the card, then a
-/// `body` of [`card_row`]s separated by [`row_divider`]s. The macOS/Windows grouped-
-/// settings pattern — related settings share one card under a heading, so a page is a
-/// few cards instead of one-per-setting (far less scrolling). Inter-row gap = [`ROW_GAP`].
+/// A **grouped settings card**: an optional semibold `header` **above** the card, then a
+/// `body` of [`card_row`]s that auto-space by [`GAP`]. The macOS/Windows grouped-settings
+/// pattern (SwiftUI `Form` `Section("…")`) — related settings share one card under a section
+/// heading placed over the card, so a page is a few cards instead of one-per-setting (far
+/// less scrolling). The caller's inter-card [`GAP`] becomes the gap above each header, so a
+/// header reads as belonging to the card *below* it, not the one above.
 pub fn group_card(
     ui: &mut egui::Ui,
     p: &Palette,
     header: Option<&str>,
     body: impl FnOnce(&mut egui::Ui),
 ) {
+    if let Some(h) = header {
+        ui.label(
+            egui::RichText::new(h)
+                .font(FontId::new(SECTION_SIZE, FontFamily::Name(SEMIBOLD.into())))
+                .color(p.text),
+        );
+        ui.add_space(SPACE_2);
+    }
     card_frame(p)
+        // Symmetric padding (like `card`) now the header lives outside the card — the first
+        // row gets the same top breathing room as the last row's bottom.
         .inner_margin(Margin {
             left: SPACE_4,
             right: SPACE_4,
-            top: GROUP_PAD_TOP,
+            top: SPACE_3,
             bottom: SPACE_3,
         })
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            // One standard GAP between the header and every row — no dividers needed; the
-            // caller just lists `card_row`s and they auto-space.
+            // One standard GAP between every row — no dividers needed; the caller just lists
+            // `card_row`s and they auto-space.
             ui.spacing_mut().item_spacing.y = GAP;
-            if let Some(h) = header {
-                ui.label(
-                    egui::RichText::new(h)
-                        .font(FontId::new(SECTION_SIZE, FontFamily::Name(SEMIBOLD.into())))
-                        .color(p.text),
-                );
-            }
             body(ui);
         });
 }
@@ -574,6 +585,16 @@ pub fn secondary_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.add(egui::Button::new(text).min_size(egui::vec2(BUTTON_W, CONTROL_H)))
 }
 
+/// A [`secondary_button`] whose label is **dimmed** (the secondary text color) so it reads as
+/// a *placeholder* rather than a set value — e.g. the empty "Set" / "Add" chord slots in the
+/// shortcut editor. Same fill + hover/press as `secondary_button`; only the text is muted.
+pub fn placeholder_button(ui: &mut egui::Ui, p: &Palette, text: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(egui::RichText::new(text).color(p.text_secondary))
+            .min_size(egui::vec2(BUTTON_W, CONTROL_H)),
+    )
+}
+
 /// A **destructive** action button (e.g. Delete) — the themed [`danger`](Palette::danger)
 /// fill (a darker red than the brand accent) with white text.
 pub fn danger_button(ui: &mut egui::Ui, p: &Palette, text: &str) -> egui::Response {
@@ -689,7 +710,7 @@ pub fn tab_bar<T: Copy + PartialEq>(
     p: &Palette,
     current: &mut T,
     left_inset: f32,
-    tabs: &[(T, &str)],
+    tabs: &[(T, &str, Option<crate::icon::Icon>)],
 ) -> bool {
     let mut changed = false;
     // Lay the labels out first, remembering each one's rect + state, so the indicators can
@@ -700,9 +721,9 @@ pub fn tab_bar<T: Copy + PartialEq>(
         .horizontal(|ui| {
             ui.add_space(left_inset);
             ui.spacing_mut().item_spacing.x = TAB_GAP;
-            for &(value, label) in tabs {
+            for &(value, label, icon) in tabs {
                 let selected = *current == value;
-                let resp = tab_label(ui, p, selected, label);
+                let resp = tab_label(ui, p, selected, label, icon);
                 marks.push((resp.rect, selected, resp.hovered()));
                 if resp.clicked() && !selected {
                     *current = value;
@@ -748,7 +769,13 @@ pub fn tab_bar<T: Copy + PartialEq>(
 /// section headings below it. The face is **always semibold**; only the *color*
 /// distinguishes states (selected → full text color, hover → full text color, otherwise
 /// the quiet secondary tone) — so switching tabs never reflows the strip.
-fn tab_label(ui: &mut egui::Ui, p: &Palette, selected: bool, label: &str) -> egui::Response {
+fn tab_label(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    selected: bool,
+    label: &str,
+    icon: Option<crate::icon::Icon>,
+) -> egui::Response {
     let font = FontId::new(SECTION_SIZE, FontFamily::Name(SEMIBOLD.into()));
     // Lay out with a placeholder color so the real tint can be chosen after we know the
     // hover state (which needs the response, which needs the size — hence layout first).
@@ -756,19 +783,36 @@ fn tab_label(ui: &mut egui::Ui, p: &Palette, selected: bool, label: &str) -> egu
         .painter()
         .layout_no_wrap(label.to_owned(), font, Color32::PLACEHOLDER);
     let text_size = galley.size();
+    // Optional leading icon (SF-Symbol-style tab glyph), tinted to match the label color.
+    let icon_w = if icon.is_some() { TAB_ICON_SIZE } else { 0.0 };
+    let icon_gap = if icon.is_some() { SPACE_2 - 2.0 } else { 0.0 };
     let pad_top = SPACE_2;
     let gap_below = 3.0; // the text sits close to its underline (a tight pivot, not a tab box)
     let height = pad_top + text_size.y + gap_below + TAB_INDICATOR_H;
-    let (rect, resp) =
-        ui.allocate_exact_size(egui::vec2(text_size.x, height), egui::Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(icon_w + icon_gap + text_size.x, height),
+        egui::Sense::click(),
+    );
     if ui.is_rect_visible(rect) {
         let color = if selected || resp.hovered() {
             p.text
         } else {
             p.text_secondary
         };
+        let mut x = rect.left();
+        if let Some(ic) = icon {
+            // Center the icon on the text's vertical midline (a hair up, so the optically
+            // heavier glyph doesn't read low next to the cap-height label).
+            let cy = rect.top() + pad_top + text_size.y / 2.0 - 1.0;
+            let irect = egui::Rect::from_center_size(
+                egui::pos2(x + icon_w / 2.0, cy),
+                egui::Vec2::splat(icon_w),
+            );
+            crate::icon::paint_tinted(ui, irect, ic, color);
+            x += icon_w + icon_gap;
+        }
         ui.painter()
-            .galley(egui::pos2(rect.left(), rect.top() + pad_top), galley, color);
+            .galley(egui::pos2(x, rect.top() + pad_top), galley, color);
     }
     resp
 }
