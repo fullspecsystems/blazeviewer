@@ -245,7 +245,7 @@ fn sample_frame(dark: bool, tab: InspectorTab) -> PanelFrame {
                     // Chords (mac thin-space glyphs) — should each render as ONE keycap.
                     ("Rotate right / left".into(), "R / \u{21e7}\u{2009}R".into()),
                     ("Flip / pin compare".into(), "Y / \u{21e7}\u{2009}Y".into()),
-                    ("Slideshow slower / faster".into(), "[ / ]".into()),
+                    ("Slideshow faster / slower".into(), "[ / ]".into()),
                     ("Detailed info panel".into(), "\u{2318}\u{2009}I".into()),
                 ],
             },

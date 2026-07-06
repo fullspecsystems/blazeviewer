@@ -130,8 +130,6 @@ with any pre-release suffix carried only by the tag.
   step between the archive's sibling folders.
 
 ### Changed
-- **Slideshow speed keys are now idiomatic:** `[` slows the slideshow down and `]` speeds it
-  up (they were reversed). The Keyboard Shortcuts help lists the pair in keyboard order.
 - **All transient notifications are now native on macOS.** Every toast — Copied, rotate,
   Saved rotation, Pinned/Unpinned, muted/unmuted, deleted, "Scan stopped", "No photos in
   *Foo*", "Recursive folders: on", … — is one consistent **bottom-center SwiftUI pill**

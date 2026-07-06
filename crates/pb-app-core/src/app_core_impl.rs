@@ -3218,8 +3218,8 @@ impl AppCore {
                     row("Previous random", sc(Action::RandomPrev)),
                     row("Slideshow", sc(Action::SlideshowToggle)),
                     row(
-                        "Slideshow slower / faster",
-                        two(Action::SlideshowSlower, Action::SlideshowFaster),
+                        "Slideshow faster / slower",
+                        two(Action::SlideshowFaster, Action::SlideshowSlower),
                     ),
                 ],
             ),
