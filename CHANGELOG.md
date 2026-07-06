@@ -140,6 +140,10 @@ with any pre-release suffix carried only by the tag.
   step between the archive's sibling folders.
 
 ### Changed
+- **Windows: the empty-state welcome screen is now a real UI (egui).** When no photos are open,
+  the centered **Open File** / **Open Folder** buttons (each showing its keyboard shortcut) are
+  drawn with proper buttons over "or drag and drop here", matching the macOS welcome screen —
+  instead of the CPU-rasterized hint.
 - **Settings polish.** The Settings tabs now have icons (General / Appearance / AI / Shortcuts),
   each section's heading sits **above** its card (like macOS System Settings) with a clearer gap
   grouping the heading to the settings it labels, and empty shortcut slots show a dimmed

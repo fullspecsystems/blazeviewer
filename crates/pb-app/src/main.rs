@@ -75,8 +75,8 @@ mod reveal;
 // paths in the winit shell modules (and the `use action::…` lines below) keep
 // resolving unchanged.
 use pb_app_core::{
-    action, contract, keymap, pb_key, slideshow, AppCore, ArchiveScope, Nav, OpenButton, OpenPanel,
-    UndoAction, Viewport,
+    action, contract, keymap, pb_key, slideshow, AppCore, ArchiveScope, Nav, OpenPanel, UndoAction,
+    Viewport,
 };
 // The HUD CPU compositor (info panel / toasts / pie / chip) and its Font Awesome icon
 // rasterizer now live in the shell-neutral `pb-hud` crate (NS0). Re-export them at the
@@ -487,7 +487,9 @@ impl App {
                 // (toasts, `i` line, play hint, empty-state) stays a CPU quad for now.
                 native_help: true,
                 last_help_visible: false,
-                native_open: false,
+                // The egui overlay draws the welcome / empty-state buttons (task #54 Phase 4) —
+                // suppress the CPU-HUD open panel and let the shell render + hit-test them.
+                native_open: true,
                 last_open_visible: false,
                 native_inspector: true,
                 last_inspector_snap: None,
@@ -1119,6 +1121,8 @@ impl App {
             // gate — egui only *consumes* a click actually over the pill, so panning the photo
             // elsewhere during a scan still works.
             || self.scan_pill_visible()
+            // The welcome screen's Open buttons are interactive too.
+            || self.core.open_panel_visible()
     }
 
     /// Whether the egui overlay has **any** content to composite — the interactive panels
@@ -1236,6 +1240,8 @@ impl App {
             A::TreeOpen(path) => self.core.fs_tree_open(path),
             A::TreeExtendUp => self.core.fs_tree_extend_up(),
             A::CancelScan => self.cancel_scan_command(),
+            A::OpenFile => self.core.dispatch_action(Action::OpenFile),
+            A::OpenFolder => self.core.dispatch_action(Action::OpenFolder),
         }
         self.overlay_dirty = true;
     }
@@ -2465,13 +2471,17 @@ impl ApplicationHandler for App {
             self.last_edr_headroom = headroom;
         }
 
-        // Empty launch (no folder/file given): show a blank background with the centered
-        // Open File / Open Folder call to action instead of an image.
+        // Empty launch (no folder/file given): a blank background with the centered
+        // Open File / Open Folder call to action instead of an image. With `native_open`
+        // the egui overlay draws that welcome (on the first tick), so skip the CPU panel —
+        // otherwise both would show. The `!native_open` path keeps the CPU hint.
         if self.core.playlist.current().is_none() {
             renderer.clear_image();
-            if let Some((bitmap, w, h, file, folder)) = self.core.open_panel_bitmap() {
-                renderer.set_message(Some((&bitmap, w, h)));
-                self.core.open_panel = Some(OpenPanel { w, h, file, folder });
+            if !self.core.native_open {
+                if let Some((bitmap, w, h, file, folder)) = self.core.open_panel_bitmap() {
+                    renderer.set_message(Some((&bitmap, w, h)));
+                    self.core.open_panel = Some(OpenPanel { w, h, file, folder });
+                }
             }
         }
 
@@ -2736,7 +2746,6 @@ impl ApplicationHandler for App {
             // so they don't stay lit. (The scan pill's Cancel hover is egui's now.)
             WindowEvent::CursorLeft { .. } => {
                 self.core.last_cursor = None;
-                self.core.update_open_hover();
                 self.core.update_play_hint_hover();
                 self.core.update_tree_hover();
             }
@@ -2748,17 +2757,11 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 let pressed = state == ElementState::Pressed;
-                // A press on an interactive on-image control (an open-panel button or the play
-                // hint) fires that control and must NOT also start a drag-to-pan. (The scan
-                // pill's Cancel is an egui button, handled in the overlay, and a press over any
-                // egui panel is swallowed before this event by `overlay_consumed`.)
-                let open_hit = pressed.then(|| self.core.open_hovered_button()).flatten();
-                if let Some(button) = open_hit {
-                    match button {
-                        OpenButton::File => self.core.dispatch_action(Action::OpenFile),
-                        OpenButton::Folder => self.core.dispatch_action(Action::OpenFolder),
-                    }
-                } else if pressed && self.core.play_hint_hit() {
+                // A press on an interactive on-image control (the play hint) fires that control
+                // and must NOT also start a drag-to-pan. (The welcome Open buttons and the scan
+                // pill's Cancel are egui buttons, handled in the overlay — a press over any egui
+                // panel is swallowed before this event by `overlay_consumed`.)
+                if pressed && self.core.play_hint_hit() {
                     // Click the play hint → play, and dismiss it (it's been used).
                     self.core.play_hint = None;
                     self.core.dispatch_action(Action::PlayPause);
@@ -3247,7 +3250,8 @@ fn main() {
             Some("describe") => pb_app_core::InspectorTab::Describe,
             _ => pb_app_core::InspectorTab::Details,
         };
-        match egui_shot::write_shot(Path::new(&out), dark, tab) {
+        let welcome = args.iter().any(|a| a == "--welcome");
+        match egui_shot::write_shot(Path::new(&out), dark, tab, welcome) {
             Ok(()) => println!("PhotoBlaze: wrote egui panels \u{2192} {out}"),
             Err(e) => eprintln!("PhotoBlaze: egui shot failed: {e}"),
         }

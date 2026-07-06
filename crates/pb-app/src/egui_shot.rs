@@ -24,8 +24,9 @@ use resvg::tiny_skia;
 use crate::panels_ui::{self, InspectorFrame, PanelFrame, TreeFrame};
 
 /// Render the panels to `out` as a PNG. `dark` picks the theme; `tab` the Inspector tab.
-pub fn write_shot(out: &Path, dark: bool, tab: InspectorTab) -> Result<(), String> {
-    pollster::block_on(run(out, dark, tab))
+/// `welcome` renders the empty-state welcome screen alone instead of the full panel set.
+pub fn write_shot(out: &Path, dark: bool, tab: InspectorTab, welcome: bool) -> Result<(), String> {
+    pollster::block_on(run(out, dark, tab, welcome))
 }
 
 /// Render a **Settings** tab's card stack to `out` as a PNG (`--settings-shot`) — the
@@ -204,7 +205,7 @@ async fn run_settings(out: &Path, dark: bool, tab: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn run(out: &Path, dark: bool, tab: InspectorTab) -> Result<(), String> {
+async fn run(out: &Path, dark: bool, tab: InspectorTab, welcome: bool) -> Result<(), String> {
     let ppp = 2.0f32;
     let (w, h) = (2400u32, 1400u32); // physical pixels
 
@@ -232,7 +233,7 @@ async fn run(out: &Path, dark: bool, tab: InspectorTab) -> Result<(), String> {
     let mut renderer =
         egui_wgpu::Renderer::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb, None, 1, false);
 
-    let frame = sample_frame(dark, tab);
+    let frame = sample_frame(dark, tab, welcome);
     let mut actions = Vec::new();
     let raw = || egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
@@ -401,7 +402,23 @@ fn lin_to_srgb(x: f32) -> u8 {
 }
 
 /// Representative panel data so every panel + row kind shows.
-fn sample_frame(dark: bool, tab: InspectorTab) -> PanelFrame {
+fn sample_frame(dark: bool, tab: InspectorTab, welcome: bool) -> PanelFrame {
+    // Welcome preview: the empty-state buttons alone (no photo, no other panels).
+    if welcome {
+        return PanelFrame {
+            help: None,
+            inspector: None,
+            tree: None,
+            info: None,
+            scan: None,
+            welcome: Some(panels_ui::WelcomePanel {
+                file_key: "O".into(),
+                folder_key: "\u{21e7}O".into(),
+            }),
+            dark,
+            panel_alpha: 242,
+        };
+    }
     let help = HelpPanel {
         sections: vec![
             HelpSection {
@@ -601,6 +618,7 @@ fn sample_frame(dark: bool, tab: InspectorTab) -> PanelFrame {
             found: 1232945,
             current: "2013/2013-08-14 - Summer Road Trip Photos and Videos".into(),
         }),
+        welcome: None,
         dark,
         panel_alpha: 242, // ≈95% — the shot previews the panels near-opaque
     }

@@ -72,6 +72,8 @@ pub enum Icon {
     Brush,
     /// Settings ▸ Shortcuts tab (matches SF `keyboard`).
     Keyboard,
+    /// Open-file action (the welcome screen's Open File button — matches SF `doc`).
+    File,
 }
 
 /// A **theme-aware** icon color. `Neutral` is the quiet default (a gray that varies
@@ -132,6 +134,7 @@ fn svg(icon: Icon, family: Family) -> &'static str {
         Icon::Sliders => glyph!("sliders"),
         Icon::Brush => glyph!("brush"),
         Icon::Keyboard => glyph!("keyboard"),
+        Icon::File => glyph!("file"),
     }
 }
 
@@ -275,6 +278,7 @@ mod tests {
             Icon::Sliders,
             Icon::Brush,
             Icon::Keyboard,
+            Icon::File,
         ] {
             for family in [Family::Solid, Family::Regular] {
                 let img = rasterize_white(svg(icon, family), 32).expect("icon should rasterize");

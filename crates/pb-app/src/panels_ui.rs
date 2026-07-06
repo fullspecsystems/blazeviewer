@@ -15,7 +15,7 @@ use pb_app_core::panels::{
     TextPanel,
 };
 use pb_app_core::settings::InfoLineAlign;
-use pb_app_core::{fs_tree, AppCore, InspectorTab};
+use pb_app_core::{fs_tree, Action, AppCore, InspectorTab};
 use pb_ui::icon::{Icon, Tone};
 use pb_ui::Palette;
 use std::path::PathBuf;
@@ -45,6 +45,8 @@ const HELP_TEXT_SIZE: f32 = 13.5;
 const HELP_KEY_SIZE: f32 = 12.0;
 const HELP_ROW_H: f32 = 23.0;
 const HELP_KEYCAP_H: f32 = 18.0;
+/// Keycap corner radius (shared by the Help rows and the welcome buttons' nesting math).
+const KEYCAP_RADIUS: f32 = 5.0;
 const HELP_SECTION_H: f32 = 24.0;
 /// Small left pad for help text (section headings + descriptions) inside the content box so
 /// they don't jam against the section bar's left edge — applied equally so they stay aligned.
@@ -81,6 +83,9 @@ pub enum PanelAction {
     /// The scan pill's **Cancel** button — stop the in-flight folder scan (keeps what's
     /// streamed in so far). Applied by the shell as `cancel_scan_command`.
     CancelScan,
+    /// The welcome screen's **Open File** / **Open Folder** buttons.
+    OpenFile,
+    OpenFolder,
 }
 
 /// The Inspector's visible state for one frame.
@@ -103,6 +108,16 @@ pub struct InfoLine {
     pub is_live: bool,
     pub is_animated: bool,
     pub align: pb_app_core::settings::InfoLineAlign,
+}
+
+/// The first-run **welcome / empty-state** surface (no photos open): centered Open File /
+/// Open Folder buttons (each with its keyboard shortcut) over a "or drag and drop here" hint
+/// — the egui equivalent of the macOS SwiftUI `EmptyStateView`.
+pub struct WelcomePanel {
+    /// The keyboard shortcut hint for Open File (e.g. `O`), or empty if unbound.
+    pub file_key: String,
+    /// The keyboard shortcut hint for Open Folder (e.g. `⇧O` / `Shift+O`), or empty.
+    pub folder_key: String,
 }
 
 /// The ambient folder-scan pill (top-center): a spinner, `Scanning <Name>` + `<N> found`,
@@ -128,6 +143,8 @@ pub struct PanelFrame {
     /// (scan state lives in `App::dir_scan`, not the core), so `snapshot` leaves it `None`
     /// and the shell fills it in `render_overlay_frame`.
     pub scan: Option<ScanPill>,
+    /// The welcome / empty-state surface, when no photos are open.
+    pub welcome: Option<WelcomePanel>,
     pub dark: bool,
     /// The panel surface alpha (0–255), from Settings ▸ Appearance ▸ *Info panel opacity*
     /// (`info_opacity` — the old HUD opacity). The winit shell has no separate `panel_opacity`
@@ -157,6 +174,10 @@ impl PanelFrame {
                 is_animated,
                 align: core.settings.info_line_align,
             });
+        let welcome = core.open_panel_visible().then(|| WelcomePanel {
+            file_key: core.shortcut_for(Action::OpenFile),
+            folder_key: core.shortcut_for(Action::OpenFolder),
+        });
         PanelFrame {
             help,
             inspector,
@@ -164,6 +185,7 @@ impl PanelFrame {
             info,
             // Scan state is shell-owned; the shell sets this in `render_overlay_frame`.
             scan: None,
+            welcome,
             dark: core.hud_dark,
             panel_alpha: opacity_to_alpha(core.settings.info_opacity),
         }
@@ -227,6 +249,11 @@ pub fn build(ctx: &egui::Context, frame: &PanelFrame, actions: &mut Vec<PanelAct
     // (SwiftUI z-order) — drawn before Help so Help composites over it.
     if let Some(scan) = &frame.scan {
         scan_pill(ctx, &p, alpha, scan, actions);
+    }
+    // The welcome screen (empty deck). Help takes the center when up, so hide it then
+    // (mirrors the SwiftUI `openPanelVisible && !helpVisible`).
+    if let (Some(welcome), None) = (&frame.welcome, &frame.help) {
+        welcome_panel(ctx, &p, welcome, actions);
     }
     if let Some(help) = &frame.help {
         let r = duck(
@@ -565,6 +592,141 @@ fn draw_spinner(ui: &egui::Ui, center: egui::Pos2, r: f32, p: &Palette) {
     }
     ui.ctx()
         .request_repaint_after(std::time::Duration::from_millis(33));
+}
+
+// ── Welcome / empty-state ─────────────────────────────────────────────────────
+
+/// The open button's inner padding — the **right** inset (keycap → button edge) and the
+/// keycap's top/bottom margin, so the keycap nests in the button's right end with equal margin
+/// on three sides. The left inset is [`OPEN_PAD_LEFT`] (a touch more, so the icon isn't jammed
+/// against the rounded corner).
+const OPEN_PAD: f32 = 8.0;
+/// The left inset (button edge → icon) — a few px more than [`OPEN_PAD`] so the icon has room
+/// off the (larger, concentric) left corner.
+const OPEN_PAD_LEFT: f32 = OPEN_PAD + 4.0;
+/// The open button's leading icon size + the gap after it (SwiftUI `.padding(.leading, 8)`).
+const OPEN_ICON: f32 = 16.0;
+const OPEN_ICON_GAP: f32 = 8.0;
+/// The minimum gap between the label and the trailing keycap (SwiftUI `Spacer(minLength: 14)`).
+const OPEN_SPACER_MIN: f32 = 14.0;
+/// Button height = the keycap height + `OPEN_PAD` above and below it, so the keycap sits with
+/// equal margin on three sides (the nesting math).
+const OPEN_BTN_H: f32 = HELP_KEYCAP_H + 2.0 * OPEN_PAD;
+/// Button radius = the keycap radius + `OPEN_PAD`, so the button's right corners run
+/// **concentric** with the keycap's — the keycap nests perfectly.
+const OPEN_BTN_RADIUS: f32 = KEYCAP_RADIUS + OPEN_PAD;
+/// The open button label type size.
+const OPEN_LABEL_SIZE: f32 = 14.0;
+/// The uniform vertical gap in the welcome stack — between the two buttons **and** between the
+/// buttons and the hint, so the spacing reads consistent.
+const OPEN_STACK_GAP: f32 = 18.0;
+const OPEN_HINT_SIZE: f32 = 13.0;
+
+/// The welcome / empty-state surface: two equal-width Open File / Open Folder buttons stacked
+/// over a "or drag and drop here" hint, centered on screen — the egui skin of the SwiftUI
+/// `EmptyStateView`. Transparent (no card): it sits directly on the empty canvas.
+fn welcome_panel(
+    ctx: &egui::Context,
+    p: &Palette,
+    welcome: &WelcomePanel,
+    actions: &mut Vec<PanelAction>,
+) {
+    // Both buttons take the wider one's natural content width, so they line up (SwiftUI's
+    // `OpenButtonWidth` preference key).
+    let natural = |ui: &egui::Ui, label: &str, key: &str| {
+        let lw = galley(
+            ui,
+            label,
+            FontId::new(OPEN_LABEL_SIZE, FontFamily::Proportional),
+            Color32::PLACEHOLDER,
+            f32::INFINITY,
+        )
+        .size()
+        .x;
+        OPEN_PAD_LEFT
+            + OPEN_ICON
+            + OPEN_ICON_GAP
+            + lw
+            + OPEN_SPACER_MIN
+            + keycaps_width(ui, key)
+            + OPEN_PAD
+    };
+    egui::Area::new(egui::Id::new("pb_welcome"))
+        .anchor(Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .order(egui::Order::Middle)
+        .show(ctx, |ui| {
+            let w = natural(ui, "Open File", &welcome.file_key).max(natural(
+                ui,
+                "Open Folder",
+                &welcome.folder_key,
+            ));
+            ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+            if open_button(ui, p, Icon::File, "Open File", &welcome.file_key, w) {
+                actions.push(PanelAction::OpenFile);
+            }
+            ui.add_space(OPEN_STACK_GAP);
+            if open_button(ui, p, Icon::Folder, "Open Folder", &welcome.folder_key, w) {
+                actions.push(PanelAction::OpenFolder);
+            }
+            ui.add_space(OPEN_STACK_GAP);
+            // "or drag and drop here" — secondary, centered under the button column.
+            let hint = galley(
+                ui,
+                "or drag and drop here",
+                FontId::new(OPEN_HINT_SIZE, FontFamily::Proportional),
+                panel_secondary(p),
+                f32::INFINITY,
+            );
+            let (hrect, _) =
+                ui.allocate_exact_size(egui::vec2(w, hint.size().y), egui::Sense::hover());
+            paint_vtext(
+                ui,
+                hrect.center().x - hint.size().x / 2.0,
+                hrect.center().y,
+                &hint,
+            );
+        });
+}
+
+/// One welcome open button: a neutral rounded control (`[icon] Label ···· [keycap]`) at fixed
+/// `width`, brightening on hover. Returns whether it was clicked.
+fn open_button(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    icon: Icon,
+    label: &str,
+    shortcut: &str,
+    width: f32,
+) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, OPEN_BTN_H), egui::Sense::click());
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let fill = if resp.hovered() {
+        p.control_hover
+    } else {
+        p.control
+    };
+    ui.painter().rect(
+        rect,
+        Rounding::same(OPEN_BTN_RADIUS),
+        fill,
+        Stroke::new(1.0, separator(p)),
+    );
+    let cy = rect.center().y;
+    let ix = rect.left() + OPEN_PAD_LEFT;
+    pb_ui::icon::paint_tinted(ui, sq(ix + OPEN_ICON / 2.0, cy, OPEN_ICON), icon, p.text);
+    let lx = ix + OPEN_ICON + OPEN_ICON_GAP;
+    let g = galley(
+        ui,
+        label,
+        FontId::new(OPEN_LABEL_SIZE, FontFamily::Proportional),
+        p.text,
+        f32::INFINITY,
+    );
+    paint_vtext(ui, lx, cy, &g);
+    draw_keycaps(ui, p, shortcut, rect.right() - OPEN_PAD, cy);
+    resp.clicked()
 }
 
 // ── Shared chrome ────────────────────────────────────────────────────────────
@@ -984,17 +1146,11 @@ fn help_row(ui: &mut egui::Ui, p: &Palette, label: &str, shortcut: &str, col_w: 
     paint_vtext(ui, rect.left() + HELP_TEXT_PAD, cy, &g);
 }
 
-/// Draw a shortcut's keycaps (and "/" separators) **right-aligned** ending at `right_x`,
-/// v-centered on `cy`. Returns the total width used. A shortcut is groups split on " / ",
-/// each group's keys split on whitespace.
-fn draw_keycaps(ui: &mut egui::Ui, p: &Palette, shortcut: &str, right_x: f32, cy: f32) -> f32 {
-    if shortcut.trim().is_empty() {
-        return 0.0;
-    }
-    // `Some(cap)` = one keycap's text; `None` = a "/" separator between alternatives. A **chord**
-    // (an alternative carrying a modifier — the mac ⇧⌘⌥⌃ glyphs or a Windows "Shift+…") renders
-    // as ONE keycap so the modifier stays glued to its key (⇧R, not ⇧ · R); a modifier-less
-    // alternative (the Pan arrows) splits into one cap per key.
+/// Tokenize a shortcut string: `Some(cap)` = one keycap's text, `None` = a "/" separator
+/// between alternatives. A **chord** (an alternative carrying a modifier — the mac ⇧⌘⌥⌃
+/// glyphs or a Windows "Shift+…") stays ONE keycap so the modifier stays glued to its key
+/// (⇧R, not ⇧ · R); a modifier-less alternative (the Pan arrows) splits into one cap per key.
+fn keycap_tokens(shortcut: &str) -> Vec<Option<String>> {
     let is_chord = |alt: &str| alt.contains(['\u{21e7}', '\u{2318}', '\u{2325}', '\u{2303}', '+']);
     let mut tokens: Vec<Option<String>> = Vec::new();
     for (gi, alt) in shortcut.split(" / ").enumerate() {
@@ -1008,6 +1164,40 @@ fn draw_keycaps(ui: &mut egui::Ui, p: &Palette, shortcut: &str, right_x: f32, cy
             tokens.extend(alt.split_whitespace().map(|k| Some(k.to_string())));
         }
     }
+    tokens
+}
+
+/// The pixel width [`draw_keycaps`] would use for `shortcut` (0 if empty), without drawing —
+/// so the welcome buttons can be sized to equal width before layout.
+fn keycaps_width(ui: &egui::Ui, shortcut: &str) -> f32 {
+    if shortcut.trim().is_empty() {
+        return 0.0;
+    }
+    let tokens = keycap_tokens(shortcut);
+    let key_font = FontId::new(HELP_KEY_SIZE, FontFamily::Proportional);
+    let text_w = |s: &str| {
+        galley(ui, s, key_font.clone(), Color32::PLACEHOLDER, f32::INFINITY)
+            .size()
+            .x
+    };
+    let sum: f32 = tokens
+        .iter()
+        .map(|t| match t {
+            Some(cap) => text_w(cap) + 14.0,
+            None => text_w("/") + 2.0,
+        })
+        .sum();
+    sum + 5.0 * tokens.len().saturating_sub(1) as f32
+}
+
+/// Draw a shortcut's keycaps (and "/" separators) **right-aligned** ending at `right_x`,
+/// v-centered on `cy`. Returns the total width used. A shortcut is groups split on " / ",
+/// each group's keys split on whitespace.
+fn draw_keycaps(ui: &mut egui::Ui, p: &Palette, shortcut: &str, right_x: f32, cy: f32) -> f32 {
+    if shortcut.trim().is_empty() {
+        return 0.0;
+    }
+    let tokens = keycap_tokens(shortcut);
     let gap = 5.0;
     let key_font = FontId::new(HELP_KEY_SIZE, FontFamily::Proportional);
     let (bg, key_col) = badge_colors(p);
@@ -1034,7 +1224,7 @@ fn draw_keycaps(ui: &mut egui::Ui, p: &Palette, shortcut: &str, right_x: f32, cy
                 );
                 ui.painter().rect(
                     rect,
-                    Rounding::same(5.0),
+                    Rounding::same(KEYCAP_RADIUS),
                     bg,
                     Stroke::new(0.5, separator(p)),
                 );
