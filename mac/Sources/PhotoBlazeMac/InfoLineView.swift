@@ -8,10 +8,10 @@ import SwiftUI
 struct InfoLineView: View {
     let model: CoreModel
 
-    // The pill's geometry. The codec badge is inset from the pill by `inset` on the top,
-    // right, and bottom (it fills the row height, and the trailing padding drops to match the
-    // vertical one), so a badge radius of `pillRadius − inset` makes its corners *concentric*
-    // with the pill's — the curves run exactly parallel.
+    // The pill's geometry. The codec badge is inset from the pill by ~`inset` on the top,
+    // right, and bottom (its own vertical padding makes it about the row height, and the pill's
+    // trailing padding drops to match the vertical one), so a badge radius of `pillRadius −
+    // inset` makes its corners run roughly concentric with the pill's — parallel curves.
     private let pillRadius: CGFloat = 9
     private let inset: CGFloat = 6
 
@@ -28,7 +28,9 @@ struct InfoLineView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 7)
-                    .frame(maxHeight: .infinity)  // fill the row → equal top/bottom inset
+                    // ~row-height so the top/bottom inset ≈ the trailing one (do NOT use
+                    // frame(maxHeight: .infinity) here — it makes the pill fill the viewport).
+                    .padding(.vertical, 2.5)
                     .background(
                         .quaternary,
                         in: RoundedRectangle(cornerRadius: pillRadius - inset)
@@ -37,7 +39,7 @@ struct InfoLineView: View {
         }
         .padding(.leading, 11)
         // Trailing padding collapses to the vertical inset when the badge is present, so it's
-        // spaced equally on all three exposed sides and the concentric corners line up.
+        // spaced equally on the exposed sides and the concentric corners line up.
         .padding(.trailing, hasCodec ? inset : 11)
         .padding(.vertical, inset)
         .panelBackground(cornerRadius: pillRadius, opacity: model.panelOpacity)
