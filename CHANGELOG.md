@@ -37,7 +37,8 @@ with any pre-release suffix carried only by the tag.
   A **Copy button** (⧉ in the header) copies the whole active tab — details, recognized
   text, or the AI description — in one click, and you can now **drag-select across the whole
   readout** instead of one value at a time. **AI descriptions render full Markdown** —
-  headings and bullet/numbered lists, not just inline bold/italic.
+  headings and bullet/numbered lists, not just inline bold/italic. The Describe tab has an
+  **Ask** button that opens the follow-up-question dialog right there (no ⇧D needed).
 - **Redesigned welcome screen on macOS** — with no photos open, the window shows a clean
   **Open File** / **Open Folder** pair (each with its shortcut key) and nothing else.
   Dragging images onto the window still works.

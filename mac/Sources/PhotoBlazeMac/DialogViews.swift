@@ -67,7 +67,7 @@ struct AskSheetView: View {
                 Image(systemName: "sparkles")
                     .font(.title)
                     .foregroundStyle(.tint)
-                Text("Ask a question about this photo:")
+                Text("Ask a question about this image:")
                     .fixedSize(horizontal: false, vertical: true)
             }
             TextEditor(text: $model.askEntry)
@@ -86,6 +86,7 @@ struct AskSheetView: View {
                     .keyboardShortcut(.cancelAction)
                 Button("Ask") { model.askSubmit() }
                     .keyboardShortcut(.return, modifiers: .command)
+                    .buttonStyle(.borderedProminent)  // the accent (blue) default action
                     .disabled(model.askEntry.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }

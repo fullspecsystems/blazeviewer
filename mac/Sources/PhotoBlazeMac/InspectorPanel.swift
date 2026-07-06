@@ -67,6 +67,17 @@ struct InspectorPanelView: View {
                 }
                 .padding(2)
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                // On the Describe tab: a shortcut to the "Ask about image" dialog (the ⇧D
+                // interface) right there beside it, so you can ask a follow-up without the key.
+                if model.inspectorTab == 2 {
+                    Button(action: { model.menuAction("ask_image") }) {
+                        Image(systemName: "questionmark.bubble")
+                            .foregroundStyle(Color.panelSecondary)
+                            .imageScale(.medium)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Ask a question about this image")
+                }
                 // Copy the whole active tab (details / text / description) — one consistent
                 // action across all three, so you never have to hand-select the text. It
                 // swaps to a checkmark for ~1s so you can see the copy landed (a clearer,
