@@ -86,6 +86,11 @@ pub enum PanelAction {
     /// The welcome screen's **Open File** / **Open Folder** buttons.
     OpenFile,
     OpenFolder,
+    /// The play hint was clicked — play the motion item (same as the `P` key).
+    PlayPause,
+    /// The pointer moved onto (`true`) / off (`false`) the play hint — the shell pins its
+    /// auto-fade open while hovered.
+    PlayHintHover(bool),
 }
 
 /// The Inspector's visible state for one frame.
@@ -120,6 +125,19 @@ pub struct WelcomePanel {
     pub folder_key: String,
 }
 
+/// The **play hint** (bottom-center, above the info line): a `[icon] Play [P]` button that
+/// flashes when you settle on a motion item — the egui skin of the SwiftUI `PlayHintView`,
+/// reusing the welcome button design. The shell owns the flash/fade timing (`alpha`).
+#[derive(Clone)]
+pub struct PlayHintFrame {
+    /// `1` = Live Photo (livephoto glyph), `2` = animation (play ▶).
+    pub kind: u8,
+    /// The keyboard shortcut hint for play/pause (e.g. `P`).
+    pub shortcut: String,
+    /// The current fade opacity (0–1) — the shell animates the flash/hold/fade-out.
+    pub alpha: f32,
+}
+
 /// The ambient folder-scan pill (top-center): a spinner, `Scanning <Name>` + `<N> found`,
 /// the sub-folder currently being walked, and a **Cancel** button — the egui equivalent of
 /// the macOS SwiftUI `ScanPillView`. Shown while a directory scan streams the deck in.
@@ -145,6 +163,9 @@ pub struct PanelFrame {
     pub scan: Option<ScanPill>,
     /// The welcome / empty-state surface, when no photos are open.
     pub welcome: Option<WelcomePanel>,
+    /// The play hint (motion items). Shell-owned (flash/fade timing lives in the shell), so
+    /// `snapshot` leaves it `None` and the shell fills it in `render_overlay_frame`.
+    pub play_hint: Option<PlayHintFrame>,
     pub dark: bool,
     /// The panel surface alpha (0–255), from Settings ▸ Appearance ▸ *Info panel opacity*
     /// (`info_opacity` — the old HUD opacity). The winit shell has no separate `panel_opacity`
@@ -186,6 +207,8 @@ impl PanelFrame {
             // Scan state is shell-owned; the shell sets this in `render_overlay_frame`.
             scan: None,
             welcome,
+            // Shell-owned (fade timing); the shell sets this in `render_overlay_frame`.
+            play_hint: None,
             dark: core.hud_dark,
             panel_alpha: opacity_to_alpha(core.settings.info_opacity),
         }
@@ -231,6 +254,12 @@ pub fn build(ctx: &egui::Context, frame: &PanelFrame, actions: &mut Vec<PanelAct
 
     if let Some(info) = &frame.info {
         info_line(ctx, &p, alpha, info);
+    }
+    // The play hint rides the bottom-center, `EDGE` above the info line (or `EDGE` off the
+    // bottom when the line is hidden), sharing the toast's spot (SwiftUI parity).
+    if let Some(ph) = &frame.play_hint {
+        let info_h = info_span.map_or(0.0, |(_, _, h)| h);
+        play_hint_panel(ctx, &p, alpha, info_h, ph, actions);
     }
     // The tree (top-left) and Inspector (top-right) can coexist; Help (centered) is
     // topmost — draw it last so it sits above the others (SwiftUI z-order).
@@ -631,31 +660,13 @@ fn welcome_panel(
     welcome: &WelcomePanel,
     actions: &mut Vec<PanelAction>,
 ) {
-    // Both buttons take the wider one's natural content width, so they line up (SwiftUI's
-    // `OpenButtonWidth` preference key).
-    let natural = |ui: &egui::Ui, label: &str, key: &str| {
-        let lw = galley(
-            ui,
-            label,
-            FontId::new(OPEN_LABEL_SIZE, FontFamily::Proportional),
-            Color32::PLACEHOLDER,
-            f32::INFINITY,
-        )
-        .size()
-        .x;
-        OPEN_PAD_LEFT
-            + OPEN_ICON
-            + OPEN_ICON_GAP
-            + lw
-            + OPEN_SPACER_MIN
-            + keycaps_width(ui, key)
-            + OPEN_PAD
-    };
     egui::Area::new(egui::Id::new("pb_welcome"))
         .anchor(Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .order(egui::Order::Middle)
         .show(ctx, |ui| {
-            let w = natural(ui, "Open File", &welcome.file_key).max(natural(
+            // Both buttons take the wider one's natural content width, so they line up
+            // (SwiftUI's `OpenButtonWidth` preference key).
+            let w = open_button_width(ui, "Open File", &welcome.file_key).max(open_button_width(
                 ui,
                 "Open Folder",
                 &welcome.folder_key,
@@ -688,25 +699,39 @@ fn welcome_panel(
         });
 }
 
-/// One welcome open button: a neutral rounded control (`[icon] Label ···· [keycap]`) at fixed
-/// `width`, brightening on hover. Returns whether it was clicked.
-fn open_button(
+/// The natural content width of an open button (`[icon] label ···· [keycap]`) — the welcome
+/// buttons size to the wider one, and the play hint sizes to its own.
+fn open_button_width(ui: &egui::Ui, label: &str, shortcut: &str) -> f32 {
+    let lw = galley(
+        ui,
+        label,
+        FontId::new(OPEN_LABEL_SIZE, FontFamily::Proportional),
+        Color32::PLACEHOLDER,
+        f32::INFINITY,
+    )
+    .size()
+    .x;
+    OPEN_PAD_LEFT
+        + OPEN_ICON
+        + OPEN_ICON_GAP
+        + lw
+        + OPEN_SPACER_MIN
+        + keycaps_width(ui, shortcut)
+        + OPEN_PAD
+}
+
+/// Paint an open button (`[icon] label ···· [keycap]`) into `rect` with the given `fill` — the
+/// shared body of the welcome buttons and the play hint. The nesting math (height, radius) is
+/// baked into `rect` / [`OPEN_BTN_RADIUS`] by the caller.
+fn draw_open_button(
     ui: &mut egui::Ui,
+    rect: egui::Rect,
     p: &Palette,
     icon: Icon,
     label: &str,
     shortcut: &str,
-    width: f32,
-) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, OPEN_BTN_H), egui::Sense::click());
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    let fill = if resp.hovered() {
-        p.control_hover
-    } else {
-        p.control
-    };
+    fill: Color32,
+) {
     ui.painter().rect(
         rect,
         Rounding::same(OPEN_BTN_RADIUS),
@@ -726,7 +751,79 @@ fn open_button(
     );
     paint_vtext(ui, lx, cy, &g);
     draw_keycaps(ui, p, shortcut, rect.right() - OPEN_PAD, cy);
+}
+
+/// One welcome open button at fixed `width`, brightening on hover. Returns whether it was
+/// clicked.
+fn open_button(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    icon: Icon,
+    label: &str,
+    shortcut: &str,
+    width: f32,
+) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, OPEN_BTN_H), egui::Sense::click());
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let fill = if resp.hovered() {
+        p.control_hover
+    } else {
+        p.control
+    };
+    draw_open_button(ui, rect, p, icon, label, shortcut, fill);
     resp.clicked()
+}
+
+/// The play hint: a `[icon] Play [P]` button (the welcome button design, translucent so it
+/// reads over a photo), bottom-center **above the info line**, at the shell-computed fade
+/// `alpha`. Reports hover (to pin the fade) and a click (to play). `info_h` is the info line's
+/// pill height (0 when it's hidden) — the hint's bottom sits `EDGE` above the line's top.
+fn play_hint_panel(
+    ctx: &egui::Context,
+    p: &Palette,
+    base_alpha: u8,
+    info_h: f32,
+    frame: &PlayHintFrame,
+    actions: &mut Vec<PanelAction>,
+) {
+    // Bottom offset: EDGE above the info line's top (= 2·EDGE + info height), or EDGE when the
+    // line is hidden — so the hint→line and line→bottom gaps both equal EDGE (SwiftUI parity).
+    let bottom = if info_h > 0.0 {
+        2.0 * EDGE + info_h
+    } else {
+        EDGE
+    };
+    let icon = if frame.kind == 1 {
+        Icon::LivePhoto
+    } else {
+        Icon::Play
+    };
+    egui::Area::new(egui::Id::new("pb_play_hint"))
+        .anchor(Align2::CENTER_BOTTOM, egui::vec2(0.0, -bottom))
+        .order(egui::Order::Middle)
+        .show(ctx, |ui| {
+            ui.set_opacity(frame.alpha);
+            let w = open_button_width(ui, "Play", &frame.shortcut);
+            let (rect, resp) =
+                ui.allocate_exact_size(egui::vec2(w, OPEN_BTN_H), egui::Sense::click());
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            // Translucent so it sits over the photo like the info line; brighten on hover.
+            let base = if resp.hovered() {
+                p.control_hover
+            } else {
+                p.control
+            };
+            let fill = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), base_alpha);
+            draw_open_button(ui, rect, p, icon, "Play", &frame.shortcut, fill);
+            actions.push(PanelAction::PlayHintHover(resp.hovered()));
+            if resp.clicked() {
+                actions.push(PanelAction::PlayPause);
+            }
+        });
 }
 
 // ── Shared chrome ────────────────────────────────────────────────────────────

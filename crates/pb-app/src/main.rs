@@ -133,6 +133,12 @@ const SCAN_DIALOG_DELAY: Duration = Duration::from_millis(250);
 /// while the displayed path/count lag by at most this. Show/hide is immediate.
 const SCAN_CARD_REFRESH: Duration = Duration::from_millis(120);
 
+/// Play-hint flash timing (SwiftUI parity): fade in, hold, then fade out — unless the pointer
+/// holds it open (see [`App::tick_play_hint`]).
+const PLAY_HINT_FADE_IN: Duration = Duration::from_millis(200);
+const PLAY_HINT_HOLD: Duration = Duration::from_secs(3);
+const PLAY_HINT_FADE_OUT: Duration = Duration::from_millis(250);
+
 /// Whether an Escape press should quit, given an optional "ignore Esc until"
 /// guard set briefly after the file picker closes (to swallow the stray Esc that
 /// dismissed it). Quits when there is no guard, or it has already expired.
@@ -292,6 +298,22 @@ struct App {
     /// draws it). Tracks the last `set_egui_overlay(Some/None)` so we only re-hand on a
     /// visibility edge, not every frame.
     overlay_active: bool,
+    /// The last `play_hint_seq` the shell flashed, so a bump (a fresh motion item) re-arms the
+    /// hint. Play-hint fade timing is shell-owned (the `native_play` seam): the core signals
+    /// *when* + *what*, the shell renders + fades the egui pill.
+    play_hint_seq: u64,
+    /// When the play hint's flash began (its fade-in / hold clock), or `None` when not shown.
+    play_hint_shown: Option<Instant>,
+    /// When the play hint began fading out, or `None` while it's fading in / holding.
+    play_hint_fade_out: Option<Instant>,
+    /// The motion kind (1 = Live Photo, 2 = animation) the hint is showing — kept so the icon
+    /// stays put while it fades out after the item stops being a motion item (`kind` → 0).
+    play_hint_kind: u8,
+    /// Whether the pointer is over the play hint (pins its auto-fade open).
+    play_hint_hovered: bool,
+    /// This tick's computed play-hint pill (kind + fade alpha), or `None` when hidden — set by
+    /// [`App::tick_play_hint`] each turn and read by `render_overlay_frame`.
+    play_hint_frame: Option<panels_ui::PlayHintFrame>,
 }
 
 /// A deferred dialog open (see [`App::pending_dialog`]). Carries only what the opener
@@ -503,7 +525,9 @@ impl App {
                 // HUD line and let the shell render + duck it around the panels.
                 native_info: true,
                 last_info_snap: None,
-                native_play: false,
+                // The egui overlay draws the play hint (task #54 Phase 4) — the core only
+                // flash-signals it (bumps `play_hint_seq`); the shell renders + fades the pill.
+                native_play: true,
                 play_hint_seq: 0,
                 toast_native: None,
                 toast_seq: 0,
@@ -576,6 +600,12 @@ impl App {
             egui_overlay: None,
             overlay_dirty: false,
             overlay_active: false,
+            play_hint_seq: 0,
+            play_hint_shown: None,
+            play_hint_fade_out: None,
+            play_hint_kind: 0,
+            play_hint_hovered: false,
+            play_hint_frame: None,
         }
     }
 
@@ -1123,6 +1153,8 @@ impl App {
             || self.scan_pill_visible()
             // The welcome screen's Open buttons are interactive too.
             || self.core.open_panel_visible()
+            // The play hint is interactive (hover pins it, click plays) while it's shown.
+            || self.play_hint_shown.is_some()
     }
 
     /// Whether the egui overlay has **any** content to composite — the interactive panels
@@ -1196,6 +1228,8 @@ impl App {
         // Scan state is shell-owned (`dir_scan`), so the pill is filled in here rather than
         // by `snapshot` (which only reaches the core).
         frame.scan = self.scan_pill_frame();
+        // Play-hint fade is shell-owned too (computed by `tick_play_hint` each turn).
+        frame.play_hint = self.play_hint_frame.clone();
         let mut actions: Vec<panels_ui::PanelAction> = Vec::new();
         {
             let (device, queue) = match self.core.renderer.as_ref() {
@@ -1242,6 +1276,12 @@ impl App {
             A::CancelScan => self.cancel_scan_command(),
             A::OpenFile => self.core.dispatch_action(Action::OpenFile),
             A::OpenFolder => self.core.dispatch_action(Action::OpenFolder),
+            A::PlayPause => {
+                // Click the hint → play (like the P key) and dismiss it (done its job).
+                self.play_hint_fade_out = Some(Instant::now());
+                self.core.dispatch_action(Action::PlayPause);
+            }
+            A::PlayHintHover(hovered) => self.play_hint_hovered = hovered,
         }
         self.overlay_dirty = true;
     }
@@ -1971,6 +2011,61 @@ impl App {
         self.core.chip_sig = want;
         self.core.chip_built = Instant::now();
         self.overlay_dirty = true;
+    }
+
+    /// Drive the egui play hint's flash / hold / fade (the `native_play` seam). The core bumps
+    /// `play_hint_seq` on a fresh motion item; the shell flashes the pill, holds it
+    /// [`PLAY_HINT_HOLD`] (pinned indefinitely while the pointer hovers it), then fades it out.
+    /// Returns the pill's data for this overlay frame, and marks the overlay dirty while it's
+    /// animating so the fade actually renders. `None` when nothing is shown.
+    fn tick_play_hint(&mut self, now: Instant) -> Option<panels_ui::PlayHintFrame> {
+        let kind = self.core.play_hint_kind();
+        // Fresh motion item → flash.
+        if kind != 0 && self.core.play_hint_seq != self.play_hint_seq {
+            self.play_hint_seq = self.core.play_hint_seq;
+            self.play_hint_shown = Some(now);
+            self.play_hint_fade_out = None;
+            self.play_hint_kind = kind;
+        }
+        let shown = self.play_hint_shown?;
+        if kind != 0 {
+            self.play_hint_kind = kind;
+        }
+        if self.play_hint_hovered && kind != 0 {
+            // Hover pins it fully open and restarts the hold clock (so un-hover resumes the
+            // countdown from now).
+            self.play_hint_shown = Some(now - PLAY_HINT_FADE_IN);
+            self.play_hint_fade_out = None;
+        } else if kind == 0 && self.play_hint_fade_out.is_none() {
+            // The item stopped being a motion item (played / advanced) → fade out.
+            self.play_hint_fade_out = Some(now);
+        } else if self.play_hint_fade_out.is_none()
+            && now.duration_since(shown) >= PLAY_HINT_FADE_IN + PLAY_HINT_HOLD
+        {
+            // The hold elapsed → auto fade out.
+            self.play_hint_fade_out = Some(now);
+        }
+        let alpha = match self.play_hint_fade_out {
+            Some(fo) => {
+                let a =
+                    1.0 - now.duration_since(fo).as_secs_f32() / PLAY_HINT_FADE_OUT.as_secs_f32();
+                if a <= 0.0 {
+                    self.play_hint_shown = None;
+                    self.play_hint_fade_out = None;
+                    return None;
+                }
+                a
+            }
+            None => {
+                (now.duration_since(shown).as_secs_f32() / PLAY_HINT_FADE_IN.as_secs_f32()).min(1.0)
+            }
+        };
+        self.overlay_dirty = true; // keep re-rendering while it animates
+        Some(panels_ui::PlayHintFrame {
+            kind: self.play_hint_kind,
+            shortcut: self.core.shortcut_for(Action::PlayPause),
+            alpha,
+        })
     }
 
     /// Esc / window-close: shut down with a perceived-*instant* exit, writing
@@ -2742,11 +2837,10 @@ impl ApplicationHandler for App {
                 });
             }
 
-            // Pointer left the window: drop any open-button / play-hint / folder-tree hover
-            // so they don't stay lit. (The scan pill's Cancel hover is egui's now.)
+            // Pointer left the window: drop any folder-tree hover so it doesn't stay lit. (The
+            // welcome/play-hint/scan-pill hovers are egui's now.)
             WindowEvent::CursorLeft { .. } => {
                 self.core.last_cursor = None;
-                self.core.update_play_hint_hover();
                 self.core.update_tree_hover();
             }
 
@@ -2757,15 +2851,11 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 let pressed = state == ElementState::Pressed;
-                // A press on an interactive on-image control (the play hint) fires that control
-                // and must NOT also start a drag-to-pan. (The welcome Open buttons and the scan
-                // pill's Cancel are egui buttons, handled in the overlay — a press over any egui
-                // panel is swallowed before this event by `overlay_consumed`.)
-                if pressed && self.core.play_hint_hit() {
-                    // Click the play hint → play, and dismiss it (it's been used).
-                    self.core.play_hint = None;
-                    self.core.dispatch_action(Action::PlayPause);
-                } else if pressed && self.core.folder_tree_click() {
+                // The interactive on-image controls (welcome Open buttons, play hint, scan-pill
+                // Cancel) are all egui buttons handled in the overlay now — a press over any egui
+                // panel is swallowed before this event by `overlay_consumed`. So here only the
+                // folder-tree click and drag-to-pan remain.
+                if pressed && self.core.folder_tree_click() {
                     // A folder-tree row opened a folder / a "… n more" marker paged.
                 } else {
                     self.core.dragging = pressed;
@@ -2909,6 +2999,11 @@ impl ApplicationHandler for App {
         // Execute the tick's effects (SetWake → `requested_wake`, StopLiveAudio, any
         // ShellFlowAction, redraws, …). Must run before we read `requested_wake`.
         self.drain_effects(event_loop);
+
+        // Drive the egui play hint's flash/fade (after the core tick bumped `play_hint_seq`);
+        // stash this frame's pill for `render_overlay_frame` and dirty the overlay while it
+        // animates.
+        self.play_hint_frame = self.tick_play_hint(now);
 
         // Drive the egui rich-panel overlay: (re)render the panels into the offscreen
         // texture when they change (or an egui animation is due) and hand it to the

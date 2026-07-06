@@ -140,6 +140,10 @@ with any pre-release suffix carried only by the tag.
   step between the archive's sibling folders.
 
 ### Changed
+- **Windows: the Live-Photo / animation play hint is now a real UI (egui).** When you settle on a
+  Live Photo or animated image, a `Play` button (with the keyboard shortcut) flashes bottom-center
+  above the info line — matching the welcome buttons — and clicking it plays; it holds while you
+  hover and fades on its own otherwise. Replaces the CPU-rasterized hint.
 - **Windows: the empty-state welcome screen is now a real UI (egui).** When no photos are open,
   the centered **Open File** / **Open Folder** buttons (each showing its keyboard shortcut) are
   drawn with proper buttons over "or drag and drop here", matching the macOS welcome screen —

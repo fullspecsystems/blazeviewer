@@ -415,6 +415,7 @@ fn sample_frame(dark: bool, tab: InspectorTab, welcome: bool) -> PanelFrame {
                 file_key: "O".into(),
                 folder_key: "\u{21e7}O".into(),
             }),
+            play_hint: None,
             dark,
             panel_alpha: 242,
         };
@@ -619,6 +620,12 @@ fn sample_frame(dark: bool, tab: InspectorTab, welcome: bool) -> PanelFrame {
             current: "2013/2013-08-14 - Summer Road Trip Photos and Videos".into(),
         }),
         welcome: None,
+        // The play hint (bottom-center) — previews its spacing above the info line.
+        play_hint: Some(panels_ui::PlayHintFrame {
+            kind: 1,
+            shortcut: "P".into(),
+            alpha: 1.0,
+        }),
         dark,
         panel_alpha: 242, // ≈95% — the shot previews the panels near-opaque
     }
