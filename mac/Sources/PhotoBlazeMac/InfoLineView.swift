@@ -25,12 +25,13 @@ struct InfoLineView: View {
                 .truncationMode(.middle)
             if hasCodec {
                 Text(model.infoLineCodec)
-                    .font(.caption)
+                    .font(.caption2)
                     .foregroundStyle(.secondary)
-                    .padding(.horizontal, 7)
-                    // ~row-height so the top/bottom inset ≈ the trailing one (do NOT use
-                    // frame(maxHeight: .infinity) here — it makes the pill fill the viewport).
-                    .padding(.vertical, 2.5)
+                    .padding(.horizontal, 6)
+                    // Deliberately shorter than the callout row so the badge sits inside it and
+                    // never drives the pill's height (do NOT use frame(maxHeight: .infinity) —
+                    // it makes the pill fill the viewport).
+                    .padding(.vertical, 2)
                     .background(
                         .quaternary,
                         in: RoundedRectangle(cornerRadius: pillRadius - inset)
