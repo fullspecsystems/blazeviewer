@@ -9,13 +9,17 @@ import SwiftUI
 struct PlayHintView: View {
     let model: CoreModel
     @State private var hovering = false
+    /// Set on click so the pill keeps its lit look and fades away *with* it, instead of
+    /// snapping back to the resting look before the fade (which read as janky).
+    @State private var dismissing = false
 
     // Match InfoLineView's geometry so the "P" badge is concentric with the pill.
     private let pillRadius: CGFloat = 11
     private let inset: CGFloat = 6
 
     var body: some View {
-        HStack(spacing: 8) {
+        let active = hovering || dismissing
+        return HStack(spacing: 8) {
             // A Live Photo gets Apple's livephoto mark; any other animation gets play ▶.
             Image(systemName: model.playHintKind == 1 ? "livephoto" : "play.fill")
                 .font(.callout)
@@ -39,16 +43,19 @@ struct PlayHintView: View {
         // Make the *whole* pill (padding + material, not just the text) the hover/click region —
         // without this the padded areas don't hit-test, so hover often never fires.
         .contentShape(RoundedRectangle(cornerRadius: pillRadius))
-        // Hover cue that's actually visible: a subtle brightness lift + tiny grow (nudging the
+        // Hover cue that's actually visible: a subtle brightness lift + a 1% grow (nudging the
         // near-opaque material's opacity was imperceptible). macOS has no built-in hover style
-        // for a bespoke pill like this.
-        .brightness(hovering ? 0.08 : 0)
-        .scaleEffect(hovering ? 1.03 : 1.0)
-        .animation(.easeInOut(duration: 0.13), value: hovering)
+        // for a bespoke pill like this. `active` keeps the look through the click's fade-out.
+        .brightness(active ? 0.08 : 0)
+        .scaleEffect(active ? 1.01 : 1.0)
+        .animation(.easeInOut(duration: 0.13), value: active)
         .onHover { inside in
             hovering = inside
             model.playHintHover(inside)
         }
-        .onTapGesture { model.triggerPlay() }
+        .onTapGesture {
+            dismissing = true  // hold the lit look while it fades away
+            model.triggerPlay()
+        }
     }
 }
