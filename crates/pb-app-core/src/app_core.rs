@@ -384,6 +384,13 @@ pub struct AppCore {
     /// When set, the one-line **info readout** (`i`) is not rasterized to the HUD — the shell
     /// draws it natively (macOS SwiftUI). The core still owns the toggle state + content string.
     pub native_info: bool,
+    /// When set, the **play hint** (▶/Live Photo, on a motion item) is not rasterized to the
+    /// HUD — the shell draws it natively and owns its fade/hover. The core only signals *when*
+    /// to flash it (`play_hint_seq`) and *what* it is (`play_hint_kind`).
+    pub native_play: bool,
+    /// Monotonic counter bumped each time a fresh motion item settles — the native shell keys
+    /// its play-hint flash off a change here (the "show once per item" trigger).
+    pub play_hint_seq: u64,
     /// The current native toast's data (message + icon + timing), when `native_toast`.
     pub toast_native: Option<crate::overlay::NativeToast>,
     /// Monotonic toast counter — the shell keys its entrance animation off it, so an identical

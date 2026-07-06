@@ -474,6 +474,8 @@ impl App {
                 toast: None,
                 native_toast: false,
                 native_info: false,
+                native_play: false,
+                play_hint_seq: 0,
                 toast_native: None,
                 toast_seq: 0,
                 wait_started: None,

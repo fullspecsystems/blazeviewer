@@ -163,6 +163,7 @@ impl AppCoreHandle {
         core.native_tree = true;
         core.native_toast = true;
         core.native_info = true;
+        core.native_play = true;
         AppCoreHandle {
             core,
             dir_scan: None,
@@ -1074,6 +1075,20 @@ impl AppCoreHandle {
     /// The codec label (e.g. `JPEG`) — the host renders it in a small capsule.
     fn info_line_codec(&self) -> String {
         self.core.info_line_codec()
+    }
+
+    // ── The native play hint (▶/Live Photo on a motion item): the last HUD overlay to go
+    // native. The core signals *when* to flash it (seq) + *what* it is (kind); the host owns
+    // the pill, its 3s fade, hover-to-hold, and click-to-play (via menu_action "play_pause").──
+
+    /// 0 = none (still / already playing), 1 = Live Photo, 2 = another animation.
+    fn play_hint_kind(&self) -> u8 {
+        self.core.play_hint_kind()
+    }
+
+    /// Bumped when a fresh motion item settles — the host flashes the hint on a change.
+    fn play_hint_seq(&self) -> u64 {
+        self.core.play_hint_seq
     }
 
     /// Horizontal placement from Settings: 0 = left, 1 = center, 2 = right (default).
@@ -2573,6 +2588,8 @@ mod ffi {
         fn info_line_text(&self) -> String;
         fn info_line_codec(&self) -> String;
         fn info_line_align(&self) -> u8;
+        fn play_hint_kind(&self) -> u8;
+        fn play_hint_seq(&self) -> u64;
         fn settings_form(&self) -> SettingsFormFfi;
         fn settings_edited(&mut self, form: SettingsFormFfi);
 

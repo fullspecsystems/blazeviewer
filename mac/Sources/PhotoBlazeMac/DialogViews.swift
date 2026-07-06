@@ -77,7 +77,7 @@ struct AskSheetView: View {
                     RoundedRectangle(cornerRadius: 6).stroke(.secondary.opacity(0.3))
                 )
                 .focused($focused)
-            Text("⌘Return to ask")
+            Text("⌘⏎ to ask")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack(spacing: 8) {

@@ -224,6 +224,17 @@ struct ContentView: View {
                         .allowsHitTesting(false)
                 }
             }
+            // The play hint rides the same bottom-center spot as the toast, just above the info
+            // line. Unlike the toast it IS interactive (hover holds it, click plays), so it
+            // keeps hit-testing. They rarely co-occur; the toast layers above it when they do.
+            .overlay(alignment: .bottom) {
+                if model.playHintVisible {
+                    PlayHintView(model: model)
+                        .padding(.bottom, toastBottomInset)
+                        .transition(.opacity)
+                }
+            }
+            .animation(.easeInOut(duration: 0.22), value: model.playHintVisible)
             // The unified native toast rides the bottom-center, above where the info line
             // sits, and topmost so transient feedback (copy, rotate, "Scan stopped", …) is
             // never occluded by a panel. Non-interactive; it fades itself out.

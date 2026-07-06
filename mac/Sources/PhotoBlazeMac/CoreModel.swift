@@ -69,6 +69,15 @@ final class CoreModel {
     private(set) var infoLineCodec = ""
     private(set) var infoLineAlign = 2
 
+    /// The native play hint (▶ / Live Photo on a motion item) — the last on-image HUD overlay
+    /// to go native. `kind`: 0 none / 1 Live Photo / 2 animation. It flashes for ~3s on a fresh
+    /// motion item, hover holds it open, and a click (or P) plays.
+    private(set) var playHintVisible = false
+    private(set) var playHintKind = 0
+    @ObservationIgnored private var playHintSeq: UInt64 = 0
+    @ObservationIgnored private var playHintHovered = false
+    @ObservationIgnored private var playHintFadeTask: Task<Void, Never>?
+
     // MARK: - Native rich panels (task #54, mac-first) — the first is Help
 
     /// Whether the native SwiftUI Help panel should show, and its sections — refreshed
@@ -892,6 +901,45 @@ final class CoreModel {
         kick()
     }
 
+    // ── The native play hint's shell-owned fade / hover / click ──
+
+    private func showPlayHint() {
+        playHintVisible = true
+        schedulePlayHintFade()
+    }
+
+    /// Auto-hide after 3s — but only if the pointer isn't holding it open.
+    private func schedulePlayHintFade() {
+        playHintFadeTask?.cancel()
+        playHintFadeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard let self, !Task.isCancelled, !self.playHintHovered else { return }
+            self.playHintVisible = false
+        }
+    }
+
+    private func hidePlayHint() {
+        playHintFadeTask?.cancel()
+        playHintFadeTask = nil
+        playHintVisible = false
+    }
+
+    /// Hover holds the hint open (cancels the fade); leaving restarts the 3s countdown.
+    func playHintHover(_ hovering: Bool) {
+        playHintHovered = hovering
+        if hovering {
+            playHintFadeTask?.cancel()
+        } else if playHintVisible {
+            schedulePlayHintFade()
+        }
+    }
+
+    /// Click the hint → play (same as the P key); dismiss it since it's done its job.
+    func triggerPlay() {
+        hidePlayHint()
+        menuAction("play_pause")
+    }
+
     /// Map the core's semantic toast icon (0 = none, see `ToastIcon`) to an SF Symbol, or nil
     /// for a text-only toast.
     func toastSymbol(_ icon: Int) -> String? {
@@ -1108,6 +1156,17 @@ final class CoreModel {
         }
         if infoVis != infoLineVisible {
             infoLineVisible = infoVis
+        }
+        // The native play hint: `kind` drives the icon + relevance (0 while playing / on a
+        // still); a `seq` bump is the "fresh motion item — flash it" trigger.
+        let phKind = Int(core.play_hint_kind())
+        if phKind != playHintKind { playHintKind = phKind }
+        let phSeq = core.play_hint_seq()
+        if phKind == 0 {
+            if playHintVisible { hidePlayHint() }
+        } else if phSeq != playHintSeq {
+            playHintSeq = phSeq
+            showPlayHint()
         }
         updatePacing()
     }

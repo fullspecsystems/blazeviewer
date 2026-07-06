@@ -165,6 +165,8 @@ impl AppCore {
             toast: None,
             native_toast: false,
             native_info: false,
+            native_play: false,
+            play_hint_seq: 0,
             toast_native: None,
             toast_seq: 0,
             wait_started: None,
@@ -2697,6 +2699,13 @@ impl AppCore {
         }
         if self.has_motion(item) {
             self.anim_hint_shown_for = Some(item);
+            // Native shell: just flash-signal it (bump the seq); the shell renders + fades the
+            // pill and reads `play_hint_kind` for the icon. No HUD raster / colliders / cursor.
+            if self.native_play {
+                self.play_hint_seq = self.play_hint_seq.wrapping_add(1);
+                self.draw(); // wake the shell so it reads the new seq
+                return;
+            }
             // A Live Photo gets the livephoto mark; an animated still gets the play ▶. Styled
             // like the open-screen buttons: `▶ Play  P` with the shortcut dimmed at the right —
             // and it's a real button: hovering holds it open, a click plays (see the click /
@@ -5165,6 +5174,26 @@ impl AppCore {
         self.live_motion_cache
             .get(&item)
             .is_some_and(|paired| paired.is_some())
+    }
+
+    /// The native play-hint kind for the current item: `0` = none (a still, or already
+    /// playing — the hint's job is done), `1` = Live Photo (the livephoto mark), `2` = another
+    /// animation (play ▶). Stays consistent with `has_motion` (which bumps `play_hint_seq`):
+    /// a fresh motion item is a Live Photo (→1) or has an `animated` container (→2).
+    pub fn play_hint_kind(&self) -> u8 {
+        if self.playback.is_some() {
+            return 0; // engaged — no hint while it plays/pauses
+        }
+        let Some(item) = self.displayed_item else {
+            return 0;
+        };
+        if self.is_live_photo(item) {
+            1
+        } else if self.current.as_ref().is_some_and(|m| m.animated.is_some()) {
+            2
+        } else {
+            0
+        }
     }
 
     /// Corner inset (physical px) for the info/EXIF/help panel. Scales with the
