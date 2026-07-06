@@ -754,6 +754,18 @@ pub fn build_menu(_keymap: &Keymap) -> BuiltMenu {
         CheckMenuItem::with_id(ids::COMPARE_PIN, "Pin for Compare", false, false, None);
     let compare_toggle = MenuItem::with_id(ids::COMPARE_TOGGLE, "Compare with Pinned", false, None);
 
+    // Go — folder navigation, Finder's chords (⌘↑ Enclosing Folder, ⌘←/⌘→ step between
+    // sibling folders — PhotoBlaze has no back/forward history to shadow). Real ⌘ key-
+    // equivalents (NSMenu-owned); the keymap binds `Alt+arrow` for Windows and never ⌘-chords,
+    // so there's no double-fire. Matches the native macOS host's Go menu.
+    let go = Submenu::new("Go", true);
+    let _ = go.append_items(&[
+        &cmd_item(ids::OPEN_PARENT, "Enclosing Folder", CMD, Code::ArrowUp),
+        &sep(),
+        &cmd_item(ids::PREV_FOLDER, "Previous Folder", CMD, Code::ArrowLeft),
+        &cmd_item(ids::NEXT_FOLDER, "Next Folder", CMD, Code::ArrowRight),
+    ]);
+
     let image = Submenu::new("Image", true);
     let _ = image.append_items(&[
         &item(ids::NEXT, "Next"),
@@ -790,9 +802,9 @@ pub fn build_menu(_keymap: &Keymap) -> BuiltMenu {
     let help = Submenu::new("Help", true);
     let _ = help.append_items(&[&item(ids::HELP, "Keyboard Shortcuts")]);
 
-    // App, File, Edit, View, Image, Window, Help — the conventional macOS order
-    // (Window directly before Help).
-    for sub in [&app, &file, &edit, &view, &image, &window, &help] {
+    // App, File, Edit, View, Go, Image, Window, Help — the conventional macOS order
+    // (Go between View and Image, Window directly before Help), matching the native host.
+    for sub in [&app, &file, &edit, &view, &go, &image, &window, &help] {
         if let Err(e) = menu.append(sub) {
             eprintln!("menu: failed to append submenu: {e}");
         }
