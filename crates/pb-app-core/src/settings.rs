@@ -147,8 +147,11 @@ pub struct Settings {
     /// Whether the info line (`i`) starts shown on a fresh launch — the default state; the `i`
     /// key still toggles it live, and flipping this in Settings applies at once (task #54).
     pub show_image_info: bool,
-    /// Which fields the info line shows: file name, resolution (W×H), codec. Applied live. At
-    /// least one stays on — the line hides if somehow all are off (an empty pill reads as a bug).
+    /// Which fields the info line shows: folder, file name, resolution (W×H), codec. Applied
+    /// live. Folder is prepended to the file name with a `/` (the relative dir when the scan is
+    /// recursive, else the containing folder's name). The line hides if the enabled fields
+    /// produce no text (an empty pill reads as a bug).
+    pub info_show_folder: bool,
     pub info_show_filename: bool,
     pub info_show_resolution: bool,
     pub info_show_codec: bool,
@@ -242,6 +245,7 @@ impl Default for Settings {
             appearance_mode: AppearanceMode::System, // follow the OS light/dark theme
             info_line_align: InfoLineAlign::Right,   // today's bottom-right placement
             show_image_info: false,                  // off until opted in (unchanged launch)
+            info_show_folder: false,                 // opt-in — filename alone by default
             info_show_filename: true,
             info_show_resolution: true,
             info_show_codec: true,

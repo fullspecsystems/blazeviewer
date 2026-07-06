@@ -3017,7 +3017,8 @@ impl AppCore {
         // The field toggles (filename / resolution / codec) are read live by info_line_*(), so
         // if the line is up, re-place it to reflect the new content — or hide it if the change
         // left no fields on (info_line_visible now returns false).
-        let fields_changed = old.info_show_filename != self.settings.info_show_filename
+        let fields_changed = old.info_show_folder != self.settings.info_show_folder
+            || old.info_show_filename != self.settings.info_show_filename
             || old.info_show_resolution != self.settings.info_show_resolution
             || old.info_show_codec != self.settings.info_show_codec;
         if self.info_line
@@ -3469,12 +3470,32 @@ impl AppCore {
         Some(parts.join(" · "))
     }
 
-    /// The filename / resolution fields, each gated by its Settings toggle (shared by the full
-    /// HUD string and the native main text).
+    /// The name (folder / filename) and resolution fields, each gated by its Settings toggle
+    /// (shared by the full HUD string and the native main text). Folder is prepended to the
+    /// filename with a `/` — the relative dir when the scan is recursive, else the containing
+    /// folder's name.
     fn info_line_parts(&self, meta: &crate::meta::PhotoMeta) -> Vec<String> {
         let mut parts = Vec::new();
-        if self.settings.info_show_filename {
-            parts.push(meta.rel.clone());
+        // `rel` is the path relative to the scan root, so split its directory (nested scans)
+        // from the file name.
+        let (dir, file) = match meta.rel.rsplit_once('/') {
+            Some((d, f)) => (Some(d.to_string()), f),
+            None => (None, meta.rel.as_str()),
+        };
+        let name = match (
+            self.settings.info_show_folder,
+            self.settings.info_show_filename,
+        ) {
+            (true, true) => match dir.or_else(|| self.info_folder_name()) {
+                Some(f) if !f.is_empty() => format!("{f}/{file}"),
+                _ => file.to_string(),
+            },
+            (false, true) => file.to_string(),
+            (true, false) => dir.or_else(|| self.info_folder_name()).unwrap_or_default(),
+            (false, false) => String::new(),
+        };
+        if !name.is_empty() {
+            parts.push(name);
         }
         if self.settings.info_show_resolution {
             parts.push(format!("{}×{}", meta.w, meta.h));
@@ -3482,17 +3503,22 @@ impl AppCore {
         parts
     }
 
-    /// Whether the info readout should show: toggled on (`i`), a photo loaded, and at least one
-    /// field enabled — an empty pill (all fields off) reads as a bug, so it hides instead.
-    pub fn info_line_visible(&self) -> bool {
-        self.info_line && self.current.is_some() && self.any_info_field()
+    /// The immediate containing folder's name — used for the Folder field when `rel` has no
+    /// directory of its own (a flat, non-recursive scan). `None` for a source without a real
+    /// path on disk (an archive entry).
+    fn info_folder_name(&self) -> Option<String> {
+        let item = self.displayed_item?;
+        let path = self.source.path(item)?;
+        path.parent()?
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
     }
 
-    /// True if any of the three info fields is enabled.
-    fn any_info_field(&self) -> bool {
-        self.settings.info_show_filename
-            || self.settings.info_show_resolution
-            || self.settings.info_show_codec
+    /// Whether the info readout should show: toggled on (`i`) and the enabled fields produce
+    /// some text — an empty pill (all fields off, or a folder-only field that can't resolve)
+    /// reads as a bug, so it hides instead.
+    pub fn info_line_visible(&self) -> bool {
+        self.info_line && self.info_line_content().is_some_and(|s| !s.is_empty())
     }
 
     /// The info readout's main text (native shell) — `rel · W×H[· Live]`, codec split out so the
@@ -5915,23 +5941,40 @@ mod tests {
         });
         core.info_line = true;
 
-        // All fields on (defaults): full HUD string, native main text, and codec pill.
+        // Default fields (folder off, filename/resolution/codec on): the file NAME only, not
+        // the relative dir.
         assert_eq!(
             core.info_line_content().as_deref(),
-            Some("folder/photo.jpg · 4032×3024 · JPEG")
+            Some("photo.jpg · 4032×3024 · JPEG")
         );
         assert_eq!(
             core.info_line_main().as_deref(),
-            Some("folder/photo.jpg · 4032×3024")
+            Some("photo.jpg · 4032×3024")
         );
         assert_eq!(core.info_line_codec(), "JPEG");
         assert!(core.info_line_visible());
 
-        // Codec off → dropped from the string, and the pill accessor goes empty.
+        // Folder on → the relative dir is prepended to the file name with a `/`.
+        core.settings.info_show_folder = true;
+        assert_eq!(
+            core.info_line_content().as_deref(),
+            Some("folder/photo.jpg · 4032×3024 · JPEG")
+        );
+        // Folder on, filename off → just the folder.
+        core.settings.info_show_filename = false;
+        assert_eq!(
+            core.info_line_content().as_deref(),
+            Some("folder · 4032×3024 · JPEG")
+        );
+        core.settings.info_show_filename = true;
+        core.settings.info_show_folder = false;
+
+        // Codec off → dropped from the string, and the pill accessor goes empty (folder is
+        // back off, so it's the file name alone again).
         core.settings.info_show_codec = false;
         assert_eq!(
             core.info_line_content().as_deref(),
-            Some("folder/photo.jpg · 4032×3024")
+            Some("photo.jpg · 4032×3024")
         );
         assert_eq!(core.info_line_codec(), "");
 
@@ -5940,7 +5983,7 @@ mod tests {
         assert_eq!(core.info_line_content().as_deref(), Some("4032×3024"));
         assert_eq!(core.info_line_main().as_deref(), Some("4032×3024"));
 
-        // All three off → the line hides (empty-pill guard) even though `i` is on.
+        // All fields off → the line hides (empty-pill guard) even though `i` is on.
         core.settings.info_show_resolution = false;
         assert!(!core.info_line_visible());
     }

@@ -45,10 +45,10 @@ struct SettingsView: View {
                 .frame(width: 560, height: 510)
                 .tabItem { tabLabel("General", symbol: "gearshape") }
             appearancePane
-                .frame(width: 560, height: 315)
+                .frame(width: 560, height: 520)
                 .tabItem { tabLabel("Appearance", symbol: "paintbrush") }
             aiPane
-                .frame(width: 560, height: 680)
+                .frame(width: 560, height: 645)
                 .tabItem { tabLabel("AI", symbol: "sparkles") }
             ShortcutsPane(model: model)
                 .frame(width: 560, height: 640)
@@ -237,7 +237,9 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.segmented)
                 // Field toggles apply live; the last enabled one can't be turned off (an empty
-                // line reads as a bug), so there's always something to show.
+                // line reads as a bug), so there's always something to show. Folder is prepended
+                // to the filename with a "/".
+                Toggle("Folder", isOn: infoFieldBinding(\.infoShowFolder))
                 Toggle("Filename", isOn: infoFieldBinding(\.infoShowFilename))
                 Toggle("Resolution", isOn: infoFieldBinding(\.infoShowResolution))
                 Toggle("Codec", isOn: infoFieldBinding(\.infoShowCodec))
@@ -246,9 +248,10 @@ struct SettingsView: View {
         .formStyle(.grouped)
     }
 
-    /// How many of the three info fields are on — used to forbid turning off the last one.
+    /// How many of the info fields are on — used to forbid turning off the last one.
     private var infoFieldsEnabledCount: Int {
-        (draft.infoShowFilename ? 1 : 0)
+        (draft.infoShowFolder ? 1 : 0)
+            + (draft.infoShowFilename ? 1 : 0)
             + (draft.infoShowResolution ? 1 : 0)
             + (draft.infoShowCodec ? 1 : 0)
     }
@@ -656,6 +659,7 @@ struct SettingsDraft: Equatable {
     var appearanceMode = 0
     var infoLineAlign = 2  // 0 left / 1 center / 2 right (task #54)
     var showImageInfo = false  // info line's launch default (task #54)
+    var infoShowFolder = false
     var infoShowFilename = true
     var infoShowResolution = true
     var infoShowCodec = true
@@ -692,6 +696,7 @@ struct SettingsDraft: Equatable {
         appearanceMode = Int(form.appearance_mode)
         infoLineAlign = Int(form.info_line_align)
         showImageInfo = form.show_image_info
+        infoShowFolder = form.info_show_folder
         infoShowFilename = form.info_show_filename
         infoShowResolution = form.info_show_resolution
         infoShowCodec = form.info_show_codec
@@ -748,6 +753,7 @@ struct SettingsDraft: Equatable {
             appearance_mode: UInt8(appearanceMode),
             info_line_align: UInt8(infoLineAlign),
             show_image_info: showImageInfo,
+            info_show_folder: infoShowFolder,
             info_show_filename: infoShowFilename,
             info_show_resolution: infoShowResolution,
             info_show_codec: infoShowCodec,

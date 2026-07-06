@@ -1128,6 +1128,7 @@ impl AppCoreHandle {
                 InfoLineAlign::Right => 2,
             },
             show_image_info: s.show_image_info,
+            info_show_folder: s.info_show_folder,
             info_show_filename: s.info_show_filename,
             info_show_resolution: s.info_show_resolution,
             info_show_codec: s.info_show_codec,
@@ -2093,6 +2094,7 @@ fn fold_settings_form(
         _ => InfoLineAlign::Right,
     };
     s.show_image_info = form.show_image_info;
+    s.info_show_folder = form.info_show_folder;
     s.info_show_filename = form.info_show_filename;
     s.info_show_resolution = form.info_show_resolution;
     s.info_show_codec = form.info_show_codec;
@@ -2387,6 +2389,7 @@ mod ffi {
         info_line_align: u8,
         // Info line: launch default + which fields show (task #54).
         show_image_info: bool,
+        info_show_folder: bool,
         info_show_filename: bool,
         info_show_resolution: bool,
         info_show_codec: bool,
