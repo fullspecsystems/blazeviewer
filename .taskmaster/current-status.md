@@ -1,13 +1,14 @@
 # PhotoBlaze — Current Status (session handoff)
 
 _Last updated: 2026-07-06. **The macOS rich-panel migration (task #54 / ADR-023) is COMPLETE and
-owner-approved.** **Windows / egui parity (Phase 4) is now LARGELY DONE too** — the egui-over-wgpu
-main-window seam is built and the tree, inspector, help panel, info line, and **scan pill** are all
-ported. This doc is the handoff for the remaining parity items (next up: the welcome-screen buttons)._
+owner-approved.** **The Windows / egui HUD rework (Phase 4) is now DONE** — every interactive
+on-photo overlay is egui (tree, inspector, help, info line, scan pill, welcome buttons, play hint),
+the dead CPU-HUD code is removed, and ⌘+arrow folder nav is wired in the winit macOS menu. What's
+left is optional/non-HUD (see below)._
 
-Latest on `main`: `1794d25` (egui info readout + ducking). Prior Phase-4 commits: `1e90eb1`
-(the panels), `53807a7` (inspector + help polish, markdown, opacity, shortcuts), `159f764`
-(slideshow-key revert). All pushed.
+Latest on `main`: `a3a6bfb` (⌘+arrow folder nav). Prior this session: `7d29a2b` (dead-CPU-HUD
+cleanup), `9a7a48d` (play hint), `e0d8541` (welcome screen), `6fee0b1` (scan pill + settings polish).
+All pushed.
 
 ## Big picture
 
@@ -54,13 +55,10 @@ exposes the data via `&self` accessors. **On winit these are now true:** `native
   themes) + a live 100k-file slow scan (pill SHOW/HIDE fires, no panics). **Gated the SAME as the
   old card** (`scan_bootstrapped && past-`SCAN_DIALOG_DELAY``), so the rare **pre-bootstrap
   `DialogKind::Scanning` window is UNCHANGED** — the pill is the post-bootstrap surface only.
-  - **Follow-ups (not done):** (1) *full parity* = drop the bootstrap gate + suppress the
-    pre-bootstrap Scanning dialog so the pill covers the whole scan like macOS (needs pre-photo
-    overlay rendering confirmed live — I couldn't verify it headlessly, screen capture blocked).
-    (2) `AppCore::update_chip_hover` is now unused (no shell calls it); `push_chip`/`clear_chip`/
-    `chip_hit` are still referenced by `pb-mac-ffi`'s `tick_chip` (always-`None` teardown path), so
-    they're NOT dead — leave them. The CPU `render_scan_card` (`pb-hud`) + `Renderer::set_chip` are
-    reachable only via that dormant `push_chip`; removable if the mac path drops it too.
+  - **Follow-up (not done):** *full parity* = drop the bootstrap gate + suppress the pre-bootstrap
+    Scanning dialog so the pill covers the whole scan like macOS (needs pre-photo overlay rendering
+    confirmed live — couldn't verify headlessly, screen capture blocked). (The CPU-chip removal
+    follow-up noted here earlier is DONE — see `7d29a2b`.)
 - **Folder tree** — Finder-style, disclosure chevrons (browse ≠ open), dark count pills, outdented
   parent row, truncation, current-folder = accent open-folder icon + bold name (no band).
 - **Inspector** — tabbed (Details / Text / Describe) with FA tab icons; Details wraps + 13px +
@@ -78,21 +76,31 @@ exposes the data via `&self` accessors. **On winit these are now true:** `native
 - **Core fixes (shared w/ mac):** Details EXIF now warmed on the native path (was only after a
   Describe round-trip); `fresh_shuffle_seed`; `last_info_snap` + a `native_info` tick block.
 
-## What's LEFT for winit⇄mac parity (priority order)
+## The egui HUD rework is DONE
 
-Owner priority (2026-07-06): **#3 info-line ducking = DONE**. **Scan UI + Cancel (#2) = DONE**
-this session (see below). Remaining:
+Every **interactive** on-photo overlay is now egui. Landed this session (all on `main`, pushed):
+**Scan pill (#2)**, **welcome / empty-state Open buttons (#5, `native_open`)**, **play hint
+(#4, `native_play`)** — all reuse the shared `open_button` design (`draw_open_button` +
+`open_button_width` + `OPEN_*` in `panels_ui.rs`; the play hint is the same button, translucent,
+bottom-center `EDGE` above the info line). Then the **dead-CPU-HUD cleanup** (574 lines: the open-
+panel/play-hint/scan-chip rasterizers + hit-tests across pb-app-core/pb-render/pb-app/pb-mac-ffi;
+kept the pb-hud rasterizers — `hud_gallery` still uses them — and `chip_sig`/`chip_built`). And
+**⌘+arrow folder nav** in the winit macOS menu (a "Go" submenu; the actions were already core-handled).
 
-1. **Welcome-screen buttons (#5)** — NEXT. First-run empty state. `open_panel_visible` exists in the
-   core; needs the egui surface + Open File / Open Folder buttons. Flip `native_open`.
+## What's LEFT (all optional / non-HUD)
+
+The remaining CPU-HUD bits are **non-interactive**, so there's no hit-testing to remove — pure
+cosmetic consistency, low value:
+1. **Toasts (`native_toast` false)** — work well; port only for pixel-consistency.
+2. **The loading pie** (decode-wait spinner) — CPU-HUD, non-interactive, no flag; same story.
+
+Non-HUD parity items still open:
 3. **Drag-to-move / drag-to-resize panels** — SwiftUI has `ResizeHandle`; egui panels are
    fixed-position/width today.
 4. **Folder count precompute** — tree counts only appear after opening a folder (core
    `folder_counts` only covers the recursive deck; siblings are blank until visited).
-5. **Play-hint fade (#4)** — Live-Photo/animation only; still CPU HUD (`native_play` false).
-6. **Toasts (#1)** — lowest; non-interactive, CPU-HUD toasts already work. Consistency only.
-7. **Cmd/Ctrl+arrow folder nav** — `Action::PrevFolder`/`NextFolder` exist but aren't bound/reaching
-   the winit shell.
+5. **Windows folder-nav modifier** — winit macOS now uses ⌘+arrow (Go menu); Windows keeps
+   `Alt+arrow` (keymap, Explorer idiom). Switch to `Ctrl+arrow` only if the owner asks.
 
 ## Working notes for a new session
 
