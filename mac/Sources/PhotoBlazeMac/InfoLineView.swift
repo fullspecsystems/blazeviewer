@@ -15,6 +15,10 @@ struct InfoLineView: View {
     private let pillRadius: CGFloat = 11
     private let inset: CGFloat = 6
 
+    /// The SF Symbol marking an animated (non-Live-Photo) image beside the codec. Placeholder
+    /// until the final glyph is chosen — one place to swap it.
+    static let animationMark = "circle.dotted.and.circle"
+
     var body: some View {
         let hasCodec = !model.infoLineCodec.isEmpty
         HStack(spacing: 8) {
@@ -23,9 +27,15 @@ struct InfoLineView: View {
                 .foregroundStyle(.primary)
                 .lineLimit(1)
                 .truncationMode(.middle)
-            // A Live Photo shows the livephoto mark by the codec instead of the word "Live".
+            // A Live Photo shows the livephoto mark by the codec (instead of the word "Live");
+            // any other animated image (GIF/APNG/…) shows a motion mark. Swap `animationMark`
+            // for the final SF Symbol once picked.
             if model.infoLineIsLive {
                 Image(systemName: "livephoto")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else if model.infoLineIsAnimated {
+                Image(systemName: Self.animationMark)
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }

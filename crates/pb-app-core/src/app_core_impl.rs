@@ -3546,6 +3546,13 @@ impl AppCore {
         self.current.is_some() && self.displayed_item.is_some_and(|i| self.is_live_photo(i))
     }
 
+    /// Whether the current photo is an animated image (GIF / APNG / animated WebP / AVIF / …) —
+    /// the native shell shows a motion mark by the codec. Distinct from a Live Photo, which has
+    /// its own mark (`info_line_is_live`).
+    pub fn info_line_is_animated(&self) -> bool {
+        !self.info_line_is_live() && self.current.as_ref().is_some_and(|m| m.animated.is_some())
+    }
+
     /// The current photo's codec label (e.g. `JPEG`) for the info readout's pill — empty when
     /// the codec field is toggled off (so the shell omits the badge).
     pub fn info_line_codec(&self) -> String {
