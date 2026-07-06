@@ -62,6 +62,7 @@ mod live_audio;
 mod macos_chrome;
 #[cfg(target_os = "macos")]
 mod macos_open;
+mod md;
 mod menu;
 mod panels_ui;
 mod pb_key_winit;
@@ -98,8 +99,8 @@ use pb_app_core::decode_pool::{recommended_workers, DecodeFn, DecodePool};
 // Engine tuning constants + pure helpers migrated to pb-app-core (NS0 5.5 / Phase B) so the
 // orchestration methods that use them can live on `AppCore`. The shell still shares several.
 use pb_app_core::engine::{
-    decode_item, file_name_of, is_hdr, meta_for, render_color, ring_capacity, scale_mode_of,
-    window_for_capacity, RING_BUDGET_BYTES,
+    decode_item, file_name_of, fresh_shuffle_seed, is_hdr, meta_for, render_color, ring_capacity,
+    scale_mode_of, window_for_capacity, RING_BUDGET_BYTES,
 };
 use pb_app_core::metrics::StageTimes;
 // Playlist-resolution currency migrated to pb-app-core (NS0 5.6 Step 2): the `Resolved` snapshot
@@ -364,7 +365,7 @@ impl App {
         scan_root: Option<PathBuf>,
         metrics: StageTimes,
     ) -> Self {
-        let playlist = Playlist::new(source.len(), 0).with_cursor(start);
+        let playlist = Playlist::new(source.len(), fresh_shuffle_seed()).with_cursor(start);
         let decode: Arc<DecodeFn> = Arc::new(|src: &dyn PhotoSource, item, fit, allow_preview| {
             if !METRICS_ON_FLAG.load(std::sync::atomic::Ordering::Relaxed) {
                 return decode_item(src, item, fit, allow_preview);
@@ -1209,9 +1210,10 @@ impl App {
             A::SelectTab(tab) => self.core.panels.open_inspector(tab),
             A::CopyDetails => self.core.dispatch_action(Action::CopyImageDetails),
             A::CopyText => self.core.dispatch_action(Action::CopyImageText),
-            // TODO(egui-panels): a describe-copy action + the Ask dialog aren't wired to
-            // the winit shell yet (mac-only today); no-op until they land.
-            A::CopyDescribe | A::Ask => {}
+            A::CopyDescribe => self.core.dispatch_action(Action::CopyDescription),
+            // The Describe tab's "Ask" button opens the ask-a-question dialog
+            // (`DialogKind::AskImage`) — fully wired on winit (multi-line question field).
+            A::Ask => self.core.dispatch_action(Action::AskImage),
             A::TreeToggle(path) => self.core.fs_tree_toggle(&path),
             A::TreeOpen(path) => self.core.fs_tree_open(path),
             A::TreeExtendUp => self.core.fs_tree_extend_up(),

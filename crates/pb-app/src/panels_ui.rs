@@ -23,18 +23,31 @@ use std::path::PathBuf;
 const EDGE: f32 = 24.0;
 /// The shared panel corner radius (SwiftUI `panelBackground(cornerRadius: 12)`).
 const PANEL_RADIUS: f32 = 12.0;
-/// Panel body opacity over the photo — legible but lets the image faintly through
-/// (SwiftUI `.regularMaterial` at the default 0.92 panel opacity; egui has no blur, so
-/// this is flat translucency per ADR-023, kept fairly opaque so text stays crisp).
-const PANEL_ALPHA: u8 = 242;
 /// Help panel fixed width (SwiftUI `width: 520`).
 const HELP_WIDTH: f32 = 520.0;
 /// Inspector default/min width (SwiftUI `inspectorWidth` default 360).
 const INSPECTOR_WIDTH: f32 = 360.0;
 /// Folder-tree default/min width (SwiftUI `treeWidth` default 280).
 const TREE_WIDTH: f32 = 280.0;
-/// Inspector pair-row label column width (SwiftUI `.frame(width: 116)`).
-const PAIR_LABEL_W: f32 = 116.0;
+/// Inspector pair-row label column width. Wider than SwiftUI's 116 so long EXIF field names
+/// (PhotographicSensitivity, FocalLengthIn35mmFilm, DateTimeDigitized…) fit on one line before
+/// wrapping — values are mostly short or extreme-and-wrapping anyway, so the label gets the
+/// room. The smaller 13px label helps too.
+const PAIR_LABEL_W: f32 = 156.0;
+/// Inspector Details type size — the folder-tree name size (13) so the metadata table stays
+/// dense and long values wrap less; bold spans (filename / section titles) get a hair more.
+const DETAIL_SIZE: f32 = 13.0;
+const DETAIL_HEADER_SIZE: f32 = 13.5;
+/// Help panel metrics: descriptions + section headings at the title size (compact), keycaps a
+/// touch smaller. Rows are a fixed height with tight spacing so the table doesn't sprawl.
+const HELP_TEXT_SIZE: f32 = 13.5;
+const HELP_KEY_SIZE: f32 = 12.0;
+const HELP_ROW_H: f32 = 23.0;
+const HELP_KEYCAP_H: f32 = 18.0;
+const HELP_SECTION_H: f32 = 24.0;
+/// Small left pad for help text (section headings + descriptions) inside the content box so
+/// they don't jam against the section bar's left edge — applied equally so they stay aligned.
+const HELP_TEXT_PAD: f32 = 4.0;
 /// Tree indent per depth level + base leading (SwiftUI `depth * 14 + 10`).
 const TREE_INDENT: f32 = 14.0;
 const TREE_BASE_INDENT: f32 = 10.0;
@@ -84,6 +97,12 @@ pub struct PanelFrame {
     pub inspector: Option<InspectorFrame>,
     pub tree: Option<TreeFrame>,
     pub dark: bool,
+    /// The panel surface alpha (0–255), from Settings ▸ Appearance ▸ *Info panel opacity*
+    /// (`info_opacity` — the old HUD opacity). The winit shell has no separate `panel_opacity`
+    /// slider (that field is macOS-only), and the CPU HUD's winit panels used `info_opacity`
+    /// too, so this restores that behavior *and* makes the existing slider actually move these
+    /// panels. egui alpha is linear, so no material-style remap is needed.
+    pub panel_alpha: u8,
 }
 
 impl PanelFrame {
@@ -102,23 +121,31 @@ impl PanelFrame {
             inspector,
             tree,
             dark: core.hud_dark,
+            panel_alpha: opacity_to_alpha(core.settings.info_opacity),
         }
     }
+}
+
+/// Map an opacity percentage (0–100) to a 0–255 alpha — straight linear, since egui just
+/// alpha-blends (no frosted material to compensate for).
+fn opacity_to_alpha(opacity: u8) -> u8 {
+    ((opacity.min(100) as f32 / 100.0) * 255.0).round() as u8
 }
 
 /// Lay out the open panels into `ctx`, collecting interactions into `actions`.
 pub fn build(ctx: &egui::Context, frame: &PanelFrame, actions: &mut Vec<PanelAction>) {
     let p = Palette::new(frame.dark);
+    let alpha = frame.panel_alpha;
     // The tree (top-left) and Inspector (top-right) can coexist; Help (centered) is
     // topmost — draw it last so it sits above the others (SwiftUI z-order).
     if let Some(tree) = &frame.tree {
-        tree_panel(ctx, &p, tree, actions);
+        tree_panel(ctx, &p, alpha, tree, actions);
     }
     if let Some(insp) = &frame.inspector {
-        inspector_panel(ctx, &p, insp, actions);
+        inspector_panel(ctx, &p, alpha, insp, actions);
     }
     if let Some(help) = &frame.help {
-        help_panel(ctx, &p, help, actions);
+        help_panel(ctx, &p, alpha, help, actions);
     }
 }
 
@@ -136,15 +163,15 @@ fn panel_surface(p: &Palette) -> Color32 {
 }
 
 /// The translucent panel surface (fill + hairline border + rounded corners + shadow),
-/// matching SwiftUI `panelBackground`.
-fn panel_frame(p: &Palette) -> egui::Frame {
+/// matching SwiftUI `panelBackground`. `alpha` is the user's *Panel opacity* setting.
+fn panel_frame(p: &Palette, alpha: u8) -> egui::Frame {
     let fill = panel_surface(p);
     egui::Frame::none()
         .fill(Color32::from_rgba_unmultiplied(
             fill.r(),
             fill.g(),
             fill.b(),
-            PANEL_ALPHA,
+            alpha,
         ))
         .stroke(Stroke::new(0.5, separator(p)))
         .rounding(Rounding::same(PANEL_RADIUS))
@@ -424,7 +451,13 @@ fn scroll_body<R>(
 
 // ── Help panel ───────────────────────────────────────────────────────────────
 
-fn help_panel(ctx: &egui::Context, p: &Palette, help: &HelpPanel, actions: &mut Vec<PanelAction>) {
+fn help_panel(
+    ctx: &egui::Context,
+    p: &Palette,
+    alpha: u8,
+    help: &HelpPanel,
+    actions: &mut Vec<PanelAction>,
+) {
     let max_h = panel_max_height(ctx, 220.0);
     egui::Window::new("pb_help")
         .title_bar(false)
@@ -432,7 +465,7 @@ fn help_panel(ctx: &egui::Context, p: &Palette, help: &HelpPanel, actions: &mut 
         .collapsible(false)
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
         .max_height(max_h)
-        .frame(panel_frame(p))
+        .frame(panel_frame(p, alpha))
         .show(ctx, |ui| {
             ui.set_width(HELP_WIDTH);
             ui.set_max_width(HELP_WIDTH);
@@ -446,7 +479,7 @@ fn help_panel(ctx: &egui::Context, p: &Palette, help: &HelpPanel, actions: &mut 
                 egui::Frame::none()
                     .inner_margin(egui::Margin::symmetric(18.0, 14.0))
                     .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 20.0;
+                        ui.spacing_mut().item_spacing.y = 14.0;
                         for section in &help.sections {
                             help_section(ui, p, section);
                         }
@@ -457,28 +490,36 @@ fn help_panel(ctx: &egui::Context, p: &Palette, help: &HelpPanel, actions: &mut 
 
 fn help_section(ui: &mut egui::Ui, p: &Palette, section: &pb_app_core::panels::HelpSection) {
     ui.vertical(|ui| {
-        ui.spacing_mut().item_spacing.y = 9.0;
-        // Section heading over a faint tint bar.
-        egui::Frame::none()
-            .fill(quaternary(p))
-            .rounding(Rounding::same(6.0))
-            .inner_margin(egui::Margin::symmetric(8.0, 4.0))
-            .show(ui, |ui| {
-                ui.label(
-                    RichText::new(&section.title)
-                        .font(FontId::new(14.0, FontFamily::Name(pb_ui::SEMIBOLD.into())))
-                        .color(p.text),
-                );
-            });
-        // Two balanced columns (SwiftUI splits column-major; a simple even split reads the
-        // same at this size). Column width is derived from the fixed panel width, NOT
-        // `available_width` — inside an auto-sizing `Window` the latter is unbounded, so
-        // a content-driven width would grow the whole panel past HELP_WIDTH.
-        let content_w = HELP_WIDTH - 2.0 * 18.0; // minus the body frame's h-margins
+        ui.spacing_mut().item_spacing.y = 6.0; // heading bar → columns
+                                               // The *real* content width — `available_width` when the body scrolls has the scrollbar
+                                               // already subtracted, so the bar and the right column's keycaps share one right edge
+                                               // (capped at the no-scrollbar width so an unbounded auto-size can't grow the panel).
+        let content_w = ui.available_width().min(HELP_WIDTH - 2.0 * 18.0);
+        // Section heading: a tint bar spanning exactly the content box — left edge on the
+        // descriptions, right edge on the keycaps — with the heading text left-aligned to the
+        // descriptions and v-centered (the systematized `paint_vtext`).
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(content_w, HELP_SECTION_H), egui::Sense::hover());
+        ui.painter()
+            .rect(rect, Rounding::same(6.0), quaternary(p), Stroke::NONE);
+        let hg = galley(
+            ui,
+            &section.title,
+            FontId::new(HELP_TEXT_SIZE, FontFamily::Name(pb_ui::SEMIBOLD.into())),
+            p.text,
+            f32::INFINITY,
+        );
+        paint_vtext(ui, rect.left() + HELP_TEXT_PAD, rect.center().y, &hg);
+        // Two balanced columns (a simple even split reads like SwiftUI's column-major at this
+        // size).
         let col_w = (content_w - 28.0) / 2.0;
         let rows = &section.rows;
         let mid = rows.len().div_ceil(2);
         ui.horizontal_top(|ui| {
+            // Zero egui's inter-item gap so the only spacing is the explicit 28px below — else
+            // the right column (and its right-aligned keycaps) sits `item_spacing.x` past
+            // `content_w` while the section bar stops at `content_w`, so their right edges drift.
+            ui.spacing_mut().item_spacing.x = 0.0;
             help_column(ui, p, &rows[..mid], col_w);
             ui.add_space(28.0);
             help_column(ui, p, &rows[mid..], col_w);
@@ -494,48 +535,117 @@ fn help_column(ui: &mut egui::Ui, p: &Palette, rows: &[(String, String)], width:
         egui::Layout::top_down(egui::Align::Min),
         |ui| {
             ui.set_width(width);
-            ui.spacing_mut().item_spacing.y = 8.0;
+            ui.spacing_mut().item_spacing.y = 2.0; // tight — rows are fixed-height
+            ui.spacing_mut().interact_size.y = 0.0; // drop pb_ui's 32px control-height minimum
             for (label, shortcut) in rows {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(label).color(p.text));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        keycaps(ui, p, shortcut);
-                    });
-                });
+                help_row(ui, p, label, shortcut, width);
             }
         },
     );
 }
 
-/// Render a shortcut string as keycaps: alternatives split on " / ", keys split on space.
-fn keycaps(ui: &mut egui::Ui, p: &Palette, shortcut: &str) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 5.0;
-        let groups: Vec<&str> = shortcut.split(" / ").collect();
-        for (gi, group) in groups.iter().enumerate() {
-            if gi > 0 {
-                ui.label(RichText::new("/").color(panel_secondary(p)));
-            }
-            for key in group.split_whitespace() {
-                keycap(ui, p, key);
-            }
-        }
-    });
+/// One shortcut row, laid out by hand so the description text, the keycaps, and the "/"
+/// separators all share one vertical center: description left (truncated), keycaps
+/// right-aligned.
+fn help_row(ui: &mut egui::Ui, p: &Palette, label: &str, shortcut: &str, col_w: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(col_w, HELP_ROW_H), egui::Sense::hover());
+    let cy = rect.center().y;
+    let keys_w = draw_keycaps(ui, p, shortcut, rect.right(), cy);
+    // Match the section heading's small left pad so headings and descriptions align.
+    let avail = (rect.width() - HELP_TEXT_PAD - keys_w - 8.0).max(20.0);
+    let g = galley(
+        ui,
+        label,
+        FontId::new(HELP_TEXT_SIZE, FontFamily::Proportional),
+        p.text,
+        avail,
+    );
+    paint_vtext(ui, rect.left() + HELP_TEXT_PAD, cy, &g);
 }
 
-fn keycap(ui: &mut egui::Ui, p: &Palette, key: &str) {
-    egui::Frame::none()
-        .fill(quaternary(p))
-        .stroke(Stroke::new(0.5, separator(p)))
-        .rounding(Rounding::same(5.0))
-        .inner_margin(egui::Margin::symmetric(6.0, 2.0))
-        .show(ui, |ui| {
-            ui.label(
-                RichText::new(key)
-                    .font(FontId::new(12.0, FontFamily::Proportional))
-                    .color(p.text),
-            );
-        });
+/// Draw a shortcut's keycaps (and "/" separators) **right-aligned** ending at `right_x`,
+/// v-centered on `cy`. Returns the total width used. A shortcut is groups split on " / ",
+/// each group's keys split on whitespace.
+fn draw_keycaps(ui: &mut egui::Ui, p: &Palette, shortcut: &str, right_x: f32, cy: f32) -> f32 {
+    if shortcut.trim().is_empty() {
+        return 0.0;
+    }
+    // `Some(cap)` = one keycap's text; `None` = a "/" separator between alternatives. A **chord**
+    // (an alternative carrying a modifier — the mac ⇧⌘⌥⌃ glyphs or a Windows "Shift+…") renders
+    // as ONE keycap so the modifier stays glued to its key (⇧R, not ⇧ · R); a modifier-less
+    // alternative (the Pan arrows) splits into one cap per key.
+    let is_chord = |alt: &str| alt.contains(['\u{21e7}', '\u{2318}', '\u{2325}', '\u{2303}', '+']);
+    let mut tokens: Vec<Option<String>> = Vec::new();
+    for (gi, alt) in shortcut.split(" / ").enumerate() {
+        if gi > 0 {
+            tokens.push(None);
+        }
+        let alt = alt.trim();
+        if is_chord(alt) {
+            tokens.push(Some(alt.to_string()));
+        } else {
+            tokens.extend(alt.split_whitespace().map(|k| Some(k.to_string())));
+        }
+    }
+    let gap = 5.0;
+    let key_font = FontId::new(HELP_KEY_SIZE, FontFamily::Proportional);
+    let (bg, key_col) = badge_colors(p);
+    let text_w = |ui: &egui::Ui, s: &str| {
+        galley(ui, s, key_font.clone(), Color32::PLACEHOLDER, f32::INFINITY)
+            .size()
+            .x
+    };
+    let widths: Vec<f32> = tokens
+        .iter()
+        .map(|t| match t {
+            Some(cap) => text_w(ui, cap) + 14.0,
+            None => text_w(ui, "/") + 2.0,
+        })
+        .collect();
+    let total = widths.iter().sum::<f32>() + gap * tokens.len().saturating_sub(1) as f32;
+    let mut x = right_x - total;
+    for (t, w) in tokens.iter().zip(&widths) {
+        match t {
+            Some(cap) => {
+                let rect = egui::Rect::from_min_size(
+                    egui::pos2(x, cy - HELP_KEYCAP_H / 2.0),
+                    egui::vec2(*w, HELP_KEYCAP_H),
+                );
+                ui.painter().rect(
+                    rect,
+                    Rounding::same(5.0),
+                    bg,
+                    Stroke::new(0.5, separator(p)),
+                );
+                let g = galley(ui, cap, key_font.clone(), key_col, f32::INFINITY);
+                paint_vtext(ui, rect.center().x - g.size().x / 2.0, cy, &g);
+            }
+            None => {
+                let g = galley(ui, "/", key_font.clone(), panel_secondary(p), f32::INFINITY);
+                paint_vtext(ui, x + (*w - g.size().x) / 2.0, cy, &g);
+            }
+        }
+        x += w + gap;
+    }
+    total
+}
+
+/// A dark, translucent badge fill + a bright label — the high-contrast look shared by the
+/// folder-tree count pills and the help keycaps (the mid-gray `quaternary` washes out over a
+/// photo). Heavier alpha in light mode: a translucent dark fill over a light panel lands far
+/// lighter than its alpha (linear-light compositing).
+fn badge_colors(p: &Palette) -> (Color32, Color32) {
+    if p.dark {
+        (
+            Color32::from_rgba_unmultiplied(0, 0, 0, 130),
+            Color32::from_gray(228),
+        )
+    } else {
+        (
+            Color32::from_rgba_unmultiplied(0, 0, 0, 210),
+            Color32::from_gray(250),
+        )
+    }
 }
 
 // ── Inspector panel ──────────────────────────────────────────────────────────
@@ -543,6 +653,7 @@ fn keycap(ui: &mut egui::Ui, p: &Palette, key: &str) {
 fn inspector_panel(
     ctx: &egui::Context,
     p: &Palette,
+    alpha: u8,
     insp: &InspectorFrame,
     actions: &mut Vec<PanelAction>,
 ) {
@@ -553,7 +664,7 @@ fn inspector_panel(
         .collapsible(false)
         .anchor(Align2::RIGHT_TOP, [-EDGE, EDGE])
         .max_height(max_h)
-        .frame(panel_frame(p))
+        .frame(panel_frame(p, alpha))
         .show(ctx, |ui| {
             ui.set_width(INSPECTOR_WIDTH);
             ui.set_max_width(INSPECTOR_WIDTH);
@@ -604,22 +715,27 @@ fn inspector_tabs(
     current: InspectorTab,
     actions: &mut Vec<PanelAction>,
 ) {
+    // Icons roughly match the SwiftUI SF Symbols (info.circle / text.viewfinder / sparkles).
     let tabs = [
-        (InspectorTab::Details, "Details"),
-        (InspectorTab::Text, "Text"),
-        (InspectorTab::Describe, "Describe"),
+        (InspectorTab::Details, "Details", Icon::Info),
+        (InspectorTab::Text, "Text", Icon::Text),
+        (InspectorTab::Describe, "Describe", Icon::Sparkles),
     ];
     let font = FontId::new(12.5, FontFamily::Proportional);
-    let seg_pad = 11.0;
+    let seg_pad = 10.0;
+    let icon_sz = 12.5;
+    let icon_gap = 5.0;
     let track_h = 24.0;
-    // Each segment sizes to its label; clamp the whole track so it never runs into the
-    // right-hand controls.
+    // Each segment sizes to its icon + gap + label; clamp the whole track so it never runs
+    // into the right-hand controls.
     let widths: Vec<f32> = tabs
         .iter()
-        .map(|(_, l)| {
-            galley(ui, l, font.clone(), Color32::PLACEHOLDER, f32::INFINITY)
-                .size()
-                .x
+        .map(|(_, l, _)| {
+            icon_sz
+                + icon_gap
+                + galley(ui, l, font.clone(), Color32::PLACEHOLDER, f32::INFINITY)
+                    .size()
+                    .x
                 + seg_pad * 2.0
         })
         .collect();
@@ -633,7 +749,7 @@ fn inspector_tabs(
     ui.painter()
         .rect(track, Rounding::same(7.0), quaternary(p), Stroke::NONE);
     let mut x = track_left + 2.0;
-    for ((tab, label), w) in tabs.iter().zip(widths) {
+    for ((tab, label, icon), w) in tabs.iter().zip(widths) {
         let seg = egui::Rect::from_min_size(
             egui::pos2(x, track.top() + 2.0),
             egui::vec2(w, track_h - 4.0),
@@ -652,8 +768,12 @@ fn inspector_tabs(
         } else {
             panel_secondary(p)
         };
+        // Center the [icon · gap · label] group in the segment; both share `cy`.
         let g = galley(ui, label, font.clone(), color, f32::INFINITY);
-        paint_vtext(ui, seg.center().x - g.size().x / 2.0, cy, &g);
+        let group_w = icon_sz + icon_gap + g.size().x;
+        let gx = seg.center().x - group_w / 2.0;
+        pb_ui::icon::paint_tinted(ui, sq(gx + icon_sz / 2.0, cy, icon_sz), *icon, color);
+        paint_vtext(ui, gx + icon_sz + icon_gap, cy, &g);
         if resp.clicked() && !selected {
             actions.push(PanelAction::SelectTab(*tab));
         }
@@ -682,25 +802,48 @@ fn details_body(ui: &mut egui::Ui, p: &Palette, d: &DetailsPanel) {
         ui.label(RichText::new("Nothing to show").color(panel_secondary(p)));
         return;
     }
+    // Pin the content width so long EXIF values (e.g. the Flash string) **wrap** inside the
+    // panel instead of widening the whole Window — egui grows an auto-sized Window to fit a
+    // non-wrapping row, which is what blew the panel out to full width. Everything below
+    // wraps at this width. (Leaves room for the vertical scrollbar the tab usually shows.)
+    let content_w = INSPECTOR_WIDTH - 2.0 * 16.0 - 8.0;
+    ui.set_width(content_w);
     for row in &d.rows {
         match row {
             DetailRow::Span { text, bold } => {
                 let font = if *bold {
-                    FontId::new(14.0, FontFamily::Name(pb_ui::SEMIBOLD.into()))
+                    FontId::new(DETAIL_HEADER_SIZE, FontFamily::Name(pb_ui::SEMIBOLD.into()))
                 } else {
-                    FontId::new(14.0, FontFamily::Proportional)
+                    FontId::new(DETAIL_SIZE, FontFamily::Proportional)
                 };
                 ui.add(
-                    egui::Label::new(RichText::new(text).font(font).color(p.text)).selectable(true),
+                    egui::Label::new(RichText::new(text).font(font).color(p.text))
+                        .wrap()
+                        .selectable(true),
                 );
             }
             DetailRow::Pair { label, value } => {
                 ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    // Fixed leading label column; a long label (ComponentsConfiguration…)
+                    // wraps within it rather than shoving the value column right.
                     ui.allocate_ui(egui::vec2(PAIR_LABEL_W, 0.0), |ui| {
                         ui.set_width(PAIR_LABEL_W);
-                        ui.label(RichText::new(label).color(panel_secondary(p)));
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(label)
+                                    .size(DETAIL_SIZE)
+                                    .color(panel_secondary(p)),
+                            )
+                            .wrap(),
+                        );
                     });
-                    ui.add(egui::Label::new(RichText::new(value).color(p.text)).selectable(true));
+                    // Value fills the remaining width and wraps.
+                    ui.add(
+                        egui::Label::new(RichText::new(value).size(DETAIL_SIZE).color(p.text))
+                            .wrap()
+                            .selectable(true),
+                    );
                 });
             }
         }
@@ -744,42 +887,94 @@ fn describe_body(
     d: &DescribePanel,
     actions: &mut Vec<PanelAction>,
 ) {
+    // Empty deck → nothing (no header over a photo-less state).
+    if matches!(d.body, DescribeBody::NoPhoto) {
+        return;
+    }
+    // A stable "Description" heading carrying the **Ask** button (matches the SwiftUI kind-0
+    // header): always present so the Ask affordance doesn't jump as the body state changes.
+    describe_header(ui, p, actions);
     match &d.body {
         DescribeBody::NoPhoto => {}
         DescribeBody::Idle => {
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new("Press D to describe this image.").color(panel_secondary(p)),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add(egui::Button::new(RichText::new("Ask").color(p.accent)).frame(false))
-                        .clicked()
-                    {
-                        actions.push(PanelAction::Ask);
-                    }
-                });
-            });
+            ui.label(RichText::new("Press D to describe this image.").color(panel_secondary(p)));
         }
         DescribeBody::Busy => {
             ui.label(RichText::new("Describing…").color(panel_secondary(p)));
         }
         DescribeBody::Ready(text) => {
-            // TODO(egui-panels): block-level Markdown to match the SwiftUI MarkdownBlocksView;
-            // wrapped selectable text for now.
-            ui.add(egui::Label::new(RichText::new(text).color(p.text)).selectable(true));
+            // Render the AI text as block-level Markdown (headings / lists / emphasis), like
+            // the SwiftUI Describe tab. Wrap at the pinned content width so nothing widens the
+            // panel (the Details-tab lesson).
+            let wrap_w = INSPECTOR_WIDTH - 2.0 * 16.0 - 8.0;
+            crate::md::render(ui, p, text, wrap_w);
         }
         DescribeBody::Error(text) => {
             ui.add(
-                egui::Label::new(RichText::new(text).color(panel_secondary(p))).selectable(true),
+                egui::Label::new(RichText::new(text).color(panel_secondary(p)))
+                    .wrap()
+                    .selectable(true),
             );
         }
     }
 }
 
+/// The Describe tab's "Description" heading + right-aligned **Ask** button (a
+/// message-question icon + "Ask" in the accent). Clicking opens the ask-a-question dialog
+/// (`Action::AskImage`). Mirrors the SwiftUI header's Ask affordance. Laid out **by hand**
+/// (like the panel headers) so the 14pt heading, the 13pt "Ask", and the icon all sit on one
+/// centerline — egui's `horizontal` won't center mixed sizes + an icon.
+fn describe_header(ui: &mut egui::Ui, p: &Palette, actions: &mut Vec<PanelAction>) {
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), egui::Sense::hover());
+    let cy = rect.center().y;
+    let title = galley(
+        ui,
+        "Description",
+        FontId::new(14.0, FontFamily::Name(pb_ui::SEMIBOLD.into())),
+        p.text,
+        f32::INFINITY,
+    );
+    paint_vtext(ui, rect.left(), cy, &title);
+    // Ask affordance on the right: [icon · "Ask"], both accent, one click target.
+    let ask = galley(
+        ui,
+        "Ask",
+        FontId::new(13.0, FontFamily::Proportional),
+        p.accent,
+        f32::INFINITY,
+    );
+    let icon_sz = 13.0;
+    let gap = 5.0;
+    let group_w = icon_sz + gap + ask.size().x;
+    let gx = rect.right() - group_w;
+    pb_ui::icon::paint(
+        ui,
+        sq(gx + icon_sz / 2.0, cy, icon_sz),
+        Icon::MessageQuestion,
+        Tone::Accent,
+        p,
+    );
+    paint_vtext(ui, gx + icon_sz + gap, cy, &ask);
+    let hit = egui::Rect::from_min_max(egui::pos2(gx - 3.0, rect.top()), rect.right_bottom());
+    let resp = ui.interact(hit, ui.id().with("ask_btn"), egui::Sense::click());
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if resp.clicked() {
+        actions.push(PanelAction::Ask);
+    }
+}
+
 // ── Folder-tree panel ────────────────────────────────────────────────────────
 
-fn tree_panel(ctx: &egui::Context, p: &Palette, tree: &TreeFrame, actions: &mut Vec<PanelAction>) {
+fn tree_panel(
+    ctx: &egui::Context,
+    p: &Palette,
+    alpha: u8,
+    tree: &TreeFrame,
+    actions: &mut Vec<PanelAction>,
+) {
     let max_h = panel_max_height(ctx, 200.0);
     egui::Window::new("pb_tree")
         .title_bar(false)
@@ -787,7 +982,7 @@ fn tree_panel(ctx: &egui::Context, p: &Palette, tree: &TreeFrame, actions: &mut 
         .collapsible(false)
         .anchor(Align2::LEFT_TOP, [EDGE, EDGE])
         .max_height(max_h)
-        .frame(panel_frame(p))
+        .frame(panel_frame(p, alpha))
         .show(ctx, |ui| {
             ui.set_width(TREE_WIDTH);
             ui.set_max_width(TREE_WIDTH);
@@ -956,23 +1151,8 @@ fn tree_row(ui: &mut egui::Ui, p: &Palette, row: &fs_tree::Row, actions: &mut Ve
 /// `.quaternary` look). Returns its width so the caller reserves the name's room.
 fn tree_pill(ui: &egui::Ui, p: &Palette, count: u64, right_x: f32, cy: f32) -> f32 {
     let num = count.to_string();
-    // A dark, translucent capsule with a bright number in *both* themes (over a light panel
-    // a low-alpha dark fill only reaches mid-gray and the number washes out — hence the
-    // heavier light-mode alpha).
-    let (bg, num_color) = if p.dark {
-        (
-            Color32::from_rgba_unmultiplied(0, 0, 0, 130),
-            Color32::from_gray(228),
-        )
-    } else {
-        // The composite is in linear light, where a translucent dark fill over a light panel
-        // lands far lighter than its alpha suggests — so light mode needs a heavy alpha to
-        // read as a genuinely dark capsule against the bright number.
-        (
-            Color32::from_rgba_unmultiplied(0, 0, 0, 230),
-            Color32::from_gray(250),
-        )
-    };
+    // The shared dark-translucent badge look (same as the help keycaps).
+    let (bg, num_color) = badge_colors(p);
     let g = galley(
         ui,
         &num,

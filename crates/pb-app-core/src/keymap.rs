@@ -567,9 +567,10 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         // bind a key in Settings if they want one.
         (Action::CancelScan, vec![]),
         one(Action::SlideshowToggle, "S"),
-        // `[` shortens the interval (faster), `]` lengthens it (slower).
-        one(Action::SlideshowFaster, "["),
-        one(Action::SlideshowSlower, "]"),
+        // Idiomatic bracket pairing (like Photoshop's brush size): `[` = slower (down), `]`
+        // = faster (up).
+        one(Action::SlideshowSlower, "["),
+        one(Action::SlideshowFaster, "]"),
         // Animation playback (on-demand; `P` toggles play/pause). `.`/`,` step a
         // frame forward/back (hold to scrub); they pause playback first.
         one(Action::PlayPause, "P"),

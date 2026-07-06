@@ -1140,6 +1140,19 @@ impl AppCore {
             // the explicit Copy Text / D commands still supersede for responsiveness.
             if self.inspector_panel_visible() && self.current.is_some() && !flying {
                 match self.panels.inspector {
+                    // Warm the Details EXIF for the *displayed* photo. Cheap and safe (unlike
+                    // the OCR/describe scans below): `ensure_exif_cached` is a synchronous
+                    // metadata parse — bytes read + `read_exif_fields`, bytes dropped — no
+                    // full-res decode, no thread, idempotent (returns early when cached). The
+                    // native path needs this explicitly (the HUD path warmed it in
+                    // `show_overlay`, suppressed here); without it the Details tab shows only
+                    // the basic rows until a Describe round-trip warms the cache as a side
+                    // effect. `!flying` keeps it off the fast-flick hot path.
+                    Some(InspectorTab::Details) => {
+                        if let Some(item) = self.displayed_item {
+                            self.ensure_exif_cached(item);
+                        }
+                    }
                     Some(InspectorTab::Text) if self.text_scan.is_none() => self.ensure_text_scan(),
                     Some(InspectorTab::Describe)
                         if self.settings.describe_auto && self.describe_scan.is_none() =>
@@ -2405,7 +2418,8 @@ impl AppCore {
                 }
             }
         }
-        self.playlist = Playlist::new(self.source.len(), 0).with_cursor(start);
+        self.playlist = Playlist::new(self.source.len(), crate::engine::fresh_shuffle_seed())
+            .with_cursor(start);
         // Re-resolve the compare pin by identity against the new source: it survives a
         // same-deck rebuild (delete-advance, recursive toggle — same paths, new
         // indices); a genuinely new deck can't match, so the pin clears silently. The
@@ -3136,6 +3150,12 @@ impl AppCore {
         } else if !scale_changed {
             self.draw();
         }
+
+        // Re-pull the native panels: their opacity (and theme) come from settings but aren't
+        // in the panel snapshot, so without this a *natively* presented tree/inspector (the
+        // egui overlay on winit; the SwiftUI panels on mac) wouldn't pick up a Panel-opacity
+        // change until the next unrelated repaint.
+        self.emit_panels_changed();
     }
 
     /// The keybindings help table: a title row, then every hotkey → action as a
@@ -3198,8 +3218,8 @@ impl AppCore {
                     row("Previous random", sc(Action::RandomPrev)),
                     row("Slideshow", sc(Action::SlideshowToggle)),
                     row(
-                        "Slideshow faster / slower",
-                        two(Action::SlideshowFaster, Action::SlideshowSlower),
+                        "Slideshow slower / faster",
+                        two(Action::SlideshowSlower, Action::SlideshowFaster),
                     ),
                 ],
             ),
@@ -3216,8 +3236,8 @@ impl AppCore {
                         two(Action::RotateCw, Action::RotateCcw),
                     ),
                     row(
-                        "Pin / flip compare",
-                        two(Action::ComparePin, Action::CompareToggle),
+                        "Flip / pin compare",
+                        two(Action::CompareToggle, Action::ComparePin),
                     ),
                     row("Fullscreen", sc(Action::Fullscreen)),
                 ],
@@ -6423,6 +6443,31 @@ mod tests {
         let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(vec![dir.join("b.png")]));
         core.rebuild_playlist(source, dir.join("x.zip"), None, false, 0);
         assert_eq!(core.settings.last_folder.as_deref(), Some(dir.as_path()));
+    }
+
+    #[test]
+    fn rebuild_playlist_reseeds_the_shuffle_so_repeated_opens_diverge() {
+        // Regression test: `rebuild_playlist` used to reseed the random walk with the
+        // hardcoded literal `0`, so opening a deck of the same size produced the exact
+        // same "random" order every single time (same launch, next launch, always).
+        // Two independent opens of an equally-sized deck must land on different
+        // shuffle permutations.
+        let mut core = test_core();
+        let dir = std::env::temp_dir();
+        let paths: Vec<PathBuf> = (0..32).map(|i| dir.join(format!("{i}.png"))).collect();
+
+        let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(paths.clone()));
+        core.rebuild_playlist(source, dir.clone(), Some(dir.clone()), true, 0);
+        let first = core.playlist.shuffle().clone();
+
+        let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(paths));
+        core.rebuild_playlist(source, dir.clone(), Some(dir.clone()), true, 0);
+        let second = core.playlist.shuffle().clone();
+
+        assert_ne!(
+            first, second,
+            "two opens of the same-size deck must not shuffle identically"
+        );
     }
 
     // --- "Text in image" state machine (task #45): drive `poll_text_scan` with a

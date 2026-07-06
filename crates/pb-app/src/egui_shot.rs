@@ -238,12 +238,15 @@ fn sample_frame(dark: bool, tab: InspectorTab) -> PanelFrame {
                 ],
             },
             HelpSection {
-                title: "Panels".into(),
+                title: "View & Zoom".into(),
                 rows: vec![
-                    ("Keyboard help".into(), "?".into()),
-                    ("Folder tree".into(), "⇧F".into()),
-                    ("Info panel".into(), "⇧I".into()),
-                    ("Hide panels".into(), "Tab".into()),
+                    ("Zoom out / in".into(), "- / =".into()),
+                    ("Pan".into(), "\u{2190} \u{2191} \u{2193} \u{2192}".into()),
+                    // Chords (mac thin-space glyphs) — should each render as ONE keycap.
+                    ("Rotate right / left".into(), "R / \u{21e7}\u{2009}R".into()),
+                    ("Flip / pin compare".into(), "Y / \u{21e7}\u{2009}Y".into()),
+                    ("Slideshow slower / faster".into(), "[ / ]".into()),
+                    ("Detailed info panel".into(), "\u{2318}\u{2009}I".into()),
                 ],
             },
         ],
@@ -284,6 +287,37 @@ fn sample_frame(dark: bool, tab: InspectorTab) -> PanelFrame {
                     label: "ISO".into(),
                     value: "64".into(),
                 },
+                // Medium-long labels that should now fit on one line at the wider column.
+                DetailRow::Pair {
+                    label: "DateTimeDigitized".into(),
+                    value: "2005:09:21 13:58:57".into(),
+                },
+                DetailRow::Pair {
+                    label: "MaxApertureValue".into(),
+                    value: "2 EV".into(),
+                },
+                DetailRow::Pair {
+                    label: "ExposureBiasValue".into(),
+                    value: "0 EV".into(),
+                },
+                DetailRow::Pair {
+                    label: "PhotographicSensitivity".into(),
+                    value: "64".into(),
+                },
+                DetailRow::Pair {
+                    label: "FocalLengthIn35mmFilm".into(),
+                    value: "24 mm".into(),
+                },
+                // A long value (wraps) + a long label (wraps in its column) — the #3 blow-out.
+                DetailRow::Pair {
+                    label: "Flash".into(),
+                    value: "not fired, no return light detection function, auto mode 0 (unknown)"
+                        .into(),
+                },
+                DetailRow::Pair {
+                    label: "ComponentsConfiguration".into(),
+                    value: "YCbCr".into(),
+                },
             ],
         }),
         InspectorTab::Text => InspectorSnapshot::Text(TextPanel {
@@ -298,8 +332,14 @@ fn sample_frame(dark: bool, tab: InspectorTab) -> PanelFrame {
         }),
         InspectorTab::Describe => InspectorSnapshot::Describe(DescribePanel {
             body: DescribeBody::Ready(
-                "A bright, modern condo living room with floor-to-ceiling windows \
-                 overlooking the city. A grey sectional sofa faces a wall-mounted TV."
+                "Here are some interesting details from the image:\n\n\
+                 1. **Bed Design**: The bed features a unique black headboard with rectangular \
+                 panels, creating a geometric and modern look.\n\
+                 2. **Color Contrast**: The yellow pillow adds a vibrant pop of color against \
+                 the neutral tones of the bedding (gray with floral patterns).\n\
+                 3. **Lighting**: A tall floor lamp with an arched neck provides warm lighting \
+                 to the room, enhancing its cozy atmosphere.\n\n\
+                 These details collectively create a balanced, cozy bedroom design."
                     .into(),
             ),
         }),
@@ -373,5 +413,6 @@ fn sample_frame(dark: bool, tab: InspectorTab) -> PanelFrame {
         inspector: Some(inspector),
         tree: Some(tree),
         dark,
+        panel_alpha: 242, // ≈95% — the shot previews the panels near-opaque
     }
 }

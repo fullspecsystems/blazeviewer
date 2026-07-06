@@ -56,6 +56,12 @@ pub enum Icon {
     Trash,
     Folder,
     FolderOpen,
+    /// Recognized-text / OCR (the Inspector Text tab — matches SF `text.viewfinder`).
+    Text,
+    /// AI description (the Inspector Describe tab — matches SF `sparkles`).
+    Sparkles,
+    /// Ask-a-question (the Describe tab's Ask button — matches SF `questionmark.bubble`).
+    MessageQuestion,
 }
 
 /// A **theme-aware** icon color. `Neutral` is the quiet default (a gray that varies
@@ -108,6 +114,9 @@ fn svg(icon: Icon, family: Family) -> &'static str {
         Icon::Trash => glyph!("trash-can"),
         Icon::Folder => glyph!("folder"),
         Icon::FolderOpen => glyph!("folder-open"),
+        Icon::Text => glyph!("text"),
+        Icon::Sparkles => glyph!("sparkles"),
+        Icon::MessageQuestion => glyph!("message-question"),
     }
 }
 
@@ -180,11 +189,18 @@ pub fn image(ui: &mut egui::Ui, icon: Icon, size: f32, tone: Tone, p: &Palette) 
 /// Complements [`image`], which adds a flowing widget. Draws nothing new to the layout —
 /// pure painting — so the caller owns the geometry (and thus vertical centering).
 pub fn paint(ui: &egui::Ui, rect: egui::Rect, icon: Icon, tone: Tone, p: &Palette) {
+    paint_tinted(ui, rect, icon, tone_color(tone, p));
+}
+
+/// Like [`paint`], but with an **explicit** tint color — for callers whose color isn't one
+/// of the semantic [`Tone`]s (e.g. an inspector tab's icon that goes white when selected and
+/// panel-secondary otherwise).
+pub fn paint_tinted(ui: &egui::Ui, rect: egui::Rect, icon: Icon, tint: Color32) {
     let side = rect.width().max(rect.height());
     let px = (side * ui.ctx().pixels_per_point()).round().max(1.0) as u32;
     let tex = texture(ui.ctx(), icon, ACTIVE_FAMILY, px);
     let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-    ui.painter().image(tex.id(), rect, uv, tone_color(tone, p));
+    ui.painter().image(tex.id(), rect, uv, tint);
 }
 
 /// An icon **inline** with a single line of text — sized to the body text. Add it before
@@ -236,6 +252,9 @@ mod tests {
             Icon::Trash,
             Icon::Folder,
             Icon::FolderOpen,
+            Icon::Text,
+            Icon::Sparkles,
+            Icon::MessageQuestion,
         ] {
             for family in [Family::Solid, Family::Regular] {
                 let img = rasterize_white(svg(icon, family), 32).expect("icon should rasterize");

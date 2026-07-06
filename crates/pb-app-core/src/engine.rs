@@ -7,8 +7,9 @@
 //! few of these (the ones it shares) via `pb_app_core::engine::*`.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pb_decode::{decode_named_bytes, DecodeError, DecodedImage, FitBox, PixelFormat};
 use pb_render::{Rotation, ScaleMode};
@@ -17,6 +18,22 @@ use pb_source::PhotoSource;
 use crate::meta::PhotoMeta;
 use crate::settings::ScaleModePref;
 use crate::{Action, Nav};
+
+/// A fresh, non-reproducible seed for a new [`pb_core::Playlist`]'s shuffle order.
+///
+/// `pb-core` stays pure/dependency-free (no `rand` crate, no clock) so its shuffle is
+/// a deterministic function of `(len, seed)` — the seed has to come from the caller.
+/// Mixes wall-clock nanos with a process-local counter so two decks opened in the
+/// same clock tick (e.g. rapid folder switches) still diverge.
+pub fn fresh_shuffle_seed() -> u64 {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+    nanos ^ count.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+}
 
 /// VRAM budget for the resident texture ring (~1.5 GB → ~16–32 fit-size slots on
 /// a 7680-wide display, far more on smaller ones). Capacity is clamped to [4, 64].
@@ -493,6 +510,19 @@ mod tests {
         // Multibyte values are truncated on char boundaries, not bytes.
         let out = truncate_exif_value(&"é".repeat(100));
         assert_eq!(out.chars().count(), EXIF_VALUE_MAX + 1);
+    }
+
+    #[test]
+    fn fresh_shuffle_seed_varies_across_calls() {
+        // Regression test: the shuffle seed passed into `Playlist::new` used to be a
+        // hardcoded `0` at every real call site, making "random" navigation produce
+        // the exact same order every launch for a given deck size. Successive calls
+        // (even within the same clock tick) must diverge.
+        let seeds: Vec<u64> = (0..64).map(|_| fresh_shuffle_seed()).collect();
+        assert!(
+            seeds.windows(2).all(|w| w[0] != w[1]),
+            "consecutive seeds must differ: {seeds:?}"
+        );
     }
 
     #[test]

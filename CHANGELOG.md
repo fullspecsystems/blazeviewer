@@ -130,6 +130,8 @@ with any pre-release suffix carried only by the tag.
   step between the archive's sibling folders.
 
 ### Changed
+- **Slideshow speed keys are now idiomatic:** `[` slows the slideshow down and `]` speeds it
+  up (they were reversed). The Keyboard Shortcuts help lists the pair in keyboard order.
 - **All transient notifications are now native on macOS.** Every toast — Copied, rotate,
   Saved rotation, Pinned/Unpinned, muted/unmuted, deleted, "Scan stopped", "No photos in
   *Foo*", "Recursive folders: on", … — is one consistent **bottom-center SwiftUI pill**
@@ -154,6 +156,10 @@ with any pre-release suffix carried only by the tag.
   buttons.
 
 ### Fixed
+- **Random photo ([enter]) is actually random now.** The shuffle order was seeded with a fixed
+  constant, so opening the same folder always produced the exact same "random" sequence — every
+  launch, every day. Each open now draws a fresh seed, so the order varies from one open to the
+  next as intended.
 - **Flying through photos stays smooth with the Inspector's Text or Describe tab open.** OCR
   and AI-description scans were being kicked on *every* photo you flew past — an OCR thread or a
   describe network round-trip per frame — competing with decode and stuttering the flight. They
