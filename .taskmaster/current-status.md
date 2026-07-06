@@ -1,97 +1,96 @@
 # PhotoBlaze — Current Status (session handoff)
 
-_Last updated: 2026-07-05 (night). **The macOS rich-panel migration (task #54 / ADR-023) is
-COMPLETE and owner-approved for 1.0.** All green: **563 tests**, clippy clean (workspace +
-aarch64), Swift host builds. The remaining track is **Windows / egui parity (Phase 4)** — this
-doc is the handoff for it._
+_Last updated: 2026-07-06. **The macOS rich-panel migration (task #54 / ADR-023) is COMPLETE and
+owner-approved.** **Windows / egui parity (Phase 4) is now LARGELY DONE too** — the egui-over-wgpu
+main-window seam is built and the tree, inspector, help panel, and info line are all ported. This
+doc is the handoff for the remaining parity items (next up: the scan UI)._
+
+Latest on `main`: `1794d25` (egui info readout + ducking). Prior Phase-4 commits: `1e90eb1`
+(the panels), `53807a7` (inspector + help polish, markdown, opacity, shortcuts), `159f764`
+(slideshow-key revert). All pushed.
 
 ## Big picture
 
 Two shells drive one shared, platform-neutral core:
-- **`mac/` SwiftUI host** (the shipping macOS app) — drives the Rust engine over swift-bridge.
-  **Every on-image overlay is now native SwiftUI**; nothing is left on the CPU HUD rasterizer.
-- **`pb-app` winit shell** (the shipping Windows app; also runs on macOS via wgpu-Metal) — the
-  main window is **custom wgpu + the CPU-rasterized HUD** for on-image overlays, plus **egui in a
-  second window** (`dialog.rs`) for Settings / About / Confirm / Message / Password.
+- **`mac/` SwiftUI host** (the shipping macOS app) — every on-image overlay is native SwiftUI.
+- **`pb-app` winit shell** (the shipping Windows app; also runs on macOS via wgpu-Metal) — the main
+  window is **custom wgpu** for the photo, **plus an egui overlay** for the rich panels (tree /
+  inspector / help / info line), **plus egui in a second window** (`dialog.rs`) for Settings /
+  About / dialogs. Only the **ephemeral toasts + play hint** are still CPU-HUD on winit.
 
-The core (`pb-app-core`, `pb-core`, `fs_tree.rs`, `panels.rs`, settings) is **100% shared and
-shell-neutral**. The shell seam is the `native_*` flags in `app_core.rs`: when a flag is set the
-core suppresses HUD rasterization and exposes the data via `&self` FFI accessors instead; the
-SwiftUI host reads them. The winit shell leaves the flags false and keeps the HUD.
+The core (`pb-app-core`, `pb-core`, `fs_tree.rs`, `panels.rs`, settings) is 100% shared. The shell
+seam is the `native_*` flags in `app_core.rs`: when set, the core suppresses HUD rasterization and
+exposes the data via `&self` accessors. **On winit these are now true:** `native_help`,
+`native_inspector`, `native_tree`, `native_info`. Still false (CPU HUD): `native_toast`,
+`native_play`, `native_open`.
 
-## What's fully DONE (macOS, on `main`)
+## The egui-over-wgpu seam (the hard part — DONE)
 
-Native SwiftUI, matching/exceeding the old HUD: **welcome screen, Finder-style folder tree**
-(chevron browse ≠ open, `fs_tree.rs`), **tabbed Inspector** (Details/Text/Describe, Markdown,
-copy-all + Ask button), **scan pill** (ambient, cancellable), **unified toasts**, **one-line
-info readout**, and the **play hint** (▶/livephoto pill, fades, hover-to-hold, click-plays).
-Plus this session's polish: shared 24px margin system, width-aware panel↔info-line collision,
-concentric codec badge, **configurable info line** (Settings ▸ Appearance ▸ Image Info: show-by-
-default + Folder/Filename/Resolution/Codec toggles + position), Live-Photo & animated-image
-marks by the codec, "photo"→"image" wording pass, Ask-dialog polish.
+- `pb-app/src/egui_overlay.rs` — an `EguiOverlay` (egui ctx + egui-winit state + egui-wgpu
+  renderer) sharing the **main renderer's** wgpu device/queue, rendering the panels into an
+  offscreen `Rgba8UnormSrgb` texture. **Retained:** re-renders only on `overlay_dirty` /
+  `PanelsChanged` / an egui animation frame — **never per nav frame**.
+- `pb-render` composites that texture into the fp16 scRGB intermediate **before** tone-map
+  (premultiplied blend; `Renderer::set_egui_overlay`). Color-correct on SDR + HDR.
+- `pb-app/src/panels_ui.rs` — all the panels, consuming the shell-neutral `pb_app_core::panels` /
+  `fs_tree` models. `PanelFrame::snapshot(core)` copies the data out (pure), `build()` lays it out
+  and returns `PanelAction`s the shell applies.
+- **Verify headlessly:** `./target/debug/photoblaze --egui-shot [out.png] [--light]
+  [--tab=details|text|describe]` renders the panels to a PNG (screen capture is blocked on this Mac
+  — TCC + borderless surface). `sample_frame` in `egui_shot.rs` holds representative content.
 
-## The drift to close (mac ⇄ winit)
+## What's DONE this session (winit egui)
 
-Everything below is **already in the core**; only the **winit/egui view + Settings UI** lag.
+- **Folder tree** — Finder-style, disclosure chevrons (browse ≠ open), dark count pills, outdented
+  parent row, truncation, current-folder = accent open-folder icon + bold name (no band).
+- **Inspector** — tabbed (Details / Text / Describe) with FA tab icons; Details wraps + 13px +
+  wide label column; **Markdown** in Describe (`md.rs`: headings/lists/bold/code/links; italic →
+  upright); copy-all wired; **Ask** button opens the real `AskImage` dialog.
+- **Help panel** — keyboard shortcuts, keycaps (chords grouped: `⇧R` / `Shift+R` one cap), dark
+  keycap badges, full-width section bars aligned to the keys, correct shortcut order.
+- **Info readout (`i`)** — egui pill, `folder/name · W×H`, Live-Photo / animation (FA `film`)
+  marks, codec badge, **auto-ducks** the tree/inspector, shows independently of the panels.
+- **Settings parity** — the Image Info field toggles (show-by-default + folder/filename/resolution/
+  codec) added to the winit dialog; opacity reads `info_opacity`.
+- **The vertical-centering system** — egui won't center text next to icons, so panels hand-place
+  text via `paint_vtext` (a `TEXT_LIFT` knob calibrated to sub-point) + geometric-drawn icons.
+  This is the backbone of every panel's layout; reuse it.
+- **Core fixes (shared w/ mac):** Details EXIF now warmed on the native path (was only after a
+  Describe round-trip); `fresh_shuffle_seed`; `last_info_snap` + a `native_info` tick block.
 
-**A. Settings UI drift (small — the real 1.0 requirement).** `mac/…/SettingsView.swift` has the
-**Image Info** section; the egui Settings (`dialog.rs`) does **not**. Missing egui rows:
-`show_image_info` + `info_show_folder` / `_filename` / `_resolution` / `_codec` (the
-`info_line_align` position picker is already there). Also: the winit shell (`main.rs`) hardcodes
-`info_line: false` — wire it to `settings.show_image_info` like `new_host` does. The winit HUD
-info line **already honors** the field toggles (`info_line_content` gates each field); it just
-lacks the Settings UI to set them, and shows no live/animated symbol (text-only — could append
-"Live"/"GIF" if wanted).
+## What's LEFT for winit⇄mac parity (priority order)
 
-**B. On-image panel richness (large — optional, post-1.0 candidate).** The winit shell still
-renders the **original HUD** tree/inspector/help/etc. — functional, but the older, pre-redesign,
-less-refined design (no Finder browser, no tabbed inspector, no material look). "Phase 4" =
-bringing these up to the mac's polish **in egui**.
+Owner priority (2026-07-06): **#3 info-line ducking = DONE**. Remaining:
 
-## Answering the owner's Phase-4 questions
-
-- **Start over?** No. The core, models, settings, and `fs_tree`/`panels` are shared and done —
-  only the egui **view layer** is new. `pb-ui` (egui component system: cards, toggles, buttons,
-  slider, icons + a **gallery** example) already exists and styles the dialogs.
-- **Can egui ape the SwiftUI look?** The broad strokes, yes (that's what `pb-ui` + the dialogs
-  already do). It will be **less refined**: egui has **no native material/blur** (use a
-  translucent solid fill), plainer fonts, and less-smooth animation/transitions than SwiftUI.
-  Clean and functional, not glassy.
-- **The architectural crux:** the winit **main window has no egui today** — on-image panels are
-  HUD, egui lives only in the dialog window. Real Phase 4 (B) needs an **egui-over-wgpu pass in
-  the main window** (egui context + input routing + a render pass after the photo). That seam is
-  the hard part; once it exists, each panel is a moderate port of a shell-neutral model.
-- **One big-bang automated session?** **Settings parity (A): yes, easily** — pure Rust/egui,
-  testable on macOS via `cargo run -p pb-app`. **Full panel upgrade (B): draftable, not "done."**
-  A workflow can stand up the egui-in-main-window seam + port every panel in one big session, but
-  expect polish rounds and a **Windows-only validation pass** (WIC codecs, DXGI HDR, MSI, signing
-  can't be tested from the Mac).
-
-## Recommendation
-
-Ship **Windows 1.0 on the existing HUD panels + egui Settings parity (A)** — small, low-risk,
-all doable on macOS. Treat the **egui panel upgrade (B)** as a fast-follow, where the "big-bang
-draft then polish" approach fits and a Windows box is on hand.
+1. **Scan UI + Cancel (#2)** — NEXT. A CPU-HUD scan chip already exists (`tick_chip` in `main.rs`:
+   "Scanning *Folder* · N found" + Cancel). The likely work is moving it into the egui overlay for
+   consistency and confirming Cancel is wired — probably not a from-scratch build. Check that first.
+2. **Welcome-screen buttons (#5)** — first-run empty state. `open_panel_visible` exists in the
+   core; needs the egui surface + Open File / Open Folder buttons. Flip `native_open`.
+3. **Drag-to-move / drag-to-resize panels** — SwiftUI has `ResizeHandle`; egui panels are
+   fixed-position/width today.
+4. **Folder count precompute** — tree counts only appear after opening a folder (core
+   `folder_counts` only covers the recursive deck; siblings are blank until visited).
+5. **Play-hint fade (#4)** — Live-Photo/animation only; still CPU HUD (`native_play` false).
+6. **Toasts (#1)** — lowest; non-interactive, CPU-HUD toasts already work. Consistency only.
+7. **Cmd/Ctrl+arrow folder nav** — `Action::PrevFolder`/`NextFolder` exist but aren't bound/reaching
+   the winit shell.
 
 ## Working notes for a new session
 
-- **Run/iterate the egui shell on macOS:** `cargo run -p pb-app` (opens the winit+wgpu window;
-  ⌘, / menu opens the egui Settings). `cargo run -p pb-ui --example gallery` previews components.
-- **Gate:** `cargo fmt --all && cargo test --workspace && cargo clippy --all-targets -- -D
-  warnings`. ⚠ Never run `apply_settings`/`apply_keymap` end-to-end in a test — they write the
-  **real** `settings.toml` (unit-test the pure content/visibility fns instead, e.g.
-  `info_line_fields_respect_the_settings_toggles`).
-- **Where things live:** egui Settings + dialogs = `crates/pb-app/src/dialog.rs`; winit shell +
-  HUD wiring = `crates/pb-app/src/main.rs`; egui components = `crates/pb-ui/`; shared settings =
-  `crates/pb-app-core/src/settings.rs`; info-line/play-hint accessors + `native_*` flags =
-  `app_core.rs` / `app_core_impl.rs`. Plans: `.taskmaster/docs/hud-panels-plan.md`,
-  `folder-tree-plan.md`.
-- **CHANGELOG:** add user-facing lines under `[Unreleased]`.
-
-## Suggested order
-
-1. **Settings parity (A)** — add the Image Info egui rows to `dialog.rs`; wire `main.rs`
-   launch default. Verify on macOS with `cargo run -p pb-app`. (Ships Windows 1.0.)
-2. **Sweep `dialog.rs` for any other mac⇄egui Settings drift** while in there.
-3. **(Post-1.0) Panel upgrade (B)** — egui-over-wgpu main-window seam, then port tree /
-   inspector / help / info line / toasts / play hint; Windows validation pass.
+- **Run/iterate on macOS:** `cargo run -p pb-app` (winit+wgpu window; `⇧F` tree, `⇧I`/`T`/`D`
+  inspector, `?` help, `i` info line, `⌘,` Settings). Headless panel preview: `--egui-shot`.
+  Components: `cargo run -p pb-ui --example gallery`.
+- **Gate:** `cargo fmt --all && cargo clippy -p pb-ui -p pb-app -p pb-app-core --all-targets -- -D
+  warnings && cargo test -p pb-ui -p pb-app -p pb-app-core`. ⚠ Never run `apply_settings` /
+  `apply_keymap` end-to-end in a test — they write the **real** `settings.toml`.
+- **Where things live:** egui panels = `crates/pb-app/src/panels_ui.rs` (+ `egui_overlay.rs`,
+  `md.rs`, `egui_shot.rs`); render seam = `crates/pb-render/src/gpu.rs`; egui Settings/dialogs =
+  `dialog.rs`; winit shell wiring = `main.rs`; egui components/icons = `crates/pb-ui/`; shared
+  models = `panels.rs` / `fs_tree.rs`; `native_*` flags + accessors = `app_core.rs` /
+  `app_core_impl.rs`. Detailed gotchas: the auto-memory `egui-panels-winit-phase4.md`.
+- **Perf note:** the info line changes per photo, so the retained overlay re-renders per nav (per
+  frame during hold-to-fly). Fine so far; throttle if fly-through stutters.
+- **CHANGELOG:** user-facing lines under `[Unreleased]`.
+- **Windows validation still owed:** WIC codecs, DXGI HDR, MSI, signing — can't be tested from the
+  Mac. All egui work above is verified on macOS via `cargo run` + `--egui-shot`.
