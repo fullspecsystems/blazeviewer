@@ -3610,11 +3610,17 @@ impl AppCore {
             .map(|n| n.to_string_lossy().into_owned())
     }
 
-    /// Whether the info readout should show: toggled on (`i`) and the enabled fields produce
-    /// some text — an empty pill (all fields off, or a folder-only field that can't resolve)
-    /// reads as a bug, so it hides instead.
+    /// Whether the info readout should show: toggled on (`i`), not suppressed by
+    /// `Tab`, and the enabled fields produce some text — an empty pill (all fields
+    /// off, or a folder-only field that can't resolve) reads as a bug, so it hides
+    /// instead. **The native macOS shell polls this directly** (`CoreModel.swift`)
+    /// as its actual show/hide gate — it does not consult `info_line_shown` (that's
+    /// the winit HUD rasterizer's own drawn-state bookkeeping) — so `panels.hidden`
+    /// belongs here, not just in the HUD-side `refresh_info_line_visibility`.
     pub fn info_line_visible(&self) -> bool {
-        self.info_line && self.info_line_content().is_some_and(|s| !s.is_empty())
+        self.info_line
+            && !self.panels.hidden
+            && self.info_line_content().is_some_and(|s| !s.is_empty())
     }
 
     /// The info readout's main text (native shell) — `rel · W×H[· Live]`, codec split out so the
@@ -6152,6 +6158,37 @@ mod tests {
         // All fields off → the line hides (empty-pill guard) even though `i` is on.
         core.settings.info_show_resolution = false;
         assert!(!core.info_line_visible());
+    }
+
+    /// `info_line_visible()` is what the **native macOS shell** actually polls
+    /// (`CoreModel.swift`) to show/hide its SwiftUI info-line view — unlike the
+    /// winit HUD path, it never looks at `info_line_shown`. So `Tab` must suppress
+    /// it here directly, or the native line ignores Tab-hide entirely.
+    #[test]
+    fn info_line_visible_respects_tab_hidden() {
+        use crate::meta::PhotoMeta;
+        let mut core = test_core();
+        core.current = Some(PhotoMeta {
+            rel: "a.jpg".to_string(),
+            w: 100,
+            h: 100,
+            codec: "JPEG",
+            animated: None,
+        });
+        core.info_line = true;
+        assert!(core.info_line_visible());
+
+        core.dispatch_action(Action::TogglePanels); // Tab: the line alone counts as open
+        assert!(core.panels.hidden);
+        assert!(
+            !core.info_line_visible(),
+            "the native shell's actual gate must hide too"
+        );
+        assert!(core.info_line, "…without turning the toggle off");
+
+        core.dispatch_action(Action::TogglePanels); // Tab again reveals
+        assert!(!core.panels.hidden);
+        assert!(core.info_line_visible());
     }
 
     #[test]
