@@ -1,10 +1,11 @@
 // The empty-state / welcome surface (task #54, mac-first) — shown natively over the
 // blank canvas when no photos are loaded. It replaces the HUD "Press O to open" panel;
 // because it's a real SwiftUI view, its buttons carry their own hover/click (so the
-// cursor no longer leaks through an overlaid panel to a HUD hit-rect), and it can grow
-// into a proper home screen: identity, the primary open actions, a few essential keys,
-// and a link to the full shortcuts panel. The core owns visibility (`open_panel_visible`)
-// and the shortcut lookups (`action_shortcut`); this view just composes them.
+// cursor no longer leaks through an overlaid panel to a HUD hit-rect). Kept deliberately
+// minimal (owner call 2026-07-05): just the two opens + drag-and-drop — see the note in
+// `body` on why the nav/shortcut tips were removed. The core owns visibility
+// (`open_panel_visible`) and the shortcut lookups (`action_shortcut`); this view just
+// composes them.
 
 import SwiftUI
 
@@ -45,24 +46,12 @@ struct EmptyStateView: View {
                 .foregroundStyle(.secondary)
                 .padding(.top, 12)
 
-            // A wide gap sets the shortcut hints well apart — they're reference, not
-            // actions, so they read as clearly secondary to everything above.
-            VStack(spacing: 12) {
-                HStack(spacing: 20) {
-                    tip("next", "Next")
-                    tip("prev", "Previous")
-                    tip("random", "Random")
-                }
-                // A de-emphasized link (not a bordered button) — secondary to the opens.
-                Button(action: { model.showAllShortcuts() }) {
-                    HStack(spacing: 6) {
-                        Text("Show Shortcuts")
-                        ShortcutView(shortcut: "?")
-                    }
-                }
-                .buttonStyle(.link)
-            }
-            .padding(.top, 48)
+            // Owner call (2026-07-05): the Next/Previous/Random tips + "Show Shortcuts"
+            // link that used to live here made the welcome screen feel cluttered. This
+            // screen should stay just the two opens + drag-and-drop for a clean first
+            // impression; a togglable toolbar (task #55) is the planned home for
+            // discoverable nav/panel affordances instead — visible by default for new
+            // users, hideable for advanced ones.
         }
         .padding(48)
         // No keyboard-focus ring on the opens — the core owns keys, and a blue outline
@@ -100,21 +89,5 @@ struct EmptyStateView: View {
             )
         }
         .buttonStyle(.bordered)
-    }
-
-    /// A label + keycap tip (e.g. Next [Space]) — label first, key after, matching the
-    /// buttons and the Show Shortcuts link. Non-interactive text (these keys do nothing
-    /// with no photo loaded); hidden if the action is unbound.
-    @ViewBuilder
-    private func tip(_ actionId: String, _ label: String) -> some View {
-        let key = model.shortcut(actionId)
-        if !key.isEmpty {
-            HStack(spacing: 6) {
-                Text(label)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                ShortcutView(shortcut: key)
-            }
-        }
     }
 }

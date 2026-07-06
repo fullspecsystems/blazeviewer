@@ -614,8 +614,6 @@ final class CoreModel {
     /// and the O / ⇧O keys (open state stays in the core).
     func openFile() { menuAction("open_file") }
     func openFolder() { menuAction("open_folder") }
-    /// The welcome surface's "See all shortcuts" link toggles the Help panel.
-    func showAllShortcuts() { menuAction("help") }
 
     /// The user-facing key label for an action by id ("next", "open_file", …) — for the
     /// welcome surface's shortcut tips. A generic lookup, so new tips need no new FFI.
