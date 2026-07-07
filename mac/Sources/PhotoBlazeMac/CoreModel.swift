@@ -487,6 +487,23 @@ final class CoreModel {
         syncToolbar()
     }
 
+    /// A toolbar nav/random button was pressed and **held** — begin hold-to-fly (task #55).
+    /// The initial advance runs now; `kick()` keeps the pump ticking so it flies each frame
+    /// (the tick's `held_nav()` sees the pointer hold) until `endPointerNav`. Same machinery a
+    /// held Space key uses.
+    func beginPointerNav(_ actionId: String) {
+        core.begin_pointer_nav(actionId)
+        kick()
+        drainEffects()
+    }
+
+    /// The held toolbar button was released — stop flying (the pump re-pauses once idle).
+    func endPointerNav() {
+        core.end_pointer_nav()
+        kick()
+        drainEffects()
+    }
+
     // MARK: - The window toolbar (task #55)
 
     /// The mouse-driven toolbar (nav / view / panel affordances). AppKit, like the menu bar —

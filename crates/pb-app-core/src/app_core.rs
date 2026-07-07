@@ -102,6 +102,11 @@ pub struct AppCore {
     /// Physical keys currently held → the [`Action`] each resolved to at press time (the
     /// hold-to-fly / continuous-action set). OS key-repeat is ignored; focus loss clears it.
     pub held: HashMap<PbKey, Action>,
+    /// A nav action held by the **pointer** (a toolbar nav/random button pressed and held) —
+    /// a second, single-slot source of hold-to-fly alongside the keyboard's `held` map, so a
+    /// mouse user can "blaze" by holding the ‹ › / shuffle button exactly like holding Space.
+    /// `held_nav()` considers it; focus loss clears it (mouse-up normally does).
+    pub pointer_nav: Option<Action>,
     /// When the current on-screen frame was presented — the anchor for the self-paced
     /// advance interval and the slideshow dwell deadline.
     pub last_present: Option<Instant>,

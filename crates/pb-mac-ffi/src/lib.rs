@@ -551,6 +551,21 @@ impl AppCoreHandle {
         }
     }
 
+    /// A toolbar nav/random button was pressed and **held** → begin hold-to-fly for its
+    /// action (task #55). The Swift host kicks the pump + drains afterward, exactly like a
+    /// keypress, so the self-paced advance runs for as long as the button is held.
+    fn begin_pointer_nav(&mut self, action_id: &str) {
+        self.core.now = Instant::now();
+        if let Some(action) = Action::from_id(action_id) {
+            self.core.begin_pointer_nav(action);
+        }
+    }
+
+    /// The held toolbar nav/random button was released → stop flying.
+    fn end_pointer_nav(&mut self) {
+        self.core.end_pointer_nav();
+    }
+
     /// Right-click over the photo: the core decides the context-menu item set from live
     /// state and answers with `ShowContextMenu` (task #41); the host pops the NSMenu.
     fn context_menu(&mut self) {
@@ -2481,6 +2496,9 @@ mod ffi {
 
         // The native menu (NS1 item 8): clicks in by Action id, state out by pull.
         fn menu_action(&mut self, id: &str);
+        // Toolbar hold-to-fly (task #55): press-and-hold a nav/random button to blaze.
+        fn begin_pointer_nav(&mut self, action_id: &str);
+        fn end_pointer_nav(&mut self);
         fn menu_state(&self) -> MenuStateFfi;
         // The live slideshow interval, formatted for the macOS toolbar (task #55).
         fn slideshow_interval_display(&self) -> String;

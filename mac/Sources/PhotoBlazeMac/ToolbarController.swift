@@ -129,14 +129,8 @@ final class ToolbarController: NSObject, NSToolbarDelegate {
     }
 
     // Group actions fire with the group as sender; `selectedIndex` is the clicked segment.
-    @objc private func navFired(_ g: NSToolbarItemGroup) {
-        model?.menuAction(g.selectedIndex == 0 ? "prev" : "next")
-    }
-
-    @objc private func randomFired(_ g: NSToolbarItemGroup) {
-        model?.menuAction(g.selectedIndex == 0 ? "random_prev" : "random")
-    }
-
+    // (nav + random are hold-capable instead — see `holdNav` / `HoldSegmentedControl` — so
+    // press-and-hold blazes; the other groups stay plain click.)
     @objc private func folderNavFired(_ g: NSToolbarItemGroup) {
         model?.menuAction(g.selectedIndex == 0 ? "prev_folder" : "next_folder")
     }
@@ -189,28 +183,21 @@ final class ToolbarController: NSObject, NSToolbarDelegate {
     ) -> NSToolbarItem? {
         switch id {
         case .navigation:
-            return group(id, images: [symbol("chevron.left"), symbol("chevron.right")],
-                         labels: ["Previous", "Next"], tips: ["Previous", "Next"],
-                         mode: .momentary, action: #selector(navFired(_:)), priority: .high,
-                         palette: "Navigate")
+            // Hold-capable (task #55): press-and-hold blazes like holding Space (the core's
+            // pointer-nav hold-to-fly); a quick click is a single advance.
+            return holdNav(id, images: [symbol("chevron.left"), symbol("chevron.right")],
+                           actionIds: ["prev", "next"], tips: ["Previous", "Next"],
+                           priority: .high, palette: "Navigate")
         case .random:
-            // No mirrored-shuffle glyph exists in SF Symbols — flip `shuffle` horizontally so
-            // the "previous random" segment pairs with it. BOTH segments go through the same
-            // draw pipeline: mixing a raw symbol image (which the segmented control scales up,
-            // → oversized) with a hand-drawn one (left at natural size, → smaller) made the
-            // pair huge AND mismatched. Same pipeline → same size.
-            //
-            // Labels must stay SHORT. Counter-intuitively, a native image group in the unified
-            // toolbar reserves each segment's width to fit its **label** even in `.iconOnly`
-            // mode (where the label never renders). A long first label ("Previous Random", 15
-            // chars) ballooned this group to 134pt vs nav's 81pt — nothing to do with the wide
-            // `shuffle` glyph. "Random"/"Random" sizes it to ~78pt, matching the nav pair. The
-            // per-segment tooltips ("Previous random" / "Random") carry the direction for
-            // VoiceOver without paying the label width.
-            return group(id, images: [shuffleImage(flipped: true), shuffleImage(flipped: false)],
-                         labels: ["Random", "Random"],
-                         tips: ["Previous random", "Random"],
-                         mode: .momentary, action: #selector(randomFired(_:)), palette: "Random")
+            // Hold-capable too (holding blazes through the random walk). No mirrored-shuffle
+            // glyph exists in SF Symbols — flip `shuffle` horizontally for the "previous
+            // random" segment. BOTH segments go through the same draw pipeline: mixing a raw
+            // symbol image (which the segmented control scales up, → oversized) with a
+            // hand-drawn one (left at natural size, → smaller) made the pair huge AND
+            // mismatched. Same pipeline → same size.
+            return holdNav(id, images: [shuffleImage(flipped: true), shuffleImage(flipped: false)],
+                           actionIds: ["random_prev", "random"],
+                           tips: ["Previous random", "Random"], palette: "Random")
         case .folderNav:
             // Previous / next FOLDER (the sibling-folder jump, `Alt+←`/`Alt+→`). Double
             // chevrons distinguish it from the single-chevron photo nav ("jump a whole group").
@@ -315,6 +302,37 @@ final class ToolbarController: NSObject, NSToolbarDelegate {
             g.subitems[i].toolTip = tip
         }
         return g
+    }
+
+    /// A hold-capable segmented pair (nav / random) — the one place we can't use a native
+    /// `NSToolbarItemGroup`, because a group only reports clicks, never press-and-hold. A
+    /// `HoldSegmentedControl` (subclass) hosted in a view-based item gives us mouse down/up →
+    /// `beginPointerNav`/`endPointerNav`, so holding blazes. `actionIds[i]` is the Action id
+    /// for segment `i` (0 = left/previous, 1 = right/next). We rely on Tahoe styling the
+    /// standalone control with Liquid Glass to match the native groups (owner-verified).
+    private func holdNav(
+        _ id: NSToolbarItem.Identifier, images: [NSImage], actionIds: [String], tips: [String],
+        priority: NSToolbarItem.VisibilityPriority = .standard, palette: String
+    ) -> NSToolbarItem {
+        let seg = HoldSegmentedControl()
+        seg.segmentCount = images.count
+        seg.trackingMode = .momentary
+        seg.focusRingType = .none
+        for (i, img) in images.enumerated() {
+            seg.setImage(img, forSegment: i)
+            if i < tips.count { seg.setToolTip(tips[i], forSegment: i) }
+        }
+        seg.onPress = { [weak self] idx in
+            guard idx >= 0, idx < actionIds.count else { return }
+            self?.model?.beginPointerNav(actionIds[idx])
+        }
+        seg.onRelease = { [weak self] in self?.model?.endPointerNav() }
+        let item = NSToolbarItem(itemIdentifier: id)
+        item.view = seg
+        item.label = palette
+        item.paletteLabel = palette
+        item.visibilityPriority = priority
+        return item
     }
 
     /// A native title group (text segments — Fit/Fill/1:1).
@@ -454,4 +472,44 @@ extension NSToolbarItem.Identifier {
     static let openFolder = NSToolbarItem.Identifier("pb.openFolder")
     static let settings = NSToolbarItem.Identifier("pb.settings")
     static let openParent = NSToolbarItem.Identifier("pb.openParent")
+}
+
+/// An `NSSegmentedControl` that reports press-and-**hold** per segment, for toolbar hold-to-fly
+/// (task #55). It deliberately bypasses the control's normal click action and modal tracking
+/// loop: `mouseDown` begins the hold (and shows the pressed segment), `mouseUp` ends it — so a
+/// quick press→release is one begin→end (a single advance, like a Space tap) and holding blazes.
+/// Not calling `super.mouseDown` is the whole point: the default runs a nested tracking loop
+/// that blocks until mouse-up and fires the normal action (a second, unwanted advance).
+final class HoldSegmentedControl: NSSegmentedControl {
+    /// Pressed-segment index (0 = left, 1 = right).
+    var onPress: ((Int) -> Void)?
+    /// Released (regardless of where the cursor ended up — the down-view gets the up).
+    var onRelease: (() -> Void)?
+
+    private var holding = false
+
+    override func mouseDown(with event: NSEvent) {
+        let x = convert(event.locationInWindow, from: nil).x
+        let seg = segmentAt(x)
+        holding = true
+        setSelected(true, forSegment: seg) // pressed feedback for the duration of the hold
+        onPress?(seg)
+    }
+
+    override func mouseUp(with event: NSEvent) { endHold() }
+
+    private func endHold() {
+        guard holding else { return }
+        holding = false
+        for i in 0..<segmentCount { setSelected(false, forSegment: i) }
+        onRelease?()
+    }
+
+    /// Which segment a window-space `x` falls in. Equal-width division — our nav/random pairs
+    /// are two like-sized segments, so it's exact enough; a boundary miss merely picks the
+    /// neighbouring direction.
+    private func segmentAt(_ x: CGFloat) -> Int {
+        let w = bounds.width / CGFloat(max(1, segmentCount))
+        return min(segmentCount - 1, max(0, Int(x / w)))
+    }
 }

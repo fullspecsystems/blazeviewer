@@ -75,6 +75,7 @@ impl AppCore {
             now: Instant::now(),
             viewport,
             held: std::collections::HashMap::new(),
+            pointer_nav: None,
             last_present: None,
             frame_interval: Duration::from_micros(8_333),
             hold_start: None,
@@ -601,6 +602,7 @@ impl AppCore {
             }
             CoreEvent::FocusLost => {
                 self.held.clear();
+                self.pointer_nav = None; // mouse-up normally ends it; this is the safety net
                 self.hold_start = None;
                 self.mods = contract::Modifiers::NONE;
                 self.zoom_started = None;
@@ -5519,7 +5521,9 @@ impl AppCore {
     /// one, but two *different* nav directions held at once is treated as idle.
     pub fn held_nav(&self) -> Option<Nav> {
         let mut dir: Option<Nav> = None;
-        for &action in self.held.values() {
+        // Both hold sources: the keyboard's held-key map and the pointer's single held nav
+        // (a toolbar ‹ › / shuffle button pressed and held) — so both blaze identically.
+        for action in self.held.values().copied().chain(self.pointer_nav) {
             if let Some(n) = nav_of(action) {
                 match dir {
                     None => dir = Some(n),
@@ -5529,6 +5533,26 @@ impl AppCore {
             }
         }
         dir
+    }
+
+    /// A toolbar nav/random button was pressed and **held**: begin hold-to-fly for `action`,
+    /// reusing the exact keyboard path — the initial tap advance (or pie-glow while catching
+    /// up) plus the self-paced fly timer. `end_pointer_nav` (mouse-up) stops it. A quick click
+    /// is just begin→end with no fly, i.e. a single advance, matching a Space tap.
+    pub fn begin_pointer_nav(&mut self, action: Action) {
+        self.pointer_nav = Some(action);
+        self.hold_start = Some(self.now);
+        let Some(nav) = nav_of(action) else { return };
+        if self.target_item.is_some() && self.displayed_item != self.target_item {
+            self.pie_glow_started = Some(self.now);
+        } else {
+            self.advance(nav);
+        }
+    }
+
+    /// The held toolbar nav/random button was released — stop flying.
+    pub fn end_pointer_nav(&mut self) {
+        self.pointer_nav = None;
     }
 
     /// Zoom direction from the held actions: `+1` in ([`Action::ZoomIn`]), `-1` out
@@ -7348,6 +7372,31 @@ mod tests {
         });
         assert!(!core.held.contains_key(&PbKey::ArrowLeft));
         assert!(core.held.contains_key(&PbKey::ArrowRight));
+    }
+
+    #[test]
+    fn pointer_nav_is_a_second_hold_to_fly_source() {
+        let mut core = test_core();
+        // A held toolbar nav button makes `held_nav` report a direction, exactly as a held
+        // key would — that's what drives the self-paced advance each tick.
+        assert!(core.held_nav().is_none());
+        core.pointer_nav = Some(Action::Next);
+        assert!(core.held_nav().is_some());
+        // A key held the SAME direction is still that direction (not "two → idle").
+        core.held.insert(PbKey::Space, Action::Next);
+        assert!(core.held_nav().is_some());
+        // The OPPOSITE direction held at the same time is idle (ambiguous) — same rule as two
+        // keys held in opposite directions.
+        core.held.clear();
+        core.held.insert(PbKey::Backspace, Action::Prev);
+        assert!(core.held_nav().is_none());
+        // Release + the focus-loss safety net both clear the pointer hold.
+        core.held.clear();
+        core.end_pointer_nav();
+        assert_eq!(core.pointer_nav, None);
+        core.pointer_nav = Some(Action::Random);
+        core.handle(CoreEvent::FocusLost);
+        assert_eq!(core.pointer_nav, None);
     }
 
     #[test]
