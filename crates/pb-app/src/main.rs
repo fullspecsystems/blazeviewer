@@ -66,6 +66,7 @@ mod md;
 mod menu;
 mod panels_ui;
 mod pb_key_winit;
+mod sdf_rect;
 #[cfg(target_os = "macos")]
 mod proxy_icon;
 mod reveal;

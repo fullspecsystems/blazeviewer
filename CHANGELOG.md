@@ -159,6 +159,13 @@ with any pre-release suffix carried only by the tag.
   step between the archive's sibling folders.
 
 ### Changed
+- **Windows: crisper panel corners.** The egui chrome (info pill and codec badge, the Help /
+  Inspector / folder-tree panels, the scan pill, keycaps, tab selector, and the Open buttons)
+  now draws its rounded rectangles with an analytic signed-distance-field shader instead of
+  egui's tessellated corners, so they're clean and resolution-independent on HiDPI instead of
+  reading soft or jagged — closer to the native macOS panels. The codec badge's `JPEG` / `BMP`
+  label is also vertically centered on its ink now (it used to ride high). No cost to the
+  flick-through hot path (the chrome is only redrawn when it changes).
 - **Fullscreen's primary shortcut is now `F`** (was `F11`) — the Mac-idiomatic single key,
   shown on the View-menu badge, the keyboard-help panel, and the toolbar's exit hint. `F11`
   and `Alt`/`Option`+`Enter` still work for Windows muscle memory.

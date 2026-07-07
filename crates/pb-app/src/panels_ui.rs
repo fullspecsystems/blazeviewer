@@ -334,6 +334,18 @@ fn info_pill_size(ctx: &egui::Context, info: &InfoLine) -> (f32, f32) {
     (w, text.y + 2.0 * INFO_INSET)
 }
 
+/// Snap a rect's origin and size to the physical pixel grid at `ppp`, so egui's rounded
+/// corners and thin borders land on whole pixels instead of smearing across fractional ones
+/// — noticeably crisper corners on HiDPI, where a fractionally-positioned pill otherwise
+/// feathers its arcs unevenly.
+fn snap_rect(rect: egui::Rect, ppp: f32) -> egui::Rect {
+    let snap = |v: f32| (v * ppp).round() / ppp;
+    egui::Rect::from_min_size(
+        egui::pos2(snap(rect.min.x), snap(rect.min.y)),
+        egui::vec2(snap(rect.width()), snap(rect.height())),
+    )
+}
+
 /// The one-line info readout: `folder/name · W×H`, an optional Live-Photo / animation mark, and
 /// an optional codec badge (a nested round-rect concentric with the pill). Bottom-corner per the
 /// alignment setting, non-interactive, laid out by hand so everything shares one vertical center.
@@ -386,6 +398,11 @@ fn info_line(ctx: &egui::Context, p: &Palette, alpha: u8, info: &InfoLine) {
             });
             let badge_w = codec_g.as_ref().map_or(0.0, |g| g.size().x + 12.0);
             let (rect, _) = ui.allocate_exact_size(egui::vec2(w, pill_h), egui::Sense::hover());
+            // Snap the pill to the physical pixel grid so its rounded corners + hairline
+            // border land on whole pixels (crisper on HiDPI). All content below is placed
+            // off this snapped rect.
+            let ppp = ui.ctx().pixels_per_point();
+            let rect = snap_rect(rect, ppp);
 
             // Pill: soft shadow, then the translucent surface + hairline border.
             ui.painter().add(
@@ -398,11 +415,17 @@ fn info_line(ctx: &egui::Context, p: &Palette, alpha: u8, info: &InfoLine) {
                 .as_shape(rect, Rounding::same(INFO_RADIUS)),
             );
             let fill = panel_surface(p);
-            ui.painter().rect(
+            // Crisp analytic corners (task #57 follow-up): draw the pill fill + hairline
+            // border with an SDF shader instead of egui's tessellated rounded rect, which
+            // feathers its arcs unevenly on HiDPI. The shadow above stays egui (its blur
+            // hides any corner imperfection).
+            crate::sdf_rect::round_rect(
+                ui,
                 rect,
-                Rounding::same(INFO_RADIUS),
+                INFO_RADIUS,
                 Color32::from_rgba_unmultiplied(fill.r(), fill.g(), fill.b(), alpha),
-                Stroke::new(0.5, separator(p)),
+                1.0,
+                separator(p),
             );
 
             // Content, all on one vertical center.
@@ -427,17 +450,25 @@ fn info_line(ctx: &egui::Context, p: &Palette, alpha: u8, info: &InfoLine) {
             }
             if let Some(cg) = codec_g {
                 let badge_h = pill_h - 2.0 * INFO_INSET;
-                let badge = egui::Rect::from_min_size(
-                    egui::pos2(x, cy - badge_h / 2.0),
-                    egui::vec2(badge_w, badge_h),
+                let badge = snap_rect(
+                    egui::Rect::from_min_size(
+                        egui::pos2(x, cy - badge_h / 2.0),
+                        egui::vec2(badge_w, badge_h),
+                    ),
+                    ppp,
                 );
-                ui.painter().rect(
+                crate::sdf_rect::round_rect(
+                    ui,
                     badge,
-                    Rounding::same(INFO_RADIUS - INFO_INSET),
+                    INFO_RADIUS - INFO_INSET,
                     badge_bg,
-                    Stroke::NONE,
+                    0.0,
+                    Color32::TRANSPARENT,
                 );
-                paint_vtext(ui, badge.center().x - cg.size().x / 2.0, cy, &cg);
+                // The codec text is all-caps (no descenders), so the shared `TEXT_LIFT`
+                // box-centering reads high in the badge — center on the galley's ink bounds
+                // instead, which is exact for any case.
+                paint_text_centered(ui, badge.center(), &cg);
             }
         });
 }
@@ -463,14 +494,6 @@ const SCAN_HEADING_SIZE: f32 = 13.5;
 const SCAN_COUNT_SIZE: f32 = 13.0;
 const SCAN_SUB_SIZE: f32 = 11.5;
 const SCAN_CANCEL_SIZE: f32 = 13.0;
-
-/// The pill's translucent background (SwiftUI `panelBackground`) — `panel_frame` with the
-/// pill's slightly larger radius and its own inner padding.
-fn scan_frame(p: &Palette, alpha: u8) -> egui::Frame {
-    panel_frame(p, alpha)
-        .rounding(Rounding::same(SCAN_RADIUS))
-        .inner_margin(egui::Margin::symmetric(SCAN_PAD_H, SCAN_PAD_V))
-}
 
 /// The ambient scan pill: a spinner, `Scanning <Name>` with the running count, the current
 /// sub-folder, and a **Cancel** button — hand-laid so the spinner, text, divider, and button
@@ -521,14 +544,17 @@ fn scan_pill(
     });
     let content_w = SCAN_SPINNER + SCAN_GAP + SCAN_TEXT_W + SCAN_GAP + 1.0 + SCAN_GAP + cancel_w;
 
-    egui::Window::new("pb_scan_pill")
-        .title_bar(false)
-        .resizable(false)
-        .collapsible(false)
-        .movable(false)
-        .anchor(Align2::CENTER_TOP, [0.0, EDGE])
-        .frame(scan_frame(p, alpha))
-        .show(ctx, |ui| {
+    sdf_panel(
+        ctx,
+        p,
+        alpha,
+        "pb_scan_pill",
+        Align2::CENTER_TOP,
+        egui::vec2(0.0, EDGE),
+        f32::INFINITY,
+        SCAN_RADIUS,
+        egui::Margin::symmetric(SCAN_PAD_H, SCAN_PAD_V),
+        |ui| {
             ui.set_width(content_w);
             let (rect, _) =
                 ui.allocate_exact_size(egui::vec2(content_w, content_h), egui::Sense::hover());
@@ -745,12 +771,7 @@ fn draw_open_button(
     shortcut: &str,
     fill: Color32,
 ) {
-    ui.painter().rect(
-        rect,
-        Rounding::same(OPEN_BTN_RADIUS),
-        fill,
-        Stroke::new(1.0, separator(p)),
-    );
+    crate::sdf_rect::round_rect(ui, rect, OPEN_BTN_RADIUS, fill, 1.0, separator(p));
     let cy = rect.center().y;
     let ix = rect.left() + OPEN_PAD_LEFT;
     pb_ui::icon::paint_tinted(ui, sq(ix + OPEN_ICON / 2.0, cy, OPEN_ICON), icon, p.text);
@@ -852,25 +873,68 @@ fn panel_surface(p: &Palette) -> Color32 {
     }
 }
 
-/// The translucent panel surface (fill + hairline border + rounded corners + shadow),
-/// matching SwiftUI `panelBackground`. `alpha` is the user's *Panel opacity* setting.
-fn panel_frame(p: &Palette, alpha: u8) -> egui::Frame {
-    let fill = panel_surface(p);
-    egui::Frame::none()
-        .fill(Color32::from_rgba_unmultiplied(
-            fill.r(),
-            fill.g(),
-            fill.b(),
-            alpha,
-        ))
-        .stroke(Stroke::new(0.5, separator(p)))
-        .rounding(Rounding::same(PANEL_RADIUS))
-        .shadow(egui::epaint::Shadow {
+/// Show a chrome-free panel `Window` whose background is a crisp **SDF** rounded rect (fill +
+/// hairline border + shadow) instead of egui's tessellated `Frame` — the same look as
+/// [`panel_frame`] but with analytic, resolution-independent corners. Two shape slots are
+/// reserved at the top of the window's layer and backfilled (shadow, then fill + border) once
+/// the window rect is known, so they land *behind* the content. The panels ignore the
+/// response, so this returns nothing.
+#[allow(clippy::too_many_arguments)]
+fn sdf_panel(
+    ctx: &egui::Context,
+    p: &Palette,
+    alpha: u8,
+    id: &str,
+    anchor: Align2,
+    offset: egui::Vec2,
+    max_h: f32,
+    radius: f32,
+    margin: egui::Margin,
+    content: impl FnOnce(&mut egui::Ui),
+) {
+    let shown = egui::Window::new(id)
+        .title_bar(false)
+        .resizable(false)
+        .collapsible(false)
+        .movable(false)
+        .anchor(anchor, offset)
+        .max_height(max_h)
+        .frame(egui::Frame::none().inner_margin(margin))
+        .show(ctx, |ui| {
+            let shadow = ui.painter().add(egui::Shape::Noop);
+            let bg = ui.painter().add(egui::Shape::Noop);
+            content(ui);
+            (shadow, bg)
+        });
+    let Some(shown) = shown else {
+        return;
+    };
+    let Some((shadow_idx, bg_idx)) = shown.inner else {
+        return;
+    };
+    let rect = shown.response.rect;
+    let painter = ctx.layer_painter(shown.response.layer_id);
+    painter.set(
+        shadow_idx,
+        egui::epaint::Shadow {
             offset: egui::vec2(0.0, 5.0),
             blur: 18.0,
             spread: 0.0,
             color: Color32::from_black_alpha(70),
-        })
+        }
+        .as_shape(rect, Rounding::same(radius)),
+    );
+    let fill = panel_surface(p);
+    painter.set(
+        bg_idx,
+        crate::sdf_rect::round_rect_shape(
+            rect,
+            radius,
+            Color32::from_rgba_unmultiplied(fill.r(), fill.g(), fill.b(), alpha),
+            1.0,
+            separator(p),
+        ),
+    );
 }
 
 /// The opaque stand-in for `.secondary` used on icons / labels / ✕ so they stay legible
@@ -1017,6 +1081,15 @@ fn paint_vtext(ui: &egui::Ui, x: f32, cy: f32, g: &std::sync::Arc<egui::Galley>)
         .galley(egui::pos2(x, y), g.clone(), Color32::PLACEHOLDER);
 }
 
+/// Paint galley `g` with its **ink** (mesh) bounds centered on `c`, both axes. Unlike the
+/// box-height `TEXT_LIFT` centering, this is exact for all-caps text (no descenders), where
+/// the galley box carries empty descender space that reads as a downward bias — used for the
+/// codec badge so its `JPEG` / `BMP` sits dead-center.
+fn paint_text_centered(ui: &egui::Ui, c: egui::Pos2, g: &std::sync::Arc<egui::Galley>) {
+    let pos = c - g.mesh_bounds.center().to_vec2();
+    ui.painter().galley(pos, g.clone(), Color32::PLACEHOLDER);
+}
+
 /// A hoverable drawn-icon color.
 fn icon_tone(hovered: bool, p: &Palette) -> Color32 {
     if hovered {
@@ -1152,14 +1225,17 @@ fn help_panel(
     actions: &mut Vec<PanelAction>,
 ) {
     let max_h = panel_max_height(ctx, 220.0, duck);
-    egui::Window::new("pb_help")
-        .title_bar(false)
-        .resizable(false)
-        .collapsible(false)
-        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-        .max_height(max_h)
-        .frame(panel_frame(p, alpha))
-        .show(ctx, |ui| {
+    sdf_panel(
+        ctx,
+        p,
+        alpha,
+        "pb_help",
+        Align2::CENTER_CENTER,
+        egui::vec2(0.0, 0.0),
+        max_h,
+        PANEL_RADIUS,
+        egui::Margin::ZERO,
+        |ui| {
             ui.set_width(HELP_WIDTH);
             ui.set_max_width(HELP_WIDTH);
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -1193,8 +1269,7 @@ fn help_section(ui: &mut egui::Ui, p: &Palette, section: &pb_app_core::panels::H
         // descriptions and v-centered (the systematized `paint_vtext`).
         let (rect, _) =
             ui.allocate_exact_size(egui::vec2(content_w, HELP_SECTION_H), egui::Sense::hover());
-        ui.painter()
-            .rect(rect, Rounding::same(6.0), quaternary(p), Stroke::NONE);
+        crate::sdf_rect::round_rect(ui, rect, 6.0, quaternary(p), 0.0, Color32::TRANSPARENT);
         let hg = galley(
             ui,
             &section.title,
@@ -1332,12 +1407,7 @@ fn draw_keycaps(ui: &mut egui::Ui, p: &Palette, shortcut: &str, right_x: f32, cy
                     egui::pos2(x, cy - HELP_KEYCAP_H / 2.0),
                     egui::vec2(*w, HELP_KEYCAP_H),
                 );
-                ui.painter().rect(
-                    rect,
-                    Rounding::same(KEYCAP_RADIUS),
-                    bg,
-                    Stroke::new(0.5, separator(p)),
-                );
+                crate::sdf_rect::round_rect(ui, rect, KEYCAP_RADIUS, bg, 1.0, separator(p));
                 let g = galley(ui, cap, key_font.clone(), key_col, f32::INFINITY);
                 paint_vtext(ui, rect.center().x - g.size().x / 2.0, cy, &g);
             }
@@ -1380,14 +1450,17 @@ fn inspector_panel(
     actions: &mut Vec<PanelAction>,
 ) {
     let max_h = panel_max_height(ctx, 200.0, duck);
-    egui::Window::new("pb_inspector")
-        .title_bar(false)
-        .resizable(false)
-        .collapsible(false)
-        .anchor(Align2::RIGHT_TOP, [-EDGE, EDGE])
-        .max_height(max_h)
-        .frame(panel_frame(p, alpha))
-        .show(ctx, |ui| {
+    sdf_panel(
+        ctx,
+        p,
+        alpha,
+        "pb_inspector",
+        Align2::RIGHT_TOP,
+        egui::vec2(-EDGE, EDGE),
+        max_h,
+        PANEL_RADIUS,
+        egui::Margin::ZERO,
+        |ui| {
             ui.set_width(INSPECTOR_WIDTH);
             ui.set_max_width(INSPECTOR_WIDTH);
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -1468,8 +1541,7 @@ fn inspector_tabs(
         egui::pos2(track_left, cy - track_h / 2.0),
         egui::vec2(total, track_h),
     );
-    ui.painter()
-        .rect(track, Rounding::same(7.0), quaternary(p), Stroke::NONE);
+    crate::sdf_rect::round_rect(ui, track, 7.0, quaternary(p), 0.0, Color32::TRANSPARENT);
     let mut x = track_left + 2.0;
     for ((tab, label, icon), w) in tabs.iter().zip(widths) {
         let seg = egui::Rect::from_min_size(
@@ -1482,8 +1554,7 @@ fn inspector_tabs(
         }
         let selected = *tab == current;
         if selected {
-            ui.painter()
-                .rect(seg, Rounding::same(5.0), p.accent, Stroke::NONE);
+            crate::sdf_rect::round_rect(ui, seg, 5.0, p.accent, 0.0, Color32::TRANSPARENT);
         }
         let color = if selected {
             Color32::WHITE
@@ -1699,14 +1770,17 @@ fn tree_panel(
     actions: &mut Vec<PanelAction>,
 ) {
     let max_h = panel_max_height(ctx, 200.0, duck);
-    egui::Window::new("pb_tree")
-        .title_bar(false)
-        .resizable(false)
-        .collapsible(false)
-        .anchor(Align2::LEFT_TOP, [EDGE, EDGE])
-        .max_height(max_h)
-        .frame(panel_frame(p, alpha))
-        .show(ctx, |ui| {
+    sdf_panel(
+        ctx,
+        p,
+        alpha,
+        "pb_tree",
+        Align2::LEFT_TOP,
+        egui::vec2(EDGE, EDGE),
+        max_h,
+        PANEL_RADIUS,
+        egui::Margin::ZERO,
+        |ui| {
             ui.set_width(TREE_WIDTH);
             ui.set_max_width(TREE_WIDTH);
             // No inter-element gap: header, groove, and body stack flush, so the panel is
@@ -1893,8 +1967,7 @@ fn tree_pill(ui: &egui::Ui, p: &Palette, count: u64, right_x: f32, cy: f32) -> f
         egui::pos2(right_x - pill_w, cy - pill_h / 2.0),
         egui::vec2(pill_w, pill_h),
     );
-    ui.painter()
-        .rect(pill, Rounding::same(pill_h / 2.0), bg, Stroke::NONE);
+    crate::sdf_rect::round_rect(ui, pill, pill_h / 2.0, bg, 0.0, Color32::TRANSPARENT);
     paint_vtext(ui, pill.center().x - g.size().x / 2.0, cy, &g);
     pill_w
 }
