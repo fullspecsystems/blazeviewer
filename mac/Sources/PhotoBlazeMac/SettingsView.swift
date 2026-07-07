@@ -1,6 +1,7 @@
 import AppKit
 import PbMacFfi
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The Settings window (NS2 item 5 + the NS2.6 Shortcuts editor). Two tabs — General
 /// (a SwiftUI form over the `SettingsFormFfi` mirror) and Shortcuts (the keybinding
@@ -30,6 +31,13 @@ struct SettingsView: View {
     /// Whether the reactivate-and-retry (see `autoListModelsIfNeeded`) has already fired
     /// once this Settings-window session — a single follow-up attempt, not a poll.
     @State private var retriedModelsOnActivate = false
+    /// File-associations section: how many of `defaultTargetTypes` currently open in
+    /// PhotoBlaze (drives the status line), whether a Set is in flight, and whether the
+    /// app is running App-Translocated — a read-only Gatekeeper copy where setting a
+    /// default is a silent no-op, so we steer the user to move it to Applications first.
+    @State private var defaultTypeCount = 0
+    @State private var settingDefault = false
+    @State private var isAppTranslocated = false
 
     /// A finished Test-connection probe: `ok` colors the summary line.
     private struct ConnResult { let ok: Bool; let message: String }
@@ -42,7 +50,7 @@ struct SettingsView: View {
         // failed attempts — see git history); don't re-attempt without new info.
         TabView {
             generalPane
-                .frame(width: 560, height: 510)
+                .frame(width: 560, height: 615)
                 .tabItem { tabLabel("General", symbol: "slider.horizontal.3") }
             appearancePane
                 .frame(width: 560, height: 560)
@@ -59,6 +67,7 @@ struct SettingsView: View {
                 draft = SettingsDraft(form: model.settingsForm())
                 currentImageFolder = model.currentImageFolder()
                 model.keymapBeginEdit()
+                refreshDefaultViewerState()
                 loaded = true
             }
         }
@@ -191,6 +200,26 @@ struct SettingsView: View {
                     Spacer()
                     Button("Choose…") { choosePinnedFolder() }
                         .disabled(!draft.pickerFixed)
+                }
+            }
+            // "Set as default" — the one affordance that spares the user a manual
+            // Get Info ▸ "Change All…" per file type. One click sets PhotoBlaze as the
+            // default handler for every supported image type at once (which also flips
+            // the Quick Look "Open with" button — same LaunchServices setting). The row
+            // count never changes (fixed pane height): the button just disables and the
+            // caption re-words. ADR-018 holds — it only ever runs on this explicit click.
+            Section("File Associations") {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Default photo viewer")
+                        Text(defaultViewerSubline)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 12)
+                    Button("Set as Default") { setAsDefaultViewer() }
+                        .disabled(isDefaultViewer || settingDefault || isAppTranslocated)
                 }
             }
         }
@@ -448,6 +477,86 @@ struct SettingsView: View {
             .monospacedDigit()
             .foregroundStyle(.secondary)
             .frame(width: 110, alignment: .trailing)
+        }
+    }
+
+    // MARK: - Default photo viewer (file associations)
+
+    /// The image content types PhotoBlaze offers to become the default handler for.
+    /// Resolved from the file extensions it decodes (mirrors the Info.plist associations)
+    /// so each **concrete** type is set individually — crucially the per-vendor RAW UTIs
+    /// (`com.sony.arw-raw-image`, …), which the `public.camera-raw-image` umbrella in the
+    /// plist does *not* cascade to. Archives (zip/7z) are deliberately omitted: a photo
+    /// viewer shouldn't seize the default unzip handler. Built once; an extension this
+    /// macOS doesn't recognize resolves to a dynamic type and is dropped — you can't be
+    /// the default for a type the system has no UTI for.
+    private static let defaultTargetTypes: [UTType] = {
+        let exts = [
+            // Mainstream image formats.
+            "jpg", "jpeg", "jpe", "jfif", "png", "gif", "tiff", "tif", "bmp", "dib",
+            "ico", "webp", "jxl", "svg", "svgz", "tga", "heic", "heif", "hif", "avif",
+            // RAW — concrete per-vendor types (the umbrella UTI won't cover these).
+            "arw", "nef", "cr2", "cr3", "dng", "raf", "rw2", "orf", "srw", "pef",
+        ]
+        var seen = Set<String>()
+        var types: [UTType] = []
+        for ext in exts {
+            guard let t = UTType(filenameExtension: ext), !t.isDynamic else { continue }
+            if seen.insert(t.identifier).inserted { types.append(t) }
+        }
+        return types
+    }()
+
+    /// True once every supported image type opens in PhotoBlaze.
+    private var isDefaultViewer: Bool {
+        !Self.defaultTargetTypes.isEmpty && defaultTypeCount == Self.defaultTargetTypes.count
+    }
+
+    /// Re-read, from LaunchServices, how many of the target types currently point at this
+    /// app, plus whether we're running App-Translocated. Cheap (one lookup per type);
+    /// called on open and after a Set. Identity is by bundle id, so a second copy of
+    /// PhotoBlaze elsewhere on disk isn't mistaken for us.
+    private func refreshDefaultViewerState() {
+        isAppTranslocated = Bundle.main.bundleURL.path.contains("/AppTranslocation/")
+        let myID = Bundle.main.bundleIdentifier
+        defaultTypeCount = Self.defaultTargetTypes.reduce(into: 0) { count, type in
+            if let url = NSWorkspace.shared.urlForApplication(toOpen: type),
+                Bundle(url: url)?.bundleIdentifier == myID {
+                count += 1
+            }
+        }
+    }
+
+    /// The caption under "Default photo viewer": translocated → move-first hint; else
+    /// full / none / partial — never changing the row count (the pane height is fixed).
+    private var defaultViewerSubline: String {
+        if isAppTranslocated {
+            return "Move PhotoBlaze to your Applications folder to set it as the default."
+        }
+        if isDefaultViewer {
+            return "PhotoBlaze opens JPEG, PNG, HEIC, RAW, and more — including Quick Look."
+        }
+        if defaultTypeCount == 0 {
+            return "Open JPEG, PNG, HEIC, RAW, and more in PhotoBlaze."
+        }
+        return "PhotoBlaze opens \(defaultTypeCount) of \(Self.defaultTargetTypes.count) image types."
+    }
+
+    /// One click → PhotoBlaze becomes the default for every supported image type. Setting
+    /// a *document*-type default (unlike the default browser/mail role) is silent, so this
+    /// flips both Finder double-click and the Quick Look "Open with" button with no system
+    /// prompt. Each type is set individually (see `defaultTargetTypes`); a per-type failure
+    /// (e.g. a UTI this macOS doesn't fully register) is skipped, then we re-read state.
+    private func setAsDefaultViewer() {
+        guard !isAppTranslocated else { return }
+        let appURL = Bundle.main.bundleURL
+        settingDefault = true
+        Task {
+            for type in Self.defaultTargetTypes {
+                try? await NSWorkspace.shared.setDefaultApplication(at: appURL, toOpen: type)
+            }
+            settingDefault = false
+            refreshDefaultViewerState()
         }
     }
 

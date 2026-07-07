@@ -7,6 +7,15 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Added
+- **macOS: "Set as Default" photo viewer** (Settings ▸ General ▸ File Associations). One click
+  makes PhotoBlaze the default for every image type it supports — JPEG, PNG, GIF, TIFF, BMP,
+  ICO, WebP, HEIC/HEIF, AVIF, JPEG XL, SVG, TGA, and **each camera's RAW format**
+  (Sony/Nikon/Canon/Adobe DNG/Fuji/Panasonic/Olympus/Samsung/Pentax) — instead of hunting
+  through Finder's Get Info ▸ "Change All…" one type at a time. It also updates the Quick Look
+  "Open with" button (same setting). The row shows whether PhotoBlaze is already your default,
+  and prompts you to move the app to Applications first if it's running from a quarantined copy.
+
 ## [0.1.0] - 2026-07-07
 
 ### Added
