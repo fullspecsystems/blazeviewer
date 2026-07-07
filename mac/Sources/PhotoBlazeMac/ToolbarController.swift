@@ -304,6 +304,11 @@ final class ToolbarController: NSObject, NSToolbarDelegate {
         let g = NSToolbarItemGroup(itemIdentifier: id, images: images, selectionMode: mode,
                                    labels: labels, target: self, action: action)
         g.visibilityPriority = priority
+        // Always render the segmented capsule; never let AppKit collapse it into a pull-down
+        // popup when the window narrows (`.automatic` does — a useless dropdown-of-buttons for a
+        // momentary pair). `.expanded` keeps the buttons; when there's truly no room the whole
+        // group drops into the `»` overflow instead.
+        g.controlRepresentation = .expanded
         g.label = palette
         g.paletteLabel = palette
         for (i, tip) in tips.enumerated() where i < g.subitems.count {
@@ -319,6 +324,7 @@ final class ToolbarController: NSObject, NSToolbarDelegate {
     ) -> NSToolbarItemGroup {
         let g = NSToolbarItemGroup(itemIdentifier: id, titles: titles, selectionMode: .selectOne,
                                    labels: labels, target: self, action: action)
+        g.controlRepresentation = .expanded // stay segmented; don't collapse to a pull-down
         g.label = palette
         g.paletteLabel = palette
         for (i, tip) in tips.enumerated() where i < g.subitems.count {
