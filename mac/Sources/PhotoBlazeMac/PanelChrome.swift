@@ -9,6 +9,14 @@ import SwiftUI
 /// line) keep the same `edge` gap between them.
 enum Layout {
     static let edge: CGFloat = 24
+
+    /// The single fade every chrome overlay shows/hides on — the corner panels (folder
+    /// tree, Inspector), the info line, and Help. Enabling/disabling/hiding any of them
+    /// (or hitting Tab to hide them all at once) reads as one smooth system instead of a
+    /// mix of instant pops and coincidental fades. ~0.2s easeInOut matches the info line's
+    /// established feel; driven from `CoreModel` via `withAnimation` so it fires on every
+    /// path — a direct close, a Tab hide/reveal, or a settings toggle.
+    static let chromeFade: Animation = .easeInOut(duration: 0.2)
 }
 
 extension Color {

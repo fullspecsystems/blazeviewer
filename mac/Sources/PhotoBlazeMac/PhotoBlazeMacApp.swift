@@ -230,6 +230,9 @@ struct ContentView: View {
                         .padding(.horizontal, Layout.edge)
                         .padding(.bottom, Layout.edge)
                         .allowsHitTesting(false)
+                        // Explicit (was the implicit default) so it reads the same as the
+                        // corner panels; the fade is driven by `withAnimation` in the model.
+                        .transition(.opacity)
                 }
             }
             // The play hint rides the same bottom-center spot as the toast, just above the info

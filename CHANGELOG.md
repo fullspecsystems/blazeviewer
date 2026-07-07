@@ -26,6 +26,13 @@ with any pre-release suffix carried only by the tag.
   "Open with" button (same setting). The row shows whether PhotoBlaze is already your default,
   and prompts you to move the app to Applications first if it's running from a quarantined copy.
 
+### Fixed
+- **macOS: the panels now fade in and out smoothly and consistently.** The Folders and Details
+  panels used to pop instantly on close and, when hidden together with Tab, briefly collapse
+  their contents before disappearing — a visible height jump. Now the Folders panel, the
+  Details panel, the info line, and Help all share one quick, gentle fade whether you toggle
+  them individually or hide everything at once, holding their full size the whole way out.
+
 ## [0.1.0] - 2026-07-07
 
 ### Added

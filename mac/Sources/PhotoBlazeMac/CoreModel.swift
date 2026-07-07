@@ -3,6 +3,7 @@ import AVFoundation
 import Observation
 import PbMacFfi
 import QuartzCore
+import SwiftUI
 import UniformTypeIdentifiers
 
 /// Which NS2 dialog is presented as a SwiftUI sheet over the canvas. Confirm/Message are
@@ -623,9 +624,13 @@ final class CoreModel {
     /// visibility and (when visible) its rows, flattened from the core's live keymap.
     private func refreshHelp() {
         core.help_refresh()
-        helpVisible = core.help_visible()
-        guard helpVisible else {
-            helpSections = []
+        let vis = core.help_visible()
+        if vis != helpVisible {
+            withAnimation(Layout.chromeFade) { helpVisible = vis }
+        }
+        guard vis else {
+            // Keep the last sections so the sheet holds its size while it fades out (same
+            // no-collapse rule as the corner panels); rebuilt on the next open.
             return
         }
         // The core hands rows as a flat (isHeader, text, shortcut) list; regroup into
@@ -671,9 +676,15 @@ final class CoreModel {
     /// Re-pull the native Inspector after a `PanelsChanged` marker: visibility, the
     /// selected tab, and (when visible) the active tab's rows flattened by the core.
     private func refreshInspector() {
-        inspectorVisible = core.inspector_visible()
-        guard inspectorVisible else {
-            inspectorRows = []
+        let vis = core.inspector_visible()
+        if vis != inspectorVisible {
+            withAnimation(Layout.chromeFade) { inspectorVisible = vis }
+        }
+        guard vis else {
+            // Deliberately keep the last rows: the card holds its full height while it
+            // fades out. Emptying them here collapses the content to one line mid-fade —
+            // the "info hides before the header" jank on Tab. They're repopulated below on
+            // the next open (synchronously, before it paints), so there's no stale flash.
             return
         }
         inspectorTab = Int(core.inspector_tab())
@@ -730,10 +741,14 @@ final class CoreModel {
     /// Re-pull the native folder tree after a `PanelsChanged` marker: visibility and (when
     /// visible) the current folder's hierarchy rows, as derived by the core.
     private func refreshTree() {
-        treeVisible = core.tree_visible()
-        guard treeVisible else {
-            treeRows = []
-            currentTreePath = ""
+        let vis = core.tree_visible()
+        if vis != treeVisible {
+            withAnimation(Layout.chromeFade) { treeVisible = vis }
+        }
+        guard vis else {
+            // Keep the last rows/path so the panel holds its height through the fade-out
+            // (emptying collapses it to just the "Folders" header mid-fade). Repopulated
+            // on the next reveal before it paints — no stale flash.
             return
         }
         treeUsesFs = core.tree_uses_fs()
@@ -1344,7 +1359,10 @@ final class CoreModel {
             infoLineAlign = Int(core.info_line_align())
         }
         if infoVis != infoLineVisible {
-            infoLineVisible = infoVis
+            // Its own explicit fade (was only fading as a side effect of the toast's
+            // `toastBottomInset` animation) — so it matches the panels and stays smooth
+            // even when nothing else on screen moves.
+            withAnimation(Layout.chromeFade) { infoLineVisible = infoVis }
         }
         // The native play hint: kind 0 = playing / a still (hide), 1/2 = a motion item. A seq
         // bump is the "fresh motion item — flash it" trigger.
