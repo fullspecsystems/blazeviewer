@@ -762,6 +762,13 @@ impl AppCoreHandle {
         self.core.slideshow_interval_display()
     }
 
+    /// Spike (task #59): height (physical px) of the translucent glass toolbar the surface
+    /// extends under, so the photo fits below it and zoom/fill overflow shows under the glass.
+    /// `0` = classic opaque bar. Set on attach + resize by the glass-toolbar mode.
+    fn set_content_top_inset(&mut self, px: u32) {
+        self.core.set_content_top_inset(px);
+    }
+
     /// Whether the current item has motion (dims the toolbar's Play-Animation button) and
     /// whether it's actively playing (lights it). Both read on each `syncToolbar` (task #55).
     fn current_has_motion(&mut self) -> bool {
@@ -1158,6 +1165,7 @@ impl AppCoreHandle {
                 InfoLineAlign::Right => 2,
             },
             show_image_info: s.show_image_info,
+            glass_toolbar: s.glass_toolbar,
             info_show_folder: s.info_show_folder,
             info_show_filename: s.info_show_filename,
             info_show_resolution: s.info_show_resolution,
@@ -2093,6 +2101,7 @@ fn fold_settings_form(
         _ => InfoLineAlign::Right,
     };
     s.show_image_info = form.show_image_info;
+    s.glass_toolbar = form.glass_toolbar;
     s.info_show_folder = form.info_show_folder;
     s.info_show_filename = form.info_show_filename;
     s.info_show_resolution = form.info_show_resolution;
@@ -2388,6 +2397,8 @@ mod ffi {
         info_line_align: u8,
         // Info line: launch default + which fields show (task #54).
         show_image_info: bool,
+        // Transparent toolbar (task #59): photo extends under a translucent glass toolbar.
+        glass_toolbar: bool,
         info_show_folder: bool,
         info_show_filename: bool,
         info_show_resolution: bool,
@@ -2502,6 +2513,8 @@ mod ffi {
         fn menu_state(&self) -> MenuStateFfi;
         // The live slideshow interval, formatted for the macOS toolbar (task #55).
         fn slideshow_interval_display(&self) -> String;
+        // Translucent glass-toolbar spike (task #59): the top inset the photo fits under.
+        fn set_content_top_inset(&mut self, px: u32);
         // Motion state for the toolbar's Play-Animation button (task #55).
         fn current_has_motion(&mut self) -> bool;
         fn animation_playing(&self) -> bool;

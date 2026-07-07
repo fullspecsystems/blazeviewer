@@ -42,24 +42,29 @@ struct SettingsView: View {
     /// A finished Test-connection probe: `ok` colors the summary line.
     private struct ConnResult { let ok: Bool; let message: String }
 
+    /// The tallest a Settings tab may be: the screen's visible height less room for the window's
+    /// titlebar + tab bar + a margin, so a big tab (Shortcuts) never runs off-screen — its Form
+    /// scrolls the overflow instead.
+    private var settingsHeightCap: CGFloat {
+        max(400, (NSScreen.main?.visibleFrame.height ?? 900) - 120)
+    }
+
     var body: some View {
-        // Each pane carries its own fixed size fit to ITS content, so the Settings
-        // scene auto-sizes the window per selected tab (the System Settings behavior).
-        // General's height is constant because the pinned-folder row never appears or
-        // disappears — it's disabled instead. USER-resizing remains punted (five
-        // failed attempts — see git history); don't re-attempt without new info.
+        // One fixed size for every tab (`settingsTab`, task #58) — grouped Forms resist
+        // auto-measuring, so this is the pragmatic call over per-tab hand-tuning. The window
+        // stays put when switching tabs.
         TabView {
             generalPane
-                .frame(width: 560, height: 615)
+                .settingsTab(cap: settingsHeightCap)
                 .tabItem { tabLabel("General", symbol: "slider.horizontal.3") }
             appearancePane
-                .frame(width: 560, height: 560)
+                .settingsTab(cap: settingsHeightCap)
                 .tabItem { tabLabel("Appearance", symbol: "paintbrush") }
             aiPane
-                .frame(width: 560, height: 645)
+                .settingsTab(cap: settingsHeightCap)
                 .tabItem { tabLabel("AI", symbol: "sparkles") }
             ShortcutsPane(model: model)
-                .frame(width: 560, height: 640)
+                .settingsTab(cap: settingsHeightCap)
                 .tabItem { tabLabel("Shortcuts", symbol: "keyboard") }
         }
         .onAppear {
@@ -254,6 +259,10 @@ struct SettingsView: View {
                 labeledSlider(
                     "Panel opacity", value: $draft.panelOpacity, in: 50...100, format: "%.0f%%"
                 )
+                Toggle(isOn: $draft.glassToolbar) {
+                    Text("Transparent toolbar")
+                    Text("Photos extend under a translucent toolbar when zoomed or filled")
+                }
             }
             // The one-line info readout (`i`): whether it starts shown, where it sits, and
             // which fields it lists. `i` still toggles it live regardless of the default.
@@ -768,6 +777,18 @@ struct ShortcutsPane: View {
 /// encodings match the FFI struct: scroll 0 pan / 1 zoom; scale 0 fit / 1 fill / 2
 /// original; startup 0 fullscreen / 1 windowed / 2 remember. Equatable so the window's
 /// auto-save `onChange(of: draft)` can watch the whole draft at once.
+private extension View {
+    /// The one Settings-window size (task #58). Grouped `Form`s can't be auto-measured — a
+    /// `.fixedSize` grouped Form reports only ~one viewport and goes blind past it, and with no
+    /// fixed height it collapses — so the honest call is a single fixed size for every tab, sized
+    /// to the tallest normal tab (AI, ~645) so nothing clips. General & Appearance get a little
+    /// bottom padding; Shortcuts is genuinely taller than any screen, so its Form scrolls.
+    /// Clamped to the screen for small displays. USER-resizing remains punted (see git history).
+    func settingsTab(cap: CGFloat) -> some View {
+        frame(width: 560, height: min(648, cap))
+    }
+}
+
 struct SettingsDraft: Equatable {
     var startSpeed: Double = 2
     var rampSecs: Double = 5
@@ -780,6 +801,7 @@ struct SettingsDraft: Equatable {
     var appearanceMode = 0
     var infoLineAlign = 2  // 0 left / 1 center / 2 right (task #54)
     var showImageInfo = false  // info line's launch default (task #54)
+    var glassToolbar = true  // transparent toolbar (task #59)
     var infoShowFolder = false
     var infoShowFilename = true
     var infoShowResolution = true
@@ -817,6 +839,7 @@ struct SettingsDraft: Equatable {
         appearanceMode = Int(form.appearance_mode)
         infoLineAlign = Int(form.info_line_align)
         showImageInfo = form.show_image_info
+        glassToolbar = form.glass_toolbar
         infoShowFolder = form.info_show_folder
         infoShowFilename = form.info_show_filename
         infoShowResolution = form.info_show_resolution
@@ -874,6 +897,7 @@ struct SettingsDraft: Equatable {
             appearance_mode: UInt8(appearanceMode),
             info_line_align: UInt8(infoLineAlign),
             show_image_info: showImageInfo,
+            glass_toolbar: glassToolbar,
             info_show_folder: infoShowFolder,
             info_show_filename: infoShowFilename,
             info_show_resolution: infoShowResolution,

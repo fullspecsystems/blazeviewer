@@ -142,6 +142,14 @@ struct ContentView: View {
             // The canvas fills the window, so its size is the layout's content size — the
             // basis for every overlay's shared-margin math.
             .onGeometryChange(for: CGSize.self) { $0.size } action: { contentSize = $0 }
+            // The translucent-toolbar legibility scrim (task #59) — the lowest overlay, so the
+            // panels / title / toast all draw over it rather than being tinted by it. Only
+            // present in the glass-toolbar mode; sized to the bar.
+            .overlay(alignment: .top) {
+                if model.glassScrimVisible {
+                    GlassTopScrim(height: model.glassTopInsetPoints)
+                }
+            }
             // The empty-state welcome surface (task #54): shown when no photos are
             // loaded; hidden while Help is up (Help takes the center). A native view, so
             // its buttons own their hover/click — no HUD hit-rect leaks under a panel.
@@ -296,6 +304,7 @@ struct ContentView: View {
                 // appearance from the first frame; System leaves the OS in charge.
                 model.applyAppearancePreference()
                 model.refreshPanelOpacity()  // the saved "Panel opacity" for the chrome
+                model.refreshGlassToolbar()  // the saved "Transparent toolbar" default (#59)
                 model.openLaunchPathIfAny()
                 model.openSettingsAction = { openSettings() }
                 model.runFSmokeIfRequested()

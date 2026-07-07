@@ -8,6 +8,16 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
+- **macOS: transparent toolbar** (Settings ▸ Appearance ▸ "Transparent toolbar", on by
+  default) — a zoomed or filled photo now extends up under the translucent glass toolbar
+  instead of being cut off by an opaque bar, so you see more of the image. A soft gradient
+  keeps the title readable over a bright photo. Fit-to-window is unchanged, and you can turn
+  it off.
+- **macOS: hold the toolbar nav / random buttons to "blaze"** — press and hold ‹ ›, the
+  shuffle pair (or click-and-hold) and the toolbar flies through photos exactly like holding
+  the arrow keys or Space: self-paced to how fast frames decode, so it never skips or stalls.
+  A quick click is still a single step. Mouse users get the same fast flick-through the
+  keyboard has always had.
 - **macOS: "Set as Default" photo viewer** (Settings ▸ General ▸ File Associations). One click
   makes PhotoBlaze the default for every image type it supports — JPEG, PNG, GIF, TIFF, BMP,
   ICO, WebP, HEIC/HEIF, AVIF, JPEG XL, SVG, TGA, and **each camera's RAW format**

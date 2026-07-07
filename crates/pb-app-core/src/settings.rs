@@ -147,6 +147,10 @@ pub struct Settings {
     /// Whether the info line (`i`) starts shown on a fresh launch — the default state; the `i`
     /// key still toggles it live, and flipping this in Settings applies at once (task #54).
     pub show_image_info: bool,
+    /// Transparent toolbar (task #59, macOS): extend the photo under a translucent glass
+    /// toolbar so a zoomed/cropped image shows under it (fit mode is unchanged). Default `true`
+    /// (the most Mac-like look); a legibility scrim keeps the title readable. Windowed-mode only.
+    pub glass_toolbar: bool,
     /// Which fields the info line shows: folder, file name, resolution (W×H), codec. Applied
     /// live. Folder is prepended to the file name with a `/` (the relative dir when the scan is
     /// recursive, else the containing folder's name). The line hides if the enabled fields
@@ -245,6 +249,7 @@ impl Default for Settings {
             appearance_mode: AppearanceMode::System, // follow the OS light/dark theme
             info_line_align: InfoLineAlign::Right,   // today's bottom-right placement
             show_image_info: false,                  // off until opted in (unchanged launch)
+            glass_toolbar: true,                     // transparent toolbar on by default (#59)
             info_show_folder: false,                 // opt-in — filename alone by default
             info_show_filename: true,
             info_show_resolution: true,

@@ -1169,8 +1169,9 @@ final class CoreModel {
         // theme too (#46) — the canvas re-reports the resulting effective appearance.
         applyAppearancePreference()
         refreshPanelOpacity()  // a live "Panel opacity" drag updates the panels at once
+        refreshGlassToolbar()  // a "Transparent toolbar" flip re-chromes the window (#59)
         kick()
-        drainEffects()
+        drainEffects()  // → assertWindowChrome applies the glass chrome + inset
     }
 
     /// Pull the shared panel opacity from the core (0.5–1.0). Called on load + on settings edits.
@@ -2249,15 +2250,21 @@ final class CoreModel {
         guard menuTrackingDepth == 0 else { return }
         guard let window = hostWindow else { return }
         let fs = speedModeFullscreen
+        // Translucent windowed toolbar (task #59 spike, PB_GLASS_TOOLBAR): extend the content
+        // under a transparent toolbar so a zoomed/cropped photo shows under the glass — but
+        // keep the title bar, traffic lights, and shadow (unlike the borderless speed mode).
+        let glass = glassToolbar && !fs
+        let wantFullSize = fs || glass
+        let wantTransparent = fs || glass
         if fs, borderlessOK {
             // True borderless mode: keep it that way if SwiftUI re-adds `.titled`.
             if window.styleMask.contains(.titled) {
                 log("chrome: styleMask ← [.borderless, .fullSizeContentView] (SwiftUI re-added .titled)")
                 window.styleMask = [.borderless, .fullSizeContentView]
             }
-        } else if window.styleMask.contains(.fullSizeContentView) != fs {
-            log("chrome: styleMask.fullSizeContentView ← \(fs)")
-            if fs {
+        } else if window.styleMask.contains(.fullSizeContentView) != wantFullSize {
+            log("chrome: styleMask.fullSizeContentView ← \(wantFullSize)")
+            if wantFullSize {
                 window.styleMask.insert(.fullSizeContentView)
             } else {
                 window.styleMask.remove(.fullSizeContentView)
@@ -2268,18 +2275,18 @@ final class CoreModel {
             log("chrome: hasShadow ← \(!fs)")
             window.hasShadow = !fs
         }
-        if window.titlebarAppearsTransparent != fs {
-            log("chrome: titlebarAppearsTransparent ← \(fs)")
-            window.titlebarAppearsTransparent = fs
+        if window.titlebarAppearsTransparent != wantTransparent {
+            log("chrome: titlebarAppearsTransparent ← \(wantTransparent)")
+            window.titlebarAppearsTransparent = wantTransparent
         }
         let vis: NSWindow.TitleVisibility = fs ? .hidden : .visible
         if window.titleVisibility != vis {
             log("chrome: titleVisibility ← \(fs ? "hidden" : "visible")")
             window.titleVisibility = vis
         }
-        let sep: NSTitlebarSeparatorStyle = fs ? .none : .automatic
+        let sep: NSTitlebarSeparatorStyle = (fs || glass) ? .none : .automatic
         if window.titlebarSeparatorStyle != sep {
-            log("chrome: titlebarSeparatorStyle ← \(fs ? "none" : "automatic")")
+            log("chrome: titlebarSeparatorStyle ← \((fs || glass) ? "none" : "automatic")")
             window.titlebarSeparatorStyle = sep
         }
         for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
@@ -2296,5 +2303,47 @@ final class CoreModel {
         if toolbarInstalled {
             toolbarController?.reassertIfClobbered(on: window, speedMode: fs)
         }
+        // Tell the renderer how tall the glass bar is, so the photo fits below it (task #59).
+        updateContentTopInset()
+    }
+
+    /// The transparent-toolbar mode (task #59): windowed mode extends the canvas under a
+    /// translucent toolbar so a zoomed/cropped photo shows under the glass (fit mode unchanged),
+    /// with a legibility scrim. Driven by the `glass_toolbar` setting (default on) — refreshed
+    /// on load + on every settings edit (`refreshGlassToolbar`), so the Settings toggle applies
+    /// live.
+    private(set) var glassToolbar = true
+
+    func refreshGlassToolbar() {
+        glassToolbar = core.settings_form().glass_toolbar
+    }
+
+    /// Last inset pushed to the core (physical px), so we only re-send + repaint on a change.
+    @ObservationIgnored private var lastContentTopInsetPx: UInt32 = .max
+
+    /// The glass bar's height in **points** (0 when off) — drives the SwiftUI legibility scrim.
+    private(set) var glassTopInsetPoints: CGFloat = 0
+
+    /// Whether the top legibility scrim should show: the glass toolbar is on, windowed, and
+    /// there's an actual bar to sit under.
+    var glassScrimVisible: Bool {
+        glassToolbar && !speedModeFullscreen && glassTopInsetPoints > 1
+    }
+
+    /// Compute the glass bar's height from `contentLayoutRect` (the area below the titlebar +
+    /// toolbar) and hand it to the renderer (px) + the scrim overlay (points). `0` when the
+    /// spike is off or in speed mode.
+    private func updateContentTopInset() {
+        guard let window = hostWindow else { return }
+        var pts: CGFloat = 0
+        if glassToolbar, !speedModeFullscreen, let content = window.contentView {
+            pts = max(0, content.bounds.height - window.contentLayoutRect.height)
+        }
+        if abs(pts - glassTopInsetPoints) > 0.5 { glassTopInsetPoints = pts }
+        let px = UInt32((pts * window.backingScaleFactor).rounded())
+        guard px != lastContentTopInsetPx else { return }
+        lastContentTopInsetPx = px
+        core.set_content_top_inset(px)
+        core.render() // repaint at the new inset
     }
 }

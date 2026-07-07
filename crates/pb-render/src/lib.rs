@@ -143,6 +143,11 @@ pub trait Renderer {
     /// that doesn't cover the screen. Takes effect on the next `render`. Off the
     /// photo hot path — set from user settings, not per frame.
     fn set_letterbox(&mut self, rgb: [u8; 3]);
+    /// Spike (task #59): height in physical px of a translucent top bar (glass toolbar) the
+    /// surface extends *under*. The photo is fit against the content region below it and its
+    /// zoom/fill overflow rides up under the bar; `0` (default) keeps the classic opaque-bar
+    /// layout. Off the hot path — set on resize / chrome change, not per frame.
+    fn set_content_top_inset(&mut self, _px: u32) {}
     /// Set or clear the transient bottom-center status toast. Its own overlay layer,
     /// so it composites *over* the info panel rather than replacing it; the caller
     /// fades it by re-uploading with scaled alpha. `bottom_margin` is the gap from

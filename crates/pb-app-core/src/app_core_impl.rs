@@ -2969,6 +2969,16 @@ impl AppCore {
         }
     }
 
+    /// Spike (task #59): forward the translucent-top-bar height (physical px) to the renderer
+    /// so the photo fits below the bar while zoom/fill overflow shows under the glass. Shell-
+    /// driven (the macOS glass-toolbar mode sets it on attach + resize); `0` = classic opaque
+    /// bar. A no-op before the renderer stands up.
+    pub fn set_content_top_inset(&mut self, px: u32) {
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_content_top_inset(px);
+        }
+    }
+
     /// Apply the settings the user saved in the dialog: swap in the new model, apply
     /// the parts that aren't read live (hold delay, appearance + letterbox color,
     /// default scale mode), then persist to disk (an explicit user action — privacy

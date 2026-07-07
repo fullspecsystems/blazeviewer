@@ -323,9 +323,16 @@ fn quad_vertices(
     img_h: u32,
     screen_w: u32,
     screen_h: u32,
+    top_inset: u32,
 ) -> [Vertex; 4] {
     let (sw, sh) = (screen_w as f32, screen_h as f32);
-    let p = view.placement(img_w, img_h, screen_w, screen_h);
+    // Fit/center against the content region *below* a translucent top bar, then slide the
+    // whole placement down by the inset. The surface is still the full `screen_h`, so a
+    // zoomed/cropped photo's overflow rides up under the bar (task #59 spike). `top_inset == 0`
+    // reduces to the classic full-surface fit.
+    let content_h = screen_h.saturating_sub(top_inset).max(1);
+    let mut p = view.placement(img_w, img_h, screen_w, content_h);
+    p.y += top_inset as f32;
     let x0 = (p.x / sw) * 2.0 - 1.0;
     let x1 = ((p.x + p.w) / sw) * 2.0 - 1.0;
     let y_top = 1.0 - (p.y / sh) * 2.0;
@@ -1032,7 +1039,7 @@ fn vertex_buffer(
 ) -> wgpu::Buffer {
     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("vbuf"),
-        contents: bytemuck::cast_slice(&quad_vertices(view, img_w, img_h, screen_w, screen_h)),
+        contents: bytemuck::cast_slice(&quad_vertices(view, img_w, img_h, screen_w, screen_h, 0)),
         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
     })
 }
@@ -1256,6 +1263,12 @@ pub struct WgpuRenderer {
     /// Background (letterbox) fill, sRGB, shown around a non-covering photo.
     /// Defaults to [`LETTERBOX`]; the app overrides it from user settings.
     letterbox: [u8; 3],
+    /// Spike (task #59): height in **physical px** of a translucent top bar the surface
+    /// extends *under* (a glass toolbar). The photo is fit/centered against the content region
+    /// below it (`surface_h - inset`) and the quad is offset down by `inset`, so a fitted photo
+    /// stays fully below the bar while a zoomed/cropped one's natural overflow shows under the
+    /// glass. `0` (default) = the classic opaque-bar behavior, untouched.
+    content_top_inset: u32,
     /// No image loaded (bare launch with no folder, or the last photo deleted):
     /// draw just the letterbox background, no photo quad. Cleared by `set_image` /
     /// `present_slot`, set by `clear_image`.
@@ -1462,6 +1475,7 @@ impl WgpuRenderer {
             ring: Vec::new(),
             present_idx: None,
             letterbox: [LETTERBOX[0], LETTERBOX[1], LETTERBOX[2]],
+            content_top_inset: 0,
             blank: false,
             message: None,
             tree: None,
@@ -1506,6 +1520,10 @@ impl Renderer for WgpuRenderer {
     /// photo hot path — set from user settings, not per frame.
     fn set_letterbox(&mut self, rgb: [u8; 3]) {
         self.letterbox = rgb;
+    }
+
+    fn set_content_top_inset(&mut self, px: u32) {
+        self.content_top_inset = px;
     }
 
     /// Set or clear the transient bottom-center status toast (tasks.json #10). It
@@ -1705,7 +1723,7 @@ impl Renderer for WgpuRenderer {
             &self.vbuf,
             0,
             bytemuck::cast_slice(&quad_vertices(
-                &self.view, self.img_w, self.img_h, width, height,
+                &self.view, self.img_w, self.img_h, width, height, self.content_top_inset,
             )),
         );
         // The overlay panel's corner position depends on the viewport.
@@ -1814,6 +1832,7 @@ impl Renderer for WgpuRenderer {
                 height,
                 self.config.width,
                 self.config.height,
+                self.content_top_inset,
             )),
         );
     }
@@ -1829,6 +1848,7 @@ impl Renderer for WgpuRenderer {
                 self.img_h,
                 self.config.width,
                 self.config.height,
+                self.content_top_inset,
             )),
         );
     }
@@ -2044,6 +2064,7 @@ impl Renderer for WgpuRenderer {
                 h,
                 self.config.width,
                 self.config.height,
+                self.content_top_inset,
             )),
         );
     }
@@ -2663,12 +2684,12 @@ mod tests {
             ..Default::default()
         };
         // Image exactly the screen size -> full-screen quad (top-left at -1,+1).
-        let v = quad_vertices(&view, 100, 100, 100, 100);
+        let v = quad_vertices(&view, 100, 100, 100, 100, 0);
         assert!((v[0].pos[0] + 1.0).abs() < 1e-5, "x0 = {}", v[0].pos[0]);
         assert!((v[0].pos[1] - 1.0).abs() < 1e-5, "y_top = {}", v[0].pos[1]);
 
         // Image half the screen -> centered, top-left at -0.5,+0.5.
-        let v = quad_vertices(&view, 50, 50, 100, 100);
+        let v = quad_vertices(&view, 50, 50, 100, 100, 0);
         assert!((v[0].pos[0] + 0.5).abs() < 1e-5, "x0 = {}", v[0].pos[0]);
         assert!((v[0].pos[1] - 0.5).abs() < 1e-5, "y_top = {}", v[0].pos[1]);
     }
