@@ -1,22 +1,19 @@
-# Build, sign, and publish PhotoBlaze release artifacts: a Windows MSI and a macOS DMG.
+# Build, sign, and publish the PhotoBlaze macOS release: a signed, notarized DMG attached
+# to a GitHub Release.
 #
-# Triggers on a version tag (e.g. `v0.1.0`) — each platform job builds the release
-# binary, packages + signs its installer, and attaches it (plus a SHA256 sidecar) to the
-# GitHub Release. Also runnable manually (workflow_dispatch) to produce the artifacts
-# without a release. The two jobs are independent; each signs only if its secrets are set.
-#   • windows-msi: cargo-wix MSI, signed via Azure Trusted Signing.
-#   • macos-dmg:   .app → Developer ID codesign → DMG → notarize + staple (scripts/release-macos.sh).
+# Windows is no longer built here — it ships via **Velopack** (per-user installer + auto-update),
+# built + signed **locally** with scripts/release-windows.ps1 and uploaded to the
+# downloads.fullspec.ca feed (GitHub Actions credits are finite; see CLAUDE.md → "Cutting a
+# release"). This workflow now covers only macOS.
 #
-# Code signing uses **Azure Trusted Signing** (see decisions.md ADR-018 and the
-# step-by-step in .taskmaster/docs/release-signing.md). The endpoint / account /
-# profile below are the owner's existing public-trust setup, shared with the
-# `secrt` project — code-signing certs aren't app-specific, so one profile signs
-# every app. Enabling signing here therefore only needs the three repo secrets:
-#   secrets: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET
-# Signing is skipped automatically when AZURE_CLIENT_SECRET is unset, so forks /
-# early builds still produce an (unsigned) MSI. The service principal needs the
-# "Trusted Signing Certificate Profile Signer" role on the account. The .exe is
-# signed before packaging so the installed binary is trusted too, then the MSI.
+# Triggers on a version tag (e.g. `v0.1.0`): the macos-dmg job builds the .app, Developer ID
+# codesigns it, packages + notarizes + staples a DMG, and the release job attaches it (plus a
+# SHA256 sidecar) to a single GitHub Release with notes synthesized from the CHANGELOG. Also
+# runnable manually (workflow_dispatch) to produce the DMG without a release.
+#
+# Signing uses Developer ID + notarization, gated on the secrets — an unset CSC_LINK still
+# produces an (unsigned) DMG. See .taskmaster/docs/release-signing.md and
+# scripts/setup-signing-secrets.sh.
 
 name: release
 
@@ -29,158 +26,6 @@ permissions:
   contents: write # create releases and upload assets
 
 jobs:
-  # Releases are cut from `main`, which `ci.yml` already builds, lints, and tests
-  # on every push — so re-running the suite here just doubled the wall-clock for
-  # no added safety. This job only builds, signs, and publishes. Cut tags from a
-  # green `main` (CI status is visible on the commit before you tag).
-  windows-msi:
-    runs-on: windows-latest
-    env:
-      # Fixed vcpkg location so the libheif cache key, setup-libheif.ps1, and
-      # pb-decode/build.rs all agree (build.rs reads VCPKG_ROOT).
-      VCPKG_ROOT: C:\vcpkg-pb
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-
-      # The parallel-HEIC decode backend (tasks.json #16): the release binary ships
-      # with `--features libheif` (WIC serializes HEVC; libheif measured ~4.8× its
-      # throughput). Only the vcpkg `installed` tree is cached — buildtrees/downloads
-      # are transient. First run pays the ~15 min C build; hits skip it entirely.
-      - name: Cache libheif (vcpkg installed tree)
-        id: libheif-cache
-        uses: actions/cache@v4
-        with:
-          path: C:\vcpkg-pb\installed
-          key: libheif-${{ runner.os }}-x64-windows-static-md-v1
-      - name: Build libheif (vcpkg, cache miss only)
-        if: steps.libheif-cache.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: pwsh scripts/setup-libheif.ps1
-
-      # Cache the compiled cargo-wix binary so it isn't rebuilt from source (~2 min)
-      # on every run. Bump the key suffix to force a refresh.
-      - name: Cache cargo-wix
-        id: cache-wix
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/cargo-wix.exe
-          key: cargo-wix-${{ runner.os }}-v1
-      - name: Install cargo-wix
-        if: steps.cache-wix.outputs.cache-hit != 'true'
-        run: cargo install cargo-wix --locked
-
-      # Don't rely on the runner preinstalling WiX 3 — GitHub has been removing
-      # older toolsets from the images, and cargo-wix needs WiX v3's candle/light.
-      # Fetch the pinned 3.14 binaries and export WIX + PATH so discovery is
-      # deterministic regardless of what the image ships.
-      - name: Install WiX v3 toolset
-        shell: pwsh
-        run: |
-          $url = "https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip"
-          $zip = "$env:RUNNER_TEMP\wix3.zip"
-          $dir = "$env:RUNNER_TEMP\wix3"
-          Invoke-WebRequest -Uri $url -OutFile $zip
-          Expand-Archive -Path $zip -DestinationPath "$dir\bin" -Force
-          if (-not (Test-Path "$dir\bin\candle.exe")) { Write-Error "WiX install failed: candle.exe missing"; exit 1 }
-          # cargo-wix reads $WIX (and appends \bin); PATH is the belt-and-suspenders fallback.
-          "WIX=$dir\" >> $env:GITHUB_ENV
-          "$dir\bin"  >> $env:GITHUB_PATH
-          Write-Host "Installed WiX v3 to $dir"
-
-      # cargo-wix stamps the MSI version from Cargo metadata, not the tag — so a
-      # mismatch would advertise a different version than it installs. Fail fast.
-      - name: Check tag matches crate version
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: pwsh
-        run: |
-          # Compare only the numeric core: a tag may carry a SemVer pre-release
-          # suffix (v0.1.0-beta.1), but the MSI ProductVersion is numeric and can't,
-          # so the crate version stays 0.1.0 and we match against that.
-          $tagCore = ("${{ github.ref_name }}".TrimStart('v') -split '-')[0]
-          $crateVer = ((cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
-            Where-Object { $_.name -eq 'pb-app' }).version
-          if ($tagCore -ne $crateVer) {
-            Write-Error "Tag '${{ github.ref_name }}' (core $tagCore) != pb-app crate version $crateVer. Bump Cargo.toml or retag."
-            exit 1
-          }
-          Write-Host "Tag core matches crate version: $crateVer"
-
-      - name: Build release binary
-        run: cargo build --release -p pb-app --features libheif
-
-      # --- Signing is gated on whether the secrets exist ---
-      - name: Detect signing configuration
-        id: signing
-        shell: pwsh
-        run: |
-          $configured = -not [string]::IsNullOrEmpty("${{ secrets.AZURE_CLIENT_ID }}")
-          "configured=$($configured.ToString().ToLower())" >> $env:GITHUB_OUTPUT
-          if (-not $configured) { Write-Host "::warning::Azure Trusted Signing secrets not set — producing an UNSIGNED MSI." }
-
-      - name: Sign the executable (Azure Trusted Signing)
-        if: steps.signing.outputs.configured == 'true'
-        uses: azure/trusted-signing-action@v0.5.1
-        with:
-          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
-          endpoint: https://wus.codesigning.azure.net/
-          trusted-signing-account-name: jdlien-signing
-          certificate-profile-name: jdlien-public-trust
-          files-folder: ${{ github.workspace }}/target/release
-          files-folder-filter: exe
-          files-folder-recurse: false
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
-
-      - name: Package MSI (no rebuild — wraps the signed exe)
-        run: cargo wix --package pb-app --no-build --nocapture
-
-      - name: Sign the MSI (Azure Trusted Signing)
-        if: steps.signing.outputs.configured == 'true'
-        uses: azure/trusted-signing-action@v0.5.1
-        with:
-          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
-          endpoint: https://wus.codesigning.azure.net/
-          trusted-signing-account-name: jdlien-signing
-          certificate-profile-name: jdlien-public-trust
-          files-folder: ${{ github.workspace }}/target/wix
-          files-folder-filter: msi
-          files-folder-recurse: false
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
-
-      # A checksum sidecar so downloaders can verify integrity independent of the
-      # signature (and so a mirror/CDN can be audited).
-      - name: Compute SHA256 checksum
-        shell: pwsh
-        run: |
-          Get-ChildItem target/wix/*.msi | ForEach-Object {
-            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
-            "$hash  $($_.Name)" | Out-File -FilePath "$($_.FullName).sha256" -Encoding ascii
-            Write-Host "$hash  $($_.Name)"
-          }
-
-      # The `release` job (below) attaches this to the GitHub Release — one job publishes
-      # both installers + the notes, so the release notes aren't generated twice.
-      - name: Upload MSI as a build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: photoblaze-msi
-          path: |
-            target/wix/*.msi
-            target/wix/*.msi.sha256
-
   # macOS: build the SwiftUI-host .app (release-macos.sh's default since the 2026-07-02
   # cutover — cargo staticlib → swift build via build-swift-host.sh), Developer ID
   # codesign under the hardened runtime, package a DMG, notarize + staple, attach to the
@@ -200,8 +45,8 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
-      # cargo-wix stamps the MSI from Cargo metadata; the DMG is named from it too — so a
-      # tag that disagrees with the crate version would ship a mislabeled file. Fail fast.
+      # The DMG is named from the crate version — a tag that disagrees would ship a
+      # mislabeled file. Fail fast.
       - name: Check tag matches crate version
         if: startsWith(github.ref, 'refs/tags/')
         run: |
@@ -244,26 +89,26 @@ jobs:
             dist/*.dmg
             dist/*.dmg.sha256
 
-  # Publish ONE GitHub Release with both installers and real notes synthesized from the
+  # Publish ONE GitHub Release with the macOS DMG and real notes synthesized from the
   # CHANGELOG (no duplicated GitHub auto-notes — see CLAUDE.md → "Cutting a release").
-  # Runs only on a tag, after both build jobs have uploaded their artifacts.
+  # Runs only on a tag, after the build job has uploaded its artifact.
   release:
-    needs: [windows-msi, macos-dmg]
+    needs: [macos-dmg]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4 # for CHANGELOG.md + scripts/changelog-section.sh
 
-      - name: Download both installers
+      - name: Download the DMG
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-          merge-multiple: true # flatten photoblaze-msi + photoblaze-dmg into artifacts/
+          merge-multiple: true
 
       # Release body = the CHANGELOG section for this version (fails loudly if it's missing,
       # so [Unreleased] must be rolled into the version before tagging). NOT
-      # generate_release_notes — that appends GitHub's auto-notes and, with two jobs, did it
-      # twice. An agent can still curate the body afterward with `gh release edit`.
+      # generate_release_notes — that appends GitHub's auto-notes. An agent can still curate
+      # the body afterward with `gh release edit`.
       - name: Release notes from CHANGELOG
         run: |
           version="${GITHUB_REF_NAME#v}"
@@ -275,8 +120,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/**/*.msi
-            artifacts/**/*.msi.sha256
             artifacts/**/*.dmg
             artifacts/**/*.dmg.sha256
           body_path: ${{ runner.temp }}/notes.md

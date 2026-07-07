@@ -236,9 +236,9 @@ gallery's Icons row.
 
 **The line is content, not footprint** (owner, ADR-018): PhotoBlaze keeps **no
 persistent record of which photos were viewed, or any pixel/metadata derived from
-them.** The app's own *existence* on disk is fine — the MSI's registry writes
-(ProgID, file associations, folder verb), a Start-menu shortcut, and read-only
-config (the future task #8) are all explicitly in-bounds. What's forbidden is a
+them.** The app's own *existence* on disk is fine — the installer's registry writes
+(the per-user ProgID, file associations, folder verb the Velopack install hook writes),
+a Start-menu shortcut, and read-only config (the future task #8) are all explicitly in-bounds. What's forbidden is a
 trace of the *viewing*: no thumbnail DB or pixel cache, no recent-files/MRU of
 photo paths, no decoded-pixel temp files, no log of viewed paths. **One deliberate
 exception (ADR-022, owner 2026-07-02):** `settings::last_folder` remembers the single
@@ -431,28 +431,35 @@ cargo bench                # criterion microbenchmarks over the corpus
 
 ## Cutting a release
 
-Releases are tag-driven: push a `v*` tag from a green `main` and
-`.github/workflows/release.yml` builds + signs both installers (Windows **MSI** via Azure
-Trusted Signing, macOS **DMG** via Developer ID + notarization), then **one** `release` job
-publishes a single GitHub Release with both attached. The step-by-step + signing setup is in
-`.taskmaster/docs/release-signing.md`. To cut one:
+**Windows** ships **Velopack** (per-user installer + auto-update), built + signed **locally**
+(GitHub Actions credits are finite): `pwsh scripts/release-windows.ps1 -Upload` builds with
+libheif, signs the exe + `Setup.exe` + `Update.exe` via Azure Trusted Signing, `vpk pack`s a full
+release, and rsyncs the flat feed to `downloads.fullspec.ca/photoblaze/win`. The app reads that
+feed over HTTP (`update.rs` `FEED_URL`) and self-updates — downloads in the background, installs on
+quit. Version comes from `crates/pb-app/Cargo.toml`, so it always matches the app; there is **no
+tag / GitHub Release for Windows**.
+
+**macOS** is tag-driven: push a `v*` tag from a green `main` and `.github/workflows/release.yml`
+builds + signs the **DMG** (Developer ID + notarization), then the `release` job publishes a single
+GitHub Release with it attached (it also builds locally via `scripts/release-macos.sh`). Signing
+setup is in `.taskmaster/docs/release-signing.md`.
+
+To cut a release:
 
 1. **Roll the `CHANGELOG.md`.** Move `## [Unreleased]` into `## [<version>] - <YYYY-MM-DD>`,
    leave a fresh empty `[Unreleased]`, and update the compare links at the bottom. The crate
-   version (`crates/pb-app/Cargo.toml`) must match the tag's numeric core — the workflow fails
-   the build if they disagree (a `-beta.N` suffix lives only on the tag).
-2. **Tag + push:** `git tag -a v<version> -m "…" && git push origin v<version>`.
-3. **Synthesize real release notes — the notes ARE the CHANGELOG.** The `release` job sets the
-   GitHub Release body to the CHANGELOG section for that version (via
-   `scripts/changelog-section.sh`), so write a **real, curated, user-facing** set of notes in
-   the CHANGELOG *before* tagging — that's what users read, not a bare "Full Changelog" compare
-   link. **Never** enable `generate_release_notes` (with two build jobs it appended GitHub's
-   auto-notes twice — the bug this process fixes). After publishing you may still curate the
-   body — a short highlights/intro line is nice for a milestone — with
-   `gh release edit <tag> --notes-file <file>`.
-4. **Verify the published release:** both installers + their `.sha256` are attached, and the
-   macOS DMG is genuinely notarized — `xcrun stapler validate <dmg>` and
-   `spctl -a -t open --context context:primary-signature -vv <dmg>` → `source=Notarized
+   version (`crates/pb-app/Cargo.toml`) must match the tag's numeric core (a `-beta.N` suffix
+   lives only on the tag).
+2. **Windows:** `pwsh scripts/release-windows.ps1 -Upload` from this machine (with `.env.release`
+   signing creds). Prune superseded packages on the server periodically.
+3. **macOS:** `git tag -a v<version> -m "…" && git push origin v<version>` → release.yml builds +
+   publishes the notarized DMG. The release body is the CHANGELOG section for that version (via
+   `scripts/changelog-section.sh`), so write **real, curated, user-facing** notes in the CHANGELOG
+   *before* tagging. **Never** enable `generate_release_notes`. You may curate the body afterward
+   with `gh release edit <tag> --notes-file <file>`.
+4. **Verify:** the Windows feed serves the new `releases.win.json` + `.nupkg` (and a launched build
+   self-updates); the macOS DMG is attached and genuinely notarized — `xcrun stapler validate
+   <dmg>` and `spctl -a -t open --context context:primary-signature -vv <dmg>` → `source=Notarized
    Developer ID`. A `-` in the tag publishes a pre-release; a clean `vX.Y.Z` is a full release.
 
 

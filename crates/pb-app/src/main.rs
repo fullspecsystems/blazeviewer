@@ -70,6 +70,8 @@ mod sdf_rect;
 #[cfg(target_os = "macos")]
 mod proxy_icon;
 mod reveal;
+// Velopack per-user installer lifecycle hooks + background auto-update (Windows ship path).
+mod update;
 // The action vocabulary, physical-key model, keymap, and slideshow timing now live
 // in the platform-neutral `pb-app-core` (NS0). Re-export them at the crate root so
 // the existing `crate::action` / `crate::keymap` / `crate::pb_key` / `crate::slideshow`
@@ -2082,6 +2084,9 @@ impl App {
             a.set_visible(false);
         }
         self.clear_session_state();
+        // If a background update was downloaded this session, install it now — this exits the
+        // process (the next launch is the new version). A no-op if nothing was staged.
+        update::apply_on_quit();
         self.core.effects.push(contract::CoreEffect::Quit);
     }
 
@@ -2908,6 +2913,14 @@ impl ApplicationHandler for App {
         // instead of calling `Instant::now()`, so all timing this tick is consistent.
         self.core.now = Instant::now();
         let now = self.core.now;
+        // A background download finished: tell the user once (it installs when they quit).
+        if update::newly_ready() {
+            self.core
+                .show_toast("Update ready. It installs when you quit.");
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+        }
         // Keep the OS-drawn chrome (title bar, menu) on the Appearance preference;
         // no-ops unless the preference changed (e.g. a Settings save this turn).
         self.apply_chrome_theme();
@@ -3297,6 +3310,13 @@ struct ArchiveLoad {
 }
 
 fn main() {
+    // Velopack: installer lifecycle hooks + background auto-update. `velopack_startup` MUST run
+    // before anything else — on an install/update/uninstall invocation it does its work and
+    // exits. `start_background_check` kicks off a self-gating background update check (a no-op
+    // for a dev run / not-yet-installed build); a downloaded update installs on quit.
+    update::velopack_startup();
+    update::start_background_check();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // Hidden dev command: render the HUD component gallery to a PNG and exit before the event

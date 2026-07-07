@@ -75,6 +75,10 @@ arboard = { version = "3", default-features = false }
 # walkdir iterates (no stack growth with depth), doesn't follow symlinks by default (no
 # cycles), and bounds open dir handles. Already in the lockfile (transitive), so it's free.
 walkdir = "2"
+# Velopack: per-user Windows installer + built-in auto-update (ships on the winit shell).
+# `velopack_startup()` runs first in main() (handles the --veloapp-* lifecycle args; a no-op
+# off a Velopack install), and a background thread checks the feed via `UpdateManager`/`HttpSource`.
+velopack = "0.0.70"
 
 # Linux Copy Image: enable arboard's image clipboard (Wayland/X11). Windows and macOS use
 # their own native paths in clipboard.rs, so only Linux needs this.
@@ -133,11 +137,3 @@ sevenz-rust2 = "0.21.3"
 # the resource compiler is absent the build still succeeds (see build.rs).
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
-
-# WiX/MSI packaging (cargo-wix). The installer source lives at wix/main.wxs and
-# registers PhotoBlaze as an "Open with" candidate + a folder right-click verb.
-# No EULA dialog (skip the license-agreement screen).
-[package.metadata.wix]
-eula = false
-name = "PhotoBlaze"
-product-name = "PhotoBlaze"

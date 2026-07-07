@@ -2,10 +2,12 @@
 
 All notable changes to PhotoBlaze are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions match the Git
-tags / GitHub releases; the MSI ProductVersion is the numeric core (e.g. `0.1.0`),
+tags / GitHub releases; the installer version is the numeric core (e.g. `0.1.0`),
 with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
+
+## [0.1.0] - 2026-07-07
 
 ### Added
 - **macOS: a window toolbar** (customizable, hideable) for mouse-driven control — a
@@ -159,6 +161,10 @@ with any pre-release suffix carried only by the tag.
   step between the archive's sibling folders.
 
 ### Changed
+- **Windows: a one-click installer with automatic updates.** PhotoBlaze now installs on Windows
+  in a few seconds with no admin prompt (a per-user install), and keeps itself current — new
+  versions download in the background and install when you quit, so you never fetch an installer
+  again. This replaces the old Windows Installer (`.msi`) package.
 - **Windows: crisper panel corners.** The egui chrome (info pill and codec badge, the Help /
   Inspector / folder-tree panels, the scan pill, keycaps, tab selector, and the Open buttons)
   now draws its rounded rectangles with an analytic signed-distance-field shader instead of
@@ -669,7 +675,8 @@ Initial beta — a fast, keyboard-driven Windows photo viewer.
 - Signed WiX/MSI installer with file associations and an "Open with PhotoBlaze"
   folder verb.
 
-[Unreleased]: https://github.com/jdlien/photoblaze/compare/v0.1.0-beta.4...HEAD
+[Unreleased]: https://github.com/jdlien/photoblaze/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/jdlien/photoblaze/compare/v0.1.0-beta.4...v0.1.0
 [0.1.0-beta.4]: https://github.com/jdlien/photoblaze/compare/v0.1.0-beta.3...v0.1.0-beta.4
 [0.1.0-beta.3]: https://github.com/jdlien/photoblaze/compare/v0.1.0-beta.2...v0.1.0-beta.3
 [0.1.0-beta.2]: https://github.com/jdlien/photoblaze/compare/v0.1.0-beta.1...v0.1.0-beta.2
