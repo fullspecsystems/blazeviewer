@@ -1363,28 +1363,24 @@ impl App {
             // makes Windows apply fullscreen-optimizations that drop DWM
             // composition on focus changes / transitions and flash the legacy
             // basic-theme caption. A plain borderless window stays composited.
+            // (The monitor sizing itself happens below, *after* the menu is hidden.)
             window.set_fullscreen(None);
             window.set_decorations(false);
-            if let Some(mon) = window.current_monitor() {
-                window.set_outer_position(mon.position());
-                // If winit applied the resize synchronously it returns the new size and
-                // emits no `Resized` event — feed it to the core ourselves (see
-                // `handle_resized`), else overlays stay placed for the old surface.
-                if let Some(new) = window.request_inner_size(mon.size()) {
-                    self.handle_resized(new.width, new.height);
-                }
-            }
         }
         // macOS: auto-hide the menu bar + Dock in borderless fullscreen so it reclaims
         // that strip (chromeless) while staying in the current Space; restore them when
         // returning to windowed mode.
         #[cfg(target_os = "macos")]
         macos_chrome::set_chromeless(!self.core.windowed);
-        // Show the menu in windowed mode, hide it in fullscreen (the chrome-free
-        // speed mode). Adding/removing the bar resizes the client area → a `Resized`
-        // event → the debounced re-decode path. Done *before* the windowed sizing
-        // below so a restored client size already accounts for the menu bar's height
-        // (sizing pre-menu would lose that height on every toggle — a slow drift).
+        // Show the menu in windowed mode, hide it in fullscreen (the chrome-free speed
+        // mode). This MUST run *before* the sizing below in BOTH modes: adding/removing
+        // the native menu bar changes the client area without moving the outer window, so
+        // a borderless-fullscreen window sized while the menu is still attached ends up one
+        // menu-bar taller than the monitor — its bottom overhangs off-screen and crops the
+        // photo (task #57). Hiding the menu first makes the fullscreen outer == the monitor;
+        // it also lets the windowed restore account for the menu height (avoids a per-toggle
+        // height drift). Adding/removing the bar resizes the client area → a `Resized` event
+        // → the debounced re-decode path.
         self.apply_menu_for_mode();
 
         if self.core.windowed {
@@ -1409,6 +1405,16 @@ impl App {
                         self.handle_resized(new.width, new.height);
                     }
                 }
+            }
+        } else if let Some(mon) = window.current_monitor() {
+            // Size the borderless window to exactly the monitor — done here, *after* the
+            // menu is hidden, so the outer bounds match the monitor instead of hanging one
+            // menu-bar-height below it (task #57). If winit applied the resize synchronously
+            // it returns the new size and emits no `Resized` event — feed it to the core
+            // ourselves (see `handle_resized`), else overlays stay placed for the old surface.
+            window.set_outer_position(mon.position());
+            if let Some(new) = window.request_inner_size(mon.size()) {
+                self.handle_resized(new.width, new.height);
             }
         }
     }

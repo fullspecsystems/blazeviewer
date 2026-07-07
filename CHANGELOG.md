@@ -200,6 +200,11 @@ with any pre-release suffix carried only by the tag.
   buttons.
 
 ### Fixed
+- **Windows: photos are no longer clipped at the bottom edge in fullscreen.** The borderless
+  fullscreen window was being sized to the monitor while the menu bar was still attached, so it
+  ended up one menu-bar taller than the screen and its bottom hung off the display — cropping the
+  bottom of any photo that filled the height. The menu is now hidden before the window is sized, so
+  fullscreen matches the monitor exactly.
 - **Windows: the image info line no longer jumps around between photos** when it's centered or
   right-aligned. It was positioned from the *previous* photo's width, so every photo landed it in a
   slightly different spot; it's now pinned to the correct spot from each photo's own width.
