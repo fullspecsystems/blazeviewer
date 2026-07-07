@@ -125,6 +125,7 @@ final class CoreModel {
     @ObservationIgnored private var keyMonitor: Any?
     @ObservationIgnored private var focusObserver: NSObjectProtocol?
     @ObservationIgnored private var keyLossObserver: NSObjectProtocol?
+    @ObservationIgnored private var keyGainObserver: NSObjectProtocol?
     @ObservationIgnored private var menuTrackObservers: [NSObjectProtocol] = []
     /// Open menus being tracked (menu bar or context menu). While non-zero,
     /// `assertWindowChrome` must not touch the window — a `styleMask` write during menu
@@ -240,6 +241,10 @@ final class CoreModel {
             }
             self.kick() // a hold/nav may have started — run the pump
             self.drainEffects()
+            // Keep the toolbar in step with keyboard-driven state the effect markers don't
+            // cover — notably the slideshow interval (`[` / `]`), which only toasts. Discrete
+            // presses only (skip OS auto-repeat) to stay off any held-key fast path.
+            if event.type == .keyDown, !event.isARepeat { self.syncToolbar() }
             return event.modifierFlags.contains(.command) ? event : nil
         }
 
@@ -260,6 +265,24 @@ final class CoreModel {
             MainActor.assumeIsolated {
                 self?.forwardFocusLost(
                     "window didResignKey (\((note.object as? NSWindow)?.title ?? "?"))")
+            }
+        }
+        // Keep the cosmetic keyboard focus on the content whenever the viewer window becomes
+        // key. Otherwise AppKit/SwiftUI hands first-responder to the first toolbar control on
+        // the first photo open — a blue focus ring that can't be Tabbed off (the SwiftUI-hosted
+        // toolbar has no working key-view loop). Keys go through the monitor above, so pinning
+        // first responder to the canvas is purely visual. Only touch the host window, and only
+        // when a control other than the canvas holds focus (avoid needless churn).
+        keyGainObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            MainActor.assumeIsolated {
+                guard let self, let window = note.object as? NSWindow, window === self.hostWindow,
+                      let canvas = self.canvasView, window.firstResponder !== canvas
+                else { return }
+                window.makeFirstResponder(canvas)
             }
         }
 
@@ -454,10 +477,14 @@ final class CoreModel {
     @ObservationIgnored private var fSmokeStarted = false
 
     /// A native menu item fired (by stable Action id) — same dispatch as the keyboard.
+    /// Menu bar AND toolbar clicks both land here (mouse-driven), so it's where we mark a
+    /// Fullscreen toggle as mouse-initiated (for the exit hint) and re-sync the toolbar.
     func menuAction(_ id: String) {
+        if id == "fullscreen" { fullscreenHintFromMouse = true }
         core.menu_action(id)
         kick()
         drainEffects()
+        syncToolbar()
     }
 
     // MARK: - The window toolbar (task #55)
@@ -466,43 +493,97 @@ final class CoreModel {
     /// its buttons fire the same Action ids through `menuAction`, and `syncToolbar` mirrors
     /// the live `MenuState` onto it. Installed once the window exists (`attachCanvas`).
     @ObservationIgnored private var toolbarController: ToolbarController?
+    /// The deferred `window.toolbar` assignment has actually run — until it has, the
+    /// per-drain clobber re-assert must stay its hand (it would set `window.toolbar`
+    /// synchronously, re-triggering the very crash the defer avoids).
+    @ObservationIgnored private var toolbarInstalled = false
 
     func installToolbarIfNeeded() {
         guard toolbarController == nil, let window = hostWindow else { return }
         let tc = ToolbarController(model: self)
         toolbarController = tc
-        tc.install(on: window)
-        syncToolbar()
+        // Defer the `window.toolbar =` assignment off the window-realization callstack.
+        // `installToolbarIfNeeded` runs inside `attachCanvas` ← `viewDidMoveToWindow` ←
+        // SwiftUI's `addSubview:` while it's still building the WindowGroup window (and its
+        // own `.toolbarBackground` toolbar surface). Setting the toolbar *there* mutates it
+        // re-entrantly mid-realization and crashes in `-[NSToolbar _loadAllPlaceholderItems]`
+        // (SIGTRAP). One runloop hop lands the install after the window is fully realized.
+        DispatchQueue.main.async { [weak self, weak window] in
+            guard let self, let window else { return }
+            tc.install(on: window)
+            self.toolbarInstalled = true
+            self.syncToolbar()
+        }
     }
 
     /// Push the live `MenuState` (+ the folder-tree visibility, which lives outside it) to the
     /// toolbar — the toolbar twin of `menuBar?.sync`. Called on `MenuStateChanged` and
     /// `PanelsChanged`, the same markers that re-sync the menu bar / panels.
     private func syncToolbar() {
-        toolbarController?.sync(core.menu_state(), treeVisible: treeVisible)
+        toolbarController?.sync(
+            core.menu_state(),
+            treeVisible: treeVisible,
+            slideshowInterval: core.slideshow_interval_display().toString(),
+            hasMotion: core.current_has_motion(),
+            playing: core.animation_playing()
+        )
     }
+
+    /// The last motion state pushed to the toolbar's Play-Animation button — so the pump
+    /// re-syncs it only on a real change (a new item under hold-to-fly, or playback ending
+    /// on its own), not every frame.
+    @ObservationIgnored private var lastHasMotion = false
+    @ObservationIgnored private var lastPlaying = false
+
+    /// Set when a Fullscreen toggle arrives via the toolbar/menu (mouse) rather than the F
+    /// key — drives the one-shot "Press F to exit" hint on entering the borderless speed mode
+    /// (a keyboard user who pressed F doesn't need telling). Read + cleared in `SetWindowMode`.
+    @ObservationIgnored private var fullscreenHintFromMouse = false
+
+    /// The titlebar filename, driven through SwiftUI's `.navigationTitle` (see `ContentView`).
+    var windowTitleText = "PhotoBlaze"
+    /// The titlebar subtitle ("N of M"), driven through SwiftUI's `.navigationSubtitle`.
+    var windowSubtitleText = ""
 
     /// Split the core's `name (idx/n)` window title into a clean filename title + an
     /// "N of M" subtitle (the Preview-on-Tahoe unified-toolbar look). A title that doesn't
     /// carry the trailing counter (the "PhotoBlaze" empty state) just sets the title and
     /// clears the subtitle. The counter is matched only at the very end, so a filename that
     /// itself contains " (…)" isn't mis-split.
+    ///
+    /// ⚠ These flow through **SwiftUI** `.navigationTitle`/`.navigationSubtitle` (observed
+    /// properties), NOT a direct `window.title`/`window.subtitle` write. SwiftUI owns the
+    /// `WindowGroup` titlebar and repaints over AppKit-side title writes on its update passes —
+    /// an AppKit `window.subtitle` set gets silently cleared (and the title races back to the
+    /// WindowGroup's "PhotoBlaze"). Letting SwiftUI own it makes both stick.
     private func applyWindowTitle(_ full: String) {
-        guard let window = hostWindow else { return }
         if let m = Self.titleCounter.firstMatch(
             in: full, range: NSRange(full.startIndex..., in: full)),
             let nameRange = Range(m.range(at: 1), in: full),
             let idxRange = Range(m.range(at: 2), in: full),
             let nRange = Range(m.range(at: 3), in: full)
         {
-            window.title = String(full[nameRange])
+            windowTitleText = String(full[nameRange])
             let idx = Self.grouped(String(full[idxRange]))
             let n = Self.grouped(String(full[nRange]))
-            window.subtitle = "\(idx) of \(n)"
+            let count = "\(idx) of \(n)"
+            // Prepend the immediate parent folder when the photo is a real on-disk file
+            // ("Pictures · 2 of 147"); archive entries have no path, so just the count.
+            let folder = folderLabel(for: core.current_photo_path().toString())
+            windowSubtitleText = folder.isEmpty ? count : "\(folder)  ·  \(count)"
         } else {
-            window.title = full
-            window.subtitle = ""
+            windowTitleText = full
+            windowSubtitleText = ""
         }
+    }
+
+    /// The immediate parent folder's display name for a photo's full path — the subtitle's
+    /// folder chip. Empty for an archive entry or the empty deck (`current_photo_path()` is
+    /// empty), which drops the chip and shows just the counter. RAM-only, like the filename
+    /// title and proxy icon (no persisted viewing trace — privacy #2 holds).
+    private func folderLabel(for path: String) -> String {
+        guard !path.isEmpty else { return "" }
+        return URL(fileURLWithPath: path).deletingLastPathComponent().lastPathComponent
     }
 
     /// `^(.*) \((\d+)/(\d+)\)$` — matches the `engine::title_for` format, capturing the name,
@@ -1003,6 +1084,31 @@ final class CoreModel {
         menuAction("play_pause")
     }
 
+    // ── The "Press F to exit fullscreen" hint (task #55) ──
+
+    /// Shown for ~6s when the borderless speed mode is entered **by mouse** (toolbar/menu) —
+    /// a keyboard user who pressed the key doesn't need it. Rendered natively with the keycap
+    /// pill (not a toast), so the key reads as a `⌗`-style cap; the shown key is the live
+    /// primary binding (`F` by default). Driven by `SetWindowMode`.
+    private(set) var fullscreenHintVisible = false
+    @ObservationIgnored private var fullscreenHintTask: Task<Void, Never>?
+
+    private func showFullscreenHint() {
+        fullscreenHintVisible = true
+        fullscreenHintTask?.cancel()
+        fullscreenHintTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(6))
+            guard let self, !Task.isCancelled else { return }
+            self.fullscreenHintVisible = false
+        }
+    }
+
+    private func hideFullscreenHint() {
+        fullscreenHintTask?.cancel()
+        fullscreenHintTask = nil
+        fullscreenHintVisible = false
+    }
+
     /// Map the core's semantic toast icon (0 = none, see `ToastIcon`) to an SF Symbol, or nil
     /// for a text-only toast.
     func toastSymbol(_ icon: Int) -> String? {
@@ -1237,6 +1343,17 @@ final class CoreModel {
                 playHintSeq = phSeq
                 showPlayHint()
             }
+        }
+        // Keep the toolbar's Play-Animation button in step with motion state the discrete
+        // input paths miss: a new item reached under hold-to-fly, or playback finishing on
+        // its own. Cheap reads (the current item's motion is cached); full re-sync only on a
+        // change. (Both accessors are cache hits here — the tick above primed them.)
+        let hasMotion = core.current_has_motion()
+        let playing = core.animation_playing()
+        if hasMotion != lastHasMotion || playing != lastPlaying {
+            lastHasMotion = hasMotion
+            lastPlaying = playing
+            syncToolbar()
         }
         updatePacing()
     }
@@ -1613,6 +1730,15 @@ final class CoreModel {
         case .SetWindowMode(let fullscreen):
             log("SetWindowMode(fullscreen: \(fullscreen))")
             setWindowMode(fullscreen: fullscreen)
+            // Entering the borderless speed mode by mouse hides all chrome (the toolbar and
+            // menu bar auto-hide) — a mouse user has no visible way back out, so hint the key.
+            // Only when the toggle came by mouse (a keyboard user just pressed it themselves).
+            if fullscreen {
+                if fullscreenHintFromMouse { showFullscreenHint() }
+            } else {
+                hideFullscreenHint() // exiting — a "press F to exit" notice is now stale
+            }
+            fullscreenHintFromMouse = false
         case .HideWindow:
             hostWindow?.orderOut(nil)
         case .MenuStateChanged:
@@ -2147,7 +2273,11 @@ final class CoreModel {
         }
         // Re-assert the toolbar if SwiftUI swapped its own in during a scene update — the
         // same defeat-the-framework pattern used above (identity check preserves the user's
-        // Hide-Toolbar choice, which keeps *our* object, just hidden).
-        toolbarController?.reassertIfClobbered(on: window, speedMode: fs)
+        // Hide-Toolbar choice, which keeps *our* object, just hidden). Only after the
+        // deferred initial install has landed: a synchronous re-assert before then would
+        // re-trigger the realization-time crash the defer exists to avoid.
+        if toolbarInstalled {
+            toolbarController?.reassertIfClobbered(on: window, speedMode: fs)
+        }
     }
 }

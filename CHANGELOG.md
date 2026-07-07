@@ -9,16 +9,24 @@ with any pre-release suffix carried only by the tag.
 
 ### Added
 - **macOS: a window toolbar** (customizable, hideable) for mouse-driven control — a
-  discoverability layer over the keyboard-first core. The default set has **Previous / Next**
-  and **Random** buttons, a **Fit / Fill / 1:1** scale switch, **Rotate Left**, and toggles for
-  the **Info** panel, **Folders** tree, and **Slideshow** (the active ones light up). Every
-  button just fires the command its keyboard shortcut and menu item already do. It merges into
-  the title bar (which now shows the filename with an **"N of M"** counter as a subtitle), and
-  because it lives up there it doesn't eat into the image. **View ▸ Hide Toolbar** (⌥⌘T) turns
-  it off, **View ▸ Customize Toolbar…** lets you drag your own set of buttons in or out (Zoom,
-  Compare, Copy, Show in Finder, Delete, Describe, Open, Settings, and more are available), and
-  it auto-hides in full-screen — so power users can make the window completely chrome-less
-  again.
+  discoverability layer over the keyboard-first core. The default set centers a **Previous /
+  Next** pair, a **Random / Previous-Random** pair, a **Previous / Next Folder** pair (double
+  chevrons — jump to a sibling folder), a **Slideshow** control that shows the current interval
+  (e.g. "4s"), and a **Play Animation** button that dims on stills and lights
+  up while a Live Photo / animation plays; trailing are a **Rotate ⟲ / ⟳** pair, toggles for the
+  **Folders**, **Image Info**, and **Details** panels (which light up with a tinted background
+  while open), and a **Fullscreen** button (kept until last as the window narrows, so it stays
+  reachable). Every control just fires the command its keyboard shortcut and menu item already
+  do. It merges into the title bar (which now shows the filename
+  with the **folder name and "N of M" counter** as a subtitle — e.g. "Vacation · 2 of 147"),
+  rendered in the system's Liquid Glass, and
+  because it lives up there it doesn't eat into the image. Entering fullscreen **by the
+  toolbar/menu** briefly shows how to get back out ("Press F to exit fullscreen") — skipped when
+  you used the key yourself. **View ▸ Hide Toolbar** (⌥⌘T) turns it off, **View ▸ Customize
+  Toolbar…** lets you drag your own set in or out (Scale, Zoom, Save Rotation, Pin, Compare,
+  Copy, Copy Path, Show in Finder, Delete, Describe, Text, Open, Settings, Enclosing Folder),
+  and it auto-hides in full-screen — so power users can make the window
+  completely chrome-less again.
 - **Windows: the rich panels are now a real UI (egui).** On the Windows/winit build, the
   **Help** (`?`), **Inspector** (Details / Text / Describe — `⇧I`, `T`, `D`), and **folder
   tree** (`⇧F`) panels are drawn with a proper retained-mode UI over the photo instead of the
@@ -151,6 +159,9 @@ with any pre-release suffix carried only by the tag.
   step between the archive's sibling folders.
 
 ### Changed
+- **Fullscreen's primary shortcut is now `F`** (was `F11`) — the Mac-idiomatic single key,
+  shown on the View-menu badge, the keyboard-help panel, and the toolbar's exit hint. `F11`
+  and `Alt`/`Option`+`Enter` still work for Windows muscle memory.
 - **Windows: the Live-Photo / animation play hint is now a real UI (egui).** When you settle on a
   Live Photo or animated image, a `Play` button (with the keyboard shortcut) flashes bottom-center
   above the info line — matching the welcome buttons — and clicking it plays; it holds while you

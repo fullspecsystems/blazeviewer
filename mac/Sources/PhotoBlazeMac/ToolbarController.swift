@@ -2,51 +2,41 @@ import AppKit
 import PbMacFfi
 
 /// The window toolbar (task #55) — the mouse-driven discoverability layer over the
-/// keyboard-first core. It is the AppKit sibling of `MenuBar.swift`: every button fires a
-/// stable Action id over the same `CoreModel.menuAction(_:)` path a keypress or a menu item
-/// uses, and `sync(_:treeVisible:)` reflects the live `MenuState` (selected scale, panel /
-/// slideshow on-state, enable flags) exactly like the menu bar's `sync(_:)`. No new core
-/// state, no new orchestration seam — this is pure presenter chrome (task #55, item 5).
+/// keyboard-first core. AppKit sibling of `MenuBar.swift`: every control fires a stable
+/// Action id through `CoreModel.menuAction(_:)` (the same path a keypress/menu item uses),
+/// and `sync(...)` mirrors the live `MenuState` onto it.
 ///
-/// **Why an `NSToolbar`, not a floating overlay strip or a SwiftUI `.toolbar`:**
-/// - A real toolbar lives in the titlebar, so in windowed mode it costs *zero* extra
-///   fit-to-screen image area beyond the titlebar the window already has — the
-///   prime-directive-safe answer the task's "never eats the image" constraint wanted.
-/// - `View ▸ Hide Toolbar` (⌥⌘T) + the Customize sheet are native AppKit behaviors, so the
-///   "hideable by power users / customizable" requirement is ~free (see `MenuBar.build`).
-/// - In native fullscreen the OS auto-hides the toolbar and reveals it on mouse-to-top; in
-///   the borderless F speed mode the titlebar (and thus the toolbar) is gone entirely — so
-///   the chrome evaporates the moment you go flick-fast, and never touches the keypress→
-///   photon path.
-/// - Staying in AppKit (like the menu bar and the window-chrome management) avoids adding a
-///   second SwiftUI-owns-the-titlebar fight on top of the menu-clobber one.
+/// **Rendering.** Momentary/selection clusters (nav, random, rotate, zoom, scale) are native
+/// `NSToolbarItemGroup`s — the system draws them as glass capsules, correctly sized, no focus
+/// ring. The **toggles** (Folders / Info / Inspector / Slideshow) are `pushOnPushOff` buttons
+/// so their `.on` state shows the accent-tinted background macOS uses for active toolbar
+/// controls (a plain toolbar item has no on-state). Slideshow additionally carries the live
+/// interval text ("4s"), so it's a custom view either way.
 ///
-/// ⚠ SwiftUI owns the `WindowGroup` window's titlebar surface and can replace `window.toolbar`
-/// on its scene-update passes (the same class of clobber `MenuBar.reassert` handles). So the
-/// install is re-asserted from `CoreModel.assertWindowChrome` (compare-before-set, logged),
-/// and needs an on-device smoke test to confirm it doesn't fight — the one seam here that a
-/// headless build can't validate.
+/// **Overflow priority.** When the window is too narrow AppKit collapses items into the `»`
+/// menu, lowest `visibilityPriority` first. The tiers encode the owner's essential-vs-rare
+/// intuition: nav + info never drop (`.high`); rotate + fullscreen drop first (`.low`); power
+/// features (save, pin, compare, copy, reveal, delete, describe, open, settings, parent) live
+/// only in the Customize palette.
 @MainActor
 final class ToolbarController: NSObject, NSToolbarDelegate {
     private weak var model: CoreModel?
 
-    /// The toolbar we own — re-asserted onto the window if SwiftUI swaps in its own.
+    /// The toolbar we own — re-asserted onto the window if SwiftUI swaps its own in.
     let toolbar: NSToolbar
 
-    /// Every button/segment fires a stable Action id — the same vocabulary the menu bar and
-    /// keymap share (`crates/pb-app-core/src/action.rs`). Looked up by toolbar-item id.
+    /// Item identifier → its Action id, for click dispatch. Identifier-keyed (not instance-
+    /// keyed), so it's safe against the palette copies `willBeInsertedIntoToolbar: false`
+    /// spawns. `sync` reaches live state by walking `toolbar.items` — never a cached instance,
+    /// because opening Customize builds duplicate item/button instances and a cached reference
+    /// would point at the wrong (palette/stale) one (the "slideshow time freezes in Customize"
+    /// bug).
     private var actionForItem: [NSToolbarItem.Identifier: String] = [:]
 
-    /// Plain (bordered) action items, kept so `sync` can flip their `isEnabled` (menu parity:
-    /// Compare / Show in Finder / Delete are context-gated).
-    private var plainItems: [NSToolbarItem.Identifier: NSToolbarItem] = [:]
-
-    /// The toggle buttons (Inspector / Folder tree / Slideshow), kept so `sync` can show
-    /// their live on-state (recessed + accent tint) from `MenuState`.
-    private var toggleButtons: [NSToolbarItem.Identifier: NSButton] = [:]
-
-    /// The scale segmented control, kept so `sync` can select Fit/Fill/1:1 from `MenuState.scale`.
-    private var scaleSegment: NSSegmentedControl?
+    /// SF Symbols at a fixed moderate size — the toolbar-standard weight. Applied to every
+    /// glyph via `symbol(_:)`. (v2 used `.large` scale, which made wide glyphs like `shuffle`
+    /// look oversized next to thin chevrons; a fixed point size evens them out.)
+    private static let symbolConfig = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
 
     init(model: CoreModel) {
         self.model = model
@@ -58,18 +48,16 @@ final class ToolbarController: NSObject, NSToolbarDelegate {
         toolbar.displayMode = .iconOnly
     }
 
-    /// Attach to the window. `.unifiedCompact` merges the toolbar into the titlebar (the
-    /// Preview-on-Tahoe look: title + "N of M" subtitle leading, tool clusters trailing) and
-    /// keeps the bar short so it eats the least image area.
+    /// Attach to the window. `.unified` is the taller, more visible bar; the window title +
+    /// "N of M" subtitle sit leading (`CoreModel.applyWindowTitle`), the centered nav cluster
+    /// follows.
     func install(on window: NSWindow) {
         window.toolbar = toolbar
-        window.toolbarStyle = .unifiedCompact
+        window.toolbarStyle = .unified
     }
 
-    /// Heal a SwiftUI clobber: if the window is showing a different toolbar object (SwiftUI
-    /// swapped its own in during a scene update), put ours back. Never touches `isVisible` —
-    /// the user's `Hide Toolbar` choice keeps *our* object (just hidden), so an identity check
-    /// preserves it. Skipped in the borderless speed mode, which has no titlebar at all.
+    /// Heal a SwiftUI clobber (identity check preserves the user's Hide-Toolbar choice, which
+    /// keeps *our* object, just hidden). Skipped in the borderless speed mode (no titlebar).
     func reassertIfClobbered(on window: NSWindow, speedMode: Bool) {
         guard !speedMode else { return }
         if window.toolbar !== toolbar {
@@ -79,26 +67,50 @@ final class ToolbarController: NSObject, NSToolbarDelegate {
 
     // MARK: - Live state (menu-bar parity)
 
-    /// Apply a fresh `MenuState`: the selected scale segment, the panel/slideshow on-states,
-    /// and the context enable flags — the toolbar twin of `MenuBar.sync(_:)`. `treeVisible`
-    /// comes from the model (the folder tree isn't in `MenuState`; it's refreshed on
-    /// `PanelsChanged`).
-    func sync(_ s: MenuStateFfi, treeVisible: Bool) {
-        scaleSegment?.selectedSegment = Int(s.scale)
-        setToggle(.inspector, s.info_full)
-        setToggle(.folderTree, treeVisible)
-        setToggle(.slideshow, s.slideshow)
-        plainItems[.compare]?.isEnabled = s.compare_toggle_enabled
-        plainItems[.reveal]?.isEnabled = s.reveal_enabled
-        plainItems[.delete]?.isEnabled = s.reveal_enabled // both need a real on-disk file
-    }
-
-    private func setToggle(_ id: NSToolbarItem.Identifier, _ on: Bool) {
-        guard let button = toggleButtons[id] else { return }
-        button.state = on ? .on : .off
-        // Belt to the pushOnPushOff recess: an accent tint makes the active state
-        // unmistakable over a busy photo, where the recess alone can read as subtle.
-        button.contentTintColor = on ? .controlAccentColor : nil
+    /// Mirror the live state onto whatever items are **currently in the toolbar** (walking
+    /// `toolbar.items`, not a cache): the selected scale segment, the toggle on-states (accent
+    /// background), the slideshow glyph + interval, and the palette items' context enables.
+    /// `treeVisible` and `slideshowInterval` live outside `MenuState`, so `CoreModel` passes
+    /// them in.
+    func sync(
+        _ s: MenuStateFfi, treeVisible: Bool, slideshowInterval: String,
+        hasMotion: Bool, playing: Bool
+    ) {
+        let toggleState = { (item: NSToolbarItem, on: Bool) in
+            (item.view as? NSButton)?.state = on ? .on : .off
+        }
+        for item in toolbar.items {
+            switch item.itemIdentifier {
+            case .scale:
+                (item as? NSToolbarItemGroup)?.selectedIndex = Int(s.scale)
+            case .folderTree:
+                toggleState(item, treeVisible)
+            case .infoLine:
+                toggleState(item, s.info_basic)
+            case .inspector:
+                toggleState(item, s.info_full)
+            case .playAnimation:
+                if let b = item.view as? NSButton {
+                    b.isEnabled = hasMotion // dim on a still
+                    b.state = playing ? .on : .off // light up while playing
+                }
+            case .slideshow:
+                if let b = item.view as? NSButton {
+                    b.state = s.slideshow ? .on : .off
+                    b.title = "  \(slideshowInterval)"
+                }
+            case .saveRotation:
+                item.isEnabled = s.save_rotation_enabled
+            case .compare:
+                item.isEnabled = s.compare_toggle_enabled
+            case .pin:
+                item.isEnabled = s.compare_pin_enabled
+            case .reveal, .delete:
+                item.isEnabled = s.reveal_enabled // both need a real on-disk file
+            default:
+                break
+            }
+        }
     }
 
     // MARK: - Firing
@@ -108,50 +120,64 @@ final class ToolbarController: NSObject, NSToolbarDelegate {
         model?.menuAction(id)
     }
 
+    /// Toggle buttons + slideshow carry their Action id on the button's `identifier` (the
+    /// sender is the `NSButton`, not the toolbar item). The `pushOnPushOff` flip is cosmetic;
+    /// the core owns the real toggle and the next `sync` sets the authoritative state.
     @objc private func toggleFired(_ sender: NSButton) {
-        // The button's own pushOnPushOff flip is cosmetic; the core owns the real toggle and
-        // the next `sync` sets the authoritative state. Fire by the id stashed on the button.
-        guard let raw = sender.identifier?.rawValue else { return }
-        model?.menuAction(raw)
+        guard let id = sender.identifier?.rawValue else { return }
+        model?.menuAction(id)
     }
 
-    @objc private func navFired(_ sender: NSSegmentedControl) {
-        model?.menuAction(sender.selectedSegment == 0 ? "prev" : "next")
+    // Group actions fire with the group as sender; `selectedIndex` is the clicked segment.
+    @objc private func navFired(_ g: NSToolbarItemGroup) {
+        model?.menuAction(g.selectedIndex == 0 ? "prev" : "next")
     }
 
-    @objc private func scaleFired(_ sender: NSSegmentedControl) {
-        switch sender.selectedSegment {
+    @objc private func randomFired(_ g: NSToolbarItemGroup) {
+        model?.menuAction(g.selectedIndex == 0 ? "random_prev" : "random")
+    }
+
+    @objc private func folderNavFired(_ g: NSToolbarItemGroup) {
+        model?.menuAction(g.selectedIndex == 0 ? "prev_folder" : "next_folder")
+    }
+
+    @objc private func rotateFired(_ g: NSToolbarItemGroup) {
+        model?.menuAction(g.selectedIndex == 0 ? "rotate_ccw" : "rotate_cw")
+    }
+
+    @objc private func zoomFired(_ g: NSToolbarItemGroup) {
+        model?.menuAction(g.selectedIndex == 0 ? "zoom_out" : "zoom_in")
+    }
+
+    @objc private func scaleFired(_ g: NSToolbarItemGroup) {
+        switch g.selectedIndex {
         case 0: model?.menuAction("scale_fit")
         case 1: model?.menuAction("scale_fill")
         default: model?.menuAction("scale_original")
         }
     }
 
-    @objc private func zoomFired(_ sender: NSSegmentedControl) {
-        model?.menuAction(sender.selectedSegment == 0 ? "zoom_out" : "zoom_in")
-    }
-
     // MARK: - NSToolbarDelegate
 
-    /// The out-of-the-box set: navigation + random leading (paired with the title/counter),
-    /// then a flexible gap, then the view/panel cluster trailing. Deliberately sparse — the
-    /// menu bar carries the full 50-action vocabulary; the Customize sheet holds the long tail.
+    /// The default set: a leading gap centers the "moving through photos" cluster (nav ·
+    /// random · folder-nav · slideshow) off the title; the rotate pair + panel toggles trail,
+    /// and Fullscreen sits on its own past a fixed space (not clustered with the panels).
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         [
-            .navigation, .random,
             .flexibleSpace,
-            .scale, .rotateLeft, .inspector, .folderTree, .slideshow,
+            .navigation, .random, .folderNav, .slideshow, .playAnimation,
+            .flexibleSpace,
+            .rotate, .folderTree, .infoLine, .inspector,
+            .space, .fullscreen,
         ]
     }
 
-    /// Everything the user may drag into the bar (the Customize palette). Order = palette order.
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         [
-            .navigation, .random,
-            .scale, .rotateLeft, .rotateRight, .zoom,
-            .inspector, .folderTree, .slideshow, .playPause, .compare,
-            .copy, .copyPath, .reveal, .delete, .describe,
-            .openFile, .openFolder, .settings, .fullscreen,
+            .navigation, .random, .folderNav, .slideshow, .scale, .rotate, .saveRotation, .zoom,
+            .folderTree, .infoLine, .inspector, .fullscreen, .playAnimation, .compare, .pin,
+            .copy, .copyPath, .reveal, .delete, .describe, .showText,
+            .openFile, .openFolder, .settings, .openParent,
             .space, .flexibleSpace,
         ]
     }
@@ -163,43 +189,84 @@ final class ToolbarController: NSObject, NSToolbarDelegate {
     ) -> NSToolbarItem? {
         switch id {
         case .navigation:
-            return segmented(
-                id, symbols: ["chevron.left", "chevron.right"], mode: .momentary,
-                action: #selector(navFired(_:)),
-                label: "Navigate", tips: "Previous / Next"
-            )
-        case .scale:
-            let item = segmentedLabels(
-                id, labels: ["Fit", "Fill", "1:1"], mode: .selectOne,
-                action: #selector(scaleFired(_:)),
-                label: "Scale", tips: "Fit / Fill / Actual size"
-            )
-            scaleSegment = item.view as? NSSegmentedControl
-            return item
-        case .zoom:
-            return segmented(
-                id, symbols: ["minus.magnifyingglass", "plus.magnifyingglass"], mode: .momentary,
-                action: #selector(zoomFired(_:)),
-                label: "Zoom", tips: "Zoom out / in"
-            )
-        case .inspector:
-            return toggle(id, action: "full_exif", symbol: "info.circle", label: "Info")
-        case .folderTree:
-            return toggle(id, action: "folder_tree", symbol: "sidebar.left", label: "Folders")
-        case .slideshow:
-            return toggle(id, action: "slideshow", symbol: "play.rectangle", label: "Slideshow")
-
+            return group(id, images: [symbol("chevron.left"), symbol("chevron.right")],
+                         labels: ["Previous", "Next"], tips: ["Previous", "Next"],
+                         mode: .momentary, action: #selector(navFired(_:)), priority: .high,
+                         palette: "Navigate")
         case .random:
-            return button(id, action: "random", symbol: "shuffle", label: "Random")
-        case .rotateLeft:
-            return button(id, action: "rotate_ccw", symbol: "rotate.left", label: "Rotate Left")
-        case .rotateRight:
-            return button(id, action: "rotate_cw", symbol: "rotate.right", label: "Rotate Right")
-        case .playPause:
-            return button(id, action: "play_pause", symbol: "play.fill", label: "Play")
+            // No mirrored-shuffle glyph exists in SF Symbols — flip `shuffle` horizontally so
+            // the "previous random" segment pairs with it. BOTH segments go through the same
+            // draw pipeline: mixing a raw symbol image (which the segmented control scales up,
+            // → oversized) with a hand-drawn one (left at natural size, → smaller) made the
+            // pair huge AND mismatched. Same pipeline → same size.
+            //
+            // Labels must stay SHORT. Counter-intuitively, a native image group in the unified
+            // toolbar reserves each segment's width to fit its **label** even in `.iconOnly`
+            // mode (where the label never renders). A long first label ("Previous Random", 15
+            // chars) ballooned this group to 134pt vs nav's 81pt — nothing to do with the wide
+            // `shuffle` glyph. "Random"/"Random" sizes it to ~78pt, matching the nav pair. The
+            // per-segment tooltips ("Previous random" / "Random") carry the direction for
+            // VoiceOver without paying the label width.
+            return group(id, images: [shuffleImage(flipped: true), shuffleImage(flipped: false)],
+                         labels: ["Random", "Random"],
+                         tips: ["Previous random", "Random"],
+                         mode: .momentary, action: #selector(randomFired(_:)), palette: "Random")
+        case .folderNav:
+            // Previous / next FOLDER (the sibling-folder jump, `Alt+←`/`Alt+→`). Double
+            // chevrons distinguish it from the single-chevron photo nav ("jump a whole group").
+            // Labels stay SHORT ("Folder"/"Folder") for the same reason as .random — segment
+            // width tracks the label even in `.iconOnly`; the tooltips carry the direction.
+            return group(id, images: [symbol("chevron.left.2"), symbol("chevron.right.2")],
+                         labels: ["Folder", "Folder"],
+                         tips: ["Previous folder", "Next folder"],
+                         mode: .momentary, action: #selector(folderNavFired(_:)), palette: "Folder Navigation")
+        case .rotate:
+            return group(id, images: [symbol("rotate.left"), symbol("rotate.right")],
+                         labels: ["Rotate Left", "Rotate Right"],
+                         tips: ["Rotate left", "Rotate right"],
+                         mode: .momentary, action: #selector(rotateFired(_:)), priority: .low,
+                         palette: "Rotate")
+        case .zoom:
+            return group(id, images: [symbol("minus.magnifyingglass"), symbol("plus.magnifyingglass")],
+                         labels: ["Zoom Out", "Zoom In"], tips: ["Zoom out", "Zoom in"],
+                         mode: .momentary, action: #selector(zoomFired(_:)), palette: "Zoom")
+        case .scale:
+            return titleGroup(id, titles: ["Fit", "Fill", "1:1"],
+                              labels: ["Fit", "Crop to Fill", "Actual Size"],
+                              tips: ["Fit to window", "Crop to fill", "Actual size (1:1)"],
+                              action: #selector(scaleFired(_:)), palette: "Scale")
+
+        case .slideshow:
+            return slideshowControl(id)
+        case .folderTree:
+            return toggle(id, action: "folder_tree", symbol: "folder.circle", label: "Folders")
+        case .infoLine:
+            return toggle(id, action: "info", symbol: "info", label: "Image Info")
+        case .inspector:
+            return toggle(id, action: "full_exif", symbol: "info.circle", label: "Details",
+                          priority: .high)
+
+        case .fullscreen:
+            // `.high`: Fullscreen is one of the most-used controls, so it should be among the
+            // LAST items shed into the `»` overflow when the window narrows — never the first.
+            // (AppKit still parks the `»` chevron to its right; a titlebar accessory could put
+            // it to the left like Preview's search, but an accessory doesn't get the toolbar's
+            // Liquid Glass, so the button looked bare — the glass look wins here.)
+            return button(id, action: "fullscreen",
+                          symbol: "arrow.up.left.and.arrow.down.right", label: "Fullscreen",
+                          priority: .high)
+        case .saveRotation:
+            return button(id, action: "save_rotation", symbol: "square.and.arrow.down",
+                          label: "Save Rotation")
+        case .playAnimation:
+            // A toggle so it lights (accent background) while playing; `sync` also dims it
+            // (disabled) when the current image has no motion.
+            return toggle(id, action: "play_pause", symbol: "livephoto.play", label: "Play Animation")
         case .compare:
             return button(id, action: "compare_toggle", symbol: "rectangle.on.rectangle",
                           label: "Compare")
+        case .pin:
+            return button(id, action: "compare_pin", symbol: "pin", label: "Pin")
         case .copy:
             return button(id, action: "copy", symbol: "doc.on.doc", label: "Copy")
         case .copyPath:
@@ -210,30 +277,63 @@ final class ToolbarController: NSObject, NSToolbarDelegate {
             return button(id, action: "delete", symbol: "trash", label: "Delete")
         case .describe:
             return button(id, action: "describe", symbol: "sparkles", label: "Describe")
+        case .showText:
+            return button(id, action: "show_text", symbol: "text.viewfinder", label: "Text")
         case .openFile:
             return button(id, action: "open_file", symbol: "doc", label: "Open File")
         case .openFolder:
-            return button(id, action: "open_folder", symbol: "folder.badge.plus",
-                          label: "Open Folder")
+            return button(id, action: "open_folder", symbol: "folder.badge.plus", label: "Open Folder")
         case .settings:
             return button(id, action: "settings", symbol: "gearshape", label: "Settings")
-        case .fullscreen:
-            return button(id, action: "fullscreen",
-                          symbol: "arrow.up.left.and.arrow.down.right", label: "Fullscreen")
+        case .openParent:
+            return button(id, action: "open_parent", symbol: "arrow.up", label: "Enclosing Folder")
         default:
             return nil
         }
     }
 
-    // MARK: - Item builders
+    // MARK: - Builders
 
-    /// A plain bordered action button item — the standard toolbar look, native customization,
-    /// explicit enable control (`autovalidates = false`, `sync` owns `isEnabled`).
+    /// A native image group (one glass segmented capsule). `tips` set **per-segment** tooltips
+    /// — a group-level `toolTip` would show for every segment, which reads wrong.
+    private func group(
+        _ id: NSToolbarItem.Identifier, images: [NSImage], labels: [String], tips: [String],
+        mode: NSToolbarItemGroup.SelectionMode, action: Selector,
+        priority: NSToolbarItem.VisibilityPriority = .standard, palette: String
+    ) -> NSToolbarItemGroup {
+        let g = NSToolbarItemGroup(itemIdentifier: id, images: images, selectionMode: mode,
+                                   labels: labels, target: self, action: action)
+        g.visibilityPriority = priority
+        g.label = palette
+        g.paletteLabel = palette
+        for (i, tip) in tips.enumerated() where i < g.subitems.count {
+            g.subitems[i].toolTip = tip
+        }
+        return g
+    }
+
+    /// A native title group (text segments — Fit/Fill/1:1).
+    private func titleGroup(
+        _ id: NSToolbarItem.Identifier, titles: [String], labels: [String], tips: [String],
+        action: Selector, palette: String
+    ) -> NSToolbarItemGroup {
+        let g = NSToolbarItemGroup(itemIdentifier: id, titles: titles, selectionMode: .selectOne,
+                                   labels: labels, target: self, action: action)
+        g.label = palette
+        g.paletteLabel = palette
+        for (i, tip) in tips.enumerated() where i < g.subitems.count {
+            g.subitems[i].toolTip = tip
+        }
+        return g
+    }
+
+    /// A plain bordered action button (glass) — native customization, explicit enable control.
     private func button(
-        _ id: NSToolbarItem.Identifier, action: String, symbol: String, label: String
+        _ id: NSToolbarItem.Identifier, action: String, symbol name: String, label: String,
+        priority: NSToolbarItem.VisibilityPriority = .standard
     ) -> NSToolbarItem {
         let item = NSToolbarItem(itemIdentifier: id)
-        item.image = symbolImage(symbol, label)
+        item.image = symbol(name)
         item.label = label
         item.paletteLabel = label
         item.toolTip = label
@@ -241,68 +341,82 @@ final class ToolbarController: NSObject, NSToolbarDelegate {
         item.action = #selector(itemFired(_:))
         item.isBordered = true
         item.autovalidates = false
+        item.visibilityPriority = priority
         actionForItem[id] = action
-        plainItems[id] = item
         return item
     }
 
-    /// A toggle item (Inspector / Folder tree / Slideshow): a `pushOnPushOff` button so the
-    /// active panel shows the recessed toolbar-toggle look; `sync` sets the authoritative
-    /// on-state from `MenuState` / the model's panel visibility.
+    /// A toggle: a `pushOnPushOff` button whose `.on` state shows the accent-tinted background
+    /// macOS uses for active toolbar controls (`sync` drives the state). View-based (the only
+    /// way to get the on-state), sized to fit, focus ring off.
     private func toggle(
-        _ id: NSToolbarItem.Identifier, action: String, symbol: String, label: String
+        _ id: NSToolbarItem.Identifier, action: String, symbol name: String, label: String,
+        priority: NSToolbarItem.VisibilityPriority = .standard
     ) -> NSToolbarItem {
-        let b = NSButton(title: "", image: symbolImage(symbol, label) ?? NSImage(), target: self,
-                         action: #selector(toggleFired(_:)))
+        let b = NSButton(image: symbol(name), target: self, action: #selector(toggleFired(_:)))
         b.setButtonType(.pushOnPushOff)
         b.bezelStyle = .texturedRounded
         b.imagePosition = .imageOnly
-        b.identifier = NSUserInterfaceItemIdentifier(action) // toggleFired reads this
+        b.focusRingType = .none
+        b.identifier = NSUserInterfaceItemIdentifier(action)
+        // Intrinsic sizing (the system measures the button) — the modern replacement for the
+        // deprecated item.minSize/maxSize.
         let item = NSToolbarItem(itemIdentifier: id)
         item.view = b
         item.label = label
         item.paletteLabel = label
         item.toolTip = label
-        actionForItem[id] = action
-        toggleButtons[id] = b
+        item.visibilityPriority = priority
         return item
     }
 
-    /// A segmented control (nav / zoom) wrapped in a toolbar item — renders as one grouped
-    /// glass capsule on Tahoe.
-    private func segmented(
-        _ id: NSToolbarItem.Identifier, symbols: [String],
-        mode: NSSegmentedControl.SwitchTracking, action: Selector, label: String, tips: String
-    ) -> NSToolbarItem {
-        let images = symbols.map { symbolImage($0, label) ?? NSImage() }
-        let seg = NSSegmentedControl(images: images, trackingMode: mode, target: self, action: action)
-        return wrap(seg, id: id, label: label, tips: tips)
-    }
-
-    private func segmentedLabels(
-        _ id: NSToolbarItem.Identifier, labels: [String],
-        mode: NSSegmentedControl.SwitchTracking, action: Selector, label: String, tips: String
-    ) -> NSToolbarItem {
-        let seg = NSSegmentedControl(labels: labels, trackingMode: mode, target: self, action: action)
-        return wrap(seg, id: id, label: label, tips: tips)
-    }
-
-    private func wrap(
-        _ seg: NSSegmentedControl, id: NSToolbarItem.Identifier, label: String, tips: String
-    ) -> NSToolbarItem {
-        seg.segmentStyle = .separated
+    /// The slideshow control: a `pushOnPushOff` button (accent background while running) that
+    /// also shows the live interval. Fixed width so the button doesn't jiggle as the interval
+    /// changes with `[` / `]`. The one custom view (no native item shows a live value).
+    private func slideshowControl(_ id: NSToolbarItem.Identifier) -> NSToolbarItem {
+        let b = NSButton(title: "  4s", image: symbol("play.square.stack"), target: self,
+                         action: #selector(toggleFired(_:)))
+        b.setButtonType(.pushOnPushOff)
+        b.bezelStyle = .texturedRounded
+        b.imagePosition = .imageLeading
+        b.focusRingType = .none
+        b.identifier = NSUserInterfaceItemIdentifier("slideshow")
+        // A fixed width (sized for the widest interval, "60.0s") so adjusting `[`/`]` doesn't
+        // resize the button. A width constraint is the modern replacement for item.minSize/
+        // maxSize; height stays intrinsic.
+        b.translatesAutoresizingMaskIntoConstraints = false
+        b.widthAnchor.constraint(equalToConstant: 78).isActive = true
         let item = NSToolbarItem(itemIdentifier: id)
-        item.view = seg
-        item.label = label
-        item.paletteLabel = label
-        item.toolTip = tips
+        item.view = b
+        item.label = "Slideshow"
+        item.paletteLabel = "Slideshow"
+        item.toolTip = "Start / stop slideshow (adjust with [ and ])"
         return item
     }
 
-    /// An SF Symbol as a template toolbar image (tints with the accent / theme), with an
-    /// accessibility description for VoiceOver.
-    private func symbolImage(_ name: String, _ desc: String) -> NSImage? {
-        NSImage(systemSymbolName: name, accessibilityDescription: desc)
+    /// An SF Symbol as a template toolbar image at the shared size.
+    private func symbol(_ name: String) -> NSImage {
+        (NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(Self.symbolConfig)) ?? NSImage()
+    }
+
+    /// The `shuffle` glyph, optionally horizontally flipped, drawn into a layout-neutral
+    /// template image. Both random segments use this (see `.random`) so they're the same image
+    /// *type* and therefore the same size — the fix for the oversized/mismatched pair. Kept
+    /// template so it still tints with the theme/accent.
+    private func shuffleImage(flipped: Bool) -> NSImage {
+        let base = symbol("shuffle")
+        let out = NSImage(size: base.size, flipped: false) { rect in
+            guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
+            if flipped {
+                ctx.translateBy(x: rect.width, y: 0)
+                ctx.scaleBy(x: -1, y: 1)
+            }
+            base.draw(in: rect)
+            return true
+        }
+        out.isTemplate = true
+        return out
     }
 }
 
@@ -311,22 +425,27 @@ final class ToolbarController: NSObject, NSToolbarDelegate {
 extension NSToolbarItem.Identifier {
     static let navigation = NSToolbarItem.Identifier("pb.navigation")
     static let random = NSToolbarItem.Identifier("pb.random")
-    static let scale = NSToolbarItem.Identifier("pb.scale")
-    static let zoom = NSToolbarItem.Identifier("pb.zoom")
-    static let rotateLeft = NSToolbarItem.Identifier("pb.rotateLeft")
-    static let rotateRight = NSToolbarItem.Identifier("pb.rotateRight")
-    static let inspector = NSToolbarItem.Identifier("pb.inspector")
-    static let folderTree = NSToolbarItem.Identifier("pb.folderTree")
+    static let folderNav = NSToolbarItem.Identifier("pb.folderNav")
     static let slideshow = NSToolbarItem.Identifier("pb.slideshow")
-    static let playPause = NSToolbarItem.Identifier("pb.playPause")
+    static let scale = NSToolbarItem.Identifier("pb.scale")
+    static let rotate = NSToolbarItem.Identifier("pb.rotate")
+    static let saveRotation = NSToolbarItem.Identifier("pb.saveRotation")
+    static let zoom = NSToolbarItem.Identifier("pb.zoom")
+    static let folderTree = NSToolbarItem.Identifier("pb.folderTree")
+    static let infoLine = NSToolbarItem.Identifier("pb.infoLine")
+    static let inspector = NSToolbarItem.Identifier("pb.inspector")
+    static let fullscreen = NSToolbarItem.Identifier("pb.fullscreen")
+    static let playAnimation = NSToolbarItem.Identifier("pb.playAnimation")
     static let compare = NSToolbarItem.Identifier("pb.compare")
+    static let pin = NSToolbarItem.Identifier("pb.pin")
     static let copy = NSToolbarItem.Identifier("pb.copy")
     static let copyPath = NSToolbarItem.Identifier("pb.copyPath")
     static let reveal = NSToolbarItem.Identifier("pb.reveal")
     static let delete = NSToolbarItem.Identifier("pb.delete")
     static let describe = NSToolbarItem.Identifier("pb.describe")
+    static let showText = NSToolbarItem.Identifier("pb.showText")
     static let openFile = NSToolbarItem.Identifier("pb.openFile")
     static let openFolder = NSToolbarItem.Identifier("pb.openFolder")
     static let settings = NSToolbarItem.Identifier("pb.settings")
-    static let fullscreen = NSToolbarItem.Identifier("pb.fullscreen")
+    static let openParent = NSToolbarItem.Identifier("pb.openParent")
 }

@@ -44,6 +44,10 @@ final class MetalCanvasNSView: NSView {
         // bounds) instead of ballooning/squeezing until the next render lands.
         layerContentsRedrawPolicy = .never
         layerContentsPlacement = .center
+        // Own the window's keyboard focus (see `acceptsFirstResponder`). `.none` so that even
+        // when this view IS first responder it paints no ring — the content is the focus, not a
+        // control.
+        focusRingType = .none
         // Finder file drops onto the photo canvas (the winit shell's DroppedPaths).
         registerForDraggedTypes([.fileURL])
         // The definitive size signal. SwiftUI sizes this representable on its own
@@ -68,6 +72,16 @@ final class MetalCanvasNSView: NSView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("not from a nib") }
+
+    /// Accept first responder so the **content** owns the window's keyboard focus. Without
+    /// this the canvas refuses focus, and when the window becomes key AppKit hands
+    /// first-responder to the first toolbar control instead — which paints a blue focus ring
+    /// that can't be Tabbed away (the SwiftUI-hosted toolbar has no working key-view loop).
+    /// Every other app focuses its content on open for the same reason. Safe because keys are
+    /// delivered by `CoreModel`'s local event monitor (gated on the target window), NOT the
+    /// responder chain — so first responder here is purely about where the (suppressed) focus
+    /// ring sits. `CoreModel` re-asserts this on `didBecomeKey`.
+    override var acceptsFirstResponder: Bool { true }
 
     override func makeBackingLayer() -> CALayer {
         let layer = CAMetalLayer()
@@ -190,6 +204,10 @@ final class MetalCanvasNSView: NSView {
         metalLayer.contentsScale = scale
         attached = true
         model?.hostWindow = window
+        // Take the window's keyboard focus immediately so no toolbar control becomes the
+        // initial first responder and paints a stuck focus ring (see `acceptsFirstResponder`).
+        window?.initialFirstResponder = self
+        window?.makeFirstResponder(self)
         // Report the effective appearance BEFORE the renderer attaches, so the first
         // frame's letterbox + HUD already resolve `Appearance: System` correctly (#46).
         model?.osThemeChanged(dark: effectiveAppearance.isDarkAppearance)

@@ -558,10 +558,11 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         one(Action::OpenParent, "Alt+Up"),
         one(Action::PrevFolder, "Alt+Left"),
         one(Action::NextFolder, "Alt+Right"),
-        // Fullscreen is a core action, so it's worth a few bindings: F11 (Windows
-        // convention), Alt+Enter / Option+Enter (the discoverable-by-habit one), and
-        // bare `F` (the most memorable — and the only one that's discoverable at all).
-        (Action::Fullscreen, vec![p("F11"), p("Alt+Enter"), p("F")]),
+        // Fullscreen: bare `F` is primary — Mac-idiomatic, the most memorable, and the one
+        // shown on the menu badge / help / toolbar hint. The Windows-muscle-memory alternates
+        // stay as secondaries: F11 (Windows convention, but needs `fn` on a Mac and collides
+        // with Mission Control's clear-desktop) and Alt+Enter / Option+Enter.
+        (Action::Fullscreen, vec![p("F"), p("F11"), p("Alt+Enter")]),
         one(Action::Recursive, "Ctrl+R"),
         // Stop an in-flight folder scan — menu-only by default (Esc stays Quit); a user can
         // bind a key in Settings if they want one.

@@ -4888,6 +4888,14 @@ impl AppCore {
         self.show_toast(&slideshow::format_interval(interval));
     }
 
+    /// The current slideshow interval, formatted for display (e.g. `4s`, `0.5s`) — the
+    /// same formatting the `[`/`]` adjust toast uses. The macOS toolbar shows this on its
+    /// slideshow control (task #55). Reflects live adjustments, not just the configured
+    /// default, since it reads the running `slideshow.interval`.
+    pub fn slideshow_interval_display(&self) -> String {
+        slideshow::format_interval(self.slideshow.interval)
+    }
+
     /// Request the native picker (`O` = file(s), `Shift+O` = folder). Computes the start
     /// directory from live state (core), then emits an [`CoreEffect::OpenFilePanel`] /
     /// [`OpenFolderPanel`](CoreEffect::OpenFolderPanel); the shell runs the modal panel in
@@ -5681,6 +5689,20 @@ impl AppCore {
     /// animated container (GIF/APNG/WebP/HEIF sequence) or a Live Photo's `.mov`.
     pub fn has_motion(&mut self, item: usize) -> bool {
         self.current_is_animated(item) || self.live_motion_path(item).is_some()
+    }
+
+    /// Whether the currently displayed item has a playable motion component — the macOS
+    /// toolbar dims its Play-Animation button on stills (task #55). `&mut` because Live-Photo
+    /// pairing is resolved + cached on first check (cheap cache hit after; the display path
+    /// has usually primed it already).
+    pub fn current_has_motion(&mut self) -> bool {
+        self.displayed_item.is_some_and(|i| self.has_motion(i))
+    }
+
+    /// Whether an animation / Live Photo is actively playing — the toolbar lights its
+    /// Play-Animation button while it runs.
+    pub fn animation_playing(&self) -> bool {
+        self.playback.as_ref().is_some_and(|pb| pb.is_playing())
     }
 
     /// Kick the whole-sequence decode for `item` on a worker thread so a big GIF/WebP (or

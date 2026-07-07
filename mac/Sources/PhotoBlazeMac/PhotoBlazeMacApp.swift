@@ -248,6 +248,17 @@ struct ContentView: View {
             }
             .animation(.easeOut(duration: 0.22), value: model.toastVisible)
             .animation(.easeInOut(duration: 0.2), value: toastBottomInset)
+            // The "Press F to exit fullscreen" hint — bottom-center (like the toast), shown
+            // when speed mode is entered by mouse. Non-interactive; the model fades it after 6s.
+            .overlay(alignment: .bottom) {
+                if model.fullscreenHintVisible {
+                    FullscreenHintView(model: model)
+                        .padding(.bottom, toastBottomInset)
+                        .transition(.opacity)
+                        .allowsHitTesting(false)
+                }
+            }
+            .animation(.easeInOut(duration: 0.3), value: model.fullscreenHintVisible)
             // Help last = topmost: it's an ephemeral reference sheet centered over the
             // photo, so it should occlude the tree/inspector (which it overlaps) rather
             // than slide under them.
@@ -273,6 +284,11 @@ struct ContentView: View {
                 model.speedModeFullscreen ? Visibility.hidden : .automatic,
                 for: .windowToolbar
             )
+            // Drive the titlebar filename + "N of M" subtitle through SwiftUI — it owns the
+            // WindowGroup titlebar and would otherwise clobber a direct AppKit `window.subtitle`
+            // write (the subtitle vanished; see `CoreModel.applyWindowTitle`).
+            .navigationTitle(model.windowTitleText)
+            .navigationSubtitle(model.windowSubtitleText)
             .onAppear {
                 // After SwiftUI has installed its own main menu, replace it with ours.
                 model.installMenuBarIfNeeded()

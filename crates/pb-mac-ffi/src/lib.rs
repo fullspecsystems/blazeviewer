@@ -741,6 +741,22 @@ impl AppCoreHandle {
     }
 
     /// The latest menu check/enabled state (pull after a `MenuStateChanged` marker).
+    /// The live slideshow interval, formatted (`4s`, `0.5s`) — the macOS toolbar's
+    /// slideshow control shows it (task #55). Read on each `syncToolbar`.
+    fn slideshow_interval_display(&self) -> String {
+        self.core.slideshow_interval_display()
+    }
+
+    /// Whether the current item has motion (dims the toolbar's Play-Animation button) and
+    /// whether it's actively playing (lights it). Both read on each `syncToolbar` (task #55).
+    fn current_has_motion(&mut self) -> bool {
+        self.core.current_has_motion()
+    }
+
+    fn animation_playing(&self) -> bool {
+        self.core.animation_playing()
+    }
+
     fn menu_state(&self) -> ffi::MenuStateFfi {
         let s = &self.last_menu_state;
         ffi::MenuStateFfi {
@@ -2466,6 +2482,11 @@ mod ffi {
         // The native menu (NS1 item 8): clicks in by Action id, state out by pull.
         fn menu_action(&mut self, id: &str);
         fn menu_state(&self) -> MenuStateFfi;
+        // The live slideshow interval, formatted for the macOS toolbar (task #55).
+        fn slideshow_interval_display(&self) -> String;
+        // Motion state for the toolbar's Play-Animation button (task #55).
+        fn current_has_motion(&mut self) -> bool;
+        fn animation_playing(&self) -> bool;
         fn context_menu(&mut self);
 
         // The native Help panel (task #54, mac-first): on a PanelsChanged marker call
