@@ -7,10 +7,15 @@
 //!
 //! Calls the backends directly (not the dispatcher) so both run in one process.
 
+#[cfg(windows)]
 use std::path::Path;
-
+#[cfg(windows)]
 use pb_decode::{DecodeRequest, ImageDecoder, LibHeifDecoder, WicDecoder};
 
+// Decodes with BOTH WIC and libheif to compare them — inherently Windows-only (no
+// WIC anywhere else). Off Windows this is a stub (`main` at the bottom); the libheif
+// backend alone is smoke-tested with `--example decode`.
+#[cfg(windows)]
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
@@ -122,5 +127,14 @@ fn main() {
         } else {
             "MISMATCH (likely a color-space discrepancy — investigate)"
         }
+    );
+}
+
+/// Off Windows there's no WIC to compare against, so this A/B tool is a no-op.
+#[cfg(not(windows))]
+fn main() {
+    eprintln!(
+        "heic_compare compares libheif against WIC and is Windows-only; \
+         use `--example decode` to smoke-test the libheif backend elsewhere."
     );
 }

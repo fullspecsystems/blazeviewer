@@ -1,26 +1,57 @@
 //! Build script for `pb-decode`.
 //!
 //! Only does something when the optional `libheif` feature is enabled: it points
-//! the linker at the vcpkg-built static libheif + libde265 (HEVC decode) so the
-//! `libheif` module's hand-rolled FFI resolves. No `vcpkg` build-dependency — the
-//! install layout is fixed and the link directives are spelled out, which is
-//! deterministic and self-documenting (no triplet-detection magic, no transitive
-//! dependency guessing). When the feature is off this script is a no-op and the
-//! crate stays pure-Rust with zero native build risk (ADR-015).
+//! the linker at libheif + libde265 (HEVC decode) so the `libheif` module's
+//! hand-rolled FFI resolves, and emits the `heic_libheif` cfg the crate gates the
+//! backend on. When the feature is off this script is a no-op and the crate stays
+//! pure-Rust with zero native build risk (ADR-015).
 //!
-//! Phase 0 setup (one-time, see docs/heic-decode-plan.md):
-//!   <VCPKG_ROOT>/vcpkg install "libheif[core]:x64-windows-static-md"
-//! `core` drops the x265 *encoder* default; libde265 (HEVC *decode*) is a hard
-//! dependency so it's always present. static-md = static libs + dynamic CRT,
-//! matching Rust's default MSVC CRT linkage (so no DLLs to ship in the MSI).
+//! Two link strategies, picked by the **target** OS (not the host — a build script
+//! runs on the host, so we read `CARGO_CFG_TARGET_OS`, which is correct under
+//! cross-compilation):
+//!   * **Windows** — a vcpkg-built *static* libheif+libde265, decode-only and
+//!     plugin-loader-free (Phase 0, `scripts/setup-libheif.ps1`). Static so there
+//!     are no DLLs to ship in the installer.
+//!   * **Linux** (and other non-mac unixes) — the *system* shared libheif
+//!     (`apt install libheif-dev`); libheif loads libde265 as a runtime plugin, so
+//!     we link only `heif`.
 
 fn main() {
-    #[cfg(feature = "libheif")]
-    link_libheif();
+    // Register the cfg we may set, so `#[cfg(heic_libheif)]` never trips the
+    // unexpected-cfgs lint (Rust ≥ 1.80) when the feature is off.
+    println!("cargo:rustc-check-cfg=cfg(heic_libheif)");
+
+    // Cargo sets this env var iff the `libheif` feature is active for this build.
+    if std::env::var_os("CARGO_FEATURE_LIBHEIF").is_none() {
+        return;
+    }
+
+    // Branch on the *target* OS (a build script otherwise sees only the host).
+    match std::env::var("CARGO_CFG_TARGET_OS").as_deref() {
+        Ok("windows") => {
+            link_libheif_windows();
+            println!("cargo:rustc-cfg=heic_libheif");
+        }
+        // Linux + the BSDs: system libheif. macOS is deliberately excluded (it
+        // decodes HEIC via Image I/O; no libheif backend there).
+        Ok("linux" | "freebsd" | "dragonfly" | "netbsd" | "openbsd") => {
+            link_libheif_unix();
+            println!("cargo:rustc-cfg=heic_libheif");
+        }
+        // Any other target with the feature forced on: link nothing, set no cfg —
+        // the backend simply isn't compiled, so the build stays sound.
+        _ => {}
+    }
 }
 
-#[cfg(feature = "libheif")]
-fn link_libheif() {
+/// Windows: point the linker at the vcpkg static libheif + libde265.
+///
+/// Phase 0 setup (one-time, see docs/heic-decode-plan.md):
+///   <VCPKG_ROOT>/vcpkg install "libheif[core]:x64-windows-static-md"
+/// `core` drops the x265 *encoder* default; libde265 (HEVC *decode*) is a hard
+/// dependency so it's always present. static-md = static libs + dynamic CRT,
+/// matching Rust's default MSVC CRT linkage (so no DLLs to ship in the installer).
+fn link_libheif_windows() {
     use std::path::Path;
 
     // VCPKG_ROOT, or the conventional ~/vcpkg from the Phase-0 install.
@@ -51,4 +82,29 @@ fn link_libheif() {
     // options) — Cargo doesn't otherwise track the external lib.
     println!("cargo:rerun-if-changed={libdir}\\heif.lib");
     println!("cargo:rerun-if-env-changed=VCPKG_ROOT");
+}
+
+/// Linux / BSD: link the system shared libheif (`apt install libheif-dev`).
+///
+/// Unlike the Windows static build, the distro libheif loads its HEVC decoder
+/// (libde265) as a *runtime plugin*, so we link only `heif` and let it pull the
+/// codec in. Probe `pkg-config` for a non-standard install prefix; a stock
+/// `libheif-dev` lands in the default linker search path, so the bare `-lheif`
+/// resolves even if pkg-config isn't present.
+fn link_libheif_unix() {
+    if let Ok(out) = std::process::Command::new("pkg-config")
+        .args(["--libs-only-L", "libheif"])
+        .output()
+    {
+        if out.status.success() {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            for tok in stdout.split_whitespace() {
+                if let Some(dir) = tok.strip_prefix("-L") {
+                    println!("cargo:rustc-link-search=native={dir}");
+                }
+            }
+        }
+    }
+    println!("cargo:rustc-link-lib=dylib=heif");
+    println!("cargo:rerun-if-env-changed=PKG_CONFIG_PATH");
 }

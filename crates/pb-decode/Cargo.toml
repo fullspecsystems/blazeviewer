@@ -37,13 +37,18 @@ rawloader = "0.37.1"
 # 16-bit RLE) had gaps. No extra dependency.
 
 [features]
-# CPU HEVC decode via libheif (libde265), behind the ImageDecoder seam, A/B-able
-# vs the WIC backend. OFF by default: it links a vcpkg-built static C lib
-# (`libheif[core]:x64-windows-static-md`, see build.rs), so a missing/broken C
-# toolchain must never block the pure-Rust core (ADR-015). Enable with
-# `--features libheif`. The win is parallelism: WIC's HEVC decoder serializes
-# (~1.6-2.4x across 8 threads, measured), libheif is plain CPU so the pool's
-# workers scale ~linearly. Windows-only for now (the lib is built per-triplet).
+# CPU HEVC decode via libheif (libde265), behind the ImageDecoder seam. OFF by
+# default: it links a native C lib (see build.rs), so a missing/broken C toolchain
+# must never block the pure-Rust core (ADR-015). Enable with `--features libheif`.
+# Two roles by platform:
+#   * Windows — an A/B accelerator over WIC. WIC's HEVC decoder serializes
+#     (~1.6-2.4x across 8 threads, measured); libheif is plain CPU so the pool's
+#     workers scale ~linearly. Links a vcpkg static `libheif[core]:x64-windows-
+#     static-md` (scripts/setup-libheif.ps1).
+#   * Linux — the *only* HEIC path (there's no WIC). Links the system shared lib
+#     (`apt install libheif-dev`); libde265 loads as a runtime plugin.
+# build.rs sets the `heic_libheif` cfg the backend gates on. macOS uses Image I/O,
+# so it ignores this feature.
 libheif = []
 
 [dev-dependencies]

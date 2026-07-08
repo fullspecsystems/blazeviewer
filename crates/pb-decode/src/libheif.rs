@@ -24,9 +24,10 @@ use std::os::raw::{c_char, c_int};
 use std::ptr;
 use std::sync::OnceLock;
 
-use crate::isobmff::{
-    color_from_colr_box, colr_transfer, has_thumbnail_ref, is_hdr_transfer, isobmff_brand,
-};
+use crate::isobmff::{color_from_colr_box, colr_transfer, is_hdr_transfer, isobmff_brand};
+// The thumbnail carve-out only fires on Windows (it prefers WIC's GetThumbnail).
+#[cfg(windows)]
+use crate::isobmff::has_thumbnail_ref;
 use crate::{common, ColorTransform, DecodeError, DecodeRequest, DecodedImage, ImageDecoder};
 
 // --- libheif enum constants we use (from heif_image.h / heif_error.h) ---
@@ -291,16 +292,21 @@ impl ImageDecoder for LibHeifDecoder {
     }
 }
 
-/// Whether the dispatcher should send these bytes to libheif instead of WIC. True
-/// when all hold:
-/// - the libheif backend is selected (default; `PB_HEIC_BACKEND=wic` forces WIC),
+/// Whether the dispatcher should send these bytes to libheif. True when all hold:
+/// - the libheif backend is selected (default; `PB_HEIC_BACKEND=wic` forces WIC —
+///   Windows only, where there's a WIC to fall back to),
 /// - it's an `HEIC` (HEVC) file — AVIF has no AV1 decoder in our libheif build,
-/// - it's **not** HDR (PQ/HLG stays on WIC's fp16 scRGB float path),
-/// - and it's a **full** decode request, OR a preview request for a HEIC with **no
-///   real embedded thumbnail**. WIC's `GetThumbnail` is the fast preview path only
-///   when a real `thmb` item exists; otherwise WIC fakes it by decoding the whole
-///   grid (~as slow as a full) and we'd then decode the full again — so libheif (one
-///   parallel decode) handles those previews too.
+/// - it's **not** HDR (PQ/HLG stays on WIC's fp16 scRGB float path — Windows only),
+/// - and (Windows) it's a **full** decode request, OR a preview request for a HEIC
+///   with **no real embedded thumbnail**. WIC's `GetThumbnail` is the fast preview
+///   path only when a real `thmb` item exists; otherwise WIC fakes it by decoding
+///   the whole grid (~as slow as a full) and we'd then decode the full again — so
+///   libheif (one parallel decode) handles those previews too.
+///
+/// On **Linux** there is no WIC, so the WIC-preference carve-outs (the env switch,
+/// the HDR gate, the thumbnail-preview exception) don't apply: libheif is the only
+/// HEIC decoder, and it takes every SDR HEIC decode — previews included. HDR HEIC
+/// and AVIF still route away (no decoder for them here) → a graceful `Unsupported`.
 pub(crate) fn route_full_heic(bytes: &[u8], allow_preview: bool) -> bool {
     if !backend_is_libheif() {
         return false;
@@ -309,22 +315,39 @@ pub(crate) fn route_full_heic(bytes: &[u8], allow_preview: bool) -> bool {
         return false;
     }
     if colr_transfer(bytes).is_some_and(is_hdr_transfer) {
-        return false; // HDR → WIC float path
+        return false; // HDR → WIC float path (Windows); unsupported on Linux
     }
-    // Preview of a *thumbnailed* HEIC → WIC's fast GetThumbnail. Everything else
-    // (full decodes, and previews of no-thumbnail HEICs) → libheif.
-    !(allow_preview && has_thumbnail_ref(bytes))
+    // Preview of a *thumbnailed* HEIC → WIC's fast GetThumbnail. No WIC off Windows,
+    // so libheif handles previews there too.
+    #[cfg(windows)]
+    {
+        !(allow_preview && has_thumbnail_ref(bytes))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = allow_preview; // no thumbnail carve-out without WIC
+        true
+    }
 }
 
 /// Read the `PB_HEIC_BACKEND` A/B switch once. Default (unset) = libheif (the whole
 /// point of compiling the feature in); set to `wic` to force the WIC path for an
-/// apples-to-apples comparison in one binary.
+/// apples-to-apples comparison in one binary. The switch only makes sense on Windows
+/// (the only target with a WIC to fall back to); off Windows libheif is the sole HEIC
+/// decoder, so the env var is ignored and this is always `true`.
 fn backend_is_libheif() -> bool {
-    static SEL: OnceLock<bool> = OnceLock::new();
-    *SEL.get_or_init(|| match std::env::var("PB_HEIC_BACKEND") {
-        Ok(v) => !v.eq_ignore_ascii_case("wic"),
-        Err(_) => true,
-    })
+    #[cfg(not(windows))]
+    {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        static SEL: OnceLock<bool> = OnceLock::new();
+        *SEL.get_or_init(|| match std::env::var("PB_HEIC_BACKEND") {
+            Ok(v) => !v.eq_ignore_ascii_case("wic"),
+            Err(_) => true,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -370,11 +393,21 @@ mod tests {
         assert!(route_full_heic(&ftyp(b"heic"), true));
     }
 
+    #[cfg(windows)]
     #[test]
     fn keeps_thumbnailed_previews_on_wic() {
         // Preview of a HEIC WITH a real thumbnail → WIC's fast GetThumbnail.
         assert!(!route_full_heic(&heic_with_thumb(), true));
         // ...but its full decode still goes to libheif.
+        assert!(route_full_heic(&heic_with_thumb(), false));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn routes_thumbnailed_previews_to_libheif_without_wic() {
+        // No WIC to prefer, so even a thumbnailed HEIC's preview goes to libheif
+        // (there's no other HEIC decoder on Linux).
+        assert!(route_full_heic(&heic_with_thumb(), true));
         assert!(route_full_heic(&heic_with_thumb(), false));
     }
 

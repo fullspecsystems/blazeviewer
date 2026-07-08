@@ -12,7 +12,7 @@
 
 // Only the `colr`-box color parser (Windows/libheif + tests) needs this; the brand
 // and HDR-transfer sniffers are pure byte scans.
-#[cfg(any(windows, test))]
+#[cfg(any(windows, heic_libheif, test))]
 use crate::ColorTransform;
 
 /// If `bytes` is an ISOBMFF (`ftyp`) image these backends handle — AVIF or
@@ -166,7 +166,7 @@ pub(crate) fn colr_transfer(bytes: &[u8]) -> Option<u8> {
 /// Only the WIC/libheif backends (Windows) consult this — the macOS Image I/O backend
 /// lets CoreGraphics color-manage into a fixed Display-P3 space instead — so it's
 /// gated to its real consumers (plus `test`, so the parser tests run everywhere).
-#[cfg(any(windows, test))]
+#[cfg(any(windows, heic_libheif, test))]
 pub(crate) fn color_from_colr_box(bytes: &[u8]) -> Option<ColorTransform> {
     let mut i = 4usize; // a valid box has its 4-byte size *before* the type
     while i + 8 <= bytes.len() {
@@ -182,7 +182,7 @@ pub(crate) fn color_from_colr_box(bytes: &[u8]) -> Option<ColorTransform> {
 
 /// Parse a `colr` box whose type field starts at `pos` (the 4-byte size precedes
 /// it). `None` if it isn't a usable color box (lets the scan keep looking).
-#[cfg(any(windows, test))]
+#[cfg(any(windows, heic_libheif, test))]
 fn parse_colr_at(bytes: &[u8], pos: usize) -> Option<ColorTransform> {
     let box_start = pos.checked_sub(4)?;
     let size = u32::from_be_bytes(bytes[box_start..pos].try_into().ok()?) as usize;
@@ -222,9 +222,10 @@ fn parse_colr_at(bytes: &[u8], pos: usize) -> Option<ColorTransform> {
 /// handle those itself rather than pay that twice.
 ///
 /// Pragmatic byte-scan, bounded to the file head where `meta`/`iref` always live.
-/// Only the libheif backend consults this, so it's gated to that feature to stay
-/// dead-code-free in builds without it.
-#[cfg(feature = "libheif")]
+/// Only the libheif backend's Windows path consults this (to defer to WIC's fast
+/// GetThumbnail); off Windows there's no WIC to prefer, so it's gated to that one
+/// consumer to stay dead-code-free everywhere else.
+#[cfg(all(windows, feature = "libheif"))]
 pub(crate) fn has_thumbnail_ref(bytes: &[u8]) -> bool {
     let head = &bytes[..bytes.len().min(64 * 1024)];
     head.windows(4).any(|w| w == b"thmb")

@@ -28,12 +28,15 @@ mod livephoto;
 #[cfg(windows)]
 mod mf_video;
 // Shared ISOBMFF/`colr` parsing for the HEVC/AV1 container backends (WIC, Image I/O,
-// libheif). Only compiled where one of them is — keeps non-HEIC targets (e.g. the
-// Linux bench build) dead-code-free.
-#[cfg(any(windows, target_os = "macos"))]
+// libheif). Only compiled where one of them is — keeps non-HEIC targets (e.g. a
+// libheif-less Linux bench build) dead-code-free.
+#[cfg(any(windows, target_os = "macos", heic_libheif))]
 mod isobmff;
 mod jxl;
-#[cfg(all(windows, feature = "libheif"))]
+// The CPU libheif HEVC backend: Windows (vcpkg static) and Linux (system shared
+// lib). `heic_libheif` is set by build.rs when the `libheif` feature is on for a
+// supported target — a single flag so the gates below don't repeat the cfg.
+#[cfg(heic_libheif)]
 mod libheif;
 pub mod metadata;
 pub mod orientation;
@@ -52,7 +55,7 @@ pub use image_backend::ImageCrateDecoder;
 #[cfg(target_os = "macos")]
 pub use imageio::ImageIoDecoder;
 pub use jxl::JxlDecoder;
-#[cfg(all(windows, feature = "libheif"))]
+#[cfg(heic_libheif)]
 pub use libheif::LibHeifDecoder;
 #[cfg(target_os = "macos")]
 pub use livephoto::decode_live_motion;
@@ -292,10 +295,12 @@ fn decode_bytes_inner(
         fit,
         allow_preview,
     };
-    // HEIC full decodes (SDR, non-preview) go to the parallel CPU libheif backend
-    // when its feature is built in — WIC's HEVC decoder serializes, libheif scales
-    // across cores. Previews, AVIF, and HDR HEIC fall through to WIC below.
-    #[cfg(all(windows, feature = "libheif"))]
+    // HEIC decodes go to the CPU libheif backend when it's built in. On Windows it's
+    // an A/B accelerator over WIC (WIC's HEVC decoder serializes; libheif scales
+    // across cores) — AVIF / HDR HEIC / thumbnailed previews fall through to WIC
+    // below. On Linux there is no WIC, so libheif is the *only* HEIC path (and it
+    // also takes the previews `route_full_heic` would otherwise leave to WIC).
+    #[cfg(heic_libheif)]
     if libheif::route_full_heic(bytes, allow_preview) {
         return libheif::LibHeifDecoder.decode(&req);
     }
