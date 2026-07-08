@@ -613,24 +613,24 @@
             "id": 1,
             "title": "Boot checkpoint: cargo run on Linux + rfd backend one-liner",
             "description": "Add rfd features=[\"xdg-portal\"] (or gtk3) to the unix target block; cargo run on a Vulkan Linux box/VM; confirm it views/flicks images. This is the go/no-go — there's a real chance it Just Works.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 2,
-            "title": "HEIC/AVIF via --features libheif (libheif-dev)",
-            "description": "Wire the existing libheif feature into the Linux build; apt install libheif-dev; confirm HEIC decodes. Far easier than the Windows vcpkg path.",
-            "status": "pending"
+            "title": "HEIC via --features libheif (libheif-dev)",
+            "description": "Wire the existing libheif feature into the Linux build; apt install libheif-dev; confirm HEIC decodes. Far easier than the Windows vcpkg path. DONE for HEIC (9e21484). AVIF split to its own subtask — the system libheif path does not decode AV1 here.",
+            "status": "done"
           },
           {
             "id": 3,
             "title": "Papercut pass: Wayland/X11 decorations, HiDPI/fractional scaling, GL fallback",
-            "description": "Run under both Wayland and X11; check window decorations, fractional scaling, and that wgpu falls back to GL if a box lacks Vulkan. Fix the shake-out bugs.",
+            "description": "Run under both Wayland and X11; check window decorations, fractional scaling, and that wgpu falls back to GL if a box lacks Vulkan. Fix the shake-out bugs. NOTE: fullscreen is a borderless window manually positioned (set_outer_position is a no-op on native Wayland and primary_monitor() can be None) — use Fullscreen::Borderless on the Wayland backend. First thing to check in the Ubuntu VM test.",
             "status": "pending"
           },
           {
             "id": 4,
             "title": "Desktop integration: .desktop file + icon (+ optional xdg-mime default)",
-            "description": "Ship a .desktop entry + icon so it's a real app in the launcher; optional xdg-mime association for 'open with'.",
+            "description": "Ship a .desktop entry + icon so it's a real app in the launcher; optional xdg-mime association for 'open with'. NOTE: Settings ▸ System shows a dead \"Default apps\" row on Linux (silent no-op, Windows wording, dialog.rs ~2104) — hide or re-word until the .desktop/xdg-mime story lands. The .desktop file is also the only way Wayland gets a window icon.",
             "status": "pending"
           },
           {
@@ -643,6 +643,60 @@
             "id": 6,
             "title": "THE DELIVERABLE: companion blog post + post it",
             "description": "'I ported my Rust image viewer to Linux (and it might be the fastest one there)'. ~1200 words, screenshot running on a Wayland desktop, aimed at r/rust / HN / r/linux. This is what makes the port COUNT — the port without the post is the vanishing pattern. Pays into both April Big Rocks (Build + Blog). Do NOT let this slip past the code.",
+            "status": "pending"
+          },
+          {
+            "id": 7,
+            "title": "AVIF decode on Linux",
+            "description": "No AVIF decoder at all on Linux (WIC covers it on Windows). Route .avif through libheif where the system build has AV1, else wire the dav1d+avif-parse path from the original plan. Decide + implement.",
+            "status": "pending"
+          },
+          {
+            "id": 8,
+            "title": "Linux CI job that actually builds the shell",
+            "description": "core-linux only tests pb-core and is advisory. Add an ubuntu job with libgtk-3-dev + libheif-dev that builds pb-app (--features libheif) and runs the workspace tests, so the actively-developed Linux shell cannot rot silently.",
+            "status": "pending"
+          },
+          {
+            "id": 9,
+            "title": "Fonts via fontconfig instead of hard-coded paths",
+            "description": "pb-hud and pb-ui probe DejaVu/Liberation/Noto at Debian/Arch paths only; Fedora-style layouts fall through to egui fallback. Resolve through fontconfig (or bundle a face).",
+            "status": "pending"
+          },
+          {
+            "id": 10,
+            "title": "OS theme tracking on X11",
+            "description": "window.theme() is None on X11 so the app defaults dark regardless of the desktop setting (Wayland tracks via portal). Read the portal/gsettings directly or document the limitation.",
+            "status": "pending"
+          },
+          {
+            "id": 11,
+            "title": "Reveal-in-file-manager with file selection",
+            "description": "Linux reveal is xdg-open on the folder only. Use the org.freedesktop.FileManager1.ShowItems DBus call (Nautilus/Dolphin/Thunar all implement it) with the xdg-open fallback.",
+            "status": "pending"
+          },
+          {
+            "id": 12,
+            "title": "Decide the degraded-feature story: OCR, Live Photos, animated AVIF/HEIC, HDR-HEIC tone-map, TTS",
+            "description": "All currently degrade gracefully on Linux (message or still image). Decide accept-vs-implement per feature: OCR (tesseract?), Live Photo video+audio (GStreamer/ffmpeg — big), animated AVIF/HEIC, HDR HEIC decoded-to-SDR tone-map, Describe TTS (speech-dispatcher).",
+            "status": "pending"
+          },
+          {
+            "id": 13,
+            "title": "File the winit WSLg keycode-overflow issue upstream",
+            "description": "wayland/seat/keyboard/mod.rs:135 key+8 overflow on WSLg bogus keycodes; unfixed on master. Our X11 preference dodges it, but upstream should know.",
+            "status": "pending"
+          },
+          {
+            "id": 14,
+            "title": "Right-click context menu on Linux (egui)",
+            "description": "CoreEffect::ShowContextMenu is discarded by the Linux shell arm (main.rs ~1851; muda cannot attach to a raw winit window). Render an egui context menu in the existing overlay — the menu dropdown row renderer already exists.",
+            "status": "pending"
+          },
+          {
+            "id": 15,
+            "title": "Small Linux fixes bundle",
+            "description": "a) 7z RAM pre-flight: parse /proc/meminfo MemAvailable instead of the blind 8 GiB assumption (archive.rs ~99). b) HEIC embedded-thumbnail fast-preview is cfg(windows)-gated (libheif.rs ~29) — enable for libheif builds so HEIC fly-through gets previews. c) Copy Image publishes pixels only — add text/uri-list file reference alongside. d) DONE: scanner skipped HEIC on Linux (is_supported_extension gate) — fixed.",
             "status": "pending"
           }
         ]

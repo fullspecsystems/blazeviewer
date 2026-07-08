@@ -1,8 +1,54 @@
 # PhotoBlaze — Current Status (session handoff)
 
-_Last updated: 2026-07-08 (second session). Supersedes the tree-bleed investigation handoff._
+_Last updated: 2026-07-08 (second session, later). Supersedes the tree-bleed investigation handoff._
 
-## TL;DR
+## NEWEST (uncommitted): Linux menu keyboard nav + WSLg Wayland crash fix
+
+Two work items on top of the committed bleed fix (`751d7db`), both verified live under the
+X11 harness, ready to commit after owner sign-off:
+
+1. **Menu-bar keyboard navigation (GTK-style), Linux egui bar.** The bar/dropdown are now
+   fully state-driven by a shell-owned `menu::MenuNav` (open menu + selected row + Alt hint):
+   - `Alt+F/E/V/G/I/H` opens that menu (mnemonic = title's first letter; underlines shown
+     while Alt is held), `F10` toggles the first menu.
+   - Arrows navigate (`←`/`→` switch menus, `↑`/`↓` move the selection, skipping separators
+     and disabled rows, wrapping), `Home`/`End`, `Enter`/`Space` activates, a letter jumps to
+     matching items (unique match activates). **Esc closes the menu instead of quitting.**
+   - An open dropdown grabs all key *presses* (native behavior); key *releases* still reach
+     the core's held-key tracker (fly-strand safety). Clicking outside closes the menu and
+     the click never leaks to the photo.
+   - Logic is the pure `menu::menu_nav_key` (unit-tested: 4 new tests in `menu.rs`); rendering
+     in `panels_ui.rs` (`menu_bar` + shared `menu_dropdown`); wiring in `main.rs` (`menu_key`,
+     interception at the top of the key-Pressed arm, ModifiersChanged → alt_hint, click-outside
+     swallow). Pointer hover only steals the selection while the mouse is actually moving.
+
+2. **WSLg Wayland crasher dodged (`build_event_loop`, main.rs).** Owner hit
+   `attempt to add with overflow` in winit 0.30.13 `wayland/seat/keyboard/mod.rs:135`
+   (`key + 8`) pressing Alt+Right on the default Wayland backend — WSLg's RDP input bridge
+   sends bogus (u32::MAX-ish) keycodes. **Unfixed upstream** (checked winit master + issues;
+   worth filing). Mitigation: the app now prefers the **X11/XWayland backend when WSL is
+   detected** (`WSL_DISTRO_NAME` / `/proc/sys/fs/binfmt_misc/WSLInterop`, with `DISPLAY` set);
+   real Linux desktops keep winit's normal Wayland preference. `PB_BACKEND=x11|wayland`
+   overrides. Bonus: X11 also dodges WSLg's Wayland display-loss segfaults and makes the app
+   screenshotable/drivable. Verified: launch with both servers up auto-picks X11, no crash.
+
+3. **PageUp/PageDown = prev/next folder (keymap secondaries).** Owner found physical
+   Alt+Left/Right dead under WSLg even on X11 while Alt+Up works: the **Windows host
+   translates Alt+Left/Right into browser back/forward app-commands for remoted (RDP/RAIL)
+   windows**, so the arrow never reaches Linux at all (the microsoft/wslg#188 pattern —
+   a WSLg contributor confirmed via xev that such chords are "not delivered from Windows
+   side"; the earlier Wayland garbage-keycode crash was the same swallow manifesting).
+   XTEST-injected Alt+Right works fine — the app wiring was never broken; only host-delivered
+   input dies. Fix: `PrevFolder`/`NextFolder` gained always-delivered secondary chords
+   **PageUp/PageDown** (keymap defaults, all platforms; Alt+Left/Right stay the shown
+   primaries; unit test `folder_nav_has_pageup_pagedown_fallbacks`). Verified live.
+   Alt+Left/Right will work on a real Linux box — this is purely a WSLg host limitation.
+
+No CHANGELOG entries (Linux is experimental — per the norm).
+
+---
+
+## TL;DR (earlier this session)
 
 The **Linux tree/Inspector panel "bleed" is FIXED and verified** (uncommitted). Root cause was
 neither of the prior session's hypotheses: egui's `ScrollArea` clips its content to the viewport
@@ -52,10 +98,11 @@ pixel probe rows below the panel edge show only the soft shadow. Inspector (Shif
 
 ## Next steps
 
-1. Owner: confirm the fix on the real desktop (Wayland run, real scale factor) — expected to hold
-   at any ppp since `clip_rect_margin` is logical-unit.
-2. Commit the fix + CHANGELOG + fmt churn (suggest: `fix(panels): clip scrolled rows exactly at
-   the panel edge (egui clip_rect_margin bleed)`).
+1. Owner: try the menu keyboard nav + confirm Alt+Right no longer crashes on a normal launch
+   (the app should print "WSL detected — using the X11 (XWayland) backend"). Then commit the
+   menu + backend work (bleed fix already landed as `751d7db`).
+2. Consider filing the winit issue upstream (WSLg Wayland `key + 8` overflow, keyboard/mod.rs:135,
+   still present on master).
 3. The macOS task #58 (auto-size Settings window) handoff from 2026-07-07 is still pending —
    recover its plan via `git log` on this file if picking that up.
 
