@@ -2,7 +2,7 @@
   "master": {
     "metadata": {
       "created": "2026-06-26",
-      "updated": "2026-07-07",
+      "updated": "2026-07-08",
       "description": "Post-core feature backlog for PhotoBlaze. These ship AFTER the core viewer is stable (roadmap Phases 0-3: window, decode-to-fit, prefetch ring, hold-to-fly). Every task obeys the prime directive (faster or perf-neutral) and the project's TDD rules: pure logic isolated and unit-tested, GPU work behind the Renderer seam, golden-image tests for visuals. Shared infrastructure is factored out so it is built once: a per-photo ViewTransform (rotation + zoom + scaling mode), a translucent HUD/overlay layer, and a central configurable action/keymap."
     },
     "tasks": [
@@ -115,52 +115,6 @@
         ]
       },
       {
-        "id": 43,
-        "title": "Flicker compare mode: pin (Shift+Y) + instant A/B toggle (Y)",
-        "description": "Owner-approved 2026-07-03 — full design + implementation order in .taskmaster/docs/compare-mode-plan.md. Y pins the current photo, then flips instantly between the pin and wherever you are (full-screen flicker comparison — perceptually better than side-by-side for culling, and a keypress-is-a-rebind cheap in this engine). Shift+Y moves/clears the pin. Zoom/pan carries across same-dimension flips (the 100%-crop sharpness workflow). Pin is RAM-only (privacy ADR-018), survives playlist rebuilds by name, unpins on delete. The pinned texture is exempt from ring eviction so the flip never decodes. Split view demoted to an optional phase 2 reusing the same pin state; a future squoosh-style export preview can ride the same toggle seam. IMPLEMENTED 2026-07-03: all five build subtasks landed in one session, workspace green (150+ tests incl. 7 new compare semantics tests + 2 playlist jump_to tests), clippy -D warnings, fmt, swift host builds. Live-smoked on the corpus: pin 1/15, browse, Y flips 1<->3 then 1<->4 (return point follows) — trace-verified.",
-        "status": "done",
-        "priority": "high",
-        "dependencies": [],
-        "subtasks": [
-          {
-            "id": 1,
-            "title": "Core semantics + tests (TDD)",
-            "description": "Action::{CompareToggle, ComparePin} (ids compare_toggle/compare_pin, OneShot); compare_pin/compare_return/compare_pin_name on AppCore; dispatch arms per the plan; delete index-fixup + rebuild re-resolution; headless AppCore unit tests first.",
-            "status": "done"
-          },
-          {
-            "id": 2,
-            "title": "Residency: pin exempt from eviction",
-            "description": "plan_residency keeps the pinned index (callers append to targets, deduped); request_prefetch includes it; pb-core property tests (pin always survives, capacity respected, capacity-1 prefers current).",
-            "status": "done"
-          },
-          {
-            "id": 3,
-            "title": "View carry on same-dimension flips",
-            "description": "Copy outgoing zoom/pan/scale-mode to the incoming photo when pixel dimensions match; rotations stay per-image.",
-            "status": "done"
-          },
-          {
-            "id": 4,
-            "title": "Toasts + thumbtack icon",
-            "description": "Vendor FA solid thumbtack.svg into pb-hud/icons + icon::assets; toasts: Pinned for compare / Unpinned. No flip toast in v1.",
-            "status": "done"
-          },
-          {
-            "id": 5,
-            "title": "Surfaces: keymap, editor, help, menus",
-            "description": "Defaults Y/Shift+Y; EDITOR_GROUPS; help overlay row; Image menu + context menu on both shells (muda + MenuBar.swift, same Action ids); MenuState(+Ffi) enable flag; badges pick up live bindings automatically.",
-            "status": "done"
-          },
-          {
-            "id": 6,
-            "title": "CHANGELOG + owner smoke",
-            "description": "Unreleased > Added entry; run the smoke checklist at the end of compare-mode-plan.md. CHANGELOG entry landed; the owner smoke checklist in compare-mode-plan.md remains (zoom-carry on a burst pair, pin inside a .zip, delete-the-pin, rebind-updates-badges). Pin/flip/return already owner-exercised live on the corpus (trace 2026-07-03).",
-            "status": "done"
-          }
-        ]
-      },
-      {
         "id": 44,
         "title": "AI image description (on-device / local models only)",
         "description": "DETAILED PLAN: .taskmaster/docs/ai-descriptions-plan.md (2026-07-03; HUD/panel target revised 2026-07-05 by task #54). Describe the current image with a vision model. Trigger: `D` (rebindable; menu + context menu), result overlaid where the detailed info panel goes; optional auto-describe when the user PARKS on an image >500 ms (EAGER_PREP_DELAY pattern) — cancelled on advance (generation counter), results cached RAM-only per image (meta_cache pattern), dropped on exit. Auto mode is an opt-in toggle: fine by construction on the Apple on-device backend, but a configured endpoint could be remote, and passive sends must be a deliberate choice. Two backends behind one core-owned seam/policy: (1) macOS 27+ Foundation Models framework (on-device, image input, ships with the OS); (2) an OpenAI-compatible local endpoint (LM Studio / llama.cpp / Ollama — Qwen3-VL-8B or 27B-class on an RTX 5090) for Windows and power users. One-shot v1 (streaming later if slow; expected 1–5 s). Prompt built in core so both backends match: salient EXIF (capture time, camera/lens, raw GPS coords — offline reverse-geocoder is a LATER upgrade), filename + parent folder; all context framed as UNVERIFIED (trust-the-pixels instruction — hallucination guard) with epoch-default junk dates filtered out. Custom prompt template = advanced, settings.toml-only in v1 ({filename}/{folder}/{datetime}/{location}/{camera} placeholders). Optional TTS via CoreEffect::Speak — AVSpeechSynthesizer / Windows.Media.SpeechSynthesis, offline system voices, speech stops on navigation. New 'AI Descriptions' settings section (own tab on macOS): backend picker (Auto/Apple/Local), endpoint URL + model, auto-describe toggle, speak-aloud toggle. Privacy (ADR-018): never cloud, RAM-only, no sidecars/caches on disk; the endpoint URL + toggles are the only persisted config. v1 scope: on-disk stills (archive entries punted like Delete). Interim HUD note: pb-hud font fallback helps the current paragraph renderer and non-Latin EXIF/text values, but task #54 makes Description/Ask a rich panel with selectable/copyable text; the HUD is not the final rich-text surface. Additions from final discussion: 'Speak descriptions' is ALSO a menu toggle (Image menu, Mute-Live-Photo-Audio pattern, MenuState checkbox); the AI Descriptions settings section carries a short privacy blurb (custom endpoint = your images upload to that URL, incl. auto-describe — keep it local/trusted; online services may retain/train on images). || WWDC26 CONFIRMED (2026-07-04, https://developer.apple.com/videos/play/wwdc2026/241/): FM image input is NEW in the 2026 release (macOS 27) — on-device, ships with the OS, no download/setup; API is session.respond { PROMPT; Attachment(x) } where x = NSImage/CGImage/CIImage/CVPixelBuffer/file-URL, any size/aspect. VQA confirmed — the model answers ARBITRARY user questions about an image, not just captions (new subtask 9). WARNING: the 2M-first-time-downloads cap the owner saw is on PRIVATE CLOUD COMPUTE (the cloud escalation tier), NOT the free on-device model; and PCC is CLOUD, so per ADR-018 (never cloud by our hand) we request the ON-DEVICE model ONLY and never PCC — the cap does not constrain us. 3rd-party server models (Anthropic/Google) also plug into the FM framework, billed per-token — not our path. Subtask 2 (prompt builder) DONE 2026-07-04. || COPY + ASK DONE 2026-07-04: Copy AI description (Edit + context menus, both shells) + Ask about image (Shift+D, multi-line dialog, both shells) landed — see subtask 9.",
@@ -225,166 +179,6 @@
         ]
       },
       {
-        "id": 45,
-        "title": "Copy Text from Image / Show Text (on-device OCR + QR codes)",
-        "description": "DETAILED PLAN: .taskmaster/docs/ai-descriptions-plan.md (OCR section, 2026-07-03; panel target revised 2026-07-05 by task #54). Tier 1 only: on-demand OCR of the current image — 'Copy Text from Image' in the Edit/context menus (clipboard + toast) and `T` to show recognized text in the Text panel. The current HUD paragraph renderer is only the interim display; task #54 makes Text/OCR a selectable/copyable rich panel. Engines are OS-built-in and fully on-device: macOS Vision RecognizeTextRequest (NO macOS 27 dependency — available on the current floor; Swift-side via the same delegate/FFI shape as the FM describe backend) and Windows.Media.Ocr via the windows crate (worker thread, downscaled input ≤ OcrEngine.MaxImageDimension, language packs required). Shares task #44's state machine (busy/generation-cancel/RAM-only cache) and the ClipboardPayload::Text seam. Tier 2 (VisionKit Live Text overlay) and Tier 3 (direct image-space text selection) deliberately punted — recorded in the plan doc. GARNISH: QR/barcode payloads via a pure-Rust decoder (rxing or rqrr) on BOTH platforms (Windows has no OS barcode API; one shared backend, no FFI, testable with generated QR PNGs). ⚠ Decode from FULL-RES RGBA, not the OCR downscale (pixels-per-module). Payloads list above the text in the T panel and ride the copy command — no new key/menu item. IMPLEMENTED 2026-07-04 (Windows + shared core; #44 not started, so the analysis state machine was built fresh in pb-app-core/image_text.rs for #44 to generalize later): Action::CopyImageText (id copy_text) + Action::ShowImageText (id show_text, default T); InfoMode::Text panel via new pb-hud render_paragraph (word-wrap block, first in the crate); TextScan worker (anim_decode shape: full-res decode + baked rotation -> rqrr QR on full-res gray -> Lanczos cap -> Windows.Media.Ocr via blocking IAsyncOperation::join(), first in tree — windows-future calls it join, not get); ClipboardPayload::Text grew an optional core-supplied toast (winit shell honors it; pb-mac-ffi clipboard_text_toast() accessor ready for Swift); archive entries WORK (pixel-based, no path needed). Deck-gen guard drops post-rebuild results; navigate-away results still cache (item-keyed). Caches cleared in enter_empty_state/rebuild_playlist/clear_session_state; rotate evicts per-item. 15 new unit tests + dev example image_text_probe (live-smoked: 1200x500 PNG, 4/4 lines in 29 ms; app T+Esc clean-exit smoke). DONE 2026-07-04: macOS Vision backend landed (subtask 2) and owner-smoked on the running app — text recognition + QR both confirmed working on Windows and macOS.",
-        "status": "done",
-        "priority": "low",
-        "dependencies": [],
-        "subtasks": [
-          {
-            "id": 1,
-            "title": "Actions + shared analysis state",
-            "description": "DONE 2026-07-04: Action::CopyImageText (menu/context, no default key) + Action::ShowImageText (T); busy/generation/cache machinery built fresh in image_text.rs (ImageText/TextScan — #44's describe generalizes FROM this); InfoMode::Text panel on the shared overlay slot; 8 headless AppCore tests.",
-            "status": "done"
-          },
-          {
-            "id": 2,
-            "title": "macOS Vision backend",
-            "description": "DONE 2026-07-04: implemented behind image_text::platform::ocr_lines (cfg(target_os=macos)) via typed objc2 bindings — VNRecognizeTextRequest (accurate mode + language correction) over a CGImage built from the displayed RGBA (CFData copy -> CGDataProvider -> device-RGB CGImage), run inside an autoreleasepool on the scan worker thread (performRequests: blocks, mirroring the Windows join()). VNRecognizeTextRequest.results() is already typed as recognized-text observations, so no downcast. Deps added to pb-app-core (macOS target, default-features=false minimal sets): objc2 0.6 + objc2-vision/foundation/core-graphics/core-foundation 0.3. Package.swift links Vision.framework (a staticlib carries no framework refs). Swift wiring: MenuBar.swift Edit item + CoreModel.swift context-menu item (id copy_text), and writeClipboard() now adopts clipboard_text_toast() for the custom toast; the non-windows/non-macos stub remains for Linux. Live-smoked via examples/image_text_probe: 5/5 lines + QR from a text+QR PNG; full Swift host builds/links/launches clean. Remaining: owner visual smoke (press T / Copy Text in the running app).",
-            "status": "done"
-          },
-          {
-            "id": 3,
-            "title": "Windows.Media.Ocr backend",
-            "description": "DONE 2026-07-04: windows-crate WinRT (features Media_Ocr/Graphics_Imaging/Storage_Streams/Security_Cryptography/...), blocking IAsyncOperation::join() on the scan worker (windows-future 0.3 names it join, not .get()), RGBA→BGRA→SoftwareBitmap capped to OcrEngine.MaxImageDimension via new pb_decode::downscale_rgba8, missing-language-pack message. Live-smoked via examples/image_text_probe: 4/4 lines in 29 ms.",
-            "status": "done"
-          },
-          {
-            "id": 4,
-            "title": "Clipboard + toast + panel wiring",
-            "description": "DONE 2026-07-04: ClipboardPayload::Text grew { text, toast: Option<String> } (core-supplied 'Copied N characters' / 'Copied text + N QR codes'; 'No text found' toasts core-side without a write); T panel renders via new pb-hud render_paragraph (greedy word-wrap + hard-split for URLs + '… N more lines' cap); Edit menu (both builds) + context menu items; help-overlay row; EDITOR_GROUPS.",
-            "status": "done"
-          },
-          {
-            "id": 5,
-            "title": "QR/barcode payloads in the analysis results",
-            "description": "DONE 2026-07-04: rqrr (QR-only, pure Rust; rxing passed over as too heavy — revisit only if 1D barcodes are asked for) on full-res grayscale before the OCR downscale; payloads above the text in the T panel and first in the copied text; qrcode dev-dep generates the round-trip test bitmaps.",
-            "status": "done"
-          }
-        ]
-      },
-      {
-        "id": 46,
-        "title": "Light mode support for the HUD (appearance preference: System/Light/Dark)",
-        "description": "The HUD rasterizer (pb-hud/src/hud.rs) currently hardcodes always-white text ([255,255,255]) with a black shadow/outline (tokens::TEXT/TEXT_DIM/SHADOW, hud.rs ~30-38) and a translucent-black panel background (tokens::BG) - there is no color/theme parameter threaded through render_table/render_centered/render_panel today, only background alpha is parameterized. Add a user-facing Appearance preference (System/Light/Dark, defaulting to System = current dark-on-black look unchanged) that flips the HUD to black text with a white shadow/halo and a light translucent panel background when resolved-light. Reuse the existing OS theme detection already used for the egui dialog window (winit's Window::theme() in pb-app/src/dialog.rs:404, dark_ui = window.theme() != Some(Theme::Light)) rather than hand-rolling a new registry/NSAppearance check - it already covers Windows (AppsUseLightTheme/DWM) and macOS (NSApp.effectiveAppearance) portably. Settings storage follows the existing ScaleModePref/StartupMode enum pattern in pb-app-core/src/settings.rs (Copy/Default/Serialize/Deserialize, #[serde(rename_all = \"lowercase\")], #[default] variant, TOML-persisted, round-trip tested).",
-        "status": "done",
-        "priority": "low",
-        "dependencies": [],
-        "subtasks": [
-          {
-            "id": 1,
-            "title": "Settings: AppearanceMode enum (System/Light/Dark)",
-            "description": "New AppearanceMode { System, Light, Dark } in pb-app-core/src/settings.rs following the ScaleModePref/StartupMode shape (Copy, Default = System, Serialize/Deserialize, serde rename_all lowercase); Settings::appearance_mode field, Default impl, round-trip test.",
-            "status": "done"
-          },
-          {
-            "id": 2,
-            "title": "Resolve effective light/dark for the main window",
-            "description": "Extend/reuse the OS-theme-detection already used for the dialog window (winit Window::theme() in dialog.rs:404) so the main viewer window can resolve an effective dark:bool too (System -> OS theme; Light/Dark -> forced). Handle live OS theme-change events if winit surfaces them, so System mode updates without a restart.",
-            "status": "done"
-          },
-          {
-            "id": 3,
-            "title": "Parameterize pb-hud text/outline/panel colors",
-            "description": "Thread a resolved dark:bool (or a small Palette-style struct) through render_table/render_centered/render_panel/render_panel_icon instead of the hardcoded tokens::TEXT/TEXT_DIM/SHADOW/BG constants; light variant = black text fill, white shadow/halo, light translucent panel background. Keep dark variant pixel-identical to today's look (regression guard).",
-            "status": "done"
-          },
-          {
-            "id": 4,
-            "title": "Wire resolved theme into every HUD call site",
-            "description": "All existing HUD render call sites (toast, EXIF/info panel, help overlay, shortcuts, scan card, and the new folder-tree overlay if landed by then) pass the resolved theme through instead of relying on implicit constants.",
-            "status": "done"
-          },
-          {
-            "id": 5,
-            "title": "Settings UI + persistence",
-            "description": "Add the Appearance choice to the Settings dialog (pb-ui component, e.g. a segmented control or toggle group per the existing pb-ui catalog) under an Appearance section; auto-saves like other Settings fields per the existing auto-save wiring.",
-            "status": "done"
-          },
-          {
-            "id": 6,
-            "title": "CHANGELOG + owner smoke",
-            "description": "Unreleased > Added entry. Smoke: System mode matches OS light/OS dark on both platforms; forced Light/Dark override OS; switching OS theme live while System is selected updates the HUD without restart; dark-mode HUD is visually unchanged from before this task.",
-            "status": "done"
-          }
-        ]
-      },
-      {
-        "id": 47,
-        "title": "Folder hierarchy overlay (Shift+F): render-only phase 1, interactive nav phase 2",
-        "description": "Owner ask (2026-07-03): Shift+F shows the current photo's folder in its hierarchy along the LEFT side of the screen, FA solid folder/folder-open glyphs; first draft is display-only to judge the look, then phase 2 makes it interactive (click/keyboard a folder to open it without the file picker). Plan: .taskmaster/docs/folder-tree-plan.md; future rich-panel/native presenter migration is task #54 / ADR-023, so do not deepen pb-hud into a full tree widget. Phase 1 implemented 2026-07-03: pb-hud render_tree (TreeRow rows, indent + folder glyphs + highlight band on the current folder, windows around the current row with '… n more' markers when taller than max_h; gallery tiles + composite placement in --hud-gallery); a new top-left renderer layer (Renderer::set_tree + top_left_quad_vertices in pb-render — the info panel's overlay_margin inset mirrored to the top-left corner — own OverlayDraw slot, re-placed on resize); Action::FolderTree (id folder_tree, default Shift+F — verified free — View group in EDITOR_GROUPS, listed in the ? help overlay); pb-app-core/folder_tree.rs derives rows anchored at the OPENED ROOT (never above it; owner direction 2026-07-03): root heading, the ancestor chain down to the current folder (middles deeper than 4 collapse into a dim '…' marker row), siblings of the current folder (highlighted) + its children — disk decks: two read-only read_dirs (the chain is pure path components); archive decks: grouped from the in-RAM entry-name paths, zero I/O — unit-tested pure; AppCore folder_tree_open/folder_tree_sig (root|folder signature: rebuilt only on folder/deck/DPI/resize change, never per frame, never while flying), cleared in the winit Esc teardown. RAM-only, nothing persisted (privacy #2).",
-        "status": "done",
-        "priority": "medium",
-        "dependencies": [],
-        "subtasks": [
-          {
-            "id": 1,
-            "title": "Phase 1: HUD tree renderer (pb-hud render_tree)",
-            "description": "TreeRow + render_tree: indent per depth, FA folder/folder-open glyphs (vendored), semibold + translucent band on the current row, tail-elided names, windowing around the current row with '… n more' markers. Unit tests + gallery tiles.",
-            "status": "done"
-          },
-          {
-            "id": 2,
-            "title": "Phase 1: top-left renderer layer (set_tree)",
-            "description": "Renderer::set_tree + top_left_quad_vertices (margin in from the top-left — the info panel's bottom-right inset, mirrored), own OverlayDraw slot, re-placed on resize — the first left-side HUD layer.",
-            "status": "done"
-          },
-          {
-            "id": 3,
-            "title": "Phase 1: Action::FolderTree + Shift+F + editor/help wiring",
-            "description": "New action (id folder_tree), default binding Shift+F, View group in EDITOR_GROUPS (mac Shortcuts editor auto-populates), row in the ? help overlay.",
-            "status": "done"
-          },
-          {
-            "id": 4,
-            "title": "Phase 1: folder derivation + AppCore state/tick",
-            "description": "pb-app-core/folder_tree.rs (root-anchored: opened root + ancestor chain w/ '…' collapse + siblings + children; pure grouping for archives, two-read_dir disk path, unit-tested); AppCore folder_tree_open/folder_tree_sig, per-tick signature gate (skipped while flying), DPI/resize invalidation, Esc-teardown clear.",
-            "status": "done"
-          },
-          {
-            "id": 5,
-            "title": "Phase 1: owner smoke (look + feel)",
-            "description": "Judge the draft look per the plan's checklist: plain folder, inside a .zip and a .7z, recursive scan, toggle during slideshow, no nav cost while closed. Decide styling tweaks before phase 2.",
-            "status": "done"
-          },
-          {
-            "id": 6,
-            "title": "Phase 2: clickable navigation (disk) — IMPLEMENTED 2026-07-03",
-            "description": "Landed: clickable rows (full Open Folder via pb_core::open::plan), hover band + pointer cursor, up row (parent's real name, folder-arrow-up), clickable '… n more' paging markers, Go actions (open_parent Alt+Up/⌘↑ menu, prev/next_folder Alt+←→/⌘←→, new Go menu on both shells), photo-count badges (capsule live; trailing variant A/B'd in --hud-gallery — owner to pick), empty-deck tree (browses from the root, so photo-less folders never strand), and live tracking during hold-to-fly (no-I/O playlist derivation via a per-deck cached counts map + 100 ms rebuild throttle; full read_dir view restored on settle). Rework after owner smoke (same day): the tree now shows EVERY folder at every level along the path (tree-view expansion — a recursive ~/Pictures open landing deep no longer hides the root's other folders; one read_dir per visible level, level lists from the counts map in fly mode); indent hairlines removed (intersected the badges); capsule badges re-colored contrasty (theme shadow fill ~0.85 + full-strength digits). Owner smoke pending.",
-            "status": "done"
-          },
-          {
-            "id": 7,
-            "title": "Phase 3: archive folder navigation (prefix re-scoping) — IMPLEMENTED 2026-07-03",
-            "description": "Make archive rows clickable: ClickTarget::ArchiveScope(prefix), a ScopedSource PhotoSource wrapper (index map over entries under the prefix, pure RAM, zip+7z identical) rebuilt via rebuild_playlist; tree keeps deriving from the UNSCOPED source so out-of-scope siblings stay clickable; sibling Go commands step between prefixes. Design pinned in folder-tree-plan.md; planning session next.",
-            "status": "done"
-          }
-        ]
-      },
-      {
-        "id": 48,
-        "title": "macOS: Cmd+W leaves the app in a dead state (window closed, Open/Open Folder do nothing)",
-        "description": "Cmd+W closes the WindowGroup's only window (default SwiftUI behavior: app stays running, no applicationShouldTerminateAfterLastWindowClosed override in PhotoBlazeMacApp.swift). The app is then stuck: no visible window, and File > Open / Open Folder (and the application(_:open:) Finder-open delegate) don't bring a window back, because ContentView's .onAppear wiring (model.installMenuBarIfNeeded, openLaunchPathIfAny, openSettingsAction, the AppCore FFI bridge) never re-runs. Reopening from the Dock likely has the same problem (no applicationShouldHandleReopen override). Two candidate fixes: (1) mac-idiomatic — implement applicationShouldHandleReopen(hasVisibleWindows:) + make Open/Open Folder recreate the window if closed, matching apps like Preview/TextEdit; (2) simpler — override applicationShouldTerminateAfterLastWindowClosed to return true, so Cmd+W becomes equivalent to Esc (same RAM-teardown quit path already implemented and tested, see the no-trace-on-teardown work). Leaning toward (2): PhotoBlaze is explicitly a single-window app by design (no multi-window command anywhere), and (1) requires safely tearing down/recreating the AppCore FFI bridge + Metal canvas mid-process, an untested path in the same fragile window-lifecycle territory as the argv[1] windowless-launch bug already chased once (see PhotoBlazeMacApp.swift's launch-gotcha comment).",
-        "status": "done",
-        "priority": "medium",
-        "dependencies": [],
-        "details": "Files: mac/Sources/PhotoBlazeMac/PhotoBlazeMacApp.swift (AppDelegate, WindowGroup scene), CoreModel.swift (model.onAppear wiring, openLaunchPathIfAny). Owner decision needed on (1) vs (2) before implementing — see task description for the tradeoff. If (2) is chosen: add `func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }` to AppDelegate and verify it routes through the same clean-teardown path as Esc (no disk writes, RAM caches dropped). If (1) is chosen: implement applicationShouldHandleReopen for the Dock-icon case, and make the Open/Open Folder menu commands + application(_:open:) recreate the WindowGroup scene when no window exists, re-running the .onAppear wiring exactly once.",
-        "testStrategy": "Manual on the physical console (per owner-display-setup memory): launch PhotoBlaze, hit Cmd+W, then try File > Open, Open Folder, and clicking the Dock icon. Confirm the chosen behavior (app quits cleanly, or a window reliably reopens with menu/FFI wiring intact) with no leftover process or dead window state.",
-        "subtasks": []
-      },
-      {
-        "id": 49,
-        "title": "Folder nav (Cmd+Up/Left/Right): skip empty folders instead of \"No supported images\" dialog — IMPLEMENTED 2026-07-03",
-        "description": "Cmd+Left/Right (PrevFolder/NextFolder) and Cmd+Up (OpenParent) resolve purely by name-adjacency: open_sibling_cmd -> folder_tree::spawn_sibling/sibling_target does one read_dir on the parent and jumps to the immediately-adjacent folder name, with zero awareness of whether that folder actually contains photos. open_dir then opens it via pb_core::open::plan(LaunchInput::Directory(..)), which ALWAYS scans recursively (recursive: true, crates/pb-core/src/open.rs:86) -- so every Cmd+arrow hop triggers a full recursive walk (pb_app_core::scan::stream_scan) of the target subtree. Confirmed (owner repro): when that scan finishes having found zero images, crates/pb-mac-ffi/src/lib.rs:1291-1304 fires CoreEffect::ReportError(\"No supported images in that selection.\") and the Mac host shows it as a Message dialog -- a hard stop that requires dismissing a dialog and re-pressing, instead of continuing to the next folder that does have photos.\n\nWant: pressing Cmd+Right/Left/Up steps past an empty folder straight to the next/previous sibling (or ancestor) that actually has >=1 photo, with no dialog interruption for the common empty-intermediate-folder case -- reserve the dialog (or a toast) for the case where NO folder in that direction has any photos at all.\n\nThe risk (correctly flagged by the owner): since directory-open is always recursive, the existing full-subtree scan already doubles as an implicit 'does this folder have photos' check today -- but it's expensive machinery (spawns the Scanning progress dialog, rebuilds the playlist, enumerates the ENTIRE subtree with no early-exit-on-first-match) to run as a mere probe for every candidate folder in a skip loop. A folder with several consecutive empty siblings, each hiding a deep/huge nested tree (the exact ~/Library-shaped pathology scan.rs was hardened against before, see scan.rs:148-157), would make one keypress pay for N full recursive walks instead of one. The sibling-stepping path (folder_tree.rs spawn_sibling) also currently has NONE of the main scanner's cancellation plumbing -- it's a bare thread::spawn with no ScanProgress-style cancel flag, so a rapid re-press just orphans the previous probe thread (harmless today for one shallow read_dir; not fine for a multi-hop recursive search).",
-        "status": "done",
-        "priority": "medium",
-        "dependencies": [],
-        "details": "SETTLED DESIGN (owner + assistant, 2026-07-03): keyboard skips, clicks don't. (1) Scope: ⌘←/→ (PrevFolder/NextFolder) only — ⌘↑ can't hit this (parent opens recursively and the parent subtree ⊇ the current deck, so it can't scan empty while a photo is shown). (2) Skip = same-level siblings, stepping in the pressed direction past photo-less candidates via a dedicated early-exit recursive probe (a candidate counts as non-empty if ANY descendant has a supported image, matching the recursive open). (3) Terminal fallback on the keyboard path = a TOAST (not the modal): fires when nothing in that direction has photos (incl. plain end-of-row, today silent). The 'No supported images' modal stays for explicit opens (picker/drop/Finder/tree click) — clicks never redirect. (4) Probe hardening per prior scan.rs work: iterative walkdir, follow_links(false), error-tolerant, early-exit on first hit; hop cap AND an overall wall-clock budget (the expensive case is one huge photo-less subtree, which must be fully enumerated to conclude empty — a hop cap alone doesn't bound it); budget/cap exhaustion → toast. (5) Cancellation: TreeIo carries a cancel flag set on Drop, so a re-press SUPERSEDES the in-flight probe (no orphaned deep walks); checked per walk entry. (6) Stale-result guard: the Sibling result carries the origin root; tick drops it if the deck moved on. (7) Archives already correct for free: archive folder rows derive from image entry names, so photo-less archive folders can't exist — no skip needed there. Code surface: folder_tree.rs sibling_target/spawn_sibling (+TreeIo), scan.rs probe helper beside image_walker, app_core_impl.rs tick Sibling arm + open_sibling_cmd. OPTIONAL FOLLOW-UP (separate decision, not this task): tree-click on an empty folder still shows the modal because an empty scan never re-roots; re-rooting to an empty deck (nav-point, tree stays up) would honor the #47 promise better.",
-        "testStrategy": "Unit tests (temp-dir fixtures, deterministic): probe finds a deep image / concludes empty / aborts on cancel + deadline; sibling search skips N empty siblings to the first non-empty one in each direction, exhausts to None at the row end, respects the hop cap (cap as a parameter so the test doesn't need 64 dirs) and a pre-set cancel flag; tick drops a Sibling result whose origin root no longer matches; a None result toasts. Manual: consecutive empty siblings (some with deep photo-less subtrees) hop straight to the next folder with photos, no dialog; rapid ⌘→ re-presses supersede cleanly (no thread pileup, no stall); all-empty direction toasts instead of dialog.",
-        "subtasks": []
-      },
-      {
         "id": 50,
         "title": "Installer artwork: de-2003 the MSI wizard (owner artwork + WiX reskin)",
         "description": "The MSI ships WiX's stock WixUI_FeatureTree chrome — including the default welcome-page bitmap with the CD-ROM-and-floppy clipart, unchanged since WiX 2 (owner, 2026-07-03: 'the nostalgia is heartwarming but... this is lame'). The fix is a skin, NOT a packaging change: MSIX stays parked per ADR-018 + the 2026-07-03 park (Store discovery is its only draw; the folder right-click verb would need a packaged IExplorerCommand COM handler). Replace the two stock bitmaps with PhotoBlaze-branded art and drop the feature-tree dialog set for a leaner one. The modern-install-experience angle beyond the skin is task #51 (Velopack).",
@@ -426,17 +220,6 @@
         "subtasks": []
       },
       {
-        "id": 52,
-        "title": "Upstream the AES key-derivation cache to sevenz-rust2, then drop the vendored copy",
-        "description": "PhotoBlaze vendors sevenz-rust2 0.21.1 (vendor/sevenz-rust2, wired via [patch.crates-io]) with one patch: encryption/aes.rs caches the derived AES key across blocks. Upstream re-derives the key (2^num_cycles_power SHA-256 rounds, ~10-40 ms at the standard cycles=19, scaling with password length) for EVERY block, and 7-Zip writes one salt per archive — so a non-solid stored+encrypted archive (one block per file) re-derives the identical key thousands of times. Measured: 3,000-file stored+encrypted archive with a 50-char password opened in 3.88 s vs 0.15 s for 7z t; with the cache, 0.08 s (48x). Owner's real 10 GB archive: 24 s -> ~4 s. 7-Zip itself caches the key the same way. STATUS: PR submitted AND MERGED (hasenbanck/sevenz-rust2#118, merged 2026-07-04). Remaining: wait for the next crates.io release (latest is still 0.21.2, pre-merge), then drop the vendored copy.",
-        "status": "done",
-        "priority": "medium",
-        "dependencies": [],
-        "details": "PR #118 is merged upstream — steps (1)-(3) are DONE. What remains is the teardown when a release ships (watch https://crates.io/crates/sevenz-rust2 or the repo's releases page for the first version after 0.21.2): (a) confirm the release actually contains the cache (check its CHANGELOG/diff — a patch release could ship without it); (b) bump the workspace dep to that version (crates/pb-source/Cargo.toml and the pb-app dev-dep), delete vendor/sevenz-rust2 and the [patch.crates-io] block in the root Cargo.toml (its comment documents this exact plan); (c) verify: cargo tree shows no path override, all pb-source tests pass (encrypted round-trip + wrong-password tests), and archive_probe on a many-file stored+encrypted long-password archive still opens fast (repro recipe: N small files, 7z a -mx0 -mhe=on -p<long password>; pre-cache baseline was 3.88 s / 3,000 files, cached 0.08 s). NOTE: upstream may have evolved the implementation during review (LRU instead of single-entry, std-feature gating) — the behavior contract to verify is 'derivation cost paid once per archive, wrong password still fails', not the exact patch shape. DONE 2026-07-05: sevenz-rust2 0.21.3 released same-day with the cache (CHANGELOG credits #118/@jdlien), plus upstream added a num_cycles_power DoS cap and a short-read fix. Bumped pb-source and pb-app dev-dep to 0.21.3, deleted vendor/sevenz-rust2 and the [patch.crates-io] block, verified cargo tree shows no override and all pb-source tests (incl. wrong-password) pass against the real crate.",
-        "testStrategy": "PR accepted upstream (or an equivalent cache lands independently); after switching back to the crates.io release: cargo tree shows no path override for sevenz-rust2, vendor/ is gone, all pb-source tests pass (including the encrypted round-trip + wrong-password tests), and archive_probe on a 3,000-file stored+encrypted long-password archive still opens in well under 0.5 s.",
-        "subtasks": []
-      },
-      {
         "id": 53,
         "title": "Vendor-patch wgpu-hal: presentsWithTransaction during window-mode transitions (flash-free resize, MTKView-grade)",
         "description": "Make the fullscreen-toggle / resize composite pixel-perfect on macOS. Today's mitigation (2026-07-04) is benign-not-atomic: layerContentsPlacement=.center + contentsGravity on the canvas view means the one racy composite ({new bounds, previous drawable} — wgpu presents out-of-band from the CA transaction that moves the bounds) shows UNSCALED stale content for <=1 frame instead of a stretch. The atomic fix is Apple's presentsWithTransaction (what MTKView flips on during live resize). wgpu-hal 22's Metal backend ALREADY implements the correct present branch (Surface.present_with_transaction pub field; present does commit -> wait_until_scheduled -> drawable.present(); the field's own doc comment cites resize-sensitive UI apps) — but wgpu 22 gives no safe way to SET it: Surface::as_hal hands out only a shared ref, there's no creation-time knob, and configure() re-asserts the flag onto the layer every resize (so flipping the CAMetalLayer property from Swift is useless). PLAN: (1) vendor wgpu-hal 22.0 with a ~20-line patch — interior-mutable flag (AtomicBool) + set_present_with_transaction(&self) — wired via [patch.crates-io] like the sevenz-rust2 precedent; (2) pb-render seam Renderer::set_present_with_transaction(bool) reaching the hal surface through Surface::as_hal; (3) flip it ON only around window-mode transitions (and optionally during live resize), OFF otherwise — presentsWithTransaction costs a main-thread waitUntilScheduled block per present, which MTKView itself only tolerates while resizing; the photo hot path (hold-to-fly) never resizes, keypress->photon untouched; (4) owner drives the upstream PR against wgpu trunk — NOTE trunk's Metal backend was rewritten on objc2 in 23+, so the trunk patch is the same concept but different code; a hal-level setter is the least-bikesheddable API shape. When the eventual egui/wgpu upgrade train moves off 22, the vendored patch drops (if merged) or re-rolls. Payoff is polish: the remaining <=1-frame unscaled reveal on F-toggles/live-resize becomes zero-artifact.",
@@ -444,52 +227,6 @@
         "priority": "low",
         "dependencies": [],
         "subtasks": []
-      },
-      {
-        "id": 54,
-        "title": "HUD panel layer — move rich panels to UI presenters (ADR-023)",
-        "description": "PLAN: .taskmaster/docs/hud-panels-plan.md + ADR-023 (revised 2026-07-05). pb-hud (CPU-quad compositor) stays for ephemeral overlays: toasts, basic info line, play/rotate hints, scan chip, tooltips, empty-state CTA. Rich panels move to real retained UI presenters because they need scroll, selection, copy, Markdown/wrapping, hit-testing, and native accessibility where possible: folder tree, EXIF/details, Help, Text/OCR, and Description/Ask. Load-bearing discipline: extract shell-neutral RichPanel models + PanelAction contracts in pb-app-core first; presenters render semantic data and never own row derivation, copy payloads, folder targets, or help/description text. Windows/winit gets an in-viewport egui presenter (egui_winit + egui_wgpu, same surface/present path, reusing pb-ui); this is permanent and not throwaway. macOS does NOT get a speculative egui RawInput bridge by default; it consumes the same models through FFI and uses native SwiftUI/AppKit presenters first. The RawInput bridge is only a fallback for a concrete short-term parity need. Folder navigation pilot: Windows egui tree first, then native macOS tree starting with SwiftUI List(..., children:) / OutlineGroup and escalating to AppKit NSOutlineView only if Finder-like keyboard/type-select/performance or count display requires it. Prime directive safe: with no rich panel visible, no presenter render/layout runs, no hidden repaint wake keeps the frame pump alive, and scripted keypress-to-photon metrics must match before/after with panels hidden. Independent of task #44: interim markdown_to_plain keeps descriptions clean on the current HUD until the Description panel migrates. || OWNER DECISIONS 2026-07-05 (design review; plan doc updated): Esc ALWAYS quits — never closes panels (no inline text inputs in panels; Ask stays a dialog). Details/Text/Describe = tabs of ONE floating Inspector panel; basic i info line stays on the ephemeral HUD. Max 3 floating panels (Inspector/tree/Help) with title-bar chrome (✕ close, drag-to-move, copy-all), free overlap, no snap/resize/dock in v1. Tab = global panels_hidden toggle (hidden ≠ closed; any panel action while hidden reveals first; no-op when nothing open). Persist panel POSITIONS only (persist_prefs, logical points, clamp on restore); open state session-only. Render seam COMMITTED: egui → offscreen Rgba8Unorm texture → existing overlay pipeline into the fp16 intermediate (shared device/queue — do NOT crib dialog.rs, it owns a separate device; retained texture, repaint-on-request only). Verification: scripted-workload runner does not exist — Phase 1 builds a minimal headless CoreEvent replay dumping StageTimes p50/p95/p99 (hidden / open+idle / open+fly). Markdown: never fetch remote images (ADR-018) — prefer in-house subset renderer. Key releases always reach the held tracker (stuck-fly guard). || 2026-07-04 UPDATE: (a) basic i-line FULLY DECOUPLED — own permanent pb-render layer, coexists with rich panels (panel reserves a bottom strip + lifts); fixes the i/⇧I/i dead-input bug; line-alignment pref (L/C/R) deferred. (b) Remaining phases RE-SEQUENCED macOS-FIRST (native SwiftUI presenters before the Windows egui seam) — Mac needs no render-seam work and the owner smokes on macOS; surfaces the per-shell 'present panels natively' suppress-HUD seam now (host capability flag -> core suppresses that panel's HUD rasterization + state-changed marker -> Swift pulls flattened model via FFI; ephemeral layer never suppressed). Windows keeps today's HUD panels until the egui phase (now subtask 5). See hud-panels-plan.md + ADR-023.",
-        "status": "done",
-        "priority": "medium",
-        "dependencies": [],
-        "subtasks": [
-          {
-            "id": 1,
-            "title": "Extract shell-neutral rich panel models",
-            "description": "Add typed RichPanel models/accessors and PanelAction contracts in pb-app-core for FolderTree, EXIF/details, Help, Text/OCR, and Description/Ask. Core owns row ordering, grouping, labels, untruncated copy payloads, Markdown/plain text, folder targets, loading/error/empty states, and actions. Keep pb-hud as the first consumer so existing behavior stays unchanged while the seam lands. Add pure tests for model shape and copy payloads. ALSO (2026-07-05): decouple the basic i info line (stays HUD); replace the InfoMode content slot with the Inspector model (open/closed + active tab) + panels_hidden + per-panel placement state (positions persisted, open state RAM-only); add ClosePanel/tab-select/Tab-visibility actions, menu items + MenuState. || IMPLEMENTED 2026-07-04 (owner smoke pending): overlay::Panels + InspectorTab state machine (reveal rule, Tab no-op, tree_visible) + panels.rs models (Details/Help/Text/Describe w/ interim lines() projections + copy payloads); InfoMode DELETED — slot_content() priority (Help > tab > basic line); info_line decoupled (re-appears when a rich panel closes; i still replaces a visible panel); Action::TogglePanels on Tab + View ▸ Hide Panels in winit menus + MenuBar.swift; MenuState reshaped (info_basic/info_full/panels_hidden/hide_panels_enabled; InfoOverlay removed thru contract/FFI/Swift); settings panel_pos_* + clamp_panel_pos; DialogResult Settings payload BOXED (CoreEvent size / clippy). 541 tests, clippy -D warnings, fmt, swift host builds. || ALSO DONE 2026-07-04 (owner course-correction): the basic `i` info line is now FULLY DECOUPLED from the rich panels — its own permanent pb-render set_info_line layer (bottom-right); set_overlay grew an independent bottom inset so a shared-corner rich panel LIFTS above the line strip; tick runs the line before the panel. `i` and ⇧I/T/D are orthogonal and coexist. Fixes the i/⇧I/i dead-input bug. New info_line_shown/info_line_item/info_line_h state + show_info_line/hide_info_line + info_line_and_inspector_are_independent regression test. 542 tests green, clippy -D warnings, fmt, swift host builds. Future garnish (deferred): line-alignment preference (left/center/right); centered will need a toast-stacks-above rule. || File-info ALIGNMENT preference DONE 2026-07-04 (owner-approved): settings::InfoLineAlign {Left,Center,Right} default Right; pb_render::HAlign line quad + bottom_aligned_quad; GEOMETRY-AWARE reserve (info_line_span + info_line_reserve_for) — a layer reserves only when its horizontal span overlaps the line's, so a wide centered line (long filename / narrow window) pushes BOTH corner panels while the default right line leaves the left tree alone. Tree caps max_h w/ a single conditional re-render; toast is NOT a collider (fixed 64px margin clears the line, verified 9-29px). Wired through egui Settings (Appearance tab) + SwiftUI Appearance tab + SettingsFormFfi. +info_line_reserve_follows_the_horizontal_overlap test. 543 tests, clippy -D warnings, fmt, swift host builds. This is the core-owned footprint the native presenters will inset their layout by later (not throwaway).",
-            "status": "done"
-          },
-          {
-            "id": 2,
-            "title": "macOS presenter seam + Help pilot + replay harness",
-            "description": "MAC-FIRST re-sequence (owner 2026-07-04). Stand up the per-shell 'present panels natively' seam: a host capability flag ('I present rich panels natively') -> core SUPPRESSES that panel's pb-hud rasterization on macOS while keeping it for winit + emits a panel-state-changed marker; Swift pulls the flattened semantic model over the NS2 stash-pull FFI (flat rows + generation counter). Pilot = HELP (read-only): a SwiftUI view in a ZStack over the MetalCanvas (same window, NOT child windows), chrome (title/x/drag), Tab-hide of a native view. Input gating: extend the NSEvent monitor gate (panelOpen||alertUp||activeSheet) with 'panel owns first responder'; KEY RELEASES ALWAYS reach the core held tracker (stuck-fly guard); panel focus fires FocusLost clear. Build the shell-neutral headless CoreEvent replay harness here (StageTimes p50/p95/p99: hidden/open+idle/open+fly) — it also guards the suppress-HUD refactor. Smoke fullscreen/resize + 1x<->2x backing-scale with the panel open vs commit 0effc66. The ephemeral layer (toasts, i-line, hints, scan chip) is NEVER suppressed. || SEAM + HELP PILOT IMPLEMENTED 2026-07-04 (owner smoke pending; replay harness is the remaining Phase-1 item). Suppress-HUD seam: AppCore::native_help (mac host sets it at construction) + show_overlay early-returns for a native slot (clearing any leftover HUD panel) + tick emits CoreEffect::PanelsChanged only on a real Help show/hide + apply_keymap re-emits on content change. FFI: PanelsChanged marker + help_refresh/help_visible + indexed help_row_* accessors (keymap-editor pull pattern, no Vec<struct> return). Swift: CoreModel.helpVisible/helpRows refreshed on the marker; HelpPanelView SwiftUI card (title + x close + scroll, .regularMaterial) layered .overlay(.center) over MetalCanvas (hit-tests above the canvas; rest falls through). Winit untouched (native_help=false; no-op drain arm). 545 tests incl. native_help_suppresses_the_hud_and_signals_visibility + winit_keeps_help_on_the_hud_no_native_signal; clippy -D warnings; fmt; swift host builds. DEFERRED (by design): input gating (Help is read-only — first-responder gate + CmdC-beats-Copy-Image land with the Inspector); drag-to-move (Help centers; comes with shared panel chrome); the headless replay harness (its own slice — needs corpus + renderer). || HELP PANEL DESIGN POLISH 2026-07-05 (owner feedback): FFI rows regrouped host-side into sections; HelpPanelView now — keycap pills per key (.quaternary fill + hairline border) with plain dim '/' separators (parse splits on ' / ' so a key '/' vs the separator are distinct); two column-major columns per section (related consecutive rows stay together); tinted grouped section headers (.quaternary bar, bold primary, more top margin); faint groove instead of a hard divider; adaptive height (measures content, fits up to the window height via a GeometryReader maxHeight, scrolls when the window is short). Swift host builds.",
-            "status": "done"
-          },
-          {
-            "id": 3,
-            "title": "macOS Finder folder browser (fs_tree)",
-            "description": "The ⇧F macOS tree is a real Finder browser (owner redesign 2026-07-05): chevron expand/collapse (off-thread read_dir, no scan) DECOUPLED from name-click open (load photos), outdented up-to-parent row, siblings at every level, over a resident RAM-only pb-app-core/src/fs_tree.rs model (persistent, incremental, shell-neutral). Increments: (1) FsTree model DONE (7acc91c, 6 tests); (2) native wiring DONE (b599b0a) — AppCore::fs_tree + off-thread read channel, FFI snapshot/tree_uses_fs/tree_toggle, SwiftUI outline, disk decks only (archive/empty keep v1 folder_tree.rs flat list); (3) keep-deck-until-photos DONE (94a7e8d): empty folder -> non-modal toast, not a blocking NSAlert; deck was already kept — don't tear down the current deck until the opened folder yields its first frame (empty -> toast, deck intact; anti-'stuck' safety); (4) ambient scan pill DONE (c16a54c): native top-center non-blocking pill replaces the Scanning modal + HUD chip, with Cancel — folder/archive open scan becomes a non-blocking top-center SwiftUI element with Cancel. RELATED OPEN UX: cmd-left/right folder nav (open_sibling_cmd) — deck-root-anchor bug fixed (3f9dff1, in-deck peer jump) but owner wants a from-scratch rethink of the behavior (peer-only vs all-folders-in-order, edge fallback) — redesign, don't patch. The winit HUD keeps the old folder_tree.rs auto-path derivation until the egui phase.",
-            "status": "done"
-          },
-          {
-            "id": 4,
-            "title": "macOS Inspector tabs (Details / Text / Describe)",
-            "description": "Migrate the Inspector tab by tab as native SwiftUI views over the same core models, retiring each pb-hud render_* on macOS as it lands: (1) Details/EXIF — scroll, row copy, copy full details, no copy-payload truncation; (2) Text/OCR — selectable recognized text + QR payloads, copy full text, CmdC first-responder-aware so panel selection beats Copy Image; (3) Describe/Ask — native AttributedString(markdown:) with remote images STRIPPED (ADR-018 no-remote-fetch), selectable text, copy full answer, Speak/VoiceOver-friendly, Ask stays a sheet (Esc rule) reachable via PanelAction::AskImage. Keep render_panel (i-line)/toasts/hints/scan chip/tooltips/empty-state CTA in pb-hud on both shells. || IMPLEMENTED 2026-07-05 (commit 53a553b, owner smoke pending). One tabbed native panel (trailing edge) for Details/Text/Describe. AppCore::native_inspector extends slot_is_native to suppress the HUD tabs; the tick kicks the active tab's scan (OCR for Text, auto-describe when enabled) and diffs an InspectorSnapshot (panels.rs) of the active tab, re-emitting PanelsChanged on any visibility/tab/content change — so async OCR + describe results re-pull in place. FFI: inspector_visible/tab, inspector_show_tab (open-not-toggle for tab-bar clicks), inspector_close, flattened typed inspector_row_* (kind header/pair/body/status). Swift: InspectorPanelView (segmented tab bar, selectable values, ✕). DEFERRED: ⌘C-copy-all, pointer-gating, drag-to-move.",
-            "status": "done"
-          },
-          {
-            "id": 5,
-            "title": "Windows egui presenter track (seam + Help + tree + Inspector)",
-            "description": "The Windows side last, over the same models + the same suppress-HUD seam (winit host sets the capability flag). This is the originally-Phase-1 egui work: offscreen Rgba8Unorm texture composited by the existing overlay pipeline into the fp16 intermediate (color-correct SDR+HDR, retained across nav frames, shares main device/queue — do NOT crib dialog.rs's separate device); egui repaint deadline feeds SetWake/work_pending; verify premultiplied-alpha vs the overlay blend; enable bundled AccessKit for Narrator/NVDA. Then Help pilot -> folder tree -> Inspector tabs in egui, reusing pb-ui tokens; Markdown = in-house LayoutJob subset (no remote fetch). Retire each winit pb-hud render_* as its egui panel lands; rerun the replay harness on Windows (hidden/open+idle/open+fly).",
-            "status": "done"
-          },
-          {
-            "id": 6,
-            "title": "macOS native empty-state Open panel",
-            "description": "NEXT native element (owner call 2026-07-05, reclassified from 'CTA stays HUD'). The empty-state 'Press O to open' + Open File / Open Folder buttons become a SwiftUI view over the MetalCanvas, using the same native_* suppress seam + PanelsChanged-style signal. Unlike the read-only Help pilot, this adds the CLICK-DISPATCH path: a button fires Action::OpenFile / Action::OpenFolder via menu_action. Fixes the cursor-under-panel glitch by construction (no HUD open-button hit-test remains under a native panel). Also motivates the general pointer-gating (presenter reports its frame so the canvas suppresses pointerMoved forwarding inside it) that matures with the interactive panels. Winit keeps render_open_panel until its egui phase. Smaller/self-contained; a good warm-up before the folder tree (Phase 2). || IMPLEMENTED 2026-07-05 (owner smoke pending). Core: AppCore::native_open + open_panel_visible() + show_open_hint early-returns when native (open_panel stays None → the HUD open-button hit-test no-ops → the cursor-through-panel glitch is fixed by construction); tick diff signals PanelsChanged on empty-state show/hide. FFI: native_open=true, open_panel_visible(), and a GENERIC action_shortcut(id) primitive (Action::from_id → help_shortcut) so native surfaces can show any binding without a bespoke accessor. Swift: EmptyStateView — app icon + name, Open File (prominent) / Open Folder (bordered) buttons, essential-keys tips (Next/Previous/Random) reusing the Help keycap ShortcutView, and a 'See all shortcuts' link that toggles Help; shown when openPanelVisible && !helpVisible. Owner design steer: architected as a growable welcome/home surface (future: reopen-last-folder via last_folder, more tips). 546 tests incl. native_open_suppresses_the_hud_and_signals; clippy -D warnings; fmt; swift host builds.",
-            "status": "done"
-          }
-        ]
       },
       {
         "id": 55,
@@ -518,17 +255,6 @@
         "subtasks": []
       },
       {
-        "id": 57,
-        "title": "Windows: bottom edge of photos cut off in borderless fullscreen (Fit mode) [FIXED]",
-        "description": "FIXED 2026-07-06: the menu bar is now hidden BEFORE the borderless-fullscreen window is sized (apply_menu_for_mode moved ahead of request_inner_size(mon.size()) in apply_window_mode), so the window matches the monitor exactly. Verified via instrumentation on the RDP 1470x923 display: fullscreen window/client/inner == 1470x923 == monitor (was 1470x943, a 20px overhang); owner confirmed the bottom is no longer cut off. ORIGINAL REPORT + INVESTIGATION below. Reported 2026-07-06 (owner, Windows): in borderless fullscreen with Fit scaling, the bottom edge of the photo is clipped. Investigation (no code changed) RULED OUT the fit/geometry math: fit_rect (pb-render/src/fit.rs), ViewTransform::placement (pb-render/src/view.rs), and the quad->NDC mapping (pb-render/src/gpu.rs quad_vertices/vertex_buffer) form ONE self-consistent coordinate space. The shell feeds a single width/height into AppCore::resize (app_core_impl.rs ~906), which sets viewport == FitBox == the wgpu surface config; the quad is always built against config.width/height (gpu.rs vertex_buffer, lines ~1414/1538/1584). So the photo is always correctly letterboxed into the CONFIGURED surface, and a persistent visible cutoff means part of that surface is not visible on the physical screen. DEVICE EVIDENCE (2026-07-06, owner): the taskbar IS hidden in fullscreen (taskbar occlusion RULED OUT), the clipped strip is a small consistent amount (~half the taskbar height, very roughly 20-35px), and it happens on EVERY fullscreen entry but NOT in normal maximized-windowed mode. Environment: a 7680x2160 physical display on an RTX 5090, plus a Microsoft Remote Display Adapter at 1470x923 present in the session (RDP / virtual display) -- a MULTI-DISPLAY, likely mixed-DPI setup. LEADING CAUSE (revised): the borderless-fullscreen surface is configured a bit TALLER than the actually-visible window client, so the bottom rows are cropped, not scaled (a DXGI flip-model swapchain presents top-left aligned; an oversized backbuffer crops the bottom). The difference between fullscreen (sizes to mon.size() = FULL monitor) and maximized (client = WORK area) is the tell that the value fed to AppCore::resize does not equal the true visible client on this display. Prime suspects for the tens-of-px overshoot: (i) multi-monitor / mixed-DPI so window.current_monitor().size()/position() + scale_factor don't match the display the window actually lands on; (ii) winit request_inner_size(mon.size()) returning Some(requested) optimistically while Windows clamps the real client shorter and no corrective Resized fires; (iii) a fractional display scale making mon.size() (physical) disagree with the presented client by a rounding delta. Fullscreen sizing code: main.rs apply_window_mode borderless branch (~1360-1377: set_decorations(false) + set_outer_position(mon.position()) + request_inner_size(mon.size())) and the window-creation fullscreen branch (~2432). NEXT STEP: capture runtime numbers via temporary instrumentation (see details), not more static reading.",
-        "status": "done",
-        "priority": "high",
-        "dependencies": [],
-        "details": "CONFIRMED ROOT CAUSE (2026-07-06, via PB-FSDBG instrumentation, reproduced on the RDP 1470x923 display): the borderless-fullscreen WINDOW is sized one native-menu-bar-height TALLER than the monitor, so its bottom overhangs off-screen and crops the photo. Measured in fullscreen: winit_inner == GetClientRect == GetWindowRect == 1470x943 at (0,0), while current_monitor().size() == 1470x923 -- the window is 20px too tall (== a single-row HMENU height at scale 1; ~30px at the physical display's 150%, which the owner eyeballed as 'half the taskbar'). It is NOT a surface/client mismatch (winit and Win32 agree on 943) and NOT a fit-math bug -- the window itself overhangs the monitor. MECHANISM: apply_window_mode's fullscreen branch calls request_inner_size(mon.size()) (~line 1373) while the native menu bar is STILL shown, so Windows makes outer = requested_client + menu_height. apply_menu_for_mode() -- which hides the bar via muda hide_for_hwnd == SetMenu(hwnd, NULL) -- runs AFTER, at ~line 1388; removing the HMENU grows the client into the former menu strip but does NOT shrink the outer window, so the borderless window stays mon.height + menu_height tall at the monitor origin and its bottom hangs off-screen. The WINDOWED branch is immune because it already runs apply_menu_for_mode() BEFORE its windowed_restore sizing (~line 1399+); only the fullscreen sizing runs before the menu hide. FIX: hoist self.apply_menu_for_mode() to BEFORE the fullscreen request_inner_size(mon.size()) (e.g. call it before the decorations/size if/else so the menu is already gone when fullscreen sizes), or after all decoration/menu changes settle re-assert the borderless rect to EXACTLY the monitor as the last step (set_outer_position(mon.position()) + request_inner_size(mon.size())). Re-check the launch-into-fullscreen path (resumed: window created + menu attached before the surface is sized) -- it likely shares the overhang; ensure the fix covers it. After fixing, confirm fullscreen inner == mon.size() via the probe, then REMOVE the temporary PB-FSDBG instrumentation (dbg_fs_geometry + its two call sites in pb-app/src/main.rs). Relevant code: pb-app/src/main.rs apply_window_mode (borderless-fullscreen branch) and the window-creation fullscreen branch; both use mon.size() (full monitor, taskbar-inclusive), never the work area. FIX DIRECTIONS (do NOT implement yet; choose after confirming): (1) reliably trigger the shell fullscreen-detection so the taskbar auto-hides on every entry path (explicit SetWindowPos / topmost re-assert, or ensure the window is foreground + exact monitor bounds at the moment the resize event fires); (2) use winit set_fullscreen(Some(Borderless(monitor))), which reliably hides the taskbar but re-introduces the DWM / fullscreen-optimization issues the current borderless approach was chosen to avoid (see #21) -- only with care; (3) fallback: size the window to the monitor WORK AREA (excludes the taskbar) so nothing is occluded -- but that leaves the taskbar visible (not chrome-free), a UX downgrade against the prime-directive borderless speed mode. NOTE: golden-image render tests already prove the letterbox geometry is correct (gpu.rs offscreen_letterboxes_and_draws_image), so this is an OS window/occlusion issue, not a renderer fix; any regression guard belongs at the shell layer (assert the fullscreen client rect maps onto the visible monitor and is not overlapped by the shell taskbar).",
-        "testStrategy": "Manual on Windows: enter fullscreen both ways (launched-into and toggled) with a height-bound photo (a 3:2 or portrait image on the wide monitor) in Fit mode; confirm the whole photo including its bottom edge is visible and the taskbar is hidden. Repeat on a second monitor and with a taskbar set to always-on-top / non-auto-hide. Shell-level regression guard after the fix: assert the fullscreen window client area maps 1:1 onto the visible monitor and is not overlapped by the taskbar (SHAppBarMessage ABM_GETTASKBARPOS or a monitor work-area vs full-area comparison). No new pb-app-core unit tests expected (the pure fit geometry is already covered).",
-        "subtasks": []
-      },
-      {
         "id": 58,
         "title": "Auto-size the macOS Settings window to each tab's content",
         "description": "Owner gripe (2026-07-07): every new Settings control means hand-tuning a per-tab fixed frame height (SettingsView.swift TabView: General 615 / Appearance 615 / AI 645 / Shortcuts 640). Make it automatic — the window sizes to the current tab's natural content height. Prior art: vertical-only *user*-resizing was PUNTED after 5 failed attempts (see git history + the comment above the TabView, and the ns2-native-dialogs memory); this is the different goal of auto-fit-to-content, not user-resize.",
@@ -537,53 +263,6 @@
         "dependencies": [],
         "details": "Approach to try (needs ON-DEVICE iteration — SwiftUI window sizing can't be verified headlessly): the Settings scene already uses .windowResizability(.contentSize), so per-tab fixed frames are what pin the size. Options: (a) drop the fixed heights and let contentSize follow each Form's natural height — historically the Forms expanded to fill instead of reporting intrinsic height, which is likely why it failed; (b) measure each pane's content height (onGeometryChange on the Form's content, guard against feedback loops) and apply it as the frame height; (c) keep fixed frames but compute them from the content once at build. Watch for: the object_setClass/KVO segfault hazard on SwiftUI windows (never do that); jumpy resize when switching tabs; the window collapsing to min. Do it as a focused session with the owner watching, not a blind tack-on.",
         "subtasks": []
-      },
-      {
-        "id": 59,
-        "title": "macOS transparent 'Liquid Glass' toolbar — canvas extends under a translucent bar",
-        "description": "Windowed mode extends the photo canvas UNDER a translucent glass toolbar (iOS 26 Liquid Glass style) so a zoomed/filled photo shows through the bar; fit mode is unchanged (photo never occluded). A top legibility scrim keeps the toolbar controls readable over bright photos. Settings ▸ Appearance ▸ 'Transparent toolbar' toggle (default on). Grew out of the NSToolbar work (#55). Committed 4884b50d; retro-added to tasks.json 2026-07-07 to reconcile the backlog with git.",
-        "status": "done",
-        "priority": "medium",
-        "dependencies": [],
-        "details": "Renderer::set_content_top_inset(px) — quad fits against surface_h − inset and offsets down by the inset (crates/pb-render/{gpu.rs,lib.rs}). settings.rs glass_toolbar: bool (default true). pb-mac-ffi set_content_top_inset + glass_toolbar form field. CoreModel.swift glassToolbar / updateContentTopInset / glassTopInsetPoints / glassScrimVisible + glass branch in assertWindowChrome. New GlassTopScrim.swift gradient scrim (ease-out 0.58→0 stops, darker top, height ≈ inset*1.08, dark-in-dark / light-in-light). PhotoBlazeMacApp.swift scrim overlay (lowest) + refreshGlassToolbar() on launch. SettingsView.swift toggle.",
-        "testStrategy": "Owner on-device smoke: scrim legibility over bright + dark photos; toggle flips glass cleanly; fit mode never occludes the photo; fill/zoom shows under the bar as intended.",
-        "subtasks": []
-      },
-      {
-        "id": 60,
-        "title": "PSD support: display the embedded flattened composite (viewer, not compositor)",
-        "description": "Add read support for Photoshop .psd files by extracting the pre-flattened full-resolution composite that Photoshop embeds when 'Maximize Compatibility' is on (the default) — NOT by compositing layers. A viewer only needs the merged image, so this is a cheap new ImageDecoder behind the existing seam and perf-neutral (decoded once, held in the prefetch ring like any other image). The pure-Rust `psd` crate parses the header and returns the composite RGBA, so no C deps and no build-risk (unlike libheif). PSD carries an '8BPS' magic number, so route it by CONTENT SNIFF (PsdDecoder::can_decode + the magic branch in decode_bytes_inner, where PNG/JPEG/etc. are recognized) rather than by extension — RAW/SVG/TGA are extension-routed only because they can't be sniffed. Add 'psd' to is_supported_extension so the directory scanner enumerates them. Owner asked 2026-07-07 alongside PDF and Affinity: PSD is the clean-fit one; PDF is a heavy C-dep and not-a-photo (parked), Affinity is a closed undocumented format (declined).",
-        "status": "done",
-        "priority": "low",
-        "dependencies": [],
-        "details": "PLACEMENT: new crates/pb-decode/src/psd.rs with `struct PsdDecoder` impl ImageDecoder (mirror svg.rs / zune.rs). can_decode: bytes.starts_with(b\"8BPS\"). Sniff dispatch: add an 8BPS branch in decode_bytes_inner alongside the other magic-sniffable backends (lib.rs ~300) so a mislabeled name still routes correctly. CAVEATS to handle, not ignore: (1) Files saved WITHOUT Maximize Compatibility have no embedded composite — the `psd` crate's flattened-image accessor returns empty/errors; map that to DecodeError::Corrupt(\"PSD has no embedded composite\") (bytes recognized but no image producible) so catch_panics lets the viewer skip it, never a blank frame. (2) .psb (Large Document Format) is a distinct variant the crate likely won't parse — do NOT advertise 'psb' in is_supported_extension until verified against a real PSB; v1 is psd-only. (3) Composite comes out full-res — run it through the same fast_image_resize decode-to-fit as the other backends, don't hand back a 100 MP buffer. (4) Orientation: PSD composites are already upright, no EXIF orientation read needed. (5) Confirm the `psd` crate's CURRENT accessor name for the flattened composite before wiring — the API has shifted across versions. Prime directive: perf-neutral (one decode, ring-cached); adds one small pure-Rust dep.",
-        "testStrategy": "TDD: (1) golden-image — a small fixture .psd saved WITH compatibility decodes to expected RGBA, codec tag 'PSD'; (2) a no-composite fixture returns DecodeError::Corrupt cleanly (no panic, no blank); (3) is_supported_extension('psd') true, is_supported_extension('psb') false for v1; (4) content-sniff routes an 8BPS file via decode_named_bytes even when the name lacks/mislabels the extension. Manual: drop a real layered PSD onto the window, confirm the merged image shows and flicking past it in a mixed folder never stalls or blanks.",
-        "subtasks": [
-          {
-            "id": 1,
-            "title": "PsdDecoder + 8BPS content-sniff routing",
-            "description": "psd.rs with PsdDecoder impl ImageDecoder; can_decode checks 8BPS; extract flattened composite via the `psd` crate; add the 8BPS branch to decode_bytes_inner; decode-to-fit through fast_image_resize.",
-            "status": "done"
-          },
-          {
-            "id": 2,
-            "title": "Register 'psd' in is_supported_extension (psb excluded v1)",
-            "description": "Add 'psd' to the BASE list so the scanner enumerates them; leave 'psb' out until the crate is verified against a Large Document Format file.",
-            "status": "done"
-          },
-          {
-            "id": 3,
-            "title": "Graceful no-composite fallback",
-            "description": "Map a missing/empty embedded composite (files saved without Maximize Compatibility) to DecodeError::Corrupt so the viewer skips rather than showing a blank frame.",
-            "status": "done"
-          },
-          {
-            "id": 4,
-            "title": "Tests: golden-image + no-composite + sniff-not-extension",
-            "description": "Golden decode of a compatibility-saved fixture; clean Corrupt error on a no-composite fixture; content-sniff routes an 8BPS file regardless of name; extension predicate asserts psd=true / psb=false.",
-            "status": "done"
-          }
-        ]
       },
       {
         "id": 61,
@@ -601,9 +280,9 @@
       },
       {
         "id": 62,
-        "title": "Linux port — the winit/wgpu shell is already portable; close the gaps + SHIP THE WRITEUP",
+        "title": "Linux port — winit/wgpu shell running on Linux (shipped & working)",
         "description": "The core is already cross-platform by construction: wgpu (Vulkan) + winit (Wayland/X11) render/window path, all pure-Rust decoders (jpeg/png/jxl/svg/raw/gif/webp/tiff). The OS-integration arms are ALREADY WRITTEN for Linux: clipboard (arboard #[cfg(all(unix, not(macos)))]), reveal (xdg-open), live-audio (no-op stub), menu (not(macos) muda path), HDR display query (default fallback). So the gaps are small. THE POINT of this task is not personal utility (owner wouldn't use it much) — it's DISTRIBUTION: the fast-culling niche (photos held resident in GPU memory, hold-to-fly) is genuinely underserved on Linux (feh/imv are CPU/basic, nomacs/Gwenview aren't fast, Loupe is a viewer not a culler), and the Linux crowd (r/rust, HN, r/linux) is the tastemaker audience most likely to try a Rust binary and amplify it. The definition of done for this task INCLUDES the companion blog post — a Linux port with no writeup is the 'vanishing on the cusp' pattern (built, never noticed). Ship the port AND the post together; that pays into both April Big Rocks (Build + Blog) in one motion. Owner lit up about this 2026-07-07.",
-        "status": "pending",
+        "status": "done",
         "priority": "medium",
         "dependencies": [],
         "details": "GAPS (small, in bite order): (1) rfd file dialog — pulled default-features=false, so the O open dialog has no Linux backend; add features=[\"xdg-portal\"] (or gtk3) to the cfg(all(unix, not(macos))) target block in pb-app/Cargo.toml. One line. Drag-drop file input works via winit regardless, so the app is usable even before this. (2) HEIC/AVIF: no WIC/ImageIO on Linux, so they silently drop; the libheif feature already exists and on Linux libheif is trivial (apt install libheif-dev) — none of the Windows vcpkg static-link pain. Build/ship with --features libheif. (3) set-as-default: Windows-only today; Linux wants a .desktop + xdg-mime story eventually, not needed for a working viewer. (4) Packaging: no installer; bare binary runs; AppImage/Flatpak later, optional. (5) Untested surface: Wayland vs X11 decorations, HiDPI/fractional scaling, GL fallback if a box has no Vulkan — shake-out, not architecture. HONEST CAVEAT: a third platform is a permanent support tax (CI, Wayland compositor fragmentation, bug reports forever); the code is nearly free, the support surface is not.",
@@ -620,81 +299,143 @@
             "title": "HEIC via --features libheif (libheif-dev)",
             "description": "Wire the existing libheif feature into the Linux build; apt install libheif-dev; confirm HEIC decodes. Far easier than the Windows vcpkg path. DONE for HEIC (9e21484). AVIF split to its own subtask — the system libheif path does not decode AV1 here.",
             "status": "done"
+          }
+        ]
+      },
+      {
+        "id": 63,
+        "title": "Anthropic (Claude) cloud describe backend — opt-in, extends #44's Describer seam",
+        "description": "Owner ask 2026-07-08 (~2 AM). Add a first-class Anthropic/Claude vision backend to the AI-description feature as a THIRD backend behind the existing Describer seam (idle local RTX 5090 works today; this is a frontier-quality upgrade toggle, NOT a replacement — local stays the default). ⚠ CHARTER CHANGE, NOT A NEUTRAL ADD: task #44 is titled 'on-device / local models only', its design is governed by ADR-018 ('never cloud, RAM-only, no sidecars/caches on disk'), and #44's own notes explicitly say '3rd-party server models (Anthropic/Google) ... not our path.' This task DELIBERATELY relaxes that: an EXPLICIT, opt-in, user-configured cloud backend is now allowed. That relaxation must be reconciled in ADR-018 + #44's privacy blurb FIRST (subtask 1) so shipping a cloud backend is a conscious documented decision, not silent drift — a Codex review will flag the contradiction otherwise. Note the seam already contemplates remote: the LocalEndpoint backend can point at any OpenAI-compatible URL and the settings already carry a 'custom endpoint = your images upload to that URL' privacy caption — so 'never cloud' has always meant 'never cloud silently/by default', and this extends that, it doesn't invent it. || WHERE IT PLUGS IN (all already exist, verified 2026-07-08): the Describer trait (prepared image + prompt -> text) in crates/pb-app-core/src/describe.rs; add an AnthropicEndpoint impl alongside LocalEndpoint. New DescribeBackend enum variant in settings.rs (currently Auto/AppleOnDevice/LocalEndpoint). Wire into describer_from_settings() at app_core_impl.rs (~line 4439). Prompt builder (prompt.rs), InfoMode::Describe panel, Ask flow, Copy, generation-cancel, RAM-only per-item cache are ALL backend-agnostic and reused unchanged — this really is just a new backend + secret handling + one settings option. || THE ONE REAL GOTCHA — Anthropic's /v1/messages is NOT OpenAI-shaped, so you CANNOT repoint LocalEndpoint: image is a base64 SOURCE block {\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/jpeg\",\"data\":\"<b64>\"}} (not OpenAI's image_url data-URI); headers are x-api-key + anthropic-version: 2023-06-01 (LocalEndpoint sends NO auth header today); response is content[0].text (not choices[0].message.content). Endpoint POST https://api.anthropic.com/v1/messages. (An OpenAI-compat shim exists at api.anthropic.com/v1/chat/completions but it is a second-class beta and you'd have to add auth-header support to LocalEndpoint anyway — go native.) || MODEL: default claude-haiku-4-5 ($1/$5 per MTok, fast, vision-capable) — the honest sweet spot for library-scale captioning; offer claude-sonnet-5 for richer prose. NOT Opus (overkill + slow for alt-text). || SECRET HANDLING: new describe_api_key. Store in the OS keychain (keyring crate), NOT plaintext settings.toml; never log it. (Owner wrote secrt — credential hygiene is the standard here.) || NOT VIA GOLDFISH: owner floated routing through Goldfish/the Max subscription. Rejected — grep confirmed no ANTHROPIC_API_KEY in ~/code/goldfish or ~/goldfish-tools; Goldfish runs on Claude Code / the Max subscription, whose OAuth auth is licensed for Claude Code / first-party apps, NOT for piping a separate app's API calls through it (ToS problem + brittle). This backend uses the user's OWN metered API key. If the real wish was 'Rachel can see my photos', that's a Goldfish capability (Claude Code already has vision), not a PhotoBlaze one — keep them separate. || v1 scope: on-disk stills, one-shot (streaming later), reuse the whole #44 pipeline. Distribution bonus: 'local-first image describer with an optional frontier backend' is a genuine blog-post bullet (April Big Rocks: Build + Blog).",
+        "status": "pending",
+        "priority": "low",
+        "dependencies": [
+          44
+        ],
+        "details": "Mirror LocalEndpoint's shape: blocking ureq on a worker thread (no tokio), connect+global timeouts, DescribeError taxonomy mapped to actionable user_message() (add a distinct arm for 401 = bad/expired API key, and 429 = rate limited). Keep request-build / response-parse / error-map as PURE functions with unit tests, exactly like LocalEndpoint (chat_url/build_chat_request/parse_chat_response/map_ureq_error) — only the socket call stays untested in-process, exercised by a dev example probe. Prepared image is already downscaled+JPEG (PreparedImage.jpeg, MAX_EDGE 1024, quality 85) — base64 that same buffer into the source block; media_type is image/jpeg. Respect settings.describe_max_tokens (Brief/Standard/Detailed = 256/512/1024) as Anthropic max_tokens. Settings UI extends the existing 'AI Descriptions' tab from #44 subtask 8 (BOTH shells: egui dialog.rs + SwiftUI SettingsView.swift) — backend picker gains 'Anthropic (Claude)'; add a SECURE api-key field (keychain-backed, not the TOML draft) + model field/picker (haiku/sonnet); update the ADR-018 privacy caption to name the cloud case explicitly ('Anthropic backend uploads the image to Anthropic; may be retained/used per their policy — this is the one non-local option'). Test-connection can hit GET /v1/models (with x-api-key) to validate the key. Do NOT thread the api key through the same serde SettingsDraft/FFI path as other fields — it must not land in settings.toml or logs.",
+        "testStrategy": "Pure: unit-test the Anthropic request body (base64 source block present, x-api-key + anthropic-version headers set, model + max_tokens included), response parse (content[].text; server error object surfaced), and error mapping (401 -> 'check your API key' actionable message; 429 -> rate-limit message). Dev example anthropic_describe_probe against api.anthropic.com with a real key (mirrors describe_probe.rs) to live-smoke the socket path the unit tests skip. Manual: select the Anthropic backend, enter a key, press D on a photo -> multi-sentence description; Shift+D Ask a question -> answered; Copy description works; confirm the key is stored in the OS keychain and does NOT appear in settings.toml or any log; confirm ADR-018 + the settings privacy caption were updated (subtask 1) BEFORE this ships.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Reconcile the charter FIRST (ADR-018 + #44 privacy blurb)",
+            "description": "Before any code: update ADR-018 and task #44's privacy notes/settings caption to state that ONE explicit, opt-in, user-keyed cloud backend (Anthropic) is now permitted, local stays default, nothing is sent to cloud without the user selecting that backend and entering their own key. This makes the cloud backend a documented decision, not silent drift that contradicts the app's stated privacy posture. Load-bearing — do not skip.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "AnthropicEndpoint backend (pure Rust) + probe",
+            "description": "New impl Describer in describe.rs: POST /v1/messages, base64 source block (reuse PreparedImage.jpeg), x-api-key + anthropic-version headers, blocking ureq on a worker thread mirroring LocalEndpoint, parse content[0].text, DescribeError taxonomy incl. 401/429 arms. Pure unit tests for build/parse/error-map; dev example anthropic_describe_probe for the live socket path.",
+            "status": "pending"
           },
           {
             "id": 3,
+            "title": "API key in the OS keychain (keyring crate)",
+            "description": "Store/retrieve describe_api_key via the keyring crate; never in settings.toml, never logged. Load at describe time. Keep it off the serde SettingsDraft/FFI path used for non-secret fields.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "Wire into DescribeBackend + describer_from_settings",
+            "description": "Add the Anthropic variant to the DescribeBackend enum (settings.rs) and the match in describer_from_settings() (app_core_impl.rs ~4439); default model claude-haiku-4-5; thread describe_max_tokens through as Anthropic max_tokens.",
+            "status": "pending"
+          },
+          {
+            "id": 5,
+            "title": "Settings UI (both shells) + updated privacy caption",
+            "description": "Extend the existing AI Descriptions tab (#44 subtask 8) in BOTH shells: backend picker gains 'Anthropic (Claude)'; secure keychain-backed api-key field; model field/picker (haiku/sonnet); 'Test & validate key' via GET /v1/models with x-api-key; update the ADR-018 privacy caption to name the cloud case. Mirror the egui + SwiftUI structure #44 already established.",
+            "status": "pending"
+          },
+          {
+            "id": 6,
+            "title": "CHANGELOG + owner smoke",
+            "description": "Unreleased > Added entry ('optional Anthropic/Claude cloud backend for AI descriptions'). Owner smoke: pick Anthropic, enter key, D + Shift+D + Copy on the corpus; verify key is in the keychain not settings.toml; verify local backend still default and unchanged.",
+            "status": "pending"
+          }
+        ]
+      },
+      {
+        "id": 64,
+        "title": "Linux polish + THE BLOG POST — make the port count",
+        "description": "Follow-up to #62 (the port is shipped & working). This carries the remaining functional gaps and, critically, the companion blog post — the deliverable that turns the working port into distribution/amplification. Per ADR / owner (2026-07-07): a Linux port with no writeup is the 'vanishing on the cusp' pattern. The blog post pays into both April Big Rocks (Build + Blog). Do NOT let the post slip past the code. Biggest real functional gap: AVIF does not decode on Linux at all (no WIC); papercut pass (Wayland/X11/HiDPI/GL fallback) and a Linux CI job that builds the shell are the next most important so it can't rot silently.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          62
+        ],
+        "subtasks": [
+          {
+            "id": 1,
             "title": "Papercut pass: Wayland/X11 decorations, HiDPI/fractional scaling, GL fallback",
             "description": "Run under both Wayland and X11; check window decorations, fractional scaling, and that wgpu falls back to GL if a box lacks Vulkan. Fix the shake-out bugs. NOTE: fullscreen is a borderless window manually positioned (set_outer_position is a no-op on native Wayland and primary_monitor() can be None) — use Fullscreen::Borderless on the Wayland backend. First thing to check in the Ubuntu VM test.",
             "status": "pending"
           },
           {
-            "id": 4,
+            "id": 2,
             "title": "Desktop integration: .desktop file + icon (+ optional xdg-mime default)",
             "description": "Ship a .desktop entry + icon so it's a real app in the launcher; optional xdg-mime association for 'open with'. NOTE: Settings ▸ System shows a dead \"Default apps\" row on Linux (silent no-op, Windows wording, dialog.rs ~2104) — hide or re-word until the .desktop/xdg-mime story lands. The .desktop file is also the only way Wayland gets a window icon.",
             "status": "pending"
           },
           {
-            "id": 5,
+            "id": 3,
             "title": "Packaging (optional, ship-gated): AppImage or Flatpak",
             "description": "Bare binary works for early users; AppImage or Flatpak for a real release channel. Optional — don't let it block the writeup.",
             "status": "pending"
           },
           {
-            "id": 6,
+            "id": 4,
             "title": "THE DELIVERABLE: companion blog post + post it",
             "description": "'I ported my Rust image viewer to Linux (and it might be the fastest one there)'. ~1200 words, screenshot running on a Wayland desktop, aimed at r/rust / HN / r/linux. This is what makes the port COUNT — the port without the post is the vanishing pattern. Pays into both April Big Rocks (Build + Blog). Do NOT let this slip past the code.",
             "status": "pending"
           },
           {
-            "id": 7,
+            "id": 5,
             "title": "AVIF decode on Linux",
             "description": "No AVIF decoder at all on Linux (WIC covers it on Windows). Route .avif through libheif where the system build has AV1, else wire the dav1d+avif-parse path from the original plan. Decide + implement.",
             "status": "pending"
           },
           {
-            "id": 8,
+            "id": 6,
             "title": "Linux CI job that actually builds the shell",
             "description": "core-linux only tests pb-core and is advisory. Add an ubuntu job with libgtk-3-dev + libheif-dev that builds pb-app (--features libheif) and runs the workspace tests, so the actively-developed Linux shell cannot rot silently.",
             "status": "pending"
           },
           {
-            "id": 9,
+            "id": 7,
             "title": "Fonts via fontconfig instead of hard-coded paths",
             "description": "pb-hud and pb-ui probe DejaVu/Liberation/Noto at Debian/Arch paths only; Fedora-style layouts fall through to egui fallback. Resolve through fontconfig (or bundle a face).",
             "status": "pending"
           },
           {
-            "id": 10,
+            "id": 8,
             "title": "OS theme tracking on X11",
             "description": "window.theme() is None on X11 so the app defaults dark regardless of the desktop setting (Wayland tracks via portal). Read the portal/gsettings directly or document the limitation.",
             "status": "pending"
           },
           {
-            "id": 11,
+            "id": 9,
             "title": "Reveal-in-file-manager with file selection",
             "description": "Linux reveal is xdg-open on the folder only. Use the org.freedesktop.FileManager1.ShowItems DBus call (Nautilus/Dolphin/Thunar all implement it) with the xdg-open fallback.",
             "status": "pending"
           },
           {
-            "id": 12,
+            "id": 10,
             "title": "Decide the degraded-feature story: OCR, Live Photos, animated AVIF/HEIC, HDR-HEIC tone-map, TTS",
             "description": "All currently degrade gracefully on Linux (message or still image). Decide accept-vs-implement per feature: OCR (tesseract?), Live Photo video+audio (GStreamer/ffmpeg — big), animated AVIF/HEIC, HDR HEIC decoded-to-SDR tone-map, Describe TTS (speech-dispatcher).",
             "status": "pending"
           },
           {
-            "id": 13,
+            "id": 11,
             "title": "File the winit WSLg keycode-overflow issue upstream",
             "description": "wayland/seat/keyboard/mod.rs:135 key+8 overflow on WSLg bogus keycodes; unfixed on master. Our X11 preference dodges it, but upstream should know.",
             "status": "pending"
           },
           {
-            "id": 14,
+            "id": 12,
             "title": "Right-click context menu on Linux (egui)",
             "description": "CoreEffect::ShowContextMenu is discarded by the Linux shell arm (main.rs ~1851; muda cannot attach to a raw winit window). Render an egui context menu in the existing overlay — the menu dropdown row renderer already exists.",
             "status": "pending"
           },
           {
-            "id": 15,
+            "id": 13,
             "title": "Small Linux fixes bundle",
             "description": "a) 7z RAM pre-flight: parse /proc/meminfo MemAvailable instead of the blind 8 GiB assumption (archive.rs ~99). b) HEIC embedded-thumbnail fast-preview is cfg(windows)-gated (libheif.rs ~29) — enable for libheif builds so HEIC fly-through gets previews. c) Copy Image publishes pixels only — add text/uri-list file reference alongside. d) DONE: scanner skipped HEIC on Linux (is_supported_extension gate) — fixed.",
             "status": "pending"
