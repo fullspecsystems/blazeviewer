@@ -481,6 +481,14 @@ pub fn is_supported_extension(ext: &str) -> bool {
     if matches!(e.as_str(), "avif" | "heic" | "heif" | "hif") {
         return true;
     }
+    // On Linux, HEIC (not AVIF — this libheif build has no AV1 decoder) comes via the
+    // system libheif when the `libheif` feature is on. Without this arm the *scanner*
+    // skipped HEICs even though the decoder could open them — folders full of iPhone
+    // photos appeared empty.
+    #[cfg(all(heic_libheif, not(any(windows, target_os = "macos"))))]
+    if matches!(e.as_str(), "heic" | "heif" | "hif") {
+        return true;
+    }
     false
 }
 
