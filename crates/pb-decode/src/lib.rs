@@ -37,6 +37,7 @@ mod jxl;
 mod libheif;
 pub mod metadata;
 pub mod orientation;
+mod psd;
 mod raw;
 mod svg;
 #[cfg(windows)]
@@ -58,6 +59,7 @@ pub use livephoto::decode_live_motion;
 pub use metadata::read_exif_fields;
 #[cfg(windows)]
 pub use mf_video::decode_live_motion;
+pub use psd::PsdDecoder;
 pub use raw::{is_raw_extension, RawPreviewDecoder};
 pub use svg::SvgDecoder;
 #[cfg(windows)]
@@ -300,8 +302,11 @@ fn decode_bytes_inner(
     // Specific magic-sniffable backends first, the broad `image` crate last.
     let jpeg = ZuneJpegDecoder;
     let jxl = JxlDecoder;
+    let psd = PsdDecoder;
     let images = ImageCrateDecoder;
-    let mut backends: Vec<&dyn ImageDecoder> = vec![&jpeg, &jxl];
+    // PSD is `8BPS`-sniffable, so it routes by content like JPEG/JXL — no
+    // extension hint needed (the `image` crate doesn't handle PSD anyway).
+    let mut backends: Vec<&dyn ImageDecoder> = vec![&jpeg, &jxl, &psd];
     // AVIF + HEIC via the OS imaging codecs (pure-Rust elsewhere can't do AV1/HEVC):
     // WIC on Windows, Image I/O on macOS. Tried before the `image` crate, which
     // doesn't handle them here.
@@ -457,6 +462,9 @@ pub fn is_supported_extension(ext: &str) -> bool {
         "ppm", "pam", "hdr", "exr", "ff", "dds", //
         // JXL, SVG
         "jxl", "svg", "svgz", //
+        // Photoshop (embedded flattened composite). `psb`/Large Document Format
+        // is a distinct variant the `psd` crate doesn't parse — excluded for v1.
+        "psd", //
         // RAW (embedded-preview path)
         "arw", "nef", "cr2", "cr3", "dng", "raf", "rw2", "orf", "srw", "pef", "raw",
     ];
@@ -512,6 +520,10 @@ mod tests {
         assert!(is_supported_extension("svg"));
         assert!(is_supported_extension("nef"));
         assert!(is_supported_extension("arw"));
+        assert!(is_supported_extension("psd"));
+        assert!(is_supported_extension("PSD"));
+        // .psb (Large Document Format) is not parsed by the psd crate yet — v1 psd-only.
+        assert!(!is_supported_extension("psb"));
         assert!(!is_supported_extension("txt"));
         assert!(!is_supported_extension("mp4"));
     }
