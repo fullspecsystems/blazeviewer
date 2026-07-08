@@ -177,6 +177,11 @@ pub struct PanelFrame {
     /// too, so this restores that behavior *and* makes the existing slider actually move these
     /// panels. egui alpha is linear, so no material-style remap is needed.
     pub panel_alpha: u8,
+    /// Top strip (logical px) reserved by an in-client menu bar that the top-anchored panels
+    /// must clear — the Linux egui menu bar ([`menu_bar`]). Shell-owned (menu visibility lives
+    /// in the shell), so `snapshot` leaves it `0.0` and the shell fills it in
+    /// `render_overlay_frame`. `0.0` on Windows/macOS (their menu is OS chrome, not in-client).
+    pub top_inset: f32,
 }
 
 impl PanelFrame {
@@ -215,6 +220,8 @@ impl PanelFrame {
             play_hint: None,
             dark: core.hud_dark,
             panel_alpha: opacity_to_alpha(core.settings.info_opacity),
+            // Shell-owned (menu-bar visibility lives in the shell); set in render_overlay_frame.
+            top_inset: 0.0,
         }
     }
 }
@@ -267,21 +274,22 @@ pub fn build(ctx: &egui::Context, frame: &PanelFrame, actions: &mut Vec<PanelAct
     }
     // The tree (top-left) and Inspector (top-right) can coexist; Help (centered) is
     // topmost — draw it last so it sits above the others (SwiftUI z-order).
+    let top = frame.top_inset;
     if let Some(tree) = &frame.tree {
         let r = duck(screen.left() + EDGE, screen.left() + EDGE + TREE_WIDTH);
-        tree_panel(ctx, &p, alpha, r, tree, actions);
+        tree_panel(ctx, &p, alpha, top, r, tree, actions);
     }
     if let Some(insp) = &frame.inspector {
         let r = duck(
             screen.right() - EDGE - INSPECTOR_WIDTH,
             screen.right() - EDGE,
         );
-        inspector_panel(ctx, &p, alpha, r, insp, actions);
+        inspector_panel(ctx, &p, alpha, top, r, insp, actions);
     }
     // The scan pill rides the top-center, above the corner panels but below Help
     // (SwiftUI z-order) — drawn before Help so Help composites over it.
     if let Some(scan) = &frame.scan {
-        scan_pill(ctx, &p, alpha, scan, actions);
+        scan_pill(ctx, &p, alpha, top, scan, actions);
     }
     // The welcome screen (empty deck). Help takes the center when up, so hide it then
     // (mirrors the SwiftUI `openPanelVisible && !helpVisible`).
@@ -339,23 +347,52 @@ pub fn menu_bar(
                         // egui draws popup contents with the global ctx style, so
                         // re-assert ours (theme + fonts) inside the dropdown.
                         pb_ui::apply_to_ui(ui, dark);
-                        ui.set_min_width(210.0);
-                        menu_group(ui, group, actions);
+                        // Rows are hand-drawn and self-spacing, so kill egui's inter-widget
+                        // gaps — the menu reads as one continuous list, not a stack of cards.
+                        ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                        menu_group(ui, &p, group, actions);
                     });
                 }
             });
         });
 }
 
-/// Render one menu's rows into an open dropdown `ui`.
+// Menu-row metrics (logical px). A real menu layout: a left check gutter, the label, a
+// gap, then a right-aligned shortcut — every row the same width so the column lines up.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn menu_group(ui: &mut egui::Ui, group: &crate::menu::MenuGroup, actions: &mut Vec<PanelAction>) {
+const MENU_ROW_H: f32 = 25.0;
+#[cfg(all(unix, not(target_os = "macos")))]
+const MENU_PAD_X: f32 = 10.0;
+#[cfg(all(unix, not(target_os = "macos")))]
+const MENU_GUTTER: f32 = 18.0; // check column (only reserved when the menu has checkables)
+#[cfg(all(unix, not(target_os = "macos")))]
+const MENU_GAP: f32 = 18.0; // min space between label and shortcut
+#[cfg(all(unix, not(target_os = "macos")))]
+const MENU_FONT: f32 = 14.0;
+
+/// Render one menu's rows into an open dropdown `ui`. Rows are drawn by hand (not egui
+/// `Button`s, which carry the card fill + center the text) so the menu looks like a menu:
+/// left-aligned labels over a shared check gutter, dimmed right-aligned shortcuts, an
+/// accent hover bar, disabled items greyed. The dropdown is pre-sized to its widest row so
+/// the shortcut column is flush.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn menu_group(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    group: &crate::menu::MenuGroup,
+    actions: &mut Vec<PanelAction>,
+) {
     use crate::menu::MenuRow;
+    let font = egui::FontId::proportional(MENU_FONT);
+    let (gutter, want_w) = menu_layout(ui, group, &font);
+    // Pin the width exactly (min == max) so the popup is content-tight, not stretched to
+    // egui's default popup width — and so the unconstrained preview Area sizes the same.
+    ui.set_min_width(want_w);
+    ui.set_max_width(want_w);
+
     for row in &group.items {
         match row {
-            MenuRow::Separator => {
-                ui.separator();
-            }
+            MenuRow::Separator => menu_separator(ui, p),
             MenuRow::Item {
                 action,
                 label,
@@ -363,24 +400,172 @@ fn menu_group(ui: &mut egui::Ui, group: &crate::menu::MenuGroup, actions: &mut V
                 enabled,
                 checked,
             } => {
-                // A leading check column keeps checkable/plain items aligned (egui has no
-                // native "check menu item"); a leading gap reserves the same width when off.
-                let text = match checked {
-                    Some(true) => format!("\u{2714}  {label}"),
-                    Some(false) => format!("      {label}"),
-                    None => label.clone(),
-                };
-                let mut btn = egui::Button::new(text);
-                if !shortcut.is_empty() {
-                    btn = btn.shortcut_text(egui::RichText::new(shortcut).weak());
-                }
-                if ui.add_enabled(*enabled, btn).clicked() {
+                if menu_item(ui, p, &font, gutter, label, shortcut, *enabled, *checked) {
                     actions.push(PanelAction::Menu(*action));
                     ui.close_menu();
                 }
             }
         }
     }
+}
+
+/// Width of `s` laid out in `font`, for sizing the menu to its content.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn text_width(ui: &egui::Ui, s: &str, font: &egui::FontId) -> f32 {
+    ui.fonts(|f| f.layout_no_wrap(s.to_owned(), font.clone(), Color32::WHITE).size().x)
+}
+
+/// `(check-gutter width, total menu width)` for `group`: the gutter is only reserved when
+/// the menu has checkable items (check-free menus stay tight), and the width is the widest
+/// row — `[pad][gutter][label]···gap···[shortcut][pad]`. Shared by the live menu and the
+/// `--egui-shot` preview so they size identically.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn menu_layout(ui: &egui::Ui, group: &crate::menu::MenuGroup, font: &egui::FontId) -> (f32, f32) {
+    use crate::menu::MenuRow;
+    let gutter = if group
+        .items
+        .iter()
+        .any(|r| matches!(r, MenuRow::Item { checked: Some(_), .. }))
+    {
+        MENU_GUTTER
+    } else {
+        0.0
+    };
+    let mut want_w = 120.0f32;
+    for row in &group.items {
+        if let MenuRow::Item {
+            label, shortcut, ..
+        } = row
+        {
+            let base = MENU_PAD_X + gutter + text_width(ui, label, font);
+            let w = if shortcut.is_empty() {
+                base + MENU_PAD_X
+            } else {
+                base + MENU_GAP + text_width(ui, shortcut, font) + MENU_PAD_X
+            };
+            want_w = want_w.max(w);
+        }
+    }
+    (gutter, want_w)
+}
+
+/// One drop-down row. Returns whether it was clicked. Text is placed with [`paint_vtext`]
+/// (the same `TEXT_LIFT` optical-centering the panels use) so the ink sits on the row
+/// centerline — egui's raw `Align2::CENTER` reads high with these fonts.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[allow(clippy::too_many_arguments)]
+fn menu_item(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    font: &egui::FontId,
+    gutter: f32,
+    label: &str,
+    shortcut: &str,
+    enabled: bool,
+    checked: Option<bool>,
+) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), MENU_ROW_H),
+        if enabled {
+            egui::Sense::click()
+        } else {
+            egui::Sense::hover()
+        },
+    );
+    let hovered = enabled && resp.hovered();
+    // Accent hover bar (inset a hair from the popup edges so it reads as a pill).
+    if hovered {
+        ui.painter()
+            .rect_filled(rect.shrink2(egui::vec2(4.0, 1.0)), 5.0, p.accent);
+    }
+    let text_col = if !enabled {
+        p.text_secondary.gamma_multiply(0.55)
+    } else if hovered {
+        Color32::WHITE
+    } else {
+        p.text
+    };
+    let short_col = if hovered {
+        Color32::from_white_alpha(210)
+    } else {
+        p.text_secondary
+    };
+    let cy = rect.center().y;
+    if checked == Some(true) {
+        let g = galley(ui, "\u{2713}", font.clone(), text_col, f32::INFINITY); // ✓
+        paint_vtext(
+            ui,
+            rect.left() + MENU_PAD_X + (gutter - g.size().x) / 2.0,
+            cy,
+            &g,
+        );
+    }
+    let lg = galley(ui, label, font.clone(), text_col, f32::INFINITY);
+    paint_vtext(ui, rect.left() + MENU_PAD_X + gutter, cy, &lg);
+    if !shortcut.is_empty() {
+        let sg = galley(ui, shortcut, font.clone(), short_col, f32::INFINITY);
+        paint_vtext(ui, rect.right() - MENU_PAD_X - sg.size().x, cy, &sg);
+    }
+    resp.clicked()
+}
+
+/// A thin inset divider between menu sections.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn menu_separator(ui: &mut egui::Ui, p: &Palette) {
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 7.0), egui::Sense::hover());
+    let y = rect.center().y.round() + 0.5;
+    ui.painter().hline(
+        (rect.left() + 8.0)..=(rect.right() - 8.0),
+        y,
+        egui::Stroke::new(1.0, p.text_secondary.gamma_multiply(0.35)),
+    );
+}
+
+/// Render one menu's drop-down open at `x`, in a popup-styled frame — a **dev preview** of
+/// the real dropdown (whose popup is otherwise only reachable by clicking). Used by
+/// `--egui-shot` so the menu can be eyeballed headlessly; not called on the live path.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn menu_dropdown_preview(
+    ctx: &egui::Context,
+    dark: bool,
+    x: f32,
+    group: &crate::menu::MenuGroup,
+) {
+    use crate::menu::MenuRow;
+    let p = Palette::new(dark);
+    let mut sink = Vec::new();
+    let surf = panel_surface(&p);
+    let font = egui::FontId::proportional(MENU_FONT);
+    let top = egui::pos2(x, MENU_BAR_H + 1.0);
+    egui::Area::new(egui::Id::new("pb_menu_preview"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(top)
+        .show(ctx, |ui| {
+            pb_ui::apply_to_ui(ui, dark);
+            ui.set_opacity(1.0); // headless shot has no time; keep the Area from fading in
+            ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+            // Size the box up front (a floating Area is otherwise unconstrained, stretching
+            // rows full-width) so `set_min_size` establishes the rect + clip, then paint an
+            // opaque rounded background before the rows.
+            let (_g, w) = menu_layout(ui, group, &font);
+            let n_item = group
+                .items
+                .iter()
+                .filter(|r| matches!(r, MenuRow::Item { .. }))
+                .count() as f32;
+            let n_sep = group.items.len() as f32 - n_item;
+            let h = n_item * MENU_ROW_H + n_sep * 7.0 + 8.0;
+            ui.set_min_size(egui::vec2(w, h));
+            ui.painter().rect(
+                egui::Rect::from_min_size(top, egui::vec2(w, h)),
+                8.0,
+                surf,
+                egui::Stroke::new(1.0, p.text_secondary.gamma_multiply(0.3)),
+            );
+            ui.add_space(4.0);
+            menu_group(ui, &p, group, &mut sink);
+        });
 }
 
 // ── Info readout (`i`) ───────────────────────────────────────────────────────
@@ -592,6 +777,7 @@ fn scan_pill(
     ctx: &egui::Context,
     p: &Palette,
     alpha: u8,
+    top_inset: f32,
     pill: &ScanPill,
     actions: &mut Vec<PanelAction>,
 ) {
@@ -640,7 +826,7 @@ fn scan_pill(
         alpha,
         "pb_scan_pill",
         Align2::CENTER_TOP,
-        egui::vec2(0.0, EDGE),
+        egui::vec2(0.0, EDGE + top_inset),
         f32::INFINITY,
         SCAN_RADIUS,
         egui::Margin::symmetric(SCAN_PAD_H, SCAN_PAD_V),
@@ -995,15 +1181,30 @@ fn sdf_panel(
             let shadow = ui.painter().add(egui::Shape::Noop);
             let bg = ui.painter().add(egui::Shape::Noop);
             content(ui);
-            (shadow, bg)
+            // Capture the *actual* content bounds this frame. egui's auto-sized Window caches
+            // its rect and updates it a frame late, so when a panel's content grows every frame
+            // — the folder tree while a scan streams rows in — `response.rect` lags behind and a
+            // background sized to it ends above the last rows (they bleed past the panel). The
+            // live content rect doesn't lag, so we union the two below.
+            (shadow, bg, ui.min_rect())
         });
     let Some(shown) = shown else {
         return;
     };
-    let Some((shadow_idx, bg_idx)) = shown.inner else {
+    let Some((shadow_idx, bg_idx, content_rect)) = shown.inner else {
         return;
     };
-    let rect = shown.response.rect;
+    // Enclose whichever is larger: the window's (possibly stale) frame or the real content.
+    let rect = shown.response.rect.union(content_rect);
+    #[cfg(debug_assertions)]
+    if id == "pb_tree" && std::env::var("PB_TREE_DEBUG").is_ok() {
+        eprintln!(
+            "[sdf {id}] response=({:.0},{:.0} {:.0}x{:.0}) content=({:.0},{:.0} {:.0}x{:.0}) final_h={:.0} max_h={:.0} clip={:?}",
+            shown.response.rect.min.x, shown.response.rect.min.y, shown.response.rect.width(), shown.response.rect.height(),
+            content_rect.min.x, content_rect.min.y, content_rect.width(), content_rect.height(),
+            rect.height(), max_h, ctx.screen_rect(),
+        );
+    }
     let painter = ctx.layer_painter(shown.response.layer_id);
     painter.set(
         shadow_idx,
@@ -1270,8 +1471,8 @@ fn groove(ui: &mut egui::Ui, p: &Palette) {
 /// top+bottom edge insets. Applied as the `egui::Window`'s `max_height` (capping the
 /// *window*, not a ScrollArea inside an auto-sizing window — that mis-measures and leaves
 /// the panel far shorter than the space allows, task #54 #2).
-fn panel_max_height(ctx: &egui::Context, floor: f32, duck: f32) -> f32 {
-    (ctx.screen_rect().height() - 2.0 * EDGE - duck).max(floor)
+fn panel_max_height(ctx: &egui::Context, floor: f32, top_inset: f32, duck: f32) -> f32 {
+    (ctx.screen_rect().height() - 2.0 * EDGE - top_inset - duck).max(floor)
 }
 
 /// A scroll body that fits its content up to `max_h`, then scrolls — usable inside an
@@ -1315,7 +1516,8 @@ fn help_panel(
     help: &HelpPanel,
     actions: &mut Vec<PanelAction>,
 ) {
-    let max_h = panel_max_height(ctx, 220.0, duck);
+    // Help is centered (not top-anchored), so it doesn't move for the menu bar.
+    let max_h = panel_max_height(ctx, 220.0, 0.0, duck);
     sdf_panel(
         ctx,
         p,
@@ -1537,18 +1739,19 @@ fn inspector_panel(
     ctx: &egui::Context,
     p: &Palette,
     alpha: u8,
+    top_inset: f32,
     duck: f32,
     insp: &InspectorFrame,
     actions: &mut Vec<PanelAction>,
 ) {
-    let max_h = panel_max_height(ctx, 200.0, duck);
+    let max_h = panel_max_height(ctx, 200.0, top_inset, duck);
     sdf_panel(
         ctx,
         p,
         alpha,
         "pb_inspector",
         Align2::RIGHT_TOP,
-        egui::vec2(-EDGE, EDGE),
+        egui::vec2(-EDGE, EDGE + top_inset),
         max_h,
         PANEL_RADIUS,
         egui::Margin::ZERO,
@@ -1858,18 +2061,19 @@ fn tree_panel(
     ctx: &egui::Context,
     p: &Palette,
     alpha: u8,
+    top_inset: f32,
     duck: f32,
     tree: &TreeFrame,
     actions: &mut Vec<PanelAction>,
 ) {
-    let max_h = panel_max_height(ctx, 200.0, duck);
+    let max_h = panel_max_height(ctx, 200.0, top_inset, duck);
     sdf_panel(
         ctx,
         p,
         alpha,
         "pb_tree",
         Align2::LEFT_TOP,
-        egui::vec2(EDGE, EDGE),
+        egui::vec2(EDGE, EDGE + top_inset),
         max_h,
         PANEL_RADIUS,
         egui::Margin::ZERO,
@@ -1885,39 +2089,42 @@ fn tree_panel(
                 actions.push(PanelAction::CloseTree);
             }
             groove(ui, p);
-            // A ScrollArea inside an auto-sizing Window can't measure its own available
-            // height (circular), so it collapses far shorter than the space allows (#2).
-            // Give it a *definite* height: estimate the content from the row count, cap at
-            // the available height, and fill exactly that (auto_shrink off) — fit-to-content
-            // when it's short, scroll when it overflows.
-            let rows = tree.rows.len() + tree.parent_name.is_some() as usize;
+            // The folder list scrolls once it overflows. Use the shared `scroll_body` helper —
+            // the SAME definite-height ScrollArea (`max_height` + `min_scrolled_height`, sized
+            // from the remembered content height) the Inspector and Help panels use. This is
+            // load-bearing: a bare `ScrollArea` inside this auto-sizing Window — or one merely
+            // wrapped in `allocate_ui` — never gets a definite height, so it lays the rows out
+            // at *full* content height and never enters scroll/clip mode. The rows then render
+            // past the panel and bleed over the photo (top into the header, bottom over the
+            // image) even though the layout geometry and background are correct — the clip is
+            // what's missing, and `max_height` is what turns it on. The panel background (sized
+            // to the real content bounds in `sdf_panel`) then encloses exactly this body.
             let body_top = HEADER_H + 1.0; // header + groove
-                                           // Each row is `TREE_ROW_H` tall with a 1px inter-row gap (`item_spacing.y = 1`
-                                           // below), so the true per-row pitch is `TREE_ROW_H + 1`. Using the bare row height
-                                           // under-counted by ~1px/row and clipped the last row into a needless scroll even
-                                           // with space to spare. `+ 12` is the list's 6+6px top/bottom padding.
-            let est = rows as f32 * (TREE_ROW_H + 1.0) + 12.0;
-            let body_h = est.min((max_h - body_top).max(80.0));
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .max_height(body_h)
-                .min_scrolled_height(body_h)
-                .show(ui, |ui| {
-                    egui::Frame::none()
-                        .inner_margin(egui::Margin::symmetric(0.0, 6.0))
-                        .show(ui, |ui| {
-                            // Dense list: drop pb_ui's 32px control-height minimum so rows
-                            // hug their content instead of each nested layout reserving 32px.
-                            ui.spacing_mut().interact_size.y = 0.0;
-                            ui.spacing_mut().item_spacing.y = 1.0;
-                            if let Some(parent) = &tree.parent_name {
-                                up_row(ui, p, parent, actions);
-                            }
-                            for row in &tree.rows {
-                                tree_row(ui, p, row, actions);
-                            }
-                        });
-                });
+            #[cfg(debug_assertions)]
+            if std::env::var("PB_TREE_DEBUG").is_ok() {
+                let sr = ctx.screen_rect();
+                let rows = tree.rows.len() + tree.parent_name.is_some() as usize;
+                eprintln!(
+                    "[tree] screen={:.0}x{:.0} ppp={:.3} max_h={:.0} body_max={:.0} rows={} top_inset={:.0}",
+                    sr.width(), sr.height(), ctx.pixels_per_point(), max_h, max_h - body_top, rows, top_inset,
+                );
+            }
+            scroll_body(ui, "pb_tree", max_h - body_top, |ui| {
+                egui::Frame::none()
+                    .inner_margin(egui::Margin::symmetric(0.0, 6.0))
+                    .show(ui, |ui| {
+                        // Dense list: drop pb_ui's 32px control-height minimum so rows
+                        // hug their content instead of each nested layout reserving 32px.
+                        ui.spacing_mut().interact_size.y = 0.0;
+                        ui.spacing_mut().item_spacing.y = 1.0;
+                        if let Some(parent) = &tree.parent_name {
+                            up_row(ui, p, parent, actions);
+                        }
+                        for row in &tree.rows {
+                            tree_row(ui, p, row, actions);
+                        }
+                    });
+            });
         },
     );
 }

@@ -1252,6 +1252,13 @@ impl App {
         frame.scan = self.scan_pill_frame();
         // Play-hint fade is shell-owned too (computed by `tick_play_hint` each turn).
         frame.play_hint = self.play_hint_frame.clone();
+        // Linux: reserve the menu-bar strip so the top-anchored panels (tree / inspector /
+        // scan pill) sit below the bar, not under it. Logical px — the egui overlay lays out
+        // in points, same units as the `TopBottomPanel` height (not the physical `menu_inset_px`).
+        #[cfg(all(unix, not(target_os = "macos")))]
+        if self.menu_bar_visible() {
+            frame.top_inset = panels_ui::MENU_BAR_H;
+        }
         let mut actions: Vec<panels_ui::PanelAction> = Vec::new();
         // Linux: the windowed menu bar (the egui stand-in for the native muda bar). Build its
         // spec here from the live menu state + keymap — an owned `Vec`, so it can be borrowed
@@ -3386,6 +3393,11 @@ fn main() {
     update::velopack_startup();
     update::start_background_check();
 
+    // Debug-only build stamp: lets me confirm which binary is actually running on Linux/WSL (a
+    // stale `target/debug` copy vs a fresh rebuild). Debug builds already have a console.
+    #[cfg(debug_assertions)]
+    eprintln!("PhotoBlaze debug build :: panel/menu/crash fixes :: 2026-07-08a");
+
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // Hidden dev command: render the HUD component gallery to a PNG and exit before the event
@@ -3554,7 +3566,16 @@ fn main() {
     if deferred {
         app.queue_launch(plan);
     }
-    event_loop.run_app(&mut app).expect("event loop");
+    if let Err(e) = event_loop.run_app(&mut app) {
+        // On WSLg / remote / software displays the Wayland (or X11) connection can be reset
+        // out from under winit ("Connection reset by peer"); `run_app` then returns
+        // `ExitFailure` with nothing left to drive. Don't `.expect()` — panicking here
+        // unwinds and drops the GPU + windowing resources on the now-dead connection, which
+        // segfaults (core dump). Exit hard instead: skip the destructors (there's no live
+        // connection to release them against) and report cleanly.
+        eprintln!("PhotoBlaze: display connection lost — exiting ({e:?})");
+        std::process::exit(1);
+    }
 
     let report = app.core.metrics.report();
     if !report.is_empty() {

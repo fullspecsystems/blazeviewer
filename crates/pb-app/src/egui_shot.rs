@@ -206,7 +206,13 @@ async fn run_settings(out: &Path, dark: bool, tab: &str) -> Result<(), String> {
 }
 
 async fn run(out: &Path, dark: bool, tab: InspectorTab, welcome: bool) -> Result<(), String> {
-    let ppp = 2.0f32;
+    // Dev override so the panels can be previewed at a specific display scale (e.g. the WSL
+    // physical 1.5 vs the default 2.0) — non-integer scales round glyph positions differently.
+    let ppp = std::env::var("PB_SHOT_PPP")
+        .ok()
+        .and_then(|s| s.parse::<f32>().ok())
+        .filter(|v| *v > 0.0)
+        .unwrap_or(2.0);
     let (w, h) = (2400u32, 1400u32); // physical pixels
 
     // Headless device (the golden-test path).
@@ -234,6 +240,13 @@ async fn run(out: &Path, dark: bool, tab: InspectorTab, welcome: bool) -> Result
         egui_wgpu::Renderer::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb, None, 1, false);
 
     let frame = sample_frame(dark, tab, welcome);
+    // Linux renders the in-client menu bar, so inset the top-anchored panels below it (the
+    // shell does this live in `render_overlay_frame`).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let frame = PanelFrame {
+        top_inset: panels_ui::MENU_BAR_H,
+        ..frame
+    };
     let mut actions = Vec::new();
     // Linux: also render the windowed menu bar (the egui stand-in for the native muda bar), so
     // `--egui-shot` previews it too. A sample MenuState exercises checks / enabled / the Undo label.
@@ -265,11 +278,44 @@ async fn run(out: &Path, dark: bool, tab: InspectorTab, welcome: bool) -> Result
     // texture the renderer never got and render nothing.
     // Two warm-up frames: the first run reports a bogus default `screen_rect`, so the
     // anchored windows would cache a wrong size; a second settles them at the real size.
-    for _ in 0..2 {
+    // Dev override: `PB_SHOT_WARMUP=0` renders the *un-settled* first frame, reproducing what
+    // the live overlay shows while a folder scan streams new tree rows in every frame (the
+    // layout never settles). Default 2 (settled).
+    let warmups: usize = std::env::var("PB_SHOT_WARMUP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2);
+    // Dev toggle: `PB_SHOT_LAG=1` reproduces the streaming-scan overflow — warm-up frames render
+    // a *short* tree so the egui Window settles small, then the final frame's full tree overflows
+    // that stale window rect (the exact condition a live scan creates as it appends rows).
+    let warm_frame = std::env::var("PB_SHOT_LAG").is_ok().then(|| PanelFrame {
+        help: None,
+        inspector: None,
+        tree: frame.tree.as_ref().map(|t| TreeFrame {
+            rows: t.rows.iter().take(4).cloned().collect(),
+            parent_name: t.parent_name.clone(),
+        }),
+        info: None,
+        scan: None,
+        welcome: None,
+        play_hint: None,
+        dark,
+        panel_alpha: 242,
+        top_inset: frame.top_inset,
+    });
+    for _ in 0..warmups {
+        let warm_target = warm_frame.as_ref().unwrap_or(&frame);
         let warm = ctx.run(raw(), |ctx| {
-            panels_ui::build(ctx, &frame, &mut actions);
+            panels_ui::build(ctx, warm_target, &mut actions);
             #[cfg(all(unix, not(target_os = "macos")))]
-            panels_ui::menu_bar(ctx, dark, 235, &menu_groups, &mut actions);
+            {
+                panels_ui::menu_bar(ctx, dark, 235, &menu_groups, &mut actions);
+                if std::env::var("PB_SHOT_TREE_ONLY").is_err() {
+                    if let Some(g) = menu_groups.get(4) {
+                        panels_ui::menu_dropdown_preview(ctx, dark, 300.0, g);
+                    }
+                }
+            }
         });
         for (id, d) in &warm.textures_delta.set {
             renderer.update_texture(&device, &queue, *id, d);
@@ -278,7 +324,17 @@ async fn run(out: &Path, dark: bool, tab: InspectorTab, welcome: bool) -> Result
     let full = ctx.run(raw(), |ctx| {
         panels_ui::build(ctx, &frame, &mut actions);
         #[cfg(all(unix, not(target_os = "macos")))]
-        panels_ui::menu_bar(ctx, dark, 235, &menu_groups, &mut actions);
+        {
+            panels_ui::menu_bar(ctx, dark, 235, &menu_groups, &mut actions);
+            // Preview the "Image" drop-down open so `--egui-shot` shows the row styling
+            // (checks / disabled / shortcuts), which a closed bar can't. Skipped in
+            // tree-only mode so it doesn't crowd the tree.
+            if std::env::var("PB_SHOT_TREE_ONLY").is_err() {
+                if let Some(g) = menu_groups.get(4) {
+                    panels_ui::menu_dropdown_preview(ctx, dark, 300.0, g);
+                }
+            }
+        }
     });
     let jobs = ctx.tessellate(full.shapes, full.pixels_per_point);
     let desc = egui_wgpu::ScreenDescriptor {
@@ -442,6 +498,7 @@ fn sample_frame(dark: bool, tab: InspectorTab, welcome: bool) -> PanelFrame {
             play_hint: None,
             dark,
             panel_alpha: 242,
+            top_inset: 0.0,
         };
     }
     let help = HelpPanel {
@@ -626,11 +683,14 @@ fn sample_frame(dark: bool, tab: InspectorTab, welcome: bool) -> PanelFrame {
         ],
     };
 
+    // Dev toggle: isolate the folder tree (drop the other panels) so its overflow / clipping
+    // can be eyeballed without the inspector, scan pill, and menu preview crowding it.
+    let tree_only = std::env::var("PB_SHOT_TREE_ONLY").is_ok();
     PanelFrame {
-        help: Some(help),
-        inspector: Some(inspector),
+        help: (!tree_only).then_some(help),
+        inspector: (!tree_only).then_some(inspector),
         tree: Some(tree),
-        info: Some(panels_ui::InfoLine {
+        info: (!tree_only).then(|| panels_ui::InfoLine {
             main: "1990s/1990-12-24 · 6048 × 4024".into(),
             codec: "HEIC → JPEG".into(),
             is_live: true,
@@ -638,19 +698,20 @@ fn sample_frame(dark: bool, tab: InspectorTab, welcome: bool) -> PanelFrame {
             align: pb_app_core::settings::InfoLineAlign::Right,
         }),
         // The ambient scan pill (top-center) — a long sub-folder to exercise truncation.
-        scan: Some(panels_ui::ScanPill {
+        scan: (!tree_only).then(|| panels_ui::ScanPill {
             name: "Pictures".into(),
             found: 1232945,
             current: "2013/2013-08-14 - Summer Road Trip Photos and Videos".into(),
         }),
         welcome: None,
         // The play hint (bottom-center) — previews its spacing above the info line.
-        play_hint: Some(panels_ui::PlayHintFrame {
+        play_hint: (!tree_only).then(|| panels_ui::PlayHintFrame {
             kind: 1,
             shortcut: "P".into(),
             alpha: 1.0,
         }),
         dark,
         panel_alpha: 242, // ≈95% — the shot previews the panels near-opaque
+        top_inset: 0.0,    // Linux overrides this in `run()` (menu bar reserves the top strip)
     }
 }
