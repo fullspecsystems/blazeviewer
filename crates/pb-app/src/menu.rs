@@ -871,6 +871,197 @@ pub fn menu_bar_spec(keymap: &Keymap, s: &crate::contract::MenuState) -> Vec<Men
     ]
 }
 
+/// Keyboard/pointer state for the egui menu bar (Linux). The bar and its dropdown are
+/// fully state-driven — pointer and keyboard both mutate this one struct, so hover and
+/// arrow-key selection can never fight. Owned by the shell (`App`), rendered by
+/// `panels_ui::menu_bar`, driven from the key handler via [`menu_nav_key`].
+#[cfg(all(unix, not(target_os = "macos")))]
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MenuNav {
+    /// Which group's dropdown is open (index into the `menu_bar_spec` vec), or none.
+    pub open: Option<usize>,
+    /// Selected row in the open group (index into its `items`, item rows only). `None`
+    /// after a mouse-open (no preselection — GTK/Windows behavior).
+    pub sel: Option<usize>,
+    /// Underline the title mnemonics (Alt is held) — the GTK "reveal on Alt" hint.
+    pub alt_hint: bool,
+}
+
+/// A key press routed to the menu bar, in menu terms (the shell maps winit keycodes).
+#[cfg(all(unix, not(target_os = "macos")))]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MenuKey {
+    Esc,
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    /// Enter / Space — activate the selected item.
+    Activate,
+    /// A plain letter while a menu is open: an item mnemonic (first letter of the label).
+    Char(char),
+    /// Alt+letter: a bar mnemonic (Alt+F → File), GTK/Windows style.
+    AltChar(char),
+    /// F10 toggles the first menu (the freedesktop menubar key).
+    F10,
+}
+
+/// What [`menu_nav_key`] did with the key.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MenuKeyOutcome {
+    /// Not a menu key in this state — let the app's keymap handle it.
+    Ignored,
+    /// The menu took it (state changed, or swallowed by an open dropdown's key grab).
+    Consumed,
+    /// Activate this item — the menu closed itself; the shell dispatches the action.
+    Activate(MenuAction),
+}
+
+/// The bar mnemonic of a menu title: its first letter, lowercased (File → `f`).
+#[cfg(all(unix, not(target_os = "macos")))]
+fn mnemonic(title: &str) -> Option<char> {
+    title.chars().next().map(|c| c.to_ascii_lowercase())
+}
+
+/// Whether row `i` is a selectable (enabled, non-separator) item.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn selectable(items: &[MenuRow], i: usize) -> bool {
+    matches!(items.get(i), Some(MenuRow::Item { enabled: true, .. }))
+}
+
+/// First selectable row, for opening a menu from the keyboard.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn first_selectable(items: &[MenuRow]) -> Option<usize> {
+    (0..items.len()).find(|&i| selectable(items, i))
+}
+
+/// Step the selection over the selectable rows, wrapping. `from = None` enters from the
+/// top (Down) or bottom (Up), matching native menus.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn step_selectable(items: &[MenuRow], from: Option<usize>, down: bool) -> Option<usize> {
+    let n = items.len();
+    if n == 0 {
+        return None;
+    }
+    let start = match (from, down) {
+        (Some(i), true) => i + 1,
+        (Some(i), false) => i + n - 1, // mod-n step back
+        (None, true) => 0,
+        (None, false) => n - 1,
+    };
+    (0..n)
+        .map(|k| {
+            if down {
+                (start + k) % n
+            } else {
+                (start + n - k) % n
+            }
+        })
+        .find(|&i| selectable(items, i))
+}
+
+/// Drive the menu bar with one key press. Pure — no egui, no winit — so the
+/// GTK/Windows-style rules live in one unit-tested place:
+/// * closed: `Alt+mnemonic` or `F10` opens (selecting the first item); all else ignored.
+/// * open: `Esc` closes; `←`/`→` switch menus; `↑`/`↓`/`Home`/`End` move the selection
+///   (skipping separators + disabled rows, wrapping); `Enter`/`Space` activates; a letter
+///   jumps to items starting with it (activating on a unique match); `Alt+mnemonic`
+///   switches menus; `F10` closes. An open dropdown consumes every key it's fed.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn menu_nav_key(nav: &mut MenuNav, groups: &[MenuGroup], key: MenuKey) -> MenuKeyOutcome {
+    use MenuKeyOutcome as Out;
+    let open_group = |nav: &mut MenuNav, g: usize| {
+        nav.open = Some(g);
+        nav.sel = first_selectable(&groups[g].items);
+    };
+    let g = match nav.open {
+        Some(g) => g,
+        // Closed: only the open chords do anything.
+        None => {
+            return match key {
+                MenuKey::AltChar(c) => {
+                    match groups.iter().position(|gr| mnemonic(gr.title) == Some(c)) {
+                        Some(g) => {
+                            open_group(nav, g);
+                            Out::Consumed
+                        }
+                        None => Out::Ignored,
+                    }
+                }
+                MenuKey::F10 if !groups.is_empty() => {
+                    open_group(nav, 0);
+                    Out::Consumed
+                }
+                _ => Out::Ignored,
+            };
+        }
+    };
+    let items = &groups[g].items;
+    match key {
+        MenuKey::Esc | MenuKey::F10 => {
+            nav.open = None;
+            nav.sel = None;
+        }
+        MenuKey::Left => open_group(nav, (g + groups.len() - 1) % groups.len()),
+        MenuKey::Right => open_group(nav, (g + 1) % groups.len()),
+        MenuKey::Up => nav.sel = step_selectable(items, nav.sel, false),
+        MenuKey::Down => nav.sel = step_selectable(items, nav.sel, true),
+        MenuKey::Home => nav.sel = first_selectable(items),
+        MenuKey::End => nav.sel = step_selectable(items, None, false),
+        MenuKey::Activate => {
+            if let Some(MenuRow::Item {
+                action,
+                enabled: true,
+                ..
+            }) = nav.sel.and_then(|i| items.get(i))
+            {
+                let action = *action;
+                nav.open = None;
+                nav.sel = None;
+                return MenuKeyOutcome::Activate(action);
+            }
+        }
+        MenuKey::AltChar(c) => {
+            if let Some(g2) = groups.iter().position(|gr| mnemonic(gr.title) == Some(c)) {
+                open_group(nav, g2);
+            }
+        }
+        MenuKey::Char(c) => {
+            // Item mnemonic: rows whose label starts with the letter. A unique match
+            // activates; several matches cycle the selection through them.
+            let matches: Vec<usize> = (0..items.len())
+                .filter(|&i| {
+                    selectable(items, i)
+                        && matches!(&items[i], MenuRow::Item { label, .. }
+                            if label.chars().next().map(|l| l.to_ascii_lowercase()) == Some(c))
+                })
+                .collect();
+            match matches.as_slice() {
+                [] => {}
+                [only] => {
+                    if let Some(MenuRow::Item { action, .. }) = items.get(*only) {
+                        let action = *action;
+                        nav.open = None;
+                        nav.sel = None;
+                        return MenuKeyOutcome::Activate(action);
+                    }
+                }
+                many => {
+                    let next = many
+                        .iter()
+                        .find(|&&i| nav.sel.is_none_or(|s| i > s))
+                        .or(many.first());
+                    nav.sel = next.copied();
+                }
+            }
+        }
+    }
+    Out::Consumed
+}
+
 /// The macOS menu bar — same item ids (so [`action_for`] / dispatch are shared), but
 /// built to Apple conventions: a leading **application menu** (the first submenu
 /// becomes the bold app menu under `init_for_nsapp`), with About / Settings / Quit
@@ -1193,6 +1384,151 @@ pub fn build_context_menu(state: &crate::contract::ContextMenuState) -> Menu {
 mod tests {
     use super::*;
     use crate::keymap::KeyChord;
+
+    /// A small three-menu bar for the nav tests: File(Open, Quit), Edit(sep-heavy,
+    /// with a disabled row), View(checkable) — enough shape for every rule.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn bar() -> Vec<MenuGroup> {
+        let item = |action, label: &str, enabled| MenuRow::Item {
+            action,
+            label: label.to_string(),
+            shortcut: String::new(),
+            enabled,
+            checked: None,
+        };
+        vec![
+            MenuGroup {
+                title: "File",
+                items: vec![
+                    item(MenuAction::OpenFile, "Open File…", true),
+                    item(MenuAction::OpenFolder, "Open Folder…", true),
+                    MenuRow::Separator,
+                    item(MenuAction::Exit, "Quit", true),
+                ],
+            },
+            MenuGroup {
+                title: "Edit",
+                items: vec![
+                    MenuRow::Separator,
+                    item(MenuAction::Undo, "Undo", false),
+                    item(MenuAction::Copy, "Copy", true),
+                ],
+            },
+            MenuGroup {
+                title: "View",
+                items: vec![item(MenuAction::Slideshow, "Slideshow", true)],
+            },
+        ]
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn alt_mnemonic_opens_the_menu_and_selects_the_first_item() {
+        let (groups, mut nav) = (bar(), MenuNav::default());
+        assert_eq!(
+            menu_nav_key(&mut nav, &groups, MenuKey::AltChar('f')),
+            MenuKeyOutcome::Consumed
+        );
+        assert_eq!((nav.open, nav.sel), (Some(0), Some(0)));
+        // Alt+E while open switches menus — and skips Edit's leading separator +
+        // disabled Undo to land on Copy.
+        menu_nav_key(&mut nav, &groups, MenuKey::AltChar('e'));
+        assert_eq!((nav.open, nav.sel), (Some(1), Some(2)));
+        // An unknown mnemonic while closed is ignored (falls through to the keymap).
+        let mut closed = MenuNav::default();
+        assert_eq!(
+            menu_nav_key(&mut closed, &groups, MenuKey::AltChar('z')),
+            MenuKeyOutcome::Ignored
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn f10_toggles_and_esc_closes() {
+        let (groups, mut nav) = (bar(), MenuNav::default());
+        menu_nav_key(&mut nav, &groups, MenuKey::F10);
+        assert_eq!(nav.open, Some(0));
+        menu_nav_key(&mut nav, &groups, MenuKey::F10);
+        assert_eq!(nav.open, None);
+        menu_nav_key(&mut nav, &groups, MenuKey::F10);
+        assert_eq!(
+            menu_nav_key(&mut nav, &groups, MenuKey::Esc),
+            MenuKeyOutcome::Consumed // Esc is EATEN — it must never fall through to quit
+        );
+        assert_eq!((nav.open, nav.sel), (None, None));
+        // Esc with everything closed is not a menu key.
+        assert_eq!(
+            menu_nav_key(&mut nav, &groups, MenuKey::Esc),
+            MenuKeyOutcome::Ignored
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn arrows_wrap_and_skip_separators_and_disabled() {
+        let (groups, mut nav) = (bar(), MenuNav::default());
+        menu_nav_key(&mut nav, &groups, MenuKey::AltChar('f'));
+        // Down: Open File(0) → Open Folder(1) → skips the separator(2) → Quit(3) → wraps.
+        menu_nav_key(&mut nav, &groups, MenuKey::Down);
+        assert_eq!(nav.sel, Some(1));
+        menu_nav_key(&mut nav, &groups, MenuKey::Down);
+        assert_eq!(nav.sel, Some(3));
+        menu_nav_key(&mut nav, &groups, MenuKey::Down);
+        assert_eq!(nav.sel, Some(0));
+        // Up from the top wraps to the bottom.
+        menu_nav_key(&mut nav, &groups, MenuKey::Up);
+        assert_eq!(nav.sel, Some(3));
+        menu_nav_key(&mut nav, &groups, MenuKey::End);
+        assert_eq!(nav.sel, Some(3));
+        menu_nav_key(&mut nav, &groups, MenuKey::Home);
+        assert_eq!(nav.sel, Some(0));
+        // Left/Right cycle the menus (wrapping) and reselect the first item.
+        menu_nav_key(&mut nav, &groups, MenuKey::Left);
+        assert_eq!((nav.open, nav.sel), (Some(2), Some(0)));
+        menu_nav_key(&mut nav, &groups, MenuKey::Right);
+        assert_eq!((nav.open, nav.sel), (Some(0), Some(0)));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn enter_activates_and_letters_jump() {
+        let (groups, mut nav) = (bar(), MenuNav::default());
+        menu_nav_key(&mut nav, &groups, MenuKey::AltChar('f'));
+        menu_nav_key(&mut nav, &groups, MenuKey::End);
+        assert_eq!(
+            menu_nav_key(&mut nav, &groups, MenuKey::Activate),
+            MenuKeyOutcome::Activate(MenuAction::Exit)
+        );
+        assert_eq!(nav.open, None, "activation closes the menu");
+        // A unique letter match activates immediately (Q → Quit)…
+        menu_nav_key(&mut nav, &groups, MenuKey::AltChar('f'));
+        assert_eq!(
+            menu_nav_key(&mut nav, &groups, MenuKey::Char('q')),
+            MenuKeyOutcome::Activate(MenuAction::Exit)
+        );
+        // …an ambiguous one cycles the selection through the matches (O → the two Opens).
+        menu_nav_key(&mut nav, &groups, MenuKey::AltChar('f'));
+        menu_nav_key(&mut nav, &groups, MenuKey::Char('o'));
+        assert_eq!(nav.sel, Some(1), "sel was 0, next 'O' match is row 1");
+        menu_nav_key(&mut nav, &groups, MenuKey::Char('o'));
+        assert_eq!(nav.sel, Some(0), "wraps back to the first match");
+        // A letter matching nothing is swallowed, not dispatched.
+        assert_eq!(
+            menu_nav_key(&mut nav, &groups, MenuKey::Char('x')),
+            MenuKeyOutcome::Consumed
+        );
+        // Enter with no selection is swallowed and keeps the menu open.
+        let mut fresh = MenuNav {
+            open: Some(0),
+            sel: None,
+            alt_hint: false,
+        };
+        assert_eq!(
+            menu_nav_key(&mut fresh, &groups, MenuKey::Activate),
+            MenuKeyOutcome::Consumed
+        );
+        assert_eq!(fresh.open, Some(0));
+    }
 
     #[test]
     fn image_labels_carry_the_users_keymap_shortcut() {

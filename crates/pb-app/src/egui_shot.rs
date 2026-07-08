@@ -309,7 +309,8 @@ async fn run(out: &Path, dark: bool, tab: InspectorTab, welcome: bool) -> Result
             panels_ui::build(ctx, warm_target, &mut actions);
             #[cfg(all(unix, not(target_os = "macos")))]
             {
-                panels_ui::menu_bar(ctx, dark, 235, &menu_groups, &mut actions);
+                let mut nav = crate::menu::MenuNav::default();
+                panels_ui::menu_bar(ctx, dark, 235, &menu_groups, &mut nav, &mut actions);
                 if std::env::var("PB_SHOT_TREE_ONLY").is_err() {
                     if let Some(g) = menu_groups.get(4) {
                         panels_ui::menu_dropdown_preview(ctx, dark, 300.0, g);
@@ -325,7 +326,8 @@ async fn run(out: &Path, dark: bool, tab: InspectorTab, welcome: bool) -> Result
         panels_ui::build(ctx, &frame, &mut actions);
         #[cfg(all(unix, not(target_os = "macos")))]
         {
-            panels_ui::menu_bar(ctx, dark, 235, &menu_groups, &mut actions);
+            let mut nav = crate::menu::MenuNav::default();
+            panels_ui::menu_bar(ctx, dark, 235, &menu_groups, &mut nav, &mut actions);
             // Preview the "Image" drop-down open so `--egui-shot` shows the row styling
             // (checks / disabled / shortcuts), which a closed bar can't. Skipped in
             // tree-only mode so it doesn't crowd the tree.

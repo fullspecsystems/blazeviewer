@@ -325,12 +325,16 @@ pub fn menu_bar(
     dark: bool,
     alpha: u8,
     groups: &[crate::menu::MenuGroup],
+    nav: &mut crate::menu::MenuNav,
     actions: &mut Vec<PanelAction>,
 ) {
     let p = Palette::new(dark);
     let base = panel_surface(&p);
     // A menu bar wants to stay legible, so floor the surface alpha well above the panel setting.
     let bg = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), alpha.max(238));
+    let font = egui::FontId::proportional(MENU_FONT);
+    // Left x of each title, captured while laying the bar out — the dropdown anchors here.
+    let mut title_x: Vec<f32> = Vec::with_capacity(groups.len());
     egui::TopBottomPanel::top("pb_menu_bar")
         .exact_height(MENU_BAR_H)
         .show_separator_line(false)
@@ -341,20 +345,76 @@ pub fn menu_bar(
         )
         .show(ctx, |ui| {
             pb_ui::apply_to_ui(ui, dark);
-            egui::menu::bar(ui, |ui| {
-                for group in groups {
-                    ui.menu_button(group.title, |ui| {
-                        // egui draws popup contents with the global ctx style, so
-                        // re-assert ours (theme + fonts) inside the dropdown.
-                        pb_ui::apply_to_ui(ui, dark);
-                        // Rows are hand-drawn and self-spacing, so kill egui's inter-widget
-                        // gaps — the menu reads as one continuous list, not a stack of cards.
-                        ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-                        menu_group(ui, &p, group, actions);
-                    });
+            ui.horizontal_centered(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                for (i, group) in groups.iter().enumerate() {
+                    let w = text_width(ui, group.title, &font) + 2.0 * MENU_TITLE_PAD;
+                    let (rect, resp) = ui
+                        .allocate_exact_size(egui::vec2(w, MENU_BAR_H - 6.0), egui::Sense::click());
+                    title_x.push(rect.left());
+                    if resp.clicked() {
+                        // Click toggles; opening by mouse leaves no row preselected.
+                        nav.open = (nav.open != Some(i)).then_some(i);
+                        nav.sel = None;
+                    } else if resp.hovered() && nav.open.is_some() && nav.open != Some(i) {
+                        // Native menus glide: with any dropdown open, hovering another
+                        // title switches to it.
+                        nav.open = Some(i);
+                        nav.sel = None;
+                    }
+                    let open = nav.open == Some(i);
+                    if open {
+                        ui.painter().rect_filled(rect, 5.0, p.accent);
+                    } else if resp.hovered() {
+                        ui.painter()
+                            .rect_filled(rect, 5.0, p.text_secondary.gamma_multiply(0.18));
+                    }
+                    let col = if open { Color32::WHITE } else { p.text };
+                    let g = galley(ui, group.title, font.clone(), col, f32::INFINITY);
+                    let tx = rect.left() + MENU_TITLE_PAD;
+                    paint_vtext(ui, tx, rect.center().y, &g);
+                    // GTK-style: holding Alt reveals the mnemonic underline (Alt+F → File).
+                    if nav.alt_hint {
+                        if let Some(first) = group.title.get(0..1) {
+                            let fw = text_width(ui, first, &font);
+                            let y = (rect.center().y + g.size().y / 2.0).round() + 0.5;
+                            ui.painter()
+                                .hline(tx..=(tx + fw), y, egui::Stroke::new(1.0, col));
+                        }
+                    }
                 }
             });
         });
+    // The open dropdown, anchored under its title. Drawn by us (not egui's menu state)
+    // so the keyboard — Alt+mnemonics, arrows, Enter, Esc — can drive it (`MenuNav`).
+    if let Some(gi) = nav.open {
+        let (Some(group), Some(&x)) = (groups.get(gi), title_x.get(gi)) else {
+            nav.open = None;
+            return;
+        };
+        let mut fired: Option<crate::menu::MenuAction> = None;
+        let dd_rect = menu_dropdown(ctx, dark, x, group, &mut nav.sel, &mut fired);
+        if let Some(action) = fired {
+            actions.push(PanelAction::Menu(action));
+            nav.open = None;
+            nav.sel = None;
+        } else {
+            // A click below the bar and outside the dropdown closes it (clicks on the
+            // bar toggle/switch above; clicks the photo would get are swallowed by the
+            // shell while a menu is open — native menus eat their closing click).
+            let clicked_out = ctx.input(|inp| {
+                inp.pointer.any_pressed()
+                    && inp
+                        .pointer
+                        .interact_pos()
+                        .is_some_and(|pos| pos.y > MENU_BAR_H && !dd_rect.contains(pos))
+            });
+            if clicked_out {
+                nav.open = None;
+                nav.sel = None;
+            }
+        }
+    }
 }
 
 // Menu-row metrics (logical px). A real menu layout: a left check gutter, the label, a
@@ -369,6 +429,10 @@ const MENU_GUTTER: f32 = 18.0; // check column (only reserved when the menu has 
 const MENU_GAP: f32 = 18.0; // min space between label and shortcut
 #[cfg(all(unix, not(target_os = "macos")))]
 const MENU_FONT: f32 = 14.0;
+#[cfg(all(unix, not(target_os = "macos")))]
+const MENU_TITLE_PAD: f32 = 10.0; // horizontal padding inside a bar title's hover pill
+#[cfg(all(unix, not(target_os = "macos")))]
+const MENU_SEP_H: f32 = 7.0; // separator row height (matches `menu_separator`)
 
 /// Render one menu's rows into an open dropdown `ui`. Rows are drawn by hand (not egui
 /// `Button`s, which carry the card fill + center the text) so the menu looks like a menu:
@@ -380,7 +444,8 @@ fn menu_group(
     ui: &mut egui::Ui,
     p: &Palette,
     group: &crate::menu::MenuGroup,
-    actions: &mut Vec<PanelAction>,
+    sel: &mut Option<usize>,
+    fired: &mut Option<crate::menu::MenuAction>,
 ) {
     use crate::menu::MenuRow;
     let font = egui::FontId::proportional(MENU_FONT);
@@ -389,8 +454,11 @@ fn menu_group(
     // egui's default popup width — and so the unconstrained preview Area sizes the same.
     ui.set_min_width(want_w);
     ui.set_max_width(want_w);
+    // The pointer only steals the selection while it's actually moving — a resting
+    // cursor must not pin the highlight against the arrow keys (GTK behavior).
+    let mouse_moving = ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
 
-    for row in &group.items {
+    for (idx, row) in group.items.iter().enumerate() {
         match row {
             MenuRow::Separator => menu_separator(ui, p),
             MenuRow::Item {
@@ -400,9 +468,22 @@ fn menu_group(
                 enabled,
                 checked,
             } => {
-                if menu_item(ui, p, &font, gutter, label, shortcut, *enabled, *checked) {
-                    actions.push(PanelAction::Menu(*action));
-                    ui.close_menu();
+                let (clicked, hovered) = menu_item(
+                    ui,
+                    p,
+                    &font,
+                    gutter,
+                    label,
+                    shortcut,
+                    *enabled,
+                    *checked,
+                    *sel == Some(idx),
+                );
+                if hovered && mouse_moving {
+                    *sel = Some(idx);
+                }
+                if clicked {
+                    *fired = Some(*action);
                 }
             }
         }
@@ -457,9 +538,11 @@ fn menu_layout(ui: &egui::Ui, group: &crate::menu::MenuGroup, font: &egui::FontI
     (gutter, want_w)
 }
 
-/// One drop-down row. Returns whether it was clicked. Text is placed with [`paint_vtext`]
-/// (the same `TEXT_LIFT` optical-centering the panels use) so the ink sits on the row
-/// centerline — egui's raw `Align2::CENTER` reads high with these fonts.
+/// One drop-down row. Returns `(clicked, hovered)`. The highlight follows `selected` —
+/// the one [`crate::menu::MenuNav::sel`] state both the pointer and the arrow keys move —
+/// so mouse and keyboard can never show two competing highlights. Text is placed with
+/// [`paint_vtext`] (the same `TEXT_LIFT` optical-centering the panels use) so the ink
+/// sits on the row centerline — egui's raw `Align2::CENTER` reads high with these fonts.
 #[cfg(all(unix, not(target_os = "macos")))]
 #[allow(clippy::too_many_arguments)]
 fn menu_item(
@@ -471,7 +554,8 @@ fn menu_item(
     shortcut: &str,
     enabled: bool,
     checked: Option<bool>,
-) -> bool {
+    selected: bool,
+) -> (bool, bool) {
     let (rect, resp) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), MENU_ROW_H),
         if enabled {
@@ -481,19 +565,20 @@ fn menu_item(
         },
     );
     let hovered = enabled && resp.hovered();
-    // Accent hover bar (inset a hair from the popup edges so it reads as a pill).
-    if hovered {
+    let lit = enabled && selected;
+    // Accent selection bar (inset a hair from the popup edges so it reads as a pill).
+    if lit {
         ui.painter()
             .rect_filled(rect.shrink2(egui::vec2(4.0, 1.0)), 5.0, p.accent);
     }
     let text_col = if !enabled {
         p.text_secondary.gamma_multiply(0.55)
-    } else if hovered {
+    } else if lit {
         Color32::WHITE
     } else {
         p.text
     };
-    let short_col = if hovered {
+    let short_col = if lit {
         Color32::from_white_alpha(210)
     } else {
         p.text_secondary
@@ -514,7 +599,7 @@ fn menu_item(
         let sg = galley(ui, shortcut, font.clone(), short_col, f32::INFINITY);
         paint_vtext(ui, rect.right() - MENU_PAD_X - sg.size().x, cy, &sg);
     }
-    resp.clicked()
+    (resp.clicked(), hovered)
 }
 
 /// A thin inset divider between menu sections.
@@ -530,28 +615,31 @@ fn menu_separator(ui: &mut egui::Ui, p: &Palette) {
     );
 }
 
-/// Render one menu's drop-down open at `x`, in a popup-styled frame — a **dev preview** of
-/// the real dropdown (whose popup is otherwise only reachable by clicking). Used by
-/// `--egui-shot` so the menu can be eyeballed headlessly; not called on the live path.
+/// Render one menu's drop-down open at `x` in a popup-styled frame — the **live**
+/// dropdown ([`menu_bar`] anchors it under the open title) and the `--egui-shot`
+/// preview share this. `sel` is the selected row (pointer + arrow keys); a click sets
+/// `fired`. Returns the popup rect (for the caller's click-outside-closes test).
 #[cfg(all(unix, not(target_os = "macos")))]
-pub fn menu_dropdown_preview(
+fn menu_dropdown(
     ctx: &egui::Context,
     dark: bool,
     x: f32,
     group: &crate::menu::MenuGroup,
-) {
+    sel: &mut Option<usize>,
+    fired: &mut Option<crate::menu::MenuAction>,
+) -> egui::Rect {
     use crate::menu::MenuRow;
     let p = Palette::new(dark);
-    let mut sink = Vec::new();
     let surf = panel_surface(&p);
     let font = egui::FontId::proportional(MENU_FONT);
     let top = egui::pos2(x, MENU_BAR_H + 1.0);
-    egui::Area::new(egui::Id::new("pb_menu_preview"))
+    let mut rect = egui::Rect::from_min_size(top, egui::Vec2::ZERO);
+    egui::Area::new(egui::Id::new("pb_menu_dropdown"))
         .order(egui::Order::Foreground)
         .fixed_pos(top)
         .show(ctx, |ui| {
             pb_ui::apply_to_ui(ui, dark);
-            ui.set_opacity(1.0); // headless shot has no time; keep the Area from fading in
+            ui.set_opacity(1.0); // menus open instantly — no Area fade-in
             ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
             // Size the box up front (a floating Area is otherwise unconstrained, stretching
             // rows full-width) so `set_min_size` establishes the rect + clip, then paint an
@@ -563,17 +651,32 @@ pub fn menu_dropdown_preview(
                 .filter(|r| matches!(r, MenuRow::Item { .. }))
                 .count() as f32;
             let n_sep = group.items.len() as f32 - n_item;
-            let h = n_item * MENU_ROW_H + n_sep * 7.0 + 8.0;
+            let h = n_item * MENU_ROW_H + n_sep * MENU_SEP_H + 8.0;
             ui.set_min_size(egui::vec2(w, h));
+            rect = egui::Rect::from_min_size(top, egui::vec2(w, h));
             ui.painter().rect(
-                egui::Rect::from_min_size(top, egui::vec2(w, h)),
+                rect,
                 8.0,
                 surf,
                 egui::Stroke::new(1.0, p.text_secondary.gamma_multiply(0.3)),
             );
             ui.add_space(4.0);
-            menu_group(ui, &p, group, &mut sink);
+            menu_group(ui, &p, group, sel, fired);
         });
+    rect
+}
+
+/// Render one menu's drop-down open at `x` — a **dev preview** for `--egui-shot` so the
+/// menu can be eyeballed headlessly; not called on the live path (which goes through
+/// [`menu_bar`] → [`menu_dropdown`] with real [`crate::menu::MenuNav`] state).
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn menu_dropdown_preview(
+    ctx: &egui::Context,
+    dark: bool,
+    x: f32,
+    group: &crate::menu::MenuGroup,
+) {
+    menu_dropdown(ctx, dark, x, group, &mut None, &mut None);
 }
 
 // ── Info readout (`i`) ───────────────────────────────────────────────────────

@@ -151,6 +151,78 @@ fn esc_quits(guard: Option<Instant>, now: Instant) -> bool {
     }
 }
 
+/// Build the winit event loop. On Linux, prefer the **X11 (XWayland) backend inside
+/// WSL**: WSLg's RDP→Wayland input bridge sends bogus keycodes that overflow-panic
+/// winit's Wayland backend (`key + 8` on e.g. Alt+Right — unfixed upstream as of
+/// winit 0.30.13), and its Wayland connection also drops on display hiccups, while
+/// XWayland is stable. A real Linux desktop keeps winit's normal preference (Wayland
+/// when available). `PB_BACKEND=wayland|x11` overrides in either direction.
+fn build_event_loop() -> Result<EventLoop<()>, winit::error::EventLoopError> {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        use winit::platform::wayland::EventLoopBuilderExtWayland as _;
+        use winit::platform::x11::EventLoopBuilderExtX11 as _;
+        let mut builder = EventLoop::builder();
+        let in_wsl = std::env::var_os("WSL_DISTRO_NAME").is_some()
+            || std::fs::metadata("/proc/sys/fs/binfmt_misc/WSLInterop").is_ok();
+        let x11_available = std::env::var_os("DISPLAY").is_some();
+        match std::env::var("PB_BACKEND").as_deref() {
+            Ok("x11") => {
+                builder.with_x11();
+            }
+            Ok("wayland") => {
+                builder.with_wayland();
+            }
+            _ if in_wsl && x11_available => {
+                eprintln!(
+                    "PhotoBlaze: WSL detected — using the X11 (XWayland) backend \
+                     (set PB_BACKEND=wayland to override)"
+                );
+                builder.with_x11();
+            }
+            _ => {}
+        }
+        return builder.build();
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    EventLoop::new()
+}
+
+/// The letter a `KeyCode` names (`KeyA` → `'a'`), for the menu-bar mnemonics.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn letter_of(code: KeyCode) -> Option<char> {
+    use KeyCode::*;
+    const MAP: [(KeyCode, char); 26] = [
+        (KeyA, 'a'),
+        (KeyB, 'b'),
+        (KeyC, 'c'),
+        (KeyD, 'd'),
+        (KeyE, 'e'),
+        (KeyF, 'f'),
+        (KeyG, 'g'),
+        (KeyH, 'h'),
+        (KeyI, 'i'),
+        (KeyJ, 'j'),
+        (KeyK, 'k'),
+        (KeyL, 'l'),
+        (KeyM, 'm'),
+        (KeyN, 'n'),
+        (KeyO, 'o'),
+        (KeyP, 'p'),
+        (KeyQ, 'q'),
+        (KeyR, 'r'),
+        (KeyS, 's'),
+        (KeyT, 't'),
+        (KeyU, 'u'),
+        (KeyV, 'v'),
+        (KeyW, 'w'),
+        (KeyX, 'x'),
+        (KeyY, 'y'),
+        (KeyZ, 'z'),
+    ];
+    MAP.iter().find(|(k, _)| *k == code).map(|&(_, c)| c)
+}
+
 /// Collect monitor bounds as `(x, y, w, h)` physical-pixel rects in virtual-desktop
 /// space — the shape [`settings::geometry_on_screen`] checks a saved window against
 /// to decide if restoring it would land off-screen (#1).
@@ -300,6 +372,11 @@ struct App {
     /// draws it). Tracks the last `set_egui_overlay(Some/None)` so we only re-hand on a
     /// visibility edge, not every frame.
     overlay_active: bool,
+    /// Keyboard/pointer state of the Linux egui menu bar (which dropdown is open, which
+    /// row is selected, Alt-mnemonic hint). Shell-owned so the key handler can drive it
+    /// GTK-style (Alt+F / F10 / arrows / Enter / Esc) — see `menu::menu_nav_key`.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    menu_nav: menu::MenuNav,
     /// The last `play_hint_seq` the shell flashed, so a bump (a fresh motion item) re-arms the
     /// hint. Play-hint fade timing is shell-owned (the `native_play` seam): the core signals
     /// *when* + *what*, the shell renders + fades the egui pill.
@@ -600,6 +677,8 @@ impl App {
             egui_overlay: None,
             overlay_dirty: false,
             overlay_active: false,
+            #[cfg(all(unix, not(target_os = "macos")))]
+            menu_nav: menu::MenuNav::default(),
             play_hint_seq: 0,
             play_hint_shown: None,
             play_hint_fade_out: None,
@@ -1175,6 +1254,62 @@ impl App {
         cfg!(all(unix, not(target_os = "macos"))) && self.core.windowed
     }
 
+    /// Mark the egui overlay for a re-render this turn and wake the redraw — used when
+    /// menu state changes from the key/mouse handlers (outside an egui frame).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn touch_overlay(&mut self) {
+        self.overlay_dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Feed one key press to the menu bar's state machine ([`menu::menu_nav_key`]),
+    /// building the live menu spec so enabled/disabled rows are honored. `Ignored` means
+    /// the menus don't own this key in the current state — let the keymap have it.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn menu_key(&mut self, code: KeyCode) -> menu::MenuKeyOutcome {
+        use menu::{MenuKey, MenuKeyOutcome};
+        let open = self.menu_nav.open.is_some();
+        let alt = self.core.mods.alt;
+        let key = if open {
+            match code {
+                KeyCode::Escape => Some(MenuKey::Esc),
+                KeyCode::ArrowLeft => Some(MenuKey::Left),
+                KeyCode::ArrowRight => Some(MenuKey::Right),
+                KeyCode::ArrowUp => Some(MenuKey::Up),
+                KeyCode::ArrowDown => Some(MenuKey::Down),
+                KeyCode::Home => Some(MenuKey::Home),
+                KeyCode::End => Some(MenuKey::End),
+                KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => Some(MenuKey::Activate),
+                KeyCode::F10 => Some(MenuKey::F10),
+                c => letter_of(c).map(|ch| {
+                    if alt {
+                        MenuKey::AltChar(ch)
+                    } else {
+                        MenuKey::Char(ch)
+                    }
+                }),
+            }
+        } else if code == KeyCode::F10 {
+            Some(MenuKey::F10)
+        } else if alt {
+            letter_of(code).map(MenuKey::AltChar)
+        } else {
+            None
+        };
+        match key {
+            Some(k) => {
+                let groups = menu::menu_bar_spec(&self.core.keymap, &self.current_menu_state());
+                menu::menu_nav_key(&mut self.menu_nav, &groups, k)
+            }
+            // An open dropdown grabs unmapped presses too (digits, F-keys…) so they
+            // never leak into photo nav underneath the menu.
+            None if open => MenuKeyOutcome::Consumed,
+            None => MenuKeyOutcome::Ignored,
+        }
+    }
+
     /// Physical-pixel top strip to reserve for the windowed menu bar (0 elsewhere / in
     /// fullscreen). Fed to the renderer's `content_top_inset` so the photo fits + centers
     /// *below* the bar instead of under it — never clipping the image's top edge. Scales
@@ -1269,6 +1404,10 @@ impl App {
             .menu_bar_visible()
             .then(|| menu::menu_bar_spec(&self.core.keymap, &self.current_menu_state()));
         {
+            // Borrowed as a field-local so the egui closure can take it alongside the
+            // disjoint `&mut self.egui_overlay` borrow.
+            #[cfg(all(unix, not(target_os = "macos")))]
+            let menu_nav = &mut self.menu_nav;
             let (device, queue) = match self.core.renderer.as_ref() {
                 Some(r) => (r.device(), r.queue()),
                 None => return,
@@ -1283,6 +1422,7 @@ impl App {
                             frame.dark,
                             frame.panel_alpha,
                             groups,
+                            menu_nav,
                             &mut actions,
                         );
                     }
@@ -2774,6 +2914,25 @@ impl ApplicationHandler for App {
             self.drain_effects(event_loop);
             return;
         }
+        // While a menu dropdown is open, a click egui didn't take (i.e. not on the
+        // bar/dropdown/panels) closes the menu and must NOT also reach the photo
+        // (drag-to-pan / tree-click) — native menus eat their closing click.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        if self.menu_nav.open.is_some()
+            && matches!(
+                event,
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    ..
+                }
+            )
+        {
+            self.menu_nav.open = None;
+            self.menu_nav.sel = None;
+            self.touch_overlay();
+            self.drain_effects(event_loop);
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => self.begin_exit(),
 
@@ -2826,6 +2985,29 @@ impl ApplicationHandler for App {
                 ..
             } => match state {
                 ElementState::Pressed => {
+                    // Linux windowed menu bar: the keyboard drives the menus GTK-style —
+                    // Alt+mnemonic (Alt+F → File) or F10 opens, arrows navigate, Enter
+                    // activates, Esc closes the menu (instead of quitting the app). While
+                    // a dropdown is open it grabs every key *press* (native menu
+                    // behavior); key *releases* still flow to the core's held-key tracker
+                    // below, so a fly can never strand.
+                    #[cfg(all(unix, not(target_os = "macos")))]
+                    if self.menu_bar_visible() {
+                        match self.menu_key(code) {
+                            menu::MenuKeyOutcome::Ignored => {}
+                            menu::MenuKeyOutcome::Consumed => {
+                                self.touch_overlay();
+                                self.drain_effects(event_loop);
+                                return;
+                            }
+                            menu::MenuKeyOutcome::Activate(action) => {
+                                self.touch_overlay();
+                                self.dispatch_menu(action);
+                                self.drain_effects(event_loop);
+                                return;
+                            }
+                        }
+                    }
                     if code == KeyCode::Escape {
                         // A dialog is open but the main window kept keyboard focus:
                         // Esc dismisses the dialog (cancelling any pending confirm),
@@ -2897,6 +3079,14 @@ impl ApplicationHandler for App {
                     // `super_key()` is Cmd (⌘) on macOS, the Windows key elsewhere.
                     logo: s.super_key(),
                 };
+                // Holding Alt reveals the menu-bar mnemonic underlines (GTK style).
+                #[cfg(all(unix, not(target_os = "macos")))]
+                if self.menu_nav.alt_hint != s.alt_key() {
+                    self.menu_nav.alt_hint = s.alt_key();
+                    if self.menu_bar_visible() {
+                        self.touch_overlay();
+                    }
+                }
             }
 
             // Focus loss can swallow the key-up event; clear held keys so
@@ -3536,7 +3726,7 @@ fn main() {
         }
     }
 
-    let event_loop = EventLoop::new().expect("create event loop");
+    let event_loop = build_event_loop().expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
 
     // macOS: graft `application:openURLs:` onto winit's app delegate NOW. winit sets the
