@@ -1175,6 +1175,18 @@ impl App {
         cfg!(all(unix, not(target_os = "macos"))) && self.core.windowed
     }
 
+    /// Physical-pixel top strip to reserve for the windowed menu bar (0 elsewhere / in
+    /// fullscreen). Fed to the renderer's `content_top_inset` so the photo fits + centers
+    /// *below* the bar instead of under it — never clipping the image's top edge. Scales
+    /// [`panels_ui::MENU_BAR_H`] by the live DPI factor.
+    fn menu_inset_px(&self) -> u32 {
+        #[cfg(all(unix, not(target_os = "macos")))]
+        if self.menu_bar_visible() {
+            return (panels_ui::MENU_BAR_H * self.core.viewport.scale_factor).round() as u32;
+        }
+        0
+    }
+
     /// Recreate the overlay's offscreen target for a new surface size and force a
     /// re-render (the panels re-lay-out; the renderer is re-handed the new texture).
     fn resize_overlay(&mut self, w: u32, h: u32) {
@@ -1344,6 +1356,10 @@ impl App {
             height,
             scale: self.core.viewport.scale_factor,
         });
+        // Re-reserve the menu-bar strip for the new size/DPI/mode (0 in fullscreen) before the
+        // redraw below picks up the new geometry — keeps the photo below the Linux menu bar.
+        let inset = self.menu_inset_px();
+        self.core.set_content_top_inset(inset);
         if fit_changed {
             // macOS: the swapchain reconfigure (`renderer.resize`, just done by the core)
             // can reset the CAMetalLayer's colorspace/EDR, so re-assert them here — after
@@ -2626,6 +2642,10 @@ impl ApplicationHandler for App {
         if self.core.playlist.current().is_none() {
             renderer.clear_image();
         }
+
+        // Reserve the top strip for the Linux windowed menu bar so even the first (hidden)
+        // frame places the photo below it — no top-edge clip on reveal. No-op elsewhere.
+        renderer.set_content_top_inset(self.menu_inset_px());
 
         // Present the first frame WHILE HIDDEN, then reveal — no white startup gap.
         let _ = renderer.render();

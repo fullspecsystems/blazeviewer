@@ -297,12 +297,20 @@ pub fn build(ctx: &egui::Context, frame: &PanelFrame, actions: &mut Vec<PanelAct
     }
 }
 
+/// Fixed **logical** height of the windowed menu bar. The shell reserves this many
+/// (DPI-scaled) pixels at the top of the photo via the renderer's `content_top_inset`, so the
+/// image fits + centers *below* the bar instead of under it. Kept in lockstep with the
+/// `exact_height` in [`menu_bar`] — they must match or the photo gaps/overlaps the bar.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub const MENU_BAR_H: f32 = 30.0;
+
 /// Draw the windowed **menu bar** — the Linux egui stand-in for the native muda bar, which
 /// can't attach to winit's non-GTK window (see [`crate::menu::menu_bar_spec`]). A full-width
-/// top strip of drop-down menus over the photo; a click pushes [`PanelAction::Menu`], which
-/// the shell dispatches through the same `App::dispatch_menu` the native bar uses. Windowed
-/// mode only — the shell omits it in the chrome-free fullscreen speed mode. Drawn in the same
-/// egui frame as [`build`], right after it, so it composites over the panels.
+/// top strip of drop-down menus; a click pushes [`PanelAction::Menu`], which the shell
+/// dispatches through the same `App::dispatch_menu` the native bar uses. Windowed mode only —
+/// the shell omits it in the chrome-free fullscreen speed mode. A fixed-height
+/// [`egui::TopBottomPanel`] so its height is deterministic ([`MENU_BAR_H`]) and the photo
+/// inset the shell reserves matches it exactly.
 #[cfg(all(unix, not(target_os = "macos")))]
 pub fn menu_bar(
     ctx: &egui::Context,
@@ -314,29 +322,28 @@ pub fn menu_bar(
     let p = Palette::new(dark);
     let base = panel_surface(&p);
     // A menu bar wants to stay legible, so floor the surface alpha well above the panel setting.
-    let bg = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), alpha.max(230));
-    let width = ctx.screen_rect().width();
-    egui::Area::new(egui::Id::new("pb_menu_bar"))
-        .fixed_pos(egui::pos2(0.0, 0.0))
-        .show(ctx, |ui| {
-            pb_ui::apply_to_ui(ui, dark);
+    let bg = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), alpha.max(238));
+    egui::TopBottomPanel::top("pb_menu_bar")
+        .exact_height(MENU_BAR_H)
+        .show_separator_line(false)
+        .frame(
             egui::Frame::none()
                 .fill(bg)
-                .inner_margin(egui::Margin::symmetric(8.0, 3.0))
-                .show(ui, |ui| {
-                    ui.set_width(width);
-                    egui::menu::bar(ui, |ui| {
-                        for group in groups {
-                            ui.menu_button(group.title, |ui| {
-                                // egui draws popup contents with the global ctx style, so
-                                // re-assert ours (theme + fonts) inside the dropdown.
-                                pb_ui::apply_to_ui(ui, dark);
-                                ui.set_min_width(210.0);
-                                menu_group(ui, group, actions);
-                            });
-                        }
+                .inner_margin(egui::Margin::symmetric(6.0, 0.0)),
+        )
+        .show(ctx, |ui| {
+            pb_ui::apply_to_ui(ui, dark);
+            egui::menu::bar(ui, |ui| {
+                for group in groups {
+                    ui.menu_button(group.title, |ui| {
+                        // egui draws popup contents with the global ctx style, so
+                        // re-assert ours (theme + fonts) inside the dropdown.
+                        pb_ui::apply_to_ui(ui, dark);
+                        ui.set_min_width(210.0);
+                        menu_group(ui, group, actions);
                     });
-                });
+                }
+            });
         });
 }
 
