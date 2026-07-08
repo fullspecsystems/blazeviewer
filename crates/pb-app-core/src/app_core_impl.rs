@@ -3136,7 +3136,7 @@ impl AppCore {
                         "Flip / pin compare",
                         two(Action::CompareToggle, Action::ComparePin),
                     ),
-                    row("Fullscreen", sc(Action::Fullscreen)),
+                    row("Quick Full Screen", sc(Action::Fullscreen)),
                 ],
             ),
             section(

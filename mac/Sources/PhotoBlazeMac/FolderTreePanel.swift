@@ -32,7 +32,7 @@ struct FolderTreePanelView: View {
 
     @State private var contentHeight: CGFloat = 0
 
-    private let chromeHeight: CGFloat = 42
+    private let chromeHeight = PanelMetrics.headerHeight + 2  // header + groove
 
     private var scrollHeight: CGFloat {
         let available = max(120, maxHeight - chromeHeight)
@@ -42,24 +42,7 @@ struct FolderTreePanelView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Text("Folders")
-                    .font(.headline)
-                Spacer()
-                Button(action: { model.closeTree() }) {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(Color.panelSecondary)
-                        .imageScale(.large)
-                }
-                .buttonStyle(.plain)
-                .help("Close (⇧F)")
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-
-            Rectangle()
-                .fill(Color.primary.opacity(0.08))
-                .frame(height: 1)
+            PanelHeader(title: "Folders", closeHelp: "Close (⇧F)") { model.closeTree() }
 
             ScrollViewReader { proxy in
                 ScrollView {
@@ -95,10 +78,11 @@ struct FolderTreePanelView: View {
             }
         }
         .frame(width: min(model.treeWidth, maxWidth))
-        .panelBackground(cornerRadius: 12, opacity: model.panelOpacity)
+        .panelBackground(opacity: model.panelOpacity)
         // Drag the trailing edge to widen (280pt minimum).
         .overlay(alignment: .trailing) {
             ResizeHandle(
+                model: model,
                 width: Binding(get: { model.treeWidth }, set: { model.treeWidth = $0 }),
                 minWidth: 280, maxWidth: maxWidth, sign: 1)
         }

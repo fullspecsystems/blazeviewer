@@ -45,7 +45,7 @@ struct HelpPanelView: View {
     @State private var contentHeight: CGFloat = 0
 
     /// Title bar + groove height — subtracted from `maxHeight` for the scroll budget.
-    private let chromeHeight: CGFloat = 42
+    private let chromeHeight = PanelMetrics.headerHeight + 2  // header + groove
 
     private var scrollHeight: CGFloat {
         let available = max(160, maxHeight - chromeHeight)
@@ -57,26 +57,7 @@ struct HelpPanelView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Title bar with the in-band ✕ dismiss the HUD panels lacked.
-            HStack {
-                Text("Keyboard Shortcuts")
-                    .font(.headline)
-                Spacer()
-                Button(action: onClose) {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(Color.panelSecondary)
-                        .imageScale(.large)
-                }
-                .buttonStyle(.plain)
-                .help("Close (?)")
-            }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 12)
-
-            // A faint groove rather than a hard divider (subtler on the material).
-            Rectangle()
-                .fill(Color.primary.opacity(0.08))
-                .frame(height: 1)
+            PanelHeader(title: "Keyboard Shortcuts", closeHelp: "Close (?)", onClose: onClose)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
@@ -97,12 +78,7 @@ struct HelpPanelView: View {
             .onPreferenceChange(HelpContentHeight.self) { contentHeight = $0 }
         }
         .frame(width: 520)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(.separator, lineWidth: 0.5)
-        )
-        .shadow(radius: 24, y: 8)
+        .panelBackground()
         .arrowCursorOnHover()
     }
 
@@ -177,16 +153,8 @@ struct ShortcutView: View {
     }
 
     private func keycap(_ s: String) -> some View {
-        Text(s)
-            .font(.system(size: 12, weight: .medium))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .frame(minWidth: 16)
-            .background(.quaternary, in: RoundedRectangle(cornerRadius: 5))
-            .overlay(
-                RoundedRectangle(cornerRadius: 5)
-                    .strokeBorder(.separator, lineWidth: 0.5)
-            )
+        // The shared soft-pill keycap (see `Keycap`) — same as the play hint and welcome opens.
+        Keycap(text: s)
     }
 
     private func parse(_ s: String) -> [[String]] {

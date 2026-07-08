@@ -558,11 +558,21 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         one(Action::OpenParent, "Alt+Up"),
         one(Action::PrevFolder, "Alt+Left"),
         one(Action::NextFolder, "Alt+Right"),
-        // Fullscreen: bare `F` is primary — Mac-idiomatic, the most memorable, and the one
-        // shown on the menu badge / help / toolbar hint. The Windows-muscle-memory alternates
-        // stay as secondaries: F11 (Windows convention, but needs `fn` on a Mac and collides
-        // with Mission Control's clear-desktop) and Alt+Enter / Option+Enter.
-        (Action::Fullscreen, vec![p("F"), p("F11"), p("Alt+Enter")]),
+        // Quick Full Screen (our borderless speed mode, distinct from the OS's native
+        // Spaces fullscreen): bare `F` is primary everywhere — Mac-idiomatic, the most
+        // memorable, and the one shown on the menu badge / help / toolbar hint. ⌥⏎ /
+        // Alt+Enter is the cross-platform secondary. F11 is Windows muscle-memory but a
+        // poor Mac citizen (needs `fn`, and collides with Mission Control's clear-desktop),
+        // so it's a Windows/Linux-only alternate — dropped on macOS so it never surfaces as
+        // the secondary slot in the Shortcuts editor there.
+        (
+            Action::Fullscreen,
+            if cfg!(target_os = "macos") {
+                vec![p("F"), p("Alt+Enter")]
+            } else {
+                vec![p("F"), p("F11"), p("Alt+Enter")]
+            },
+        ),
         one(Action::Recursive, "Ctrl+R"),
         // Stop an in-flight folder scan — menu-only by default (Esc stays Quit); a user can
         // bind a key in Settings if they want one.
@@ -706,12 +716,19 @@ mod tests {
 
     #[test]
     fn bare_f_toggles_fullscreen() {
-        // Discoverable fullscreen: F joins F11 and Alt+Enter (see `default_bindings`).
+        // F is primary everywhere; ⌥⏎ / Alt+Enter is the cross-platform alternate. F11 is
+        // a Windows/Linux-only secondary — dropped on macOS (fn-key + Mission Control
+        // clash), so it never shows as the Shortcuts-editor secondary there. See
+        // `default_bindings`.
         let km = Keymap::defaults();
         let chord = |s: &str| KeyChord::parse(s).unwrap();
         assert_eq!(km.action_for(&chord("F")), Some(Action::Fullscreen));
-        assert_eq!(km.action_for(&chord("F11")), Some(Action::Fullscreen));
         assert_eq!(km.action_for(&chord("Alt+Enter")), Some(Action::Fullscreen));
+        if cfg!(target_os = "macos") {
+            assert_eq!(km.action_for(&chord("F11")), None);
+        } else {
+            assert_eq!(km.action_for(&chord("F11")), Some(Action::Fullscreen));
+        }
     }
 
     #[test]

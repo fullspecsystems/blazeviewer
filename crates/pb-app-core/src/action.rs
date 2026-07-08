@@ -322,7 +322,9 @@ impl Action {
             Action::OpenParent => "Open parent folder",
             Action::PrevFolder => "Previous folder",
             Action::NextFolder => "Next folder",
-            Action::Fullscreen => "Toggle fullscreen",
+            // A named feature (Title Case, like Apple's "Enter Full Screen") — our
+            // borderless speed mode, deliberately distinct from the OS's native full screen.
+            Action::Fullscreen => "Quick Full Screen",
             Action::Recursive => "Recursive (current folder)",
             Action::CancelScan => "Stop scanning",
             Action::SlideshowToggle => "Slideshow",

@@ -99,6 +99,12 @@ struct ContentView: View {
     @State private var treeFrame: CGRect = .zero
     @State private var inspectorFrame: CGRect = .zero
 
+    /// The one shared spacing the whole chrome lays out on — panel↔edge, info-line↔edge,
+    /// toast↔info-line, etc. On macOS 26+ `WindowCornerInsetReader` drives it from the OS
+    /// window corner radius (so it tracks the corners and never drifts); seeded with — and, on
+    /// older systems, held at — `Layout.edge`.
+    @State private var edge: CGFloat = Layout.edge
+
     private static let contentSpace = "content"
 
     /// A corner panel only reserves room above the info line if it *actually* overlaps it
@@ -117,16 +123,16 @@ struct ContentView: View {
     /// A corner panel's max height: the full window height minus the top+bottom edge insets,
     /// but capped to stop `edge` above the info line when it would otherwise collide with it.
     private func panelMaxHeight(_ panel: CGRect) -> CGFloat {
-        let full = max(120, contentSize.height - 2 * Layout.edge)
+        let full = max(120, contentSize.height - 2 * edge)
         guard overlapsInfoLine(panel) else { return full }
-        return max(120, min(full, infoLineFrame.minY - 2 * Layout.edge))
+        return max(120, min(full, infoLineFrame.minY - 2 * edge))
     }
 
     /// The toast sits `edge` above the info line (or `edge` off the bottom when it's hidden),
     /// so the toast→line and line→bottom gaps match.
     private var toastBottomInset: CGFloat {
-        guard model.infoLineVisible, !infoLineFrame.isEmpty else { return Layout.edge }
-        return (contentSize.height - infoLineFrame.minY) + Layout.edge
+        guard model.infoLineVisible, !infoLineFrame.isEmpty else { return edge }
+        return (contentSize.height - infoLineFrame.minY) + edge
     }
 
     var body: some View {
@@ -139,6 +145,14 @@ struct ContentView: View {
             // excludes the titlebar there, so there's no inset to ignore).
             .ignoresSafeArea()
             .frame(minWidth: 520, minHeight: 360)
+            // Track the OS window-corner radius for the shared edge gap (macOS 26+). Full-bleed
+            // behind the canvas, so its corner-adaptive insets are the window's; older systems
+            // keep `edge`.
+            .background {
+                if #available(macOS 26.0, *) {
+                    WindowCornerInsetReader { edge = $0 }
+                }
+            }
             // The canvas fills the window, so its size is the layout's content size — the
             // basis for every overlay's shared-margin math.
             .onGeometryChange(for: CGSize.self) { $0.size } action: { contentSize = $0 }
@@ -173,7 +187,7 @@ struct ContentView: View {
                     InspectorPanelView(
                         model: model,
                         maxHeight: panelMaxHeight(inspectorFrame),
-                        maxWidth: max(360, contentSize.width - 80)
+                        maxWidth: max(280, contentSize.width - 80)
                     )
                     .onGeometryChange(for: CGRect.self) {
                         $0.frame(in: .named(Self.contentSpace))
@@ -182,8 +196,8 @@ struct ContentView: View {
                         maxWidth: .infinity, maxHeight: .infinity,
                         alignment: .topTrailing
                     )
-                    .padding(.trailing, Layout.edge)
-                    .padding(.top, Layout.edge)
+                    .padding(.trailing, edge)
+                    .padding(.top, edge)
                     .transition(.opacity)
                 }
             }
@@ -202,8 +216,8 @@ struct ContentView: View {
                         maxWidth: .infinity, maxHeight: .infinity,
                         alignment: .topLeading
                     )
-                    .padding(.leading, Layout.edge)
-                    .padding(.top, Layout.edge)
+                    .padding(.leading, edge)
+                    .padding(.top, edge)
                     .transition(.opacity)
                 }
             }
@@ -214,7 +228,7 @@ struct ContentView: View {
             .overlay(alignment: .top) {
                 if model.scanPillVisible {
                     ScanPillView(model: model)
-                        .padding(.top, Layout.edge)
+                        .padding(.top, edge)
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
             }
@@ -227,8 +241,8 @@ struct ContentView: View {
                         .onGeometryChange(for: CGRect.self) {
                             $0.frame(in: .named(Self.contentSpace))
                         } action: { infoLineFrame = $0 }
-                        .padding(.horizontal, Layout.edge)
-                        .padding(.bottom, Layout.edge)
+                        .padding(.horizontal, edge)
+                        .padding(.bottom, edge)
                         .allowsHitTesting(false)
                         // Explicit (was the implicit default) so it reads the same as the
                         // corner panels; the fade is driven by `withAnimation` in the model.
@@ -278,7 +292,7 @@ struct ContentView: View {
                     HelpPanelView(
                         sections: model.helpSections,
                         onClose: { model.closeHelp() },
-                        maxHeight: max(120, contentSize.height - 2 * Layout.edge)
+                        maxHeight: max(120, contentSize.height - 2 * edge)
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                     .transition(.opacity)

@@ -63,7 +63,8 @@ struct ScanPillView: View {
             .frame(width: textWidth, alignment: .leading)
 
             // A subtle grooved rule (the inspector/tree heading divider, run vertically) —
-            // not the pure-black default `Divider()`.
+            // not the pure-black default `Divider()`. Inset (fixed height), the typical macOS
+            // toolbar-separator look.
             Rectangle()
                 .fill(Color.primary.opacity(0.12))
                 .frame(width: 1, height: 26)
@@ -80,7 +81,9 @@ struct ScanPillView: View {
         // The shared panel backdrop (same material / border / shadow as the tree, inspector,
         // and toast) — was a heavier `.thickMaterial`; the secondary text + spinner now get
         // their contrast from the colorScheme-resolved gray, not the material.
-        .panelBackground(cornerRadius: 14, opacity: model.panelOpacity)
+        // Shares the one chrome radius for now; give it its own value here if a chunkier
+        // pill wants a different curve.
+        .panelBackground(opacity: model.panelOpacity)
         .arrowCursorOnHover()
     }
 }

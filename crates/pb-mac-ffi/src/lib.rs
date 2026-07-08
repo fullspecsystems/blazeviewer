@@ -328,7 +328,12 @@ impl AppCoreHandle {
             _ => {
                 for r in self.core.details_panel().rows {
                     match r {
-                        DetailRow::Span { text, .. } => rows.push((0, text, String::new())),
+                        // A bold span is a section header (kind 0); a non-bold span is a
+                        // sub-header — the folder path under the filename (kind 4), rendered
+                        // regular-weight and tucked directly beneath its header.
+                        DetailRow::Span { text, bold } => {
+                            rows.push((if bold { 0 } else { 4 }, text, String::new()))
+                        }
                         DetailRow::Pair { label, value } => rows.push((1, label, value)),
                     }
                 }
@@ -341,7 +346,8 @@ impl AppCoreHandle {
         self.inspector_snapshot.len()
     }
 
-    /// Row kind: 0 header, 1 label/value pair, 2 body paragraph, 3 status/muted.
+    /// Row kind: 0 header, 1 label/value pair, 2 body paragraph, 3 status/muted,
+    /// 4 sub-header (regular-weight span under a header, e.g. the folder path).
     fn inspector_row_kind(&self, i: usize) -> u8 {
         self.inspector_snapshot.get(i).map(|r| r.0).unwrap_or(0)
     }

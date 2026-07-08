@@ -25,7 +25,7 @@ struct GlassTopScrim: View {
         // nothing gradually — no perceptible edge — without making the band any taller.
         LinearGradient(
             stops: [
-                .init(color: base.opacity(0.58), location: 0.0), // a touch darker at the very top
+                .init(color: base.opacity(0.54), location: 0.0), // a touch darker at the very top
                 .init(color: base.opacity(0.34), location: 0.28),
                 .init(color: base.opacity(0.15), location: 0.55),
                 .init(color: base.opacity(0.05), location: 0.80),

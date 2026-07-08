@@ -623,7 +623,8 @@ fn scan_pill(
             if resp.clicked() {
                 actions.push(PanelAction::CancelScan);
             }
-        });
+        },
+    );
 }
 
 /// Blend `c` toward white by `t` (a subtle hover lift for the Cancel button).
@@ -1254,7 +1255,8 @@ fn help_panel(
                         }
                     });
             });
-        });
+        },
+    );
 }
 
 fn help_section(ui: &mut egui::Ui, p: &Palette, section: &pb_app_core::panels::HelpSection) {
@@ -1494,7 +1496,8 @@ fn inspector_panel(
                         }
                     });
             });
-        });
+        },
+    );
 }
 
 /// The segmented tab control (Details / Text / Describe), drawn manually into the header so
@@ -1825,7 +1828,8 @@ fn tree_panel(
                             }
                         });
                 });
-        });
+        },
+    );
 }
 
 /// The "up to parent" affordance at the top of the tree — a drawn up-left arrow + the parent

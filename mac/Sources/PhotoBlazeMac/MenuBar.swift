@@ -221,7 +221,7 @@ final class MenuBar: NSObject {
             item("zoom_in", "Zoom In"),
             item("zoom_out", "Zoom Out"),
             sep(),
-            item("fullscreen", "Fullscreen"),
+            item("fullscreen", "Quick Full Screen"),
             // Native (Spaces) fullscreen — the ⌃⌘F / green-button behavior, a deliberate
             // alternative to the borderless speed mode above (winit-menu parity). AppKit
             // manages the Enter/Exit title itself for toggleFullScreen: items, and

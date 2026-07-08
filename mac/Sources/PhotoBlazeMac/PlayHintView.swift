@@ -13,7 +13,7 @@ struct PlayHintView: View {
     @State private var dismissing = false
 
     // Match InfoLineView's geometry so the "P" badge is concentric with the pill.
-    private let pillRadius: CGFloat = 11
+    private let pillRadius = PanelMetrics.cornerRadius
     private let inset: CGFloat = 6
 
     var body: some View {
@@ -25,12 +25,7 @@ struct PlayHintView: View {
             Text("Play")
                 .font(.callout)
                 .foregroundStyle(.primary)
-            Text("P")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: pillRadius - inset))
+            Keycap(text: "P")
         }
         // The leading icon is inset the same as the top/bottom (it leads with a symbol, not
         // text, so it doesn't need the info line's roomier text gutter).

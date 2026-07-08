@@ -453,7 +453,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
     let fill = check_item(ids::FILL, "Crop to Fill\t9");
     let original = check_item(ids::ORIGINAL, "Original 1:1\t0");
     let recursive = check_item(ids::RECURSIVE, "Recursive (This Folder)\tCtrl+R");
-    let fullscreen = check_item(ids::FULLSCREEN, "Fullscreen\tF11");
+    let fullscreen = check_item(ids::FULLSCREEN, "Quick Full Screen\tF11");
     let slideshow = check_item(ids::SLIDESHOW, "Slideshow\tS");
     let info = check_item(ids::INFO, "Show Image Info\tI");
     let full_exif = check_item(ids::FULL_EXIF, "Show All EXIF Info\tShift+I");
@@ -900,9 +900,9 @@ pub fn build_context_menu(state: &crate::contract::ContextMenuState) -> Menu {
     // Fullscreen toggle, last. The label tracks the live mode — vital in the fullscreen
     // speed mode, where the menu bar is hidden and this is the only pointer route out.
     let fullscreen_label = if state.fullscreen {
-        "Exit Fullscreen"
+        "Exit Quick Full Screen"
     } else {
-        "Enter Fullscreen"
+        "Enter Quick Full Screen"
     };
     let _ = menu.append_items(&[&sep(), &item(ids::FULLSCREEN, fullscreen_label)]);
     menu

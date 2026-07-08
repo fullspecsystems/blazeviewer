@@ -28,8 +28,9 @@ struct EmptyStateView: View {
     var body: some View {
         VStack(spacing: 0) {
             // Primary actions — equal-weight (neither emphasized), each carrying its key;
-            // stacked vertically so the two pills line up.
-            VStack(spacing: 10) {
+            // stacked vertically so the two pills line up. Gap is the app's shared spacing
+            // (`Layout.edge`) — the same used between stacked chrome elements everywhere else.
+            VStack(spacing: Layout.edge) {
                 openButton("Open File", icon: "doc", key: model.shortcut("open_file")) {
                     model.openFile()
                 }
@@ -37,14 +38,14 @@ struct EmptyStateView: View {
                     model.openFolder()
                 }
             }
-            .controlSize(.large)
             .onPreferenceChange(OpenButtonWidth.self) { openButtonWidth = $0 }
 
-            // The drag-and-drop alternative sits just under the buttons (tightly related).
+            // The drag-and-drop alternative sits under the buttons — the shared gap, pulled in
+            // 8pt since it's a lighter, secondary line and reads better a touch closer.
             Text("or drag and drop here")
                 .font(.callout)
                 .foregroundStyle(.secondary)
-                .padding(.top, 12)
+                .padding(.top, Layout.edge - 6)
 
             // Owner call (2026-07-05): the Next/Previous/Random tips + "Show Shortcuts"
             // link that used to live here made the welcome screen feel cluttered. This
@@ -80,6 +81,9 @@ struct EmptyStateView: View {
                     ShortcutView(shortcut: key)
                 }
             }
+            .font(.callout)
+            // Equal width: measure only the *content* (both buttons size to the wider), so the
+            // padding + material below wrap an already-equal width — the pills match.
             .fixedSize(horizontal: openButtonWidth == 0, vertical: false)
             .frame(width: openButtonWidth > 0 ? openButtonWidth : nil, alignment: .leading)
             .background(
@@ -87,8 +91,15 @@ struct EmptyStateView: View {
                     Color.clear.preference(key: OpenButtonWidth.self, value: g.size.width)
                 }
             )
+            // Same pill as the play hint: the shared chrome material / border / shadow at the
+            // chrome radius, not a system bordered button — so the on-canvas controls read as
+            // one design language.
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .panelBackground(opacity: model.panelOpacity)
+            .contentShape(RoundedRectangle(cornerRadius: PanelMetrics.cornerRadius))
         }
-        .buttonStyle(.bordered)
+        .buttonStyle(.plain)
         // These sit directly on the photo canvas (not a panel), so they get the on-image
         // hover cue too — the same "alive" language as the play hint, not a panel's.
         .onImageHoverGlow()

@@ -866,7 +866,7 @@ final class CoreModel {
             add("reveal", "Show in Finder")
         }
         menu.addItem(.separator())
-        add("fullscreen", fullscreen ? "Exit Fullscreen" : "Enter Fullscreen")
+        add("fullscreen", fullscreen ? "Exit Quick Full Screen" : "Enter Quick Full Screen")
         NSMenu.popUpContextMenu(menu, with: event, for: view)
     }
 
@@ -1146,7 +1146,7 @@ final class CoreModel {
     func toastSymbol(_ icon: Int) -> String? {
         switch icon {
         case 1: return "speaker.slash.fill"  // Mute
-        case 2: return "speaker.wave.2.fill"  // Unmute
+        case 2: return "speaker.wave.1.fill"  // Unmute
         case 3: return "photo.badge.checkmark"  // Save (rotation)
         case 4: return "arrow.uturn.backward"  // Undo
         case 5: return "trash.fill"  // Delete (permanent)
@@ -1884,6 +1884,13 @@ final class CoreModel {
     /// re-asserts `desiredCursor` on AppKit's `cursorUpdate` pass, so a window-edge resize
     /// cursor (or any SwiftUI cursor rect) can't leak over the canvas.
     private func applyCursor(_ kind: String) {
+        // While a panel's resize strip owns the cursor, ignore the core's cursor
+        // intent. The core reacts to pointer-moves over the photo *beneath* the panel
+        // (it doesn't know the panel is there) and emits an arrow/grab `SetCursor` on
+        // essentially every move — which would stomp the resize cursor back a pixel
+        // after the strip's hover set it, so the ↔ only flashed for ~1pt. The strip's
+        // hover owns the cursor until the pointer leaves it (see `setPanelResizeCursor`).
+        if panelResizeCursorActive { return }
         switch kind {
         case "hidden":
             desiredCursor = .arrow
@@ -1899,6 +1906,23 @@ final class CoreModel {
         }
         desiredCursor.set()
     }
+
+    /// A panel's resize strip claims the cursor while hovered. It must route through
+    /// `desiredCursor` (not a bare `NSCursor.set()`): the canvas re-asserts `desiredCursor`
+    /// on every `cursorUpdate` pass — including under the panel, since its tracking area
+    /// spans the whole view — so a directly-`set()` resize cursor is stomped back to the
+    /// arrow on the same event cycle and never shows. Setting the source of truth makes the
+    /// re-assertion agree instead of fight. Restores the arrow on exit.
+    func setPanelResizeCursor(_ active: Bool) {
+        panelResizeCursorActive = active
+        desiredCursor = active ? .resizeLeftRight : .arrow
+        desiredCursor.set()
+    }
+
+    /// True while the pointer is over a panel's resize strip — makes `applyCursor`
+    /// ignore the core's competing cursor updates so the ↔ resize cursor holds across
+    /// the whole strip instead of being stomped back to the arrow on the next move.
+    @ObservationIgnored private var panelResizeCursorActive = false
 
     /// The cursor the core last asked for — the canvas re-asserts it whenever AppKit
     /// runs a cursor update over the view.

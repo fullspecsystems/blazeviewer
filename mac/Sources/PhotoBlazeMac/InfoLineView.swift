@@ -12,7 +12,7 @@ struct InfoLineView: View {
     // right, and bottom (its own vertical padding makes it about the row height, and the pill's
     // trailing padding drops to match the vertical one), so a badge radius of `pillRadius −
     // inset` makes its corners run roughly concentric with the pill's — parallel curves.
-    private let pillRadius: CGFloat = 11
+    private let pillRadius = PanelMetrics.cornerRadius
     private let inset: CGFloat = 6
 
     /// The SF Symbol marking an animated (non-Live-Photo) image beside the codec. Placeholder

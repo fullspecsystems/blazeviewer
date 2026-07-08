@@ -240,7 +240,7 @@ final class ToolbarController: NSObject, NSToolbarDelegate {
             // it to the left like Preview's search, but an accessory doesn't get the toolbar's
             // Liquid Glass, so the button looked bare — the glass look wins here.)
             return button(id, action: "fullscreen",
-                          symbol: "arrow.up.left.and.arrow.down.right", label: "Fullscreen",
+                          symbol: "arrow.up.left.and.arrow.down.right", label: "Quick Full Screen",
                           priority: .high)
         case .saveRotation:
             return button(id, action: "save_rotation", symbol: "square.and.arrow.down",

@@ -13,28 +13,47 @@ struct ToastView: View {
     private var symbol: String? { model.toastSymbol(model.toastIcon) }
     private var message: String { model.toastMessage }
 
+    /// SF Symbols have wildly different intrinsic boxes (a wide `speaker.wave.2.fill` vs a
+    /// narrow `rotate.left` vs a tall `doc.on.doc`), so a bare glyph makes every icon toast a
+    /// different size and shape. Rendering each in a **fixed square** at one point size gives
+    /// every icon-only toast the *same* square pill. `iconBox` fits the largest toast glyph at
+    /// `iconPointSize` (measured max ≈ 40pt); equal padding keeps the pill square.
+    private let iconPointSize: CGFloat = 28
+    private let iconBox: CGFloat = 42
+    private let iconOnlyPadding: CGFloat = 12
+
+    private func toastIcon(_ symbol: String) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: iconPointSize, weight: .medium))
+            .frame(width: iconBox, height: iconBox)
+    }
+
     var body: some View {
         content
             .foregroundStyle(.primary)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 11)
-            .panelBackground(cornerRadius: 12, opacity: model.panelOpacity)
+            .panelBackground(opacity: model.panelOpacity)
     }
 
     @ViewBuilder
     private var content: some View {
         if let symbol, !message.isEmpty {
-            // Icon + label → a vertical confirmation card: prominent glyph above the label.
+            // Icon + label → a vertical confirmation card: the glyph (same fixed square) above
+            // the label; the pill width is driven by the label.
             VStack(spacing: 5) {
-                Image(systemName: symbol).font(.system(size: 26, weight: .medium))
+                toastIcon(symbol)
                 Text(message).font(.callout.weight(.medium))
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 11)
         } else if let symbol {
-            // Icon only (e.g. rotate) — the glyph is the whole message, so make it big.
-            Image(systemName: symbol).font(.system(size: 32, weight: .medium))
+            // Icon only (mute / unmute / rotate / save …) → a consistent square, whatever glyph.
+            toastIcon(symbol)
+                .padding(iconOnlyPadding)
         } else {
             // Text only (e.g. "Copied image").
             Text(message).font(.callout.weight(.medium))
+                .padding(.horizontal, 16)
+                .padding(.vertical, 11)
         }
     }
 }

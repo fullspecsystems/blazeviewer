@@ -4,7 +4,7 @@
 // it (see `CoreModel.fullscreenHintFromMouse`). It's a native view, not a toast, so the key
 // renders as a keycap (`ShortcutView`) — the same pill styling as the welcome screen and the
 // help panel — instead of plain text. The key shown is the live primary binding (`F` by
-// default; F11 / Alt+Enter also work).
+// default; ⌥⏎ also works — F11 is a Windows-only alternate, not bound on macOS).
 
 import SwiftUI
 
@@ -22,11 +22,11 @@ struct FullscreenHintView: View {
         HStack(spacing: 8) {
             Text("Press").font(.callout.weight(.medium))
             ShortcutView(shortcut: key)
-            Text("to exit fullscreen").font(.callout.weight(.medium))
+            Text("to exit Quick Full Screen").font(.callout.weight(.medium))
         }
         .foregroundStyle(.primary)
         .padding(.horizontal, 16)
         .padding(.vertical, 11)
-        .panelBackground(cornerRadius: 12, opacity: model.panelOpacity)
+        .panelBackground(opacity: model.panelOpacity)
     }
 }

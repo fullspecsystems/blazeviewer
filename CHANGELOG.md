@@ -8,6 +8,11 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
+- **Photoshop `.psd` files now open.** PhotoBlaze shows the flattened composite Photoshop
+  saves inside the file (the default "Maximize Compatibility" merged image), so a `.psd` in a
+  folder displays and flicks past just like any other photo — no Photoshop, no layer
+  flattening, no slowdown. Files saved without an embedded composite are skipped cleanly rather
+  than shown blank.
 - **macOS: transparent toolbar** (Settings ▸ Appearance ▸ "Transparent toolbar", on by
   default) — a zoomed or filled photo now extends up under the translucent glass toolbar
   instead of being cut off by an opaque bar, so you see more of the image. A soft gradient
@@ -26,7 +31,20 @@ with any pre-release suffix carried only by the tag.
   "Open with" button (same setting). The row shows whether PhotoBlaze is already your default,
   and prompts you to move the app to Applications first if it's running from a quarantined copy.
 
+### Changed
+- **"Quick Full Screen" is now named as such**, everywhere it appears (View menu, toolbar,
+  keyboard help, the exit hint, and the right-click menu) — so our instant borderless mode
+  reads clearly apart from macOS's native full screen sitting right below it. The shortcut is
+  unchanged: **F** (with **⌥⏎** as an alternate). On macOS the old **F11** alternate has been
+  dropped — it needed the **fn** key and clashed with Mission Control, so it no longer shows as
+  the secondary shortcut in Settings; F11 stays available on Windows.
+
 ### Fixed
+- **macOS: the Folders and Details panels are easier to resize.** Hovering the draggable inner
+  edge of either panel now shows the ↔ resize cursor (the photo canvas was reasserting the plain
+  arrow over the whole window and hiding it), the grab zone is wider and centered on the border
+  so it's no longer a near-invisible one-pixel target, and dragging tracks the pointer smoothly
+  instead of flickering between two widths.
 - **macOS: the panels now fade in and out smoothly and consistently.** The Folders and Details
   panels used to pop instantly on close and, when hidden together with Tab, briefly collapse
   their contents before disappearing — a visible height jump. Now the Folders panel, the
