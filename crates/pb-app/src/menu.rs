@@ -590,6 +590,164 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
     }
 }
 
+/// A shell-neutral description of the windowed menu bar for the **egui overlay** used on
+/// Linux — where winit makes a raw X11/Wayland window, not a `gtk::ApplicationWindow`, so
+/// muda has nothing to attach a native bar to (this is why Tauri uses `tao`, not winit).
+/// Built from the same ids/labels/keymap hints as [`build_menu`] plus the live [`MenuState`]
+/// for the check/enabled marks, so the egui bar and the Win/mac native bar stay in lockstep.
+/// Clicks carry a [`MenuAction`] dispatched through the very same `App::dispatch_menu`.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub struct MenuGroup {
+    pub title: &'static str,
+    pub items: Vec<MenuRow>,
+}
+
+/// One row of an egui menu dropdown: a dispatchable item or a separator.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub enum MenuRow {
+    Separator,
+    Item {
+        action: MenuAction,
+        label: String,
+        /// Right-aligned shortcut hint (live from the keymap), or empty.
+        shortcut: String,
+        enabled: bool,
+        /// `Some(checked)` for a checkable item (draws a check column); `None` = plain.
+        checked: Option<bool>,
+    },
+}
+
+/// Build the egui menu-bar model for the current [`MenuState`]. Mirrors [`build_menu`]'s
+/// structure exactly (same groups, order, ids, labels), reading the check/enabled marks
+/// from `s`. Kept beside `build_menu` on purpose — this file is the one place the two menu
+/// presentations could drift, so they sit together.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn menu_bar_spec(keymap: &Keymap, s: &crate::contract::MenuState) -> Vec<MenuGroup> {
+    use crate::contract::ScaleMode;
+    // A plain (uncheckable) item; `label` may carry a hardcoded "\tHint".
+    let item = |action, label: &str, enabled| {
+        let (label, shortcut) = match label.split_once('\t') {
+            Some((l, h)) => (l.to_string(), h.to_string()),
+            None => (label.to_string(), String::new()),
+        };
+        MenuRow::Item { action, label, shortcut, enabled, checked: None }
+    };
+    // A checkable item (shows a check column tracking `checked`).
+    let check = |action, label: &str, enabled, checked: bool| {
+        let (label, shortcut) = match label.split_once('\t') {
+            Some((l, h)) => (l.to_string(), h.to_string()),
+            None => (label.to_string(), String::new()),
+        };
+        MenuRow::Item { action, label, shortcut, enabled, checked: Some(checked) }
+    };
+    let sep = || MenuRow::Separator;
+    // Shortcut hint for a keymap-bound item, live from the user's bindings (as `labeled`).
+    let l = |base, action| labeled(keymap, base, action);
+
+    vec![
+        MenuGroup {
+            title: "File",
+            items: vec![
+                item(MenuAction::OpenFile, "Open File…\tO", true),
+                item(MenuAction::OpenFolder, "Open Folder…\tShift+O", true),
+                item(MenuAction::CancelScan, "Stop Scanning", s.cancel_scan_enabled),
+                sep(),
+                item(MenuAction::SaveRotation, "Save Rotation\tCtrl+S", s.save_rotation_enabled),
+                item(MenuAction::Reveal, "Show in File Explorer", s.reveal_enabled),
+                sep(),
+                item(MenuAction::Delete, "Delete\tDel", true),
+                item(MenuAction::DeletePermanently, "Delete Permanently\tShift+Del", true),
+                sep(),
+                item(MenuAction::Settings, "Settings…\tCtrl+,", true),
+                sep(),
+                item(MenuAction::Exit, "Exit\tEsc", true),
+            ],
+        },
+        MenuGroup {
+            title: "Edit",
+            items: vec![
+                item(
+                    MenuAction::Undo,
+                    &format!("{}\tCtrl+Z", s.undo.unwrap_or("Undo")),
+                    s.undo.is_some(),
+                ),
+                sep(),
+                item(MenuAction::Copy, "Copy\tCtrl+C", true),
+                item(MenuAction::CopyPath, "Copy File Path\tShift+Ctrl+C", true),
+                item(MenuAction::CopyImageText, &l("Copy Text from Image", Action::CopyImageText), true),
+                sep(),
+                item(MenuAction::DescribeImage, &l("Describe Image", Action::DescribeImage), true),
+                item(MenuAction::AskImage, &l("Ask About Image…", Action::AskImage), true),
+                item(MenuAction::CopyDescription, &l("Copy AI Description", Action::CopyDescription), true),
+            ],
+        },
+        MenuGroup {
+            title: "View",
+            items: vec![
+                check(MenuAction::Fit, "Fit\t8", true, s.scale == ScaleMode::Fit),
+                check(MenuAction::Fill, "Crop to Fill\t9", true, s.scale == ScaleMode::Fill),
+                check(MenuAction::Original, "Original 1:1\t0", true, s.scale == ScaleMode::Original),
+                sep(),
+                item(MenuAction::ZoomIn, "Zoom In\t=", true),
+                item(MenuAction::ZoomOut, "Zoom Out\t-", true),
+                sep(),
+                check(MenuAction::Fullscreen, "Quick Full Screen\tF11", true, s.fullscreen),
+                check(MenuAction::Recursive, "Recursive (This Folder)\tCtrl+R", true, s.recursive),
+                check(MenuAction::Slideshow, "Slideshow\tS", true, s.slideshow),
+                item(MenuAction::SlideshowFaster, "Slideshow Faster\t[", true),
+                item(MenuAction::SlideshowSlower, "Slideshow Slower\t]", true),
+                sep(),
+                check(MenuAction::Info, "Show Image Info\tI", true, s.info_basic),
+                check(MenuAction::FullExif, "Show All EXIF Info\tShift+I", true, s.info_full),
+                item(MenuAction::FolderTree, &l("Show Folder Tree", Action::FolderTree), true),
+                check(MenuAction::TogglePanels, "Hide Panels\tTab", s.hide_panels_enabled, s.panels_hidden),
+            ],
+        },
+        MenuGroup {
+            title: "Go",
+            items: vec![
+                item(MenuAction::OpenParent, &l("Parent Folder", Action::OpenParent), true),
+                sep(),
+                item(MenuAction::PrevFolder, &l("Previous Folder", Action::PrevFolder), true),
+                item(MenuAction::NextFolder, &l("Next Folder", Action::NextFolder), true),
+            ],
+        },
+        MenuGroup {
+            title: "Image",
+            items: vec![
+                item(MenuAction::Next, &l("Next", Action::Next), true),
+                item(MenuAction::Previous, &l("Previous", Action::Prev), true),
+                item(MenuAction::Random, &l("Random", Action::Random), true),
+                item(MenuAction::RandomPrev, &l("Previous Random", Action::RandomPrev), true),
+                sep(),
+                item(MenuAction::RotateRight, &l("Rotate Right", Action::RotateCw), true),
+                item(MenuAction::RotateLeft, &l("Rotate Left", Action::RotateCcw), true),
+                sep(),
+                check(
+                    MenuAction::ComparePin,
+                    &l("Pin for Compare", Action::ComparePin),
+                    s.compare_pin_enabled,
+                    s.compare_pinned_here,
+                ),
+                item(MenuAction::CompareToggle, &l("Compare with Pinned", Action::CompareToggle), s.compare_toggle_enabled),
+                sep(),
+                item(MenuAction::PlayPause, &l("Play/Pause Animation", Action::PlayPause), true),
+                item(MenuAction::FrameNext, &l("Next Frame", Action::FrameNext), true),
+                item(MenuAction::FramePrev, &l("Previous Frame", Action::FramePrev), true),
+                sep(),
+                check(MenuAction::MuteLiveAudio, "Mute Live Photo Audio\tM", true, s.mute_live_audio),
+            ],
+        },
+        MenuGroup {
+            title: "Help",
+            items: vec![
+                item(MenuAction::Help, "Keyboard Shortcuts\t?", true),
+                item(MenuAction::About, "About PhotoBlaze", true),
+            ],
+        },
+    ]
+}
+
 /// The macOS menu bar — same item ids (so [`action_for`] / dispatch are shared), but
 /// built to Apple conventions: a leading **application menu** (the first submenu
 /// becomes the bold app menu under `init_for_nsapp`), with About / Settings / Quit

@@ -282,8 +282,8 @@ pub fn apply_to_ui(ui: &mut egui::Ui, dark: bool) {
     *ui.style_mut() = style(dark);
 }
 
-/// Load the OS UI font (Segoe UI on Windows, SF Pro on macOS) as the proportional
-/// family, once, so the chrome reads as a native app rather than egui's default face.
+/// Load the OS UI font (Segoe UI on Windows, SF Pro on macOS, DejaVu Sans on Linux) as the
+/// proportional family, once, so the chrome reads as a native app rather than egui's default face.
 /// Falls back to egui's bundled font silently if no file can be read. This is a read of
 /// a system font file — never a photo, never a write — so it's outside the no-trace
 /// view path. The lists carry both platforms' paths (the absent one is just skipped),
@@ -319,6 +319,13 @@ pub fn install_fonts(ctx: &egui::Context) {
         "/Library/Fonts/SF-Pro-Text-Regular.otf", // macOS: static SF Pro Text (best small-size spacing)
         "/System/Library/Fonts/SFNS.ttf", // macOS fallback: SF Pro (variable; default = Regular)
         r"C:\Windows\Fonts\segoeui.ttf",  // Windows: Segoe UI
+        // Linux: DejaVu Sans (the pb-hud overlay font too) — good metrics + glyph coverage (arrows,
+        // symbols); without a real face egui falls back to its bundled font, which drifts the layout
+        // and shows tofu for glyphs it lacks. Liberation/Noto cover distros without DejaVu.
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", // Debian/Ubuntu
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",             // Arch/Fedora layout
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
     ]) {
         fonts.font_data.insert(
             "system-ui".to_owned(),
@@ -345,6 +352,10 @@ pub fn install_fonts(ctx: &egui::Context) {
         "/Library/Fonts/SF-Pro-Text-Semibold.otf", // macOS: real SF semibold if installed
         r"C:\Windows\Fonts\seguisb.ttf",           // Windows: Segoe UI Semibold
         "/System/Library/Fonts/SFNS.ttf",          // macOS fallback: SF Pro (Regular)
+        // Linux: DejaVu Sans Bold stands in for the semibold weight (as pb-hud does).
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", // Debian/Ubuntu
+        "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",             // Arch/Fedora layout
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
     ]) {
         fonts.font_data.insert(
             "system-ui-semibold".to_owned(),

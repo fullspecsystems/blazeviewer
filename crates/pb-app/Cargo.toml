@@ -75,15 +75,17 @@ arboard = { version = "3", default-features = false }
 # walkdir iterates (no stack growth with depth), doesn't follow symlinks by default (no
 # cycles), and bounds open dir handles. Already in the lockfile (transitive), so it's free.
 walkdir = "2"
-# Velopack: per-user Windows installer + built-in auto-update (ships on the winit shell).
-# `velopack_startup()` runs first in main() (handles the --veloapp-* lifecycle args; a no-op
-# off a Velopack install), and a background thread checks the feed via `UpdateManager`/`HttpSource`.
-velopack = "0.0.70"
 
 # Linux Copy Image: enable arboard's image clipboard (Wayland/X11). Windows and macOS use
 # their own native paths in clipboard.rs, so only Linux needs this.
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 arboard = { version = "3", default-features = false, features = ["image-data"] }
+# rfd needs an explicit backend on Linux (Windows/macOS always compile their native one, so the
+# base `default-features = false` above is enough there). Use the GTK3 backend: it shows a real
+# file dialog under X11/Wayland — including WSLg — without requiring a running xdg-desktop-portal
+# service (which the `xdg-portal` backend would). The GTK dev libs are already in the tree via the
+# menu/trash path. Both declarations keep `default-features = false`, so Linux gets *only* gtk3.
+rfd = { version = "0.14", default-features = false, features = ["gtk3"] }
 
 # macOS: poke the wgpu CAMetalLayer for wide-gamut/EDR output (hdr_surface.rs) via
 # raw `msg_send!`. objc2 0.6 is already in the tree (winit/muda); raw-window-handle
@@ -98,6 +100,13 @@ libc = "0.2"
 # Win32 for: pointing the window icon at the exe's multi-size .ico (crisp small
 # title-bar icon, vs winit downscaling one big image), and the native menu later.
 [target.'cfg(windows)'.dependencies]
+# Velopack: per-user Windows installer + built-in auto-update (ships on the winit shell).
+# `velopack_startup()` runs first in main() (handles the --veloapp-* lifecycle args; a no-op off
+# a Velopack install), and a background thread checks the feed via `UpdateManager`/`HttpSource`.
+# Windows-only: macOS ships a notarized DMG and Linux has no updater, so gating it here keeps
+# velopack — and the OpenSSL its `native-tls`/`ureq` chain drags in — out of every non-Windows
+# build (see src/update.rs, which stubs these calls off Windows).
+velopack = "0.0.70"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",

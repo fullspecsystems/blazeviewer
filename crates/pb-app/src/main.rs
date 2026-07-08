@@ -1155,6 +1155,9 @@ impl App {
             || self.core.open_panel_visible()
             // The play hint is interactive (hover pins it, click plays) while it's shown.
             || self.play_hint_shown.is_some()
+            // The Linux windowed menu bar is interactive — route its clicks to egui (egui only
+            // consumes a click actually over the bar/dropdown, so the photo stays pannable).
+            || self.menu_bar_visible()
     }
 
     /// Whether the egui overlay has **any** content to composite — the interactive panels
@@ -1163,6 +1166,13 @@ impl App {
     /// which gates *pointer* routing: the readout must never intercept clicks meant for the photo.)
     fn overlay_visible(&self) -> bool {
         self.overlay_panel_visible() || self.core.info_line_visible()
+    }
+
+    /// Whether the windowed menu bar should show — **Linux only** (the egui stand-in for the
+    /// native muda bar, which can't attach to winit's non-GTK window). Windowed mode only; the
+    /// fullscreen speed mode stays chrome-free, matching the native bar's windowed-only rule.
+    fn menu_bar_visible(&self) -> bool {
+        cfg!(all(unix, not(target_os = "macos"))) && self.core.windowed
     }
 
     /// Recreate the overlay's offscreen target for a new surface size and force a
@@ -1231,6 +1241,14 @@ impl App {
         // Play-hint fade is shell-owned too (computed by `tick_play_hint` each turn).
         frame.play_hint = self.play_hint_frame.clone();
         let mut actions: Vec<panels_ui::PanelAction> = Vec::new();
+        // Linux: the windowed menu bar (the egui stand-in for the native muda bar). Build its
+        // spec here from the live menu state + keymap — an owned `Vec`, so it can be borrowed
+        // into the render closure without tangling with the `&mut self.egui_overlay` borrow
+        // below — then draw it in the same egui frame as the panels.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let menu_groups: Option<Vec<menu::MenuGroup>> = self
+            .menu_bar_visible()
+            .then(|| menu::menu_bar_spec(&self.core.keymap, &self.current_menu_state()));
         {
             let (device, queue) = match self.core.renderer.as_ref() {
                 Some(r) => (r.device(), r.queue()),
@@ -1239,6 +1257,10 @@ impl App {
             if let Some(ov) = self.egui_overlay.as_mut() {
                 ov.run(&window, device, queue, |ctx| {
                     panels_ui::build(ctx, &frame, &mut actions);
+                    #[cfg(all(unix, not(target_os = "macos")))]
+                    if let Some(groups) = &menu_groups {
+                        panels_ui::menu_bar(ctx, frame.dark, frame.panel_alpha, groups, &mut actions);
+                    }
                 });
             }
         }
@@ -1282,6 +1304,10 @@ impl App {
                 self.core.dispatch_action(Action::PlayPause);
             }
             A::PlayHintHover(hovered) => self.play_hint_hovered = hovered,
+            // The Linux windowed menu bar dispatches through the very same path the native
+            // muda bar uses, so an egui menu click behaves identically to a keyboard action.
+            #[cfg(all(unix, not(target_os = "macos")))]
+            A::Menu(action) => self.dispatch_menu(action),
         }
         self.overlay_dirty = true;
     }
@@ -1490,16 +1516,46 @@ impl App {
     /// gate keeps this off the per-tick path (nothing is pushed when nothing moved), so it's
     /// safe to call every tick from `about_to_wait`; a no-op until the menu exists.
     fn apply_menu_state(&mut self) {
-        // No menu yet (not built): nothing to mirror, and don't cache — so the first apply
-        // once the items exist re-asserts every one of them from scratch. All menu handles
-        // are built together in `ensure_menu`, so `view_checks` gates them all.
-        if self.view_checks.is_none() {
-            return;
+        // Linux: the windowed menu is the egui overlay bar (no muda handles / `view_checks`).
+        // The bar reads the live state directly in `render_overlay_frame`; here we only cache it
+        // + re-render the bar when it changes (there's nothing native to mirror onto).
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            let next = self.current_menu_state();
+            if self.menu_state != Some(next) {
+                self.menu_state = Some(next);
+                self.overlay_dirty = true;
+            }
         }
+        // Win/mac: mirror the change onto the native (muda) menu via a single `SetMenuState`
+        // effect the drain applies (`apply_menu_to_native`) — only when it actually moved, so
+        // this stays off the per-tick path.
+        #[cfg(not(all(unix, not(target_os = "macos"))))]
+        {
+            // No menu yet (not built): nothing to mirror, and don't cache — so the first apply
+            // once the items exist re-asserts every one of them from scratch. All menu handles
+            // are built together in `ensure_menu`, so `view_checks` gates them all.
+            if self.view_checks.is_none() {
+                return;
+            }
+            let next = self.current_menu_state();
+            if self.menu_state == Some(next) {
+                return;
+            }
+            self.menu_state = Some(next);
+            self.core
+                .effects
+                .push(contract::CoreEffect::SetMenuState(next));
+        }
+    }
+
+    /// Compute the [`contract::MenuState`] for the current live view/edit state — the pure
+    /// mapping shared by [`apply_menu_state`](Self::apply_menu_state) (native menu sync on
+    /// Win/mac) and the Linux egui menu bar (`render_overlay_frame`), so both read one truth.
+    fn current_menu_state(&self) -> contract::MenuState {
         // Native (Spaces) fullscreen is OS truth (the real `NSWindow.styleMask` via
-        // `hdr_surface::window_is_fullscreen`), not winit's requested-mode flag — read
-        // every tick so a green-button / gesture toggle flips the label too. Windows has
-        // no such menu item, so it's always `false` there.
+        // `hdr_surface::window_is_fullscreen`), read every tick so a green-button / gesture
+        // toggle flips the label. Windows/Linux have no such item, so it's always `false`.
         #[cfg(target_os = "macos")]
         let native_fullscreen = self
             .window
@@ -1508,7 +1564,7 @@ impl App {
         #[cfg(not(target_os = "macos"))]
         let native_fullscreen = false;
 
-        let next = AppCore::menu_state_from(
+        AppCore::menu_state_from(
             self.core.view.mode,
             self.core.info_line,
             self.core.panels,
@@ -1525,17 +1581,7 @@ impl App {
             native_fullscreen,
             self.core.displayed_item,
             self.core.compare_pin,
-        );
-        // Only sync when the state actually changed — kept off the per-tick path (nothing is
-        // pushed when nothing moved). The shell applies it in the drain via
-        // `apply_menu_to_native`; `MenuState` is `Copy`, so there's no alloc here.
-        if self.menu_state == Some(next) {
-            return;
-        }
-        self.menu_state = Some(next);
-        self.core
-            .effects
-            .push(contract::CoreEffect::SetMenuState(next));
+        )
     }
 
     /// The shell side of [`CoreEffect::SetMenuState`]: mirror a [`contract::MenuState`] onto

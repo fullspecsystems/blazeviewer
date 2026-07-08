@@ -235,6 +235,22 @@ async fn run(out: &Path, dark: bool, tab: InspectorTab, welcome: bool) -> Result
 
     let frame = sample_frame(dark, tab, welcome);
     let mut actions = Vec::new();
+    // Linux: also render the windowed menu bar (the egui stand-in for the native muda bar), so
+    // `--egui-shot` previews it too. A sample MenuState exercises checks / enabled / the Undo label.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let menu_groups = {
+        let keymap = crate::keymap::Keymap::load();
+        let state = crate::contract::MenuState {
+            info_basic: true,
+            recursive: true,
+            save_rotation_enabled: true,
+            reveal_enabled: true,
+            compare_pin_enabled: true,
+            undo: Some("Undo Rotate Right"),
+            ..Default::default()
+        };
+        crate::menu::menu_bar_spec(&keymap, &state)
+    };
     let raw = || egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
@@ -250,12 +266,20 @@ async fn run(out: &Path, dark: bool, tab: InspectorTab, welcome: bool) -> Result
     // Two warm-up frames: the first run reports a bogus default `screen_rect`, so the
     // anchored windows would cache a wrong size; a second settles them at the real size.
     for _ in 0..2 {
-        let warm = ctx.run(raw(), |ctx| panels_ui::build(ctx, &frame, &mut actions));
+        let warm = ctx.run(raw(), |ctx| {
+            panels_ui::build(ctx, &frame, &mut actions);
+            #[cfg(all(unix, not(target_os = "macos")))]
+            panels_ui::menu_bar(ctx, dark, 235, &menu_groups, &mut actions);
+        });
         for (id, d) in &warm.textures_delta.set {
             renderer.update_texture(&device, &queue, *id, d);
         }
     }
-    let full = ctx.run(raw(), |ctx| panels_ui::build(ctx, &frame, &mut actions));
+    let full = ctx.run(raw(), |ctx| {
+        panels_ui::build(ctx, &frame, &mut actions);
+        #[cfg(all(unix, not(target_os = "macos")))]
+        panels_ui::menu_bar(ctx, dark, 235, &menu_groups, &mut actions);
+    });
     let jobs = ctx.tessellate(full.shapes, full.pixels_per_point);
     let desc = egui_wgpu::ScreenDescriptor {
         size_in_pixels: [w, h],

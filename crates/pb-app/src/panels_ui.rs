@@ -91,6 +91,10 @@ pub enum PanelAction {
     /// The pointer moved onto (`true`) / off (`false`) the play hint — the shell pins its
     /// auto-fade open while hovered.
     PlayHintHover(bool),
+    /// A windowed menu-bar item was clicked (the Linux egui bar — see [`menu_bar`]). The shell
+    /// dispatches it through `App::dispatch_menu`, the same path the native muda bar uses.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    Menu(crate::menu::MenuAction),
 }
 
 /// The Inspector's visible state for one frame.
@@ -290,6 +294,85 @@ pub fn build(ctx: &egui::Context, frame: &PanelFrame, actions: &mut Vec<PanelAct
             screen.center().x + HELP_WIDTH / 2.0,
         );
         help_panel(ctx, &p, alpha, r, help, actions);
+    }
+}
+
+/// Draw the windowed **menu bar** — the Linux egui stand-in for the native muda bar, which
+/// can't attach to winit's non-GTK window (see [`crate::menu::menu_bar_spec`]). A full-width
+/// top strip of drop-down menus over the photo; a click pushes [`PanelAction::Menu`], which
+/// the shell dispatches through the same `App::dispatch_menu` the native bar uses. Windowed
+/// mode only — the shell omits it in the chrome-free fullscreen speed mode. Drawn in the same
+/// egui frame as [`build`], right after it, so it composites over the panels.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn menu_bar(
+    ctx: &egui::Context,
+    dark: bool,
+    alpha: u8,
+    groups: &[crate::menu::MenuGroup],
+    actions: &mut Vec<PanelAction>,
+) {
+    let p = Palette::new(dark);
+    let base = panel_surface(&p);
+    // A menu bar wants to stay legible, so floor the surface alpha well above the panel setting.
+    let bg = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), alpha.max(230));
+    let width = ctx.screen_rect().width();
+    egui::Area::new(egui::Id::new("pb_menu_bar"))
+        .fixed_pos(egui::pos2(0.0, 0.0))
+        .show(ctx, |ui| {
+            pb_ui::apply_to_ui(ui, dark);
+            egui::Frame::none()
+                .fill(bg)
+                .inner_margin(egui::Margin::symmetric(8.0, 3.0))
+                .show(ui, |ui| {
+                    ui.set_width(width);
+                    egui::menu::bar(ui, |ui| {
+                        for group in groups {
+                            ui.menu_button(group.title, |ui| {
+                                // egui draws popup contents with the global ctx style, so
+                                // re-assert ours (theme + fonts) inside the dropdown.
+                                pb_ui::apply_to_ui(ui, dark);
+                                ui.set_min_width(210.0);
+                                menu_group(ui, group, actions);
+                            });
+                        }
+                    });
+                });
+        });
+}
+
+/// Render one menu's rows into an open dropdown `ui`.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn menu_group(ui: &mut egui::Ui, group: &crate::menu::MenuGroup, actions: &mut Vec<PanelAction>) {
+    use crate::menu::MenuRow;
+    for row in &group.items {
+        match row {
+            MenuRow::Separator => {
+                ui.separator();
+            }
+            MenuRow::Item {
+                action,
+                label,
+                shortcut,
+                enabled,
+                checked,
+            } => {
+                // A leading check column keeps checkable/plain items aligned (egui has no
+                // native "check menu item"); a leading gap reserves the same width when off.
+                let text = match checked {
+                    Some(true) => format!("\u{2714}  {label}"),
+                    Some(false) => format!("      {label}"),
+                    None => label.clone(),
+                };
+                let mut btn = egui::Button::new(text);
+                if !shortcut.is_empty() {
+                    btn = btn.shortcut_text(egui::RichText::new(shortcut).weak());
+                }
+                if ui.add_enabled(*enabled, btn).clicked() {
+                    actions.push(PanelAction::Menu(*action));
+                    ui.close_menu();
+                }
+            }
+        }
     }
 }
 
