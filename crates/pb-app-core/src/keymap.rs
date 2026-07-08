@@ -563,12 +563,13 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         // memorable, and the one shown on the menu badge / help / toolbar hint. ⌥⏎ /
         // Alt+Enter is the cross-platform secondary. F11 is Windows muscle-memory but a
         // poor Mac citizen (needs `fn`, and collides with Mission Control's clear-desktop),
-        // so it's a Windows/Linux-only alternate — dropped on macOS so it never surfaces as
-        // the secondary slot in the Shortcuts editor there.
+        // so on macOS it drops to the LAST slot — still bound for switchers who reach for
+        // it, but past the two slots the Shortcuts editor shows, so it never surfaces there.
+        // Windows keeps F11 as the visible secondary.
         (
             Action::Fullscreen,
             if cfg!(target_os = "macos") {
-                vec![p("F"), p("Alt+Enter")]
+                vec![p("F"), p("Alt+Enter"), p("F11")]
             } else {
                 vec![p("F"), p("F11"), p("Alt+Enter")]
             },
@@ -716,19 +717,17 @@ mod tests {
 
     #[test]
     fn bare_f_toggles_fullscreen() {
-        // F is primary everywhere; ⌥⏎ / Alt+Enter is the cross-platform alternate. F11 is
-        // a Windows/Linux-only secondary — dropped on macOS (fn-key + Mission Control
-        // clash), so it never shows as the Shortcuts-editor secondary there. See
-        // `default_bindings`.
+        // F is the primary (slot 0 = the shown binding) everywhere; ⌥⏎ / Alt+Enter and F11
+        // are alternates that also toggle. On macOS F11 sits in the last slot (past the
+        // editor's two), so it's bound but never shown; on Windows it's the visible
+        // secondary. See `default_bindings`.
         let km = Keymap::defaults();
         let chord = |s: &str| KeyChord::parse(s).unwrap();
         assert_eq!(km.action_for(&chord("F")), Some(Action::Fullscreen));
+        assert_eq!(km.action_for(&chord("F11")), Some(Action::Fullscreen));
         assert_eq!(km.action_for(&chord("Alt+Enter")), Some(Action::Fullscreen));
-        if cfg!(target_os = "macos") {
-            assert_eq!(km.action_for(&chord("F11")), None);
-        } else {
-            assert_eq!(km.action_for(&chord("F11")), Some(Action::Fullscreen));
-        }
+        // F is the primary slot the menu badge / help / hint read.
+        assert_eq!(km.slot(Action::Fullscreen, 0), Some(chord("F")));
     }
 
     #[test]

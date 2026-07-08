@@ -4,7 +4,8 @@
 // it (see `CoreModel.fullscreenHintFromMouse`). It's a native view, not a toast, so the key
 // renders as a keycap (`ShortcutView`) — the same pill styling as the welcome screen and the
 // help panel — instead of plain text. The key shown is the live primary binding (`F` by
-// default; ⌥⏎ also works — F11 is a Windows-only alternate, not bound on macOS).
+// default; ⌥⏎ also works, as does F11 — a low-priority alternate on macOS, so it never
+// shows as the primary).
 
 import SwiftUI
 

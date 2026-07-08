@@ -34,10 +34,10 @@ with any pre-release suffix carried only by the tag.
 ### Changed
 - **"Quick Full Screen" is now named as such**, everywhere it appears (View menu, toolbar,
   keyboard help, the exit hint, and the right-click menu) — so our instant borderless mode
-  reads clearly apart from macOS's native full screen sitting right below it. The shortcut is
-  unchanged: **F** (with **⌥⏎** as an alternate). On macOS the old **F11** alternate has been
-  dropped — it needed the **fn** key and clashed with Mission Control, so it no longer shows as
-  the secondary shortcut in Settings; F11 stays available on Windows.
+  reads clearly apart from macOS's native full screen sitting right below it. Its shortcut is
+  **F** (with **⌥⏎** alongside). On macOS, **F11** is no longer surfaced as the secondary
+  shortcut in Settings ▸ Shortcuts — it needs the **fn** key and clashes with Mission Control,
+  so it's now a hidden alternate that still works. F11 stays the visible secondary on Windows.
 
 ### Fixed
 - **macOS: the Folders and Details panels are easier to resize.** Hovering the draggable inner
