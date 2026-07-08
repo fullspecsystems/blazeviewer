@@ -412,7 +412,11 @@ fn menu_group(
 /// Width of `s` laid out in `font`, for sizing the menu to its content.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn text_width(ui: &egui::Ui, s: &str, font: &egui::FontId) -> f32 {
-    ui.fonts(|f| f.layout_no_wrap(s.to_owned(), font.clone(), Color32::WHITE).size().x)
+    ui.fonts(|f| {
+        f.layout_no_wrap(s.to_owned(), font.clone(), Color32::WHITE)
+            .size()
+            .x
+    })
 }
 
 /// `(check-gutter width, total menu width)` for `group`: the gutter is only reserved when
@@ -422,11 +426,15 @@ fn text_width(ui: &egui::Ui, s: &str, font: &egui::FontId) -> f32 {
 #[cfg(all(unix, not(target_os = "macos")))]
 fn menu_layout(ui: &egui::Ui, group: &crate::menu::MenuGroup, font: &egui::FontId) -> (f32, f32) {
     use crate::menu::MenuRow;
-    let gutter = if group
-        .items
-        .iter()
-        .any(|r| matches!(r, MenuRow::Item { checked: Some(_), .. }))
-    {
+    let gutter = if group.items.iter().any(|r| {
+        matches!(
+            r,
+            MenuRow::Item {
+                checked: Some(_),
+                ..
+            }
+        )
+    }) {
         MENU_GUTTER
     } else {
         0.0
@@ -1196,15 +1204,6 @@ fn sdf_panel(
     };
     // Enclose whichever is larger: the window's (possibly stale) frame or the real content.
     let rect = shown.response.rect.union(content_rect);
-    #[cfg(debug_assertions)]
-    if id == "pb_tree" && std::env::var("PB_TREE_DEBUG").is_ok() {
-        eprintln!(
-            "[sdf {id}] response=({:.0},{:.0} {:.0}x{:.0}) content=({:.0},{:.0} {:.0}x{:.0}) final_h={:.0} max_h={:.0} clip={:?}",
-            shown.response.rect.min.x, shown.response.rect.min.y, shown.response.rect.width(), shown.response.rect.height(),
-            content_rect.min.x, content_rect.min.y, content_rect.width(), content_rect.height(),
-            rect.height(), max_h, ctx.screen_rect(),
-        );
-    }
     let painter = ctx.layer_painter(shown.response.layer_id);
     painter.set(
         shadow_idx,
@@ -1490,6 +1489,13 @@ fn scroll_body<R>(
     let mem = egui::Id::new(("pb_scroll_h", id));
     let measured = ui.ctx().data(|d| d.get_temp::<f32>(mem));
     let h = measured.map(|m| m.min(max_h)).unwrap_or(max_h).max(60.0);
+    // egui's ScrollArea clips its content to the viewport *expanded by*
+    // `Visuals::clip_rect_margin` (3px default) — meant to keep edge shadows/focus
+    // rings from being cut inside a padded container. These panel bodies run flush
+    // against the panel background's edge, so that margin let every scrolled-out row
+    // paint a 3px sliver *outside* the panel — over the header above and the photo
+    // below (the tree/Inspector "bleed", task #54). Clip exactly at the viewport.
+    ui.visuals_mut().clip_rect_margin = 0.0;
     let out = egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .max_height(h)
@@ -2100,15 +2106,6 @@ fn tree_panel(
             // what's missing, and `max_height` is what turns it on. The panel background (sized
             // to the real content bounds in `sdf_panel`) then encloses exactly this body.
             let body_top = HEADER_H + 1.0; // header + groove
-            #[cfg(debug_assertions)]
-            if std::env::var("PB_TREE_DEBUG").is_ok() {
-                let sr = ctx.screen_rect();
-                let rows = tree.rows.len() + tree.parent_name.is_some() as usize;
-                eprintln!(
-                    "[tree] screen={:.0}x{:.0} ppp={:.3} max_h={:.0} body_max={:.0} rows={} top_inset={:.0}",
-                    sr.width(), sr.height(), ctx.pixels_per_point(), max_h, max_h - body_top, rows, top_inset,
-                );
-            }
             scroll_body(ui, "pb_tree", max_h - body_top, |ui| {
                 egui::Frame::none()
                     .inner_margin(egui::Margin::symmetric(0.0, 6.0))

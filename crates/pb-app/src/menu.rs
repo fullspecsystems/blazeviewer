@@ -630,7 +630,13 @@ pub fn menu_bar_spec(keymap: &Keymap, s: &crate::contract::MenuState) -> Vec<Men
             Some((l, h)) => (l.to_string(), h.to_string()),
             None => (label.to_string(), String::new()),
         };
-        MenuRow::Item { action, label, shortcut, enabled, checked: None }
+        MenuRow::Item {
+            action,
+            label,
+            shortcut,
+            enabled,
+            checked: None,
+        }
     };
     // A checkable item (shows a check column tracking `checked`).
     let check = |action, label: &str, enabled, checked: bool| {
@@ -638,7 +644,13 @@ pub fn menu_bar_spec(keymap: &Keymap, s: &crate::contract::MenuState) -> Vec<Men
             Some((l, h)) => (l.to_string(), h.to_string()),
             None => (label.to_string(), String::new()),
         };
-        MenuRow::Item { action, label, shortcut, enabled, checked: Some(checked) }
+        MenuRow::Item {
+            action,
+            label,
+            shortcut,
+            enabled,
+            checked: Some(checked),
+        }
     };
     let sep = || MenuRow::Separator;
     // Shortcut hint for a keymap-bound item, live from the user's bindings (as `labeled`).
@@ -650,13 +662,29 @@ pub fn menu_bar_spec(keymap: &Keymap, s: &crate::contract::MenuState) -> Vec<Men
             items: vec![
                 item(MenuAction::OpenFile, "Open File…\tO", true),
                 item(MenuAction::OpenFolder, "Open Folder…\tShift+O", true),
-                item(MenuAction::CancelScan, "Stop Scanning", s.cancel_scan_enabled),
+                item(
+                    MenuAction::CancelScan,
+                    "Stop Scanning",
+                    s.cancel_scan_enabled,
+                ),
                 sep(),
-                item(MenuAction::SaveRotation, "Save Rotation\tCtrl+S", s.save_rotation_enabled),
-                item(MenuAction::Reveal, "Show in File Explorer", s.reveal_enabled),
+                item(
+                    MenuAction::SaveRotation,
+                    "Save Rotation\tCtrl+S",
+                    s.save_rotation_enabled,
+                ),
+                item(
+                    MenuAction::Reveal,
+                    "Show in File Explorer",
+                    s.reveal_enabled,
+                ),
                 sep(),
                 item(MenuAction::Delete, "Delete\tDel", true),
-                item(MenuAction::DeletePermanently, "Delete Permanently\tShift+Del", true),
+                item(
+                    MenuAction::DeletePermanently,
+                    "Delete Permanently\tShift+Del",
+                    true,
+                ),
                 sep(),
                 item(MenuAction::Settings, "Settings…\tCtrl+,", true),
                 sep(),
@@ -674,42 +702,104 @@ pub fn menu_bar_spec(keymap: &Keymap, s: &crate::contract::MenuState) -> Vec<Men
                 sep(),
                 item(MenuAction::Copy, "Copy\tCtrl+C", true),
                 item(MenuAction::CopyPath, "Copy File Path\tShift+Ctrl+C", true),
-                item(MenuAction::CopyImageText, &l("Copy Text from Image", Action::CopyImageText), true),
+                item(
+                    MenuAction::CopyImageText,
+                    &l("Copy Text from Image", Action::CopyImageText),
+                    true,
+                ),
                 sep(),
-                item(MenuAction::DescribeImage, &l("Describe Image", Action::DescribeImage), true),
-                item(MenuAction::AskImage, &l("Ask About Image…", Action::AskImage), true),
-                item(MenuAction::CopyDescription, &l("Copy AI Description", Action::CopyDescription), true),
+                item(
+                    MenuAction::DescribeImage,
+                    &l("Describe Image", Action::DescribeImage),
+                    true,
+                ),
+                item(
+                    MenuAction::AskImage,
+                    &l("Ask About Image…", Action::AskImage),
+                    true,
+                ),
+                item(
+                    MenuAction::CopyDescription,
+                    &l("Copy AI Description", Action::CopyDescription),
+                    true,
+                ),
             ],
         },
         MenuGroup {
             title: "View",
             items: vec![
                 check(MenuAction::Fit, "Fit\t8", true, s.scale == ScaleMode::Fit),
-                check(MenuAction::Fill, "Crop to Fill\t9", true, s.scale == ScaleMode::Fill),
-                check(MenuAction::Original, "Original 1:1\t0", true, s.scale == ScaleMode::Original),
+                check(
+                    MenuAction::Fill,
+                    "Crop to Fill\t9",
+                    true,
+                    s.scale == ScaleMode::Fill,
+                ),
+                check(
+                    MenuAction::Original,
+                    "Original 1:1\t0",
+                    true,
+                    s.scale == ScaleMode::Original,
+                ),
                 sep(),
                 item(MenuAction::ZoomIn, "Zoom In\t=", true),
                 item(MenuAction::ZoomOut, "Zoom Out\t-", true),
                 sep(),
-                check(MenuAction::Fullscreen, "Quick Full Screen\tF11", true, s.fullscreen),
-                check(MenuAction::Recursive, "Recursive (This Folder)\tCtrl+R", true, s.recursive),
+                check(
+                    MenuAction::Fullscreen,
+                    "Quick Full Screen\tF11",
+                    true,
+                    s.fullscreen,
+                ),
+                check(
+                    MenuAction::Recursive,
+                    "Recursive (This Folder)\tCtrl+R",
+                    true,
+                    s.recursive,
+                ),
                 check(MenuAction::Slideshow, "Slideshow\tS", true, s.slideshow),
                 item(MenuAction::SlideshowFaster, "Slideshow Faster\t[", true),
                 item(MenuAction::SlideshowSlower, "Slideshow Slower\t]", true),
                 sep(),
                 check(MenuAction::Info, "Show Image Info\tI", true, s.info_basic),
-                check(MenuAction::FullExif, "Show All EXIF Info\tShift+I", true, s.info_full),
-                item(MenuAction::FolderTree, &l("Show Folder Tree", Action::FolderTree), true),
-                check(MenuAction::TogglePanels, "Hide Panels\tTab", s.hide_panels_enabled, s.panels_hidden),
+                check(
+                    MenuAction::FullExif,
+                    "Show All EXIF Info\tShift+I",
+                    true,
+                    s.info_full,
+                ),
+                item(
+                    MenuAction::FolderTree,
+                    &l("Show Folder Tree", Action::FolderTree),
+                    true,
+                ),
+                check(
+                    MenuAction::TogglePanels,
+                    "Hide Panels\tTab",
+                    s.hide_panels_enabled,
+                    s.panels_hidden,
+                ),
             ],
         },
         MenuGroup {
             title: "Go",
             items: vec![
-                item(MenuAction::OpenParent, &l("Parent Folder", Action::OpenParent), true),
+                item(
+                    MenuAction::OpenParent,
+                    &l("Parent Folder", Action::OpenParent),
+                    true,
+                ),
                 sep(),
-                item(MenuAction::PrevFolder, &l("Previous Folder", Action::PrevFolder), true),
-                item(MenuAction::NextFolder, &l("Next Folder", Action::NextFolder), true),
+                item(
+                    MenuAction::PrevFolder,
+                    &l("Previous Folder", Action::PrevFolder),
+                    true,
+                ),
+                item(
+                    MenuAction::NextFolder,
+                    &l("Next Folder", Action::NextFolder),
+                    true,
+                ),
             ],
         },
         MenuGroup {
@@ -718,10 +808,22 @@ pub fn menu_bar_spec(keymap: &Keymap, s: &crate::contract::MenuState) -> Vec<Men
                 item(MenuAction::Next, &l("Next", Action::Next), true),
                 item(MenuAction::Previous, &l("Previous", Action::Prev), true),
                 item(MenuAction::Random, &l("Random", Action::Random), true),
-                item(MenuAction::RandomPrev, &l("Previous Random", Action::RandomPrev), true),
+                item(
+                    MenuAction::RandomPrev,
+                    &l("Previous Random", Action::RandomPrev),
+                    true,
+                ),
                 sep(),
-                item(MenuAction::RotateRight, &l("Rotate Right", Action::RotateCw), true),
-                item(MenuAction::RotateLeft, &l("Rotate Left", Action::RotateCcw), true),
+                item(
+                    MenuAction::RotateRight,
+                    &l("Rotate Right", Action::RotateCw),
+                    true,
+                ),
+                item(
+                    MenuAction::RotateLeft,
+                    &l("Rotate Left", Action::RotateCcw),
+                    true,
+                ),
                 sep(),
                 check(
                     MenuAction::ComparePin,
@@ -729,13 +831,34 @@ pub fn menu_bar_spec(keymap: &Keymap, s: &crate::contract::MenuState) -> Vec<Men
                     s.compare_pin_enabled,
                     s.compare_pinned_here,
                 ),
-                item(MenuAction::CompareToggle, &l("Compare with Pinned", Action::CompareToggle), s.compare_toggle_enabled),
+                item(
+                    MenuAction::CompareToggle,
+                    &l("Compare with Pinned", Action::CompareToggle),
+                    s.compare_toggle_enabled,
+                ),
                 sep(),
-                item(MenuAction::PlayPause, &l("Play/Pause Animation", Action::PlayPause), true),
-                item(MenuAction::FrameNext, &l("Next Frame", Action::FrameNext), true),
-                item(MenuAction::FramePrev, &l("Previous Frame", Action::FramePrev), true),
+                item(
+                    MenuAction::PlayPause,
+                    &l("Play/Pause Animation", Action::PlayPause),
+                    true,
+                ),
+                item(
+                    MenuAction::FrameNext,
+                    &l("Next Frame", Action::FrameNext),
+                    true,
+                ),
+                item(
+                    MenuAction::FramePrev,
+                    &l("Previous Frame", Action::FramePrev),
+                    true,
+                ),
                 sep(),
-                check(MenuAction::MuteLiveAudio, "Mute Live Photo Audio\tM", true, s.mute_live_audio),
+                check(
+                    MenuAction::MuteLiveAudio,
+                    "Mute Live Photo Audio\tM",
+                    true,
+                    s.mute_live_audio,
+                ),
             ],
         },
         MenuGroup {

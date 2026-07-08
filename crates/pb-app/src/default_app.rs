@@ -234,8 +234,10 @@ mod win {
             (ARCHIVE_EXTS, "PhotoBlaze.Archive"),
         ] {
             for ext in exts {
-                let k =
-                    create_key_str(HKEY_CURRENT_USER, &format!("Software\\Classes\\{ext}\\OpenWithProgids"))?;
+                let k = create_key_str(
+                    HKEY_CURRENT_USER,
+                    &format!("Software\\Classes\\{ext}\\OpenWithProgids"),
+                )?;
                 let name = wide(progid);
                 set_string(k.0, PCWSTR(name.as_ptr()), "")?;
             }
@@ -305,6 +307,10 @@ mod win {
             "Software\\Classes\\Directory\\Background\\shell\\PhotoBlaze",
         );
         delete_tree(HKEY_CURRENT_USER, "Software\\PhotoBlaze");
-        delete_value(HKEY_CURRENT_USER, "Software\\RegisteredApplications", "PhotoBlaze");
+        delete_value(
+            HKEY_CURRENT_USER,
+            "Software\\RegisteredApplications",
+            "PhotoBlaze",
+        );
     }
 }

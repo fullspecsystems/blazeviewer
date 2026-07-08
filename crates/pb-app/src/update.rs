@@ -4,10 +4,10 @@
 //! dependency (and the OpenSSL its `native-tls`/`ureq` chain drags in) out of every non-Windows
 //! build. `main()` calls the same four functions on every platform; only Windows does real work.
 
-#[cfg(windows)]
-pub use win::*;
 #[cfg(not(windows))]
 pub use stub::*;
+#[cfg(windows)]
+pub use win::*;
 
 /// No-op auto-update surface for non-Windows targets (macOS = DMG, Linux = none). Keeps `main()`
 /// platform-agnostic while `velopack` (and OpenSSL) stay out of the non-Windows build.

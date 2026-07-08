@@ -1547,8 +1547,7 @@ impl WgpuRenderer {
             return false;
         }
         if !caps.present_modes.contains(&self.config.present_mode) {
-            self.config.present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox)
-            {
+            self.config.present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
                 wgpu::PresentMode::Mailbox
             } else {
                 wgpu::PresentMode::Fifo
@@ -1774,7 +1773,12 @@ impl Renderer for WgpuRenderer {
             &self.vbuf,
             0,
             bytemuck::cast_slice(&quad_vertices(
-                &self.view, self.img_w, self.img_h, width, height, self.content_top_inset,
+                &self.view,
+                self.img_w,
+                self.img_h,
+                width,
+                height,
+                self.content_top_inset,
             )),
         );
         // The overlay panel's corner position depends on the viewport.

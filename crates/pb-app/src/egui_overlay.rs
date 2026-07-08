@@ -159,26 +159,6 @@ impl EguiOverlay {
         let paint_jobs = self
             .ctx
             .tessellate(full_output.shapes, full_output.pixels_per_point);
-        #[cfg(debug_assertions)]
-        if std::env::var("PB_TREE_DEBUG").is_ok() {
-            let maxy = paint_jobs
-                .iter()
-                .map(|j| j.clip_rect.max.y)
-                .fold(0.0f32, f32::max);
-            let below = paint_jobs
-                .iter()
-                .filter(|j| j.clip_rect.max.y > 780.0)
-                .count();
-            eprintln!(
-                "[jobs] n={} max_clip_y={:.0} n_clip_below_780={} ppp={:.3} size={}x{}",
-                paint_jobs.len(),
-                maxy,
-                below,
-                full_output.pixels_per_point,
-                self.size.0,
-                self.size.1,
-            );
-        }
         let desc = egui_wgpu::ScreenDescriptor {
             size_in_pixels: [self.size.0, self.size.1],
             pixels_per_point: full_output.pixels_per_point,

@@ -7,6 +7,12 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Fixed
+- **Panels no longer leak scrolled-off rows past their edges.** When the Folders tree or
+  the Inspector held more rows than fit, a thin slice of the next scrolled-out row was
+  painted outside the panel — into the header above and over the photo below. Rows now
+  clip exactly at the panel's edge.
+
 ### Added
 - **Photoshop `.psd` files now open.** PhotoBlaze shows the flattened composite Photoshop
   saves inside the file (the default "Maximize Compatibility" merged image), so a `.psd` in a

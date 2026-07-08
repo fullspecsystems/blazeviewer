@@ -66,10 +66,10 @@ mod md;
 mod menu;
 mod panels_ui;
 mod pb_key_winit;
-mod sdf_rect;
 #[cfg(target_os = "macos")]
 mod proxy_icon;
 mod reveal;
+mod sdf_rect;
 // Velopack per-user installer lifecycle hooks + background auto-update (Windows ship path).
 mod update;
 // The action vocabulary, physical-key model, keymap, and slideshow timing now live
@@ -1278,7 +1278,13 @@ impl App {
                     panels_ui::build(ctx, &frame, &mut actions);
                     #[cfg(all(unix, not(target_os = "macos")))]
                     if let Some(groups) = &menu_groups {
-                        panels_ui::menu_bar(ctx, frame.dark, frame.panel_alpha, groups, &mut actions);
+                        panels_ui::menu_bar(
+                            ctx,
+                            frame.dark,
+                            frame.panel_alpha,
+                            groups,
+                            &mut actions,
+                        );
                     }
                 });
             }
@@ -3392,11 +3398,6 @@ fn main() {
     // for a dev run / not-yet-installed build); a downloaded update installs on quit.
     update::velopack_startup();
     update::start_background_check();
-
-    // Debug-only build stamp: lets me confirm which binary is actually running on Linux/WSL (a
-    // stale `target/debug` copy vs a fresh rebuild). Debug builds already have a console.
-    #[cfg(debug_assertions)]
-    eprintln!("PhotoBlaze debug build :: panel/menu/crash fixes :: 2026-07-08a");
 
     let args: Vec<String> = std::env::args().skip(1).collect();
 

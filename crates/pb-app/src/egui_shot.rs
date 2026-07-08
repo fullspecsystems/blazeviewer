@@ -712,6 +712,6 @@ fn sample_frame(dark: bool, tab: InspectorTab, welcome: bool) -> PanelFrame {
         }),
         dark,
         panel_alpha: 242, // ≈95% — the shot previews the panels near-opaque
-        top_inset: 0.0,    // Linux overrides this in `run()` (menu bar reserves the top strip)
+        top_inset: 0.0,   // Linux overrides this in `run()` (menu bar reserves the top strip)
     }
 }

@@ -8,9 +8,9 @@
 //! Calls the backends directly (not the dispatcher) so both run in one process.
 
 #[cfg(windows)]
-use std::path::Path;
-#[cfg(windows)]
 use pb_decode::{DecodeRequest, ImageDecoder, LibHeifDecoder, WicDecoder};
+#[cfg(windows)]
+use std::path::Path;
 
 // Decodes with BOTH WIC and libheif to compare them — inherently Windows-only (no
 // WIC anywhere else). Off Windows this is a stub (`main` at the bottom); the libheif

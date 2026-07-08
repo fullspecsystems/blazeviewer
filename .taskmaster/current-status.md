@@ -1,189 +1,68 @@
 # PhotoBlaze — Current Status (session handoff)
 
-_Last updated: 2026-07-08. Supersedes the prior macOS task #58/#59 handoff (recover via git if needed)._
+_Last updated: 2026-07-08 (second session). Supersedes the tree-bleed investigation handoff._
 
 ## TL;DR
 
-Chasing a **Linux/WSLg folder-tree panel "bleed"** (task #54 territory). The owner reports
-tree rows spilling out the **top** (into the "Folders" header) and **bottom** (over the photo).
+The **Linux tree/Inspector panel "bleed" is FIXED and verified** (uncommitted). Root cause was
+neither of the prior session's hypotheses: egui's `ScrollArea` clips its content to the viewport
+**expanded by `Visuals::clip_rect_margin` (3px default)** (egui 0.29 `scroll_area.rs:595-600`) —
+meant to keep focus rings/shadows from being cut inside a *padded* container. Our panel bodies run
+flush against the panel background's edge, so every scrolled-out row painted a 3px sliver *outside*
+the panel: into the header above, over the photo below. The fix is one line in the shared
+`scroll_body` helper (`panels_ui.rs`): `ui.visuals_mut().clip_rect_margin = 0.0;` — covers the
+tree, Inspector, and Help in one place. **This was never Linux-specific** — the winit/Windows
+shell shares this code; it was just first noticed on Linux. CHANGELOG line added under
+`[Unreleased] ▸ Fixed`.
 
-**Status: NOT fixed.** But it is now narrowed hard: the panel **layout/geometry is provably
-correct** — the bug lives in the **live egui-overlay render/composite path**, which headless
-`--egui-shot` does not exercise. A **self-serve X11 test harness** now exists so the next agent
-can reproduce, screenshot, and iterate **without the owner** (previously I was debugging blind).
+## How it was pinned (and where the prior analysis went wrong)
 
-Several *adjacent* things WERE fixed and verified this session (menu redesign, menu-bar overlap,
-graceful crash-exit) — see "Landed" below. The tree bleed is the one open item.
+Added a debug dump of the egui offscreen texture (`EguiOverlay::target`) to PNG *before*
+compositing, plus per-paint-job clip-vs-vertex-bounds probes, then drove the live app under the
+X11 harness:
 
----
+- **The bleed was present in the offscreen texture itself** → egui pass, not the composite.
+- **The composite is mathematically exact** — probed pixel (150,600): predicted premultiplied-over
+  value 76, live value 76. Hypothesis (B) (premultiplied-alpha composite mismatch) is dead. The
+  "photo showing through the panel" is just the ~71% `info_opacity` setting.
+- Scroll-content jobs carried `clip=(21,86)-(367,779)` against a panel background ending at
+  y=776 / viewport starting at 89 — the ±3 is `clip_rect_margin`. The leaked sliver measured
+  exactly rows y=776–778.
+- Prior session's errors: (1) the "2 paint jobs with full-screen clips" were **not** "the photo +
+  a HUD element" (the photo is never an egui job); (2) headless `--egui-shot` "clipping fine"
+  proved nothing — its tree content fit the viewport, so there was nothing scrolled-out to leak;
+  (3) "geometry is provably correct" was true but irrelevant — the layout was never the bug.
 
-## The bug (what the owner sees)
+Verified post-fix under the X11 harness with the tree scrolled mid-list (the leaking state):
+top edge clean under the "Folders" header, bottom row cut exactly at the rounded corner, and the
+pixel probe rows below the panel edge show only the soft shadow. Inspector (Shift+I) clean too.
 
-Open a big folder (`/mnt/d/Media/Pictures`, ~16k images, tree = 47 rows), press **Shift+F**
-(Folders tree). Rows appear to bleed past the panel: into the header at the top, over the photo
-at the bottom. The panel background does **not** back the rows where they sit over the (bright)
-image.
+## State of the tree (uncommitted)
 
-Reference images captured this session live in the scratchpad
-(`.../scratchpad/x11_tree.png`, `v2_early.png`, `v2_late.png`).
+- **The fix:** `panels_ui.rs` `scroll_body` — `clip_rect_margin = 0.0` + explanatory comment.
+- **CHANGELOG.md**: new `Fixed` entry under `[Unreleased]`.
+- **All `PB_TREE_DEBUG` scaffolding stripped** per the previous handoff's plan: the probes in
+  `panels_ui.rs` (`tree_panel`, `sdf_panel`), the `[jobs]` block in `egui_overlay.rs`, and the
+  startup build banner in `main.rs`. The temporary texture-dump code was added and removed within
+  this session (recover from this session's transcript if ever needed again).
+- **`cargo fmt --all` applied** — also reformatted files the previous wip commit left unformatted
+  (`menu.rs`, `update.rs`, `default_app.rs`, …), so the diff has some fmt-only churn.
+- `cargo test -p pb-app -p pb-render`: 79 passed. Clippy: only pre-existing dead-code warnings
+  (Linux-gated menu scaffolding).
 
----
+## Next steps
 
-## What is PROVEN (with live probe data)
+1. Owner: confirm the fix on the real desktop (Wayland run, real scale factor) — expected to hold
+   at any ppp since `clip_rect_margin` is logical-unit.
+2. Commit the fix + CHANGELOG + fmt churn (suggest: `fix(panels): clip scrolled rows exactly at
+   the panel edge (egui clip_rect_margin bleed)`).
+3. The macOS task #58 (auto-size Settings window) handoff from 2026-07-07 is still pending —
+   recover its plan via `git log` on this file if picking that up.
 
-I added temporary probes and drove the **live** app under X11 (see harness). At the settled
-state, window 1280×800 @ ppp 1.0, 47-row tree:
+## Environment quick-ref (unchanged)
 
-```
-[tree] screen=1280x800 ppp=1.000 max_h=722 body_max=687 rows=47 top_inset=30
-[sdf pb_tree] response=(24,54 280x722) content=(24,54 280x722) final_h=722 max_h=722
-[jobs] n=77 max_clip_y=800 n_clip_below_780=2 ppp=1.000 size=1280x800
-```
-
-Reading this:
-- **Geometry is perfect.** `max_h=722` (= 800 − 2·EDGE(24) − top_inset(30) ✓). The panel window
-  `response` **and** the real content `min_rect` are **both** `280×722`, sitting y=54→776, fully
-  inside the 800px screen. The SDF background (`final_h=722`) encloses exactly that. So the
-  `allocate_ui`/`scroll_body` sizing **and** the `sdf_panel` union-background fix all work.
-- **egui's clip rects are correct.** Only **2** of 77 paint jobs have `clip_rect.max.y > 780`
-  (the full-screen photo + one HUD element); everything else — including the tree rows — is
-  clipped at ≤780 (the tree viewport is ~776). So egui **emits** the right scissor rects.
-- **Headless clips; live does not.** `--egui-shot` renders the identical panel code through the
-  identical `egui_wgpu::Renderer::render()` call and clips perfectly at every scale I tried. The
-  live overlay does not. **The only difference is the render target/composite**, not the layout.
-
-**Conclusion: this is a render/composite bug, not a panels_ui layout bug.** Stop trying to fix it
-in `panels_ui.rs` — the numbers there are already right.
-
-### Newest observation (reframes it)
-In the settled screenshot (`v2_late.png`) the tree actually shows a **scrolled ~27-row window**
-(`$RECYCLE.BIN`…`Contacts`), i.e. it *is* scrolling/clipping to the viewport. The visible
-defect is that the **semi-transparent dark panel background does not darken the bright photo** —
-rows over the black letterbox look correctly backed, rows over the bright "Full Spectrum" image
-look like floating text with no panel behind them. That strongly implicates the **compositing of
-the egui offscreen texture over the photo** (premultiplied-alpha handling), not the scissor.
-
----
-
-## Two live hypotheses (next agent: decide between them with ONE test)
-
-- **(A) Scissor not applied in the offscreen pass** — the ScrollArea mesh isn't cut at the
-  viewport when rendered to the offscreen texture.
-- **(B) Premultiplied-alpha composite mismatch** — the panel background *is* drawn correctly into
-  the offscreen texture, but `fs_egui` composites it over the photo such that a semi-transparent
-  dark fill fails to darken bright pixels. (My current lead — see "Newest observation".)
-
-### THE decisive next step
-**Dump the egui offscreen texture (`EguiOverlay::target`) to a PNG before compositing** and look
-at it. Copy the readback logic from `egui_shot.rs` (it already maps an `Rgba` texture → PNG).
-Add it in `crates/pb-app/src/egui_overlay.rs::run()` after `renderer.render(...)` into
-`self.target`, gated on `PB_TREE_DEBUG`.
-- If the panel background is **present and full-height** in that PNG → hypothesis **(B)**, fix in
-  `crates/pb-render/src/gpu.rs` (`set_egui_overlay` @1680, `fs_egui` shader, the premultiplied
-  path noted @1683 "store back to premultiplied linear; `fs_egui` composites straight" and the
-  blend states @469/524/554).
-- If the background is **short / rows unclipped** in that PNG → hypothesis **(A)**, the problem is
-  in the egui→offscreen render pass in `egui_overlay.rs` (163–203) — check `ScreenDescriptor`
-  vs the actual `self.target` size and the scissor.
-
-Relevant compositing code already located:
-- `crates/pb-app/src/egui_overlay.rs` — `run()` renders egui → `self.target` (offscreen,
-  `LoadOp::Clear(TRANSPARENT)`), `ScreenDescriptor{ size_in_pixels: self.size, ppp }`.
-- `crates/pb-render/src/gpu.rs:1680` `set_egui_overlay` — builds the bind group over the
-  offscreen texture; comment says egui is premultiplied and `fs_egui` composites it straight.
-- `crates/pb-render/src/gpu.rs` `fs_egui` shader + `BlendState`s (469/524/554) — the composite.
-
----
-
-## THE self-serve X11 harness (biggest gift — use it, don't debug blind)
-
-WSLg runs winit on **Wayland** by default, where the app can't be screenshotted or driven and
-where it **intermittently segfaults** on a display hiccup. **Force winit to X11 (XWayland)** and
-everything becomes automatable and stable:
-
-```bash
-export DISPLAY=:0
-unset WAYLAND_DISPLAY          # <-- forces winit -> X11; app is now an X11 window
-```
-
-Tools installed this session (apt, via `wsl -d Ubuntu -u root`): **xdotool, imagemagick
-(`import`), x11-utils**.
-
-Recipe (a full script is in the scratchpad `x11v2.sh`, but it's easy to recreate):
-```bash
-PB_TREE_DEBUG=1 timeout 45 ~/photoblaze/target/debug/photoblaze /mnt/d/Media/Pictures >log 2>&1 &
-sleep 9
-WIN=$(xdotool search --class photoblaze | head -1)     # window title = "photo.jpg (n/total)"
-xdotool windowactivate --sync "$WIN"; xdotool windowfocus "$WIN"
-xdotool key --clearmodifiers shift+f                    # XTEST (NOT --window: winit ignores XSendEvent)
-sleep 4
-import -window "$WIN" out.png                           # screenshot the window
-```
-Notes: `--class photoblaze` finds it (title isn't "PhotoBlaze"). Key injection **must** be XTEST
-(`xdotool key`, no `--window`) — winit ignores synthetic XSendEvent. Under X11 the app ran 35–45s
-clean (no segfault). `PB_TREE_DEBUG=1` emits the `[tree]`/`[sdf pb_tree]`/`[jobs]` probe lines.
-
-### WSL build gotcha that bit me hard
-`rsync -a` from `/mnt/c/...` **content-syncs but preserves the old mtime**, so **cargo does not
-recompile** (it "Finished in 0.18s" with stale binary). After rsync, **`touch` the changed
-`.rs` files** before `cargo build`, or you'll test a stale binary and chase ghosts. (This is why
-the owner "saw no change" twice.) See also [[linux-port]] memory for the rsync workflow.
-
-**Strong recommendation for the next agent:** run Claude Code **natively inside Ubuntu** on a
-Linux-filesystem git clone (not `/mnt/c`, not rsync) — edit/build/run/screenshot all local, no
-mtime dance. Sync to Windows via git. The owner asked about this; it's the right call for
-continued Linux UI work.
-
----
-
-## Code changes this session (ALL UNCOMMITTED)
-
-### Landed & verified — keep
-- **Menu dropdown redesign** (`panels_ui.rs`, Linux-gated): `menu_item`/`menu_layout`/
-  `menu_group`/`menu_separator` + `MENU_*` consts — narrow, aligned (uses `paint_vtext`
-  optical centering), opaque, no card look. Owner approved earlier.
-- **Menu-bar overlap fix**: `PanelFrame.top_inset` field + plumbing; top-anchored panels
-  (`tree_panel`, `inspector_panel`, `scan_pill`) offset by `EDGE + top_inset`; `panel_max_height`
-  subtracts `top_inset`. `main.rs render_overlay_frame` sets `top_inset = MENU_BAR_H` on Linux.
-- **Graceful crash-exit** (`main.rs`, the `event_loop.run_app` call): on `Err` it prints
-  "display connection lost" and `exit(1)` instead of `.expect()` panic → segfault. This tamed the
-  WSLg Wayland "Connection reset by peer" crash into a clean exit.
-- **`sdf_panel` union background** (`panels_ui.rs` ~1189–1198): background sized to
-  `response.rect.union(content_rect)` where `content_rect = ui.min_rect()` captured in-closure.
-  Correct improvement (bg can never be shorter than content). Keep regardless of the tree bug.
-- **`--egui-shot` dev affordances** (`egui_shot.rs`): env toggles `PB_SHOT_PPP`,
-  `PB_SHOT_TREE_ONLY`, `PB_SHOT_WARMUP`, `PB_SHOT_LAG` + `menu_dropdown_preview` + Linux
-  `top_inset`. Useful; keep.
-
-### Attempted for the tree bug — did NOT fix it (decide keep/revert)
-- **`tree_panel` now uses `scroll_body`** (the shared helper the Inspector/Help use) instead of a
-  raw `allocate_ui` + `ScrollArea`. Cleaner/DRY and geometry is correct, but it did **not** fix
-  the live bleed (confirming the bug isn't here). Fine to keep; not a fix.
-
-### Debug scaffolding — REMOVE before any commit
-- `PB_TREE_DEBUG` probes in `panels_ui.rs` (`tree_panel` ~2088, `sdf_panel` ~1200) and
-  `egui_overlay.rs` `run()` (~162, the `[jobs]` block).
-- Startup **banner** `eprintln!("PhotoBlaze debug build … 2026-07-08a")` in `main.rs` (right after
-  `velopack_startup`). It was a build-freshness check; drop it (or keep as a `debug_assertions`
-  aid — owner's call).
-
----
-
-## Environment quick-ref
-- WSLg: winit defaults to **Wayland** (software lavapipe); RTX 5090 is CUDA-only for gfx Vulkan.
-- Live window observed **1280×800 @ ppp 1.0**. Physical desktop differs (see
-  [[windows-display-rdp-env]]).
-- Wayland run is segfault-prone on display hiccups (handled gracefully now); **X11 run is stable**.
-- HEIC needs `--features libheif` (system `libheif-dev`, already installed in this WSL).
-- See [[linux-port]] for the menu-bar-is-egui / portability / WSL workflow context.
-
-## Next tasks (priority order)
-1. **Dump the egui offscreen texture to PNG** (above) → resolve hypothesis (A) vs (B). This is
-   the single highest-value action; it turns a guessing game into a one-look answer.
-2. Fix per the result: (B) → `pb-render` `fs_egui`/blend/premultiplied composite; (A) → the
-   `egui_overlay` offscreen render pass / ScreenDescriptor-vs-target-size.
-3. Verify with the X11 harness (screenshot the settled tree over a bright photo — rows must be
-   backed by the panel, header clean, nothing over the image).
-4. Strip all `PB_TREE_DEBUG` probes + the banner. Then have the owner confirm on a real Wayland
-   run. Add a `CHANGELOG.md` line only if a user-facing Windows/mac fix falls out (Linux is
-   experimental, usually no changelog).
+- Repo now lives natively in WSL Ubuntu at `~/photoblaze` (git clone, no rsync/mtime dance).
+- X11 harness: `export DISPLAY=:0; unset WAYLAND_DISPLAY`, run the app, `xdotool search --class
+  photoblaze`, `xdotool key --clearmodifiers shift+f` (XTEST, never `--window`), scroll via
+  `xdotool mousemove … click --repeat N 5`, screenshot with `import -window $WIN out.png`.
+- HEIC needs `--features libheif`; see [[linux-port]] for the Linux menu-bar/portability context.
