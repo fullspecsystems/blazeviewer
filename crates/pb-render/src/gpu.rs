@@ -1194,6 +1194,12 @@ struct RingSlot {
 /// On-screen presenter for a window surface.
 pub struct WgpuRenderer {
     surface: wgpu::Surface<'static>,
+    /// Kept so the surface can be re-queried for its capabilities on every reconfigure. A
+    /// lost/reset surface (WSLg / remote / software lavapipe, when the display connection
+    /// hiccups) can momentarily report a *different* — even empty — present-mode set than at
+    /// construction, and `configure` **panics** on a mode that's no longer supported. See
+    /// [`WgpuRenderer::reconfigure_surface`].
+    adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
@@ -1389,8 +1395,14 @@ impl WgpuRenderer {
                 .or_else(|| caps.formats.iter().copied().find(|f| !f.is_srgb()))
                 .unwrap_or(caps.formats[0])
         };
-        // Mailbox = low latency, no tearing; fall back to Fifo if unsupported.
-        let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+        // Mailbox = low latency, no tearing; fall back to Fifo if unsupported. On a software
+        // (Cpu) adapter — lavapipe under WSLg — prefer Fifo even when Mailbox is advertised:
+        // its triple-buffering is unstable there (drawable timeouts / surface loss / the
+        // present-mode reconfigure panic) while Fifo (plain vsync) is lighter and steadier.
+        // Real GPUs (DX12 / Metal / Vulkan) keep Mailbox — the low-latency path is the point.
+        let want_mailbox = caps.present_modes.contains(&wgpu::PresentMode::Mailbox)
+            && adapter.get_info().device_type != wgpu::DeviceType::Cpu;
+        let present_mode = if want_mailbox {
             wgpu::PresentMode::Mailbox
         } else {
             wgpu::PresentMode::Fifo
@@ -1444,6 +1456,7 @@ impl WgpuRenderer {
 
         Self {
             surface,
+            adapter,
             device,
             queue,
             config,
@@ -1511,6 +1524,44 @@ impl WgpuRenderer {
     /// reads it from winit directly.
     pub fn present_mode(&self) -> wgpu::PresentMode {
         self.config.present_mode
+    }
+
+    /// Reconfigure the surface, **re-querying its capabilities first**. A lost/reset surface —
+    /// common on WSLg / remote / software (lavapipe) backends when the display connection
+    /// hiccups ("Connection reset by peer") — can report a shrunken or **empty** present-mode
+    /// set, and `wgpu`'s `configure` *panics* on a present mode that's no longer in the list
+    /// (the crash: "Requested present mode Mailbox is not in the list of supported present
+    /// modes: []"). So skip entirely while the surface reports no usable modes — the frame is
+    /// dropped and the next one retries once the connection recovers — and otherwise clamp the
+    /// present mode (and format / alpha) to something actually supported (Mailbox if available,
+    /// else the spec-guaranteed Fifo). Returns whether the surface was (re)configured.
+    ///
+    /// A no-op change on healthy surfaces (Windows DX12 / macOS Metal): the caps are stable, so
+    /// the config is re-applied unchanged — this only adds a safety net where the surface can
+    /// vanish out from under us.
+    fn reconfigure_surface(&mut self) -> bool {
+        let caps = self.surface.get_capabilities(&self.adapter);
+        if caps.present_modes.is_empty() || caps.formats.is_empty() {
+            // Surface not currently usable (lost / reset). Configuring now would panic — drop
+            // the frame and retry next time; the surface comes back when the display does.
+            return false;
+        }
+        if !caps.present_modes.contains(&self.config.present_mode) {
+            self.config.present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox)
+            {
+                wgpu::PresentMode::Mailbox
+            } else {
+                wgpu::PresentMode::Fifo
+            };
+        }
+        if !caps.formats.contains(&self.config.format) {
+            self.config.format = caps.formats[0];
+        }
+        if !caps.alpha_modes.contains(&self.config.alpha_mode) {
+            self.config.alpha_mode = caps.alpha_modes[0];
+        }
+        self.surface.configure(&self.device, &self.config);
+        true
     }
 }
 
@@ -1707,7 +1758,7 @@ impl Renderer for WgpuRenderer {
         }
         self.config.width = width;
         self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
+        self.reconfigure_surface();
         // The fp16 intermediate must track the surface size.
         let (intermediate, tonemap_bind_group) = make_intermediate(
             &self.device,
@@ -2077,8 +2128,11 @@ impl Renderer for WgpuRenderer {
             // frame up indefinitely. The eprintln is deliberate — this is rare, and
             // its absence from a trace cost a debugging session (2026-07-04).
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                // Re-query caps and clamp the present mode — a lost surface (WSLg/software) can
+                // report an empty/shrunken mode set, and a blind `configure` with the old mode
+                // panics. `reconfigure_surface` skips safely until the surface is usable again.
                 eprintln!("render: surface lost/outdated — reconfigured, frame dropped");
-                self.surface.configure(&self.device, &self.config);
+                self.reconfigure_surface();
                 return Ok(false);
             }
             Err(wgpu::SurfaceError::Timeout) => {
