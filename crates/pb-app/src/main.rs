@@ -418,6 +418,9 @@ impl App {
                     scale_factor: 1.0,
                 },
                 held: HashMap::new(),
+                // Pointer-driven hold-to-fly (toolbar nav/random press-and-hold); the winit
+                // shell has no such toolbar, so it starts idle like the other constructors.
+                pointer_nav: None,
                 last_present: None,
                 frame_interval: Duration::from_micros(8_333),
                 hold_start: None,
