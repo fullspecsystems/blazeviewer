@@ -554,10 +554,13 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         one(Action::TogglePanels, "Tab"),
         // Go commands — the Explorer idioms (Alt+↑ up, Alt+←/→ between siblings; no
         // back/forward history to collide with). macOS also gets ⌘↑/⌘←/⌘→ as native
-        // menu accelerators (MenuBar.swift), Finder-style.
+        // menu accelerators (MenuBar.swift), Finder-style. PageUp/PageDown are the
+        // always-delivered secondaries: Windows hosts translate Alt+Left/Right into
+        // browser back/forward app-commands for remoted (RDP/RAIL) windows, so under
+        // WSLg those arrows never reach Linux at all (the microsoft/wslg#188 pattern).
         one(Action::OpenParent, "Alt+Up"),
-        one(Action::PrevFolder, "Alt+Left"),
-        one(Action::NextFolder, "Alt+Right"),
+        (Action::PrevFolder, vec![p("Alt+Left"), p("PageUp")]),
+        (Action::NextFolder, vec![p("Alt+Right"), p("PageDown")]),
         // Quick Full Screen (our borderless speed mode, distinct from the OS's native
         // Spaces fullscreen): bare `F` is primary everywhere — Mac-idiomatic, the most
         // memorable, and the one shown on the menu badge / help / toolbar hint. ⌥⏎ /
@@ -728,6 +731,22 @@ mod tests {
         assert_eq!(km.action_for(&chord("Alt+Enter")), Some(Action::Fullscreen));
         // F is the primary slot the menu badge / help / hint read.
         assert_eq!(km.slot(Action::Fullscreen, 0), Some(chord("F")));
+    }
+
+    #[test]
+    fn folder_nav_has_pageup_pagedown_fallbacks() {
+        // Windows hosts translate Alt+Left/Right into browser back/forward app-commands
+        // for remoted windows (WSLg/RDP RAIL), so those arrows never reach Linux at all
+        // (the microsoft/wslg#188 pattern). The folder jumps need chords that always
+        // arrive: plain PageUp/PageDown. Alt+Left/Right stay the shown primaries.
+        let km = Keymap::defaults();
+        let chord = |s: &str| KeyChord::parse(s).unwrap();
+        assert_eq!(km.action_for(&chord("PageUp")), Some(Action::PrevFolder));
+        assert_eq!(km.action_for(&chord("PageDown")), Some(Action::NextFolder));
+        assert_eq!(km.action_for(&chord("Alt+Left")), Some(Action::PrevFolder));
+        assert_eq!(km.action_for(&chord("Alt+Right")), Some(Action::NextFolder));
+        assert_eq!(km.slot(Action::PrevFolder, 0), Some(chord("Alt+Left")));
+        assert_eq!(km.slot(Action::NextFolder, 0), Some(chord("Alt+Right")));
     }
 
     #[test]
