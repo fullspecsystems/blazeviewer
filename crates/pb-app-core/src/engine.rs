@@ -247,6 +247,7 @@ pub fn decode_motion_job(
     source: &Arc<dyn PhotoSource>,
     item: usize,
     fit: Option<FitBox>,
+    cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<pb_decode::Animation, DecodeError> {
     #[cfg(any(
         target_os = "macos",
@@ -259,16 +260,27 @@ pub fn decode_motion_job(
             .map(|f| f.max_width.max(f.max_height))
             .unwrap_or(MOTION_MAX_LONG_EDGE)
             .min(MOTION_MAX_LONG_EDGE);
-        return pb_decode::decode_live_motion(path, edge);
+        // Linux's FFmpeg decoder is cancellable (navigating away stops it mid-clip); the macOS
+        // AVFoundation / Windows Media Foundation players decode via the OS, so they ignore it.
+        #[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
+        return pb_decode::decode_live_motion_cancellable(path, edge, cancel);
+        #[cfg(any(target_os = "macos", windows))]
+        {
+            let _ = cancel; // OS players decode via the OS; nothing to interrupt mid-clip
+            return pb_decode::decode_live_motion(path, edge);
+        }
     }
-    // On platforms without a motion decoder `live` is always `None`; acknowledge it there
-    // so the parameter isn't flagged unused.
+    // On platforms without a motion decoder `live` is always `None` and there's nothing to
+    // cancel; acknowledge both so the parameters aren't flagged unused.
     #[cfg(not(any(
         target_os = "macos",
         windows,
         all(unix, not(target_os = "macos"), feature = "livephoto")
     )))]
-    let _ = &live;
+    {
+        let _ = &live;
+        let _ = cancel;
+    }
     match source.bytes(item) {
         Ok(bytes) => pb_decode::decode_animation(&bytes, fit),
         Err(e) => Err(DecodeError::Corrupt(format!("read error: {e}"))),

@@ -55,7 +55,9 @@ use std::path::Path;
 pub use animation::{decode_animation, detect_animation, AnimFrame, Animation, AnimationKind};
 pub use color::ColorTransform;
 #[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
-pub use ff_live::{decode_live_motion, decode_motion_audio, MotionAudio};
+pub use ff_live::{
+    decode_live_motion, decode_live_motion_cancellable, decode_motion_audio, MotionAudio,
+};
 pub use image_backend::ImageCrateDecoder;
 #[cfg(target_os = "macos")]
 pub use imageio::ImageIoDecoder;

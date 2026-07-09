@@ -191,6 +191,10 @@ pub struct AnimDecode {
     /// the user presses `P` before it finishes).
     pub want: AnimWant,
     pub rx: std::sync::mpsc::Receiver<Result<Animation, DecodeError>>,
+    /// Cooperative cancel flag: set it (navigate away / supersede) and the worker's decoder
+    /// checks it and bails early instead of decoding the whole clip on an orphaned thread.
+    /// Honored by the Linux FFmpeg motion decoder; a no-op for the OS players / still animations.
+    pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// A whole animation decoded ahead of the user (eager prep) and held ready for instant

@@ -21,6 +21,7 @@
 //! Reads only, RAM-only — the no-trace guarantee (privacy #2) holds.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use ff::format::Pixel;
@@ -52,8 +53,19 @@ fn ff_init() {
 /// Decode the Live Photo motion `.mov` at `path` into an [`Animation`], capping each
 /// frame's long edge to `max_long_edge` px (decode-to-fit → bounds RAM). Linux-only.
 pub fn decode_live_motion(path: &Path, max_long_edge: u32) -> Result<Animation, DecodeError> {
+    decode_live_motion_cancellable(path, max_long_edge, &AtomicBool::new(false))
+}
+
+/// Like [`decode_live_motion`], but bails early (with an error, discarded by the caller) once
+/// `cancel` is set — so navigating away from a Live Photo stops its in-flight `.mov` decode
+/// instead of running it to completion on an orphaned thread (wasted CPU + transient RAM).
+pub fn decode_live_motion_cancellable(
+    path: &Path,
+    max_long_edge: u32,
+    cancel: &AtomicBool,
+) -> Result<Animation, DecodeError> {
     ff_init();
-    decode_video_inner(path, max_long_edge)
+    decode_video_inner(path, max_long_edge, cancel)
         .map_err(|e| DecodeError::Corrupt(format!("FFmpeg: {e}")))?
 }
 
@@ -76,6 +88,7 @@ pub fn decode_motion_audio(path: &Path) -> Result<MotionAudio, DecodeError> {
 fn decode_video_inner(
     path: &Path,
     max_long_edge: u32,
+    cancel: &AtomicBool,
 ) -> Result<Result<Animation, DecodeError>, ff::Error> {
     let mut ictx = ff::format::input(&path)?;
     let stream = ictx
@@ -151,6 +164,11 @@ fn decode_video_inner(
     };
 
     for (s, packet) in ictx.packets() {
+        // Bail promptly if the caller navigated away — checked per packet (≈ per frame), so an
+        // abandoned decode stops within a frame instead of finishing the whole clip.
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(Err(DecodeError::Corrupt("motion decode cancelled".into())));
+        }
         if s.index() != vindex {
             continue;
         }

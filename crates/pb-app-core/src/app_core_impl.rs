@@ -2876,7 +2876,7 @@ impl AppCore {
     pub fn stop_playback(&mut self) {
         self.playback = None;
         self.anim_frame_shown_at = None;
-        self.anim_decode = None;
+        self.cancel_anim_decode(); // stop an in-flight decode, don't just orphan it
         self.prepared = None;
         self.framestep_started = None;
         self.framestep_last = None;
@@ -5755,7 +5755,19 @@ impl AppCore {
     /// a Live Photo `.mov`) never stalls the event loop; the still first frame stays on
     /// screen until it lands (picked up by `poll_anim_decode`). `want` decides what
     /// happens on arrival — eager prep (stash ready), play (`P`), or step (frame-step).
+    /// Signal any in-flight animation decode to stop and drop it. The worker checks the flag and
+    /// bails early rather than decoding the whole clip onto a now-dropped channel — so navigating
+    /// through Live Photos doesn't pile up orphaned decodes (wasted CPU + transient RAM).
+    pub fn cancel_anim_decode(&mut self) {
+        if let Some(d) = &self.anim_decode {
+            d.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.anim_decode = None;
+    }
+
     pub fn start_animation_decode(&mut self, item: usize, want: AnimWant) {
+        // Supersede any in-flight decode so its orphaned worker stops promptly (see `cancel`).
+        self.cancel_anim_decode();
         self.anim_gen += 1;
         let gen = self.anim_gen;
         let epoch = self.epoch;
@@ -5764,9 +5776,11 @@ impl AppCore {
         // A Live Photo decodes its companion `.mov` via AVFoundation; everything else
         // decodes the still's own bytes as a multi-frame animation.
         let live = self.live_motion_path(item);
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancel_job = std::sync::Arc::clone(&cancel);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let result = decode_motion_job(live, &source, item, fit);
+            let result = decode_motion_job(live, &source, item, fit, &cancel_job);
             let _ = tx.send(result);
         });
         self.anim_decode = Some(AnimDecode {
@@ -5775,6 +5789,7 @@ impl AppCore {
             epoch,
             want,
             rx,
+            cancel,
         });
         // A user-initiated decode (P / step) means they've engaged — suppress the "▶ P"
         // hint. An eager prep is invisible background work, so leave the hint alone.
