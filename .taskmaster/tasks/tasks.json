@@ -212,7 +212,7 @@
         "id": 51,
         "title": "Evaluate Velopack: modern install UX + auto-updates for the Windows channel",
         "description": "Owner call (2026-07-03): 'auto updates are kinda non-optional in 2026.' Velopack (the maintained Squirrel successor, first-class Rust crate `velopack`) gives the Chrome/Discord install model — double-click, no wizard, installed + launched in seconds, per-user in %LocalAppData%, with built-in DELTA AUTO-UPDATES from a simple static feed (GitHub Releases works as the feed). This is an EVALUATION task, not a committed cutover: decide whether Velopack becomes the primary consumer channel (MSI kept for perMachine/enterprise), the beta channel only, or isn't a fit. Distinct from MSIX (still parked, ADR-018): Velopack is unpackaged Win32, so the registry integrations stay ordinary registry writes.",
-        "status": "pending",
+        "status": "done",
         "priority": "medium",
         "dependencies": [],
         "details": "Questions the spike must answer: (1) Integration cost — the velopack crate wants a VelopackApp::build().run() hook at process start (fast-exit update hooks) in pb-app's main; measure its startup cost against the keypress→photon budget (should be ~0 when no update event, but MEASURE, per the prime directive). (2) File associations + the folder verb: Velopack installs per-user with a stable %LocalAppData% path — port the MSI's HKCR writes to HKCU\\Software\\Classes self-registration at install/update hook time (PhotoBlaze already has HKCU self-registration code from the 'Set default…' work, task #14.1) and confirm Open-with + Default-apps behave identically to the MSI install. (3) Update UX: silent background download + apply-on-restart (the viewer restarts in ms, so this fits) vs a toast offering restart-now; where the check runs (startup + daily?), and it must respect privacy #2 — an update CHECK is a network call, so it needs an off switch in Settings and must never phone home viewing data (it doesn't, but say so in the privacy notes). (4) Signing: vpk pack signs with signtool args — confirm Azure Trusted Signing /dlib flags pass through cleanly (same dlib/dmdf as release-windows.ps1). (5) Channel strategy: GitHub Releases as the update feed (vpk upload github), MSI + Velopack artifacts side by side on the same release; decide whether the MSI stays the website default. (6) Uninstall/upgrade coexistence: installing the Velopack build alongside an existing MSI install — define the migration story (likely: Velopack setup detects the MSI product and offers to remove it, or docs just say uninstall first). Output: a decisions.md ADR with the verdict + a working spike branch producing a signed Velopack setup.exe + one exercised delta update.",
@@ -441,6 +441,16 @@
             "status": "pending"
           }
         ]
+      },
+      {
+        "id": 65,
+        "title": "macOS auto-update via Sparkle (EdDSA appcast on the downloads feed)",
+        "description": "macOS ships a versioned DMG + a PhotoBlaze-latest.dmg symlink with NO in-app auto-update — users manually re-download. Add Sparkle (the Mac-native updater) so macOS gets the same background-download / install-on-quit UX Windows already has via Velopack, WITHOUT migrating the proven Developer ID + notarization DMG flow. Sparkle rides the existing DMG on downloads.fullspec.ca via an EdDSA-signed appcast.xml. Chosen over a Velopack-for-Mac migration (session decision 2026-07-08): Sparkle is lower-risk and Mac-native; Velopack would unify tooling but re-plumb notarization and change the drag-to-Applications install UX.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "details": "Wiring: (1) Add Sparkle to the SwiftUI host .app (SPM package or embedded XCFramework via build-swift-host.sh). (2) Generate an EdDSA key pair (Sparkle generate_keys); ship SUPublicEDKey in Info.plist, keep the private key with the release creds (.env.release / keychain, never committed). (3) Host appcast.xml at downloads.fullspec.ca/photoblaze/mac/ next to the DMG; SUFeedURL in Info.plist points at it. (4) On each release, sign the DMG (Sparkle sign_update -> EdDSA sig) and append an <item> (sparkle:version=CFBundleVersion, sparkle:shortVersionString, enclosure url+length+sparkle:edSignature, sparkle:minimumSystemVersion) — script it into release-macos.sh / release-mac-upload.ps1 the way vpk maintains the Windows feed. (5) A 'Check for Updates…' menu item (SPUStandardUpdaterController). Privacy #2: the update check is app-existence traffic, not a viewing trace — confirm no viewed-photo/path data rides the check (same bar Velopack's check meets); an appcast GET carries only version/OS. Same seam could later serve Linux (AppImageUpdate) if wanted.",
+        "testStrategy": "Stand up a local/staging appcast, sign a bumped DMG, point a running older build at it, and confirm Sparkle detects -> downloads -> installs on quit -> relaunches the new NOTARIZED build (spctl/stapler still valid). Confirm SUPublicEDKey rejects an unsigned/tampered enclosure."
       }
     ]
   }
