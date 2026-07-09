@@ -27,6 +27,9 @@ mod livephoto;
 // The Windows mirror: the same .mov decode via Media Foundation (task #39).
 #[cfg(windows)]
 mod mf_video;
+// The Linux mirror: .mov motion + audio decode via FFmpeg, behind the `livephoto` feature.
+#[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
+mod ff_live;
 // Shared ISOBMFF/`colr` parsing for the HEVC/AV1 container backends (WIC, Image I/O,
 // libheif). Only compiled where one of them is — keeps non-HEIC targets (e.g. a
 // libheif-less Linux bench build) dead-code-free.
@@ -51,6 +54,8 @@ use std::path::Path;
 
 pub use animation::{decode_animation, detect_animation, AnimFrame, Animation, AnimationKind};
 pub use color::ColorTransform;
+#[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
+pub use ff_live::{decode_live_motion, decode_motion_audio, MotionAudio};
 pub use image_backend::ImageCrateDecoder;
 #[cfg(target_os = "macos")]
 pub use imageio::ImageIoDecoder;

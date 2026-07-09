@@ -56,6 +56,12 @@ serde_json = "1"
 # base64 the JPEG-encoded, downscaled image into the endpoint's data URI (already in the lock).
 base64 = "0.22"
 
+[features]
+# Linux Live Photo motion + audio: forwards to pb-decode's FFmpeg backend and flips on the
+# Linux motion-decode + pairing paths in engine.rs / app_core_impl.rs. Off by default (macOS
+# and Windows have their own backends, always on). See pb-decode's `livephoto` feature.
+livephoto = ["pb-decode/livephoto"]
+
 [dev-dependencies]
 # Generate QR bitmaps for the image_text decode tests (never shipped). Default features
 # pull the `image` crate; we only need the raw module colors.

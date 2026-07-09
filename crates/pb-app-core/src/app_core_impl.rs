@@ -5702,16 +5702,28 @@ impl AppCore {
     /// only ever reached when settled on a photo, never on the fly-through path. Always
     /// `None` on platforms without a motion decoder (macOS + Windows have one).
     pub fn live_motion_path(&mut self, item: usize) -> Option<PathBuf> {
-        #[cfg(not(any(target_os = "macos", windows)))]
+        #[cfg(not(any(
+            target_os = "macos",
+            windows,
+            all(unix, not(target_os = "macos"), feature = "livephoto")
+        )))]
         {
             let _ = item;
             None
         }
-        #[cfg(any(target_os = "macos", windows))]
+        #[cfg(any(
+            target_os = "macos",
+            windows,
+            all(unix, not(target_os = "macos"), feature = "livephoto")
+        ))]
         if let Some(cached) = self.live_motion_cache.get(&item) {
             return cached.clone();
         }
-        #[cfg(any(target_os = "macos", windows))]
+        #[cfg(any(
+            target_os = "macos",
+            windows,
+            all(unix, not(target_os = "macos"), feature = "livephoto")
+        ))]
         {
             let paired = self.source.path(item).and_then(companion_motion);
             self.live_motion_cache.insert(item, paired.clone());

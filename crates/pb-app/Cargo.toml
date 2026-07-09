@@ -15,6 +15,11 @@ path = "src/main.rs"
 # through the parallel CPU libheif backend (links the vcpkg static libs; see
 # pb-decode/build.rs). Off by default so the stock build is pure-Rust + WIC.
 libheif = ["pb-decode/libheif"]
+# Linux Live Photo support: the FFmpeg motion decoder (pb-decode/pb-app-core) plus the
+# audio-output backend in `live_audio.rs`, which pipes the decoded PCM to PipeWire's
+# `pw-cat`. Off by default; Linux-only in effect (Windows/macOS have native backends).
+# Needs system FFmpeg; audio needs `pw-cat` (from pipewire) on PATH at runtime.
+livephoto = ["pb-app-core/livephoto", "pb-decode/livephoto", "dep:libc"]
 
 [dependencies]
 # Platform-neutral orchestration model (actions, key model, keymap) — shared with
@@ -75,6 +80,14 @@ arboard = { version = "3", default-features = false }
 # walkdir iterates (no stack growth with depth), doesn't follow symlinks by default (no
 # cycles), and bounds open dir handles. Already in the lockfile (transitive), so it's free.
 walkdir = "2"
+
+# Linux Live Photo audio output (`--features livephoto`): `live_audio.rs` pipes the
+# FFmpeg-decoded PCM (pb-decode's `decode_motion_audio`) to PipeWire's `pw-cat`, and uses
+# libc only to SIGSTOP/SIGCONT that child for pause/resume. We deliberately do NOT use
+# cpal/rodio: cpal's ALSA path on a PipeWire desktop advertises `buffer_size min: 1` and
+# underruns nondeterministically (clicks); piping straight to PipeWire plays clean.
+# Windows/macOS play audio through their native media players, so only Linux uses this.
+libc = { version = "0.2", optional = true }
 
 # Linux Copy Image: enable arboard's image clipboard (Wayland/X11). Windows and macOS use
 # their own native paths in clipboard.rs, so only Linux needs this.
