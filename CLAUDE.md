@@ -473,9 +473,19 @@ plugins** (`libheif-libde265.so` etc.) are copied into `usr/lib/libheif/plugins`
 they resolve inside the bundle. Live Photo *audio* still needs `pw-cat` (PipeWire) on the user's PATH
 — present on any modern desktop, degrades to silent motion if absent, so it's intentionally **not**
 bundled. **No signing, no auto-update yet** (unlike Velopack/Sparkle): the AppImage is unsigned and
-the app won't self-update on Linux — a zsync/AppImageUpdate feed is a future add. The AppImage is
-built for the **host arch only** (run the script on an x86_64 box for the x86_64 artifact; there's no
-cross-build). `dist/` is git-ignored, so the artifacts never get committed.
+the app won't self-update on Linux — a zsync/AppImageUpdate feed is a future add. `dist/` is
+git-ignored, so the artifacts never get committed.
+
+`release-linux.sh` builds for the **host arch**, so from a Mac/Windows box (no Linux VM needed) use
+**`scripts/release-linux-docker.sh [amd64|arm64]`** — it builds an **Ubuntu 26.04** container
+(`scripts/appimage.Dockerfile`, matching the FFmpeg 8 / libheif 1.21 the code targets) and runs
+`release-linux.sh` inside it. On **Apple Silicon + OrbStack** `linux/amd64` runs under **Rosetta**, so
+the **x86_64** artifact (what most Linux users need) builds at near-native speed; `arm64` is native.
+It uses a container-only `CARGO_TARGET_DIR` (a cached volume) so it never clashes with the host's
+macOS `target/`, and `APPIMAGE_EXTRACT_AND_RUN=1` so no FUSE/`--privileged` is required. The build
+distro sets the glibc floor (2.43 here → recent-distro runtime); dropping it means building
+FFmpeg/libheif from source on an older base. **AppImages can only be built on Linux** (the container
+*is* that Linux) — there's no native macOS/Windows AppImage build.
 
 > **Release only from a clean, committed workspace.** `crates/pb-app/build.rs` stamps the build
 > id `-dirty` on **any** `git status --porcelain` output — **untracked files included** — and that

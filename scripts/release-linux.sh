@@ -37,13 +37,16 @@ export APPIMAGE_EXTRACT_AND_RUN=1
 
 # ── 1. Build the full-feature release binary ─────────────────────────────────────────
 cargo build --release -p pb-app --features livephoto,pb-decode/libheif
+# Honor a custom target dir (the Docker builder points this at a cached volume so it never
+# clashes with the host's macOS `target/`).
+BIN="${CARGO_TARGET_DIR:-target}/release/photoblaze"
 
 # ── 2. Assemble the AppDir skeleton ──────────────────────────────────────────────────
 rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib" \
          "$APPDIR/usr/share/applications" \
          "$APPDIR/usr/share/icons/hicolor/256x256/apps"
-cp target/release/photoblaze "$APPDIR/usr/bin/photoblaze"
+cp "$BIN" "$APPDIR/usr/bin/photoblaze"
 
 # Icon (AppImage wants a top-level <name>.png plus the hicolor path).
 cp icons/photoblaze-icon-v3-windows.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/photoblaze.png"
@@ -80,7 +83,7 @@ EOF
 chmod +x "$APPRUN_TMPL"
 
 # ── 3. Bundle the deps linuxdeploy CAN see (walks the binary's NEEDED libs) ───────────
-LD="$TOOLS/linuxdeploy.AppImage"
+LD="$TOOLS/linuxdeploy-$ARCH.AppImage"
 if [ ! -x "$LD" ]; then
   echo ">> fetching linuxdeploy"
   mkdir -p "$TOOLS"
@@ -117,7 +120,7 @@ else
 fi
 
 # ── 5. Package the AppDir into a single .AppImage ─────────────────────────────────────
-PKG="$TOOLS/linuxdeploy-plugin-appimage.AppImage"
+PKG="$TOOLS/linuxdeploy-plugin-appimage-$ARCH.AppImage"
 if [ ! -x "$PKG" ]; then
   echo ">> fetching linuxdeploy-plugin-appimage"
   curl -fL --retry 3 -o "$PKG" \
