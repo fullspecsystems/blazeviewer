@@ -447,6 +447,17 @@ on a hosted `macos-15` runner — is **`workflow_dispatch`-only (dormant)**; a `
 auto-triggers it. A GitHub Release for the DMG, if wanted, is created manually. Signing setup is
 in `.taskmaster/docs/release-signing.md`.
 
+macOS **auto-updates via Sparkle** (task #65) — the in-app equivalent of Windows' Velopack. The
+`.app` embeds `Sparkle.framework` (assembled by `build-swift-host.sh`, since a SwiftPM executable
+has no Xcode "Embed Frameworks" phase) and reads an EdDSA-signed `appcast.xml` next to the DMG
+(`SUFeedURL` in `Info-swift-host.plist`). `release-macos.sh` re-signs Sparkle's nested helpers with
+the Developer ID (inside-out, before the app) and, after notarizing, EdDSA-signs the DMG and writes
+`dist/appcast.xml` (`scripts/generate-mac-appcast.sh`); `release-mac-upload.ps1` publishes that
+appcast alongside the DMG. The **private EdDSA signing key lives only in the release Mac's login
+keychain** (generated once via Sparkle's `generate_keys`; the public `SUPublicEDKey` is committed in
+the plist) — **back it up** (`generate_keys -x`); losing it means no future build can be signed for
+auto-update without shipping a new public key via a stopgap manual update.
+
 > **Release only from a clean, committed workspace.** `crates/pb-app/build.rs` stamps the build
 > id `-dirty` on **any** `git status --porcelain` output — **untracked files included** — and that
 > shows in the About dialog. Commit (or `.gitignore`) everything first: both release scripts build
@@ -471,8 +482,9 @@ To cut a release:
    scp/rsync needs native PowerShell (the feed is already in `dist\feed`, so a retry is upload-only).
    Prune superseded packages on the server periodically.
 3. **macOS (on your Mac):** `./scripts/release-macos.sh --release` builds the signed + notarized
-   DMG, then `pwsh scripts/release-mac-upload.ps1` publishes it to the feed (same native-PowerShell
-   caveat as Windows). A GitHub Release is **optional and manual** — nothing auto-builds from a tag:
+   DMG **and** EdDSA-signs it into `dist/appcast.xml` (Sparkle auto-update, task #65), then `pwsh
+   scripts/release-mac-upload.ps1` publishes the DMG **and the appcast** to the feed (same
+   native-PowerShell caveat as Windows). A GitHub Release is **optional and manual** — nothing auto-builds from a tag:
    `gh release create v<version> dist/PhotoBlaze-<version>.dmg* --notes-file <(bash
    scripts/changelog-section.sh <version>)`. Write **real, curated, user-facing** CHANGELOG notes
    before tagging so `changelog-section.sh` has a body. **Never** enable `generate_release_notes`.
@@ -482,7 +494,9 @@ To cut a release:
 5. **Verify:** the Windows feed serves the new `releases.win.json` + `.nupkg` (and a launched build
    self-updates); the macOS DMG is genuinely notarized — `xcrun stapler validate <dmg>` and
    `spctl -a -t open --context context:primary-signature -vv <dmg>` → `source=Notarized Developer
-   ID`. A `-` in a tag marks a pre-release; a clean `vX.Y.Z` is a full release.
+   ID`; the macOS feed serves the new `appcast.xml` (curl it) and a launched older build detects →
+   downloads → installs-on-quit the update. A `-` in a tag marks a pre-release; a clean `vX.Y.Z`
+   is a full release.
 
 
 ## Project Task Tracking

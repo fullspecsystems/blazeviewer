@@ -121,10 +121,31 @@ fi
 SIGNED=0
 if [[ -n "$IDENTITY" ]]; then
 	echo "==> Signing $APP ($IDENTITY)"
+	# Sparkle.framework (task #65): re-sign its nested helpers with OUR Developer ID +
+	# hardened runtime FIRST — inside-out, before the app binary/bundle. The framework ships
+	# signed by the Sparkle project (no Team ID), which notarization rejects; each nested
+	# code item (the two XPC services, the Autoupdate tool, the Updater.app helper) must carry
+	# our signature. Order + item list per Sparkle's distribution docs. Guarded on existence so
+	# the --egui target (no Sparkle) skips cleanly.
+	FW="$APP/Contents/Frameworks/Sparkle.framework"
+	if [[ -d "$FW" ]]; then
+		echo "==> Signing Sparkle.framework helpers"
+		for nested in \
+			"Versions/B/XPCServices/Installer.xpc" \
+			"Versions/B/XPCServices/Downloader.xpc" \
+			"Versions/B/Autoupdate" \
+			"Versions/B/Updater.app"; do
+			[[ -e "$FW/$nested" ]] && \
+				codesign --force --options runtime --timestamp --sign "$IDENTITY" "$FW/$nested"
+		done
+		codesign --force --options runtime --timestamp --sign "$IDENTITY" "$FW"
+	fi
+
 	# Sign the executable, then the bundle (inside-out; the app holds only the one binary
-	# plus non-code resources — Assets.car / .icns). No `--entitlements`: a non-sandboxed
-	# Rust app needs no hardened-runtime exceptions, so `--options runtime` alone is correct
-	# (an empty entitlements file is a no-op and AMFI's XML parser is fussy about it).
+	# plus non-code resources — Assets.car / .icns — and Sparkle.framework, signed above).
+	# No `--entitlements`: a non-sandboxed Rust app needs no hardened-runtime exceptions, so
+	# `--options runtime` alone is correct (an empty entitlements file is a no-op and AMFI's
+	# XML parser is fussy about it).
 	codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP/Contents/MacOS/$BIN_NAME"
 	codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
 	codesign --verify --deep --strict --verbose=2 "$APP"
@@ -173,6 +194,17 @@ fi
 
 # 5) Checksum sidecar (integrity independent of the signature).
 ( cd "$DIST" && shasum -a 256 "$(basename "$DMG")" | tee "$(basename "$DMG").sha256" )
+
+# 6) Sparkle appcast (task #65): EdDSA-sign the notarized DMG and write dist/appcast.xml, which
+#    release-mac-upload.ps1 publishes next to the DMG. Only for the real SwiftUI host (the --egui
+#    bundle has no Sparkle) and only on a notarized build (a dev/unsigned DMG is never shipped).
+#    Hard-fails on error: a release DMG without a valid appcast is broken and should stop the run.
+if [[ "$TARGET" == "swift-host" && $NOTARIZED == 1 ]]; then
+	echo "==> Generating Sparkle appcast"
+	./scripts/generate-mac-appcast.sh "$DMG" "$SHORT_VERSION"
+else
+	echo "==> Sparkle appcast SKIPPED (needs the notarized swift-host DMG)"
+fi
 
 echo "==> Done: $DMG"
 [[ $SIGNED == 1 ]] || echo "    (UNSIGNED — for distribution, set the signing/notarization secrets)"

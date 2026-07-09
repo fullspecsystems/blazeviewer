@@ -48,6 +48,13 @@ $sha = "$name.sha256"
 if (Test-Path (Join-Path $dmgFile.DirectoryName $sha)) { $files += $sha }
 else { Write-Host "    (no $sha sidecar; uploading the DMG only)" -ForegroundColor Yellow }
 
+# ── 2b. The Sparkle appcast (task #65). release-macos.sh writes appcast.xml next to the DMG;
+#        publishing it at the stable feed URL is what lets running builds see the new version and
+#        auto-update. Its <enclosure> already points at this versioned DMG.
+$appcast = "appcast.xml"
+if (Test-Path (Join-Path $dmgFile.DirectoryName $appcast)) { $files += $appcast }
+else { Write-Host "    (no appcast.xml alongside the DMG; macOS auto-update won't see this release)" -ForegroundColor Yellow }
+
 # ── 3. scp the file(s). cd into the source first so scp uses bare names — a Windows absolute
 #      path (C:\...) would have its drive-letter colon misread as an scp remote-host separator.
 $target = "${UploadHost}:${RemoteDir}/"

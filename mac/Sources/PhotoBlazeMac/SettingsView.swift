@@ -38,6 +38,11 @@ struct SettingsView: View {
     @State private var defaultTypeCount = 0
     @State private var settingDefault = false
     @State private var isAppTranslocated = false
+    /// Sparkle auto-update prefs (task #65) — mirrors of `Updater.shared`, loaded on open.
+    /// These are Mac-only and persisted by Sparkle (its own UserDefaults), so they live
+    /// OUTSIDE `draft`/`settings.toml` and write straight through on toggle — no debounce.
+    @State private var autoUpdateCheck = true
+    @State private var autoUpdateInstall = true
 
     /// A finished Test-connection probe: `ok` colors the summary line.
     private struct ConnResult { let ok: Bool; let message: String }
@@ -73,6 +78,8 @@ struct SettingsView: View {
                 currentImageFolder = model.currentImageFolder()
                 model.keymapBeginEdit()
                 refreshDefaultViewerState()
+                autoUpdateCheck = Updater.shared.automaticallyChecksForUpdates
+                autoUpdateInstall = Updater.shared.automaticallyDownloadsUpdates
                 loaded = true
             }
         }
@@ -206,6 +213,18 @@ struct SettingsView: View {
                     Button("Choose…") { choosePinnedFolder() }
                         .disabled(!draft.pickerFixed)
                 }
+                // Sparkle auto-update (task #65) — a launch-time behavior, so it lives at the
+                // foot of Startup rather than in its own section. Written straight to Sparkle
+                // (not `draft`); the second toggle only applies while the first is on.
+                Toggle("Automatically check for updates", isOn: Binding(
+                    get: { autoUpdateCheck },
+                    set: { autoUpdateCheck = $0; Updater.shared.automaticallyChecksForUpdates = $0 }
+                ))
+                Toggle("Download and install updates automatically", isOn: Binding(
+                    get: { autoUpdateInstall },
+                    set: { autoUpdateInstall = $0; Updater.shared.automaticallyDownloadsUpdates = $0 }
+                ))
+                .disabled(!autoUpdateCheck)
             }
             // "Set as default" — the one affordance that spares the user a manual
             // Get Info ▸ "Change All…" per file type. One click sets PhotoBlaze as the

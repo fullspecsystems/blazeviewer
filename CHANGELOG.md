@@ -10,6 +10,13 @@ with any pre-release suffix carried only by the tag.
 ## [0.1.1] - 2026-07-08
 
 ### Added
+- **macOS now updates itself.** PhotoBlaze checks for new versions in the background and, when
+  one is available, downloads it and installs it the next time you quit — the same hands-off
+  updating the Windows version already has, so you no longer need to re-download the DMG by
+  hand. There's a **PhotoBlaze ▸ Check for Updates…** menu item to check on demand, and two
+  switches in **Settings ▸ General ▸ Startup** — "Automatically check for updates" and
+  "Download and install updates automatically" — if you'd rather manage it yourself. Update
+  checks send only your version and macOS version, never anything about the photos you view.
 - **Photoshop `.psd` files now open.** PhotoBlaze shows the flattened composite Photoshop
   saves inside the file (the default "Maximize Compatibility" merged image), so a `.psd` in a
   folder displays and flicks past just like any other photo — no Photoshop, no layer

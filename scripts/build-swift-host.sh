@@ -76,6 +76,20 @@ chmod +x "$APP_DIR/Contents/MacOS/PhotoBlaze"
 # bundle ships. Regenerate via scripts/build-macos-icons.sh when the icon changes.
 cp packaging/macos/PhotoBlaze.icns packaging/macos/Assets.car "$APP_DIR/Contents/Resources/"
 
+# Embed Sparkle.framework (task #65, macOS auto-update). `swift build` LINKS against Sparkle
+# but — a SwiftPM executable has no Xcode "Embed Frameworks" phase — does not copy it into the
+# bundle, so we do it here. The executable's load command is `@rpath/Sparkle.framework/...`
+# and Package.swift adds `-rpath @executable_path/../Frameworks`, so it resolves once embedded.
+# This is MANDATORY: the binary is already linked, so a missing framework is a launch-time dyld
+# crash, not a soft absence. release-macos.sh re-signs the framework's nested helpers (Autoupdate,
+# Updater.app, XPC services) with the Developer ID before notarization.
+SPARKLE_FW="$(find mac/.build/artifacts -type d -name 'Sparkle.framework' -path '*macos-arm64*' 2>/dev/null | head -1)"
+[[ -n "$SPARKLE_FW" ]] || SPARKLE_FW="$(find mac/.build/artifacts -type d -name 'Sparkle.framework' 2>/dev/null | head -1)"
+[[ -n "$SPARKLE_FW" ]] || { echo "error: Sparkle.framework not found under mac/.build/artifacts (run 'swift package --package-path mac resolve')" >&2; exit 1; }
+echo "==> Embedding Sparkle.framework"
+mkdir -p "$APP_DIR/Contents/Frameworks"
+cp -R "$SPARKLE_FW" "$APP_DIR/Contents/Frameworks/"
+
 echo "==> Done: $APP_DIR"
 if [[ "$RUN" == 1 ]]; then
 	# `open` will NOT relaunch an already-running app — LaunchServices just activates

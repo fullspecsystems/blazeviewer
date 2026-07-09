@@ -36,6 +36,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.activate()
+        // Start Sparkle's background update scheduler (task #65). No-op unless this bundle
+        // carries a feed URL (a real assembled .app, not a bare `swift run`) — see Updater.
+        Updater.shared.startIfEnabled()
     }
 
     /// PhotoBlaze is a single-window app by design (task #48, owner call): once the last

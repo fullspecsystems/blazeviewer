@@ -145,6 +145,21 @@ final class MenuBar: NSObject {
         return item
     }
 
+    /// The Sparkle "Check for Updates…" item, or nothing when the updater is inert (a
+    /// bare-binary dev run with no feed URL). Targets the updater controller directly — our
+    /// submenus set `autoenablesItems = false`, so no validation runs; Sparkle tolerates a
+    /// second check while one is in flight.
+    private func updateMenuItems() -> [NSMenuItem] {
+        guard Updater.shared.isEnabled else { return [] }
+        let item = NSMenuItem(
+            title: "Check for Updates…",
+            action: Updater.shared.checkForUpdatesAction,
+            keyEquivalent: ""
+        )
+        item.target = Updater.shared.checkForUpdatesTarget
+        return [.separator(), item]
+    }
+
     private func build() -> NSMenu {
         let main = NSMenu()
         let sep = { NSMenuItem.separator() }
@@ -155,6 +170,11 @@ final class MenuBar: NSObject {
         //    terminate: directly.
         main.addItem(submenu("PhotoBlaze", [
             item("about", "About PhotoBlaze"),
+            // Sparkle's manual "Check for Updates…" (task #65) — only in a Sparkle-configured
+            // .app (a bare-binary dev run has no feed). Targets the updater controller directly
+            // (not the responder chain) since it isn't a first responder. The convention slot is
+            // right below About.
+        ] + updateMenuItems() + [
             sep(),
             item("settings", "Settings…", key: ","),
             sep(),
