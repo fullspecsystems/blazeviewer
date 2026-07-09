@@ -39,7 +39,10 @@ SIG_ATTRS="$("$SIGN" "$DMG")"   # e.g. sparkle:edSignature="AbC…" length="1048
 [[ "$SIG_ATTRS" == *edSignature* ]] || { echo "error: sign_update produced no signature (is the EdDSA private key in your keychain?)" >&2; exit 1; }
 
 DMG_NAME="$(basename "$DMG")"
-ENCLOSURE_URL="https://downloads.fullspec.ca/photoblaze/mac/$DMG_NAME"
+# The base the <enclosure> URL is built on. Defaults to the production feed; the local
+# Sparkle staging test (scripts/test-sparkle-update.sh) overrides it to a localhost server.
+BASE_URL="${PB_APPCAST_BASE_URL:-https://downloads.fullspec.ca/photoblaze/mac}"
+ENCLOSURE_URL="$BASE_URL/$DMG_NAME"
 PUB_DATE="$(date -u "+%a, %d %b %Y %H:%M:%S +0000")"
 
 # Release notes: the CHANGELOG section for this version, wrapped as HTML (Sparkle renders the
