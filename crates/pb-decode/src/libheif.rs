@@ -10,10 +10,12 @@
 //! sharpening the on-screen one. iPhone/Sony HEICs are 40–48-tile HEVC grids;
 //! libheif demuxes + stitches the grid for free (the reason NVDEC is deferred).
 //!
-//! Scope: **HEIC (HEVC) only.** Our libheif is built decode-only with libde265 (no
-//! aom/dav1d), so AVIF stays on WIC; HDR (PQ/HLG) HEICs stay on WIC's fp16 float
-//! path; fast scroll **previews** stay on WIC's embedded-thumbnail path. This
-//! backend is the *full* SDR HEIC decode — see [`route_full_heic`].
+//! Scope: **SDR HEIC (HEVC), plus AVIF (AV1) when the linked libheif has an AV1
+//! decoder.** The Windows vcpkg build is libde265-only (no aom/dav1d), so AVIF there
+//! stays on WIC; the Linux system libheif is typically built with dav1d, so it takes
+//! AVIF too. HDR (PQ/HLG) stays on WIC's fp16 float path (Windows); fast-scroll
+//! **previews** stay on WIC's embedded-thumbnail path. AVIF routing is gated at
+//! runtime on [`has_av1_decoder`] — see [`route_full_heic`].
 //!
 //! The binding is a small hand-rolled `extern "C"` surface (no `libheif-sys`
 //! version coupling) linked against the vcpkg static libs by `build.rs`. Every
@@ -35,6 +37,9 @@ const HEIF_ERROR_OK: c_int = 0;
 const HEIF_COLORSPACE_RGB: c_int = 1;
 const HEIF_CHROMA_INTERLEAVED_RGBA: c_int = 11;
 const HEIF_CHANNEL_INTERLEAVED: c_int = 10;
+/// `heif_compression_AV1` (heif.h `enum heif_compression_format`) — probed via
+/// `heif_have_decoder_for_format` to learn whether this libheif can decode AVIF.
+const HEIF_COMPRESSION_AV1: c_int = 4;
 
 // Opaque libheif types (we only ever hold pointers to them).
 #[repr(C)]
@@ -99,6 +104,9 @@ struct HeifDecodingOptions {
 // Symbols resolve against the static heif.lib/libde265.lib linked by build.rs.
 extern "C" {
     fn heif_init(params: *mut c_void) -> HeifError;
+    /// Non-zero when a decoder plugin is registered for `format` (e.g. AV1 → dav1d/aom).
+    /// Added in libheif 1.15; our build is ≥ 1.21, so it always links.
+    fn heif_have_decoder_for_format(format: c_int) -> c_int;
     fn heif_context_alloc() -> *mut HeifContext;
     fn heif_context_free(ctx: *mut HeifContext);
     fn heif_context_read_from_memory_without_copy(
@@ -181,11 +189,11 @@ unsafe fn check(e: HeifError) -> Result<(), String> {
     Err(format!("{msg} (code {} subcode {})", e.code, e.subcode))
 }
 
-/// Decode an HEIC's primary image to tightly-packed interleaved RGBA8 via libheif.
-/// libheif applies the container's geometric transforms (rotation/crop/mirror)
-/// during decode, so the result is already display-oriented (caller passes
-/// orientation 1 to `finalize`).
-fn decode_hevc(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
+/// Decode the primary image (HEVC for HEIC, AV1 for AVIF — libheif dispatches to the
+/// registered plugin) to tightly-packed interleaved RGBA8. libheif applies the
+/// container's geometric transforms (rotation/crop/mirror) during decode, so the
+/// result is already display-oriented (caller passes orientation 1 to `finalize`).
+fn decode_primary(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
     init_once();
     unsafe {
         let ctx = Ctx(heif_context_alloc());
@@ -274,13 +282,22 @@ pub struct LibHeifDecoder;
 
 impl ImageDecoder for LibHeifDecoder {
     fn can_decode(&self, bytes: &[u8]) -> bool {
-        matches!(isobmff_brand(bytes), Some("HEIC"))
+        match isobmff_brand(bytes) {
+            Some("HEIC") => true,
+            // AVIF only when this libheif was built with an AV1 decoder (dav1d/aom).
+            Some("AVIF") => has_av1_decoder(),
+            _ => false,
+        }
     }
 
     fn decode(&self, req: &DecodeRequest) -> Result<DecodedImage, DecodeError> {
-        let (rgba, w, h) = decode_hevc(req.bytes).map_err(DecodeError::Corrupt)?;
+        let (rgba, w, h) = decode_primary(req.bytes).map_err(DecodeError::Corrupt)?;
+        let codec = match isobmff_brand(req.bytes) {
+            Some("AVIF") => "AVIF",
+            _ => "HEIC",
+        };
         // libheif self-orients (applies irot/imir), like WIC → pass orientation 1.
-        let mut img = common::finalize_oriented(rgba, w, h, 1, "HEIC", req.fit, false)?;
+        let mut img = common::finalize_oriented(rgba, w, h, 1, codec, req.fit, false)?;
         // Source-native pixels (e.g. Display-P3); carry the colr transform for the
         // in-shader CMS — the exact same path the WIC backend uses.
         img.color = color_from_colr_box(req.bytes).unwrap_or_else(ColorTransform::srgb);
@@ -304,14 +321,23 @@ impl ImageDecoder for LibHeifDecoder {
 ///   libheif (one parallel decode) handles those previews too.
 ///
 /// On **Linux** there is no WIC, so the WIC-preference carve-outs (the env switch,
-/// the HDR gate, the thumbnail-preview exception) don't apply: libheif is the only
-/// HEIC decoder, and it takes every SDR HEIC decode — previews included. HDR HEIC
-/// and AVIF still route away (no decoder for them here) → a graceful `Unsupported`.
+/// the thumbnail-preview exception) don't apply: libheif is the only ISOBMFF decoder,
+/// and it takes every SDR HEIC decode — previews included — plus SDR **AVIF** when the
+/// system libheif carries an AV1 decoder (the usual dav1d build). HDR (PQ/HLG) still
+/// routes away (the 8-bit RGBA path can't hold it) → a graceful `Unsupported`.
 pub(crate) fn route_full_heic(bytes: &[u8], allow_preview: bool) -> bool {
     if !backend_is_libheif() {
         return false;
     }
-    if !matches!(isobmff_brand(bytes), Some("HEIC")) {
+    // HEIC always; AVIF only when the linked libheif actually has an AV1 decoder — so
+    // the Windows libde265-only build leaves AVIF to WIC, while a dav1d-built libheif
+    // (typical on Linux) decodes it here. A dav1d-less build → routes away → Unsupported.
+    let routable = match isobmff_brand(bytes) {
+        Some("HEIC") => true,
+        Some("AVIF") => has_av1_decoder(),
+        _ => false,
+    };
+    if !routable {
         return false;
     }
     if colr_transfer(bytes).is_some_and(is_hdr_transfer) {
@@ -348,6 +374,19 @@ fn backend_is_libheif() -> bool {
             Err(_) => true,
         })
     }
+}
+
+/// Whether the linked libheif has a registered **AV1** decoder plugin — i.e. whether
+/// it can decode AVIF. The Linux system libheif is normally built with dav1d (Debian/
+/// Ubuntu's `libheif1` depends on `libdav1d`), so this is `true`; the Windows vcpkg
+/// static build is libde265-only, so it's `false` and AVIF stays on WIC. Cached — the
+/// query walks libheif's plugin registry once.
+pub(crate) fn has_av1_decoder() -> bool {
+    static AV1: OnceLock<bool> = OnceLock::new();
+    *AV1.get_or_init(|| {
+        init_once();
+        unsafe { heif_have_decoder_for_format(HEIF_COMPRESSION_AV1) != 0 }
+    })
 }
 
 #[cfg(test)]
@@ -412,11 +451,19 @@ mod tests {
     }
 
     #[test]
-    fn does_not_route_avif_or_hdr() {
-        // AVIF has no AV1 decoder in our libheif build → WIC.
-        assert!(!route_full_heic(&ftyp(b"avif"), false));
-        assert!(!route_full_heic(&ftyp(b"avif"), true));
-        // HDR HEIC (PQ=16, HLG=18) stays on WIC's fp16 float path.
+    fn avif_routing_follows_av1_decoder_availability() {
+        // SDR AVIF routes to libheif exactly when the linked libheif can decode AV1
+        // (dav1d/aom present). The Windows vcpkg build is libde265-only → false → AVIF
+        // falls through to WIC; a dav1d-built libheif (typical on Linux) → true.
+        let av1 = has_av1_decoder();
+        assert_eq!(route_full_heic(&ftyp(b"avif"), false), av1);
+        assert_eq!(route_full_heic(&ftyp(b"avif"), true), av1);
+    }
+
+    #[test]
+    fn does_not_route_hdr_or_non_isobmff() {
+        // HDR (PQ=16, HLG=18) stays on WIC's fp16 float path / unsupported off Windows —
+        // regardless of codec, and even where AV1 is available.
         assert!(!route_full_heic(&heic_nclx(16), false));
         assert!(!route_full_heic(&heic_nclx(18), false));
         // Not an ISOBMFF image at all.

@@ -181,8 +181,8 @@
       {
         "id": 50,
         "title": "Installer artwork: de-2003 the MSI wizard (owner artwork + WiX reskin)",
-        "description": "The MSI ships WiX's stock WixUI_FeatureTree chrome — including the default welcome-page bitmap with the CD-ROM-and-floppy clipart, unchanged since WiX 2 (owner, 2026-07-03: 'the nostalgia is heartwarming but... this is lame'). The fix is a skin, NOT a packaging change: MSIX stays parked per ADR-018 + the 2026-07-03 park (Store discovery is its only draw; the folder right-click verb would need a packaged IExplorerCommand COM handler). Replace the two stock bitmaps with PhotoBlaze-branded art and drop the feature-tree dialog set for a leaner one. The modern-install-experience angle beyond the skin is task #51 (Velopack).",
-        "status": "pending",
+        "description": "The MSI ships WiX's stock WixUI_FeatureTree chrome — including the default welcome-page bitmap with the CD-ROM-and-floppy clipart, unchanged since WiX 2 (owner, 2026-07-03: 'the nostalgia is heartwarming but... this is lame'). The fix is a skin, NOT a packaging change: MSIX stays parked per ADR-018 + the 2026-07-03 park (Store discovery is its only draw; the folder right-click verb would need a packaged IExplorerCommand COM handler). Replace the two stock bitmaps with PhotoBlaze-branded art and drop the feature-tree dialog set for a leaner one. The modern-install-experience angle beyond the skin is task #51 (Velopack). [Cancelled 2026-07-08: WiX/MSI was retired when Velopack shipped (0.1.0). Velopack packs its own install splash (photoblaze-splash.jpg via release-windows.ps1). If Velopack install artwork wants polish, that is a fresh, much smaller task.]",
+        "status": "cancelled",
         "priority": "low",
         "dependencies": [],
         "details": "Bitmap specs (classic WixUI, what cargo-wix's WiX3 pipeline consumes): banner 493×58 (top strip on interior pages, WixVariable WixUIBannerBmp) and dialog 493×312 (welcome/finish left panel, WixUIDialogBmp), 24-bit BMP. Source from the existing brand assets (the 1024 icon master / packaging art). Wiring in crates/pb-app/wix/main.wxs: two <WixVariable> elements beside the UIRef; switch <UIRef Id='WixUI_FeatureTree'/> → WixUI_InstallDir (or WixUI_Minimal — PhotoBlaze has no optional features worth a tree); delete the vestigial DiskPrompt/'CD-ROM #1' Media strings from the cargo-wix template. Rebuild locally with scripts/release-windows.ps1 (signs too), then click through every wizard page.",
@@ -389,8 +389,8 @@
           {
             "id": 5,
             "title": "AVIF decode on Linux",
-            "description": "No AVIF decoder at all on Linux (WIC covers it on Windows). Route .avif through libheif where the system build has AV1, else wire the dav1d+avif-parse path from the original plan. Decide + implement.",
-            "status": "pending"
+            "description": "No AVIF decoder at all on Linux (WIC covers it on Windows). Route .avif through libheif where the system build has AV1, else wire the dav1d+avif-parse path from the original plan. Decide + implement. [Implemented 2026-07-08: route AVIF to the libheif backend gated on heif_have_decoder_for_format(AV1). Linux distro libheif (built with dav1d — Debian/Ubuntu libheif1 depends on libdav1d) decodes AVIF through the same pipeline as HEIC (color via colr box, self-orient); Windows vcpkg (libde265-only) keeps AVIF on WIC, unchanged. SDR only for now — HDR (PQ/HLG) AVIF routes away like HDR HEIC. VERIFY IN A LINUX VM: (1) an .avif file opens and displays, (2) a folder with .avif is scanned (not skipped), (3) color/orientation look right, (4) if the distro libheif lacks dav1d it degrades to a clean \"unsupported\", not a crash.]",
+            "status": "review"
           },
           {
             "id": 6,
