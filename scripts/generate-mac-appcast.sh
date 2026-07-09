@@ -45,11 +45,31 @@ BASE_URL="${PB_APPCAST_BASE_URL:-https://downloads.fullspec.ca/photoblaze/mac}"
 ENCLOSURE_URL="$BASE_URL/$DMG_NAME"
 PUB_DATE="$(date -u "+%a, %d %b %Y %H:%M:%S +0000")"
 
-# Release notes: the CHANGELOG section for this version, wrapped as HTML (Sparkle renders the
-# <description> in a WebView). A <pre> block keeps the Keep-a-Changelog layout readable without
-# a markdown→HTML step; escape the three XML-significant chars first.
-NOTES="$(bash scripts/changelog-section.sh "$VERSION" 2>/dev/null || true)"
-NOTES_HTML="$(printf '%s' "$NOTES" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')"
+# Release notes: the CHANGELOG section for this version, converted from Keep-a-Changelog
+# Markdown to HTML — Sparkle renders <description> as HTML in a WebView, so raw Markdown shows
+# its literal `###`/`**`/`-` syntax and a <pre> wrapper preserves every hard-wrapped line (a
+# mile-long dialog). This does the small conversion the changelog actually uses (### headings,
+# `-` bullets with wrapped continuation lines joined, **bold**, `code`) in pure perl — always
+# present on macOS, so the release stays dependency-free (no pandoc/cmark needed).
+md_to_html() {
+	perl -e '
+		my (@out, $in_list, $li);
+		sub esc { my $s = shift; $s =~ s/&/&amp;/g; $s =~ s/</&lt;/g; $s =~ s/>/&gt;/g; return $s; }
+		sub inl { my $s = shift; $s =~ s{\*\*(.+?)\*\*}{<strong>$1</strong>}g; $s =~ s{`(.+?)`}{<code>$1</code>}g; return $s; }
+		sub flush_li { if (defined $li && length $li) { push @out, "<li>".inl($li)."</li>"; $li=undef; } }
+		sub close_list { if ($in_list) { flush_li(); push @out, "</ul>"; $in_list=0; } }
+		while (my $l = <STDIN>) {
+			chomp $l; $l =~ s/\s+$//;
+			if    ($l =~ /^#{1,6}\s+(.*)/) { close_list(); push @out, "<h3>".inl(esc($1))."</h3>"; }
+			elsif ($l =~ /^[-*]\s+(.*)/)   { flush_li(); unless ($in_list) { push @out, "<ul>"; $in_list=1; } $li = esc($1); }
+			elsif ($l =~ /^\s*$/)          { close_list(); }
+			else  { my $t = $l; $t =~ s/^\s+//; if ($in_list) { $li .= " ".esc($t); } else { push @out, "<p>".inl(esc($t))."</p>"; } }
+		}
+		close_list();
+		print join("", @out);
+	'
+}
+NOTES_HTML="$(bash scripts/changelog-section.sh "$VERSION" 2>/dev/null | md_to_html)"
 
 mkdir -p "$(dirname "$OUT")"
 cat > "$OUT" <<XML
@@ -66,7 +86,7 @@ cat > "$OUT" <<XML
       <sparkle:version>$VERSION</sparkle:version>
       <sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-      <description><![CDATA[<h2>Version $VERSION</h2><pre>$NOTES_HTML</pre>]]></description>
+      <description><![CDATA[$NOTES_HTML]]></description>
       <enclosure url="$ENCLOSURE_URL" type="application/octet-stream" $SIG_ATTRS />
     </item>
   </channel>
