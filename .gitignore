@@ -6,6 +6,12 @@
 # Release packaging output (DMGs, MSIs, checksums) from scripts/release-{macos.sh,windows.ps1}
 /dist/
 
+# Local vendored crates (a temporary `cargo vendor` of a dep with an unreleased fix). Not part
+# of the build — deps resolve from crates.io — so keep it untracked AND out of the -dirty check:
+# crates/pb-app/build.rs stamps the build `-dirty` on ANY `git status --porcelain` output,
+# untracked paths included. (Safe to delete; it's stale once the dep is repointed to crates.io.)
+/vendor/
+
 # Coverage / profiling output
 *.profraw
 *.profdata

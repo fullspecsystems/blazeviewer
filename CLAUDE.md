@@ -439,10 +439,24 @@ feed over HTTP (`update.rs` `FEED_URL`) and self-updates — downloads in the ba
 quit. Version comes from `crates/pb-app/Cargo.toml`, so it always matches the app; there is **no
 tag / GitHub Release for Windows**.
 
-**macOS** is tag-driven: push a `v*` tag from a green `main` and `.github/workflows/release.yml`
-builds + signs the **DMG** (Developer ID + notarization), then the `release` job publishes a single
-GitHub Release with it attached (it also builds locally via `scripts/release-macos.sh`). Signing
-setup is in `.taskmaster/docs/release-signing.md`.
+**macOS** is **built locally on the owner's Mac** via `scripts/release-macos.sh` (Developer ID +
+notarization), then published to `downloads.fullspec.ca/photoblaze/mac` with
+`scripts/release-mac-upload.ps1` (which repoints the `PhotoBlaze-latest.dmg` symlink). Hosted
+GitHub Actions is too expensive to use, so `.github/workflows/release.yml` — which builds the DMG
+on a hosted `macos-15` runner — is **`workflow_dispatch`-only (dormant)**; a `v*` tag no longer
+auto-triggers it. A GitHub Release for the DMG, if wanted, is created manually. Signing setup is
+in `.taskmaster/docs/release-signing.md`.
+
+> **Release only from a clean, committed workspace.** `crates/pb-app/build.rs` stamps the build
+> id `-dirty` on **any** `git status --porcelain` output — **untracked files included** — and that
+> shows in the About dialog. Commit (or `.gitignore`) everything first: both release scripts build
+> fresh from the working tree, so a stray file (a local `vendor/` dir, a scratch note) silently
+> ships a `-dirty` build. Check `git status` is clean before running a release script.
+
+> **Never let a tool auto-invoke a paid CI run.** Hosted runners cost real money (a macOS run is
+> billed at 10×), so releases are scripted and run locally — the `v*`-tag trigger was removed from
+> release.yml precisely so a tag push (or `gh release create`) can't quietly start a hosted build.
+> Don't re-add an automatic hosted trigger; script the build instead.
 
 To cut a release:
 
@@ -451,16 +465,24 @@ To cut a release:
    version (`crates/pb-app/Cargo.toml`) must match the tag's numeric core (a `-beta.N` suffix
    lives only on the tag).
 2. **Windows:** `pwsh scripts/release-windows.ps1 -Upload` from this machine (with `.env.release`
-   signing creds). Prune superseded packages on the server periodically.
-3. **macOS:** `git tag -a v<version> -m "…" && git push origin v<version>` → release.yml builds +
-   publishes the notarized DMG. The release body is the CHANGELOG section for that version (via
-   `scripts/changelog-section.sh`), so write **real, curated, user-facing** notes in the CHANGELOG
-   *before* tagging. **Never** enable `generate_release_notes`. You may curate the body afterward
-   with `gh release edit <tag> --notes-file <file>`.
-4. **Verify:** the Windows feed serves the new `releases.win.json` + `.nupkg` (and a launched build
-   self-updates); the macOS DMG is attached and genuinely notarized — `xcrun stapler validate
-   <dmg>` and `spctl -a -t open --context context:primary-signature -vv <dmg>` → `source=Notarized
-   Developer ID`. A `-` in the tag publishes a pre-release; a clean `vX.Y.Z` is a full release.
+   signing creds). **Run it from native PowerShell, not the Bash tool / Git Bash** — the ssh
+   config's YubiKey `Match exec` hook has a Windows path that Git Bash mangles, so the upload fails
+   `Permission denied (publickey)`. The build + sign + pack still succeed there; only the `-Upload`
+   scp/rsync needs native PowerShell (the feed is already in `dist\feed`, so a retry is upload-only).
+   Prune superseded packages on the server periodically.
+3. **macOS (on your Mac):** `./scripts/release-macos.sh --release` builds the signed + notarized
+   DMG, then `pwsh scripts/release-mac-upload.ps1` publishes it to the feed (same native-PowerShell
+   caveat as Windows). A GitHub Release is **optional and manual** — nothing auto-builds from a tag:
+   `gh release create v<version> dist/PhotoBlaze-<version>.dmg* --notes-file <(bash
+   scripts/changelog-section.sh <version>)`. Write **real, curated, user-facing** CHANGELOG notes
+   before tagging so `changelog-section.sh` has a body. **Never** enable `generate_release_notes`.
+4. **Tag for posterity** (optional): `git tag -a v<version> -m "…" && git push origin v<version>`.
+   Windows never needs it (Velopack reads the version from `Cargo.toml`); it's a record + the anchor
+   for a manual macOS GitHub Release. Safe to push now that release.yml doesn't auto-build on tags.
+5. **Verify:** the Windows feed serves the new `releases.win.json` + `.nupkg` (and a launched build
+   self-updates); the macOS DMG is genuinely notarized — `xcrun stapler validate <dmg>` and
+   `spctl -a -t open --context context:primary-signature -vv <dmg>` → `source=Notarized Developer
+   ID`. A `-` in a tag marks a pre-release; a clean `vX.Y.Z` is a full release.
 
 
 ## Project Task Tracking

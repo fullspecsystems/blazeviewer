@@ -6,10 +6,16 @@
 # downloads.fullspec.ca feed (GitHub Actions credits are finite; see CLAUDE.md → "Cutting a
 # release"). This workflow now covers only macOS.
 #
-# Triggers on a version tag (e.g. `v0.1.0`): the macos-dmg job builds the .app, Developer ID
-# codesigns it, packages + notarizes + staples a DMG, and the release job attaches it (plus a
-# SHA256 sidecar) to a single GitHub Release with notes synthesized from the CHANGELOG. Also
-# runnable manually (workflow_dispatch) to produce the DMG without a release.
+# Builds the .app, Developer ID codesigns it, packages + notarizes + staples a DMG, and (on a
+# tag) attaches it to a GitHub Release with notes synthesized from the CHANGELOG.
+#
+# MANUAL-ONLY (workflow_dispatch). The macos-dmg job runs on a HOSTED macos-15 runner, and hosted
+# Actions is too expensive to use (a macOS run bills at 10×), so releases are built locally on the
+# owner's Mac (scripts/release-macos.sh) — see CLAUDE.md → "Cutting a release". The `push: tags`
+# trigger was REMOVED so a `v*` tag (or `gh release create`, which pushes one) can NEVER quietly
+# start a paid hosted build. Re-add it only alongside a self-hosted Mac runner (point `runs-on` at
+# the `[self-hosted, macOS, ARM64]` label first). This workflow is kept intact for that day / a
+# deliberate manual dispatch; it is dormant otherwise.
 #
 # Signing uses Developer ID + notarization, gated on the secrets — an unset CSC_LINK still
 # produces an (unsigned) DMG. See .taskmaster/docs/release-signing.md and
@@ -18,8 +24,6 @@
 name: release
 
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
