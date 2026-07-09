@@ -393,6 +393,11 @@ struct App {
     /// This tick's computed play-hint pill (kind + fade alpha), or `None` when hidden — set by
     /// [`App::tick_play_hint`] each turn and read by `render_overlay_frame`.
     play_hint_frame: Option<panels_ui::PlayHintFrame>,
+    /// The next wake the play-hint animation needs (fade-in/out frame, or the hold-expiry that
+    /// starts the fade-out), folded into the event loop's wake so the animation self-drives —
+    /// never relying on redraw self-pump, which stalls on Linux (the pill would otherwise linger
+    /// until the next input event). `None` when static (hover-pinned) or hidden.
+    play_hint_wake: Option<Instant>,
 }
 
 /// A deferred dialog open (see [`App::pending_dialog`]). Carries only what the opener
@@ -685,6 +690,7 @@ impl App {
             play_hint_kind: 0,
             play_hint_hovered: false,
             play_hint_frame: None,
+            play_hint_wake: None,
         }
     }
 
@@ -2272,6 +2278,7 @@ impl App {
     /// Returns the pill's data for this overlay frame, and marks the overlay dirty while it's
     /// animating so the fade actually renders. `None` when nothing is shown.
     fn tick_play_hint(&mut self, now: Instant) -> Option<panels_ui::PlayHintFrame> {
+        self.play_hint_wake = None;
         let kind = self.core.play_hint_kind();
         // Fresh motion item → flash.
         if kind != 0 && self.core.play_hint_seq != self.play_hint_seq {
@@ -2314,6 +2321,20 @@ impl App {
             }
         };
         self.overlay_dirty = true; // keep re-rendering while it animates
+                                   // Schedule the next wake so the animation self-drives — the Linux redraw self-pump
+                                   // stalls, so without an explicit wake the pill freezes mid-fade until the next input
+                                   // event. Fading in/out → next frame; holding fully open → the hold-expiry that starts
+                                   // the fade-out; hover-pinned → none (a pointer event re-ticks it).
+        const ANIM_FRAME: Duration = Duration::from_millis(16);
+        self.play_hint_wake = if self.play_hint_fade_out.is_some() {
+            Some(now + ANIM_FRAME)
+        } else if self.play_hint_hovered && kind != 0 {
+            None
+        } else if now.duration_since(shown) < PLAY_HINT_FADE_IN {
+            Some(now + ANIM_FRAME)
+        } else {
+            Some(shown + PLAY_HINT_FADE_IN + PLAY_HINT_HOLD)
+        };
         Some(panels_ui::PlayHintFrame {
             kind: self.play_hint_kind,
             shortcut: self.core.shortcut_for(Action::PlayPause),
@@ -3331,10 +3352,15 @@ impl ApplicationHandler for App {
 
         // The event loop's next wake: the earliest of the core's requested wake, the shell's
         // own dialog-repaint deadline, and the overlay's egui repaint; `None` = idle.
-        let wake = [self.requested_wake, dialog_wake, overlay_wake]
-            .into_iter()
-            .flatten()
-            .min();
+        let wake = [
+            self.requested_wake,
+            dialog_wake,
+            overlay_wake,
+            self.play_hint_wake,
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         match wake {
             Some(at) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
             None => event_loop.set_control_flow(ControlFlow::Wait),

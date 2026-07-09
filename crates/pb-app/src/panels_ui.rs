@@ -1023,6 +1023,13 @@ fn lighten(c: Color32, t: f32) -> Color32 {
     Color32::from_rgb(mix(c.r()), mix(c.g()), mix(c.b()))
 }
 
+/// Scale a straight (unmultiplied) color's alpha by `f` (clamped 0..=1) — used to fade
+/// SDF-shader fills/borders, which `egui::Ui::set_opacity` can't touch (see `draw_open_button`).
+fn mul_alpha(c: Color32, f: f32) -> Color32 {
+    let a = (c.a() as f32 * f.clamp(0.0, 1.0)).round() as u8;
+    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a)
+}
+
 /// A rotating arc spinner centered on `center`, radius `r`, advanced by egui's frame time —
 /// a fading tail (full alpha at the head → transparent at the tail). Requests a throttled
 /// ~30 fps repaint so a long scan doesn't re-render the overlay every frame.
@@ -1153,6 +1160,7 @@ fn open_button_width(ui: &egui::Ui, label: &str, shortcut: &str) -> f32 {
 /// Paint an open button (`[icon] label ···· [keycap]`) into `rect` with the given `fill` — the
 /// shared body of the welcome buttons and the play hint. The nesting math (height, radius) is
 /// baked into `rect` / [`OPEN_BTN_RADIUS`] by the caller.
+#[allow(clippy::too_many_arguments)]
 fn draw_open_button(
     ui: &mut egui::Ui,
     rect: egui::Rect,
@@ -1161,8 +1169,15 @@ fn draw_open_button(
     label: &str,
     shortcut: &str,
     fill: Color32,
+    fade: f32,
 ) {
-    crate::sdf_rect::round_rect(ui, rect, OPEN_BTN_RADIUS, fill, 1.0, separator(p));
+    // The pill's fill + hairline border are drawn by an SDF shader (an egui paint *callback*),
+    // which `ui.set_opacity` — how the play hint fades its text/icons — cannot reach. So bake the
+    // fade factor into their alpha here; the text/icons below are ordinary egui shapes and fade
+    // via `set_opacity`. `fade` is 1.0 for the always-solid welcome buttons.
+    let fill = mul_alpha(fill, fade);
+    let border = mul_alpha(separator(p), fade);
+    crate::sdf_rect::round_rect(ui, rect, OPEN_BTN_RADIUS, fill, 1.0, border);
     let cy = rect.center().y;
     let ix = rect.left() + OPEN_PAD_LEFT;
     pb_ui::icon::paint_tinted(ui, sq(ix + OPEN_ICON / 2.0, cy, OPEN_ICON), icon, p.text);
@@ -1175,7 +1190,7 @@ fn draw_open_button(
         f32::INFINITY,
     );
     paint_vtext(ui, lx, cy, &g);
-    draw_keycaps(ui, p, shortcut, rect.right() - OPEN_PAD, cy);
+    draw_keycaps(ui, p, shortcut, rect.right() - OPEN_PAD, cy, fade);
 }
 
 /// One welcome open button at fixed `width`, brightening on hover. Returns whether it was
@@ -1197,7 +1212,7 @@ fn open_button(
     } else {
         p.control
     };
-    draw_open_button(ui, rect, p, icon, label, shortcut, fill);
+    draw_open_button(ui, rect, p, icon, label, shortcut, fill, 1.0);
     resp.clicked()
 }
 
@@ -1243,7 +1258,18 @@ fn play_hint_panel(
                 p.control
             };
             let fill = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), base_alpha);
-            draw_open_button(ui, rect, p, icon, "Play", &frame.shortcut, fill);
+            // The pill's SDF fill/border fade via the explicit `frame.alpha` (set_opacity, applied
+            // above for the text/icons, can't reach the shader callback).
+            draw_open_button(
+                ui,
+                rect,
+                p,
+                icon,
+                "Play",
+                &frame.shortcut,
+                fill,
+                frame.alpha,
+            );
             actions.push(PanelAction::PlayHintHover(resp.hovered()));
             if resp.clicked() {
                 actions.push(PanelAction::PlayPause);
@@ -1729,7 +1755,7 @@ fn help_column(ui: &mut egui::Ui, p: &Palette, rows: &[(String, String)], width:
 fn help_row(ui: &mut egui::Ui, p: &Palette, label: &str, shortcut: &str, col_w: f32) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(col_w, HELP_ROW_H), egui::Sense::hover());
     let cy = rect.center().y;
-    let keys_w = draw_keycaps(ui, p, shortcut, rect.right(), cy);
+    let keys_w = draw_keycaps(ui, p, shortcut, rect.right(), cy, 1.0);
     // Match the section heading's small left pad so headings and descriptions align.
     let avail = (rect.width() - HELP_TEXT_PAD - keys_w - 8.0).max(20.0);
     let g = galley(
@@ -1789,7 +1815,14 @@ fn keycaps_width(ui: &egui::Ui, shortcut: &str) -> f32 {
 /// Draw a shortcut's keycaps (and "/" separators) **right-aligned** ending at `right_x`,
 /// v-centered on `cy`. Returns the total width used. A shortcut is groups split on " / ",
 /// each group's keys split on whitespace.
-fn draw_keycaps(ui: &mut egui::Ui, p: &Palette, shortcut: &str, right_x: f32, cy: f32) -> f32 {
+fn draw_keycaps(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    shortcut: &str,
+    right_x: f32,
+    cy: f32,
+    fade: f32,
+) -> f32 {
     if shortcut.trim().is_empty() {
         return 0.0;
     }
@@ -1797,6 +1830,10 @@ fn draw_keycaps(ui: &mut egui::Ui, p: &Palette, shortcut: &str, right_x: f32, cy
     let gap = 5.0;
     let key_font = FontId::new(HELP_KEY_SIZE, FontFamily::Proportional);
     let (bg, key_col) = badge_colors(p);
+    // The keycap's fill + border are SDF-shader shapes, so — like the pill itself — they don't
+    // fade through `set_opacity`; bake `fade` in (1.0 for the static help panel).
+    let bg = mul_alpha(bg, fade);
+    let border = mul_alpha(separator(p), fade);
     let text_w = |ui: &egui::Ui, s: &str| {
         galley(ui, s, key_font.clone(), Color32::PLACEHOLDER, f32::INFINITY)
             .size()
@@ -1818,7 +1855,7 @@ fn draw_keycaps(ui: &mut egui::Ui, p: &Palette, shortcut: &str, right_x: f32, cy
                     egui::pos2(x, cy - HELP_KEYCAP_H / 2.0),
                     egui::vec2(*w, HELP_KEYCAP_H),
                 );
-                crate::sdf_rect::round_rect(ui, rect, KEYCAP_RADIUS, bg, 1.0, separator(p));
+                crate::sdf_rect::round_rect(ui, rect, KEYCAP_RADIUS, bg, 1.0, border);
                 let g = galley(ui, cap, key_font.clone(), key_col, f32::INFINITY);
                 paint_vtext(ui, rect.center().x - g.size().x / 2.0, cy, &g);
             }

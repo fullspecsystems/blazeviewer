@@ -11,6 +11,9 @@ with any pre-release suffix carried only by the tag.
 - **The Keyboard Shortcuts panel (`/` or `?`) no longer clips its last rows** on shorter windows.
   Its rows and spacing were tightened and it now uses more of the available window height, so all
   the shortcuts stay visible instead of the bottom of the list being cut off.
+- **The play hint (the `▶ Play` / Live Photo pill) now fades out cleanly.** Its background, border,
+  and shortcut keycap fade together with the label, instead of the label fading while the pill's
+  shell lingered on screen — and on Linux it no longer stays stuck until you move the mouse.
 
 ### Added
 - **Photoshop files without a flattened preview now show something instead of nothing.** A `.psd`
