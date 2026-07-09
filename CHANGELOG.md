@@ -7,11 +7,7 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
-### Fixed
-- **Panels no longer leak scrolled-off rows past their edges.** When the Folders tree or
-  the Inspector held more rows than fit, a thin slice of the next scrolled-out row was
-  painted outside the panel — into the header above and over the photo below. Rows now
-  clip exactly at the panel's edge.
+## [0.1.1] - 2026-07-08
 
 ### Added
 - **Photoshop `.psd` files now open.** PhotoBlaze shows the flattened composite Photoshop
@@ -46,6 +42,14 @@ with any pre-release suffix carried only by the tag.
   so it's now a hidden alternate that still works. F11 stays the visible secondary on Windows.
 
 ### Fixed
+- **Panels no longer stretch while you resize the window.** As you dragged the window edge, the
+  Folders tree, the Inspector, and the info line were stretched to the new window size (their
+  text and rows squished or elongated) until you let go. They now redraw at the new size every
+  step of the drag, so they keep their shape and reflow smoothly.
+- **Panels no longer leak scrolled-off rows past their edges.** When the Folders tree or
+  the Inspector held more rows than fit, a thin slice of the next scrolled-out row was
+  painted outside the panel — into the header above and over the photo below. Rows now
+  clip exactly at the panel's edge.
 - **macOS: the Folders and Details panels are easier to resize.** Hovering the draggable inner
   edge of either panel now shows the ↔ resize cursor (the photo canvas was reasserting the plain
   arrow over the whole window and hiding it), the grab zone is wider and centered on the border
@@ -725,7 +729,8 @@ Initial beta — a fast, keyboard-driven Windows photo viewer.
 - Signed WiX/MSI installer with file associations and an "Open with PhotoBlaze"
   folder verb.
 
-[Unreleased]: https://github.com/jdlien/photoblaze/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/jdlien/photoblaze/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/jdlien/photoblaze/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/jdlien/photoblaze/compare/v0.1.0-beta.4...v0.1.0
 [0.1.0-beta.4]: https://github.com/jdlien/photoblaze/compare/v0.1.0-beta.3...v0.1.0-beta.4
 [0.1.0-beta.3]: https://github.com/jdlien/photoblaze/compare/v0.1.0-beta.2...v0.1.0-beta.3

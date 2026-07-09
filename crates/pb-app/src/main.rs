@@ -1331,6 +1331,16 @@ impl App {
             }
         }
         self.overlay_dirty = true;
+        // Re-lay-out the panels *now* rather than deferring to the next `about_to_wait`.
+        // A live resize reconfigures the swapchain and repaints synchronously (see the
+        // `Resized` handler → `handle_resized`), so a deferred re-render would let that
+        // frame composite the stale, old-size overlay texture — stretched to the new
+        // viewport by the 1:1 fullscreen-triangle compositor. Only when a panel or the
+        // info line is actually shown; nothing composites otherwise.
+        if self.overlay_visible() {
+            self.render_overlay_frame();
+            self.overlay_dirty = false;
+        }
     }
 
     /// Drive the egui rich-panel overlay each `about_to_wait` turn: (re)render the panels
@@ -2937,8 +2947,15 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => self.begin_exit(),
 
             WindowEvent::Resized(size) => {
-                self.handle_resized(size.width, size.height);
+                // Resize + re-lay-out the egui overlay *before* `handle_resized`'s
+                // synchronous redraw, so the frame it presents composites the overlay at the
+                // new size instead of stretching the previous (old-size) texture across the
+                // new viewport. The overlay is drawn via a fullscreen triangle that maps the
+                // texture 1:1 to the viewport, so a size mismatch visibly stretches the panels
+                // during a live resize drag. egui already recorded the new size from the same
+                // event above (the `track` branch), so the re-layout reflows correctly.
                 self.resize_overlay(size.width, size.height);
+                self.handle_resized(size.width, size.height);
             }
 
             // The window's backing scale factor changed — a move to a monitor with a
