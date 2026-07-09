@@ -7,6 +7,14 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Added
+- **Photoshop files without a flattened preview now show something instead of nothing.** A `.psd`
+  saved *without* "Maximize Compatibility" has no merged image inside — only the layer stack — so
+  it used to open to a blank error. PhotoBlaze now falls back to the small preview thumbnail
+  Photoshop embeds in every file (the image Finder shows): low resolution, but you can see the
+  photo. On macOS, less-common PSDs (CMYK and others, when a flattened image *is* present) render
+  at full resolution via the system decoder.
+
 ## [0.1.1] - 2026-07-08
 
 ### Added
@@ -20,11 +28,7 @@ with any pre-release suffix carried only by the tag.
 - **Photoshop `.psd` files now open.** PhotoBlaze shows the flattened composite Photoshop
   saves inside the file (the default "Maximize Compatibility" merged image), so a `.psd` in a
   folder displays and flicks past just like any other photo — no Photoshop, no layer
-  flattening, no slowdown. Files saved *without* "Maximize Compatibility" (no flattened image
-  inside — only the layer stack) no longer show a blank error: PhotoBlaze falls back to the
-  preview thumbnail Photoshop embeds in every file (the small image Finder shows) — low
-  resolution, but you can see the photo. On macOS, less-common PSDs (CMYK and others, when a
-  flattened image is present) render at full resolution via the system decoder.
+  flattening, no slowdown.
 - **macOS: transparent toolbar** (Settings ▸ Appearance ▸ "Transparent toolbar", on by
   default) — a zoomed or filled photo now extends up under the translucent glass toolbar
   instead of being cut off by an opaque bar, so you see more of the image. A soft gradient
