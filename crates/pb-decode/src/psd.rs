@@ -13,15 +13,20 @@
 //!
 //! Coverage: color modes **Grayscale** and **RGB** (with or without alpha),
 //! **8- and 16-bit** depth (16-bit is narrowed to 8 for the RGBA8 texture — PSD
-//! isn't HDR), **raw or RLE** compression. Other modes (CMYK / Lab / Indexed /
-//! Duotone / Multichannel), the rare ZIP-compressed composite, and files saved
-//! without "Maximize Compatibility" (no baked composite at all) decode-error here —
-//! but **on macOS the [`ImageDecoder::decode`] impl falls back to Image I/O**
-//! (`crate::imageio::decode_sdr_p3`), which flattens the layer stack and reads those
-//! modes (the same decoder Finder/QuickLook use), so most such files still render;
-//! elsewhere they're skipped. The result runs through shared
-//! [`common::finalize_oriented`] decode-to-fit like every other backend, so a PSD is
-//! perf-neutral: one decode, held resident in the ring.
+//! isn't HDR), **raw or RLE** compression. Two fallbacks handle what that misses
+//! ([`ImageDecoder::decode`]):
+//! - A composite that *exists* but in a mode/compression we skip (CMYK / Lab / ZIP):
+//!   on macOS, hand it to Image I/O (`crate::imageio::decode_sdr_p3`), which decodes
+//!   those — it has real pixels because a composite is present.
+//! - **No composite at all** (saved without "Maximize Compatibility": only the layer
+//!   stack): neither Image I/O nor QuickLook can render it — a viewer doesn't
+//!   composite layers, and Apple's decoder returns a blank canvas — so we fall back to
+//!   the small JPEG **thumbnail** Photoshop embeds in every save
+//!   ([`embedded_thumbnail_jpeg`]). Low-res, but a real picture (the one Finder shows)
+//!   instead of a blank error, and it works on every platform.
+//!
+//! The result runs through shared [`common::finalize_oriented`] decode-to-fit like
+//! every other backend, so a PSD is perf-neutral: one decode, held resident in the ring.
 //!
 //! Routed by the `8BPS` magic ([`ImageDecoder::can_decode`] returns true), so a
 //! mislabeled name still lands here. PSD composites are already upright and PSD
@@ -55,22 +60,33 @@ impl ImageDecoder for PsdDecoder {
     }
 
     fn decode(&self, req: &DecodeRequest) -> Result<DecodedImage, DecodeError> {
-        match decode_composite(req.bytes) {
-            // Orientation 1: PSD composites are upright and the format carries no EXIF
-            // orientation. `finalize_oriented` then decode-to-fit downscales to `fit`.
-            Ok((rgba, w, h)) => common::finalize_oriented(rgba, w, h, 1, "PSD", req.fit, false),
-            // No usable in-crate composite: either the file was saved without Photoshop's
-            // "Maximize Compatibility" (no flattened merged image — only the layer stack), or
-            // it's a mode/compression our ~1-page reader doesn't cover (CMYK/Lab, ZIP). On
-            // macOS, Image I/O *flattens the layer stack itself* and decodes those modes — the
-            // very decoder Finder/QuickLook use — so fall back to it before giving up. If Image
-            // I/O also fails, surface the original (more specific) reader error. Windows/Linux
-            // keep the clean error; the embedded-thumbnail preview is a separate follow-up.
+        // 1) A real merged composite in a mode/compression we read (RGB/Gray, 8/16-bit,
+        //    raw/RLE): full-res, fast — the common "Maximize Compatibility" case.
+        if !composite_is_placeholder(req.bytes) {
+            if let Ok((rgba, w, h)) = decode_composite(req.bytes) {
+                // Orientation 1: PSD composites are upright and carry no EXIF orientation.
+                return common::finalize_oriented(rgba, w, h, 1, "PSD", req.fit, false);
+            }
+            // A composite exists but in a mode/compression our ~1-page reader skips (CMYK/Lab,
+            // ZIP). macOS Image I/O decodes those — and crucially it has real pixels to return
+            // *because a composite is present* (unlike the no-composite case below, where it
+            // just yields a blank canvas). Try it; on failure, drop to the thumbnail.
             #[cfg(target_os = "macos")]
-            Err(e) => crate::imageio::decode_sdr_p3(req, "PSD").map_err(|_| e),
-            #[cfg(not(target_os = "macos"))]
-            Err(e) => Err(e),
+            if let Ok(img) = crate::imageio::decode_sdr_p3(req, "PSD") {
+                return Ok(img);
+            }
         }
+        // 2) No usable full image — the file was saved without "Maximize Compatibility" (no
+        //    flattened image at all, only the layer stack; Image I/O and QuickLook both render
+        //    it blank), or every full path failed. Fall back to the small JPEG thumbnail
+        //    Photoshop writes into *every* save: low-res, but a real picture beats a blank
+        //    error. Cross-platform — no OS decoder needed (it's the image Finder shows).
+        if let Some(jpeg) = embedded_thumbnail_jpeg(req.bytes) {
+            return crate::decode_bytes(jpeg, req.fit, false);
+        }
+        Err(DecodeError::Corrupt(
+            "psd: no merged composite and no embedded thumbnail".into(),
+        ))
     }
 
     fn name(&self) -> &'static str {
@@ -127,6 +143,51 @@ fn image_data_offset(bytes: &[u8]) -> Option<usize> {
 
 /// The "Version Info" image resource (ID 1057).
 const RESOURCE_VERSION_INFO: u16 = 1057;
+
+/// Thumbnail image resources: 1036 (RGB, current) and 1033 (BGR, Photoshop 4.0). Both wrap a
+/// small JFIF stream behind a fixed 28-byte header (format/width/height/rowbytes/size/…). The
+/// embedded JPEG is byte-order-agnostic, so we read either the same way.
+const RESOURCE_THUMBNAIL: u16 = 1036;
+const RESOURCE_THUMBNAIL_V4: u16 = 1033;
+/// Bytes of thumbnail-resource header before the JFIF stream begins.
+const THUMBNAIL_HEADER_LEN: usize = 28;
+/// Thumbnail `format` field value for a JFIF (JPEG) payload (`kJpegRGB`).
+const THUMBNAIL_FORMAT_JPEG: u32 = 1;
+
+/// The embedded thumbnail's JPEG bytes (image resource 1036/1033), if present — the small
+/// preview Photoshop writes into *every* save, even one without "Maximize Compatibility". It's
+/// the reliable last-resort image when the full composite can't be decoded (no merged image, or
+/// a mode/compression we don't read): low-res, but a real picture instead of a blank error, and
+/// it works on every platform (no OS decoder needed). Walks the image-resources section the same
+/// way [`composite_is_placeholder`] does; bounds-checked, so a hostile file yields `None`.
+fn embedded_thumbnail_jpeg(bytes: &[u8]) -> Option<&[u8]> {
+    let cm_len = be_u32(bytes, HEADER_LEN)? as usize;
+    let ir_len_off = HEADER_LEN + 4 + cm_len;
+    let len = be_u32(bytes, ir_len_off)? as usize;
+    let start = ir_len_off + 4;
+    let end = start.saturating_add(len).min(bytes.len());
+    let mut p = start;
+    while p + 6 <= end {
+        if &bytes[p..p + 4] != b"8BIM" {
+            break;
+        }
+        let id = be_u16(bytes, p + 4)?;
+        p += 6;
+        // Pascal name: 1 length byte + name, padded so (len byte + name) is even.
+        let name_span = 1 + *bytes.get(p)? as usize;
+        p += name_span + (name_span & 1);
+        let size = be_u32(bytes, p)? as usize;
+        p += 4; // p now at the resource data
+        if id == RESOURCE_THUMBNAIL || id == RESOURCE_THUMBNAIL_V4 {
+            let format = be_u32(bytes, p)?;
+            if format == THUMBNAIL_FORMAT_JPEG && size > THUMBNAIL_HEADER_LEN {
+                return bytes.get(p + THUMBNAIL_HEADER_LEN..p + size);
+            }
+        }
+        p = p.checked_add(size + (size & 1))?; // resource payloads are padded to even
+    }
+    None
+}
 
 /// Whether the file's Version-Info resource (1057) declares the merged composite a
 /// **placeholder** (`hasRealMergedData == 0`) — the authoritative "saved without
@@ -372,6 +433,52 @@ mod tests {
         assert!(d.can_decode(RGB8_RLE));
         assert!(!d.can_decode(&[0xFF, 0xD8, 0xFF])); // JPEG
         assert!(!d.can_decode(b"8BP")); // too short / not the full signature
+    }
+
+    /// Assemble a minimal PSD (header + empty color-mode-data + the given image-resources
+    /// blob). Enough for the resource-walking helpers; no layer/image-data sections needed.
+    fn psd_with_resources(resources: &[u8]) -> Vec<u8> {
+        let mut p = Vec::new();
+        p.extend_from_slice(b"8BPS");
+        p.extend_from_slice(&1u16.to_be_bytes()); // version 1
+        p.extend_from_slice(&[0u8; 6]); // reserved
+        p.extend_from_slice(&3u16.to_be_bytes()); // channels
+        p.extend_from_slice(&2u32.to_be_bytes()); // height
+        p.extend_from_slice(&3u32.to_be_bytes()); // width
+        p.extend_from_slice(&8u16.to_be_bytes()); // depth
+        p.extend_from_slice(&3u16.to_be_bytes()); // mode RGB
+        p.extend_from_slice(&0u32.to_be_bytes()); // color-mode-data length
+        p.extend_from_slice(&(resources.len() as u32).to_be_bytes());
+        p.extend_from_slice(resources);
+        p
+    }
+
+    #[test]
+    fn extracts_embedded_jpeg_thumbnail() {
+        let jpeg: &[u8] = b"\xFF\xD8\xFF\xE0THUMB-JPEG\xFF\xD9"; // stand-in JFIF stream
+                                                                 // Thumbnail resource data: 28-byte header (format=JPEG, rest arbitrary) + the JPEG.
+        let mut data = THUMBNAIL_FORMAT_JPEG.to_be_bytes().to_vec();
+        data.extend_from_slice(&[0u8; THUMBNAIL_HEADER_LEN - 4]);
+        data.extend_from_slice(jpeg);
+        // One "8BIM" resource, id 1036, empty (even-padded) Pascal name, then size + data.
+        let mut res = Vec::new();
+        res.extend_from_slice(b"8BIM");
+        res.extend_from_slice(&RESOURCE_THUMBNAIL.to_be_bytes());
+        res.extend_from_slice(&[0u8, 0u8]); // empty name, padded to even
+        res.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        res.extend_from_slice(&data);
+        if data.len() % 2 == 1 {
+            res.push(0);
+        }
+
+        let psd = psd_with_resources(&res);
+        let got = embedded_thumbnail_jpeg(&psd).expect("thumbnail found");
+        assert_eq!(
+            got, jpeg,
+            "extracts exactly the JFIF stream after the 28-byte header"
+        );
+        // A file with no thumbnail resource yields None (fall through to the real error).
+        assert!(embedded_thumbnail_jpeg(&psd_with_resources(&[])).is_none());
     }
 
     /// Every RGB compression/depth combination decodes to the identical exact
