@@ -547,6 +547,36 @@
             "status": "pending"
           }
         ]
+      },
+      {
+        "id": 69,
+        "title": "Live Photo motion: start playing before the whole .mov is decoded (streaming + decode-ahead)",
+        "description": "Owner ask (2026-07-09): pressing P on a Live Photo takes several seconds to start because the motion .mov is decoded to a COMPLETE Animation before playback begins. decode_motion_job (crates/pb-app-core/src/engine.rs:245) calls pb_decode::decode_live_motion(path, edge) which decodes EVERY frame up front (ff_live.rs on Linux does a full FFmpeg decode of all ~44-90 frames; the Windows Media Foundation and macOS AVFoundation backends have their own latency). Two wins: (a) DECODE-AHEAD — after a short dwell (~1-2s) on a Live Photo still, eagerly kick the motion decode so P is instant when pressed (there is already an AnimWant eager-prep path via start_animation_decode + the `prepared` stash — confirm it covers Live Photos and tune the dwell); and (b) STREAM-PLAY — begin playback as soon as the first frame(s) are ready and keep decoding the rest in the background, instead of blocking on the full decode. This mirrors the app's core 'preview-first then refine' principle (CLAUDE.md) which currently is NOT applied to motion.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "details": "Today decode_live_motion returns a fully-populated Animation (all AnimFrames in RAM) and the pump only starts once it lands (poll_anim_decode). To stream: introduce a progressive decode seam — e.g. the decoder pushes frames over a channel (or into a shared growable frame buffer + a 'complete' flag) and the playback pump plays whatever is available, advancing as more arrive; if decode outpaces playback (it will — ~3s clip) it's seamless, and if it lags the pump holds the last ready frame. Keep it behind the same decode_live_motion seam so all three backends (Linux ff_live.rs, Windows mf_video.rs, macOS livephoto.rs) can adopt it; ff_live.rs is the easy first mover since we own the frame loop (decode_video_inner already builds frames Vec incrementally — hand them out as they're produced). Note the audio path (live_audio.rs / decode_motion_audio) already streams via pw-cat on Linux and native players elsewhere, so audio start is not the bottleneck — this is about the VIDEO frames. Decode-ahead (a): verify start_animation_decode(item, AnimWant::Prep) fires for Live-Photo items after the display dwell and stashes into `prepared` so P rebinds instantly; if motion isn't eagerly prepped today, wire it (respect the prefetch budget / don't decode motion for items being scrubbed past). Privacy #2 holds: motion frames stay RAM-only, dropped on revert/exit. Perf: never block the event loop; decode stays on the worker pool; the pump reads ready frames on the tick. Measure keypress→first-motion-frame before/after.",
+        "testStrategy": "Manual: on Linux (WGPU_BACKEND=gl, --features livephoto) open a Live Photo, press P, confirm the first motion frame appears in well under the current several-second wait (ideally ~immediately once decode-ahead has run), and the rest plays smoothly without a stutter at the streaming boundary. Confirm decode-ahead: dwell ~2s on a Live Photo, then P — should be effectively instant. Confirm graceful behavior when navigating away mid-decode (no crash, frames freed). Cross-check Windows/macOS backends still work (even if they adopt streaming later). Pure-ish: if a streaming buffer type lands in pb-app-core, unit-test that the pump plays available frames and clamps to the last ready frame when decode lags.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Progressive decode seam + streaming pump",
+            "description": "Add a streaming variant behind decode_live_motion (channel or shared growable frame buffer + complete flag); make the playback pump play ready frames and advance as more arrive, holding the last ready frame if decode lags. Implement first in ff_live.rs (we own the frame loop).",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "Decode-ahead on dwell",
+            "description": "Ensure a Live Photo's motion is eagerly decoded via start_animation_decode/AnimWant after a ~1-2s display dwell and stashed in `prepared`, so P rebinds instantly. Respect the prefetch budget; don't decode motion for items being scrubbed past.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "Measure keypress->first-motion-frame",
+            "description": "Instrument the P->first-frame latency (reuse the existing timing hooks) and report before/after for the Linux backend; sanity-check no event-loop blocking and frames free on nav-away.",
+            "status": "pending"
+          }
+        ]
       }
     ]
   }
