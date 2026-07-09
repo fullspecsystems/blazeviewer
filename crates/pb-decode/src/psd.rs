@@ -14,10 +14,14 @@
 //! Coverage: color modes **Grayscale** and **RGB** (with or without alpha),
 //! **8- and 16-bit** depth (16-bit is narrowed to 8 for the RGBA8 texture — PSD
 //! isn't HDR), **raw or RLE** compression. Other modes (CMYK / Lab / Indexed /
-//! Duotone / Multichannel) and the rare ZIP-compressed composite decode-error
-//! cleanly, so the viewer skips them rather than showing wrong colors. The result
-//! runs through shared [`common::finalize_oriented`] decode-to-fit like every other
-//! backend, so a PSD is perf-neutral: one decode, held resident in the ring.
+//! Duotone / Multichannel), the rare ZIP-compressed composite, and files saved
+//! without "Maximize Compatibility" (no baked composite at all) decode-error here —
+//! but **on macOS the [`ImageDecoder::decode`] impl falls back to Image I/O**
+//! (`crate::imageio::decode_sdr_p3`), which flattens the layer stack and reads those
+//! modes (the same decoder Finder/QuickLook use), so most such files still render;
+//! elsewhere they're skipped. The result runs through shared
+//! [`common::finalize_oriented`] decode-to-fit like every other backend, so a PSD is
+//! perf-neutral: one decode, held resident in the ring.
 //!
 //! Routed by the `8BPS` magic ([`ImageDecoder::can_decode`] returns true), so a
 //! mislabeled name still lands here. PSD composites are already upright and PSD
@@ -51,10 +55,22 @@ impl ImageDecoder for PsdDecoder {
     }
 
     fn decode(&self, req: &DecodeRequest) -> Result<DecodedImage, DecodeError> {
-        let (rgba, w, h) = decode_composite(req.bytes)?;
-        // Orientation 1: PSD composites are upright and the format carries no EXIF
-        // orientation. `finalize_oriented` then decode-to-fit downscales to `fit`.
-        common::finalize_oriented(rgba, w, h, 1, "PSD", req.fit, false)
+        match decode_composite(req.bytes) {
+            // Orientation 1: PSD composites are upright and the format carries no EXIF
+            // orientation. `finalize_oriented` then decode-to-fit downscales to `fit`.
+            Ok((rgba, w, h)) => common::finalize_oriented(rgba, w, h, 1, "PSD", req.fit, false),
+            // No usable in-crate composite: either the file was saved without Photoshop's
+            // "Maximize Compatibility" (no flattened merged image — only the layer stack), or
+            // it's a mode/compression our ~1-page reader doesn't cover (CMYK/Lab, ZIP). On
+            // macOS, Image I/O *flattens the layer stack itself* and decodes those modes — the
+            // very decoder Finder/QuickLook use — so fall back to it before giving up. If Image
+            // I/O also fails, surface the original (more specific) reader error. Windows/Linux
+            // keep the clean error; the embedded-thumbnail preview is a separate follow-up.
+            #[cfg(target_os = "macos")]
+            Err(e) => crate::imageio::decode_sdr_p3(req, "PSD").map_err(|_| e),
+            #[cfg(not(target_os = "macos"))]
+            Err(e) => Err(e),
+        }
     }
 
     fn name(&self) -> &'static str {

@@ -48,27 +48,33 @@ impl ImageDecoder for ImageIoDecoder {
 
         // SDR: draw into a Display-P3 8-bit context (preserves wide gamut for any
         // source), then carry the fixed P3 → BT.709 transform.
-        let (rgba, w, h, orient) =
-            unsafe { imageio_decode_rgba8_p3(req.bytes) }.ok_or_else(|| {
-                DecodeError::Corrupt(
-                    "Image I/O: decode failed (unsupported or corrupt HEIC/AVIF)".into(),
-                )
-            })?;
-        // `CGImageSourceCreateImageAtIndex` does NOT bake orientation — and unlike a
-        // plain JPEG, HEIC/AVIF often carry rotation in the ISOBMFF `irot` transform,
-        // not EXIF (so kamadak would read 1 and the photo shows sideways). We read
-        // ImageIO's own `kCGImagePropertyOrientation`, which combines `irot` + EXIF,
-        // and apply it here (pass it through, not the container bytes).
-        let mut img = common::finalize_oriented(rgba, w, h, orient, codec, req.fit, false)?;
-        // We forced a Display-P3 draw, so pixels are P3-encoded regardless of the
-        // source profile — carry the matching P3(SMPTE-432) → BT.709 + sRGB-TRC transform.
-        img.color = ColorTransform::from_cicp(12, 13, 0, true);
-        Ok(img)
+        decode_sdr_p3(req, codec)
     }
 
     fn name(&self) -> &'static str {
         "imageio"
     }
+}
+
+/// The SDR Image I/O decode path, shared by `ImageIoDecoder` (HEIC/AVIF) and the PSD
+/// fallback (`psd.rs`): decode via `CGImageSource` into a Display-P3 8-bit buffer, apply
+/// Image I/O's own orientation (`kCGImagePropertyOrientation` = EXIF + container `irot`,
+/// which `CGImageSourceCreateImageAtIndex` does not bake in), decode-to-fit, and carry the
+/// fixed P3 → BT.709 transform (pixels are P3-encoded regardless of the source profile
+/// because we forced a P3 draw). `codec` is only the label `finalize_oriented` records.
+///
+/// Format-agnostic — `CGImageSource` decodes any type Image I/O supports — so PSD routes
+/// here when our in-crate reader can't produce a composite (Image I/O flattens the layer
+/// stack and reads CMYK/Lab/ZIP that the ~1-page reader doesn't).
+pub(crate) fn decode_sdr_p3(
+    req: &DecodeRequest,
+    codec: &'static str,
+) -> Result<DecodedImage, DecodeError> {
+    let (rgba, w, h, orient) = unsafe { imageio_decode_rgba8_p3(req.bytes) }
+        .ok_or_else(|| DecodeError::Corrupt("Image I/O: decode failed".into()))?;
+    let mut img = common::finalize_oriented(rgba, w, h, orient, codec, req.fit, false)?;
+    img.color = ColorTransform::from_cicp(12, 13, 0, true);
+    Ok(img)
 }
 
 // --- Minimal CoreFoundation / Image I/O / CoreGraphics FFI -------------------------

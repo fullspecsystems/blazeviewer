@@ -20,8 +20,9 @@ with any pre-release suffix carried only by the tag.
 - **Photoshop `.psd` files now open.** PhotoBlaze shows the flattened composite Photoshop
   saves inside the file (the default "Maximize Compatibility" merged image), so a `.psd` in a
   folder displays and flicks past just like any other photo — no Photoshop, no layer
-  flattening, no slowdown. Files saved without an embedded composite are skipped cleanly rather
-  than shown blank.
+  flattening, no slowdown. On macOS, files saved *without* "Maximize Compatibility" (which have
+  no flattened image inside — only the layer stack) still open: PhotoBlaze falls back to the
+  system image decoder, which flattens them. CMYK and other less-common PSDs open the same way.
 - **macOS: transparent toolbar** (Settings ▸ Appearance ▸ "Transparent toolbar", on by
   default) — a zoomed or filled photo now extends up under the translucent glass toolbar
   instead of being cut off by an opaque bar, so you see more of the image. A soft gradient
