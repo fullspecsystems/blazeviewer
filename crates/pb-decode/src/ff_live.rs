@@ -28,7 +28,7 @@ use ff::media::Type;
 use ff::software::scaling::{Context as Scaler, Flags as ScaleFlags};
 use ffmpeg_next as ff;
 
-use crate::{common, AnimFrame, Animation, AnimationKind, ColorTransform, DecodeError, FitBox};
+use crate::{AnimFrame, Animation, AnimationKind, ColorTransform, DecodeError};
 
 /// Safety cap on decoded frames — a real Live Photo is ~3 s, so this is only a runaway
 /// guard (a malformed/long `.mov`). Hitting it flags the result truncated. Mirrors the
@@ -95,21 +95,28 @@ fn decode_video_inner(
         )));
     }
 
-    // swscale native YUV/etc → RGBA at native size; rotation + decode-to-fit run after.
+    // Decode-to-fit **in swscale**: scale straight to the target during the YUV→RGBA pass
+    // (cheap, SIMD, one pass we already run) instead of decoding at native res and then doing a
+    // separate per-frame Lanczos downscale — which measured ~44% of decode time. Rotation only
+    // swaps w/h, so the rotated long edge is `max(dw, dh)` either way; pick the scale that lands
+    // it within `max_long_edge` (never upscale). The rotate below then runs on the smaller frame.
+    let long = dw.max(dh);
+    let s = if max_long_edge > 0 && long > max_long_edge {
+        max_long_edge as f64 / long as f64
+    } else {
+        1.0
+    };
+    let sw = ((dw as f64 * s).round() as u32).max(1);
+    let sh = ((dh as f64 * s).round() as u32).max(1);
     let mut scaler = Scaler::get(
         decoder.format(),
         dw,
         dh,
         Pixel::RGBA,
-        dw,
-        dh,
+        sw,
+        sh,
         ScaleFlags::BILINEAR,
     )?;
-
-    let fit = FitBox {
-        max_width: max_long_edge.max(1),
-        max_height: max_long_edge.max(1),
-    };
 
     let mut frames: Vec<AnimFrame> = Vec::new();
     let mut timestamps: Vec<f64> = Vec::new();
@@ -129,11 +136,8 @@ fn decode_video_inner(
             let mut rgba_frame = ff::frame::Video::empty();
             scaler.run(&decoded, &mut rgba_frame)?;
             let rgba = tight_rgba(&rgba_frame);
-            let (rgba, w, h) = rotate_rgba(rgba, dw, dh, rotation);
-            let (rgba, fw, fh) = match common::downscale_to_fit(rgba, w, h, fit) {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
+            // swscale already scaled to fit, so rotate is the only post-step (no Lanczos pass).
+            let (rgba, fw, fh) = rotate_rgba(rgba, sw, sh, rotation);
             let ts = decoded.timestamp().map(|t| t as f64 * time_base);
             timestamps.push(ts.unwrap_or(f64::NAN));
             frames.push(AnimFrame {
@@ -213,57 +217,41 @@ fn tight_rgba(frame: &ff::frame::Video) -> Vec<u8> {
 }
 
 /// Rotate a tightly-packed RGBA8 buffer by `deg` (0/90/180/270, clockwise), returning the
-/// rotated buffer and its new dimensions. Portrait iPhone Live Photos carry a 90°/270°
-/// display matrix; ignoring it shows them sideways.
+/// rotated buffer and its new dimensions. Portrait iPhone Live Photos carry a 90°/270° display
+/// matrix; ignoring it shows them sideways.
+///
+/// Copies whole 4-byte pixels via raw pointers, iterating the destination in row order
+/// (sequential writes) — this runs on every motion frame and was ~24% of decode time as a
+/// bounds-checked scalar loop building a `[u8; 4]` per pixel.
 fn rotate_rgba(src: Vec<u8>, w: u32, h: u32, deg: i32) -> (Vec<u8>, u32, u32) {
     let (w, h) = (w as usize, h as usize);
-    let get = |x: usize, y: usize, s: &[u8]| {
-        let i = (y * w + x) * 4;
-        [s[i], s[i + 1], s[i + 2], s[i + 3]]
-    };
-    match deg.rem_euclid(360) {
-        90 => {
-            let (nw, nh) = (h, w);
-            let mut out = vec![0u8; nw * nh * 4];
-            for y in 0..h {
-                for x in 0..w {
-                    let px = get(x, y, &src);
-                    // clockwise 90°: dst is h×w (nw=h, nh=w); src (x,y) -> dst (h-1-y, x).
-                    let (dx, dy) = (nw - 1 - y, x);
-                    let di = (dy * nw + dx) * 4;
-                    out[di..di + 4].copy_from_slice(&px);
-                }
-            }
-            (out, nw as u32, nh as u32)
-        }
-        180 => {
-            let mut out = vec![0u8; w * h * 4];
-            for y in 0..h {
-                for x in 0..w {
-                    let px = get(x, y, &src);
-                    let (dx, dy) = (w - 1 - x, h - 1 - y);
-                    let di = (dy * w + dx) * 4;
-                    out[di..di + 4].copy_from_slice(&px);
-                }
-            }
-            (out, w as u32, h as u32)
-        }
-        270 => {
-            let (nw, nh) = (h, w);
-            let mut out = vec![0u8; nw * nh * 4];
-            for y in 0..h {
-                for x in 0..w {
-                    let px = get(x, y, &src);
-                    // clockwise 270° (= 90° CCW): dst is h×w (nw=h, nh=w); src (x,y) -> dst (y, w-1-x).
-                    let (dx, dy) = (y, nh - 1 - x);
-                    let di = (dy * nw + dx) * 4;
-                    out[di..di + 4].copy_from_slice(&px);
-                }
-            }
-            (out, nw as u32, nh as u32)
-        }
-        _ => (src, w as u32, h as u32),
+    let d = deg.rem_euclid(360);
+    if d == 0 || w == 0 || h == 0 {
+        return (src, w as u32, h as u32);
     }
+    // 90°/270° swap the axes; 180° keeps them.
+    let (nw, nh) = if d == 180 { (w, h) } else { (h, w) };
+    let mut out = vec![0u8; nw * nh * 4];
+    let sp = src.as_ptr();
+    let dp = out.as_mut_ptr();
+    for dy in 0..nh {
+        for dx in 0..nw {
+            // dst (dx,dy) ← src (x,y): each clockwise mapping, inverted. nw==h for 90/270.
+            let (x, y) = match d {
+                90 => (dy, nw - 1 - dx),
+                180 => (w - 1 - dx, h - 1 - dy),
+                _ => (nh - 1 - dy, dx), // 270 (nh == w)
+            };
+            let si = (y * w + x) * 4;
+            let di = (dy * nw + dx) * 4;
+            // SAFETY: by construction x<w, y<h ⇒ si+4 ≤ w·h·4 = src.len(); dx<nw, dy<nh ⇒
+            // di+4 ≤ nw·nh·4 = out.len(). Ranges never overlap the ends.
+            unsafe {
+                std::ptr::copy_nonoverlapping(sp.add(si), dp.add(di), 4);
+            }
+        }
+    }
+    (out, nw as u32, nh as u32)
 }
 
 /// The clockwise display rotation (0/90/180/270) from the video stream's DISPLAYMATRIX
