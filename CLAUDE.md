@@ -441,7 +441,10 @@ tag / GitHub Release for Windows**.
 
 **macOS** is **built locally on the owner's Mac** via `scripts/release-macos.sh` (Developer ID +
 notarization), then published to `downloads.fullspec.ca/photoblaze/mac` with
-`scripts/release-mac-upload.ps1` (which repoints the `PhotoBlaze-latest.dmg` symlink). Hosted
+`scripts/release-mac-upload.sh` — which scp's the DMG + appcast **straight from the Mac** to
+jdlien.com and repoints the `PhotoBlaze-latest.dmg` symlink (the remote `mac/` dir is
+jdlien-owned, no sudo). No Windows detour: `scripts/release-mac-upload.ps1` is the equivalent for
+running the upload from the Windows box, but the whole Mac release now stays on the Mac. Hosted
 GitHub Actions is too expensive to use, so `.github/workflows/release.yml` — which builds the DMG
 on a hosted `macos-15` runner — is **`workflow_dispatch`-only (dormant)**; a `v*` tag no longer
 auto-triggers it. A GitHub Release for the DMG, if wanted, is created manually. Signing setup is
@@ -481,10 +484,12 @@ To cut a release:
    `Permission denied (publickey)`. The build + sign + pack still succeed there; only the `-Upload`
    scp/rsync needs native PowerShell (the feed is already in `dist\feed`, so a retry is upload-only).
    Prune superseded packages on the server periodically.
-3. **macOS (on your Mac):** `./scripts/release-macos.sh --release` builds the signed + notarized
-   DMG **and** EdDSA-signs it into `dist/appcast.xml` (Sparkle auto-update, task #65), then `pwsh
-   scripts/release-mac-upload.ps1` publishes the DMG **and the appcast** to the feed (same
-   native-PowerShell caveat as Windows). A GitHub Release is **optional and manual** — nothing auto-builds from a tag:
+3. **macOS (all on your Mac):** `./scripts/release-macos.sh --release` builds the signed +
+   notarized DMG **and** EdDSA-signs it into `dist/appcast.xml` (Sparkle auto-update, task #65),
+   then `./scripts/release-mac-upload.sh` scp's the DMG **and the appcast** to jdlien.com and
+   repoints `PhotoBlaze-latest.dmg` — no Windows box needed. (Optionally verify the seed's updater
+   first with `./scripts/test-sparkle-update.sh dist/PhotoBlaze-<version>.dmg`.) A GitHub Release is
+   **optional and manual** — nothing auto-builds from a tag:
    `gh release create v<version> dist/PhotoBlaze-<version>.dmg* --notes-file <(bash
    scripts/changelog-section.sh <version>)`. Write **real, curated, user-facing** CHANGELOG notes
    before tagging so `changelog-section.sh` has a body. **Never** enable `generate_release_notes`.
