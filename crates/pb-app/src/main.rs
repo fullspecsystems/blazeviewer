@@ -1575,8 +1575,22 @@ impl App {
             // composition on focus changes / transitions and flash the legacy
             // basic-theme caption. A plain borderless window stays composited.
             // (The monitor sizing itself happens below, *after* the menu is hidden.)
-            window.set_fullscreen(None);
-            window.set_decorations(false);
+            //
+            // Linux (X11/Wayland) is the exception: a manually-sized borderless
+            // window can't paint over the compositor's reserved panel zones (the
+            // GNOME top bar / taskbar), so it never truly covers the screen. Use
+            // the real fullscreen API there — the DWM concern above is Windows-only,
+            // and macOS reclaims its chrome via `macos_chrome::set_chromeless`.
+            #[cfg(all(unix, not(target_os = "macos")))]
+            {
+                window.set_decorations(false);
+                window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+            }
+            #[cfg(not(all(unix, not(target_os = "macos"))))]
+            {
+                window.set_fullscreen(None);
+                window.set_decorations(false);
+            }
         }
         // macOS: auto-hide the menu bar + Dock in borderless fullscreen so it reclaims
         // that strip (chromeless) while staying in the current Space; restore them when
@@ -1618,14 +1632,22 @@ impl App {
                 }
             }
         } else if let Some(mon) = window.current_monitor() {
+            // Linux drove real fullscreen above; the compositor owns the surface size and
+            // emits an async `Resized` the normal path handles — never hand-size it here (a
+            // manual `request_inner_size` while fullscreen fights the compositor).
+            #[cfg(all(unix, not(target_os = "macos")))]
+            let _ = mon;
             // Size the borderless window to exactly the monitor — done here, *after* the
             // menu is hidden, so the outer bounds match the monitor instead of hanging one
             // menu-bar-height below it (task #57). If winit applied the resize synchronously
             // it returns the new size and emits no `Resized` event — feed it to the core
             // ourselves (see `handle_resized`), else overlays stay placed for the old surface.
-            window.set_outer_position(mon.position());
-            if let Some(new) = window.request_inner_size(mon.size()) {
-                self.handle_resized(new.width, new.height);
+            #[cfg(not(all(unix, not(target_os = "macos"))))]
+            {
+                window.set_outer_position(mon.position());
+                if let Some(new) = window.request_inner_size(mon.size()) {
+                    self.handle_resized(new.width, new.height);
+                }
             }
         }
     }

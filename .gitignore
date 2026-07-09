@@ -32,3 +32,6 @@ Thumbs.db
 
 # Local release credentials (release-macos.sh / release-windows.ps1 source this; see .env.release.example)
 .env.release
+
+# Local scratch/smoke-test image sets (generated, not the pinned benchmark corpus)
+scratch-corpus/

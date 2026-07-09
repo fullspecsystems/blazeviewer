@@ -7,6 +7,11 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Fixed
+- **The Keyboard Shortcuts panel (`/` or `?`) no longer clips its last rows** on shorter windows.
+  Its rows and spacing were tightened and it now uses more of the available window height, so all
+  the shortcuts stay visible instead of the bottom of the list being cut off.
+
 ### Added
 - **Photoshop files without a flattened preview now show something instead of nothing.** A `.psd`
   saved *without* "Maximize Compatibility" has no merged image inside — only the layer stack — so

@@ -43,11 +43,14 @@ const DETAIL_HEADER_SIZE: f32 = 13.5;
 /// touch smaller. Rows are a fixed height with tight spacing so the table doesn't sprawl.
 const HELP_TEXT_SIZE: f32 = 13.5;
 const HELP_KEY_SIZE: f32 = 12.0;
-const HELP_ROW_H: f32 = 23.0;
+const HELP_ROW_H: f32 = 21.0;
 const HELP_KEYCAP_H: f32 = 18.0;
 /// Keycap corner radius (shared by the Help rows and the welcome buttons' nesting math).
 const KEYCAP_RADIUS: f32 = 5.0;
-const HELP_SECTION_H: f32 = 24.0;
+const HELP_SECTION_H: f32 = 22.0;
+/// Top/bottom breathing margin for the (tall) Help panel — smaller than the corner panels'
+/// `EDGE` so its long content fits at ordinary window heights (see `help_panel`).
+const HELP_EDGE: f32 = 8.0;
 /// Small left pad for help text (section headings + descriptions) inside the content box so
 /// they don't jam against the section bar's left edge — applied equally so they stay aligned.
 const HELP_TEXT_PAD: f32 = 4.0;
@@ -1625,8 +1628,13 @@ fn help_panel(
     help: &HelpPanel,
     actions: &mut Vec<PanelAction>,
 ) {
-    // Help is centered (not top-anchored), so it doesn't move for the menu bar.
-    let max_h = panel_max_height(ctx, 220.0, 0.0, duck);
+    // Help is centered (not top-anchored), so it doesn't move for the menu bar. It's the
+    // tallest panel (the long "Files & App" section), so give it a smaller top/bottom
+    // breathing margin than the corner panels' `EDGE` — otherwise 2·EDGE (48px) plus the
+    // menu-bar strip leaves too little for the content and it clips at ordinary window
+    // heights. `HELP_EDGE` still keeps it off the very edges; `scroll_body` handles any
+    // remaining overflow on a genuinely short window.
+    let max_h = (ctx.screen_rect().height() - 2.0 * HELP_EDGE - duck).max(220.0);
     sdf_panel(
         ctx,
         p,
@@ -1648,9 +1656,9 @@ fn help_panel(
             groove(ui, p);
             scroll_body(ui, "help", max_h - HEADER_H, |ui| {
                 egui::Frame::none()
-                    .inner_margin(egui::Margin::symmetric(18.0, 14.0))
+                    .inner_margin(egui::Margin::symmetric(18.0, 10.0))
                     .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 14.0;
+                        ui.spacing_mut().item_spacing.y = 10.0;
                         for section in &help.sections {
                             help_section(ui, p, section);
                         }
