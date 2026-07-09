@@ -128,14 +128,47 @@ pub fn detect_animation(bytes: &[u8]) -> Option<AnimationKind> {
     if is_animated_webp(bytes) {
         return Some(AnimationKind::Webp);
     }
-    // ISOBMFF image sequences (animated AVIF / HEIC) decode only through the macOS
-    // Image I/O backend, so they're only worth flagging there. A still AVIF/HEIC
+    // ISOBMFF image sequences (animated AVIF `avis` / HEIC `msf1`). A still AVIF/HEIC
     // (brand `avif`/`heic`/`mif1`) is NOT a sequence and stays on the still path.
+    // Decodable on macOS (Image I/O) and on Linux with `livephoto` (the FFmpeg video
+    // pipeline) — there's no pure-Rust AV1/HEVC sequence decoder, so elsewhere it's not
+    // flagged (it would only produce a dead "▶" with nothing to play).
     #[cfg(target_os = "macos")]
     if crate::isobmff::isobmff_is_sequence(bytes) {
         return Some(AnimationKind::Heif);
     }
+    #[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
+    if isobmff_image_sequence(bytes) {
+        return Some(AnimationKind::Heif);
+    }
     None
+}
+
+/// Whether `bytes` is an ISOBMFF image **sequence** (animated AVIF `avis` / HEIC `msf1`):
+/// major or a compatible brand is a sequence brand. A self-contained copy of the sniff in
+/// `isobmff` (that module only compiles with the HEIC backends), so animated-AVIF detection
+/// on Linux doesn't drag the whole `colr`-parsing module into a libheif-less build.
+#[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
+fn isobmff_image_sequence(bytes: &[u8]) -> bool {
+    if bytes.len() < 16 || &bytes[4..8] != b"ftyp" {
+        return false;
+    }
+    let is_seq = |b: &[u8]| matches!(b, b"avis" | b"msf1");
+    if is_seq(&bytes[8..12]) {
+        return true;
+    }
+    // Compatible-brands list (offset 16, after the 4-byte minor version), bounded by the
+    // ftyp box length.
+    let box_len = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+    let end = box_len.min(bytes.len());
+    let mut i = 16;
+    while i + 4 <= end {
+        if is_seq(&bytes[i..i + 4]) {
+            return true;
+        }
+        i += 4;
+    }
+    false
 }
 
 /// A GIF with **more than one image descriptor**. Walks the block stream just far
@@ -766,6 +799,44 @@ mod tests {
             decode_animation(&png, None),
             Err(DecodeError::Unsupported)
         ));
+    }
+
+    /// A minimal ISOBMFF `ftyp` box with the given major brand + compatible-brands list.
+    #[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
+    fn ftyp(major: &[u8; 4], compat: &[&[u8; 4]]) -> Vec<u8> {
+        let len = 16 + compat.len() * 4;
+        let mut b = (len as u32).to_be_bytes().to_vec();
+        b.extend_from_slice(b"ftyp");
+        b.extend_from_slice(major);
+        b.extend_from_slice(&[0, 0, 0, 0]); // minor version
+        for c in compat {
+            b.extend_from_slice(*c);
+        }
+        b
+    }
+
+    /// On Linux with `livephoto`, an ISOBMFF **sequence** brand (`avis`/`msf1`) — in the major
+    /// slot or the compatible list — is flagged animated (→ the FFmpeg sequence decoder); a
+    /// still `avif`/`heic` is not.
+    #[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
+    #[test]
+    fn detects_isobmff_image_sequences_on_linux() {
+        assert_eq!(
+            detect_animation(&ftyp(b"avis", &[b"avif", b"mif1"])),
+            Some(AnimationKind::Heif),
+            "major-brand avis"
+        );
+        assert_eq!(
+            detect_animation(&ftyp(b"mif1", &[b"msf1", b"heic"])),
+            Some(AnimationKind::Heif),
+            "compatible-brand msf1"
+        );
+        assert_eq!(
+            detect_animation(&ftyp(b"avif", &[b"mif1"])),
+            None,
+            "a still avif is not a sequence"
+        );
+        assert_eq!(detect_animation(&ftyp(b"heic", &[b"mif1"])), None, "still heic");
     }
 
     /// Local smoke test over JD's real corpus, when present. CI machines don't have

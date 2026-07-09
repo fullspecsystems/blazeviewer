@@ -281,10 +281,25 @@ pub fn decode_motion_job(
         let _ = &live;
         let _ = cancel;
     }
-    match source.bytes(item) {
-        Ok(bytes) => pb_decode::decode_animation(&bytes, fit),
-        Err(e) => Err(DecodeError::Corrupt(format!("read error: {e}"))),
+    let bytes = match source.bytes(item) {
+        Ok(b) => b,
+        Err(e) => return Err(DecodeError::Corrupt(format!("read error: {e}"))),
+    };
+    // An animated ISOBMFF sequence (animated AVIF `avis` / HEIC `msf1`) with a real file path
+    // decodes via the FFmpeg video pipeline — Linux has no pure-Rust AV1/HEVC sequence decoder,
+    // so we reuse the one already linked for Live Photo motion. Archive entries (no path) fall
+    // through to the still-frame `image`-crate path below (which reports it unsupported, gracefully).
+    #[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
+    if pb_decode::detect_animation(&bytes) == Some(pb_decode::AnimationKind::Heif) {
+        if let Some(path) = source.path(item) {
+            let edge = fit
+                .map(|f| f.max_width.max(f.max_height))
+                .unwrap_or(MOTION_MAX_LONG_EDGE)
+                .min(MOTION_MAX_LONG_EDGE);
+            return pb_decode::decode_image_sequence_cancellable(path, edge, cancel);
+        }
     }
+    pb_decode::decode_animation(&bytes, fit)
 }
 
 /// Whether an EXIF `(tag, value)` is a binary blob better left out of the panel —

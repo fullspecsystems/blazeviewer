@@ -22,6 +22,10 @@ with any pre-release suffix carried only by the tag.
   pause if decoding can't keep up, then resume — a fair trade for a near-instant start.
 
 ### Added
+- **Animated AVIF now plays on Linux.** Multi-frame `.avif` files (and HEIC image sequences) show
+  the first frame as usual and play the full animation on `P`, looping like a GIF — previously they
+  were stuck on the first frame. (Wide-gamut/HDR sequences play but their colors read a touch
+  oversaturated for now; full per-sequence color management is a follow-up.)
 - **Photoshop files without a flattened preview now show something instead of nothing.** A `.psd`
   saved *without* "Maximize Compatibility" has no merged image inside — only the layer stack — so
   it used to open to a blank error. PhotoBlaze now falls back to the small preview thumbnail

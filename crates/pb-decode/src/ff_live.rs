@@ -65,8 +65,54 @@ pub fn decode_live_motion_cancellable(
     cancel: &AtomicBool,
 ) -> Result<Animation, DecodeError> {
     ff_init();
-    decode_video_inner(path, max_long_edge, cancel)
+    // A Live Photo plays its motion once and reverts to the still (finite loop = 1).
+    decode_video_inner(path, max_long_edge, cancel, VideoKind::live())
         .map_err(|e| DecodeError::Corrupt(format!("FFmpeg: {e}")))?
+}
+
+/// Decode an animated ISOBMFF image **sequence** (animated AVIF `avis` / HEIC `msf1`) at
+/// `path` into an [`Animation`], via the same FFmpeg video pipeline as Live Photo motion.
+/// Linux's answer to the macOS Image I/O sequence backend — there's no pure-Rust AV1/HEVC
+/// sequence decoder, so we reuse FFmpeg (already linked for `livephoto`). Loops like a GIF
+/// (`loop_count = 0`), so it plays until the user pauses/navigates rather than reverting.
+pub fn decode_image_sequence(path: &Path, max_long_edge: u32) -> Result<Animation, DecodeError> {
+    decode_image_sequence_cancellable(path, max_long_edge, &AtomicBool::new(false))
+}
+
+/// Cancellable [`decode_image_sequence`] — bails early (discarded error) once `cancel` is set.
+pub fn decode_image_sequence_cancellable(
+    path: &Path,
+    max_long_edge: u32,
+    cancel: &AtomicBool,
+) -> Result<Animation, DecodeError> {
+    ff_init();
+    decode_video_inner(path, max_long_edge, cancel, VideoKind::sequence())
+        .map_err(|e| DecodeError::Corrupt(format!("FFmpeg: {e}")))?
+}
+
+/// How to label a decoded FFmpeg video sequence — a Live Photo's motion (plays once, reverts
+/// to the still) vs an animated image sequence (loops like a GIF).
+struct VideoKind {
+    kind: AnimationKind,
+    loop_count: u32,
+    codec: &'static str,
+}
+
+impl VideoKind {
+    fn live() -> Self {
+        Self {
+            kind: AnimationKind::LivePhoto,
+            loop_count: 1,
+            codec: "Live Photo",
+        }
+    }
+    fn sequence() -> Self {
+        Self {
+            kind: AnimationKind::Heif,
+            loop_count: 0, // animated AVIF/HEIC loops (GIF convention)
+            codec: "AVIF",
+        }
+    }
 }
 
 // ── Streaming video (task #69: play while decoding) ──────────────────────────────────
@@ -263,6 +309,7 @@ fn decode_video_inner(
     path: &Path,
     max_long_edge: u32,
     cancel: &AtomicBool,
+    label: VideoKind,
 ) -> Result<Result<Animation, DecodeError>, ff::Error> {
     let mut ictx = ff::format::input(&path)?;
     let stream = ictx
@@ -379,15 +426,16 @@ fn decode_video_inner(
 
     let (width, height) = (frames[0].width, frames[0].height);
     Ok(Ok(Animation {
-        kind: AnimationKind::LivePhoto,
+        kind: label.kind,
         width,
         height,
         frames,
-        // Plays once and stops (finite loop = 1), like the Windows/macOS backends.
-        loop_count: 1,
-        codec: "Live Photo",
+        // Live Photo = play once (loop 1); animated AVIF/HEIC = loop forever (0).
+        loop_count: label.loop_count,
+        codec: label.codec,
         // swscale's RGBA is nominal BT.709 (sRGB primaries/curve to within a hair) — pass
-        // through, matching the Windows Media Foundation backend.
+        // through, matching the Windows Media Foundation backend. (P3/HDR AVIF sequences will
+        // read a touch oversaturated until per-sequence color management lands — a follow-up.)
         color: ColorTransform::srgb(),
         truncated,
     }))
@@ -638,5 +686,22 @@ mod tests {
             "frames must be contiguous between header and done"
         );
         assert!(first_dims.is_some_and(|(w, h)| w > 0 && h > 0));
+    }
+
+    /// The FFmpeg sequence decoder turns an animated AVIF/HEIC into a multi-frame, looping
+    /// [`Animation`] (task: animated AVIF on Linux). Point `PB_SEQ_TEST_AVIF` at an animated
+    /// `.avif` (e.g. `test-images/animated/3.avif`) to run it; skipped when unset.
+    #[test]
+    fn image_sequence_decodes_multiple_looping_frames() {
+        let Ok(path) = std::env::var("PB_SEQ_TEST_AVIF") else {
+            eprintln!("skipping: set PB_SEQ_TEST_AVIF to an animated .avif to run this");
+            return;
+        };
+        let anim = decode_image_sequence(Path::new(&path), 1440).expect("sequence decode");
+        assert_eq!(anim.kind, AnimationKind::Heif, "an image sequence");
+        assert_eq!(anim.loop_count, 0, "loops like a GIF");
+        assert!(anim.frames.len() > 1, "expected >1 frame");
+        assert!(anim.frames.iter().all(|f| f.width > 0 && f.height > 0));
+        assert!(anim.width > 0 && anim.height > 0);
     }
 }
