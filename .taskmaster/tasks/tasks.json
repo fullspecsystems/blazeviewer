@@ -2,7 +2,7 @@
   "master": {
     "metadata": {
       "created": "2026-06-26",
-      "updated": "2026-07-08",
+      "updated": "2026-07-09",
       "description": "Post-core feature backlog for PhotoBlaze. These ship AFTER the core viewer is stable (roadmap Phases 0-3: window, decode-to-fit, prefetch ring, hold-to-fly). Every task obeys the prime directive (faster or perf-neutral) and the project's TDD rules: pure logic isolated and unit-tested, GPU work behind the Renderer seam, golden-image tests for visuals. Shared infrastructure is factored out so it is built once: a per-photo ViewTransform (rotation + zoom + scaling mode), a translucent HUD/overlay layer, and a central configurable action/keymap."
     },
     "tasks": [
@@ -451,6 +451,102 @@
         "dependencies": [],
         "details": "Wiring: (1) Add Sparkle to the SwiftUI host .app (SPM package or embedded XCFramework via build-swift-host.sh). (2) Generate an EdDSA key pair (Sparkle generate_keys); ship SUPublicEDKey in Info.plist, keep the private key with the release creds (.env.release / keychain, never committed). (3) Host appcast.xml at downloads.fullspec.ca/photoblaze/mac/ next to the DMG; SUFeedURL in Info.plist points at it. (4) On each release, sign the DMG (Sparkle sign_update -> EdDSA sig) and append an <item> (sparkle:version=CFBundleVersion, sparkle:shortVersionString, enclosure url+length+sparkle:edSignature, sparkle:minimumSystemVersion) — script it into release-macos.sh / release-mac-upload.ps1 the way vpk maintains the Windows feed. (5) A 'Check for Updates…' menu item (SPUStandardUpdaterController). Privacy #2: the update check is app-existence traffic, not a viewing trace — confirm no viewed-photo/path data rides the check (same bar Velopack's check meets); an appcast GET carries only version/OS. Same seam could later serve Linux (AppImageUpdate) if wanted.",
         "testStrategy": "Stand up a local/staging appcast, sign a bumped DMG, point a running older build at it, and confirm Sparkle detects -> downloads -> installs on quit -> relaunches the new NOTARIZED build (spctl/stapler still valid). Confirm SUPublicEDKey rejects an unsigned/tampered enclosure."
+      },
+      {
+        "id": 66,
+        "title": "Windows: folder tree (Shift+F) does not show for 7z archives",
+        "description": "Owner-observed Windows gap (2026-07-09): opening a .7z archive with internal folders shows NO folder tree on Shift+F, while the same feature works for .zip. The tree derivation is SHARED and format-agnostic — crate::folder_tree::rows_from_names groups the deck's forward-slashed entry names (name(i)) into rows/counts/scope targets, and show_folder_tree_mode (crates/pb-app-core/src/app_core_impl.rs:1677) takes the archive branch whenever self.source.path(item).is_none() and walks full.name(i) over the unscoped source. ZipSource and SevenZSource are structurally identical to that code path: both return the full internal path from name() (via normalize_entry_name, pb-source/src/lib.rs), both return None from the default path() impl, and both return the archive file from container(). So a 7z with folders SHOULD produce the same tree a zip does. The divergence is therefore 7z-specific and the prime suspect is that sevenz-rust2's entry.name() on the block-decode/solid path (pb-source/src/lib.rs:697, normalize_entry_name(entry.name())) yields BARE FILE NAMES without the internal folder chain — folder_of() then returns \"\" for every entry, rows_from_names emits only the root row, and with a single row the tree looks like it 'isn't showing'. Verify empirically before assuming: dump (0..full.len()).map(|i| full.name(i)) for a folder-structured 7z and check the names actually contain '/'.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "details": "Where to look, in order: (1) Confirm the symptom's mechanism — is the archive branch even taken? Add a probe (debug build has a console) that logs, for the open 7z, source.path(displayed_item).is_none() and the first several full.name(i). If path() is unexpectedly Some, the disk branch runs and the wrong tree (or none) shows. If name(i) lacks '/', grouping collapses to the root. (2) If names are bare: the fix is in pb-source SevenZSource construction (both the streamed path ~line 485/586 and the parallel BlockDecoder path ~line 660-697) — ensure the stored SevenZEntry.name is the archive-relative PATH from sevenz-rust2, not a basename. sevenz-rust2's SevenZArchiveEntry exposes the full name; if for_each_entries hands back a stripped name, reconstruct it from the archive metadata. Keep normalize_entry_name (backslash->slash, ./ and leading / strip) so grouping matches the zip path. (3) Regression-test at the pb-source layer: a fixture .7z with nested folders (a/one.jpg, a/b/two.jpg, top.jpg) asserts src.name(i) returns the full slashed paths — mirror the existing zip name test (~line 1051). Then a folder_tree unit test already covers rows_from_names given correct names, so once names are right the tree renders. Note the counts/scope-target machinery, ScopedSource re-scoping, and Go prev/next sibling all key off the same name(i), so a name fix repairs archive navigation wholesale, not just the tree. Shared code, so the ZIP path must stay green.",
+        "testStrategy": "Repro first: open a .7z containing nested folders on Windows, press Shift+F, confirm no/one-row tree; open the equivalent .zip and confirm the full tree — pinning the format divergence. Unit: pb-source fixture 7z asserts name(i) carries the internal folder chain (parity with the zip name test); folder_tree tests already assert rows_from_names output for good names. Manual after fix: Shift+F on the 7z shows the same folder hierarchy + counts as the zip, clicking a folder row re-scopes the deck, and Go prev/next steps across sibling archive folders. Confirm the zip tree is unregressed and nothing new is written to disk (privacy #2 — the tree derives from in-RAM names).",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Confirm the mechanism (probe name(i) + path())",
+            "description": "On a folder-structured 7z, log source.path(item).is_none() and the first several full.name(i). Determine whether the archive branch is taken and whether 7z entry names carry the '/'-separated internal folder path or are bare basenames.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "Preserve the internal folder path in SevenZSource entry names",
+            "description": "If names are bare: fix SevenZSource construction (streamed + parallel BlockDecoder paths) so SevenZEntry.name is the full archive-relative path from sevenz-rust2, then normalize_entry_name as today. pb-source fixture test asserting name(i) contains the folder chain (parity with the zip name test).",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "Verify tree + archive nav end-to-end on 7z",
+            "description": "Shift+F shows the hierarchy/counts matching the zip; folder-row click re-scopes; Go prev/next steps across sibling folders. Zip path unregressed.",
+            "status": "pending"
+          }
+        ]
+      },
+      {
+        "id": 67,
+        "title": "Smoother hold-to-pan / hold-to-zoom — gentler acceleration curve",
+        "description": "Owner feel note (2026-07-09): holding the pan/zoom keys accelerates too aggressively and doesn't feel smooth — want a slower, gentler ramp with smoother motion. The hold-to-view loop is AppCore::apply_view_holds (crates/pb-app-core/src/app_core_impl.rs:5642), driven by the tuning constants in crates/pb-app-core/src/engine.rs: zoom e-folding rate ramps ZOOM_MIN_RATE 0.5 -> ZOOM_MAX_RATE 2.5 over ZOOM_RAMP_SECS 0.7 (exp() applied multiplicatively about center); pan speed ramps PAN_MIN_SPEED 450 -> PAN_MAX_SPEED 3200 px/s over PAN_RAMP_SECS 0.7. Both are already time-based (frame-rate independent, dt-clamped to 0.1s) so 'smoother' here means the FEEL of the ramp, not a timing bug. Two levers: (a) TUNING — lower the max rate/speed and/or lengthen the ramp so it starts and stays gentler (e.g. PAN_MAX ~1800-2400, ZOOM_MAX ~1.5-2.0, RAMP ~1.0-1.2s), a one-file constant change; (b) CURVE SHAPE — the ramp is currently LINEAR in t (min + (max-min)*(t/ramp)); an ease-in (smoothstep / t^2) keeps fine control longer at the start before building speed, which reads as 'smoother'. Optional stretch: a short release ease-out / inertia so motion doesn't stop dead on key-up. Shared-core feel change (helps macOS + Linux too), surfaced while testing on Windows; keep it a measured, owner-in-the-loop tuning pass, not a blind edit.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "details": "Scope options, cheapest first: (1) Retune the six constants (ZOOM_MIN/MAX_RATE, ZOOM_RAMP_SECS, PAN_MIN/MAX_SPEED, PAN_RAMP_SECS) for a gentler start and lower top speed — pure constant edit in engine.rs, no logic change. (2) Swap the linear ramp for an ease-in in apply_view_holds: factor the shared 'min + (max-min) * shape(t/ramp)' into a small pure helper (e.g. ease_in(u)=u*u or smoothstep) so zoom and pan share one curve and it's unit-testable (assert monotonic, ease_in(0)=0, ease_in(1)=1, gentler-than-linear midpoint). Keep the multiplicative exp() zoom-about-center and the pan clamp untouched. (3) Optional inertia: on key release, decay the last velocity over ~150-250ms instead of zeroing zoom_started/pan_started immediately — bigger change, own subtask, only if the owner still wants more polish after (1)+(2). Note the scroll-wheel/trackpad steps (WHEEL_ZOOM_STEP, PIXEL_ZOOM_STEP, WHEEL_PAN_STEP, PINCH_GAIN) are a SEPARATE input path (AppCore::scroll, not apply_view_holds) — the owner's note is about held-key motion, so leave the gesture constants unless they ask. Prime directive: this is off the photo hot path (only runs while a pan/zoom key is held), so feel is free to change; still no per-frame heap alloc. Consider whether any of these should become settings (nav ramp/start/max are already configurable) vs hard-coded; default to constants unless the owner wants a knob.",
+        "testStrategy": "Primarily owner feel-test on device (Windows first, then confirm macOS/Linux unchanged-for-the-better): hold each pan direction and zoom in/out, confirm the start is gentle enough for fine framing and the top speed is comfortable, not lurchy. If the ramp is refactored into a pure ease helper, unit-test the curve (endpoints, monotonicity, gentler-than-linear midpoint). Regression: apply_view_holds still returns changed=true only while keys are held (loop keeps polling) and pan stays clamped to image bounds; keypress->photon nav timing is untouched (this path is nav-independent).",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Retune the ramp constants (gentler start, lower top speed)",
+            "description": "Adjust ZOOM_MIN/MAX_RATE + ZOOM_RAMP_SECS and PAN_MIN/MAX_SPEED + PAN_RAMP_SECS in engine.rs; owner feel-checks candidate values on device. One-file change.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "Ease-in curve shape (shared pure helper)",
+            "description": "Replace the linear t-ramp in apply_view_holds with a shared ease-in (smoothstep / t^2) helper used by both zoom and pan; unit-test endpoints + monotonicity + gentler-than-linear midpoint.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "Optional: release ease-out / inertia",
+            "description": "Only if still wanted after 1+2: decay the last pan/zoom velocity over ~150-250ms on key-up instead of stopping dead, so motion settles smoothly. Own subtask because it adds state to the hold loop.",
+            "status": "pending"
+          }
+        ]
+      },
+      {
+        "id": 68,
+        "title": "Cursor auto-hide option — hide the mouse pointer when idle / in speed mode (all platforms)",
+        "description": "Owner ask (2026-07-09): let the mouse pointer hide, as an OPTION, on every platform where possible. Half the plumbing already exists but nothing actually hides today: contract::CursorKind::Hidden is defined (crates/pb-app-core/src/contract.rs:80) and its doc even claims 'the viewer hides the cursor in the chrome-free hot path and restores it on movement' — but (1) NOTHING in the core emits SetCursor(Hidden) (hover_cursor at app_core_impl.rs:2678-2686 only emits Grab/Grabbing/Pointer/Default), (2) the winit shell STUBS it: cursor_icon maps Hidden -> CursorIcon::Default (crates/pb-app/src/main.rs:3361, with the note 'Hidden is unused on the SetCursor path'), so Windows/Linux never hide, and (3) only the macOS shell honors it (CoreModel.swift:1897 NSCursor.setHiddenUntilMouseMoves(true)) — and even that is dead code since the core never sends it. So this is: wire a core auto-hide POLICY, make the winit shell truly hide, confirm macOS, and expose it as a setting. 'Where possible': winit uses Window::set_cursor_visible(false) (works on Windows + X11; on Wayland cursor visibility is compositor-mediated and may be a soft no-op — accept graceful degradation there).",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "details": "Design: (a) POLICY in core — after N seconds with no CursorMoved (and no panel/dialog/menu open, and pointer not over a clickable affordance), emit CoreEffect::SetCursor(CursorKind::Hidden); any real pointer movement restores the resolved cursor (Default/Grab/etc via the existing hover_cursor path). Drive the timeout off the existing tick-deadline machinery (next_deadline / self.now) — do NOT add a spin; the app already sleeps when idle, so schedule a wake at the hide deadline. A natural stronger default: in the borderless Fullscreen 'speed mode' (WindowMode::Fullscreen) hide sooner or immediately-on-idle, since that mode is the chrome-free hot path the contract doc references. (b) WINIT SHELL — replace the Hidden->Default stub: on SetCursor(Hidden) call window.set_cursor_visible(false); on any other kind restore visibility + set the icon. Track visibility so we don't thrash set_cursor_visible every event. Windows + X11 honor it; Wayland may ignore — that's the 'where possible' caveat, log/accept. (c) macOS — the core now actually emits Hidden; verify setHiddenUntilMouseMoves gives the desired feel, or switch to explicit NSCursor.hide()/unhide() (persistent hide with our own restore-on-move) if the until-mouse-moves auto-restore fights the policy. (d) SETTING — add a serde-default bool (e.g. settings.hide_cursor_when_idle, maybe an idle-seconds too) and surface a toggle in BOTH shells (egui Settings General/Appearance tab via a pb-ui toggle_with_label + the SwiftUI SettingsView), defaulting per owner (likely ON in fullscreen, or a simple global ON/OFF). Privacy #2: cursor state is ephemeral runtime state; the only persisted bit is the toggle in settings.toml — no viewing trace. Keep the policy pure/testable in pb-app-core (feed it 'now' + last-move time + mode + overlay state, assert it emits Hidden after the timeout and restores on move) so it isn't a shell-only behavior.",
+        "testStrategy": "Pure: unit-test the idle policy in pb-app-core — given last-move time, now, window mode, and whether an overlay/affordance is active, assert it decides Hidden after the timeout and Restore on movement, and never hides while a dialog/menu/hover-affordance is up. Manual per platform: Windows (winit) — leave the pointer still over a photo, confirm it vanishes after the timeout and reappears on the first move; confirm it does NOT hide while hovering the Cancel-scan chip or with a panel/menu open; confirm it hides sooner/at-idle in fullscreen speed mode. macOS — same feel via the SwiftUI shell. Linux — X11 hides; note Wayland behavior. Settings: toggling the option OFF disables all hiding on every platform; the setting round-trips through settings.toml (and the SwiftUI FFI) and nothing else is persisted.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Core idle auto-hide policy + emit SetCursor(Hidden)",
+            "description": "Pure, testable policy in pb-app-core: after an idle timeout with no pointer movement (and no overlay/affordance/menu/dialog active) emit CoreEffect::SetCursor(CursorKind::Hidden); restore the resolved cursor on movement. Schedule the hide via the existing tick-deadline machinery (no spin). Stronger/sooner hide in WindowMode::Fullscreen. Unit tests over (now, last-move, mode, overlay state).",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "winit shell: actually hide via set_cursor_visible",
+            "description": "Replace the Hidden->Default stub in cursor_icon/SetCursor handling (main.rs): on Hidden call window.set_cursor_visible(false), on any other kind restore visibility + set the icon; track state to avoid per-event thrash. Windows + X11 honored; accept Wayland's compositor-mediated limitation.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "macOS: confirm/adjust the hide behavior",
+            "description": "Core now emits Hidden — verify the SwiftUI shell's setHiddenUntilMouseMoves feel matches the policy, or switch to explicit NSCursor.hide()/unhide() if the auto-restore-on-move semantics fight the core's restore. No new orchestration.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "Settings toggle (both shells) + default",
+            "description": "Add settings.hide_cursor_when_idle (serde default; optional idle-seconds) and a toggle in BOTH shells — egui Settings (pb-ui toggle_with_label) + SwiftUI SettingsView + its FFI. Owner picks the default (likely ON, or ON-only-in-fullscreen). CHANGELOG Unreleased > Added.",
+            "status": "pending"
+          }
+        ]
       }
     ]
   }
