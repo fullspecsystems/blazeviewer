@@ -28,10 +28,17 @@ pub struct Playback {
     /// A finite loop count was reached: parked on the last frame, no more advancing
     /// until the user restarts (play/pause) or steps a frame.
     finished: bool,
+    /// Whether the whole sequence has been decoded. Batch playback lands complete;
+    /// **streaming** playback (task #69 — play a Live Photo `.mov` while it's still
+    /// decoding) starts `false` and flips true on [`mark_complete`](Self::mark_complete).
+    /// While incomplete, [`advance`](Self::advance) holds on the last *decoded* frame
+    /// (the frontier) instead of wrapping or finishing — an underrun waits for more
+    /// frames rather than ending the clip early.
+    complete: bool,
 }
 
 impl Playback {
-    /// Wrap a decoded animation. `playing` starts it immediately (the `P`-to-play
+    /// Wrap a fully decoded animation. `playing` starts it immediately (the `P`-to-play
     /// path) or paused (the frame-step path), beginning on frame 0.
     pub fn new(anim: Animation, playing: bool) -> Self {
         Self {
@@ -40,6 +47,52 @@ impl Playback {
             playing,
             loops_done: 0,
             finished: false,
+            complete: true,
+        }
+    }
+
+    /// Wrap a **streaming** animation whose frames are still arriving (task #69). `anim`
+    /// holds the header plus however many frames have decoded so far (at least the first);
+    /// feed later frames with [`push_frame`](Self::push_frame) and finalize the loop count
+    /// with [`mark_complete`](Self::mark_complete). Playback begins on frame 0 and holds on
+    /// the decoded frontier until either more frames arrive or the decode completes.
+    pub fn new_streaming(anim: Animation, playing: bool) -> Self {
+        Self {
+            anim,
+            index: 0,
+            playing,
+            loops_done: 0,
+            finished: false,
+            complete: false,
+        }
+    }
+
+    /// Append a freshly decoded frame to a streaming sequence (task #69). No-op on the
+    /// cursor; the next [`advance`](Self::advance) can now move past the old frontier.
+    pub fn push_frame(&mut self, frame: AnimFrame) {
+        self.anim.frames.push(frame);
+    }
+
+    /// Whether every frame has been decoded (batch playback, or a stream that has been
+    /// [`mark_complete`](Self::mark_complete)d).
+    pub fn is_complete(&self) -> bool {
+        self.complete
+    }
+
+    /// Mark a streaming sequence fully decoded with its final `loop_count` (task #69).
+    /// If the cursor is already parked on the now-final last frame (the stream caught up
+    /// to the decoder before it finished), that pass is completed here — the same
+    /// bookkeeping [`advance`](Self::advance) does when it lands on the last frame — so a
+    /// finite clip finishes instead of looping.
+    pub fn mark_complete(&mut self, loop_count: u32) {
+        self.anim.loop_count = loop_count;
+        self.complete = true;
+        let n = self.frame_count();
+        if n > 0 && self.index + 1 == n && !self.finished {
+            self.loops_done += 1;
+            if self.anim.loop_count != 0 && self.loops_done >= self.anim.loop_count {
+                self.finished = true;
+            }
         }
     }
 
@@ -130,25 +183,32 @@ impl Playback {
         }
         let n = self.frame_count();
         if n <= 1 {
-            // A degenerate single-frame "animation": nothing to advance; a finite
-            // loop is immediately done.
-            self.finished = self.anim.loop_count != 0;
+            // A single frame so far. If the sequence is complete this is a degenerate
+            // one-frame "animation" (a finite loop is immediately done); if it's still
+            // streaming, hold here until the next frame arrives.
+            if self.complete {
+                self.finished = self.anim.loop_count != 0;
+            }
             return self.index;
         }
         if self.index + 1 < n {
             self.index += 1;
-            // Landing on the last frame completes this pass (it has now been shown).
-            if self.index + 1 == n {
+            // Landing on the last frame completes this pass (it has now been shown) — but
+            // only when the sequence is complete. While streaming, `n-1` is just the
+            // decoded frontier, not the real end, so we don't count the pass yet.
+            if self.complete && self.index + 1 == n {
                 self.loops_done += 1;
                 if self.anim.loop_count != 0 && self.loops_done >= self.anim.loop_count {
                     self.finished = true; // park on the last frame
                 }
             }
-        } else {
+        } else if self.complete {
             // We were parked-but-not-finished on the last frame (an infinite loop, or a
             // finite one with passes left): wrap to start the next pass.
             self.index = 0;
         }
+        // else: streaming and parked on the decoded frontier — underrun. Hold on the last
+        // decoded frame until `push_frame` extends the sequence or `mark_complete` ends it.
         self.index
     }
 
@@ -202,6 +262,83 @@ pub struct AnimDecode {
 pub struct Prepared {
     pub item: usize,
     pub anim: Animation,
+}
+
+/// One message from a **streaming** Live Photo motion decode (task #69). The
+/// platform-neutral mirror of `pb_decode::MotionChunk` — the (Linux-only) worker maps the
+/// decoder's chunks onto this so the core wiring (`AnimStream`, `poll_anim_stream`) carries
+/// no platform-specific type. Order is always: one `Header`, then `Frame`s, then a terminal
+/// `Done` or `Failed`.
+pub enum StreamMsg {
+    /// Sent once before any frame: the display size + color to build the `Animation` header.
+    Header {
+        width: u32,
+        height: u32,
+        color: ColorTransform,
+        codec: &'static str,
+    },
+    /// A decoded frame, in playback order.
+    Frame(AnimFrame),
+    /// The stream finished cleanly (`truncated` if the frame cap was hit).
+    Done { loop_count: u32, truncated: bool },
+    /// The stream failed. If a Playback is already installed this is a truncated finish;
+    /// otherwise it's a play failure to surface.
+    Failed(String),
+}
+
+/// An in-flight **streaming** Live Photo motion decode (task #69) — frames arrive and play
+/// while the rest of the `.mov` is still decoding, instead of waiting for the whole clip.
+/// Only ever set on the Linux FFmpeg path; the macOS/Windows OS players stay on the batch
+/// [`AnimDecode`] path (they decode the whole clip in one call).
+pub struct AnimStream {
+    pub gen: u64,
+    pub item: usize,
+    pub epoch: u64,
+    /// What to do as frames land — `Play` installs a playing Playback on the first frame;
+    /// `Eager`/`Step` accumulate into `pending` and install/stash on `Done`. Upgradable
+    /// (an eager stream becomes `Play` when the user presses `P`).
+    pub want: AnimWant,
+    pub rx: std::sync::mpsc::Receiver<StreamMsg>,
+    /// Cooperative cancel flag (navigate away / supersede) — the worker's decoder checks it
+    /// per packet and stops mid-clip.
+    pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The header once received (dims/color/codec) — needed to build the [`Animation`].
+    pub header: Option<StreamHeader>,
+    /// Frames accumulated before a Playback is installed: the eager/step path holds them
+    /// until `Done`; the play path only uses this for the header-before-first-frame gap.
+    pub pending: Vec<AnimFrame>,
+    /// Whether a streaming Playback has been installed (Play mode, first frame seen). Once
+    /// true, later frames are pushed straight onto `playback`.
+    pub installed: bool,
+}
+
+/// The header fields of a streaming motion decode, stashed until the frames arrive.
+pub struct StreamHeader {
+    pub width: u32,
+    pub height: u32,
+    pub color: ColorTransform,
+    pub codec: &'static str,
+}
+
+impl AnimStream {
+    /// Build the accumulated header + `pending` frames into a complete [`Animation`] (the
+    /// eager/step finish path, once `Done` lands). Returns `None` if no header/frames arrived.
+    pub fn into_animation(self, loop_count: u32, truncated: bool) -> Option<Animation> {
+        let h = self.header?;
+        if self.pending.is_empty() {
+            return None;
+        }
+        Some(Animation {
+            kind: AnimationKind::LivePhoto,
+            width: h.width,
+            height: h.height,
+            frames: self.pending,
+            loop_count,
+            codec: h.codec,
+            color: h.color,
+            truncated,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -316,5 +453,77 @@ mod tests {
         assert_eq!(pb.current_delay(), Duration::from_millis(40));
         pb.advance();
         assert_eq!(pb.current_frame().rgba, vec![1u8; 4]);
+    }
+
+    /// One `AnimFrame` tagged `id` so streaming pushes are distinguishable.
+    fn frame(id: u8, delay_ms: u64) -> AnimFrame {
+        AnimFrame {
+            rgba: vec![id; 4],
+            width: 1,
+            height: 1,
+            delay: Duration::from_millis(delay_ms),
+        }
+    }
+
+    // --- Streaming playback (task #69: play a Live Photo while it's still decoding) ---
+
+    #[test]
+    fn streaming_holds_on_the_frontier_until_more_frames_arrive() {
+        // Start streaming with two decoded frames; the rest are still "decoding".
+        let mut pb = Playback::new_streaming(anim(2, 40, 0), true);
+        assert!(!pb.is_complete());
+        assert_eq!(pb.advance(), 1); // play up to the decoded frontier
+        // Underrun: no more frames yet, and we're *not* complete, so hold — never wrap to 0
+        // and never finish (unlike a complete infinite loop, which would wrap here).
+        assert_eq!(pb.advance(), 1);
+        assert_eq!(pb.advance(), 1);
+        assert!(!pb.is_finished());
+        assert!(pb.is_playing());
+        // A freshly decoded frame lands → the frontier moves and playback resumes.
+        pb.push_frame(frame(2, 40));
+        assert_eq!(pb.advance(), 2);
+        assert_eq!(pb.advance(), 2, "hold again on the new frontier");
+    }
+
+    #[test]
+    fn streaming_finishes_a_live_photo_once_complete() {
+        // A Live Photo streams in and plays through once (loop_count = 1).
+        let mut pb = Playback::new_streaming(anim(2, 40, 0), true);
+        pb.push_frame(frame(2, 40)); // 3 frames total
+        assert_eq!(pb.advance(), 1);
+        assert_eq!(pb.advance(), 2); // frontier
+        assert!(!pb.is_finished(), "not finished until decode completes");
+        pb.mark_complete(1);
+        assert!(pb.is_complete());
+        // Parked on the last frame when completion arrived → that pass is done.
+        assert!(pb.is_finished());
+        assert!(!pb.is_playing());
+    }
+
+    #[test]
+    fn streaming_completes_mid_playback_then_plays_out_and_finishes() {
+        // Completion can arrive while frames are still ahead of the cursor.
+        let mut pb = Playback::new_streaming(anim(3, 40, 0), true);
+        assert_eq!(pb.advance(), 1); // cursor mid-sequence
+        pb.mark_complete(1); // real last frame is now index 2, still ahead
+        assert!(!pb.is_finished(), "still frames to show");
+        assert_eq!(pb.advance(), 2); // land on the true last frame → pass completes
+        assert!(pb.is_finished());
+        assert!(!pb.is_playing());
+    }
+
+    #[test]
+    fn streaming_is_due_only_once_a_second_frame_exists() {
+        // A one-frame stream can't advance yet, so it's never due (mirrors a solo still).
+        let mut pb = Playback::new_streaming(
+            Animation {
+                frames: vec![frame(0, 40)],
+                ..anim(1, 40, 0)
+            },
+            true,
+        );
+        assert!(!pb.is_due(Duration::from_secs(10)));
+        pb.push_frame(frame(1, 40));
+        assert!(pb.is_due(Duration::from_millis(40)));
     }
 }

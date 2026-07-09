@@ -640,6 +640,7 @@ impl App {
                 playback: None,
                 anim_frame_shown_at: None,
                 anim_decode: None,
+                anim_stream: None,
                 prepared: None,
                 anim_gen: 0,
                 anim_hint_shown_for: None,

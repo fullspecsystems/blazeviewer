@@ -69,6 +69,180 @@ pub fn decode_live_motion_cancellable(
         .map_err(|e| DecodeError::Corrupt(format!("FFmpeg: {e}")))?
 }
 
+// ── Streaming video (task #69: play while decoding) ──────────────────────────────────
+
+/// One message from the [`decode_live_motion_streaming`] pipeline. The consumer installs a
+/// streaming [`Playback`](crate::Animation) on the first [`Frame`](MotionChunk::Frame),
+/// appends later frames as they arrive, and finalizes on [`Done`](MotionChunk::Done) —
+/// so a Live Photo starts playing within a frame or two instead of after the whole `.mov`
+/// decodes.
+pub enum MotionChunk {
+    /// Sent once, before any frame: the sequence's display dimensions + color, enough to
+    /// build the `Animation` header.
+    Header(MotionHeader),
+    /// A decoded, scaled, rotation-corrected frame (in emission = playback order).
+    Frame(AnimFrame),
+    /// The stream finished cleanly; `truncated` if the frame cap was hit.
+    Done { loop_count: u32, truncated: bool },
+    /// The stream failed. If a Playback is already installed the consumer can treat this as
+    /// a truncated finish; if not, it's a play failure to surface.
+    Failed(DecodeError),
+}
+
+/// Header for a streaming Live Photo motion decode — the post-rotation display size and the
+/// color transform every frame shares.
+pub struct MotionHeader {
+    pub width: u32,
+    pub height: u32,
+    pub color: ColorTransform,
+    pub codec: &'static str,
+}
+
+/// Streaming counterpart of [`decode_live_motion`] (task #69): decode the `.mov` at `path`
+/// and hand each frame to `emit` as it's ready, rather than returning the whole [`Animation`]
+/// at the end. Emits exactly one [`Header`](MotionChunk::Header), then a [`Frame`](
+/// MotionChunk::Frame) per decoded frame, then a terminal [`Done`](MotionChunk::Done) or
+/// [`Failed`](MotionChunk::Failed). Bails (emitting nothing further) once `cancel` is set.
+///
+/// Per-frame pacing uses the stream's nominal frame rate (Live Photos are constant-fps), so a
+/// frame can be emitted immediately without waiting to see the next frame's timestamp.
+pub fn decode_live_motion_streaming(
+    path: &Path,
+    max_long_edge: u32,
+    cancel: &AtomicBool,
+    emit: &mut dyn FnMut(MotionChunk),
+) {
+    ff_init();
+    if let Err(e) = stream_video_inner(path, max_long_edge, cancel, emit) {
+        emit(MotionChunk::Failed(DecodeError::Corrupt(format!(
+            "FFmpeg: {e}"
+        ))));
+    }
+}
+
+fn stream_video_inner(
+    path: &Path,
+    max_long_edge: u32,
+    cancel: &AtomicBool,
+    emit: &mut dyn FnMut(MotionChunk),
+) -> Result<(), ff::Error> {
+    let mut ictx = ff::format::input(&path)?;
+    let stream = ictx
+        .streams()
+        .best(Type::Video)
+        .ok_or(ff::Error::StreamNotFound)?;
+    let vindex = stream.index();
+    let rotation = rotation_degrees(&stream);
+    // Nominal per-frame delay from the stream's average frame rate (constant-fps clip).
+    let fr = stream.avg_frame_rate();
+    let nominal = if fr.numerator() > 0 && fr.denominator() > 0 {
+        Duration::from_secs_f64(fr.denominator() as f64 / fr.numerator() as f64)
+    } else {
+        FALLBACK_DELAY
+    };
+
+    let ctx = ff::codec::context::Context::from_parameters(stream.parameters())?;
+    let mut decoder = ctx.decoder().video()?;
+    let (dw, dh) = (decoder.width(), decoder.height());
+    if dw == 0 || dh == 0 {
+        emit(MotionChunk::Failed(DecodeError::Corrupt(
+            "Live Photo motion has no video frames".into(),
+        )));
+        return Ok(());
+    }
+
+    // Same decode-to-fit-in-swscale scale as the batch path.
+    let long = dw.max(dh);
+    let s = if max_long_edge > 0 && long > max_long_edge {
+        max_long_edge as f64 / long as f64
+    } else {
+        1.0
+    };
+    let sw = ((dw as f64 * s).round() as u32).max(1);
+    let sh = ((dh as f64 * s).round() as u32).max(1);
+    let mut scaler = Scaler::get(
+        decoder.format(),
+        dw,
+        dh,
+        Pixel::RGBA,
+        sw,
+        sh,
+        ScaleFlags::BILINEAR,
+    )?;
+
+    // Display dims are post-rotation (90°/270° swap the axes).
+    let (disp_w, disp_h) = if rotation == 90 || rotation == 270 {
+        (sh, sw)
+    } else {
+        (sw, sh)
+    };
+    emit(MotionChunk::Header(MotionHeader {
+        width: disp_w,
+        height: disp_h,
+        // swscale RGBA is nominal BT.709 (≈ sRGB) — pass through, like the batch path.
+        color: ColorTransform::srgb(),
+        codec: "Live Photo",
+    }));
+
+    let mut count: usize = 0;
+    let mut truncated = false;
+    // Pull every ready RGBA frame out of the decoder and emit it. Returns whether the cap hit.
+    let mut drain = |decoder: &mut ff::decoder::Video,
+                     scaler: &mut Scaler,
+                     emit: &mut dyn FnMut(MotionChunk)|
+     -> Result<bool, ff::Error> {
+        let mut decoded = ff::frame::Video::empty();
+        while decoder.receive_frame(&mut decoded).is_ok() {
+            if count >= MAX_MOTION_FRAMES {
+                return Ok(true);
+            }
+            let mut rgba_frame = ff::frame::Video::empty();
+            scaler.run(&decoded, &mut rgba_frame)?;
+            let rgba = tight_rgba(&rgba_frame);
+            let (rgba, fw, fh) = rotate_rgba(rgba, sw, sh, rotation);
+            count += 1;
+            emit(MotionChunk::Frame(AnimFrame {
+                rgba,
+                width: fw,
+                height: fh,
+                delay: nominal,
+            }));
+        }
+        Ok(false)
+    };
+
+    for (s, packet) in ictx.packets() {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(()); // navigated away — stop; the consumer drops the stream
+        }
+        if s.index() != vindex {
+            continue;
+        }
+        decoder.send_packet(&packet)?;
+        if drain(&mut decoder, &mut scaler, emit)? {
+            truncated = true;
+            break;
+        }
+    }
+    if !truncated && !cancel.load(Ordering::Relaxed) {
+        decoder.send_eof()?;
+        truncated = drain(&mut decoder, &mut scaler, emit)?;
+    }
+
+    if count == 0 {
+        emit(MotionChunk::Failed(DecodeError::Corrupt(
+            "Live Photo motion decoded no frames".into(),
+        )));
+    } else {
+        // Plays once and stops (finite loop = 1), like the batch/Windows/macOS backends.
+        emit(MotionChunk::Done {
+            loop_count: 1,
+            truncated,
+        });
+    }
+    Ok(())
+}
+
 /// Interleaved f32 PCM decoded from a Live Photo's motion `.mov` audio track, for the
 /// Linux [`LiveAudio`] backend (`rodio` plays it). `samples` is channel-interleaved.
 pub struct MotionAudio {
@@ -418,4 +592,51 @@ fn append_interleaved_f32(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The streaming decoder emits its chunks in order — exactly one `Header` first, then a
+    /// run of `Frame`s, then a terminal `Done` — which is what lets playback start before the
+    /// whole `.mov` decodes (task #69). Point `PB_LIVE_TEST_MOV` at a Live Photo `.mov` to run
+    /// it (e.g. `test-images/live/IMG_0031.mov`); skipped when unset so it stays CI-safe.
+    #[test]
+    fn streaming_emits_header_then_frames_then_done_in_order() {
+        let Ok(path) = std::env::var("PB_LIVE_TEST_MOV") else {
+            eprintln!("skipping: set PB_LIVE_TEST_MOV to a Live Photo .mov to run this");
+            return;
+        };
+        let cancel = AtomicBool::new(false);
+        let mut kinds: Vec<&'static str> = Vec::new();
+        let mut frames = 0usize;
+        let mut first_dims = None;
+        decode_live_motion_streaming(Path::new(&path), 1440, &cancel, &mut |chunk| match chunk {
+            MotionChunk::Header(h) => {
+                first_dims = Some((h.width, h.height));
+                kinds.push("header");
+            }
+            MotionChunk::Frame(f) => {
+                assert!(f.width > 0 && f.height > 0, "frame has zero dimensions");
+                frames += 1;
+                kinds.push("frame");
+            }
+            MotionChunk::Done { loop_count, .. } => {
+                assert_eq!(loop_count, 1, "a Live Photo plays once");
+                kinds.push("done");
+            }
+            MotionChunk::Failed(e) => panic!("stream failed: {e}"),
+        });
+
+        assert_eq!(kinds.first(), Some(&"header"), "Header must come first");
+        assert_eq!(kinds.last(), Some(&"done"), "Done must come last");
+        assert!(frames >= 2, "expected multiple frames, got {frames}");
+        // Everything between the header and the terminal done is a frame — no interleaving.
+        assert!(
+            kinds[1..kinds.len() - 1].iter().all(|k| *k == "frame"),
+            "frames must be contiguous between header and done"
+        );
+        assert!(first_dims.is_some_and(|(w, h)| w > 0 && h > 0));
+    }
 }

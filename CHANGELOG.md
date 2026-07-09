@@ -15,6 +15,12 @@ with any pre-release suffix carried only by the tag.
   and shortcut keycap fade together with the label, instead of the label fading while the pill's
   shell lingered on screen — and on Linux it no longer stays stuck until you move the mouse.
 
+### Changed
+- **Live Photos start playing almost immediately (Linux).** Pressing `P` now begins playback as
+  soon as the first frames are ready and keeps going while the rest of the motion clip decodes in
+  the background, instead of waiting for the whole clip first. On a slow machine playback may briefly
+  pause if decoding can't keep up, then resume — a fair trade for a near-instant start.
+
 ### Added
 - **Photoshop files without a flattened preview now show something instead of nothing.** A `.psd`
   saved *without* "Maximize Compatibility" has no merged image inside — only the layer stack — so

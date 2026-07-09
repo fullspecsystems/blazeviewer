@@ -22,7 +22,7 @@ use pb_source::{FsSource, PhotoSource};
 use hud::Row;
 use pb_hud::{hud, icon};
 
-use crate::animation::{AnimDecode, AnimWant, Playback, Prepared};
+use crate::animation::{AnimDecode, AnimWant, Playback, Prepared, StreamHeader, StreamMsg};
 use crate::contract;
 use crate::decode_pool::Outcome;
 use crate::engine::*;
@@ -193,6 +193,7 @@ impl AppCore {
             playback: None,
             anim_frame_shown_at: None,
             anim_decode: None,
+            anim_stream: None,
             prepared: None,
             anim_gen: 0,
             anim_hint_shown_for: None,
@@ -250,6 +251,9 @@ impl AppCore {
             // `poll_anim_decode` picks it up promptly (active playback drives its own
             // precise next-frame wake via `tick_playback`, not this frame poll).
             || self.anim_decode.is_some()
+            // A streaming Live Photo decode (task #69) likewise keeps the loop polling so
+            // `poll_anim_stream` drains newly decoded frames as they arrive.
+            || self.anim_stream.is_some()
             // A tree-io job (the folder tree's read_dir derivation / a Go sibling
             // lookup) keeps the loop polling so `tick` installs it when it lands.
             || self.tree_io.is_some()
@@ -991,6 +995,9 @@ impl AppCore {
         // 1b. Pick up a finished off-thread animation decode (kicked by `P` / frame-step) and
         // install playback — never on the still/keypress hot path (#37).
         self.poll_anim_decode();
+        // 1b'. Drain any newly decoded frames from a streaming Live Photo decode (task #69):
+        // install/extend the playing sequence so it plays while the rest still decodes.
+        self.poll_anim_stream();
 
         // 1c. Pick up a finished off-thread text scan (OCR + QR, task #45): cache it,
         // refresh the `T` panel's busy state, run a deferred copy.
@@ -2767,6 +2774,16 @@ impl AppCore {
             self.start_live_audio(item);
             return;
         }
+        // An eager stream (task #69) is decoding → upgrade it to play and start playing
+        // whatever's decoded so far (the rest keeps streaming in).
+        if self.anim_stream.is_some() {
+            if let Some(s) = self.anim_stream.as_mut() {
+                s.want = AnimWant::Play;
+            }
+            self.anim_hint_shown_for = Some(item);
+            self.install_stream_playback(); // no-op until the first frame lands, then installs
+            return;
+        }
         // An eager prep is already decoding → upgrade it to play on arrival.
         if let Some(d) = self.anim_decode.as_mut() {
             d.want = AnimWant::Play;
@@ -2796,6 +2813,11 @@ impl AppCore {
             let anim = self.prepared.take().unwrap().anim;
             self.anim_hint_shown_for = Some(item);
             self.install_animation(anim, false, delta); // paused, stepped
+            return;
+        }
+        if let Some(s) = self.anim_stream.as_mut() {
+            s.want = AnimWant::Step(delta);
+            self.anim_hint_shown_for = Some(item);
             return;
         }
         if let Some(d) = self.anim_decode.as_mut() {
@@ -2868,6 +2890,199 @@ impl AppCore {
                 }
             }
         }
+    }
+
+    /// Drain a streaming Live Photo motion decode (task #69): install a playing Playback on
+    /// the first frame, extend it as frames arrive, and finalize on `Done` — so the clip
+    /// starts within a frame or two instead of after the whole `.mov` decodes. Called each
+    /// tick alongside [`poll_anim_decode`](Self::poll_anim_decode). A no-op off the Linux
+    /// FFmpeg path (`anim_stream` is only ever set there).
+    pub fn poll_anim_stream(&mut self) {
+        use std::sync::mpsc::TryRecvError;
+        let Some((gen, epoch, item)) = self
+            .anim_stream
+            .as_ref()
+            .map(|s| (s.gen, s.epoch, s.item))
+        else {
+            return;
+        };
+        // Stale (superseded / geometry changed / navigated away): cancel + drop.
+        if gen != self.anim_gen || epoch != self.epoch || self.displayed_item != Some(item) {
+            self.cancel_anim_stream();
+            return;
+        }
+        // Drain everything available now without holding the receiver borrow.
+        let mut msgs = Vec::new();
+        let mut disconnected = false;
+        {
+            let s = self.anim_stream.as_ref().unwrap();
+            loop {
+                match s.rx.try_recv() {
+                    Ok(m) => msgs.push(m),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+        for msg in msgs {
+            self.apply_stream_msg(msg);
+            if self.anim_stream.is_none() {
+                return; // a terminal Done/Failed cleared it
+            }
+        }
+        if disconnected {
+            // The worker vanished without a terminal message — drop the stream.
+            self.anim_stream = None;
+        }
+    }
+
+    fn apply_stream_msg(&mut self, msg: StreamMsg) {
+        match msg {
+            StreamMsg::Header {
+                width,
+                height,
+                color,
+                codec,
+            } => {
+                if let Some(s) = self.anim_stream.as_mut() {
+                    s.header = Some(StreamHeader {
+                        width,
+                        height,
+                        color,
+                        codec,
+                    });
+                }
+            }
+            StreamMsg::Frame(frame) => self.stream_frame(frame),
+            StreamMsg::Done {
+                loop_count,
+                truncated,
+            } => self.stream_done(loop_count, truncated),
+            StreamMsg::Failed(e) => self.stream_failed(e),
+        }
+    }
+
+    /// A streaming frame arrived: extend the live Playback if one's installed, else buffer it
+    /// (and, in `Play` mode, install a playing streaming Playback as soon as we can).
+    fn stream_frame(&mut self, frame: pb_decode::AnimFrame) {
+        let Some((installed, want)) = self.anim_stream.as_ref().map(|s| (s.installed, s.want))
+        else {
+            return;
+        };
+        if installed {
+            if let Some(pb) = self.playback.as_mut() {
+                pb.push_frame(frame);
+            }
+            return;
+        }
+        if let Some(s) = self.anim_stream.as_mut() {
+            s.pending.push(frame);
+        }
+        // Eager/Step accumulate until `Done`; Play starts the moment a frame + header exist.
+        if matches!(want, AnimWant::Play) {
+            self.install_stream_playback();
+        }
+    }
+
+    /// Install a **playing** streaming [`Playback`] from the stream's header + all frames
+    /// buffered so far, and start its audio. Returns whether it installed (needs the header
+    /// and at least one buffered frame). Used both for the first `Play` frame and the
+    /// eager→`Play` upgrade (play whatever's decoded so far, then keep extending it).
+    fn install_stream_playback(&mut self) -> bool {
+        let Some(s) = self.anim_stream.as_mut() else {
+            return false;
+        };
+        if s.installed {
+            return true;
+        }
+        if s.header.is_none() || s.pending.is_empty() {
+            return false; // header not here yet, or nothing decoded — wait for the first frame
+        }
+        let header = s.header.as_ref().unwrap();
+        let (width, height, codec, color) =
+            (header.width, header.height, header.codec, header.color);
+        let item = s.item;
+        let frames = std::mem::take(&mut s.pending);
+        s.installed = true;
+        let anim = pb_decode::Animation {
+            kind: pb_decode::AnimationKind::LivePhoto,
+            width,
+            height,
+            frames,
+            loop_count: 0, // provisional; the real count lands with `Done` → `mark_complete`
+            codec,
+            color,
+            truncated: false,
+        };
+        self.playback = Some(Playback::new_streaming(anim, true));
+        self.present_anim_frame();
+        self.start_live_audio(item);
+        true
+    }
+
+    /// A streaming decode finished. If it's already playing, finalize the live Playback's loop
+    /// count (so a finite Live Photo ends instead of looping); otherwise build the accumulated
+    /// frames into a complete [`Animation`] and route it by `want` (eager → stash, step → step).
+    fn stream_done(&mut self, loop_count: u32, truncated: bool) {
+        let Some(installed) = self.anim_stream.as_ref().map(|s| s.installed) else {
+            return;
+        };
+        if installed {
+            if let Some(pb) = self.playback.as_mut() {
+                pb.mark_complete(loop_count);
+            }
+            self.anim_stream = None;
+            if truncated {
+                self.show_toast("Animation truncated");
+            }
+            return;
+        }
+        let Some(stream) = self.anim_stream.take() else {
+            return;
+        };
+        let (item, want) = (stream.item, stream.want);
+        let Some(anim) = stream.into_animation(loop_count, truncated) else {
+            return; // no header/frames — nothing to show
+        };
+        match want {
+            AnimWant::Eager => {
+                self.prepared = Some(Prepared { item, anim });
+                if self.overlay_shown && self.slot_content() == Some(SlotContent::Details) {
+                    self.show_overlay();
+                }
+            }
+            // A Play stream installs on its first frame, so reaching here means it completed
+            // before any frame was consumed as "installed" — play the whole thing now.
+            AnimWant::Play => {
+                self.install_animation(anim, true, 0);
+                self.start_live_audio(item);
+            }
+            AnimWant::Step(delta) => self.install_animation(anim, false, delta),
+        }
+    }
+
+    /// A streaming decode failed. Mid-playback, treat it as a truncated finish (don't yank the
+    /// video away); before any frame, surface it like a batch decode failure (silent for an
+    /// eager prep the user never asked for).
+    fn stream_failed(&mut self, err: String) {
+        let Some((installed, want)) = self.anim_stream.as_ref().map(|s| (s.installed, s.want))
+        else {
+            return;
+        };
+        if installed {
+            if let Some(pb) = self.playback.as_mut() {
+                pb.mark_complete(1);
+            }
+        } else {
+            eprintln!("live photo stream failed: {err}");
+            if want != AnimWant::Eager {
+                self.show_toast("Can't play this animation");
+            }
+        }
+        self.anim_stream = None;
     }
 
     /// Stop and drop any playback / in-flight decode / eager prep, reverting to the
@@ -5763,9 +5978,29 @@ impl AppCore {
             d.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         self.anim_decode = None;
+        self.cancel_anim_stream();
+    }
+
+    /// Signal any in-flight streaming Live Photo decode (task #69) to stop and drop it — the
+    /// worker checks the flag per packet and bails. Called on navigate/supersede (via
+    /// [`cancel_anim_decode`](Self::cancel_anim_decode)) so streams don't pile up.
+    pub fn cancel_anim_stream(&mut self) {
+        if let Some(s) = &self.anim_stream {
+            s.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.anim_stream = None;
     }
 
     pub fn start_animation_decode(&mut self, item: usize, want: AnimWant) {
+        // A Live Photo on the Linux FFmpeg path streams its motion (task #69) — play the
+        // `.mov` while it's still decoding rather than waiting for the whole clip. The macOS
+        // AVFoundation / Windows Media Foundation players decode in one call, so they stay on
+        // the batch path below (as do GIF/APNG/WebP everywhere — decoded from the still bytes).
+        #[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
+        if self.live_motion_path(item).is_some() {
+            self.start_live_stream(item, want);
+            return;
+        }
         // Supersede any in-flight decode so its orphaned worker stops promptly (see `cancel`).
         self.cancel_anim_decode();
         self.anim_gen += 1;
@@ -5798,14 +6033,79 @@ impl AppCore {
         }
     }
 
+    /// Kick a **streaming** Live Photo motion decode (task #69) on the Linux FFmpeg path: the
+    /// worker emits each frame as it's decoded (mapped onto the platform-neutral [`StreamMsg`]),
+    /// and [`poll_anim_stream`](Self::poll_anim_stream) installs/extends the playing sequence so
+    /// the clip starts within a frame or two instead of after the whole `.mov`. Same cancel /
+    /// generation / epoch discipline as [`start_animation_decode`](Self::start_animation_decode).
+    #[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
+    pub fn start_live_stream(&mut self, item: usize, want: AnimWant) {
+        // Supersede any in-flight decode/stream so its orphaned worker stops promptly.
+        self.cancel_anim_decode();
+        self.anim_gen += 1;
+        let gen = self.anim_gen;
+        let epoch = self.epoch;
+        let Some(path) = self.live_motion_path(item) else {
+            return;
+        };
+        // Cap the motion's long edge to the display fit (decode-to-fit), never above the RAM
+        // ceiling — the same bound the batch `decode_motion_job` uses.
+        let edge = self
+            .decode_fit()
+            .map(|f| f.max_width.max(f.max_height))
+            .unwrap_or(crate::engine::MOTION_MAX_LONG_EDGE)
+            .min(crate::engine::MOTION_MAX_LONG_EDGE);
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancel_job = std::sync::Arc::clone(&cancel);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // Map the decoder's chunks onto the neutral `StreamMsg` the core wiring consumes.
+            let mut emit = |chunk: pb_decode::MotionChunk| {
+                let msg = match chunk {
+                    pb_decode::MotionChunk::Header(h) => StreamMsg::Header {
+                        width: h.width,
+                        height: h.height,
+                        color: h.color,
+                        codec: h.codec,
+                    },
+                    pb_decode::MotionChunk::Frame(f) => StreamMsg::Frame(f),
+                    pb_decode::MotionChunk::Done {
+                        loop_count,
+                        truncated,
+                    } => StreamMsg::Done {
+                        loop_count,
+                        truncated,
+                    },
+                    pb_decode::MotionChunk::Failed(e) => StreamMsg::Failed(e.to_string()),
+                };
+                let _ = tx.send(msg);
+            };
+            pb_decode::decode_live_motion_streaming(&path, edge, &cancel_job, &mut emit);
+        });
+        self.anim_stream = Some(crate::animation::AnimStream {
+            gen,
+            item,
+            epoch,
+            want,
+            rx,
+            cancel,
+            header: None,
+            pending: Vec::new(),
+            installed: false,
+        });
+        if want != AnimWant::Eager {
+            self.anim_hint_shown_for = self.displayed_item;
+        }
+    }
+
     /// When the user has rested on an animated still, eagerly decode the whole sequence
     /// in the background so pressing `P` is instant (fixes the slow first-play on WebP /
     /// AVIF, ~0.6–2s to decode). Returns the wake deadline while the dwell elapses (so
     /// the idle loop wakes to kick it), else `None`. Strictly off the hot path — only
     /// when settled (never while flying), exactly when the prefetch pool is idle.
     pub fn maybe_prepare_animation(&mut self, now: Instant) -> Option<Instant> {
-        if self.playback.is_some() || self.anim_decode.is_some() {
-            return None; // already playing, or a decode is already in flight
+        if self.playback.is_some() || self.anim_decode.is_some() || self.anim_stream.is_some() {
+            return None; // already playing, or a decode/stream is already in flight
         }
         let item = self.displayed_item?;
         if self.displayed_item != self.target_item {

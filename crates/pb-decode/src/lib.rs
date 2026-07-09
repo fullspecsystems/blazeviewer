@@ -56,7 +56,8 @@ pub use animation::{decode_animation, detect_animation, AnimFrame, Animation, An
 pub use color::ColorTransform;
 #[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
 pub use ff_live::{
-    decode_live_motion, decode_live_motion_cancellable, decode_motion_audio, MotionAudio,
+    decode_live_motion, decode_live_motion_cancellable, decode_live_motion_streaming,
+    decode_motion_audio, MotionAudio, MotionChunk, MotionHeader,
 };
 pub use image_backend::ImageCrateDecoder;
 #[cfg(target_os = "macos")]

@@ -24,7 +24,7 @@ use pb_hud::hud::Hud;
 use pb_render::{Renderer, Rotation, ViewTransform};
 use pb_source::PhotoSource;
 
-use crate::animation::{AnimDecode, Playback, Prepared};
+use crate::animation::{AnimDecode, AnimStream, Playback, Prepared};
 use crate::contract::CoreEffect;
 use crate::decode_pool::{DecodePool, Outcome};
 use crate::keymap::Keymap;
@@ -482,6 +482,9 @@ pub struct AppCore {
     pub anim_frame_shown_at: Option<Instant>,
     /// An in-flight off-thread animation decode, or `None`.
     pub anim_decode: Option<AnimDecode>,
+    /// An in-flight **streaming** Live Photo motion decode (task #69) — frames play as they
+    /// arrive. Only set on the Linux FFmpeg path; `None` elsewhere (OS players use `anim_decode`).
+    pub anim_stream: Option<AnimStream>,
     /// An animation decoded ahead (eager prep) and held ready for instant playback.
     pub prepared: Option<Prepared>,
     /// Animation generation; bumped on navigate so a late decode for a past item is discarded.
