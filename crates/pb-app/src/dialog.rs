@@ -481,8 +481,13 @@ impl DialogWindow {
             // height than Segoe so the GitHub link at the bottom isn't clipped.
             #[cfg(target_os = "macos")]
             DialogKind::About => (254.0, 351.0, false, "About PhotoBlaze"),
-            #[cfg(not(target_os = "macos"))]
+            // Windows (Segoe UI): the original tuned height.
+            #[cfg(target_os = "windows")]
             DialogKind::About => (254.0, 321.0, false, "About PhotoBlaze"),
+            // Linux uses the bundled fonts, whose line metrics run taller still — the 321px
+            // Windows height clips the bottom rows, so give it more room.
+            #[cfg(all(unix, not(target_os = "macos")))]
+            DialogKind::About => (254.0, 383.0, false, "About PhotoBlaze"),
             DialogKind::Settings => (560.0, 660.0, true, "PhotoBlaze Settings"),
             DialogKind::Confirm => (450.0, 172.0, false, "Confirm Delete"),
             DialogKind::Message => (470.0, 185.0, false, "PhotoBlaze"),
