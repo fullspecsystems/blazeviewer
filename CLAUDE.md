@@ -461,6 +461,22 @@ keychain** (generated once via Sparkle's `generate_keys`; the public `SUPublicED
 the plist) — **back it up** (`generate_keys -x`); losing it means no future build can be signed for
 auto-update without shipping a new public key via a stopgap manual update.
 
+**Linux** ships a self-contained **AppImage** — one executable the user downloads, `chmod +x`es, and
+runs; **no `apt install`, no dependency hunt.** Built locally with `scripts/release-linux.sh` (→
+`dist/PhotoBlaze-<version>-<arch>.AppImage`). It builds the full-feature release binary
+(`--features livephoto,pb-decode/libheif`) and uses **linuxdeploy** (fetched to `dist/appimage-tools`)
+to bundle the *specialized* decode libraries — libheif, FFmpeg, and the AV1/HEVC codecs — while
+leaving the ~universal system stack (glibc, GTK, Mesa/GL, X11, Wayland) to the host, per the AppImage
+excludelist. Two things linuxdeploy/`ldd` can't see are handled by the script: **libheif's dlopen'd
+plugins** (`libheif-libde265.so` etc.) are copied into `usr/lib/libheif/plugins` with their own deps
+(libde265/libaom/…), and a **custom `AppRun`** exports `LIBHEIF_PLUGIN_PATH` + `LD_LIBRARY_PATH` so
+they resolve inside the bundle. Live Photo *audio* still needs `pw-cat` (PipeWire) on the user's PATH
+— present on any modern desktop, degrades to silent motion if absent, so it's intentionally **not**
+bundled. **No signing, no auto-update yet** (unlike Velopack/Sparkle): the AppImage is unsigned and
+the app won't self-update on Linux — a zsync/AppImageUpdate feed is a future add. The AppImage is
+built for the **host arch only** (run the script on an x86_64 box for the x86_64 artifact; there's no
+cross-build). `dist/` is git-ignored, so the artifacts never get committed.
+
 > **Release only from a clean, committed workspace.** `crates/pb-app/build.rs` stamps the build
 > id `-dirty` on **any** `git status --porcelain` output — **untracked files included** — and that
 > shows in the About dialog. Commit (or `.gitignore`) everything first: both release scripts build
