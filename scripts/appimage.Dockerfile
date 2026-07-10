@@ -24,15 +24,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libheif-dev libheif-plugin-libde265 libde265-0 libheif-plugin-aomdec \
     && rm -rf /var/lib/apt/lists/*
 
-# Rust via rustup, into a system prefix. Pre-install the pinned stable toolchain + components
-# (matching rust-toolchain.toml) so `docker run` doesn't re-download the toolchain each build.
+# Rust via rustup, into a system prefix. The exact toolchain + components come from
+# rust-toolchain.toml — the ONE source of truth shared with dev + CI (task #71): install rustup
+# with NO default toolchain, COPY just the pin file, then `rustup show` installs the exact
+# channel + components it names, pre-warmed into the image. Changing the pin invalidates this
+# layer and reinstalls; the runtime bind-mount of the repo carries the same file, so the
+# container never re-downloads the toolchain on `docker run`.
 ENV RUSTUP_HOME=/opt/rustup \
     CARGO_HOME=/opt/cargo \
     PATH=/opt/cargo/bin:$PATH
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-      | sh -s -- -y --no-modify-path --profile minimal \
-        --default-toolchain stable \
-        --component rustfmt,clippy,llvm-tools-preview \
-    && chmod -R a+w "$RUSTUP_HOME" "$CARGO_HOME"
-
 WORKDIR /src
+COPY rust-toolchain.toml ./rust-toolchain.toml
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --no-modify-path --profile minimal --default-toolchain none \
+    && rustup show \
+    && rustc --version \
+    && chmod -R a+w "$RUSTUP_HOME" "$CARGO_HOME"

@@ -1,4 +1,9 @@
 [toolchain]
-channel = "stable"
+# Pinned to an EXACT version (not floating "stable") so new-compiler lint churn is a
+# deliberate, reviewed bump — not a surprise on whatever stable a fresh machine/container
+# pulls (task #71). This file is the ONE source of truth: scripts/appimage.Dockerfile reads
+# it, and CI asserts `rustc --version` matches. To bump: change this, then fix any new lints
+# in the same PR and let all three platform gates go green.
+channel = "1.97.0"
 # rustfmt + clippy for hygiene; llvm-tools-preview backs cargo-llvm-cov coverage.
 components = ["rustfmt", "clippy", "llvm-tools-preview"]

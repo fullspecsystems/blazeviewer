@@ -35,7 +35,10 @@ edition = "2021"
 # marks a custom (non-OSI) license; the terms live in the root LICENSE file. Not
 # published to crates.io (private), so this string is informational only.
 license = "LicenseRef-Proprietary"
-rust-version = "1.80"
+# Tracks the pinned toolchain (rust-toolchain.toml) — a private app with no external
+# consumers, so this is the version we build/ship with, not an independently-tested MSRV
+# floor. Bump it alongside the pin (task #71).
+rust-version = "1.97"
 repository = ""
 
 [workspace.dependencies]
