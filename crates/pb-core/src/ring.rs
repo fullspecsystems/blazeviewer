@@ -159,10 +159,8 @@ impl ResidentRing {
                     return Some(Reservation { item, slot, epoch });
                 }
             }
-            match self.pick_victim(&rank_of, item_rank) {
-                Some(slot) => self.free_slot(slot),
-                None => return None,
-            }
+            let slot = self.pick_victim(&rank_of, item_rank)?;
+            self.free_slot(slot);
         }
     }
 

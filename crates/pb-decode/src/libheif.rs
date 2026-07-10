@@ -364,7 +364,7 @@ pub(crate) fn route_full_heic(bytes: &[u8], allow_preview: bool) -> bool {
 fn backend_is_libheif() -> bool {
     #[cfg(not(windows))]
     {
-        return true;
+        true
     }
     #[cfg(windows)]
     {

@@ -353,7 +353,7 @@ impl Gallery {
 fn mini_dialog(ui: &mut egui::Ui, p: &Palette, body: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::none()
         .fill(p.page)
-        .stroke(egui::Stroke::new(1.0, p.card_stroke))
+        .stroke(egui::Stroke::new(1.0_f32, p.card_stroke))
         .rounding(egui::Rounding::same(8.0))
         .inner_margin(egui::Margin::same(18.0))
         .show(ui, |ui| {
@@ -392,7 +392,7 @@ fn swatches(ui: &mut egui::Ui, p: &Palette) {
                     rect,
                     egui::Rounding::same(6.0),
                     color,
-                    egui::Stroke::new(1.0, p.card_stroke),
+                    egui::Stroke::new(1.0_f32, p.card_stroke),
                 );
                 ui.label(egui::RichText::new(name).size(11.0).color(p.text_secondary));
             });

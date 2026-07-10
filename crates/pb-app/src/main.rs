@@ -182,7 +182,7 @@ fn build_event_loop() -> Result<EventLoop<()>, winit::error::EventLoopError> {
             }
             _ => {}
         }
-        return builder.build();
+        builder.build()
     }
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     EventLoop::new()
@@ -261,6 +261,8 @@ struct App {
     last_edr_headroom: f32,
     /// The native menu bar (windowed mode only). Built once, kept alive here so its
     /// native handle outlives the window. `None` until the first window is created.
+    // Read only by the Windows/macOS native-menu paths; on Linux it's held but never read.
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     menu: Option<muda::Menu>,
     /// macOS-only: the **Window** submenu, kept so [`apply_menu_for_mode`] can mark it
     /// as the NSApp Window menu (`set_as_windows_menu_for_nsapp`) right after
@@ -310,6 +312,7 @@ struct App {
     menu_state: Option<contract::MenuState>,
     /// Whether the menu has been attached to the current window (`init_for_hwnd`),
     /// so fullscreen↔windowed toggles can show/hide it instead of re-initializing.
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     menu_attached: bool,
     /// The Appearance mode last pushed to the OS-drawn chrome (title bar + native
     /// menu), so `apply_chrome_theme` (checked each `about_to_wait` turn) only
@@ -1697,6 +1700,8 @@ impl App {
     }
 
     /// Build the native menu bar once (cross-platform; muda owns the OS handle).
+    // Called only from the Windows/macOS window-setup paths; unreached on Linux (no native menu).
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     fn ensure_menu(&mut self) {
         if self.menu.is_none() {
             let built = menu::build_menu(&self.core.keymap);

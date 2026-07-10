@@ -382,7 +382,7 @@ pub fn menu_bar(
                             let fw = text_width(ui, first, &font);
                             let y = (rect.center().y + g.size().y / 2.0).round() + 0.5;
                             ui.painter()
-                                .hline(tx..=(tx + fw), y, egui::Stroke::new(1.0, col));
+                                .hline(tx..=(tx + fw), y, egui::Stroke::new(1.0_f32, col));
                         }
                     }
                 }
@@ -614,7 +614,7 @@ fn menu_separator(ui: &mut egui::Ui, p: &Palette) {
     ui.painter().hline(
         (rect.left() + 8.0)..=(rect.right() - 8.0),
         y,
-        egui::Stroke::new(1.0, p.text_secondary.gamma_multiply(0.35)),
+        egui::Stroke::new(1.0_f32, p.text_secondary.gamma_multiply(0.35)),
     );
 }
 
@@ -661,7 +661,7 @@ fn menu_dropdown(
                 rect,
                 8.0,
                 surf,
-                egui::Stroke::new(1.0, p.text_secondary.gamma_multiply(0.3)),
+                egui::Stroke::new(1.0_f32, p.text_secondary.gamma_multiply(0.3)),
             );
             ui.add_space(4.0);
             menu_group(ui, &p, group, sel, fired);
@@ -1053,7 +1053,7 @@ fn draw_spinner(ui: &egui::Ui, center: egui::Pos2, r: f32, p: &Palette) {
                 egui::pos2(center.x + r * a0.cos(), center.y + r * a0.sin()),
                 egui::pos2(center.x + r * a1.cos(), center.y + r * a1.sin()),
             ],
-            Stroke::new(2.0, c),
+            Stroke::new(2.0_f32, c),
         );
     }
     ui.ctx()
@@ -1542,7 +1542,7 @@ fn sq(cx: f32, cy: f32, s: f32) -> egui::Rect {
 /// Draw a ✕ into `rect`.
 fn draw_x(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
     let r = rect.shrink(rect.width() * 0.28);
-    let s = Stroke::new(1.6, color);
+    let s = Stroke::new(1.6_f32, color);
     painter.line_segment([r.left_top(), r.right_bottom()], s);
     painter.line_segment([r.right_top(), r.left_bottom()], s);
 }
@@ -1550,7 +1550,7 @@ fn draw_x(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
 /// Draw a copy (two-documents) glyph into `rect`; `bg` fills the front sheet so the overlap
 /// reads.
 fn draw_copy(painter: &egui::Painter, rect: egui::Rect, bg: Color32, color: Color32) {
-    let s = Stroke::new(1.3, color);
+    let s = Stroke::new(1.3_f32, color);
     let back = egui::Rect::from_min_size(rect.min + egui::vec2(7.0, 3.0), egui::vec2(9.0, 11.0));
     let front = egui::Rect::from_min_size(rect.min + egui::vec2(3.0, 6.0), egui::vec2(9.0, 11.0));
     painter.rect_stroke(back, Rounding::same(2.0), s);
@@ -1581,7 +1581,7 @@ fn draw_chevron(painter: &egui::Painter, rect: egui::Rect, color: Color32, expan
 /// Draw an up-left arrow (go-to-parent) into `rect`.
 fn draw_up_arrow(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
     let r = rect.shrink(rect.width() * 0.22);
-    let s = Stroke::new(1.6, color);
+    let s = Stroke::new(1.6_f32, color);
     let tip = r.left_top();
     painter.line_segment([r.right_bottom(), tip], s);
     let a = 5.0;

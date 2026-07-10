@@ -202,7 +202,7 @@ fn visuals(p: &Palette) -> egui::Visuals {
     v.panel_fill = p.page;
     v.window_fill = p.page;
     v.window_rounding = Rounding::same(RADIUS_CARD);
-    v.window_stroke = Stroke::new(1.0, p.card_stroke);
+    v.window_stroke = Stroke::new(1.0_f32, p.card_stroke);
     // Text-input / "extreme" backgrounds sit at control fill.
     v.extreme_bg_color = p.control;
     v.faint_bg_color = if p.dark {
@@ -213,25 +213,25 @@ fn visuals(p: &Palette) -> egui::Visuals {
 
     let radius = Rounding::same(RADIUS_CONTROL);
     // Resting label text.
-    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, p.text);
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.card_stroke);
+    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, p.text);
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, p.card_stroke);
     // Resting interactive control (button/combo/field).
     v.widgets.inactive.bg_fill = p.control;
     v.widgets.inactive.weak_bg_fill = p.control;
-    v.widgets.inactive.bg_stroke = Stroke::new(1.0, p.card_stroke);
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, p.card_stroke);
     v.widgets.inactive.rounding = radius;
-    v.widgets.inactive.fg_stroke = Stroke::new(1.0, p.text);
+    v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, p.text);
     // Hovered.
     v.widgets.hovered.bg_fill = p.control_hover;
     v.widgets.hovered.weak_bg_fill = p.control_hover;
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, p.accent);
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, p.accent);
     v.widgets.hovered.rounding = radius;
-    v.widgets.hovered.fg_stroke = Stroke::new(1.0, p.text);
+    v.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, p.text);
     // Active (pressed).
     v.widgets.active.bg_fill = p.control_hover;
     v.widgets.active.weak_bg_fill = p.control_hover;
     v.widgets.active.rounding = radius;
-    v.widgets.active.fg_stroke = Stroke::new(1.0, p.text);
+    v.widgets.active.fg_stroke = Stroke::new(1.0_f32, p.text);
     // Open (e.g. an expanded combo).
     v.widgets.open.bg_fill = p.control;
     v.widgets.open.weak_bg_fill = p.control;
@@ -239,7 +239,7 @@ fn visuals(p: &Palette) -> egui::Visuals {
 
     // Accent: text selection, the slider's trailing fill, links.
     v.selection.bg_fill = p.accent.linear_multiply(0.55);
-    v.selection.stroke = Stroke::new(1.0, p.text);
+    v.selection.stroke = Stroke::new(1.0_f32, p.text);
     v.slider_trailing_fill = true;
     v.hyperlink_color = p.accent;
     v
@@ -469,7 +469,7 @@ pub fn group_card(
 fn card_frame(p: &Palette) -> egui::Frame {
     egui::Frame::none()
         .fill(p.card)
-        .stroke(Stroke::new(1.0, p.card_stroke))
+        .stroke(Stroke::new(1.0_f32, p.card_stroke))
         .rounding(Rounding::same(RADIUS_CARD))
 }
 
@@ -631,7 +631,7 @@ fn filled_button(ui: &mut egui::Ui, base: Color32, text: &str) -> egui::Response
             &mut v.widgets.active,
         ] {
             w.bg_stroke = Stroke::NONE;
-            w.fg_stroke = Stroke::new(1.0, Color32::WHITE);
+            w.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
         }
         ui.add(
             egui::Button::new(egui::RichText::new(text).color(Color32::WHITE))
@@ -751,7 +751,7 @@ pub fn tab_bar<T: Copy + PartialEq>(
     painter.hline(
         ui.max_rect().x_range(),
         baseline - 0.5,
-        Stroke::new(1.0, p.card_stroke),
+        Stroke::new(1.0_f32, p.card_stroke),
     );
     for (rect, selected, hovered) in marks {
         let color = if selected {
@@ -836,7 +836,7 @@ pub fn progress_bar(ui: &mut egui::Ui, p: &Palette, fraction: f32) -> egui::Resp
         let radius = Rounding::same(rect.height() * 0.5);
         let painter = ui.painter();
         // Track: control fill + the card hairline, so it reads like an inset groove.
-        painter.rect(rect, radius, p.control, Stroke::new(1.0, p.card_stroke));
+        painter.rect(rect, radius, p.control, Stroke::new(1.0_f32, p.card_stroke));
         if frac > 0.0 {
             // Clamp the fill to at least its own height so even tiny progress shows as a
             // visible rounded nub rather than nothing.

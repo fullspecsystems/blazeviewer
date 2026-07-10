@@ -111,6 +111,10 @@ pub(crate) fn finalize_oriented(
 /// `fast_image_resize` has no f16 path), then pack to half-floats. `peak` is the
 /// max RGB value (the SDR-display tone-map white point). Orientation is assumed
 /// applied already (WIC self-orients), so none is done here.
+// Only the Windows (`wic.rs`) and macOS (`imageio.rs`) HDR backends call this; on other targets
+// (Linux) the lib build has no caller, so allow the dead code there rather than gate the fn out
+// (it's still used by the `#[cfg(test)]` tests on every platform).
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 pub(crate) fn finalize_hdr_scrgb(
     mut linear: Vec<f32>,
     mut w: u32,
@@ -158,6 +162,8 @@ pub(crate) fn finalize_hdr_scrgb(
 }
 
 /// Downscale an RGBA **f32** image to fit `fit` (Lanczos3), for the HDR path.
+// Dead on non-Windows/macOS for the same reason as its only caller `finalize_hdr_scrgb`.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 fn downscale_to_fit_f32(
     pixels: Vec<f32>,
     w: u32,

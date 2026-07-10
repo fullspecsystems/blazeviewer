@@ -280,6 +280,9 @@ fn item(id: &str, label: &str) -> MenuItem {
 /// carry a `\t` hint, no real accelerator" rule as [`item`]. Starts unchecked; the
 /// app pushes the live state via [`ViewChecks`] right after the menu attaches, so the
 /// initial value here doesn't matter.
+// The native menu is Windows/macOS-only (muda needs the off-by-default `gtk` feature on Linux),
+// so this — and `BuiltMenu`/`build_menu` below — are dead on Linux; allow it only there.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 fn check_item(id: &str, label: &str) -> CheckMenuItem {
     CheckMenuItem::with_id(id, label, true, false, None)
 }
@@ -340,6 +343,7 @@ pub struct ViewChecks {
 
 /// Everything [`build_menu`] hands back: the menu itself plus the item handles whose
 /// state the app toggles at runtime (Save Rotation's enabled flag; the View checks).
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 pub struct BuiltMenu {
     pub menu: Menu,
     pub save_rotation: MenuItem,
@@ -387,6 +391,7 @@ pub struct BuiltMenu {
 /// **View checks** (scale mode / recursive / fullscreen — see
 /// `App::refresh_view_menu_checks`).
 #[cfg(not(target_os = "macos"))]
+#[cfg_attr(not(windows), allow(dead_code))] // used on Windows; Linux has no native menu
 pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
     let menu = Menu::new();
     let sep = || PredefinedMenuItem::separator();
