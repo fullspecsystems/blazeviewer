@@ -20,6 +20,11 @@ with any pre-release suffix carried only by the tag.
   soon as the first frames are ready and keeps going while the rest of the motion clip decodes in
   the background, instead of waiting for the whole clip first. On a slow machine playback may briefly
   pause if decoding can't keep up, then resume — a fair trade for a near-instant start.
+- **Live Photos start playing almost immediately on macOS too.** The motion clip now decodes
+  through a streaming pipeline that plays while it decodes (and stops decoding the moment you
+  navigate away), replacing a path that both waited for the whole clip and re-decoded it far less
+  efficiently — pressing `P` used to take one to two seconds on a typical Live Photo; playback now
+  starts in a fraction of that, with color handling for wide-gamut (P3) clips preserved.
 
 ### Added
 - **Linux now updates itself.** The AppImage checks for a new version in the background and, when

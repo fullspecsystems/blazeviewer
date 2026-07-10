@@ -121,6 +121,9 @@ jobs:
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
       - name: Test the FFI bridge (round-trip + the open flow, no GPU needed)
-        run: cargo test -p pb-mac-ffi -p pb-app-core
+        # pb-decode is included for the macOS-gated decoder tests (Image I/O, the
+        # AVAssetReader Live Photo streaming path — its corpus tests self-skip without
+        # PB_LIVE_TEST_MOV, but the CI-safe ones still run).
+        run: cargo test -p pb-mac-ffi -p pb-app-core -p pb-decode
       - name: Build the SwiftUI host (.app)
         run: ./scripts/build-swift-host.sh --debug

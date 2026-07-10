@@ -1,35 +1,56 @@
-//! Apple **Live Photo** motion decoder (macOS), via AVFoundation — task #38 spike.
+//! Apple **Live Photo** motion decoder (macOS), via AVFoundation's `AVAssetReader` —
+//! tasks #38 / #69.
 //!
 //! A Live Photo is *two files*: a still (JPEG/HEIC) plus a short QuickTime `.mov`
 //! (H.264 on the iPhone 6s, HEVC since), linked by a shared content identifier. This
-//! module decodes that companion `.mov` into the same [`Animation`] the animated-image
-//! playback consumes, so it reuses the whole task #37 machinery (Playback, eager-prep,
-//! present path). Only the *decode* is new — and it leans on the OS decoder, so H.264
-//! and HEVC both "just work" with hardware assist and no per-codec Rust.
+//! module decodes that companion `.mov` — leaning on the OS decoder, so H.264 and
+//! HEVC both "just work" with hardware assist and no per-codec Rust.
 //!
-//! Approach: `AVAssetImageGenerator` sampled at the track's frame rate. It hands back a
-//! `CGImage` per frame — already rotated (`appliesPreferredTrackTransform`) and
-//! color-managed — which feeds straight into `imageio::draw_cgimage_p3`, exactly like
-//! the still HEIC path. RAM is bounded by `maximumSize` (a full-res 3 s clip is ~1 GB
-//! of RGBA, so the long edge is capped). Reads only, RAM-only — the no-trace guarantee
-//! (privacy #2) holds.
+//! **Streaming** ([`decode_live_motion_streaming`], task #69): `AVAssetReader` +
+//! `AVAssetReaderTrackOutput` pull decoded BGRA pixel buffers **sequentially** — one
+//! linear decode pass, presentation-ordered — and each frame is emitted through the
+//! [`MotionChunk`] contract as soon as it's converted, so playback starts on the
+//! first frame instead of after the whole clip. (The previous spike used
+//! `AVAssetImageGenerator.copyCGImageAtTime:` with zero tolerance — a random-access
+//! API that re-decodes from the nearest keyframe on *every* call and returned only
+//! the finished clip; 1–2 s before first frame on a real Live Photo. Git history has
+//! it.) The batch [`decode_live_motion`] is now a thin collector over the stream.
+//!
+//! - **Timing**: each sample's `CMSampleBufferGetDuration` (real container timing,
+//!   clamped to sane bounds), falling back to the track's nominal frame rate.
+//! - **Rotation**: `AVAssetReader` does *not* apply `preferredTransform`; the
+//!   quadrant is snapped by `common::transform_to_quadrant` and applied by
+//!   `common::rotate_rgba`. Non-quadrant transforms (mirrored front-camera clips)
+//!   play untransformed — an accepted degradation, chosen over refusing to play.
+//! - **Color**: the first pixel buffer's CoreVideo attachments are mapped to CICP
+//!   code points (`CVColorPrimaries…`/`CVTransferFunction…GetIntegerCodePointForString`)
+//!   and carried as the header's [`ColorTransform`] — BT.709 and P3 clips both come
+//!   out honest. HDR (HLG/PQ) motion is SDR-clamped through the 8-bit BGRA path
+//!   (known limitation; the still keeps its fp16 scRGB path).
+//! - **Decode-to-fit**: the long edge is capped by asking VideoToolbox to scale
+//!   (`kCVPixelBufferWidth/HeightKey`); if the request is silently ignored the first
+//!   buffer's real size is detected and a per-frame Lanczos fallback kicks in. The
+//!   header is always built from *decoded* dimensions, never track metadata.
+//!
+//! Reads only, RAM-only — the no-trace guarantee (privacy #2) holds.
 //!
 //! Hand-rolled Objective-C runtime FFI, the same no-new-deps style as `imageio.rs`.
-//! The only ABI subtlety is passing `CMTime`/`CGSize` by value through `objc_msgSend`:
-//! casting it to the correct `extern "C"` fn-pointer type makes Rust apply the same
-//! AAPCS64 rules the ObjC method was compiled with, so they line up.
-//!
-//! Known spike limitations (productionization tracked in #38): frames are sampled at a
-//! *constant* `1/nominalFrameRate` (true per-frame timestamps need `AVAssetReader`);
-//! audio is out of scope; the whole clip is pre-decoded to RGBA (no streaming yet).
+//! The ABI subtlety is by-value structs through `objc_msgSend`: casting the shared
+//! entry point to the correct `extern "C"` fn-pointer type makes Rust apply the same
+//! AAPCS64 rules the ObjC method was compiled with. `preferredTransform` returns a
+//! 48-byte `CGAffineTransform` — an **indirect** struct return, which plain
+//! `objc_msgSend` handles on arm64 (x8); x86_64 must go through `objc_msgSend_stret`
+//! (wired below, untested — the shipping target is aarch64-apple-darwin).
 
 use std::ffi::{c_void, CStr, CString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crate::imageio::{draw_cgimage_p3, unpremultiply};
-use crate::{AnimFrame, Animation, AnimationKind, ColorTransform, DecodeError};
+use crate::animation::{MotionCollector, MAX_DECODED_BYTES};
+use crate::common::{bgra_to_rgba_tight, downscale_to_fit, rotate_rgba, transform_to_quadrant};
+use crate::{AnimFrame, Animation, ColorTransform, DecodeError, FitBox, MotionChunk, MotionHeader};
 
 /// Safety cap on decoded frames — a real Live Photo is ~3 s, so this is only a
 /// runaway guard (a malformed/long `.mov`). Hitting it flags the result truncated.
@@ -38,12 +59,23 @@ const MAX_MOTION_FRAMES: usize = 600;
 /// `kCMTimeFlags_Valid`.
 const CM_TIME_VALID: u32 = 1;
 
+/// `kCVPixelFormatType_32BGRA` — fourcc `'BGRA'`, the one RGB layout VideoToolbox
+/// always supports.
+const PIXEL_BGRA: u32 = 0x4247_5241;
+
+/// `kCVPixelBufferLock_ReadOnly`.
+const LOCK_READ_ONLY: u64 = 1;
+
+/// `AVAssetReaderStatus` (NSInteger).
+const READER_COMPLETED: isize = 2;
+const READER_FAILED: isize = 3;
+const READER_CANCELLED: isize = 4;
+
 // --- Objective-C runtime + framework FFI (no new crate deps) -----------------------
 
 type Id = *mut c_void;
 type Class = *mut c_void;
 type Sel = *const c_void;
-type CGImageRef = *const c_void;
 
 /// `CMTime` — a rational timestamp. Layout matches `<CoreMedia/CMTime.h>`.
 #[repr(C)]
@@ -62,18 +94,27 @@ struct CGSize {
     height: f64,
 }
 
+/// `CGAffineTransform` — 6×f64. Returned **by value** from `preferredTransform`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CGAffineTransform {
+    a: f64,
+    b: f64,
+    c: f64,
+    d: f64,
+    tx: f64,
+    ty: f64,
+}
+
 #[link(name = "objc", kind = "dylib")]
 extern "C" {
     fn objc_getClass(name: *const std::os::raw::c_char) -> Class;
     fn sel_registerName(name: *const std::os::raw::c_char) -> Sel;
     fn objc_msgSend();
+    #[cfg(target_arch = "x86_64")]
+    fn objc_msgSend_stret();
     fn objc_autoreleasePoolPush() -> *mut c_void;
     fn objc_autoreleasePoolPop(pool: *mut c_void);
-}
-
-#[link(name = "CoreMedia", kind = "framework")]
-extern "C" {
-    fn CMTimeMakeWithSeconds(seconds: f64, preferred_timescale: i32) -> CMTime;
 }
 
 #[link(name = "AVFoundation", kind = "framework")]
@@ -81,9 +122,40 @@ extern "C" {
     static AVMediaTypeVideo: Id;
 }
 
-#[link(name = "CoreGraphics", kind = "framework")]
+#[link(name = "CoreMedia", kind = "framework")]
 extern "C" {
-    fn CGImageRelease(image: CGImageRef);
+    fn CMSampleBufferGetImageBuffer(sbuf: *const c_void) -> *const c_void;
+    fn CMSampleBufferGetDuration(sbuf: *const c_void) -> CMTime;
+}
+
+#[link(name = "CoreVideo", kind = "framework")]
+extern "C" {
+    fn CVPixelBufferLockBaseAddress(pb: *const c_void, flags: u64) -> i32;
+    fn CVPixelBufferUnlockBaseAddress(pb: *const c_void, flags: u64) -> i32;
+    fn CVPixelBufferGetBaseAddress(pb: *const c_void) -> *const c_void;
+    fn CVPixelBufferGetBytesPerRow(pb: *const c_void) -> usize;
+    fn CVPixelBufferGetWidth(pb: *const c_void) -> usize;
+    fn CVPixelBufferGetHeight(pb: *const c_void) -> usize;
+    fn CVPixelBufferGetPixelFormatType(pb: *const c_void) -> u32;
+    /// +1 (copy rule) — release the returned attachment.
+    fn CVBufferCopyAttachment(
+        buffer: *const c_void,
+        key: *const c_void,
+        attachment_mode: *mut u32,
+    ) -> *const c_void;
+    /// CoreVideo colorimetry CFString → H.273/CICP code point (2 = unspecified).
+    fn CVColorPrimariesGetIntegerCodePointForString(s: *const c_void) -> i32;
+    fn CVTransferFunctionGetIntegerCodePointForString(s: *const c_void) -> i32;
+    static kCVPixelBufferPixelFormatTypeKey: *const c_void;
+    static kCVPixelBufferWidthKey: *const c_void;
+    static kCVPixelBufferHeightKey: *const c_void;
+    static kCVImageBufferColorPrimariesKey: *const c_void;
+    static kCVImageBufferTransferFunctionKey: *const c_void;
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    fn CFRelease(cf: *const c_void);
 }
 
 // Force-link Foundation so `NSString` / `NSURL` are registered.
@@ -139,143 +211,683 @@ unsafe fn send_bool(obj: Id, s: Sel, a: bool) {
     f(obj, s, a)
 }
 #[inline]
-unsafe fn send_size(obj: Id, s: Sel, a: CGSize) {
-    let f: unsafe extern "C" fn(Id, Sel, CGSize) =
+unsafe fn send_void(obj: Id, s: Sel) {
+    let f: unsafe extern "C" fn(Id, Sel) =
+        std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+    f(obj, s)
+}
+#[inline]
+unsafe fn send_void_id(obj: Id, s: Sel, a: Id) {
+    let f: unsafe extern "C" fn(Id, Sel, Id) =
         std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
     f(obj, s, a)
 }
 #[inline]
-unsafe fn send_cmtime(obj: Id, s: Sel, a: CMTime) {
-    let f: unsafe extern "C" fn(Id, Sel, CMTime) =
+unsafe fn send_void_id2(obj: Id, s: Sel, a: Id, b: Id) {
+    let f: unsafe extern "C" fn(Id, Sel, Id, Id) =
+        std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+    f(obj, s, a, b)
+}
+#[inline]
+unsafe fn send_ret_bool(obj: Id, s: Sel) -> bool {
+    let f: unsafe extern "C" fn(Id, Sel) -> bool =
+        std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+    f(obj, s)
+}
+#[inline]
+unsafe fn send_id_ret_bool(obj: Id, s: Sel, a: Id) -> bool {
+    let f: unsafe extern "C" fn(Id, Sel, Id) -> bool =
         std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
     f(obj, s, a)
 }
-/// `copyCGImageAtTime:actualTime:error:` — CMTime by value, two out-pointers we pass
-/// null, returns a `+1` `CGImageRef` (caller releases).
 #[inline]
-unsafe fn send_copy_cgimage(gen: Id, s: Sel, t: CMTime) -> CGImageRef {
-    let f: unsafe extern "C" fn(Id, Sel, CMTime, *mut CMTime, *mut Id) -> CGImageRef =
+unsafe fn send_ret_isize(obj: Id, s: Sel) -> isize {
+    let f: unsafe extern "C" fn(Id, Sel) -> isize =
         std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
-    f(gen, s, t, std::ptr::null_mut(), std::ptr::null_mut())
+    f(obj, s)
+}
+#[inline]
+unsafe fn send_u32(obj: Id, s: Sel, a: u32) -> Id {
+    let f: unsafe extern "C" fn(Id, Sel, u32) -> Id =
+        std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+    f(obj, s, a)
+}
+/// `initWithAsset:error:` — an `NSError**` out-parameter.
+#[inline]
+unsafe fn send_id_err(obj: Id, s: Sel, a: Id, err: *mut Id) -> Id {
+    let f: unsafe extern "C" fn(Id, Sel, Id, *mut Id) -> Id =
+        std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+    f(obj, s, a, err)
+}
+#[inline]
+unsafe fn send_ret_cstr(obj: Id, s: Sel) -> *const std::os::raw::c_char {
+    let f: unsafe extern "C" fn(Id, Sel) -> *const std::os::raw::c_char =
+        std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+    f(obj, s)
+}
+/// `naturalSize` — a `CGSize` (2×f64) return, register-passed on both arches.
+#[inline]
+unsafe fn send_ret_size(obj: Id, s: Sel) -> CGSize {
+    let f: unsafe extern "C" fn(Id, Sel) -> CGSize =
+        std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+    f(obj, s)
+}
+/// `preferredTransform` — a 48-byte `CGAffineTransform` return. Indirect on both
+/// arches, but the entry point differs: arm64 has no `_stret` (plain `objc_msgSend`
+/// handles the x8 indirect return); x86_64 requires `objc_msgSend_stret`.
+#[inline]
+unsafe fn send_ret_transform(obj: Id, s: Sel) -> CGAffineTransform {
+    #[cfg(target_arch = "aarch64")]
+    let entry = objc_msgSend as unsafe extern "C" fn();
+    #[cfg(target_arch = "x86_64")]
+    let entry = objc_msgSend_stret as unsafe extern "C" fn();
+    let f: unsafe extern "C" fn(Id, Sel) -> CGAffineTransform = std::mem::transmute(entry);
+    f(obj, s)
 }
 
-/// Decode the Live Photo motion `.mov` at `path` into an [`Animation`], capping each
-/// frame's long edge to `max_long_edge` px (decode-to-fit → bounds RAM). macOS-only.
-pub fn decode_live_motion(path: &Path, max_long_edge: u32) -> Result<Animation, DecodeError> {
-    let cpath = CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| DecodeError::Corrupt("Live Photo path has interior NUL".into()))?;
-    let anim = unsafe {
-        let pool = objc_autoreleasePoolPush();
-        let r = decode_motion_inner(&cpath, max_long_edge);
-        objc_autoreleasePoolPop(pool);
-        r
+// --- RAII guards --------------------------------------------------------------------
+
+/// An autorelease pool scope, popped on drop.
+struct Pool(*mut c_void);
+impl Pool {
+    fn new() -> Self {
+        Pool(unsafe { objc_autoreleasePoolPush() })
+    }
+}
+impl Drop for Pool {
+    fn drop(&mut self) {
+        unsafe { objc_autoreleasePoolPop(self.0) }
+    }
+}
+
+/// An owned (+1, from `alloc`/`init`) Objective-C object, `release`d on drop —
+/// autorelease pools do **not** cover these.
+struct Owned(Id);
+impl Drop for Owned {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { send_void(self.0, sel(c"release")) }
+        }
+    }
+}
+
+/// An owned (+1, copy-rule) CoreFoundation object, `CFRelease`d on drop.
+struct OwnedCf(*const c_void);
+impl Drop for OwnedCf {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { CFRelease(self.0) }
+        }
+    }
+}
+
+/// A read-only base-address lock on a `CVPixelBuffer`, unlocked on drop.
+struct PixelLock(*const c_void);
+impl Drop for PixelLock {
+    fn drop(&mut self) {
+        unsafe {
+            CVPixelBufferUnlockBaseAddress(self.0, LOCK_READ_ONLY);
+        }
+    }
+}
+
+// --- The streaming decoder ------------------------------------------------------------
+
+/// Streaming Live Photo motion decode (task #69): decode the `.mov` at `path` and hand
+/// each frame to `emit` as it's ready, per the [`MotionChunk`] state-machine contract.
+/// Frames are capped to `max_long_edge` (decode-to-fit) and bounded by
+/// [`MAX_MOTION_FRAMES`] / [`MAX_DECODED_BYTES`]. Bails silently (emitting no terminal
+/// chunk) once `cancel` is set — the consumer has already dropped the stream.
+pub fn decode_live_motion_streaming(
+    path: &Path,
+    max_long_edge: u32,
+    cancel: &AtomicBool,
+    emit: &mut dyn FnMut(MotionChunk),
+) {
+    let Ok(cpath) = CString::new(path.as_os_str().as_bytes()) else {
+        emit(MotionChunk::Failed(DecodeError::Corrupt(
+            "Live Photo path has interior NUL".into(),
+        )));
+        return;
     };
-    anim.ok_or_else(|| DecodeError::Corrupt("Live Photo motion decode failed".into()))
+    let _pool = Pool::new();
+    unsafe { stream_inner(&cpath, max_long_edge, cancel, emit) }
 }
 
-unsafe fn decode_motion_inner(cpath: &CStr, max_long_edge: u32) -> Option<Animation> {
-    // NSURL fileURLWithPath:[NSString stringWithUTF8String:path]
+/// Decode the Live Photo motion `.mov` at `path` into a whole [`Animation`], capping each
+/// frame's long edge to `max_long_edge` px. A collector over the streaming decoder (which
+/// also validates the chunk contract) — kept for the batch callers (`decode_motion_job`,
+/// the `live_probe` example).
+pub fn decode_live_motion(path: &Path, max_long_edge: u32) -> Result<Animation, DecodeError> {
+    let mut collector = MotionCollector::default();
+    decode_live_motion_streaming(path, max_long_edge, &AtomicBool::new(false), &mut |chunk| {
+        collector.push(chunk)
+    });
+    collector.finish()
+}
+
+macro_rules! fail {
+    ($emit:expr, $($arg:tt)*) => {{
+        $emit(MotionChunk::Failed(DecodeError::Corrupt(format!($($arg)*))));
+        return;
+    }};
+}
+
+unsafe fn stream_inner(
+    cpath: &CStr,
+    max_long_edge: u32,
+    cancel: &AtomicBool,
+    emit: &mut dyn FnMut(MotionChunk),
+) {
+    // Eager-prep streams get superseded fast — don't even open the asset if already stale.
+    if cancel.load(Ordering::Relaxed) {
+        return;
+    }
+
+    // NSURL fileURLWithPath:[NSString stringWithUTF8String:path]  (all autoreleased)
     let path_ns = send_cstr(
         class(c"NSString"),
         sel(c"stringWithUTF8String:"),
         cpath.as_ptr(),
     );
     if path_ns.is_null() {
-        return None;
+        fail!(emit, "Live Photo path is not valid UTF-8");
     }
     let url = send_id(class(c"NSURL"), sel(c"fileURLWithPath:"), path_ns);
-    if url.is_null() {
-        return None;
-    }
-    // AVURLAsset URLAssetWithURL:options:
-    let asset = send_id2(
-        class(c"AVURLAsset"),
-        sel(c"URLAssetWithURL:options:"),
-        url,
-        std::ptr::null_mut(),
-    );
-    if asset.is_null() {
-        return None;
-    }
-    // First video track → nominal frame rate (drives the sample cadence).
-    let tracks = send_id(asset, sel(c"tracksWithMediaType:"), AVMediaTypeVideo);
-    if tracks.is_null() {
-        return None;
-    }
-    let track = send(tracks, sel(c"firstObject"));
-    if track.is_null() {
-        return None; // no video track — not a motion clip
-    }
-    let raw_fps = send_f32(track, sel(c"nominalFrameRate"));
-    let fps = if raw_fps > 0.1 { raw_fps } else { 30.0 } as f64;
-
-    // AVAssetImageGenerator, rotation-applied, size-capped, exact frames.
-    let generator = send_id(
-        send(class(c"AVAssetImageGenerator"), sel(c"alloc")),
-        sel(c"initWithAsset:"),
-        asset,
-    );
-    if generator.is_null() {
-        return None;
-    }
-    send_bool(generator, sel(c"setAppliesPreferredTrackTransform:"), true);
-    let cap = max_long_edge.max(1) as f64;
-    send_size(
-        generator,
-        sel(c"setMaximumSize:"),
-        CGSize {
-            width: cap,
-            height: cap,
-        },
-    );
-    let zero = CMTime {
-        value: 0,
-        timescale: 1,
-        flags: CM_TIME_VALID,
-        epoch: 0,
+    let asset = if url.is_null() {
+        std::ptr::null_mut()
+    } else {
+        send_id2(
+            class(c"AVURLAsset"),
+            sel(c"URLAssetWithURL:options:"),
+            url,
+            std::ptr::null_mut(),
+        )
     };
-    send_cmtime(generator, sel(c"setRequestedTimeToleranceBefore:"), zero);
-    send_cmtime(generator, sel(c"setRequestedTimeToleranceAfter:"), zero);
+    if asset.is_null() {
+        fail!(emit, "Live Photo motion: AVURLAsset creation failed");
+    }
+    let tracks = send_id(asset, sel(c"tracksWithMediaType:"), AVMediaTypeVideo);
+    let track = if tracks.is_null() {
+        std::ptr::null_mut()
+    } else {
+        send(tracks, sel(c"firstObject"))
+    };
+    if track.is_null() {
+        fail!(emit, "Live Photo motion has no video track");
+    }
 
-    let copy_sel = sel(c"copyCGImageAtTime:actualTime:error:");
-    let delay = Duration::from_secs_f64(1.0 / fps);
-    let mut frames: Vec<AnimFrame> = Vec::new();
-    let mut truncated = false;
-    for i in 0..MAX_MOTION_FRAMES {
-        let t = CMTimeMakeWithSeconds(i as f64 / fps, 600);
-        let cg = send_copy_cgimage(generator, copy_sel, t);
-        if cg.is_null() {
-            break; // past the end of the asset (or a decode error) — done
+    // Fallback per-frame delay from the nominal frame rate (real timing comes from each
+    // sample's duration below).
+    let raw_fps = send_f32(track, sel(c"nominalFrameRate"));
+    let fps = if raw_fps > 0.1 { raw_fps as f64 } else { 30.0 };
+    let fallback_delay = Duration::from_secs_f64(1.0 / fps);
+
+    // AVAssetReader does not apply preferredTransform — snap it to a rotate_rgba quadrant.
+    let t = send_ret_transform(track, sel(c"preferredTransform"));
+    let rotation = match transform_to_quadrant(t.a, t.b, t.c, t.d) {
+        Some(deg) => deg,
+        None => {
+            // Accepted degradation: play untransformed (e.g. a mirrored front-camera clip
+            // shows un-mirrored) rather than refuse the clip entirely.
+            eprintln!(
+                "PhotoBlaze: Live Photo preferredTransform [{} {} {} {}] isn't a rotation — playing untransformed",
+                t.a, t.b, t.c, t.d
+            );
+            0
         }
-        let drawn = draw_cgimage_p3(cg);
-        CGImageRelease(cg);
-        let Some((mut rgba, w, h)) = drawn else { break };
-        unpremultiply(&mut rgba);
-        frames.push(AnimFrame {
+    };
+
+    // Ask VideoToolbox to decode-to-fit (long edge ≤ cap, never upscale). The first
+    // decoded buffer is the source of truth — if the request is ignored, a CPU fallback
+    // kicks in there.
+    let nat = send_ret_size(track, sel(c"naturalSize"));
+    let (nw, nh) = (nat.width.max(0.0) as u32, nat.height.max(0.0) as u32);
+    let mut want_scale: Option<(u32, u32)> = None;
+    if nw > 0 && nh > 0 && max_long_edge > 0 && nw.max(nh) > max_long_edge {
+        let s = max_long_edge as f64 / nw.max(nh) as f64;
+        want_scale = Some((
+            ((nw as f64 * s).round() as u32).max(1),
+            ((nh as f64 * s).round() as u32).max(1),
+        ));
+    }
+
+    // Output settings: exactly BGRA + the optional scale — anything fancier risks an
+    // (uncatchable) NSInvalidArgumentException from the track-output initializer.
+    let dict = send(class(c"NSMutableDictionary"), sel(c"dictionary"));
+    if dict.is_null() {
+        fail!(emit, "Live Photo motion: NSMutableDictionary failed");
+    }
+    let set = sel(c"setObject:forKey:");
+    let num_cls = class(c"NSNumber");
+    let num_sel = sel(c"numberWithUnsignedInt:");
+    send_void_id2(
+        dict,
+        set,
+        send_u32(num_cls, num_sel, PIXEL_BGRA),
+        kCVPixelBufferPixelFormatTypeKey as Id,
+    );
+    if let Some((sw, sh)) = want_scale {
+        send_void_id2(
+            dict,
+            set,
+            send_u32(num_cls, num_sel, sw),
+            kCVPixelBufferWidthKey as Id,
+        );
+        send_void_id2(
+            dict,
+            set,
+            send_u32(num_cls, num_sel, sh),
+            kCVPixelBufferHeightKey as Id,
+        );
+    }
+
+    // Reader + track output (+1 each — RAII-released).
+    let mut err: Id = std::ptr::null_mut();
+    let reader = Owned(send_id_err(
+        send(class(c"AVAssetReader"), sel(c"alloc")),
+        sel(c"initWithAsset:error:"),
+        asset,
+        &mut err,
+    ));
+    if reader.0.is_null() {
+        fail!(
+            emit,
+            "Live Photo motion: AVAssetReader init failed: {}",
+            error_desc(err)
+        );
+    }
+    let output = Owned(send_id2(
+        send(class(c"AVAssetReaderTrackOutput"), sel(c"alloc")),
+        sel(c"initWithTrack:outputSettings:"),
+        track,
+        dict,
+    ));
+    if output.0.is_null() {
+        fail!(emit, "Live Photo motion: track output init failed");
+    }
+    // We copy each buffer into a tight RGBA Vec ourselves — no defensive copy needed.
+    send_bool(output.0, sel(c"setAlwaysCopiesSampleData:"), false);
+    if !send_id_ret_bool(reader.0, sel(c"canAddOutput:"), output.0) {
+        fail!(emit, "Live Photo motion: reader rejected the track output");
+    }
+    send_void_id(reader.0, sel(c"addOutput:"), output.0);
+
+    if cancel.load(Ordering::Relaxed) {
+        return;
+    }
+    if !send_ret_bool(reader.0, sel(c"startReading")) {
+        let e = send(reader.0, sel(c"error"));
+        fail!(
+            emit,
+            "Live Photo motion: startReading failed: {}",
+            error_desc(e)
+        );
+    }
+
+    let copy_sel = sel(c"copyNextSampleBuffer");
+    let cancel_sel = sel(c"cancelReading");
+    let mut count: usize = 0;
+    let mut bytes: u64 = 0;
+    let mut truncated = false;
+    // Set at the first decoded buffer: the header's post-rotation dims (every later
+    // frame must match) and the CPU downscale target if VideoToolbox ignored the scale.
+    let mut header_dims: Option<(u32, u32)> = None;
+    let mut cpu_fit: Option<FitBox> = None;
+
+    loop {
+        // Per-iteration pool: a 600-frame AVFoundation loop accumulates autoreleased
+        // internals; the outer pool alone would hold them all to the end.
+        let _fp = Pool::new();
+        if cancel.load(Ordering::Relaxed) {
+            send_void(reader.0, cancel_sel);
+            return; // silent — no terminal chunk; the consumer dropped the stream
+        }
+        let sbuf = send(output.0, copy_sel); // +1 (copy rule)
+        if sbuf.is_null() {
+            break; // EOF or error — classify reader.status below
+        }
+        let sbuf = OwnedCf(sbuf);
+        let img = CMSampleBufferGetImageBuffer(sbuf.0);
+        if img.is_null() {
+            continue; // not a video sample — skip
+        }
+
+        let pw = CVPixelBufferGetWidth(img);
+        let ph = CVPixelBufferGetHeight(img);
+        let fmt = CVPixelBufferGetPixelFormatType(img);
+        if pw == 0 || ph == 0 || fmt != PIXEL_BGRA {
+            send_void(reader.0, cancel_sel);
+            fail!(
+                emit,
+                "Live Photo motion: unexpected pixel buffer ({pw}x{ph}, format {fmt:#x})"
+            );
+        }
+
+        // First decoded buffer: fix the output geometry + color, emit the Header.
+        if header_dims.is_none() {
+            let (mut ow, mut oh) = (pw as u32, ph as u32);
+            if max_long_edge > 0 && ow.max(oh) > max_long_edge {
+                // VideoToolbox ignored (or we never sent) the scale request — Lanczos
+                // per frame instead. Header dims = the fallback target.
+                let fit = FitBox {
+                    max_width: max_long_edge,
+                    max_height: max_long_edge,
+                };
+                let s = (fit.max_width as f64 / ow as f64)
+                    .min(fit.max_height as f64 / oh as f64)
+                    .min(1.0);
+                ow = ((ow as f64 * s).round() as u32).max(1);
+                oh = ((oh as f64 * s).round() as u32).max(1);
+                cpu_fit = Some(fit);
+            }
+            let (hw, hh) = if rotation == 90 || rotation == 270 {
+                (oh, ow)
+            } else {
+                (ow, oh)
+            };
+            header_dims = Some((hw, hh));
+            emit(MotionChunk::Header(MotionHeader {
+                width: hw,
+                height: hh,
+                color: buffer_color(img),
+                codec: "Live Photo",
+            }));
+        }
+
+        // Copy out (BGRA, row-padded) → tight straight-alpha RGBA.
+        let rgba = {
+            if CVPixelBufferLockBaseAddress(img, LOCK_READ_ONLY) != 0 {
+                send_void(reader.0, cancel_sel);
+                fail!(emit, "Live Photo motion: pixel buffer lock failed");
+            }
+            let _lock = PixelLock(img);
+            let base = CVPixelBufferGetBaseAddress(img);
+            let stride = CVPixelBufferGetBytesPerRow(img);
+            let needed = stride
+                .checked_mul(ph - 1)
+                .and_then(|v| v.checked_add(pw.checked_mul(4)?));
+            let (Some(needed), false) = (needed, base.is_null()) else {
+                send_void(reader.0, cancel_sel);
+                fail!(emit, "Live Photo motion: bad pixel buffer layout");
+            };
+            let src = std::slice::from_raw_parts(base as *const u8, needed);
+            match bgra_to_rgba_tight(src, pw, ph, stride) {
+                Some(v) => v,
+                None => {
+                    send_void(reader.0, cancel_sel);
+                    fail!(emit, "Live Photo motion: bad pixel buffer geometry");
+                }
+            }
+        };
+
+        // Real per-sample duration when the container carries one; nominal fps otherwise.
+        let dur = CMSampleBufferGetDuration(sbuf.0);
+        let delay = if dur.flags & CM_TIME_VALID != 0 && dur.value > 0 && dur.timescale > 0 {
+            Duration::from_secs_f64(dur.value as f64 / dur.timescale as f64)
+                .clamp(Duration::from_millis(1), Duration::from_secs(2))
+        } else {
+            fallback_delay
+        };
+
+        // Optional CPU decode-to-fit fallback, then the container rotation.
+        let (rgba, fw, fh) = match cpu_fit {
+            Some(fit) => match downscale_to_fit(rgba, pw as u32, ph as u32, fit) {
+                Ok(v) => v,
+                Err(e) => {
+                    send_void(reader.0, cancel_sel);
+                    fail!(emit, "Live Photo motion: downscale failed: {e}");
+                }
+            },
+            None => (rgba, pw as u32, ph as u32),
+        };
+        let (rgba, fw, fh) = rotate_rgba(rgba, fw, fh, rotation);
+        if header_dims != Some((fw, fh)) {
+            send_void(reader.0, cancel_sel);
+            fail!(emit, "Live Photo motion: frame size changed mid-stream");
+        }
+
+        // Frame + byte budgets, checked *before* emitting — the consumer retains every
+        // frame, so the caps bound what it can ever hold.
+        let next_bytes = bytes.saturating_add(rgba.len() as u64);
+        if count >= MAX_MOTION_FRAMES || next_bytes > MAX_DECODED_BYTES {
+            truncated = true;
+            send_void(reader.0, cancel_sel);
+            break;
+        }
+        bytes = next_bytes;
+        count += 1;
+        emit(MotionChunk::Frame(AnimFrame {
             rgba,
-            width: w,
-            height: h,
+            width: fw,
+            height: fh,
             delay,
+        }));
+    }
+
+    // Terminal. Internal truncation also drives the reader to Cancelled, so it must be
+    // classified *first* — count ≥ 1 there by construction, and installed playback needs
+    // its Done (a missing terminal would park it on the frontier forever).
+    if truncated {
+        emit(MotionChunk::Done {
+            loop_count: 1,
+            truncated: true,
         });
+        return;
     }
-    if frames.len() >= MAX_MOTION_FRAMES {
-        truncated = true;
+    match send_ret_isize(reader.0, sel(c"status")) {
+        READER_COMPLETED => {
+            if count == 0 {
+                fail!(emit, "Live Photo motion decoded no frames");
+            }
+            // Plays once and stops (finite loop = 1), like every motion backend.
+            emit(MotionChunk::Done {
+                loop_count: 1,
+                truncated: false,
+            });
+        }
+        READER_FAILED => {
+            let e = send(reader.0, sel(c"error"));
+            fail!(emit, "Live Photo motion decode failed: {}", error_desc(e));
+        }
+        READER_CANCELLED => {
+            // Not our flag (that path returned above) and not truncation — unexpected.
+            fail!(emit, "Live Photo motion: reader cancelled unexpectedly");
+        }
+        other => fail!(
+            emit,
+            "Live Photo motion: reader in unexpected state {other}"
+        ),
     }
-    if frames.is_empty() {
-        return None;
+}
+
+/// `NSError` → its localized description (lossy), or a placeholder.
+unsafe fn error_desc(err: Id) -> String {
+    if !err.is_null() {
+        let desc = send(err, sel(c"localizedDescription"));
+        if !desc.is_null() {
+            let cstr = send_ret_cstr(desc, sel(c"UTF8String"));
+            if !cstr.is_null() {
+                return CStr::from_ptr(cstr).to_string_lossy().into_owned();
+            }
+        }
     }
-    let (width, height) = (frames[0].width, frames[0].height);
-    Some(Animation {
-        kind: AnimationKind::LivePhoto,
-        width,
-        height,
-        frames,
-        // A Live Photo plays once and stops (finite loop = 1), not looping forever.
-        loop_count: 1,
-        codec: "Live Photo",
-        // Drawn into a Display-P3 context (see `draw_cgimage_p3`), so carry the same
-        // P3(SMPTE-432) → BT.709 transform the still HEIC path uses.
-        color: ColorTransform::from_cicp(12, 13, 0, true),
-        truncated,
-    })
+    "(no error description)".into()
+}
+
+/// Map the pixel buffer's CoreVideo colorimetry attachments to a [`ColorTransform`] via
+/// honest CICP code points. Real Live Photos are BT.709 (transfer 1 → ≈sRGB passthrough)
+/// or P3-primaries/709-transfer; missing or unknown attachments fall back to sRGB
+/// passthrough (as does anything `from_cicp`/moxcms can't build — including HLG/PQ, which
+/// this 8-bit path SDR-clamps by design).
+unsafe fn buffer_color(img: *const c_void) -> ColorTransform {
+    /// The CICP code point for one colorimetry attachment (`transfer` picks which
+    /// CoreVideo mapper to use), or `None` if the attachment is absent/out of range.
+    unsafe fn attachment_code(
+        img: *const c_void,
+        key: *const c_void,
+        transfer: bool,
+    ) -> Option<u8> {
+        let s = OwnedCf(CVBufferCopyAttachment(img, key, std::ptr::null_mut()));
+        if s.0.is_null() {
+            return None;
+        }
+        let code = if transfer {
+            CVTransferFunctionGetIntegerCodePointForString(s.0)
+        } else {
+            CVColorPrimariesGetIntegerCodePointForString(s.0)
+        };
+        u8::try_from(code).ok()
+    }
+    let (Some(primaries), Some(transfer)) = (
+        attachment_code(img, kCVImageBufferColorPrimariesKey, false),
+        attachment_code(img, kCVImageBufferTransferFunctionKey, true),
+    ) else {
+        return ColorTransform::srgb();
+    };
+    // Matrix 0 (identity/RGB) + full range: the buffer is already RGB — only primaries
+    // and transfer matter for the shader transform.
+    ColorTransform::from_cicp(primaries, transfer, 0, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    fn collect(path: &Path, cancel: &AtomicBool) -> Vec<MotionChunk> {
+        let mut chunks = Vec::new();
+        decode_live_motion_streaming(path, 1440, cancel, &mut |c| chunks.push(c));
+        chunks
+    }
+
+    /// A missing file must produce exactly one `Failed` and nothing else.
+    #[test]
+    fn missing_file_fails_cleanly() {
+        let chunks = collect(
+            Path::new("/nonexistent/definitely/not/here.mov"),
+            &AtomicBool::new(false),
+        );
+        assert_eq!(chunks.len(), 1);
+        assert!(matches!(chunks[0], MotionChunk::Failed(_)));
+    }
+
+    /// Garbage bytes must produce exactly one `Failed` — no Header, no Frame, no panic.
+    #[test]
+    fn garbage_file_fails_cleanly() {
+        let dir = std::env::temp_dir().join("pb_livephoto_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("garbage.mov");
+        std::fs::write(&path, b"this is definitely not a quicktime movie").unwrap();
+        let chunks = collect(&path, &AtomicBool::new(false));
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(chunks.len(), 1, "expected a single Failed chunk");
+        assert!(matches!(chunks[0], MotionChunk::Failed(_)));
+    }
+
+    /// A pre-set cancel flag must emit nothing at all (silent non-terminal return).
+    #[test]
+    fn preset_cancel_emits_nothing() {
+        let mov = match std::env::var("PB_LIVE_TEST_MOV") {
+            Ok(p) => p,
+            Err(_) => {
+                eprintln!("PB_LIVE_TEST_MOV not set — skipping");
+                return;
+            }
+        };
+        let chunks = collect(Path::new(&mov), &AtomicBool::new(true));
+        assert!(chunks.is_empty(), "cancelled stream must emit no chunks");
+    }
+
+    /// Cancelling after a few frames stops the stream with no terminal chunk.
+    #[test]
+    fn midstream_cancel_has_no_terminal() {
+        let mov = match std::env::var("PB_LIVE_TEST_MOV") {
+            Ok(p) => p,
+            Err(_) => {
+                eprintln!("PB_LIVE_TEST_MOV not set — skipping");
+                return;
+            }
+        };
+        let cancel = AtomicBool::new(false);
+        let mut chunks: Vec<MotionChunk> = Vec::new();
+        let mut frames = 0usize;
+        decode_live_motion_streaming(Path::new(&mov), 1440, &cancel, &mut |c| {
+            if matches!(c, MotionChunk::Frame(_)) {
+                frames += 1;
+                if frames == 3 {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            }
+            chunks.push(c);
+        });
+        assert!(frames >= 3, "expected at least 3 frames before cancel");
+        assert!(
+            !matches!(
+                chunks.last(),
+                Some(MotionChunk::Done { .. }) | Some(MotionChunk::Failed(_))
+            ),
+            "a cancelled stream must not emit a terminal chunk"
+        );
+        assert!(frames <= 4, "cancel must stop the stream within a frame");
+    }
+
+    /// The full ordering contract on a real clip: Header first, Done last, ≥2 frames,
+    /// loop_count 1, nothing after the terminal. Mirrors the ff_live (Linux) test.
+    #[test]
+    fn streaming_emits_header_then_frames_then_done_in_order() {
+        let mov = match std::env::var("PB_LIVE_TEST_MOV") {
+            Ok(p) => p,
+            Err(_) => {
+                eprintln!("PB_LIVE_TEST_MOV not set — skipping");
+                return;
+            }
+        };
+        let chunks = collect(Path::new(&mov), &AtomicBool::new(false));
+        assert!(chunks.len() >= 4, "expected header + ≥2 frames + done");
+        assert!(
+            matches!(chunks.first(), Some(MotionChunk::Header(_))),
+            "first chunk must be the Header"
+        );
+        let (mut frames, mut headers) = (0usize, 0usize);
+        for (i, c) in chunks.iter().enumerate() {
+            match c {
+                MotionChunk::Header(_) => headers += 1,
+                MotionChunk::Frame(f) => {
+                    frames += 1;
+                    assert!(!f.rgba.is_empty() && f.width > 0 && f.height > 0);
+                }
+                MotionChunk::Done {
+                    loop_count,
+                    truncated,
+                } => {
+                    assert_eq!(i, chunks.len() - 1, "Done must be the final chunk");
+                    assert_eq!(*loop_count, 1, "a Live Photo plays once");
+                    assert!(!truncated, "a real Live Photo must not truncate");
+                }
+                MotionChunk::Failed(e) => panic!("stream failed: {e}"),
+            }
+        }
+        assert_eq!(headers, 1, "exactly one Header");
+        assert!(frames >= 2, "expected at least 2 frames, got {frames}");
+    }
+
+    /// The batch wrapper agrees with the stream (same clip through both paths).
+    #[test]
+    fn batch_wrapper_collects_the_stream() {
+        let mov = match std::env::var("PB_LIVE_TEST_MOV") {
+            Ok(p) => p,
+            Err(_) => {
+                eprintln!("PB_LIVE_TEST_MOV not set — skipping");
+                return;
+            }
+        };
+        let anim = decode_live_motion(Path::new(&mov), 1440).expect("batch decode");
+        assert!(anim.frame_count() >= 2);
+        assert_eq!(anim.loop_count, 1);
+        assert!(anim.width > 0 && anim.height > 0);
+        assert!(anim.width.max(anim.height) <= 1440, "decode-to-fit cap");
+        let f = &anim.frames[0];
+        assert_eq!((f.width, f.height), (anim.width, anim.height));
+    }
 }

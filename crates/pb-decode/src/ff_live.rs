@@ -29,7 +29,11 @@ use ff::media::Type;
 use ff::software::scaling::{Context as Scaler, Flags as ScaleFlags};
 use ffmpeg_next as ff;
 
-use crate::{AnimFrame, Animation, AnimationKind, ColorTransform, DecodeError};
+use crate::animation::MAX_DECODED_BYTES;
+use crate::common::rotate_rgba;
+use crate::{
+    AnimFrame, Animation, AnimationKind, ColorTransform, DecodeError, MotionChunk, MotionHeader,
+};
 
 /// Safety cap on decoded frames — a real Live Photo is ~3 s, so this is only a runaway
 /// guard (a malformed/long `.mov`). Hitting it flags the result truncated. Mirrors the
@@ -116,33 +120,8 @@ impl VideoKind {
 }
 
 // ── Streaming video (task #69: play while decoding) ──────────────────────────────────
-
-/// One message from the [`decode_live_motion_streaming`] pipeline. The consumer installs a
-/// streaming [`Playback`](crate::Animation) on the first [`Frame`](MotionChunk::Frame),
-/// appends later frames as they arrive, and finalizes on [`Done`](MotionChunk::Done) —
-/// so a Live Photo starts playing within a frame or two instead of after the whole `.mov`
-/// decodes.
-pub enum MotionChunk {
-    /// Sent once, before any frame: the sequence's display dimensions + color, enough to
-    /// build the `Animation` header.
-    Header(MotionHeader),
-    /// A decoded, scaled, rotation-corrected frame (in emission = playback order).
-    Frame(AnimFrame),
-    /// The stream finished cleanly; `truncated` if the frame cap was hit.
-    Done { loop_count: u32, truncated: bool },
-    /// The stream failed. If a Playback is already installed the consumer can treat this as
-    /// a truncated finish; if not, it's a play failure to surface.
-    Failed(DecodeError),
-}
-
-/// Header for a streaming Live Photo motion decode — the post-rotation display size and the
-/// color transform every frame shares.
-pub struct MotionHeader {
-    pub width: u32,
-    pub height: u32,
-    pub color: ColorTransform,
-    pub codec: &'static str,
-}
+// `MotionChunk`/`MotionHeader` (the message vocabulary + its state-machine contract) live
+// in `crate::animation` — shared with the macOS AVAssetReader backend.
 
 /// Streaming counterpart of [`decode_live_motion`] (task #69): decode the `.mov` at `path`
 /// and hand each frame to `emit` as it's ready, rather than returning the whole [`Animation`]
@@ -231,8 +210,9 @@ fn stream_video_inner(
     }));
 
     let mut count: usize = 0;
+    let mut bytes: u64 = 0;
     let mut truncated = false;
-    // Pull every ready RGBA frame out of the decoder and emit it. Returns whether the cap hit.
+    // Pull every ready RGBA frame out of the decoder and emit it. Returns whether a cap hit.
     let mut drain = |decoder: &mut ff::decoder::Video,
                      scaler: &mut Scaler,
                      emit: &mut dyn FnMut(MotionChunk)|
@@ -246,6 +226,13 @@ fn stream_video_inner(
             scaler.run(&decoded, &mut rgba_frame)?;
             let rgba = tight_rgba(&rgba_frame);
             let (rgba, fw, fh) = rotate_rgba(rgba, sw, sh, rotation);
+            // Byte budget, checked *before* emitting: the consumer retains every frame,
+            // so stop when the next frame would push it past the cap.
+            let next_bytes = bytes.saturating_add(rgba.len() as u64);
+            if next_bytes > MAX_DECODED_BYTES {
+                return Ok(true);
+            }
+            bytes = next_bytes;
             count += 1;
             emit(MotionChunk::Frame(AnimFrame {
                 rgba,
@@ -454,44 +441,6 @@ fn tight_rgba(frame: &ff::frame::Video) -> Vec<u8> {
         out[y * row_bytes..(y + 1) * row_bytes].copy_from_slice(src);
     }
     out
-}
-
-/// Rotate a tightly-packed RGBA8 buffer by `deg` (0/90/180/270, clockwise), returning the
-/// rotated buffer and its new dimensions. Portrait iPhone Live Photos carry a 90°/270° display
-/// matrix; ignoring it shows them sideways.
-///
-/// Copies whole 4-byte pixels via raw pointers, iterating the destination in row order
-/// (sequential writes) — this runs on every motion frame and was ~24% of decode time as a
-/// bounds-checked scalar loop building a `[u8; 4]` per pixel.
-fn rotate_rgba(src: Vec<u8>, w: u32, h: u32, deg: i32) -> (Vec<u8>, u32, u32) {
-    let (w, h) = (w as usize, h as usize);
-    let d = deg.rem_euclid(360);
-    if d == 0 || w == 0 || h == 0 {
-        return (src, w as u32, h as u32);
-    }
-    // 90°/270° swap the axes; 180° keeps them.
-    let (nw, nh) = if d == 180 { (w, h) } else { (h, w) };
-    let mut out = vec![0u8; nw * nh * 4];
-    let sp = src.as_ptr();
-    let dp = out.as_mut_ptr();
-    for dy in 0..nh {
-        for dx in 0..nw {
-            // dst (dx,dy) ← src (x,y): each clockwise mapping, inverted. nw==h for 90/270.
-            let (x, y) = match d {
-                90 => (dy, nw - 1 - dx),
-                180 => (w - 1 - dx, h - 1 - dy),
-                _ => (nh - 1 - dy, dx), // 270 (nh == w)
-            };
-            let si = (y * w + x) * 4;
-            let di = (dy * nw + dx) * 4;
-            // SAFETY: by construction x<w, y<h ⇒ si+4 ≤ w·h·4 = src.len(); dx<nw, dy<nh ⇒
-            // di+4 ≤ nw·nh·4 = out.len(). Ranges never overlap the ends.
-            unsafe {
-                std::ptr::copy_nonoverlapping(sp.add(si), dp.add(di), 4);
-            }
-        }
-    }
-    (out, nw as u32, nh as u32)
 }
 
 /// The clockwise display rotation (0/90/180/270) from the video stream's DISPLAYMATRIX
