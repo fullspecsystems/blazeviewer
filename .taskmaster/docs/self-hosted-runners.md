@@ -75,6 +75,10 @@ Setup, in order:
    vTPM's partial VM encryption, local account via `start ms-cxh:localonly` at OOBE
    (Shift+F10), license recycled from the Microsoft account via Settings → Activation →
    Troubleshoot → "I changed hardware on this device recently".
+   **Rebuilds: skip the whole OOBE gauntlet** (MS-account push, privacy-toggle parade,
+   OEM/upsell screens) with `scripts/windows-arm64-autounattend.xml` — instructions in
+   the file's header comment (attach as a tiny second CD image; creates the local
+   admin directly, declines every "express setting").
 2. **Bootstrap** (installs Git + VS Build Tools ARM64 + rustup + registers the runner
    service): generate a token on the Mac —
    `gh api -X POST repos/jdlien/photoblaze/actions/runners/registration-token --jq .token`

@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Zero-gauntlet OOBE for the Windows 11 ARM64 CI runner VM (task #75).
+
+  Drop this file, renamed EXACTLY `autounattend.xml`, at the ROOT of the install
+  medium and Windows Setup picks it up automatically. In VMware Fusion the easy way
+  is a tiny second CD image:  hdiutil makehybrid -iso -joliet -default-volume-name
+  UNATTEND -o unattend.iso <dir containing autounattend.xml>  — attach it as a second
+  CD/DVD drive alongside the Windows ISO before first boot.
+
+  What it skips: the Microsoft-account requirement (creates the local admin below),
+  the EULA page, wireless setup, OEM registration, and the entire privacy-toggle
+  parade (ProtectYourPC=3 = decline all "express settings"). You still pick the
+  disk/partition by hand — deliberately left interactive so a stray boot can't wipe
+  anything unprompted.
+
+  ⚠ processorArchitecture is arm64 — this file is for the ARM64 ISO only (an x64
+  medium wants copies of these components with processorArchitecture="amd64").
+  ⚠ The local account is created with a BLANK password (set one at first logon, or
+  before registering the runner service — the service registration needs one).
+-->
+<unattend xmlns="urn:schemas-microsoft-com:unattend"
+          xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+  <settings pass="oobeSystem">
+    <component name="Microsoft-Windows-Shell-Setup"
+               processorArchitecture="arm64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <OOBE>
+        <HideEULAPage>true</HideEULAPage>
+        <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+        <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+        <!-- 3 = every "express settings" privacy/ads toggle declined, no questions asked -->
+        <ProtectYourPC>3</ProtectYourPC>
+      </OOBE>
+      <UserAccounts>
+        <LocalAccounts>
+          <LocalAccount wcm:action="add">
+            <Name>jd</Name>
+            <DisplayName>JD</DisplayName>
+            <Group>Administrators</Group>
+            <Password>
+              <Value></Value>
+              <PlainText>true</PlainText>
+            </Password>
+          </LocalAccount>
+        </LocalAccounts>
+      </UserAccounts>
+    </component>
+  </settings>
+</unattend>
