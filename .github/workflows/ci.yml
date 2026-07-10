@@ -103,6 +103,27 @@ jobs:
       - name: Test with libheif
         run: cargo test -p pb-decode --features libheif --locked
 
+  # Windows ARM64 (the Fusion VM on the Mac, task #75): NATIVE aarch64 execution of the
+  # workspace tests — the value is running on ARM64, not re-linting (fmt/clippy are
+  # platform-identical and already gated by the x64 lane). Toggled by the repo variable
+  # WIN_ARM64_RUNNER (gh variable set WIN_ARM64_RUNNER --body 1) so the job doesn't
+  # queue-for-24h-then-fail while the runner VM is offline or not yet registered —
+  # a paused VM would otherwise hold every push's CI run open.
+  windows-arm64:
+    if: ${{ vars.WIN_ARM64_RUNNER == '1' }}
+    runs-on: [self-hosted, Windows, ARM64]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      # Same Git Bash shim fix as the x64 lane (see that lane's comment).
+      - name: Prefer Git Bash for shell:bash steps
+        shell: pwsh
+        run: Add-Content $env:GITHUB_PATH "C:\Program Files\Git\bin"
+      - name: Install Rust (rustup bootstrap; version from rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Test (native aarch64-pc-windows-msvc)
+        run: cargo test --workspace --locked
+
   # The Linux gate (task #71): clippy -D warnings + tests + release build over the FULL crate
   # graph, inside the Ubuntu 26.04 appimage container (the only env with the FFmpeg 8 / libheif
   # 1.21 the livephoto+libheif build links — a stock ubuntu-latest can't do it, and hosted

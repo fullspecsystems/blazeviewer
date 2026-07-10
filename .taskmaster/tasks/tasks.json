@@ -726,6 +726,15 @@
           69
         ],
         "subtasks": []
+      },
+      {
+        "id": 75,
+        "title": "Windows ARM64: self-hosted CI lane + (later) native arm64 build",
+        "description": "Stand up the Windows 11 ARM64 VM (VMware Fusion on the Apple Silicon Mac) as a self-hosted runner so workspace tests run natively on aarch64-pc-windows-msvc. Bootstrap script: scripts/setup-windows-arm64-runner.ps1; setup steps + lane-toggle convention (repo var WIN_ARM64_RUNNER): .taskmaster/docs/self-hosted-runners.md. The ci.yml lane (windows-arm64) exists and is if-gated on the variable. Follow-ups once the lane is green: vcpkg libheif arm64-windows-static-md triplet, then a release-windows.ps1 -Arch arm64 + per-arch Velopack channel/feed (mirror the Linux latest-<arch> model) if/when an ARM64 build ships. Perf claims for ARM64 need physical Snapdragon hardware, not the VM.",
+        "status": "in-progress",
+        "priority": "low",
+        "dependencies": [],
+        "subtasks": []
       }
     ]
   }

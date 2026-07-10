@@ -58,6 +58,41 @@ Gotchas learned setting this up:
 - Jobs run even while the account's hosted billing is broken — the billing lock only
   blocks GitHub-hosted runners.
 
+## Windows ARM64 runner (task #75 — the Fusion VM on the Mac)
+
+A Windows 11 ARM64 guest in VMware Fusion on the Apple Silicon Mac, so the workspace
+tests run **natively on aarch64-pc-windows-msvc** (the x64 build already runs on
+Snapdragon machines via Prism emulation, but emulation taxes the SIMD decode paths —
+the thing PhotoBlaze exists for; a native lane keeps an ARM64 build honest before it
+ever ships). Distinct from GREMLIN: this lane only runs tests (fmt/clippy are
+platform-identical and stay on the x64 lane); no libheif/vcpkg yet
+(`arm64-windows-static-md` triplet is the known follow-up risk when release builds
+become a goal).
+
+Setup, in order:
+
+1. **VM**: Windows 11 ARM64 ISO (not the default x64 one), UEFI Secure Boot ON, the
+   vTPM's partial VM encryption, local account via `start ms-cxh:localonly` at OOBE
+   (Shift+F10), license recycled from the Microsoft account via Settings → Activation →
+   Troubleshoot → "I changed hardware on this device recently".
+2. **Bootstrap** (installs Git + VS Build Tools ARM64 + rustup + registers the runner
+   service): generate a token on the Mac —
+   `gh api -X POST repos/jdlien/photoblaze/actions/runners/registration-token --jq .token`
+   — then in an **elevated** PowerShell in the VM:
+   `.\scripts\setup-windows-arm64-runner.ps1 -Token <paste>` (grab the script via a
+   shared folder or `Invoke-WebRequest` from the repo; it prompts once for the account
+   password to install the service).
+3. **Enable the lane**: `gh variable set WIN_ARM64_RUNNER --body 1 --repo jdlien/photoblaze`.
+   The `windows-arm64` job is `if`-gated on that variable so a paused/unregistered VM
+   never leaves CI runs queued open — **set it back to `0` whenever the VM will be off
+   for a while**, and jobs skip cleanly instead of hanging.
+4. Optional, only for the Live Photo corpus tests (they self-skip otherwise): install
+   **HEVC Video Extensions** from the Store and copy `test-images/live/` over.
+
+The default runner labels (`self-hosted, Windows, ARM64`) match the lane. Fusion note:
+the VM must be *running* for jobs to pick up — suspend counts as offline (which is
+exactly what the toggle variable is for).
+
 ## macOS runner (to do on the Mac)
 
 ```bash
