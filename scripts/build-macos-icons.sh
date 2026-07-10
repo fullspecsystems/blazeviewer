@@ -7,7 +7,7 @@
 #
 # Outputs (commit these):
 #   packaging/macos/Assets.car      — Liquid Glass AppIcon for macOS 26+ (from AppIcon.icon)
-#   packaging/macos/PhotoBlaze.icns — flat fallback for pre-26 (legacy PNG, interior filled)
+#   packaging/macos/PhotoBlaze.icns — flat fallback for pre-26 (legacy PNG, outline only)
 #
 # Requires: Xcode 26+ (`xcrun actool`) and ImageMagick (`magick`).
 set -euo pipefail
@@ -37,18 +37,12 @@ xcrun actool "$ICON_BUNDLE" \
 [[ -f "$TMP/Assets.car" ]] || { echo "error: actool produced no Assets.car (Xcode 26+?)" >&2; exit 1; }
 cp "$TMP/Assets.car" "$OUT/Assets.car"
 
-echo "==> Flat legacy: $LEGACY_PNG → $OUT/PhotoBlaze.icns (interior filled white)"
-W="$(sips -g pixelWidth  "$LEGACY_PNG" | awk '/pixelWidth/{print $2}')"
-H="$(sips -g pixelHeight "$LEGACY_PNG" | awk '/pixelHeight/{print $2}')"
-# Flood-fill the frame-enclosed transparent interior white (opaque frame blocks the fill,
-# so the outer corners stay transparent — free-form icon, flame breaks the bounds).
-magick "$LEGACY_PNG" -fuzz 15% -fill white \
-	-draw "color $(( W / 2 )),$(( H * 53 / 100 )) floodfill" "$TMP/filled.png"
+echo "==> Flat legacy: $LEGACY_PNG → $OUT/PhotoBlaze.icns"
 ICONSET="$TMP/PhotoBlaze.iconset"
 mkdir -p "$ICONSET"
 for s in 16 32 64 128 256 512; do
-	sips -z "$s" "$s"             "$TMP/filled.png" --out "$ICONSET/icon_${s}x${s}.png"    >/dev/null
-	sips -z "$((s*2))" "$((s*2))" "$TMP/filled.png" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
+	sips -z "$s" "$s"             "$LEGACY_PNG" --out "$ICONSET/icon_${s}x${s}.png"    >/dev/null
+	sips -z "$((s*2))" "$((s*2))" "$LEGACY_PNG" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
 done
 iconutil -c icns "$ICONSET" -o "$OUT/PhotoBlaze.icns"
 
