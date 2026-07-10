@@ -113,7 +113,7 @@ pub const MAX_DECODED_BYTES: u64 = 1536 * 1024 * 1024;
 // ── Streaming motion decode (task #69: play while decoding) ─────────────────────────
 
 /// One message from a streaming Live Photo motion decode (`decode_live_motion_streaming`
-/// — FFmpeg on Linux, AVAssetReader on macOS). The consumer installs a streaming
+/// — FFmpeg on Linux, AVAssetReader on macOS, Media Foundation on Windows). The consumer installs a streaming
 /// `Playback` on the first [`Frame`](MotionChunk::Frame), appends later frames as they
 /// arrive, and finalizes on [`Done`](MotionChunk::Done) — so a Live Photo starts playing
 /// within a frame or two instead of after the whole `.mov` decodes.
@@ -155,8 +155,8 @@ pub struct MotionHeader {
 /// contract** along the way — the batch `decode_live_motion` wrappers are built on this, so
 /// a producer bug (frame before header, chunk after terminal, dims drifting from the
 /// header) surfaces as a decode error instead of a corrupt `Animation`.
-// Only the macOS batch wrapper uses it today; the contract tests run on every platform.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+// The macOS and Windows batch wrappers use it; the contract tests run on every platform.
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 #[derive(Default)]
 pub(crate) struct MotionCollector {
     header: Option<MotionHeader>,
@@ -166,7 +166,7 @@ pub(crate) struct MotionCollector {
     violation: Option<&'static str>,
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 impl MotionCollector {
     pub(crate) fn push(&mut self, chunk: MotionChunk) {
         if self.violation.is_some() {

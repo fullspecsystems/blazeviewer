@@ -25,7 +25,8 @@ mod imageio;
 // streaming (tasks #38 / #69: frames emit as they decode, so playback starts immediately).
 #[cfg(target_os = "macos")]
 mod livephoto;
-// The Windows mirror: the same .mov decode via Media Foundation (task #39).
+// The Windows mirror: the same .mov decode via Media Foundation, streaming (tasks #39 / #69:
+// frames emit as they decode, so playback starts immediately).
 #[cfg(windows)]
 mod mf_video;
 // The Linux mirror: .mov motion + audio decode via FFmpeg, behind the `livephoto` feature.
@@ -73,7 +74,7 @@ pub use libheif::LibHeifDecoder;
 pub use livephoto::{decode_live_motion, decode_live_motion_streaming};
 pub use metadata::read_exif_fields;
 #[cfg(windows)]
-pub use mf_video::decode_live_motion;
+pub use mf_video::{decode_live_motion, decode_live_motion_streaming};
 pub use psd::PsdDecoder;
 pub use raw::{is_raw_extension, RawPreviewDecoder};
 pub use svg::SvgDecoder;

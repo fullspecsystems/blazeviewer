@@ -5994,12 +5994,13 @@ impl AppCore {
 
     pub fn start_animation_decode(&mut self, item: usize, want: AnimWant) {
         // A Live Photo streams its motion (task #69) — play the `.mov` while it's still
-        // decoding rather than waiting for the whole clip. Wired on the Linux FFmpeg path
-        // and the macOS AVAssetReader path; Windows' Media Foundation player still decodes
-        // in one call, so it stays on the batch path below (as do GIF/APNG/WebP everywhere
-        // — decoded from the still bytes).
+        // decoding rather than waiting for the whole clip. Wired on every platform with a
+        // motion decoder: the Linux FFmpeg path, the macOS AVAssetReader path, and the
+        // Windows Media Foundation path. (GIF/APNG/WebP stay on the batch path below
+        // everywhere — decoded from the still bytes.)
         #[cfg(any(
             target_os = "macos",
+            windows,
             all(unix, not(target_os = "macos"), feature = "livephoto")
         ))]
         if self.live_motion_path(item).is_some() {
@@ -6039,13 +6040,14 @@ impl AppCore {
     }
 
     /// Kick a **streaming** Live Photo motion decode (task #69) — FFmpeg on Linux,
-    /// AVAssetReader on macOS: the worker emits each frame as it's decoded (mapped onto the
-    /// platform-neutral [`StreamMsg`]), and [`poll_anim_stream`](Self::poll_anim_stream)
-    /// installs/extends the playing sequence so the clip starts within a frame or two instead
-    /// of after the whole `.mov`. Same cancel / generation / epoch discipline as
-    /// [`start_animation_decode`](Self::start_animation_decode).
+    /// AVAssetReader on macOS, Media Foundation on Windows: the worker emits each frame as
+    /// it's decoded (mapped onto the platform-neutral [`StreamMsg`]), and
+    /// [`poll_anim_stream`](Self::poll_anim_stream) installs/extends the playing sequence so
+    /// the clip starts within a frame or two instead of after the whole `.mov`. Same cancel /
+    /// generation / epoch discipline as [`start_animation_decode`](Self::start_animation_decode).
     #[cfg(any(
         target_os = "macos",
+        windows,
         all(unix, not(target_os = "macos"), feature = "livephoto")
     ))]
     pub fn start_live_stream(&mut self, item: usize, want: AnimWant) {

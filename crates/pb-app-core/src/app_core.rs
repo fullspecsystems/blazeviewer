@@ -483,8 +483,8 @@ pub struct AppCore {
     /// An in-flight off-thread animation decode, or `None`.
     pub anim_decode: Option<AnimDecode>,
     /// An in-flight **streaming** Live Photo motion decode (task #69) — frames play as they
-    /// arrive. Set on the Linux FFmpeg and macOS AVAssetReader paths; `None` on Windows
-    /// (its Media Foundation player uses the batch `anim_decode`).
+    /// arrive. Set on every platform with a motion decoder: the Linux FFmpeg, macOS
+    /// AVAssetReader, and Windows Media Foundation paths.
     pub anim_stream: Option<AnimStream>,
     /// An animation decoded ahead (eager prep) and held ready for instant playback.
     pub prepared: Option<Prepared>,

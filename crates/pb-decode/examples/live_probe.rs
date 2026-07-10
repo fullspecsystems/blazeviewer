@@ -44,10 +44,10 @@ fn main() {
     const MAX_LONG_EDGE: u32 = 1440;
 
     for path in &files {
-        // Streaming stats (macOS AVAssetReader, task #69): what the chunk callback can
-        // observe — time-to-header (≈ setup), time-to-first-frame (the user-facing win),
-        // total, and how fast a cancel stops the worker.
-        #[cfg(target_os = "macos")]
+        // Streaming stats (macOS AVAssetReader / Windows Media Foundation, task #69): what
+        // the chunk callback can observe — time-to-header (≈ setup), time-to-first-frame (the
+        // user-facing win), total, and how fast a cancel stops the worker.
+        #[cfg(any(target_os = "macos", windows))]
         {
             use std::sync::atomic::{AtomicBool, Ordering};
 

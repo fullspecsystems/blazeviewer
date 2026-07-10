@@ -289,8 +289,8 @@ pub enum StreamMsg {
 
 /// An in-flight **streaming** Live Photo motion decode (task #69) — frames arrive and play
 /// while the rest of the `.mov` is still decoding, instead of waiting for the whole clip.
-/// Set on the Linux FFmpeg and macOS AVAssetReader paths; Windows' Media Foundation player
-/// stays on the batch [`AnimDecode`] path (it decodes the whole clip in one call).
+/// Set on every platform with a motion decoder: the Linux FFmpeg, macOS AVAssetReader, and
+/// Windows Media Foundation paths.
 pub struct AnimStream {
     pub gen: u64,
     pub item: usize,
