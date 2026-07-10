@@ -472,20 +472,34 @@ plugins** (`libheif-libde265.so` etc.) are copied into `usr/lib/libheif/plugins`
 (libde265/libaom/…), and a **custom `AppRun`** exports `LIBHEIF_PLUGIN_PATH` + `LD_LIBRARY_PATH` so
 they resolve inside the bundle. Live Photo *audio* still needs `pw-cat` (PipeWire) on the user's PATH
 — present on any modern desktop, degrades to silent motion if absent, so it's intentionally **not**
-bundled. **No signing, no auto-update yet** (unlike Velopack/Sparkle): the AppImage is unsigned and
-the app won't self-update on Linux — a zsync/AppImageUpdate feed is a future add. `dist/` is
-git-ignored, so the artifacts never get committed.
+bundled. **Unsigned** (no Developer-ID/GPG equivalent yet), but it **does self-update** now (below).
+`dist/` is git-ignored, so the artifacts never get committed.
 
 `release-linux.sh` builds for the **host arch**, so from a Mac/Windows box (no Linux VM needed) use
-**`scripts/release-linux-docker.sh [amd64|arm64]`** — it builds an **Ubuntu 26.04** container
-(`scripts/appimage.Dockerfile`, matching the FFmpeg 8 / libheif 1.21 the code targets) and runs
-`release-linux.sh` inside it. On **Apple Silicon + OrbStack** `linux/amd64` runs under **Rosetta**, so
-the **x86_64** artifact (what most Linux users need) builds at near-native speed; `arm64` is native.
-It uses a container-only `CARGO_TARGET_DIR` (a cached volume) so it never clashes with the host's
-macOS `target/`, and `APPIMAGE_EXTRACT_AND_RUN=1` so no FUSE/`--privileged` is required. The build
-distro sets the glibc floor (2.43 here → recent-distro runtime); dropping it means building
+**`scripts/release-linux-docker.sh [amd64|arm64|both] [--upload]`** — it builds an **Ubuntu 26.04**
+container (`scripts/appimage.Dockerfile`, matching the FFmpeg 8 / libheif 1.21 the code targets) and
+runs `release-linux.sh` inside it. `both` builds x86_64 then aarch64; `--upload` publishes the
+result afterwards (see below). On **Apple Silicon + OrbStack** `linux/amd64` runs under **Rosetta**,
+so the **x86_64** artifact (what most Linux users need) builds at near-native speed; `arm64` is
+native. It uses a container-only `CARGO_TARGET_DIR` (a cached volume) so it never clashes with the
+host's macOS `target/`, and `APPIMAGE_EXTRACT_AND_RUN=1` so no FUSE/`--privileged` is required. The
+build distro sets the glibc floor (2.43 here → recent-distro runtime); dropping it means building
 FFmpeg/libheif from source on an older base. **AppImages can only be built on Linux** (the container
-*is* that Linux) — there's no native macOS/Windows AppImage build.
+*is* that Linux) — there's no native macOS/Windows AppImage build. ⚠ The container build image
+pre-installs the Rust toolchain via `rustup-init`, whose `--component` takes a **comma-separated**
+list (`rustfmt,clippy,…`) — a space-separated list makes it reject the second component.
+
+**Publishing + auto-update (Linux) — the JSON-feed self-replace model** (the Velopack/Sparkle analog
+for AppImages). `scripts/release-linux-upload.sh` (or `release-linux-docker.sh … --upload`) scp's the
+versioned AppImage(s) + a `.sha256` sidecar each to `downloads.fullspec.ca/photoblaze/linux`, writes a
+shared `latest.json` manifest (version + per-arch url/sha256/size), and repoints the
+`PhotoBlaze-latest-<arch>.AppImage` symlinks; Caddy redirects `/photoblaze/latest/linux` (x86_64) and
+`/photoblaze/latest/linux-arm64` (aarch64) at them. The app's `update.rs` `linux` module reads
+`latest.json` in a background thread, and if it advertises a newer build for this arch it downloads
+the AppImage, **verifies the sha256**, and swaps `$APPIMAGE` in place on quit (atomic rename — the
+next launch is the new version). Self-gates when `$APPIMAGE` is unset (a `cargo run` / extracted
+binary) or the AppImage's directory isn't writable (installed read-only) — then it just stays put.
+`PB_UPDATE_FEED` overrides the feed base URL for offline testing.
 
 > **Release only from a clean, committed workspace.** `crates/pb-app/build.rs` stamps the build
 > id `-dirty` on **any** `git status --porcelain` output — **untracked files included** — and that
@@ -519,15 +533,20 @@ To cut a release:
    `gh release create v<version> dist/PhotoBlaze-<version>.dmg* --notes-file <(bash
    scripts/changelog-section.sh <version>)`. Write **real, curated, user-facing** CHANGELOG notes
    before tagging so `changelog-section.sh` has a body. **Never** enable `generate_release_notes`.
-4. **Tag for posterity** (optional): `git tag -a v<version> -m "…" && git push origin v<version>`.
+4. **Linux (from your Mac via OrbStack):** `./scripts/release-linux-docker.sh both --upload` builds
+   both AppImages and publishes them + `latest.json` to the feed (repointing the `latest-<arch>`
+   symlinks). Needs your ssh keys for the scp step (it runs host-side, after the container work). A
+   launched older AppImage then self-updates on next quit.
+5. **Tag for posterity** (optional): `git tag -a v<version> -m "…" && git push origin v<version>`.
    Windows never needs it (Velopack reads the version from `Cargo.toml`); it's a record + the anchor
    for a manual macOS GitHub Release. Safe to push now that release.yml doesn't auto-build on tags.
-5. **Verify:** the Windows feed serves the new `releases.win.json` + `.nupkg` (and a launched build
+6. **Verify:** the Windows feed serves the new `releases.win.json` + `.nupkg` (and a launched build
    self-updates); the macOS DMG is genuinely notarized — `xcrun stapler validate <dmg>` and
    `spctl -a -t open --context context:primary-signature -vv <dmg>` → `source=Notarized Developer
    ID`; the macOS feed serves the new `appcast.xml` (curl it) and a launched older build detects →
-   downloads → installs-on-quit the update. A `-` in a tag marks a pre-release; a clean `vX.Y.Z`
-   is a full release.
+   downloads → installs-on-quit the update; the Linux feed serves the new `latest.json` +
+   `latest-<arch>` symlinks (curl `…/photoblaze/latest/linux`). A `-` in a tag marks a pre-release; a
+   clean `vX.Y.Z` is a full release.
 
 
 ## Project Task Tracking

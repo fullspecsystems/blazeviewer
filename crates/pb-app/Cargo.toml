@@ -100,6 +100,14 @@ arboard = { version = "3", default-features = false, features = ["image-data"] }
 # menu/trash path. Both declarations keep `default-features = false`, so Linux gets *only* gtk3.
 rfd = { version = "0.14", default-features = false, features = ["gtk3"] }
 
+# Linux in-app AppImage auto-update (src/update.rs `linux`): a JSON-feed self-replace updater.
+# `ureq` (rustls — no OpenSSL) polls latest.json + streams the newer AppImage down; `sha2` verifies
+# it before the on-quit `$APPIMAGE` swap. `ureq` already resolves in the lockfile via pb-app-core,
+# so this adds ~no build cost; both stay off the Windows/macOS builds (those use Velopack/Sparkle).
+[target.'cfg(target_os = "linux")'.dependencies]
+ureq = { version = "3", features = ["json"] }
+sha2 = "0.10"
+
 # macOS: poke the wgpu CAMetalLayer for wide-gamut/EDR output (hdr_surface.rs) via
 # raw `msg_send!`. objc2 0.6 is already in the tree (winit/muda); raw-window-handle
 # comes through winit's re-export.
@@ -154,6 +162,9 @@ windows = { version = "0.62", features = [
 [dev-dependencies]
 zip = { version = "2", default-features = false, features = ["deflate"] }
 sevenz-rust2 = "0.21.3"
+# Parse a sample latest.json in the update-feed unit tests, so the manifest struct stays in sync
+# with what scripts/release-linux-upload.sh writes. Already in the lockfile (via ureq/pb-app-core).
+serde_json = "1"
 
 # Embeds the .exe icon + version metadata on Windows (build.rs). Best-effort: if
 # the resource compiler is absent the build still succeeds (see build.rs).

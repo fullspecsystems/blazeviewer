@@ -22,6 +22,11 @@ with any pre-release suffix carried only by the tag.
   pause if decoding can't keep up, then resume — a fair trade for a near-instant start.
 
 ### Added
+- **Linux now updates itself.** The AppImage checks for a new version in the background and, when
+  one is available, downloads and verifies it, then swaps itself in the next time you quit — the
+  same hands-off updating Windows and macOS already have, so you no longer re-download the AppImage
+  by hand. Update checks send only your version and CPU architecture, never anything about the
+  photos you view. (If the AppImage is installed somewhere you can't write to, it's left untouched.)
 - **Animated AVIF now plays on Linux.** Multi-frame `.avif` files (and HEIC image sequences) show
   the first frame as usual and play the full animation on `P`, looping like a GIF — previously they
   were stuck on the first frame. (Wide-gamut/HDR sequences play but their colors read a touch
