@@ -477,10 +477,6 @@ impl DialogWindow {
         parent: Option<&Window>,
     ) -> Option<DialogWindow> {
         let (w, h, resizable, title) = match kind {
-            // macOS renders the body in SF Pro, whose taller line metrics need ~30px more
-            // height than Segoe so the GitHub link at the bottom isn't clipped.
-            #[cfg(target_os = "macos")]
-            DialogKind::About => (254.0, 351.0, false, "About PhotoBlaze"),
             // Windows (Segoe UI): the original tuned height.
             #[cfg(target_os = "windows")]
             DialogKind::About => (254.0, 321.0, false, "About PhotoBlaze"),

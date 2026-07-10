@@ -1,34 +1,26 @@
-//! The native windowed-mode menu bar.
+//! The **Windows** native windowed-mode menu bar, plus the shared cross-platform menu model.
 //!
-//! Built with [`muda`] — a real Windows `HMENU` now, a native macOS `NSMenu`
-//! later from the same API (the "macOS is a cheap port" goal). The menu exists
-//! **only in windowed mode**; fullscreen is the chrome-free "speed mode" and stays
-//! menu-free. A native OS menu is OS-drawn and present only when windowed, so it's
-//! **perf-neutral** — consistent with the prime directive (see `CLAUDE.md`).
+//! Built with [`muda`] — a real Windows `HMENU`. The menu exists **only in windowed mode**;
+//! fullscreen is the chrome-free "speed mode" and stays menu-free. A native OS menu is
+//! OS-drawn and present only when windowed, so it's **perf-neutral** (see `CLAUDE.md`).
+//! macOS ships the native SwiftUI host (which builds its own AppKit menu); Linux draws an
+//! egui menu (`panels_ui`). Both consume the dependency-free model in this module — the
+//! id → [`action_for`] mapping, the group/row spec, and the keyboard-nav state machine — so
+//! only the native muda *construction* ([`build_menu`]) is Windows-specific. (The `#[cfg(windows)]`
+//! split that stops Linux compiling `build_menu` + muda at all is a follow-up — task #73.)
 //!
-//! Clicks emit a [`muda::MenuEvent`] carrying the item's id; `main.rs` polls the
-//! event channel in `about_to_wait`, maps the id to a [`MenuAction`] via the pure
-//! [`action_for`] (unit-tested here), and calls the **same `App` methods the
-//! keyboard already calls**.
+//! Clicks emit a [`muda::MenuEvent`] carrying the item's id; `main.rs` polls the event
+//! channel in `about_to_wait`, maps the id to an action via the pure [`action_for`]
+//! (unit-tested here), and calls the **same `App` methods the keyboard already calls**.
 //!
-//! **Shortcuts, per platform.** *Windows* shows shortcuts as right-aligned label hints
-//! (`"Open File…\tO"`) with no real accelerator registered — the winit key handler owns
-//! those keys and a registered accelerator would double-fire. *macOS* registers **real
-//! ⌘-chord key-equivalents** (Settings ⌘, / Copy ⌘C / Move to Trash ⌘⌫ / …) because the
-//! keymap never binds ⌘-chords, so NSMenu owns them cleanly with no double-fire; the
-//! **bare-key** items (nav, rotate, frame-step) carry **no accelerator and no hint text** —
-//! an NSMenu key-equivalent for a bare key would *steal* it from the keymap (breaking
-//! hold-to-fly), and literal hint text in an NSMenuItem title is non-idiomatic whitespace.
+//! **Shortcuts.** Windows shows shortcuts as right-aligned label hints (`"Open File…\tO"`)
+//! with no real accelerator registered — the winit key handler owns those keys, and a
+//! registered accelerator would double-fire.
 
 use muda::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
 use crate::action::Action;
 use crate::keymap::Keymap;
-
-// `macos_menu_chord` (the ⌘-accelerator table the keyboard-help overlay formats through) moved
-// to `pb_app_core::keymap` (NS0 5.5 / Phase B) so `AppCore`'s help-overlay build can reach it.
-// `build_menu` here registers the native NSMenu key-equivalents via muda's `Accelerator`
-// directly, so it never needed this table.
 
 /// Stable string ids for the menu items. Kept in one place so the builder and the
 /// dispatcher ([`action_for`]) can never drift apart.
@@ -60,13 +52,6 @@ pub mod ids {
     pub const ZOOM_IN: &str = "zoom_in";
     pub const ZOOM_OUT: &str = "zoom_out";
     pub const FULLSCREEN: &str = "fullscreen";
-    /// macOS-only: the native (Spaces) fullscreen toggle (`toggleFullScreen:` on
-    /// ⌃⌘F / Globe+F), distinct from the borderless `FULLSCREEN` speed mode.
-    /// Intercepted directly in the menu-event loop, not routed through `Action`.
-    /// macOS-only (both its menu item and its handler are `cfg`'d to macOS), so the
-    /// constant is too — otherwise it reads as dead code on Windows/Linux.
-    #[cfg(target_os = "macos")]
-    pub const NATIVE_FULLSCREEN: &str = "native_fullscreen";
     pub const RECURSIVE: &str = "recursive";
     pub const SLIDESHOW: &str = "slideshow";
     pub const SLIDESHOW_FASTER: &str = "slideshow_faster";
@@ -291,9 +276,8 @@ fn check_item(id: &str, label: &str) -> CheckMenuItem {
 /// `"Shift+R"`, `"P"`), or empty if the action is unbound. Sourced live from the keymap so
 /// the menu reflects **customized** bindings (`KeyChord`'s `Display` — the same text the
 /// Settings ▸ Shortcuts editor shows), never a hardcoded guess. The first binding wins when
-/// an action has two (menus show one accelerator). Windows-only in production (macOS shows
-/// bare-key items with no hint — see [`build_menu`]); kept + tested cross-platform.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+/// an action has two (menus show one accelerator). Used by the Windows native menu (the Linux
+/// egui menu renders labels without the `\t` accelerator hint); kept + tested cross-platform.
 fn shortcut_hint(keymap: &Keymap, action: Action) -> String {
     keymap
         .bindings_for(action)
@@ -305,11 +289,8 @@ fn shortcut_hint(keymap: &Keymap, action: Action) -> String {
 /// A menu label with the action's current shortcut appended as a `\t` hint
 /// (`"Next\tSpace"`), which **Windows** right-aligns in the accelerator column. Sourced
 /// live from the keymap so it tracks customized bindings. No hint if the action is unbound,
-/// so an un-shortcutted item just reads as its plain label. **Windows-only:** on macOS these
-/// bare-key items show no hint at all (a `\t` in an NSMenuItem title is just stray
-/// whitespace, and a real key-equivalent would hijack the key — see the module docs), so
-/// this is unused there.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+/// so an un-shortcutted item just reads as its plain label. Used by the Windows native menu;
+/// the Linux egui menu builds its rows from the plain labels + the model, not this `\t` form.
 fn labeled(keymap: &Keymap, base: &str, action: Action) -> String {
     let hint = shortcut_hint(keymap, action);
     if hint.is_empty() {
@@ -365,21 +346,6 @@ pub struct BuiltMenu {
     /// Starts disabled.
     pub compare_toggle: MenuItem,
     pub checks: ViewChecks,
-    /// macOS-only: the **Window** submenu (Minimize ⌘M / Zoom / Bring All to Front).
-    /// Returned so the app can call [`Submenu::set_as_windows_menu_for_nsapp`] on it —
-    /// which muda requires be done *after* `Menu::init_for_nsapp` — to make macOS
-    /// auto-populate the standard window list. There's no Window menu on Windows.
-    #[cfg(target_os = "macos")]
-    pub window: Submenu,
-    /// macOS-only: the native (Spaces) fullscreen item. Returned so the app can flip
-    /// its title between "Enter Full Screen" and "Exit Full Screen" to mirror the live
-    /// native-fullscreen state (the Mac-standard behavior — no checkmark; see
-    /// `App::refresh_native_fullscreen_label`). macOS also auto-injects its own
-    /// Globe/Fn+F fullscreen item, which we can't suppress (muda gives no access to the
-    /// raw `NSMenuItem` to wire the native `toggleFullScreen:` action), so this carries
-    /// the ⌃⌘F shortcut + the label management the auto item won't do for us.
-    #[cfg(target_os = "macos")]
-    pub native_fullscreen: MenuItem,
 }
 
 /// Build the full menu bar. Best-effort: a failed `append` (rare) is logged and the
@@ -390,7 +356,6 @@ pub struct BuiltMenu {
 /// EXIF-writable file — see `App::refresh_save_menu_item`; starts disabled), and the
 /// **View checks** (scale mode / recursive / fullscreen — see
 /// `App::refresh_view_menu_checks`).
-#[cfg(not(target_os = "macos"))]
 #[cfg_attr(not(windows), allow(dead_code))] // used on Windows; Linux has no native menu
 pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
     let menu = Menu::new();
@@ -1067,250 +1032,6 @@ pub fn menu_nav_key(nav: &mut MenuNav, groups: &[MenuGroup], key: MenuKey) -> Me
     Out::Consumed
 }
 
-/// The macOS menu bar — same item ids (so [`action_for`] / dispatch are shared), but
-/// built to Apple conventions: a leading **application menu** (the first submenu
-/// becomes the bold app menu under `init_for_nsapp`), with About / Settings / Quit
-/// there rather than in File, and **real ⌘ accelerators** instead of the Windows
-/// hint-text. The accelerators are safe to register here (unlike Windows) because the
-/// winit keymap never binds ⌘-chords (`KeyChord.logo`), so NSMenu owns them with no
-/// double-fire. Bare-key fast-nav (Space / R / 8-9-0 / …) and the fullscreen toggles
-/// (F / ⌥⏎ / F11) stay keymap-owned, so those items carry no accelerator.
-#[cfg(target_os = "macos")]
-pub fn build_menu(_keymap: &Keymap) -> BuiltMenu {
-    use muda::accelerator::{Accelerator, Code, Modifiers};
-    /// The ⌘ (Command) key — `Modifiers::SUPER` maps to NSEventModifierFlags::Command.
-    const CMD: Modifiers = Modifiers::SUPER;
-    /// A normal item carrying a real key-equivalent (NSMenu dispatches it → MenuEvent).
-    fn cmd_item(id: &str, label: &str, mods: Modifiers, code: Code) -> MenuItem {
-        MenuItem::with_id(id, label, true, Some(Accelerator::new(Some(mods), code)))
-    }
-
-    let menu = Menu::new();
-    let sep = || PredefinedMenuItem::separator();
-
-    // 1) Application menu. The FIRST submenu is rendered as the macOS app menu (bold,
-    //    app-named). About / Settings / Quit live here per convention — not in File.
-    //    Quit routes through our own id (→ Action::Quit → clean teardown, privacy #6)
-    //    rather than PredefinedMenuItem::quit, which would bypass it.
-    let app = Submenu::new("PhotoBlaze", true);
-    let _ = app.append_items(&[
-        &item(ids::ABOUT, "About PhotoBlaze"),
-        &sep(),
-        &cmd_item(ids::SETTINGS, "Settings…", CMD, Code::Comma),
-        &sep(),
-        &PredefinedMenuItem::hide(None),
-        &PredefinedMenuItem::hide_others(None),
-        &PredefinedMenuItem::show_all(None),
-        &sep(),
-        &cmd_item(ids::EXIT, "Quit PhotoBlaze", CMD, Code::KeyQ),
-    ]);
-
-    // Disabled until a rotation is pending on an eligible file (toggled at runtime).
-    let save_rotation = MenuItem::with_id(
-        ids::SAVE_ROTATION,
-        "Save Rotation",
-        false,
-        Some(Accelerator::new(Some(CMD), Code::KeyS)),
-    );
-
-    // Disabled until a real on-disk file is displayed (toggled at runtime). Shortcut-less —
-    // ⇧⌘R is claimed by other Mac apps; a user can bind one in Settings.
-    let reveal = MenuItem::with_id(ids::REVEAL, "Show in Finder", false, None);
-
-    // Disabled until a folder scan is actually streaming in (toggled at runtime). No
-    // accelerator — it's a contextual command, menu-only.
-    let cancel_scan = MenuItem::with_id(ids::CANCEL_SCAN, "Stop Scanning", false, None);
-
-    let file = Submenu::new("File", true);
-    let _ = file.append_items(&[
-        &cmd_item(ids::OPEN_FILE, "Open File…", CMD, Code::KeyO),
-        &cmd_item(
-            ids::OPEN_FOLDER,
-            "Open Folder…",
-            CMD.union(Modifiers::SHIFT),
-            Code::KeyO,
-        ),
-        &cancel_scan,
-        &sep(),
-        &save_rotation,
-        &reveal,
-        &sep(),
-        // macOS Finder idioms: Move to Trash = ⌘⌫, Delete Immediately = ⌥⌘⌫ (NOT ⇧⌘⌫,
-        // which Finder maps to *Empty Trash*). These are ⌘-chords, so NSMenu owns them
-        // with no double-fire against the keymap's bare Del / Shift+Del (`KeyChord.logo`).
-        // `Code::Backspace` renders as the ⌫ glyph (muda → key-equivalent `\u{0008}`).
-        &cmd_item(ids::DELETE, "Move to Trash", CMD, Code::Backspace),
-        &cmd_item(
-            ids::DELETE_PERMANENTLY,
-            "Delete Immediately…",
-            CMD.union(Modifiers::ALT),
-            Code::Backspace,
-        ),
-    ]);
-
-    // Undo (⌘Z) at the top of Edit, per macOS convention. Starts disabled; the app
-    // flips its label + enabled state to mirror the undo stack.
-    let undo = MenuItem::with_id(
-        ids::UNDO,
-        "Undo",
-        false,
-        Some(Accelerator::new(Some(CMD), Code::KeyZ)),
-    );
-    let edit = Submenu::new("Edit", true);
-    let _ = edit.append_items(&[
-        &undo,
-        &sep(),
-        &cmd_item(ids::COPY, "Copy", CMD, Code::KeyC),
-        &cmd_item(
-            ids::COPY_PATH,
-            "Copy File Path",
-            CMD.union(Modifiers::SHIFT),
-            Code::KeyC,
-        ),
-        // On-device OCR + QR payloads (task #45); bare-key/unbound, so NO
-        // accelerator (an NSMenu key-equivalent would steal the key — see the
-        // menu-accelerator note at the top of this file).
-        &item(ids::COPY_IMAGE_TEXT, "Copy Text from Image"),
-    ]);
-
-    let fit = check_item(ids::FIT, "Fit");
-    let fill = check_item(ids::FILL, "Crop to Fill");
-    let original = check_item(ids::ORIGINAL, "Original 1:1");
-    let recursive = check_item(ids::RECURSIVE, "Recursive (This Folder)");
-    let fullscreen = check_item(ids::FULLSCREEN, "Fullscreen");
-    let slideshow = check_item(ids::SLIDESHOW, "Slideshow");
-    let info = check_item(ids::INFO, "Show Image Info");
-    let full_exif = check_item(ids::FULL_EXIF, "Show All EXIF Info");
-    let toggle_panels = check_item(ids::TOGGLE_PANELS, "Hide Panels");
-    let mute_live_audio = check_item(ids::MUTE_LIVE_AUDIO, "Mute Live Photo Audio");
-    // Native (Spaces) fullscreen. Its title flips to "Exit Full Screen" while engaged
-    // (Mac convention — no checkmark), driven by `App::refresh_native_fullscreen_label`.
-    let native_fullscreen = cmd_item(
-        ids::NATIVE_FULLSCREEN,
-        "Enter Full Screen",
-        CMD.union(Modifiers::CONTROL),
-        Code::KeyF,
-    );
-
-    let view = Submenu::new("View", true);
-    let _ = view.append_items(&[
-        &fit,
-        &fill,
-        &original,
-        &sep(),
-        &item(ids::ZOOM_IN, "Zoom In"),
-        &item(ids::ZOOM_OUT, "Zoom Out"),
-        &sep(),
-        // Two fullscreen modes (owner decision): our borderless speed mode (checkable,
-        // bound to F / ⌥⏎ / F11 in the keymap), and the macOS-native Spaces fullscreen
-        // (⌃⌘F) for those who want it. `SUPER` maps to ⌘ (muda's `META` does not — see
-        // modifier_mask), so this is a real ⌃⌘F. macOS *also* auto-injects its own
-        // Globe/Fn+F fullscreen item at the menu's end (a duplicate we can't suppress
-        // via muda); ours is the one carrying ⌃⌘F + the Enter/Exit label management.
-        &fullscreen,
-        &native_fullscreen,
-        &recursive,
-        &slideshow,
-        &item(ids::SLIDESHOW_FASTER, "Slideshow Faster"),
-        &item(ids::SLIDESHOW_SLOWER, "Slideshow Slower"),
-        &sep(),
-        &info,
-        &full_exif,
-        &toggle_panels,
-    ]);
-
-    // No accelerators / no hint text: these are bare-key bindings (Space / R / , / . / …)
-    // owned by the winit keymap. A macOS key-equivalent for a bare key would make NSMenu
-    // *steal* it from the keymap (breaking hold-to-fly), and — unlike Windows, which
-    // right-aligns a `\t` hint in the accelerator column — a literal hint in an NSMenuItem
-    // title just renders as stray whitespace. So the Mac items show a plain label (the
-    // idiomatic choice for a shortcut macOS can't express as a key-equivalent).
-    // Compare (task #43): bare keys (Y / ⇧Y) live in the keymap, so like the other
-    // Image items these carry no key-equivalent. Start disabled (empty deck).
-    let compare_pin =
-        CheckMenuItem::with_id(ids::COMPARE_PIN, "Pin for Compare", false, false, None);
-    let compare_toggle = MenuItem::with_id(ids::COMPARE_TOGGLE, "Compare with Pinned", false, None);
-
-    // Go — folder navigation, Finder's chords (⌘↑ Enclosing Folder, ⌘←/⌘→ step between
-    // sibling folders — PhotoBlaze has no back/forward history to shadow). Real ⌘ key-
-    // equivalents (NSMenu-owned); the keymap binds `Alt+arrow` for Windows and never ⌘-chords,
-    // so there's no double-fire. Matches the native macOS host's Go menu.
-    let go = Submenu::new("Go", true);
-    let _ = go.append_items(&[
-        &cmd_item(ids::OPEN_PARENT, "Enclosing Folder", CMD, Code::ArrowUp),
-        &sep(),
-        &cmd_item(ids::PREV_FOLDER, "Previous Folder", CMD, Code::ArrowLeft),
-        &cmd_item(ids::NEXT_FOLDER, "Next Folder", CMD, Code::ArrowRight),
-    ]);
-
-    let image = Submenu::new("Image", true);
-    let _ = image.append_items(&[
-        &item(ids::NEXT, "Next"),
-        &item(ids::PREVIOUS, "Previous"),
-        &item(ids::RANDOM, "Random"),
-        &item(ids::RANDOM_PREV, "Previous Random"),
-        &sep(),
-        &item(ids::ROTATE_RIGHT, "Rotate Right"),
-        &item(ids::ROTATE_LEFT, "Rotate Left"),
-        &sep(),
-        &compare_pin,
-        &compare_toggle,
-        &sep(),
-        &item(ids::PLAY_PAUSE, "Play/Pause Animation"),
-        &item(ids::FRAME_NEXT, "Next Frame"),
-        &item(ids::FRAME_PREV, "Previous Frame"),
-        &sep(),
-        &mute_live_audio,
-    ]);
-
-    // Standard macOS Window menu. The predefined items carry their native labels,
-    // selectors and ⌘-equivalents for free: Minimize = ⌘M (`performMiniaturize:`),
-    // Zoom (`performZoom:`), Bring All to Front (`arrangeInFront:`). Marking it the
-    // app's Window menu (`set_as_windows_menu_for_nsapp`, done in `apply_menu_for_mode`
-    // after `init_for_nsapp`) lets macOS append the live window list below these.
-    let window = Submenu::new("Window", true);
-    let _ = window.append_items(&[
-        &PredefinedMenuItem::minimize(None),
-        &PredefinedMenuItem::maximize(None),
-        &sep(),
-        &PredefinedMenuItem::bring_all_to_front(None),
-    ]);
-
-    let help = Submenu::new("Help", true);
-    let _ = help.append_items(&[&item(ids::HELP, "Keyboard Shortcuts")]);
-
-    // App, File, Edit, View, Go, Image, Window, Help — the conventional macOS order
-    // (Go between View and Image, Window directly before Help), matching the native host.
-    for sub in [&app, &file, &edit, &view, &go, &image, &window, &help] {
-        if let Err(e) = menu.append(sub) {
-            eprintln!("menu: failed to append submenu: {e}");
-        }
-    }
-    BuiltMenu {
-        menu,
-        save_rotation,
-        reveal,
-        cancel_scan,
-        undo,
-        compare_pin,
-        compare_toggle,
-        checks: ViewChecks {
-            fit,
-            fill,
-            original,
-            recursive,
-            fullscreen,
-            slideshow,
-            info,
-            full_exif,
-            toggle_panels,
-            mute_live_audio,
-        },
-        window,
-        native_fullscreen,
-    }
-}
-
 /// Build the right-click **photo context menu** (task #41): a fresh popup of the most
 /// common per-photo commands, shown over the image at the cursor. Reuses the menu-bar item
 /// ids, so a click dispatches through the same [`action_for`] → [`Action`] path as the bar
@@ -1368,9 +1089,6 @@ pub fn build_context_menu(state: &crate::contract::ContextMenuState) -> Menu {
     // Reveal only for a real on-disk file (archive entries have no path). The label follows
     // the platform idiom, matching the File-menu item.
     if state.can_reveal {
-        #[cfg(target_os = "macos")]
-        let reveal_label = "Show in Finder";
-        #[cfg(not(target_os = "macos"))]
         let reveal_label = "Show in File Explorer";
         let _ = menu.append(&item(ids::REVEAL, reveal_label));
     }

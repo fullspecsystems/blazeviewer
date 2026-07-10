@@ -1,14 +1,13 @@
 # Lint + test on pushes to main, PRs, and on demand.
 #
 # Windows is the real target (winit, wgpu/DX12, WIC decode, the build.rs icon),
-# so the full workspace builds and tests there. The pure `pb-core` crate is also
-# checked on Linux — it has no I/O or GPU, matching the project's "gate the
-# platform-independent logic on Linux" methodology (decisions.md ADR-010/011).
-# The mac-swift lane (NS1, ADR-021) gates the SwiftUI host: the pb-mac-ffi
-# bridge tests + the full build-swift-host.sh chain (cargo staticlib →
-# swift-bridge package → swift build → .app). The egui-on-Mac beta needs no
-# separate lane — the workspace it builds from is the same code the Windows
-# job compiles, and release.yml builds the Mac DMG.
+# so the full workspace builds and tests there. The `linux-gate` lane runs the FULL
+# workspace clippy + tests + release build in the Ubuntu 26.04 appimage container
+# (task #71 — `scripts/check-linux.sh`), gating the Linux winit shell + the livephoto/
+# libheif build that the Windows lane can't see. The mac-swift lane (NS1, ADR-021) gates
+# the SwiftUI host: clippy over the shipped macOS graph, the pb-mac-ffi bridge tests, and
+# the full build-swift-host.sh chain (cargo staticlib → swift-bridge package → swift build
+# → .app). release.yml builds the Mac DMG. All three pin the toolchain via rust-toolchain.toml.
 #
 # ── Runners (2026-07-03): SELF-HOSTED — the owner's own machines ──
 # The hosted-minute bill (~260 billable min/run, 78% of it the macOS 10×
@@ -19,9 +18,10 @@
 #   • The runners persist state between runs, so the GitHub cache actions
 #     (Swatinem/rust-cache, actions/cache) are gone from those lanes — the
 #     _work tree keeps cargo's target warm, and libheif is built once on disk.
-#   • core-linux stays on ubuntu-latest (bills ~0.5 min at 1×) but is
-#     continue-on-error until the account's billing works again — a hosted
-#     lane must not redden the self-hosted signal it can't gate.
+#   • The Linux gate runs on the Mac runner via OrbStack/Docker (task #71) rather
+#     than a hosted ubuntu lane — hosted billing is broken, and it needs the
+#     appimage container's FFmpeg 8 / libheif 1.21 anyway. It requires OrbStack
+#     running on the Mac runner (as the local release build already does).
 #   • Trigger policy stays main+PR+dispatch: runs are free now, but they
 #     compete for CPU with whoever is using the machine.
 # Docs-only changes (*.md, .taskmaster/) skip CI entirely; superseded runs on
@@ -68,16 +68,24 @@ jobs:
       - name: Prefer Git Bash for shell:bash steps
         shell: pwsh
         run: Add-Content $env:GITHUB_PATH "C:\Program Files\Git\bin"
-      - name: Install Rust (stable + rustfmt + clippy)
+      # rust-toolchain.toml pins the EXACT version (task #71); dtolnay just bootstraps rustup,
+      # and the pin overrides it for every cargo command below. The next step asserts they agree.
+      - name: Install Rust (rustup bootstrap; version from rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Assert pinned toolchain
+        shell: bash
+        run: |
+          rustup show active-toolchain
+          rustc --version
+          rustc --version | grep -q '1.97.0' || { echo "::error::rustc != pinned 1.97.0 (rust-toolchain.toml)"; exit 1; }
       - name: Format check
         run: cargo fmt --all -- --check
       - name: Clippy (deny warnings)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
       # The `libheif` feature ships in the release MSI (tasks.json #16), so CI must
       # keep it compiling — it's cfg'd out of the default build and would otherwise
       # rot invisibly. The vcpkg tree persists on the runner machine; only a brand-new
@@ -91,24 +99,23 @@ jobs:
             Write-Host "libheif already present at $env:VCPKG_ROOT"
           }
       - name: Clippy with libheif (deny warnings)
-        run: cargo clippy -p pb-decode -p pb-app --features libheif --all-targets -- -D warnings
+        run: cargo clippy -p pb-decode -p pb-app --features libheif --all-targets --locked -- -D warnings
       - name: Test with libheif
-        run: cargo test -p pb-decode --features libheif
+        run: cargo test -p pb-decode --features libheif --locked
 
-  core-linux:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    # Advisory while the account's hosted billing is broken (jobs refuse to start):
-    # a hosted lane must not fail runs the self-hosted lanes have passed. Flip this
-    # back to a hard gate once billing works — it bills ~0.5 min/run at 1×.
-    continue-on-error: true
+  # The Linux gate (task #71): clippy -D warnings + tests + release build over the FULL crate
+  # graph, inside the Ubuntu 26.04 appimage container (the only env with the FFmpeg 8 / libheif
+  # 1.21 the livephoto+libheif build links — a stock ubuntu-latest can't do it, and hosted
+  # billing is broken anyway). Runs on the self-hosted Mac via OrbStack/Docker. This is a REQUIRED
+  # gate — it replaces the old advisory `core-linux` (`cargo test -p pb-core`, which check-linux.sh
+  # subsumes) so Linux-only issues can't slip through like the ones fixed in f71c0720.
+  linux-gate:
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Test pb-core (pure, platform-independent)
-        run: cargo test -p pb-core
+      - name: Linux gate (clippy + test + build in the appimage container)
+        run: ./scripts/check-linux.sh amd64
 
   # The NS1 SwiftUI host (arm64 runner = the aarch64-apple-darwin target the app ships).
   # Kept lean (macOS minutes are pricey): the FFI bridge tests + the whole host build
@@ -118,12 +125,19 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust (stable)
+      - name: Install Rust (rustup bootstrap; version from rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # Lint the actually-shipped macOS Rust graph -D warnings (task #71) — the SwiftUI host's
+      # staticlib + engine crates. Excludes the retired pb-app (it no longer builds on macOS) and
+      # pb-ui (egui chrome, not shipped on the native host).
+      - name: Clippy the shipped macOS graph (excl. pb-app)
+        run: cargo clippy --locked --all-targets -p pb-mac-ffi -p pb-app-core -p pb-core -p pb-decode -p pb-source -p pb-render -p pb-hud -- -D warnings
       - name: Test the FFI bridge (round-trip + the open flow, no GPU needed)
         # pb-decode is included for the macOS-gated decoder tests (Image I/O, the
         # AVAssetReader Live Photo streaming path — its corpus tests self-skip without
         # PB_LIVE_TEST_MOV, but the CI-safe ones still run).
-        run: cargo test -p pb-mac-ffi -p pb-app-core -p pb-decode
+        run: cargo test --locked -p pb-mac-ffi -p pb-app-core -p pb-decode
       - name: Build the SwiftUI host (.app)
         run: ./scripts/build-swift-host.sh --debug

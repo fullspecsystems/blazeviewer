@@ -69,10 +69,10 @@ toml = { version = "0.8", default-features = false, features = ["parse", "displa
 # Derive (de)serialization for the typed Settings model (settings.toml).
 serde = { version = "1", features = ["derive"] }
 # Cross-platform **text** clipboard for Copy File Path (Shift+Ctrl+C / ⇧⌘C) on every
-# platform. Copy **Image** uses each platform's richer native path in `clipboard.rs`
-# (Windows: Win32 CF_DIBV5 + CF_HDROP; macOS: NSPasteboard image + file-url via objc2),
-# so only Linux falls back to arboard's `image-data` (enabled per-target below).
-# `default-features = false` drops the Linux wayland backend we don't need.
+# platform. Copy **Image** uses Windows' richer native path in `clipboard.rs` (Win32
+# CF_DIBV5 + CF_HDROP), so only Linux falls back to arboard's `image-data` (enabled
+# per-target below). `default-features = false` drops the Linux wayland backend we don't
+# need. (macOS ships the SwiftUI host, which owns the clipboard natively.)
 arboard = { version = "3", default-features = false }
 # Iterative, symlink-safe directory walk for the recursive folder scan. The old hand-
 # rolled recursion overflowed the stack on a deeply nested tree and could loop forever on
@@ -107,16 +107,6 @@ rfd = { version = "0.14", default-features = false, features = ["gtk3"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 ureq = { version = "3", features = ["json"] }
 sha2 = "0.10"
-
-# macOS: poke the wgpu CAMetalLayer for wide-gamut/EDR output (hdr_surface.rs) via
-# raw `msg_send!`. objc2 0.6 is already in the tree (winit/muda); raw-window-handle
-# comes through winit's re-export.
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
-# Mach VM statistics (host_statistics64) for the eager-archive (7z) RAM budget — the
-# macOS analog of Windows' GlobalMemoryStatusEx (see src/archive.rs). Already in the
-# lock graph transitively, so this adds no new build cost.
-libc = "0.2"
 
 # Win32 for: pointing the window icon at the exe's multi-size .ico (crisp small
 # title-bar icon, vs winit downscaling one big image), and the native menu later.
