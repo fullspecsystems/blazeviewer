@@ -84,8 +84,10 @@ Setup, in order:
    `gh api -X POST repos/jdlien/photoblaze/actions/runners/registration-token --jq .token`
    — then in an **elevated** PowerShell in the VM:
    `.\scripts\setup-windows-arm64-runner.ps1 -Token <paste>` (grab the script via a
-   shared folder or `Invoke-WebRequest` from the repo; it prompts once for the account
-   password to install the service).
+   shared folder or `Invoke-WebRequest` from the repo; it Read-Hosts the account
+   password and passes `--windowslogonpassword` — in `--unattended` mode config.cmd
+   can't prompt and dies *after* registering, leaving an offline runner to
+   `config.cmd remove` before retrying).
 3. **Enable the lane**: `gh variable set WIN_ARM64_RUNNER --body 1 --repo jdlien/photoblaze`.
    The `windows-arm64` job is `if`-gated on that variable so a paused/unregistered VM
    never leaves CI runs queued open — **set it back to `0` whenever the VM will be off

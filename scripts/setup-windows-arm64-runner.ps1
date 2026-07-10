@@ -43,11 +43,16 @@ Invoke-WebRequest -Uri "https://github.com/actions/runner/releases/download/v$ve
 Expand-Archive -Path $zip -DestinationPath $RunnerDir -Force
 Remove-Item $zip
 
-Write-Host "== [4/4] Register as a service (prompts once for this account's password)" -ForegroundColor Cyan
+Write-Host "== [4/4] Register as a service" -ForegroundColor Cyan
+# --unattended CANNOT prompt: the password must be passed explicitly or the service
+# install dies with "Invalid configuration provided for windowslogonpassword" AFTER
+# the runner has already registered (learned on the first VM). Read-Host keeps it
+# out of the shell history. Blank passwords can't run services — set one first.
+$pw = Read-Host "Password for $env:USERNAME (runner service logon)"
 Set-Location $RunnerDir
 # Default labels come out as: self-hosted, Windows, ARM64 — exactly what ci.yml targets.
 .\config.cmd --url $Repo --token $Token --name "$env:COMPUTERNAME-arm64" --unattended `
-    --runasservice --windowslogonaccount $env:USERNAME
+    --runasservice --windowslogonaccount $env:USERNAME --windowslogonpassword $pw
 
 Write-Host ""
 Write-Host "Done. Next (from the Mac): enable the CI lane —" -ForegroundColor Green
