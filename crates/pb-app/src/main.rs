@@ -28,6 +28,17 @@
 //!   cargo run -p pb-app --release -- "D:\Media\Pictures" -r          # recurse subfolders
 //!   cargo run -p pb-app --release -- "D:\Media\Pictures" -r --windowed --metrics
 
+// pb-app is the **Windows/Linux** winit shell. macOS ships via the native SwiftUI host
+// (mac/ + the pb-mac-ffi staticlib), which never links this crate, so the winit shell is
+// intentionally not built on macOS (task #70 — the NS0–NS2 rearchitecture made the host the
+// mac app). This guard makes that boundary explicit rather than letting a stale winit-mac
+// build rot; build the mac app with scripts/build-swift-host.sh.
+#[cfg(target_os = "macos")]
+compile_error!(
+    "pb-app (the winit shell) is not built on macOS — macOS ships via the SwiftUI host \
+     (mac/ + pb-mac-ffi). Build it with scripts/build-swift-host.sh."
+);
+
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -54,14 +65,8 @@ mod default_app;
 mod dialog;
 mod egui_overlay;
 mod egui_shot;
-#[cfg(target_os = "macos")]
-mod hdr_surface;
 mod hud_gallery;
 mod live_audio;
-#[cfg(target_os = "macos")]
-mod macos_chrome;
-#[cfg(target_os = "macos")]
-mod macos_open;
 mod md;
 mod menu;
 mod panels_ui;

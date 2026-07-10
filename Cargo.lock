@@ -3807,7 +3807,6 @@ dependencies = [
  "half",
  "libc",
  "muda",
- "objc2 0.6.4",
  "pb-app-core",
  "pb-core",
  "pb-decode",
