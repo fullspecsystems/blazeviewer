@@ -25,13 +25,6 @@ pub fn in_file_manager(path: &Path) {
     }
 }
 
-/// macOS: `open -R <path>` asks Finder to reveal (containing folder + select the file) —
-/// the CLI form of `NSWorkspace.activateFileViewerSelectingURLs`, no extra deps.
-#[cfg(target_os = "macos")]
-fn launch(path: &Path) -> std::io::Result<()> {
-    Command::new("open").arg("-R").arg(path).spawn().map(|_| ())
-}
-
 /// Windows: `explorer /select,"<path>"` opens the containing folder and selects the file.
 /// Explorer parses its own command line, splitting on space/comma/`=` outside quotes — so
 /// the quotes must wrap **only the path**, not the whole `/select,…` token. `raw_arg`

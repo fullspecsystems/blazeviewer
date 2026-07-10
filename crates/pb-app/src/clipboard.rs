@@ -44,26 +44,6 @@ pub fn set_image(width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
     win::set(width, height, rgba, None)
 }
 
-/// macOS: write the image **and** a file reference to the clipboard in one pasteboard item —
-/// the direct mirror of the Windows CF_DIBV5 + CF_HDROP two-format copy. Image editors paste
-/// the pixels (`public.tiff`), Finder pastes/copies the file and a terminal pastes its path
-/// (`public.file-url`). See [`mac::set`].
-#[cfg(target_os = "macos")]
-pub fn set_image_and_file(
-    width: u32,
-    height: u32,
-    rgba: &[u8],
-    path: &std::path::Path,
-) -> Result<(), String> {
-    mac::set(width, height, rgba, Some(path))
-}
-
-/// macOS image-only write (an archive entry has no file on disk) — pixels only, no file URL.
-#[cfg(target_os = "macos")]
-pub fn set_image(width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
-    mac::set(width, height, rgba, None)
-}
-
 /// Linux (and other non-Windows, non-macOS): write the image **pixels** via `arboard`
 /// (Wayland/X11 data-control). The CF_HDROP-style file reference is a Windows/macOS extra —
 /// a paste still lands the pixels — so this mirror copies just the image, ignoring `path`.
@@ -89,106 +69,6 @@ pub fn set_image(width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
     arboard::Clipboard::new()
         .and_then(|mut c| c.set_image(image))
         .map_err(|e| e.to_string())
-}
-
-/// macOS clipboard write via `NSPasteboard` (raw `objc2` messaging, matching `macos_open.rs`
-/// / `macos_chrome.rs`). One `NSPasteboardItem` carries up to two representations so a paste
-/// picks what it wants — like the Windows two-format copy:
-/// - `public.tiff` — the (rotation-baked) pixels, built from the RGBA via `NSBitmapImageRep`,
-///   for image editors / documents.
-/// - `public.file-url` — a reference to the source file (when there is one), for pasting the
-///   **file** into Finder or its **path** into a terminal. Absent for an archive entry.
-#[cfg(target_os = "macos")]
-mod mac {
-    use std::ffi::CString;
-    use std::path::Path;
-
-    use objc2::runtime::AnyObject;
-    use objc2::{class, msg_send};
-
-    /// Autoreleased `NSString*` from a Rust `&str` (UTF-8, copied by AppKit).
-    unsafe fn nsstring(s: &str) -> *mut AnyObject {
-        let c = CString::new(s).unwrap_or_default();
-        msg_send![class!(NSString), stringWithUTF8String: c.as_ptr()]
-    }
-
-    /// Autoreleased `NSData*` holding an in-memory **TIFF** of the RGBA image, via
-    /// `NSBitmapImageRep`. Straight-alpha, device-RGB (the DIB clipboard likewise carries no
-    /// ICC profile — a wide-gamut source pastes interpreted as sRGB, a documented limitation).
-    unsafe fn tiff_data(width: u32, height: u32, rgba: &[u8]) -> Result<*mut AnyObject, String> {
-        // NSBitmapImageRep references (does not copy) the planes buffer, so `rgba` must
-        // outlive the `TIFFRepresentation` call below — it does (caller owns it). The rep
-        // only reads it, so casting away const is sound here.
-        let mut plane: *mut u8 = rgba.as_ptr() as *mut u8;
-        let planes: *mut *mut u8 = &mut plane;
-        let cs = nsstring("NSDeviceRGBColorSpace");
-        let alloc: *mut AnyObject = msg_send![class!(NSBitmapImageRep), alloc];
-        let rep: *mut AnyObject = msg_send![
-            alloc,
-            initWithBitmapDataPlanes: planes,
-            pixelsWide: width as isize,
-            pixelsHigh: height as isize,
-            bitsPerSample: 8_isize,
-            samplesPerPixel: 4_isize,
-            hasAlpha: true,
-            isPlanar: false,
-            colorSpaceName: cs,
-            bytesPerRow: (width as isize) * 4,
-            bitsPerPixel: 32_isize,
-        ];
-        if rep.is_null() {
-            return Err("NSBitmapImageRep init failed".to_string());
-        }
-        let tiff: *mut AnyObject = msg_send![rep, TIFFRepresentation]; // autoreleased
-        let _: () = msg_send![rep, release]; // balance alloc/init (+1)
-        if tiff.is_null() {
-            return Err("TIFFRepresentation was nil".to_string());
-        }
-        Ok(tiff)
-    }
-
-    /// Autoreleased `NSString*` = the file's `file://` URL (`NSURL.absoluteString`), the value
-    /// the `public.file-url` pasteboard type expects.
-    unsafe fn file_url_string(path: &Path) -> Result<*mut AnyObject, String> {
-        let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-        let nss = nsstring(&abs.to_string_lossy());
-        let url: *mut AnyObject = msg_send![class!(NSURL), fileURLWithPath: nss];
-        if url.is_null() {
-            return Err("NSURL fileURLWithPath was nil".to_string());
-        }
-        let s: *mut AnyObject = msg_send![url, absoluteString];
-        if s.is_null() {
-            return Err("NSURL absoluteString was nil".to_string());
-        }
-        Ok(s)
-    }
-
-    pub fn set(width: u32, height: u32, rgba: &[u8], path: Option<&Path>) -> Result<(), String> {
-        // SAFETY: main-thread AppKit/Foundation messaging (copy runs on the event loop).
-        // Every object is autoreleased except the `NSPasteboardItem` we create with `new`
-        // and `release` after `writeObjects:` retains it into the pasteboard. Only standard,
-        // type-correct messages are sent; `rgba` outlives the TIFF build (see `tiff_data`).
-        unsafe {
-            let tiff = tiff_data(width, height, rgba)?;
-            let item: *mut AnyObject = msg_send![class!(NSPasteboardItem), new]; // +1
-            let ok_tiff: bool = msg_send![item, setData: tiff, forType: nsstring("public.tiff")];
-            if let Some(path) = path {
-                let url_str = file_url_string(path)?;
-                let _: bool =
-                    msg_send![item, setString: url_str, forType: nsstring("public.file-url")];
-            }
-            let pb: *mut AnyObject = msg_send![class!(NSPasteboard), generalPasteboard];
-            let _: isize = msg_send![pb, clearContents];
-            let arr: *mut AnyObject = msg_send![class!(NSArray), arrayWithObject: item];
-            let wrote: bool = msg_send![pb, writeObjects: arr];
-            let _: () = msg_send![item, release]; // balance `new` (+1)
-            if wrote && ok_tiff {
-                Ok(())
-            } else {
-                Err("NSPasteboard write failed".to_string())
-            }
-        }
-    }
 }
 
 #[cfg(windows)]

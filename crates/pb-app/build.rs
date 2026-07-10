@@ -91,6 +91,21 @@ fn rerun_on_git_head() {
 }
 
 fn main() {
+    // pb-app is the Windows/Linux winit shell; macOS ships via the native SwiftUI host
+    // (mac/ + pb-mac-ffi). Guard on the SUPPORTED targets HERE in the build script — it runs
+    // before rustc type-checks the crate, so an unsupported target fails with ONE clean message
+    // instead of a cascade of errors from the (intentionally) macOS-incomplete source. Build the
+    // mac app with scripts/build-swift-host.sh.
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os != "windows" && target_os != "linux" {
+        println!(
+            "cargo::error=pb-app is the Windows/Linux winit shell; macOS ships via the SwiftUI \
+             host (mac/ + pb-mac-ffi, built with scripts/build-swift-host.sh) — target OS \
+             '{target_os}' is unsupported."
+        );
+        return;
+    }
+
     if let Some(id) = git_build_id() {
         println!("cargo:rustc-env=PB_BUILD_ID={id}");
     }

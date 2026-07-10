@@ -28,16 +28,11 @@
 //!   cargo run -p pb-app --release -- "D:\Media\Pictures" -r          # recurse subfolders
 //!   cargo run -p pb-app --release -- "D:\Media\Pictures" -r --windowed --metrics
 
-// pb-app is the **Windows/Linux** winit shell. macOS ships via the native SwiftUI host
-// (mac/ + the pb-mac-ffi staticlib), which never links this crate, so the winit shell is
-// intentionally not built on macOS (task #70 — the NS0–NS2 rearchitecture made the host the
-// mac app). This guard makes that boundary explicit rather than letting a stale winit-mac
-// build rot; build the mac app with scripts/build-swift-host.sh.
-#[cfg(target_os = "macos")]
-compile_error!(
-    "pb-app (the winit shell) is not built on macOS — macOS ships via the SwiftUI host \
-     (mac/ + pb-mac-ffi). Build it with scripts/build-swift-host.sh."
-);
+// pb-app is the **Windows/Linux** winit shell — macOS ships via the native SwiftUI host
+// (mac/ + the pb-mac-ffi staticlib), which never links this crate (task #70 — the NS0–NS2
+// rearchitecture made the host the mac app). The unsupported-target guard lives in build.rs:
+// a build-script check fails with one clean message on macOS/other targets, instead of a rustc
+// cascade from the (intentionally) macOS-incomplete source here.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -71,8 +66,6 @@ mod md;
 mod menu;
 mod panels_ui;
 mod pb_key_winit;
-#[cfg(target_os = "macos")]
-mod proxy_icon;
 mod reveal;
 mod sdf_rect;
 // Velopack per-user installer lifecycle hooks + background auto-update (Windows ship path).
@@ -259,35 +252,11 @@ struct App {
     /// Files dropped on the window this burst; winit delivers one event per file,
     /// so they're coalesced here and applied once in `about_to_wait`.
     pending_drops: Vec<PathBuf>,
-    /// macOS: the EDR headroom last applied to the renderer (the window's display).
-    /// On a window move we re-query the new screen and only reconfigure when it
-    /// changes — so dragging across a display with different HDR capability adapts.
-    #[cfg(target_os = "macos")]
-    last_edr_headroom: f32,
     /// The native menu bar (windowed mode only). Built once, kept alive here so its
     /// native handle outlives the window. `None` until the first window is created.
     // Read only by the Windows/macOS native-menu paths; on Linux it's held but never read.
     #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     menu: Option<muda::Menu>,
-    /// macOS-only: the **Window** submenu, kept so [`apply_menu_for_mode`] can mark it
-    /// as the NSApp Window menu (`set_as_windows_menu_for_nsapp`) right after
-    /// `init_for_nsapp` — the order muda requires — which makes macOS append the live
-    /// window list under Minimize / Zoom / Bring All to Front.
-    #[cfg(target_os = "macos")]
-    window_menu: Option<muda::Submenu>,
-    /// macOS-only: the native (Spaces) fullscreen menu item, kept so its title can flip
-    /// between "Enter Full Screen" and "Exit Full Screen" to mirror the live state (the
-    /// Mac convention — no checkmark). The last-pushed engaged state is cached as part of
-    /// [`App::menu_state`], so the per-tick refresh is a no-op when nothing changed.
-    #[cfg(target_os = "macos")]
-    native_fullscreen_item: Option<muda::MenuItem>,
-    /// macOS-only: the file currently shown as the title-bar proxy icon (the window's
-    /// represented file). Caches the last-pushed value so the per-tick refresh is a
-    /// no-op `setRepresentedURL:` call when the displayed photo hasn't changed. `None`
-    /// = no proxy (fullscreen, an archive entry, or the empty state). See
-    /// [`proxy_icon::set_represented_url`] / [`App::refresh_proxy_icon`].
-    #[cfg(target_os = "macos")]
-    proxy_icon_path: Option<PathBuf>,
     /// The "Save Rotation" menu item, kept so its enabled state can be toggled at
     /// runtime (only enabled when the current photo has an unsaved rotation on an
     /// EXIF-writable file).
@@ -660,16 +629,8 @@ impl App {
                 effects: Vec::new(),
             },
             pending_drops: Vec::new(),
-            #[cfg(target_os = "macos")]
-            last_edr_headroom: 1.0,
             applied_appearance: None,
             menu: None,
-            #[cfg(target_os = "macos")]
-            window_menu: None,
-            #[cfg(target_os = "macos")]
-            native_fullscreen_item: None,
-            #[cfg(target_os = "macos")]
-            proxy_icon_path: None,
             save_rotation_item: None,
             reveal_item: None,
             compare_pin_item: None,
@@ -1184,54 +1145,6 @@ impl App {
         self.core.show_toast(msg);
     }
 
-    /// Toggle macOS **native (Spaces) fullscreen** — the green-button / ⌃⌘F behavior —
-    /// as a deliberate alternative to our borderless speed mode (F / ⌥⏎ / F11). winit's
-    /// `Fullscreen::Borderless(None)` maps to AppKit's `toggleFullScreen:` on macOS.
-    /// Driven from our "Enter Full Screen" menu item (⌃⌘F). The Enter/Exit label is kept
-    /// in sync separately (via `App::apply_menu_state`), reading the real window
-    /// state — so it stays correct even for the green-button / gesture toggles.
-    #[cfg(target_os = "macos")]
-    fn toggle_native_fullscreen(&mut self) {
-        let Some(window) = self.window.clone() else {
-            return;
-        };
-        if window.fullscreen().is_some() {
-            window.set_fullscreen(None);
-        } else {
-            window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
-        }
-    }
-
-    /// macOS: when the window has moved to a display with different EDR headroom (a
-    /// multi-monitor setup where one panel is HDR and another isn't), reconfigure the
-    /// CAMetalLayer + the renderer's highlight roll-off for the new screen and repaint.
-    /// Cheap when nothing changed (one `NSScreen` query, no re-poke). Driven from
-    /// `WindowEvent::Moved`, which fires throughout a drag.
-    #[cfg(target_os = "macos")]
-    fn reconfigure_edr_for_display(&mut self) {
-        let changed = match (self.core.renderer.as_ref(), self.window.as_ref()) {
-            (Some(r), Some(w)) if r.hdr_surface_wants_edr().is_some() => {
-                let hr = hdr_surface::window_max_edr(w);
-                if (hr - self.last_edr_headroom).abs() > 0.01 {
-                    // Different display HDR capability — re-poke the layer (colorspace
-                    // + wantsEDR) for the new screen, then update the roll-off below.
-                    hdr_surface::configure(w);
-                    Some(hr)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
-        if let Some(hr) = changed {
-            if let Some(r) = self.core.renderer.as_mut() {
-                r.set_edr_headroom(hr);
-            }
-            self.last_edr_headroom = hr;
-            self.core.draw();
-        }
-    }
-
     // ── egui rich-panel overlay (task #54 Phase 4) ──────────────────────────────
 
     /// Whether any egui-presented rich panel (Help / Inspector / folder tree) is on
@@ -1539,26 +1452,6 @@ impl App {
         let inset = self.menu_inset_px();
         self.core.set_content_top_inset(inset);
         if fit_changed {
-            // macOS: the swapchain reconfigure (`renderer.resize`, just done by the core)
-            // can reset the CAMetalLayer's colorspace/EDR, so re-assert them here — after
-            // the reconfigure, before the redraw — to keep P3/HDR alive across a resize /
-            // fullscreen toggle / move to a display with different EDR headroom. Needs the
-            // window, so it stays shell-side.
-            #[cfg(target_os = "macos")]
-            if self
-                .core
-                .renderer
-                .as_ref()
-                .is_some_and(|r| r.hdr_surface_wants_edr().is_some())
-            {
-                if let Some(w) = self.window.as_ref() {
-                    let headroom = hdr_surface::configure(w);
-                    self.last_edr_headroom = headroom;
-                    if let Some(r) = self.core.renderer.as_mut() {
-                        r.set_edr_headroom(headroom);
-                    }
-                }
-            }
             self.core.draw();
         }
         // Remember the new windowed size so it can be restored later (#1).
@@ -1594,8 +1487,7 @@ impl App {
             // Linux (X11/Wayland) is the exception: a manually-sized borderless
             // window can't paint over the compositor's reserved panel zones (the
             // GNOME top bar / taskbar), so it never truly covers the screen. Use
-            // the real fullscreen API there — the DWM concern above is Windows-only,
-            // and macOS reclaims its chrome via `macos_chrome::set_chromeless`.
+            // the real fullscreen API there — the DWM concern above is Windows-only.
             #[cfg(all(unix, not(target_os = "macos")))]
             {
                 window.set_decorations(false);
@@ -1607,11 +1499,6 @@ impl App {
                 window.set_decorations(false);
             }
         }
-        // macOS: auto-hide the menu bar + Dock in borderless fullscreen so it reclaims
-        // that strip (chromeless) while staying in the current Space; restore them when
-        // returning to windowed mode.
-        #[cfg(target_os = "macos")]
-        macos_chrome::set_chromeless(!self.core.windowed);
         // Show the menu in windowed mode, hide it in fullscreen (the chrome-free speed
         // mode). This MUST run *before* the sizing below in BOTH modes: adding/removing
         // the native menu bar changes the client area without moving the outer window, so
@@ -1718,11 +1605,6 @@ impl App {
             self.compare_pin_item = Some(built.compare_pin);
             self.compare_toggle_item = Some(built.compare_toggle);
             self.view_checks = Some(built.checks);
-            #[cfg(target_os = "macos")]
-            {
-                self.window_menu = Some(built.window);
-                self.native_fullscreen_item = Some(built.native_fullscreen);
-            }
         }
     }
 
@@ -1771,15 +1653,8 @@ impl App {
     /// mapping shared by [`apply_menu_state`](Self::apply_menu_state) (native menu sync on
     /// Win/mac) and the Linux egui menu bar (`render_overlay_frame`), so both read one truth.
     fn current_menu_state(&self) -> contract::MenuState {
-        // Native (Spaces) fullscreen is OS truth (the real `NSWindow.styleMask` via
-        // `hdr_surface::window_is_fullscreen`), read every tick so a green-button / gesture
-        // toggle flips the label. Windows/Linux have no such item, so it's always `false`.
-        #[cfg(target_os = "macos")]
-        let native_fullscreen = self
-            .window
-            .as_ref()
-            .is_some_and(|a| hdr_surface::window_is_fullscreen(a));
-        #[cfg(not(target_os = "macos"))]
+        // Native (Spaces) fullscreen is a macOS-only concept; Windows/Linux have no such
+        // item, so it's always `false`.
         let native_fullscreen = false;
 
         AppCore::menu_state_from(
@@ -1846,25 +1721,11 @@ impl App {
         if let Some(it) = self.compare_toggle_item.as_ref() {
             it.set_enabled(state.compare_toggle_enabled);
         }
-        // Edit ▸ Undo title + enabled state (Windows appends the `\tCtrl+Z` hint; macOS
-        // shows the real ⌘Z key-equivalent the item already carries).
+        // Edit ▸ Undo title + enabled state (Windows appends the `\tCtrl+Z` hint).
         if let Some(it) = self.undo_item.as_ref() {
             let base = state.undo.unwrap_or("Undo");
-            #[cfg(target_os = "macos")]
-            it.set_text(base);
-            #[cfg(not(target_os = "macos"))]
             it.set_text(format!("{base}\tCtrl+Z"));
             it.set_enabled(state.undo.is_some());
-        }
-        // macOS: native (Spaces) fullscreen item title ("Enter"/"Exit Full Screen") — a
-        // title toggle, never a checkmark (the Mac convention).
-        #[cfg(target_os = "macos")]
-        if let Some(it) = self.native_fullscreen_item.as_ref() {
-            it.set_text(if state.native_fullscreen_engaged {
-                "Exit Full Screen"
-            } else {
-                "Enter Full Screen"
-            });
         }
     }
 
@@ -1889,41 +1750,8 @@ impl App {
                 let _ = menu.show_context_menu_for_hwnd(hwnd, None);
             }
         }
-        #[cfg(target_os = "macos")]
-        if let Some(view) = ns_view_ptr(window) {
-            use muda::ContextMenu;
-            // SAFETY: `view` is this live window's NSView; `None` = show at the cursor.
-            unsafe {
-                let _ = menu.show_context_menu_for_nsview(view, None);
-            }
-        }
         #[cfg(not(any(windows, target_os = "macos")))]
         let _ = (menu, window);
-    }
-
-    /// macOS: keep the title-bar **proxy icon** (the window's represented file) pointed
-    /// at the displayed photo, so it shows the file's Finder icon and can be dragged out.
-    /// Only in windowed mode (the borderless speed mode has no title bar), and only for a
-    /// real on-disk file — an archive entry or the empty state clears it. Cached so the
-    /// per-tick call is a no-op `setRepresentedURL:` until the displayed photo changes,
-    /// keeping it off the hold-to-fly hot path. RAM-only, never persisted (privacy #2).
-    #[cfg(target_os = "macos")]
-    fn refresh_proxy_icon(&mut self) {
-        let want = if self.core.windowed {
-            self.core
-                .displayed_item
-                .and_then(|i| self.core.source.path(i))
-                .map(Path::to_path_buf)
-        } else {
-            None
-        };
-        if self.proxy_icon_path == want {
-            return;
-        }
-        if let Some(a) = self.window.as_ref() {
-            proxy_icon::set_represented_url(a, want.as_deref());
-        }
-        self.proxy_icon_path = want;
     }
 
     /// Attach the menu bar in windowed mode, hide it in fullscreen. The menu is a
@@ -1950,29 +1778,6 @@ impl App {
                 }
             } else if self.menu_attached {
                 let _ = menu.hide_for_hwnd(hwnd);
-            }
-        }
-    }
-
-    /// On non-Windows platforms the menu isn't wired up yet (macOS uses
-    /// `init_for_nsapp` — a future cheap port), so this is a no-op.
-    /// macOS: the menu bar is the app-global `NSMenu` (one `init_for_nsapp`), not a
-    /// per-window `HMENU`. Attach it once and leave it — macOS auto-hides the bar in
-    /// fullscreen while keeping the ⌘ key-equivalents live, so there's no per-mode
-    /// show/hide and nothing to do once attached.
-    #[cfg(target_os = "macos")]
-    fn apply_menu_for_mode(&mut self) {
-        self.ensure_menu();
-        if !self.menu_attached {
-            if let Some(menu) = self.menu.as_ref() {
-                menu.init_for_nsapp();
-                // Must run *after* `init_for_nsapp` (muda requirement): hand the Window
-                // submenu to AppKit as the app's Window menu, so macOS appends the live
-                // window list under our Minimize / Zoom / Bring All to Front items.
-                if let Some(window) = self.window_menu.as_ref() {
-                    window.set_as_windows_menu_for_nsapp();
-                }
-                self.menu_attached = true;
             }
         }
     }
@@ -2763,12 +2568,6 @@ impl ApplicationHandler for App {
             }
         }
 
-        // macOS: attach the app-global menu bar once, regardless of windowed/fullscreen
-        // (the bar auto-hides in fullscreen but its ⌘-shortcuts stay live). `NSMenu`
-        // has no per-window handle, so there's no `init_for_hwnd` equivalent.
-        #[cfg(target_os = "macos")]
-        self.apply_menu_for_mode();
-
         // Now that the menu bar is attached, re-apply the saved client size + position
         // so the restored window matches what was saved exactly — attaching the menu
         // shrinks the client area, so sizing only pre-attach would lose its height
@@ -2843,17 +2642,6 @@ impl ApplicationHandler for App {
             }
         }
 
-        // macOS: configure the CAMetalLayer (scRGB colorspace + EDR) from the screen
-        // the *window* is on, and give the renderer that screen's roll-off headroom.
-        // After the initial resize (a surface reconfigure can reset the layer) and
-        // before the first present, so the first HDR frame is already correct.
-        #[cfg(target_os = "macos")]
-        if renderer.hdr_surface_wants_edr().is_some() {
-            let headroom = hdr_surface::configure(&window);
-            renderer.set_edr_headroom(headroom);
-            self.last_edr_headroom = headroom;
-        }
-
         // Empty launch (no folder/file given): a blank background instead of an image.
         // The egui overlay draws the Open File / Open Folder welcome (on the first tick).
         if self.core.playlist.current().is_none() {
@@ -2868,13 +2656,6 @@ impl ApplicationHandler for App {
         let _ = renderer.render();
         window.set_visible(true);
         window.request_redraw();
-
-        // macOS: a fullscreen launch *is* the borderless mode — auto-hide the menu bar +
-        // Dock from the first frame so it's chromeless (`apply_window_mode` handles later toggles).
-        #[cfg(target_os = "macos")]
-        if !self.core.windowed {
-            macos_chrome::set_chromeless(true);
-        }
 
         // Phase 3 engine: size the resident ring to the display and start filling
         // it. The first frame is already up via the single-image path; navigation
@@ -3030,9 +2811,6 @@ impl ApplicationHandler for App {
             // so `track_windowed_geometry` ignores it there.
             WindowEvent::Moved(_) => {
                 self.track_windowed_geometry();
-                // macOS: adapt HDR/EDR if the window crossed onto a different display.
-                #[cfg(target_os = "macos")]
-                self.reconfigure_edr_for_display();
             }
 
             WindowEvent::RedrawRequested => self.core.draw(),
@@ -3270,13 +3048,6 @@ impl ApplicationHandler for App {
         // 0. Native menu-bar clicks (windowed mode). Map each id to the same action
         // the keyboard triggers and dispatch it; an unknown/foreign id is ignored.
         while let Ok(ev) = muda::MenuEvent::receiver().try_recv() {
-            // macOS native (Spaces) fullscreen is handled directly, not via `Action`
-            // (it's a platform-specific window command, not a portable app action).
-            #[cfg(target_os = "macos")]
-            if ev.id.as_ref() == menu::ids::NATIVE_FULLSCREEN {
-                self.toggle_native_fullscreen();
-                continue;
-            }
             if let Some(action) = menu::action_for(ev.id.as_ref()) {
                 self.dispatch_menu(action);
                 // muda auto-flips a clicked CheckMenuItem's native checkmark, which can
@@ -3291,24 +3062,11 @@ impl ApplicationHandler for App {
         // the native-fullscreen title. Cached field-by-field, so this per-tick call is a
         // no-op unless something actually changed.
         self.apply_menu_state();
-        // macOS: keep the title-bar proxy icon pointed at the displayed photo (cached).
-        #[cfg(target_os = "macos")]
-        self.refresh_proxy_icon();
         // 0b. Apply any files dropped on the window this burst (coalesced — winit
         // delivers one `DroppedFile` per file).
         if !self.pending_drops.is_empty() {
             let drops = std::mem::take(&mut self.pending_drops);
             self.open_input(classify_inputs(drops));
-        }
-        // 0b'. macOS: files opened from Finder / the Dock / `open -a` arrive via
-        // `application:openURLs:` (winit drops them — see `macos_open`); route them
-        // through the same open path as drag-and-drop.
-        #[cfg(target_os = "macos")]
-        {
-            let opened = macos_open::take_opened();
-            if !opened.is_empty() {
-                self.open_input(classify_inputs(opened));
-            }
         }
         // 0c. Pick up a finished background archive open (.7z eager decompress) or
         // directory scan (large/nested folder walked off the event loop).
@@ -3554,18 +3312,6 @@ fn hwnd_of(window: &Window) -> Option<isize> {
     }
 }
 
-/// macOS: the window's `NSView` pointer, for muda's `show_context_menu_for_nsview` (task
-/// #41). Same `RawWindowHandle::AppKit` path `proxy_icon` / `hdr_surface` use.
-#[cfg(target_os = "macos")]
-fn ns_view_ptr(window: &Window) -> Option<*const std::ffi::c_void> {
-    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    let handle = window.window_handle().ok()?;
-    match handle.as_raw() {
-        RawWindowHandle::AppKit(h) => Some(h.ns_view.as_ptr() as *const std::ffi::c_void),
-        _ => None,
-    }
-}
-
 /// Whether a path names an archive we open as a playlist (`.zip` or `.7z`).
 fn is_archive(p: &Path) -> bool {
     p.extension()
@@ -3804,14 +3550,6 @@ fn main() {
 
     let event_loop = build_event_loop().expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
-
-    // macOS: graft `application:openURLs:` onto winit's app delegate NOW. winit sets the
-    // delegate during `EventLoop::new()` above, and the run loop — which dispatches a cold
-    // double-click's `openURLs` right after `applicationDidFinishLaunching` — hasn't started
-    // yet. This is the only point early enough to catch the *launch* file; installing in
-    // `resumed()` is too late for a cold open (the event has already been dispatched).
-    #[cfg(target_os = "macos")]
-    macos_open::install();
 
     let metrics = if metrics_on {
         METRICS_ON_FLAG.store(true, std::sync::atomic::Ordering::Relaxed);
