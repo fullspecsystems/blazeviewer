@@ -3119,6 +3119,38 @@ impl AppCore {
         }
     }
 
+    /// The Live Photo motion path whose **audio** the shell should pre-warm now, or `None`.
+    ///
+    /// `Some` only when we're settled on a Live Photo whose audio would play on `P` — unmuted,
+    /// not already playing, and past the same eager-prep dwell the video uses. The shell opens
+    /// the OS audio pipeline ahead of the keypress so `P`→sound is near-instant, closing the gap
+    /// streaming exposed: the video now starts on the first frame, but the OS audio player still
+    /// needs ~100–300 ms to spin up, so it would otherwise lag. A **pure query** (no effect, no
+    /// state change beyond the memoized pairing) — the shell owns the player handle and decides
+    /// prepare/keep/drop from the returned path. `&mut` only because the Live-Photo pairing is
+    /// memoized on first lookup (a cheap cache hit after). Windows-only in practice: elsewhere
+    /// the shell's pre-warm is a no-op, so the returned path just goes unused.
+    pub fn live_audio_prewarm_target(&mut self, now: Instant) -> Option<PathBuf> {
+        if self.settings.mute_live_audio {
+            return None; // muted → nothing to warm
+        }
+        if self.playback.is_some() {
+            return None; // already playing — the live handle is owned by StartLiveAudio
+        }
+        let item = self.displayed_item?;
+        if self.displayed_item != self.target_item {
+            return None; // still catching up to the target — not settled yet
+        }
+        // Past the eager-prep dwell (the same gate the video prep uses), so a fast flick-through
+        // doesn't spin up an audio pipeline for every photo it passes.
+        if let Some(due) = self.last_present.map(|t| t + EAGER_PREP_DELAY) {
+            if now < due {
+                return None;
+            }
+        }
+        self.live_motion_path(item) // `Some` only for a Live Photo (else there's no audio to warm)
+    }
+
     /// `i` (the basic one-line info readout) or `Shift+I` (the Inspector's Details
     /// tab). Independent (task #54): opening/closing one never touches the other —
     /// the two can be on at once, the line sitting below the panel. When shown the
@@ -7845,6 +7877,62 @@ mod tests {
             .filter(|e| matches!(e, contract::CoreEffect::StartLiveAudio { .. }))
             .count();
         assert_eq!(audio_starts, 1, "audio starts exactly once, at install");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The audio pre-warm decision (`live_audio_prewarm_target`): `Some(path)` only when settled
+    /// on a Live Photo, unmuted, not playing, past the eager-prep dwell. Each guard suppresses it.
+    /// Gated to the platforms where `live_motion_path` actually pairs a `.mov` (else it's always
+    /// `None` and there's nothing to assert).
+    #[cfg(any(
+        target_os = "macos",
+        windows,
+        all(unix, not(target_os = "macos"), feature = "livephoto")
+    ))]
+    #[test]
+    fn live_audio_prewarm_target_gates_on_settle_mute_dwell_and_play() {
+        let dir = std::env::temp_dir().join("pb_prewarm_target_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let still = dir.join("IMG_0002.jpg");
+        std::fs::write(&still, b"x").unwrap();
+        let mov = dir.join("IMG_0002.mov");
+        std::fs::write(&mov, b"x").unwrap();
+
+        let mut core = test_core();
+        core.source = Arc::new(pb_source::FsSource::new(vec![still]));
+        let now = Instant::now();
+        core.displayed_item = Some(0);
+        core.target_item = Some(0);
+        // Past the eager-prep dwell.
+        core.last_present = Some(now - EAGER_PREP_DELAY - Duration::from_millis(1));
+
+        // Settled + unmuted + not playing + past dwell → warm this Live Photo's audio.
+        assert_eq!(core.live_audio_prewarm_target(now), Some(mov.clone()));
+
+        // Muted → None.
+        core.settings.mute_live_audio = true;
+        assert_eq!(core.live_audio_prewarm_target(now), None);
+        core.settings.mute_live_audio = false;
+
+        // Within the dwell window (just landed) → None (don't warm while flicking through).
+        core.last_present = Some(now);
+        assert_eq!(core.live_audio_prewarm_target(now), None);
+        core.last_present = Some(now - EAGER_PREP_DELAY - Duration::from_millis(1));
+
+        // Not settled (still catching up to the target) → None.
+        core.target_item = Some(1);
+        assert_eq!(core.live_audio_prewarm_target(now), None);
+        core.target_item = Some(0);
+        assert_eq!(core.live_audio_prewarm_target(now), Some(mov.clone()));
+
+        // Already playing → None (the live handle is owned by StartLiveAudio, not pre-warm).
+        let (tx, _cancel) = inject_stream(&mut core, 0, AnimWant::Play);
+        tx.send(stream_header()).unwrap();
+        tx.send(stream_frame()).unwrap();
+        core.poll_anim_stream();
+        assert!(core.playback.is_some(), "sanity: playback installed");
+        assert_eq!(core.live_audio_prewarm_target(now), None);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

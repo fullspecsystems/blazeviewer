@@ -22,6 +22,11 @@ with any pre-release suffix carried only by the tag.
   cuts the wait from about one to two seconds on a typical Live Photo down to a fraction of that,
   and wide-gamut (P3) clips keep their correct color. On a slow machine playback may briefly pause
   if decoding can't keep up, then resume, which is a fair trade for a near-instant start.
+- **Live Photo sound starts more in sync with the motion (Windows).** Now that the video starts on
+  the first frame, the audio's start-up delay was showing up as the sound lagging behind. While you
+  rest on a Live Photo, PhotoBlaze now warms up its audio in the background so pressing `P` starts
+  the sound almost immediately, lined up with the picture. Nothing is written to disk while it does
+  this. If you press `P` the instant you land on a photo (before the warm-up), it behaves as before.
 
 ### Added
 - **Linux now updates itself.** The AppImage checks for a new version in the background and, when

@@ -8,6 +8,15 @@
 //! wall-clock-driven, so over a ~3 s clip they stay together to the ear. It is *not*
 //! sample-accurate — that would want the `AVPlayer` streaming rework (a v2 task).
 //!
+//! **Pre-warm** ([`LiveAudio::prepare`]): the OS player's async source-open + decoder spin-up
+//! costs ~100–300 ms before the first sound reaches the device. Once streaming made the *video*
+//! start on the first frame, that latency showed up as the audio lagging the video. So while the
+//! user dwells on a Live Photo (before pressing `P`), the shell opens the player ahead of time —
+//! [`prepare`](LiveAudio::prepare) sets the source but does **not** play — and [`start`](LiveAudio::start)
+//! then seeks + plays a warm pipeline, so `P`→sound is near-instant and lines up with the frame.
+//! Implemented Windows-first (the WinRT `MediaPlayer`); the other backends return `None` from
+//! `prepare` and stay on the create-on-play path unchanged.
+//!
 //! On **Linux** (feature `livephoto`) there's no such all-in-one player, so we extract the
 //! PCM (FFmpeg via `pb_decode::decode_motion_audio`) and pipe it to PipeWire's `pw-cat` —
 //! see the Linux `imp` below for why that beats cpal/rodio on a PipeWire desktop. Without the
@@ -36,6 +45,10 @@ mod imp {
         pub fn play(_path: &Path, _start_secs: f64) -> Option<LiveAudio> {
             None
         }
+        pub fn prepare(_path: &Path) -> Option<LiveAudio> {
+            None
+        }
+        pub fn start(&self, _at_secs: f64) {}
         pub fn pause(&self) {}
         pub fn resume(&self) {}
     }
@@ -117,6 +130,18 @@ mod imp {
             })
         }
 
+        /// Pre-warm is not implemented on the Linux (`pw-cat`) path — warming it would mean
+        /// spawning `pw-cat` `SIGSTOP`'d holding a PipeWire stream, which isn't worth the
+        /// complexity yet. Returning `None` keeps the shell on the create-on-play path
+        /// (`start` below is therefore never reached on Linux).
+        pub fn prepare(_path: &Path) -> Option<LiveAudio> {
+            None
+        }
+
+        /// Unreachable on Linux (`prepare` returns `None`, so no pre-warmed handle exists to
+        /// `start`); present only to satisfy the platform-neutral call site.
+        pub fn start(&self, _at_secs: f64) {}
+
         /// Pause — SIGSTOP the `pw-cat` child (freezes playback, keeps position). Idempotent.
         pub fn pause(&self) {
             self.signal(libc::SIGSTOP);
@@ -168,24 +193,41 @@ mod imp {
     impl LiveAudio {
         /// Open the `.mov`'s audio and start playing from `start_secs` into the clip
         /// (`0.0` = the top, to line up with the motion's first frame; a non-zero offset
-        /// keeps a mid-playback unmute in sync). `None` if the player can't be made.
-        ///
-        /// Never blocks this thread: the source opens async on Media Foundation's own
-        /// threads, but the seek and `Play()` issued *before* `MediaOpened` stick — the
-        /// session queues them and playback starts at the requested offset once the
-        /// source is ready (verified empirically; no `MediaOpened` handler needed).
+        /// keeps a mid-playback unmute in sync). `None` if the player can't be made — the
+        /// create-on-play path when nothing was pre-warmed.
         pub fn play(path: &Path, start_secs: f64) -> Option<LiveAudio> {
+            let audio = Self::prepare(path)?;
+            audio.start(start_secs);
+            Some(audio)
+        }
+
+        /// Pre-warm: open the source (async, on Media Foundation's own threads) but do **not**
+        /// play — so a later [`start`](Self::start) reaches sound almost immediately. Read-only,
+        /// and the same file the video eager-prep already reads, so it writes no trace (privacy
+        /// #2); it only moves an open that [`play`] already does onto the dwell, a bit earlier.
+        /// `None` if the player can't be made (the caller falls back to `play`).
+        pub fn prepare(path: &Path) -> Option<LiveAudio> {
             let uri = Uri::CreateUri(&HSTRING::from(file_uri(path)?)).ok()?;
             let source = MediaSource::CreateFromUri(&uri).ok()?;
             let player = MediaPlayer::new().ok()?;
             player.SetAutoPlay(false).ok()?;
-            player.SetSource(&source).ok()?;
-            let start = TimeSpan {
-                Duration: (start_secs.max(0.0) * 1e7) as i64, // seconds → 100 ns ticks
-            };
-            player.PlaybackSession().ok()?.SetPosition(start).ok()?;
-            player.Play().ok()?;
+            player.SetSource(&source).ok()?; // kicks the async open; no Play() yet
             Some(LiveAudio { player })
+        }
+
+        /// Seek to `at_secs` and play — start (or resume-at-offset) a [`prepare`](Self::prepare)d
+        /// player. Best-effort: the seek and `Play()` issued before `MediaOpened` stick (the
+        /// session queues them and playback starts at the requested offset once the source is
+        /// ready — verified empirically, no `MediaOpened` handler needed), so a warm pipeline
+        /// starts near-instantly and a cold one starts as soon as it opens.
+        pub fn start(&self, at_secs: f64) {
+            let start = TimeSpan {
+                Duration: (at_secs.max(0.0) * 1e7) as i64, // seconds → 100 ns ticks
+            };
+            if let Ok(session) = self.player.PlaybackSession() {
+                let _ = session.SetPosition(start);
+            }
+            let _ = self.player.Play();
         }
 
         /// Pause (keeps the position) — mirrors pausing the motion.

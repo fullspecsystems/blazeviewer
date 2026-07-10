@@ -322,6 +322,14 @@ struct App {
     /// "cheap path" (task #38). `None` when nothing is playing / it's a silent clip / not
     /// a Live Photo. Dropped (which stops it) on pause-to-step, finish, or navigate.
     live_audio: Option<LiveAudio>,
+    /// A **pre-warmed** audio player (opened, not yet playing) for the settled Live Photo, so
+    /// pressing `P` starts sound near-instantly instead of after the OS player's ~100–300 ms
+    /// spin-up (which streaming's instant video exposed). Prepared on dwell from
+    /// `AppCore::live_audio_prewarm_target`, consumed by `StartLiveAudio` when its path matches,
+    /// dropped on navigate / mute / `StopLiveAudio`. `None` (and pre-warm is a no-op) on the
+    /// non-Windows backends. The path it was prepared for, to match against `StartLiveAudio`.
+    prepared_audio: Option<LiveAudio>,
+    prepared_audio_path: Option<std::path::PathBuf>,
 
     /// A dialog the orchestration layer asked the shell to open, deferred so the opener
     /// methods don't need the `ActiveEventLoop` (window creation lives in the shell's
@@ -647,6 +655,8 @@ impl App {
             scan_gen: 0,
             pending_launch: None,
             live_audio: None,
+            prepared_audio: None,
+            prepared_audio_path: None,
             pending_dialog: None,
             requested_wake: None,
             egui_overlay: None,
@@ -2088,6 +2098,32 @@ impl App {
         self.overlay_dirty = true;
     }
 
+    /// Pre-warm the settled Live Photo's audio pipeline so pressing `P` reaches sound almost
+    /// immediately (closing the gap streaming's instant video exposed). Driven each tick by
+    /// [`AppCore::live_audio_prewarm_target`]: prepare when it names a new path, keep while it's
+    /// the same, drop when it goes `None` (muted / not a Live Photo / navigated). A no-op on the
+    /// non-Windows backends, where `LiveAudio::prepare` returns `None`. Never touches a playing
+    /// handle — the `None` case here is only ever reached once `StartLiveAudio` has already moved
+    /// a warm player into `live_audio` (effects drain before this runs).
+    fn maybe_prewarm_live_audio(&mut self, now: Instant) {
+        match self.core.live_audio_prewarm_target(now) {
+            // Same path already prepared (or being prepared) — leave it warming.
+            Some(path) if self.prepared_audio_path.as_deref() == Some(&path) => {}
+            // A (new) Live Photo to warm: open its player without playing. On Linux/stub
+            // `prepare` returns `None`, so this records the path but leaves the player cold
+            // (StartLiveAudio then opens fresh, unchanged behavior).
+            Some(path) => {
+                self.prepared_audio = LiveAudio::prepare(&path);
+                self.prepared_audio_path = Some(path);
+            }
+            // Nothing to warm — discard a stale pre-warm (a playing one was already consumed).
+            None => {
+                self.prepared_audio = None;
+                self.prepared_audio_path = None;
+            }
+        }
+    }
+
     /// Drive the egui play hint's flash / hold / fade (the `native_play` seam). The core bumps
     /// `play_hint_seq` on a fresh motion item; the shell flashes the pill, holds it
     /// [`PLAY_HINT_HOLD`] (pinned indefinitely while the pointer hovers it), then fades it out.
@@ -2340,11 +2376,25 @@ impl App {
                         self.finish_picker(input);
                     }
                     // Live Photo audio (task #38): the core decides when/where; the shell owns the
-                    // ObjC `AVAudioPlayer`. A no-op on non-macOS (the stub player returns None).
+                    // player handle. If the audio was pre-warmed for this path on dwell, start the
+                    // warm pipeline (near-instant sound); otherwise open + play fresh.
                     contract::CoreEffect::StartLiveAudio { path, at_secs } => {
-                        self.live_audio = LiveAudio::play(&path, at_secs);
+                        self.live_audio = match self.prepared_audio.take() {
+                            Some(warm) if self.prepared_audio_path.as_deref() == Some(&path) => {
+                                warm.start(at_secs);
+                                Some(warm)
+                            }
+                            // Path mismatch (stale prewarm) or nothing warmed → fresh open+play.
+                            _ => LiveAudio::play(&path, at_secs),
+                        };
+                        self.prepared_audio_path = None;
                     }
-                    contract::CoreEffect::StopLiveAudio => self.live_audio = None,
+                    contract::CoreEffect::StopLiveAudio => {
+                        self.live_audio = None;
+                        // Navigate / mute / finish also discards any pre-warmed-but-unplayed player.
+                        self.prepared_audio = None;
+                        self.prepared_audio_path = None;
+                    }
                     contract::CoreEffect::PauseLiveAudio => {
                         if let Some(a) = &self.live_audio {
                             a.pause();
@@ -3106,6 +3156,10 @@ impl ApplicationHandler for App {
         // Execute the tick's effects (SetWake → `requested_wake`, StopLiveAudio, any
         // ShellFlowAction, redraws, …). Must run before we read `requested_wake`.
         self.drain_effects(event_loop);
+
+        // Pre-warm the Live Photo audio while settled, *after* draining (so a StartLiveAudio this
+        // tick has already consumed any warm player before we re-poll). Cheap when idle.
+        self.maybe_prewarm_live_audio(now);
 
         // Drive the egui play hint's flash/fade (after the core tick bumped `play_hint_seq`);
         // stash this frame's pill for `render_overlay_frame` and dirty the overlay while it
