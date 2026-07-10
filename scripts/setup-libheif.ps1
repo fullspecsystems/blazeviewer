@@ -19,8 +19,13 @@
 
   Prerequisite: MSVC C++ build tools (VS 2022 / Build Tools with the C++ workload).
 
+  Architecture: -Triplet selects the vcpkg triplet, which must match the build target
+  (pb-decode/build.rs derives it from CARGO_CFG_TARGET_ARCH). Build each arch you ship on
+  its own native box: x64-windows-static-md (default) on x64, arm64-windows-static-md on ARM64.
+
 .EXAMPLE
-  pwsh scripts/setup-libheif.ps1
+  pwsh scripts/setup-libheif.ps1                                # x64 (default)
+  pwsh scripts/setup-libheif.ps1 -Triplet arm64-windows-static-md   # native ARM64
   # then:  cargo run -p pb-app --release --features libheif -- "<folder>" -r
 #>
 [CmdletBinding()]

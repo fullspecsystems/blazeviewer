@@ -21,12 +21,26 @@
   Needs the .NET 8+ runtime (vpk's ATS signing) — present with the .NET SDK. vpk itself is installed
   on first use as a dotnet global tool. Signing skips cleanly (unsigned) when no credentials exist.
 
+  Architecture: defaults to the host arch. x64 ships as the historical `win` channel; arm64 as
+  `win-arm64`. Both channels live in the same flat feed dir and an install only auto-updates within
+  its own channel (Velopack tracks the install channel), so the two arches never cross. Build each on
+  its own native box (no cross toolchain here) after `setup-libheif.ps1 -Triplet <arch>-windows-static-md`.
+
 .EXAMPLE
-  pwsh scripts/release-windows.ps1            # build + sign + pack → dist\feed
+  pwsh scripts/release-windows.ps1            # host arch: build + sign + pack → dist\feed
   pwsh scripts/release-windows.ps1 -Upload    # ...then rsync the feed to downloads.fullspec.ca
+  pwsh scripts/release-windows.ps1 -Arch arm64 -Upload   # native ARM64 build (run on an ARM64 box)
 #>
 [CmdletBinding()]
 param(
+    # Target CPU architecture. Defaults to the host arch (this script builds for the host — a native
+    # ARM64 build must run on an ARM64 box, an x64 build on x64; there's no cross-compile here).
+    # Each arch ships as its OWN Velopack channel (x64 = `win`, arm64 = `win-arm64`) into the SAME
+    # flat feed dir, so an install only ever auto-updates within its own arch (Velopack tracks the
+    # channel the app was installed from — see crates/pb-app/src/update.rs). libheif must be built for
+    # the matching vcpkg triplet first: `scripts/setup-libheif.ps1 -Triplet <arch>-windows-static-md`.
+    [ValidateSet("x64", "arm64")]
+    [string]$Arch = $(if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }),
     # Signing account defaults to the owner's public-trust setup; override for a different account.
     [string]$Endpoint = "https://wus.codesigning.azure.net/",
     [string]$AccountName = "jdlien-signing",
@@ -53,20 +67,36 @@ if (Test-Path .env.release) {
 # ── 1. Version from Cargo.toml (pb-app) — the package and the app always agree.
 $Version = ((cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
     Where-Object { $_.name -eq 'pb-app' }).version
-Write-Host "==> PhotoBlaze $Version (Windows / Velopack)" -ForegroundColor Cyan
 
-# ── 2. libheif is the ship config — locate the vcpkg tree pb-decode/build.rs links.
+# Per-arch knobs: the vcpkg triplet pb-decode/build.rs links, the Rust target triple, the Velopack
+# VC++ redist framework that Setup installs if missing, and the Velopack channel. x64 keeps the
+# historical `win` channel so existing x64 installs keep updating; arm64 gets its own `win-arm64`.
+$ArchCfg = @{
+    x64   = @{ Triplet = "x64-windows-static-md";   Target = "x86_64-pc-windows-msvc";  Framework = "vcredist143-x64";   Channel = "win" }
+    arm64 = @{ Triplet = "arm64-windows-static-md"; Target = "aarch64-pc-windows-msvc"; Framework = "vcredist143-arm64"; Channel = "win-arm64" }
+}[$Arch]
+$HostArch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
+Write-Host "==> PhotoBlaze $Version (Windows / Velopack / $Arch → channel '$($ArchCfg.Channel)')" -ForegroundColor Cyan
+if ($Arch -ne $HostArch) {
+    # This script builds native (no cross toolchain wired up): the vcpkg libheif and the Rust MSVC
+    # link both need the arch's native tools. Build arm64 on an arm64 box, x64 on x64.
+    throw "Requested -Arch $Arch on a $HostArch host. This script builds for the host arch only — run it on a $Arch machine."
+}
+
+# ── 2. libheif is the ship config — locate the vcpkg tree pb-decode/build.rs links (this arch's triplet).
+$Triplet = $ArchCfg.Triplet
 if (-not $env:VCPKG_ROOT) {
     $env:VCPKG_ROOT = @("C:\vcpkg-pb", "$env:USERPROFILE\vcpkg") |
-        Where-Object { Test-Path "$_\installed\x64-windows-static-md\lib\heif.lib" } |
+        Where-Object { Test-Path "$_\installed\$Triplet\lib\heif.lib" } |
         Select-Object -First 1
 }
-if (-not $env:VCPKG_ROOT -or -not (Test-Path "$env:VCPKG_ROOT\installed\x64-windows-static-md\lib\heif.lib")) {
-    throw "libheif not found (checked VCPKG_ROOT, C:\vcpkg-pb, ~\vcpkg). Run scripts/setup-libheif.ps1 first — the release ships --features libheif."
+if (-not $env:VCPKG_ROOT -or -not (Test-Path "$env:VCPKG_ROOT\installed\$Triplet\lib\heif.lib")) {
+    throw "libheif ($Triplet) not found (checked VCPKG_ROOT, C:\vcpkg-pb, ~\vcpkg). Run ``scripts/setup-libheif.ps1 -Triplet $Triplet`` first — the release ships --features libheif."
 }
-Write-Host "==> libheif: $env:VCPKG_ROOT"
+Write-Host "==> libheif: $env:VCPKG_ROOT ($Triplet)"
 
-# ── 3. Always build fresh — a stale exe must never be silently signed/packaged.
+# ── 3. Always build fresh — a stale exe must never be silently signed/packaged. Building for the
+#      host arch, so no --target (keeps the output in target\release and avoids a full rebuild).
 Write-Host "==> cargo build --release -p pb-app --features libheif" -ForegroundColor Cyan
 cargo build --release -p pb-app --features libheif
 if ($LASTEXITCODE -ne 0) { throw "build failed" }
@@ -124,8 +154,8 @@ $packArgs = @(
     "--icon", "crates\pb-app\icons\photoblaze.ico",
     "--splashImage", "crates\pb-app\icons\photoblaze-splash.jpg",
     "--splashProgressColor", "#FF4915",
-    "--framework", "vcredist143-x64",
-    "--channel", "win",
+    "--framework", $ArchCfg.Framework,
+    "--channel", $ArchCfg.Channel,
     "--outputDir", $Feed
 ) + $SignArgs
 Write-Host "==> vpk pack $Version" -ForegroundColor Cyan

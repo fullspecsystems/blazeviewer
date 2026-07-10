@@ -59,16 +59,23 @@ fn link_libheif_windows() {
         let home = std::env::var("USERPROFILE").unwrap_or_default();
         format!("{home}\\vcpkg")
     });
-    // static-md: static libs, dynamic CRT — matches Rust MSVC's default CRT.
-    let triplet = "x64-windows-static-md";
+    // static-md: static libs, dynamic CRT — matches Rust MSVC's default CRT. The triplet
+    // tracks the *target* arch (read from CARGO_CFG_TARGET_ARCH, correct under cross-compile),
+    // so a native ARM64 build links the arm64 vcpkg tree and an x64 build the x64 one. Run
+    // `scripts/setup-libheif.ps1 -Triplet <arch>-windows-static-md` once per arch you ship.
+    let triplet = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("aarch64") => "arm64-windows-static-md",
+        // x86_64 (and any other Windows arch we haven't special-cased) uses the x64 tree.
+        _ => "x64-windows-static-md",
+    };
     let libdir = format!("{root}\\installed\\{triplet}\\lib");
 
     if !Path::new(&libdir).join("heif.lib").exists() {
         panic!(
             "feature `libheif` is on but {libdir}\\heif.lib was not found.\n\
-             Run Phase 0:  pwsh scripts/setup-libheif.ps1\n\
+             Run Phase 0:  pwsh scripts/setup-libheif.ps1 -Triplet {triplet}\n\
              (it bootstraps vcpkg + builds a decode-only, plugin-loader-free static\n\
-             libheif). Or set VCPKG_ROOT if your vcpkg lives elsewhere.",
+             libheif for this arch). Or set VCPKG_ROOT if your vcpkg lives elsewhere.",
         );
     }
 

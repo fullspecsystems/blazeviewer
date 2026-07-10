@@ -439,6 +439,14 @@ feed over HTTP (`update.rs` `FEED_URL`) and self-updates — downloads in the ba
 quit. Version comes from `crates/pb-app/Cargo.toml`, so it always matches the app; there is **no
 tag / GitHub Release for Windows**.
 
+*Architecture:* the script defaults to the host arch and takes `-Arch x64|arm64`. **x64** ships as the
+historical `win` Velopack channel; **ARM64** as `win-arm64` — both land in the same flat feed dir, and
+an install only ever auto-updates within its own channel (Velopack tracks the channel the app was
+installed from, so `update.rs` needs no arch logic and the two never cross). Each arch is built on its
+own **native** box (no cross toolchain wired up), after building that arch's libheif once with
+`scripts/setup-libheif.ps1 -Triplet <arch>-windows-static-md` (`pb-decode/build.rs` picks the vcpkg
+triplet from the target arch). ARM64 uses the `vcredist143-arm64` redist framework.
+
 **macOS** is **built locally on the owner's Mac** via `scripts/release-macos.sh` (Developer ID +
 notarization), then published to `downloads.fullspec.ca/photoblaze/mac` with
 `scripts/release-mac-upload.sh` — which scp's the DMG + appcast **straight from the Mac** to
