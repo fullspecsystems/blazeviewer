@@ -6,9 +6,7 @@
 # platform-independent logic on Linux" methodology (decisions.md ADR-010/011).
 # The mac-swift lane (NS1, ADR-021) gates the SwiftUI host: the pb-mac-ffi
 # bridge tests + the full build-swift-host.sh chain (cargo staticlib →
-# swift-bridge package → swift build → .app). The egui-on-Mac beta needs no
-# separate lane — the workspace it builds from is the same code the Windows
-# job compiles, and release.yml builds the Mac DMG.
+# swift-bridge package → swift build → .app). release.yml builds the Mac DMG.
 #
 # ── Runners (2026-07-03): SELF-HOSTED — the owner's own machines ──
 # The hosted-minute bill (~260 billable min/run, 78% of it the macOS 10×

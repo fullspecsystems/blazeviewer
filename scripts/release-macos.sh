@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Sign, package (DMG), notarize, and staple PhotoBlaze.app for distribution.
 #
-# Pipeline: build .app (scripts/bundle-macos.sh) → codesign with the Developer ID
+# Pipeline: build the SwiftUI host .app (scripts/build-swift-host.sh) → codesign with the Developer ID
 # Application cert under the hardened runtime → hdiutil DMG (drag-to-/Applications) →
 # codesign the DMG → notarytool submit --wait → stapler staple → SHA256 sidecar.
 # Output: dist/PhotoBlaze-<version>.dmg (+ .sha256).
@@ -18,23 +18,20 @@
 # Locally you can skip CSC_LINK: if a "Developer ID Application" identity is already in
 # your login keychain it's used directly (no base64 dance).
 #
-# Usage: scripts/release-macos.sh [--release|--debug] [--egui]
-#   Default: the SwiftUI host (PhotoBlaze.app via build-swift-host.sh) — it IS
-#   PhotoBlaze on macOS since the 2026-07-02 cutover. Runs fine LOCALLY with a
-#   Developer ID identity in the login keychain + the three APPLE_* env vars —
-#   no CI required (Actions credits are finite).
-#   --egui        package the retired egui bundle instead (legacy escape hatch).
+# Usage: scripts/release-macos.sh [--release|--debug]
+#   Builds the SwiftUI host (PhotoBlaze.app via build-swift-host.sh) — it IS PhotoBlaze on
+#   macOS since the 2026-07-02 cutover (the old egui/winit bundle was retired in task #70).
+#   Runs fine LOCALLY with a Developer ID identity in the login keychain + the three APPLE_*
+#   env vars — no CI required (Actions credits are finite).
 set -euo pipefail
 
 PROFILE="release"
-TARGET="swift-host"
 for a in "$@"; do
 	case "$a" in
 		--debug) PROFILE="debug" ;;
 		--release) PROFILE="release" ;;
-		--swift-host) TARGET="swift-host" ;; # accepted for compat; now the default
-		--egui) TARGET="egui" ;;
-		*) echo "unknown arg: $a (usage: release-macos.sh [--release|--debug] [--egui])" >&2; exit 2 ;;
+		--swift-host) ;; # accepted for compat; the SwiftUI host is the only target now
+		*) echo "unknown arg: $a (usage: release-macos.sh [--release|--debug])" >&2; exit 2 ;;
 	esac
 done
 
@@ -43,20 +40,12 @@ cd "$REPO_ROOT"
 
 DIST="dist"
 SHORT_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/pb-app/Cargo.toml | head -1)"
-if [[ "$TARGET" == "swift-host" ]]; then
-	APP_NAME="PhotoBlaze"
-	BIN_NAME="PhotoBlaze"
-	APP="target/swift-host/$PROFILE/$APP_NAME.app"
-	BUILD_CMD="./scripts/build-swift-host.sh --$PROFILE"
-	DMG_SUFFIX="" # the real artifact since the cutover
-else
-	APP_NAME="PhotoBlaze"
-	BIN_NAME="photoblaze"
-	APP="target/$PROFILE/bundle/$APP_NAME.app"
-	BUILD_CMD="./scripts/bundle-macos.sh --$PROFILE"
-	DMG_SUFFIX="-egui" # retired legacy bundle; never collide with the real DMG name
-fi
-DMG="$DIST/$APP_NAME-$SHORT_VERSION$DMG_SUFFIX.dmg"
+# The SwiftUI host is PhotoBlaze on macOS (the egui/winit bundle was retired in task #70).
+APP_NAME="PhotoBlaze"
+BIN_NAME="PhotoBlaze"
+APP="target/swift-host/$PROFILE/$APP_NAME.app"
+BUILD_CMD="./scripts/build-swift-host.sh --$PROFILE"
+DMG="$DIST/$APP_NAME-$SHORT_VERSION.dmg"
 
 # Local credentials, two ways (CI keeps using repo-secret env vars):
 #   a) PREFERRED — a notarytool keychain profile (secrets never touch disk). One-time:
@@ -126,7 +115,7 @@ if [[ -n "$IDENTITY" ]]; then
 	# signed by the Sparkle project (no Team ID), which notarization rejects; each nested
 	# code item (the two XPC services, the Autoupdate tool, the Updater.app helper) must carry
 	# our signature. Order + item list per Sparkle's distribution docs. Guarded on existence so
-	# the --egui target (no Sparkle) skips cleanly.
+	# a build without Sparkle bundled (e.g. an unsigned dry-run) skips cleanly.
 	FW="$APP/Contents/Frameworks/Sparkle.framework"
 	if [[ -d "$FW" ]]; then
 		echo "==> Signing Sparkle.framework helpers"
@@ -196,10 +185,10 @@ fi
 ( cd "$DIST" && shasum -a 256 "$(basename "$DMG")" | tee "$(basename "$DMG").sha256" )
 
 # 6) Sparkle appcast (task #65): EdDSA-sign the notarized DMG and write dist/appcast.xml, which
-#    release-mac-upload.ps1 publishes next to the DMG. Only for the real SwiftUI host (the --egui
-#    bundle has no Sparkle) and only on a notarized build (a dev/unsigned DMG is never shipped).
-#    Hard-fails on error: a release DMG without a valid appcast is broken and should stop the run.
-if [[ "$TARGET" == "swift-host" && $NOTARIZED == 1 ]]; then
+#    release-mac-upload.ps1 publishes next to the DMG. Only on a notarized build (a dev/unsigned
+#    DMG is never shipped). Hard-fails on error: a release DMG without a valid appcast is broken
+#    and should stop the run.
+if [[ $NOTARIZED == 1 ]]; then
 	echo "==> Generating Sparkle appcast"
 	./scripts/generate-mac-appcast.sh "$DMG" "$SHORT_VERSION"
 else

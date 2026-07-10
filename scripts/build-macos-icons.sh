@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Regenerate the committed macOS icon artifacts from the sources in icons/. Run this on
 # your Mac whenever the icon design changes (rare — an OS cycle, or a redesign), then
-# commit the results. They're consumed directly by scripts/bundle-macos.sh and the CI
+# commit the results. They're consumed directly by scripts/build-swift-host.sh and the CI
 # release job, so **CI needs neither Xcode 26 (actool) nor ImageMagick** — the icons are
 # baked here, where you have both.
 #

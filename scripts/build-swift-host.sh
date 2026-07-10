@@ -7,13 +7,13 @@
 #   3. swift build --package-path mac   (the SwiftUI executable)
 #   4. assemble target/swift-host/<profile>/PhotoBlaze.app
 #      (the official Mac app since the 2026-07-02 cutover: name AND bundle id are
-#      PhotoBlaze / com.jdlien.PhotoBlaze — it replaces the egui beta on macOS)
+#      PhotoBlaze / com.jdlien.PhotoBlaze — the only macOS build since task #70)
 #
 # Usage:
 #   scripts/build-swift-host.sh [--debug|--release] [--run]   (default: --release)
 #
-# This is the strangler-fig target: the shippable egui-on-Mac beta
-# (scripts/bundle-macos.sh) is untouched and never gated on this build.
+# This is the only macOS build now — the old egui/winit "strangler-fig" bundle was retired
+# in task #70 (pb-app no longer compiles on macOS; the guard lives in crates/pb-app/build.rs).
 # `--run` quits any running PhotoBlaze first: `open` never relaunches a live app
 # (LaunchServices activates the existing instance by bundle id — even an installed
 # /Applications copy), which otherwise silently tests a stale build.
@@ -52,7 +52,7 @@ swift build --package-path mac -c "$PROFILE"
 BIN="$(swift build --package-path mac -c "$PROFILE" --show-bin-path)/PhotoBlazeMac"
 [[ -x "$BIN" ]] || { echo "error: $BIN not found" >&2; exit 1; }
 
-# Version in lockstep with the app crate, like bundle-macos.sh.
+# Version in lockstep with the app crate (crates/pb-app/Cargo.toml).
 SHORT_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/pb-app/Cargo.toml | head -1)"
 # Build stamp for the About panel (PBBuildID) — same format as pb-app's PB_BUILD_ID
 # (build.rs): short commit hash, "-dirty" when the tree has changes. Empty outside git.
@@ -72,8 +72,8 @@ printf 'APPL????' > "$APP_DIR/Contents/PkgInfo"
 cp "$BIN" "$APP_DIR/Contents/MacOS/PhotoBlaze"
 chmod +x "$APP_DIR/Contents/MacOS/PhotoBlaze"
 # The app icon: the prebuilt Liquid Glass Assets.car (Tahoe+, CFBundleIconName=AppIcon)
-# + the flat icns fallback (CFBundleIconFile=PhotoBlaze) — the same assets the egui
-# bundle ships. Regenerate via scripts/build-macos-icons.sh when the icon changes.
+# + the flat icns fallback (CFBundleIconFile=PhotoBlaze). Regenerate via
+# scripts/build-macos-icons.sh when the icon changes.
 cp packaging/macos/PhotoBlaze.icns packaging/macos/Assets.car "$APP_DIR/Contents/Resources/"
 
 # Embed Sparkle.framework (task #65, macOS auto-update). `swift build` LINKS against Sparkle

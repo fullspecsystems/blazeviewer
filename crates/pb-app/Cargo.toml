@@ -69,10 +69,10 @@ toml = { version = "0.8", default-features = false, features = ["parse", "displa
 # Derive (de)serialization for the typed Settings model (settings.toml).
 serde = { version = "1", features = ["derive"] }
 # Cross-platform **text** clipboard for Copy File Path (Shift+Ctrl+C / ⇧⌘C) on every
-# platform. Copy **Image** uses each platform's richer native path in `clipboard.rs`
-# (Windows: Win32 CF_DIBV5 + CF_HDROP; macOS: NSPasteboard image + file-url via objc2),
-# so only Linux falls back to arboard's `image-data` (enabled per-target below).
-# `default-features = false` drops the Linux wayland backend we don't need.
+# platform. Copy **Image** uses Windows' richer native path in `clipboard.rs` (Win32
+# CF_DIBV5 + CF_HDROP), so only Linux falls back to arboard's `image-data` (enabled
+# per-target below). `default-features = false` drops the Linux wayland backend we don't
+# need. (macOS ships the SwiftUI host, which owns the clipboard natively.)
 arboard = { version = "3", default-features = false }
 # Iterative, symlink-safe directory walk for the recursive folder scan. The old hand-
 # rolled recursion overflowed the stack on a deeply nested tree and could loop forever on
