@@ -24,6 +24,9 @@ with any pre-release suffix carried only by the tag.
   if decoding can't keep up, then resume, which is a fair trade for a near-instant start.
 
 ### Added
+- **The About dialog now shows the build's CPU architecture** next to the build id (e.g.
+  `Build 1ad1043 · ARM64`), so you can confirm at a glance whether you're running the native
+  Windows ARM64 build or the x64 one.
 - **Linux now updates itself.** The AppImage checks for a new version in the background and, when
   one is available, downloads and verifies it, then swaps itself in the next time you quit — the
   same hands-off updating Windows and macOS already have, so you no longer re-download the AppImage

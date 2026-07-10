@@ -2617,6 +2617,7 @@ mod tests {
 
     #[test]
     fn offscreen_letterboxes_and_draws_image() {
+        let _gpu = crate::gpu_test_lock();
         let (iw, ih) = (1600u32, 1000u32);
         let img = test_pattern(iw, ih);
         let (sw, sh) = (1920u32, 1080u32);
@@ -2651,6 +2652,7 @@ mod tests {
 
     #[test]
     fn transparent_image_blends_over_letterbox() {
+        let _gpu = crate::gpu_test_lock();
         let img = [250, 0, 0, 0];
         let out = render_offscreen(&img, 1, 1, 4, 4);
         assert!(
@@ -2671,6 +2673,7 @@ mod tests {
 
     #[test]
     fn disabled_color_transform_is_bit_exact_passthrough() {
+        let _gpu = crate::gpu_test_lock();
         // A solid opaque pixel rendered with the (disabled) sRGB transform must
         // come back unchanged — the common case stays exact and free.
         let img = [200u8, 50, 90, 255];
@@ -2684,6 +2687,7 @@ mod tests {
 
     #[test]
     fn enabled_color_transform_applies_curve_and_reencode() {
+        let _gpu = crate::gpu_test_lock();
         // Identity primaries + a gamma-2.0 source curve, re-encoded to sRGB: the
         // shader must linearize (x^2), pass the matrix (identity), then sRGB-encode.
         let g = 2.0f32;

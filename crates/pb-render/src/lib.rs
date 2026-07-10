@@ -20,6 +20,23 @@ pub use gpu::{render_offscreen, render_offscreen_color, test_pattern, WgpuRender
 pub use upload::{StagingUpload, UploadStrategy};
 pub use view::{Placement, Rotation, ViewTransform, MAX_ZOOM, MIN_ZOOM};
 
+/// Serializes GPU-device creation across this crate's tests. The libtest harness runs
+/// tests in parallel by default, and some virtual GPU drivers — notably **VMware SVGA 3D**
+/// on a Windows-on-ARM VM — fault (`STATUS_ACCESS_VIOLATION`) under *concurrent* wgpu
+/// device creation, even though each device works fine on its own. The headless
+/// golden-image and staging tests hold this lock for the span of their GPU work so only
+/// one device is ever being created/used at a time. On a healthy driver it's a negligible
+/// serialization; on a fragile one it's the difference between green and a crash (letting
+/// `cargo test` pass without the `--test-threads=1` workaround). Held only in the sync test
+/// bodies, never across an `.await`, so it doesn't trip `clippy::await_holding_lock`.
+#[cfg(test)]
+pub(crate) fn gpu_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A poisoned lock just means a prior GPU test panicked; the guard is still usable and
+    // the next test should still run, so recover the inner guard rather than propagate.
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// A source→sRGB color conversion the fragment shader applies per texel: a 3×3
 /// matrix (source-linear RGB → sRGB-linear RGB, row-major) plus the source EOTF as
 /// moxcms's 7-param parametric curve `(g, a, b, c, d, e, f)`. `enabled == false`

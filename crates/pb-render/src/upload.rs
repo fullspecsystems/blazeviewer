@@ -154,12 +154,15 @@ mod tests {
     /// 1600-wide rows are already aligned).
     #[test]
     fn staging_round_trips_single_band() {
+        // Serialize GPU-device creation vs the other GPU tests (see `crate::gpu_test_lock`).
+        let _gpu = crate::gpu_test_lock();
         // rows_per_band > height -> a single band (the normal fit-sized case).
         pollster::block_on(round_trip(1000));
     }
 
     #[test]
     fn staging_round_trips_multiple_bands() {
+        let _gpu = crate::gpu_test_lock();
         // A tiny band forces 4 bands over the 10-row image (3+3+3+1), exercising
         // the y-origin banding used for images larger than max_buffer_size.
         pollster::block_on(round_trip(3));

@@ -1064,6 +1064,19 @@ fn load_icon_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
     Some(ctx.load_texture("about-icon", color, egui::TextureOptions::LINEAR))
 }
 
+/// A friendly name for the CPU architecture this binary was built for, using each
+/// platform's conventional label (`ARM64`/`x64`) rather than Rust's target-triple spelling
+/// (`aarch64`/`x86_64`). `std::env::consts::ARCH` is a compile-time constant for the *build*
+/// target, so this reflects the actual binary — not the host it happens to run on.
+fn arch_label() -> &'static str {
+    match std::env::consts::ARCH {
+        "aarch64" => "ARM64",
+        "x86_64" => "x64",
+        "x86" => "x86",
+        other => other,
+    }
+}
+
 /// The About card: big centered icon, name, version, tagline, copyright, link.
 fn about_ui(ui: &mut egui::Ui, icon: Option<&egui::TextureHandle>) {
     ui.vertical_centered(|ui| {
@@ -1078,16 +1091,17 @@ fn about_ui(ui: &mut egui::Ui, icon: Option<&egui::TextureHandle>) {
         ui.heading("PhotoBlaze");
         ui.add_space(2.0);
         ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
-        // The build's git commit (set by build.rs), so a local build can be traced to the exact
-        // commit it was built from. Absent for a build with no git available (source tarball).
-        if let Some(build) = option_env!("PB_BUILD_ID") {
-            ui.add_space(1.0);
-            ui.label(
-                egui::RichText::new(format!("Build {build}"))
-                    .size(11.0)
-                    .weak(),
-            );
-        }
+        // The build's git commit (set by build.rs) plus the CPU architecture this binary was
+        // built for, so a local build can be traced to its exact commit *and* you can confirm at
+        // a glance which arch it is — notably the native Windows ARM64 build vs x64. The commit is
+        // absent for a build with no git available (source tarball); the arch always shows.
+        ui.add_space(1.0);
+        let arch = arch_label();
+        let build_line = match option_env!("PB_BUILD_ID") {
+            Some(build) => format!("Build {build} \u{00b7} {arch}"),
+            None => arch.to_string(),
+        };
+        ui.label(egui::RichText::new(build_line).size(11.0).weak());
         ui.add_space(10.0);
         ui.label("An ultra-fast image viewer");
         ui.add_space(8.0);
