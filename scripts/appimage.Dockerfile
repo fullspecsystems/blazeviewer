@@ -32,7 +32,7 @@ ENV RUSTUP_HOME=/opt/rustup \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
       | sh -s -- -y --no-modify-path --profile minimal \
         --default-toolchain stable \
-        --component rustfmt clippy llvm-tools-preview \
+        --component rustfmt,clippy,llvm-tools-preview \
     && chmod -R a+w "$RUSTUP_HOME" "$CARGO_HOME"
 
 WORKDIR /src
