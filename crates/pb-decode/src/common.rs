@@ -197,6 +197,110 @@ fn downscale_to_fit_f32(
     ))
 }
 
+/// Rotate a tightly-packed RGBA8 buffer by `deg` (0/90/180/270, clockwise), returning the
+/// rotated buffer and its new dimensions. Portrait iPhone Live Photos carry a 90°/270° display
+/// matrix; ignoring it shows them sideways. Shared by the motion decoders (FFmpeg on Linux,
+/// AVAssetReader on macOS — neither applies the container rotation itself).
+///
+/// Copies whole 4-byte pixels via raw pointers, iterating the destination in row order
+/// (sequential writes) — this runs on every motion frame and was ~24% of decode time as a
+/// bounds-checked scalar loop building a `[u8; 4]` per pixel.
+// Only the motion decoders call this; on targets without one (e.g. Linux without the
+// `livephoto` feature, Windows) the lib build has no caller, so allow the dead code there
+// (it's still used by the `#[cfg(test)]` tests on every platform).
+#[cfg_attr(
+    not(any(target_os = "macos", all(unix, feature = "livephoto"))),
+    allow(dead_code)
+)]
+pub(crate) fn rotate_rgba(src: Vec<u8>, w: u32, h: u32, deg: i32) -> (Vec<u8>, u32, u32) {
+    let (w, h) = (w as usize, h as usize);
+    let d = deg.rem_euclid(360);
+    if d == 0 || w == 0 || h == 0 {
+        return (src, w as u32, h as u32);
+    }
+    // 90°/270° swap the axes; 180° keeps them.
+    let (nw, nh) = if d == 180 { (w, h) } else { (h, w) };
+    let mut out = vec![0u8; nw * nh * 4];
+    let sp = src.as_ptr();
+    let dp = out.as_mut_ptr();
+    for dy in 0..nh {
+        for dx in 0..nw {
+            // dst (dx,dy) ← src (x,y): each clockwise mapping, inverted. nw==h for 90/270.
+            let (x, y) = match d {
+                90 => (dy, nw - 1 - dx),
+                180 => (w - 1 - dx, h - 1 - dy),
+                _ => (nh - 1 - dy, dx), // 270 (nh == w)
+            };
+            let si = (y * w + x) * 4;
+            let di = (dy * nw + dx) * 4;
+            // SAFETY: by construction x<w, y<h ⇒ si+4 ≤ w·h·4 = src.len(); dx<nw, dy<nh ⇒
+            // di+4 ≤ nw·nh·4 = out.len(). Ranges never overlap the ends.
+            unsafe {
+                std::ptr::copy_nonoverlapping(sp.add(si), dp.add(di), 4);
+            }
+        }
+    }
+    (out, nw as u32, nh as u32)
+}
+
+/// Snap a video track's preferred display transform (the 2×2 linear part `[a b; c d]`,
+/// translation already dropped) to a **clockwise** rotation quadrant for [`rotate_rgba`]:
+/// `Some(0 | 90 | 180 | 270)`, or `None` for anything that isn't a pure quadrant rotation
+/// (reflection, skew, scale). iPhone portrait Live Photos carry `(0, 1, -1, 0)` = 90° CW.
+/// The caller decides the `None` degradation (PhotoBlaze plays those unrotated rather than
+/// refusing to play — a mirrored front-camera clip shows un-mirrored).
+// Only the macOS AVAssetReader motion decoder calls this (FFmpeg reads its rotation from
+// the display matrix side data instead); the tests run everywhere.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn transform_to_quadrant(a: f64, b: f64, c: f64, d: f64) -> Option<i32> {
+    const EPS: f64 = 1e-3;
+    let m = |x: f64, want: f64| (x - want).abs() < EPS;
+    // (a, b, c, d) patterns for each clockwise display rotation.
+    for (deg, pa, pb, pc, pd) in [
+        (0, 1.0, 0.0, 0.0, 1.0),
+        (90, 0.0, 1.0, -1.0, 0.0),
+        (180, -1.0, 0.0, 0.0, -1.0),
+        (270, 0.0, -1.0, 1.0, 0.0),
+    ] {
+        if m(a, pa) && m(b, pb) && m(c, pc) && m(d, pd) {
+            return Some(deg);
+        }
+    }
+    None
+}
+
+/// Copy a BGRA8 pixel buffer whose rows are padded to `stride` bytes (a CVPixelBuffer /
+/// Media Foundation layout) into tightly-packed straight-alpha RGBA8. `None` if the
+/// geometry is inconsistent (zero dims, `stride < w*4`, buffer shorter than the last
+/// row's end) or a size computation overflows.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn bgra_to_rgba_tight(src: &[u8], w: usize, h: usize, stride: usize) -> Option<Vec<u8>> {
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let row_bytes = w.checked_mul(4)?;
+    if stride < row_bytes {
+        return None;
+    }
+    // The last row need not be padded out to `stride`.
+    let needed = stride.checked_mul(h - 1)?.checked_add(row_bytes)?;
+    if src.len() < needed {
+        return None;
+    }
+    let mut out = vec![0u8; row_bytes.checked_mul(h)?];
+    for y in 0..h {
+        let src_row = &src[y * stride..y * stride + row_bytes];
+        let dst_row = &mut out[y * row_bytes..(y + 1) * row_bytes];
+        for (d, s) in dst_row.chunks_exact_mut(4).zip(src_row.chunks_exact(4)) {
+            d[0] = s[2];
+            d[1] = s[1];
+            d[2] = s[0];
+            d[3] = s[3];
+        }
+    }
+    Some(out)
+}
+
 /// Expand tightly-packed RGB8 to RGBA8 (opaque). Used by backends that decode to
 /// 3-channel (e.g. the RAW demosaic pipeline).
 pub(crate) fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
@@ -323,6 +427,136 @@ mod tests {
         assert_eq!((img.width, img.height), (40, 40));
         assert_eq!((img.orig_width, img.orig_height), (100, 100));
         assert_eq!(img.pixels.len(), 40 * 40 * 8);
+    }
+
+    /// A 2×3 buffer of distinct pixels; each pixel's R channel encodes its index.
+    fn px_grid(w: usize, h: usize) -> Vec<u8> {
+        (0..w * h)
+            .flat_map(|i| [i as u8, 100 + i as u8, 200u8, 255])
+            .collect()
+    }
+
+    /// The R channel of pixel (x, y) in a tightly-packed RGBA buffer of width `w`.
+    fn r_at(buf: &[u8], w: usize, x: usize, y: usize) -> u8 {
+        buf[(y * w + x) * 4]
+    }
+
+    #[test]
+    fn rotate_rgba_0_is_identity() {
+        let src = px_grid(2, 3);
+        let (out, w, h) = rotate_rgba(src.clone(), 2, 3, 0);
+        assert_eq!((w, h), (2, 3));
+        assert_eq!(out, src);
+    }
+
+    #[test]
+    fn rotate_rgba_90_cw_swaps_dims_and_maps_pixels() {
+        // src (2 wide × 3 tall), indices:   0 1        90° CW:   4 2 0
+        //                                   2 3   →              5 3 1
+        //                                   4 5
+        let (out, w, h) = rotate_rgba(px_grid(2, 3), 2, 3, 90);
+        assert_eq!((w, h), (3, 2));
+        assert_eq!(r_at(&out, 3, 0, 0), 4);
+        assert_eq!(r_at(&out, 3, 1, 0), 2);
+        assert_eq!(r_at(&out, 3, 2, 0), 0);
+        assert_eq!(r_at(&out, 3, 0, 1), 5);
+        assert_eq!(r_at(&out, 3, 2, 1), 1);
+    }
+
+    #[test]
+    fn rotate_rgba_180_reverses() {
+        let (out, w, h) = rotate_rgba(px_grid(2, 3), 2, 3, 180);
+        assert_eq!((w, h), (2, 3));
+        assert_eq!(r_at(&out, 2, 0, 0), 5);
+        assert_eq!(r_at(&out, 2, 1, 2), 0);
+    }
+
+    #[test]
+    fn rotate_rgba_270_cw_swaps_dims_and_maps_pixels() {
+        // 270° CW (= 90° CCW):   1 3 5
+        //                        0 2 4
+        let (out, w, h) = rotate_rgba(px_grid(2, 3), 2, 3, 270);
+        assert_eq!((w, h), (3, 2));
+        assert_eq!(r_at(&out, 3, 0, 0), 1);
+        assert_eq!(r_at(&out, 3, 2, 0), 5);
+        assert_eq!(r_at(&out, 3, 0, 1), 0);
+        assert_eq!(r_at(&out, 3, 2, 1), 4);
+    }
+
+    #[test]
+    fn rotate_rgba_four_quarters_round_trip() {
+        let src = px_grid(2, 3);
+        let (a, w, h) = rotate_rgba(src.clone(), 2, 3, 90);
+        let (b, w, h) = rotate_rgba(a, w, h, 90);
+        let (c, w, h) = rotate_rgba(b, w, h, 90);
+        let (d, w, h) = rotate_rgba(c, w, h, 90);
+        assert_eq!((w, h), (2, 3));
+        assert_eq!(d, src);
+    }
+
+    #[test]
+    fn transform_to_quadrant_maps_the_four_rotations() {
+        assert_eq!(transform_to_quadrant(1.0, 0.0, 0.0, 1.0), Some(0));
+        // iPhone portrait (UIImageOrientationRight): rotate 90° CW to display upright.
+        assert_eq!(transform_to_quadrant(0.0, 1.0, -1.0, 0.0), Some(90));
+        assert_eq!(transform_to_quadrant(-1.0, 0.0, 0.0, -1.0), Some(180));
+        assert_eq!(transform_to_quadrant(0.0, -1.0, 1.0, 0.0), Some(270));
+    }
+
+    #[test]
+    fn transform_to_quadrant_tolerates_float_noise() {
+        assert_eq!(
+            transform_to_quadrant(0.0002, 0.9999, -1.0001, -0.0003),
+            Some(90)
+        );
+    }
+
+    #[test]
+    fn transform_to_quadrant_rejects_non_rotations() {
+        // Reflection (horizontal mirror), skew, and scale are not quadrant rotations.
+        assert_eq!(transform_to_quadrant(-1.0, 0.0, 0.0, 1.0), None);
+        assert_eq!(transform_to_quadrant(1.0, 0.5, 0.0, 1.0), None);
+        assert_eq!(transform_to_quadrant(2.0, 0.0, 0.0, 2.0), None);
+    }
+
+    #[test]
+    fn bgra_to_rgba_swizzles_and_honors_stride() {
+        // 2×2 BGRA with 4 bytes of row padding (stride 12): unique channel values.
+        #[rustfmt::skip]
+        let src = [
+            10, 20, 30, 40,   50, 60, 70, 80,   0, 0, 0, 0, // row 0 + pad
+            90, 100, 110, 120, 130, 140, 150, 160,          // row 1, unpadded tail
+        ];
+        let out = bgra_to_rgba_tight(&src, 2, 2, 12).unwrap();
+        // BGRA (10,20,30,40) → RGBA (30,20,10,40); padding never read.
+        assert_eq!(
+            out,
+            vec![30, 20, 10, 40, 70, 60, 50, 80, 110, 100, 90, 120, 150, 140, 130, 160]
+        );
+    }
+
+    #[test]
+    fn bgra_to_rgba_rejects_bad_geometry() {
+        assert!(
+            bgra_to_rgba_tight(&[0; 16], 0, 2, 8).is_none(),
+            "zero width"
+        );
+        assert!(
+            bgra_to_rgba_tight(&[0; 16], 2, 0, 8).is_none(),
+            "zero height"
+        );
+        assert!(
+            bgra_to_rgba_tight(&[0; 16], 2, 2, 4).is_none(),
+            "stride < w*4"
+        );
+        assert!(
+            bgra_to_rgba_tight(&[0; 15], 2, 2, 8).is_none(),
+            "buffer short"
+        );
+        assert!(
+            bgra_to_rgba_tight(&[0; 16], usize::MAX / 2, 2, usize::MAX).is_none(),
+            "overflow"
+        );
     }
 
     #[test]

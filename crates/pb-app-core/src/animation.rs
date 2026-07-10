@@ -265,10 +265,11 @@ pub struct Prepared {
 }
 
 /// One message from a **streaming** Live Photo motion decode (task #69). The
-/// platform-neutral mirror of `pb_decode::MotionChunk` — the (Linux-only) worker maps the
-/// decoder's chunks onto this so the core wiring (`AnimStream`, `poll_anim_stream`) carries
-/// no platform-specific type. Order is always: one `Header`, then `Frame`s, then a terminal
-/// `Done` or `Failed`.
+/// platform-neutral mirror of `pb_decode::MotionChunk` — the worker (FFmpeg on Linux,
+/// AVAssetReader on macOS) maps the decoder's chunks onto this so the core wiring
+/// (`AnimStream`, `poll_anim_stream`) carries no platform-specific type. Order is always:
+/// one `Header`, then `Frame`s, then a terminal `Done` or `Failed` — unless the stream was
+/// cancelled, in which case it just stops (the consumer has already dropped it).
 pub enum StreamMsg {
     /// Sent once before any frame: the display size + color to build the `Animation` header.
     Header {
@@ -288,8 +289,8 @@ pub enum StreamMsg {
 
 /// An in-flight **streaming** Live Photo motion decode (task #69) — frames arrive and play
 /// while the rest of the `.mov` is still decoding, instead of waiting for the whole clip.
-/// Only ever set on the Linux FFmpeg path; the macOS/Windows OS players stay on the batch
-/// [`AnimDecode`] path (they decode the whole clip in one call).
+/// Set on the Linux FFmpeg and macOS AVAssetReader paths; Windows' Media Foundation player
+/// stays on the batch [`AnimDecode`] path (it decodes the whole clip in one call).
 pub struct AnimStream {
     pub gen: u64,
     pub item: usize,
@@ -473,8 +474,8 @@ mod tests {
         let mut pb = Playback::new_streaming(anim(2, 40, 0), true);
         assert!(!pb.is_complete());
         assert_eq!(pb.advance(), 1); // play up to the decoded frontier
-        // Underrun: no more frames yet, and we're *not* complete, so hold — never wrap to 0
-        // and never finish (unlike a complete infinite loop, which would wrap here).
+                                     // Underrun: no more frames yet, and we're *not* complete, so hold — never wrap to 0
+                                     // and never finish (unlike a complete infinite loop, which would wrap here).
         assert_eq!(pb.advance(), 1);
         assert_eq!(pb.advance(), 1);
         assert!(!pb.is_finished());

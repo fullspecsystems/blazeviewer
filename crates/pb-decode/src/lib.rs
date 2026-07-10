@@ -21,7 +21,8 @@ mod common;
 mod image_backend;
 #[cfg(target_os = "macos")]
 mod imageio;
-// Apple Live Photo motion (.mov) decode via AVFoundation (task #38) — macOS only.
+// Apple Live Photo motion (.mov) decode via AVFoundation's AVAssetReader — macOS only,
+// streaming (tasks #38 / #69: frames emit as they decode, so playback starts immediately).
 #[cfg(target_os = "macos")]
 mod livephoto;
 // The Windows mirror: the same .mov decode via Media Foundation (task #39).
@@ -52,13 +53,15 @@ mod zune;
 
 use std::path::Path;
 
-pub use animation::{decode_animation, detect_animation, AnimFrame, Animation, AnimationKind};
+pub use animation::{
+    decode_animation, detect_animation, AnimFrame, Animation, AnimationKind, MotionChunk,
+    MotionHeader,
+};
 pub use color::ColorTransform;
 #[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
 pub use ff_live::{
     decode_image_sequence, decode_image_sequence_cancellable, decode_live_motion,
-    decode_live_motion_cancellable, decode_live_motion_streaming, decode_motion_audio,
-    MotionAudio, MotionChunk, MotionHeader,
+    decode_live_motion_cancellable, decode_live_motion_streaming, decode_motion_audio, MotionAudio,
 };
 pub use image_backend::ImageCrateDecoder;
 #[cfg(target_os = "macos")]
@@ -67,7 +70,7 @@ pub use jxl::JxlDecoder;
 #[cfg(heic_libheif)]
 pub use libheif::LibHeifDecoder;
 #[cfg(target_os = "macos")]
-pub use livephoto::decode_live_motion;
+pub use livephoto::{decode_live_motion, decode_live_motion_streaming};
 pub use metadata::read_exif_fields;
 #[cfg(windows)]
 pub use mf_video::decode_live_motion;

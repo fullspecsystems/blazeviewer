@@ -551,7 +551,7 @@
       {
         "id": 69,
         "title": "Live Photo motion: start playing before the whole .mov is decoded (streaming + decode-ahead)",
-        "description": "Owner ask (2026-07-09): pressing P on a Live Photo takes several seconds to start because the motion .mov is decoded to a COMPLETE Animation before playback begins. decode_motion_job (crates/pb-app-core/src/engine.rs:245) calls pb_decode::decode_live_motion(path, edge) which decodes EVERY frame up front (ff_live.rs on Linux does a full FFmpeg decode of all ~44-90 frames; the Windows Media Foundation and macOS AVFoundation backends have their own latency). Two wins: (a) DECODE-AHEAD — after a short dwell (~1-2s) on a Live Photo still, eagerly kick the motion decode so P is instant when pressed (there is already an AnimWant eager-prep path via start_animation_decode + the `prepared` stash — confirm it covers Live Photos and tune the dwell); and (b) STREAM-PLAY — begin playback as soon as the first frame(s) are ready and keep decoding the rest in the background, instead of blocking on the full decode. This mirrors the app's core 'preview-first then refine' principle (CLAUDE.md) which currently is NOT applied to motion.",
+        "description": "Owner ask (2026-07-09): pressing P on a Live Photo takes several seconds to start because the motion .mov is decoded to a COMPLETE Animation before playback begins. decode_motion_job (crates/pb-app-core/src/engine.rs:245) calls pb_decode::decode_live_motion(path, edge) which decodes EVERY frame up front (ff_live.rs on Linux does a full FFmpeg decode of all ~44-90 frames; the Windows Media Foundation and macOS AVFoundation backends have their own latency). Two wins: (a) DECODE-AHEAD — after a short dwell (~1-2s) on a Live Photo still, eagerly kick the motion decode so P is instant when pressed (there is already an AnimWant eager-prep path via start_animation_decode + the `prepared` stash — confirm it covers Live Photos and tune the dwell); and (b) STREAM-PLAY — begin playback as soon as the first frame(s) are ready and keep decoding the rest in the background, instead of blocking on the full decode. This mirrors the app's core 'preview-first then refine' principle (CLAUDE.md) which currently is NOT applied to motion. UPDATE (2026-07-09): STREAM-PLAY now also on macOS — livephoto.rs rewritten from AVAssetImageGenerator (batch, zero-tolerance per-frame seeks) to a streaming AVAssetReader pipeline emitting MotionChunk; the pb-app-core gates at start_animation_decode/start_live_stream include target_os=macos. Measured: first frame 13-161ms vs 1.0-1.9s before; cancel-on-navigate 8-12ms. Windows (Media Foundation) remains batch-only.",
         "status": "done",
         "priority": "medium",
         "dependencies": [],
@@ -580,72 +580,138 @@
       },
       {
         "id": 70,
-        "title": "Retire the winit/egui macOS shell from pb-app — post-NS mac-native cleanup (remove ~123 cfg(macos) blocks + 3 files)",
-        "description": "Now that macOS ships entirely via the SwiftUI host (mac/Sources/PhotoBlazeMac + the pb-mac-ffi swift-bridge staticlib, which exposes pb-app-core/pb-render/pb-core/pb-source — NEVER pb-app), the winit/egui macOS pathway inside pb-app is dead weight: it links into no shipped artifact (scripts/release-macos.sh -> scripts/build-swift-host.sh builds only pb-mac-ffi + the SwiftPM host), it compiles in NO CI job (ci.yml clippy's pb-app only on the Windows self-hosted runner, where cfg(macos) is stripped; Linux CI runs only `cargo test -p pb-core`; the macOS runner builds only pb-mac-ffi + the host), and it exists solely for a legacy `cargo run -p pb-app` dev harness the owner has retired (2026-07-09: 'definitely not going back to winit and egui on the Mac'). Removing it deletes the LAST non-native Mac code path — mac-arsed alignment: the SwiftUI host is the native substrate; the winit-mac shell was the egui-chrome anti-pattern — and makes 'fully mac-assed' structurally enforced (no way to accidentally ship egui-on-Mac). Surface to remove: 3 Mac-only files (crates/pb-app/src/{hdr_surface.rs,macos_chrome.rs,macos_open.rs} = 259 lines, referenced nowhere outside pb-app) + 123 `cfg(target_os = \"macos\")` lines across main.rs (62), menu.rs (27), panels_ui.rs (17), clipboard.rs (5), live_audio.rs (4), egui_shot.rs (4), reveal.rs (2), dialog.rs (2) + the pb-app/Cargo.toml `[target.'cfg(target_os = \"macos\")'.dependencies]` block (objc2, libc).",
+        "title": "Retire the winit/egui macOS shell from pb-app — 4 mac-only files + ~123 cfg(macos) sites + the legacy packaging escape hatch",
+        "description": "macOS ships via the native SwiftUI host (mac/ + the pb-mac-ffi staticlib, which never links pb-app), so the winit/egui macOS pathway in pb-app is dead — built in no CI job, linked into no shipped artifact, kept only for a retired `cargo run -p pb-app` Mac dev harness. Remove it in behavior-preserving slices, each independently green on Windows + Linux, so the source reflects Windows/Linux-only and there's no way to accidentally ship egui-on-Mac. INVENTORY (corrected per Codex): FOUR mac-only files (~334 lines) — hdr_surface.rs, macos_chrome.rs, macos_open.rs, AND proxy_icon.rs (75 lines; objc2 / RawWindowHandle::AppKit / NSWindow / NSURL) — plus ~123 cfg(macos) sites across main.rs/menu.rs/panels_ui/clipboard/live_audio/egui_shot/reveal/dialog, PLUS the still-live LEGACY PACKAGING path (scripts/bundle-macos.sh + `release-macos.sh --egui` still build pb-app into a .app — the escape hatch that would otherwise undermine the whole invariant). CRITICAL (Codex #1): menu.rs is CROSS-PLATFORM — MenuGroup/MenuRow/menu_bar_spec + keyboard navigation (menu.rs:598) drive the LINUX egui menu (panels_ui.rs:318) and F10/Alt-mnemonics/arrows/Enter/Esc (main.rs:1260), with Linux nav tests (menu.rs:1388). Do NOT gate menu.rs Windows-only; only remove its macOS arms. The cleaner windows_menu/menu_model split + muda-to-windows-only is a SEPARATE follow-up (#73).",
         "status": "pending",
         "priority": "high",
-        "dependencies": [],
-        "details": "Mechanical but large; LOW conceptual risk, HIGH tedium. Nothing links the removed code and Windows+Linux build/clippy are the guardrail — mistakes surface as compile errors, not silent bugs. The real hazard is mis-collapsing a 3-way windows/macos/linux cfg into the wrong 2-way pair, so go file-by-file and keep Windows + a Linux-container `cargo clippy -p pb-app --features livephoto,pb-decode/libheif --all-targets -- -D warnings` green after EACH subtask. Fold in the structural win: gate menu.rs Windows-only (Linux has no native menu — muda's gtk feature is off), which lets the cfg_attr(dead_code) band-aids added in f71c0720 be DELETED rather than carried. After removal, re-audit pb-app deps: egui/egui-wgpu/egui-winit + pb-ui stay (Win/Linux dialogs) and muda stays (Windows menu), but objc2 and the macOS `libc` target dep go. This is the concrete pay-down of the cross-platform debt discussed 2026-07-09; pairs with #71 (add a Linux clippy gate so pb-app can't silently re-accumulate Linux dead code).",
-        "testStrategy": "After each subtask: Windows self-hosted build + a Linux container run (scripts/appimage.Dockerfile image) of `cargo clippy -p pb-app --features livephoto,pb-decode/libheif --all-targets -- -D warnings` AND `cargo build` must stay green. Once: build the macOS SwiftUI host (scripts/build-swift-host.sh) and smoke it — it never linked pb-app so it cannot regress, but confirm. End-state assertion: `grep -rc 'target_os = \"macos\"' crates/pb-app/src` returns 0, and the 3 Mac-only files are gone. No behavior change on Windows/Linux: spot-check the viewer launches, a photo flicks, and a dialog + the Windows menu still open.",
+        "dependencies": [
+          71
+        ],
+        "details": "GUARD (corrected per Codex #4): use a SUPPORTED-TARGET ALLOWLIST, not a macOS denylist — `#[cfg(not(any(windows, target_os = \"linux\")))] compile_error!(\"pb-app is the Windows/Linux winit shell; macOS ships via mac/ + pb-mac-ffi\")` — so BSD/other-unix aren't left half-supported, and the end-state has ZERO bare `target_os = \"macos\"` in pb-app (assert via an allowlist, not a raw grep count). VERIFY the guard yields a CLEAN single diagnostic: `cargo check -p pb-app --target aarch64-apple-darwin` must FAIL with the boundary message, NOT a cascade of missing-symbol/type errors. build.rs already exists (build.rs:93); a build-script target check may give a cleaner single failure than a source compile_error — either is fine, but verify the resulting diagnostic. (Supersedes the initially-committed macOS-denylist guard form.)\n\nUNIFORM CFG RULE for the sweep: delete exact `#[cfg(target_os = \"macos\")]` items; unconditionalize `#[cfg(not(target_os = \"macos\"))]`; LEAVE compound Linux/Windows gates (all(unix, not(macos)) / not(any(windows, macos)) / not(all(unix, not(macos)))) and the `cfg_attr(..., allow(dead_code))` band-aids (they suppress the Windows-only menu builders' Linux dead code — removing them is #73, not here). Simplify surviving Linux cfgs to `target_os = \"linux\"` where it reads clean. Do NOT also swap MenuAction->Action (Codex: make the platform split behavior-preserving first; dedup in a later follow-up).\n\nSHARED-CORE PRUNING IS OUT (Codex #5): pb-app-core cleanup beyond direct pb-app dep hygiene moves to #72. Here, only direct-dependency cleanup (objc2 + mac libc gone; muda relocation waits for #73's windows-menu split) verified via cargo tree.",
+        "testStrategy": "Per slice: Windows clippy/test/build + launch smoke, AND Linux via scripts/check-linux.sh (#71); commit only while BOTH are green. Guard: `cargo check -p pb-app --target aarch64-apple-darwin` fails with the boundary message (single clean diagnostic, not a symbol cascade). FINAL Windows smoke: launch/navigate, windowed native menu, context menu, Settings/About dialog, fullscreen transition, clipboard/reveal, Live Photo if touched. FINAL Linux smoke: launch/navigate, F10 + Alt mnemonics, arrow/Enter/Esc menu, mouse menu selection, file dialog, clipboard/reveal, fullscreen, Live Photo playback/audio, AppImage startup. FINAL macOS: build-swift-host.sh, launch the FRESH build (guard against a stale installed instance), native menus/dialogs/Live Photo/Sparkle, and confirm `release-macos.sh --egui` no longer exists. STATIC checks: the 4 obsolete Rust files absent; bundle-macos.sh + Info.plist absent; no macOS impl remains under pb-app; no direct objc2 / macOS libc target dep; operational docs name the SwiftUI host as the only macOS artifact; Windows + Linux menu tests remain and run.",
         "subtasks": [
           {
             "id": 1,
-            "title": "Guardrail + delete the 3 Mac-only files + drop the Mac dep block",
-            "description": "Cheap, reversible first step. Add `#[cfg(target_os = \"macos\")] compile_error!(\"pb-app is the Windows/Linux winit shell; macOS ships via the SwiftUI host (mac/ + pb-mac-ffi)\");` at the top of main.rs to document + enforce the boundary immediately. Delete crates/pb-app/src/{hdr_surface.rs, macos_chrome.rs, macos_open.rs} and their `mod` declarations. Remove `[target.'cfg(target_os = \"macos\")'.dependencies]` (objc2, libc) from crates/pb-app/Cargo.toml. Verify Windows + Linux green.",
+            "title": "Supported-target guard + delete the 4 Mac-only files + drop mac deps",
+            "description": "Replace the initial macOS-denylist guard with the supported-target allowlist `#[cfg(not(any(windows, target_os = \"linux\")))] compile_error!(...)` (or a build.rs target check). Delete hdr_surface.rs, macos_chrome.rs, macos_open.rs, AND proxy_icon.rs. Drop [target.'cfg(target_os = \"macos\")'.dependencies] (objc2, mac libc). Verify: `cargo check -p pb-app --target aarch64-apple-darwin` fails with the boundary message as a single clean diagnostic; scripts/check-linux.sh green.",
             "status": "pending"
           },
           {
             "id": 2,
-            "title": "Strip cfg(macos) from main.rs (62 blocks)",
-            "description": "Remove every macos arm; collapse 3-way windows/macos/linux cfgs to the windows/linux pair; delete now-unreachable macOS-only helpers (e.g. last_edr_headroom, native Spaces-fullscreen handling, CAMetalLayer/hdr_surface references, the winit-mac transparent-toolbar bits). Windows + Linux behavior must be byte-identical.",
+            "title": "Strip cfg(macos) from main.rs (incl. all proxy_icon references)",
+            "description": "Delete exact macos items (incl. the proxy_icon_path field + init, refresh_proxy_icon, all call sites, and the module decl + related comments); unconditionalize not(macos); leave the Linux/Windows compound gates + dead_code allows; simplify surviving Linux cfgs to target_os=\"linux\" where clean. No behavior change on Win/Linux.",
             "status": "pending"
           },
           {
             "id": 3,
-            "title": "menu.rs: drop macos arms AND gate the module Windows-only",
-            "description": "Remove the 27 macos cfgs. Since Linux has no native menu (muda's gtk feature is off), gate menu.rs to Windows-only so it isn't compiled dead on Linux, and DELETE the cfg_attr(not(any(windows, target_os = \"macos\")), allow(dead_code)) band-aids added in f71c0720 (build_menu/BuiltMenu/check_item + App::menu/menu_attached/ensure_menu). Net: menu.rs becomes a clean Windows-only module, no dead-code suppression.",
+            "title": "Strip cfg(macos) from panels_ui / clipboard / live_audio / egui_shot / reveal / dialog",
+            "description": "Same uniform rule. Keep the Linux egui menu rendering in panels_ui.rs intact (it consumes the cross-platform menu model).",
             "status": "pending"
           },
           {
             "id": 4,
-            "title": "Strip cfg(macos) from the remaining shell files",
-            "description": "panels_ui.rs (17), clipboard.rs (5), live_audio.rs (4), egui_shot.rs (4), reveal.rs (2), dialog.rs (2). Collapse each 3-way cfg to the Windows/Linux pair and drop macOS-only branches (native NSPasteboard clipboard path, macOS reveal-in-Finder, the macOS live-audio backend, macOS egui-shot capture, etc.). These are the platform-native paths the SwiftUI host now owns natively.",
+            "title": "menu.rs: remove ONLY the 5 macOS arms (keep it cross-platform)",
+            "description": "Delete the macOS arms; KEEP the shared MenuGroup/MenuRow/menu_bar_spec/keyboard-nav model + the Linux nav tests + the cfg_attr dead_code allows (behavior-preserving). Do NOT Windows-gate the module — that split is #73.",
             "status": "pending"
           },
           {
             "id": 5,
-            "title": "Dep + shared-core sweep",
-            "description": "Confirm the now-orphaned pb-app deps are gone (objc2 + macOS libc target dep) while egui/egui-wgpu/egui-winit + pb-ui + muda remain for Win/Linux. Then grep pb-app-core for winit-shell-only helpers made redundant now that the SwiftUI host owns that behavior; delete only what neither shell NOR pb-mac-ffi references (pb-app-core is shared — be conservative). Internal-only, so likely no CHANGELOG entry per CLAUDE.md.",
+            "title": "Retire the legacy macOS packaging escape hatch",
+            "description": "Delete scripts/bundle-macos.sh; remove the --egui arg + alternate branch from scripts/release-macos.sh; delete packaging/macos/Info.plist if no consumer remains; scrub stale 'egui beta / escape hatch' comments in build-swift-host.sh, release-macos.sh, and release-signing docs (+ ci.yml — sequence with the live-photo ci.yml work). Mark superseded ADRs/old plans as history, but stop advertising a deliberately-uncompilable path in operational scripts/current docs.",
+            "status": "pending"
+          },
+          {
+            "id": 6,
+            "title": "Direct pb-app dependency cleanup only (cargo tree verified)",
+            "description": "Confirm objc2 + macOS libc target dep are gone (cargo tree). Leave muda relocation to #73 (it needs the windows-menu split first). NO shared-core API pruning — that's #72.",
             "status": "pending"
           }
         ]
       },
       {
         "id": 71,
-        "title": "Harden CI + toolchain against silent cross-platform drift (the gap that hid the Linux clippy debt)",
-        "description": "The 2026-07-09 clippy cleanup (commit f71c0720) exposed two process gaps that let Linux-only debt accumulate invisibly. (1) rust-toolchain.toml floats `channel = \"stable\"`, so a newer stable silently promotes new future-incompat/clippy lints to -D warnings ERRORS: float_literal_f32_fallback (rust #154024) surfaced only in the AppImage build container on Rust 1.97 and never on the owner's 1.95 Mac. (2) CI never lints pb-app on Linux — ci.yml clippy's pb-app only on the Windows self-hosted runner (cfg(macos) stripped, Linux-dead code like the menu/HDR-finalize helpers never seen), Linux CI runs only `cargo test -p pb-core`, and the macOS runner builds only pb-mac-ffi + the host. Result: the Linux dead-code + lints were red for anyone building on Linux but green in CI. Close both so every platform's cfg-specific surface is linted somewhere and toolchain bumps are deliberate.",
+        "title": "Harden CI + toolchain against silent cross-platform drift — establish the guardrails BEFORE #70",
+        "description": "Establish a reproducible, platform-complete lint/test/build gate so #70's macOS-shell retirement is validated by CI rather than being the experiment that proves its own missing gate (Codex). The 2026-07-09 clippy cleanup (f71c0720) exposed two gaps: (1) rust-toolchain.toml floats `channel = \"stable\"`, so a newer stable silently promoted future-incompat/clippy lints to -D warnings ERRORS only in the AppImage container (Rust 1.97), never on the owner's Mac (1.95) — float_literal_f32_fallback #154024; (2) CI never lints pb-app on Linux — ci.yml clippy's pb-app only on the Windows self-hosted runner (cfg(macos) stripped, Linux-dead code unseen), Linux CI runs only `cargo test -p pb-core`, and the mac runner builds only pb-mac-ffi + the host. PARALLEL-WORK CONSTRAINT (Codex couldn't see this): the concurrent macOS-streaming-Live-Photo plan edits ci.yml (mac lane +pb-decode) and CHANGELOG, so the ci.yml subtasks here (3-4) must land AFTER that work merges; the toolchain pin (1) and scripts/check-linux.sh (2) are new/standalone and land immediately, giving #70 a reproducible local gate now.",
         "status": "pending",
-        "priority": "medium",
+        "priority": "high",
         "dependencies": [],
-        "details": "(a) Pin rust-toolchain.toml to an explicit version (channel = \"1.9x.0\") so lint churn becomes a reviewed bump instead of a surprise on whatever stable a fresh machine/container pulls; scripts/appimage.Dockerfile pins nothing either (installs `stable`) — align it to the SAME version so container builds match CI/dev, and document the manual-bump cadence. (b) Add a Linux clippy job to ci.yml: `cargo clippy -p pb-app -p pb-app-core -p pb-source -p pb-render -p pb-hud --features livephoto,pb-decode/libheif --all-targets -- -D warnings` on ubuntu (or the OrbStack appimage image), mirroring the Windows clippy coverage for the Linux cfg surface — pb-app is already Linux-clean as of f71c0720, so this just keeps it that way (and gates #70). (c) Optional: a macOS clippy step on the self-hosted mac runner for pb-mac-ffi + the engine crates with -D warnings, so the macOS cfg surface is gated too. High leverage, low effort.",
-        "testStrategy": "CI: push a branch and confirm the new Linux clippy job runs green (pb-app is clean post-f71c0720). Regression check: temporarily reintroduce a trivial Linux-only dead-code item, confirm the Linux job goes RED (would have caught today's issue), then revert. Toolchain: `rustup show` in CI equals the pinned version, and the appimage container installs that same version. Confirm the pin doesn't break the existing Windows/macOS jobs.",
+        "details": "AUTHORITATIVE TOOLCHAIN PIN (one source of truth, not three drift points): pick the EXACT version — the newer stable proven by the AppImage cleanup, only after Windows+macOS validation — and set it in rust-toolchain.toml. scripts/appimage.Dockerfile must READ rust-toolchain.toml when installing rustup (so editing the file invalidates the Docker layer), not hardcode it. Pin every `dtolnay/rust-toolchain@stable` step in ci.yml + release.yml to that channel (or one shared setup mechanism). Add a CI assertion `rustc --version` == pin. Add `--locked` to all CI + release cargo commands. Decide the workspace `rust-version = \"1.80\"` MSRV: either verify it with a small MSRV job for the crates that claim it, or drop it — don't carry an unverified compatibility promise. Do NOT leave `1.9x.0`/\"e.g.\" placeholders — choose the concrete version before implementing.\n\nREPRODUCIBLE LINUX GATE — scripts/check-linux.sh (new; run locally AND from CI): clippy over the FULL package list (pb-app, pb-app-core, pb-core, pb-decode, pb-source, pb-render, pb-hud, pb-ui — pb-decode + pb-ui had fixes in f71c0720 and merely compiling them as deps does NOT run their own clippy) --all-targets --features (package-qualified) --locked -- -D warnings; then `cargo test` over the testable crates --locked; then `cargo build --release -p pb-app --features livephoto,libheif --locked`. Runs inside the appimage container (NOT ubuntu-latest — the livephoto path needs Ubuntu 26.04's FFmpeg 8 / libheif 1.21) with persistent target + registry volumes; the self-hosted Mac driving OrbStack fits the hosted-billing constraint.\n\nMANDATORY macOS CLIPPY: lint the actually-shipped Rust graph -D warnings — pb-mac-ffi + pb-app-core + pb-core + pb-decode + pb-source + pb-render + pb-hud (EXCLUDE the retired pb-app) — on the self-hosted mac runner, keeping build-swift-host.sh --debug as the end-to-end bridge/app build. The Linux gate must be REQUIRED (a continue-on-error job just recreates the blind spot); if it subsumes the advisory core-linux job, remove core-linux rather than keep two overlapping paths.",
+        "testStrategy": "Toolchain: `rustc --version` in every CI job equals the rust-toolchain.toml pin, and the appimage container installs that same version (it reads the file). Regression: temporarily reintroduce a trivial Linux-only dead-code item and confirm the required Linux gate goes RED (would have caught the f71c0720 issue), then revert. check-linux.sh: passes locally in the container and, once wired, in CI. macOS clippy: green over the shipped graph; build-swift-host.sh --debug still builds. Confirm --locked doesn't force a lockfile change (Cargo.lock is current).",
         "subtasks": [
           {
             "id": 1,
-            "title": "Pin the Rust toolchain version (dev + CI + AppImage container)",
-            "description": "Set rust-toolchain.toml `channel` to an explicit stable (e.g. \"1.9x.0\") instead of floating \"stable\", and align scripts/appimage.Dockerfile's rustup-init `--default-toolchain` to the same version so container/CI/dev all match. Document the manual-bump policy (bump deliberately, fix new lints in the same PR).",
+            "title": "Authoritative toolchain pin (rust-toolchain.toml single source) + --locked + MSRV decision",
+            "description": "Choose the exact stable version (post Win+mac validation). rust-toolchain.toml is the sole source; appimage.Dockerfile reads it; ci.yml + release.yml toolchain steps pin to it (or one shared mechanism); add a rustc-version CI assertion; add --locked to CI/release cargo commands. Decide rust-version=1.80: verify via MSRV job or remove. Standalone (no ci.yml photo-lane collision beyond the toolchain step) — coordinate the ci.yml touch with the live-photo work.",
             "status": "pending"
           },
           {
             "id": 2,
-            "title": "Add a Linux clippy -D warnings job for the winit shell + engine",
-            "description": "New ci.yml job on ubuntu (or the appimage image) running `cargo clippy -p pb-app -p pb-app-core -p pb-source -p pb-render -p pb-hud --features livephoto,pb-decode/libheif --all-targets -- -D warnings`. This is the gate that would have caught the Linux dead-code/lints fixed in f71c0720; it also protects #70's cleanup from silently regressing.",
+            "title": "scripts/check-linux.sh — reusable full clippy + test + release build in the appimage container",
+            "description": "New script (no ci.yml touch → lands now): clippy over the FULL package list incl pb-decode + pb-ui --all-targets --features (package-qualified) --locked -D warnings, then test, then release build of pb-app w/ livephoto,libheif --locked, inside the appimage.Dockerfile image with persistent target+registry volumes. This is #70's reproducible local gate.",
             "status": "pending"
           },
           {
             "id": 3,
-            "title": "(Optional) macOS clippy for pb-mac-ffi + engine",
-            "description": "Add a clippy -D warnings step on the self-hosted macOS runner for pb-mac-ffi + the engine crates, so the macOS cfg surface (imageio decode, CAMetalLayer surface adapter, etc.) is linted rather than only built. Lowest priority of the three.",
+            "title": "Wire check-linux.sh as a REQUIRED Linux CI gate; retire the advisory core-linux job",
+            "description": "Add a required (not continue-on-error) Linux job invoking check-linux.sh on the self-hosted mac/OrbStack; remove the overlapping advisory core-linux job. Touches ci.yml → SEQUENCE AFTER the live-photo plan's ci.yml change merges.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "Mandatory macOS clippy over the shipped graph (exclude pb-app) + keep build-swift-host --debug",
+            "description": "Self-hosted mac runner: clippy -D warnings over pb-mac-ffi + pb-app-core + pb-core + pb-decode + pb-source + pb-render + pb-hud (NOT pb-app); keep build-swift-host.sh --debug as the end-to-end build. Touches ci.yml → sequence after the live-photo ci.yml change merges.",
+            "status": "pending"
+          }
+        ]
+      },
+      {
+        "id": 72,
+        "title": "Prune pb-app-core of winit-shell-only API orphaned by #70 (evidence-based, not a grep-and-delete)",
+        "description": "The deliberately-narrowed-out part of #70 (Codex #5). pb-app-core is shared by the Windows + Linux winit shells, the pb-mac-ffi Swift bridge, AND generated bridge glue — public methods don't emit dead-code warnings, and textual reference searches miss bridge-mediated/generated consumers — so a blunt 'grep and delete apparently-unused' would turn a mechanical shell retirement into a risky shared-core API refactor. Do this only AFTER #70 is green, as an explicit verified pass.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          70
+        ],
+        "details": "For each candidate symbol: (1) an explicit candidate list (winit-shell-shaped helpers plausibly orphaned once the macOS shell and its call sites are gone); (2) a pb-app call-site search; (3) a pb-mac-ffi search INCLUDING generated/ bridge glue; (4) run BOTH host test suites (pb-app-core on Windows/Linux + pb-mac-ffi on macOS). Delete only symbols proven unused by all four. No behavior change to either shell.",
+        "testStrategy": "Each removed symbol has a documented no-callers proof across pb-app + pb-mac-ffi(+generated); pb-app-core tests green on Windows/Linux; pb-mac-ffi builds + the Swift host runs unchanged on macOS.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Assemble + prove the candidate symbol list",
+            "description": "List winit-shell-shaped pb-app-core symbols plausibly orphaned by #70; for each, prove no callers across pb-app, pb-mac-ffi, and generated bridge glue.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "Delete only the proven-dead; re-run both host suites",
+            "description": "Remove the proven-unused symbols; pb-app-core tests green on Win/Linux; pb-mac-ffi + Swift host unchanged on macOS.",
+            "status": "pending"
+          }
+        ]
+      },
+      {
+        "id": 73,
+        "title": "Split menu.rs → shared menu_model + #[cfg(windows)] windows_menu; move muda to Windows-only deps",
+        "description": "Codex's 'much cleaner boundary' for the menu, as a behavior-preserving follow-up AFTER #70 lands (menu.rs de-macOS'd but still cross-platform with dead_code band-aids and muda compiled-dead on Linux). Extract the dependency-free menu actions / spec / navigation (shared by the Windows muda menu AND the Linux egui menu) into a shared menu_model; move the native muda construction, handles, attachment, state sync, and context-menu presentation into windows_menu.rs (#[cfg(windows)]); keep panels_ui.rs consuming the pure model for the Linux egui menu. Then relocate muda to [target.'cfg(windows)'.dependencies] (no longer compiled dead on Linux) and DELETE the cfg_attr(..., allow(dead_code)) band-aids added in f71c0720. Behavior-preserving; the MenuAction->Action dedup is a separate later cleanup, NOT this.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          70
+        ],
+        "details": "Keep it behavior-preserving: Windows native menu + context menu unchanged; Linux egui menu + F10/Alt/arrows/Enter/Esc unchanged. The win is structural — Linux stops compiling muda + the dead builders, so the allow(dead_code) suppressions disappear rather than being carried, and muda becomes a Windows-only dependency.",
+        "testStrategy": "Windows + Linux menu tests still present and green; muda absent from the Linux dep tree (cargo tree --target x86_64-unknown-linux-gnu); no allow(dead_code) menu band-aids remain; manual: Windows native/context menu + Linux egui menu behave exactly as before.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Extract the shared, dependency-free menu model (actions / spec / navigation)",
+            "description": "Move MenuAction/MenuGroup/MenuRow/menu_bar_spec/menu_nav into a shared module used by both shells; no behavior change; Win + Linux menu tests stay green.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "windows_menu.rs (#[cfg(windows)]) + muda to Windows-only deps + drop the allows",
+            "description": "Move native muda construction/handles/attachment/state-sync/context-menu to windows_menu.rs (#[cfg(windows)]); relocate muda to [target.'cfg(windows)'.dependencies]; delete the Linux dead_code allows. Verify muda is gone from the Linux dep tree.",
             "status": "pending"
           }
         ]

@@ -2895,14 +2895,12 @@ impl AppCore {
     /// Drain a streaming Live Photo motion decode (task #69): install a playing Playback on
     /// the first frame, extend it as frames arrive, and finalize on `Done` — so the clip
     /// starts within a frame or two instead of after the whole `.mov` decodes. Called each
-    /// tick alongside [`poll_anim_decode`](Self::poll_anim_decode). A no-op off the Linux
-    /// FFmpeg path (`anim_stream` is only ever set there).
+    /// tick alongside [`poll_anim_decode`](Self::poll_anim_decode). A no-op where no
+    /// streaming producer exists (`anim_stream` is only set on the Linux FFmpeg and macOS
+    /// AVAssetReader paths).
     pub fn poll_anim_stream(&mut self) {
         use std::sync::mpsc::TryRecvError;
-        let Some((gen, epoch, item)) = self
-            .anim_stream
-            .as_ref()
-            .map(|s| (s.gen, s.epoch, s.item))
+        let Some((gen, epoch, item)) = self.anim_stream.as_ref().map(|s| (s.gen, s.epoch, s.item))
         else {
             return;
         };
@@ -2934,8 +2932,11 @@ impl AppCore {
             }
         }
         if disconnected {
-            // The worker vanished without a terminal message — drop the stream.
-            self.anim_stream = None;
+            // The worker vanished without a terminal message (a panic, or a producer bug).
+            // Treat it as a stream failure rather than silently dropping: if a Playback is
+            // already installed and incomplete, `stream_failed` marks it complete — else it
+            // would park on the decoded frontier forever while the audio played on.
+            self.stream_failed("Live Photo stream worker vanished".into());
         }
     }
 
@@ -5992,11 +5993,15 @@ impl AppCore {
     }
 
     pub fn start_animation_decode(&mut self, item: usize, want: AnimWant) {
-        // A Live Photo on the Linux FFmpeg path streams its motion (task #69) — play the
-        // `.mov` while it's still decoding rather than waiting for the whole clip. The macOS
-        // AVFoundation / Windows Media Foundation players decode in one call, so they stay on
-        // the batch path below (as do GIF/APNG/WebP everywhere — decoded from the still bytes).
-        #[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
+        // A Live Photo streams its motion (task #69) — play the `.mov` while it's still
+        // decoding rather than waiting for the whole clip. Wired on the Linux FFmpeg path
+        // and the macOS AVAssetReader path; Windows' Media Foundation player still decodes
+        // in one call, so it stays on the batch path below (as do GIF/APNG/WebP everywhere
+        // — decoded from the still bytes).
+        #[cfg(any(
+            target_os = "macos",
+            all(unix, not(target_os = "macos"), feature = "livephoto")
+        ))]
         if self.live_motion_path(item).is_some() {
             self.start_live_stream(item, want);
             return;
@@ -6033,12 +6038,16 @@ impl AppCore {
         }
     }
 
-    /// Kick a **streaming** Live Photo motion decode (task #69) on the Linux FFmpeg path: the
-    /// worker emits each frame as it's decoded (mapped onto the platform-neutral [`StreamMsg`]),
-    /// and [`poll_anim_stream`](Self::poll_anim_stream) installs/extends the playing sequence so
-    /// the clip starts within a frame or two instead of after the whole `.mov`. Same cancel /
-    /// generation / epoch discipline as [`start_animation_decode`](Self::start_animation_decode).
-    #[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
+    /// Kick a **streaming** Live Photo motion decode (task #69) — FFmpeg on Linux,
+    /// AVAssetReader on macOS: the worker emits each frame as it's decoded (mapped onto the
+    /// platform-neutral [`StreamMsg`]), and [`poll_anim_stream`](Self::poll_anim_stream)
+    /// installs/extends the playing sequence so the clip starts within a frame or two instead
+    /// of after the whole `.mov`. Same cancel / generation / epoch discipline as
+    /// [`start_animation_decode`](Self::start_animation_decode).
+    #[cfg(any(
+        target_os = "macos",
+        all(unix, not(target_os = "macos"), feature = "livephoto")
+    ))]
     pub fn start_live_stream(&mut self, item: usize, want: AnimWant) {
         // Supersede any in-flight decode/stream so its orphaned worker stops promptly.
         self.cancel_anim_decode();
@@ -7748,5 +7757,191 @@ mod tests {
         });
         assert!(core.held.is_empty());
         assert!(core.effects.is_empty());
+    }
+
+    // --- Streaming Live Photo lifecycle (task #69) ---------------------------------------
+    // The consumer half is platform-neutral (only the *producers* are gated), so these run
+    // everywhere: they inject an `AnimStream` by hand — exactly what `start_live_stream`
+    // builds — and drive `poll_anim_stream` through install / extend / finish / failure.
+
+    use crate::animation::{AnimStream, StreamMsg};
+    use std::sync::mpsc;
+
+    /// Wire a synthetic streaming decode for `item`, exactly like `start_live_stream` does,
+    /// returning the producer's sender and the shared cancel flag.
+    fn inject_stream(
+        core: &mut AppCore,
+        item: usize,
+        want: AnimWant,
+    ) -> (
+        mpsc::Sender<StreamMsg>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let (tx, rx) = mpsc::channel();
+        core.displayed_item = Some(item);
+        core.target_item = Some(item);
+        core.anim_gen += 1;
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        core.anim_stream = Some(AnimStream {
+            gen: core.anim_gen,
+            item,
+            epoch: core.epoch,
+            want,
+            rx,
+            cancel: std::sync::Arc::clone(&cancel),
+            header: None,
+            pending: Vec::new(),
+            installed: false,
+        });
+        (tx, cancel)
+    }
+
+    fn stream_header() -> StreamMsg {
+        StreamMsg::Header {
+            width: 1,
+            height: 1,
+            color: pb_decode::ColorTransform::srgb(),
+            codec: "Live Photo",
+        }
+    }
+
+    fn stream_frame() -> StreamMsg {
+        StreamMsg::Frame(pb_decode::AnimFrame {
+            rgba: vec![1, 2, 3, 255],
+            width: 1,
+            height: 1,
+            delay: Duration::from_millis(33),
+        })
+    }
+
+    #[test]
+    fn stream_installs_playback_on_header_plus_first_frame_and_starts_audio_once() {
+        // A real still + companion .mov pair on disk, so `live_motion_path` resolves and
+        // the audio effect fires (the pairing checks the .mov exists).
+        let dir = std::env::temp_dir().join("pb_stream_install_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let still = dir.join("IMG_0001.jpg");
+        std::fs::write(&still, b"not a real jpeg").unwrap();
+        std::fs::write(dir.join("IMG_0001.mov"), b"not a real mov").unwrap();
+
+        let mut core = test_core();
+        core.source = Arc::new(pb_source::FsSource::new(vec![still]));
+        let (tx, _cancel) = inject_stream(&mut core, 0, AnimWant::Play);
+        // Nothing installs before the first frame exists.
+        tx.send(stream_header()).unwrap();
+        core.poll_anim_stream();
+        assert!(core.playback.is_none(), "header alone must not install");
+        // Header + first frame → a playing, incomplete streaming Playback + audio from 0.0.
+        tx.send(stream_frame()).unwrap();
+        core.poll_anim_stream();
+        let pb = core.playback.as_ref().expect("playback installed");
+        assert!(pb.is_playing() && !pb.is_complete());
+        assert_eq!(pb.frame_count(), 1);
+        let audio_starts = core
+            .effects
+            .iter()
+            .filter(|e| matches!(e, contract::CoreEffect::StartLiveAudio { .. }))
+            .count();
+        assert_eq!(audio_starts, 1, "audio starts exactly once, at install");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stream_frames_extend_installed_playback_and_done_completes_it() {
+        let mut core = test_core();
+        let (tx, _cancel) = inject_stream(&mut core, 0, AnimWant::Play);
+        tx.send(stream_header()).unwrap();
+        tx.send(stream_frame()).unwrap();
+        core.poll_anim_stream();
+        assert!(core.playback.is_some());
+        // Later frames append to the live playback without reinstalling.
+        tx.send(stream_frame()).unwrap();
+        tx.send(stream_frame()).unwrap();
+        core.poll_anim_stream();
+        assert_eq!(core.playback.as_ref().unwrap().frame_count(), 3);
+        // `Done` finalizes the loop count and clears the stream.
+        tx.send(StreamMsg::Done {
+            loop_count: 1,
+            truncated: false,
+        })
+        .unwrap();
+        core.poll_anim_stream();
+        assert!(core.anim_stream.is_none());
+        assert!(core.playback.as_ref().unwrap().is_complete());
+    }
+
+    #[test]
+    fn stream_disconnect_after_install_completes_playback() {
+        // The worker vanishing without a terminal chunk (panic / producer bug) must not
+        // leave an installed playback incomplete — it would park on the decoded frontier
+        // forever while the audio played on.
+        let mut core = test_core();
+        let (tx, _cancel) = inject_stream(&mut core, 0, AnimWant::Play);
+        tx.send(stream_header()).unwrap();
+        tx.send(stream_frame()).unwrap();
+        core.poll_anim_stream();
+        assert!(core.playback.is_some());
+        drop(tx); // worker vanished
+        core.poll_anim_stream();
+        assert!(core.anim_stream.is_none());
+        assert!(
+            core.playback.as_ref().unwrap().is_complete(),
+            "disconnect must complete the installed playback"
+        );
+    }
+
+    #[test]
+    fn stream_disconnect_before_install_leaves_no_playback() {
+        let mut core = test_core();
+        let (tx, _cancel) = inject_stream(&mut core, 0, AnimWant::Play);
+        tx.send(stream_header()).unwrap();
+        drop(tx); // worker vanished before any frame
+        core.poll_anim_stream();
+        assert!(core.anim_stream.is_none());
+        assert!(core.playback.is_none());
+    }
+
+    #[test]
+    fn stale_stream_is_cancelled_and_dropped() {
+        // Epoch bump (viewport/geometry change) — the stream is stale: cancel + drop.
+        let mut core = test_core();
+        let (_tx, cancel) = inject_stream(&mut core, 0, AnimWant::Play);
+        core.epoch += 1;
+        core.poll_anim_stream();
+        assert!(core.anim_stream.is_none());
+        assert!(
+            cancel.load(std::sync::atomic::Ordering::Relaxed),
+            "the worker must be told to stop"
+        );
+
+        // Navigating away (displayed_item changed) — same deal.
+        let (_tx, cancel) = inject_stream(&mut core, 0, AnimWant::Play);
+        core.displayed_item = Some(1);
+        core.poll_anim_stream();
+        assert!(core.anim_stream.is_none());
+        assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn eager_stream_stashes_prepared_on_done() {
+        let mut core = test_core();
+        let (tx, _cancel) = inject_stream(&mut core, 0, AnimWant::Eager);
+        tx.send(stream_header()).unwrap();
+        tx.send(stream_frame()).unwrap();
+        tx.send(stream_frame()).unwrap();
+        core.poll_anim_stream();
+        // Eager accumulates silently — no playback while the user hasn't pressed P.
+        assert!(core.playback.is_none());
+        tx.send(StreamMsg::Done {
+            loop_count: 1,
+            truncated: false,
+        })
+        .unwrap();
+        core.poll_anim_stream();
+        assert!(core.anim_stream.is_none());
+        let prepared = core.prepared.as_ref().expect("eager stash filled");
+        assert_eq!(prepared.item, 0);
+        assert_eq!(prepared.anim.frame_count(), 2);
     }
 }

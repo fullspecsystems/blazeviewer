@@ -239,9 +239,11 @@ pub fn decode_item(
 }
 
 /// The off-thread decode for an on-demand motion sequence (tasks #37 / #38 / #39): a
-/// Live Photo's companion `.mov` (AVFoundation on macOS, Media Foundation on Windows)
-/// when `live` is set, otherwise the item's own bytes as a multi-frame animation. Both
-/// return a unified [`pb_decode::Animation`] so playback treats them identically.
+/// Live Photo's companion `.mov` when `live` is set, otherwise the item's own bytes as a
+/// multi-frame animation. Both return a unified [`pb_decode::Animation`] so playback
+/// treats them identically. Live Photos only reach the `live` branch on Windows (Media
+/// Foundation, batch) — Linux and macOS divert them to the streaming path
+/// (`start_live_stream`) before this job is ever spawned.
 pub fn decode_motion_job(
     live: Option<PathBuf>,
     source: &Arc<dyn PhotoSource>,
@@ -260,13 +262,14 @@ pub fn decode_motion_job(
             .map(|f| f.max_width.max(f.max_height))
             .unwrap_or(MOTION_MAX_LONG_EDGE)
             .min(MOTION_MAX_LONG_EDGE);
-        // Linux's FFmpeg decoder is cancellable (navigating away stops it mid-clip); the macOS
-        // AVFoundation / Windows Media Foundation players decode via the OS, so they ignore it.
+        // Linux's FFmpeg decoder is cancellable (navigating away stops it mid-clip). The
+        // macOS/Windows batch wrappers ignore the flag — on macOS this branch is only a
+        // compatibility fallback (streaming handles Live Photos before this job spawns).
         #[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
         return pb_decode::decode_live_motion_cancellable(path, edge, cancel);
         #[cfg(any(target_os = "macos", windows))]
         {
-            let _ = cancel; // OS players decode via the OS; nothing to interrupt mid-clip
+            let _ = cancel; // batch wrappers don't check the flag mid-clip
             return pb_decode::decode_live_motion(path, edge);
         }
     }

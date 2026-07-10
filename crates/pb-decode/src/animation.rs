@@ -110,6 +110,132 @@ pub const MAX_FRAMES: usize = 2048;
 /// of the OOM guard, for a modest frame count at a huge canvas. ~1.5 GiB.
 pub const MAX_DECODED_BYTES: u64 = 1536 * 1024 * 1024;
 
+// ── Streaming motion decode (task #69: play while decoding) ─────────────────────────
+
+/// One message from a streaming Live Photo motion decode (`decode_live_motion_streaming`
+/// — FFmpeg on Linux, AVAssetReader on macOS). The consumer installs a streaming
+/// `Playback` on the first [`Frame`](MotionChunk::Frame), appends later frames as they
+/// arrive, and finalizes on [`Done`](MotionChunk::Done) — so a Live Photo starts playing
+/// within a frame or two instead of after the whole `.mov` decodes.
+///
+/// The chunk sequence is a contract every producer upholds:
+/// - **Success:** one [`Header`](MotionChunk::Header), one or more `Frame`s, exactly one
+///   `Done`.
+/// - **Setup / zero-frame failure:** one [`Failed`](MotionChunk::Failed), possibly
+///   preceded by a `Header` (never by a `Frame`).
+/// - **Midstream failure:** `Header`, one or more `Frame`s, then `Failed`.
+/// - **Cancellation:** any valid non-terminal prefix, then the producer returns
+///   *silently* — no terminal chunk (the consumer has already dropped the stream).
+///
+/// Never a duplicate `Header`, never a `Frame` before the `Header`, and never anything
+/// after a terminal `Done`/`Failed`.
+pub enum MotionChunk {
+    /// Sent once, before any frame: the sequence's display dimensions + color, enough to
+    /// build the `Animation` header.
+    Header(MotionHeader),
+    /// A decoded, scaled, rotation-corrected frame (in emission = playback order).
+    Frame(AnimFrame),
+    /// The stream finished cleanly; `truncated` if the frame or byte cap was hit.
+    Done { loop_count: u32, truncated: bool },
+    /// The stream failed. If a Playback is already installed the consumer can treat this as
+    /// a truncated finish; if not, it's a play failure to surface.
+    Failed(DecodeError),
+}
+
+/// Header for a streaming Live Photo motion decode — the post-rotation display size and the
+/// color transform every frame shares.
+pub struct MotionHeader {
+    pub width: u32,
+    pub height: u32,
+    pub color: ColorTransform,
+    pub codec: &'static str,
+}
+
+/// Accumulates a [`MotionChunk`] stream into a whole [`Animation`], **validating the chunk
+/// contract** along the way — the batch `decode_live_motion` wrappers are built on this, so
+/// a producer bug (frame before header, chunk after terminal, dims drifting from the
+/// header) surfaces as a decode error instead of a corrupt `Animation`.
+// Only the macOS batch wrapper uses it today; the contract tests run on every platform.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Default)]
+pub(crate) struct MotionCollector {
+    header: Option<MotionHeader>,
+    frames: Vec<AnimFrame>,
+    done: Option<(u32, bool)>,
+    failed: Option<DecodeError>,
+    violation: Option<&'static str>,
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+impl MotionCollector {
+    pub(crate) fn push(&mut self, chunk: MotionChunk) {
+        if self.violation.is_some() {
+            return; // already invalid — keep the first violation
+        }
+        if self.done.is_some() || self.failed.is_some() {
+            self.violation = Some("chunk after a terminal Done/Failed");
+            return;
+        }
+        match chunk {
+            MotionChunk::Header(h) => {
+                if self.header.is_some() {
+                    self.violation = Some("duplicate Header");
+                } else {
+                    self.header = Some(h);
+                }
+            }
+            MotionChunk::Frame(f) => match &self.header {
+                None => self.violation = Some("Frame before Header"),
+                Some(h) if f.width != h.width || f.height != h.height => {
+                    self.violation = Some("Frame dimensions differ from the Header")
+                }
+                Some(_) => self.frames.push(f),
+            },
+            MotionChunk::Done {
+                loop_count,
+                truncated,
+            } => {
+                if self.frames.is_empty() {
+                    self.violation = Some("Done without any Frame");
+                } else {
+                    self.done = Some((loop_count, truncated));
+                }
+            }
+            MotionChunk::Failed(e) => self.failed = Some(e),
+        }
+    }
+
+    /// The collected [`Animation`], the producer's own [`MotionChunk::Failed`] error, or a
+    /// contract-violation error. A stream that ended without a terminal chunk is an
+    /// internal error here — the batch wrappers never cancel, so a silent return means the
+    /// producer broke the contract.
+    pub(crate) fn finish(self) -> Result<Animation, DecodeError> {
+        if let Some(v) = self.violation {
+            return Err(DecodeError::Corrupt(format!(
+                "Live Photo motion stream contract violated: {v}"
+            )));
+        }
+        if let Some(e) = self.failed {
+            return Err(e);
+        }
+        let (Some(h), Some((loop_count, truncated))) = (self.header, self.done) else {
+            return Err(DecodeError::Corrupt(
+                "Live Photo motion stream ended without a terminal chunk".into(),
+            ));
+        };
+        Ok(Animation {
+            kind: AnimationKind::LivePhoto,
+            width: h.width,
+            height: h.height,
+            frames: self.frames,
+            loop_count,
+            codec: h.codec,
+            color: h.color,
+            truncated,
+        })
+    }
+}
+
 // --- Detection (cheap header sniff) ------------------------------------------------
 
 /// Sniff whether `bytes` is an animated image we can play, and which kind. Reads
@@ -589,6 +715,120 @@ mod tests {
         Delay, Frame, Rgba, RgbaImage,
     };
 
+    // --- MotionCollector: the streaming-chunk contract ------------------------------
+
+    fn mc_header() -> MotionChunk {
+        MotionChunk::Header(MotionHeader {
+            width: 2,
+            height: 2,
+            color: ColorTransform::srgb(),
+            codec: "Live Photo",
+        })
+    }
+
+    fn mc_frame() -> MotionChunk {
+        MotionChunk::Frame(AnimFrame {
+            rgba: vec![0; 16],
+            width: 2,
+            height: 2,
+            delay: Duration::from_millis(33),
+        })
+    }
+
+    fn collect(chunks: Vec<MotionChunk>) -> Result<Animation, DecodeError> {
+        let mut c = MotionCollector::default();
+        for chunk in chunks {
+            c.push(chunk);
+        }
+        c.finish()
+    }
+
+    #[test]
+    fn motion_collector_builds_a_valid_stream() {
+        let anim = collect(vec![
+            mc_header(),
+            mc_frame(),
+            mc_frame(),
+            MotionChunk::Done {
+                loop_count: 1,
+                truncated: false,
+            },
+        ])
+        .expect("valid stream");
+        assert_eq!(anim.frame_count(), 2);
+        assert_eq!((anim.width, anim.height), (2, 2));
+        assert_eq!(anim.loop_count, 1);
+        assert!(!anim.truncated);
+        assert!(matches!(anim.kind, AnimationKind::LivePhoto));
+    }
+
+    #[test]
+    fn motion_collector_preserves_the_producers_error() {
+        let err = collect(vec![
+            mc_header(),
+            MotionChunk::Failed(DecodeError::Corrupt("boom".into())),
+        ])
+        .err()
+        .expect("expected an error");
+        assert!(err.to_string().contains("boom"), "got: {err}");
+    }
+
+    #[test]
+    fn motion_collector_rejects_contract_violations() {
+        for (label, chunks) in [
+            ("frame before header", vec![mc_frame()]),
+            ("duplicate header", vec![mc_header(), mc_header()]),
+            (
+                "done without frames",
+                vec![
+                    mc_header(),
+                    MotionChunk::Done {
+                        loop_count: 1,
+                        truncated: false,
+                    },
+                ],
+            ),
+            (
+                "dims mismatch",
+                vec![
+                    mc_header(),
+                    MotionChunk::Frame(AnimFrame {
+                        rgba: vec![0; 4],
+                        width: 1,
+                        height: 1,
+                        delay: Duration::from_millis(33),
+                    }),
+                ],
+            ),
+            (
+                "chunk after terminal",
+                vec![
+                    mc_header(),
+                    mc_frame(),
+                    MotionChunk::Done {
+                        loop_count: 1,
+                        truncated: false,
+                    },
+                    mc_frame(),
+                ],
+            ),
+        ] {
+            let err = collect(chunks).err().expect("expected an error");
+            assert!(
+                err.to_string().contains("contract violated"),
+                "{label}: expected a contract violation, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn motion_collector_flags_a_stream_with_no_terminal() {
+        let err = collect(vec![mc_header(), mc_frame()])
+            .err()
+            .expect("expected an error");
+        assert!(err.to_string().contains("without a terminal"), "got: {err}");
+    }
+
     // --- timing: the spec's required gotcha tests ---------------------------------
 
     #[test]
@@ -836,7 +1076,11 @@ mod tests {
             None,
             "a still avif is not a sequence"
         );
-        assert_eq!(detect_animation(&ftyp(b"heic", &[b"mif1"])), None, "still heic");
+        assert_eq!(
+            detect_animation(&ftyp(b"heic", &[b"mif1"])),
+            None,
+            "still heic"
+        );
     }
 
     /// Local smoke test over JD's real corpus, when present. CI machines don't have
