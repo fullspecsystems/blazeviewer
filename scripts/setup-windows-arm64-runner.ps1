@@ -1,5 +1,5 @@
-# Bootstrap a Windows ARM64 self-hosted CI runner (the Fusion VM on the Mac).
-# One paste in an ELEVATED PowerShell inside the fresh VM:
+# Bootstrap a Windows ARM64 self-hosted CI runner (a Windows-on-ARM VM on the Mac —
+# Parallels/UTM/Fusion, whichever won). One paste in an ELEVATED PowerShell:
 #
 #   1. On the Mac (token is single-use, expires in 1 h):
 #        gh api -X POST repos/jdlien/photoblaze/actions/runners/registration-token --jq .token
@@ -8,15 +8,23 @@
 #        .\setup-windows-arm64-runner.ps1 -Token <paste>
 #
 # Installs Git + VS Build Tools (ARM64 MSVC + Windows SDK) + rustup (aarch64 host),
-# then registers the Actions runner as a Windows service under this account (so jobs
-# see this user's rustup/MSVC environment — same convention as GREMLIN).
+# downloads the Actions runner, and registers it — as a foreground process by
+# DEFAULT (no service). Reasoning: a personal Windows install today is very likely
+# signed in with a Microsoft account (PIN, not password) — GREMLIN's service
+# convention needs the real account PASSWORD for `--windowslogonpassword`, which an
+# MS-account/Hello-PIN setup usually doesn't have to hand, and hit exactly this wall
+# twice (once as an outright config.cmd failure, once flagged before it could bite
+# again). If you deliberately run a LOCAL account with a real password and want
+# service persistence across reboots, pass -AsService — same convention as GREMLIN.
+#
 # After it finishes: flip the repo variable that enables the CI lane (see
 # .taskmaster/docs/self-hosted-runners.md → "Windows ARM64 runner").
 #Requires -RunAsAdministrator
 param(
     [Parameter(Mandatory)] [string]$Token,
     [string]$RunnerDir = "C:\actions-runner",
-    [string]$Repo = "https://github.com/jdlien/photoblaze"
+    [string]$Repo = "https://github.com/jdlien/photoblaze",
+    [switch]$AsService
 )
 $ErrorActionPreference = "Stop"
 
@@ -43,19 +51,31 @@ Invoke-WebRequest -Uri "https://github.com/actions/runner/releases/download/v$ve
 Expand-Archive -Path $zip -DestinationPath $RunnerDir -Force
 Remove-Item $zip
 
-Write-Host "== [4/4] Register as a service" -ForegroundColor Cyan
-# --unattended CANNOT prompt: the password must be passed explicitly or the service
-# install dies with "Invalid configuration provided for windowslogonpassword" AFTER
-# the runner has already registered (learned on the first VM). Read-Host keeps it
-# out of the shell history. Blank passwords can't run services — set one first.
-$pw = Read-Host "Password for $env:USERNAME (runner service logon)"
 Set-Location $RunnerDir
 # Default labels come out as: self-hosted, Windows, ARM64 — exactly what ci.yml targets.
-.\config.cmd --url $Repo --token $Token --name "$env:COMPUTERNAME-arm64" --unattended `
-    --runasservice --windowslogonaccount $env:USERNAME --windowslogonpassword $pw
-
-Write-Host ""
-Write-Host "Done. Next (from the Mac): enable the CI lane —" -ForegroundColor Green
+if ($AsService) {
+    Write-Host "== [4/4] Register as a service" -ForegroundColor Cyan
+    # --unattended CANNOT prompt: the password must be passed explicitly or the service
+    # install dies with "Invalid configuration provided for windowslogonpassword" AFTER
+    # the runner has already registered. Only works with a real local-account password
+    # (an MS-account PIN won't do) — Read-Host keeps it out of shell history.
+    $pw = Read-Host "Password for $env:USERNAME (runner service logon)"
+    .\config.cmd --url $Repo --token $Token --name "$env:COMPUTERNAME-arm64" --unattended `
+        --runasservice --windowslogonaccount $env:USERNAME --windowslogonpassword $pw
+    Write-Host ""
+    Write-Host "Done (installed as a service). Next (from the Mac): enable the CI lane —" -ForegroundColor Green
+} else {
+    Write-Host "== [4/4] Register (foreground — no service, no password needed)" -ForegroundColor Cyan
+    .\config.cmd --url $Repo --token $Token --name "$env:COMPUTERNAME-arm64" --unattended
+    Write-Host ""
+    Write-Host "Registered. Now open a NEW, NON-elevated PowerShell (matches the PATH a" -ForegroundColor Green
+    Write-Host "real build would see), cd $RunnerDir, and run: .\run.cmd" -ForegroundColor Green
+    Write-Host "Leave that window open — it prints 'Listening for Jobs' when ready." -ForegroundColor Green
+    Write-Host "(Persistence across reboots without a service: a Task Scheduler 'At log on'" -ForegroundColor Green
+    Write-Host " trigger running run.cmd needs no stored password — ask if you want that set up.)" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "Then (from the Mac): enable the CI lane —" -ForegroundColor Green
+}
 Write-Host "  gh variable set WIN_ARM64_RUNNER --body 1 --repo jdlien/photoblaze"
 Write-Host "Optional (only for Live Photo corpus tests): install 'HEVC Video Extensions'"
 Write-Host "from the Microsoft Store and copy the test clips over."

@@ -58,36 +58,53 @@ Gotchas learned setting this up:
 - Jobs run even while the account's hosted billing is broken — the billing lock only
   blocks GitHub-hosted runners.
 
-## Windows ARM64 runner (task #75 — the Fusion VM on the Mac)
+## Windows ARM64 runner (task #75)
 
-A Windows 11 ARM64 guest in VMware Fusion on the Apple Silicon Mac, so the workspace
-tests run **natively on aarch64-pc-windows-msvc** (the x64 build already runs on
-Snapdragon machines via Prism emulation, but emulation taxes the SIMD decode paths —
-the thing PhotoBlaze exists for; a native lane keeps an ARM64 build honest before it
-ever ships). Distinct from GREMLIN: this lane only runs tests (fmt/clippy are
-platform-identical and stay on the x64 lane); no libheif/vcpkg yet
+A Windows 11 ARM64 guest VM on the Mac (Fusion/UTM/Parallels all evaluated — Parallels
+won on speed/graphics; the hypervisor doesn't matter to this section, it's all guest-OS
+config), so the workspace tests run **natively on aarch64-pc-windows-msvc** (the x64
+build already runs on Snapdragon machines via Prism emulation, but emulation taxes the
+SIMD decode paths — the thing PhotoBlaze exists for; a native lane keeps an ARM64 build
+honest before it ever ships). Distinct from GREMLIN: this lane only runs tests
+(fmt/clippy are platform-identical and stay on the x64 lane); no libheif/vcpkg yet
 (`arm64-windows-static-md` triplet is the known follow-up risk when release builds
 become a goal).
+
+**⚠ Foreground runner, not a service — by design.** A personal Windows install today is
+very likely signed into a Microsoft account (unlocked with a Hello PIN), and the
+GREMLIN-style Windows-service registration needs the account's real *password* for
+`--windowslogonpassword` — a PIN doesn't work there, and `--unattended` can't prompt for
+one, so it fails *after* already registering the runner (hit this twice, on two separate
+VM rebuilds). The bootstrap script's default now skips the service entirely: it
+registers the runner, then you run `.\run.cmd` yourself in a normal window and leave it
+open. `-AsService` is still there for a deliberately-local-account VM with a real
+password.
 
 Setup, in order:
 
 1. **VM**: Windows 11 ARM64 ISO (not the default x64 one), UEFI Secure Boot ON, the
    vTPM's partial VM encryption, local account via `start ms-cxh:localonly` at OOBE
-   (Shift+F10), license recycled from the Microsoft account via Settings → Activation →
+   (Shift+F10) *if you want a local account* — otherwise a Microsoft-account sign-in is
+   completely fine for this runner (see above; it just means the foreground path, not
+   the service). License recycled from the Microsoft account via Settings → Activation →
    Troubleshoot → "I changed hardware on this device recently".
    **Rebuilds: skip the whole OOBE gauntlet** (MS-account push, privacy-toggle parade,
    OEM/upsell screens) with `scripts/windows-arm64-autounattend.xml` — instructions in
    the file's header comment (attach as a tiny second CD image; creates the local
-   admin directly, declines every "express setting").
-2. **Bootstrap** (installs Git + VS Build Tools ARM64 + rustup + registers the runner
-   service): generate a token on the Mac —
+   admin directly, declines every "express setting"). Only relevant if you're deliberately
+   going local-account; skip it entirely for an MS-account install.
+2. **Bootstrap** (installs Git + VS Build Tools ARM64 + rustup + downloads/registers the
+   runner): generate a token on the Mac —
    `gh api -X POST repos/jdlien/photoblaze/actions/runners/registration-token --jq .token`
    — then in an **elevated** PowerShell in the VM:
    `.\scripts\setup-windows-arm64-runner.ps1 -Token <paste>` (grab the script via a
-   shared folder or `Invoke-WebRequest` from the repo; it Read-Hosts the account
-   password and passes `--windowslogonpassword` — in `--unattended` mode config.cmd
-   can't prompt and dies *after* registering, leaving an offline runner to
-   `config.cmd remove` before retrying).
+   shared folder or `Invoke-WebRequest` from the repo). When it finishes it prints the
+   next step: open a **new, non-elevated** PowerShell (so the runner sees the same PATH
+   a real build would), `cd C:\actions-runner`, run `.\run.cmd`, and leave that window
+   open — it prints "Listening for Jobs" when ready. If a prior attempt left a
+   half-registered/offline runner behind, `.\config.cmd remove --token <fresh token>`
+   before retrying (or remove it from the Mac: `gh api -X DELETE
+   repos/jdlien/photoblaze/actions/runners/<id>`).
 3. **Enable the lane**: `gh variable set WIN_ARM64_RUNNER --body 1 --repo jdlien/photoblaze`.
    The `windows-arm64` job is `if`-gated on that variable so a paused/unregistered VM
    never leaves CI runs queued open — **set it back to `0` whenever the VM will be off
