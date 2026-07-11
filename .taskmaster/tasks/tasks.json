@@ -761,7 +761,7 @@
             "id": 3,
             "title": "FFI via C accessor shim (plan phase 3 + ABI section)",
             "description": "The shim owns every dav1d struct (Dav1dSettings/Dav1dPicture never cross the FFI boundary — recompiled against the installed headers each build, so layout drift is structurally impossible; this replaces the original hand-mirrored-structs approach). Surface: pb_dav1d_open(n_threads, max_frame_delay) / send(ptr,len,cookie) / next_picture / picture getters (plane, stride, w, h, bpc, layout, mtrx, range, trc, cookie) / picture_unref / close / version_ok. pb_dav1d_version_ok() asserts the runtime major version BEFORE any other call. Rust side: opaque pointers + RAII wrappers for context/data/pictures, exercised on every error exit. Acceptance: keyframe OBU -> picture smoke test; drop/error-path tests leak-clean.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 4,
@@ -812,6 +812,16 @@
             "status": "pending"
           }
         ]
+      },
+      {
+        "id": 77,
+        "title": "Resolve LGPL static-link compliance (libheif/libde265) before public/commercial release",
+        "description": "The Windows binary statically links libheif + libde265, both LGPL-3.0. LGPL requires that users can relink the application against a modified version of the library - a static link alone does not satisfy this. Flagged in THIRD-PARTY-NOTICES.md during the task #76 license audit (dav1d itself is BSD-2 and fully handled by the notices file; Linux AppImage bundles shared .so files so it already complies). Not urgent while the app is private/free, but a MUST before any public or commercial release (Velopack commercial plan).",
+        "details": "Options, roughly in order of practicality: (1) Ship libheif+libde265 as DLLs inside the Velopack package - Velopack handles loose DLLs next to the exe; LGPL is then satisfied by user-replaceability; needs a vcpkg dynamic triplet build (x64-windows + arm64-windows, dynamic CRT implications to check) and a build.rs link switch. (2) Offer relink materials (publish the app's object files or a static archive on request) - legally valid, operationally clunky. (3) Replace libheif/libde265 with a non-LGPL path (WIC-only HEIC would lose the measured ~4.9x parallel decode win; a BSD HEVC decoder does not realistically exist). (4) Counsel review if commercial licensing of libheif (strukturag offers commercial terms) turns out cheaper than the engineering. Also do a quick sweep of the rest of the dependency tree (cargo license) for any other copyleft surprises while at it.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "subtasks": []
       }
     ]
   }

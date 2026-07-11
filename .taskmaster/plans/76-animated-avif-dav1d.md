@@ -256,6 +256,17 @@ today**, so #76 measures rather than rebuilds it:
    features, so an optional `cc` would break feature-off builds).
 3. **FFI via C shim.** As specified above; RAII wrappers; version check first. *Acceptance:*
    keyframe OBU → picture smoke test; drop/error-path tests leak-clean.
+   **✔ Done 2026-07-11:** full shim surface (open/close, data_new/remaining/free with the
+   timestamp cookie, send + err_is_again, picture new/get/free + geometry/plane/stride/
+   cookie/CICP accessors) with Rust RAII wrappers (`Decoder`/`Data<'a>`/`Picture`; `Data`
+   borrows the sample bytes so the no-op free callback's lifetime contract is
+   borrow-checked). dav1d's stderr logger silenced (hostile files must not spam the
+   console). Tests: keyframe TU (committed 36-byte ffmpeg/libaom fixture
+   `red_64x64_keyframe.obu`) → 64×64 I420 picture with genuinely red pixels + cookie
+   ride-through; garbage bytes → clean `DecodeError` + safe drops; drop-mid-decode with
+   undrained queue → clean. Leak-cleanliness is structural (RAII on every exit; no ASan
+   on MSVC here — the Linux fuzz target in phase 8 adds sanitizer coverage for the pure
+   demux side).
 4. **Demuxer + `probe_avis`.** Bounded box reader, positive track selection, the
    support/reject table, sample expansion, timing. *Acceptance:* unit tests per table form +
    malformed-input tests; probe rejects each unsupported class.
