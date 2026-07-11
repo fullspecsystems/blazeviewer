@@ -15,6 +15,11 @@ with any pre-release suffix carried only by the tag.
   on Windows (it uses HEVC, which this decoder does not handle).
 
 ### Fixed
+- **The folder tree (Shift+F) now shows for ZIP and 7z archives.** Opening an archive that has
+  internal folders showed an empty "Folders" panel. The panel was reading only the on-disk folder
+  browser, which does not apply to an archive, so the archive's folder list never appeared. It now
+  falls back to the archive's own folder tree (the same way it already worked on macOS), and
+  clicking a folder re-scopes the view to it.
 - **ZIP/7z archives now open on machines with less RAM.** The memory check that guards against
   opening an archive too large to fit in RAM was too conservative and could refuse *every* archive
   — even a tiny one — on a machine with around 8 GB of RAM. It now reserves memory before applying

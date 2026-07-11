@@ -2602,6 +2602,133 @@ mod tests {
         }
     }
 
+    /// A `.zip`/`.7z` deck derives its tree into the core's v1 `folder_tree_panel`, not the
+    /// disk-only `FsTree`. Regression for task #66: `PanelFrame::snapshot` must surface those
+    /// rows as `TreeFrame::archive` — the winit skin read only `fs_tree_rows()` before, so an
+    /// archive's "Folders" panel came up empty even though the tree was correctly derived.
+    #[test]
+    fn archive_deck_snapshots_folder_rows_not_empty() {
+        use pb_app_core::folder_tree::TreeTarget;
+        use pb_app_core::overlay::TreePanel;
+        use pb_app_core::Viewport;
+        use pb_hud::hud::TreeRow;
+        use std::time::Instant;
+
+        let mut core = AppCore::headless(Viewport {
+            width: 1,
+            height: 1,
+            scale_factor: 1.0,
+        });
+        core.native_tree = true;
+        core.folder_tree_open = true;
+        // No displayed disk photo (an archive/empty deck): tree_is_fs() is false, so snapshot
+        // must fall back to folder_tree_panel — the branch the winit skin was missing.
+        assert!(core.tree_panel_visible(), "open + native → the panel shows");
+        assert!(
+            !core.tree_is_fs(),
+            "an archive/empty deck is not the FsTree"
+        );
+
+        let mk = |depth, name: &str, current| TreeRow {
+            depth,
+            name: name.to_string(),
+            open: false,
+            current,
+            marker: false,
+            up: false,
+            count: Some(1),
+        };
+        core.folder_tree_panel = Some(TreePanel {
+            w: 0,
+            h: 0,
+            margin: 0,
+            hits: Vec::new(),
+            rows: vec![mk(0, "trip.7z", false), mk(1, "a", false), mk(1, "b", true)],
+            targets: vec![
+                Some(TreeTarget::Scope(String::new())),
+                Some(TreeTarget::Scope("a".into())),
+                Some(TreeTarget::Scope("b".into())),
+            ],
+            hovered: None,
+            page: 0,
+            built: Instant::now(),
+        });
+
+        let frame = PanelFrame::snapshot(&core);
+        let tree = frame.tree.expect("the tree is visible");
+        assert!(
+            tree.rows.is_empty(),
+            "an archive deck renders the archive rows, not the (empty) FsTree rows"
+        );
+        assert_eq!(
+            tree.archive.len(),
+            3,
+            "all three folder rows surface (was 0 before the fix)"
+        );
+        assert_eq!(tree.archive[0].name, "trip.7z");
+        assert_eq!(tree.archive[2].name, "b");
+        assert!(tree.archive[2].current, "the current folder is marked");
+        assert_eq!(
+            tree.archive[1].index, 1,
+            "the row index aligns with folder_tree_panel for tree_activate"
+        );
+        assert!(
+            tree.archive.iter().all(|r| r.clickable),
+            "every targeted row is clickable"
+        );
+    }
+
+    /// The pure `folder_tree_panel` → [`ArchiveTreeRow`] mapping: a `…` collapse marker (no
+    /// target) is inert; targeted rows are clickable and keep their panel index for activation.
+    #[test]
+    fn archive_tree_rows_marks_only_targeted_rows_clickable() {
+        use pb_app_core::folder_tree::TreeTarget;
+        use pb_app_core::overlay::TreePanel;
+        use pb_hud::hud::TreeRow;
+        use std::time::Instant;
+
+        let row = |depth, name: &str, marker| TreeRow {
+            depth,
+            name: name.to_string(),
+            open: false,
+            current: false,
+            marker,
+            up: false,
+            count: None,
+        };
+        let panel = TreePanel {
+            w: 0,
+            h: 0,
+            margin: 0,
+            hits: Vec::new(),
+            rows: vec![
+                row(0, "root", false),
+                row(1, "\u{2026}", true),
+                row(2, "deep", false),
+            ],
+            targets: vec![
+                Some(TreeTarget::Scope(String::new())),
+                None,
+                Some(TreeTarget::Scope("deep".into())),
+            ],
+            hovered: None,
+            page: 0,
+            built: Instant::now(),
+        };
+        let rows = archive_tree_rows(&panel);
+        assert_eq!(rows.len(), 3);
+        assert!(
+            rows[0].clickable,
+            "the root row re-scopes to the whole archive"
+        );
+        assert!(
+            rows[1].marker && !rows[1].clickable,
+            "the … marker is inert"
+        );
+        assert!(rows[2].clickable);
+        assert_eq!(rows[2].index, 2, "index tracks position for tree_activate");
+    }
+
     /// Lay out just the info line in one egui frame at a fixed screen size.
     fn run_info(ctx: &egui::Context, screen: egui::Rect, line: &InfoLine) {
         let p = Palette::new(true);
