@@ -822,6 +822,26 @@
         "priority": "medium",
         "dependencies": [],
         "subtasks": []
+      },
+      {
+        "id": 78,
+        "title": "CLI polish: clap, --help/--version, session-override flags, Windows console attach",
+        "description": "Make PhotoBlaze a pleasant cross-platform CLI citizen for scripted launches. Today (main.rs:3406-3525): hand-rolled args, no --help/--version, unknown flags silently swallowed; release Windows builds are GUI-subsystem so nothing can print anyway. Decision (owner, 2026-07-11): use clap 4 (derive) - binary cost is a rounding error on this exe, parse time is launch-only, and it buys polished help/typo suggestions/value validation/completions for a low-usage feature. clap lives in pb-app ONLY (pb-app-core stays toml-only per NS0); the CLI parses into a plain LaunchOverrides struct the core consumes. Overrides NEVER persist to settings.toml (a scripted --dark --slideshow=5 launch must not rewrite the user's config).",
+        "details": "Order of operations in main(): (1) Velopack --veloapp-* intercept stays FIRST (update.rs:402); (2) Windows: AttachConsole(ATTACH_PARENT_PROCESS) + rebind stdout/stderr BEFORE parsing (clap's help/errors are invisible without it; known cosmetic PowerShell prompt-interleave wart is acceptable); (3) clap parse; (4) launch. Register the hidden dev flags (--hud-gallery, --egui-shot, --settings-shot, --light, --tab, --welcome, --metrics) as hide=true so clap doesn't error on them. Parse-error fallback: no console attached (double-click / file association) -> existing Message dialog instead of a silent exit; console -> normal stderr + exit 2. Flag set (long + short where sensible), all mapping to existing state per the 2026-07-11 survey: --fullscreen/-f, --windowed/-w (exist); --recursive/-r, --no-recursive (exist); --info/--no-info (settings.show_image_info); --details (Panels.inspector, the Shift+I inspector); --folders (folder_tree_open); --slideshow[=SECS] (slideshow + interval); --scale <fit|fill|original> (scale_mode); --theme <light|dark|system> (appearance_mode); --mute (mute_live_audio); --shuffle (NEW small feature: start nav in the precomputed pb-core shuffle order - randomness today is per-keypress, not a mode); --version (build.rs build-id stamp, same string as About). Exit codes: 0 ok, 2 usage/bad path (with stderr message when console attached). Docs: README CLI section; optional clap_complete completions later. Estimate: 1-2 focused days; the AttachConsole shim is the only fiddly part.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "subtasks": []
+      },
+      {
+        "id": 79,
+        "title": "Basic video-clip playback (mp4/m4v/mov + per-platform webm/avi) via the existing motion pipeline",
+        "description": "Play the short video clips that show up sprinkled through photo libraries, by extending the Live Photo motion pipeline - NOT by building a video player. The 2026-07-11 survey confirmed the per-platform decoders are already codec-general (MF source reader / AVAssetReader / FFmpeg open any video stream; mf_video.rs:136-148) and the full pipeline exists: MotionChunk streaming, wall-clock pacing, pause, frame-step, and audio from the file's own track. Scope line (hard): clips that fit the existing whole-clip-in-RAM model (600 frames / 1.5 GB caps ~= 10-20 s at display-fit res). Longer videos truncate with a visible 'clip truncated' toast. NO seeking/scrub timeline, NO A/V sync engineering, NO long-form playback - that is the 'massive project' explicitly out of scope.",
+        "details": "Four gaps to close: (1) Extension allowlist: is_supported_extension (pb-decode lib.rs:478, currently asserts mp4 is rejected) gains mp4/m4v/mov everywhere; webm/avi per-platform where the backend can open them (Windows webm only via the Web Media Extensions Store package - same graceful-absence pattern as HEVC/AV1 stills; macOS no webm/avi; Linux FFmpeg everything). (2) Item shape: videos become first-class items with a poster frame (decode frame 0 via the same motion backend, capped to display fit) feeding the resident ring; the item's motion path is itself. CRITICAL dedup rule: a .mov that is a Live Photo companion (same-stem sibling still, engine.rs:536 companion_motion) must NOT appear as its own item or every Live Photo lists twice. (3) Semantics: new AnimationKind::Video - proper codec label (mf_video.rs:231 hardcodes 'Live Photo'), play-once-then-park (P replays), NO 450ms revert-to-still (Live-Photo-only behavior), audio starts/stops with playback as today. (4) Caps + truncation toast; consider a lower decode res for longer clips before truncating. Out of scope: archive-embedded videos (motion decoders open by path; archive entries have none - same limitation as Live Photos in archives today). Privacy: unchanged, read-only. Estimate: 3-5 days including corpus verification.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "subtasks": []
       }
     ]
   }
