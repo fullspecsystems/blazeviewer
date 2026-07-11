@@ -7,13 +7,6 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
-### Added
-- **Animated AVIF now plays on Windows.** Files with an AVIF image sequence (the `avis` format)
-  show the play hint and loop like a GIF, with correct frame timing and wide-gamut color.
-  HDR animated AVIFs deliberately stay on the still path, where they render in full HDR
-  quality rather than a washed-out clamped animation. Animated HEIC stays first-frame-static
-  on Windows (it uses HEVC, which this decoder does not handle).
-
 ### Fixed
 - **The folder tree (Shift+F) now shows for ZIP and 7z archives.** Opening an archive that has
   internal folders showed an empty "Folders" panel. The panel was reading only the on-disk folder
@@ -63,6 +56,11 @@ with any pre-release suffix carried only by the tag.
   same hands-off updating Windows and macOS already have, so you no longer re-download the AppImage
   by hand. Update checks send only your version and CPU architecture, never anything about the
   photos you view. (If the AppImage is installed somewhere you can't write to, it's left untouched.)
+- **Animated AVIF now plays on Windows.** Files with an AVIF image sequence (the `avis` format)
+  show the play hint and loop like a GIF, with correct frame timing and wide-gamut color.
+  HDR animated AVIFs deliberately stay on the still path, where they render in full HDR
+  quality rather than a washed-out clamped animation. Animated HEIC stays first-frame-static
+  on Windows (it uses HEVC, which this decoder does not handle).
 - **Animated AVIF now plays on Linux.** Multi-frame `.avif` files (and HEIC image sequences) show
   the first frame as usual and play the full animation on `P`, looping like a GIF — previously they
   were stuck on the first frame. (Wide-gamut/HDR sequences play but their colors read a touch
