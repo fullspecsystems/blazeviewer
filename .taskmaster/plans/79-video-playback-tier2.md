@@ -25,7 +25,7 @@ Windows/macOS (no OS demuxer — graceful "can't play"; self-selects toward came
 | Poster | **First non-black frame**, always: cheap mean-luma walk, not semantic frame picking. |
 | UX shape | Identical to Live Photos/animated images: poster + play badge, `P` to play. |
 | Seeking | **`←`/`→` = ±2 s while a video is playing; holding scrubs** (auto-repeat of coalesced seeks). Overrides pan/nav *only during video playback*, and pan wins when the view is zoomed with horizontal overflow (rare for video). `Space`/`Backspace` keep navigating; everything else unchanged. |
-| Long content | 2 s is tuned for short clips; `Shift+←/→` = 30 s for long files (constant; revisit only if real use demands). |
+| Long content | 2 s is tuned for short clips; `Shift+←/→` = **15 s** for longer files (owner-revised 2026-07-11 from 30 s — 30 s jumps only pay off on genuinely long files, which are edge content here; constant, revisit only if real use demands). |
 | Loop semantics | `AnimationKind::Video`: play once, park on the last frame; `P` replays; **no** Live-Photo revert-to-still. |
 
 ## Verified current state (2026-07-11 survey; key anchors)
@@ -149,7 +149,7 @@ must NOT appear as its own item — otherwise every Live Photo lists twice.
 5. **A/V sync.** Audio-position master clock + smoothing; pause/resume/mute/seek correctness;
    Linux incremental audio. *Accept:* sync probe (tone-blip + flash-frame fixture) stays
    within ~50 ms over 5 min incl. two pause/resume cycles.
-6. **Seeking.** Reopen-at-keyframe per backend; ±2 s / Shift 30 s; coalescing; HUD position
+6. **Seeking.** Reopen-at-keyframe per backend; ±2 s / Shift 15 s; coalescing; HUD position
    pill; audio repositioning; key-resolution gating vs pan/nav. *Accept:* hold-→ scrubs
    smoothly through a 4-min clip; seek lands within one keyframe interval; photos' arrow
    behavior byte-identical when no video is playing.
