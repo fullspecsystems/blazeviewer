@@ -53,6 +53,30 @@ cargo run -p pb-app --release -- --windowed                   # dev window; then
 At runtime you can also **double-click** an image (once installed), **drag-and-drop**
 photos or a folder onto the window, or press **`O`** for the native open dialog.
 
+### Command-line options
+
+Run `photoblaze --help` for the full list. Every option shapes a **single launch**
+and never changes your saved settings.
+
+| Option | Effect |
+|---|---|
+| `PATH...` | Files, a folder, or an archive (`.zip` / `.7z`) to open |
+| `-w, --windowed` / `-f, --fullscreen` | Start windowed or borderless-fullscreen |
+| `-r, --recursive` / `--no-recursive` | Include subfolders, or open the folder flat |
+| `--info` / `--no-info` | Show or hide the info line on launch |
+| `--details` / `--folders` | Open the image-details (Inspector) / folder-tree panel |
+| `--slideshow[=SECS]` | Start a slideshow, optionally at SECS per slide |
+| `--shuffle` | Navigate in random (shuffle) order |
+| `--reverse` | Play backward — with `--shuffle`, a reverse shuffle |
+| `--scale fit\|fill\|original` | Initial scale mode |
+| `--theme light\|dark\|system` | Light / dark theme for this launch |
+| `--mute` | Mute Live Photo audio |
+| `--start-at N\|NAME` | Open at photo N (1-based) or the first name match |
+| `-h, --help` / `-V, --version` | Print help / version and exit |
+
+Encrypted archives are opened by entering the password in the viewer, not on the
+command line.
+
 ### Keys
 
 | Key | Action |

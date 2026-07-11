@@ -19,6 +19,7 @@ members = [
     "crates/pb-ui",
     "crates/pb-hud",
     "crates/pb-app-core",
+    "crates/pb-cli",
     "crates/pb-app",
     # macOS-only FFI staticlib for the SwiftUI/AppKit host (NS1). Its swift-bridge deps
     # are target-gated to macOS, so on Windows/Linux CI (`--workspace`) it builds an empty
@@ -50,6 +51,7 @@ pb-render = { path = "crates/pb-render" }
 pb-ui = { path = "crates/pb-ui" }
 pb-hud = { path = "crates/pb-hud" }
 pb-app-core = { path = "crates/pb-app-core" }
+pb-cli = { path = "crates/pb-cli" }
 
 
 # Dev profile: keep OUR crates at a light opt-level (fast incremental compiles,

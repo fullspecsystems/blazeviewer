@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 
 use std::collections::HashSet;
 
-use pb_core::{full_ring, prefetch_targets, prefetch_targets_scanning, Playlist, ResidentRing};
+use pb_core::{
+    full_ring, prefetch_targets, prefetch_targets_scanning, Playlist, ResidentRing, ShuffleOrder,
+};
 use pb_decode::{read_exif_fields, FitBox};
 use pb_render::{test_pattern, Rotation, ScaleMode, ViewTransform, MAX_ZOOM, MIN_ZOOM};
 use pb_source::{FsSource, PhotoSource};
@@ -27,6 +29,7 @@ use crate::contract;
 use crate::decode_pool::Outcome;
 use crate::engine::*;
 use crate::keymap::Keymap;
+use crate::launch::{LaunchOverrides, StartAt};
 use crate::panels::{
     DescribeBody, DescribePanel, DetailRow, DetailsPanel, HelpPanel, HelpSection, TextBody,
     TextPanel,
@@ -202,6 +205,7 @@ impl AppCore {
             live_revert_at: None,
             keymap: Keymap::defaults(),
             settings,
+            launch: LaunchOverrides::default(),
             effects: Vec::new(),
         }
     }
@@ -340,7 +344,10 @@ impl AppCore {
             // effects). The native menu's mute check re-asserts on the next per-tick
             // `apply_menu_state` diff, so no explicit refresh is needed here.
             Action::MuteLiveAudio => {
-                let muted = !self.settings.mute_live_audio;
+                // An explicit toggle supersedes a `--mute` launch override and persists the
+                // user's choice (clearing the session override so it no longer masks the setting).
+                let muted = !self.effective_mute();
+                self.launch.mute = None;
                 self.settings.mute_live_audio = muted;
                 self.settings.save();
                 if muted {
@@ -799,12 +806,17 @@ impl AppCore {
         }
         if !self.scan_bootstrapped {
             self.scan_bootstrapped = true;
+            // A `--start-at` / `--shuffle` / `--reverse` launch chooses the first photo shown over
+            // this bootstrap batch (the deck wasn't listed at construction); else the plan's cursor.
+            let start = self
+                .launch_start_index(&*resolved.source)
+                .unwrap_or(resolved.start);
             self.rebuild_playlist(
                 resolved.source,
                 resolved.root,
                 resolved.scan_root,
                 resolved.recursive,
-                resolved.start,
+                start,
             );
         } else {
             self.extend_playlist(resolved.source);
@@ -2529,6 +2541,103 @@ impl AppCore {
 
     /// Advance one photo (sequential or random). The gated engine path: present on
     /// a ring hit, else hold the previous frame + prefetch while the decode lands.
+    /// Apply the session-only CLI launch overrides (task #78) to live/launch state. Called once
+    /// by the shell right after constructing the core. **Never mutates [`Self::settings`]**, so no
+    /// override can leak to disk on a later save (privacy #2): the settings-shaped values that are
+    /// read *live* (`--theme`, `--mute`) are served from `self.launch` via [`Self::effective_appearance`]
+    /// / [`Self::effective_mute`]; the rest map to transient live state (view mode, info line, nav
+    /// direction, panels, slideshow). `--start-at` and the shuffle/reverse *start position* are
+    /// resolved against the deck later (they need the — possibly deferred — scan to list its entries).
+    pub fn apply_launch_overrides(&mut self, overrides: &LaunchOverrides) {
+        self.launch = overrides.clone();
+        // Initial scale mode (8/9/0 still switch it live afterward).
+        if let Some(scale) = self.launch.scale {
+            self.view.mode = scale_mode_of(scale);
+        }
+        // Info line launch state (--info / --no-info, else the saved default).
+        self.info_line = self
+            .launch
+            .show_info
+            .unwrap_or(self.settings.show_image_info);
+        // --shuffle / --reverse pick the launch nav; the slideshow + hold-to-fly auto-advance in
+        // it (manual Next/Prev still steer normally). See `LaunchOverrides::launch_nav`.
+        self.last_nav = self.launch.launch_nav();
+        if self.launch.open_details {
+            self.panels.open_inspector(InspectorTab::Details);
+        }
+        if self.launch.open_folders {
+            self.folder_tree_open = true;
+        }
+        if let Some(ss) = self.launch.slideshow {
+            if let Some(secs) = ss.interval_secs {
+                self.slideshow.interval = slideshow::clamp_interval(Duration::from_secs_f64(secs));
+            }
+            self.slideshow.on = true;
+            self.last_present = Some(self.now);
+        }
+        // --theme / --mute deliberately stay OUT of `self.settings` (see the doc comment); the
+        // effective_* helpers below fold them in for live reads.
+
+        // Start position for a deck already resolved at construction (an explicit file list). A
+        // deferred folder / archive scan is empty here, so it applies the same start when its first
+        // batch bootstraps (`apply_scan_batch`), where the deck is finally listed.
+        if !self.playlist.is_empty() {
+            if let Some(idx) = self.launch_start_index(&*self.source) {
+                self.playlist.jump_to(idx);
+            }
+        }
+    }
+
+    /// The initial cursor a `--start-at` / `--shuffle` / `--reverse` launch wants over `source`
+    /// (task #78), or `None` when no start override is set (the plan's own cursor stands).
+    /// Precedence: an explicit `--start-at` wins; else `--shuffle` starts on a random photo; else
+    /// `--reverse` starts on the last. For a **streamed** folder scan `source` is the first batch,
+    /// so a large `--start-at N` (or the random pick) is over what has loaded so far.
+    fn launch_start_index(&self, source: &dyn PhotoSource) -> Option<usize> {
+        let len = source.len();
+        if len == 0 {
+            return None;
+        }
+        if let Some(start_at) = &self.launch.start_at {
+            return Some(match start_at {
+                // 1-based on the command line; clamp into the deck.
+                StartAt::Index(n) => n.saturating_sub(1).min(len - 1),
+                // First file whose base name matches (case-insensitive); fall back to the first
+                // photo if not found.
+                StartAt::Name(name) => (0..len)
+                    .find(|&i| {
+                        let full = source.name(i);
+                        let base = full.rsplit(['/', '\\']).next().unwrap_or(full);
+                        base.eq_ignore_ascii_case(name.trim())
+                    })
+                    .unwrap_or(0),
+            });
+        }
+        if self.launch.shuffle {
+            // Random start: position 0 of a fresh shuffle order over the deck (a random index).
+            return ShuffleOrder::new(len, crate::engine::fresh_shuffle_seed())
+                .at(0)
+                .map(|i| i as usize);
+        }
+        if self.launch.reverse {
+            return Some(len - 1);
+        }
+        None
+    }
+
+    /// The light/dark preference in effect: a `--theme` launch override wins for this session,
+    /// else the saved [`settings::AppearanceMode`]. Read at every place the theme is applied so a
+    /// scripted `--theme dark` holds without ever touching (or persisting) the saved value.
+    pub fn effective_appearance(&self) -> settings::AppearanceMode {
+        self.launch.theme.unwrap_or(self.settings.appearance_mode)
+    }
+
+    /// Whether Live Photo audio is muted right now: a `--mute` launch override wins for this
+    /// session, else the saved `mute_live_audio`. Cleared by an explicit user mute toggle.
+    pub fn effective_mute(&self) -> bool {
+        self.launch.mute.unwrap_or(self.settings.mute_live_audio)
+    }
+
     pub fn advance(&mut self, nav: Nav) {
         // Any in-deck navigation ends an Open-Parent (⌘↑) climb: the next ⌘↑ must restart
         // from the folder you navigated to, not resume from the stale climb rung (which would
@@ -3105,7 +3214,7 @@ impl AppCore {
     /// an animation (no audio track), a silent clip, or when muted. Called when the motion
     /// starts playing from frame 0.
     pub fn start_live_audio(&mut self, item: usize) {
-        if self.settings.mute_live_audio {
+        if self.effective_mute() {
             self.effects.push(contract::CoreEffect::StopLiveAudio);
             return;
         }
@@ -3149,7 +3258,7 @@ impl AppCore {
     /// the live OS theme — `System` follows [`os_dark`](AppCore::os_dark) (kept current
     /// by the shell's `OsThemeChanged` reports); `Light`/`Dark` pin it.
     pub fn effective_dark(&self) -> bool {
-        match self.settings.appearance_mode {
+        match self.effective_appearance() {
             settings::AppearanceMode::System => self.os_dark,
             settings::AppearanceMode::Light => false,
             settings::AppearanceMode::Dark => true,
@@ -3221,6 +3330,16 @@ impl AppCore {
         let scale_changed = old.scale_mode != self.settings.scale_mode;
         if scale_changed {
             self.set_scale_mode(scale_mode_of(self.settings.scale_mode));
+        }
+
+        // An explicit Settings change to theme / mute supersedes a CLI session override
+        // (--theme / --mute) for the rest of this launch, so the dialog choice takes effect and
+        // the override no longer masks it (and the saved value below is the user's real choice).
+        if old.appearance_mode != self.settings.appearance_mode {
+            self.launch.theme = None;
+        }
+        if old.mute_live_audio != self.settings.mute_live_audio {
+            self.launch.mute = None;
         }
 
         // Persist the whole model (atomic write; best-effort).
@@ -6181,6 +6300,73 @@ mod tests {
             height: 1,
             scale_factor: 1.0,
         })
+    }
+
+    /// A five-item source named `a.jpg`..`e.jpg` under a folder, for the launch-start tests.
+    fn five_photos() -> Arc<dyn PhotoSource> {
+        Arc::new(FsSource::new(
+            ["a", "b", "c", "d", "e"]
+                .iter()
+                .map(|n| PathBuf::from(format!("photos/{n}.jpg")))
+                .collect(),
+        ))
+    }
+
+    #[test]
+    fn launch_start_index_none_without_a_start_override() {
+        let core = test_core();
+        assert_eq!(core.launch_start_index(&*five_photos()), None);
+    }
+
+    #[test]
+    fn launch_start_index_start_at_is_one_based_and_clamped() {
+        let src = five_photos();
+        let idx = |n| {
+            let mut core = test_core();
+            core.launch.start_at = Some(StartAt::Index(n));
+            core.launch_start_index(&*src)
+        };
+        assert_eq!(idx(1), Some(0)); // 1-based → first
+        assert_eq!(idx(3), Some(2));
+        assert_eq!(idx(99), Some(4)); // clamps to the last
+        assert_eq!(idx(0), Some(0)); // degenerate 0 → first
+    }
+
+    #[test]
+    fn launch_start_index_start_at_name_matches_basename_case_insensitively() {
+        let src = five_photos();
+        let by_name = |name: &str| {
+            let mut core = test_core();
+            core.launch.start_at = Some(StartAt::Name(name.to_string()));
+            core.launch_start_index(&*src)
+        };
+        assert_eq!(by_name("c.jpg"), Some(2));
+        assert_eq!(by_name("C.JPG"), Some(2)); // case-insensitive
+        assert_eq!(by_name("missing.jpg"), Some(0)); // not found → first
+    }
+
+    #[test]
+    fn launch_start_index_reverse_starts_on_the_last_photo() {
+        let mut core = test_core();
+        core.launch.reverse = true;
+        assert_eq!(core.launch_start_index(&*five_photos()), Some(4));
+    }
+
+    #[test]
+    fn launch_start_index_shuffle_picks_an_in_range_photo() {
+        let mut core = test_core();
+        core.launch.shuffle = true;
+        let idx = core.launch_start_index(&*five_photos());
+        assert!(matches!(idx, Some(i) if i < 5));
+    }
+
+    #[test]
+    fn launch_start_index_start_at_wins_over_shuffle_and_reverse() {
+        let mut core = test_core();
+        core.launch.start_at = Some(StartAt::Index(2));
+        core.launch.shuffle = true;
+        core.launch.reverse = true;
+        assert_eq!(core.launch_start_index(&*five_photos()), Some(1));
     }
 
     #[test]

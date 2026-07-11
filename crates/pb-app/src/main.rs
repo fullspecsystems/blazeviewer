@@ -70,6 +70,7 @@ mod reveal;
 mod sdf_rect;
 // Velopack per-user installer lifecycle hooks + background auto-update (Windows ship path).
 mod update;
+mod win_console;
 // The action vocabulary, physical-key model, keymap, and slideshow timing now live
 // in the platform-neutral `pb-app-core` (NS0). Re-export them at the crate root so
 // the existing `crate::action` / `crate::keymap` / `crate::pb_key` / `crate::slideshow`
@@ -439,6 +440,7 @@ enum DialogOutcome {
 
 impl App {
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         windowed: bool,
         root: PathBuf,
@@ -447,6 +449,8 @@ impl App {
         recursive: bool,
         scan_root: Option<PathBuf>,
         metrics: StageTimes,
+        settings: settings::Settings,
+        overrides: &pb_app_core::LaunchOverrides,
     ) -> Self {
         let playlist = Playlist::new(source.len(), fresh_shuffle_seed()).with_cursor(start);
         let decode: Arc<DecodeFn> = Arc::new(|src: &dyn PhotoSource, item, fit, allow_preview| {
@@ -465,169 +469,174 @@ impl App {
             r
         });
         let (pool, results) = DecodePool::new(recommended_workers(), POOL_BUDGET_BYTES, decode);
-        // Preferences (nav feel, defaults, …); the hold loop reads them live.
-        let settings = settings::Settings::load();
+        // `settings` (pristine, loaded by `main`) drives the launch defaults; the hold loop reads
+        // it live. CLI overrides apply to live state via `apply_launch_overrides` below — never to
+        // `settings`, so a later save can't leak them to disk (privacy #2).
+        let mut core = AppCore {
+            now: Instant::now(),
+            viewport: Viewport {
+                width: 1,
+                height: 1,
+                scale_factor: 1.0,
+            },
+            held: HashMap::new(),
+            // Pointer-driven hold-to-fly (toolbar nav/random press-and-hold); the winit
+            // shell has no such toolbar, so it starts idle like the other constructors.
+            pointer_nav: None,
+            last_present: None,
+            frame_interval: Duration::from_micros(8_333),
+            hold_start: None,
+            initial_delay: Duration::from_millis(settings.hold_delay_ms as u64),
+            slideshow: slideshow::Slideshow {
+                interval: Duration::from_secs_f64(settings.slideshow_interval_secs),
+                ..slideshow::Slideshow::default()
+            },
+            mods: contract::Modifiers::NONE,
+            esc_guard_until: None,
+            persist_prefs: true, // a live shell persists the remembered last_folder
+            os_dark: true,       // dark until `resumed` reads the real window theme (#46)
+            hud_dark: true,      // matches the Hud's default Theme::DARK
+            fit: None,
+            // Start in the user's default scale mode (8/9/0 still switch it live).
+            view: ViewTransform {
+                mode: scale_mode_of(settings.scale_mode),
+                ..ViewTransform::default()
+            },
+            last_cursor: None,
+            dragging: false,
+            rotations: HashMap::new(),
+            zoom_started: None,
+            zoom_last: None,
+            pan_started: None,
+            pan_last: None,
+            resize_settle_at: None,
+            geometry_save_at: None,
+            windowed,
+            meta_cache: HashMap::new(),
+            current: None,
+            exif_cache: HashMap::new(),
+            recognized_text: HashMap::new(),
+            text_scan: None,
+            text_gen: 0,
+            descriptions: HashMap::new(),
+            describe_scan: None,
+            describe_gen: 0,
+            pool,
+            results,
+            ring: ResidentRing::new(0),
+            ahead: 8,
+            behind: 2,
+            failed: HashSet::new(),
+            deleted: HashSet::new(),
+            preview_resident: HashSet::new(),
+            pending_uploads: Vec::new(),
+            upgrade_done: HashSet::new(),
+            last_upgrade_set: Vec::new(),
+            full_requested_at: HashMap::new(),
+            live_motion_cache: HashMap::new(),
+            metrics,
+            // A launch straight onto an archive (the resolve_playlist
+            // safety-net path) starts unscoped, like apply_archive stamps.
+            archive_scope: source.container().is_some().then(|| ArchiveScope {
+                full: Arc::clone(&source),
+                prefix: String::new(),
+            }),
+            source,
+            playlist,
+            targets: Vec::new(),
+            last_nav: Nav::Forward,
+            displayed_item: None,
+            target_item: None,
+            compare_pin: None,
+            compare_return: None,
+            compare_pin_id: None,
+            compare_carry: None,
+            epoch: 1,
+            root,
+            scan_root,
+            recursive,
+            scanning: false,
+            launching: false,
+            dialog_open: false,
+            archive_loading: false,
+            redraw_pending: false,
+            scan_bootstrapped: false,
+            password_archive: None,
+            pending_delete: None,
+            pending_confirm_delete: None,
+            info_line: false,
+            info_line_shown: false,
+            info_line_item: None,
+            info_line_w: 0,
+            info_line_h: 0,
+            panels: pb_app_core::Panels::default(),
+            // The rich panels (Help / Inspector / folder tree) are presented by the
+            // egui overlay (task #54 Phase 4), so the core suppresses their CPU-HUD
+            // rasterization and emits `PanelsChanged` instead. The ephemeral layer
+            // (toasts, `i` line, play hint, empty-state) stays a CPU quad for now.
+            native_help: true,
+            last_help_visible: false,
+            // The egui overlay draws the welcome / empty-state buttons (task #54 Phase 4) —
+            // suppress the CPU-HUD open panel and let the shell render + hit-test them.
+            native_open: true,
+            last_open_visible: false,
+            native_inspector: true,
+            last_inspector_snap: None,
+            native_tree: true,
+            last_tree_visible: false,
+            overlay_shown: false,
+            overlay_item: None,
+            toast: None,
+            native_toast: false,
+            // The egui overlay draws the info readout (task #54 Phase 4) — suppress the CPU
+            // HUD line and let the shell render + duck it around the panels.
+            native_info: true,
+            last_info_snap: None,
+            // The egui overlay draws the play hint (task #54 Phase 4) — the core only
+            // flash-signals it (bumps `play_hint_seq`); the shell renders + fades the pill.
+            native_play: true,
+            play_hint_seq: 0,
+            toast_native: None,
+            toast_seq: 0,
+            wait_started: None,
+            pie_finish: None,
+            pie_glow_started: None,
+            decode_ewma: 0.25,
+            pie_drawn: false,
+            pie_pushed: None,
+            chip_sig: None,
+            chip_built: Instant::now(),
+            folder_tree_open: false,
+            folder_tree_sig: None,
+            folder_tree_panel: None,
+            folder_tree_counts: None,
+            tree_io: None,
+            fs_tree: None,
+            fs_tree_io: None,
+            climb_anchor: None,
+            hud: Hud::load(),
+            renderer: None,
+            undo_stack: Vec::new(),
+            playback: None,
+            anim_frame_shown_at: None,
+            anim_decode: None,
+            anim_stream: None,
+            prepared: None,
+            anim_gen: 0,
+            anim_hint_shown_for: None,
+            framestep_started: None,
+            framestep_last: None,
+            live_revert_at: None,
+            keymap: Keymap::load(),
+            settings,
+            launch: pb_app_core::LaunchOverrides::default(),
+            effects: Vec::new(),
+        };
+        // Session-only CLI launch overrides → live state (never persisted); see the method.
+        core.apply_launch_overrides(overrides);
         Self {
             window: None,
-            core: AppCore {
-                now: Instant::now(),
-                viewport: Viewport {
-                    width: 1,
-                    height: 1,
-                    scale_factor: 1.0,
-                },
-                held: HashMap::new(),
-                // Pointer-driven hold-to-fly (toolbar nav/random press-and-hold); the winit
-                // shell has no such toolbar, so it starts idle like the other constructors.
-                pointer_nav: None,
-                last_present: None,
-                frame_interval: Duration::from_micros(8_333),
-                hold_start: None,
-                initial_delay: Duration::from_millis(settings.hold_delay_ms as u64),
-                slideshow: slideshow::Slideshow {
-                    interval: Duration::from_secs_f64(settings.slideshow_interval_secs),
-                    ..slideshow::Slideshow::default()
-                },
-                mods: contract::Modifiers::NONE,
-                esc_guard_until: None,
-                persist_prefs: true, // a live shell persists the remembered last_folder
-                os_dark: true,       // dark until `resumed` reads the real window theme (#46)
-                hud_dark: true,      // matches the Hud's default Theme::DARK
-                fit: None,
-                // Start in the user's default scale mode (8/9/0 still switch it live).
-                view: ViewTransform {
-                    mode: scale_mode_of(settings.scale_mode),
-                    ..ViewTransform::default()
-                },
-                last_cursor: None,
-                dragging: false,
-                rotations: HashMap::new(),
-                zoom_started: None,
-                zoom_last: None,
-                pan_started: None,
-                pan_last: None,
-                resize_settle_at: None,
-                geometry_save_at: None,
-                windowed,
-                meta_cache: HashMap::new(),
-                current: None,
-                exif_cache: HashMap::new(),
-                recognized_text: HashMap::new(),
-                text_scan: None,
-                text_gen: 0,
-                descriptions: HashMap::new(),
-                describe_scan: None,
-                describe_gen: 0,
-                pool,
-                results,
-                ring: ResidentRing::new(0),
-                ahead: 8,
-                behind: 2,
-                failed: HashSet::new(),
-                deleted: HashSet::new(),
-                preview_resident: HashSet::new(),
-                pending_uploads: Vec::new(),
-                upgrade_done: HashSet::new(),
-                last_upgrade_set: Vec::new(),
-                full_requested_at: HashMap::new(),
-                live_motion_cache: HashMap::new(),
-                metrics,
-                // A launch straight onto an archive (the resolve_playlist
-                // safety-net path) starts unscoped, like apply_archive stamps.
-                archive_scope: source.container().is_some().then(|| ArchiveScope {
-                    full: Arc::clone(&source),
-                    prefix: String::new(),
-                }),
-                source,
-                playlist,
-                targets: Vec::new(),
-                last_nav: Nav::Forward,
-                displayed_item: None,
-                target_item: None,
-                compare_pin: None,
-                compare_return: None,
-                compare_pin_id: None,
-                compare_carry: None,
-                epoch: 1,
-                root,
-                scan_root,
-                recursive,
-                scanning: false,
-                launching: false,
-                dialog_open: false,
-                archive_loading: false,
-                redraw_pending: false,
-                scan_bootstrapped: false,
-                password_archive: None,
-                pending_delete: None,
-                pending_confirm_delete: None,
-                info_line: false,
-                info_line_shown: false,
-                info_line_item: None,
-                info_line_w: 0,
-                info_line_h: 0,
-                panels: pb_app_core::Panels::default(),
-                // The rich panels (Help / Inspector / folder tree) are presented by the
-                // egui overlay (task #54 Phase 4), so the core suppresses their CPU-HUD
-                // rasterization and emits `PanelsChanged` instead. The ephemeral layer
-                // (toasts, `i` line, play hint, empty-state) stays a CPU quad for now.
-                native_help: true,
-                last_help_visible: false,
-                // The egui overlay draws the welcome / empty-state buttons (task #54 Phase 4) —
-                // suppress the CPU-HUD open panel and let the shell render + hit-test them.
-                native_open: true,
-                last_open_visible: false,
-                native_inspector: true,
-                last_inspector_snap: None,
-                native_tree: true,
-                last_tree_visible: false,
-                overlay_shown: false,
-                overlay_item: None,
-                toast: None,
-                native_toast: false,
-                // The egui overlay draws the info readout (task #54 Phase 4) — suppress the CPU
-                // HUD line and let the shell render + duck it around the panels.
-                native_info: true,
-                last_info_snap: None,
-                // The egui overlay draws the play hint (task #54 Phase 4) — the core only
-                // flash-signals it (bumps `play_hint_seq`); the shell renders + fades the pill.
-                native_play: true,
-                play_hint_seq: 0,
-                toast_native: None,
-                toast_seq: 0,
-                wait_started: None,
-                pie_finish: None,
-                pie_glow_started: None,
-                decode_ewma: 0.25,
-                pie_drawn: false,
-                pie_pushed: None,
-                chip_sig: None,
-                chip_built: Instant::now(),
-                folder_tree_open: false,
-                folder_tree_sig: None,
-                folder_tree_panel: None,
-                folder_tree_counts: None,
-                tree_io: None,
-                fs_tree: None,
-                fs_tree_io: None,
-                climb_anchor: None,
-                hud: Hud::load(),
-                renderer: None,
-                undo_stack: Vec::new(),
-                playback: None,
-                anim_frame_shown_at: None,
-                anim_decode: None,
-                anim_stream: None,
-                prepared: None,
-                anim_gen: 0,
-                anim_hint_shown_for: None,
-                framestep_started: None,
-                framestep_last: None,
-                live_revert_at: None,
-                keymap: Keymap::load(),
-                settings,
-                effects: Vec::new(),
-            },
+            core,
             pending_drops: Vec::new(),
             applied_appearance: None,
             menu: None,
@@ -1665,7 +1674,7 @@ impl App {
             self.core.recursive,
             !self.core.windowed, // `windowed` is the inverse of the fullscreen checkbox
             self.core.slideshow.on,
-            self.core.settings.mute_live_audio,
+            self.core.effective_mute(),
             self.core.can_save_rotation(),
             self.core.can_reveal(),
             self.dir_scan.is_some(),
@@ -1795,7 +1804,7 @@ impl App {
         if !self.menu_attached || !self.core.windowed {
             return;
         }
-        let theme = match self.core.settings.appearance_mode {
+        let theme = match self.core.effective_appearance() {
             settings::AppearanceMode::System => muda::MenuTheme::Auto,
             settings::AppearanceMode::Light => muda::MenuTheme::Light,
             settings::AppearanceMode::Dark => muda::MenuTheme::Dark,
@@ -1820,7 +1829,7 @@ impl App {
         if self.window.is_none() {
             return;
         }
-        let mode = self.core.settings.appearance_mode;
+        let mode = self.core.effective_appearance();
         if self.applied_appearance == Some(mode) {
             return;
         }
@@ -3403,6 +3412,41 @@ struct ArchiveLoad {
     progress: pb_source::OpenProgress,
 }
 
+/// The `--version` string: the crate version plus the git build id, matching the About box
+/// (`env!("CARGO_PKG_VERSION")` + `option_env!("PB_BUILD_ID")`, stamped by `build.rs`).
+fn cli_version() -> String {
+    match option_env!("PB_BUILD_ID") {
+        Some(id) => format!("{} ({id})", env!("CARGO_PKG_VERSION")),
+        None => env!("CARGO_PKG_VERSION").to_string(),
+    }
+}
+
+/// Render a clap parse result (`--help` / `--version` / a usage error) and exit. With output
+/// available we use clap's own formatting (stdout for help/version, stderr for errors). Without it
+/// (a genuine GUI launch with no console — double-click / association) we pop a native dialog *only
+/// for a real error* (`use_stderr`), so a bad flag isn't a silent failure; `--help` / `--version`
+/// are pointless in a GUI, so those just exit quietly. Exit code is clap's own: 0 for help/version,
+/// 2 for a usage error.
+fn report_cli_error_and_exit(err: pb_cli::clap::Error, have_output: bool) -> ! {
+    let code = err.exit_code();
+    if have_output {
+        let _ = err.print();
+    } else if err.use_stderr() {
+        show_startup_message_dialog(&err.render().to_string());
+    }
+    std::process::exit(code);
+}
+
+/// A native modal message for the no-console startup path (a parse error or a bad path from a
+/// double-click / association launch). Uses the OS dialog directly — no event loop needed yet.
+fn show_startup_message_dialog(text: &str) {
+    rfd::MessageDialog::new()
+        .set_title("PhotoBlaze")
+        .set_description(text)
+        .set_level(rfd::MessageLevel::Warning)
+        .show();
+}
+
 fn main() {
     // Velopack: installer lifecycle hooks + background auto-update. `velopack_startup` MUST run
     // before anything else — on an install/update/uninstall invocation it does its work and
@@ -3484,44 +3528,50 @@ fn main() {
         return;
     }
 
-    let cli_windowed = args.iter().any(|a| a == "--windowed" || a == "-w");
-    let cli_fullscreen = args.iter().any(|a| a == "--fullscreen" || a == "-f");
-    // Saved preferences drive the launch defaults (window mode + recursive scan); an
-    // explicit CLI flag always wins. A fresh install (defaults) starts windowed.
-    let startup_settings = settings::Settings::load();
-    let windowed = if cli_windowed {
-        true
-    } else if cli_fullscreen {
-        false
-    } else {
-        !startup_settings.start_fullscreen()
-    };
-    let force_recursive = args.iter().any(|a| a == "--recursive" || a == "-r");
-    let force_flat = args.iter().any(|a| a == "--no-recursive");
-    let metrics_on = args.iter().any(|a| a == "--metrics");
+    // Attach to the parent console (Windows GUI-subsystem builds) so clap's help / version /
+    // error output is visible; elsewhere stdout already works. The return says whether output is
+    // available (a console, pipe, or redirect) — which decides how a *real* parse error is
+    // reported (stderr vs. a native dialog). Help / version never dialog.
+    let have_output = win_console::attach_parent_console();
 
-    // Every entry point (CLI, double-click via association, drag-drop, picker)
-    // funnels through the same pure plan: classify the paths, decide the source +
-    // cursor, then scan. A folder opens recursively by default; `--no-recursive`
-    // forces flat and `-r` forces recursive on the command line.
-    let positional: Vec<PathBuf> = args
-        .iter()
-        .filter(|a| !a.starts_with('-'))
-        .map(PathBuf::from)
-        .collect();
-    // A bare launch (no path) opens the empty state — nothing is auto-opened (owner
-    // call, 2026-07-03: reversed from the brief reopen-last-folder behavior). The
-    // remembered `settings::last_folder` only seeds the Open dialog's start folder.
-    let mut plan = open::plan(classify_inputs(positional));
+    // Parse the real CLI via the shared pb-cli parser. Help / version / bad input all come back
+    // as a clap::Error (the lib never calls process::exit); we render + exit here.
+    let cli = match pb_cli::parse_from(std::env::args_os(), &cli_version()) {
+        Ok(cli) => cli,
+        Err(e) => report_cli_error_and_exit(e, have_output),
+    };
+    let overrides = cli.to_overrides();
+
+    // Saved preferences drive the launch defaults; the session overrides layer onto live state in
+    // `apply_launch_overrides`. Window mode + recursive resolve here (pre-window): a flag wins,
+    // else the saved preference. A fresh install (defaults) starts windowed.
+    let startup_settings = settings::Settings::load();
+    let windowed = overrides
+        .windowed
+        .unwrap_or_else(|| !startup_settings.start_fullscreen());
+    let metrics_on = overrides.metrics;
+
+    // Mixed strictness: a nonexistent positional path is a usage error (exit 2), reported to the
+    // console when there is one, else a dialog — never a silent exit.
+    for p in &cli.paths {
+        if !p.exists() {
+            let msg = format!("photoblaze: no such file or folder: {}", p.display());
+            if have_output {
+                eprintln!("{msg}");
+            } else {
+                show_startup_message_dialog(&msg);
+            }
+            std::process::exit(2);
+        }
+    }
+
+    // Every entry point (CLI, double-click via association, drag-drop, picker) funnels through the
+    // same pure plan: classify the paths, decide the source + cursor, then scan. A bare launch
+    // opens the empty state (nothing is auto-opened). A folder opens recursively by default;
+    // `--recursive` / `--no-recursive` override the saved preference.
+    let mut plan = open::plan(classify_inputs(cli.paths.clone()));
     if let Source::Scan { recursive, .. } = &mut plan.source {
-        // Default from the saved preference; an explicit CLI flag overrides it.
-        *recursive = startup_settings.recursive;
-        if force_recursive {
-            *recursive = true;
-        }
-        if force_flat {
-            *recursive = false;
-        }
+        *recursive = overrides.recursive.unwrap_or(startup_settings.recursive);
     }
     // An archive **or folder** launch (CLI / double-click) is deferred until the window
     // exists, so the viewer shows immediately: an archive loads behind the spinner / dialogs,
@@ -3565,6 +3615,8 @@ fn main() {
         resolved.recursive,
         resolved.scan_root,
         metrics,
+        startup_settings,
+        &overrides,
     );
     // Hand the deferred open (archive or folder scan) to the app; `resumed` fires it once
     // the window and engine are up. The plan carries the startup recursive override.
