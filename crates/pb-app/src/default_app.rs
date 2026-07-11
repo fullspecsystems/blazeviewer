@@ -150,11 +150,7 @@ mod win {
     pub fn ensure_user_registration() -> windows::core::Result<()> {
         let caps = create_key(HKEY_CURRENT_USER, w!("SOFTWARE\\PhotoBlaze\\Capabilities"))?;
         set_string(caps.0, w!("ApplicationName"), super::APP_NAME)?;
-        set_string(
-            caps.0,
-            w!("ApplicationDescription"),
-            "A fast, keyboard-driven image viewer.",
-        )?;
+        set_string(caps.0, w!("ApplicationDescription"), pb_app_core::TAGLINE)?;
 
         let assoc = create_key(
             HKEY_CURRENT_USER,

@@ -28,6 +28,7 @@ use crate::animation::{AnimDecode, AnimStream, Playback, Prepared};
 use crate::contract::CoreEffect;
 use crate::decode_pool::{DecodePool, Outcome};
 use crate::keymap::Keymap;
+use crate::launch::LaunchOverrides;
 use crate::metrics::StageTimes;
 use crate::overlay::{Panels, Toast, TreePanel};
 use crate::settings::Settings;
@@ -66,7 +67,7 @@ pub struct ArchiveScope {
 /// (`shift+enter`). All are gated + self-paced + prefetchable the same way (random
 /// walks a known shuffle order, so its next/prior targets are knowable — see
 /// `pb_core::ShuffleOrder`).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Nav {
     Forward,
     Backward,
@@ -502,8 +503,14 @@ pub struct AppCore {
     /// The active keybindings (loaded from `keymap.toml`; editable via the shortcut editor).
     pub keymap: Keymap,
     /// Persisted user preferences (nav feel, defaults, saved window geometry). The hold loop
-    /// reads them live; the Settings dialog edits + saves them.
+    /// reads them live; the Settings dialog edits + saves them. **Kept pristine** — CLI launch
+    /// overrides never fold in here, so a save never leaks them to disk (task #78 / privacy #2).
     pub settings: Settings,
+    /// Session-only CLI launch overrides (task #78), applied by [`AppCore::apply_launch_overrides`].
+    /// Stored so the two settings read *live* (`--theme`, `--mute`) resolve through
+    /// [`AppCore::effective_appearance`] / [`AppCore::effective_mute`] without mutating (and thus
+    /// persisting) [`Self::settings`]. Default = no overrides.
+    pub launch: LaunchOverrides,
 
     // --- Effect sink (NS0 5.5 / Phase 0.1) ---
     /// Orchestration pushes [`CoreEffect`]s here instead of touching the OS directly; the

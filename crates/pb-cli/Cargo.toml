@@ -1,0 +1,23 @@
+[package]
+name = "pb-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors = ["JD Lien <jd@jdlien.com>"]
+# The PhotoBlaze CLI surface (task #78): the clap argument parser + the pure mapping
+# into `pb_app_core::LaunchOverrides`. A *library* (not part of the `pb-app` binary) so
+# it can be shared: `pb-app` (the winit shell) links it today, and the macOS FFI host
+# (`pb-mac-ffi`) can link the SAME parser later — Swift feeds its `CommandLine.arguments`
+# through `parse_from`, so there is one source of truth for the flag surface. Kept out of
+# `pb-app-core` on purpose: the core stays clap-free / toml-only per NS0; parsing is a
+# shell/entrypoint concern, and only the parsed *result* (LaunchOverrides) lives in core.
+description = "PhotoBlaze CLI parser: clap arguments mapped into pb_app_core::LaunchOverrides, shared across shells."
+
+[dependencies]
+# The parsed result type + the slideshow clamp bounds. No other core surface is needed:
+# pb-cli produces plain data; the shells apply it.
+pb-app-core = { workspace = true }
+# clap 4 (derive). Pure Rust, cross-platform (Windows x64/ARM64, Linux, macOS), no build
+# risk. Binary/parse cost is launch-only; buys polished --help, typo suggestions, value
+# validation, and (later) shell completions for a low-usage feature.
+clap = { version = "4", features = ["derive"] }
