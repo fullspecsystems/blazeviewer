@@ -236,6 +236,11 @@ today**, so #76 measures rather than rebuilds it:
 1. **Pin + policy lock.** `-VcpkgRef` pin in `setup-libheif.ps1`; record the dav1d version;
    create the third-party notices file (dav1d BSD-2-Clause text; audit what libheif/libde265
    already require while there) and wire it into the shipped artifacts.
+   **✔ Done 2026-07-11:** pin = vcpkg `a0400024711b283056538ac19ced80b91a83c24c` (the
+   2026-06-26 tip both existing trees were already on → libheif 1.23.0, libde265 1.1.1,
+   **dav1d 1.5.3**; the shim's ABI target). `THIRD-PARTY-NOTICES.md` created (verbatim dav1d
+   1.5.3 COPYING; LGPL static-link compliance for libheif/libde265 flagged as a pre-existing
+   open item for the owner) and copied into the Velopack pack dir by `release-windows.ps1`.
 2. **Build plumbing.** `dav1d` feature (pb-decode + pb-app pass-through); **restructure
    `build.rs`** so libheif and dav1d are independent (kill the early return); vcpkg port
    install in the setup script; `cc` shim compilation; `dav1d.lib` preflight with actionable

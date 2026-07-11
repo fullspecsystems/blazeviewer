@@ -7,7 +7,10 @@
 .DESCRIPTION
   Idempotent — safe to re-run (e.g. after a `git pull` in the vcpkg tree, which
   reverts the portfile patch). It:
-    1. Clones + bootstraps vcpkg at $VCPKG_ROOT (default: ~/vcpkg) if absent.
+    1. Clones vcpkg at $VCPKG_ROOT (default: ~/vcpkg) if absent, pins the tree to the
+       recorded known-good commit (-VcpkgRef; carries libheif 1.23.0, libde265 1.1.1,
+       dav1d 1.5.3), and bootstraps the matching vcpkg.exe. The pin makes port versions
+       — and the C ABI our FFI builds against — reproducible across boxes (task #76).
     2. Patches the libheif portfile to add -DENABLE_PLUGIN_LOADING=OFF. This kills
        the dynamic-plugin scanner (which on Windows spams ~one LoadLibraryA per HEVC
        grid tile, ~98 per iPhone image, all failing) at the source. The statically
@@ -31,7 +34,11 @@
 [CmdletBinding()]
 param(
     [string]$VcpkgRoot = $(if ($env:VCPKG_ROOT) { $env:VCPKG_ROOT } else { "$env:USERPROFILE\vcpkg" }),
-    [string]$Triplet = "x64-windows-static-md"
+    [string]$Triplet = "x64-windows-static-md",
+    # The recorded known-good vcpkg commit (2026-06-26 tip: libheif 1.23.0, libde265 1.1.1,
+    # dav1d 1.5.3). Override to move the pin deliberately — then update this default so every
+    # box (x64, ARM64, CI) builds the same port versions.
+    [string]$VcpkgRef = "a0400024711b283056538ac19ced80b91a83c24c"
 )
 $ErrorActionPreference = "Stop"
 
@@ -40,6 +47,19 @@ if (-not (Test-Path "$VcpkgRoot\.git")) {
     Write-Host "Cloning vcpkg into $VcpkgRoot ..." -ForegroundColor Cyan
     git clone --depth 1 https://github.com/microsoft/vcpkg.git $VcpkgRoot
 }
+
+# 1b. Pin the tree to the recorded known-good commit — a bare clone tracks the moving tip, so
+# without this no ABI/version assumption is reproducible across boxes. `checkout -f` discards
+# the portfile patch; step 2 re-applies it. Drop vcpkg.exe on a ref change so the bootstrap
+# below rebuilds the tool version the tree expects.
+$head = git -C $VcpkgRoot rev-parse HEAD
+if ($head -ne $VcpkgRef) {
+    Write-Host "Pinning vcpkg to $VcpkgRef (was $head) ..." -ForegroundColor Cyan
+    git -C $VcpkgRoot fetch --depth 1 origin $VcpkgRef
+    git -C $VcpkgRoot checkout -f $VcpkgRef
+    if (Test-Path "$VcpkgRoot\vcpkg.exe") { Remove-Item "$VcpkgRoot\vcpkg.exe" -Force }
+}
+
 if (-not (Test-Path "$VcpkgRoot\vcpkg.exe")) {
     Write-Host "Bootstrapping vcpkg ..." -ForegroundColor Cyan
     & "$VcpkgRoot\bootstrap-vcpkg.bat" -disableMetrics

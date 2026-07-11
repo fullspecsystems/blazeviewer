@@ -142,6 +142,9 @@ $Feed = Join-Path $RepoRoot "dist\feed"
 if (Test-Path $Stage) { Remove-Item -Recurse -Force $Stage }
 New-Item -ItemType Directory -Force $Stage, $Feed | Out-Null
 Copy-Item $Exe (Join-Path $Stage "photoblaze.exe") -Force
+# Third-party license notices ship next to the exe — dav1d's BSD-2 (and friends) require the
+# license text to accompany binary distributions (see THIRD-PARTY-NOTICES.md, task #76).
+Copy-Item (Join-Path $RepoRoot "THIRD-PARTY-NOTICES.md") $Stage -Force
 
 $packArgs = @(
     "pack",
