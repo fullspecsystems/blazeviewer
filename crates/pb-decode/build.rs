@@ -1,73 +1,88 @@
 //! Build script for `pb-decode`.
 //!
-//! Only does something when the optional `libheif` feature is enabled: it points
-//! the linker at libheif + libde265 (HEVC decode) so the `libheif` module's
-//! hand-rolled FFI resolves, and emits the `heic_libheif` cfg the crate gates the
-//! backend on. When the feature is off this script is a no-op and the crate stays
-//! pure-Rust with zero native build risk (ADR-015).
+//! Handles the two optional native decode backends **independently** (a build may
+//! enable either, both, or neither — task #76 restructured this from the old
+//! libheif-only early-return so a dav1d-only build isn't silently skipped):
 //!
-//! Two link strategies, picked by the **target** OS (not the host — a build script
-//! runs on the host, so we read `CARGO_CFG_TARGET_OS`, which is correct under
-//! cross-compilation):
-//!   * **Windows** — a vcpkg-built *static* libheif+libde265, decode-only and
-//!     plugin-loader-free (Phase 0, `scripts/setup-libheif.ps1`). Static so there
-//!     are no DLLs to ship in the installer.
-//!   * **Linux** (and other non-mac unixes) — the *system* shared libheif
-//!     (`apt install libheif-dev`); libheif loads libde265 as a runtime plugin, so
-//!     we link only `heif`.
+//!   * **`libheif`** (HEVC/HEIC) — points the linker at libheif + libde265 and
+//!     emits the `heic_libheif` cfg. Windows links the vcpkg static libs
+//!     (decode-only, plugin-loader-free; `scripts/setup-libheif.ps1`); Linux/BSD
+//!     links the system shared libheif.
+//!   * **`dav1d`** (AV1, for animated AVIF — task #76) — **Windows-only** (macOS
+//!     plays `avis` via Image I/O, Linux via FFmpeg): links the vcpkg static
+//!     dav1d, compiles the C accessor shim (`csrc/dav1d_shim.c`) against the
+//!     *same tree's* headers — so dav1d's structs never cross the FFI boundary
+//!     by hand — and emits the `av1_dav1d` cfg. A no-op on other targets, so the
+//!     feature is safe in a workspace-wide build.
+//!
+//! When both features are off this script only registers the cfgs and the crate
+//! stays pure-Rust with zero native build risk (ADR-015). Both backends branch on
+//! the **target** OS/arch (not the host — a build script runs on the host, so we
+//! read `CARGO_CFG_TARGET_*`, which is correct under cross-compilation).
 
 fn main() {
-    // Register the cfg we may set, so `#[cfg(heic_libheif)]` never trips the
-    // unexpected-cfgs lint (Rust ≥ 1.80) when the feature is off.
+    // Register the cfgs we may set, so `#[cfg(heic_libheif)]` / `#[cfg(av1_dav1d)]`
+    // never trip the unexpected-cfgs lint (Rust ≥ 1.80) when the features are off.
     println!("cargo:rustc-check-cfg=cfg(heic_libheif)");
+    println!("cargo:rustc-check-cfg=cfg(av1_dav1d)");
 
-    // Cargo sets this env var iff the `libheif` feature is active for this build.
-    if std::env::var_os("CARGO_FEATURE_LIBHEIF").is_none() {
-        return;
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+
+    // Cargo sets CARGO_FEATURE_<NAME> iff that feature is active for this build.
+    if std::env::var_os("CARGO_FEATURE_LIBHEIF").is_some() {
+        match target_os.as_str() {
+            "windows" => {
+                link_libheif_windows();
+                println!("cargo:rustc-cfg=heic_libheif");
+            }
+            // Linux + the BSDs: system libheif. macOS is deliberately excluded (it
+            // decodes HEIC via Image I/O; no libheif backend there).
+            "linux" | "freebsd" | "dragonfly" | "netbsd" | "openbsd" => {
+                link_libheif_unix();
+                println!("cargo:rustc-cfg=heic_libheif");
+            }
+            // Any other target with the feature forced on: link nothing, set no
+            // cfg — the backend simply isn't compiled, so the build stays sound.
+            _ => {}
+        }
     }
 
-    // Branch on the *target* OS (a build script otherwise sees only the host).
-    match std::env::var("CARGO_CFG_TARGET_OS").as_deref() {
-        Ok("windows") => {
-            link_libheif_windows();
-            println!("cargo:rustc-cfg=heic_libheif");
-        }
-        // Linux + the BSDs: system libheif. macOS is deliberately excluded (it
-        // decodes HEIC via Image I/O; no libheif backend there).
-        Ok("linux" | "freebsd" | "dragonfly" | "netbsd" | "openbsd") => {
-            link_libheif_unix();
-            println!("cargo:rustc-cfg=heic_libheif");
-        }
-        // Any other target with the feature forced on: link nothing, set no cfg —
-        // the backend simply isn't compiled, so the build stays sound.
-        _ => {}
+    if std::env::var_os("CARGO_FEATURE_DAV1D").is_some() && target_os == "windows" {
+        build_dav1d_windows();
+        println!("cargo:rustc-cfg=av1_dav1d");
     }
 }
 
-/// Windows: point the linker at the vcpkg static libheif + libde265.
-///
-/// Phase 0 setup (one-time, see docs/heic-decode-plan.md):
-///   <VCPKG_ROOT>/vcpkg install "libheif[core]:x64-windows-static-md"
-/// `core` drops the x265 *encoder* default; libde265 (HEVC *decode*) is a hard
-/// dependency so it's always present. static-md = static libs + dynamic CRT,
-/// matching Rust's default MSVC CRT linkage (so no DLLs to ship in the installer).
-fn link_libheif_windows() {
-    use std::path::Path;
-
-    // VCPKG_ROOT, or the conventional ~/vcpkg from the Phase-0 install.
+/// The vcpkg tree the Windows native backends link from: `(root, triplet)`.
+/// Root is `VCPKG_ROOT` or the conventional `~/vcpkg`; the triplet tracks the
+/// *target* arch (read from `CARGO_CFG_TARGET_ARCH`, correct under
+/// cross-compilation). static-md = static libs + dynamic CRT, matching Rust's
+/// default MSVC CRT linkage (no DLLs to ship in the installer). Port versions are
+/// pinned by `scripts/setup-libheif.ps1 -VcpkgRef` (libheif 1.23.0, libde265
+/// 1.1.1, dav1d 1.5.3).
+fn vcpkg_tree() -> (String, &'static str) {
     let root = std::env::var("VCPKG_ROOT").unwrap_or_else(|_| {
         let home = std::env::var("USERPROFILE").unwrap_or_default();
         format!("{home}\\vcpkg")
     });
-    // static-md: static libs, dynamic CRT — matches Rust MSVC's default CRT. The triplet
-    // tracks the *target* arch (read from CARGO_CFG_TARGET_ARCH, correct under cross-compile),
-    // so a native ARM64 build links the arm64 vcpkg tree and an x64 build the x64 one. Run
-    // `scripts/setup-libheif.ps1 -Triplet <arch>-windows-static-md` once per arch you ship.
     let triplet = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
         Ok("aarch64") => "arm64-windows-static-md",
         // x86_64 (and any other Windows arch we haven't special-cased) uses the x64 tree.
         _ => "x64-windows-static-md",
     };
+    (root, triplet)
+}
+
+/// Windows: point the linker at the vcpkg static libheif + libde265.
+///
+/// Phase 0 setup (one-time, see docs/heic-decode-plan.md):
+///   pwsh scripts/setup-libheif.ps1 -Triplet <arch>-windows-static-md
+/// `core` drops the x265 *encoder* default; libde265 (HEVC *decode*) is a hard
+/// dependency so it's always present.
+fn link_libheif_windows() {
+    use std::path::Path;
+
+    let (root, triplet) = vcpkg_tree();
     let libdir = format!("{root}\\installed\\{triplet}\\lib");
 
     if !Path::new(&libdir).join("heif.lib").exists() {
@@ -88,6 +103,44 @@ fn link_libheif_windows() {
     // Relink if the static lib is rebuilt (e.g. a vcpkg reinstall with different
     // options) — Cargo doesn't otherwise track the external lib.
     println!("cargo:rerun-if-changed={libdir}\\heif.lib");
+    println!("cargo:rerun-if-env-changed=VCPKG_ROOT");
+}
+
+/// Windows: link the vcpkg static dav1d and compile the C accessor shim (task #76).
+///
+/// The shim (`csrc/dav1d_shim.c`) is the whole ABI-safety strategy: it's compiled
+/// against the headers *installed next to the lib we link*, so `Dav1dSettings` /
+/// `Dav1dPicture` layouts are resolved by the C compiler every build — Rust only
+/// ever sees opaque pointers plus the shim's own stable surface. (Layout drift
+/// between our code and the pinned dav1d is therefore structurally impossible,
+/// instead of merely asserted; see the task 76 plan, "ABI safety".)
+fn build_dav1d_windows() {
+    use std::path::Path;
+
+    let (root, triplet) = vcpkg_tree();
+    let libdir = format!("{root}\\installed\\{triplet}\\lib");
+    let include = format!("{root}\\installed\\{triplet}\\include");
+
+    if !Path::new(&libdir).join("dav1d.lib").exists() {
+        panic!(
+            "feature `dav1d` is on but {libdir}\\dav1d.lib was not found.\n\
+             Run:  pwsh scripts/setup-libheif.ps1 -Triplet {triplet}\n\
+             (it installs the pinned dav1d port alongside libheif). Or set\n\
+             VCPKG_ROOT if your vcpkg lives elsewhere.",
+        );
+    }
+
+    println!("cargo:rustc-link-search=native={libdir}");
+    println!("cargo:rustc-link-lib=static=dav1d");
+
+    // cc emits the link line for the shim archive itself.
+    cc::Build::new()
+        .file("csrc/dav1d_shim.c")
+        .include(&include)
+        .compile("pb_dav1d_shim");
+
+    println!("cargo:rerun-if-changed=csrc/dav1d_shim.c");
+    println!("cargo:rerun-if-changed={libdir}\\dav1d.lib");
     println!("cargo:rerun-if-env-changed=VCPKG_ROOT");
 }
 

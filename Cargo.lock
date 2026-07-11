@@ -3869,6 +3869,7 @@ name = "pb-decode"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "cc",
  "fast_image_resize",
  "ffmpeg-next",
  "flate2",

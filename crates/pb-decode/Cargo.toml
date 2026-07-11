@@ -60,6 +60,17 @@ libheif = []
 # Linux/BSD — Windows (Media Foundation) and macOS (AVFoundation) have their own backends and
 # ignore it. `apt install libavcodec-dev libavformat-dev libswscale-dev libswresample-dev clang`.
 livephoto = ["dep:ffmpeg-next"]
+# Animated AVIF (avis) playback on Windows via a vcpkg static dav1d (task #76). OFF by
+# default: links a native C lib (ADR-015). build.rs sets the `av1_dav1d` cfg the backend
+# gates on and compiles the C accessor shim (csrc/dav1d_shim.c) against the pinned vcpkg
+# headers. A harmless no-op on non-Windows targets (macOS = Image I/O, Linux = FFmpeg).
+dav1d = []
+
+[build-dependencies]
+# Compiles the dav1d shim when `--features dav1d` targets Windows. Unconditional: build
+# scripts can't cfg-gate on features (they only see CARGO_FEATURE_* env vars at run
+# time), so an optional `cc` would break every feature-off build of build.rs itself.
+cc = "1"
 
 [dev-dependencies]
 

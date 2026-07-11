@@ -87,10 +87,14 @@ if ($content -match 'ENABLE_PLUGIN_LOADING') {
 Write-Host "Installing libheif[core]:$Triplet ..." -ForegroundColor Cyan
 & "$VcpkgRoot\vcpkg.exe" install "libheif[core]:$Triplet" --disable-metrics
 
+# 4. dav1d — the AV1 decoder for animated AVIF playback (task #76; pb-decode's
+# `dav1d` feature links it and compiles the C shim against this tree's headers).
+Write-Host "Installing dav1d:$Triplet ..." -ForegroundColor Cyan
+& "$VcpkgRoot\vcpkg.exe" install "dav1d:$Triplet" --disable-metrics
+
 $libdir = "$VcpkgRoot\installed\$Triplet\lib"
-if (Test-Path "$libdir\heif.lib") {
-    Write-Host "`nlibheif ready: $libdir\heif.lib" -ForegroundColor Green
-    Write-Host "Set VCPKG_ROOT=$VcpkgRoot (or keep it at ~/vcpkg) and build with --features libheif." -ForegroundColor Green
-} else {
-    throw "Install reported success but $libdir\heif.lib is missing."
+foreach ($lib in "heif.lib", "dav1d.lib") {
+    if (-not (Test-Path "$libdir\$lib")) { throw "Install reported success but $libdir\$lib is missing." }
 }
+Write-Host "`nNative decode libs ready: $libdir\{heif,dav1d}.lib" -ForegroundColor Green
+Write-Host "Set VCPKG_ROOT=$VcpkgRoot (or keep it at ~/vcpkg) and build with --features libheif,dav1d." -ForegroundColor Green

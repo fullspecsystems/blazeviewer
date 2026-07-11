@@ -755,7 +755,7 @@
             "id": 2,
             "title": "Build plumbing: feature + restructured build.rs + vcpkg port + cc shim wiring (plan phase 2)",
             "description": "Add the 'dav1d' cargo feature to pb-decode (pb-app pass-through like 'libheif'). RESTRUCTURE build.rs so libheif and dav1d are handled independently — the current early return on missing CARGO_FEATURE_LIBHEIF (build.rs:25) would silently skip a dav1d-only build. Install dav1d:<arch>-windows-static-md via the setup script; compile the C accessor shim (csrc/dav1d_shim.c) with the cc crate against the vcpkg headers; emit cargo:rustc-cfg=av1_dav1d + rustc-check-cfg; dav1d.lib preflight with an actionable panic. Acceptance: all four feature combos build (none / dav1d / libheif / libheif,dav1d); 'dav1d' is a compile-checked no-op on non-Windows.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 3,

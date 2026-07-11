@@ -32,6 +32,11 @@ mod mf_video;
 // The Linux mirror: .mov motion + audio decode via FFmpeg, behind the `livephoto` feature.
 #[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
 mod ff_live;
+// The dav1d AV1 backend for animated AVIF (avis) playback — Windows-only, task #76.
+// `av1_dav1d` is set by build.rs when the `dav1d` feature is on for a Windows target
+// (macOS plays avis via Image I/O, Linux via FFmpeg; elsewhere the feature is a no-op).
+#[cfg(av1_dav1d)]
+mod dav1d;
 // Shared ISOBMFF/`colr` parsing for the HEVC/AV1 container backends (WIC, Image I/O,
 // libheif). Only compiled where one of them is — keeps non-HEIC targets (e.g. a
 // libheif-less Linux bench build) dead-code-free.

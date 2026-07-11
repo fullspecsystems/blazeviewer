@@ -15,6 +15,9 @@ path = "src/main.rs"
 # through the parallel CPU libheif backend (links the vcpkg static libs; see
 # pb-decode/build.rs). Off by default so the stock build is pure-Rust + WIC.
 libheif = ["pb-decode/libheif"]
+# Pass-through: animated AVIF (avis) playback via the vcpkg static dav1d (task #76).
+# Windows-only in effect; off by default so the stock build stays pure-Rust + WIC.
+dav1d = ["pb-decode/dav1d"]
 # Linux Live Photo support: the FFmpeg motion decoder (pb-decode/pb-app-core) plus the
 # audio-output backend in `live_audio.rs`, which pipes the decoded PCM to PipeWire's
 # `pw-cat`. Off by default; Linux-only in effect (Windows/macOS have native backends).

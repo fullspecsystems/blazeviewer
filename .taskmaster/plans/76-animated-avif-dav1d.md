@@ -246,6 +246,14 @@ today**, so #76 measures rather than rebuilds it:
    install in the setup script; `cc` shim compilation; `dav1d.lib` preflight with actionable
    panic. *Acceptance:* all four feature combos build (`none`, `dav1d`, `libheif`,
    `libheif,dav1d`); `dav1d` is a compile-checked no-op on non-Windows.
+   **✔ Done 2026-07-11:** all four combos build; clippy (pb-decode + pb-app, both
+   features) clean; `dav1d::tests::linked_dav1d_is_the_pinned_version` proves the static
+   lib links and the shim's headers agree with it (1.5.x, API major 7); full pb-decode
+   suite (115 tests) green with `libheif,dav1d`. dav1d installed into both local vcpkg
+   trees (binary-cache hit); `setup-libheif.ps1` now installs `dav1d:$Triplet` and
+   checks both libs. Non-Windows no-op enforced by the `target_os == "windows"` gate in
+   build.rs (`cc` is an unconditional build-dep — build scripts can't cfg-gate on
+   features, so an optional `cc` would break feature-off builds).
 3. **FFI via C shim.** As specified above; RAII wrappers; version check first. *Acceptance:*
    keyframe OBU → picture smoke test; drop/error-path tests leak-clean.
 4. **Demuxer + `probe_avis`.** Bounded box reader, positive track selection, the
