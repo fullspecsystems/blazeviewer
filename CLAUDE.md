@@ -314,7 +314,7 @@ replace any of them with data.
 | JPEG | `turbojpeg` (libjpeg-turbo, **native scaled decode**) | `zune-jpeg` (pure Rust, SIMD; pair with `fast_image_resize`) |
 | PNG/APNG | `png` (image-rs) + `zlib-rs` backend (pure Rust, fastest now) | — (no scaled decode exists for PNG) |
 | WebP | `libwebp-sys` (`use_scaling` = true downscale-on-decode) | `image-webp` (pure Rust, no SIMD/scaling) |
-| AVIF | `dav1d` crate + `avif-parse` | parallelize across images (single-tile ≈ no thread gain) |
+| AVIF | stills: Windows WIC / macOS ImageIO; **animated (`avis`): vcpkg dav1d + own demuxer** (task #76) | Linux: FFmpeg (`livephoto`) for animated |
 | HEIC | `libheif-rs` | ⚠ **highest** Windows build risk — pin vcpkg ports or ship DLLs |
 | JXL | `jxl-oxide` (pure Rust) | `jpegxl-rs` only if native DC downscale needed |
 | TIFF / BMP / QOI | `tiff` / `image` / `qoi` (all pure Rust) | — |
@@ -345,10 +345,21 @@ pragmatic crate choices differ from the table above and are the current baseline
   overflow the default stack (a Nikon D800 NEF does; it's why the preview path exists for
   full-preview cameras). Slower than preview-only; "preview-first then refine" is the
   future optimization. JPEG-segment-parse finds embedded previews (`jpeg_spans`).
-- **AVIF + HEIC**: **Windows WIC** (`wic.rs`, `cfg(windows)`, `windows` crate) using the
-  OS codec extensions — NOT dav1d/libheif/vcpkg. First platform-specific decode backend
-  (macOS would mirror with ImageIO). Needs the AV1/HEVC/HEIF Store extensions; absent →
-  graceful decode error. **JPEG-2000 not added** (no pure-Rust decoder; OpenJPEG/C, rare).
+- **AVIF + HEIC stills**: **Windows WIC** (`wic.rs`, `cfg(windows)`, `windows` crate) using the
+  OS codec extensions — first platform-specific decode backend (macOS mirrors with ImageIO).
+  Needs the AV1/HEVC/HEIF Store extensions; absent → graceful decode error. **JPEG-2000 not
+  added** (no pure-Rust decoder; OpenJPEG/C, rare).
+- **Animated AVIF (`avis`) on Windows** (task #76): the vcpkg static **dav1d** behind
+  `--features dav1d` (ship config, like libheif; same pinned tree via `setup-libheif.ps1`).
+  WIC exposes only frame 0 and MF can't demux `.avif`, so `pb-decode/src/avis.rs` demuxes the
+  sample tables itself (pure Rust, fuzzed) and feeds dav1d through a **C accessor shim**
+  (`csrc/dav1d_shim.c`, compiled by build.rs against the pinned headers — dav1d structs never
+  cross the FFI by hand). `probe_avis` is the shared detect/decode decision: avis-only (msf1 =
+  HEVC stays still), HDR → the fp16 WIC still path, fragmented/encrypted/stz2 → still; no dead
+  play hints. YUV→RGB in `yuv.rs` (identity/601/709/2020, limited+full, 8/10/12-bit); the trak
+  `colr` rides as the display `ColorTransform`. Cancellable via `decode_animation_cancellable`
+  (the whole animation path now checks the flag). Loops like a GIF; corpus 26-frame 1280×531 ≈
+  139 ms release decode.
 - **Orientation** (subtle, was buggy): `common::read_orientation` scans **all** EXIF IFDs
   (HEIC/RAW put Orientation outside the primary IFD; a PRIMARY-only lookup wrongly read 1).
   WIC **already applies** the container rotation, so the WIC path passes orientation=1 (re-
@@ -443,9 +454,11 @@ tag / GitHub Release for Windows**.
 historical `win` Velopack channel; **ARM64** as `win-arm64` — both land in the same flat feed dir, and
 an install only ever auto-updates within its own channel (Velopack tracks the channel the app was
 installed from, so `update.rs` needs no arch logic and the two never cross). Each arch is built on its
-own **native** box (no cross toolchain wired up), after building that arch's libheif once with
-`scripts/setup-libheif.ps1 -Triplet <arch>-windows-static-md` (`pb-decode/build.rs` picks the vcpkg
-triplet from the target arch). ARM64 uses the `vcredist143-arm64` redist framework.
+own **native** box (no cross toolchain wired up), after building that arch's native decode libs
+(libheif **and dav1d**, task #76) once with `scripts/setup-libheif.ps1 -Triplet
+<arch>-windows-static-md` — the script pins the vcpkg tree to a recorded commit (`-VcpkgRef`) and
+installs both ports; `pb-decode/build.rs` picks the vcpkg triplet from the target arch. The ship
+feature set is `--features libheif,dav1d`. ARM64 uses the `vcredist143-arm64` redist framework.
 
 **macOS** is **built locally on the owner's Mac** via `scripts/release-macos.sh` (Developer ID +
 notarization), then published to `downloads.fullspec.ca/photoblaze/mac` with

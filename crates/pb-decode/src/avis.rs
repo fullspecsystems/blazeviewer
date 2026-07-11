@@ -539,7 +539,9 @@ mod decode {
     /// dav1d threads for the sequence decode. Small on purpose: the decode
     /// pool already parallelizes across images, so a wide dav1d would
     /// oversubscribe. `max_frame_delay = 1` keeps output sequential and the
-    /// per-picture memory low. A/B'd in plan phase 9 before shipping numbers.
+    /// per-picture memory low. A/B'd (plan phase 9, corpus `animated/3.avif`,
+    /// 26×1280×531 release): 4 threads ≈ 139 ms, 2 ≈ 142 ms — a wash with
+    /// `max_frame_delay = 1` capping frame parallelism; 4 kept.
     const N_THREADS: i32 = 4;
     const MAX_FRAME_DELAY: i32 = 1;
 

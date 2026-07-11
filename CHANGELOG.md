@@ -7,6 +7,13 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Added
+- **Animated AVIF now plays on Windows.** Files with an AVIF image sequence (the `avis` format)
+  show the play hint and loop like a GIF, with correct frame timing and wide-gamut color.
+  HDR animated AVIFs deliberately stay on the still path, where they render in full HDR
+  quality rather than a washed-out clamped animation. Animated HEIC stays first-frame-static
+  on Windows (it uses HEVC, which this decoder does not handle).
+
 ### Fixed
 - **ZIP/7z archives now open on machines with less RAM.** The memory check that guards against
   opening an archive too large to fit in RAM was too conservative and could refuse *every* archive

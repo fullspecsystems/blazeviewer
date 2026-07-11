@@ -294,6 +294,34 @@ today**, so #76 measures rather than rebuilds it:
     build unchanged; workspace tests + clippy `-D warnings` + fmt. Then ARM64: vcpkg build +
     the same smoke. Sync any drift back into `tasks.json`.
 
+## Execution record (2026-07-11, phases 4-10 — commits `0adc5a2` + follow-up)
+
+- **Phases 4-7 ✔** — `avis.rs` probe/demuxer (self-contained colr parsing so it unit-tests on
+  platforms without `isobmff`), `yuv.rs`, `decode_avis` with the robust send/drain loop +
+  cookie mapping + projected caps, `decode_animation_cancellable` threaded through every
+  backend (engine.rs passes its flag), detection via the probe, stale comments swept.
+- **Phase 8 ✔** — 29 avis tests (synthetic-builder demux + reject classes; 9 decode-integration
+  tests on committed ~1 KB ffmpeg fixtures with per-frame solid colors — see
+  `tests/fixtures/avis/README.md`, incl. the `lime`-not-`green` and `setparams` gotchas),
+  12 yuv known-vector tests, cancellation + RAII tests, `fuzz/` cargo-fuzz harness on
+  `probe_avis` (hidden `fuzz-internals` feature; compiles on MSVC, run it Linux-side).
+  Byte-cap note: the projected check is shared logic exercised by the frame-cap tests; a
+  literal 1.5 GiB-crossing fixture is impractical in CI.
+- **Phase 9 ✔ (decode side)** — corpus `animated/3.avif` (26×1280×531): **~139 ms total
+  release decode, 5.3 ms/frame**, first-motion ≪ the 250 ms streaming trigger → batch model
+  confirmed for v1. Threads A/B'd: 4 ≈ 139 ms vs 2 ≈ 142 ms (a wash under
+  `max_frame_delay=1`); 4 kept, recorded in `avis.rs`. Present-path p50/p95 + deadline
+  misses fold into the owner's phase-11 manual smoke (`--metrics`); retained animation ≈
+  70 MB RGBA for this corpus file.
+- **Phase 10 ✔** — `release-windows.ps1` (dual-lib preflight + `libheif,dav1d`),
+  `build-windows.ps1` (`-NoNative`, legacy `-NoHeif` alias), ci.yml x64 lane (ensure-step +
+  feature lists) **and** ARM64 lane (own `VCPKG_ROOT`, arm64 ensure-step, feature-on tests,
+  still behind `WIN_ARM64_RUNNER`), CLAUDE.md (AVIF row, wired-notes bullet, release section),
+  CHANGELOG Added entry.
+- **Phase 11 — remaining:** owner manual smoke on x64 (hint, `P` loop, color/timing, panels,
+  feature-off build) + the ARM64 vcpkg build & smoke (verify the port didn't fall back to
+  `-Denable_asm=false`).
+
 ## Test matrix
 
 - **Demux units:** every supported table form; malformed bounds/arithmetic (truncated tables,

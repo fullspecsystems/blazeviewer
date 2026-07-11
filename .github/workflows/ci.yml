@@ -86,22 +86,24 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --workspace --locked
-      # The `libheif` feature ships in the release MSI (tasks.json #16), so CI must
-      # keep it compiling — it's cfg'd out of the default build and would otherwise
-      # rot invisibly. The vcpkg tree persists on the runner machine; only a brand-new
-      # machine pays the ~15 min vcpkg C build.
-      - name: Ensure libheif (vcpkg, first run on a new machine only)
+      # The `libheif` + `dav1d` features ship in the release build (tasks.json #16 /
+      # #76), so CI must keep them compiling — they're cfg'd out of the default build
+      # and would otherwise rot invisibly. The vcpkg tree persists on the runner
+      # machine; only a brand-new machine pays the ~15 min vcpkg C build (dav1d is
+      # seconds on top — binary cache).
+      - name: Ensure libheif + dav1d (vcpkg, first run on a new machine only)
         shell: pwsh
         run: |
-          if (-not (Test-Path "$env:VCPKG_ROOT\installed\x64-windows-static-md\lib\heif.lib")) {
+          $lib = "$env:VCPKG_ROOT\installed\x64-windows-static-md\lib"
+          if (-not ((Test-Path "$lib\heif.lib") -and (Test-Path "$lib\dav1d.lib"))) {
             pwsh scripts/setup-libheif.ps1
           } else {
-            Write-Host "libheif already present at $env:VCPKG_ROOT"
+            Write-Host "libheif + dav1d already present at $env:VCPKG_ROOT"
           }
-      - name: Clippy with libheif (deny warnings)
-        run: cargo clippy -p pb-decode -p pb-app --features libheif --all-targets --locked -- -D warnings
-      - name: Test with libheif
-        run: cargo test -p pb-decode --features libheif --locked
+      - name: Clippy with libheif + dav1d (deny warnings)
+        run: cargo clippy -p pb-decode -p pb-app --features libheif,dav1d --all-targets --locked -- -D warnings
+      - name: Test with libheif + dav1d
+        run: cargo test -p pb-decode --features libheif,dav1d --locked
 
   # Windows ARM64 (the Fusion VM on the Mac, task #75): NATIVE aarch64 execution of the
   # workspace tests — the value is running on ARM64, not re-linting (fmt/clippy are
@@ -112,7 +114,10 @@ jobs:
   windows-arm64:
     if: ${{ vars.WIN_ARM64_RUNNER == '1' }}
     runs-on: [self-hosted, Windows, ARM64]
-    timeout-minutes: 60
+    timeout-minutes: 90
+    env:
+      # Same fixed-tree convention as the x64 lane (build.rs reads VCPKG_ROOT).
+      VCPKG_ROOT: C:\vcpkg-pb
     steps:
       - uses: actions/checkout@v4
       # Same Git Bash shim fix as the x64 lane (see that lane's comment).
@@ -123,6 +128,20 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Test (native aarch64-pc-windows-msvc)
         run: cargo test --workspace --locked
+      # The shipped native features must not rot on the ARM64 channel either
+      # (task #76): ensure the arm64 vcpkg libs, then run the feature-on tests.
+      # First run on a fresh VM pays the vcpkg C build; cached after that.
+      - name: Ensure libheif + dav1d (vcpkg arm64, first run only)
+        shell: pwsh
+        run: |
+          $lib = "$env:VCPKG_ROOT\installed\arm64-windows-static-md\lib"
+          if (-not ((Test-Path "$lib\heif.lib") -and (Test-Path "$lib\dav1d.lib"))) {
+            pwsh scripts/setup-libheif.ps1 -Triplet arm64-windows-static-md
+          } else {
+            Write-Host "libheif + dav1d already present at $env:VCPKG_ROOT"
+          }
+      - name: Test with libheif + dav1d (native arm64)
+        run: cargo test -p pb-decode --features libheif,dav1d --locked
 
   # The Linux gate (task #71): clippy -D warnings + tests + release build over the FULL crate
   # graph, inside the Ubuntu 26.04 appimage container (the only env with the FFmpeg 8 / libheif

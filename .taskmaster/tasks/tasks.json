@@ -767,43 +767,43 @@
             "id": 4,
             "title": "avis demuxer + probe_avis (plan phase 4 + demux contract table)",
             "description": "Bounded ISOBMFF box reader (normal + extended sizes, size==0, FullBox, nesting/walk caps). probe_avis positively selects the COLOR track (handler 'pict' with an av01 stsd entry — never the 'auxv' alpha track) and REJECTS msf1, moof fragmentation, stz2, encrypted entries, >1 av01 sample description, and HDR (track-scoped colr PQ/HLG); it returns the parsed decision (track, CICP, av1C configOBUs — legally may be empty, timing basis) so detection and decode share one code path. Sample expansion: stsz both forms, multi-run stsc with validated sample_description_index, stco/co64 with every offset+size range validated against bytes.len(), stts full run expansion + mdhd v0/v1 with checked arithmetic (timescale==0 -> error). ctts/edit lists ignored (AV1-ISOBMFF binding forbids composition offsets for av01). pasp/track matrix ignored v1 (documented). No OBU normalization needed (binding mandates size-fielded OBUs; dav1d tolerates TD presence/absence — proven by fixtures from two muxers). Acceptance: unit tests per table form + malformed-input tests; probe rejects each unsupported class.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 5,
             "title": "Cancellable decode + hard memory bounds (plan phase 5)",
             "description": "New decode_animation_cancellable(bytes, fit, &AtomicBool); engine.rs decode_motion_job:308 passes its already-plumbed cancel flag (currently dropped). Backend checks cancel before each sample send and after each picture; collect_frames gets the same per-frame check (GIF/WebP benefit free). Fix the shared byte cap to a PROJECTED check (collect_frames currently pushes then checks, animation.rs:592-602; mirror ff_live.rs:232) — a frame that would cross MAX_DECODED_BYTES is never retained. Robust send/get loop: re-send the SAME Dav1dData while sz > 0, drain pictures on every EAGAIN, flush via get_picture until EAGAIN after the last sample; map sample->picture via the Dav1dData.m.timestamp cookie (robust to hidden alt-ref TUs yielding zero pictures). try_reserve_exact before large RGBA allocations; checked w/h/stride arithmetic; bound the source picture size before allocating conversion buffers. Threads: start n_threads 2-4 + max_frame_delay=1 (the decode pool already parallelizes across images); compare in phase 9.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 6,
             "title": "YUV->RGB8 + track-scoped CICP color (plan phase 6 + color section)",
             "description": "Pure-Rust conversion: I420/I422/I444/I400, 8/10/12-bit, limited + full range, identity/BT.601/BT.709/BT.2020-NCL; anything else -> DecodeError, never a silent guess. Metadata: track-scoped CICP from the SELECTED trak's stsd colr (an alpha track's colr must not win; color_from_colr_box alone is insufficient — it returns None for sRGB display transforms but the converter always needs matrix+range); nclx colr overrides bitstream color_config (MIAF); absent colr -> picture seq_hdr via shim getters. Chroma upsampling v1 = nearest/co-sited, documented. Carry the display ColorTransform (primaries/TRC in-shader; mirror macOS real-P3, never hard-code srgb()). HDR backstop: colr-less HDR slips the probe -> first picture's seq_hdr transfer check -> DecodeError -> still. Deterministic known-value unit tests across ranges/depths/matrices/layouts incl. odd dimensions.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 7,
             "title": "Detection + dispatch wiring + stale comment sweep (plan phase 7)",
             "description": "detect_animation: cfg(all(windows, av1_dav1d)) branch calls probe_avis (avis-only, HDR-excluded — isobmff_is_sequence matches msf1 too and would produce a dead play hint; the isobmff module already compiles on Windows, lib.rs:38). decode_animation_inner: same cfg routes AnimationKind::Heif to the dav1d backend; still AVIF stays on WIC; feature-off keeps Heif => Unsupported. Sweep stale macOS/Linux-only comments: animation.rs:39 (AnimationKind::Heif doc), animation.rs:257-261, engine.rs:294-297, + grep for others (lib.rs, meta.rs).",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 8,
             "title": "Tests, fixtures, fuzz (plan phase 8 + test matrix)",
             "description": "Demux units per table form + malformed bounds/arithmetic + probe rejection per class (msf1/moof/stz2/encrypted/multi-stsd/HDR). cargo-fuzz target on probe_avis + sample expansion (pure Rust, runs on the existing Linux fuzz setup without native dav1d). YUV known-value vectors. Tiny committed fixtures from avifenc AND ffmpeg (muxer diversity), each with per-frame SOLID COLORS so expected RGB is deterministic (exact asserts + tolerance; no reference decoder in CI): 8-bit 420 SDR, 10-bit SDR, P3 (asserts non-sRGB ColorTransform carried), alpha aux track (asserts color-track selection + opaque output), variable stts, odd dimensions, one 444-or-identity case. Behavioral: cancellation stops early; retained bytes never exceed the cap; detection negatives (msf1, HDR, feature-off, corrupt); shim version check + RAII error-path tests.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 9,
             "title": "Perf measurement + pre-agreed gates (plan phase 9 / performance gates)",
             "description": "Release-build corpus measurements on x64 + ARM64: P-to-first-motion latency, total decode time + peak resident memory, present_anim_frame CPU p50/p95/p99, animation deadline misses, dav1d thread counts COMPARED not guessed. Note the present path (present_anim_frame -> set_image per frame, per-upload staging alloc) is shared with GIF/APNG/WebP today — pre-existing, not a regression from this task. Escalation triggers (pre-agreed): first-motion p95 > ~250ms -> reuse the MotionChunk streaming infrastructure (task #69 machinery) for a safe-prefix start; present-path deadline misses -> file a SEPARATE follow-up task for a texture/bind-group-reusing animation upload ring (fixes GIF/WebP too). Cancellation p95 <= 100ms (excluding one in-flight frame). Record numbers in the task on close.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 10,
             "title": "Release/CI/docs wiring (plan phase 10)",
             "description": "release-windows.ps1: dav1d.lib preflight next to heif.lib (~line 94) + build --features libheif,dav1d (line 101). build-windows.ps1: same vcpkg detection + feature (lines 31-44; fold -NoHeif into a -NoNative analog or add -NoDav1d). ci.yml x64 lane: extend the vcpkg ensure-step + add dav1d to the clippy/test feature lists (ci.yml:93-104). ci.yml ARM64 lane (ci.yml:112, WIN_ARM64_RUNNER-toggled): add its own VCPKG_ROOT + ensure-step + a feature-on test — it currently tests NO native features, so libheif+dav1d rot invisibly there. CLAUDE.md: AVIF row, 'What's actually wired', release steps (extra per-arch vcpkg port). CHANGELOG Added: 'Animated AVIF now plays on Windows.' Document msf1 (animated HEIC) stays first-frame-static (HEVC, not AV1).",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 11,

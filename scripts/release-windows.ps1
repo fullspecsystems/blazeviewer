@@ -83,22 +83,25 @@ if ($Arch -ne $HostArch) {
     throw "Requested -Arch $Arch on a $HostArch host. This script builds for the host arch only — run it on a $Arch machine."
 }
 
-# ── 2. libheif is the ship config — locate the vcpkg tree pb-decode/build.rs links (this arch's triplet).
+# ── 2. libheif + dav1d are the ship config — locate the vcpkg tree pb-decode/build.rs links
+#      (this arch's triplet). Both static libs come from the same pinned tree (task #76).
 $Triplet = $ArchCfg.Triplet
 if (-not $env:VCPKG_ROOT) {
     $env:VCPKG_ROOT = @("C:\vcpkg-pb", "$env:USERPROFILE\vcpkg") |
-        Where-Object { Test-Path "$_\installed\$Triplet\lib\heif.lib" } |
+        Where-Object { (Test-Path "$_\installed\$Triplet\lib\heif.lib") -and (Test-Path "$_\installed\$Triplet\lib\dav1d.lib") } |
         Select-Object -First 1
 }
-if (-not $env:VCPKG_ROOT -or -not (Test-Path "$env:VCPKG_ROOT\installed\$Triplet\lib\heif.lib")) {
-    throw "libheif ($Triplet) not found (checked VCPKG_ROOT, C:\vcpkg-pb, ~\vcpkg). Run ``scripts/setup-libheif.ps1 -Triplet $Triplet`` first — the release ships --features libheif."
+foreach ($lib in "heif.lib", "dav1d.lib") {
+    if (-not $env:VCPKG_ROOT -or -not (Test-Path "$env:VCPKG_ROOT\installed\$Triplet\lib\$lib")) {
+        throw "$lib ($Triplet) not found (checked VCPKG_ROOT, C:\vcpkg-pb, ~\vcpkg). Run ``scripts/setup-libheif.ps1 -Triplet $Triplet`` first — the release ships --features libheif,dav1d."
+    }
 }
-Write-Host "==> libheif: $env:VCPKG_ROOT ($Triplet)"
+Write-Host "==> native decode libs: $env:VCPKG_ROOT ($Triplet)"
 
 # ── 3. Always build fresh — a stale exe must never be silently signed/packaged. Building for the
 #      host arch, so no --target (keeps the output in target\release and avoids a full rebuild).
-Write-Host "==> cargo build --release -p pb-app --features libheif" -ForegroundColor Cyan
-cargo build --release -p pb-app --features libheif
+Write-Host "==> cargo build --release -p pb-app --features libheif,dav1d" -ForegroundColor Cyan
+cargo build --release -p pb-app --features libheif,dav1d
 if ($LASTEXITCODE -ne 0) { throw "build failed" }
 $Exe = "target\release\photoblaze.exe"
 if (-not (Test-Path $Exe)) { throw "$Exe not found after build" }
