@@ -4069,9 +4069,15 @@ mod tests {
 
         let before = snapshot_tree(&dir);
 
-        // Eager-open the 7z and view every entry: must not extract to disk.
+        // Eager-open the 7z and view every entry: must not extract to disk. Go straight
+        // through `load_seven_z` (the eager decompress-to-RAM step this test guards),
+        // bypassing the live RAM-budget pre-flight: this asserts the *no-disk-write*
+        // guarantee, not the budget gate (that's `over_budget_7z_is_refused_with_structured_error`).
+        // The real `ram_budget()` floors to 0 on a low-memory machine (e.g. an 8 GB VM),
+        // which would refuse even this 1 MB archive and flake the test; injecting past it
+        // keeps the check deterministic while still exercising the decompress path.
         let resolved =
-            scan::resolve_playlist(&Source::Archive(z_path.clone()), &open::Cursor::First);
+            scan::load_seven_z(&z_path, None, &pb_source::OpenProgress::new(), 0).expect("open 7z");
         assert_eq!(resolved.source.len(), 3, "7z should yield three images");
         let fit = FitBox {
             max_width: 64,
