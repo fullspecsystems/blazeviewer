@@ -1398,6 +1398,8 @@ impl App {
             A::TreeToggle(path) => self.core.fs_tree_toggle(&path),
             A::TreeOpen(path) => self.core.fs_tree_open(path),
             A::TreeExtendUp => self.core.fs_tree_extend_up(),
+            // An archive folder row: re-scope the deck / open the container folder (task #66).
+            A::TreeActivate(i) => self.core.tree_activate(i),
             A::CancelScan => self.cancel_scan_command(),
             A::OpenFile => self.core.dispatch_action(Action::OpenFile),
             A::OpenFolder => self.core.dispatch_action(Action::OpenFolder),

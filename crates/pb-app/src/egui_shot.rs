@@ -294,6 +294,7 @@ async fn run(out: &Path, dark: bool, tab: InspectorTab, welcome: bool) -> Result
         tree: frame.tree.as_ref().map(|t| TreeFrame {
             rows: t.rows.iter().take(4).cloned().collect(),
             parent_name: t.parent_name.clone(),
+            archive: Vec::new(),
         }),
         info: None,
         scan: None,
@@ -683,6 +684,7 @@ fn sample_frame(dark: bool, tab: InspectorTab, welcome: bool) -> PanelFrame {
             row("2013", 1, false, false, true, Some(3989)),
             row("Screenshots", 1, false, false, false, Some(27)),
         ],
+        archive: Vec::new(),
     };
 
     // Dev toggle: isolate the folder tree (drop the other panels) so its overflow / clipping

@@ -837,57 +837,57 @@
         "id": 79,
         "title": "Video playback (tier 2): camera clips of any length via a streaming discard-ring player",
         "description": "Play the videos that live in real photo libraries (iPhone/camera mp4/mov of 1-15 min) as first-class items - the 'open your library and view EVERYTHING' goal. Owner decision 2026-07-11: build the MIDDLE TIER directly (not the RAM-bounded short-clip version first): a forward-only streaming player - constant-memory discard ring + bounded-channel backpressure, real PTS pacing, audio-position-corrected A/V sync, coarse keyframe seeking - on top of the existing per-platform motion decoders (MF / AVFoundation / FFmpeg, which already stream from disk by path). Duration-independent by construction: a 2-hour feature film WORKS (flat memory, bounded sync drift, fast start) and is merely a lousy movie player by design (coarse seek only, no subtitles/scrub bar/resume - VLC keeps its job). MKV won't play on Windows/macOS (no OS demuxer) - graceful error; that self-selects toward camera content. Explicitly out of scope: subtitles, scrub-bar/timeline UI, audio-track selection, remember-position, hardware-decode/zero-copy (gated escalation).",
-        "details": "PLAN (authoritative, 2026-07-11): .taskmaster/plans/79-video-playback-tier2.md — locks the owner decisions: first-non-black poster always; Live-Photo-style badge+P UX; LEFT/RIGHT = +/-2s seek while a video plays (hold = scrub via coalesced seeks; Shift = 15s; pan wins when zoomed with horizontal overflow; Space/Backspace keep navigating). Supersedes the short-clip scoping (2026-07-11 survey stands: producers are codec-general, MotionChunk streaming exists, audio plays the file's own track per platform). THREE GUARDRAILS that make 'any length works' true: (1) PATH-ONLY VIDEO ITEMS - a video's bytes must NEVER travel the RAM PhotoSource path (a 2h 4K movie is 10-50GB): extension-routed detection (no content sniff), poster + playback + metadata via the path-based readers, audit every source.bytes()/fs::read touchpoint (EXIF panel, copy-image, hashing) to gate on video items; archive-embedded videos excluded (no path). (2) DURATION-INDEPENDENT STATE everywhere incl. audio - the Linux pw-cat path must decode-and-pipe incrementally (eager PCM decode of 2h stereo f32 = ~2.7GB). (3) No timeline assumptions (no whole-clip index; frame-step only within the ring). POSTERS (blaze-mode): first-frame extraction is just another decode job the prefetch ring + self-paced advance already absorb (~30-150ms via MFCreateSourceReaderFromURL first-sample / AVAssetImageGenerator / FFmpeg first-frame; same degrade-gracefully model as slow RAW). Non-black heuristic: mean-luma check on frame 0; if dark, decode forward (or keyframe-seek) up to ~1s and take the first frame above threshold - a capped luma walk, not semantic frame picking. Posters cache in the resident ring/meta_cache (RAM-only; privacy intact). Do NOT use the Windows Shell thumbnail cache by default - requesting generation would populate thumbcache.db with content pixels for viewed files (a persistent viewing trace, ADR-018 violation); SIIGBF_INCACHEONLY opportunistic read is the only acceptable variant, decode-ourselves is the baseline. EXTENSIONS: mp4/m4v/mov everywhere; webm/avi per-platform where the backend opens them (Windows webm only via the Web Media Extensions Store package - same graceful-absence pattern as HEVC/AV1). Live-Photo-companion dedup rule: a .mov that pairs with a same-stem still (engine.rs companion_motion) must not list as its own item. PTS: stop discarding stream timestamps (mf_video.rs:206 et al) - pace on PTS, not per-sample-duration accumulation. A/V sync: slave video pacing to the audio position via periodic correction (WinRT MediaPlayer.Position / AVAudioPlayer.currentTime / Linux sample accounting); correct across pause/resume/mute/seek. SEEK: reopen-at-keyframe (SetCurrentPosition / av_seek_frame / AVAssetReader timeRange recreate) with keyboard steps (2s; Shift 15s). PRESENTER: the GPU texture/bind-group-reusing animation upload ring is IN scope (27000 set_image allocations over 2h is real churn; subsumes the #76 perf-gate follow-up; fixes GIF/WebP too). Estimate: 2-3 weeks. Semantics: AnimationKind::Video, play-once-then-park (P replays), no Live-Photo revert, duration in the info line.",
+        "details": "PLAN (authoritative, rev2 2026-07-11 — Codex review verified + incorporated): .taskmaster/plans/79-video-playback-tier2.md. Rev2 key changes: explicit rebuffer policy resolves the audio-master/no-drop contradiction (pause audio, freeze clock, preroll, hard re-anchor); queue is BYTE-budgeted (2-3 frames, ~2x one fitted 4K frame, one-frame exception) not 8-16 frames; demand-driven producer with credit+command select so Stop/SeekTo can never be deafened by backpressure; session_id + seek_generation on every frame; typed LibraryItemKind dispatched BEFORE source.bytes() (engine.rs:223 calls it unconditionally today); extension predicate SPLIT (pb-source shares is_supported_extension via callback — broadening it would index archive videos); AudioClockSample event path back into core (effects are one-way today); MF spike first (fitted-output scaling replaces per-frame full-res RGB32+Lanczos, mf_video.rs:144/213; deselect unread streams); 8-step keyframe+decode-forward seek spec; tested-SDR color guarantee with VideoColorInfo on the frame seam; viewport-fit output (not the 1440 Live-Photo cap); seek = contextual rewrite of the PAN actions (bare arrows ARE PanLeft/PanRight, keymap.rs:502 — CLAUDE.md keymap list is stale v0); teardown split UI-cancel-in-a-frame vs bounded resource retirement (IMFSourceReader drop ~1s, mf_video.rs:186); GPU reuse moved BEFORE long-playback phases; MKV-visible-with-error recommended (owner to confirm); schedule = 2-3wk Windows milestone, parity separate, phase-0 spikes replace estimates. Seek keys: +/-2s, Shift +/-15s, hold scrubs (latest-value).",
         "status": "pending",
         "priority": "medium",
         "dependencies": [],
         "subtasks": [
           {
             "id": 1,
-            "title": "Item plumbing: extensions, path-only rule, companion dedup",
-            "description": "Per-platform extension allowlist (mp4/m4v/mov core; webm/avi where the backend opens them); video items are path-only by construction (no source.bytes()); Live-Photo companion .mov dedup; archives excluded; audit every RAM-path touchpoint (EXIF panel, copy, hash) and gate video items.",
+            "title": "Phase 0: contracts + platform spikes",
+            "description": "Define LibraryItemKind, VideoMetadata, VideoFrame/VideoColorInfo, session states, AudioClockSample, byte-budget invariants. Spike MF fitted-output scaling + stream deselection + PTS + seek-forward + cancel cost; macOS reader-recreate + prepareToPlay; Linux incremental audio. Lock the SDR guarantee on real phone footage. Spike results replace the schedule estimate.",
             "status": "pending"
           },
           {
             "id": 2,
-            "title": "Poster frames for blaze mode",
-            "description": "Per-platform first-frame extraction as a normal prefetch decode job (MF first-sample / AVAssetImageGenerator / FFmpeg); capped non-black heuristic (mean-luma walk <=1s); posters ride the resident ring + meta_cache (RAM-only). No shell thumbcache generation (ADR-018); SIIGBF_INCACHEONLY read-only fast path optional.",
+            "title": "Phase 1: typed items, predicate split, action gating",
+            "description": "classify_library_file vs is_supported_archive_image_extension (pb-source gets the images-only predicate); LibraryItemKind dispatched before any bytes(); companion dedup (same-stem kept, false-positive documented+tested); every open surface (scanner, file lists, drag/drop, picker, associations, MIME); full action matrix (copy-image = displayed frame; save-rotation disabled; delete-during-playback releases handles first; slideshow suspend).",
             "status": "pending"
           },
           {
             "id": 3,
-            "title": "Streaming Playback core: discard ring + backpressure",
-            "description": "Forward-only Playback variant: bounded frame ring, producer blocks on a bounded channel (pacing for free), frames dropped after present; AnimationKind::Video semantics (play-once-park, P replays, no revert); decode-slower-than-realtime degrades to slowed playback in v1 (no drop engine).",
+            "title": "Phase 2: posters + metadata",
+            "description": "Cancellable LOW-priority poster probing (below current still + neighbors; capped concurrent decoder inits); first-non-black luma walk (dark-clip fixtures make the limitation deliberate); placeholder/error posters for unsupported containers; metadata via readers only; rotation+color identical to playback path; no thumbcache generation (ADR-018).",
             "status": "pending"
           },
           {
             "id": 4,
-            "title": "Real PTS pacing",
-            "description": "Producers emit stream PTS instead of discarding it (mf_video.rs:206, livephoto.rs, ff_live.rs); presentation anchors to PTS with drift correction; VFR content paced correctly. Short clips (Live Photos, avis) keep their existing model untouched.",
+            "title": "Phase 3: reusable GPU presentation path (before long playback)",
+            "description": "Texture/bind-group + staging reuse for the animation present path; never wait on GPU completion on the event loop; measure alloc count + upload p95 before/after. Benefits GIF/APNG/WebP/avis; closes the #76 perf follow-up.",
             "status": "pending"
           },
           {
             "id": 5,
-            "title": "A/V sync via audio-position correction",
-            "description": "Slave video pacing to the platform audio clock (WinRT MediaPlayer.Position / AVAudioPlayer.currentTime / Linux pipe sample accounting); correct across pause/resume/mute/seek. Fix the Linux audio path to incremental decode-and-pipe (duration-independent).",
+            "title": "Phase 4: silent bounded playback (VideoSession core)",
+            "description": "State machine Opening->Buffering->Playing<->Paused->Seeking->Ended (+Failed/Stopped) on FAKE producers first; PTS scheduling with session-relative origin; preroll + rebuffer policy; byte-budgeted credit-driven queue; duration-independence proven as plateau slope; VFR + EOS before audio exists.",
             "status": "pending"
           },
           {
             "id": 6,
-            "title": "Coarse seeking",
-            "description": "Reopen-at-keyframe seek per backend (SetCurrentPosition / av_seek_frame / AVAssetReader timeRange); LEFT/RIGHT +/-2s while a video plays, Shift+LEFT/RIGHT +/-15s, hold = scrub via coalesced seeks; ring + audio resync on seek; HUD position pill; pan/nav precedence per the plan.",
+            "title": "Phase 5: audio + clock bridge",
+            "description": "AudioClockSample events core<->shell with session_id; extrapolate between ~4Hz samples, hard re-anchor on discontinuities; readiness/pause/resume/mute/failure/interruption/no-audio; Linux incremental PCM with monotonic-clock honesty; drift measured (physical lip-sync = manual check).",
             "status": "pending"
           },
           {
             "id": 7,
-            "title": "GPU animation upload ring (texture/bind-group reuse)",
-            "description": "Replace per-frame set_image allocation churn on the animation path with a reusing two-slot upload ring behind UploadStrategy conventions; benefits GIF/APNG/WebP/avis too; closes the #76 perf-gate follow-up.",
+            "title": "Phase 6: seeking + contextual input",
+            "description": "Generation-safe latest-value seeks; keyframe + decode-forward landing (MF SetCurrentPosition / av_seek_frame+flush / AVAssetReader recreate); audio ack before resume; PAN-action contextual rewrite (+/-2s, Shift +/-15s, self-timed hold, custom-keymap tests); HUD position pill; paused/buffering/EOS/superseded cases.",
             "status": "pending"
           },
           {
             "id": 8,
-            "title": "Tests, guardrail audit, perf, docs",
-            "description": "Duration-independence tests (memory flat over a long synthetic clip); no-RAM-path audit test for video items; sync-drift measurement over minutes; seek correctness; corpus verification incl. one feature-length mp4; no-trace test still holds; CLAUDE.md + CHANGELOG.",
+            "title": "Phase 7: parity, failures, packaging, docs",
+            "description": "Linux then macOS matrices; codec-missing/corrupt-file UI; privacy audit (no-trace over a video folder); perf corpus incl. P->first-frame p50/p95 (H.264+HEVC) and the 4K no-Lanczos steady state; CLAUDE.md (fix the stale v0 keymap list) + CHANGELOG.",
             "status": "pending"
           }
         ]

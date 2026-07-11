@@ -83,6 +83,12 @@ pub enum PanelAction {
     TreeToggle(PathBuf),
     TreeOpen(PathBuf),
     TreeExtendUp,
+    /// An **archive** tree row was clicked (a `.zip`/`.7z` folder deck — task #66). Resolved
+    /// by index through `AppCore::tree_activate`: re-scope the deck to that internal folder,
+    /// back out to the whole archive (the root row), or open the disk folder containing the
+    /// archive (the `up` row). The `Tree{Toggle,Open,ExtendUp}` actions above are the disk
+    /// `FsTree` equivalents; archives have no chevron/expand model.
+    TreeActivate(usize),
     /// The scan pill's **Cancel** button — stop the in-flight folder scan (keeps what's
     /// streamed in so far). Applied by the shell as `cancel_scan_command`.
     CancelScan,
@@ -108,8 +114,37 @@ pub struct InspectorFrame {
 
 /// The folder tree's visible state for one frame.
 pub struct TreeFrame {
+    /// Disk-deck rows (the Finder-style [`fs_tree::FsTree`]); empty for archive/empty decks.
     pub rows: Vec<fs_tree::Row>,
+    /// The disk deck's "up to parent" label; `None` for archive/empty decks (whose exit
+    /// affordance rides inside [`archive`](Self::archive) as an `up`-flagged row).
     pub parent_name: Option<String>,
+    /// Archive/empty-deck rows, from the core's v1 `folder_tree_panel`. When non-empty these
+    /// render **instead of** [`rows`](Self::rows) — flat and click-to-activate. This is the
+    /// winit skin's port of the macOS FFI's `folder_tree_panel` fallback: the panel used to
+    /// read only `fs_tree_rows()`, which is disk-only, so a `.zip`/`.7z` deck (whose tree the
+    /// core derives into `folder_tree_panel`) showed an empty "Folders" panel (task #66).
+    pub archive: Vec<ArchiveTreeRow>,
+}
+
+/// One flat archive-tree row — a folder inside a `.zip`/`.7z`, the archive root, a `…`
+/// collapse marker, or the "up out of the archive" affordance. The winit skin's view of a
+/// core `folder_tree_panel` row: no chevrons, because an archive folder **re-scopes** the
+/// deck on click rather than expanding in place.
+pub struct ArchiveTreeRow {
+    /// Position in the core `folder_tree_panel` — the argument to `AppCore::tree_activate`.
+    pub index: usize,
+    pub depth: u32,
+    pub name: String,
+    /// The current folder ("you are here"): accent open-folder icon + bold name.
+    pub current: bool,
+    /// The "up out of the archive" row (an up-arrow; opens the folder containing the archive).
+    pub up: bool,
+    /// A dim, inert `…` collapse marker for an over-deep chain.
+    pub marker: bool,
+    /// Whether the row carries a click target (`false` for markers).
+    pub clickable: bool,
+    pub count: Option<u64>,
 }
 
 /// The one-line info readout (`i`): `folder/name · W×H`, a codec badge, and a Live-Photo /
@@ -194,9 +229,28 @@ impl PanelFrame {
             tab: core.panels.inspector.unwrap_or(InspectorTab::Details),
             snapshot: core.inspector_snapshot(),
         });
-        let tree = core.tree_panel_visible().then(|| TreeFrame {
-            rows: core.fs_tree_rows(),
-            parent_name: core.fs_tree_parent_name(),
+        // The folder tree has two data sources, mirroring the macOS FFI (`tree_refresh`): a
+        // disk deck uses the Finder-style `FsTree`; an archive/empty deck falls back to the
+        // v1 `folder_tree_panel` the core still derives. The winit skin previously read only
+        // `fs_tree_rows()` (disk-only), so archive decks showed an empty panel (task #66).
+        let tree = core.tree_panel_visible().then(|| {
+            if core.tree_is_fs() {
+                TreeFrame {
+                    rows: core.fs_tree_rows(),
+                    parent_name: core.fs_tree_parent_name(),
+                    archive: Vec::new(),
+                }
+            } else {
+                TreeFrame {
+                    rows: Vec::new(),
+                    parent_name: None,
+                    archive: core
+                        .folder_tree_panel
+                        .as_ref()
+                        .map(archive_tree_rows)
+                        .unwrap_or_default(),
+                }
+            }
         });
         let info = core
             .info_line_snapshot()
@@ -2262,16 +2316,131 @@ fn tree_panel(
                         // hug their content instead of each nested layout reserving 32px.
                         ui.spacing_mut().interact_size.y = 0.0;
                         ui.spacing_mut().item_spacing.y = 1.0;
-                        if let Some(parent) = &tree.parent_name {
-                            up_row(ui, p, parent, actions);
-                        }
-                        for row in &tree.rows {
-                            tree_row(ui, p, row, actions);
+                        if tree.archive.is_empty() {
+                            // Disk deck: the Finder-style FsTree (chevron expand/collapse).
+                            if let Some(parent) = &tree.parent_name {
+                                up_row(ui, p, parent, actions);
+                            }
+                            for row in &tree.rows {
+                                tree_row(ui, p, row, actions);
+                            }
+                        } else {
+                            // Archive/empty deck: flat, click-to-activate rows (task #66).
+                            for row in &tree.archive {
+                                archive_tree_row(ui, p, row, actions);
+                            }
                         }
                     });
             });
         },
     );
+}
+
+/// Map the core's v1 `folder_tree_panel` (an archive/empty deck) into flat [`ArchiveTreeRow`]s
+/// — the winit port of the macOS FFI's archive branch (`tree_refresh`). A row is clickable
+/// exactly when it carries a target (a `…` marker doesn't); its `index` is what a click hands
+/// `AppCore::tree_activate`. Pure, so the mapping is unit-tested without a core or egui.
+fn archive_tree_rows(panel: &pb_app_core::overlay::TreePanel) -> Vec<ArchiveTreeRow> {
+    panel
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(index, r)| ArchiveTreeRow {
+            index,
+            depth: r.depth,
+            name: r.name.clone(),
+            current: r.current,
+            up: r.up,
+            marker: r.marker,
+            clickable: panel.targets.get(index).is_some_and(Option::is_some),
+            count: r.count,
+        })
+        .collect()
+}
+
+/// One **archive** tree row — flat, no chevron: a folder re-scopes the deck on click, the
+/// root row backs out to the whole archive, the `up` row exits to the containing disk folder,
+/// and a `…` marker is inert. Activation resolves by index through `AppCore::tree_activate`,
+/// so this mirrors the macOS FFI's flat archive list (task #66). The geometry matches
+/// [`tree_row`] minus the chevron column, so names line up whichever deck is open.
+fn archive_tree_row(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    row: &ArchiveTreeRow,
+    actions: &mut Vec<PanelAction>,
+) {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), TREE_ROW_H),
+        egui::Sense::hover(),
+    );
+    let cy = rect.center().y;
+    let indent = row.depth as f32 * TREE_INDENT + TREE_BASE_INDENT;
+    let icon_x = rect.left() + indent;
+
+    if row.marker {
+        // A dim, inert "…" collapse marker (an over-deep chain folded its middle levels).
+        let g = galley(
+            ui,
+            &row.name,
+            FontId::new(TREE_NAME_SIZE, FontFamily::Proportional),
+            panel_secondary(p),
+            (rect.right() - 10.0 - icon_x).max(10.0),
+        );
+        paint_vtext(ui, icon_x, cy, &g);
+        return;
+    }
+
+    // Lead glyph: an up-arrow for the exit row, else a folder icon (open + accent = current).
+    let icon_center = sq(icon_x + TREE_ICON_SIZE / 2.0, cy, TREE_ICON_SIZE);
+    if row.up {
+        draw_up_arrow(ui.painter(), icon_center, panel_secondary(p));
+    } else {
+        let icon = if row.current {
+            Icon::FolderOpen
+        } else {
+            Icon::Folder
+        };
+        let tone = if row.current {
+            Tone::Accent
+        } else {
+            Tone::Neutral
+        };
+        pb_ui::icon::paint(ui, icon_center, icon, tone, p);
+    }
+
+    // Count pill on the right; the name truncates into what's left.
+    let mut name_right = rect.right() - 10.0;
+    if let Some(count) = row.count {
+        name_right -= tree_pill(ui, p, count, name_right, cy) + 6.0;
+    }
+    let name_x = icon_x + TREE_ICON_SIZE + 6.0;
+    let font = if row.current {
+        FontId::new(TREE_NAME_SIZE, FontFamily::Name(pb_ui::SEMIBOLD.into()))
+    } else {
+        FontId::new(TREE_NAME_SIZE, FontFamily::Proportional)
+    };
+    let g = galley(ui, &row.name, font, p.text, (name_right - name_x).max(10.0));
+    paint_vtext(ui, name_x, cy, &g);
+
+    // Clicking a targeted row re-scopes / opens by index. The current folder keeps a
+    // (self) target so it stays clickable — harmless, and matches the macOS host.
+    if row.clickable {
+        let hit = egui::Rect::from_min_max(
+            egui::pos2(icon_x, rect.top()),
+            egui::pos2(name_right, rect.bottom()),
+        );
+        let resp = ui.interact(
+            hit,
+            ui.id().with(("arc_tree", row.index)),
+            egui::Sense::click(),
+        );
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if resp.clicked() {
+            actions.push(PanelAction::TreeActivate(row.index));
+        }
+    }
 }
 
 /// The "up to parent" affordance at the top of the tree — a drawn up-left arrow + the parent
