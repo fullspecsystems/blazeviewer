@@ -8,6 +8,11 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Fixed
+- **ZIP/7z archives now open on machines with less RAM.** The memory check that guards against
+  opening an archive too large to fit in RAM was too conservative and could refuse *every* archive
+  — even a tiny one — on a machine with around 8 GB of RAM. It now reserves memory before applying
+  its safety margin, so normal archives open on smaller machines while genuinely oversized ones are
+  still refused.
 - **The About and Settings dialogs now open on virtual machines / GPUs without a low-power
   Direct3D adapter.** On some setups (notably a Parallels VM on Apple Silicon) opening a dialog
   picked an OpenGL compatibility adapter that couldn't be initialized, so the dialog never

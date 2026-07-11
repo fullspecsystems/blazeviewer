@@ -104,7 +104,8 @@ pub fn available_physical_ram() -> Option<u64> {
 
 /// The byte ceiling for an eager archive's resident decompressed-image bytes. The
 /// `PB_ARCHIVE_RAM_BUDGET` env override wins (e.g. `512MB`, `2gb`, `1.5GB`, or raw
-/// bytes); otherwise it's `fraction(available) - reservations - margin`.
+/// bytes); otherwise it's `(available - reservations - margin) * fraction` (see
+/// [`budget_from`] for why the reservation is subtracted before the fraction).
 pub fn ram_budget() -> u64 {
     if let Ok(s) = std::env::var("PB_ARCHIVE_RAM_BUDGET") {
         if let Some(b) = parse_budget(&s) {
@@ -122,9 +123,20 @@ pub fn ram_budget() -> u64 {
 }
 
 /// The budget math, pulled out so it's unit-testable without touching the OS.
+///
+/// Reserve *first*, then take the fraction: `(available - reservations - margin) *
+/// fraction`. The fraction is a headroom cushion on the RAM that's actually *spare*
+/// after PhotoBlaze's own resident use (ring + pool) and the transient-copy margin —
+/// not a slice of gross RAM the reservations are then subtracted from again. The old
+/// order (`available * fraction - reservations - margin`) double-penalized modest
+/// machines: an 8 GB box with ~4 GB free computed a **0**-byte budget and refused
+/// every archive, even a 1 MB one. Reserve-first yields ~0.9 GB there, while still
+/// saturating to 0 (correctly refusing) once free RAM drops below the reservations.
 fn budget_from(available: u64, reservations: u64, fraction: f64, margin: u64) -> u64 {
-    let usable = (available as f64 * fraction) as u64;
-    usable.saturating_sub(reservations).saturating_sub(margin)
+    let spare = available
+        .saturating_sub(reservations)
+        .saturating_sub(margin);
+    (spare as f64 * fraction) as u64
 }
 
 /// Parse a `PB_ARCHIVE_RAM_BUDGET` value: an integer or decimal with an optional
@@ -228,17 +240,35 @@ mod tests {
 
     #[test]
     fn budget_subtracts_reservations_and_margin() {
-        // 10 GB available, 60% = 6 GB, minus 2 GB reservations minus 0.5 GB margin.
+        // Reserve first, then take the fraction: 10 GB available minus 2 GB
+        // reservations minus 0.5 GB margin = 7.5 GB spare, of which 60% = ~4.5 GB.
+        // Compare against the same f64 path the impl uses (avoids an off-by-one from
+        // 0.6 not being exactly representable).
         let gb = 1024 * 1024 * 1024;
+        let spare = 10 * gb - 2 * gb - gb / 2;
         let got = budget_from(10 * gb, 2 * gb, 0.6, gb / 2);
-        assert_eq!(got, 6 * gb - 2 * gb - gb / 2);
+        assert_eq!(got, (spare as f64 * 0.6) as u64);
     }
 
     #[test]
-    fn budget_saturates_to_zero_when_reservations_exceed_usable() {
+    fn budget_saturates_to_zero_when_reservations_exceed_available() {
         let gb = 1024 * 1024 * 1024;
-        // 1 GB available -> 0.6 GB usable, far below the reservations: clamps to 0.
+        // 1 GB available, 4 GB reservations: spare saturates to 0 before the
+        // fraction, so a truly memory-starved machine still (correctly) refuses.
         assert_eq!(budget_from(gb, 4 * gb, 0.6, 0), 0);
+    }
+
+    #[test]
+    fn budget_is_nonzero_on_an_8gb_machine() {
+        // Regression: the old `available*fraction - reservations - margin` order
+        // floored an 8 GB box (~4 GB free) to 0, refusing every archive. Reserve-first
+        // must leave a usable budget there — comfortably more than a small archive.
+        let gb = 1024 * 1024 * 1024;
+        let got = budget_from(4 * gb, APP_RESERVATIONS, BUDGET_FRACTION, TRANSIENT_MARGIN);
+        assert!(
+            got >= 512 * 1024 * 1024,
+            "8 GB machine should admit at least a 512 MB archive, got {got}"
+        );
     }
 
     #[test]
