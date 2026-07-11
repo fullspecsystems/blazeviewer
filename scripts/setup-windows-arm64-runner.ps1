@@ -39,12 +39,32 @@ param(
 )
 $ErrorActionPreference = "Stop"
 
-Write-Host "== [1/4] Prerequisites via winget (Git, VS Build Tools ARM64)" -ForegroundColor Cyan
+Write-Host "== [1/4] Prerequisites via winget (Git, VS Build Tools ARM64 + Clang)" -ForegroundColor Cyan
 winget install --id Git.Git -e --accept-source-agreements --accept-package-agreements
 # ARM64-native MSVC toolset + Windows 11 SDK — what rustc's aarch64-pc-windows-msvc
-# host toolchain links with. (~15 min; --wait blocks until the VS installer finishes.)
+# host toolchain links with. VC.Llvm.Clang is NOT optional: the `ring` crate (pulled
+# in transitively by rustls/reqwest et al.) hard-requires clang to build its assembly
+# on aarch64-pc-windows-msvc — MSVC cl.exe alone fails with "failed to find tool
+# clang" deep in a `cargo test`. (~15 min; --wait blocks until the VS installer
+# finishes.)
 winget install --id Microsoft.VisualStudio.2022.BuildTools -e --accept-package-agreements --override `
-    "--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --add Microsoft.VisualStudio.Component.Windows11SDK.22621 --includeRecommended"
+    "--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --add Microsoft.VisualStudio.Component.VC.Llvm.Clang --add Microsoft.VisualStudio.Component.Windows11SDK.22621 --includeRecommended"
+
+# ring's build script expects `clang` resolvable on PATH — it does not auto-discover
+# the VS-bundled copy. Find it (path/arch subfolder varies by VS/host) and add it
+# machine-wide so every account (including a service account) sees it.
+$clangDir = (Get-ChildItem "C:\Program Files*\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm" `
+    -Recurse -Filter clang.exe -ErrorAction SilentlyContinue | Select-Object -First 1).DirectoryName
+if ($clangDir) {
+    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    if ($machinePath -notlike "*$clangDir*") {
+        [Environment]::SetEnvironmentVariable("Path", "$machinePath;$clangDir", "Machine")
+    }
+    $env:Path = "$clangDir;$env:Path"
+    Write-Host "  clang found at $clangDir (added to machine PATH)" -ForegroundColor DarkGray
+} else {
+    Write-Host "⚠ clang.exe not found under VS Build Tools — the ring crate will fail to build." -ForegroundColor Yellow
+}
 
 Write-Host "== [2/4] rustup (aarch64-pc-windows-msvc host)" -ForegroundColor Cyan
 $rustupInit = "$env:TEMP\rustup-init.exe"

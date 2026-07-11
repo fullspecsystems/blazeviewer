@@ -70,6 +70,18 @@ honest before it ever ships). Distinct from GREMLIN: this lane only runs tests
 (`arm64-windows-static-md` triplet is the known follow-up risk when release builds
 become a goal).
 
+**⚠ `ring` needs `clang` on this target, not just MSVC.** The `ring` crate (pulled in
+transitively — rustls/reqwest etc.) hard-requires clang to compile its assembly on
+`aarch64-pc-windows-msvc`; `cl.exe` alone fails deep in `cargo test` with "failed to
+find tool clang". GREMLIN (x64) never hit this because ring doesn't need clang there.
+The bootstrap script installs the VS "C++ Clang Compiler for Windows" component
+(`Microsoft.VisualStudio.Component.VC.Llvm.Clang`) and adds its bin dir to the
+machine-wide PATH automatically (ring doesn't auto-discover the VS-bundled copy — it
+has to be resolvable on PATH). If a runner predates this fix, rerun just the VS Build
+Tools winget line with that component added, `Get-ChildItem` for `clang.exe` under
+`...\BuildTools\VC\Tools\Llvm`, add its folder to the machine PATH, and
+`Restart-Service actions.runner.*`.
+
 **⚠ Foreground runner, not a service — by design.** A personal Windows install today is
 very likely signed into a Microsoft account (unlocked with a Hello PIN), and the
 GREMLIN-style Windows-service registration needs the account's real *password* for
