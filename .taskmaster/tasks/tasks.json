@@ -735,6 +735,65 @@
         "priority": "low",
         "dependencies": [],
         "subtasks": []
+      },
+      {
+        "id": 76,
+        "title": "Windows: animated AVIF (avis) playback via dav1d",
+        "description": "Animated AVIF does not play on Windows (x64 OR ARM64) — it only shows the first frame. detect_animation (crates/pb-decode/src/animation.rs) only flags ISOBMFF image sequences (avis / msf1) on macOS (Image I/O) and Linux+livephoto (FFmpeg); Windows matches neither cfg, so an avis file is treated as a still and WIC decodes frame 0. SPIKE FINDINGS (2026-07-11, ARM64): WIC GetFrameCount() returns 1 for an avis file (the AV1 Video Extension WIC codec exposes only the primary frame), and Media Foundation cannot demux a .avif at all (MFCreateSourceReaderFromURL / decode_live_motion on the .avif -> 0x80004005). So there is NO OS-native Windows path for AV1 image sequences. Owner decision (2026-07-11): add the dav1d AV1 decoder (C, via vcpkg — same pattern as the existing libheif dependency) behind a cargo feature, demux the avis container ourselves, and decode + color-convert each frame. WINDOWS-ONLY: Linux already plays animated AVIF via FFmpeg (ff_live.rs decode_image_sequence) and macOS via Image I/O — both stay unchanged; do not touch them. IMPLEMENT ON THE WINDOWS x64 BOX (cfg(windows) + vcpkg build + real corpus), then mirror the vcpkg build on ARM64. Rejected alternative: FFmpeg-on-Windows (would reuse ff_live.rs and skip the hand-rolled demux + YUV conversion) but is a much larger binary dependency the project deliberately avoided on Windows; dav1d keeps the dependency small at the cost of writing the demux + YUV->RGB ourselves.",
+        "details": "WHY THIS IS MORE CODE THAN libheif WAS: WIC / Image I/O / FFmpeg are high-level (file in, RGBA out — they demux + decode + color-convert). dav1d is a BARE AV1 frame decoder (AV1 OBUs in, planar YUV out), so we must add the two things it does NOT do: (A) an ISOBMFF avis demuxer, and (B) YUV->RGB8 conversion. The vcpkg/build side is nearly a copy of libheif (a setup script + a build.rs link block + one per-arch step in release-windows.ps1) = LOW new build complexity; the DECODE side (demux + YUV) is the real work and the fragile part. TEST FILE: animated/3.avif in the owner's corpus is a real avis (major brand 'avis', compatible 'avif avis msf1 iso8', 26 frames — its sibling 3.webp confirms 26). REFERENCE for the Animation output contract, timing, and caps: ff_live.rs decode_image_sequence (Linux, the closest analog) and animation.rs collect_frames (MAX_FRAMES / MAX_DECODED_BYTES / normalize_delay / common::downscale_to_fit / ColorTransform). GATE the whole backend behind a build cfg emitted by build.rs (e.g. av1_dav1d, exactly like heic_libheif) so a build WITHOUT the feature leaves animated AVIF as first-frame-static — no dead 'play' hint, no regression. GRACEFUL FAILURE: any demux/decode error returns a DecodeError so the app falls back to the WIC still first frame; decode_animation already wraps the call in catch_unwind. OUT OF SCOPE v1: HEIC image sequences (msf1) are HEVC, which dav1d cannot decode — leave them first-frame-static (a later libheif-image-sequence or MF path is a separate task); HDR (PQ/HLG) avis SDR-clamp or route to the still, like HDR HEIC.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "dav1d via vcpkg + build.rs link + cargo feature (mirror libheif)",
+            "description": "Add a 'dav1d' cargo feature to pb-decode (pass-through from pb-app like 'libheif'). vcpkg port: dav1d:<arch>-windows-static-md (its build pulls nasm + meson + ninja, which vcpkg provides). Extend scripts/setup-libheif.ps1 or add scripts/setup-dav1d.ps1 to install it per-arch (x64 and arm64). In pb-decode/build.rs add link_dav1d_windows() mirroring link_libheif_windows(): link the static dav1d lib from the vcpkg triplet lib dir, emit cargo:rustc-cfg=av1_dav1d, and register the cfg via rustc-check-cfg. Gate on target_os=windows AND CARGO_FEATURE_DAV1D. Acceptance: cargo build -p pb-decode --features dav1d links clean.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "Hand-rolled dav1d FFI bindings",
+            "description": "New module crates/pb-decode/src/dav1d.rs, cfg(all(windows, av1_dav1d)), hand-rolled extern C bindings in the style of libheif.rs (avoid the dav1d/dav1d-sys crate — it uses system-deps/pkg-config which fights vcpkg on Windows). Minimal API: Dav1dSettings + dav1d_default_settings, dav1d_open/dav1d_close, Dav1dData + dav1d_data_wrap (+ unref), dav1d_send_data, Dav1dPicture + dav1d_get_picture (+ dav1d_picture_unref). PIN the vcpkg dav1d version and mirror its exact struct ABI (Dav1dPicture: data[3]/stride[2]/Dav1dPictureParameters{w,h,layout,bpc}/seq_hdr with the color_config fields). Acceptance: open/close a decoder and round-trip a single keyframe OBU to a picture in a smoke test.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "ISOBMFF avis demuxer (sample table -> frames + timing + av1C)",
+            "description": "Parse moov/trak/mdia/minf/stbl of the avis file to extract, in decode order: the av1C configOBUs (sequence header — from stsd -> av01 sample entry -> av1C box), each sample's byte range (stsz sizes + stsc sample-to-chunk + stco/co64 chunk offsets), and each sample's duration (stts deltas scaled by the mdhd timescale). Handle co64 (64-bit offsets) and multi-run stsc; ignore edit lists. Bound to MAX_FRAMES. Extend crates/pb-decode/src/isobmff.rs (already box-walks for brand/colr) or a focused new reader. Unit-test on a tiny avis: correct sample count, sizes, monotonically sane offsets, plausible durations.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "AV1 decode + YUV->RGB8 conversion + color",
+            "description": "Feed the av1C configOBUs (seq header) then each sample's OBUs to dav1d (dav1d_send_data / dav1d_get_picture, handling EAGAIN). Convert each planar YUV picture to straight RGBA8, honoring chroma layout (I420/I422/I444), bit depth (8/10/12 -> 8), color RANGE (limited vs full), and MATRIX coefficients (BT.601/709/2020, from the seq header color_config / picture seq_hdr). Then common::downscale_to_fit + the MAX_FRAMES/MAX_DECODED_BYTES caps + normalize_delay, like collect_frames. Carry the DISPLAY ColorTransform from the colr box (crate::isobmff::color_from_colr_box) so P3 AVIF is correct — mirror the macOS Image I/O path (which carries a real P3 transform, NOT ColorTransform::srgb()). Keep the two color steps straight: the YUV->RGB matrix yields source-gamut RGB; the colr primaries/transfer are applied in-shader downstream. Add pure unit tests for the YUV->RGB math (known YUV -> expected RGB, limited + full range).",
+            "status": "pending"
+          },
+          {
+            "id": 5,
+            "title": "Wire detection + decode_animation dispatch for Windows",
+            "description": "animation.rs detect_animation: add a cfg(all(windows, av1_dav1d)) branch that flags avis via an isobmff sequence sniff (reuse/port isobmff_image_sequence so it does NOT require the HEIC-only isobmff module unless that always compiles on Windows). decode_animation_inner: add a cfg(all(windows, av1_dav1d)) route to the new dav1d sequence backend for AnimationKind::Heif; keep still AVIF on WIC (only avis sequences go to dav1d). Leave decode_with_image_crate's Heif => Unsupported as the feature-off fallback. Confirm the app shows the play hint and P plays the loop (looping like a GIF).",
+            "status": "pending"
+          },
+          {
+            "id": 6,
+            "title": "Tests",
+            "description": "(1) detect_animation flags a synthetic avis ftyp on Windows (mirror the macos/linux cfg tests around animation.rs line ~1059). (2) demuxer unit tests (sample count/sizes/offsets/durations). (3) YUV->RGB8 pure unit tests (deterministic; limited + full range; a couple matrices). (4) decode integration test: commit a SMALL animated-AVIF fixture to crates/pb-decode/tests/fixtures (generate a 2-4 frame avis with avifenc, or shrink 3.avif) -> decode_animation returns >1 frame, right dims, non-empty pixels, sane loop; gate on cfg(all(windows, av1_dav1d)). Keep the fixture tiny (repo is private but still).",
+            "status": "pending"
+          },
+          {
+            "id": 7,
+            "title": "Build/release wiring + docs + CHANGELOG",
+            "description": "release-windows.ps1: build dav1d per-arch (setup step) before cargo build and add --features dav1d to the ship build alongside libheif. CLAUDE.md: update the library-picks AVIF row (animated AVIF via dav1d on Windows), the 'What is actually wired' AVIF/HEIC + animation notes, and the 'Cutting a release' Windows section (the extra per-arch vcpkg step). CHANGELOG.md under Added: 'Animated AVIF now plays on Windows.' Document that HEIC sequences (msf1) stay first-frame-static on Windows (HEVC, not AV1).",
+            "status": "pending"
+          },
+          {
+            "id": 8,
+            "title": "End-to-end verify (Windows x64 primary, ARM64 mirror)",
+            "description": "Build --features dav1d,libheif. Run cargo run -p pb-decode --example anim_info -- <folder>/3.avif -> expect the Heif kind, ~26 frames, sane per-frame delays. Launch the app on the folder: the still shows instantly, the play hint appears, P plays the loop with correct color/orientation, and the event loop never stalls (decode stays on the worker pool). Confirm a build WITHOUT --features dav1d still shows the first frame (no dead play hint). Re-run the full workspace tests + clippy -D warnings + fmt. Then repeat the vcpkg dav1d build + smoke on the ARM64 box (arm64-windows-static-md) so both shipped arches are covered.",
+            "status": "pending"
+          }
+        ]
       }
     ]
   }
