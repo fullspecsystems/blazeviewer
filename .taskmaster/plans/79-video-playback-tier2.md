@@ -29,7 +29,7 @@ escalation), native HDR video output (see Color policy).
 | Queue bound (rev2) | **Bytes, not frames**: 2-3 decoded frames of lookahead under an explicit byte budget, with a one-frame exception when a single fitted frame exceeds it. |
 | Color (rev2) | **Tier-2 guarantee: correct, tested SDR** — right matrix/transfer/range, P3-SDR preserved where available, HDR tone-mapped (or OS-converted) deterministically, poster and playback bit-identical in color policy. `VideoFrame` carries `VideoColorInfo` + pixel format now so fp16/NV12 backends slot in later without rewriting the session. |
 | Output size (rev2) | **Not the 1440 Live-Photo cap** (`engine.rs:105` was a preview policy): fit to viewport, never upscale past source, geometry fixed per session; GPU scales during window resize; new fit applies on next play. |
-| Unsupported containers (rev2, **owner to confirm**) | Recommend: common video containers (incl. MKV) are *visible* items with a generic placeholder poster and a useful "codec not available" error on `P` — matches "view everything" and the Store-extension graceful-absence pattern. The alternative (invisible) would require deleting the graceful-MKV acceptance test and weakening the goal wording. |
+| Unsupported containers (**owner-confirmed 2026-07-11**) | Common video containers (incl. MKV) are *visible* items with a generic placeholder poster and a "codec not available" error on `P`. Rationale: better than showing nothing, and the error itself becomes telemetry-by-eyeball for which codecs are worth supporting. Consequence: the recognition list is **one cross-platform container list**; per-file capability is a *runtime* property (the poster attempt is the capability probe) — so codec coverage grows with the OS without PhotoBlaze shipping anything. On Windows the error should name the fix when one exists (the HEVC/AV1/Web-Media Store extensions — same pattern as HEIC stills). ⚠ Codec-pack caveat: K-Lite/LAV are **DirectShow** filters, invisible to Media Foundation — installing them will NOT light PhotoBlaze up; only MF-registered handlers (the Store extensions) do. Also: Windows 10+ ships a **native MKV byte-stream handler** (Movies & TV plays MKV), so MF may demux MKV out of the box — phase-0 spike verifies and the format matrix gets corrected from measurement, not assumption. macOS has no user-installable AVFoundation codec path (Perian-era components are dead): Apple-blessed formats per OS version are the ceiling unless we ever bundle an FFmpeg backend there (Linux-style; deliberate future decision, not free). |
 
 ## Verified review findings (rev2 — all checked against the tree)
 
@@ -166,7 +166,9 @@ block ~1 s, `mf_video.rs:186`). Rapid enter/leave must not grow retired workers 
 
 0. **Contracts + platform spikes.** Define `LibraryItemKind`, `VideoMetadata`, `VideoFrame` /
    `VideoColorInfo`, session states, `AudioClockSample`, byte-budget invariants. Spike: MF
-   fitted-output scaling + stream deselection + PTS + seek-forward + cancellation cost; macOS
+   fitted-output scaling + stream deselection + PTS + seek-forward + cancellation cost **+
+   container probe sweep (does Win10/11's native MKV handler open our test MKVs? webm with/
+   without Web Media Extensions?)** — the format matrix ships from these measurements; macOS
    reader-recreate cost + `prepareToPlay` timing; Linux incremental audio prototype. Lock the
    SDR guarantee against real phone footage (HLG iPhone clip). **Spike results replace the
    schedule estimate.**
