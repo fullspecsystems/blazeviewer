@@ -37,6 +37,30 @@ mod ff_live;
 // (macOS plays avis via Image I/O, Linux via FFmpeg; elsewhere the feature is a no-op).
 #[cfg(av1_dav1d)]
 mod dav1d;
+// The avis (animated AVIF) demuxer + probe + dav1d decode pipeline (task #76).
+// The demux half is pure Rust and deliberately self-contained, so it compiles
+// under `test` on every platform (demux unit tests need no decoder) and under
+// the hidden `fuzz-internals` feature for the fuzz harness; only the decode
+// section inside is gated on the linked dav1d.
+#[cfg(any(av1_dav1d, test, feature = "fuzz-internals"))]
+// In the fuzz-only build the probe's outputs are intentionally unread.
+#[cfg_attr(
+    all(feature = "fuzz-internals", not(any(av1_dav1d, test))),
+    allow(dead_code)
+)]
+mod avis;
+// Planar YUV→RGBA8 for the avis backend — pure math; the fuzz harness never
+// reaches it (the probe is demux-only), so it isn't compiled there.
+#[cfg(any(av1_dav1d, test))]
+mod yuv;
+
+/// Fuzz-harness hook (hidden; `fuzz/fuzz_targets/probe_avis.rs`): drives the
+/// pure-Rust avis demuxer on arbitrary bytes. Never part of a real build.
+#[cfg(feature = "fuzz-internals")]
+#[doc(hidden)]
+pub fn fuzz_probe_avis(bytes: &[u8]) {
+    let _ = avis::probe_avis(bytes);
+}
 // Shared ISOBMFF/`colr` parsing for the HEVC/AV1 container backends (WIC, Image I/O,
 // libheif). Only compiled where one of them is — keeps non-HEIC targets (e.g. a
 // libheif-less Linux bench build) dead-code-free.
@@ -60,8 +84,8 @@ mod zune;
 use std::path::Path;
 
 pub use animation::{
-    decode_animation, detect_animation, AnimFrame, Animation, AnimationKind, MotionChunk,
-    MotionHeader,
+    decode_animation, decode_animation_cancellable, detect_animation, AnimFrame, Animation,
+    AnimationKind, MotionChunk, MotionHeader,
 };
 pub use color::ColorTransform;
 #[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]

@@ -292,9 +292,10 @@ pub fn decode_motion_job(
         Err(e) => return Err(DecodeError::Corrupt(format!("read error: {e}"))),
     };
     // An animated ISOBMFF sequence (animated AVIF `avis` / HEIC `msf1`) with a real file path
-    // decodes via the FFmpeg video pipeline — Linux has no pure-Rust AV1/HEVC sequence decoder,
-    // so we reuse the one already linked for Live Photo motion. Archive entries (no path) fall
-    // through to the still-frame `image`-crate path below (which reports it unsupported, gracefully).
+    // decodes via the FFmpeg video pipeline on Linux — reusing the decoder already linked for
+    // Live Photo motion. (Windows plays `avis` via the dav1d backend inside `decode_animation`
+    // itself — task #76; macOS via Image I/O.) Archive entries (no path) fall through to
+    // `decode_animation`, which reports what it can't play as unsupported, gracefully.
     #[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
     if pb_decode::detect_animation(&bytes) == Some(pb_decode::AnimationKind::Heif) {
         if let Some(path) = source.path(item) {
@@ -305,7 +306,9 @@ pub fn decode_motion_job(
             return pb_decode::decode_image_sequence_cancellable(path, edge, cancel);
         }
     }
-    pb_decode::decode_animation(&bytes, fit)
+    // Cancellable (task #76): navigating away mid-decode stops the worker within
+    // ~a frame instead of orphaning a multi-second AV1 batch decode.
+    pb_decode::decode_animation_cancellable(&bytes, fit, cancel)
 }
 
 /// Whether an EXIF `(tag, value)` is a binary blob better left out of the panel —

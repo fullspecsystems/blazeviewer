@@ -22,6 +22,7 @@
 //! Privacy (task #2): every frame produced here is a RAM-only cache, dropped when
 //! playback stops or the user navigates away. Nothing is serialized.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::{common, ColorTransform, DecodeError, FitBox};
@@ -36,8 +37,9 @@ pub enum AnimationKind {
     /// Animated WebP (a `VP8X` chunk with the animation flag).
     Webp,
     /// An ISOBMFF image **sequence** — animated AVIF (`avis`) or HEIC (`msf1`).
-    /// Only decodable via the macOS Image I/O backend (no pure-Rust AV1/HEVC
-    /// sequence decoder), so it's only ever produced on macOS.
+    /// Decoded by the platform backends: Image I/O on macOS, FFmpeg on Linux
+    /// (`livephoto`), and dav1d on Windows (`avis` only — task #76). Only ever
+    /// produced where one of those can actually play the file.
     Heif,
     /// The motion component of an Apple **Live Photo** — a short QuickTime `.mov`
     /// (H.264 / HEVC) that lives in a *separate* file alongside the still, decoded on
@@ -256,15 +258,22 @@ pub fn detect_animation(bytes: &[u8]) -> Option<AnimationKind> {
     }
     // ISOBMFF image sequences (animated AVIF `avis` / HEIC `msf1`). A still AVIF/HEIC
     // (brand `avif`/`heic`/`mif1`) is NOT a sequence and stays on the still path.
-    // Decodable on macOS (Image I/O) and on Linux with `livephoto` (the FFmpeg video
-    // pipeline) — there's no pure-Rust AV1/HEVC sequence decoder, so elsewhere it's not
-    // flagged (it would only produce a dead "▶" with nothing to play).
+    // Decodable on macOS (Image I/O), on Linux with `livephoto` (the FFmpeg video
+    // pipeline), and on Windows with the dav1d backend (avis only — task #76).
+    // Elsewhere it's not flagged (a hint with nothing to play would be a dead "▶").
     #[cfg(target_os = "macos")]
     if crate::isobmff::isobmff_is_sequence(bytes) {
         return Some(AnimationKind::Heif);
     }
     #[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
     if isobmff_image_sequence(bytes) {
+        return Some(AnimationKind::Heif);
+    }
+    // Windows + dav1d: a full supported-file probe, not a brand sniff — msf1
+    // (HEVC), HDR, fragmented, encrypted etc. are all excluded here, so the
+    // play hint only ever appears for files the backend can actually attempt.
+    #[cfg(av1_dav1d)]
+    if crate::avis::probe_avis(bytes).is_ok() {
         return Some(AnimationKind::Heif);
     }
     None
@@ -474,8 +483,22 @@ pub fn webp_delay(ms: u32) -> Duration {
 /// [`MAX_DECODED_BYTES`]; on overflow the returned [`Animation`] has `truncated =
 /// true` and the playable prefix.
 pub fn decode_animation(bytes: &[u8], fit: Option<FitBox>) -> Result<Animation, DecodeError> {
+    static NEVER: AtomicBool = AtomicBool::new(false);
+    decode_animation_cancellable(bytes, fit, &NEVER)
+}
+
+/// [`decode_animation`] with a cancellation flag (task #76): the caller sets it
+/// when the user navigates away, and the decode bails within roughly one frame
+/// (checked between frames / samples / conversions). A cancelled decode returns
+/// an error — the caller is discarding the result anyway, matching the
+/// streaming producers' silent-stop contract.
+pub fn decode_animation_cancellable(
+    bytes: &[u8],
+    fit: Option<FitBox>,
+    cancel: &AtomicBool,
+) -> Result<Animation, DecodeError> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        decode_animation_inner(bytes, fit)
+        decode_animation_inner(bytes, fit, cancel)
     })) {
         Ok(r) => r,
         Err(_) => Err(DecodeError::Corrupt("animation decoder panicked".into())),
@@ -485,7 +508,11 @@ pub fn decode_animation(bytes: &[u8], fit: Option<FitBox>) -> Result<Animation, 
 // The `return` is load-bearing on non-macOS (a second cfg block follows), but reads
 // as "needless" on macOS where that block is compiled out — allow it for both.
 #[allow(clippy::needless_return)]
-fn decode_animation_inner(bytes: &[u8], fit: Option<FitBox>) -> Result<Animation, DecodeError> {
+fn decode_animation_inner(
+    bytes: &[u8],
+    fit: Option<FitBox>,
+    cancel: &AtomicBool,
+) -> Result<Animation, DecodeError> {
     let Some(kind) = detect_animation(bytes) else {
         return Err(DecodeError::Unsupported);
     };
@@ -494,11 +521,11 @@ fn decode_animation_inner(bytes: &[u8], fit: Option<FitBox>) -> Result<Animation
     // `image`-crate path is the universal baseline everywhere else.
     #[cfg(target_os = "macos")]
     {
-        return imageio_animation::decode(kind, bytes, fit);
+        return imageio_animation::decode(kind, bytes, fit, cancel);
     }
     #[cfg(not(target_os = "macos"))]
     {
-        decode_with_image_crate(kind, bytes, fit)
+        decode_with_image_crate(kind, bytes, fit, cancel)
     }
 }
 
@@ -513,6 +540,7 @@ fn decode_with_image_crate(
     kind: AnimationKind,
     bytes: &[u8],
     fit: Option<FitBox>,
+    cancel: &AtomicBool,
 ) -> Result<Animation, DecodeError> {
     use image::AnimationDecoder;
     use std::io::Cursor;
@@ -522,24 +550,29 @@ fn decode_with_image_crate(
         AnimationKind::Gif => {
             let dec = image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).map_err(corrupt)?;
             let loops = loop_count_to_u32(dec.loop_count());
-            collect_frames(kind, dec.into_frames(), loops, fit)
+            collect_frames(kind, dec.into_frames(), loops, fit, cancel)
         }
         AnimationKind::Apng => {
             let dec = image::codecs::png::PngDecoder::new(Cursor::new(bytes)).map_err(corrupt)?;
             let apng = dec.apng().map_err(corrupt)?;
             let loops = loop_count_to_u32(apng.loop_count());
-            collect_frames(kind, apng.into_frames(), loops, fit)
+            collect_frames(kind, apng.into_frames(), loops, fit, cancel)
         }
         AnimationKind::Webp => {
             let dec = image::codecs::webp::WebPDecoder::new(Cursor::new(bytes)).map_err(corrupt)?;
             let loops = loop_count_to_u32(dec.loop_count());
-            collect_frames(kind, dec.into_frames(), loops, fit)
+            collect_frames(kind, dec.into_frames(), loops, fit, cancel)
         }
-        // ISOBMFF sequences never reach this backend (the pure-Rust path can't decode
-        // AV1/HEVC) — they're only ever detected on macOS, which routes to Image I/O.
-        // Live Photo motion is a separate `.mov` decoded via AVFoundation (`livephoto`),
-        // never `decode_animation`, so it never reaches here either.
-        AnimationKind::Heif | AnimationKind::LivePhoto => Err(DecodeError::Unsupported),
+        // Animated AVIF (avis) decodes via the dav1d backend on Windows (task
+        // #76); without it — and for HEVC msf1 sequences everywhere off-macOS —
+        // there's no decoder here, and detection never flags what can't play.
+        #[cfg(av1_dav1d)]
+        AnimationKind::Heif => crate::avis::decode_avis(bytes, fit, cancel),
+        #[cfg(not(av1_dav1d))]
+        AnimationKind::Heif => Err(DecodeError::Unsupported),
+        // Live Photo motion is a separate `.mov` decoded via the platform video
+        // backends, never `decode_animation`, so it never reaches here.
+        AnimationKind::LivePhoto => Err(DecodeError::Unsupported),
     }
 }
 
@@ -560,6 +593,7 @@ fn collect_frames(
     frames: image::Frames<'_>,
     loop_count: u32,
     fit: Option<FitBox>,
+    cancel: &AtomicBool,
 ) -> Result<Animation, DecodeError> {
     let mut out: Vec<AnimFrame> = Vec::new();
     let mut total_bytes: u64 = 0;
@@ -567,6 +601,9 @@ fn collect_frames(
     let (mut canvas_w, mut canvas_h) = (0u32, 0u32);
 
     for frame in frames {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(DecodeError::Corrupt("cancelled".into()));
+        }
         if out.len() >= MAX_FRAMES {
             truncated = true;
             break;
@@ -589,17 +626,20 @@ fn collect_frames(
             canvas_w = w;
             canvas_h = h;
         }
-        total_bytes = total_bytes.saturating_add(rgba.len() as u64);
+        // Projected cap (task #76): a frame that would cross the byte budget
+        // is never retained — the cap is hard, not "hard plus one frame".
+        let projected = total_bytes.saturating_add(rgba.len() as u64);
+        if projected > MAX_DECODED_BYTES {
+            truncated = true;
+            break;
+        }
+        total_bytes = projected;
         out.push(AnimFrame {
             rgba,
             width: w,
             height: h,
             delay,
         });
-        if total_bytes > MAX_DECODED_BYTES {
-            truncated = true;
-            break;
-        }
     }
 
     if out.is_empty() {
@@ -634,6 +674,7 @@ mod imageio_animation {
         kind: AnimationKind,
         bytes: &[u8],
         fit: Option<FitBox>,
+        cancel: &AtomicBool,
     ) -> Result<Animation, DecodeError> {
         let raw = crate::imageio::decode_animation_frames(bytes, MAX_FRAMES).ok_or_else(|| {
             DecodeError::Corrupt("Image I/O could not decode the animation".into())
@@ -653,6 +694,9 @@ mod imageio_animation {
             .flatten();
 
         for rf in raw.frames {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(DecodeError::Corrupt("cancelled".into()));
+            }
             if out.len() >= MAX_FRAMES {
                 truncated = true;
                 break;
@@ -671,17 +715,19 @@ mod imageio_animation {
                 canvas_w = w;
                 canvas_h = h;
             }
-            total_bytes = total_bytes.saturating_add(rgba.len() as u64);
+            // Projected cap — never retain the frame that crosses the budget.
+            let projected = total_bytes.saturating_add(rgba.len() as u64);
+            if projected > MAX_DECODED_BYTES {
+                truncated = true;
+                break;
+            }
+            total_bytes = projected;
             out.push(AnimFrame {
                 rgba,
                 width: w,
                 height: h,
                 delay,
             });
-            if total_bytes > MAX_DECODED_BYTES {
-                truncated = true;
-                break;
-            }
         }
         if out.is_empty() {
             return Err(DecodeError::Corrupt("no frames decoded".into()));
@@ -710,6 +756,8 @@ mod imageio_animation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The tests' "never cancelled" flag (the cancellable API's null input).
+    static NO_CANCEL: AtomicBool = AtomicBool::new(false);
     use image::{
         codecs::gif::{GifEncoder, Repeat},
         Delay, Frame, Rgba, RgbaImage,
@@ -983,8 +1031,8 @@ mod tests {
     #[test]
     fn decodes_every_gif_frame_with_normalized_timing_and_loop_count() {
         let gif = encode_gif(3, Repeat::Infinite, Delay::from_numer_denom_ms(100, 1));
-        let anim =
-            decode_with_image_crate(AnimationKind::Gif, &gif, None).expect("decode animated gif");
+        let anim = decode_with_image_crate(AnimationKind::Gif, &gif, None, &NO_CANCEL)
+            .expect("decode animated gif");
         assert_eq!(anim.kind, AnimationKind::Gif);
         assert_eq!(anim.frame_count(), 3);
         assert_eq!(anim.loop_count, 0, "NETSCAPE infinite → 0");
@@ -1000,7 +1048,8 @@ mod tests {
     fn decode_clamps_a_zero_delay_gif_to_100ms() {
         // delay 0 → the GIF sub-threshold clamp kicks in end-to-end.
         let gif = encode_gif(2, Repeat::Infinite, Delay::from_numer_denom_ms(0, 1));
-        let anim = decode_with_image_crate(AnimationKind::Gif, &gif, None).expect("decode");
+        let anim =
+            decode_with_image_crate(AnimationKind::Gif, &gif, None, &NO_CANCEL).expect("decode");
         assert!(anim
             .frames
             .iter()
@@ -1010,7 +1059,8 @@ mod tests {
     #[test]
     fn decode_honors_a_finite_loop_count() {
         let gif = encode_gif(2, Repeat::Finite(3), Delay::from_numer_denom_ms(100, 1));
-        let anim = decode_with_image_crate(AnimationKind::Gif, &gif, None).expect("decode");
+        let anim =
+            decode_with_image_crate(AnimationKind::Gif, &gif, None, &NO_CANCEL).expect("decode");
         assert_eq!(anim.loop_count, 3);
     }
 
@@ -1025,6 +1075,7 @@ mod tests {
                 max_width: 4,
                 max_height: 4,
             }),
+            &NO_CANCEL,
         )
         .expect("decode");
         assert_eq!((anim.width, anim.height), (4, 4));

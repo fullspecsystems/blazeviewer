@@ -20,43 +20,97 @@ lives on disk (`C:\vcpkg-pb`, seeded from `~\vcpkg`; a fresh machine builds it o
 the "Ensure libheif" step). `release.yml` still targets hosted runners — it's dormant
 while releases are local, and works again whenever billing does.
 
-## Windows runner (done 2026-07-03)
+## Windows runner (updated 2026-07-11: dedicated `gh-runner` service account)
 
-Registered as `GREMLIN-win` in `C:\actions-runner`. To re-register (new machine, or
-converting to a service — a token is single-use and expires in an hour):
+Registered as `GREMLIN-win` in `C:\actions-runner`, now running as a **Windows service under
+a dedicated local `gh-runner` account** (non-admin) instead of the foreground `run.cmd` under
+`jdlien` — no terminal tab to keep open, survives reboot/logoff/disconnect, starts
+automatically (`Get-Service` shows `Running` / `StartType Auto`). Verified green end-to-end
+2026-07-11: a real `workflow_dispatch` run of `ci.yml` passed fmt/clippy/test/libheif on the
+`windows` job running as `gh-runner`.
 
-```powershell
-$token = gh api -X POST repos/jdlien/photoblaze/actions/runners/registration-token --jq .token
-cd C:\actions-runner
-.\config.cmd remove --token $token   # only if already configured
-.\config.cmd --url https://github.com/jdlien/photoblaze --token $token `
-  --name "$env:COMPUTERNAME-win" --unattended
-.\run.cmd    # foreground; or install the service (below)
-```
+**One-time setup** (this machine already has all of this done; keep this as the reference for
+a rebuild or a second Windows box):
 
-**Run it as a Windows service** (survives logoff/reboot; needs an ELEVATED shell —
-re-run config with `--runasservice`, using your own account so the runner sees your
-rustup/vcpkg/SDK environment):
+1. **Local account**: a dedicated `gh-runner` local user (`New-LocalUser` or Computer
+   Management), non-admin, real password. Its own profile/`.cargo`/`.rustup` stay separate
+   from `jdlien`'s — avoids lock contention if you build locally while CI runs, same pattern
+   the ARM64 VM section below already recommended.
+2. **Grant "Log on as a service"** (elevated PowerShell — `config.cmd --runasservice` needs
+   the target account to already hold this right):
+   ```powershell
+   $sid = (Get-LocalUser gh-runner).SID.Value
+   secedit /export /cfg $env:TEMP\secpol.cfg /areas USER_RIGHTS
+   # append ",*<sid>" to the existing SeServiceLogonRight line (or add the line if absent)
+   secedit /configure /db $env:TEMP\secpol.sdb /cfg $env:TEMP\secpol.cfg /areas USER_RIGHTS /quiet
+   ```
+3. **Install rustup for `gh-runner`** (its own pinned toolchain, per `rust-toolchain.toml`).
+   ⚠ **`Start-Process -Credential` does NOT rebuild the environment block for the target
+   user** — `$env:USERPROFILE` etc. stay as the *launching* account's, so `rustup-init` tries
+   to install into the wrong `.rustup`/`.cargo` (and fails loudly rather than silently
+   overwriting an existing one there — that's what happened here; no damage done, just wasted
+   a round trip). Use `runas.exe` instead — it does a real profile-loading logon and builds a
+   correct environment:
+   ```powershell
+   runas /user:gh-runner /profile "powershell -NoExit -File C:\Windows\Temp\gh-runner-rustup-install.ps1"
+   ```
+   where the script is the usual `Invoke-WebRequest` of `rustup-init.exe` +
+   `-y --default-toolchain 1.97.0 --profile minimal` + `rustup component add rustfmt clippy
+   llvm-tools-preview`. `runas` prompts for the password at its own console prompt — masked,
+   never a command-line argument, never in shell history.
+4. **⚠ PowerShell 7 (`pwsh`) must be a machine-wide MSI install, not the Microsoft Store
+   package.** `ci.yml`'s `shell: pwsh` steps failed with `pwsh: command not found` under
+   `gh-runner` even though `pwsh` worked fine for `jdlien` interactively — the Store package
+   (`Microsoft.PowerShell_7.x.x.0`) only exposes `pwsh` via a **per-user** app-execution alias
+   under `%LOCALAPPDATA%`, which doesn't exist for an account that's never logged in
+   interactively. Fix: install the official MSI, which adds `C:\Program Files\PowerShell\7` to
+   the **System** PATH (visible to every account):
+   ```powershell
+   $url = gh api repos/PowerShell/PowerShell/releases/latest --jq '.assets[] | select(.name | test("win-x64.msi$")) | .browser_download_url'
+   Invoke-WebRequest -Uri $url -OutFile "C:\Windows\Temp\pwsh.msi"
+   Start-Process msiexec.exe -ArgumentList "/i C:\Windows\Temp\pwsh.msi /quiet /norestart ADD_PATH=1" -Wait
+   Restart-Service "actions.runner.jdlien-photoblaze.GREMLIN-win"   # picks up the new machine PATH
+   ```
+5. **Register (or re-register) the runner as a service.** Tokens are single-use and expire in
+   an hour, so fetch a fresh one for each of the remove/register calls:
+   ```powershell
+   cd C:\actions-runner
+   $token = gh api -X POST repos/jdlien/photoblaze/actions/runners/registration-token --jq .token
+   .\config.cmd remove --token $token   # only if already configured under a different account
 
-```powershell
-# elevated PowerShell:
-$token = gh api -X POST repos/jdlien/photoblaze/actions/runners/registration-token --jq .token
-cd C:\actions-runner
-.\config.cmd remove --token $token
-.\config.cmd --url https://github.com/jdlien/photoblaze --token $token `
-  --name "$env:COMPUTERNAME-win" --unattended `
-  --runasservice --windowslogonaccount $env:USERNAME
-# it prompts for the account password once; the service auto-starts at boot
-```
+   $token = gh api -X POST repos/jdlien/photoblaze/actions/runners/registration-token --jq .token
+   # --unattended requires --windowslogonpassword explicitly -- it does NOT prompt for one,
+   # it just aborts ("Invalid configuration provided for windowslogonpassword"). Use a masked
+   # Read-Host instead of typing the password as a literal argument.
+   $securePw = Read-Host -AsSecureString "gh-runner password"
+   $plainPw = [System.Net.NetworkCredential]::new("", $securePw).Password
+   .\config.cmd --url https://github.com/jdlien/photoblaze --token $token `
+     --name "GREMLIN-win" --unattended `
+     --runasservice --windowslogonaccount gh-runner --windowslogonpassword $plainPw
+   Remove-Variable plainPw, securePw
+   ```
+6. **Verify**: `Get-Service actions.runner.jdlien-photoblaze.GREMLIN-win` → `Running`/`Auto`;
+   `Get-CimInstance Win32_Service -Filter "Name='actions.runner.jdlien-photoblaze.GREMLIN-win'"
+   | select StartName` → `.\gh-runner`; `gh api repos/jdlien/photoblaze/actions/runners` shows
+   it `online`; and a real CI run's `windows` job goes green.
 
-Gotchas learned setting this up:
+Permissions note: `C:\actions-runner` and `C:\vcpkg-pb` already grant `Authenticated Users:
+Modify`, so `gh-runner` needed **no ACL changes** on either — only its own rustup/cargo
+profile and the service-logon right were account-specific.
+
+Gotchas learned setting this up (still apply):
 - **`shell: bash` resolves to the WSL shim** (`WindowsApps\bash.EXE`) on a stock
   Windows PATH and chokes on the runner's Windows-style script paths. ci.yml prepends
   `C:\Program Files\Git\bin` via `GITHUB_PATH` as its first step — keep that step.
 - The job env is the runner process's env: rustup, VS Build Tools, git, and pwsh all
-  come from the machine. `VCPKG_ROOT=C:\vcpkg-pb` is set by the workflow.
+  come from the machine (now machine-wide installs only, so any account resolves them).
+  `VCPKG_ROOT=C:\vcpkg-pb` is set by the workflow.
 - Jobs run even while the account's hosted billing is broken — the billing lock only
   blocks GitHub-hosted runners.
+- Jobs are dispatched to whichever registered self-hosted runner is online and matches the
+  `runs-on` labels, independent of where the workflow trigger came from — pushing from the
+  Mac, from GREMLIN itself, or via `workflow_dispatch` all land on the same runner pool. There
+  is no direct Mac-to-Windows connection; each runner independently long-polls GitHub.
 
 ## Windows ARM64 runner (task #75)
 

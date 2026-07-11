@@ -65,6 +65,9 @@ livephoto = ["dep:ffmpeg-next"]
 # gates on and compiles the C accessor shim (csrc/dav1d_shim.c) against the pinned vcpkg
 # headers. A harmless no-op on non-Windows targets (macOS = Image I/O, Linux = FFmpeg).
 dav1d = []
+# Hidden: exposes the pure-Rust avis demuxer to the cargo-fuzz harness (fuzz/).
+# Never enable in a real build.
+fuzz-internals = []
 
 [build-dependencies]
 # Compiles the dav1d shim when `--features dav1d` targets Windows. Unconditional: build

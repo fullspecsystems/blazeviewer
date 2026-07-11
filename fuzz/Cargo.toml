@@ -1,0 +1,26 @@
+# cargo-fuzz harness (task #76): the avis demuxer is a hostile-bytes parser,
+# and the project rule is "fuzz the decoders". Standalone (own [workspace]) so
+# the main workspace's builds/locks are untouched. Run on the Linux side
+# (nightly + `cargo fuzz run probe_avis`); the target compiles on MSVC too but
+# libFuzzer runs best under the appimage container / WSL.
+[package]
+name = "pb-decode-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+pb-decode = { path = "../crates/pb-decode", features = ["fuzz-internals"] }
+
+[[bin]]
+name = "probe_avis"
+path = "fuzz_targets/probe_avis.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
