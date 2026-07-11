@@ -17,6 +17,16 @@
 # again). If you deliberately run a LOCAL account with a real password and want
 # service persistence across reboots, pass -AsService — same convention as GREMLIN.
 #
+# -AsService installs the service to log on as -ServiceAccount (default: whichever
+# account is running THIS script — but that's often not what you want: a dedicated
+# CI service account is best created once, then this script re-run FROM YOUR OWN
+# elevated session with -ServiceAccount gh-runner. Installing the *service* this way
+# needs only admin rights in the invoking session (standard Windows service model:
+# an admin configures a service to run as a different, often lower-privilege,
+# account) — but rustup is per-user, so it still only lives in the invoking
+# session's profile. If -ServiceAccount differs from the current user, the script
+# warns and gives the two ways to fix it (see the warning text at step 4).
+#
 # After it finishes: flip the repo variable that enables the CI lane (see
 # .taskmaster/docs/self-hosted-runners.md → "Windows ARM64 runner").
 #Requires -RunAsAdministrator
@@ -24,7 +34,8 @@ param(
     [Parameter(Mandatory)] [string]$Token,
     [string]$RunnerDir = "C:\actions-runner",
     [string]$Repo = "https://github.com/jdlien/photoblaze",
-    [switch]$AsService
+    [switch]$AsService,
+    [string]$ServiceAccount = $env:USERNAME
 )
 $ErrorActionPreference = "Stop"
 
@@ -54,14 +65,30 @@ Remove-Item $zip
 Set-Location $RunnerDir
 # Default labels come out as: self-hosted, Windows, ARM64 — exactly what ci.yml targets.
 if ($AsService) {
-    Write-Host "== [4/4] Register as a service" -ForegroundColor Cyan
+    Write-Host "== [4/4] Register as a service (logon account: $ServiceAccount)" -ForegroundColor Cyan
+    if ($ServiceAccount -ne $env:USERNAME) {
+        # Installing the SERVICE only needs admin rights in THIS session (standard
+        # Windows model — an admin configures a service to run as a different
+        # account). rustup does NOT follow that: it just installed into
+        # $env:USERPROFILE\.cargo for $env:USERNAME, and the service will run jobs
+        # as $ServiceAccount, which won't see it there — `cargo`/`rustc` will be
+        # missing when the first job runs. Fix with ONE of:
+        Write-Host "⚠ Registering to run as '$ServiceAccount', but rustup was just installed for" -ForegroundColor Yellow
+        Write-Host "  '$env:USERNAME' (this session) — the service won't see cargo/rustc there." -ForegroundColor Yellow
+        Write-Host "  Before enabling the CI lane, do ONE of:" -ForegroundColor Yellow
+        Write-Host "   (a) log into $ServiceAccount once and run: iwr https://win.rustup.rs/aarch64 -OutFile `$env:TEMP\r.exe; & `$env:TEMP\r.exe -y --default-host aarch64-pc-windows-msvc" -ForegroundColor Yellow
+        Write-Host "   (b) set CARGO_HOME/RUSTUP_HOME as machine-wide (System) env vars pointing at a" -ForegroundColor Yellow
+        Write-Host "       shared folder (e.g. C:\rustup, C:\cargo), reinstall rustup once — every" -ForegroundColor Yellow
+        Write-Host "       account then shares the same toolchain (the more robust fix long-term)." -ForegroundColor Yellow
+    }
     # --unattended CANNOT prompt: the password must be passed explicitly or the service
     # install dies with "Invalid configuration provided for windowslogonpassword" AFTER
     # the runner has already registered. Only works with a real local-account password
-    # (an MS-account PIN won't do) — Read-Host keeps it out of shell history.
-    $pw = Read-Host "Password for $env:USERNAME (runner service logon)"
+    # (an MS-account PIN won't do) — Read-Host keeps it out of shell history. `.\` scopes
+    # it to a local account, per GitHub's documented --windowslogonaccount format.
+    $pw = Read-Host "Password for $ServiceAccount (runner service logon)"
     .\config.cmd --url $Repo --token $Token --name "$env:COMPUTERNAME-arm64" --unattended `
-        --runasservice --windowslogonaccount $env:USERNAME --windowslogonpassword $pw
+        --runasservice --windowslogonaccount ".\$ServiceAccount" --windowslogonpassword $pw
     Write-Host ""
     Write-Host "Done (installed as a service). Next (from the Mac): enable the CI lane —" -ForegroundColor Green
 } else {

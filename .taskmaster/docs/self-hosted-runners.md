@@ -80,6 +80,19 @@ registers the runner, then you run `.\run.cmd` yourself in a normal window and l
 open. `-AsService` is still there for a deliberately-local-account VM with a real
 password.
 
+**Preferred for a "set up properly" VM: a dedicated local service account** (e.g.
+`gh-runner`, local admin, real password — created once regardless of whether your own
+login is MS-account-tied). Run the script from **your own** elevated session (repo
+already cloned there, no need to switch users) with
+`-AsService -ServiceAccount gh-runner` — installing a *service* only needs admin rights
+in the invoking session (standard Windows model: an admin configures a service to log on
+as a different account), so this works fine. The one thing that does NOT carry over:
+rustup is per-user, so it's installed for whoever ran the script, not for
+`-ServiceAccount` — if they differ, the script prints exactly what to do (log into the
+service account once and rerun the two-line rustup install, or point
+`CARGO_HOME`/`RUSTUP_HOME` at a shared machine-wide folder as System env vars — the more
+robust fix if more accounts join later).
+
 Setup, in order:
 
 1. **VM**: Windows 11 ARM64 ISO (not the default x64 one), UEFI Secure Boot ON, the
