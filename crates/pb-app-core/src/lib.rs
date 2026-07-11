@@ -53,6 +53,7 @@ pub mod settings;
 pub mod slideshow;
 pub mod timing;
 pub mod undo;
+pub mod video;
 
 pub use action::{Action, ActionKind};
 pub use app_core::{AppCore, ArchiveScope, Nav, Viewport};
@@ -65,3 +66,7 @@ pub use overlay::{InspectorTab, NativeToast, Panels, SlotContent, Toast, ToastIc
 pub use pb_key::PbKey;
 pub use slideshow::Slideshow;
 pub use undo::UndoAction;
+pub use video::{
+    AudioClockSample, AudioClockState, LibraryItemKind, VideoContainer, VideoMetadata,
+    VideoQueueBudget, VideoSessionState,
+};

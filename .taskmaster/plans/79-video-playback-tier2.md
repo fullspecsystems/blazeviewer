@@ -156,7 +156,7 @@ block ~1 s, `mf_video.rs:186`). Rapid enter/leave must not grow retired workers 
 | Navigate / delete / trash / reveal / copy path | Supported. Navigation or delete during playback stops the session and **releases media handles first** (Windows file locks), then acts. |
 | Copy image | Copies the currently displayed poster/frame — never encoded video bytes. |
 | OCR / AI describe | Operate on the displayed frame (or explicitly disabled — decide in phase 1; never a RAM read of the file). |
-| Save rotation | Disabled for video. In-memory display rotation permitted, never persisted. |
+| Save rotation | Disabled for video. In-memory display rotation permitted **and stays live during playback** (owner 2026-07-11: real footage starts portrait and rotates to landscape mid-clip — manual rotate while playing is the fix), never persisted. Rotation is a view transform on the presented quad, so it costs nothing on the frame path. |
 | Compare pin | Compares the parked poster/current frame; no hidden live playback. |
 | Slideshow | Landing shows the poster; explicit play suspends slideshow advance until playback ends/stops. |
 | Focus loss | Clears held-seek state like any held key; playback continues (audio owns the clock). |

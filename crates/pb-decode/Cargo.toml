@@ -89,4 +89,7 @@ required-features = ["libheif"]
 # AVIF + HEIC via the Windows Imaging Component (the OS codec extensions), and the
 # Live Photo motion .mov via Media Foundation (task #39, same OS-codec pattern);
 # pure-Rust bindings, no native build. cfg-gated off on non-Windows targets.
-windows = { version = "0.62.2", features = ["Win32_Graphics_Imaging", "Win32_System_Com", "Win32_Foundation", "Win32_Media_MediaFoundation"] }
+# Win32_System_Com_StructuredStorage + Win32_System_Variant: PROPVARIANT for the Source
+# Reader's duration attribute + SetCurrentPosition (video seek — task #79 spike, then the
+# real producer; the reader's seek/attribute methods are cfg-gated on BOTH features).
+windows = { version = "0.62.2", features = ["Win32_Graphics_Imaging", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_Foundation", "Win32_Media_MediaFoundation"] }

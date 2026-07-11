@@ -74,9 +74,12 @@ mod jxl;
 mod libheif;
 pub mod metadata;
 pub mod orientation;
+// Video playback frame contract (task #79 phase 0): the VideoFrame/VideoColorInfo
+// types every platform video producer emits. Pure data — producers come later.
 mod psd;
 mod raw;
 mod svg;
+pub mod video;
 #[cfg(windows)]
 mod wic;
 mod zune;
@@ -107,6 +110,7 @@ pub use mf_video::{decode_live_motion, decode_live_motion_streaming};
 pub use psd::PsdDecoder;
 pub use raw::{is_raw_extension, RawPreviewDecoder};
 pub use svg::SvgDecoder;
+pub use video::{SeekGeneration, VideoColorInfo, VideoFrame, VideoSessionId};
 #[cfg(windows)]
 pub use wic::WicDecoder;
 pub use zune::ZuneJpegDecoder;
