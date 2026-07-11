@@ -8,6 +8,11 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Fixed
+- **The About and Settings dialogs now open on virtual machines / GPUs without a low-power
+  Direct3D adapter.** On some setups (notably a Parallels VM on Apple Silicon) opening a dialog
+  picked an OpenGL compatibility adapter that couldn't be initialized, so the dialog never
+  appeared and the photo behind it was left stretched. Dialogs now use the same Direct3D backend
+  as the viewer, so they open reliably and the main view is undisturbed.
 - **The Keyboard Shortcuts panel (`/` or `?`) no longer clips its last rows** on shorter windows.
   Its rows and spacing were tightened and it now uses more of the available window height, so all
   the shortcuts stay visible instead of the bottom of the list being cut off.

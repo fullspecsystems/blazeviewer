@@ -549,16 +549,35 @@ impl DialogWindow {
             settings::AppearanceMode::System => window.theme() != Some(Theme::Light),
         };
 
-        let instance = wgpu::Instance::default();
+        // Match the viewer's GPU setup (pb-render): restrict to `Backends::PRIMARY`
+        // (DX12 on Windows / Metal / Vulkan) so we never select the GL *secondary*
+        // backend. On a VM the low-power adapter is often a GL compatibility device
+        // (e.g. Parallels' "Apple M2 Max (Compat)") whose `request_device` then fails
+        // `LimitsExceeded` (it reports `max_compute_workgroups_per_dimension = 0`),
+        // which killed the dialog entirely — no window, and the transient GL context
+        // corrupted the main DX12 swapchain into a stretched frame. PRIMARY keeps the
+        // dialog on the same backend as the viewer.
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::PRIMARY,
+            ..Default::default()
+        });
         let surface = instance.create_surface(window.clone()).ok()?;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
         }))?;
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None))
-                .ok()?;
+        // Request exactly the adapter's own limits — egui needs nothing beyond the
+        // defaults, so this can never exceed what the device supports (unlike
+        // `DeviceDescriptor::default()`, which demands the full default limit set).
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                required_limits: adapter.limits(),
+                ..Default::default()
+            },
+            None,
+        ))
+        .ok()?;
 
         let caps = surface.get_capabilities(&adapter);
         let format = caps
