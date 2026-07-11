@@ -456,6 +456,16 @@ impl AppCore {
             self.show_toast("Can't save rotation here");
             return;
         };
+        // Videos never persist a rotation (task #79 action matrix): footage can rotate
+        // mid-clip, so there is no single correct value to write. The in-memory display
+        // rotation stays available (and stays live during playback).
+        if matches!(
+            crate::video::item_kind(self.source.as_ref(), item),
+            crate::video::LibraryItemKind::Video(_)
+        ) {
+            self.show_toast("Can't save rotation for video");
+            return;
+        }
         if !crate::save_rotation::is_orientation_writable(&path) {
             self.show_toast("Save rotation: JPEG only");
             return;
@@ -5456,6 +5466,21 @@ impl AppCore {
         if self.exif_cache.contains_key(&item) {
             return;
         }
+        // A video's encoded bytes never enter RAM (task #79 path-only invariant): the
+        // panel's file size comes from a stat; EXIF rows stay empty until phase 2's
+        // reader-sourced VideoMetadata supplies the video facts.
+        if let crate::video::LibraryItemKind::Video(_) =
+            crate::video::item_kind(self.source.as_ref(), item)
+        {
+            let size = self
+                .source
+                .path(item)
+                .and_then(|p| std::fs::metadata(p).ok())
+                .map(|m| m.len())
+                .unwrap_or(0);
+            self.exif_cache.insert(item, (size, Vec::new()));
+            return;
+        }
         if let Ok(bytes) = self.source.bytes(item) {
             let fields = read_exif_fields(&bytes);
             self.exif_cache.insert(item, (bytes.len() as u64, fields));
@@ -6060,7 +6085,14 @@ impl AppCore {
             all(unix, not(target_os = "macos"), feature = "livephoto")
         ))]
         {
-            let paired = self.source.path(item).and_then(companion_motion);
+            // Only image items Live-pair (task #79): a *video* item with a same-stem
+            // .mov sibling (IMG_1.MP4 + IMG_1.MOV) is two videos, not a Live Photo.
+            let paired = match crate::video::item_kind(self.source.as_ref(), item) {
+                crate::video::LibraryItemKind::Image => {
+                    self.source.path(item).and_then(companion_motion)
+                }
+                crate::video::LibraryItemKind::Video(_) => None,
+            };
             self.live_motion_cache.insert(item, paired.clone());
             paired
         }

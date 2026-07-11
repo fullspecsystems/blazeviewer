@@ -7,6 +7,14 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Added
+- **Videos now appear in your library.** Camera clips (MP4, MOV, MKV, WebM, AVI, and other
+  common containers) are listed alongside photos when you browse a folder, shown as a dark
+  placeholder tile for now — poster frames and playback are coming next. Live Photo motion
+  files are not listed twice: an `IMG_1234.MOV` next to `IMG_1234.HEIC` stays hidden and
+  keeps playing through its photo with `P`. Videos never open from inside ZIP/7z archives,
+  and viewing them leaves no trace on disk, same as photos.
+
 ### Fixed
 - **The folder tree (Shift+F) now shows for ZIP and 7z archives.** Opening an archive that has
   internal folders showed an empty "Folders" panel. The panel was reading only the on-disk folder

@@ -226,6 +226,13 @@ pub fn decode_item(
     fit: Option<FitBox>,
     allow_preview: bool,
 ) -> Result<DecodedImage, DecodeError> {
+    // Typed dispatch BEFORE any bytes request (task #79 phase 1): a video item is
+    // path-only — the platform readers stream it from disk later; its encoded bytes
+    // must never be pulled into RAM. Phase 1 shows a flat placeholder; phase 2
+    // replaces it with the real poster frame via the same dispatch point.
+    if let crate::video::LibraryItemKind::Video(container) = crate::video::item_kind(source, item) {
+        return Ok(video_placeholder(container));
+    }
     let bytes = source
         .bytes(item)
         .map_err(|e| DecodeError::Corrupt(format!("read error: {e}")))?;
@@ -236,6 +243,31 @@ pub fn decode_item(
     // still first frame; only `decode_animation` (on `P`) decodes the whole sequence.
     img.animated = pb_decode::detect_animation(&bytes);
     Ok(img)
+}
+
+/// The phase-1 stand-in a video item displays: a small flat dark frame (16:9) whose
+/// codec row names the container. Deliberately tiny — it's a solid color, so the GPU
+/// upscale is invisible, and prefetch can hold many without denting the ring budget.
+/// Phase 2 (posters) replaces this with the clip's first non-black frame; the reported
+/// dimensions become real then too.
+pub fn video_placeholder(container: crate::video::VideoContainer) -> DecodedImage {
+    const W: u32 = 320;
+    const H: u32 = 180;
+    // A near-black neutral: visibly "an item", clearly not a decoded photo.
+    let pixels: Vec<u8> = [24u8, 24, 26, 255].repeat((W * H) as usize);
+    DecodedImage {
+        width: W,
+        height: H,
+        orig_width: W,
+        orig_height: H,
+        codec: container.name(),
+        format: PixelFormat::Rgba8,
+        pixels,
+        is_preview: false,
+        color: pb_decode::ColorTransform::srgb(),
+        peak: 1.0,
+        animated: None,
+    }
 }
 
 /// The off-thread decode for an on-demand motion sequence (tasks #37 / #38 / #39): a
@@ -744,5 +776,31 @@ mod tests {
         assert_eq!(companion_motion(&solo), None);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Task #79 phase 1: a video item resolves to the placeholder WITHOUT any bytes
+    /// request — the path here does not exist, so a `bytes()` call would error, and
+    /// success proves the typed dispatch fired first.
+    #[test]
+    fn video_items_dispatch_before_bytes_and_get_the_placeholder() {
+        use pb_source::FsSource;
+        let src = FsSource::new(vec![PathBuf::from(r"C:\definitely\not\here\clip.mp4")]);
+        let img = decode_item(&src, 0, None, true).expect("placeholder needs no read");
+        assert_eq!(img.codec, "MP4");
+        assert!(
+            img.is_well_formed(),
+            "placeholder pixels match its geometry"
+        );
+        assert_eq!(img.animated, None, "phase 1: P has nothing to play yet");
+        assert_eq!((img.width, img.height), (320, 180));
+    }
+
+    /// The same nonexistent path with an image extension DOES attempt the read and
+    /// fails — locking the dispatch to video items only.
+    #[test]
+    fn image_items_still_read_bytes() {
+        use pb_source::FsSource;
+        let src = FsSource::new(vec![PathBuf::from(r"C:\definitely\not\here\photo.jpg")]);
+        assert!(decode_item(&src, 0, None, true).is_err());
     }
 }

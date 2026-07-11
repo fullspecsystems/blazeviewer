@@ -125,6 +125,34 @@
 				<string>org.7-zip.7-zip-archive</string>
 			</array>
 		</dict>
+		<!-- Video containers the library lists (task #79) — same Viewer/Alternate
+		     candidacy, never the default video player. One cross-platform recognition
+		     list (pb_app_core::video::VideoContainer); playability is a runtime
+		     property of the OS decoder set. -->
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Video</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>CFBundleTypeIconFile</key>
+			<string>PhotoBlaze</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.mpeg-4</string>
+				<string>com.apple.m4v-video</string>
+				<string>com.apple.quicktime-movie</string>
+				<string>org.matroska.mkv</string>
+				<string>org.webmproject.webm</string>
+				<string>public.avi</string>
+				<string>com.microsoft.windows-media-wmv</string>
+				<string>public.mpeg</string>
+				<string>public.mpeg-2-transport-stream</string>
+				<string>public.3gpp</string>
+				<string>public.3gpp2</string>
+			</array>
+		</dict>
 	</array>
 </dict>
 </plist>

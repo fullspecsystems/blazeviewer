@@ -9,9 +9,11 @@
 //! queue, MKV-visible-with-error → one cross-platform container list, path-only video
 //! items typed *before* any `source.bytes()`).
 
+use std::path::Path;
 use std::time::Duration;
 
 pub use pb_decode::video::{SeekGeneration, VideoColorInfo, VideoFrame, VideoSessionId};
+use pb_source::PhotoSource;
 
 // ---------------------------------------------------------------------------
 // Item model: typed classification, dispatched before any bytes() request.
@@ -94,6 +96,51 @@ impl VideoContainer {
             VideoContainer::ThreeGp => "3GP",
         }
     }
+}
+
+/// Classify a filesystem path as a library item — the **scanner's** predicate (phase 1
+/// predicate split): images + loose videos. `None` = not a library file (skip it).
+/// Archive scanners never use this; they keep the images-only
+/// `pb_decode::is_supported_extension`, so a video inside a ZIP/7z is never indexed
+/// (video items are path-only by construction).
+pub fn classify_library_file(path: &Path) -> Option<LibraryItemKind> {
+    let ext = path.extension()?.to_str()?;
+    if pb_decode::is_supported_extension(ext) {
+        return Some(LibraryItemKind::Image);
+    }
+    VideoContainer::from_extension(ext).map(LibraryItemKind::Video)
+}
+
+/// What item `item` of `source` *is* — the dispatch the decode scheduler runs **before**
+/// any `source.bytes()` request. O(1) and pure: video is decided by the path's extension
+/// (the same rule the scanner admitted it under). Archive entries have no filesystem
+/// path and the archive predicate is images-only, so they are always `Image`.
+pub fn item_kind(source: &dyn PhotoSource, item: usize) -> LibraryItemKind {
+    source
+        .path(item)
+        .and_then(|p| p.extension())
+        .and_then(|e| e.to_str())
+        .and_then(VideoContainer::from_extension)
+        .map(LibraryItemKind::Video)
+        .unwrap_or(LibraryItemKind::Image)
+}
+
+/// Whether `path` is a Live-Photo *companion candidate* — a `.mov`/`.qt` video, the only
+/// container Apple pairs with a still (`IMG_1234.HEIC` + `IMG_1234.MOV`). The scan-side
+/// dedup hides exactly these when a same-stem image sits in the same directory; an
+/// `IMG_1234.mp4` next to `IMG_1234.jpg` is *not* a companion and stays visible.
+pub fn is_companion_candidate(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("mov") || e.eq_ignore_ascii_case("qt"))
+}
+
+/// The pairing key for companion dedup: (parent directory, lowercased stem). Same-stem
+/// matching is per-directory — recursive scans never pair across folders.
+pub fn companion_key(path: &Path) -> Option<(std::path::PathBuf, String)> {
+    let parent = path.parent()?.to_path_buf();
+    let stem = path.file_stem()?.to_str()?.to_lowercase();
+    Some((parent, stem))
 }
 
 /// Everything the UI knows about a video before (and without) playing it. Flows from
@@ -340,6 +387,72 @@ mod tests {
                 "{ext} must not be an image extension"
             );
         }
+    }
+
+    #[test]
+    fn classify_library_file_splits_images_videos_and_junk() {
+        use std::path::PathBuf;
+        assert_eq!(
+            classify_library_file(&PathBuf::from(r"C:\pics\a.JPG")),
+            Some(LibraryItemKind::Image)
+        );
+        assert_eq!(
+            classify_library_file(&PathBuf::from(r"C:\pics\a.heic")),
+            Some(LibraryItemKind::Image)
+        );
+        assert_eq!(
+            classify_library_file(&PathBuf::from(r"C:\pics\clip.MP4")),
+            Some(LibraryItemKind::Video(VideoContainer::Mp4))
+        );
+        assert_eq!(
+            classify_library_file(&PathBuf::from(r"C:\pics\clip.mkv")),
+            Some(LibraryItemKind::Video(VideoContainer::Mkv))
+        );
+        assert_eq!(
+            classify_library_file(&PathBuf::from(r"C:\pics\note.txt")),
+            None
+        );
+        assert_eq!(
+            classify_library_file(&PathBuf::from(r"C:\pics\noext")),
+            None
+        );
+    }
+
+    #[test]
+    fn item_kind_types_fs_videos_and_never_archive_entries() {
+        use pb_source::FsSource;
+        use std::path::PathBuf;
+        // Paths need not exist — classification is pure (no I/O before dispatch).
+        let src = FsSource::new(vec![
+            PathBuf::from(r"C:\nope\a.jpg"),
+            PathBuf::from(r"C:\nope\b.mov"),
+            PathBuf::from(r"C:\nope\c.webm"),
+        ]);
+        assert_eq!(item_kind(&src, 0), LibraryItemKind::Image);
+        assert_eq!(
+            item_kind(&src, 1),
+            LibraryItemKind::Video(VideoContainer::Mov)
+        );
+        assert_eq!(
+            item_kind(&src, 2),
+            LibraryItemKind::Video(VideoContainer::Webm)
+        );
+        // Out of range degrades to Image (no path), matching the bytes-decode fallback.
+        assert_eq!(item_kind(&src, 99), LibraryItemKind::Image);
+    }
+
+    #[test]
+    fn companion_candidates_are_mov_qt_only_and_keys_are_per_directory() {
+        use std::path::PathBuf;
+        assert!(is_companion_candidate(&PathBuf::from(r"D:\p\IMG_1.MOV")));
+        assert!(is_companion_candidate(&PathBuf::from(r"D:\p\IMG_1.qt")));
+        assert!(!is_companion_candidate(&PathBuf::from(r"D:\p\IMG_1.mp4")));
+        assert!(!is_companion_candidate(&PathBuf::from(r"D:\p\IMG_1.jpg")));
+        let a = companion_key(&PathBuf::from(r"D:\p\IMG_1.MOV")).unwrap();
+        let b = companion_key(&PathBuf::from(r"D:\p\img_1.HEIC")).unwrap();
+        let c = companion_key(&PathBuf::from(r"D:\q\IMG_1.HEIC")).unwrap();
+        assert_eq!(a, b, "case-insensitive stem, same dir");
+        assert_ne!(a, c, "different directory never pairs");
     }
 
     #[test]

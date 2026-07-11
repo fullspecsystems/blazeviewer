@@ -64,7 +64,7 @@ Exec=photoblaze %F
 Icon=photoblaze
 Categories=Graphics;Viewer;Photography;
 Terminal=false
-MimeType=image/jpeg;image/png;image/gif;image/webp;image/avif;image/heic;image/heif;image/tiff;image/bmp;image/x-adobe-dng;image/jxl;image/svg+xml;
+MimeType=image/jpeg;image/png;image/gif;image/webp;image/avif;image/heic;image/heif;image/tiff;image/bmp;image/x-adobe-dng;image/jxl;image/svg+xml;video/mp4;video/quicktime;video/x-matroska;video/webm;video/x-msvideo;video/x-ms-wmv;video/mpeg;video/mp2t;video/3gpp;video/3gpp2;
 EOF
 cp "$DESKTOP" "$APPDIR/photoblaze.desktop"
 

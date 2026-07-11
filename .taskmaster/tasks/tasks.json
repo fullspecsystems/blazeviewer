@@ -901,8 +901,8 @@
           {
             "id": 2,
             "title": "Phase 1: typed items, predicate split, action gating",
-            "description": "classify_library_file vs is_supported_archive_image_extension (pb-source gets the images-only predicate); LibraryItemKind dispatched before any bytes(); companion dedup (same-stem kept, false-positive documented+tested); every open surface (scanner, file lists, drag/drop, picker, associations, MIME); full action matrix (copy-image = displayed frame; save-rotation disabled; delete-during-playback releases handles first; slideshow suspend).",
-            "status": "pending"
+            "description": "classify_library_file vs is_supported_archive_image_extension (pb-source gets the images-only predicate); LibraryItemKind dispatched before any bytes(); companion dedup (same-stem kept, false-positive documented+tested); every open surface (scanner, file lists, drag/drop, picker, associations, MIME); full action matrix (copy-image = displayed frame; save-rotation disabled; delete-during-playback releases handles first; slideshow suspend). DONE 2026-07-11 (awaiting owner smoke): classify_library_file/item_kind (pb-app-core::video), scanner + explicit lists + dir_has_image on the library predicate (archives keep images-only is_supported_extension); decode_item dispatches typed kind BEFORE bytes() -> 320x180 placeholder tile (posters = phase 2); companion dedup (same-stem .mov/.qt, per-dir, Cursor::At exempt) in both sync resolve and the streaming scan (CompanionFilter run-buffering: never published-then-removed, batches append-only, tested end-to-end); gates: save-rotation video toast, exif panel stat-only, video items never Live-pair; copy/OCR/describe ride the displayed frame via decode_item; picker filter + Windows PhotoBlaze.Video OpenWith candidacy + Linux MimeType + macOS CFBundleDocumentTypes video type; no-trace test extended over a video folder; CHANGELOG. Playback-dependent matrix rows (delete releases handles first, slideshow suspend) land with the session phases 4-6.",
+            "status": "review"
           },
           {
             "id": 3,

@@ -81,6 +81,14 @@ mod win {
     /// Browseable archives → the `PhotoBlaze.Archive` ProgId (never the default
     /// out of the box; the Settings page just offers the option).
     const ARCHIVE_EXTS: &[&str] = &[".zip", ".7z"];
+    /// Video containers the library lists (task #79) → the `PhotoBlaze.Video` ProgId.
+    /// Open-With candidacy only, never the default (ADR-018) — PhotoBlaze must not
+    /// steal video files from the user's actual video player. Mirrors the one
+    /// cross-platform recognition list (`pb_app_core::video::VideoContainer`).
+    const VIDEO_EXTS: &[&str] = &[
+        ".mp4", ".m4v", ".mov", ".qt", ".mkv", ".webm", ".avi", ".wmv", ".asf", ".mpg", ".mpeg",
+        ".mts", ".m2ts", ".3gp", ".3g2",
+    ];
 
     /// An owned `HKEY` that always closes (registry handles leak silently otherwise).
     struct Key(HKEY);
@@ -159,6 +167,7 @@ mod win {
         for (exts, progid) in [
             (IMAGE_EXTS, "PhotoBlaze.Image"),
             (ARCHIVE_EXTS, "PhotoBlaze.Archive"),
+            (VIDEO_EXTS, "PhotoBlaze.Video"),
         ] {
             for ext in exts {
                 let name: Vec<u16> = ext.encode_utf16().chain(std::iter::once(0)).collect();
@@ -208,6 +217,7 @@ mod win {
         for (progid, label) in [
             ("PhotoBlaze.Image", "PhotoBlaze Image"),
             ("PhotoBlaze.Archive", "PhotoBlaze Archive"),
+            ("PhotoBlaze.Video", "PhotoBlaze Video"),
         ] {
             let base = format!("Software\\Classes\\{progid}");
             let k = create_key_str(HKEY_CURRENT_USER, &base)?;
@@ -228,6 +238,7 @@ mod win {
         for (exts, progid) in [
             (IMAGE_EXTS, "PhotoBlaze.Image"),
             (ARCHIVE_EXTS, "PhotoBlaze.Archive"),
+            (VIDEO_EXTS, "PhotoBlaze.Video"),
         ] {
             for ext in exts {
                 let k = create_key_str(
@@ -279,12 +290,13 @@ mod win {
     /// and out of `RegisteredApplications` — leaving other apps' entries in those shared
     /// keys untouched.
     pub fn unregister_shell_integration() {
-        for progid in ["PhotoBlaze.Image", "PhotoBlaze.Archive"] {
+        for progid in ["PhotoBlaze.Image", "PhotoBlaze.Archive", "PhotoBlaze.Video"] {
             delete_tree(HKEY_CURRENT_USER, &format!("Software\\Classes\\{progid}"));
         }
         for (exts, progid) in [
             (IMAGE_EXTS, "PhotoBlaze.Image"),
             (ARCHIVE_EXTS, "PhotoBlaze.Archive"),
+            (VIDEO_EXTS, "PhotoBlaze.Video"),
         ] {
             for ext in exts {
                 delete_value(

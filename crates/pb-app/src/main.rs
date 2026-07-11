@@ -2339,10 +2339,11 @@ impl App {
                         // — so a single picked `.zip` opens as an archive instead of being
                         // mistaken for one file inside its folder.
                         let mut exts: Vec<&str> = IMAGE_FILTER_EXTS.to_vec();
+                        exts.extend_from_slice(VIDEO_FILTER_EXTS);
                         exts.push("zip");
                         exts.push("7z");
                         let input = rfd::FileDialog::new()
-                            .add_filter("Images & archives", &exts)
+                            .add_filter("Images, videos & archives", &exts)
                             .add_filter("All files", &["*"])
                             .set_directory(&start_dir)
                             .pick_files()
@@ -3233,6 +3234,13 @@ const IMAGE_FILTER_EXTS: &[&str] = &[
     "rw2", "orf", "srw", "pef", "raw",
 ];
 
+/// Video containers the library lists (task #79) — the picker offers them alongside
+/// images. Mirrors `pb_app_core::video::VideoContainer`'s recognition list.
+const VIDEO_FILTER_EXTS: &[&str] = &[
+    "mp4", "m4v", "mov", "qt", "mkv", "webm", "avi", "wmv", "asf", "mpg", "mpeg", "mts", "m2ts",
+    "3gp", "3g2",
+];
+
 /// On Windows, point the window's title-bar/taskbar icon at the multi-size icon
 /// embedded in the .exe (`build.rs`), so each size is the purpose-rendered bitmap
 /// from our `.ico` instead of Windows crudely downscaling one big image — which is
@@ -4010,20 +4018,26 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("sub")).expect("mkdir sandbox");
         const IMG: &[u8] = include_bytes!("../icons/photoblaze.png");
-        for rel in ["a.png", "b.png", "sub/c.png"] {
+        for rel in ["a.png", "b.png", "sub/c.png", "d.png"] {
             fs::write(dir.join(rel), IMG).expect("seed image");
         }
+        // Task #79: video items ride the same guarantee. A loose clip (garbage
+        // bytes — the placeholder path must not even read them) and a Live-Photo
+        // companion pair (the .mov is hidden by dedup, exactly like the app).
+        fs::write(dir.join("clip.mp4"), b"not a real movie").expect("seed video");
+        fs::write(dir.join("d.mov"), b"companion motion").expect("seed companion");
 
         let before = snapshot_tree(&dir);
 
         // The actual disk-touching code the app runs while viewing, through the
-        // real source seam: recursive scan → FsSource → decode_item (the pool's
-        // step) + the Shift+I panel's byte read.
-        let paths = scan_images(&dir, true);
+        // real source seam: recursive scan → companion dedup → FsSource →
+        // decode_item (the pool's step) + the Shift+I panel read (bytes for an
+        // image, a stat only for a video).
+        let paths = scan::dedup_companions(scan_images(&dir, true), None);
         assert_eq!(
             paths.len(),
-            3,
-            "recursive scan should find all three images"
+            5,
+            "four images + the loose clip; the companion .mov is hidden"
         );
         let source = FsSource::new(paths);
         let fit = FitBox {
@@ -4032,8 +4046,14 @@ mod tests {
         };
         for i in 0..source.len() {
             decode_item(&source, i, Some(fit), false).expect("decode");
-            let bytes = source.bytes(i).expect("read for exif");
-            let _ = read_exif_fields(&bytes);
+            match pb_app_core::video::item_kind(&source, i) {
+                pb_app_core::video::LibraryItemKind::Image => {
+                    let bytes = source.bytes(i).expect("read for exif");
+                    let _ = read_exif_fields(&bytes);
+                }
+                // The panel never RAM-reads a video: file size comes from a stat.
+                pb_app_core::video::LibraryItemKind::Video(_) => {}
+            }
             if let Some(p) = source.path(i) {
                 let _ = fs::metadata(p).expect("stat");
             }

@@ -1,8 +1,31 @@
 # PhotoBlaze — Current Status (session handoff)
 
-_Last updated: 2026-07-11 (evening). Supersedes the morning handoff (#76 shipped / #79 planned)._
+_Last updated: 2026-07-11 (late). Supersedes the morning handoff (#76 shipped / #79 planned)._
 
-## State: main, #79 phase 0 essentially done (Windows scope), all gates green
+## State: main, #79 phases 0 AND 1 done (Windows scope), all gates green
+
+**Phase 1 (typed items + predicate split + action gating) landed after phase 0 — subtask
+79.2 is `review` (awaiting owner smoke).** What it does, end to end: folders now list
+videos (MP4/MOV/MKV/WebM/AVI/WMV/MPEG/AVCHD/3GP) as items showing a 320×180 dark
+placeholder tile; Live-Photo companion `.mov`s are hidden by same-stem-per-directory
+dedup (streaming-safe: batches append-only, a companion is never published; opening the
+companion itself via Cursor::At keeps it visible); `decode_item` dispatches
+`LibraryItemKind` **before** any `bytes()` (a video's encoded bytes never enter RAM —
+no-trace test now covers a video folder); save-rotation shows a video toast, the EXIF
+panel stat-only for videos, video items never Live-pair; picker filter, Windows
+`PhotoBlaze.Video` Open-With candidacy (never default), Linux MimeType, macOS
+CFBundleDocumentTypes all updated; CHANGELOG has the user-facing entry. Playback-dependent
+matrix rows (delete-releases-handles-first, slideshow suspend) land with phases 4-6.
+Key files: `pb-app-core/src/video.rs` (classify/item_kind/companion helpers),
+`scan.rs` (`dedup_companions` + `CompanionFilter` + wiring), `engine.rs`
+(`video_placeholder` + dispatch), `default_app.rs`, `main.rs`, release-linux.sh,
+Info-swift-host.plist.
+
+**Next: phase 2 (posters + metadata, subtask 79.3)** — cancellable low-priority poster
+probing via MF (the spike's `video_probe` open+first-frame path is the blueprint:
+open 4-20 ms, first frame 30-100 ms), first-non-black luma walk, placeholder/error
+posters for unsupported containers, `VideoMetadata` from the reader (never RAM reads),
+rotation+color identical to the future playback path. Read the spike results doc first.
 
 `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, the featured
 clippy (`libheif,dav1d`), and `fmt --check` all pass.

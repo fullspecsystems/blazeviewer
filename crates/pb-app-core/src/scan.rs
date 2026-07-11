@@ -109,12 +109,102 @@ pub enum ScanUpdate {
 const SCAN_BATCH_INTERVAL: Duration = Duration::from_millis(150);
 
 /// Whether a path's extension is a supported image format (the decoder's single
-/// source of truth — see `pb_decode::is_supported_extension`).
+/// source of truth — see `pb_decode::is_supported_extension`). The **archive** predicate:
+/// pb-source callers keep receiving exactly this, so videos inside a ZIP/7z are never
+/// indexed (task #79: video items are path-only).
 pub fn is_supported_image(p: &Path) -> bool {
     p.extension()
         .and_then(|e| e.to_str())
         .map(is_supported_extension)
         .unwrap_or(false)
+}
+
+/// Whether a path is a library item the **filesystem scanner** lists: a supported image
+/// or a recognized video container (task #79 phase 1 — the predicate split's scanner
+/// half; see [`crate::video::classify_library_file`]).
+pub fn is_supported_library_file(p: &Path) -> bool {
+    crate::video::classify_library_file(p).is_some()
+}
+
+/// Hide Live-Photo companions from a gathered path list: a `.mov`/`.qt` whose
+/// (directory, stem) matches an image in the list is the motion half of a Live Photo
+/// (`IMG_1234.HEIC` + `IMG_1234.MOV`) — it plays via the still's `P`, so listing it
+/// separately would show every Live Photo twice. Order-preserving; matching is
+/// per-directory (recursive scans never pair across folders). `exempt` is never hidden —
+/// the file the user explicitly opened must appear even if it is a companion.
+///
+/// Documented false positive (plan rev2, kept for v1): an unrelated `IMG_1234.mov`
+/// beside an `IMG_1234.jpg` is hidden too. Content-identifier validation is the future
+/// refinement.
+pub fn dedup_companions(mut paths: Vec<PathBuf>, exempt: Option<&Path>) -> Vec<PathBuf> {
+    use crate::video::{companion_key, is_companion_candidate};
+    use std::collections::HashSet;
+    let image_keys: HashSet<(PathBuf, String)> = paths
+        .iter()
+        .filter(|p| {
+            matches!(
+                crate::video::classify_library_file(p),
+                Some(crate::video::LibraryItemKind::Image)
+            )
+        })
+        .filter_map(|p| companion_key(p))
+        .collect();
+    paths.retain(|p| {
+        if !is_companion_candidate(p) || exempt == Some(p.as_path()) {
+            return true;
+        }
+        companion_key(p).is_none_or(|k| !image_keys.contains(&k))
+    });
+    paths
+}
+
+/// Streaming companion dedup for the incremental scan: batches must **never publish a
+/// companion and remove it later**, so a file is withheld until its same-stem run is
+/// complete. Correct because [`image_walker`] yields a directory's files sorted
+/// case-insensitively, which makes same-(dir, stem) files contiguous (`img_1.` sorts as
+/// a block: `.` orders below every alphanumeric) — so a run ends the moment a file with
+/// a different key arrives, and resolved entries publish in their original positions.
+pub struct CompanionFilter {
+    exempt: Option<PathBuf>,
+    run_key: Option<(PathBuf, String)>,
+    run: Vec<PathBuf>,
+}
+
+impl CompanionFilter {
+    pub fn new(exempt: Option<PathBuf>) -> Self {
+        CompanionFilter {
+            exempt,
+            run_key: None,
+            run: Vec::new(),
+        }
+    }
+
+    /// Feed the next file in walk order; returns the entries now fully resolved
+    /// (possibly empty while a same-stem run is still open).
+    pub fn push(&mut self, path: PathBuf) -> Vec<PathBuf> {
+        let key = crate::video::companion_key(&path);
+        let mut out = Vec::new();
+        // A keyless path (no parent / non-UTF-8 stem) can't pair; give it its own run.
+        if key.is_none() || key != self.run_key {
+            out = self.flush();
+            self.run_key = key;
+        }
+        self.run.push(path);
+        out
+    }
+
+    /// Resolve and drain anything still buffered (end of walk, or cancellation).
+    pub fn finish(&mut self) -> Vec<PathBuf> {
+        self.run_key = None;
+        self.flush()
+    }
+
+    fn flush(&mut self) -> Vec<PathBuf> {
+        if self.run.is_empty() {
+            return Vec::new();
+        }
+        dedup_companions(std::mem::take(&mut self.run), self.exempt.as_deref())
+    }
 }
 
 /// A scanned directory's path relative to the scan root, as a display string for the
@@ -217,7 +307,7 @@ pub fn dir_has_image(dir: &Path, cancel: &AtomicBool, deadline: Instant) -> Prob
         let Ok(entry) = entry else {
             continue; // permission-denied / vanished mid-walk — skip, don't abort
         };
-        if entry.file_type().is_file() && is_supported_image(entry.path()) {
+        if entry.file_type().is_file() && is_supported_library_file(entry.path()) {
             return Probe::Found;
         }
     }
@@ -269,7 +359,7 @@ pub fn collect_images(
             if let Some(p) = progress {
                 p.set_current(rel_display(entry.path(), dir));
             }
-        } else if ft.is_file() && is_supported_image(entry.path()) {
+        } else if ft.is_file() && is_supported_library_file(entry.path()) {
             if let Some(p) = progress {
                 p.incr_found();
             }
@@ -299,7 +389,7 @@ pub fn resolve_source(
         Source::Explicit(files) => {
             let paths: Vec<PathBuf> = files
                 .iter()
-                .filter(|p| is_supported_image(p.as_path()))
+                .filter(|p| is_supported_library_file(p.as_path()))
                 .cloned()
                 .collect();
             let root = files
@@ -327,6 +417,13 @@ pub fn resolve_scan(
     progress: Option<&ScanProgress>,
 ) -> Resolved {
     let (paths, root, scan_root, recursive) = resolve_source(source, progress);
+    // Hide Live-Photo companion .movs — except an explicitly-opened one (Cursor::At),
+    // which must appear even if a same-stem still sits beside it.
+    let exempt = match cursor {
+        open::Cursor::At(p) => Some(p.as_path()),
+        open::Cursor::First => None,
+    };
+    let paths = dedup_companions(paths, exempt);
     let start = open::resolve_cursor(&paths, cursor);
     Resolved {
         source: Arc::new(FsSource::new(paths)),
@@ -434,6 +531,10 @@ pub fn stream_scan(
         open::Cursor::First => None,
     };
     let mut gated = target.is_some();
+    // Live-Photo companion dedup, batch-safe: entries publish only once their same-stem
+    // run resolves, so a companion .mov is never in a batch and later gone (task #79).
+    // The explicitly-opened target is exempt — it must appear even if it's a companion.
+    let mut filter = CompanionFilter::new(target.clone());
     'outer: for r in &roots {
         for entry in image_walker(r, recursive) {
             if progress.is_cancelled() {
@@ -446,14 +547,15 @@ pub fn stream_scan(
             if ft.is_dir() {
                 // Publish the directory now being walked (relative to its root) for the chip.
                 progress.set_current(rel_display(entry.path(), r));
-            } else if ft.is_file() && is_supported_image(entry.path()) {
-                let p = entry.into_path();
-                progress.incr_found();
-                if gated && target.as_ref() == Some(&p) {
-                    gated = false; // the opened file is now in the snapshot — emits may start
+            } else if ft.is_file() && is_supported_library_file(entry.path()) {
+                for p in filter.push(entry.into_path()) {
+                    progress.incr_found();
+                    if gated && target.as_ref() == Some(&p) {
+                        gated = false; // the opened file is now in the snapshot — emits may start
+                    }
+                    paths.push(p);
                 }
-                paths.push(p);
-                if !gated && last_emit.elapsed() >= SCAN_BATCH_INTERVAL {
+                if !gated && paths.len() > sent_len && last_emit.elapsed() >= SCAN_BATCH_INTERVAL {
                     let snap = build_resolved(
                         paths.clone(),
                         &cursor,
@@ -469,6 +571,12 @@ pub fn stream_scan(
                 }
             }
         }
+    }
+    // Resolve whatever the last same-stem run still holds (end of walk / cancellation).
+    // No gate update needed: the final batch below is unconditional.
+    for p in filter.finish() {
+        progress.incr_found();
+        paths.push(p);
     }
     // Final batch: the un-emitted remainder, or the only batch for a fast folder.
     if !paths.is_empty() && (paths.len() > sent_len || sent_len == 0) {
@@ -602,6 +710,229 @@ pub fn resolve_playlist(source: &Source, cursor: &open::Cursor) -> Resolved {
                 Resolved::empty()
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod dedup_tests {
+    use super::{dedup_companions, CompanionFilter};
+    use std::path::PathBuf;
+
+    fn p(s: &str) -> PathBuf {
+        PathBuf::from(s)
+    }
+
+    #[test]
+    fn companion_mov_is_hidden_next_to_a_same_stem_image() {
+        let got = dedup_companions(
+            vec![
+                p(r"D:\x\IMG_1.HEIC"),
+                p(r"D:\x\IMG_1.MOV"),
+                p(r"D:\x\IMG_2.jpg"),
+            ],
+            None,
+        );
+        assert_eq!(got, vec![p(r"D:\x\IMG_1.HEIC"), p(r"D:\x\IMG_2.jpg")]);
+    }
+
+    #[test]
+    fn only_mov_qt_are_companions_and_solo_videos_stay() {
+        // An .mp4 beside a same-stem image is NOT a Live pair; a solo .mov stays.
+        let got = dedup_companions(
+            vec![
+                p(r"D:\x\IMG_1.jpg"),
+                p(r"D:\x\IMG_1.mp4"),
+                p(r"D:\x\clip.mov"),
+                p(r"D:\x\IMG_9.qt"),
+                p(r"D:\x\IMG_9.png"),
+            ],
+            None,
+        );
+        assert_eq!(
+            got,
+            vec![
+                p(r"D:\x\IMG_1.jpg"),
+                p(r"D:\x\IMG_1.mp4"),
+                p(r"D:\x\clip.mov"),
+                p(r"D:\x\IMG_9.png"),
+            ],
+            ".qt companions hide; .mp4 and solo .mov stay"
+        );
+    }
+
+    #[test]
+    fn pairing_is_per_directory_and_case_insensitive() {
+        let got = dedup_companions(
+            vec![
+                p(r"D:\a\img_1.heic"),
+                p(r"D:\a\IMG_1.MOV"), // pairs (case-insensitive stem, same dir)
+                p(r"D:\b\IMG_1.MOV"), // different dir — no still there, stays
+            ],
+            None,
+        );
+        assert_eq!(got, vec![p(r"D:\a\img_1.heic"), p(r"D:\b\IMG_1.MOV")]);
+    }
+
+    #[test]
+    fn the_explicitly_opened_companion_is_exempt() {
+        let target = p(r"D:\x\IMG_1.MOV");
+        let got = dedup_companions(
+            vec![p(r"D:\x\IMG_1.HEIC"), p(r"D:\x\IMG_1.MOV")],
+            Some(target.as_path()),
+        );
+        assert_eq!(got, vec![p(r"D:\x\IMG_1.HEIC"), p(r"D:\x\IMG_1.MOV")]);
+    }
+
+    #[test]
+    fn streaming_filter_matches_the_batch_dedup_even_when_the_mov_sorts_first() {
+        // "AAA.MOV" < "AAA.PNG": the companion arrives BEFORE the image that hides it.
+        // Feeding sorted walk order must give exactly the batch result, entry by entry,
+        // and no published entry may ever be one the batch pass would drop
+        // (batches never publish-then-remove).
+        let sorted = vec![
+            p(r"D:\x\AAA.MOV"),
+            p(r"D:\x\AAA.PNG"),
+            p(r"D:\x\IMG_1.HEIC"),
+            p(r"D:\x\IMG_1.MOV"),
+            p(r"D:\x\IMG_2.MOV"),
+            p(r"D:\x\ZZZ.jpg"),
+            p(r"D:\y\IMG_1.MOV"),
+        ];
+        let expect = dedup_companions(sorted.clone(), None);
+
+        let mut filter = CompanionFilter::new(None);
+        let mut streamed = Vec::new();
+        for path in sorted {
+            streamed.extend(filter.push(path));
+            // Invariant: everything published so far survives the batch dedup.
+            for s in &streamed {
+                assert!(expect.contains(s), "{s:?} published but batch-dropped");
+            }
+        }
+        streamed.extend(filter.finish());
+        assert_eq!(streamed, expect);
+    }
+}
+
+#[cfg(test)]
+mod stream_video_tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    /// End-to-end task #79 phase 1 scan behavior on a real tree: loose videos are listed,
+    /// a Live-Photo companion .mov never appears in ANY batch (not published-then-removed
+    /// — never published), batches only grow, and the streamed result equals the sync
+    /// resolver's.
+    #[test]
+    fn scanning_lists_videos_hides_companions_and_batches_only_grow() {
+        let dir = std::env::temp_dir().join(format!("pb_scanvid_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        for name in ["IMG_1.heic", "IMG_1.mov", "clip.mp4", "photo.jpg"] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        std::fs::write(dir.join("sub").join("solo.mov"), b"x").unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        stream_scan(
+            vec![dir.clone()],
+            true,
+            open::Cursor::First,
+            dir.clone(),
+            Some(dir.clone()),
+            1,
+            ScanProgress::new(),
+            tx, // consumed: dropped when stream_scan returns, ending rx.iter()
+        );
+        let companion = dir.join("IMG_1.mov");
+        let mut prev: Vec<PathBuf> = Vec::new();
+        let mut finished = false;
+        for (_, upd) in rx.iter() {
+            match upd {
+                ScanUpdate::Batch(r) => {
+                    let paths: Vec<PathBuf> = (0..r.source.len())
+                        .filter_map(|i| r.source.path(i).map(Path::to_path_buf))
+                        .collect();
+                    assert!(
+                        !paths.contains(&companion),
+                        "companion .mov must never be published"
+                    );
+                    assert_eq!(
+                        &paths[..prev.len()],
+                        &prev[..],
+                        "batches must only ever grow (append-only)"
+                    );
+                    prev = paths;
+                }
+                ScanUpdate::Done => finished = true,
+            }
+        }
+        assert!(finished, "scan must complete");
+        // Case-insensitive name order: clip < IMG_1 < photo, then the subfolder.
+        let expect = [
+            dir.join("clip.mp4"),
+            dir.join("IMG_1.heic"),
+            dir.join("photo.jpg"),
+            dir.join("sub").join("solo.mov"),
+        ];
+        assert_eq!(
+            prev, expect,
+            "videos listed, companion hidden, sorted order"
+        );
+
+        // The sync resolver agrees with the stream.
+        let sync = resolve_scan(
+            &Source::Scan {
+                roots: vec![dir.clone()],
+                recursive: true,
+            },
+            &open::Cursor::First,
+            None,
+        );
+        let sync_paths: Vec<PathBuf> = (0..sync.source.len())
+            .filter_map(|i| sync.source.path(i).map(Path::to_path_buf))
+            .collect();
+        assert_eq!(sync_paths, expect);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Opening the companion itself (Cursor::At) keeps it visible — the user asked for
+    /// that exact file.
+    #[test]
+    fn an_explicitly_opened_companion_stays_visible_in_the_stream() {
+        let dir = std::env::temp_dir().join(format!("pb_scanvid_at_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("IMG_1.heic"), b"x").unwrap();
+        std::fs::write(dir.join("IMG_1.mov"), b"x").unwrap();
+        let target = dir.join("IMG_1.mov");
+
+        let (tx, rx) = mpsc::channel();
+        stream_scan(
+            vec![dir.clone()],
+            false,
+            open::Cursor::At(target.clone()),
+            dir.clone(),
+            Some(dir.clone()),
+            1,
+            ScanProgress::new(),
+            tx,
+        );
+        let mut last: Vec<PathBuf> = Vec::new();
+        let mut start = 0usize;
+        for (_, upd) in rx.iter() {
+            if let ScanUpdate::Batch(r) = upd {
+                last = (0..r.source.len())
+                    .filter_map(|i| r.source.path(i).map(Path::to_path_buf))
+                    .collect();
+                start = r.start;
+            }
+        }
+        assert!(last.contains(&target), "the opened companion must appear");
+        assert_eq!(last[start], target, "and the cursor must land on it");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
