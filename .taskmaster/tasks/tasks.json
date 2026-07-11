@@ -454,9 +454,9 @@
       },
       {
         "id": 66,
-        "title": "Windows: folder tree (Shift+F) does not show for 7z archives",
-        "description": "Owner-observed Windows gap (2026-07-09): opening a .7z archive with internal folders shows NO folder tree on Shift+F, while the same feature works for .zip. The tree derivation is SHARED and format-agnostic — crate::folder_tree::rows_from_names groups the deck's forward-slashed entry names (name(i)) into rows/counts/scope targets, and show_folder_tree_mode (crates/pb-app-core/src/app_core_impl.rs:1677) takes the archive branch whenever self.source.path(item).is_none() and walks full.name(i) over the unscoped source. ZipSource and SevenZSource are structurally identical to that code path: both return the full internal path from name() (via normalize_entry_name, pb-source/src/lib.rs), both return None from the default path() impl, and both return the archive file from container(). So a 7z with folders SHOULD produce the same tree a zip does. The divergence is therefore 7z-specific and the prime suspect is that sevenz-rust2's entry.name() on the block-decode/solid path (pb-source/src/lib.rs:697, normalize_entry_name(entry.name())) yields BARE FILE NAMES without the internal folder chain — folder_of() then returns \"\" for every entry, rows_from_names emits only the root row, and with a single row the tree looks like it 'isn't showing'. Verify empirically before assuming: dump (0..full.len()).map(|i| full.name(i)) for a folder-structured 7z and check the names actually contain '/'.",
-        "status": "pending",
+        "title": "Windows/Linux: folder tree (Shift+F) empty for ZIP/7z archives (egui skin skipped folder_tree_panel)",
+        "description": "RESOLVED 2026-07-11 (owner-verified live on the real encrypted .7z). The original hypothesis in this task was WRONG and was disproven empirically: 7z entry names were never the problem. SevenZSource.name(i) on the real archive carries the full '/'-separated folder chain (sevenz-rust2 0.21.3 stores full header paths, and BlockDecoder::for_each_entries hands the callback the same header ArchiveEntry, not a basename), and folder_tree::rows_from_names produced a correct multi-row tree for plain 7z, encrypted 7z, AND zip alike — so this was neither 7z-specific nor a names bug, and 'zip works' predated the real regression. ACTUAL root cause: the winit shell migrated its panels to the egui native skin (native_tree=true, task #54 Phase 4), and panels_ui.rs's PanelFrame::snapshot built TreeFrame from ONLY core.fs_tree_rows() (the disk-only FsTree). Archive/empty decks derive their tree into the separate folder_tree_panel, which the egui skin never read, so the 'Folders' panel came up empty though the tree was correctly derived. Affected BOTH Windows and Linux (shared winit/egui skin); macOS was never affected — its FFI tree_refresh already falls back to folder_tree_panel for archive/empty decks. FIX (mirrors the mac FFI): snapshot now branches on tree_is_fs() — disk deck -> fs_tree_rows(); archive/empty deck -> folder_tree_panel via a new pure archive_tree_rows() mapper, rendered flat/click-to-activate as ArchiveTreeRow, with a new PanelAction::TreeActivate(i) -> AppCore::tree_activate(i). Commits: 3309fef (production code, inadvertently bundled by a concurrent git commit -a) + ec774b6 (2 regression tests + CHANGELOG).",
+        "status": "done",
         "priority": "medium",
         "dependencies": [],
         "details": "Where to look, in order: (1) Confirm the symptom's mechanism — is the archive branch even taken? Add a probe (debug build has a console) that logs, for the open 7z, source.path(displayed_item).is_none() and the first several full.name(i). If path() is unexpectedly Some, the disk branch runs and the wrong tree (or none) shows. If name(i) lacks '/', grouping collapses to the root. (2) If names are bare: the fix is in pb-source SevenZSource construction (both the streamed path ~line 485/586 and the parallel BlockDecoder path ~line 660-697) — ensure the stored SevenZEntry.name is the archive-relative PATH from sevenz-rust2, not a basename. sevenz-rust2's SevenZArchiveEntry exposes the full name; if for_each_entries hands back a stripped name, reconstruct it from the archive metadata. Keep normalize_entry_name (backslash->slash, ./ and leading / strip) so grouping matches the zip path. (3) Regression-test at the pb-source layer: a fixture .7z with nested folders (a/one.jpg, a/b/two.jpg, top.jpg) asserts src.name(i) returns the full slashed paths — mirror the existing zip name test (~line 1051). Then a folder_tree unit test already covers rows_from_names given correct names, so once names are right the tree renders. Note the counts/scope-target machinery, ScopedSource re-scoping, and Go prev/next sibling all key off the same name(i), so a name fix repairs archive navigation wholesale, not just the tree. Shared code, so the ZIP path must stay green.",
@@ -465,20 +465,20 @@
           {
             "id": 1,
             "title": "Confirm the mechanism (probe name(i) + path())",
-            "description": "On a folder-structured 7z, log source.path(item).is_none() and the first several full.name(i). Determine whether the archive branch is taken and whether 7z entry names carry the '/'-separated internal folder path or are bare basenames.",
-            "status": "pending"
+            "description": "On a folder-structured 7z, log source.path(item).is_none() and the first several full.name(i). Determine whether the archive branch is taken and whether 7z entry names carry the '/'-separated internal folder path or are bare basenames. RESULT: names DO carry the full chain (bare-names hypothesis disproven); archive branch is taken (path()=None). Real cause was the egui skin reading only fs_tree_rows() — see the task description.",
+            "status": "done"
           },
           {
             "id": 2,
             "title": "Preserve the internal folder path in SevenZSource entry names",
-            "description": "If names are bare: fix SevenZSource construction (streamed + parallel BlockDecoder paths) so SevenZEntry.name is the full archive-relative path from sevenz-rust2, then normalize_entry_name as today. pb-source fixture test asserting name(i) contains the folder chain (parity with the zip name test).",
-            "status": "pending"
+            "description": "NOT NEEDED (cancelled): premised on names being bare, which was disproven — SevenZSource.name(i) already returns the full archive-relative path. No pb-source change was required.",
+            "status": "cancelled"
           },
           {
             "id": 3,
             "title": "Verify tree + archive nav end-to-end on 7z",
-            "description": "Shift+F shows the hierarchy/counts matching the zip; folder-row click re-scopes; Go prev/next steps across sibling folders. Zip path unregressed.",
-            "status": "pending"
+            "description": "Shift+F shows the hierarchy/counts matching the zip; folder-row click re-scopes; Go prev/next steps across sibling folders. Zip path unregressed. DONE: owner verified live 2026-07-11 — Shift+F on the encrypted .7z now shows the folder tree with counts. Regression tests in ec774b6 (archive_deck_snapshots_folder_rows_not_empty, archive_tree_rows_marks_only_targeted_rows_clickable).",
+            "status": "done"
           }
         ]
       },
