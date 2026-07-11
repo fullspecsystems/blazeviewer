@@ -108,6 +108,45 @@ impl VideoFrame {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Poster selection (task #79 phase 2): the first-non-black mean-luma walk.
+// Pure math, shared by every platform's poster backend and unit-tested here.
+// ---------------------------------------------------------------------------
+
+/// How far into the clip the poster walk samples before giving up on finding a
+/// non-black frame: ~1 s of media or [`POSTER_MAX_FRAMES`] frames, whichever first.
+pub const POSTER_MAX_MEDIA: Duration = Duration::from_secs(1);
+pub const POSTER_MAX_FRAMES: usize = 30;
+
+/// Mean-luma floor for "not black": fade-ins and lead-in black frames sit near 0;
+/// this is ~6% gray. A genuinely dark first scene can still be picked (documented
+/// limitation — the fallback is the last sampled frame, and night-clip fixtures in
+/// the corpus keep the trade-off deliberate).
+pub const POSTER_LUMA_MIN: f32 = 0.06;
+
+/// Mean Rec.601 luma of a tightly packed RGBA8 buffer, in 0..=1. Samples every
+/// `stride`-th pixel (pass 1 to read them all) — a poster-sized frame subsampled
+/// at 8 is plenty to classify black-vs-content and costs microseconds.
+pub fn mean_luma_rgba8(pixels: &[u8], stride: usize) -> f32 {
+    let stride = stride.max(1);
+    let mut sum = 0u64;
+    let mut n = 0u64;
+    for px in pixels.chunks_exact(4).step_by(stride) {
+        // Integer Rec.601: (77 R + 150 G + 29 B) >> 8 ≈ luma in 0..=255.
+        sum += (77 * px[0] as u64 + 150 * px[1] as u64 + 29 * px[2] as u64) >> 8;
+        n += 1;
+    }
+    if n == 0 {
+        return 0.0;
+    }
+    (sum as f32 / n as f32) / 255.0
+}
+
+/// The poster walk's accept rule for one sampled frame.
+pub fn poster_frame_bright_enough(pixels: &[u8]) -> bool {
+    mean_luma_rgba8(pixels, 8) > POSTER_LUMA_MIN
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,6 +187,37 @@ mod tests {
         // Saturation at the ceiling (unreachable in practice, but the contract holds).
         let max = SeekGeneration(u64::MAX);
         assert_eq!(max.next(), max);
+    }
+
+    #[test]
+    fn mean_luma_classifies_black_and_bright_frames() {
+        let black = vec![0u8; 64 * 64 * 4];
+        assert_eq!(mean_luma_rgba8(&black, 1), 0.0);
+        assert!(!poster_frame_bright_enough(&black));
+
+        let white: Vec<u8> = [255u8, 255, 255, 255].repeat(64 * 64);
+        assert!(mean_luma_rgba8(&white, 1) > 0.95);
+        assert!(poster_frame_bright_enough(&white));
+
+        // Mid-gray sits well above the black floor.
+        let gray: Vec<u8> = [128u8, 128, 128, 255].repeat(64 * 64);
+        let l = mean_luma_rgba8(&gray, 1);
+        assert!((0.4..0.6).contains(&l), "{l}");
+
+        // Near-black (fade-in) stays under the floor.
+        let faint: Vec<u8> = [8u8, 8, 8, 255].repeat(64 * 64);
+        assert!(!poster_frame_bright_enough(&faint));
+    }
+
+    #[test]
+    fn mean_luma_subsampling_matches_full_scan_on_uniform_frames() {
+        let px: Vec<u8> = [200u8, 100, 50, 255].repeat(128 * 128);
+        let full = mean_luma_rgba8(&px, 1);
+        let sub = mean_luma_rgba8(&px, 8);
+        assert!((full - sub).abs() < 0.01);
+        // Degenerate inputs never panic.
+        assert_eq!(mean_luma_rgba8(&[], 8), 0.0);
+        assert_eq!(mean_luma_rgba8(&[1, 2, 3], 8), 0.0);
     }
 
     #[test]

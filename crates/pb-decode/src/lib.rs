@@ -29,6 +29,10 @@ mod livephoto;
 // frames emit as they decode, so playback starts immediately).
 #[cfg(windows)]
 mod mf_video;
+// Video poster + metadata probes via Media Foundation (task #79 phase 2): the clip's
+// first non-black frame and its reader-sourced stream facts, no RAM reads.
+#[cfg(windows)]
+mod mf_poster;
 // The Linux mirror: .mov motion + audio decode via FFmpeg, behind the `livephoto` feature.
 #[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
 mod ff_live;
@@ -105,6 +109,8 @@ pub use libheif::LibHeifDecoder;
 #[cfg(target_os = "macos")]
 pub use livephoto::{decode_live_motion, decode_live_motion_streaming};
 pub use metadata::read_exif_fields;
+#[cfg(windows)]
+pub use mf_poster::{decode_video_poster, probe_video_stream, VideoStreamInfo};
 #[cfg(windows)]
 pub use mf_video::{decode_live_motion, decode_live_motion_streaming};
 pub use psd::PsdDecoder;

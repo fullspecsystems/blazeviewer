@@ -68,9 +68,10 @@ impl AppCore {
     pub fn headless(viewport: crate::Viewport) -> AppCore {
         // A 1-worker pool whose decode always errors: a headless core has no photos, so it's
         // never invoked. A real host installs a decode closure over its `PhotoSource`.
-        let decode: Arc<crate::decode_pool::DecodeFn> = Arc::new(|_src, _item, _fit, _prev| {
-            Err(pb_decode::DecodeError::Corrupt("headless".into()))
-        });
+        let decode: Arc<crate::decode_pool::DecodeFn> =
+            Arc::new(|_src, _item, _fit, _prev, _cancel| {
+                Err(pb_decode::DecodeError::Corrupt("headless".into()))
+            });
         let (pool, results) = crate::decode_pool::DecodePool::new(1, 1 << 20, decode);
         let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(Vec::new()));
         let settings = settings::Settings::default();
@@ -220,7 +221,9 @@ impl AppCore {
     pub fn new_host(viewport: crate::Viewport) -> AppCore {
         let mut core = AppCore::headless(viewport);
         let decode: Arc<crate::decode_pool::DecodeFn> =
-            Arc::new(|src, item, fit, allow_preview| decode_item(src, item, fit, allow_preview));
+            Arc::new(|src, item, fit, allow_preview, cancel| {
+                crate::engine::decode_item_cancellable(src, item, fit, allow_preview, cancel)
+            });
         let (pool, results) = crate::decode_pool::DecodePool::new(
             crate::decode_pool::recommended_workers(),
             POOL_BUDGET_BYTES,
@@ -2845,7 +2848,10 @@ impl AppCore {
         if self.anim_hint_shown_for == Some(item) {
             return;
         }
-        if self.has_motion(item) {
+        // Videos show the hint too (task #79: poster + play badge is the UX shape) —
+        // deliberately NOT via has_motion, which still gates the animation decode
+        // machinery videos must never enter (their bytes never enter RAM).
+        if self.has_motion(item) || self.item_is_video(item) {
             self.anim_hint_shown_for = Some(item);
             // Both shells present the play hint natively (the winit egui overlay / the macOS
             // SwiftUI pill): flash-signal it (bump the seq); the shell renders + fades the pill
@@ -2885,6 +2891,13 @@ impl AppCore {
         let Some(item) = self.displayed_item else {
             return;
         };
+        // A video item (task #79): playback lands in later phases. Say so honestly
+        // rather than silently ignoring a P press under a play badge — and never
+        // enter the animation decode machinery (it would read the file into RAM).
+        if self.item_is_video(item) {
+            self.show_toast("Video playback is not available yet");
+            return;
+        }
         // Eagerly prepared on dwell → play instantly (no decode wait).
         if self.prepared.as_ref().is_some_and(|p| p.item == item) {
             let anim = self.prepared.take().unwrap().anim;
@@ -5467,8 +5480,10 @@ impl AppCore {
             return;
         }
         // A video's encoded bytes never enter RAM (task #79 path-only invariant): the
-        // panel's file size comes from a stat; EXIF rows stay empty until phase 2's
-        // reader-sourced VideoMetadata supplies the video facts.
+        // panel's file size comes from a stat, and its facts (duration/codec/fps/
+        // audio) from a reader-metadata probe — container headers only, ~15-25 ms
+        // once, cached for the item's lifetime (comparable to the sync fs::read the
+        // image path below already does here).
         if let crate::video::LibraryItemKind::Video(_) =
             crate::video::item_kind(self.source.as_ref(), item)
         {
@@ -5478,7 +5493,24 @@ impl AppCore {
                 .and_then(|p| std::fs::metadata(p).ok())
                 .map(|m| m.len())
                 .unwrap_or(0);
-            self.exif_cache.insert(item, (size, Vec::new()));
+            let mut rows: Vec<(String, String)> = Vec::new();
+            #[cfg(windows)]
+            if let Some(path) = self.source.path(item) {
+                if let Ok(info) = pb_decode::probe_video_stream(path) {
+                    if let Some(d) = info.duration {
+                        rows.push(("Duration".into(), crate::video::format_video_duration(d)));
+                    }
+                    rows.push(("Video codec".into(), info.codec.to_string()));
+                    if info.fps > 0.0 {
+                        rows.push(("Frame rate".into(), format!("{:.2} fps", info.fps)));
+                    }
+                    rows.push((
+                        "Audio".into(),
+                        if info.has_audio { "Yes" } else { "No" }.into(),
+                    ));
+                }
+            }
+            self.exif_cache.insert(item, (size, rows));
             return;
         }
         if let Ok(bytes) = self.source.bytes(item) {
@@ -5595,11 +5627,21 @@ impl AppCore {
         };
         if self.is_live_photo(item) {
             1
-        } else if self.current.as_ref().is_some_and(|m| m.animated.is_some()) {
+        } else if self.current.as_ref().is_some_and(|m| m.animated.is_some())
+            || self.item_is_video(item)
+        {
             2
         } else {
             0
         }
+    }
+
+    /// Whether item `item` is a video (task #79) — typed off the path, no I/O.
+    pub fn item_is_video(&self, item: usize) -> bool {
+        matches!(
+            crate::video::item_kind(self.source.as_ref(), item),
+            crate::video::LibraryItemKind::Video(_)
+        )
     }
 
     /// Corner inset (physical px) for the info/EXIF/help panel. Scales with the
@@ -8032,6 +8074,35 @@ mod tests {
             height: 1,
             delay: Duration::from_millis(33),
         })
+    }
+
+    /// Task #79 phase 2: `P` on a video item is an honest toast — it must never enter
+    /// the animation decode machinery (which would read the file into RAM), and the
+    /// hint plumbing must classify the item as a playable kind (badge = play ▶).
+    #[test]
+    fn p_on_a_video_item_toasts_and_never_starts_an_animation_decode() {
+        let mut core = test_core();
+        core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
+            r"C:\nope\clip.mp4",
+        )]));
+        core.displayed_item = Some(0);
+        core.native_toast = true; // headless has no HUD raster; the native path retains text
+        assert!(core.item_is_video(0));
+        assert_eq!(core.play_hint_kind(), 2, "video badge is the play glyph");
+
+        core.toggle_play_pause();
+        assert!(
+            core.playback.is_none(),
+            "no playback machinery for video yet"
+        );
+        assert!(core.anim_decode.is_none(), "no batch decode kicked");
+        assert!(core.anim_stream.is_none(), "no stream kicked");
+        assert!(
+            core.toast_native
+                .as_ref()
+                .is_some_and(|t| t.message.contains("not available")),
+            "P must explain itself with a toast"
+        );
     }
 
     #[test]

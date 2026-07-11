@@ -2,7 +2,20 @@
 
 _Last updated: 2026-07-11 (late). Supersedes the morning handoff (#76 shipped / #79 planned)._
 
-## State: main, #79 phases 0 AND 1 done (Windows scope), all gates green
+## State: main, #79 phases 0, 1 AND 2 done (Windows scope), all gates green
+
+**Phase 2 (posters + metadata) landed — subtask 79.3 `review`.** Videos now show their
+first non-black frame as a poster (MF reader, playback-identical rotation/color config),
+a play badge (`play_hint_kind` 2; P shows an honest "not available yet" toast and never
+enters the animation machinery), and panel rows (Duration / Video codec / Frame rate /
+Audio) from a ~22 ms reader probe cached per item. Key pieces:
+`pb-decode/src/mf_poster.rs` (probe_video_stream + decode_video_poster, mean-luma walk
+≤1 s/30 frames with last-frame fallback, bounded off-thread reader retirement — HEVC drop
+~1 s), pure luma helpers + committed 2.4 KB H.264 black-lead-in fixture, the pool's
+per-job cancel now threaded into `DecodeFn`/`decode_item_cancellable` (mid-walk cancel),
+graceful placeholder fallback when MF can't open/decode. Real-clip verify: 4K HEVC poster
+~210 ms, probe ~22 ms (incl. the 5.9 GB clip); opt-in corpus test `PB_VIDEO_POSTER_CLIP`.
+macOS/Linux poster backends = phase 7 parity (placeholder tile there meanwhile).
 
 **Phase 1 (typed items + predicate split + action gating) landed after phase 0 — subtask
 79.2 is `review` (awaiting owner smoke).** What it does, end to end: folders now list
@@ -21,11 +34,10 @@ Key files: `pb-app-core/src/video.rs` (classify/item_kind/companion helpers),
 (`video_placeholder` + dispatch), `default_app.rs`, `main.rs`, release-linux.sh,
 Info-swift-host.plist.
 
-**Next: phase 2 (posters + metadata, subtask 79.3)** — cancellable low-priority poster
-probing via MF (the spike's `video_probe` open+first-frame path is the blueprint:
-open 4-20 ms, first frame 30-100 ms), first-non-black luma walk, placeholder/error
-posters for unsupported containers, `VideoMetadata` from the reader (never RAM reads),
-rotation+color identical to the future playback path. Read the spike results doc first.
+**Next: phase 3 (reusable GPU presentation path, subtask 79.4)** — texture/bind-group +
+staging reuse for the animation present path (benefits GIF/APNG/WebP/avis too; closes the
+#76 perf follow-up); never wait on GPU completion on the event loop; measure alloc count +
+upload p95 before/after. Then phase 4 = the VideoSession core on fake producers.
 
 `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, the featured
 clippy (`libheif,dav1d`), and `fmt --check` all pass.

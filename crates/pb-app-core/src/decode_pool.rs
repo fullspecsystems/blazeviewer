@@ -28,8 +28,17 @@ use pb_source::PhotoSource;
 /// `PhotoSource` and an item index, never a path, so a filesystem listing and a
 /// ZIP archive flow through the same pool. The `bool` is `allow_preview`: true
 /// requests a fast embedded preview where one exists (HEIC thumbnail, RAW
-/// preview), false forces the full-resolution decode.
-pub type DecodeFn = dyn Fn(&dyn PhotoSource, usize, Option<FitBox>, bool) -> Result<DecodedImage, DecodeError>
+/// preview), false forces the full-resolution decode. The `&AtomicBool` is the
+/// job's cancel flag, set by `set_targets` when the item is no longer wanted —
+/// long steps (the video poster walk, task #79) check it mid-job; single-shot
+/// image decodes may ignore it (the result is discarded either way).
+pub type DecodeFn = dyn Fn(
+        &dyn PhotoSource,
+        usize,
+        Option<FitBox>,
+        bool,
+        &AtomicBool,
+    ) -> Result<DecodedImage, DecodeError>
     + Send
     + Sync;
 
@@ -255,7 +264,13 @@ fn worker_loop(shared: Arc<Shared>) {
             continue;
         }
 
-        let result = (shared.decode)(job.source.as_ref(), job.key.item, job.fit, job.preview);
+        let result = (shared.decode)(
+            job.source.as_ref(),
+            job.key.item,
+            job.fit,
+            job.preview,
+            &job.cancel,
+        );
         let bytes = match &result {
             Ok(img) => img.pixels.len(),
             Err(_) => 0,
@@ -391,7 +406,7 @@ mod tests {
 
     #[test]
     fn delivers_all_wanted_items() {
-        let decode: Arc<DecodeFn> = Arc::new(|_s, item, _, _| Ok(image(item, 16)));
+        let decode: Arc<DecodeFn> = Arc::new(|_s, item, _, _, _| Ok(image(item, 16)));
         let (pool, rx) = DecodePool::new(3, 1 << 20, decode);
         let src = source();
         pool.set_targets(1, &src, &targets(&[0, 1, 2, 3, 4]));
@@ -404,7 +419,7 @@ mod tests {
     fn decodes_in_priority_order_with_one_worker() {
         let order = Arc::new(StdMutex::new(Vec::<usize>::new()));
         let rec = order.clone();
-        let decode: Arc<DecodeFn> = Arc::new(move |_s, item, _, _| {
+        let decode: Arc<DecodeFn> = Arc::new(move |_s, item, _, _, _| {
             rec.lock().unwrap().push(item);
             Ok(image(item, 16))
         });
@@ -423,7 +438,7 @@ mod tests {
         let (release_tx, release_rx) = channel::<()>();
         let gate = Arc::new(AtomicBool::new(true)); // true => next decode gates
         let release_rx = StdMutex::new(release_rx);
-        let decode: Arc<DecodeFn> = Arc::new(move |_s, item, _, _| {
+        let decode: Arc<DecodeFn> = Arc::new(move |_s, item, _, _, _| {
             if gate.swap(false, Ordering::SeqCst) {
                 started_tx.send(()).unwrap();
                 release_rx.lock().unwrap().recv().unwrap();
@@ -453,7 +468,7 @@ mod tests {
         let gate = Arc::new(AtomicBool::new(true));
         let release_rx = StdMutex::new(release_rx);
         let c = count.clone();
-        let decode: Arc<DecodeFn> = Arc::new(move |_s, item, _, _| {
+        let decode: Arc<DecodeFn> = Arc::new(move |_s, item, _, _, _| {
             *c.lock().unwrap() += 1;
             if gate.swap(false, Ordering::SeqCst) {
                 started_tx.send(()).unwrap();
@@ -474,7 +489,7 @@ mod tests {
 
     #[test]
     fn stale_epoch_is_carried_on_the_outcome() {
-        let decode: Arc<DecodeFn> = Arc::new(|_s, item, _, _| Ok(image(item, 16)));
+        let decode: Arc<DecodeFn> = Arc::new(|_s, item, _, _, _| Ok(image(item, 16)));
         let (pool, rx) = DecodePool::new(2, 1 << 20, decode);
         let src = source();
         pool.set_targets(7, &src, &targets(&[0]));
@@ -485,7 +500,7 @@ mod tests {
     #[test]
     fn byte_budget_does_not_stall_delivery() {
         // Budget smaller than the working set; slow draining must still complete.
-        let decode: Arc<DecodeFn> = Arc::new(|_s, item, _, _| Ok(image(item, 256)));
+        let decode: Arc<DecodeFn> = Arc::new(|_s, item, _, _, _| Ok(image(item, 256)));
         let (pool, rx) = DecodePool::new(3, 300, decode); // ~1 image of headroom
         let src = source();
         pool.set_targets(1, &src, &targets(&[0, 1, 2, 3, 4, 5]));

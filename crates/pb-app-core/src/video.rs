@@ -164,6 +164,22 @@ pub struct VideoMetadata {
     pub has_audio: Option<bool>,
 }
 
+/// A media duration for the panel/HUD: `m:ss` under an hour, `h:mm:ss` above
+/// (`0:07`, `3:05`, `1:02:07`). Sub-second clips round to `0:01` so a real clip
+/// never reads as empty.
+pub fn format_video_duration(d: Duration) -> String {
+    let total = d
+        .as_secs_f64()
+        .round()
+        .max(if d.is_zero() { 0.0 } else { 1.0 }) as u64;
+    let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Session state machine: states + legal transitions (pure rules, tested).
 // ---------------------------------------------------------------------------
@@ -453,6 +469,16 @@ mod tests {
         let c = companion_key(&PathBuf::from(r"D:\q\IMG_1.HEIC")).unwrap();
         assert_eq!(a, b, "case-insensitive stem, same dir");
         assert_ne!(a, c, "different directory never pairs");
+    }
+
+    #[test]
+    fn durations_format_like_a_player() {
+        use std::time::Duration as D;
+        assert_eq!(format_video_duration(D::from_secs(0)), "0:00");
+        assert_eq!(format_video_duration(D::from_millis(400)), "0:01");
+        assert_eq!(format_video_duration(D::from_secs(7)), "0:07");
+        assert_eq!(format_video_duration(D::from_secs(185)), "3:05");
+        assert_eq!(format_video_duration(D::from_secs(3727)), "1:02:07");
     }
 
     #[test]

@@ -8,9 +8,12 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
-- **Videos now appear in your library.** Camera clips (MP4, MOV, MKV, WebM, AVI, and other
-  common containers) are listed alongside photos when you browse a folder, shown as a dark
-  placeholder tile for now — poster frames and playback are coming next. Live Photo motion
+- **Videos now appear in your library, with real poster frames.** Camera clips (MP4, MOV,
+  MKV, WebM, AVI, and other common containers) are listed alongside photos when you browse
+  a folder. Each clip shows its first non-black frame as a poster (with the correct
+  rotation and colors), a play badge, and its details in the info panel (duration, codec,
+  frame rate, audio). Playback itself is coming next; pressing `P` says so for now. A clip
+  Windows has no codec for shows a plain dark tile instead of an error. Live Photo motion
   files are not listed twice: an `IMG_1234.MOV` next to `IMG_1234.HEIC` stays hidden and
   keeps playing through its photo with `P`. Videos never open from inside ZIP/7z archives,
   and viewing them leaves no trace on disk, same as photos.

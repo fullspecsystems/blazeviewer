@@ -64,17 +64,7 @@ pub fn decode_live_motion_streaming(
     cancel: &AtomicBool,
     emit: &mut dyn FnMut(MotionChunk),
 ) {
-    // COM + MF init per call: the decode runs on a worker thread that starts
-    // uninitialized. Both results are deliberately tolerated — S_FALSE /
-    // RPC_E_CHANGED_MODE for COM (see `wic.rs`), and MFStartup is process-wide
-    // ref-counted (never shut down; the process lifetime owns it).
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-    }
-    static MF_INIT: Once = Once::new();
-    MF_INIT.call_once(|| unsafe {
-        let _ = MFStartup(MF_VERSION, MFSTARTUP_LITE);
-    });
+    ensure_mf();
 
     // A COM failure that escapes `stream_inner` becomes a terminal `Failed` here (with the
     // friendly HEVC-extensions text). `stream_inner` never emits a terminal before returning
@@ -94,6 +84,21 @@ pub fn decode_live_motion(path: &Path, max_long_edge: u32) -> Result<Animation, 
         collector.push(chunk)
     });
     collector.finish()
+}
+
+/// COM + Media Foundation init for the calling worker thread. Shared by every MF
+/// consumer in the crate (Live Photo motion, the video poster/metadata probes —
+/// task #79). Both results are deliberately tolerated — S_FALSE / RPC_E_CHANGED_MODE
+/// for COM (see `wic.rs`), and MFStartup is process-wide ref-counted (never shut
+/// down; the process lifetime owns it).
+pub(crate) fn ensure_mf() {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    }
+    static MF_INIT: Once = Once::new();
+    MF_INIT.call_once(|| unsafe {
+        let _ = MFStartup(MF_VERSION, MFSTARTUP_LITE);
+    });
 }
 
 /// Friendlier error text: a missing HEVC decoder surfaces as
@@ -297,7 +302,7 @@ unsafe fn stream_inner(
 /// enum values are **not** CICP code points, so map them explicitly; anything unknown (or a
 /// missing attribute) falls back to sRGB passthrough, as does anything `from_cicp`/moxcms can't
 /// build (including the PQ/HLG transfers this 8-bit RGB32 path SDR-clamps by design).
-unsafe fn native_color(reader: &IMFSourceReader, video: u32) -> ColorTransform {
+pub(crate) unsafe fn native_color(reader: &IMFSourceReader, video: u32) -> ColorTransform {
     let Ok(native) = reader.GetNativeMediaType(video, 0) else {
         return ColorTransform::srgb();
     };
@@ -347,7 +352,7 @@ unsafe fn native_color(reader: &IMFSourceReader, video: u32) -> ColorTransform {
 /// Copy one RGB32 sample out as straight-alpha RGBA8, honoring the row stride
 /// (padding and bottom-up both occur in the wild) and forcing alpha opaque
 /// (RGB32's fourth byte is undefined).
-unsafe fn sample_to_rgba(
+pub(crate) unsafe fn sample_to_rgba(
     sample: &IMFSample,
     w: u32,
     h: u32,

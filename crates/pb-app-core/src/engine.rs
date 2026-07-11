@@ -7,7 +7,7 @@
 //! few of these (the ones it shares) via `pb_app_core::engine::*`.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -226,11 +226,37 @@ pub fn decode_item(
     fit: Option<FitBox>,
     allow_preview: bool,
 ) -> Result<DecodedImage, DecodeError> {
-    // Typed dispatch BEFORE any bytes request (task #79 phase 1): a video item is
-    // path-only — the platform readers stream it from disk later; its encoded bytes
-    // must never be pulled into RAM. Phase 1 shows a flat placeholder; phase 2
-    // replaces it with the real poster frame via the same dispatch point.
+    decode_item_cancellable(source, item, fit, allow_preview, &AtomicBool::new(false))
+}
+
+/// [`decode_item`] with a mid-job cancel flag — what the decode pool runs, so a
+/// superseded video **poster probe** (task #79 phase 2: an open reader walking
+/// frames) stops between samples instead of finishing a walk nobody wants. Image
+/// decodes ignore the flag (bounded, single-shot); the pool still cancels them at
+/// the queue and discards stale results.
+pub fn decode_item_cancellable(
+    source: &dyn PhotoSource,
+    item: usize,
+    fit: Option<FitBox>,
+    allow_preview: bool,
+    cancel: &AtomicBool,
+) -> Result<DecodedImage, DecodeError> {
+    let _ = cancel; // referenced only on cfg(windows) today (the MF poster path)
+                    // Typed dispatch BEFORE any bytes request (task #79 phase 1): a video item is
+                    // path-only — the platform readers stream it from disk; its encoded bytes must
+                    // never be pulled into RAM. Phase 2: the poster is the clip's first non-black
+                    // frame via the OS reader, rotation + color identical to the future playback
+                    // path; any failure (missing codec, no container handler, corrupt file)
+                    // degrades to the flat placeholder tile — the item stays visible, and the
+                    // *play* attempt is where a precise error will surface (phases 4-6).
     if let crate::video::LibraryItemKind::Video(container) = crate::video::item_kind(source, item) {
+        #[cfg(windows)]
+        if let Some(path) = source.path(item) {
+            match pb_decode::decode_video_poster(path, fit, cancel) {
+                Ok(img) => return Ok(img),
+                Err(e) => eprintln!("video poster failed: {}: {e}", path.display()),
+            }
+        }
         return Ok(video_placeholder(container));
     }
     let bytes = source

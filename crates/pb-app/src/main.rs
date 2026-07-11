@@ -453,21 +453,39 @@ impl App {
         overrides: &pb_app_core::LaunchOverrides,
     ) -> Self {
         let playlist = Playlist::new(source.len(), fresh_shuffle_seed()).with_cursor(start);
-        let decode: Arc<DecodeFn> = Arc::new(|src: &dyn PhotoSource, item, fit, allow_preview| {
-            if !METRICS_ON_FLAG.load(std::sync::atomic::Ordering::Relaxed) {
-                return decode_item(src, item, fit, allow_preview);
-            }
-            let t0 = Instant::now();
-            let r = decode_item(src, item, fit, allow_preview);
-            let ms = t0.elapsed().as_secs_f64() * 1e3;
-            let tag = format!(
-                "{}{}",
-                if allow_preview { "prev " } else { "full " },
-                src.name(item)
-            );
-            POOL_DECODE_MS.lock().unwrap().push((ms, tag));
-            r
-        });
+        let decode: Arc<DecodeFn> = Arc::new(
+            |src: &dyn PhotoSource,
+             item,
+             fit,
+             allow_preview,
+             cancel: &std::sync::atomic::AtomicBool| {
+                if !METRICS_ON_FLAG.load(std::sync::atomic::Ordering::Relaxed) {
+                    return pb_app_core::engine::decode_item_cancellable(
+                        src,
+                        item,
+                        fit,
+                        allow_preview,
+                        cancel,
+                    );
+                }
+                let t0 = Instant::now();
+                let r = pb_app_core::engine::decode_item_cancellable(
+                    src,
+                    item,
+                    fit,
+                    allow_preview,
+                    cancel,
+                );
+                let ms = t0.elapsed().as_secs_f64() * 1e3;
+                let tag = format!(
+                    "{}{}",
+                    if allow_preview { "prev " } else { "full " },
+                    src.name(item)
+                );
+                POOL_DECODE_MS.lock().unwrap().push((ms, tag));
+                r
+            },
+        );
         let (pool, results) = DecodePool::new(recommended_workers(), POOL_BUDGET_BYTES, decode);
         // `settings` (pristine, loaded by `main`) drives the launch defaults; the hold loop reads
         // it live. CLI overrides apply to live state via `apply_launch_overrides` below — never to
