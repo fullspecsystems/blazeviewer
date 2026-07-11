@@ -18,6 +18,13 @@ with any pre-release suffix carried only by the tag.
   keeps playing through its photo with `P`. Videos never open from inside ZIP/7z archives,
   and viewing them leaves no trace on disk, same as photos.
 
+### Changed
+- **Smoother animation and Live Photo playback.** Showing each frame no longer creates
+  fresh GPU resources: frames now reuse one resident texture and upload buffer, which
+  removes the worst-case per-frame hitches (95th-percentile frame-present overhead dropped
+  about 3x at 1080p) and stops playback from continuously allocating memory. This also
+  lays the presentation groundwork for video playback.
+
 ### Fixed
 - **The folder tree (Shift+F) now shows for ZIP and 7z archives.** Opening an archive that has
   internal folders showed an empty "Folders" panel. The panel was reading only the on-disk folder

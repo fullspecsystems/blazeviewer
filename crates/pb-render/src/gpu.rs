@@ -1029,6 +1029,118 @@ fn upload_image(
     })
 }
 
+/// [`upload_image`] through a reusable slot (task #79 phase 3 — the `set_image`
+/// present path). While geometry + format match the slot — every frame of an
+/// animation / video — the pixels upload into the **existing** texture and the
+/// color uniform is rewritten in place: zero resource creation per frame. Any
+/// mismatch (new item, resize, SDR↔HDR) rebuilds the slot, which is exactly the
+/// old per-call cost.
+#[allow(clippy::too_many_arguments)]
+fn upload_image_reusable(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    bgl: &wgpu::BindGroupLayout,
+    uploader: &mut dyn UploadStrategy,
+    slot: &mut Option<ReuseSlot>,
+    image: &[u8],
+    img_w: u32,
+    img_h: u32,
+    color: &ColorTransform,
+    hdr: bool,
+    scale: f32,
+) -> ReuseOutcome {
+    let (tex_format, mode) = if hdr {
+        (wgpu::TextureFormat::Rgba16Float, 2.0)
+    } else {
+        (
+            wgpu::TextureFormat::Rgba8Unorm,
+            if color.enabled { 1.0 } else { 0.0 },
+        )
+    };
+    let (image, img_w, img_h) = if hdr {
+        (Cow::Borrowed(image), img_w, img_h)
+    } else {
+        clamp_to_max(
+            image,
+            img_w,
+            img_h,
+            device.limits().max_texture_dimension_2d,
+        )
+    };
+    let image: &[u8] = &image;
+
+    if let Some(s) = slot.as_ref() {
+        if s.w == img_w && s.h == img_h && s.format == tex_format {
+            // Steady state: in-place texture upload + a uniform rewrite. Queue
+            // order serializes this after every submitted draw that sampled the
+            // old frame — no fence, no wait, nothing created.
+            uploader.upload(device, queue, &s.tex, image, img_w, img_h);
+            queue.write_buffer(
+                &s.color_buf,
+                0,
+                bytemuck::bytes_of(&ColorUniform::new(color, mode, scale)),
+            );
+            return ReuseOutcome::Reused;
+        }
+    }
+
+    // (Re)build the slot — the one-time cost the old path paid every call.
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("image-reuse"),
+        size: wgpu::Extent3d {
+            width: img_w,
+            height: img_h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: tex_format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    uploader.upload(device, queue, &tex, image, img_w, img_h);
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+    let color_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("color-uniform-reuse"),
+        contents: bytemuck::bytes_of(&ColorUniform::new(color, mode, scale)),
+        // COPY_DST so later same-geometry frames rewrite it in place.
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("img-bg-reuse"),
+        layout: bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: color_buf.as_entire_binding(),
+            },
+        ],
+    });
+    *slot = Some(ReuseSlot {
+        tex,
+        color_buf,
+        w: img_w,
+        h: img_h,
+        format: tex_format,
+    });
+    ReuseOutcome::Rebuilt(bind_group)
+}
+
 fn vertex_buffer(
     device: &wgpu::Device,
     view: &ViewTransform,
@@ -1279,6 +1391,40 @@ pub struct WgpuRenderer {
     /// draw just the letterbox background, no photo quad. Cleared by `set_image` /
     /// `present_slot`, set by `clear_image`.
     blank: bool,
+    /// The reusable single-image present slot (task #79 phase 3): while
+    /// `set_image` keeps receiving frames of the same geometry/format — the
+    /// animation / video playback steady state — pixels upload into this slot's
+    /// existing texture and only its color uniform is rewritten, instead of
+    /// creating a texture + view + sampler + uniform + bind group **per frame**
+    /// (the #76 follow-up). Rebuilt automatically on any size/format change.
+    reuse: Option<ReuseSlot>,
+}
+
+/// See [`WgpuRenderer::reuse`]. Same-queue submission order makes the in-place
+/// texture write safe: the upload copy is ordered after every previously
+/// submitted draw that sampled the texture, and the next draw samples the new
+/// frame — no fence, no wait.
+///
+/// The slot deliberately does **not** hold the bind group (wgpu 22 resources
+/// aren't `Clone`): the renderer's `bind_group` field is the one built against
+/// this slot's texture — a [`ReuseOutcome::Reused`] means "keep it".
+struct ReuseSlot {
+    tex: wgpu::Texture,
+    /// `UNIFORM | COPY_DST` so per-frame color/mode/scale changes are a
+    /// `write_buffer`, not a new buffer + bind group.
+    color_buf: wgpu::Buffer,
+    w: u32,
+    h: u32,
+    format: wgpu::TextureFormat,
+}
+
+/// What [`upload_image_reusable`] did with the frame.
+enum ReuseOutcome {
+    /// Uploaded into the existing slot texture; the caller's current bind group
+    /// (built over that texture on the last rebuild) stays valid — keep it.
+    Reused,
+    /// Geometry/format changed: the slot was rebuilt and this is its new bind group.
+    Rebuilt(wgpu::BindGroup),
 }
 
 impl WgpuRenderer {
@@ -1490,6 +1636,7 @@ impl WgpuRenderer {
             letterbox: [LETTERBOX[0], LETTERBOX[1], LETTERBOX[2]],
             content_top_inset: 0,
             blank: false,
+            reuse: None,
             message: None,
             tree: None,
             egui: None,
@@ -1858,18 +2005,28 @@ impl Renderer for WgpuRenderer {
         peak: f32,
     ) {
         let scale = self.scene_scale(hdr);
-        self.bind_group = upload_image(
+        // The reusable slot (task #79 phase 3): during animation/video playback this
+        // is the per-frame path — same-geometry frames upload in place, creating
+        // nothing; `self.bind_group` (built over the slot's texture on the last
+        // rebuild) stays valid on a `Reused` outcome. The invariant that holds this
+        // together: `set_image` is the only writer of both `reuse` and `bind_group`,
+        // so a reuse hit always follows the rebuild that paired them.
+        match upload_image_reusable(
             &self.device,
             &self.queue,
             &self.bgl,
             self.upload.as_mut(),
+            &mut self.reuse,
             rgba,
             width,
             height,
             &color,
             hdr,
             scale,
-        );
+        ) {
+            ReuseOutcome::Rebuilt(bg) => self.bind_group = bg,
+            ReuseOutcome::Reused => {}
+        }
         self.blank = false; // an image is showing again
         self.message = None; // hide the empty-state hint
         self.set_present_peak(peak);
@@ -2613,6 +2770,204 @@ mod tests {
 
     fn close(a: [u8; 4], b: [u8; 4], tol: i32) -> bool {
         (0..4).all(|k| (a[k] as i32 - b[k] as i32).abs() <= tol)
+    }
+
+    /// Headless device + the image bind-group layout, for the reuse-slot tests.
+    fn test_device() -> (wgpu::Device, wgpu::Queue, wgpu::BindGroupLayout) {
+        pollster::block_on(async {
+            let instance = instance();
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    force_fallback_adapter: false,
+                    compatible_surface: None,
+                })
+                .await
+                .expect("no GPU adapter");
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor::default(), None)
+                .await
+                .expect("request device");
+            let bgl = tex_sampler_uniform_bgl(&device, "test-img-bgl");
+            (device, queue, bgl)
+        })
+    }
+
+    /// Task #79 phase 3: same-geometry frames — the animation/video steady state —
+    /// must reuse the slot's texture and bind group (zero creations per frame);
+    /// a size change must rebuild them.
+    #[test]
+    fn reuse_slot_keeps_resources_across_same_size_frames_and_rebuilds_on_resize() {
+        let _gpu = crate::gpu_test_lock();
+        let (device, queue, bgl) = test_device();
+        let mut uploader = crate::upload::StagingUpload::new();
+        let mut slot: Option<ReuseSlot> = None;
+        let color = ColorTransform::srgb();
+
+        let frame = vec![100u8; 320 * 180 * 4];
+        let first = upload_image_reusable(
+            &device,
+            &queue,
+            &bgl,
+            &mut uploader,
+            &mut slot,
+            &frame,
+            320,
+            180,
+            &color,
+            false,
+            1.0,
+        );
+        assert!(
+            matches!(first, ReuseOutcome::Rebuilt(_)),
+            "first frame builds the slot"
+        );
+        let tex0 = slot.as_ref().unwrap().tex.global_id();
+        let second = upload_image_reusable(
+            &device,
+            &queue,
+            &bgl,
+            &mut uploader,
+            &mut slot,
+            &frame,
+            320,
+            180,
+            &color,
+            false,
+            1.0,
+        );
+        assert!(
+            matches!(second, ReuseOutcome::Reused),
+            "same geometry must reuse"
+        );
+        assert_eq!(
+            slot.as_ref().unwrap().tex.global_id(),
+            tex0,
+            "same geometry must keep the texture"
+        );
+
+        // A different color transform still reuses (uniform rewritten in place).
+        let wide = ColorTransform {
+            matrix: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            trc: [2.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            enabled: true,
+        };
+        let recolored = upload_image_reusable(
+            &device,
+            &queue,
+            &bgl,
+            &mut uploader,
+            &mut slot,
+            &frame,
+            320,
+            180,
+            &wide,
+            false,
+            1.0,
+        );
+        assert!(
+            matches!(recolored, ReuseOutcome::Reused),
+            "a color change reuses too"
+        );
+
+        // Resize rebuilds.
+        let bigger = vec![50u8; 640 * 360 * 4];
+        let resized = upload_image_reusable(
+            &device,
+            &queue,
+            &bgl,
+            &mut uploader,
+            &mut slot,
+            &bigger,
+            640,
+            360,
+            &color,
+            false,
+            1.0,
+        );
+        assert!(
+            matches!(resized, ReuseOutcome::Rebuilt(_)),
+            "resize must rebuild"
+        );
+        assert_ne!(
+            slot.as_ref().unwrap().tex.global_id(),
+            tex0,
+            "resize must rebuild the texture"
+        );
+        device.poll(wgpu::Maintain::Wait);
+    }
+
+    /// Opt-in measurement (task #79 phase 3 acceptance): per-frame CPU cost of the
+    /// present upload, old path (create everything per frame) vs the reuse slot.
+    /// `PB_PRESENT_BENCH=1 cargo test -p pb-render --release present_path_churn -- --nocapture --ignored`
+    #[test]
+    #[ignore = "opt-in measurement; run with --ignored"]
+    fn present_path_churn_before_vs_after() {
+        let _gpu = crate::gpu_test_lock();
+        let (device, queue, bgl) = test_device();
+        let color = ColorTransform::srgb();
+        const N: usize = 240;
+
+        let pct = |mut v: Vec<f64>, p: f64| {
+            v.sort_by(f64::total_cmp);
+            v[((v.len() - 1) as f64 * p).round() as usize]
+        };
+
+        for (label, w, h) in [("1080p", 1920u32, 1080u32), ("4K", 3840, 2160)] {
+            let frame = vec![128u8; (w * h * 4) as usize];
+
+            // Old path: full per-frame creation (what set_image did before).
+            let mut old_uploader = crate::upload::StagingUpload::new();
+            let mut old_ms = Vec::with_capacity(N);
+            for _ in 0..N {
+                let t = std::time::Instant::now();
+                let _bg = upload_image(
+                    &device,
+                    &queue,
+                    &bgl,
+                    &mut old_uploader,
+                    &frame,
+                    w,
+                    h,
+                    &color,
+                    false,
+                    1.0,
+                );
+                old_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            device.poll(wgpu::Maintain::Wait);
+
+            // New path: the reuse slot.
+            let mut uploader = crate::upload::StagingUpload::new();
+            let mut slot: Option<ReuseSlot> = None;
+            let mut new_ms = Vec::with_capacity(N);
+            for _ in 0..N {
+                let t = std::time::Instant::now();
+                let _bg = upload_image_reusable(
+                    &device,
+                    &queue,
+                    &bgl,
+                    &mut uploader,
+                    &mut slot,
+                    &frame,
+                    w,
+                    h,
+                    &color,
+                    false,
+                    1.0,
+                );
+                new_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            device.poll(wgpu::Maintain::Wait);
+
+            eprintln!(
+                "present upload {label} x{N}: old p50={:.3}ms p95={:.3}ms | reuse p50={:.3}ms p95={:.3}ms",
+                pct(old_ms.clone(), 0.5),
+                pct(old_ms, 0.95),
+                pct(new_ms.clone(), 0.5),
+                pct(new_ms, 0.95),
+            );
+        }
     }
 
     #[test]

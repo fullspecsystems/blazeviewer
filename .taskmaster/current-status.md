@@ -2,7 +2,17 @@
 
 _Last updated: 2026-07-11 (late). Supersedes the morning handoff (#76 shipped / #79 planned)._
 
-## State: main, #79 phases 0, 1 AND 2 done (Windows scope), all gates green
+## State: main, #79 phases 0-3 done (Windows scope), all gates green
+
+**Phase 3 (reusable GPU presentation path) landed — subtask 79.4 done (closes the #76 perf
+follow-up).** `set_image` (the per-frame animation/video present path) now runs through a
+`ReuseSlot` in pb-render: same-geometry frames upload into the existing texture and rewrite
+the color uniform in place (`ReuseOutcome::Reused` keeps the renderer's bind group — wgpu 22
+resources aren't Clone); rebuild only on item/resize/HDR change. `StagingUpload` recycles
+its staging buffers via background `map_async` re-map (bounded pool of 3, opportunistic,
+never waits on the GPU — a miss allocates fresh). Measured (`present_path_churn` --ignored
+test): 1080p p95 1.35→0.42 ms (−69 %); steady-state per-frame creations 5 wgpu resources +
+one multi-MB staging alloc → 0. Reuse-identity + staging-recycle round-trip tests added.
 
 **Phase 2 (posters + metadata) landed — subtask 79.3 `review`.** Videos now show their
 first non-black frame as a poster (MF reader, playback-identical rotation/color config),
@@ -34,10 +44,13 @@ Key files: `pb-app-core/src/video.rs` (classify/item_kind/companion helpers),
 (`video_placeholder` + dispatch), `default_app.rs`, `main.rs`, release-linux.sh,
 Info-swift-host.plist.
 
-**Next: phase 3 (reusable GPU presentation path, subtask 79.4)** — texture/bind-group +
-staging reuse for the animation present path (benefits GIF/APNG/WebP/avis too; closes the
-#76 perf follow-up); never wait on GPU completion on the event loop; measure alloc count +
-upload p95 before/after. Then phase 4 = the VideoSession core on fake producers.
+**Next: phase 4 (silent bounded playback — the VideoSession core, subtask 79.5).** Pure
+state machine on FAKE producers first (unit tests; the contracts in `pb-app-core::video`
+are the spec: states + transitions, `VideoQueueBudget` credits, session_id/seek_generation
+discard rules), PTS scheduling with session-relative origin, preroll + rebuffer-don't-drift,
+then the real Windows MF producer (mf_poster's reader config is the template; seek =
+recreate reader per the spike). Duration-independence proven as plateau slope; VFR + EOS
+before audio exists (audio is phase 5).
 
 `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, the featured
 clippy (`libheif,dav1d`), and `fmt --check` all pass.
