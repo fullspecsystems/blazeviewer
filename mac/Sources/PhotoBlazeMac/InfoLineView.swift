@@ -31,7 +31,7 @@ struct InfoLineView: View {
                 summaryRow
                 VideoPlaybackRow(model: model)
             }
-            .frame(minWidth: 300, maxWidth: 560)
+            .frame(minWidth: 200, maxWidth: 560)
             .padding(.horizontal, 11)
             .padding(.vertical, inset)
             .panelBackground(cornerRadius: pillRadius, opacity: model.panelOpacity)
