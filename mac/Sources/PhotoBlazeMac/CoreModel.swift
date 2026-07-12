@@ -1959,13 +1959,17 @@ final class CoreModel {
         panel.allowsMultipleSelection = !choosingFolders
         panel.directoryURL = URL(fileURLWithPath: startDir, isDirectory: true)
         if !choosingFolders {
-            // Images + archives — mirror IMAGE_FILTER_EXTS (+zip/7z) in pb-app/src/main.rs.
-            // (No "All files" escape hatch here — NSOpenPanel has no filter popup like
-            // Windows'; anything exotic can come in via the folder panel or a drop.)
+            // Images + video + archives — mirror IMAGE_FILTER_EXTS + VIDEO_FILTER_EXTS
+            // (+zip/7z) in pb-app/src/main.rs. A container AVFoundation can't play still
+            // shows here but fails gracefully on open (nativeVideoFailed → Message dialog),
+            // same as an unreadable archive. (No "All files" escape hatch — NSOpenPanel has
+            // no filter popup like Windows'; anything exotic comes in via a folder or a drop.)
             let exts = [
                 "jpg", "jpeg", "jpe", "jfif", "png", "gif", "bmp", "tif", "tiff", "webp",
                 "tga", "qoi", "jxl", "svg", "svgz", "heic", "heif", "avif", "hdr", "exr",
                 "arw", "nef", "cr2", "cr3", "dng", "raf", "rw2", "orf", "srw", "pef", "raw",
+                "mp4", "m4v", "mov", "qt", "mkv", "webm", "avi", "wmv", "asf", "mpg", "mpeg",
+                "mts", "m2ts", "3gp", "3g2",
                 "zip", "7z",
             ]
             panel.allowedContentTypes = exts.compactMap { UTType(filenameExtension: $0) }
