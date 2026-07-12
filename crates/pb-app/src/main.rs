@@ -2934,6 +2934,13 @@ impl ApplicationHandler for App {
             // photos become the playlist).
             WindowEvent::DroppedFile(path) => {
                 self.pending_drops.push(path);
+                // Take keyboard focus: a drop leaves the drag source (Explorer)
+                // foreground, so nav keys would silently go nowhere until a click
+                // (owner-reported; the macOS shell needs its own AppKit activate —
+                // focus is per-shell, only the core is shared).
+                if let Some(w) = self.window.as_ref() {
+                    w.focus_window();
+                }
                 self.core.effects.push(contract::CoreEffect::RequestRender);
             }
 
