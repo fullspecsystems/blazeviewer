@@ -1041,14 +1041,18 @@ impl AppCore {
         // clock-catch-up scheme afterward either races the backlog or churns
         // seeks (tried, regressed, reverted). Pausing both sides loses nothing:
         // the settle arm below resumes exactly where playback froze.
+        // Session-backed only (Windows/Linux presenter stall). The macOS native AVPlayer is
+        // composited by the window server and keeps playing across a resize — no pause needed.
         if self
             .video
             .as_ref()
-            .is_some_and(|v| v.session.state() == crate::video::VideoSessionState::Playing)
+            .and_then(ActiveVideoBackend::as_session)
+            .is_some_and(|s| s.session.state() == crate::video::VideoSessionState::Playing)
         {
             let now = self.now;
             self.video
                 .as_mut()
+                .and_then(ActiveVideoBackend::as_session_mut)
                 .expect("checked above")
                 .session
                 .pause(now);
@@ -1450,9 +1454,11 @@ impl AppCore {
                 // Resume the playback the resize paused — unless the user paused
                 // it themselves meanwhile (the state must still be Paused).
                 if std::mem::take(&mut self.video_paused_by_resize) {
-                    if let Some(v) = self.video.as_mut() {
-                        if v.session.state() == crate::video::VideoSessionState::Paused {
-                            v.session.resume(now);
+                    if let Some(s) =
+                        self.video.as_mut().and_then(ActiveVideoBackend::as_session_mut)
+                    {
+                        if s.session.state() == crate::video::VideoSessionState::Paused {
+                            s.session.resume(now);
                             self.effects.push(contract::CoreEffect::ResumeVideoAudio);
                             self.draw();
                         }
@@ -6376,7 +6382,7 @@ impl AppCore {
             return;
         }
         let active = self.video.as_ref().is_some_and(|v| {
-            Some(v.item) == self.displayed_item && !matches!(v.session.state(), Failed | Stopped)
+            Some(v.item()) == self.displayed_item && !matches!(v.state(), Failed | Stopped)
         });
         if active {
             self.arm_video_line_flash();
@@ -9193,6 +9199,7 @@ mod tests {
     #[test]
     fn hovering_the_controls_zone_reveals_the_playback_line() {
         use crate::video::{VideoProducerEvent, VideoSessionId};
+        use crate::video_native::ActiveVideoBackend;
         use crate::video_session::{ActiveVideo, VideoSession};
 
         let mut core = test_core();
@@ -9212,11 +9219,11 @@ mod tests {
             animated: None,
         });
         let (session, io) = VideoSession::new(VideoSessionId(1), 16);
-        core.video = Some(ActiveVideo {
+        core.video = Some(ActiveVideoBackend::Session(ActiveVideo {
             session,
             item: 0,
             audio_started: false,
-        });
+        }));
         io.events
             .send(VideoProducerEvent::Opened {
                 session_id: VideoSessionId(1),
@@ -9254,6 +9261,7 @@ mod tests {
     #[test]
     fn resize_pauses_playback_and_settle_resumes_it() {
         use crate::video::{VideoProducerEvent, VideoSessionId, VideoSessionState};
+        use crate::video_native::ActiveVideoBackend;
         use crate::video_session::{ActiveVideo, VideoSession};
 
         let mut core = test_core();
@@ -9263,11 +9271,11 @@ mod tests {
         core.playlist = Playlist::new(1, 0);
         core.displayed_item = Some(0);
         let (session, io) = VideoSession::new(VideoSessionId(1), 16);
-        core.video = Some(ActiveVideo {
+        core.video = Some(ActiveVideoBackend::Session(ActiveVideo {
             session,
             item: 0,
             audio_started: false,
-        });
+        }));
         io.events
             .send(VideoProducerEvent::Opened {
                 session_id: VideoSessionId(1),
@@ -9294,7 +9302,7 @@ mod tests {
             .unwrap();
         core.poll_video();
         assert_eq!(
-            core.video.as_ref().unwrap().session.state(),
+            core.video.as_ref().unwrap().state(),
             VideoSessionState::Playing
         );
 
@@ -9302,7 +9310,7 @@ mod tests {
         core.effects.clear();
         core.resize(320, 200, 1.0);
         assert_eq!(
-            core.video.as_ref().unwrap().session.state(),
+            core.video.as_ref().unwrap().state(),
             VideoSessionState::Paused,
             "resize pauses the session"
         );
@@ -9319,7 +9327,7 @@ mod tests {
         core.resize_settle_at = Some(core.now - Duration::from_millis(1));
         core.handle(contract::CoreEvent::Tick(Instant::now()));
         assert_eq!(
-            core.video.as_ref().unwrap().session.state(),
+            core.video.as_ref().unwrap().state(),
             VideoSessionState::Playing,
             "settle resumes the session"
         );
