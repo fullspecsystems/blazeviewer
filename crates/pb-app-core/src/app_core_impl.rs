@@ -5643,6 +5643,11 @@ impl AppCore {
                 .and_then(|p| std::fs::metadata(p).ok())
                 .map(|m| m.len())
                 .unwrap_or(0);
+            // Only the `#[cfg(windows)]` probe below mutates `rows` today; the macOS
+            // async probe (79.9 phase 4) will too. Elsewhere it stays empty, so `mut`
+            // reads as unused — suppress it off-Windows rather than drop `mut` (it's
+            // needed where the probe runs).
+            #[cfg_attr(not(windows), allow(unused_mut))]
             let mut rows: Vec<(String, String)> = Vec::new();
             #[cfg(windows)]
             if let Some(path) = self.source.path(item) {
