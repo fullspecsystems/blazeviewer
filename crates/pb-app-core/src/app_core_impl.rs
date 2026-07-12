@@ -4288,7 +4288,7 @@ impl AppCore {
     fn refresh_after_geometry_change(&mut self) {
         use crate::video::VideoSessionState::*;
         let video_live = self.video.as_ref().is_some_and(|v| {
-            Some(v.item) == self.displayed_item && !matches!(v.session.state(), Failed | Stopped)
+            Some(v.item()) == self.displayed_item && !matches!(v.state(), Failed | Stopped)
         });
         if video_live {
             self.video_geometry_stale = true;
@@ -9123,11 +9123,11 @@ mod tests {
         core.playlist = Playlist::new(1, 0);
         core.displayed_item = Some(0);
         let (session, io) = VideoSession::new(VideoSessionId(1), 1024);
-        core.video = Some(ActiveVideo {
+        core.video = Some(ActiveVideoBackend::Session(ActiveVideo {
             session,
             item: 0,
             audio_started: false,
-        });
+        }));
         io.events
             .send(VideoProducerEvent::Opened {
                 session_id: VideoSessionId(1),
