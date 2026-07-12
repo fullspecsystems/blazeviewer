@@ -8,7 +8,7 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
-- **A Thumbnails panel (macOS): press `Shift+T` for a scrollable strip of your photos.**
+- **A Thumbnails panel: press `Shift+T` for a scrollable strip of your photos.**
   The left pane now has two tabs — Folders and Thumbnails — sharing one panel (`Shift+F`
   and `Shift+T` switch between them; clicking the tabs works too). The strip shows small
   previews of the photos around where you are, with the current one highlighted, each
@@ -20,7 +20,9 @@ with any pre-release suffix carried only by the tag.
   show in the strip, and the panel is resizable — thumbnails stay sharp when you widen
   it. Thumbnails are generated from decode work the viewer is already doing, so browsing
   speed is unaffected, and everything stays in memory only: no thumbnail files or
-  databases are ever written to disk. (Windows/Linux: coming in a follow-up.)
+  databases are ever written to disk. Available on all platforms now (Windows, Linux, and
+  macOS); on Windows and Linux the left pane and the info panel resize by dragging their
+  edge, and the tabs shrink to fit as you narrow them.
 
 ### Added
 - **Videos now appear in your library, with real poster frames.** Camera clips (MP4, MOV,

@@ -295,6 +295,7 @@ async fn run(out: &Path, dark: bool, tab: InspectorTab, welcome: bool) -> Result
             rows: t.rows.iter().take(4).cloned().collect(),
             parent_name: t.parent_name.clone(),
             archive: Vec::new(),
+            tabs: t.tabs,
         }),
         info: None,
         scan: None,
@@ -305,6 +306,8 @@ async fn run(out: &Path, dark: bool, tab: InspectorTab, welcome: bool) -> Result
         top_inset: frame.top_inset,
         tree_fade: 1.0,
         inspector_fade: 1.0,
+        pane_width: frame.pane_width,
+        inspector_width: frame.inspector_width,
     });
     for _ in 0..warmups {
         let warm_target = warm_frame.as_ref().unwrap_or(&frame);
@@ -506,6 +509,8 @@ fn sample_frame(dark: bool, tab: InspectorTab, welcome: bool) -> PanelFrame {
             top_inset: 0.0,
             tree_fade: 1.0,
             inspector_fade: 1.0,
+            pane_width: 280.0,
+            inspector_width: 360.0,
         };
     }
     let help = HelpPanel {
@@ -689,6 +694,7 @@ fn sample_frame(dark: bool, tab: InspectorTab, welcome: bool) -> PanelFrame {
             row("Screenshots", 1, false, false, false, Some(27)),
         ],
         archive: Vec::new(),
+        tabs: true,
     };
 
     // Dev toggle: isolate the folder tree (drop the other panels) so its overflow / clipping
@@ -731,5 +737,7 @@ fn sample_frame(dark: bool, tab: InspectorTab, welcome: bool) -> PanelFrame {
         top_inset: 0.0,   // Linux overrides this in `run()` (menu bar reserves the top strip)
         tree_fade: 1.0,
         inspector_fade: 1.0,
+        pane_width: 280.0,
+        inspector_width: 360.0,
     }
 }

@@ -15,9 +15,10 @@ use pb_app_core::panels::{
     TextPanel,
 };
 use pb_app_core::settings::InfoLineAlign;
-use pb_app_core::{fs_tree, Action, AppCore, InspectorTab};
+use pb_app_core::{fs_tree, Action, AppCore, InspectorTab, LeftTab};
 use pb_ui::icon::{Icon, Tone};
 use pb_ui::Palette;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// The inset of a panel from the window edge (SwiftUI `Layout.edge`).
@@ -26,10 +27,27 @@ const EDGE: f32 = 24.0;
 const PANEL_RADIUS: f32 = 12.0;
 /// Help panel fixed width (SwiftUI `width: 520`).
 const HELP_WIDTH: f32 = 520.0;
-/// Inspector default/min width (SwiftUI `inspectorWidth` default 360).
+/// Inspector default width (SwiftUI `inspectorWidth` default 360). Now user-resizable via the
+/// shared drag handle on its **left** edge (task #83); the live width rides on
+/// [`PanelFrame::inspector_width`] and this is only the startup default.
 const INSPECTOR_WIDTH: f32 = 360.0;
-/// Folder-tree default/min width (SwiftUI `treeWidth` default 280).
+/// Inspector resize bounds. Higher floor than the left pane — the Details table + tab bar want
+/// the room, and the Inspector never needs to get as narrow (owner call).
+const INSPECTOR_WIDTH_MIN: f32 = 300.0;
+const INSPECTOR_WIDTH_MAX: f32 = 560.0;
+/// Left-pane (Folders / Thumbnails) default width. Now user-resizable via the shared drag
+/// handle (task #83) — the live width rides on [`PanelFrame::pane_width`]; this is only the
+/// startup default. One knob for both tabs (the Inspector idiom).
 const TREE_WIDTH: f32 = 280.0;
+/// Left-pane resize bounds (owner-tuned). Below the floor the tab bar has no room to stay
+/// legible; the ceiling keeps the pane from eating the photo.
+const PANE_WIDTH_MIN: f32 = 212.0;
+const PANE_WIDTH_MAX: f32 = 620.0;
+/// Left-pane tab-bar mode thresholds (task #83). As the pane narrows the tab pills shed content
+/// in two steps for a clean fit: icon **+ label** when wide, **label-only** (icons dropped) in
+/// the middle band, **icon-only** (labels dropped) near the floor.
+const TAB_ICON_LABEL_MIN: f32 = 264.0;
+const TAB_LABEL_ONLY_MIN: f32 = 232.0;
 /// Inspector pair-row label column width. Wider than SwiftUI's 116 so long EXIF field names
 /// (PhotographicSensitivity, FocalLengthIn35mmFilm, DateTimeDigitized…) fit on one line before
 /// wrapping — values are mostly short or extreme-and-wrapping anyway, so the label gets the
@@ -76,6 +94,37 @@ pub enum PanelAction {
     CloseInspector,
     CloseTree,
     SelectTab(InspectorTab),
+    /// A left-pane tab-bar click (Folders | Thumbnails, task #83). Only pushed when the
+    /// clicked tab isn't already showing, so applying it never toggle-closes the pane —
+    /// it rides the same `⇧F`/`⇧T` actions the keyboard does (macOS `showLeftTab` parity).
+    SelectLeftTab(LeftTab),
+    /// The Thumbnails panel's ✕ — close the left pane (it's on the Thumbnails tab).
+    CloseThumbs,
+    /// The left pane's resize handle was dragged — the shell stores the new width (shared by
+    /// both tabs) and re-renders at it next frame.
+    SetPaneWidth(f32),
+    /// The Inspector's resize handle was dragged — the shell stores the new width.
+    SetInspectorWidth(f32),
+    /// The left pane's resize-handle strip rect (egui **points**), reported every render so the
+    /// shell can own the resize cursor geometrically (lag-free crossing in from the photo —
+    /// egui's per-frame hover cursor was the source of the flicker).
+    PaneResizeZone(egui::Rect),
+    /// The Inspector's resize-handle strip rect (egui **points**), same purpose as
+    /// [`PaneResizeZone`](Self::PaneResizeZone) for the right-anchored panel.
+    InspectorResizeZone(egui::Rect),
+    /// A thumbnail cell click: absolute jump + instant thumb-preview present (`thumb_jump`).
+    ThumbClick(usize),
+    /// The strip's visible + overscan inclusive index ranges — the demand window that fills
+    /// and eviction protect (reported only when the range changes).
+    ThumbViewport {
+        visible: (usize, usize),
+        overscan: (usize, usize),
+    },
+    /// The user grabbed the strip (not our own follow animation): detach auto-follow.
+    ThumbUserScrolled,
+    /// A programmatic follow-scroll landed — hand the generation back so FollowState knows
+    /// its animation ended (and stale generations are ignored).
+    ThumbScrollDone(u64),
     CopyDetails,
     CopyText,
     CopyDescribe,
@@ -132,6 +181,10 @@ pub struct TreeFrame {
     /// read only `fs_tree_rows()`, which is disk-only, so a `.zip`/`.7z` deck (whose tree the
     /// core derives into `folder_tree_panel`) showed an empty "Folders" panel (task #66).
     pub archive: Vec<ArchiveTreeRow>,
+    /// Whether the left pane has the Folders | Thumbnails tab bar (task #83) — true when a
+    /// thumbnail strip presenter exists on this shell (`AppCore::native_thumbs`). When false
+    /// the header is the plain "Folders" title.
+    pub tabs: bool,
 }
 
 /// One flat archive-tree row — a folder inside a `.zip`/`.7z`, the archive root, a `…`
@@ -256,6 +309,13 @@ pub struct PanelFrame {
     /// the info line's `fade` (the shell retains the last frame for the out leg).
     pub tree_fade: f32,
     pub inspector_fade: f32,
+    /// The live left-pane width (Folders / Thumbnails), user-resizable via the shared drag
+    /// handle (task #83). Shell-owned (`App::tree_width`), so `snapshot` seeds it with the
+    /// default and the shell overrides it in `render_overlay_frame`.
+    pub pane_width: f32,
+    /// The live Inspector width, user-resizable via the drag handle on its left edge (task #83).
+    /// Shell-owned (`App::inspector_width`); `snapshot` seeds the default and the shell overrides.
+    pub inspector_width: f32,
 }
 
 impl PanelFrame {
@@ -275,6 +335,7 @@ impl PanelFrame {
                     rows: core.fs_tree_rows(),
                     parent_name: core.fs_tree_parent_name(),
                     archive: Vec::new(),
+                    tabs: core.native_thumbs,
                 }
             } else {
                 TreeFrame {
@@ -285,6 +346,7 @@ impl PanelFrame {
                         .as_ref()
                         .map(archive_tree_rows)
                         .unwrap_or_default(),
+                    tabs: core.native_thumbs,
                 }
             }
         });
@@ -325,6 +387,10 @@ impl PanelFrame {
             // Shell-owned fade ramps; set in render_overlay_frame.
             tree_fade: 1.0,
             inspector_fade: 1.0,
+            // Shell-owned live width (`App::tree_width`); seeded with the default here.
+            pane_width: TREE_WIDTH,
+            // Shell-owned live width (`App::inspector_width`); seeded with the default here.
+            inspector_width: INSPECTOR_WIDTH,
         }
     }
 }
@@ -379,15 +445,38 @@ pub fn build(ctx: &egui::Context, frame: &PanelFrame, actions: &mut Vec<PanelAct
     // topmost — draw it last so it sits above the others (SwiftUI z-order).
     let top = frame.top_inset;
     if let Some(tree) = &frame.tree {
-        let r = duck(screen.left() + EDGE, screen.left() + EDGE + TREE_WIDTH);
-        tree_panel(ctx, &p, alpha, top, r, tree, frame.tree_fade, actions);
+        let r = duck(
+            screen.left() + EDGE,
+            screen.left() + EDGE + frame.pane_width,
+        );
+        tree_panel(
+            ctx,
+            &p,
+            alpha,
+            top,
+            r,
+            tree,
+            frame.pane_width,
+            frame.tree_fade,
+            actions,
+        );
     }
     if let Some(insp) = &frame.inspector {
         let r = duck(
-            screen.right() - EDGE - INSPECTOR_WIDTH,
+            screen.right() - EDGE - frame.inspector_width,
             screen.right() - EDGE,
         );
-        inspector_panel(ctx, &p, alpha, top, r, insp, frame.inspector_fade, actions);
+        inspector_panel(
+            ctx,
+            &p,
+            alpha,
+            top,
+            r,
+            insp,
+            frame.inspector_width,
+            frame.inspector_fade,
+            actions,
+        );
     }
     // The scan pill rides the top-center, above the corner panels but below Help
     // (SwiftUI z-order) — drawn before Help so Help composites over it.
@@ -2191,10 +2280,14 @@ fn inspector_panel(
     top_inset: f32,
     duck: f32,
     insp: &InspectorFrame,
+    width: f32,
     fade: f32,
     actions: &mut Vec<PanelAction>,
 ) {
     let max_h = panel_max_height(ctx, 200.0, top_inset, duck);
+    // Content wrap width (pins long EXIF values / Markdown so they wrap instead of widening the
+    // Window), tracking the live resizable width less the frame margins and scrollbar gutter.
+    let content_w = width - 2.0 * 16.0 - 8.0;
     sdf_panel(
         ctx,
         p,
@@ -2207,8 +2300,8 @@ fn inspector_panel(
         egui::Margin::ZERO,
         fade,
         |ui| {
-            ui.set_width(INSPECTOR_WIDTH);
-            ui.set_max_width(INSPECTOR_WIDTH);
+            ui.set_width(width);
+            ui.set_max_width(width);
             ui.spacing_mut().item_spacing.y = 0.0;
             // The tab bar is the header (no redundant title); it rides the shared header
             // scaffold so its height/centering/close match the tree + Help.
@@ -2234,12 +2327,27 @@ fn inspector_panel(
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 8.0;
                         match &insp.snapshot {
-                            InspectorSnapshot::Details(d) => details_body(ui, p, d),
+                            InspectorSnapshot::Details(d) => details_body(ui, p, d, content_w),
                             InspectorSnapshot::Text(t) => text_body(ui, p, t),
-                            InspectorSnapshot::Describe(d) => describe_body(ui, p, d, actions),
+                            InspectorSnapshot::Describe(d) => {
+                                describe_body(ui, p, d, content_w, actions)
+                            }
                         }
                     });
             });
+            // Resize handle on the left edge (right-anchored panel: drag left → wider).
+            let (w, zone) = resize_handle(
+                ui,
+                p,
+                width,
+                ResizeEdge::Left,
+                INSPECTOR_WIDTH_MIN,
+                INSPECTOR_WIDTH_MAX,
+            );
+            if let Some(w) = w {
+                actions.push(PanelAction::SetInspectorWidth(w));
+            }
+            actions.push(PanelAction::InspectorResizeZone(zone));
         },
     );
 }
@@ -2264,36 +2372,79 @@ fn inspector_tabs(
         (InspectorTab::Describe, "Describe", Icon::Sparkles),
     ];
     let font = FontId::new(12.5, FontFamily::Proportional);
-    let seg_pad = 10.0;
     let icon_sz = 12.5;
     let icon_gap = 5.0;
     let track_h = 24.0;
-    // Each segment sizes to its icon + gap + label; clamp the whole track so it never runs
-    // into the right-hand controls.
-    let widths: Vec<f32> = tabs
+    let track_left = header_rect.left() + HEADER_PAD_H;
+    // Room before the right-hand copy/close icons — the tab bar never runs under them.
+    let avail = (controls_left - 8.0 - track_left).max(40.0);
+    // Measure each label once (reused for the fit decision and the natural widths).
+    let label_ws: Vec<f32> = tabs
         .iter()
         .map(|(_, l, _)| {
-            icon_sz
-                + icon_gap
-                + galley(ui, l, font.clone(), Color32::PLACEHOLDER, f32::INFINITY)
-                    .size()
-                    .x
-                + seg_pad * 2.0
+            galley(ui, l, font.clone(), Color32::PLACEHOLDER, f32::INFINITY)
+                .size()
+                .x
         })
         .collect();
-    let track_left = header_rect.left() + HEADER_PAD_H;
-    let total = widths.iter().sum::<f32>() + 4.0;
-    let total = total.min((controls_left - 8.0 - track_left).max(60.0));
+    // Fit-driven shedding (three tabs — tighter than the left pane's two, so decide by what
+    // actually fits rather than a fixed width threshold, which also adapts to the copy button):
+    // icon + label when it fits, else label-only (icons dropped) as the Inspector narrows, else
+    // icon-only near the floor. Same three modes + drawing as `left_pane_tabs`.
+    let mode_total = |show_icon: bool, show_label: bool| -> f32 {
+        let seg_pad = if show_label { 10.0 } else { 8.0 };
+        label_ws
+            .iter()
+            .map(|lw| {
+                let icon_part = if show_icon { icon_sz } else { 0.0 };
+                let label_part = if show_label {
+                    let gap = if show_icon { icon_gap } else { 0.0 };
+                    gap + lw
+                } else {
+                    0.0
+                };
+                icon_part + label_part + seg_pad * 2.0
+            })
+            .sum::<f32>()
+            + 4.0
+    };
+    let (show_icon, show_label) = if mode_total(true, true) <= avail {
+        (true, true)
+    } else if mode_total(false, true) <= avail {
+        (false, true)
+    } else {
+        (true, false)
+    };
+    let seg_pad = if show_label { 10.0 } else { 8.0 };
+    // Natural segment widths for the chosen content, then scaled down so the track never
+    // overflows even at the floor (the left-pane lesson — clamping alone let segments spill).
+    let natural: Vec<f32> = label_ws
+        .iter()
+        .map(|lw| {
+            let icon_part = if show_icon { icon_sz } else { 0.0 };
+            let label_part = if show_label {
+                let gap = if show_icon { icon_gap } else { 0.0 };
+                gap + lw
+            } else {
+                0.0
+            };
+            icon_part + label_part + seg_pad * 2.0
+        })
+        .collect();
+    let natural_total = natural.iter().sum::<f32>() + 4.0;
+    let scale = (avail / natural_total).min(1.0);
+    let widths: Vec<f32> = natural.iter().map(|w| w * scale).collect();
+    let total = natural_total * scale;
     let track = egui::Rect::from_min_size(
         egui::pos2(track_left, cy - track_h / 2.0),
         egui::vec2(total, track_h),
     );
     crate::sdf_rect::round_rect(ui, track, 7.0, quaternary(p), 0.0, Color32::TRANSPARENT);
-    let mut x = track_left + 2.0;
-    for ((tab, label, icon), w) in tabs.iter().zip(widths) {
+    let mut x = track_left + 2.0 * scale;
+    for ((tab, label, icon), w) in tabs.iter().zip(&widths) {
         let seg = egui::Rect::from_min_size(
             egui::pos2(x, track.top() + 2.0),
-            egui::vec2(w, track_h - 4.0),
+            egui::vec2(*w, track_h - 4.0),
         );
         let resp = ui.interact(seg, ui.id().with(("tab", *label)), egui::Sense::click());
         if resp.hovered() {
@@ -2308,12 +2459,25 @@ fn inspector_tabs(
         } else {
             panel_secondary(p)
         };
-        // Center the [icon · gap · label] group in the segment; both share `cy`.
-        let g = galley(ui, label, font.clone(), color, f32::INFINITY);
-        let group_w = icon_sz + icon_gap + g.size().x;
-        let gx = seg.center().x - group_w / 2.0;
-        pb_ui::icon::paint_tinted(ui, sq(gx + icon_sz / 2.0, cy, icon_sz), *icon, color);
-        paint_vtext(ui, gx + icon_sz + icon_gap, cy, &g);
+        match (show_icon, show_label) {
+            // Icon + label: center the [icon · gap · label] group in the segment.
+            (true, true) => {
+                let g = galley(ui, label, font.clone(), color, f32::INFINITY);
+                let group_w = icon_sz + icon_gap + g.size().x;
+                let gx = seg.center().x - group_w / 2.0;
+                pb_ui::icon::paint_tinted(ui, sq(gx + icon_sz / 2.0, cy, icon_sz), *icon, color);
+                paint_vtext(ui, gx + icon_sz + icon_gap, cy, &g);
+            }
+            // Label only (icons dropped as the Inspector narrows).
+            (false, true) => {
+                let g = galley(ui, label, font.clone(), color, f32::INFINITY);
+                paint_vtext(ui, seg.center().x - g.size().x / 2.0, cy, &g);
+            }
+            // Icon only (labels dropped near the floor).
+            _ => {
+                pb_ui::icon::paint_tinted(ui, sq(seg.center().x, cy, icon_sz), *icon, color);
+            }
+        }
         if resp.clicked() && !selected {
             actions.push(PanelAction::SelectTab(*tab));
         }
@@ -2337,7 +2501,7 @@ fn copy_action(tab: InspectorTab) -> PanelAction {
     }
 }
 
-fn details_body(ui: &mut egui::Ui, p: &Palette, d: &DetailsPanel) {
+fn details_body(ui: &mut egui::Ui, p: &Palette, d: &DetailsPanel, content_w: f32) {
     if d.rows.is_empty() {
         ui.label(RichText::new("Nothing to show").color(panel_secondary(p)));
         return;
@@ -2346,7 +2510,6 @@ fn details_body(ui: &mut egui::Ui, p: &Palette, d: &DetailsPanel) {
     // panel instead of widening the whole Window — egui grows an auto-sized Window to fit a
     // non-wrapping row, which is what blew the panel out to full width. Everything below
     // wraps at this width. (Leaves room for the vertical scrollbar the tab usually shows.)
-    let content_w = INSPECTOR_WIDTH - 2.0 * 16.0 - 8.0;
     ui.set_width(content_w);
     for row in &d.rows {
         match row {
@@ -2425,6 +2588,7 @@ fn describe_body(
     ui: &mut egui::Ui,
     p: &Palette,
     d: &DescribePanel,
+    content_w: f32,
     actions: &mut Vec<PanelAction>,
 ) {
     // Empty deck → nothing (no header over a photo-less state).
@@ -2446,8 +2610,7 @@ fn describe_body(
             // Render the AI text as block-level Markdown (headings / lists / emphasis), like
             // the SwiftUI Describe tab. Wrap at the pinned content width so nothing widens the
             // panel (the Details-tab lesson).
-            let wrap_w = INSPECTOR_WIDTH - 2.0 * 16.0 - 8.0;
-            crate::md::render(ui, p, text, wrap_w);
+            crate::md::render(ui, p, text, content_w);
         }
         DescribeBody::Error(text) => {
             ui.add(
@@ -2516,6 +2679,7 @@ fn tree_panel(
     top_inset: f32,
     duck: f32,
     tree: &TreeFrame,
+    pane_width: f32,
     fade: f32,
     actions: &mut Vec<PanelAction>,
 ) {
@@ -2532,13 +2696,21 @@ fn tree_panel(
         egui::Margin::ZERO,
         fade,
         |ui| {
-            ui.set_width(TREE_WIDTH);
-            ui.set_max_width(TREE_WIDTH);
+            ui.set_width(pane_width);
+            ui.set_max_width(pane_width);
             // No inter-element gap: header, groove, and body stack flush, so the panel is
             // exactly its content height and honors the bottom edge inset (#1). Each region
             // owns its own internal padding.
             ui.spacing_mut().item_spacing.y = 0.0;
-            let (_, close) = panel_header(ui, p, "Folders", None);
+            // With a thumbnail strip available (task #83) the header is the shared left-pane
+            // tab bar (Folders | Thumbnails), Folders selected; otherwise the plain title.
+            let close = if tree.tabs {
+                let (rect, cy, controls_left, _copy, close) = header_bar(ui, p, None);
+                left_pane_tabs(ui, p, rect, cy, controls_left, LeftTab::Folders, actions);
+                close
+            } else {
+                panel_header(ui, p, "Folders", None).1
+            };
             if close {
                 actions.push(PanelAction::CloseTree);
             }
@@ -2578,6 +2750,18 @@ fn tree_panel(
                         }
                     });
             });
+            let (w, zone) = resize_handle(
+                ui,
+                p,
+                pane_width,
+                ResizeEdge::Right,
+                PANE_WIDTH_MIN,
+                PANE_WIDTH_MAX,
+            );
+            if let Some(w) = w {
+                actions.push(PanelAction::SetPaneWidth(w));
+            }
+            actions.push(PanelAction::PaneResizeZone(zone));
         },
     );
 }
@@ -2831,6 +3015,648 @@ fn tree_pill(ui: &egui::Ui, p: &Palette, count: u64, right_x: f32, cy: f32) -> f
     crate::sdf_rect::round_rect(ui, pill, pill_h / 2.0, bg, 0.0, Color32::TRANSPARENT);
     paint_vtext(ui, pill.center().x - g.size().x / 2.0, cy, &g);
     pill_w
+}
+
+// ── Thumbnails strip (task #83) ───────────────────────────────────────────────
+//
+// The left pane's second tab: a scrollable vertical strip of neighbor thumbnails, click to
+// jump, auto-follow, fixed uniform 3:2 cells, type badges, session rotation at draw, a
+// broken-image glyph for failed items. Pixels come from the core's RAM-only thumb store
+// (`core.thumbs.cache`), pulled once per cell into an egui texture (freed on leave). Unlike
+// the other panels this reads `&AppCore` directly (not a pure snapshot) because it needs live
+// pixel access + the shell's texture cache — so `render_overlay_frame` calls it AFTER `build`,
+// inside the same egui frame. The per-cell metadata reads mirror the macOS FFI accessors
+// (`pb-mac-ffi`'s `thumb_name`/`thumb_badge`/`thumb_rotation`/`thumb_failed`); keep the two in
+// step until a future refactor promotes them to shared `AppCore` methods.
+
+/// Strip side inset (also the gap that leaves room for the scrollbar on the right).
+const STRIP_PAD: f32 = 8.0;
+/// The cell's own inner padding around the photo (macOS parity: ONE cell card, the photo
+/// breathes inside it).
+const CELL_INNER_PAD: f32 = 7.0;
+/// The label band's gaps run tighter than the image margin (4 vs 7): the caption's own leading
+/// adds ~3pt of air, so equal constants read bottom-heavy (owner note, macOS round).
+const LABEL_GAP: f32 = 4.0;
+const LABEL_HEIGHT: f32 = 15.0;
+/// Gap below each cell card (the strip's inter-cell rhythm).
+const CELL_GAP: f32 = 6.0;
+/// Cell card + inner image-box corner radii (macOS parity: 8 / 5).
+const CELL_RADIUS: f32 = 8.0;
+/// The caption + placeholder/badge glyph sizes.
+const THUMB_LABEL_SIZE: f32 = 11.5;
+const THUMB_PLACEHOLDER_ICON: f32 = 26.0;
+const THUMB_BADGE_ICON: f32 = 11.0;
+
+/// The winit shell's per-strip state (lives on `App`, survives across frames): an egui texture
+/// cache keyed by `(item, entry generation)` — pull-once, freed when a cell leaves
+/// visible+overscan (dropping a `TextureHandle` frees its GPU texture) — plus the scroll
+/// bookkeeping the FollowState handshake and user-scroll detection need.
+#[derive(Default)]
+pub struct ThumbStripState {
+    textures: HashMap<(usize, u64), egui::TextureHandle>,
+    /// Last vertical scroll offset — a change we didn't program is the user grabbing the strip.
+    last_offset: Option<f32>,
+    /// The last item a follow-scroll centered (reserved for the smooth-vs-snap rule; v1 snaps).
+    last_centered: Option<usize>,
+    /// The last `(visible, overscan)` range reported, so the core is signalled only on change.
+    last_viewport: Option<((usize, usize), (usize, usize))>,
+}
+
+/// The shared left-pane tab bar (Folders | Thumbnails) — the Inspector's segmented control
+/// with two segments, drawn into the header so the pills, icons, and labels share one vertical
+/// center. `selected` is the tab the hosting panel is showing (never stale: the mount
+/// condition encodes it). Only a click on the *other* tab pushes an action, so applying it
+/// never toggle-closes the pane (macOS `showLeftTab` parity). Below ~233pt the icons hide and
+/// the labels stay (the macOS compact rule).
+fn left_pane_tabs(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    header_rect: egui::Rect,
+    cy: f32,
+    controls_left: f32,
+    selected: LeftTab,
+    actions: &mut Vec<PanelAction>,
+) {
+    // Three modes as the pane narrows (owner request): icon + label (wide), label-only (middle
+    // band — icons dropped), icon-only (near the floor — labels dropped). "Thumbnails" is the
+    // long word that drives the steps.
+    let w = header_rect.width();
+    let show_label = w >= TAB_LABEL_ONLY_MIN;
+    let show_icon = w >= TAB_ICON_LABEL_MIN || !show_label;
+    let tabs = [
+        (LeftTab::Folders, "Folders", Icon::Folder),
+        (LeftTab::Thumbnails, "Thumbnails", Icon::Images),
+    ];
+    let font = FontId::new(12.5, FontFamily::Proportional);
+    let seg_pad = if show_label { 10.0 } else { 8.0 };
+    let icon_sz = 12.5;
+    let icon_gap = 5.0;
+    let track_h = 24.0;
+    // Natural segment widths for the chosen content.
+    let natural: Vec<f32> = tabs
+        .iter()
+        .map(|(_, l, _)| {
+            let icon_part = if show_icon { icon_sz } else { 0.0 };
+            let label_part = if show_label {
+                let gap = if show_icon { icon_gap } else { 0.0 };
+                gap + galley(ui, l, font.clone(), Color32::PLACEHOLDER, f32::INFINITY)
+                    .size()
+                    .x
+            } else {
+                0.0
+            };
+            icon_part + label_part + seg_pad * 2.0
+        })
+        .collect();
+    let track_left = header_rect.left() + HEADER_PAD_H;
+    // Scale everything down if it wouldn't fit before the ✕ — the tab bar never overflows the
+    // panel, however narrow it's dragged (it just shrinks the pills).
+    let avail = (controls_left - 8.0 - track_left).max(40.0);
+    let natural_total = natural.iter().sum::<f32>() + 4.0;
+    let scale = (avail / natural_total).min(1.0);
+    let widths: Vec<f32> = natural.iter().map(|w| w * scale).collect();
+    let total = natural_total * scale;
+    let track = egui::Rect::from_min_size(
+        egui::pos2(track_left, cy - track_h / 2.0),
+        egui::vec2(total, track_h),
+    );
+    crate::sdf_rect::round_rect(ui, track, 7.0, quaternary(p), 0.0, Color32::TRANSPARENT);
+    let mut x = track_left + 2.0 * scale;
+    for ((tab, label, icon), w) in tabs.iter().zip(&widths) {
+        let seg = egui::Rect::from_min_size(
+            egui::pos2(x, track.top() + 2.0),
+            egui::vec2(*w, track_h - 4.0),
+        );
+        let resp = ui.interact(seg, ui.id().with(("ltab", *label)), egui::Sense::click());
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        let is_sel = *tab == selected;
+        if is_sel {
+            crate::sdf_rect::round_rect(ui, seg, 5.0, p.accent, 0.0, Color32::TRANSPARENT);
+        }
+        let color = if is_sel {
+            Color32::WHITE
+        } else {
+            panel_secondary(p)
+        };
+        match (show_icon, show_label) {
+            // Icon + label: center the [icon · gap · label] group.
+            (true, true) => {
+                let g = galley(ui, label, font.clone(), color, f32::INFINITY);
+                let group_w = icon_sz + icon_gap + g.size().x;
+                let gx = seg.center().x - group_w / 2.0;
+                pb_ui::icon::paint_tinted(ui, sq(gx + icon_sz / 2.0, cy, icon_sz), *icon, color);
+                paint_vtext(ui, gx + icon_sz + icon_gap, cy, &g);
+            }
+            // Label only (icons dropped in the middle band).
+            (false, true) => {
+                let g = galley(ui, label, font.clone(), color, f32::INFINITY);
+                paint_vtext(ui, seg.center().x - g.size().x / 2.0, cy, &g);
+            }
+            // Icon only (labels dropped near the floor).
+            _ => {
+                pb_ui::icon::paint_tinted(ui, sq(seg.center().x, cy, icon_sz), *icon, color);
+            }
+        }
+        if resp.clicked() && !is_sel {
+            actions.push(PanelAction::SelectLeftTab(*tab));
+        }
+        x += w;
+    }
+}
+
+/// Which edge of a panel carries the drag handle. The left pane grows from its **right** edge
+/// (drag right → wider); the right-anchored Inspector grows from its **left** edge (drag left →
+/// wider — the opposite sign).
+#[derive(Clone, Copy, PartialEq)]
+enum ResizeEdge {
+    Right,
+    Left,
+}
+
+/// A drag handle on a panel edge, shared by the left pane (right edge) and the Inspector (left
+/// edge) — one knob idiom. Spans the panel's content height (call it **last** inside the content
+/// so `ui.min_rect()` already covers the whole panel). Returns the new clamped width when
+/// dragged, **and** the handle's strip rect (egui points) so the shell can own the resize cursor
+/// geometrically — egui's per-frame hover cursor lags crossing in from the photo, which was the
+/// flicker. A hairline grip shows on hover/drag. Sits on the outer few px so it beats the
+/// scrollbar only at the very edge.
+fn resize_handle(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    cur_width: f32,
+    edge: ResizeEdge,
+    min: f32,
+    max: f32,
+) -> (Option<f32>, egui::Rect) {
+    let rect = ui.min_rect();
+    let grab = 7.0;
+    let strip = match edge {
+        ResizeEdge::Right => egui::Rect::from_min_max(
+            egui::pos2(rect.right() - grab, rect.top()),
+            egui::pos2(rect.right(), rect.bottom()),
+        ),
+        ResizeEdge::Left => egui::Rect::from_min_max(
+            egui::pos2(rect.left(), rect.top()),
+            egui::pos2(rect.left() + grab, rect.bottom()),
+        ),
+    };
+    let resp = ui.interact(
+        strip,
+        ui.id().with(("resize", edge == ResizeEdge::Left)),
+        egui::Sense::drag(),
+    );
+    if resp.hovered() || resp.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        let col = if resp.dragged() {
+            p.accent
+        } else {
+            p.text_secondary.gamma_multiply(0.6)
+        };
+        let vx = match edge {
+            ResizeEdge::Right => rect.right() - 2.0,
+            ResizeEdge::Left => rect.left() + 2.0,
+        };
+        ui.painter().vline(
+            vx,
+            (rect.top() + 8.0)..=(rect.bottom() - 8.0),
+            Stroke::new(2.0_f32, col),
+        );
+    }
+    let new_width = resp.dragged().then(|| {
+        // Right edge grows with a rightward drag; the left-anchored-on-the-right Inspector grows
+        // with a leftward drag, so its delta is negated.
+        let delta = match edge {
+            ResizeEdge::Right => resp.drag_delta().x,
+            ResizeEdge::Left => -resp.drag_delta().x,
+        };
+        (cur_width + delta).clamp(min, max)
+    });
+    (new_width, strip)
+}
+
+/// Render the Thumbnails strip. `pending_scroll` is the follow command the shell already took
+/// from the core (target item + generation) — applied as a snap this frame.
+#[allow(clippy::too_many_arguments)]
+pub fn thumbs_panel(
+    ctx: &egui::Context,
+    core: &AppCore,
+    state: &mut ThumbStripState,
+    dark: bool,
+    alpha: u8,
+    top_inset: f32,
+    pane_width: f32,
+    fade: f32,
+    pending_scroll: Option<(usize, u64)>,
+    actions: &mut Vec<PanelAction>,
+) {
+    let p = Palette::new(dark);
+    let count = core.source.len();
+    let current = core.playlist.current();
+    let max_h = panel_max_height(ctx, 200.0, top_inset, 0.0);
+
+    // Fixed 3:2 landscape cell (macOS parity) so rotation never reflows the strip and
+    // scroll↔index stays O(1). Width is derived from the live (resizable) pane width.
+    let cell_width = (pane_width - 2.0 * STRIP_PAD).max(80.0);
+    let box_width = cell_width - 2.0 * CELL_INNER_PAD;
+    let box_height = (box_width * 2.0 / 3.0).round();
+    let cell_height = box_height + CELL_INNER_PAD + LABEL_HEIGHT + 2.0 * LABEL_GAP;
+    let row_pitch = cell_height + CELL_GAP;
+
+    // Collected inside the scroll closure, applied after so `actions` isn't double-borrowed.
+    let mut keep: std::collections::HashSet<(usize, u64)> = std::collections::HashSet::new();
+    let mut clicked: Option<usize> = None;
+    let mut new_range: Option<(usize, usize)> = None;
+
+    sdf_panel(
+        ctx,
+        &p,
+        alpha,
+        "pb_thumbs",
+        Align2::LEFT_TOP,
+        egui::vec2(EDGE, EDGE + top_inset),
+        max_h,
+        PANEL_RADIUS,
+        egui::Margin::ZERO,
+        fade,
+        |ui| {
+            ui.set_width(pane_width);
+            ui.set_max_width(pane_width);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let (rect, cy, controls_left, _copy, close) = header_bar(ui, &p, None);
+            left_pane_tabs(
+                ui,
+                &p,
+                rect,
+                cy,
+                controls_left,
+                LeftTab::Thumbnails,
+                actions,
+            );
+            if close {
+                actions.push(PanelAction::CloseThumbs);
+            }
+            groove(ui, &p);
+
+            // The strip body: a virtualized ScrollArea over uniform-pitch rows. Fit it to the
+            // deck, capped at the available height, then scroll. `clip_rect_margin = 0` so
+            // scrolled-out rows don't bleed a sliver past the panel (the tree's lesson).
+            let content_h = count as f32 * row_pitch + 8.0;
+            let body_h = content_h.min(max_h - HEADER_H - 1.0).max(60.0);
+            ui.visuals_mut().clip_rect_margin = 0.0;
+
+            // A pending follow-scroll centers the target row this frame (snap; smooth is a
+            // later polish). We set the offset ourselves, so the resulting movement is NOT
+            // treated as a user scroll below.
+            let target_off = pending_scroll.map(|(item, _)| {
+                (item as f32 * row_pitch + row_pitch / 2.0 - body_h / 2.0).max(0.0)
+            });
+
+            let mut area = egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .max_height(body_h)
+                .min_scrolled_height(body_h);
+            if let Some(off) = target_off {
+                area = area.vertical_scroll_offset(off);
+            }
+            let out = area.show_rows(ui, row_pitch, count.max(1), |ui, row_range| {
+                if count == 0 {
+                    return;
+                }
+                new_range = Some((row_range.start, row_range.end.saturating_sub(1)));
+                for i in row_range {
+                    let (row_rect, _) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), row_pitch),
+                        egui::Sense::hover(),
+                    );
+                    let card = egui::Rect::from_min_size(
+                        egui::pos2(row_rect.left() + STRIP_PAD, row_rect.top()),
+                        egui::vec2(cell_width, cell_height),
+                    );
+                    thumb_cell(
+                        ui,
+                        &p,
+                        core,
+                        state,
+                        i,
+                        current == Some(i),
+                        card,
+                        box_width,
+                        box_height,
+                        &mut keep,
+                        &mut clicked,
+                    );
+                }
+            });
+
+            // User-scroll detection: an offset change we did NOT program is the user grabbing
+            // the strip → detach auto-follow (generation-fenced, like the SwiftUI shell).
+            let off = out.state.offset.y;
+            if target_off.is_none() {
+                if let Some(prev) = state.last_offset {
+                    if (prev - off).abs() > 0.5 {
+                        actions.push(PanelAction::ThumbUserScrolled);
+                    }
+                }
+            }
+            state.last_offset = Some(off);
+
+            let (w, zone) = resize_handle(
+                ui,
+                &p,
+                pane_width,
+                ResizeEdge::Right,
+                PANE_WIDTH_MIN,
+                PANE_WIDTH_MAX,
+            );
+            if let Some(w) = w {
+                actions.push(PanelAction::SetPaneWidth(w));
+            }
+            actions.push(PanelAction::PaneResizeZone(zone));
+        },
+    );
+
+    // The follow handshake: we centered the target this frame, so tell FollowState its
+    // animation landed (stale generations are ignored by the core).
+    if let Some((item, gen)) = pending_scroll {
+        state.last_centered = Some(item);
+        actions.push(PanelAction::ThumbScrollDone(gen));
+    }
+    if let Some(i) = clicked {
+        actions.push(PanelAction::ThumbClick(i));
+    }
+    if let Some((lo, hi)) = new_range {
+        let rows = (hi - lo) + 1;
+        let over = rows * 2;
+        let over_lo = lo.saturating_sub(over);
+        let over_hi = (hi + over).min(count.saturating_sub(1));
+        let vp = ((lo, hi), (over_lo, over_hi));
+        if state.last_viewport != Some(vp) {
+            state.last_viewport = Some(vp);
+            actions.push(PanelAction::ThumbViewport {
+                visible: (lo, hi),
+                overscan: (over_lo, over_hi),
+            });
+        }
+    }
+    // Free textures for cells no longer in demand (kept = materialized this frame).
+    state.textures.retain(|k, _| keep.contains(k));
+}
+
+/// One fixed-size strip cell drawn into `card`: the translucent card, the thumb fit-within a
+/// letterbox box (session rotation at draw), a type badge, the current/hover highlight, and
+/// the middle-truncated filename below. A cached thumb is uploaded once into `state.textures`
+/// (keyed by the entry generation) and its key recorded in `keep` so it survives eviction.
+#[allow(clippy::too_many_arguments)]
+fn thumb_cell(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    core: &AppCore,
+    state: &mut ThumbStripState,
+    i: usize,
+    is_current: bool,
+    card: egui::Rect,
+    box_width: f32,
+    box_height: f32,
+    keep: &mut std::collections::HashSet<(usize, u64)>,
+    clicked: &mut Option<usize>,
+) {
+    let resp = ui.interact(card, ui.id().with(("thumbcell", i)), egui::Sense::click());
+    let hovered = resp.hovered();
+    if hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if resp.clicked() {
+        *clicked = Some(i);
+    }
+
+    // The card: one translucent rounded rect + hairline border; current tints accent.
+    let (fill, border, border_w) = if is_current {
+        (
+            p.accent.gamma_multiply(0.24),
+            p.accent.gamma_multiply(0.85),
+            1.5,
+        )
+    } else if hovered {
+        (p.text_secondary.gamma_multiply(0.12), separator(p), 1.0)
+    } else {
+        (quaternary(p).gamma_multiply(0.5), separator(p), 1.0)
+    };
+    crate::sdf_rect::round_rect(ui, card, CELL_RADIUS, fill, border_w, border);
+
+    // The letterbox image box, inset by the inner pad.
+    let box_rect = egui::Rect::from_min_size(
+        egui::pos2(card.left() + CELL_INNER_PAD, card.top() + CELL_INNER_PAD),
+        egui::vec2(box_width, box_height),
+    );
+
+    if let Some(e) = core.thumbs.cache.get(i) {
+        let key = (i, e.gen);
+        keep.insert(key);
+        let tex_id = state
+            .textures
+            .entry(key)
+            .or_insert_with(|| {
+                let img = egui::ColorImage::from_rgba_unmultiplied(
+                    [e.w as usize, e.h as usize],
+                    &e.payload.rgba,
+                );
+                ui.ctx().load_texture(
+                    format!("pb_thumb_{}_{}", i, e.gen),
+                    img,
+                    egui::TextureOptions::LINEAR,
+                )
+            })
+            .id();
+        draw_thumb_image(
+            ui,
+            box_rect,
+            tex_id,
+            e.w,
+            e.h,
+            thumb_rotation_quarter(core, i),
+        );
+    } else if thumb_is_failed(core, i) {
+        // Broken-image glyph (approximate: the images icon in a warning tone).
+        pb_ui::icon::paint(
+            ui,
+            sq(
+                box_rect.center().x,
+                box_rect.center().y,
+                THUMB_PLACEHOLDER_ICON,
+            ),
+            Icon::Images,
+            Tone::Warning,
+            p,
+        );
+    } else {
+        // Not decoded yet: a faint placeholder glyph (correct behavior while cold, plan §3).
+        pb_ui::icon::paint_tinted(
+            ui,
+            sq(
+                box_rect.center().x,
+                box_rect.center().y,
+                THUMB_PLACEHOLDER_ICON,
+            ),
+            Icon::Images,
+            panel_secondary(p).gamma_multiply(0.35),
+        );
+    }
+
+    // Type badge (video / Live Photo / animation), bottom-left of the image box.
+    let badge = thumb_badge_kind(core, i);
+    if badge != 0 {
+        let icon = match badge {
+            1 => Icon::Play,
+            2 => Icon::LivePhoto,
+            _ => Icon::Film,
+        };
+        let r = 10.0;
+        let c = egui::pos2(box_rect.left() + r + 3.0, box_rect.bottom() - r - 3.0);
+        ui.painter()
+            .circle_filled(c, r, Color32::from_black_alpha(115));
+        pb_ui::icon::paint_tinted(ui, sq(c.x, c.y, THUMB_BADGE_ICON), icon, Color32::WHITE);
+    }
+
+    // Filename band: middle-truncated, centered under the image, dimmer unless current.
+    let label_cy = card.top() + CELL_INNER_PAD + box_height + LABEL_GAP + LABEL_HEIGHT / 2.0;
+    let color = if is_current {
+        p.text
+    } else {
+        panel_secondary(p)
+    };
+    let font = FontId::new(THUMB_LABEL_SIZE, FontFamily::Proportional);
+    let name = thumb_display_name(core, i);
+    let g = middle_truncate(ui, &name, font, color, box_width);
+    let gx = card.left() + CELL_INNER_PAD + (box_width - g.size().x) / 2.0;
+    paint_vtext(ui, gx, label_cy, &g);
+}
+
+/// Draw a thumbnail texture aspect-fit inside `box_rect`, applying the session rotation
+/// (`quarter` clockwise 90° turns) at draw. Fixed cells: the rotated image still letterboxes
+/// inside the box (its fitting box swaps for odd quarters), so nothing reflows.
+fn draw_thumb_image(
+    ui: &egui::Ui,
+    box_rect: egui::Rect,
+    tex_id: egui::TextureId,
+    w: u32,
+    h: u32,
+    quarter: u8,
+) {
+    let aspect = w.max(1) as f32 / h.max(1) as f32;
+    // For an odd quarter turn the image is fit into a box with swapped extents first, so once
+    // rotated it fills the real box (macOS: frame(swapped) → rotate → frame(box)).
+    let (avail_w, avail_h) = if quarter % 2 == 1 {
+        (box_rect.height(), box_rect.width())
+    } else {
+        (box_rect.width(), box_rect.height())
+    };
+    let (fw, fh) = fit_within(aspect, avail_w, avail_h);
+    let unrot = egui::Rect::from_center_size(box_rect.center(), egui::vec2(fw, fh));
+    if quarter == 0 {
+        ui.painter().image(
+            tex_id,
+            unrot,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    } else {
+        let angle = quarter as f32 * std::f32::consts::FRAC_PI_2;
+        egui::Image::new(egui::load::SizedTexture::new(tex_id, unrot.size()))
+            .rotate(angle, egui::Vec2::splat(0.5))
+            .paint_at(ui, unrot);
+    }
+}
+
+/// Fit an `aspect` (w/h) rectangle within `max_w × max_h`, preserving aspect (letterbox).
+fn fit_within(aspect: f32, max_w: f32, max_h: f32) -> (f32, f32) {
+    let mut w = max_w;
+    let mut h = w / aspect;
+    if h > max_h {
+        h = max_h;
+        w = h * aspect;
+    }
+    (w, h)
+}
+
+/// A single-line galley for `name`, **middle**-truncated with an ellipsis to `max_w` (so a
+/// file's extension survives, unlike egui's end-ellipsis). Names are short, so the shrink loop
+/// is cheap; the overlay is retained (re-rendered on change, not per frame) regardless.
+fn middle_truncate(
+    ui: &egui::Ui,
+    name: &str,
+    font: FontId,
+    color: Color32,
+    max_w: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let full = galley(ui, name, font.clone(), color, f32::INFINITY);
+    if full.size().x <= max_w {
+        return full;
+    }
+    let chars: Vec<char> = name.chars().collect();
+    let n = chars.len();
+    for keep in (2..n).rev() {
+        let head = keep.div_ceil(2);
+        let tail = keep / 2;
+        let s: String = chars[..head]
+            .iter()
+            .chain(std::iter::once(&'…'))
+            .chain(chars[n - tail..].iter())
+            .collect();
+        let cand = galley(ui, &s, font.clone(), color, f32::INFINITY);
+        if cand.size().x <= max_w {
+            return cand;
+        }
+    }
+    galley(ui, "…", font, color, f32::INFINITY)
+}
+
+/// The cell's display filename — the basename of the item's name/path (mirrors the macOS FFI
+/// `thumb_name`).
+fn thumb_display_name(core: &AppCore, i: usize) -> String {
+    let name = core.source.name(i);
+    name.rsplit(['/', '\\']).next().unwrap_or(name).to_string()
+}
+
+/// Item-type badge: 0 none, 1 video, 2 Live Photo, 3 animated (mirrors the macOS FFI
+/// `thumb_badge`). Live/animated appear once their lazily-filled caches know; video is always
+/// known from the item kind.
+fn thumb_badge_kind(core: &AppCore, i: usize) -> u8 {
+    if matches!(
+        pb_app_core::video::item_kind(core.source.as_ref(), i),
+        pb_app_core::LibraryItemKind::Video(_)
+    ) {
+        return 1;
+    }
+    if matches!(core.live_motion_cache.get(&i), Some(Some(_))) {
+        return 2;
+    }
+    if core
+        .meta_cache
+        .get(&i)
+        .is_some_and(|m| m.animated.is_some())
+    {
+        return 3;
+    }
+    0
+}
+
+/// The item's session rotation override in clockwise quarter turns (0..=3) — applied at draw
+/// (mirrors the macOS FFI `thumb_rotation`).
+fn thumb_rotation_quarter(core: &AppCore, i: usize) -> u8 {
+    match core.rotations.get(&i) {
+        Some(pb_render::Rotation::R90) => 1,
+        Some(pb_render::Rotation::R180) => 2,
+        Some(pb_render::Rotation::R270) => 3,
+        _ => 0,
+    }
+}
+
+/// Whether the item's decode failed — the broken-image glyph, never a spinner (mirrors the
+/// macOS FFI `thumb_failed`: display failures OR thumb-fill failures).
+fn thumb_is_failed(core: &AppCore, i: usize) -> bool {
+    core.failed.contains(&i) || core.thumbs.failed.contains(&i)
 }
 
 #[cfg(test)]

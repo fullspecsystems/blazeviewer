@@ -442,6 +442,38 @@ struct App {
     /// Fade ramps for the folder tree + Inspector (same 100 ms in / 250 ms out).
     tree_fade: PanelFade<panels_ui::TreeFrame>,
     inspector_fade: PanelFade<panels_ui::InspectorFrame>,
+    /// The Thumbnails strip's shell-side state (task #83): the egui texture cache + scroll
+    /// bookkeeping. RAM-only, dropped on exit; the thumb *pixels* live in the core store.
+    thumb_strip: panels_ui::ThumbStripState,
+    /// The user-resizable left-pane width, shared by the Folders and Thumbnails tabs (task #83).
+    /// Session-only (not persisted — a pane width isn't a viewing trace, but there's no settings
+    /// field for it yet); starts at the default and is updated by the pane's drag handle.
+    tree_width: f32,
+    /// The user-resizable Inspector width (task #83), same session-only story as `tree_width`.
+    inspector_width: f32,
+    /// Whether the pointer is over an egui panel/area, from the **live** pointer position
+    /// hit-tested against the last frame's layout (not egui's stored, one-frame-late pointer).
+    /// The shell is the single cursor writer ([`resolve_cursor`](Self::resolve_cursor)): over a
+    /// panel it shows egui's hover cursor, over the photo the core's, and — lag-free — the
+    /// resize arrow inside a reported handle zone. Updated on every `CursorMoved`.
+    pointer_over_panel: bool,
+    /// The last pointer position in **physical** window pixels (for the cursor resolve's
+    /// geometric resize-zone hit-test). `None` until the first move / after the pointer leaves.
+    last_pointer: Option<(f64, f64)>,
+    /// The core's most-recent desired photo cursor (from `SetCursor`). Stored, not applied
+    /// directly — `resolve_cursor` composes it with egui's want each frame so the two never
+    /// fight over the window cursor (the resize-handle flicker).
+    core_cursor: contract::CursorKind,
+    /// The window cursor the shell last applied — so `resolve_cursor` only calls `set_cursor`
+    /// on a real change (idempotent, no per-move thrash).
+    applied_cursor: Option<CursorIcon>,
+    /// The left pane's resize-handle strip rect in egui **points** `[x0, y0, x1, y1]`, reported
+    /// by the panel each render. `resolve_cursor` hit-tests the live pointer against it to show
+    /// the resize arrow the instant the pointer crosses in — no dependency on egui's laggy
+    /// per-frame hover cursor. Gated on the left pane being open.
+    left_pane_edge: Option<[f32; 4]>,
+    /// The Inspector's resize-handle strip rect (egui points), same as `left_pane_edge`.
+    inspector_edge: Option<[f32; 4]>,
     /// Whether the egui panel texture needs re-rendering next turn — set on a panel
     /// state/content change (`CoreEffect::PanelsChanged`), an egui-consumed event, or a
     /// timed egui repaint. When clear and a panel is open, the retained texture is reused
@@ -639,6 +671,9 @@ impl App {
             resize_settle_at: None,
             geometry_save_at: None,
             windowed,
+            // Top strip reserved by an in-client menu bar (the Linux egui bar); 0 until the
+            // shell reports one via `set_content_top_inset`. No menu inset on Windows/macOS.
+            content_top_inset: 0,
             meta_cache: HashMap::new(),
             current: None,
             exif_cache: HashMap::new(),
@@ -709,8 +744,9 @@ impl App {
             last_open_visible: false,
             native_inspector: true,
             last_inspector_snap: None,
-            // No egui strip presenter yet (task #83 phase 7) — Shift+T stays inert here.
-            native_thumbs: false,
+            // The egui overlay draws the Thumbnails strip (task #83 phase 7) — Shift+T
+            // opens the left pane's second tab; the shell renders + hit-tests the cells.
+            native_thumbs: true,
             native_tree: true,
             last_tree_visible: false,
             overlay_shown: false,
@@ -754,7 +790,10 @@ impl App {
             anim_stream: None,
             video: None,
             video_seq: 0,
-            content_top_inset: 0,
+            // macOS-only archive-video handoff state (inert on the winit shell — see the
+            // channel note above): pending bytes for the shell to pull, poster-request
+            // bookkeeping, and the off-thread read channels. (`content_top_inset` is set with
+            // the windowed group above.)
             pending_video_bytes: None,
             pending_poster_bytes: std::collections::HashMap::new(),
             poster_req_seq: 0,
@@ -816,6 +855,15 @@ impl App {
             info_vanished_at: None,
             tree_fade: PanelFade::new(),
             inspector_fade: PanelFade::new(),
+            thumb_strip: panels_ui::ThumbStripState::default(),
+            tree_width: 280.0,
+            inspector_width: 360.0,
+            pointer_over_panel: false,
+            last_pointer: None,
+            core_cursor: contract::CursorKind::Default,
+            applied_cursor: None,
+            left_pane_edge: None,
+            inspector_edge: None,
             overlay_dirty: false,
             overlay_active: false,
             #[cfg(all(unix, not(target_os = "macos")))]
@@ -1320,6 +1368,11 @@ impl App {
         self.core.help_panel_visible()
             || self.core.inspector_panel_visible()
             || self.core.tree_panel_visible()
+            // The Thumbnails strip (task #83) is the left pane's other tab — interactive (tab
+            // bar, cell clicks, scroll), so it joins the pointer-routing + render gate. Without
+            // this, switching to it makes the gate false (tree_panel_visible is false on this
+            // tab) and the overlay deactivates: the strip never composites and looks closed.
+            || self.core.thumbs_visible()
             // The scan pill is interactive (its Cancel button), so it joins the pointer-routing
             // gate — egui only *consumes* a click actually over the pill, so panning the photo
             // elsewhere during a scan still works.
@@ -1585,6 +1638,28 @@ impl App {
             frame.top_inset = panels_ui::MENU_BAR_H;
         }
         let mut actions: Vec<panels_ui::PanelAction> = Vec::new();
+        // The Thumbnails strip (task #83) is rendered after `build` in the same egui frame — it
+        // reads the core's RAM thumb store live and owns an egui texture cache, so it can't be a
+        // pure `PanelFrame` snapshot. Take its pending follow-scroll here (the mutable core op,
+        // the macOS `take_thumb_scroll`) before the immutable core borrows below; apply the
+        // FollowState handshake via the returned actions.
+        let thumbs_visible = self.core.thumbs_visible();
+        let thumb_pending = if thumbs_visible {
+            self.core
+                .thumbs
+                .pending_scroll
+                .take()
+                .map(|c| (c.item, c.gen))
+        } else {
+            None
+        };
+        // The left pane's + Inspector's live widths are shell-owned (resizable).
+        frame.pane_width = self.tree_width;
+        frame.inspector_width = self.inspector_width;
+        let thumbs_dark = frame.dark;
+        let thumbs_alpha = frame.panel_alpha;
+        let thumbs_top = frame.top_inset;
+        let thumbs_width = self.tree_width;
         // Linux: the windowed menu bar (the egui stand-in for the native muda bar). Build its
         // spec here from the live menu state + keymap — an owned `Vec`, so it can be borrowed
         // into the render closure without tangling with the `&mut self.egui_overlay` borrow
@@ -1598,6 +1673,10 @@ impl App {
             // disjoint `&mut self.egui_overlay` borrow.
             #[cfg(all(unix, not(target_os = "macos")))]
             let menu_nav = &mut self.menu_nav;
+            // Disjoint field-locals so the thumbs strip can read the core + own its texture
+            // cache inside the closure alongside the `&mut self.egui_overlay` borrow.
+            let thumb_core = &self.core;
+            let thumb_strip = &mut self.thumb_strip;
             let (device, queue) = match self.core.renderer.as_ref() {
                 Some(r) => (r.device(), r.queue()),
                 None => return,
@@ -1605,6 +1684,20 @@ impl App {
             if let Some(ov) = self.egui_overlay.as_mut() {
                 ov.run(&window, device, queue, |ctx| {
                     panels_ui::build(ctx, &frame, &mut actions);
+                    if thumbs_visible {
+                        panels_ui::thumbs_panel(
+                            ctx,
+                            thumb_core,
+                            thumb_strip,
+                            thumbs_dark,
+                            thumbs_alpha,
+                            thumbs_top,
+                            thumbs_width,
+                            1.0,
+                            thumb_pending,
+                            &mut actions,
+                        );
+                    }
                     #[cfg(all(unix, not(target_os = "macos")))]
                     if let Some(groups) = &menu_groups {
                         panels_ui::menu_bar(
@@ -1619,7 +1712,9 @@ impl App {
                 });
             }
         }
-        // Hand the (retained) texture to the renderer for compositing.
+        // Hand the (retained) texture to the renderer for compositing. `pointer_over_panel` is
+        // NOT refreshed here — it tracks the *live* pointer in the event handler; deriving it from
+        // egui's stored (one-frame-late) pointer here was the source of the right-to-left flicker.
         if let Some(ov) = self.egui_overlay.as_ref() {
             let target = ov.target();
             if let Some(r) = self.core.renderer.as_mut() {
@@ -1632,6 +1727,57 @@ impl App {
         }
     }
 
+    /// The shell's **single** cursor writer, run once per tick (after the overlay renders). It
+    /// composes three sources so egui and the core never fight over the window cursor — the
+    /// resize-handle flicker crossing in from the photo. Priority, highest first:
+    ///
+    /// - a **resize zone** — a panel's reported handle rect, hit-tested against the *live*
+    ///   pointer in egui points — wins with the horizontal-resize arrow, geometrically & lag-free;
+    /// - else, over a panel, egui's own hover cursor (pointer-hand over a tab/row, text, …);
+    /// - else the core's photo cursor (grab while pannable, otherwise the arrow).
+    ///
+    /// Applies only on a real change, so it's idempotent and never thrashes.
+    fn resolve_cursor(&mut self) {
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        // The live pointer in egui **points** — same space as the panels' reported handle rects
+        // (`ui.min_rect()` is points; the winit pointer is physical, so divide by ppp).
+        let ppp = self
+            .egui_overlay
+            .as_ref()
+            .map(|o| o.pixels_per_point())
+            .unwrap_or(1.0);
+        let pt = self.last_pointer.map(|(x, y)| (x as f32 / ppp, y as f32 / ppp));
+        let in_zone = |zone: Option<[f32; 4]>, open: bool| -> bool {
+            match (open, zone, pt) {
+                (true, Some(z), Some((px, py))) => {
+                    px >= z[0] && px <= z[2] && py >= z[1] && py <= z[3]
+                }
+                _ => false,
+            }
+        };
+        // Gate each zone on its panel being open (a stale rect from a prior open is ignored).
+        let left_open = self.core.tree_panel_visible() || self.core.thumbs_visible();
+        let over_resize = in_zone(self.left_pane_edge, left_open)
+            || in_zone(self.inspector_edge, self.core.inspector_panel_visible());
+
+        let cursor = if over_resize {
+            CursorIcon::EwResize
+        } else if self.pointer_over_panel && self.overlay_panel_visible() {
+            self.egui_overlay
+                .as_ref()
+                .map(|o| egui_cursor_to_winit(o.desired_cursor()))
+                .unwrap_or(CursorIcon::Default)
+        } else {
+            cursor_icon(self.core_cursor)
+        };
+        if self.applied_cursor != Some(cursor) {
+            window.set_cursor(cursor);
+            self.applied_cursor = Some(cursor);
+        }
+    }
+
     /// Apply a panel interaction (a close/tab/copy/tree action from the egui frame) to
     /// the core, then mark the overlay dirty so it reflects the new state next turn.
     fn apply_panel_action(&mut self, action: panels_ui::PanelAction) {
@@ -1641,6 +1787,35 @@ impl App {
             A::CloseInspector => self.core.panels.inspector = None,
             A::CloseTree => self.core.toggle_folder_tree(),
             A::SelectTab(tab) => self.core.panels.open_inspector(tab),
+            // Left-pane tab-bar click (task #83) — ride the same ⇧F/⇧T actions the keyboard
+            // does (the strip only pushes this for the non-selected tab, so it never closes).
+            A::SelectLeftTab(pb_app_core::LeftTab::Folders) => self.core.toggle_folder_tree(),
+            A::SelectLeftTab(pb_app_core::LeftTab::Thumbnails) => self.core.toggle_thumbnails(),
+            A::CloseThumbs => self.core.toggle_thumbnails(),
+            // The left pane's resize drag — store the shared width; next render lays out at it.
+            A::SetPaneWidth(w) => self.tree_width = w,
+            A::SetInspectorWidth(w) => self.inspector_width = w,
+            // The panels report their resize-handle strip rects (egui points) each render so
+            // `resolve_cursor` can own the resize arrow geometrically (lag-free crossing in).
+            A::PaneResizeZone(r) => {
+                self.left_pane_edge = Some([r.min.x, r.min.y, r.max.x, r.max.y]);
+            }
+            A::InspectorResizeZone(r) => {
+                self.inspector_edge = Some([r.min.x, r.min.y, r.max.x, r.max.y]);
+            }
+            A::ThumbClick(i) => self.core.thumb_jump(i),
+            // The strip reported its demand window — mirror the macOS `thumbs_set_viewport`:
+            // record it, rebalance the cache to it, and kick prefetch to fill it.
+            A::ThumbViewport { visible, overscan } => {
+                self.core.thumbs.viewport = Some((visible, overscan));
+                if let Some(cur) = self.core.playlist.current() {
+                    let demand = self.core.thumbs.demand(cur);
+                    self.core.thumbs.cache.rebalance(&demand);
+                }
+                self.core.request_prefetch();
+            }
+            A::ThumbUserScrolled => self.core.thumbs.follow.user_scrolled(),
+            A::ThumbScrollDone(gen) => self.core.thumbs.follow.programmatic_done(gen),
             A::CopyDetails => self.core.dispatch_action(Action::CopyImageDetails),
             A::CopyText => self.core.dispatch_action(Action::CopyImageText),
             A::CopyDescribe => self.core.dispatch_action(Action::CopyDescription),
@@ -2512,9 +2687,11 @@ impl App {
                         }
                     }
                     contract::CoreEffect::SetCursor(kind) => {
-                        if let Some(w) = self.window.as_ref() {
-                            w.set_cursor(cursor_icon(kind));
-                        }
+                        // Don't apply the photo cursor directly — the shell is the single cursor
+                        // writer (`resolve_cursor`, run once per tick after the overlay renders).
+                        // It composes this core want with egui's hover cursor and the live
+                        // pointer's resize-zone geometry, so the two never fight (the flicker).
+                        self.core_cursor = kind;
                     }
                     contract::CoreEffect::SetMenuState(state) => {
                         self.apply_menu_to_native(&state);
@@ -3074,6 +3251,22 @@ impl ApplicationHandler for App {
                 }
                 overlay_consumed = panel_open && pointer && resp.consumed;
             }
+            // Track the live pointer + whether it's over a panel (exact, lag-free), so the
+            // shell's `resolve_cursor` flips ownership the instant the pointer crosses the pane
+            // edge from the photo side — not a render later. Deriving this from egui's stored
+            // (one-frame-late) pointer was the right-to-left edge flicker.
+            match &event {
+                WindowEvent::CursorMoved { position, .. } => {
+                    self.last_pointer = Some((position.x, position.y));
+                    self.pointer_over_panel =
+                        panel_open && ov.physical_point_over_area(position.x, position.y);
+                }
+                WindowEvent::CursorLeft { .. } => {
+                    self.pointer_over_panel = false;
+                    self.last_pointer = None;
+                }
+                _ => {}
+            }
         }
         if overlay_consumed {
             self.drain_effects(event_loop);
@@ -3466,6 +3659,11 @@ impl ApplicationHandler for App {
         // repaint deadline for the wake calc.
         let overlay_wake = self.update_overlay(now);
 
+        // Own the window cursor for this tick: compose egui's hover cursor, the core's photo
+        // cursor, and the live pointer's resize-zone geometry into one authoritative value
+        // (single writer — the two used to fight and flicker on the resize handle).
+        self.resolve_cursor();
+
         // The event loop's next wake: the earliest of the core's requested wake, the shell's
         // own dialog-repaint deadline, and the overlay's egui repaint; `None` = idle.
         let wake = [
@@ -3526,6 +3724,31 @@ fn cursor_icon(kind: contract::CursorKind) -> CursorIcon {
         contract::CursorKind::Grab => CursorIcon::Grab,
         contract::CursorKind::Grabbing => CursorIcon::Grabbing,
         contract::CursorKind::Pointer => CursorIcon::Pointer,
+    }
+}
+
+/// Map egui's desired hover cursor to the winit one, for the over-a-panel case of the shell's
+/// [`App::resolve_cursor`] (the panels use a small subset — pointer-hand, resize, text). The
+/// resize handles are already owned geometrically there, so `ResizeHorizontal` here is just a
+/// belt-and-braces mapping; everything unrecognized falls back to the arrow.
+fn egui_cursor_to_winit(c: egui::CursorIcon) -> CursorIcon {
+    use egui::CursorIcon as E;
+    match c {
+        E::PointingHand => CursorIcon::Pointer,
+        E::ResizeHorizontal | E::ResizeColumn | E::ResizeEast | E::ResizeWest => {
+            CursorIcon::EwResize
+        }
+        E::ResizeVertical | E::ResizeRow | E::ResizeNorth | E::ResizeSouth => CursorIcon::NsResize,
+        E::Text | E::VerticalText => CursorIcon::Text,
+        E::Grab => CursorIcon::Grab,
+        E::Grabbing => CursorIcon::Grabbing,
+        E::Crosshair => CursorIcon::Crosshair,
+        E::NotAllowed | E::NoDrop => CursorIcon::NotAllowed,
+        E::Move => CursorIcon::Move,
+        E::Progress => CursorIcon::Progress,
+        E::Wait => CursorIcon::Wait,
+        E::Help => CursorIcon::Help,
+        _ => CursorIcon::Default,
     }
 }
 

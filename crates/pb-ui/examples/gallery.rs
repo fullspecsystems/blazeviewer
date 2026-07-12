@@ -184,6 +184,8 @@ impl Gallery {
                 Icon::Success,
                 Icon::Help,
                 Icon::Trash,
+                Icon::Folder,
+                Icon::Images,
                 Icon::Play,
                 Icon::Pause,
             ] {

@@ -42,6 +42,12 @@ pub struct EguiOverlay {
     /// When egui next wants a *timed* repaint (an animation in flight) — folded into the
     /// event loop's wake `min`, exactly like the dialog's `repaint_at`.
     next_repaint: Option<Instant>,
+    /// egui's desired cursor from the last rendered frame (pointer-hand over a tab/button,
+    /// resize over a handle, text over selectable text, …). The shell reads this to be the
+    /// **single** cursor writer — it composes egui's want with the core's photo cursor and the
+    /// live pointer geometry each frame, instead of egui and the core fighting over the window
+    /// cursor (which caused the resize-handle flicker crossing in from the photo).
+    cursor: egui::CursorIcon,
 }
 
 impl EguiOverlay {
@@ -77,6 +83,7 @@ impl EguiOverlay {
             size: (w.max(1), h.max(1)),
             dark,
             next_repaint: None,
+            cursor: egui::CursorIcon::Default,
         }
     }
 
@@ -90,6 +97,34 @@ impl EguiOverlay {
         event: &winit::event::WindowEvent,
     ) -> egui_winit::EventResponse {
         self.state.on_window_event(window, event)
+    }
+
+    /// Whether a **physical** window point is over an egui panel/area, tested against the last
+    /// frame's layout with the *live* position — so it's exact and lag-free (egui's own
+    /// `is_pointer_over_area` uses its stored pointer, which only updates on the next render and
+    /// caused the right-to-left edge flicker). Lets the shell flip cursor ownership the instant
+    /// the pointer crosses the pane edge from the photo side, not a frame later.
+    pub fn physical_point_over_area(&self, x: f64, y: f64) -> bool {
+        let ppp = self.ctx.pixels_per_point();
+        let pos = egui::pos2(x as f32 / ppp, y as f32 / ppp);
+        // A real panel/area (not the implicit background layer) — matches the semantics of
+        // `is_pointer_over_area`, so the photo area still reads as "not a panel".
+        self.ctx
+            .layer_id_at(pos)
+            .is_some_and(|id| id.order != egui::Order::Background)
+    }
+
+    /// egui's desired cursor from the last rendered frame — the shell composes it with the
+    /// core's photo cursor and the live pointer geometry to own the window cursor outright.
+    pub fn desired_cursor(&self) -> egui::CursorIcon {
+        self.cursor
+    }
+
+    /// The overlay context's pixels-per-point (physical / logical). The shell converts the
+    /// winit **physical** pointer into egui **points** with this to hit-test the panels'
+    /// reported (points) resize-zone rects in the same coordinate space egui laid them out.
+    pub fn pixels_per_point(&self) -> f32 {
+        self.ctx.pixels_per_point()
     }
 
     /// The offscreen texture the panels were rendered into — handed to
@@ -140,6 +175,9 @@ impl EguiOverlay {
         pb_ui::apply_style(&self.ctx, self.dark);
         let raw_input = self.state.take_egui_input(window);
         let full_output = self.ctx.run(raw_input, build);
+        // Capture egui's desired cursor for the shell's single-writer cursor resolve (the
+        // shell overrides the window cursor authoritatively each frame, after this).
+        self.cursor = full_output.platform_output.cursor_icon;
         self.state
             .handle_platform_output(window, full_output.platform_output);
 

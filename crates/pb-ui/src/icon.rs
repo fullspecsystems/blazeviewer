@@ -62,6 +62,8 @@ pub enum Icon {
     Sparkles,
     /// Ask-a-question (the Describe tab's Ask button — matches SF `questionmark.bubble`).
     MessageQuestion,
+    /// Thumbnails strip (the left pane's second tab — matches SF `photo.on.rectangle`).
+    Images,
     /// Live Photo mark (info readout — the concentric-ring glyph, matches SF `livephoto`).
     LivePhoto,
     /// Animated-image mark (GIF/APNG/… in the info readout) — a film strip.
@@ -134,6 +136,7 @@ fn svg(icon: Icon, family: Family) -> &'static str {
         Icon::Text => glyph!("text"),
         Icon::Sparkles => glyph!("sparkles"),
         Icon::MessageQuestion => glyph!("message-question"),
+        Icon::Images => glyph!("images"),
         Icon::LivePhoto => glyph!("livephoto"),
         Icon::Film => glyph!("film"),
         Icon::Sliders => glyph!("sliders"),
