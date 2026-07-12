@@ -84,10 +84,14 @@ final class NativeVideoPlayer {
         endObs = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
         ) { [weak self] _ in
-            guard let self else { return }
-            self.ended = true
-            pbTrace("native video \(self.sessionId): EOS — parking last frame")
-            self.model?.nativeVideoEnded(self.sessionId)
+            // Delivered on `.main` (per `queue:`), so assume main-actor isolation — the
+            // same bridge the KVO observers above use to touch `self`'s @MainActor state.
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.ended = true
+                pbTrace("native video \(self.sessionId): EOS — parking last frame")
+                self.model?.nativeVideoEnded(self.sessionId)
+            }
         }
         pbTrace("native video \(sessionId): opening \(url.lastPathComponent) muted=\(muted)")
     }
