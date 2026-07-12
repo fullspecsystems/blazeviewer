@@ -2184,11 +2184,17 @@ final class CoreModel {
         core.native_video_state_changed(sessionId, state)
         kick()
         drainEffects()
+        // Re-sync the toolbar Play glyph: unlike an animation (whose pump ticks
+        // continuously and keeps syncToolbar running), a video's play/pause is an
+        // isolated state change — without this the button only reflects motion_playing()
+        // on the next unrelated event (a key press), so it never re-lights after a pause.
+        syncToolbar()
     }
     func nativeVideoEnded(_ sessionId: UInt64) {
         core.native_video_ended(sessionId)
         kick()
         drainEffects()
+        syncToolbar() // ended → no longer playing → drop the blue
     }
     func nativeVideoSeekCompleted(_ sessionId: UInt64, generation: UInt64, finished: Bool) {
         core.native_video_seek_completed(sessionId, generation, finished)
@@ -2199,6 +2205,7 @@ final class CoreModel {
         core.native_video_failed(sessionId, error)
         kick()
         drainEffects()
+        syncToolbar() // failure cleared the session → drop the blue
     }
 
     /// `CoreEffect::WriteClipboard` (via the marker + accessors): text goes on as a string;
