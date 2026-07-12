@@ -63,6 +63,7 @@ final class NativeVideoPlayer {
                 guard let self, layer.isReadyForDisplay, !self.revealed else { return }
                 self.revealed = true
                 layer.isHidden = false
+                self.canvas?.revealVideoLayer() // unhide the container: poster→video, no black flash
                 self.player.play()
                 pbTrace("native video \(self.sessionId): revealed + playing")
             }

@@ -342,6 +342,12 @@ final class MetalCanvasNSView: NSView {
         // to black only if the model isn't wired. Opaque so it hides the wgpu canvas.
         container.backgroundColor = model?.videoLetterboxCGColor ?? NSColor.black.cgColor
         container.isOpaque = true
+        // Hide the *whole container* (not just the inner player) until the first frame is
+        // displayable, so the opaque fill doesn't cover the wgpu poster before there's a real
+        // video frame to show — that gap is the "blackout" flash. `revealVideoLayer()` unhides
+        // it (called from the player's isReadyForDisplay callback), swapping poster→video in
+        // one step with nothing solid in between.
+        container.isHidden = true
         playerLayer.videoGravity = .resizeAspect
         playerLayer.isHidden = true
         CATransaction.begin()
@@ -354,6 +360,13 @@ final class MetalCanvasNSView: NSView {
         layer?.addSublayer(container)
         CATransaction.commit()
         videoContainer = container
+    }
+
+    /// Reveal the video container once the player has its first displayable frame (called from
+    /// `NativeVideoPlayer`'s `isReadyForDisplay` observer). Until this fires the wgpu poster
+    /// shows through the hidden container — this is the poster→video swap with no black flash.
+    func revealVideoLayer() {
+        videoContainer?.isHidden = false
     }
 
     /// Update the video container's background to the current letterbox color (theme switch /
