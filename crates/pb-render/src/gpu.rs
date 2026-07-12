@@ -1297,20 +1297,13 @@ fn upload_nv12_reusable(
     let mode = if color.enabled { 1.0 } else { 0.0 };
     let uniform = ColorUniform::new_nv12(color, mode, scale, &yuv);
     if let Some(s) = slot.as_ref() {
-        if s.w == img_w
-            && s.h == img_h
-            && s.format == wgpu::TextureFormat::R8Unorm
-            && s.uv_tex.is_some()
+        if let Some(uv_tex) = s
+            .uv_tex
+            .as_ref()
+            .filter(|_| s.w == img_w && s.h == img_h && s.format == wgpu::TextureFormat::R8Unorm)
         {
             uploader.upload(device, queue, &s.tex, y, img_w, img_h);
-            uploader.upload(
-                device,
-                queue,
-                s.uv_tex.as_ref().expect("checked above"),
-                uv,
-                img_w / 2,
-                img_h / 2,
-            );
+            uploader.upload(device, queue, uv_tex, uv, img_w / 2, img_h / 2);
             queue.write_buffer(&s.color_buf, 0, bytemuck::bytes_of(&uniform));
             return ReuseOutcome::Reused;
         }
