@@ -17,9 +17,10 @@ struct LeftPaneTabBar: View {
     let closeHelp: String
     let onClose: () -> Void
 
-    /// Two segments fit icon+label down to ~250pt (the Inspector's 300 is for
-    /// three); below that the icons hide and the labels stay (owner polish #4).
-    private var compactTabs: Bool { width < 250 }
+    /// Two segments fit icon+label down to ~225pt (the Inspector's 300 is for
+    /// three); below that the icons hide and the labels stay (owner polish #4,
+    /// threshold lowered on request — icons survive a fair bit narrower).
+    private var compactTabs: Bool { width < 225 }
     private let segMargin: CGFloat = 6
     private let trackPad: CGFloat = 2
     private var segTrackHeight: CGFloat { PanelMetrics.headerHeight - 2 * segMargin }
