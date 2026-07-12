@@ -37,6 +37,10 @@ mod mf_poster;
 // thread speaking the VideoProducerEvent/Msg protocol to the VideoSession.
 #[cfg(windows)]
 mod mf_video_producer;
+// Hardware decode support (task 79.10): the D3D11/DXGI device manager, NV12
+// negotiation, and the pixel-rate policy picking hw vs the software path.
+#[cfg(windows)]
+mod mf_hw;
 // The Linux mirror: .mov motion + audio decode via FFmpeg, behind the `livephoto` feature.
 #[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
 mod ff_live;
