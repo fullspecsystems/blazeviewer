@@ -24,6 +24,10 @@ struct EmptyStateView: View {
 
     /// The shared open-button width (0 until first layout → natural size meanwhile).
     @State private var openButtonWidth: CGFloat = 0
+    /// The window's backing scale — text metrics differ between 1x and 2x (glyph
+    /// advances round differently), so a width measured on one display can be a point
+    /// short on another. Watched below to re-measure on a display move.
+    @Environment(\.displayScale) private var displayScale
 
     var body: some View {
         VStack(spacing: 0) {
@@ -39,6 +43,15 @@ struct EmptyStateView: View {
                 }
             }
             .onPreferenceChange(OpenButtonWidth.self) { openButtonWidth = $0 }
+            // Once measured, the fixed frame BOUNDS the content, so the GeometryReader
+            // can never report "the text got wider" — a clamp measured on a 1x display
+            // wrapped "Open Folder" after a drag to a 2x display (owner report,
+            // 2026-07-11). Re-enter measuring mode whenever the metrics' inputs change:
+            // the backing scale (display move) or the keycap strings (keymap edit).
+            .onChange(of: displayScale) { openButtonWidth = 0 }
+            .onChange(of: model.shortcut("open_file") + model.shortcut("open_folder")) {
+                openButtonWidth = 0
+            }
 
             // The drag-and-drop alternative sits under the buttons — the shared gap, pulled in
             // 8pt since it's a lighter, secondary line and reads better a touch closer.
@@ -75,7 +88,10 @@ struct EmptyStateView: View {
         Button(action: action) {
             HStack(spacing: 0) {
                 Image(systemName: icon)
-                Text(label).padding(.leading, 8)
+                // One line, always: if a stale width clamp is ever a point short (the
+                // single frame before a re-measure lands), truncate — never wrap the
+                // pill to two lines.
+                Text(label).lineLimit(1).padding(.leading, 8)
                 Spacer(minLength: 14)
                 if !key.isEmpty {
                     ShortcutView(shortcut: key)
