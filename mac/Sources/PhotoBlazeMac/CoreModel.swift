@@ -388,6 +388,12 @@ final class CoreModel {
     /// Pointer moved over the canvas, in physical px, top-left origin (the winit convention).
     func pointerMoved(x: Float, y: Float) {
         core.pointer_moved(x, y)
+        // Wake the pump: a move over the bottom controls zone arms the video-line flash
+        // (`video_hover_reveal`), which only surfaces as `videoControlsVisible` when `pump()`
+        // reconciles. During native playback the pump is otherwise paused (AVPlayer composites
+        // itself), so without this a hover would never reveal the controls. The pump re-pauses
+        // itself once the flash decays.
+        kick()
         drainEffects()
     }
 
@@ -1442,8 +1448,9 @@ final class CoreModel {
             // even when nothing else on screen moves.
             withAnimation(Layout.chromeFade) { infoLineVisible = infoVis }
         }
-        // The playback row shows while a native video is active and the info line is on
-        // (task 79.9 phase 5; pointer-reveal — showing it without `i` — is a follow-up).
+        // The playback row shows while a native video is active and the info line is on —
+        // either the persistent `i` line or the transient hover-reveal flash (armed by a
+        // pointer move over the bottom controls zone; `info_line_visible()` folds both in).
         let controls = infoVis && nativeVideo != nil
         if controls != videoControlsVisible {
             withAnimation(Layout.chromeFade) { videoControlsVisible = controls }
