@@ -45,18 +45,6 @@ const MAX_AUDIO_CORRECTION: Duration = Duration::from_millis(50);
 /// device hiccup): hard re-anchor to the audio position — never smooth across it.
 const AUDIO_HARD_REANCHOR: Duration = Duration::from_millis(500);
 
-/// A gap between polls longer than this is an event-loop stall (the modal window
-/// -resize loop, a system hitch): the presenting thread could not run, so the wall
-/// time that passed is not playback — media time must not advance across it
-/// (rebuffer-don't-drift, applied to our own stalls).
-const POLL_STALL: Duration = Duration::from_millis(250);
-
-/// When audio (the master clock) is this far ahead — it kept playing through a
-/// stall the video couldn't present through — racing the backlog frame-by-frame
-/// reads as fast-forward (owner-reported on window-resize drags). Past this gap
-/// the session jumps there with the existing seek machinery instead.
-const AUDIO_CATCH_UP_SEEK: Duration = Duration::from_secs(1);
-
 /// Fallback inter-frame gap for a back-step before playback has taught us the real
 /// one (30 fps). Presented-frame PTS deltas replace it as soon as they're observed.
 const DEFAULT_FRAME_INTERVAL: Duration = Duration::from_millis(33);
@@ -201,8 +189,6 @@ pub struct VideoSession {
     /// The learned inter-frame gap (the last consecutive presented-PTS delta) —
     /// what a one-frame back-step subtracts. `None` until two frames have shown.
     frame_interval: Option<Duration>,
-    /// When `poll` last ran — detects event-loop stalls (see [`POLL_STALL`]).
-    last_poll: Option<Instant>,
 }
 
 impl VideoSession {
@@ -245,7 +231,6 @@ impl VideoSession {
             desired_seek: None,
             audio_seek_ack: None,
             frame_interval: None,
-            last_poll: None,
         };
         (
             session,
@@ -280,18 +265,6 @@ impl VideoSession {
         if self.state.is_terminal() {
             return update;
         }
-        // An event-loop stall (modal resize drag, system hitch) must not advance
-        // media time: the presenter couldn't run, so shift the running anchor
-        // across the gap — rebuffer-don't-drift applied to our own stalls. (When
-        // audio kept playing through it, the master clock pulls us forward via
-        // the catch-up seek in `on_audio_clock`, never a frame-by-frame race.)
-        if let (Some(last), Some(anchor)) = (self.last_poll, self.clock.anchor) {
-            let gap = now.saturating_duration_since(last);
-            if gap >= POLL_STALL {
-                self.clock.anchor = Some(anchor + gap);
-            }
-        }
-        self.last_poll = Some(now);
         self.drain_events(&mut update);
         if self.state.is_terminal() {
             return update;
@@ -627,15 +600,6 @@ impl VideoSession {
             } else {
                 current - target
             };
-            // Audio far ahead: it kept playing through a stall the video couldn't
-            // present through. Jumping the clock would fast-forward every
-            // backlogged frame at producer speed (owner-reported on resize
-            // drags); the seek machinery lands there instantly instead.
-            if ahead && gap >= AUDIO_CATCH_UP_SEEK {
-                self.seek_to(target, now, None);
-                self.audio_last = Some((sample, now));
-                return;
-            }
             if gap >= AUDIO_HARD_REANCHOR {
                 self.clock.run_from(target, now);
             } else if gap > Duration::ZERO {
@@ -1223,81 +1187,23 @@ mod tests {
             "bounded correction, got {pos:?}"
         );
 
-        // Audio 800 ms ahead (the 500 ms–1 s band): discontinuity → hard
-        // re-anchor to the audio position. (≥ 1 s becomes a catch-up seek.)
-        s.on_audio_clock(audio_sample(850, AudioClockState::Playing), t0);
-        assert_eq!(s.position(t0), Duration::from_millis(850), "hard re-anchor");
+        // Audio 2 s ahead: discontinuity → hard re-anchor to the audio position.
+        s.on_audio_clock(audio_sample(2_050, AudioClockState::Playing), t0);
+        assert_eq!(
+            s.position(t0),
+            Duration::from_millis(2_050),
+            "hard re-anchor"
+        );
 
         // A foreign session's straggler sample must not touch the clock.
         let mut foreign = audio_sample(30_000, AudioClockState::Playing);
         foreign.session_id = VideoSessionId(999);
         s.on_audio_clock(foreign, t0);
-        assert_eq!(s.position(t0), Duration::from_millis(850));
+        assert_eq!(s.position(t0), Duration::from_millis(2_050));
 
         // Audio behind: bounded step backward (never a big visible jump).
-        s.on_audio_clock(audio_sample(750, AudioClockState::Playing), t0);
-        assert_eq!(s.position(t0), Duration::from_millis(800));
-    }
-
-    /// Owner-reported (resize drags): an event-loop stall must not advance media
-    /// time — the presenter couldn't run, so playback resumes where it froze
-    /// instead of racing the backlog.
-    #[test]
-    fn a_poll_stall_freezes_media_time() {
-        let (mut s, io) = VideoSession::new(SID, FRAME_BYTES);
-        let t0 = Instant::now();
-        opened(&io, 60_000);
-        io.events.send(VideoProducerEvent::Frame(frame(0))).unwrap();
-        io.events
-            .send(VideoProducerEvent::Frame(frame(33)))
-            .unwrap();
-        s.poll(t0); // → Playing, presents pts 0
-        let before = s.position(t0 + Duration::from_millis(10));
-
-        // The loop stalls 5 s (a modal resize drag). The next poll must not see
-        // 5 s of elapsed media time — the anchor shifts across the gap.
-        let after_stall = t0 + Duration::from_secs(5);
-        let u = s.poll(after_stall);
-        assert!(u.present.is_none(), "nothing suddenly due after the stall");
-        let resumed = s.position(after_stall);
-        assert!(
-            resumed < before + Duration::from_millis(50),
-            "media time froze across the stall, got {resumed:?}"
-        );
-        // …and pacing continues normally from there.
-        assert!(s
-            .poll(after_stall + Duration::from_millis(40))
-            .present
-            .is_some());
-    }
-
-    /// Owner-reported (resize drags): audio kept playing through a stall, so it
-    /// lands far ahead — the session must catch up with a SEEK (instant), never
-    /// by racing the backlogged frames at producer speed.
-    #[test]
-    fn audio_far_ahead_catches_up_with_a_seek_not_a_race() {
-        let (mut s, io) = VideoSession::new(SID, FRAME_BYTES);
-        let t0 = Instant::now();
-        opened_audio(&io, 60_000, true);
-        io.events.send(VideoProducerEvent::Frame(frame(0))).unwrap();
-        io.events
-            .send(VideoProducerEvent::Frame(frame(33)))
-            .unwrap();
-        s.on_audio_clock(audio_sample(0, AudioClockState::Paused), t0);
-        s.poll(t0); // → Playing
-        drain_credits(&io);
-
-        // Audio reports 5 s ahead (it played through the stall).
-        s.on_audio_clock(audio_sample(5_000, AudioClockState::Playing), t0);
-        assert_eq!(
-            s.state(),
-            VideoSessionState::Seeking,
-            "a catch-up seek, not a clock jump"
-        );
-        let sought = std::iter::from_fn(|| io.msgs.try_recv().ok()).any(|m| {
-            matches!(m, VideoProducerMsg::SeekTo { target, .. } if target == Duration::from_secs(5))
-        });
-        assert!(sought, "the producer repositions at the audio position");
+        s.on_audio_clock(audio_sample(1_900, AudioClockState::Playing), t0);
+        assert_eq!(s.position(t0), Duration::from_millis(2_000));
     }
 
     /// Phase 5: an audio failure flips to permanent silent fallback — playback
