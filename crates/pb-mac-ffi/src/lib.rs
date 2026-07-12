@@ -609,11 +609,27 @@ impl AppCoreHandle {
             return;
         };
         self.core.apply_launch_overrides(&cli.to_overrides());
+        // `--metrics`: swap in a recording StageTimes (the winit shell passes
+        // `StageTimes::enabled()` into `App::new` the same way). The core records the
+        // stages itself (decode/upload/render/present/drain); the host prints
+        // [`metrics_report`](Self::metrics_report) on quit.
+        if self.core.launch.metrics {
+            self.core.metrics = pb_app_core::metrics::StageTimes::enabled();
+        }
         self.pending_launch_paths = cli
             .launch_paths()
             .iter()
             .map(|p| p.to_string_lossy().into_owned())
             .collect();
+    }
+
+    /// The `--metrics` end-of-run summary (task #78): the core's per-stage p50/p95/p99
+    /// table, or "" when metrics are off / nothing was recorded. The host prints it to
+    /// stdout on quit — the winit shell's post-`run_app` report, minus that shell's
+    /// pool-thread extras (its `POOL_DECODE_MS` is winit-local plumbing; the core's
+    /// `decode` row covers the same stage here).
+    fn metrics_report(&self) -> String {
+        self.core.metrics.report()
     }
 
     /// Open the paths stashed by [`apply_launch_args`](Self::apply_launch_args) — called by
@@ -2813,6 +2829,8 @@ mod ffi {
         ) -> LaunchPreflightFfi;
         fn apply_launch_args(&mut self, argv: Vec<String>, version: String);
         fn open_launch_paths(&mut self) -> bool;
+        // The --metrics end-of-run summary ("" when off) — printed by the host on quit.
+        fn metrics_report(&self) -> String;
 
         // The Shortcuts editor (NS2.6): a Rust-side draft keymap; rows by (group, index),
         // edits by stable action id; chords display as macOS glyphs.

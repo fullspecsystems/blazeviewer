@@ -126,6 +126,8 @@ final class CoreModel {
 
     @ObservationIgnored private var keyMonitor: Any?
     @ObservationIgnored private var focusObserver: NSObjectProtocol?
+    /// Prints the `--metrics` report on quit (task #78) — see `init`.
+    @ObservationIgnored private var metricsObserver: NSObjectProtocol?
     @ObservationIgnored private var keyLossObserver: NSObjectProtocol?
     @ObservationIgnored private var keyGainObserver: NSObjectProtocol?
     @ObservationIgnored private var menuTrackObservers: [NSObjectProtocol] = []
@@ -165,6 +167,22 @@ final class CoreModel {
         // errors, so this parse cannot fail; the positional paths it stashes are opened by
         // `openLaunchPathIfAny` once the canvas exists.
         core.apply_launch_args(Launch.argvVec(), RustString(Launch.versionString))
+
+        // `--metrics` (task #78): print the core's per-stage p50/p95/p99 summary on quit
+        // — the winit shell's post-`run_app` report. Always observed; the report is ""
+        // unless the launch enabled metrics, so it's a no-op read otherwise (and stdout
+        // on a GUI launch goes to the void, harmlessly).
+        metricsObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let report = self?.core.metrics_report().toString(), !report.isEmpty
+                else { return }
+                try? FileHandle.standardOutput.write(contentsOf: Data("\n\(report)".utf8))
+            }
+        }
 
         installInputForwarding()
     }
