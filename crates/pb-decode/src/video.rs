@@ -43,15 +43,28 @@ impl SeekGeneration {
     }
 }
 
+/// YUV→RGB matrix coefficients for subsampled ([`PixelFormat::Nv12`]) frames
+/// (task 79.10). Inert for RGB pixel formats (the producer already converted).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum YuvMatrix {
+    Bt601,
+    Bt709,
+    Bt2020,
+}
+
 /// Source color for a video frame: the resolved shader transform for the pixels as
 /// emitted, plus the container/decoder-reported CICP code points kept verbatim so a
-/// future fp16/NV12 backend (or a diagnostics panel) can re-derive without re-probing.
+/// future fp16/P010 backend (or a diagnostics panel) can re-derive without re-probing.
+///
+/// **Single-application contract (task 79.10):** for RGB pixel formats the producer
+/// (or the OS converter) has already applied the YUV matrix + range — `yuv_matrix` /
+/// `full_range` are inert. For [`PixelFormat::Nv12`] *nothing* upstream has: the
+/// consumer (the renderer's convert) applies them exactly once. `transform` always
+/// carries primaries + transfer only, never the matrix.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VideoColorInfo {
     /// Source→sRGB transform for the emitted pixels, applied in-shader — same
-    /// mechanism as stills ([`crate::DecodedImage::color`]). For tier-2 SDR output
-    /// the producer has already applied (or had the OS apply) the YUV matrix; this
-    /// carries primaries + transfer.
+    /// mechanism as stills ([`crate::DecodedImage::color`]); primaries + transfer.
     pub transform: ColorTransform,
     /// CICP code points as reported by the source (H.273): colour_primaries,
     /// transfer_characteristics, matrix_coefficients. `None` = the container didn't
@@ -59,6 +72,8 @@ pub struct VideoColorInfo {
     pub cicp: Option<(u8, u8, u8)>,
     /// Full-range flag as reported (or assumed) for the source YUV.
     pub full_range: bool,
+    /// Matrix coefficients for NV12 frames (see the contract above).
+    pub yuv_matrix: YuvMatrix,
 }
 
 impl VideoColorInfo {
@@ -68,15 +83,17 @@ impl VideoColorInfo {
             transform: ColorTransform::srgb(),
             cicp: None,
             full_range: true,
+            yuv_matrix: YuvMatrix::Bt709,
         }
     }
 }
 
 /// One decoded, display-ready video frame. The producer→session queue element.
 ///
-/// Pixels are tightly packed `width * height * format.bytes_per_pixel()` bytes,
-/// already fitted to the session's fixed output geometry (never re-fitted mid
-/// session; window resizes rescale on the GPU and apply a new fit on next play).
+/// Pixels are tightly packed `format.frame_bytes(width, height)` bytes (for NV12:
+/// the Y plane then the interleaved half-res UV plane), already fitted to the
+/// session's fixed output geometry (never re-fitted mid session; window resizes
+/// rescale on the GPU and apply a new fit on next play).
 #[derive(Debug, Clone)]
 pub struct VideoFrame {
     pub session_id: VideoSessionId,
@@ -99,12 +116,15 @@ impl VideoFrame {
         self.pixels.len() as u64
     }
 
-    /// Structural sanity: pixel buffer matches the declared geometry/format.
+    /// Structural sanity: pixel buffer matches the declared geometry/format
+    /// (and NV12's even-dimension requirement holds).
     pub fn is_well_formed(&self) -> bool {
+        let even_ok = self.format != crate::PixelFormat::Nv12
+            || (self.width.is_multiple_of(2) && self.height.is_multiple_of(2));
         self.width > 0
             && self.height > 0
-            && self.pixels.len()
-                == self.width as usize * self.height as usize * self.format.bytes_per_pixel()
+            && even_ok
+            && self.pixels.len() == self.format.frame_bytes(self.width, self.height)
     }
 }
 
@@ -127,6 +147,10 @@ pub enum VideoProducerEvent {
         width: u32,
         height: u32,
         has_audio: bool,
+        /// Bytes of one decoded frame at the producer's REAL negotiated output —
+        /// the session's credit-granting size (task 79.10: format-aware, so an
+        /// NV12 producer isn't under-credited 2.67× by a `w·h·4` assumption).
+        frame_bytes: u64,
     },
     Frame(VideoFrame),
     EndOfStream {
@@ -233,6 +257,33 @@ mod tests {
     #[test]
     fn byte_len_matches_rgba8_geometry() {
         assert_eq!(frame(1920, 1080).byte_len(), 1920 * 1080 * 4);
+    }
+
+    /// Task 79.10: the NV12 contract — 12 bpp packed planes, even dims required.
+    #[test]
+    fn nv12_frame_bytes_and_well_formedness() {
+        assert_eq!(
+            PixelFormat::Nv12.frame_bytes(3840, 2160),
+            3840 * 2160 * 3 / 2
+        );
+        assert_eq!(PixelFormat::Rgba8.frame_bytes(2, 2), 16);
+        assert_eq!(PixelFormat::Rgba16F.frame_bytes(2, 2), 32);
+
+        let nv12 = |w: u32, h: u32| VideoFrame {
+            format: PixelFormat::Nv12,
+            pixels: vec![0; PixelFormat::Nv12.frame_bytes(w, h)],
+            width: w,
+            height: h,
+            ..frame(w, h)
+        };
+        assert!(nv12(4, 2).is_well_formed());
+        assert!(
+            !nv12(3, 2).is_well_formed() && !nv12(4, 3).is_well_formed(),
+            "odd dimensions are rejected"
+        );
+        let mut short = nv12(4, 2);
+        short.pixels.pop();
+        assert!(!short.is_well_formed());
     }
 
     #[test]

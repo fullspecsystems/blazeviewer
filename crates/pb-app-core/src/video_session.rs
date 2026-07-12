@@ -646,20 +646,21 @@ impl VideoSession {
                     session_id,
                     duration,
                     has_audio,
-                    width,
-                    height,
+                    frame_bytes,
+                    ..
                 }) => {
                     if session_id == self.id {
                         self.duration = duration;
                         self.has_audio = Some(has_audio);
                         // Correct the credit-granting frame size to the producer's
-                        // REAL negotiated output. The construction-time value is a
-                        // ceiling from the fit box (the window), which can be ~2×
-                        // the fitted frame — left uncorrected it starves credits
-                        // and serializes decode (measured: 4K60 playing at 2/3×).
-                        let real = width as u64 * height as u64 * 4;
-                        if real > 0 {
-                            self.frame_bytes = real;
+                        // REAL negotiated output (format-aware — task 79.10: an
+                        // NV12 frame is 2.67× smaller than the w·h·4 this used to
+                        // assume). The construction-time value is a ceiling from
+                        // the fit box (the window), which can be ~2× the fitted
+                        // frame — left uncorrected it starves credits and
+                        // serializes decode (measured: 4K60 playing at 2/3×).
+                        if frame_bytes > 0 {
+                            self.frame_bytes = frame_bytes;
                         }
                     }
                 }
@@ -778,6 +779,7 @@ mod tests {
                 width: 2,
                 height: 2,
                 has_audio,
+                frame_bytes: FRAME_BYTES,
             })
             .unwrap();
     }
@@ -938,6 +940,7 @@ mod tests {
                 width: 25,
                 height: 10,
                 has_audio: false,
+                frame_bytes: 1000,
             })
             .unwrap();
         s.poll(t0);
@@ -1414,6 +1417,61 @@ mod tests {
         let u = s.poll(t0 + Duration::from_millis(20));
         assert_eq!(s.state(), VideoSessionState::Playing, "replay resumes");
         assert_eq!(u.present.expect("frame 0 presents").pts, Duration::ZERO);
+    }
+
+    /// Task 79.10: an NV12 producer's frames flow with **format-aware** credit
+    /// sizing — `Opened.frame_bytes` (w·h·3/2) replaces the old w·h·4 assumption,
+    /// so the same byte budget admits 2.67× more lookahead, and the budget
+    /// invariant holds against the real (smaller) frames.
+    #[test]
+    fn nv12_frames_credit_at_their_real_size() {
+        // Budget: exactly two 4×4 NV12 frames (24 B each) + frame cap 4.
+        let budget = VideoQueueBudget {
+            max_bytes: 48,
+            max_frames: 4,
+        };
+        // Construction-time ceiling: the RGBA-sized guess (64 B) — over budget,
+        // so only the one-frame exception credit flows until Opened corrects it.
+        let (mut s, io) = VideoSession::with_budget(SID, 64, budget);
+        let t0 = Instant::now();
+        s.poll(t0);
+        assert_eq!(drain_credits(&io), 1, "RGBA-sized guess over-throttles");
+
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: SID,
+                duration: Some(Duration::from_secs(10)),
+                width: 4,
+                height: 4,
+                has_audio: false,
+                frame_bytes: 24, // 4·4·3/2 — the NV12 truth
+            })
+            .unwrap();
+        s.poll(t0);
+        assert_eq!(drain_credits(&io), 1, "corrected size admits the 2nd frame");
+
+        let nv12_frame = |pts_ms: u64| VideoFrame {
+            session_id: SID,
+            seek_generation: SeekGeneration::FIRST,
+            pts: Duration::from_millis(pts_ms),
+            width: 4,
+            height: 4,
+            format: PixelFormat::Nv12,
+            pixels: vec![0; 24],
+            color: VideoColorInfo::srgb(),
+        };
+        io.events
+            .send(VideoProducerEvent::Frame(nv12_frame(0)))
+            .unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(nv12_frame(33)))
+            .unwrap();
+        let u = s.poll(t0);
+        assert_eq!(s.state(), VideoSessionState::Playing);
+        let f = u.present.expect("NV12 frames present like any other");
+        assert_eq!(f.format, PixelFormat::Nv12);
+        assert!(f.is_well_formed());
+        s.assert_budget_invariant();
     }
 
     /// Frame stepping (task #79 follow-up): a forward step while paused serves the

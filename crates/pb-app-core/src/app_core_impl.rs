@@ -5928,16 +5928,7 @@ impl AppCore {
         match outcome {
             crate::video_session::FrameStep::Present(frame) => {
                 let pts = frame.pts;
-                if let Some(a) = self.renderer.as_mut() {
-                    a.set_image(
-                        &frame.pixels,
-                        frame.width,
-                        frame.height,
-                        render_color(&frame.color.transform),
-                        false,
-                        1.0,
-                    );
-                }
+                self.present_video_frame(&frame);
                 // Keep the paused audio player at the stepped position, so a later
                 // resume doesn't yank the clock back to where audio was left.
                 self.effects
@@ -6039,16 +6030,7 @@ impl AppCore {
             }
         }
         if let Some(frame) = update.present {
-            if let Some(a) = self.renderer.as_mut() {
-                a.set_image(
-                    &frame.pixels,
-                    frame.width,
-                    frame.height,
-                    render_color(&frame.color.transform),
-                    false,
-                    1.0,
-                );
-            }
+            self.present_video_frame(&frame);
             // The frame (and its CPU pixels) drops here — released after upload.
             self.draw();
             return;
@@ -6068,6 +6050,38 @@ impl AppCore {
                 // Ended parks on the last presented frame; P replays.
                 _ => self.draw(),
             }
+        }
+    }
+
+    /// Upload one decoded video frame through the reusable present path,
+    /// dispatching on its pixel format (task 79.10): RGBA8 rides `set_image`
+    /// exactly as before; NV12 splits its planes and goes through the renderer's
+    /// `set_video_nv12` (in-shader YUV on wgpu; a CPU convert on fallback shells).
+    fn present_video_frame(&mut self, frame: &pb_decode::VideoFrame) {
+        let Some(a) = self.renderer.as_mut() else {
+            return;
+        };
+        match frame.format {
+            pb_decode::PixelFormat::Nv12 => {
+                let y_len = frame.width as usize * frame.height as usize;
+                let (y, uv) = frame.pixels.split_at(y_len);
+                a.set_video_nv12(
+                    y,
+                    uv,
+                    frame.width,
+                    frame.height,
+                    render_yuv(&frame.color),
+                    render_color(&frame.color.transform),
+                );
+            }
+            _ => a.set_image(
+                &frame.pixels,
+                frame.width,
+                frame.height,
+                render_color(&frame.color.transform),
+                false,
+                1.0,
+            ),
         }
     }
 
@@ -8687,6 +8701,7 @@ mod tests {
                 width: 64,
                 height: 64,
                 has_audio: false,
+                frame_bytes: 64 * 64 * 4,
             })
             .unwrap();
         core.poll_video();
@@ -8745,6 +8760,7 @@ mod tests {
                 width: 1,
                 height: 1,
                 has_audio: false,
+                frame_bytes: 4,
             })
             .unwrap();
         let frame = |pts_ms: u64| pb_decode::VideoFrame {

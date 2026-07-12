@@ -88,11 +88,15 @@ pub fn run_video_producer(
         width: w,
         height: h,
         has_audio: info.has_audio,
+        frame_bytes: PixelFormat::Rgba8.frame_bytes(w, h) as u64,
     });
     let color = VideoColorInfo {
         transform: info.color,
         cicp: None,
+        // RGB32 output: MF already applied the YUV matrix + range (see the
+        // VideoColorInfo single-application contract) — these two are inert.
         full_range: true,
+        yuv_matrix: crate::video::YuvMatrix::Bt709,
     };
 
     // The credit/command/seek loop. Blocking recv IS the select: a Stop or a
@@ -408,11 +412,13 @@ mod tests {
                 width,
                 height,
                 has_audio,
+                frame_bytes,
             } => {
                 assert_eq!(session_id, SID);
                 assert_eq!((width, height), (64, 64));
                 assert!(duration.expect("mp4 duration") > Duration::from_millis(800));
                 assert!(!has_audio, "the black/color fixture is silent");
+                assert_eq!(frame_bytes, 64 * 64 * 4, "credit size = negotiated output");
             }
             other => panic!("expected Opened, got {other:?}"),
         }
