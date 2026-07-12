@@ -84,7 +84,8 @@ with any pre-release suffix carried only by the tag.
 ### Added
 - **PhotoBlaze now takes command-line options.** Run `photoblaze --help` to see them all. You can
   point it at files, a folder, or a `.zip` / `.7z`, and shape a single launch without changing your
-  saved settings: `--slideshow[=SECS]` (optionally with a per-slide time), `--shuffle` and
+  saved settings: `--slideshow[=SECS]` (optionally with a per-slide time — `5`, `3s`, or
+  `0.5m`), `--shuffle` and
   `--reverse` (together they play a reverse shuffle), `--scale fit|fill|original`,
   `--theme light|dark|system`, `--windowed` / `--fullscreen`, `--recursive` / `--no-recursive`,
   `--info` / `--no-info`, `--details` and `--folders` (open those panels), `--mute`, and

@@ -65,7 +65,7 @@ and never changes your saved settings.
 | `-r, --recursive` / `--no-recursive` | Include subfolders, or open the folder flat |
 | `--info` / `--no-info` | Show or hide the info line on launch |
 | `--details` / `--folders` | Open the image-details (Inspector) / folder-tree panel |
-| `--slideshow[=SECS]` | Start a slideshow, optionally at SECS per slide |
+| `--slideshow[=SECS]` | Start a slideshow, optionally at SECS per slide (`5`, `3s`, `0.5m`; clamped to 0.1–60 s) |
 | `--shuffle` | Navigate in random (shuffle) order |
 | `--reverse` | Play backward — with `--shuffle`, a reverse shuffle |
 | `--scale fit\|fill\|original` | Initial scale mode |

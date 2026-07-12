@@ -35,7 +35,7 @@ pub use clap;
 const AFTER_HELP: &str = "\
 EXAMPLES:
   photoblaze ~/Photos
-  photoblaze ~/Photos --slideshow=5 --shuffle
+  photoblaze ~/Photos --slideshow=3s --shuffle
   photoblaze album.zip --fullscreen --scale fill
   photoblaze ~/Photos --reverse --start-at 100";
 
@@ -98,9 +98,16 @@ pub struct Cli {
     #[arg(long)]
     pub folders: bool,
 
-    /// Start a slideshow, optionally at SECS per slide (e.g. --slideshow or
-    /// --slideshow=5). Out-of-range values are clamped to 0.1..60 seconds.
-    #[arg(long, value_name = "SECS", num_args = 0..=1, require_equals = true)]
+    /// Start a slideshow, optionally at a per-slide interval: seconds by default,
+    /// or with a unit suffix (e.g. --slideshow, --slideshow=5, --slideshow=3s,
+    /// --slideshow=0.5m). Out-of-range values are clamped to 0.1..60 seconds.
+    #[arg(
+        long,
+        value_name = "SECS",
+        num_args = 0..=1,
+        require_equals = true,
+        value_parser = parse_interval
+    )]
     pub slideshow: Option<Option<f64>>,
 
     /// Navigate in the precomputed random (shuffle) order.
@@ -215,6 +222,25 @@ fn tri(positive: bool, negative: bool) -> Option<bool> {
     } else {
         None
     }
+}
+
+/// Parse a `--slideshow` interval value into seconds: a bare number is seconds
+/// (back-compat: `--slideshow=5`), a trailing `s` / `m` (case-insensitive) is an
+/// explicit seconds / minutes unit (`3s`, `0.5m`). Anything else — other units,
+/// internal whitespace (`3 s`), garbage — is a clap value error, not a clamp. The
+/// numeric value itself is clamped downstream ([`clamp_interval_secs`]), so `5m`
+/// parses to 300 s and then clamps to the 60 s ceiling (Mixed strictness).
+fn parse_interval(s: &str) -> Result<f64, String> {
+    let t = s.trim();
+    let (num, mult) = match t.to_ascii_lowercase().as_str() {
+        u if u.ends_with('s') => (&t[..t.len() - 1], 1.0),
+        u if u.ends_with('m') => (&t[..t.len() - 1], 60.0),
+        _ => (t, 1.0),
+    };
+    // f64::from_str rejects embedded/trailing whitespace, so "3 s" fails here.
+    num.parse::<f64>()
+        .map(|n| n * mult)
+        .map_err(|_| format!("not a duration: '{s}' (seconds, or a unit: 3s, 0.5m)"))
 }
 
 /// Clamp a `--slideshow=SECS` value into `[MIN_INTERVAL, MAX_INTERVAL]` (Mixed
@@ -345,6 +371,24 @@ mod tests {
                 interval_secs: Some(0.1)
             })
         );
+    }
+
+    #[test]
+    fn slideshow_unit_suffixes() {
+        let secs = |args: &[&str]| overrides(args).slideshow.unwrap().interval_secs;
+        // Explicit seconds, fractional minutes, case-insensitive.
+        assert_eq!(secs(&["--slideshow=3s"]), Some(3.0));
+        assert_eq!(secs(&["--slideshow=0.5m"]), Some(30.0));
+        assert_eq!(secs(&["--slideshow=1m"]), Some(60.0));
+        assert_eq!(secs(&["--slideshow=3S"]), Some(3.0));
+        // Minutes above the ceiling clamp (Mixed strictness), same as bare seconds.
+        assert_eq!(secs(&["--slideshow=5m"]), Some(60.0));
+        // Unknown units / internal whitespace / bare unit are parse errors.
+        assert!(Cli::try_parse_from(["photoblaze", "--slideshow=3h"]).is_err());
+        assert!(Cli::try_parse_from(["photoblaze", "--slideshow=3 s"]).is_err());
+        assert!(Cli::try_parse_from(["photoblaze", "--slideshow=m"]).is_err());
+        // "100ms" strips the trailing s and fails on "100m" — not silently milliseconds.
+        assert!(Cli::try_parse_from(["photoblaze", "--slideshow=100ms"]).is_err());
     }
 
     #[test]
