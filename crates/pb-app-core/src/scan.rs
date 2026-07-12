@@ -109,14 +109,20 @@ pub enum ScanUpdate {
 const SCAN_BATCH_INTERVAL: Duration = Duration::from_millis(150);
 
 /// Whether a path's extension is a supported image format (the decoder's single
-/// source of truth — see `pb_decode::is_supported_extension`). The **archive** predicate:
-/// pb-source callers keep receiving exactly this, so videos inside a ZIP/7z are never
-/// indexed (task #79: video items are path-only).
+/// source of truth — see `pb_decode::is_supported_extension`).
 pub fn is_supported_image(p: &Path) -> bool {
     p.extension()
         .and_then(|e| e.to_str())
         .map(is_supported_extension)
         .unwrap_or(false)
+}
+
+/// The **archive** entry predicate: a supported image extension, or a recognized
+/// video container. Archived videos are indexed like loose ones (they play from
+/// RAM through the `VideoInput::Bytes` seam — no longer path-only); recognition ≠
+/// playability, same as the filesystem scanner's rule.
+pub fn is_supported_archive_entry(ext: &str) -> bool {
+    is_supported_extension(ext) || crate::video::VideoContainer::from_extension(ext).is_some()
 }
 
 /// Whether a path is a library item the **filesystem scanner** lists: a supported image
@@ -615,7 +621,7 @@ pub fn open_archive(
         load_seven_z(path, password, &pb_source::OpenProgress::new(), mt_headroom)
     } else {
         let has_password = password.is_some();
-        let zs = ZipSource::open(path, password, is_supported_extension)?;
+        let zs = ZipSource::open(path, password, is_supported_archive_entry)?;
         // Encrypted but no password supplied -> prompt for one.
         if zs.needs_password() {
             return Err(crate::archive::ArchiveOpenError::PasswordRequired);
@@ -658,7 +664,7 @@ pub fn seven_z_preflight_within(
     password: Option<&str>,
     budget: u64,
 ) -> Result<u64, crate::archive::ArchiveOpenError> {
-    let needed = seven_z_projected_bytes(path, password, is_supported_extension)?;
+    let needed = seven_z_projected_bytes(path, password, is_supported_archive_entry)?;
     if needed > budget {
         return Err(crate::archive::ArchiveOpenError::TooLarge { needed, budget });
     }
@@ -683,7 +689,7 @@ pub fn load_seven_z(
     let src = SevenZSource::open_with_progress(
         path,
         password,
-        is_supported_extension,
+        is_supported_archive_entry,
         Some(progress),
         mt_headroom,
     )?;
@@ -714,6 +720,103 @@ pub fn resolve_playlist(source: &Source, cursor: &open::Cursor) -> Resolved {
 }
 
 #[cfg(test)]
+mod archive_video_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_zip(tag: &str, files: &[(&str, &[u8])]) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "pb_scan_av_{tag}_{}_{}.zip",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("t").len()
+        ));
+        let f = std::fs::File::create(&path).unwrap();
+        let mut zw = zip::ZipWriter::new(f);
+        for (name, bytes) in files {
+            zw.start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zw.write_all(bytes).unwrap();
+        }
+        zw.finish().unwrap();
+        path
+    }
+
+    #[test]
+    fn the_archive_predicate_unions_images_and_video_containers() {
+        for ext in ["jpg", "PNG", "mp4", "MOV", "mkv", "webm"] {
+            assert!(is_supported_archive_entry(ext), "{ext} must be indexable");
+        }
+        for ext in ["txt", "exe", "pdf", ""] {
+            assert!(!is_supported_archive_entry(ext), "{ext} must be excluded");
+        }
+    }
+
+    /// The reported bug: an archive containing ONLY videos refused to open
+    /// (`ArchiveOpenError::Empty`). It must open as a playlist of typed video items.
+    #[test]
+    fn a_video_only_zip_opens_with_typed_video_items() {
+        let zip = write_zip(
+            "vidonly",
+            &[
+                ("b_clip.MOV", b"fake mov".as_slice()),
+                ("a_clip.mp4", b"fake mp4"),
+            ],
+        );
+        let r = open_archive(&zip, None).expect("a video-only archive must open");
+        assert_eq!(r.source.len(), 2);
+        let names: Vec<&str> = (0..2).map(|i| r.source.name(i)).collect();
+        assert_eq!(names, vec!["a_clip.mp4", "b_clip.MOV"]);
+        for i in 0..2 {
+            assert!(
+                matches!(
+                    crate::video::item_kind(r.source.as_ref(), i),
+                    crate::video::LibraryItemKind::Video(_)
+                ),
+                "entry {i} must classify as a video"
+            );
+        }
+        let _ = std::fs::remove_file(&zip);
+    }
+
+    /// Mixed archives interleave images and videos in one sorted deck, and the
+    /// classification per entry follows the name.
+    #[test]
+    fn a_mixed_zip_lists_images_and_videos_together() {
+        let zip = write_zip(
+            "mixed",
+            &[
+                ("photo.jpg", b"J".as_slice()),
+                ("clip.mp4", b"fake mp4"),
+                ("notes.txt", b"never indexed"),
+            ],
+        );
+        let r = open_archive(&zip, None).expect("open");
+        let names: Vec<&str> = (0..r.source.len()).map(|i| r.source.name(i)).collect();
+        assert_eq!(names, vec!["clip.mp4", "photo.jpg"]);
+        assert!(matches!(
+            crate::video::item_kind(r.source.as_ref(), 0),
+            crate::video::LibraryItemKind::Video(crate::video::VideoContainer::Mp4)
+        ));
+        assert!(matches!(
+            crate::video::item_kind(r.source.as_ref(), 1),
+            crate::video::LibraryItemKind::Image
+        ));
+        let _ = std::fs::remove_file(&zip);
+    }
+
+    /// A truly empty archive (nothing indexable at all) still refuses with `Empty`.
+    #[test]
+    fn a_zip_with_no_indexable_entries_still_reports_empty() {
+        let zip = write_zip("empty", &[("readme.txt", b"nope".as_slice())]);
+        match open_archive(&zip, None) {
+            Err(crate::archive::ArchiveOpenError::Empty) => {}
+            other => panic!("expected Empty, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(&zip);
+    }
+}
+
+#[cfg(test)]
 mod dedup_tests {
     use super::{dedup_companions, CompanionFilter};
     use std::path::PathBuf;
@@ -724,15 +827,18 @@ mod dedup_tests {
 
     #[test]
     fn companion_mov_is_hidden_next_to_a_same_stem_image() {
+        // The still is a `.jpg` so the pair resolves in every build config: HEIC is an
+        // image only where a still decoder exists (WIC/ImageIO, or Linux + `libheif`),
+        // and this test asserts the companion-dedup mechanics, not the still's format.
         let got = dedup_companions(
             vec![
-                p(r"D:\x\IMG_1.HEIC"),
+                p(r"D:\x\IMG_1.jpg"),
                 p(r"D:\x\IMG_1.MOV"),
                 p(r"D:\x\IMG_2.jpg"),
             ],
             None,
         );
-        assert_eq!(got, vec![p(r"D:\x\IMG_1.HEIC"), p(r"D:\x\IMG_2.jpg")]);
+        assert_eq!(got, vec![p(r"D:\x\IMG_1.jpg"), p(r"D:\x\IMG_2.jpg")]);
     }
 
     #[test]
@@ -762,15 +868,18 @@ mod dedup_tests {
 
     #[test]
     fn pairing_is_per_directory_and_case_insensitive() {
+        // Forward-slash paths so the directory split is real on every platform (Windows
+        // Path treats `/` as a separator too; `D:\a\…` would collapse to one component on
+        // Unix and defeat the per-directory check). A `.jpg` still resolves in every config.
         let got = dedup_companions(
             vec![
-                p(r"D:\a\img_1.heic"),
-                p(r"D:\a\IMG_1.MOV"), // pairs (case-insensitive stem, same dir)
-                p(r"D:\b\IMG_1.MOV"), // different dir — no still there, stays
+                p("/a/img_1.jpg"),
+                p("/a/IMG_1.MOV"), // pairs (case-insensitive stem, same dir)
+                p("/b/IMG_1.MOV"), // different dir — no still there, stays
             ],
             None,
         );
-        assert_eq!(got, vec![p(r"D:\a\img_1.heic"), p(r"D:\b\IMG_1.MOV")]);
+        assert_eq!(got, vec![p("/a/img_1.jpg"), p("/b/IMG_1.MOV")]);
     }
 
     #[test]
@@ -828,7 +937,10 @@ mod stream_video_tests {
         let dir = std::env::temp_dir().join(format!("pb_scanvid_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("sub")).unwrap();
-        for name in ["IMG_1.heic", "IMG_1.mov", "clip.mp4", "photo.jpg"] {
+        // `.jpg` still (not `.heic`) so the companion pairs in every build config — HEIC
+        // is only a recognized image where a still decoder exists (WIC/ImageIO, or Linux
+        // + `libheif`); this test is about the scanner hiding the companion, not the format.
+        for name in ["IMG_1.jpg", "IMG_1.mov", "clip.mp4", "photo.jpg"] {
             std::fs::write(dir.join(name), b"x").unwrap();
         }
         std::fs::write(dir.join("sub").join("solo.mov"), b"x").unwrap();
@@ -871,7 +983,7 @@ mod stream_video_tests {
         // Case-insensitive name order: clip < IMG_1 < photo, then the subfolder.
         let expect = [
             dir.join("clip.mp4"),
-            dir.join("IMG_1.heic"),
+            dir.join("IMG_1.jpg"),
             dir.join("photo.jpg"),
             dir.join("sub").join("solo.mov"),
         ];

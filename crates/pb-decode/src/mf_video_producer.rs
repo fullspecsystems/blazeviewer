@@ -15,7 +15,6 @@
 //! MPEG-TS starts at ~766 ms in the phase-0 spike). Reads only, RAM-only: the
 //! no-trace guarantee holds on the playback path exactly as it does for stills.
 
-use std::path::Path;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
@@ -28,7 +27,7 @@ use crate::mf_poster::{
 };
 use crate::mf_video::{ensure_mf, sample_to_rgba};
 use crate::video::{
-    SeekGeneration, VideoColorInfo, VideoFrame, VideoProducerEvent, VideoProducerMsg,
+    SeekGeneration, VideoColorInfo, VideoFrame, VideoInput, VideoProducerEvent, VideoProducerMsg,
     VideoSessionId,
 };
 use crate::{FitBox, PixelFormat};
@@ -37,8 +36,11 @@ use crate::{FitBox, PixelFormat};
 /// dedicated thread for it — never the event loop). Returns when the stream ends,
 /// the session says stop, the session is dropped, or decoding fails; every exit
 /// path retires the reader off-thread (HEVC teardown blocks ~1 s).
+///
+/// `input` is the container: a filesystem path, or an archive entry's in-RAM
+/// bytes (`Arc`-shared, so the seek reopens below cost a refcount, not a copy).
 pub fn run_video_producer(
-    path: &Path,
+    input: &VideoInput,
     fit: Option<FitBox>,
     session_id: VideoSessionId,
     generation: SeekGeneration,
@@ -50,7 +52,7 @@ pub fn run_video_producer(
         let _ = events.send(VideoProducerEvent::Failed { session_id, error });
     };
 
-    let reader = match unsafe { open_video_reader(path) } {
+    let reader = match unsafe { open_video_reader(input) } {
         Ok(r) => r,
         Err(e) => return fail(e.to_string()),
     };
@@ -79,7 +81,7 @@ pub fn run_video_producer(
     let mut hw_open = None;
     if want_hw {
         if let Some(mgr) = unsafe { crate::mf_hw::dxgi_manager() } {
-            match unsafe { crate::mf_hw::open_nv12_reader(path, &mgr, fitted) } {
+            match unsafe { crate::mf_hw::open_nv12_reader(input, &mgr, fitted) } {
                 Ok((r, hw_w, hw_h)) if hw_w > 0 && hw_h > 0 && hw_w % 2 == 0 && hw_h % 2 == 0 => {
                     hw_open = Some((r, hw_w, hw_h));
                     manager = Some(mgr);
@@ -185,7 +187,7 @@ pub fn run_video_producer(
             let abs_target = origin
                 .unwrap_or(0)
                 .saturating_add((target.as_nanos() / 100) as i64);
-            let reader = match unsafe { reopen_at(path, (w, h), abs_target, manager.as_ref()) } {
+            let reader = match unsafe { reopen_at(input, (w, h), abs_target, manager.as_ref()) } {
                 Ok((r, k)) => {
                     kind = k;
                     r
@@ -405,9 +407,11 @@ unsafe fn read_one(
 
 /// Fresh reader for a seek landing: open + negotiate the SAME output kind and
 /// geometry the session fixed at start, then position **before the first read**
-/// (~0 ms; spike E). The hw path reuses the producer's one DXGI manager.
+/// (~0 ms; spike E). The hw path reuses the producer's one DXGI manager. An
+/// in-RAM input reopens over the same shared bytes (a fresh stream instance —
+/// no re-read, no copy).
 unsafe fn reopen_at(
-    path: &Path,
+    input: &VideoInput,
     dims: (u32, u32),
     position_hns: i64,
     manager: Option<&windows::Win32::Media::MediaFoundation::IMFDXGIDeviceManager>,
@@ -421,7 +425,7 @@ unsafe fn reopen_at(
     let (reader, kind) = match manager {
         Some(mgr) => {
             let (reader, nw, nh) =
-                crate::mf_hw::open_nv12_reader(path, mgr, Some(dims)).map_err(mf_open_msg)?;
+                crate::mf_hw::open_nv12_reader(input, mgr, Some(dims)).map_err(mf_open_msg)?;
             if (nw, nh) != dims {
                 retire_reader(reader);
                 return Err("video output size changed across a seek".into());
@@ -429,7 +433,7 @@ unsafe fn reopen_at(
             (reader, OutKind::Nv12)
         }
         None => {
-            let reader = open_video_reader(path).map_err(|e| e.to_string())?;
+            let reader = open_video_reader(input).map_err(|e| e.to_string())?;
             let (nw, nh, stride) = negotiate_rgb32(&reader, Some(dims))
                 .or_else(|_| negotiate_rgb32(&reader, None))
                 .map_err(mf_open_msg)?;
@@ -478,10 +482,14 @@ mod tests {
     }
 
     fn spawn(path: std::path::PathBuf) -> (Sender<VideoProducerMsg>, Receiver<VideoProducerEvent>) {
+        spawn_input(VideoInput::Path(path))
+    }
+
+    fn spawn_input(input: VideoInput) -> (Sender<VideoProducerMsg>, Receiver<VideoProducerEvent>) {
         let (events_tx, events_rx) = channel();
         let (msgs_tx, msgs_rx) = channel();
         std::thread::spawn(move || {
-            run_video_producer(&path, None, SID, GEN, events_tx, msgs_rx);
+            run_video_producer(&input, None, SID, GEN, events_tx, msgs_rx);
         });
         (msgs_tx, events_rx)
     }
@@ -697,7 +705,8 @@ mod tests {
                 eprintln!("no D3D11 hardware device — skipping");
                 return;
             };
-            let (reader, w, h) = match crate::mf_hw::open_nv12_reader(&fixture(), &mgr, None) {
+            let input = VideoInput::Path(fixture());
+            let (reader, w, h) = match crate::mf_hw::open_nv12_reader(&input, &mgr, None) {
                 Ok(x) => x,
                 Err(e) => {
                     eprintln!("hw NV12 open failed ({e}) — skipping (fallback covers this)");
@@ -733,6 +742,67 @@ mod tests {
     #[test]
     fn a_bad_path_fails_cleanly() {
         let (_msgs, events) = spawn(std::path::PathBuf::from(r"C:\nope\missing.mp4"));
+        match events.recv_timeout(Duration::from_secs(10)).expect("event") {
+            VideoProducerEvent::Failed { session_id, .. } => assert_eq!(session_id, SID),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    /// Archive playback's core claim: the producer streams, seeks (a reopen over the
+    /// SAME shared bytes — no path anywhere), and reports EOS from an in-RAM
+    /// container exactly like a file.
+    #[test]
+    fn producer_streams_and_seeks_from_in_ram_bytes() {
+        let data = std::sync::Arc::new(std::fs::read(fixture()).expect("fixture bytes"));
+        let (msgs, events) = spawn_input(VideoInput::Bytes {
+            data,
+            name: "sub/clip.mp4".into(),
+        });
+        match events
+            .recv_timeout(Duration::from_secs(10))
+            .expect("opened")
+        {
+            VideoProducerEvent::Opened { width, height, .. } => {
+                assert_eq!((width, height), (64, 64), "bytes open ≡ path open");
+            }
+            other => panic!("expected Opened, got {other:?}"),
+        }
+        // One sequential frame…
+        msgs.send(VideoProducerMsg::Credit).unwrap();
+        match events.recv_timeout(Duration::from_secs(10)).expect("frame") {
+            VideoProducerEvent::Frame(f) => {
+                assert!(f.is_well_formed());
+                assert_eq!(f.pts, Duration::ZERO);
+            }
+            other => panic!("expected a frame, got {other:?}"),
+        }
+        // …then a seek, which exercises the fresh-reader reopen from the bytes.
+        let g1 = SeekGeneration(1);
+        msgs.send(VideoProducerMsg::SeekTo {
+            target: Duration::from_millis(500),
+            generation: g1,
+        })
+        .unwrap();
+        msgs.send(VideoProducerMsg::Credit).unwrap();
+        match events
+            .recv_timeout(Duration::from_secs(10))
+            .expect("landing")
+        {
+            VideoProducerEvent::Frame(f) => {
+                assert_eq!(f.seek_generation, g1);
+                assert!(f.pts >= Duration::from_millis(500), "landed at {:?}", f.pts);
+            }
+            other => panic!("expected the landing frame, got {other:?}"),
+        }
+    }
+
+    /// Hostile in-RAM bytes fail with a structured error, never a hang or crash.
+    #[test]
+    fn garbage_bytes_fail_cleanly() {
+        let (_msgs, events) = spawn_input(VideoInput::Bytes {
+            data: std::sync::Arc::new(vec![0x55u8; 4096]),
+            name: "junk.mp4".into(),
+        });
         match events.recv_timeout(Duration::from_secs(10)).expect("event") {
             VideoProducerEvent::Failed { session_id, .. } => assert_eq!(session_id, SID),
             other => panic!("expected Failed, got {other:?}"),

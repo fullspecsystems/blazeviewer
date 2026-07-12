@@ -66,6 +66,9 @@ livephoto = ["pb-decode/livephoto"]
 # Generate QR bitmaps for the image_text decode tests (never shipped). Default features
 # pull the `image` crate; we only need the raw module colors.
 qrcode = { version = "0.14", default-features = false }
+# Build tiny ZIPs for the archive-open tests (video-only archives must open —
+# scan.rs). Same version + features as pb-source, so the lockfile is unchanged.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Physical-RAM query for the 7z eager-decompress pre-flight (archive.rs), migrated off the shell
 # (NS0 5.6 Step 2c). Platform syscalls isolated in that one module; already in the workspace lock.

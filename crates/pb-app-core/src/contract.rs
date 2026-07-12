@@ -432,9 +432,11 @@ pub enum CoreEffect {
     /// (task #79 phase 5). The shell owns the platform player (WinRT `MediaPlayer`)
     /// and reports its clock back ~4×/s via `AppCore::video_audio_clock` — the audio
     /// side of the core⇄shell clock bridge. `muted` applies the user's mute state at
-    /// open (the clock still runs muted, so A/V sync is mute-independent).
+    /// open (the clock still runs muted, so A/V sync is mute-independent). `input`
+    /// is the same container the video producer reads: a path for a loose file, or
+    /// an archive entry's `Arc`-shared in-RAM bytes (one copy feeds both pipelines).
     StartVideoAudio {
-        path: PathBuf,
+        input: crate::video::VideoInput,
         session_id: crate::video::VideoSessionId,
         muted: bool,
     },

@@ -14,9 +14,7 @@
 //! `open` returning `None` makes the shell report `Failed`, and the session
 //! degrades to silent playback on its monotonic clock.
 
-use std::path::Path;
-
-use pb_app_core::video::{AudioClockSample, VideoSessionId};
+use pb_app_core::video::{AudioClockSample, VideoInput, VideoSessionId};
 
 pub use imp::VideoAudio;
 
@@ -29,7 +27,11 @@ mod imp {
     pub struct VideoAudio;
 
     impl VideoAudio {
-        pub fn open(_path: &Path, _session_id: VideoSessionId, _muted: bool) -> Option<VideoAudio> {
+        pub fn open(
+            _input: &VideoInput,
+            _session_id: VideoSessionId,
+            _muted: bool,
+        ) -> Option<VideoAudio> {
             None
         }
         pub fn pause(&self) {}
@@ -54,6 +56,8 @@ mod imp {
     use windows::Foundation::Uri;
     use windows::Media::Core::{ISingleSelectMediaTrackList, MediaSource};
     use windows::Media::Playback::{MediaPlaybackItem, MediaPlaybackState, MediaPlayer};
+    use windows::Storage::Streams::IRandomAccessStream;
+    use windows::Win32::System::WinRT::{CreateRandomAccessStreamOverStream, BSOS_DEFAULT};
 
     /// A WinRT `MediaPlayer` over the video file, playing its audio track ONLY —
     /// the picture is the `VideoSession`'s job, so the item's video tracks are
@@ -70,12 +74,31 @@ mod imp {
     }
 
     impl VideoAudio {
-        /// Open the file's audio **paused** (`AutoPlay` off, no `Play()` yet): the
-        /// source loads on Media Foundation's own threads while the video preroll
-        /// fills, and the core's `ResumeVideoAudio` starts the two together.
-        pub fn open(path: &Path, session_id: VideoSessionId, muted: bool) -> Option<VideoAudio> {
-            let uri = Uri::CreateUri(&HSTRING::from(crate::live_audio::file_uri(path)?)).ok()?;
-            let source = MediaSource::CreateFromUri(&uri).ok()?;
+        /// Open the container's audio **paused** (`AutoPlay` off, no `Play()` yet):
+        /// the source loads on Media Foundation's own threads while the video
+        /// preroll fills, and the core's `ResumeVideoAudio` starts the two together.
+        /// A path opens by URI; an archive entry's in-RAM bytes through a WinRT
+        /// stream over the same `Arc`-shared buffer the video producer reads —
+        /// RAM-only, one resident copy.
+        pub fn open(
+            input: &VideoInput,
+            session_id: VideoSessionId,
+            muted: bool,
+        ) -> Option<VideoAudio> {
+            let source = match input {
+                VideoInput::Path(path) => {
+                    let uri =
+                        Uri::CreateUri(&HSTRING::from(crate::live_audio::file_uri(path)?)).ok()?;
+                    MediaSource::CreateFromUri(&uri).ok()?
+                }
+                VideoInput::Bytes { data, name } => {
+                    let istream = pb_decode::mem_istream(data.clone());
+                    let stream: IRandomAccessStream =
+                        unsafe { CreateRandomAccessStreamOverStream(&istream, BSOS_DEFAULT).ok()? };
+                    let ct = pb_app_core::video::video_content_type(name).unwrap_or("video/mp4");
+                    MediaSource::CreateFromStream(&stream, &HSTRING::from(ct)).ok()?
+                }
+            };
             let item = MediaPlaybackItem::Create(&source).ok()?;
             let player = MediaPlayer::new().ok()?;
             player.SetAutoPlay(false).ok()?;
@@ -167,6 +190,42 @@ mod imp {
         fn drop(&mut self) {
             let _ = self.player.Pause();
             let _ = self.player.Close(); // IClosable — tears down the media pipeline
+        }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use pb_app_core::video::AudioClockState;
+
+    /// The archive audio path end to end: a WinRT `MediaPlayer` over the tone
+    /// fixture's **in-RAM bytes** (`CreateRandomAccessStreamOverStream` over the
+    /// shared `IStream`) must open and report a non-`Opening` clock state — no
+    /// path, no disk, the same source shape a played archive entry uses.
+    #[test]
+    fn video_audio_opens_from_in_ram_bytes() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../pb-decode/tests/fixtures/video/color_with_tone.mp4");
+        let data = std::sync::Arc::new(std::fs::read(fixture).expect("fixture bytes"));
+        let input = VideoInput::Bytes {
+            data,
+            name: "sub/clip.mp4".into(),
+        };
+        // Muted: the test must not make noise; the clock runs regardless.
+        let audio = VideoAudio::open(&input, VideoSessionId(9), true).expect("player");
+        let t0 = std::time::Instant::now();
+        loop {
+            if let Some(s) = audio.sample() {
+                if s.state != AudioClockState::Opening {
+                    break; // opened (paused) — the byte-stream source works
+                }
+            }
+            assert!(
+                t0.elapsed() < std::time::Duration::from_secs(10),
+                "the in-RAM stream source must finish opening"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }
 }

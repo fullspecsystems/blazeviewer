@@ -21,6 +21,70 @@ use std::time::Duration;
 
 use crate::{ColorTransform, PixelFormat};
 
+/// Where a video's container bytes come from — the input seam every platform
+/// reader opens from. `Path` streams from disk (the loose-file case); `Bytes`
+/// serves an **in-RAM** container (an archive entry — RAM-only per the privacy
+/// guarantee, never extracted to disk). Cheap to clone: the bytes are shared
+/// (`Arc`), so one copy feeds the producer, every seek-reopen, the poster/probe,
+/// and the shell audio player.
+#[derive(Clone)]
+pub enum VideoInput {
+    /// A file on disk, streamed by the platform reader.
+    Path(std::path::PathBuf),
+    /// An in-RAM container. `name` must end in the real extension — it routes
+    /// the container handler lookup (byte streams have no URL to sniff) and
+    /// names the item in error copy.
+    Bytes {
+        data: std::sync::Arc<Vec<u8>>,
+        name: String,
+    },
+}
+
+impl VideoInput {
+    /// The item's display name, for error/log copy.
+    pub fn display_name(&self) -> String {
+        match self {
+            VideoInput::Path(p) => p.display().to_string(),
+            VideoInput::Bytes { name, .. } => name.clone(),
+        }
+    }
+}
+
+// Manual: never dump the container bytes into logs/assertions.
+impl std::fmt::Debug for VideoInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VideoInput::Path(p) => f.debug_tuple("Path").field(p).finish(),
+            VideoInput::Bytes { data, name } => f
+                .debug_struct("Bytes")
+                .field("len", &data.len())
+                .field("name", name)
+                .finish(),
+        }
+    }
+}
+
+/// The MIME content type for a video file/entry name, when one of the recognized
+/// container extensions matches. Feeds the byte-stream container resolution on
+/// both platform seams (MF byte-stream attributes, WinRT `MediaSource` streams).
+pub fn video_content_type(name: &str) -> Option<&'static str> {
+    let ext = name.rsplit_once('.').map(|(_, e)| e)?;
+    Some(match ext.to_ascii_lowercase().as_str() {
+        "mp4" | "m4v" => "video/mp4",
+        "mov" | "qt" => "video/quicktime",
+        "mkv" => "video/x-matroska",
+        "webm" => "video/webm",
+        "avi" => "video/avi",
+        "wmv" => "video/x-ms-wmv",
+        "asf" => "video/x-ms-asf",
+        "mpg" | "mpeg" => "video/mpeg",
+        "mts" | "m2ts" => "video/mp2t",
+        "3gp" => "video/3gpp",
+        "3g2" => "video/3gpp2",
+        _ => return None,
+    })
+}
+
 /// Identifies one playback session of one item. A new session (open, replay after
 /// `Stopped`, navigate back to the item) gets a fresh id; frames from a dead session
 /// are dropped at the consumer no matter how they raced teardown.

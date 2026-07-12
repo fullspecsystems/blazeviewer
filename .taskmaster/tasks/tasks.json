@@ -964,7 +964,7 @@
             "id": 1,
             "title": "Phase 0: contracts + platform spikes",
             "description": "Define LibraryItemKind, VideoMetadata, VideoFrame/VideoColorInfo, session states, AudioClockSample, byte-budget invariants. Spike MF fitted-output scaling + stream deselection + PTS + seek-forward + cancel cost; macOS reader-recreate + prepareToPlay; Linux incremental audio. Lock the SDR guarantee on real phone footage. Spike results replace the schedule estimate. PROGRESS 2026-07-11: contracts landed (pb-decode/src/video.rs frame contract; pb-app-core/src/video.rs items/states/audio-clock/byte-budget, 23 unit tests) and ALL Windows MF spikes measured - results + design consequences in .taskmaster/docs/79-phase0-spike-results.md (verdict: no blockers; seek = fresh reader ~350ms 4K landing, HEVC teardown/SetCurrentPosition ~1s confirmed codec-specific, fitted-output scaling honored, full container sweep OK on extension-equipped box, HLG->SDR plausible, nonzero start PTS real). Remaining (not Windows-blocking): macOS reader-recreate + prepareToPlay spikes, Linux incremental audio prototype, clean-VM sweep, real HLG corpus clip. Windows milestone estimate stands (2-3wk).",
-            "status": "in-progress"
+            "status": "done"
           },
           {
             "id": 2,
@@ -1012,13 +1012,13 @@
             "id": 9,
             "title": "Linux + macOS video playback parity",
             "description": "Port the video producer per platform behind the same VideoProducerEvent/Msg protocol: Linux = FFmpeg (reuse ff_live decode; incremental PCM audio to pw-cat or a paced pipe with written-sample telemetry as the honest clock); macOS = AVAssetReader producer (recreate with a new timeRange per seek - the range is immutable once reading starts) + AVAudioPlayer clock (prepareToPlay off the UI path). Format matrices per platform; clean-VM (no Store extensions) Windows sweep for the out-of-box matrix row; real HLG phone clip for the corpus. The VideoSession core, contracts, and all session tests are platform-neutral and reused as-is.",
-            "status": "pending"
+            "status": "in-progress"
           },
           {
             "id": 10,
             "title": "GPU-accelerated video decode (the 4K60 escalation)",
             "description": "OWNER DECISION 2026-07-11 (end of session): GPU decode is NOT optional - software playback is only acceptable for the lowest-resolution videos; treat this as REQUIRED for the video feature to ship. Owner-confirmed 2026-07-11: 4K60 HEVC at full-screen output is NOT smooth on the software path even after the double-decode + credit fixes - the ADR-012 gate has tripped. Spike ladder, cheapest first, all behind the existing producer seam: (1) NV12 output from the source reader + YUV->RGB in-shader (pure wgpu, portable; 12bpp vs 32 = 2.7x less data through every CPU copy; renderer needs a two-plane texture + a convert path - phase-3 ReuseSlot extends naturally); (2) MF hardware decode via MF_SOURCE_READER_D3D_MANAGER + MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS (NVDEC on the 5090; decode CPU -> ~0; with NV12 CPU readback this is likely comfortable 4K60); (3) full zero-copy: share the decoded D3D11 texture into wgpu (DX12 shared-handle interop) - the endgame, most plumbing. Also worth measuring on the current path: IMF2DBuffer::Lock2D to skip ConvertToContiguousBuffer's internal 33MB copy. Measure each rung with the video_probe spike + the P->first-frame and steady-state tests before climbing further.",
-            "status": "in-progress"
+            "status": "review"
           }
         ]
       },

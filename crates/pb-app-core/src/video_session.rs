@@ -134,6 +134,25 @@ pub struct ActiveVideo {
     /// Whether the shell audio player has been started for this session (set once
     /// the producer's `Opened` reports a track; silent clips never start one).
     pub audio_started: bool,
+    /// The container the producer reads — filled synchronously for a path-backed
+    /// item, and by the producer thread for an archive entry (its bytes fetch runs
+    /// off the event loop; the slot is set *before* the producer can report
+    /// `Opened`, so the audio start below always finds it). The audio player opens
+    /// the same `Arc`-shared bytes: one resident copy per playing clip.
+    pub media: std::sync::Arc<std::sync::OnceLock<crate::video::VideoInput>>,
+}
+
+impl ActiveVideo {
+    /// Bundle a session with its item; the media slot starts empty (the starter
+    /// fills it — synchronously for a path, from the fetch thread for bytes).
+    pub fn new(session: VideoSession, item: usize) -> Self {
+        ActiveVideo {
+            session,
+            item,
+            audio_started: false,
+            media: std::sync::Arc::new(std::sync::OnceLock::new()),
+        }
+    }
 }
 
 /// See the module docs. Construct with [`VideoSession::new`], hand the returned
@@ -1558,10 +1577,10 @@ mod tests {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../pb-decode/tests/fixtures/video/black_then_color.mp4");
         let (mut s, io) = VideoSession::new(SID, 64 * 64 * 4);
-        let path = fixture.clone();
+        let input = pb_decode::VideoInput::Path(fixture.clone());
         std::thread::spawn(move || {
             pb_decode::run_video_producer(
-                &path,
+                &input,
                 None,
                 SID,
                 SeekGeneration::FIRST,
@@ -1636,7 +1655,7 @@ mod tests {
                 },
                 Instant::now(),
             );
-            let p = path.clone();
+            let p = pb_decode::VideoInput::Path(path.clone());
             std::thread::spawn(move || {
                 pb_decode::run_video_producer(
                     &p,

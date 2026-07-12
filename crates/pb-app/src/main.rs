@@ -2598,12 +2598,12 @@ impl App {
                     // the core decides when. Opens PAUSED — the core resumes it
                     // together with the video preroll.
                     contract::CoreEffect::StartVideoAudio {
-                        path,
+                        input,
                         session_id,
                         muted,
                     } => {
                         self.video_audio_ready = false; // fast sampling until it opens
-                        self.video_audio = video_audio::VideoAudio::open(&path, session_id, muted);
+                        self.video_audio = video_audio::VideoAudio::open(&input, session_id, muted);
                         if self.video_audio.is_none() {
                             // No player (creation failed / platform stub): tell the
                             // session once so it degrades to silent immediately
@@ -4411,10 +4411,10 @@ mod tests {
         // A real playback session: play, seek forward (recreates the reader), play out.
         let sid = VideoSessionId(1);
         let (mut session, io) = VideoSession::new(sid, 64 * 64 * 4);
-        let path = clip.clone();
+        let input = pb_decode::VideoInput::Path(clip.clone());
         std::thread::spawn(move || {
             pb_decode::run_video_producer(
-                &path,
+                &input,
                 None,
                 sid,
                 SeekGeneration::FIRST,
@@ -4467,6 +4467,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("mkdir sandbox");
         const IMG: &[u8] = include_bytes!("../icons/photoblaze.png");
+        const CLIP: &[u8] =
+            include_bytes!("../../pb-decode/tests/fixtures/video/black_then_color.mp4");
         let zip_path = dir.join("album.zip");
         {
             let f = fs::File::create(&zip_path).expect("create zip");
@@ -4477,6 +4479,10 @@ mod tests {
                 zw.start_file(name, opts).expect("start entry");
                 zw.write_all(IMG).expect("write entry");
             }
+            // A video entry too: its poster decodes from in-RAM bytes through the
+            // MF byte stream — that path must be as write-free as the image one.
+            zw.start_file("sub/clip.mp4", opts).expect("start entry");
+            zw.write_all(CLIP).expect("write entry");
             zw.finish().expect("finish zip");
         }
 
@@ -4485,12 +4491,17 @@ mod tests {
         // The disk-touching code the app runs while viewing a zip.
         let resolved =
             scan::resolve_playlist(&Source::Archive(zip_path.clone()), &open::Cursor::First);
-        assert_eq!(resolved.source.len(), 3, "zip should yield three images");
+        assert_eq!(
+            resolved.source.len(),
+            4,
+            "zip should yield three images + one video"
+        );
         let fit = FitBox {
             max_width: 64,
             max_height: 64,
         };
         for i in 0..resolved.source.len() {
+            // Images decode; the video entry posters via the in-RAM byte stream.
             decode_item(resolved.source.as_ref(), i, Some(fit), false).expect("decode");
             let bytes = resolved.source.bytes(i).expect("read for exif");
             let _ = read_exif_fields(&bytes);

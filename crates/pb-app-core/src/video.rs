@@ -13,8 +13,8 @@ use std::path::Path;
 use std::time::Duration;
 
 pub use pb_decode::video::{
-    SeekGeneration, VideoColorInfo, VideoFrame, VideoProducerEvent, VideoProducerMsg,
-    VideoSessionId,
+    video_content_type, SeekGeneration, VideoColorInfo, VideoFrame, VideoInput, VideoProducerEvent,
+    VideoProducerMsg, VideoSessionId,
 };
 use pb_source::PhotoSource;
 
@@ -31,8 +31,9 @@ use pb_source::PhotoSource;
 pub enum LibraryItemKind {
     /// A still (or animated) image: the existing decode path, bytes-in-RAM.
     Image,
-    /// A filesystem video, identified by container. Always path-backed — archive
-    /// entries are never classified as video (the archive predicate excludes them).
+    /// A video, identified by container. Path-backed for a filesystem item (the
+    /// platform readers stream it from disk); an archive entry plays from its
+    /// in-RAM bytes through the `VideoInput::Bytes` seam.
     Video(VideoContainer),
 }
 
@@ -67,9 +68,9 @@ pub enum VideoContainer {
 
 impl VideoContainer {
     /// Classify a file extension (no dot, any case) as a recognized video container.
-    /// Deliberately separate from `pb_decode::is_supported_extension` (images): the
-    /// archive scanners keep receiving the images-only predicate, so videos inside
-    /// ZIP/7z are never indexed (path-only invariant).
+    /// Deliberately separate from `pb_decode::is_supported_extension` (images); the
+    /// archive predicate (`scan::is_supported_archive_entry`) is the union of both,
+    /// so videos inside a ZIP/7z are indexed and typed like loose ones.
     pub fn from_extension(ext: &str) -> Option<VideoContainer> {
         Some(match ext.to_ascii_lowercase().as_str() {
             "mp4" | "m4v" => VideoContainer::Mp4,
@@ -115,14 +116,15 @@ pub fn classify_library_file(path: &Path) -> Option<LibraryItemKind> {
 }
 
 /// What item `item` of `source` *is* — the dispatch the decode scheduler runs **before**
-/// any `source.bytes()` request. O(1) and pure: video is decided by the path's extension
-/// (the same rule the scanner admitted it under). Archive entries have no filesystem
-/// path and the archive predicate is images-only, so they are always `Image`.
+/// any `source.bytes()` request. O(1) and pure: video is decided by the item **name's**
+/// extension (the same rule the scanner/archive predicate admitted it under). The name
+/// covers both worlds — a filesystem item's file name and an archive entry's
+/// archive-relative name both end in the real extension (a `PhotoSource` contract).
 pub fn item_kind(source: &dyn PhotoSource, item: usize) -> LibraryItemKind {
     source
-        .path(item)
-        .and_then(|p| p.extension())
-        .and_then(|e| e.to_str())
+        .name(item)
+        .rsplit_once('.')
+        .map(|(_, ext)| ext)
         .and_then(VideoContainer::from_extension)
         .map(LibraryItemKind::Video)
         .unwrap_or(LibraryItemKind::Image)
@@ -417,8 +419,8 @@ mod tests {
 
     #[test]
     fn video_and_image_extension_sets_are_disjoint() {
-        // The predicate split's core guarantee: nothing is both an image (archive-
-        // indexable, bytes-decoded) and a video (path-only).
+        // The predicate split's core guarantee: nothing is both an image
+        // (bytes-decoded) and a video (streamed by the platform readers).
         for ext in [
             "mp4", "m4v", "mov", "qt", "mkv", "webm", "avi", "wmv", "asf", "mpg", "mpeg", "mts",
             "m2ts", "3gp", "3g2",
@@ -441,9 +443,13 @@ mod tests {
             classify_library_file(&PathBuf::from(r"C:\pics\a.JPG")),
             Some(LibraryItemKind::Image)
         );
+        // HEIC is an image only where a still decoder exists (WIC on Windows, ImageIO on
+        // macOS, `libheif` on Linux). Mirror `is_supported_extension` so classify's answer
+        // is asserted correctly in every build config rather than assuming Windows/macOS.
+        let heic_kind = pb_decode::is_supported_extension("heic").then_some(LibraryItemKind::Image);
         assert_eq!(
             classify_library_file(&PathBuf::from(r"C:\pics\a.heic")),
-            Some(LibraryItemKind::Image)
+            heic_kind
         );
         assert_eq!(
             classify_library_file(&PathBuf::from(r"C:\pics\clip.MP4")),
@@ -464,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn item_kind_types_fs_videos_and_never_archive_entries() {
+    fn item_kind_types_fs_videos_by_name() {
         use pb_source::FsSource;
         use std::path::PathBuf;
         // Paths need not exist — classification is pure (no I/O before dispatch).
@@ -482,8 +488,31 @@ mod tests {
             item_kind(&src, 2),
             LibraryItemKind::Video(VideoContainer::Webm)
         );
-        // Out of range degrades to Image (no path), matching the bytes-decode fallback.
+        // Out of range degrades to Image (empty name), matching the bytes-decode fallback.
         assert_eq!(item_kind(&src, 99), LibraryItemKind::Image);
+    }
+
+    /// Archive entries classify by their entry name — a video inside a ZIP/7z is a
+    /// typed `Video` item exactly like a loose one (it plays from RAM bytes).
+    #[test]
+    fn item_kind_types_archive_video_entries_by_name() {
+        struct FakeArchive;
+        impl pb_source::PhotoSource for FakeArchive {
+            fn len(&self) -> usize {
+                2
+            }
+            fn name(&self, i: usize) -> &str {
+                ["folder/clip.MP4", "folder/photo.jpg"][i]
+            }
+            fn bytes(&self, _i: usize) -> std::io::Result<Vec<u8>> {
+                unreachable!("item_kind must never read bytes")
+            }
+        }
+        assert_eq!(
+            item_kind(&FakeArchive, 0),
+            LibraryItemKind::Video(VideoContainer::Mp4)
+        );
+        assert_eq!(item_kind(&FakeArchive, 1), LibraryItemKind::Image);
     }
 
     #[test]
