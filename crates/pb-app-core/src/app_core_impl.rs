@@ -9322,7 +9322,10 @@ mod tests {
         core.video_osd_until = None;
         core.info_line = true;
         core.flash_video_controls();
-        assert!(core.video_osd_until.is_none(), "persistent line needs no flash");
+        assert!(
+            core.video_osd_until.is_none(),
+            "persistent line needs no flash"
+        );
 
         // No active video: never arms (can't flash a still's line).
         core.info_line = false;
