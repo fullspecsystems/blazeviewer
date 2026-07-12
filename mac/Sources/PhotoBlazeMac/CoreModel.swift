@@ -167,6 +167,11 @@ final class CoreModel {
         // errors, so this parse cannot fail; the positional paths it stashes are opened by
         // `openLaunchPathIfAny` once the canvas exists.
         core.apply_launch_args(Launch.argvVec(), RustString(Launch.versionString))
+        // Arm the Apple-Event echo filter: a bare-path launch re-delivers the argv
+        // path as a document-open (see Launch.filterLaunchEcho).
+        Launch.recordArgvPaths(
+            (0..<core.launch_path_count()).map { core.launch_path_at($0).toString() }
+        )
 
         // `--metrics` (task #78): print the core's per-stage p50/p95/p99 summary on quit
         // — the winit shell's post-`run_app` report. Always observed; the report is ""
@@ -354,7 +359,11 @@ final class CoreModel {
         // classify-and-open path as a drop. Buffered by AppDelegate if they arrive before
         // this handler is installed (a cold double-click launch).
         AppDelegate.installOpenHandler { [weak self] urls in
-            self?.openPaths(urls.map(\.path))
+            // Drop the document-open echo of a bare-path CLI launch (the same path
+            // arrives via parsed argv too); real Finder opens pass through untouched.
+            let fresh = Launch.filterLaunchEcho(urls)
+            guard !fresh.isEmpty else { return }
+            self?.openPaths(fresh.map(\.path))
         }
     }
 
@@ -1328,6 +1337,14 @@ final class CoreModel {
     /// Open dropped / Finder-opened paths (multi-select aware — the launch policy classifies).
     func openPaths(_ paths: [String]) {
         guard !paths.isEmpty else { return }
+        // Take focus. A drag-drop or Finder "Open With" targets PhotoBlaze, but macOS does
+        // NOT auto-activate a background app that only receives a drag/open — so without
+        // this the user lands on an unfocused window and has to click before interacting.
+        // Bring ourselves forward + make the window key; a no-op when already active (the
+        // in-app picker path). `hostWindow` is nil only on a cold pre-window launch, where
+        // applicationDidFinishLaunching already activates.
+        NSApp.activate()
+        hostWindow?.makeKeyAndOrderFront(nil)
         let vec = RustVec<RustString>()
         for p in paths {
             vec.push(value: RustString(p))
