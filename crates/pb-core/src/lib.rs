@@ -20,6 +20,7 @@ pub mod prefetch;
 pub mod ring;
 pub mod rng;
 pub mod shuffle;
+pub mod thumbs;
 
 pub use cache::{plan_residency, ResidencyPlan};
 pub use open::{plan, resolve_cursor, Cursor, LaunchInput, OpenPlan, Source};
@@ -28,3 +29,4 @@ pub use prefetch::{full_ring, prefetch_targets, prefetch_targets_scanning};
 pub use ring::{Reservation, ResidentRing};
 pub use rng::SplitMix64;
 pub use shuffle::ShuffleOrder;
+pub use thumbs::{InsertOutcome, ThumbCache, ThumbDemand, ThumbEntry, ThumbTier};

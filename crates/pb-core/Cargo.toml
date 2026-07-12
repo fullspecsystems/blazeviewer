@@ -11,4 +11,6 @@ description = "Pure navigation, prefetch, and cache-residency logic for PhotoBla
 [dependencies]
 
 [dev-dependencies]
-# proptest is added when we wire property-based invariants for nav/cache.
+# Property-based invariants for nav/cache policies (the CLAUDE.md TDD mandate);
+# first consumer: the thumbnail-cache budget/pinning invariants (task #83).
+proptest = "1"
