@@ -84,6 +84,46 @@ fn fs_scene(in: VsOut) -> @location(0) vec4<f32> {
     // the SDR white level; HDR content (and the SDR-display path) uses 1.0.
     return vec4<f32>(lin * cx.scale.x, s.a);
 }
+
+// NV12 scene variant (task 79.10): Y rides `tex.r`, the interleaved half-res UV
+// plane rides `uv_tex.rg`. Range expansion + the YUV matrix come from the ColorXf
+// spare slots (scale.y = full-range flag; r0.w / r1.w / r2.w / scale.z = the four
+// derived matrix coefficients) and are applied EXACTLY once — NV12 frames arrive
+// raw (the single-application contract). The result is source-encoded R'G'B',
+// fed through the same mode-0/1 linearize the RGBA path uses. Must match
+// `pb_render::yuv::nv12_to_rgba` within quantization (the golden test).
+@group(0) @binding(3) var uv_tex: texture_2d<f32>;
+
+@fragment
+fn fs_scene_nv12(in: VsOut) -> @location(0) vec4<f32> {
+    let yv = textureSample(tex, samp, in.uv).r;
+    let uvv = textureSample(uv_tex, samp, in.uv).rg;
+    var yn: f32;
+    var un: f32;
+    var vn: f32;
+    if (cx.scale.y > 0.5) {
+        yn = yv;                                   // full range
+        un = uvv.r - 0.5019608;                    // 128/255
+        vn = uvv.g - 0.5019608;
+    } else {
+        yn = (yv - 0.0627451) * 1.1643836;         // (Y − 16/255) · 255/219
+        un = (uvv.r - 0.5019608) * 1.1383929;      // (C − 128/255) · 255/224
+        vn = (uvv.g - 0.5019608) * 1.1383929;
+    }
+    let enc = clamp(vec3<f32>(
+        yn + cx.r0.w * vn,
+        yn - cx.r1.w * un - cx.r2.w * vn,
+        yn + cx.scale.z * un,
+    ), vec3<f32>(0.0), vec3<f32>(1.0));
+    var lin: vec3<f32>;
+    if (cx.p1.w > 0.5) {
+        let e = vec3<f32>(eotf(enc.r), eotf(enc.g), eotf(enc.b));
+        lin = vec3<f32>(dot(cx.r0.xyz, e), dot(cx.r1.xyz, e), dot(cx.r2.xyz, e));
+    } else {
+        lin = vec3<f32>(srgb_to_linear(enc.r), srgb_to_linear(enc.g), srgb_to_linear(enc.b));
+    }
+    return vec4<f32>(lin * cx.scale.x, 1.0);
+}
 "#;
 
 /// Present pass: the scene-linear intermediate → the surface. A fullscreen triangle
@@ -287,6 +327,20 @@ impl ColorUniform {
             scale: [scale, 0.0, 0.0, 0.0],
         }
     }
+
+    /// [`Self::new`] plus the NV12 convert parameters packed into the spare slots
+    /// `fs_scene_nv12` reads: `r0.w/r1.w/r2.w/scale.z` = the derived matrix
+    /// coefficients, `scale.y` = the full-range flag (task 79.10).
+    fn new_nv12(c: &ColorTransform, mode: f32, scale: f32, yuv: &crate::YuvParams) -> Self {
+        let (a, b, cq, d) = yuv.matrix.coeffs();
+        let mut u = Self::new(c, mode, scale);
+        u.r0[3] = a;
+        u.r1[3] = b;
+        u.r2[3] = cq;
+        u.scale[1] = if yuv.full_range { 1.0 } else { 0.0 };
+        u.scale[2] = d;
+        u
+    }
 }
 
 /// Present-pass uniform (one `vec4` for std140 alignment): `x` = SDR tone-map white
@@ -394,11 +448,51 @@ fn tex_sampler_uniform_bgl(device: &wgpu::Device, label: &str) -> wgpu::BindGrou
     })
 }
 
+/// [`tex_sampler_uniform_bgl`] plus a second texture at binding 3 — the NV12
+/// two-plane layout (`fs_scene_nv12`: Y at 0, UV at 3; task 79.10).
+fn nv12_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    let texture = |binding| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    };
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("nv12-bgl"),
+        entries: &[
+            texture(0),
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            texture(3),
+        ],
+    })
+}
+
 /// The render pipelines and their bind-group layouts.
 struct Pipelines {
     /// Scene: photo quad → fp16 scRGB-linear intermediate (alpha-blended over the
     /// letterbox so transparent images composite cleanly).
     scene: wgpu::RenderPipeline,
+    /// Scene variant for NV12 video frames: two planes + in-shader YUV (79.10).
+    scene_nv12: wgpu::RenderPipeline,
     /// Tone-map: fullscreen intermediate → SDR `surface_format`.
     tonemap: wgpu::RenderPipeline,
     /// Overlay: sRGB UI bitmap → surface, alpha-blended on top.
@@ -408,6 +502,8 @@ struct Pipelines {
     egui: wgpu::RenderPipeline,
     /// Layout for the image (and overlay) bind groups: tex + sampler + color uniform.
     scene_bgl: wgpu::BindGroupLayout,
+    /// Layout for the NV12 bind group: Y tex + sampler + color uniform + UV tex.
+    nv12_bgl: wgpu::BindGroupLayout,
     /// Layout for the tone-map bind group: intermediate tex + sampler + peak uniform.
     tonemap_bgl: wgpu::BindGroupLayout,
 }
@@ -573,12 +669,48 @@ fn build_pipelines(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -
         cache: None,
     });
 
+    // NV12 scene variant (task 79.10): same module/vertex/target/blend as `scene`,
+    // its own two-texture layout + the `fs_scene_nv12` entry point.
+    let nv12_bgl = nv12_bgl(device);
+    let nv12_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("pb-scene-nv12-layout"),
+        bind_group_layouts: &[&nv12_bgl],
+        push_constant_ranges: &[],
+    });
+    let scene_nv12 = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("pb-scene-nv12-pipeline"),
+        layout: Some(&nv12_layout),
+        vertex: wgpu::VertexState {
+            module: &scene_mod,
+            entry_point: "vs_main",
+            compilation_options: Default::default(),
+            buffers: &quad_buffers,
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &scene_mod,
+            entry_point: "fs_scene_nv12",
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: INTERMEDIATE_FORMAT,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    });
+
     Pipelines {
         scene,
+        scene_nv12,
         tonemap,
         overlay,
         egui,
         scene_bgl,
+        nv12_bgl,
         tonemap_bgl,
     }
 }
@@ -1133,10 +1265,124 @@ fn upload_image_reusable(
     });
     *slot = Some(ReuseSlot {
         tex,
+        uv_tex: None,
         color_buf,
         w: img_w,
         h: img_h,
         format: tex_format,
+    });
+    ReuseOutcome::Rebuilt(bind_group)
+}
+
+/// [`upload_image_reusable`] for an NV12 video frame (task 79.10): the Y plane
+/// into an `R8Unorm` texture, the interleaved UV plane into a half-res
+/// `Rg8Unorm` one, the YUV parameters packed into the color uniform. The steady
+/// state (every frame of one clip) is two in-place uploads + one uniform write —
+/// zero resource creation, same never-wait staging ring, same slot discipline.
+#[allow(clippy::too_many_arguments)]
+fn upload_nv12_reusable(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    bgl: &wgpu::BindGroupLayout,
+    uploader: &mut dyn UploadStrategy,
+    slot: &mut Option<ReuseSlot>,
+    y: &[u8],
+    uv: &[u8],
+    img_w: u32,
+    img_h: u32,
+    color: &ColorTransform,
+    yuv: crate::YuvParams,
+    scale: f32,
+) -> ReuseOutcome {
+    let mode = if color.enabled { 1.0 } else { 0.0 };
+    let uniform = ColorUniform::new_nv12(color, mode, scale, &yuv);
+    if let Some(s) = slot.as_ref() {
+        if s.w == img_w
+            && s.h == img_h
+            && s.format == wgpu::TextureFormat::R8Unorm
+            && s.uv_tex.is_some()
+        {
+            uploader.upload(device, queue, &s.tex, y, img_w, img_h);
+            uploader.upload(
+                device,
+                queue,
+                s.uv_tex.as_ref().expect("checked above"),
+                uv,
+                img_w / 2,
+                img_h / 2,
+            );
+            queue.write_buffer(&s.color_buf, 0, bytemuck::bytes_of(&uniform));
+            return ReuseOutcome::Reused;
+        }
+    }
+
+    let plane = |label: &str, w: u32, h: u32, format: wgpu::TextureFormat| {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        })
+    };
+    let y_tex = plane("video-y-reuse", img_w, img_h, wgpu::TextureFormat::R8Unorm);
+    let uv_tex = plane(
+        "video-uv-reuse",
+        img_w / 2,
+        img_h / 2,
+        wgpu::TextureFormat::Rg8Unorm,
+    );
+    uploader.upload(device, queue, &y_tex, y, img_w, img_h);
+    uploader.upload(device, queue, &uv_tex, uv, img_w / 2, img_h / 2);
+    let y_view = y_tex.create_view(&wgpu::TextureViewDescriptor::default());
+    let uv_view = uv_tex.create_view(&wgpu::TextureViewDescriptor::default());
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+    let color_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("color-uniform-nv12"),
+        contents: bytemuck::bytes_of(&uniform),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("nv12-bg-reuse"),
+        layout: bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&y_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: color_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(&uv_view),
+            },
+        ],
+    });
+    *slot = Some(ReuseSlot {
+        tex: y_tex,
+        uv_tex: Some(uv_tex),
+        color_buf,
+        w: img_w,
+        h: img_h,
+        format: wgpu::TextureFormat::R8Unorm,
     });
     ReuseOutcome::Rebuilt(bind_group)
 }
@@ -1398,6 +1644,14 @@ pub struct WgpuRenderer {
     /// creating a texture + view + sampler + uniform + bind group **per frame**
     /// (the #76 follow-up). Rebuilt automatically on any size/format change.
     reuse: Option<ReuseSlot>,
+    /// NV12 scene pipeline + its two-texture layout (task 79.10 — video frames
+    /// from the hardware-decode producer; YUV→RGB happens in `fs_scene_nv12`).
+    scene_nv12_pipeline: wgpu::RenderPipeline,
+    nv12_bgl: wgpu::BindGroupLayout,
+    /// Whether `bind_group` currently holds an NV12 two-plane frame — picks the
+    /// scene pipeline for the single-image draw (`set_image` clears it, ring
+    /// slots are always RGBA).
+    scene_is_nv12: bool,
 }
 
 /// See [`WgpuRenderer::reuse`]. Same-queue submission order makes the in-place
@@ -1410,6 +1664,10 @@ pub struct WgpuRenderer {
 /// this slot's texture — a [`ReuseOutcome::Reused`] means "keep it".
 struct ReuseSlot {
     tex: wgpu::Texture,
+    /// The NV12 chroma plane (`Rg8Unorm`, half-res) when this slot holds a video
+    /// frame's two-plane layout (task 79.10); `None` for the RGBA formats. `tex`
+    /// is then the `R8Unorm` luma plane.
+    uv_tex: Option<wgpu::Texture>,
     /// `UNIFORM | COPY_DST` so per-frame color/mode/scale changes are a
     /// `write_buffer`, not a new buffer + bind group.
     color_buf: wgpu::Buffer,
@@ -1640,6 +1898,9 @@ impl WgpuRenderer {
             message: None,
             tree: None,
             egui: None,
+            scene_nv12_pipeline: pipelines.scene_nv12,
+            nv12_bgl: pipelines.nv12_bgl,
+            scene_is_nv12: false,
         }
     }
 
@@ -2027,6 +2288,7 @@ impl Renderer for WgpuRenderer {
             ReuseOutcome::Rebuilt(bg) => self.bind_group = bg,
             ReuseOutcome::Reused => {}
         }
+        self.scene_is_nv12 = false; // an RGBA bind group draws with the RGBA pipeline
         self.blank = false; // an image is showing again
         self.message = None; // hide the empty-state hint
         self.set_present_peak(peak);
@@ -2035,6 +2297,63 @@ impl Renderer for WgpuRenderer {
         self.img_w = width;
         self.img_h = height;
         // Re-place the quad for the new image.
+        self.queue.write_buffer(
+            &self.vbuf,
+            0,
+            bytemuck::cast_slice(&quad_vertices(
+                &self.view,
+                width,
+                height,
+                self.config.width,
+                self.config.height,
+                self.content_top_inset,
+            )),
+        );
+    }
+
+    /// The wgpu override of the trait's CPU fallback (task 79.10): the planes
+    /// upload into the two-plane reuse slot and `fs_scene_nv12` converts on the
+    /// GPU. `PB_VIDEO_CPU_CONVERT=1` forces the default CPU path (the A/B lever
+    /// and the escape hatch if a driver misbehaves).
+    fn set_video_nv12(
+        &mut self,
+        y: &[u8],
+        uv: &[u8],
+        width: u32,
+        height: u32,
+        yuv: crate::YuvParams,
+        color: ColorTransform,
+    ) {
+        if std::env::var_os("PB_VIDEO_CPU_CONVERT").is_some_and(|v| v == "1") {
+            let rgba = crate::yuv::nv12_to_rgba(y, uv, width, height, yuv);
+            self.set_image(&rgba, width, height, color, false, 1.0);
+            return;
+        }
+        let scale = self.scene_scale(false);
+        match upload_nv12_reusable(
+            &self.device,
+            &self.queue,
+            &self.nv12_bgl,
+            self.upload.as_mut(),
+            &mut self.reuse,
+            y,
+            uv,
+            width,
+            height,
+            &color,
+            yuv,
+            scale,
+        ) {
+            ReuseOutcome::Rebuilt(bg) => self.bind_group = bg,
+            ReuseOutcome::Reused => {}
+        }
+        self.scene_is_nv12 = true;
+        self.blank = false;
+        self.message = None;
+        self.set_present_peak(1.0);
+        self.present_idx = None;
+        self.img_w = width;
+        self.img_h = height;
         self.queue.write_buffer(
             &self.vbuf,
             0,
@@ -2324,19 +2643,29 @@ impl Renderer for WgpuRenderer {
                 letterbox_linear(self.letterbox),
             );
         } else {
-            let bind_group = match self.present_idx {
+            // Ring slots are always RGBA; only the single-image bind group can hold
+            // an NV12 two-plane frame (task 79.10) — pick its pipeline to match, or
+            // the bind-group layout mismatch is a validation error.
+            let single = || {
+                if self.scene_is_nv12 {
+                    (&self.scene_nv12_pipeline, &self.bind_group)
+                } else {
+                    (&self.scene_pipeline, &self.bind_group)
+                }
+            };
+            let (pipeline, bind_group) = match self.present_idx {
                 Some(i) => self
                     .ring
                     .get(i)
                     .and_then(|s| s.as_ref())
-                    .map(|s| &s.bind_group)
-                    .unwrap_or(&self.bind_group),
-                None => &self.bind_group,
+                    .map(|s| (&self.scene_pipeline, &s.bind_group))
+                    .unwrap_or_else(single),
+                None => single(),
             };
             draw_scene(
                 &mut encoder,
                 &intermediate_view,
-                &self.scene_pipeline,
+                pipeline,
                 bind_group,
                 &self.vbuf,
                 &self.ibuf,
@@ -2570,12 +2899,49 @@ pub fn render_offscreen_color(
     color: ColorTransform,
 ) -> Vec<u8> {
     pollster::block_on(render_offscreen_async(
-        image, img_w, img_h, screen_w, screen_h, color,
+        OffscreenSource::Rgba(image),
+        img_w,
+        img_h,
+        screen_w,
+        screen_h,
+        color,
     ))
 }
 
+/// Headless render of one NV12 frame through the real two-plane scene pipeline
+/// (`fs_scene_nv12`) + present pass — the task 79.10 golden harness, compared
+/// against [`crate::yuv::nv12_to_rgba`] (the CPU reference) in tests.
+pub fn render_offscreen_nv12(
+    y: &[u8],
+    uv: &[u8],
+    img_w: u32,
+    img_h: u32,
+    screen_w: u32,
+    screen_h: u32,
+    params: crate::YuvParams,
+) -> Vec<u8> {
+    pollster::block_on(render_offscreen_async(
+        OffscreenSource::Nv12 { y, uv, params },
+        img_w,
+        img_h,
+        screen_w,
+        screen_h,
+        ColorTransform::srgb(),
+    ))
+}
+
+/// What [`render_offscreen_async`] draws: an RGBA8 image or an NV12 plane pair.
+enum OffscreenSource<'a> {
+    Rgba(&'a [u8]),
+    Nv12 {
+        y: &'a [u8],
+        uv: &'a [u8],
+        params: crate::YuvParams,
+    },
+}
+
 async fn render_offscreen_async(
-    image: &[u8],
+    source: OffscreenSource<'_>,
     img_w: u32,
     img_h: u32,
     screen_w: u32,
@@ -2599,18 +2965,43 @@ async fn render_offscreen_async(
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let pipelines = build_pipelines(&device, format);
     let mut upload = StagingUpload::new();
-    let bind_group = upload_image(
-        &device,
-        &queue,
-        &pipelines.scene_bgl,
-        &mut upload,
-        image,
-        img_w,
-        img_h,
-        &color,
-        false,
-        1.0,
-    );
+    let (scene_pipeline, bind_group) = match source {
+        OffscreenSource::Rgba(image) => (
+            &pipelines.scene,
+            upload_image(
+                &device,
+                &queue,
+                &pipelines.scene_bgl,
+                &mut upload,
+                image,
+                img_w,
+                img_h,
+                &color,
+                false,
+                1.0,
+            ),
+        ),
+        OffscreenSource::Nv12 { y, uv, params } => {
+            let mut slot = None;
+            let ReuseOutcome::Rebuilt(bg) = upload_nv12_reusable(
+                &device,
+                &queue,
+                &pipelines.nv12_bgl,
+                &mut upload,
+                &mut slot,
+                y,
+                uv,
+                img_w,
+                img_h,
+                &color,
+                params,
+                1.0,
+            ) else {
+                unreachable!("a fresh slot always rebuilds");
+            };
+            (&pipelines.scene_nv12, bg)
+        }
+    };
     let vbuf = vertex_buffer(
         &device,
         &ViewTransform::default(),
@@ -2670,7 +3061,7 @@ async fn render_offscreen_async(
     draw_scene(
         &mut encoder,
         &intermediate_view,
-        &pipelines.scene,
+        scene_pipeline,
         &bind_group,
         &vbuf,
         &ibuf,
@@ -2893,6 +3284,153 @@ mod tests {
             slot.as_ref().unwrap().tex.global_id(),
             tex0,
             "resize must rebuild the texture"
+        );
+        device.poll(wgpu::Maintain::Wait);
+    }
+
+    /// Task 79.10 golden: the `fs_scene_nv12` two-plane GPU convert must match the
+    /// CPU reference (`crate::yuv::nv12_to_rgba`) within quantization, for every
+    /// matrix × range. Uniform chroma per frame keeps bilinear-vs-nearest chroma
+    /// sampling out of the comparison (Y is full-res and 1:1, so it's exact).
+    #[test]
+    fn offscreen_nv12_matches_the_cpu_reference() {
+        let _guard = crate::gpu_test_lock();
+        // 4×4 luma gradient blocks over one uniform UV sample per case.
+        let y: Vec<u8> = [
+            60u8, 60, 120, 120, 60, 60, 120, 120, 180, 180, 235, 235, 180, 180, 235, 235,
+        ]
+        .to_vec();
+        for matrix in [
+            crate::YuvMatrix::Bt601,
+            crate::YuvMatrix::Bt709,
+            crate::YuvMatrix::Bt2020,
+        ] {
+            for full_range in [false, true] {
+                for (u, v) in [(128u8, 128u8), (90, 240), (200, 80)] {
+                    let uv = vec![u, v, u, v, u, v, u, v]; // 2×2 UV texels
+                    let params = crate::YuvParams { matrix, full_range };
+                    let got = render_offscreen_nv12(&y, &uv, 4, 4, 4, 4, params);
+                    let want = crate::yuv::nv12_to_rgba(&y, &uv, 4, 4, params);
+                    for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+                        assert!(
+                            (*g as i32 - *w as i32).abs() <= 3,
+                            "{matrix:?} full={full_range} uv=({u},{v}) byte {i}: gpu {g} cpu {w}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Task 79.10: the UV plane's orientation — left half blue-leaning chroma,
+    /// right half red-leaning — must come out on the correct sides (catches a
+    /// swapped/transposed chroma plane that uniform-UV goldens can't see).
+    #[test]
+    fn offscreen_nv12_chroma_plane_orientation() {
+        let _guard = crate::gpu_test_lock();
+        let y = vec![128u8; 16];
+        // 2×2 UV texels: columns 0 = blue-ish (U high), 1 = red-ish (V high).
+        let uv = vec![220u8, 128, 128, 220, 220, 128, 128, 220];
+        let params = crate::YuvParams {
+            matrix: crate::YuvMatrix::Bt709,
+            full_range: true,
+        };
+        let got = render_offscreen_nv12(&y, &uv, 4, 4, 4, 4, params);
+        let px = |x: usize, y_: usize| {
+            let o = (y_ * 4 + x) * 4;
+            (got[o] as i32, got[o + 2] as i32) // (r, b)
+        };
+        let (r_left, b_left) = px(0, 0);
+        let (r_right, b_right) = px(3, 0);
+        assert!(
+            b_left > r_left + 40,
+            "left is blue-leaning: r={r_left} b={b_left}"
+        );
+        assert!(
+            r_right > b_right + 40,
+            "right is red-leaning: r={r_right} b={b_right}"
+        );
+    }
+
+    /// Task 79.10: the NV12 reuse slot — same geometry reuses both plane textures
+    /// (zero per-frame creation), and an RGBA↔NV12 flip at the same size rebuilds.
+    #[test]
+    fn nv12_reuse_slot_reuses_planes_and_format_flips_rebuild() {
+        let _guard = crate::gpu_test_lock();
+        let (device, queue, _bgl) = test_device();
+        let nv12_layout = super::nv12_bgl(&device);
+        let rgba_layout = tex_sampler_uniform_bgl(&device, "test-rgba");
+        let mut uploader = StagingUpload::new();
+        let mut slot: Option<ReuseSlot> = None;
+        let color = ColorTransform::srgb();
+        let params = crate::YuvParams {
+            matrix: crate::YuvMatrix::Bt709,
+            full_range: false,
+        };
+        let y = vec![100u8; 64 * 32];
+        let uv = vec![128u8; 64 * 16];
+
+        let first = upload_nv12_reusable(
+            &device,
+            &queue,
+            &nv12_layout,
+            &mut uploader,
+            &mut slot,
+            &y,
+            &uv,
+            64,
+            32,
+            &color,
+            params,
+            1.0,
+        );
+        assert!(matches!(first, ReuseOutcome::Rebuilt(_)));
+        let y0 = slot.as_ref().unwrap().tex.global_id();
+        assert!(slot.as_ref().unwrap().uv_tex.is_some(), "two-plane slot");
+
+        let second = upload_nv12_reusable(
+            &device,
+            &queue,
+            &nv12_layout,
+            &mut uploader,
+            &mut slot,
+            &y,
+            &uv,
+            64,
+            32,
+            &color,
+            params,
+            1.0,
+        );
+        assert!(
+            matches!(second, ReuseOutcome::Reused),
+            "steady state reuses"
+        );
+        assert_eq!(slot.as_ref().unwrap().tex.global_id(), y0);
+
+        // Same dimensions, RGBA frame: the format flip must rebuild (an RGBA bind
+        // group over an R8 luma texture would be wrong).
+        let rgba = vec![0u8; 64 * 32 * 4];
+        let flipped = upload_image_reusable(
+            &device,
+            &queue,
+            &rgba_layout,
+            &mut uploader,
+            &mut slot,
+            &rgba,
+            64,
+            32,
+            &color,
+            false,
+            1.0,
+        );
+        assert!(
+            matches!(flipped, ReuseOutcome::Rebuilt(_)),
+            "format flip rebuilds"
+        );
+        assert!(
+            slot.as_ref().unwrap().uv_tex.is_none(),
+            "back to single-plane"
         );
         device.poll(wgpu::Maintain::Wait);
     }

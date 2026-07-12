@@ -29,6 +29,20 @@ impl YuvMatrix {
             YuvMatrix::Bt2020 => (0.2627, 0.0593),
         }
     }
+
+    /// The four derived convert coefficients `(a, b, c, d)` for
+    /// `r = y + a·v; g = y − b·u − c·v; b = y + d·u` — computed once here so the
+    /// CPU reference and the shader uniform can never drift apart.
+    pub(crate) fn coeffs(self) -> (f32, f32, f32, f32) {
+        let (kr, kb) = self.kr_kb();
+        let kg = 1.0 - kr - kb;
+        (
+            2.0 * (1.0 - kr),
+            2.0 * kb * (1.0 - kb) / kg,
+            2.0 * kr * (1.0 - kr) / kg,
+            2.0 * (1.0 - kb),
+        )
+    }
 }
 
 /// Convert a tightly packed NV12 frame (full-res Y plane, then the interleaved
@@ -40,13 +54,8 @@ pub fn nv12_to_rgba(y: &[u8], uv: &[u8], width: u32, height: u32, p: YuvParams) 
     let (w, h) = (width as usize, height as usize);
     debug_assert_eq!(y.len(), w * h, "Y plane size");
     debug_assert_eq!(uv.len(), w * h / 2, "UV plane size");
-    let (kr, kb) = p.matrix.kr_kb();
-    let kg = 1.0 - kr - kb;
     // r = y + a·v ; g = y − b·u − c·v ; b = y + d·u  (normalized y, centered u/v)
-    let a = 2.0 * (1.0 - kr);
-    let bq = 2.0 * kb * (1.0 - kb) / kg;
-    let cq = 2.0 * kr * (1.0 - kr) / kg;
-    let d = 2.0 * (1.0 - kb);
+    let (a, bq, cq, d) = p.matrix.coeffs();
 
     let mut out = vec![255u8; w * h * 4];
     for row in 0..h {

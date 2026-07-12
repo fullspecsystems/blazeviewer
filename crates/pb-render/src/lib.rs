@@ -17,7 +17,10 @@ pub mod view;
 pub mod yuv;
 
 pub use fit::{cover_rect, fit_rect, original_rect, FitRect};
-pub use gpu::{render_offscreen, render_offscreen_color, test_pattern, WgpuRenderer, LETTERBOX};
+pub use gpu::{
+    render_offscreen, render_offscreen_color, render_offscreen_nv12, test_pattern, WgpuRenderer,
+    LETTERBOX,
+};
 pub use upload::{StagingUpload, UploadStrategy};
 pub use view::{Placement, Rotation, ViewTransform, MAX_ZOOM, MIN_ZOOM};
 pub use yuv::{YuvMatrix, YuvParams};
