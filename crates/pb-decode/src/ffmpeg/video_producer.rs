@@ -80,7 +80,9 @@ pub fn run_ff_video_producer(
         // session must not hold preroll for an audio clock that has no sink.
         // Flips to the real track presence when the FFmpeg audio decoder lands.
         has_audio: false,
-        frame_bytes: PixelFormat::Rgba8.frame_bytes(out_w, out_h) as u64,
+        // Format-aware (task 79.10): an fp16 HDR clip charges 8 bytes/px, so
+        // the session's byte budget isn't under-credited 2× on PQ/HLG sources.
+        frame_bytes: reader.conv.output_format().frame_bytes(out_w, out_h) as u64,
     });
 
     // The credit/command/seek loop — the same shape as the MF producer (the
@@ -410,19 +412,37 @@ impl Reader {
         Ok(target_units)
     }
 
-    /// Assemble the protocol frame for a converted RGBA buffer at `ts`.
+    /// Assemble the protocol frame for a converted pixel buffer at `ts`.
     fn make_frame(
         &mut self,
         session_id: VideoSessionId,
         gen: SeekGeneration,
         ts: i64,
-        rgba: Vec<u8>,
+        pixels: Vec<u8>,
     ) -> VideoFrame {
         let (w, h) = self.conv.display_dims();
-        let color = self
-            .color
-            .get_or_insert_with(|| super::color::video_color_info_rgb(&self.conv.source_color()))
-            .clone();
+        let format = self.conv.output_format();
+        let color = match format {
+            // fp16 scene-linear scRGB (plan §9): the transform is passthrough
+            // (linearization + primaries already applied); `peak` rides the
+            // running max so SDR presentation tone-maps like HDR stills do.
+            PixelFormat::Rgba16F => {
+                let sc = self.conv.source_color();
+                VideoColorInfo {
+                    transform: crate::ColorTransform::srgb(),
+                    cicp: Some((sc.primaries, sc.transfer, sc.matrix)),
+                    full_range: true,
+                    yuv_matrix: super::color::yuv_matrix(sc.matrix),
+                    peak: self.conv.peak(),
+                }
+            }
+            _ => self
+                .color
+                .get_or_insert_with(|| {
+                    super::color::video_color_info_rgb(&self.conv.source_color())
+                })
+                .clone(),
+        };
         let origin = self.origin.unwrap_or(0);
         VideoFrame {
             session_id,
@@ -430,8 +450,8 @@ impl Reader {
             pts: self.facts.pts_to_duration(ts.saturating_sub(origin)),
             width: w,
             height: h,
-            format: PixelFormat::Rgba8,
-            pixels: rgba,
+            format,
+            pixels,
             color,
         }
     }
@@ -626,7 +646,10 @@ mod tests {
     /// Drive a fixture to EOS, returning (frames, first-frame check ran).
     fn stream_to_eos(name: &str, expect_dims: (u32, u32)) -> usize {
         let (msgs, events) = spawn(fixture(name));
-        match events.recv_timeout(Duration::from_secs(10)).expect("opened") {
+        match events
+            .recv_timeout(Duration::from_secs(10))
+            .expect("opened")
+        {
             VideoProducerEvent::Opened { width, height, .. } => {
                 assert_eq!((width, height), expect_dims, "{name}: display dims");
             }
@@ -677,6 +700,46 @@ mod tests {
     fn rotated_clip_emits_upright_frames() {
         let frames = stream_to_eos("rotated90.mp4", (32, 64));
         assert!(frames >= 25, "rotated clip decoded {frames} frames");
+    }
+
+    /// The fp16 HDR contract (plan §9, owner decision #1): a PQ/BT.2020 clip
+    /// emits scene-linear Rgba16F frames — never tone-mapped RGBA8 — with a
+    /// format-aware credit size and a real peak for the SDR tone-map.
+    #[test]
+    fn hdr_pq_clip_emits_fp16_scene_linear_frames() {
+        let (msgs, events) = spawn(fixture("hdr_pq.mp4"));
+        match events
+            .recv_timeout(Duration::from_secs(10))
+            .expect("opened")
+        {
+            VideoProducerEvent::Opened {
+                width,
+                height,
+                frame_bytes,
+                ..
+            } => {
+                assert_eq!((width, height), (64, 64));
+                assert_eq!(frame_bytes, 64 * 64 * 8, "fp16 charges 8 bytes/px");
+            }
+            other => panic!("expected Opened, got {other:?}"),
+        }
+        msgs.send(VideoProducerMsg::Credit).unwrap();
+        match events.recv_timeout(Duration::from_secs(10)).expect("frame") {
+            VideoProducerEvent::Frame(f) => {
+                assert_eq!(f.format, PixelFormat::Rgba16F);
+                assert!(f.is_well_formed(), "fp16 geometry/buffer contract");
+                assert!(
+                    !f.color.transform.enabled,
+                    "scene-linear scRGB is a shader passthrough"
+                );
+                assert!(f.color.peak >= 1.0, "peak {}", f.color.peak);
+                assert_eq!(f.color.cicp, Some((9, 16, 9)), "BT.2020 PQ kept verbatim");
+                // Spot-check a pixel decodes to finite positive linear light.
+                let ch = half::f16::from_le_bytes([f.pixels[0], f.pixels[1]]).to_f32();
+                assert!(ch.is_finite() && ch >= 0.0, "linear R = {ch}");
+            }
+            other => panic!("expected a frame, got {other:?}"),
+        }
     }
 
     #[test]

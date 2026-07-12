@@ -6978,7 +6978,11 @@ impl AppCore {
     /// Upload one decoded video frame through the reusable present path,
     /// dispatching on its pixel format (task 79.10): RGBA8 rides `set_image`
     /// exactly as before; NV12 splits its planes and goes through the renderer's
-    /// `set_video_nv12` (in-shader YUV on wgpu; a CPU convert on fallback shells).
+    /// `set_video_nv12` (in-shader YUV on wgpu; a CPU convert on fallback shells);
+    /// fp16 HDR frames (task #84 plan §9) ride `set_image`'s HDR arm with the
+    /// frame's scene-linear `peak` — the same fp16 scRGB present path as HDR
+    /// stills, so PQ/HLG video gets real headroom on an EDR/HDR surface and a
+    /// correct tone-map on SDR, never an RGBA8 clip.
     fn present_video_frame(&mut self, frame: &pb_decode::VideoFrame) {
         let Some(a) = self.renderer.as_mut() else {
             return;
@@ -6996,13 +7000,13 @@ impl AppCore {
                     render_color(&frame.color.transform),
                 );
             }
-            _ => a.set_image(
+            format => a.set_image(
                 &frame.pixels,
                 frame.width,
                 frame.height,
                 render_color(&frame.color.transform),
-                false,
-                1.0,
+                format == pb_decode::PixelFormat::Rgba16F,
+                frame.color.peak,
             ),
         }
     }
@@ -10640,7 +10644,11 @@ mod tests {
         core.effects.clear();
         // ⇧F while Thumbnails shows: switch, don't close.
         core.dispatch_action(Action::FolderTree);
-        assert_eq!(core.left_tab, crate::overlay::LeftTab::Folders, "tab switched");
+        assert_eq!(
+            core.left_tab,
+            crate::overlay::LeftTab::Folders,
+            "tab switched"
+        );
         assert!(core.folder_tree_open, "pane stays open");
         assert!(!core.thumbs_visible());
         assert!(core.tree_panel_visible(), "native tree now visible");

@@ -147,6 +147,7 @@ pub fn video_color_info_rgb(sc: &SourceColor) -> VideoColorInfo {
         cicp: Some((sc.primaries, sc.transfer, sc.matrix)),
         full_range: true,
         yuv_matrix: yuv_matrix(sc.matrix),
+        peak: 1.0,
     }
 }
 
@@ -190,6 +191,63 @@ pub unsafe fn set_scaler_colorspace(sws: *mut ffi::SwsContext, matrix: u8, full_
         1 << 16,
         1 << 16,
     );
+}
+
+// ── HDR transfer decode (plan §9, task #84 subtask 3) ────────────────────────
+//
+// The fp16 video path mirrors the HDR-stills convention exactly
+// (`common::finalize_hdr_scrgb` / WIC `128bppRGBAFloat` / ImageIO
+// extended-linear-sRGB): pixels leave here as **scene-linear scRGB** — linear
+// light, BT.709 primaries, extended range — where **1.0 = SDR reference white
+// (203 nits, BT.2408 graphics white)**. The renderer either presents that to an
+// fp16/EDR surface or tone-maps to SDR using the frame's `peak`.
+
+/// SDR reference white for the scene-linear normalization (BT.2408).
+pub const SDR_WHITE_NITS: f32 = 203.0;
+
+/// ST 2084 (PQ) EOTF: encoded [0,1] → scene-linear scRGB (1.0 = 203 nits).
+pub fn pq_to_scrgb(e: f32) -> f32 {
+    const M1: f32 = 2610.0 / 16384.0;
+    const M2: f32 = 2523.0 / 4096.0 * 128.0;
+    const C1: f32 = 3424.0 / 4096.0;
+    const C2: f32 = 2413.0 / 4096.0 * 32.0;
+    const C3: f32 = 2392.0 / 4096.0 * 32.0;
+    let e = e.clamp(0.0, 1.0);
+    let ep = e.powf(1.0 / M2);
+    let num = (ep - C1).max(0.0);
+    let den = C2 - C3 * ep;
+    if den <= 0.0 {
+        return 0.0;
+    }
+    let y = (num / den).powf(1.0 / M1); // display luminance / 10000
+    y * 10000.0 / SDR_WHITE_NITS
+}
+
+/// ARIB STD-B67 (HLG) → scene-linear scRGB, per-channel with the BT.2100
+/// nominal-peak OOTF (γ = 1.2, Lw = 1000 nits). Per-channel is the standard
+/// fast approximation of the luminance-based OOTF — fine for v1 SW playback
+/// (the HW path re-does this in-shader later).
+pub fn hlg_to_scrgb(e: f32) -> f32 {
+    const A: f32 = 0.178_832_77;
+    const B: f32 = 0.284_668_92; // 1 - 4a
+    const C: f32 = 0.559_910_7;
+    let e = e.clamp(0.0, 1.0);
+    // Inverse OETF → scene light [0,1].
+    let ys = if e <= 0.5 {
+        (e * e) / 3.0
+    } else {
+        (((e - C) / A).exp() + B) / 12.0
+    };
+    // OOTF → display light at the nominal 1000-nit peak.
+    let nits = 1000.0 * ys.max(0.0).powf(1.2);
+    nits / SDR_WHITE_NITS
+}
+
+/// 3×3 source-linear → sRGB-linear primaries matrix for an H.273 primaries
+/// code (BT.2020 → 709 for HDR video; identity for 709). Reuses the CICP
+/// machinery with a linear transfer (code 8) — only the matrix is taken.
+pub fn linear_primaries_matrix(primaries: u8) -> [[f32; 3]; 3] {
+    ColorTransform::from_cicp(primaries, 8, 0, true).matrix
 }
 
 #[cfg(test)]
@@ -305,5 +363,65 @@ mod tests {
         // (Enabled or not depends on how close moxcms deems the primaries —
         // the invariant is it never errors and never picks a wild curve.)
         let _ = t;
+    }
+
+    /// PQ anchor points from BT.2408/ST 2084: SDR reference white (203 nits)
+    /// encodes at ≈0.5807 and must decode to scRGB 1.0; the curve's endpoints
+    /// hold; 0.508 is ≈100 nits.
+    #[test]
+    fn pq_decodes_the_reference_anchors() {
+        let white = pq_to_scrgb(0.580_688_9);
+        assert!((white - 1.0).abs() < 5e-3, "203 nits → 1.0, got {white}");
+        assert_eq!(pq_to_scrgb(0.0), 0.0);
+        let peak = pq_to_scrgb(1.0);
+        assert!(
+            (peak - 10000.0 / SDR_WHITE_NITS).abs() < 0.5,
+            "PQ 1.0 = 10000 nits, got {peak}"
+        );
+        let hundred = pq_to_scrgb(0.508);
+        assert!(
+            (hundred - 100.0 / SDR_WHITE_NITS).abs() < 0.01,
+            "PQ 0.508 ≈ 100 nits, got {}",
+            hundred * SDR_WHITE_NITS
+        );
+        // Out-of-range input clamps, never NaNs.
+        assert!(pq_to_scrgb(-1.0) == 0.0 && pq_to_scrgb(2.0).is_finite());
+    }
+
+    /// HLG anchors: black → 0, nominal peak (1.0) → 1000 nits, monotonic.
+    #[test]
+    fn hlg_decodes_the_reference_anchors() {
+        assert_eq!(hlg_to_scrgb(0.0), 0.0);
+        let peak = hlg_to_scrgb(1.0);
+        assert!(
+            (peak - 1000.0 / SDR_WHITE_NITS).abs() < 0.05,
+            "HLG 1.0 = 1000 nits, got {}",
+            peak * SDR_WHITE_NITS
+        );
+        let mid = hlg_to_scrgb(0.5);
+        let hi = hlg_to_scrgb(0.75);
+        assert!(0.0 < mid && mid < hi && hi < peak, "monotonic");
+    }
+
+    /// The primaries matrix: identity for 709, a real gamut map for 2020
+    /// (wide red pulls sRGB green/blue negative), white preserved.
+    #[test]
+    fn linear_primaries_matrix_maps_2020_and_passes_709() {
+        let m709 = linear_primaries_matrix(1);
+        for (i, row) in m709.iter().enumerate() {
+            for (j, v) in row.iter().enumerate() {
+                let want = if i == j { 1.0 } else { 0.0 };
+                assert!((v - want).abs() < 1e-3, "709 must be identity: {m709:?}");
+            }
+        }
+        let m2020 = linear_primaries_matrix(9);
+        assert!(
+            m2020[1][0] < 0.0 && m2020[2][0] < 0.0,
+            "2020 red exceeds sRGB: {m2020:?}"
+        );
+        for row in &m2020 {
+            let sum: f32 = row.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-2, "white preserved: {m2020:?}");
+        }
     }
 }

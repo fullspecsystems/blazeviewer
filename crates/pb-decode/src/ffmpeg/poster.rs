@@ -56,6 +56,21 @@ pub fn ff_probe_video_input(input: &VideoInput) -> Result<VideoStreamInfo, Decod
     })
 }
 
+/// The poster walk's accept rule for an fp16 scene-linear frame — the linear
+/// equivalent of [`poster_frame_bright_enough`]'s ~10% sRGB floor (sRGB 0.10
+/// linearizes to ≈0.01). Subsampled like the RGBA8 walk.
+fn scrgb_frame_bright_enough(f16_bytes: &[u8]) -> bool {
+    let mut sum = 0.0f32;
+    let mut n = 0u32;
+    for px in f16_bytes.chunks_exact(8).step_by(8) {
+        let ch = |i: usize| half::f16::from_le_bytes([px[i], px[i + 1]]).to_f32();
+        // Rec.709 linear luma.
+        sum += 0.2126 * ch(0) + 0.7152 * ch(2) + 0.0722 * ch(4);
+        n += 1;
+    }
+    n > 0 && sum / n as f32 > 0.01
+}
+
 /// The decoder for stream `index` of an opened input.
 fn decoder_for(
     ctx: &mut ff::format::context::Input,
@@ -114,13 +129,16 @@ fn poster_inner(
         // Pull every ready frame before feeding more packets.
         let mut decoded = ff::frame::Video::empty();
         while decoder.receive_frame(&mut decoded).is_ok() {
-            let (rgba, w, h) = conv.convert(&decoded)?;
+            let (pixels, w, h) = conv.convert(&decoded)?;
             sampled += 1;
             let ts = decoded.timestamp().unwrap_or(0);
             let origin = *first_ts.get_or_insert(ts);
-            let bright = poster_frame_bright_enough(&rgba);
+            let bright = match conv.output_format() {
+                PixelFormat::Rgba16F => scrgb_frame_bright_enough(&pixels),
+                _ => poster_frame_bright_enough(&pixels),
+            };
             let deep_enough = ts.saturating_sub(origin) >= max_media && max_media > 0;
-            last = Some((rgba, w, h));
+            last = Some((pixels, w, h));
             if bright || deep_enough || sampled >= POSTER_MAX_FRAMES {
                 break 'walk;
             }
@@ -147,19 +165,27 @@ fn poster_inner(
             Err(e) => return Err(format!("FFmpeg read: {e}")),
         }
     }
-    let (rgba, w, h) = last.ok_or("video decoded no frames")?;
+    let (pixels, w, h) = last.ok_or("video decoded no frames")?;
     let sc = conv.source_color();
+    // HDR (PQ/HLG) posters leave as fp16 scene-linear scRGB — the exact shape
+    // `common::finalize_hdr_scrgb` gives HDR stills, so the renderer treats a
+    // video poster and an HDR photo identically (plan §9).
+    let hdr = conv.output_format() == PixelFormat::Rgba16F;
     Ok(DecodedImage {
         width: w,
         height: h,
         orig_width: disp_w,
         orig_height: disp_h,
         codec: facts.codec,
-        format: PixelFormat::Rgba8,
-        pixels: rgba,
+        format: conv.output_format(),
+        pixels,
         is_preview: false,
-        color: super::color::sdr_transform(&sc),
-        peak: 1.0,
+        color: if hdr {
+            crate::ColorTransform::srgb() // already scene-linear; passthrough
+        } else {
+            super::color::sdr_transform(&sc)
+        },
+        peak: conv.peak(),
         animated: None,
     })
 }
@@ -250,6 +276,17 @@ mod tests {
             (info.width, info.height),
             "no rotation"
         );
+    }
+
+    /// HDR posters mirror HDR stills: fp16 scene-linear, passthrough color,
+    /// a real peak — the same `DecodedImage` shape `finalize_hdr_scrgb` makes.
+    #[test]
+    fn hdr_poster_is_fp16_scene_linear() {
+        let img = poster("hdr_pq.mp4", None).expect("hdr poster");
+        assert_eq!(img.format, PixelFormat::Rgba16F);
+        assert!(img.is_well_formed());
+        assert!(!img.color.enabled, "scene-linear → passthrough");
+        assert!(img.peak >= 1.0);
     }
 
     #[test]

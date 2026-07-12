@@ -68,3 +68,18 @@ ffmpeg -y -f lavfi -i "color=orange:size=64x32:rate=30:duration=1" \
        -c:v libx264 -pix_fmt yuv420p -crf 30 /tmp/src.mp4
 ffmpeg -y -display_rotation 90 -i /tmp/src.mp4 -c copy rotated90.mp4
 ```
+
+## hdr_pq.mp4 (task #84)
+
+64×64 @ 30 fps, 1 s, orange, HEVC 10-bit PQ (smpte2084 / bt2020 / bt2020nc) — the
+FFmpeg fp16 HDR path (plan §9): frames must leave as scene-linear scRGB Rgba16F,
+never tone-mapped RGBA8.
+
+Regen:
+
+```sh
+ffmpeg -y -f lavfi -i "color=orange:size=64x64:rate=30:duration=1" \
+       -c:v libx265 -pix_fmt yuv420p10le \
+       -x265-params "colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc" \
+       -tag:v hvc1 hdr_pq.mp4
+```

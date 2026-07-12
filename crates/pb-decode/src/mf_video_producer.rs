@@ -137,6 +137,8 @@ pub fn run_video_producer(
             OutKind::Rgb32 { .. } => true,
         },
         yuv_matrix,
+        // The MF paths are SDR (PQ/HLG stays on RGB32, SDR-converted by MF).
+        peak: 1.0,
     };
 
     // The credit/command/seek loop. Blocking recv IS the select: a Stop or a

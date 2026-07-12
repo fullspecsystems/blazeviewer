@@ -1191,19 +1191,19 @@
             "id": 1,
             "title": "Shared FFmpeg foundation",
             "description": "ffmpeg/ffvideo feature split, resampling dep + Dockerfile libswresample, ffmpeg/{init,io,probe,color} modules: custom AVIO over Arc bytes, interrupt-callback cancellation + watchdog, non-attached-pic stream selection, rotation/SAR, CICP color mapping, correct swscale coefficients",
-            "status": "in-progress"
+            "status": "done"
           },
           {
             "id": 2,
             "title": "FFmpeg video producer + poster",
             "description": "run_ff_video_producer speaking the VideoProducerEvent/Msg protocol (in-place av_seek_file seek, EOS park, corrupt-input bounds) + first-non-black poster; protocol tests on the committed fixtures + new tiny MKV/WebM corpus",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 3,
             "title": "fp16 HDR present-path fix",
             "description": "present_video_frame honors Rgba16F + VideoColorInfo peak through the fp16 scene-linear path (mirrors is_hdr stills); producer emits fp16 scRGB for PQ/HLG sources",
-            "status": "pending"
+            "status": "in-progress"
           },
           {
             "id": 4,

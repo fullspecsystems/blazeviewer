@@ -173,6 +173,11 @@ pub struct VideoColorInfo {
     pub full_range: bool,
     /// Matrix coefficients for NV12 frames (see the contract above).
     pub yuv_matrix: YuvMatrix,
+    /// Scene-linear peak for HDR ([`PixelFormat::Rgba16F`]) frames — the
+    /// tone-map white point when presenting on an SDR display, exactly like
+    /// [`crate::DecodedImage::peak`] for HDR stills. `1.0` for SDR frames
+    /// (task #84 §9: the fp16 video path mirrors the stills convention).
+    pub peak: f32,
 }
 
 impl VideoColorInfo {
@@ -183,6 +188,7 @@ impl VideoColorInfo {
             cicp: None,
             full_range: true,
             yuv_matrix: YuvMatrix::Bt709,
+            peak: 1.0,
         }
     }
 }
