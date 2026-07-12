@@ -1697,6 +1697,11 @@ final class CoreModel {
     /// (`reportSizeNow`) when AppKit doesn't re-fire the view's `layout()` on its own.
     @ObservationIgnored weak var canvasView: MetalCanvasNSView?
 
+    /// The active native video player (task 79.9): `AVPlayer` + `AVPlayerLayer` over the
+    /// canvas, commanded by the core's `PlayVideo`/`StopVideo` effects. macOS-only; the
+    /// single media authority (the Rust core keeps only a passive proxy).
+    @ObservationIgnored private var nativeVideo: NativeVideoPlayer?
+
     // MARK: - Effects out
 
     /// Pull the effect queue dry and execute each effect — always on the main actor.
@@ -1775,6 +1780,15 @@ final class CoreModel {
             liveAudio?.pause()
         case .ResumeLiveAudio:
             liveAudio?.play()
+        case .PlayVideo(let path, let sessionId, let muted):
+            playNativeVideo(path: path.toString(), sessionId: sessionId, muted: muted)
+        case .StopVideo(let sessionId):
+            // Session-gated: a StopVideo for a superseded session must not tear down
+            // the current one (a newer PlayVideo may already have replaced it).
+            if nativeVideo?.sessionId == sessionId {
+                nativeVideo?.stop()
+                nativeVideo = nil
+            }
         case .SetWindowMode(let fullscreen):
             log("SetWindowMode(fullscreen: \(fullscreen))")
             setWindowMode(fullscreen: fullscreen)
@@ -2100,6 +2114,20 @@ final class CoreModel {
         liveAudio = try? AVAudioPlayer(contentsOf: URL(fileURLWithPath: path))
         liveAudio?.currentTime = max(0, atSecs)
         liveAudio?.play()
+    }
+
+    /// `CoreEffect::PlayVideo` (task 79.9): open the clip in a native `AVPlayer` and
+    /// present it over the canvas. Replaces any prior player. The `AVPlayerLayer` shows
+    /// only once its first frame is ready — the wgpu poster holds until then.
+    private func playNativeVideo(path: String, sessionId: UInt64, muted: Bool) {
+        nativeVideo?.stop()
+        nativeVideo = nil
+        guard let canvas = canvasView else {
+            log("PlayVideo: no canvas view to present into")
+            return
+        }
+        nativeVideo = NativeVideoPlayer(
+            url: URL(fileURLWithPath: path), muted: muted, sessionId: sessionId, canvas: canvas)
     }
 
     /// `CoreEffect::WriteClipboard` (via the marker + accessors): text goes on as a string;

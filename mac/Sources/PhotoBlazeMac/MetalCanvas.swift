@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import QuartzCore
 import SwiftUI
 
@@ -28,6 +29,12 @@ final class MetalCanvasNSView: NSView {
     /// The input adapter (NS1 item 4): pointer + gestures + drops forward to the model.
     weak var model: CoreModel?
     private var attached = false
+
+    /// The native video layer (task 79.9 Phase-0A): an `AVPlayerLayer` presented as a
+    /// **sublayer of the `CAMetalLayer`** (the "first-choice" topology under test).
+    /// SwiftUI overlays composite above it (they're separate views over this
+    /// representable). Its frame + scale track the canvas on every resize.
+    private(set) var videoLayer: AVPlayerLayer?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -241,6 +248,7 @@ final class MetalCanvasNSView: NSView {
         lastReported = (size, scale)
         pbTrace("report px=\(Int(size.width))x\(Int(size.height)) scale=\(scale) bounds=\(Int(bounds.width))x\(Int(bounds.height)) onResize=\(onResize != nil)")
         onResize?(size, scale)
+        syncVideoLayerFrame()
     }
 
     override func layout() {
@@ -249,6 +257,7 @@ final class MetalCanvasNSView: NSView {
         // usually fired for this same change already, and re-reporting an unchanged
         // size would re-render a full frame per live-resize step for nothing.
         reconcileSizeIfNeeded()
+        syncVideoLayerFrame()
     }
 
     /// The backing scale changed with no bounds change — a bare scale flip does NOT
@@ -311,7 +320,45 @@ final class MetalCanvasNSView: NSView {
         pump?.invalidate()
         pump = nil
         model?.framePump = nil
+        detachVideoLayer()
         onDetach?()
+    }
+
+    // MARK: - Native video layer (task 79.9 Phase-0A spike)
+
+    /// Attach a native `AVPlayerLayer` as a sublayer of the Metal layer, hidden until
+    /// the caller reveals it on the first displayable frame (so the wgpu poster shows
+    /// until then — no black/stale flash, no audio-before-picture). Replaces any prior
+    /// video layer. `videoGravity = .resizeAspect` matches the still fit (never cropped).
+    func attachVideoLayer(_ playerLayer: AVPlayerLayer) {
+        detachVideoLayer()
+        playerLayer.videoGravity = .resizeAspect
+        playerLayer.isHidden = true
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        playerLayer.frame = layer?.bounds ?? bounds
+        playerLayer.contentsScale = backingScale
+        layer?.addSublayer(playerLayer)
+        CATransaction.commit()
+        videoLayer = playerLayer
+    }
+
+    /// Remove the native video layer (stop / navigate / teardown). Idempotent.
+    func detachVideoLayer() {
+        videoLayer?.removeFromSuperlayer()
+        videoLayer = nil
+    }
+
+    /// Keep the video layer covering the canvas across live resize, fullscreen
+    /// transitions, and 1x↔2x display moves (gate item: geometry parity). No implicit
+    /// CA animation — the frame must track the bounds atomically like the Metal layer.
+    private func syncVideoLayerFrame() {
+        guard let vl = videoLayer else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        vl.frame = layer?.bounds ?? bounds
+        vl.contentsScale = backingScale
+        CATransaction.commit()
     }
 
     private var backingScale: CGFloat {
