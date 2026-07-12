@@ -591,6 +591,11 @@ impl App {
             },
         );
         let (pool, results) = DecodePool::new(recommended_workers(), POOL_BUDGET_BYTES, decode);
+        // The macOS archive-video handoff channels (the shell side is the SwiftUI host;
+        // this winit shell never sends on them, but the fields are unconditional so every
+        // constructor wires a live pair — mirrors `AppCore::headless`).
+        let (poster_read_tx, poster_read_rx) = std::sync::mpsc::channel();
+        let (video_read_tx, video_read_rx) = std::sync::mpsc::channel();
         // `settings` (pristine, loaded by `main`) drives the launch defaults; the hold loop reads
         // it live. CLI overrides apply to live state via `apply_launch_overrides` below — never to
         // `settings`, so a later save can't leak them to disk (privacy #2).
@@ -749,6 +754,15 @@ impl App {
             anim_stream: None,
             video: None,
             video_seq: 0,
+            content_top_inset: 0,
+            pending_video_bytes: None,
+            pending_poster_bytes: std::collections::HashMap::new(),
+            poster_req_seq: 0,
+            poster_inflight: std::collections::HashSet::new(),
+            poster_read_tx,
+            poster_read_rx,
+            video_read_tx,
+            video_read_rx,
             video_seek_last: None,
             pending_delete_retry: None,
             video_pill_text: None,
