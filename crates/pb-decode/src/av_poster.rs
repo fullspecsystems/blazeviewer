@@ -36,10 +36,15 @@ pub fn decode_video_poster(
         .unwrap_or(3840)
         .max(1);
 
+    // The streaming reader is the Live-Photo decoder, whose header hardcodes
+    // codec = "Live Photo" — wrong for a plain video. Label from the container until
+    // the macOS `probe_video_stream` (a later phase) can report the real codec (H.264/
+    // HEVC), consistent with how image badges show a format.
+    let codec = container_label(path);
+
     let mut chosen: Option<(Vec<u8>, u32, u32)> = None; // first bright frame
     let mut last: Option<(Vec<u8>, u32, u32)> = None; // fallback (dark clip / long black lead)
     let mut color = ColorTransform::default();
-    let mut codec: &'static str = "Video";
     let mut frames = 0usize;
     let mut elapsed = Duration::ZERO;
     let mut failure: Option<DecodeError> = None;
@@ -55,8 +60,7 @@ pub fn decode_video_poster(
             }
             match chunk {
                 MotionChunk::Header(h) => {
-                    color = h.color;
-                    codec = h.codec;
+                    color = h.color; // honest; only the codec label is wrong for a video
                 }
                 MotionChunk::Frame(af) => {
                     frames += 1;
@@ -109,4 +113,26 @@ pub fn decode_video_poster(
         peak: 1.0,
         animated: None,
     })
+}
+
+/// A container label for the codec badge, from the file extension — a stand-in until
+/// the macOS probe reports the real codec (H.264/HEVC). Never "Live Photo".
+fn container_label(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("mov" | "qt") => "MOV",
+        Some("mp4" | "m4v") => "MP4",
+        Some("avi") => "AVI",
+        Some("mkv") => "MKV",
+        Some("webm") => "WebM",
+        Some("wmv" | "asf") => "WMV",
+        Some("mpg" | "mpeg" | "m2v") => "MPEG",
+        Some("3gp" | "3g2") => "3GP",
+        Some("mts" | "m2ts" | "ts") => "AVCHD",
+        _ => "Video",
+    }
 }
