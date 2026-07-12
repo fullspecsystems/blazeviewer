@@ -156,6 +156,7 @@ pub struct ArchiveTreeRow {
 /// animation mark — placed in a bottom corner per the alignment setting. While a video
 /// session is live it grows a second row (`progress`): elapsed left, total right, a
 /// progress bar filling the span between (task #79, owner design).
+#[derive(Clone)]
 pub struct InfoLine {
     pub main: String,
     pub codec: String,
@@ -163,11 +164,15 @@ pub struct InfoLine {
     pub is_animated: bool,
     pub align: pb_app_core::settings::InfoLineAlign,
     pub progress: Option<InfoProgress>,
+    /// Fade factor (0..=1): the shell ramps it over ~100 ms on appearance and
+    /// disappearance (it keeps the last line rendering briefly for the out leg).
+    pub fade: f32,
 }
 
 /// The playback row's data: `0:42 ▰▰▰▱▱▱ 9:01`. The pill's width is the summary
 /// row's natural width, floored so the bar stays usable — constant for a clip, so
 /// the once-a-second refresh never jitters.
+#[derive(Clone)]
 pub struct InfoProgress {
     pub elapsed: String,
     /// `None` when the container reports no duration (bare track, no right label).
@@ -290,6 +295,7 @@ impl PanelFrame {
                     fraction: r.fraction,
                     playing: core.video_playing(),
                 }),
+                fade: 1.0,
             });
         let welcome = core.open_panel_visible().then(|| WelcomePanel {
             file_key: core.shortcut_for(Action::OpenFile),
@@ -886,6 +892,13 @@ fn info_line(
         .movable(false)
         .order(egui::Order::Middle)
         .show(ctx, |ui| {
+            // Mid-fade: scale everything painted below and keep frames coming
+            // until the ramp lands (the shell owns the fade clock).
+            if info.fade < 1.0 {
+                ui.set_opacity(info.fade.clamp(0.0, 1.0));
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(16));
+            }
             let has_icon = info.is_live || info.is_animated;
             let icon_sz = INFO_TEXT_SIZE + 1.0;
             let gap = 8.0;
@@ -2801,6 +2814,7 @@ mod tests {
             codec: String::new(),
             is_live: false,
             is_animated: false,
+            fade: 1.0,
             align,
             progress: None,
         }

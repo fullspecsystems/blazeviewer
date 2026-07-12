@@ -140,6 +140,10 @@ const SCAN_CARD_REFRESH: Duration = Duration::from_millis(120);
 const PLAY_HINT_FADE_IN: Duration = Duration::from_millis(200);
 const PLAY_HINT_HOLD: Duration = Duration::from_secs(3);
 const PLAY_HINT_FADE_OUT: Duration = Duration::from_millis(250);
+/// The info line's fade: quick in (it should feel immediate), slower out (the
+/// video controls' auto-hide reads as a deliberate dissolve, not a glitch).
+const INFO_FADE_IN: Duration = Duration::from_millis(100);
+const INFO_FADE_OUT: Duration = Duration::from_millis(250);
 
 /// Whether an Escape press should quit, given an optional "ignore Esc until"
 /// guard set briefly after the file picker closes (to swallow the stray Esc that
@@ -352,6 +356,14 @@ struct App {
     /// shell sets the `native_*` panel flags so the core suppresses the CPU-HUD versions
     /// of these panels and drives this instead.
     egui_overlay: Option<egui_overlay::EguiOverlay>,
+    /// The last snapshotted info line + its appear/vanish stamps, driving the
+    /// fade (the line keeps drawing briefly after the core hides it). Stamps are
+    /// set by `update_overlay` on the visibility EDGE (it runs every turn;
+    /// renders don't), never inside the render itself.
+    last_info_line: Option<panels_ui::InfoLine>,
+    info_line_was_visible: bool,
+    info_shown_at: Option<Instant>,
+    info_vanished_at: Option<Instant>,
     /// Whether the egui panel texture needs re-rendering next turn — set on a panel
     /// state/content change (`CoreEffect::PanelsChanged`), an egui-consumed event, or a
     /// timed egui repaint. When clear and a panel is open, the retained texture is reused
@@ -657,6 +669,7 @@ impl App {
             video_pill_text: None,
             video_osd_until: None,
             video_geometry_stale: false,
+            video_paused_by_resize: false,
             prepared: None,
             anim_gen: 0,
             anim_hint_shown_for: None,
@@ -698,6 +711,10 @@ impl App {
             pending_dialog: None,
             requested_wake: None,
             egui_overlay: None,
+            last_info_line: None,
+            info_line_was_visible: false,
+            info_shown_at: None,
+            info_vanished_at: None,
             overlay_dirty: false,
             overlay_active: false,
             #[cfg(all(unix, not(target_os = "macos")))]
@@ -1225,7 +1242,12 @@ impl App {
     /// photo. With a live video it joins that gate via `video_bar_interactive` — the playback
     /// bar is a scrubber.)
     fn overlay_visible(&self) -> bool {
-        self.overlay_panel_visible() || self.core.info_line_visible()
+        self.overlay_panel_visible()
+            || self.core.info_line_visible()
+            // Keep compositing (and re-rendering) through the info line's fade-out.
+            || self
+                .info_vanished_at
+                .is_some_and(|at| at.elapsed() < INFO_FADE_OUT)
     }
 
     /// Whether the info line currently carries the interactive video playback bar
@@ -1339,6 +1361,24 @@ impl App {
     /// Retained — a nav frame with a static panel open re-renders nothing. Returns egui's
     /// next timed-repaint deadline for the wake calc.
     fn update_overlay(&mut self, now: Instant) -> Option<Instant> {
+        // The info-line fade stamps live HERE, on the visibility edge — this runs
+        // every turn, while renders don't. (Stamping inside the render was the
+        // owner-reported inconsistency: hide-without-a-render popped the line and
+        // left a stale appear stamp, so the NEXT show popped too.)
+        let line_now = self.core.info_line_visible();
+        if line_now != self.info_line_was_visible {
+            self.info_line_was_visible = line_now;
+            if line_now {
+                self.info_shown_at = Some(now);
+                self.info_vanished_at = None;
+            } else {
+                self.info_shown_at = None;
+                if self.last_info_line.is_some() {
+                    self.info_vanished_at = Some(now);
+                }
+            }
+            self.overlay_dirty = true;
+        }
         if !self.overlay_visible() {
             // Nothing open: drop the composited layer once, on the visibility edge.
             if self.overlay_active {
@@ -1382,6 +1422,41 @@ impl App {
             return;
         };
         let mut frame = panels_ui::PanelFrame::snapshot(&self.core);
+        // Fade the info line in/out over ~100 ms (macOS-shell parity — its SwiftUI
+        // overlays transition; the egui line used to pop, most visibly on the
+        // video hover reveal). Appearances ramp `fade` up; a disappearance keeps
+        // drawing the *last* line briefly with `fade` ramping down. The line
+        // itself requests egui repaints while fading.
+        let now = Instant::now();
+        match frame.info.take() {
+            Some(mut line) => {
+                // Ramp from the appear stamp `update_overlay` set on the edge.
+                line.fade = self
+                    .info_shown_at
+                    .map(|s| now.duration_since(s).as_secs_f32() / INFO_FADE_IN.as_secs_f32())
+                    .unwrap_or(1.0)
+                    .min(1.0);
+                self.last_info_line = Some(line.clone());
+                frame.info = Some(line);
+            }
+            None => {
+                // Fade the LAST line out from the vanish stamp (the core has
+                // already hidden it; the shell keeps drawing through the ramp).
+                if let (Some(last), Some(gone)) =
+                    (self.last_info_line.as_ref(), self.info_vanished_at)
+                {
+                    let t = now.duration_since(gone).as_secs_f32() / INFO_FADE_OUT.as_secs_f32();
+                    if t < 1.0 {
+                        let mut line = last.clone();
+                        line.fade = 1.0 - t;
+                        frame.info = Some(line);
+                    } else {
+                        self.last_info_line = None;
+                        self.info_vanished_at = None;
+                    }
+                }
+            }
+        }
         // Scan state is shell-owned (`dir_scan`), so the pill is filled in here rather than
         // by `snapshot` (which only reaches the core).
         frame.scan = self.scan_pill_frame();
@@ -2948,6 +3023,13 @@ impl ApplicationHandler for App {
             // photos become the playlist).
             WindowEvent::DroppedFile(path) => {
                 self.pending_drops.push(path);
+                // Take keyboard focus: a drop leaves the drag source (Explorer)
+                // foreground, so nav keys would silently go nowhere until a click
+                // (owner-reported; the macOS shell needs its own AppKit activate —
+                // focus is per-shell, only the core is shared).
+                if let Some(w) = self.window.as_ref() {
+                    w.focus_window();
+                }
                 self.core.effects.push(contract::CoreEffect::RequestRender);
             }
 

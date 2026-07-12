@@ -707,6 +707,7 @@ fn sample_frame(dark: bool, tab: InspectorTab, welcome: bool) -> PanelFrame {
                 fraction: 0.35,
                 playing: true,
             }),
+            fade: 1.0,
         }),
         // The ambient scan pill (top-center) — a long sub-folder to exercise truncation.
         scan: (!tree_only).then(|| panels_ui::ScanPill {

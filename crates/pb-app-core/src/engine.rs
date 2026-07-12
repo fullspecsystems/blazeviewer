@@ -98,6 +98,11 @@ pub const VIDEO_SEEK_REPEAT: Duration = Duration::from_millis(200);
 /// — the line's playback row is the better readout (owner call 2026-07-11).
 pub const VIDEO_OSD_HOLD: Duration = Duration::from_millis(1800);
 
+/// The hover **controls zone**: the bottom fraction of the window where pointer
+/// movement reveals the playback controls while a video is active (the info
+/// line's home corner — every video player's convention).
+pub const VIDEO_HOVER_ZONE: f32 = 0.25;
+
 /// Deleting a video whose reader is still retiring (HEVC teardown ~1 s) retries
 /// on this cadence, up to [`DELETE_RETRY_MAX`] times (~1.8 s total) — enough to
 /// outlast the measured retirement, bounded so a genuinely locked file still

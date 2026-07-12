@@ -206,6 +206,7 @@ impl AppCore {
             video_pill_text: None,
             video_osd_until: None,
             video_geometry_stale: false,
+            video_paused_by_resize: false,
             prepared: None,
             anim_gen: 0,
             anim_hint_shown_for: None,
@@ -732,6 +733,7 @@ impl AppCore {
                 self.last_cursor = Some(p);
                 self.update_tree_hover();
                 self.refresh_cursor();
+                self.video_hover_reveal(y);
             }
             // Trackpad pinch (macOS): magnify about the cursor (+ spread in / − pinch out).
             CoreEvent::Pinch { delta } => {
@@ -1033,6 +1035,25 @@ impl AppCore {
         self.fit = Some(new_fit);
         if let Some(r) = self.renderer.as_mut() {
             r.resize(width, height);
+        }
+        // A resize in flight pauses playback — freeze together, resume together.
+        // The modal drag loop stalls the presenter while audio plays on; every
+        // clock-catch-up scheme afterward either races the backlog or churns
+        // seeks (tried, regressed, reverted). Pausing both sides loses nothing:
+        // the settle arm below resumes exactly where playback froze.
+        if self
+            .video
+            .as_ref()
+            .is_some_and(|v| v.session.state() == crate::video::VideoSessionState::Playing)
+        {
+            let now = self.now;
+            self.video
+                .as_mut()
+                .expect("checked above")
+                .session
+                .pause(now);
+            self.effects.push(contract::CoreEffect::PauseVideoAudio);
+            self.video_paused_by_resize = true;
         }
         // Deferred crisp decode-to-fit + ring refill once the size settles (`self.now` is stamped
         // by the host at the start of the event).
@@ -1426,6 +1447,17 @@ impl AppCore {
                 self.resize_settle_at = None;
                 self.invalidate_geometry();
                 self.refresh_after_geometry_change();
+                // Resume the playback the resize paused — unless the user paused
+                // it themselves meanwhile (the state must still be Paused).
+                if std::mem::take(&mut self.video_paused_by_resize) {
+                    if let Some(v) = self.video.as_mut() {
+                        if v.session.state() == crate::video::VideoSessionState::Paused {
+                            v.session.resume(now);
+                            self.effects.push(contract::CoreEffect::ResumeVideoAudio);
+                            self.draw();
+                        }
+                    }
+                }
                 // Re-place a visible panel against the settled surface size (a fullscreen toggle
                 // otherwise leaves it jammed in the corner — #3).
                 if self.overlay_shown {
@@ -6191,13 +6223,7 @@ impl AppCore {
         if self.info_line && self.info_line_visible() {
             return; // the persistent line's row tracks the seek already
         }
-        if self.native_info && !self.panels.hidden && self.current.is_some() {
-            let fresh = self.video_osd_until.is_none();
-            self.video_osd_until = Some(self.now + VIDEO_OSD_HOLD);
-            if fresh {
-                self.show_info_line();
-                self.emit_panels_changed();
-            }
+        if self.arm_video_line_flash() {
             return;
         }
         let osd = match self.video.as_ref().and_then(|v| v.duration()) {
@@ -6240,6 +6266,8 @@ impl AppCore {
                 self.target_item = self.playlist.current();
                 self.request_prefetch();
             }
+            // A resize-pause dies with its session (never resume a later one).
+            self.video_paused_by_resize = false;
         }
     }
 
@@ -6312,6 +6340,46 @@ impl AppCore {
                 // Ended parks on the last presented frame; P replays.
                 _ => self.draw(),
             }
+        }
+    }
+
+    /// Arm (or refresh) the transient info-line reveal while a video is active —
+    /// shared by the seek/step OSD and the pointer hover reveal. `true` when the
+    /// flash path applies (native-line shells, chrome not Tab-hidden); the tick
+    /// arm drops the line at the deadline.
+    fn arm_video_line_flash(&mut self) -> bool {
+        if !self.native_info || self.panels.hidden || self.current.is_none() {
+            return false;
+        }
+        let fresh = self.video_osd_until.is_none();
+        self.video_osd_until = Some(self.now + VIDEO_OSD_HOLD);
+        if fresh {
+            self.show_info_line();
+            self.emit_panels_changed();
+        }
+        true
+    }
+
+    /// Pointer hover over the **controls zone** — the bottom quarter of the
+    /// window, where the info line lives — reveals the playback controls while a
+    /// video is active, like every video player (owner request). It's the same
+    /// transient reveal the seek OSD uses: refreshed on every pointer move inside
+    /// the zone, decaying via the tick arm once the pointer leaves. Shell-neutral
+    /// policy: pointer moves arrive as `CoreEvent::PointerMoved` from every shell
+    /// (the macOS SwiftUI shell shares this the moment it forwards its hovers).
+    pub fn video_hover_reveal(&mut self, y: f32) {
+        use crate::video::VideoSessionState::*;
+        if self.info_line {
+            return; // the persistent line already shows the controls
+        }
+        if y < self.viewport.height as f32 * (1.0 - VIDEO_HOVER_ZONE) {
+            return;
+        }
+        let active = self.video.as_ref().is_some_and(|v| {
+            Some(v.item) == self.displayed_item && !matches!(v.session.state(), Failed | Stopped)
+        });
+        if active {
+            self.arm_video_line_flash();
         }
     }
 
@@ -9117,6 +9185,152 @@ mod tests {
         core.handle(contract::CoreEvent::Tick(Instant::now()));
         assert!(core.video_osd_until.is_none(), "the OSD flash expires");
         assert!(!core.info_line_visible(), "the flashed line drops");
+    }
+
+    /// Hovering the bottom controls zone reveals the playback controls while a
+    /// video is active (owner request — the video-player convention); the top of
+    /// the window doesn't, and the persistent `i` line needs no flash.
+    #[test]
+    fn hovering_the_controls_zone_reveals_the_playback_line() {
+        use crate::video::{VideoProducerEvent, VideoSessionId};
+        use crate::video_session::{ActiveVideo, VideoSession};
+
+        let mut core = test_core();
+        core.native_info = true;
+        core.info_line = false;
+        core.viewport.width = 800;
+        core.viewport.height = 1000;
+        core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
+            r"C:\nope\clip.mp4",
+        )]));
+        core.displayed_item = Some(0);
+        core.current = Some(crate::meta::PhotoMeta {
+            rel: "clip.mp4".into(),
+            w: 64,
+            h: 64,
+            codec: "MP4",
+            animated: None,
+        });
+        let (session, io) = VideoSession::new(VideoSessionId(1), 16);
+        core.video = Some(ActiveVideo {
+            session,
+            item: 0,
+            audio_started: false,
+        });
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: VideoSessionId(1),
+                duration: Some(Duration::from_secs(10)),
+                width: 2,
+                height: 2,
+                has_audio: false,
+                frame_bytes: 16,
+            })
+            .unwrap();
+        core.poll_video();
+
+        // Above the zone: nothing.
+        core.video_hover_reveal(100.0);
+        assert!(core.video_osd_until.is_none(), "top hover reveals nothing");
+        // Inside the bottom quarter: the line flashes on.
+        core.video_hover_reveal(900.0);
+        assert!(core.video_osd_until.is_some() && core.info_line_visible());
+
+        // With the persistent line on, hover never arms the flash.
+        core.video_osd_until = None;
+        core.info_line = true;
+        core.video_hover_reveal(900.0);
+        assert!(
+            core.video_osd_until.is_none(),
+            "persistent line needs no flash"
+        );
+        drop(io);
+    }
+
+    /// Owner-reported (79.10 smoke): a resize drag stalls the presenter (the OS
+    /// modal loop) while audio plays on — playback must freeze *together* and
+    /// resume together at settle, exactly where it froze. (The clock-catch-up
+    /// alternative raced or seek-churned — tried, regressed, reverted.)
+    #[test]
+    fn resize_pauses_playback_and_settle_resumes_it() {
+        use crate::video::{VideoProducerEvent, VideoSessionId, VideoSessionState};
+        use crate::video_session::{ActiveVideo, VideoSession};
+
+        let mut core = test_core();
+        core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
+            r"C:\nope\clip.mp4",
+        )]));
+        core.playlist = Playlist::new(1, 0);
+        core.displayed_item = Some(0);
+        let (session, io) = VideoSession::new(VideoSessionId(1), 16);
+        core.video = Some(ActiveVideo {
+            session,
+            item: 0,
+            audio_started: false,
+        });
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: VideoSessionId(1),
+                duration: Some(Duration::from_secs(10)),
+                width: 2,
+                height: 2,
+                has_audio: false,
+                frame_bytes: 16,
+            })
+            .unwrap();
+        let frame = |pts_ms: u64| pb_decode::VideoFrame {
+            session_id: VideoSessionId(1),
+            seek_generation: crate::video::SeekGeneration::FIRST,
+            pts: Duration::from_millis(pts_ms),
+            width: 2,
+            height: 2,
+            format: pb_decode::PixelFormat::Rgba8,
+            pixels: vec![0; 16],
+            color: pb_decode::video::VideoColorInfo::srgb(),
+        };
+        io.events.send(VideoProducerEvent::Frame(frame(0))).unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(33)))
+            .unwrap();
+        core.poll_video();
+        assert_eq!(
+            core.video.as_ref().unwrap().session.state(),
+            VideoSessionState::Playing
+        );
+
+        // A resize lands mid-playback: freeze together.
+        core.effects.clear();
+        core.resize(320, 200, 1.0);
+        assert_eq!(
+            core.video.as_ref().unwrap().session.state(),
+            VideoSessionState::Paused,
+            "resize pauses the session"
+        );
+        assert!(
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::PauseVideoAudio)),
+            "…and the audio with it"
+        );
+        assert!(core.video_paused_by_resize);
+
+        // The settle deadline passes: resume together, exactly where frozen.
+        core.effects.clear();
+        core.resize_settle_at = Some(core.now - Duration::from_millis(1));
+        core.handle(contract::CoreEvent::Tick(Instant::now()));
+        assert_eq!(
+            core.video.as_ref().unwrap().session.state(),
+            VideoSessionState::Playing,
+            "settle resumes the session"
+        );
+        assert!(
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::ResumeVideoAudio)),
+            "…and the audio with it"
+        );
+        assert!(!core.video_paused_by_resize, "one-shot");
+        drop(io);
     }
 
     /// Owner-reported (79.10 smoke): toggling fullscreen while a video played went
