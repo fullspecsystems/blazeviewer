@@ -428,6 +428,24 @@ pub enum CoreEffect {
     PauseLiveAudio,
     /// Resume the paused Live Photo audio.
     ResumeLiveAudio,
+    /// Open the **video item's** audio track, PAUSED, for the playing `VideoSession`
+    /// (task #79 phase 5). The shell owns the platform player (WinRT `MediaPlayer`)
+    /// and reports its clock back ~4×/s via `AppCore::video_audio_clock` — the audio
+    /// side of the core⇄shell clock bridge. `muted` applies the user's mute state at
+    /// open (the clock still runs muted, so A/V sync is mute-independent).
+    StartVideoAudio {
+        path: PathBuf,
+        session_id: crate::video::VideoSessionId,
+        muted: bool,
+    },
+    /// Drop the video audio player (session ended / stopped / navigated away).
+    StopVideoAudio,
+    /// Pause the video audio (session paused or rebuffering — freeze together).
+    PauseVideoAudio,
+    /// Start/resume the video audio (session entered `Playing` — resume together).
+    ResumeVideoAudio,
+    /// Mute/unmute the video audio in place (the mute toggle while a video plays).
+    SetVideoAudioMuted(bool),
     /// Perform a genuinely **host-side command** — one whose execution *is* a platform
     /// operation, not core orchestration. After NS0 5.6 this carries the residue that can't be
     /// pure core: **DeletePermanent** (opens the themed confirm dialog; the Yes then calls the

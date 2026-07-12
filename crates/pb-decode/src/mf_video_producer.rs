@@ -87,6 +87,7 @@ pub fn run_video_producer(
         duration: info.duration,
         width: w,
         height: h,
+        has_audio: info.has_audio,
     });
     let color = VideoColorInfo {
         transform: info.color,
@@ -224,10 +225,12 @@ mod tests {
                 duration,
                 width,
                 height,
+                has_audio,
             } => {
                 assert_eq!(session_id, SID);
                 assert_eq!((width, height), (64, 64));
                 assert!(duration.expect("mp4 duration") > Duration::from_millis(800));
+                assert!(!has_audio, "the black/color fixture is silent");
             }
             other => panic!("expected Opened, got {other:?}"),
         }
@@ -284,6 +287,24 @@ mod tests {
             t0.elapsed() < Duration::from_secs(2),
             "stop must not hang behind backpressure"
         );
+    }
+
+    /// Phase 5: `Opened` reports the audio track's presence — the signal that
+    /// starts the shell audio player (silent clips never get one).
+    #[test]
+    fn opened_reports_an_audio_track_when_one_exists() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/video/color_with_tone.mp4");
+        let (_msgs, events) = spawn(path);
+        match events
+            .recv_timeout(Duration::from_secs(10))
+            .expect("opened")
+        {
+            VideoProducerEvent::Opened { has_audio, .. } => {
+                assert!(has_audio, "the tone fixture has an AAC track");
+            }
+            other => panic!("expected Opened, got {other:?}"),
+        }
     }
 
     #[test]

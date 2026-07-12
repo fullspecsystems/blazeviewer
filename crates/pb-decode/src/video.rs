@@ -118,12 +118,15 @@ impl VideoFrame {
 #[derive(Debug)]
 pub enum VideoProducerEvent {
     /// The reader opened; stream facts the session may use (duration for the
-    /// HUD/seek clamp — `None` stays honest for unbounded/unknown streams).
+    /// HUD/seek clamp — `None` stays honest for unbounded/unknown streams;
+    /// `has_audio` decides whether the shell audio player starts at all and
+    /// whether preroll waits for audio readiness).
     Opened {
         session_id: VideoSessionId,
         duration: Option<Duration>,
         width: u32,
         height: u32,
+        has_audio: bool,
     },
     Frame(VideoFrame),
     EndOfStream {

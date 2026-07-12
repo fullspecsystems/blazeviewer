@@ -23,14 +23,27 @@ use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use crate::video::{
-    SeekGeneration, VideoProducerEvent, VideoProducerMsg, VideoQueueBudget, VideoSessionId,
-    VideoSessionState,
+    AudioClockSample, AudioClockState, SeekGeneration, VideoProducerEvent, VideoProducerMsg,
+    VideoQueueBudget, VideoSessionId, VideoSessionState,
 };
 use pb_decode::VideoFrame;
 
 /// Frames that must be queued (or EOS known) before `Buffering` promotes to
-/// `Playing` — the preroll. Phase 5 adds "audio ready-or-absent" to the condition.
+/// `Playing` — half of the preroll; the other half is audio **ready-or-absent**.
 pub const PREROLL_FRAMES: usize = 2;
+
+/// How long preroll waits for the shell's audio player to report ready before
+/// degrading to silent playback (audio can still join later — the clock bridge
+/// re-syncs). Bounds the damage of a wedged/slow audio path: never a hang.
+pub const AUDIO_READY_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The bounded per-sample clock correction while audio is master (~4 Hz samples ⇒
+/// up to ~200 ms/s of gentle convergence — far beyond any real clock drift).
+const MAX_AUDIO_CORRECTION: Duration = Duration::from_millis(50);
+
+/// An audio-vs-video clock gap past this is a discontinuity (audio started late,
+/// device hiccup): hard re-anchor to the audio position — never smooth across it.
+const AUDIO_HARD_REANCHOR: Duration = Duration::from_millis(500);
 
 /// The producer's ends of the session channels. Handed to the platform producer
 /// thread (or a test fake). Dropping it fails the session cleanly (disconnect ⇒
@@ -93,6 +106,9 @@ impl SessionClock {
 pub struct ActiveVideo {
     pub session: VideoSession,
     pub item: usize,
+    /// Whether the shell audio player has been started for this session (set once
+    /// the producer's `Opened` reports a track; silent clips never start one).
+    pub audio_started: bool,
 }
 
 /// See the module docs. Construct with [`VideoSession::new`], hand the returned
@@ -124,6 +140,15 @@ pub struct VideoSession {
     /// True once playback ever started — distinguishes an initial fill from a
     /// mid-play rebuffer when leaving `Buffering`.
     started: bool,
+    /// Whether the stream has an audio track (from `Opened`; `None` until then).
+    has_audio: Option<bool>,
+    /// The latest shell audio-clock sample and when it arrived here.
+    audio_last: Option<(AudioClockSample, Instant)>,
+    /// Audio is broken (player failed): playback continues silently on the
+    /// monotonic clock — never a session failure.
+    audio_failed: bool,
+    /// When preroll first started waiting on audio readiness (bounds the wait).
+    audio_wait_since: Option<Instant>,
 }
 
 impl VideoSession {
@@ -158,6 +183,10 @@ impl VideoSession {
             eos: false,
             error: None,
             started: false,
+            has_audio: None,
+            audio_last: None,
+            audio_failed: false,
+            audio_wait_since: None,
         };
         (
             session,
@@ -213,7 +242,7 @@ impl VideoSession {
                     }
                 }
                 Buffering => {
-                    if self.preroll_satisfied() {
+                    if self.preroll_satisfied(now) {
                         if let Some(front_pts) = self.queue.front().map(|f| f.pts) {
                             // Initial fill starts the clock at the first frame's
                             // PTS; a rebuffer resumes from the frozen position
@@ -302,8 +331,83 @@ impl VideoSession {
         }
     }
 
-    fn preroll_satisfied(&self) -> bool {
-        self.queue.len() >= PREROLL_FRAMES || (self.eos && !self.queue.is_empty()) || self.eos
+    fn preroll_satisfied(&mut self, now: Instant) -> bool {
+        let frames_ready =
+            self.queue.len() >= PREROLL_FRAMES || (self.eos && !self.queue.is_empty()) || self.eos;
+        frames_ready && self.audio_ready_or_absent(now)
+    }
+
+    /// The audio half of preroll (plan: "2 frames + audio **ready-or-absent**").
+    /// Absent, failed, or unknown-yet audio never gates; present audio gets
+    /// [`AUDIO_READY_TIMEOUT`] to report ready before playback degrades to silent
+    /// (a late-joining player still re-syncs through the clock bridge).
+    fn audio_ready_or_absent(&mut self, now: Instant) -> bool {
+        if self.audio_failed || !matches!(self.has_audio, Some(true)) {
+            return true;
+        }
+        let ready = self.audio_last.as_ref().is_some_and(|(s, _)| {
+            matches!(
+                s.state,
+                AudioClockState::Paused | AudioClockState::Playing | AudioClockState::Ended
+            )
+        });
+        if ready {
+            return true;
+        }
+        let since = *self.audio_wait_since.get_or_insert(now);
+        now.saturating_duration_since(since) >= AUDIO_READY_TIMEOUT
+    }
+
+    /// Shell → session: the platform audio player's latest clock sample. While
+    /// both sides play, audio is the **master clock**: small gaps converge via
+    /// bounded corrections (never a visible jump); a large gap is a discontinuity
+    /// and re-anchors hard. `Failed` flips to permanent silent fallback (the
+    /// monotonic clock — playback never dies with the audio).
+    pub fn on_audio_clock(&mut self, sample: AudioClockSample, now: Instant) {
+        if sample.session_id != self.id {
+            return; // a straggler from a replaced player must not re-anchor us
+        }
+        if sample.state == AudioClockState::Failed {
+            self.audio_failed = true;
+            self.audio_last = None;
+            return;
+        }
+        if self.state == VideoSessionState::Playing && sample.state == AudioClockState::Playing {
+            let target = sample.position;
+            let current = self.clock.position(now);
+            let ahead = target > current;
+            let gap = if ahead {
+                target - current
+            } else {
+                current - target
+            };
+            if gap >= AUDIO_HARD_REANCHOR {
+                self.clock.run_from(target, now);
+            } else if gap > Duration::ZERO {
+                let step = gap.min(MAX_AUDIO_CORRECTION);
+                let corrected = if ahead {
+                    current + step
+                } else {
+                    current.saturating_sub(step)
+                };
+                self.clock.run_from(corrected, now);
+            }
+        }
+        self.audio_last = Some((sample, now));
+    }
+
+    /// Whether the stream has an audio track (from `Opened`; `None` = unknown yet).
+    pub fn has_audio(&self) -> Option<bool> {
+        if self.audio_failed {
+            return Some(false);
+        }
+        self.has_audio
+    }
+
+    /// True once playback has ever started (distinguishes the initial fill from a
+    /// mid-play rebuffer — the caller pauses audio only for the latter).
+    pub fn has_started(&self) -> bool {
+        self.started
     }
 
     fn transition(&mut self, to: VideoSessionState, update: &mut SessionUpdate) {
@@ -322,10 +426,12 @@ impl VideoSession {
                 Ok(VideoProducerEvent::Opened {
                     session_id,
                     duration,
+                    has_audio,
                     ..
                 }) => {
                     if session_id == self.id {
                         self.duration = duration;
+                        self.has_audio = Some(has_audio);
                     }
                 }
                 Ok(VideoProducerEvent::Frame(frame)) => {
@@ -432,14 +538,28 @@ mod tests {
     }
 
     fn opened(io: &VideoSessionIo, dur_ms: u64) {
+        opened_audio(io, dur_ms, false);
+    }
+
+    fn opened_audio(io: &VideoSessionIo, dur_ms: u64, has_audio: bool) {
         io.events
             .send(VideoProducerEvent::Opened {
                 session_id: SID,
                 duration: Some(Duration::from_millis(dur_ms)),
                 width: 2,
                 height: 2,
+                has_audio,
             })
             .unwrap();
+    }
+
+    fn audio_sample(pos_ms: u64, state: AudioClockState) -> AudioClockSample {
+        AudioClockSample {
+            session_id: SID,
+            state,
+            position: Duration::from_millis(pos_ms),
+            sampled_at_monotonic: Duration::ZERO,
+        }
     }
 
     fn eos(io: &VideoSessionIo) {
@@ -729,6 +849,116 @@ mod tests {
         drop(io2);
         s2.poll(t0);
         assert_eq!(s2.state(), VideoSessionState::Failed);
+    }
+
+    /// Phase 5: preroll waits for audio readiness when the stream has a track —
+    /// and degrades to silent playback after the bounded timeout.
+    #[test]
+    fn preroll_waits_for_audio_ready_or_times_out_to_silent() {
+        let (mut s, io) = VideoSession::new(SID, FRAME_BYTES);
+        let t0 = Instant::now();
+        opened_audio(&io, 10_000, true);
+        io.events.send(VideoProducerEvent::Frame(frame(0))).unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(33)))
+            .unwrap();
+
+        // Frames are ready but audio isn't: stay in Buffering.
+        s.poll(t0);
+        assert_eq!(s.state(), VideoSessionState::Buffering, "waits for audio");
+        assert_eq!(s.has_audio(), Some(true));
+
+        // Audio reports ready (opened paused) → play immediately.
+        s.on_audio_clock(audio_sample(0, AudioClockState::Paused), t0);
+        let u = s.poll(t0 + Duration::from_millis(10));
+        assert_eq!(s.state(), VideoSessionState::Playing);
+        assert!(u.present.is_some(), "first frame presents on promotion");
+
+        // A second session whose audio never reports: the timeout unblocks it.
+        let (mut s2, io2) = VideoSession::new(SID, FRAME_BYTES);
+        opened_audio(&io2, 10_000, true);
+        io2.events
+            .send(VideoProducerEvent::Frame(frame(0)))
+            .unwrap();
+        io2.events
+            .send(VideoProducerEvent::Frame(frame(33)))
+            .unwrap();
+        s2.poll(t0);
+        assert_eq!(s2.state(), VideoSessionState::Buffering);
+        s2.poll(t0 + Duration::from_millis(500));
+        assert_eq!(s2.state(), VideoSessionState::Buffering, "still waiting");
+        s2.poll(t0 + AUDIO_READY_TIMEOUT + Duration::from_millis(1));
+        assert_eq!(
+            s2.state(),
+            VideoSessionState::Playing,
+            "timeout degrades to silent playback"
+        );
+    }
+
+    /// Phase 5: while both sides play, audio is master — small gaps converge via
+    /// bounded steps, large gaps hard re-anchor, and a foreign session's sample
+    /// is ignored entirely.
+    #[test]
+    fn audio_clock_corrections_are_bounded_and_reanchor_hard_on_discontinuity() {
+        let (mut s, io) = VideoSession::new(SID, FRAME_BYTES);
+        let t0 = Instant::now();
+        opened_audio(&io, 60_000, true);
+        io.events.send(VideoProducerEvent::Frame(frame(0))).unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(33)))
+            .unwrap();
+        s.on_audio_clock(audio_sample(0, AudioClockState::Paused), t0);
+        s.poll(t0); // → Playing at position 0
+
+        // Audio 200 ms ahead: within the smooth band → one bounded step (50 ms).
+        s.on_audio_clock(audio_sample(200, AudioClockState::Playing), t0);
+        let pos = s.position(t0);
+        assert_eq!(
+            pos,
+            Duration::from_millis(50),
+            "bounded correction, got {pos:?}"
+        );
+
+        // Audio 2 s ahead: discontinuity → hard re-anchor to the audio position.
+        s.on_audio_clock(audio_sample(2_050, AudioClockState::Playing), t0);
+        assert_eq!(
+            s.position(t0),
+            Duration::from_millis(2_050),
+            "hard re-anchor"
+        );
+
+        // A foreign session's straggler sample must not touch the clock.
+        let mut foreign = audio_sample(30_000, AudioClockState::Playing);
+        foreign.session_id = VideoSessionId(999);
+        s.on_audio_clock(foreign, t0);
+        assert_eq!(s.position(t0), Duration::from_millis(2_050));
+
+        // Audio behind: bounded step backward (never a big visible jump).
+        s.on_audio_clock(audio_sample(1_900, AudioClockState::Playing), t0);
+        assert_eq!(s.position(t0), Duration::from_millis(2_000));
+    }
+
+    /// Phase 5: an audio failure flips to permanent silent fallback — playback
+    /// survives on the monotonic clock and later samples are ignored.
+    #[test]
+    fn audio_failure_degrades_to_silent_and_never_kills_playback() {
+        let (mut s, io) = VideoSession::new(SID, FRAME_BYTES);
+        let t0 = Instant::now();
+        opened_audio(&io, 10_000, true);
+        io.events.send(VideoProducerEvent::Frame(frame(0))).unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(33)))
+            .unwrap();
+        s.on_audio_clock(audio_sample(0, AudioClockState::Failed), t0);
+        assert_eq!(s.has_audio(), Some(false), "failed audio reads as absent");
+        s.poll(t0);
+        assert_eq!(
+            s.state(),
+            VideoSessionState::Playing,
+            "no audio wait after failure"
+        );
+        // Frames still pace on the monotonic clock.
+        assert!(s.poll(t0 + Duration::from_millis(34)).present.is_some());
     }
 
     /// End to end on Windows: the real MF producer streaming the committed H.264

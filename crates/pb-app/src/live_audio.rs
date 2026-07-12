@@ -18,6 +18,8 @@
 
 use std::path::Path;
 
+#[cfg(windows)]
+pub(crate) use imp::file_uri;
 pub use imp::LiveAudio;
 
 #[cfg(not(any(
@@ -211,7 +213,8 @@ mod imp {
     /// `%`, or `?` in a filename as fragment/escape/query — and it leaves existing
     /// `%XX` escapes alone, so pre-encoding everything outside the unreserved set
     /// (plus the separators we mean: `/` and the drive `:`) is both safe and exact.
-    fn file_uri(path: &Path) -> Option<String> {
+    /// Shared with the video audio player (`video_audio.rs`, task #79 phase 5).
+    pub(crate) fn file_uri(path: &Path) -> Option<String> {
         let s = path.to_str()?;
         let s = s.strip_prefix(r"\\?\").unwrap_or(s);
         // UNC `\\server\share\…` → `file://server/share/…`; drive paths get the

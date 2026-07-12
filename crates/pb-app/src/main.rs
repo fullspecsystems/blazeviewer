@@ -68,6 +68,7 @@ mod panels_ui;
 mod pb_key_winit;
 mod reveal;
 mod sdf_rect;
+mod video_audio;
 // Velopack per-user installer lifecycle hooks + background auto-update (Windows ship path).
 mod update;
 mod win_console;
@@ -323,6 +324,13 @@ struct App {
     /// "cheap path" (task #38). `None` when nothing is playing / it's a silent clip / not
     /// a Live Photo. Dropped (which stops it) on pause-to-step, finish, or navigate.
     live_audio: Option<LiveAudio>,
+
+    /// The video item's audio player + clock source (task #79 phase 5). Owned here
+    /// (a platform object); driven by the `*VideoAudio` effects; sampled ~4×/s into
+    /// `AppCore::video_audio_clock`. `None` = no video playing / silent clip.
+    video_audio: Option<video_audio::VideoAudio>,
+    /// Last time the video audio clock was sampled (throttles to ~4 Hz).
+    video_audio_sampled_at: Instant,
 
     /// A dialog the orchestration layer asked the shell to open, deferred so the opener
     /// methods don't need the `ActiveEventLoop` (window creation lives in the shell's
@@ -676,6 +684,8 @@ impl App {
             scan_gen: 0,
             pending_launch: None,
             live_audio: None,
+            video_audio: None,
+            video_audio_sampled_at: Instant::now(),
             pending_dialog: None,
             requested_wake: None,
             egui_overlay: None,
@@ -2387,6 +2397,44 @@ impl App {
                             a.resume();
                         }
                     }
+                    // Video audio (task #79 phase 5): the shell owns the WinRT player;
+                    // the core decides when. Opens PAUSED — the core resumes it
+                    // together with the video preroll.
+                    contract::CoreEffect::StartVideoAudio {
+                        path,
+                        session_id,
+                        muted,
+                    } => {
+                        self.video_audio = video_audio::VideoAudio::open(&path, session_id, muted);
+                        if self.video_audio.is_none() {
+                            // No player (creation failed / platform stub): tell the
+                            // session once so it degrades to silent immediately
+                            // instead of waiting out the readiness timeout.
+                            self.core
+                                .video_audio_clock(pb_app_core::video::AudioClockSample {
+                                    session_id,
+                                    state: pb_app_core::video::AudioClockState::Failed,
+                                    position: Duration::ZERO,
+                                    sampled_at_monotonic: Duration::ZERO,
+                                });
+                        }
+                    }
+                    contract::CoreEffect::StopVideoAudio => self.video_audio = None,
+                    contract::CoreEffect::PauseVideoAudio => {
+                        if let Some(a) = &self.video_audio {
+                            a.pause();
+                        }
+                    }
+                    contract::CoreEffect::ResumeVideoAudio => {
+                        if let Some(a) = &self.video_audio {
+                            a.resume();
+                        }
+                    }
+                    contract::CoreEffect::SetVideoAudioMuted(muted) => {
+                        if let Some(a) = &self.video_audio {
+                            a.set_muted(muted);
+                        }
+                    }
                     // The core routed a flow action (dialog / window / scan / file edit / quit) it
                     // doesn't own end-to-end yet — run the shell half.
                     contract::CoreEffect::ShellFlowAction(action) => {
@@ -3099,6 +3147,16 @@ impl ApplicationHandler for App {
         if !self.pending_drops.is_empty() {
             let drops = std::mem::take(&mut self.pending_drops);
             self.open_input(classify_inputs(drops));
+        }
+        // 0c. Video audio clock bridge (task #79 phase 5): sample the player's
+        // position/state ~4×/s into the core — the master clock while audio plays.
+        if let Some(va) = &self.video_audio {
+            if self.video_audio_sampled_at.elapsed() >= Duration::from_millis(250) {
+                self.video_audio_sampled_at = Instant::now();
+                if let Some(sample) = va.sample() {
+                    self.core.video_audio_clock(sample);
+                }
+            }
         }
         // 0c. Pick up a finished background archive open (.7z eager decompress) or
         // directory scan (large/nested folder walked off the event loop).

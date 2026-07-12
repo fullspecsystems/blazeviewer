@@ -2,7 +2,24 @@
 
 _Last updated: 2026-07-11 (late). Supersedes the morning handoff (#76 shipped / #79 planned)._
 
-## State: main, #79 phases 0-4 done (Windows scope), all gates green
+## State: main, #79 phases 0-5 done (Windows scope), all gates green
+
+**Phase 5 (audio + clock bridge) landed — subtask 79.6 `review` (owner smoke: play a clip
+WITH sound; check lip-sync by eye; mute/unmute mid-play; pause/resume keeps sync).**
+- Session: `Opened` carries `has_audio`; preroll = 2 frames + audio **ready-or-absent**
+  (1 s timeout degrades to silent — never a hang); `on_audio_clock` makes audio the
+  master clock while both play (bounded ±50 ms corrections per ~4 Hz sample, hard
+  re-anchor past 500 ms); audio `Failed` → permanent silent fallback. 14 session tests.
+- Shell: `pb-app/src/video_audio.rs` — WinRT `MediaPlayer` over the video file, opened
+  **paused** (loads in parallel with the frame preroll; core resumes both together via
+  `ResumeVideoAudio` on the Buffering→Playing transition); ~4 Hz sampling into
+  `AppCore::video_audio_clock`; mute-in-place keeps the clock running (sync is
+  mute-independent); creation failure reports one `Failed` sample.
+- Effects: `Start/Stop/Pause/ResumeVideoAudio` + `SetVideoAudioMuted`; the session's
+  state changes drive them (freeze together on rebuffer, resume together on Playing);
+  the existing Mute toggle now also mutes/unmutes video audio in place.
+- New committed fixture `color_with_tone.mp4` (H.264 + 440 Hz AAC) asserts `has_audio`
+  detection. Linux PCM / macOS audio player = phase 7 parity.
 
 **Phase 4 (silent bounded playback) landed — subtask 79.5 `review` (owner smoke: open a
 video, press P; pause/resume on P; replay after end; navigate away mid-play).**
@@ -65,13 +82,18 @@ Key files: `pb-app-core/src/video.rs` (classify/item_kind/companion helpers),
 (`video_placeholder` + dispatch), `default_app.rs`, `main.rs`, release-linux.sh,
 Info-swift-host.plist.
 
-**Next: phase 5 (audio + clock bridge, subtask 79.6).** Bidirectional `AudioClockSample`
-events (contract already in `pb-app-core::video`); Windows audio via
-`MediaPlaybackSession` (position/state/buffering); master clock swaps from monotonic to
-audio-position when audio is present + playing (extrapolate between ~4 Hz samples, hard
-re-anchor on discontinuities); readiness joins the preroll condition; no-audio/failure →
-silent playback on the monotonic clock (already the phase-4 behavior). Then phase 6 =
-seeking + contextual pan-action input (spike says: recreate the reader per seek).
+**Next: phase 6 (seeking + contextual input, subtask 79.7).** The plan's 8-step seek spec
+(clamp → bump seek_generation + flush → reposition → decode-forward → publish first ≥
+target → seek audio + ack → hard re-anchor → resume-if-was-playing). Spike-locked
+strategy: **recreate the reader per seek** (open ~20 ms, position-before-first-read
+~0 ms; repositioning a warm HEVC reader blocks ~1 s) — i.e. the producer gets a SeekTo
+message that tears down + reopens its reader at the target (or the session spawns a
+fresh producer with a start offset + bumped generation, reusing the existing identity
+discard rules). Seek-past-EOS errors (0xC00D36E5) — clamp FIRST. Input: contextual
+rewrite of the PAN actions while a video plays (±2 s, Shift ±15 s, self-timed hold with
+latest-value coalescing; pan wins when zoomed with horizontal overflow); audio seek =
+`MediaPlaybackSession.SetPosition` + await its position ack; HUD position pill
+(`m:ss / m:ss` via `format_video_duration`). Custom-keymap tests per the plan.
 
 `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, the featured
 clippy (`libheif,dav1d`), and `fmt --check` all pass.

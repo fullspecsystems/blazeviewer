@@ -360,6 +360,12 @@ impl AppCore {
                 if muted {
                     // Silence any playing clip now; a slashed-speaker icon pill = muted.
                     self.effects.push(contract::CoreEffect::StopLiveAudio);
+                    // A playing video mutes in place — its clock keeps running, so
+                    // A/V sync is unaffected (task #79 phase 5).
+                    if self.video.is_some() {
+                        self.effects
+                            .push(contract::CoreEffect::SetVideoAudioMuted(true));
+                    }
                     self.show_toast_icon("", ToastIcon::Mute);
                 } else {
                     // Unmuting mid-playback: resume audio at the motion's current position.
@@ -372,6 +378,11 @@ impl AppCore {
                                     .push(contract::CoreEffect::StartLiveAudio { path, at_secs });
                             }
                         }
+                    }
+                    // A muted video unmutes in place (its audio kept pace muted).
+                    if self.video.is_some() {
+                        self.effects
+                            .push(contract::CoreEffect::SetVideoAudioMuted(false));
                     }
                     // A speaker-with-waves icon pill = now audible.
                     self.show_toast_icon("", ToastIcon::Unmute);
@@ -5663,10 +5674,12 @@ impl AppCore {
             Some((playing_item, state)) if playing_item == item => match state {
                 Playing => {
                     self.video.as_mut().unwrap().session.pause(self.now);
+                    self.effects.push(contract::CoreEffect::PauseVideoAudio);
                     self.draw();
                 }
                 Paused => {
                     self.video.as_mut().unwrap().session.resume(self.now);
+                    self.effects.push(contract::CoreEffect::ResumeVideoAudio);
                     self.draw();
                 }
                 // Replay from the top (phase 6 turns this into a seek-to-0 on the
@@ -5705,7 +5718,11 @@ impl AppCore {
             std::thread::spawn(move || {
                 pb_decode::run_video_producer(&path, fit, id, generation, io.events, io.msgs);
             });
-            self.video = Some(crate::video_session::ActiveVideo { session, item });
+            self.video = Some(crate::video_session::ActiveVideo {
+                session,
+                item,
+                audio_started: false,
+            });
             self.anim_hint_shown_for = Some(item); // engaged — retire the hint
             self.draw();
         }
@@ -5721,17 +5738,50 @@ impl AppCore {
     pub fn stop_video(&mut self) {
         if let Some(mut v) = self.video.take() {
             v.session.stop();
+            self.effects.push(contract::CoreEffect::StopVideoAudio);
         }
     }
 
-    /// Per-tick video drive (task #79 phase 4): poll the session, present the due
-    /// frame through the reusable present path, surface failures.
+    /// Per-tick video drive (task #79 phases 4+5): poll the session, present the
+    /// due frame through the reusable present path, keep the shell audio player in
+    /// lockstep with the session state, surface failures.
     pub fn poll_video(&mut self) {
         let Some(v) = self.video.as_mut() else {
             return;
         };
         let update = v.session.poll(self.now);
         let state = v.session.state();
+        let started = v.session.has_started();
+        let item = v.item;
+        let session_id = v.session.id;
+        // Start the shell audio player the moment the producer reports a track
+        // (Opened), paused — it opens in parallel with the video preroll and the
+        // two resume together. Silent clips never create a player.
+        let start_audio = !v.audio_started && v.session.has_audio() == Some(true);
+        if start_audio {
+            v.audio_started = true;
+        }
+        if start_audio {
+            if let Some(path) = self.source.path(item).map(Path::to_path_buf) {
+                let muted = self.effective_mute();
+                self.effects.push(contract::CoreEffect::StartVideoAudio {
+                    path,
+                    session_id,
+                    muted,
+                });
+            }
+        }
+        // Session state drives the audio player (freeze together, resume
+        // together): Playing = resume; a mid-play rebuffer or the end = pause.
+        if update.state_changed {
+            use crate::video::VideoSessionState::*;
+            match state {
+                Playing => self.effects.push(contract::CoreEffect::ResumeVideoAudio),
+                Buffering if started => self.effects.push(contract::CoreEffect::PauseVideoAudio),
+                Ended => self.effects.push(contract::CoreEffect::PauseVideoAudio),
+                _ => {}
+            }
+        }
         if let Some(frame) = update.present {
             if let Some(a) = self.renderer.as_mut() {
                 a.set_image(
@@ -5756,11 +5806,21 @@ impl AppCore {
                         .and_then(|v| v.session.error.clone())
                         .unwrap_or_else(|| "Video playback failed".into());
                     self.video = None;
+                    self.effects.push(contract::CoreEffect::StopVideoAudio);
                     self.show_toast(&msg);
                 }
                 // Ended parks on the last presented frame; P replays.
                 _ => self.draw(),
             }
+        }
+    }
+
+    /// Shell → core: the platform video-audio player's latest clock sample
+    /// (task #79 phase 5). Routed to the active session, which uses it as the
+    /// master clock while both sides play.
+    pub fn video_audio_clock(&mut self, sample: crate::video::AudioClockSample) {
+        if let Some(v) = self.video.as_mut() {
+            v.session.on_audio_clock(sample, self.now);
         }
     }
 

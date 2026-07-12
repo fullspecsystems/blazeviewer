@@ -925,8 +925,8 @@
           {
             "id": 6,
             "title": "Phase 5: audio + clock bridge",
-            "description": "AudioClockSample events core<->shell with session_id; extrapolate between ~4Hz samples, hard re-anchor on discontinuities; readiness/pause/resume/mute/failure/interruption/no-audio; Linux incremental PCM with monotonic-clock honesty; drift measured (physical lip-sync = manual check).",
-            "status": "pending"
+            "description": "AudioClockSample events core<->shell with session_id; extrapolate between ~4Hz samples, hard re-anchor on discontinuities; readiness/pause/resume/mute/failure/interruption/no-audio; Linux incremental PCM with monotonic-clock honesty; drift measured (physical lip-sync = manual check). DONE 2026-07-11 (awaiting owner smoke): audio clock bridge live on Windows. Session side (video_session.rs): Opened carries has_audio; preroll = 2 frames + audio ready-or-absent with a 1s degrade-to-silent timeout; on_audio_clock = master clock while both play (bounded +/-50ms corrections per ~4Hz sample, hard re-anchor past 500ms, foreign-session samples ignored); audio Failed -> permanent silent fallback, never a session failure. 3 new session tests (14 total). Shell side: pb-app/src/video_audio.rs (WinRT MediaPlayer over the video file, opened PAUSED so it loads during the frame preroll and the two resume together; mute in place keeps the clock running so sync is mute-independent); main.rs samples ~4Hz -> AppCore::video_audio_clock; player-creation failure reports one Failed sample. Effects: Start/Stop/Pause/ResumeVideoAudio + SetVideoAudioMuted; core maps session state changes to them (freeze together on rebuffer, resume together on Playing); the Mute toggle mutes video audio in place. Producer: Opened{has_audio} from stream_info; committed color_with_tone.mp4 fixture asserts detection. Linux incremental PCM + macOS player = phase 7 parity; drift measurement vs tone fixture = optional phase 7 check.",
+            "status": "review"
           },
           {
             "id": 7,
