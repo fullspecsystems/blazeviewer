@@ -42,7 +42,12 @@ struct FolderTreePanelView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            PanelHeader(title: "Folders", closeHelp: "Close (⇧F)") { model.closeTree() }
+            // The left pane's shared tab bar (task #83): Folders | Thumbnails.
+            LeftPaneTabBar(
+                model: model, width: min(model.treeWidth, maxWidth),
+                closeHelp: "Close (⇧F)"
+            ) { model.closeTree() }
+            PanelDivider()
 
             ScrollViewReader { proxy in
                 ScrollView {

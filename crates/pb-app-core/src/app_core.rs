@@ -385,6 +385,11 @@ pub struct AppCore {
     /// content — so the marker fires on a real change (open/close, tab switch, or an
     /// async result landing), never per tick. `None` = the Inspector was hidden.
     pub last_inspector_snap: Option<crate::panels::InspectorSnapshot>,
+    /// The host presents the **Thumbnails strip** (task #83) natively: gates the
+    /// `Shift+T` toggle so a shell without a strip presenter (the winit shell,
+    /// until its egui parity phase) never enables capture / fills for a strip it
+    /// can't draw. The macOS host sets it at construction.
+    pub native_thumbs: bool,
     /// The host presents the **folder tree** (⇧F) natively (task #54, mac-first): the
     /// core skips rasterizing the tree quad and instead stores the derived rows/targets
     /// for the shell to read, signalling [`CoreEffect::PanelsChanged`] on change. A

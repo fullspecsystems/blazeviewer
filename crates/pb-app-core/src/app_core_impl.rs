@@ -175,6 +175,7 @@ impl AppCore {
             last_open_visible: false,
             native_inspector: false,
             last_inspector_snap: None,
+            native_thumbs: false,
             native_tree: false,
             last_tree_visible: false,
             overlay_shown: false,
@@ -1852,6 +1853,9 @@ impl AppCore {
     /// reveal + show, never close (the reveal rule).
     pub fn toggle_thumbnails(&mut self) {
         use crate::overlay::LeftTab;
+        if !self.native_thumbs {
+            return; // no strip presenter on this shell yet (winit: task #83 phase 7)
+        }
         if self.panels.reveal() {
             self.folder_tree_open = true;
             self.left_tab = LeftTab::Thumbnails;
@@ -2187,7 +2191,9 @@ impl AppCore {
     /// reads to show/hide its SwiftUI list: the tree is open, not `Tab`-hidden, and the
     /// host presents it natively.
     pub fn tree_panel_visible(&self) -> bool {
-        self.native_tree && self.panels.tree_visible(self.folder_tree_open)
+        self.native_tree
+            && self.panels.tree_visible(self.folder_tree_open)
+            && self.left_tab == crate::overlay::LeftTab::Folders
     }
 
     /// Activate a native tree row by index (a SwiftUI list click): navigate its target —
@@ -4106,6 +4112,7 @@ impl AppCore {
                     row("Detailed info panel", sc(Action::FullExif)),
                     row("Text in image", sc(Action::ShowImageText)),
                     row("Folder tree", sc(Action::FolderTree)),
+                    row("Thumbnails", sc(Action::Thumbnails)),
                     row("Hide/show panels", sc(Action::TogglePanels)),
                     row("Parent folder", sc(Action::OpenParent)),
                     row(
@@ -5041,6 +5048,10 @@ impl AppCore {
         }
         self.view.rotation = new;
         self.push_view();
+        // The strip draws session rotation per cell (task #83) — re-signal it.
+        if self.thumbs_visible() {
+            self.emit_panels_changed();
+        }
         // Flash a directional rotate icon (icon-only pill) as feedback.
         let ico = if ccw {
             ToastIcon::RotateLeft
@@ -10395,6 +10406,7 @@ mod tests {
 
     fn thumb_test_core() -> AppCore {
         let mut core = test_core();
+        core.native_thumbs = true; // headless default is false (no presenter)
         core.source = five_photos();
         core.playlist = Playlist::new(5, 0);
         core.ring = ResidentRing::new(4);
@@ -10537,5 +10549,85 @@ mod tests {
         core.rebuild_playlist(five_photos(), PathBuf::from("photos"), None, false, 0);
         assert_eq!(core.thumbs.cache.len(), 0, "index-keyed thumbs dropped");
         assert!(core.thumbs.cache.deck_gen() > g0);
+    }
+
+    /// Privacy (task #83 / ADR-018): the whole thumbnail machinery — capture,
+    /// derive, T1 fill decodes (incl. the EXIF-IFD1 fast path), cache churn —
+    /// is RAM-only. A thumbs-enabled session over a real sandbox must create
+    /// or modify nothing on disk. (The winit no-trace tests cover the broader
+    /// view session; this one exercises exactly the strip's new code paths.)
+    #[test]
+    fn thumbnail_session_writes_nothing_to_disk() {
+        use std::fs;
+
+        fn snapshot(dir: &std::path::Path) -> Vec<(PathBuf, u64, std::time::SystemTime)> {
+            let mut out = Vec::new();
+            let mut stack = vec![dir.to_path_buf()];
+            while let Some(d) = stack.pop() {
+                for e in fs::read_dir(&d).expect("read_dir") {
+                    let e = e.expect("entry");
+                    let m = e.metadata().expect("meta");
+                    if m.is_dir() {
+                        stack.push(e.path());
+                    } else {
+                        out.push((e.path(), m.len(), m.modified().expect("mtime")));
+                    }
+                }
+            }
+            out.sort();
+            out
+        }
+
+        let dir = std::env::temp_dir().join(format!("pb_thumb_notrace_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("mkdir sandbox");
+        const IMG: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pb-app/icons/photoblaze.png"
+        ));
+        let mut paths = Vec::new();
+        for name in ["a.png", "b.png", "c.png"] {
+            let p = dir.join(name);
+            fs::write(&p, IMG).expect("seed image");
+            paths.push(p);
+        }
+        let before = snapshot(&dir);
+
+        let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(paths));
+        // T1 fill path — the Thumb-purpose decode entry (EXIF-IFD1 probe, then
+        // the fitted decode of the read bytes).
+        for i in 0..source.len() {
+            let img = crate::engine::decode_item_for(
+                source.as_ref(),
+                i,
+                Some(crate::thumbs::thumb_fit()),
+                true,
+                crate::decode_pool::Purpose::Thumb,
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+            .expect("thumb fill decode");
+            // T0 capture + derive + cache insert.
+            let mut core = None;
+            let core = core.get_or_insert_with(|| {
+                let mut c = test_core();
+                c.native_thumbs = true;
+                c.source = source.clone();
+                c.playlist = Playlist::new(source.len(), 0);
+                c
+            });
+            core.toggle_thumbnails();
+            core.thumbs_capture(Outcome::synthetic(i, core.epoch, Ok(img)));
+            for _ in 0..200 {
+                if core.thumbs.poll(0) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert!(core.thumbs.cache.get(i).is_some(), "thumb {i} cached (RAM)");
+        }
+
+        let after = snapshot(&dir);
+        assert_eq!(before, after, "a thumbnail session must touch no files");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

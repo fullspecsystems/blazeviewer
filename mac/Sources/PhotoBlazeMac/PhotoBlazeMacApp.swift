@@ -229,9 +229,27 @@ struct ContentView: View {
                 }
             }
             // The folder tree rides the leading edge (where the HUD tree sat), top-aligned.
+            // The Thumbnails strip (task #83) is the same pane's second tab, so it mounts
+            // in the same slot — the core guarantees at most one of the two is visible.
             .overlay {
                 if model.treeVisible {
                     FolderTreePanelView(
+                        model: model,
+                        maxHeight: panelMaxHeight(treeFrame),
+                        maxWidth: max(280, contentSize.width - 80)
+                    )
+                    .onGeometryChange(for: CGRect.self) {
+                        $0.frame(in: .named(Self.contentSpace))
+                    } action: { treeFrame = $0 }
+                    .frame(
+                        maxWidth: .infinity, maxHeight: .infinity,
+                        alignment: .topLeading
+                    )
+                    .padding(.leading, edge)
+                    .padding(.top, edge)
+                    .transition(.opacity)
+                } else if model.thumbsVisible {
+                    ThumbnailsPanelView(
                         model: model,
                         maxHeight: panelMaxHeight(treeFrame),
                         maxWidth: max(280, contentSize.width - 80)

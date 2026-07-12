@@ -124,6 +124,24 @@ final class CoreModel {
     /// Whether the Finder tree (chevron expand/collapse, name-to-open) is active — else
     /// the flat v1 archive tree (click-to-activate). Drives the row rendering + actions.
     private(set) var treeUsesFs = false
+    /// The native Thumbnails strip (⇧T, task #83) — the left pane's second tab.
+    /// Visibility + the virtual row count + the current highlight + the store's
+    /// change counter, refreshed on `PanelsChanged` (`refreshThumbs`).
+    private(set) var thumbsVisible = false
+    private(set) var leftTab = 0
+    private(set) var thumbCount = 0
+    private(set) var thumbCurrent = -1
+    private(set) var thumbDirty: UInt64 = 0
+    /// The pending follow-scroll command (item + generation), pulled from the
+    /// core; `thumbScrollSeq` bumps so the panel's `.onChange` fires even when
+    /// the same item repeats.
+    private(set) var thumbScrollItem = -1
+    private(set) var thumbScrollGen: UInt64 = 0
+    private(set) var thumbScrollSeq: UInt64 = 0
+    /// Per-cell NSImage cache keyed by playlist index; entries carry the store
+    /// generation they were built from (pull-once, plan §8). Bounded: pruned
+    /// around the most recent pull; emptied when the tab closes.
+    private var thumbImages: [Int: (gen: UInt64, image: NSImage)] = [:]
     /// User-resizable panel widths (drag the inner edge). The defaults are the minimums;
     /// session-persistent (survive close/reopen) — disk persistence is a later slice.
     var treeWidth: CGFloat = 280
@@ -852,6 +870,105 @@ final class CoreModel {
     /// Close the folder tree from its ✕ — the same toggle ⇧F drives (menu checkmark follows).
     func closeTree() {
         menuAction("folder_tree")
+    }
+
+    // MARK: - Thumbnails strip (task #83)
+
+    /// Re-pull the strip's model after a `PanelsChanged` marker: visibility, the
+    /// active left-pane tab, counts, the highlight, and any pending follow-scroll.
+    private func refreshThumbs() {
+        let vis = core.thumbs_visible()
+        leftTab = Int(core.left_tab())
+        if vis != thumbsVisible {
+            withAnimation(Layout.chromeFade) { thumbsVisible = vis }
+            if !vis {
+                thumbImages.removeAll() // free the CGImage cache with the tab
+            }
+        }
+        guard vis else { return }
+        thumbCount = Int(core.thumb_count())
+        thumbCurrent = Int(core.thumb_current())
+        thumbDirty = core.thumb_dirty()
+        let item = Int(core.thumb_scroll_item())
+        if item >= 0 {
+            thumbScrollItem = item
+            thumbScrollGen = core.thumb_scroll_gen()
+            core.take_thumb_scroll()
+            thumbScrollSeq &+= 1
+        }
+    }
+
+    /// The cell's thumb as an NSImage, built from the store's RGBA8 bytes and
+    /// cached per store generation — an unchanged cell transfers nothing.
+    func thumbImage(_ i: Int) -> NSImage? {
+        let gen = core.thumb_gen(UInt(i))
+        if gen == 0 { return nil }
+        if let cached = thumbImages[i], cached.gen == gen { return cached.image }
+        let w = Int(core.thumb_width(UInt(i)))
+        let h = Int(core.thumb_height(UInt(i)))
+        let rgba = core.thumb_rgba(UInt(i))
+        guard w > 0, h > 0, rgba.len() == w * h * 4 else { return nil }
+        let data = Data(bytes: UnsafeRawPointer(rgba.as_ptr()), count: rgba.len())
+        guard let provider = CGDataProvider(data: data as CFData),
+              let cg = CGImage(
+                  width: w, height: h,
+                  bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,
+                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
+                  provider: provider, decode: nil, shouldInterpolate: true,
+                  intent: .defaultIntent)
+        else { return nil }
+        let image = NSImage(cgImage: cg, size: NSSize(width: w, height: h))
+        thumbImages[i] = (gen, image)
+        if thumbImages.count > 96 {
+            // Keep the 64 nearest the pull point — the visible+overscan working set.
+            let keep = Set(thumbImages.keys.sorted { abs($0 - i) < abs($1 - i) }.prefix(64))
+            thumbImages = thumbImages.filter { keep.contains($0.key) }
+        }
+        return image
+    }
+
+    func thumbName(_ i: Int) -> String { core.thumb_name(UInt(i)).toString() }
+    func thumbBadge(_ i: Int) -> Int { Int(core.thumb_badge(UInt(i))) }
+    func thumbRotation(_ i: Int) -> Int { Int(core.thumb_rotation(UInt(i))) }
+    func thumbFailed(_ i: Int) -> Bool { core.thumb_failed(UInt(i)) }
+
+    /// A cell click: absolute jump + the instant thumb-preview present.
+    func thumbClick(_ i: Int) {
+        core.thumb_click(UInt(i))
+        kick()
+    }
+
+    /// The strip's realized-cell span → the core's demand window (fills + pinning).
+    func thumbsSetViewport(_ visLo: Int, _ visHi: Int, _ overLo: Int, _ overHi: Int) {
+        core.thumbs_set_viewport(
+            UInt(max(0, visLo)), UInt(max(0, visHi)),
+            UInt(max(0, overLo)), UInt(max(0, overHi)))
+        kick()
+    }
+
+    /// The user grabbed the list — detach auto-follow until the next nav/click.
+    func thumbsUserScrolled() {
+        core.thumbs_user_scrolled()
+    }
+
+    /// Our follow-scroll animation for `gen` landed.
+    func thumbsScrollDone(_ gen: UInt64) {
+        core.thumbs_scroll_done(gen)
+    }
+
+    /// Switch the left pane's tab (the tab-bar click): 0 = Folders, 1 = Thumbnails.
+    /// Rides the same actions as the keyboard (⇧F / ⇧T), so the semantics match.
+    func showLeftTab(_ tab: Int) {
+        if tab == 0 && leftTab != 0 {
+            menuAction("folder_tree")
+        } else if tab == 1 && leftTab != 1 {
+            menuAction("thumbnails")
+        }
+    }
+
+    func closeThumbs() {
+        menuAction("thumbnails")
     }
 
     // MARK: - Empty-state panel actions (task #54)
@@ -1923,6 +2040,7 @@ final class CoreModel {
             openPanelVisible = core.open_panel_visible()
             refreshInspector()
             refreshTree()
+            refreshThumbs()
             syncToolbar() // the folder-tree / inspector toggle state lives here, not MenuState
         case .ShowContextMenu(
             let hasImage, let hasMotion, let canReveal, let fullscreen,

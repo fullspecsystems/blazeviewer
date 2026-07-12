@@ -8,6 +8,21 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
+- **A Thumbnails panel (macOS): press `Shift+T` for a scrollable strip of your photos.**
+  The left pane now has two tabs — Folders and Thumbnails — sharing one panel (`Shift+F`
+  and `Shift+T` switch between them; clicking the tabs works too). The strip shows small
+  previews of the photos around where you are, with the current one highlighted, each
+  cell labeled with its filename, and badges for videos, Live Photos, and animations.
+  **Click any thumbnail to jump straight to it** — if you jump somewhere far away, the
+  thumbnail itself appears instantly while the full image loads, so there is never a
+  black flash or a wait. The strip follows along as you navigate (scrolling it by hand
+  pauses the following; your next keypress or click brings it back), rotations you make
+  show in the strip, and the panel is resizable — thumbnails stay sharp when you widen
+  it. Thumbnails are generated from decode work the viewer is already doing, so browsing
+  speed is unaffected, and everything stays in memory only: no thumbnail files or
+  databases are ever written to disk. (Windows/Linux: coming in a follow-up.)
+
+### Added
 - **Videos now appear in your library, with real poster frames.** Camera clips (MP4, MOV,
   MKV, WebM, AVI, and other common containers) are listed alongside photos when you browse
   a folder. Each clip shows its first non-black frame as a poster (with the correct

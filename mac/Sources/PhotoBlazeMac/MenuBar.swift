@@ -265,6 +265,7 @@ final class MenuBar: NSObject {
             item("info", "Show Image Info"),
             item("full_exif", "Show All EXIF Info", key: "i"),
             item("folder_tree", "Show Folder Tree"),
+            item("thumbnails", "Show Thumbnails"),
             item("toggle_panels", "Hide Panels"),
             sep(),
             // The toolbar (task #55): the standard Mac affordances — AppKit toggles the

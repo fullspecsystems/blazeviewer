@@ -704,6 +704,8 @@ impl App {
             last_open_visible: false,
             native_inspector: true,
             last_inspector_snap: None,
+            // No egui strip presenter yet (task #83 phase 7) — Shift+T stays inert here.
+            native_thumbs: false,
             native_tree: true,
             last_tree_visible: false,
             overlay_shown: false,
@@ -729,6 +731,8 @@ impl App {
             chip_sig: None,
             chip_built: Instant::now(),
             folder_tree_open: false,
+            left_tab: Default::default(),
+            thumbs: Default::default(),
             folder_tree_sig: None,
             folder_tree_panel: None,
             folder_tree_counts: None,

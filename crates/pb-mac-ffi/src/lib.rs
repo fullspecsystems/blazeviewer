@@ -165,6 +165,7 @@ impl AppCoreHandle {
         core.native_open = true;
         core.native_inspector = true;
         core.native_tree = true;
+        core.native_thumbs = true; // the SwiftUI Thumbnails strip (task #83)
         core.native_toast = true;
         core.native_info = true;
         core.native_play = true;
@@ -516,6 +517,156 @@ impl AppCoreHandle {
             .get(i)
             .map(|r| r.has_target)
             .unwrap_or(false)
+    }
+
+    // --- Thumbnails strip (task #83) ---
+
+    /// Whether the Thumbnails tab is the visible left-pane content.
+    fn thumbs_visible(&self) -> bool {
+        self.core.thumbs_visible()
+    }
+
+    /// The left pane's active tab: 0 = Folders, 1 = Thumbnails (the tab-bar highlight).
+    fn left_tab(&self) -> u8 {
+        match self.core.left_tab {
+            pb_app_core::LeftTab::Folders => 0,
+            pb_app_core::LeftTab::Thumbnails => 1,
+        }
+    }
+
+    /// Deck length — the strip's virtual row count.
+    fn thumb_count(&self) -> usize {
+        self.core.source.len()
+    }
+
+    /// The current photo's playlist index (the highlight), or -1 on an empty deck.
+    fn thumb_current(&self) -> i64 {
+        self.core.playlist.current().map(|i| i as i64).unwrap_or(-1)
+    }
+
+    /// The thumb store's change counter — cheap "anything new?" probe per pull.
+    fn thumb_dirty(&self) -> u64 {
+        self.core.thumbs.cache.dirty()
+    }
+
+    /// The entry's generation (0 = no thumb yet). Swift skips re-pulling pixels
+    /// for a cell whose generation it already holds (pull-once, plan §8).
+    fn thumb_gen(&self, i: usize) -> u64 {
+        self.core.thumbs.cache.get(i).map(|e| e.gen).unwrap_or(0)
+    }
+
+    fn thumb_width(&self, i: usize) -> u32 {
+        self.core.thumbs.cache.get(i).map(|e| e.w).unwrap_or(0)
+    }
+
+    fn thumb_height(&self, i: usize) -> u32 {
+        self.core.thumbs.cache.get(i).map(|e| e.h).unwrap_or(0)
+    }
+
+    /// One entry's RGBA8 pixels, copied once on demand for exactly this cell
+    /// (never a bulk clone of the store — plan §8).
+    fn thumb_rgba(&self, i: usize) -> Vec<u8> {
+        self.core
+            .thumbs
+            .cache
+            .get(i)
+            .map(|e| e.payload.rgba.clone())
+            .unwrap_or_default()
+    }
+
+    /// The cell's display filename (the basename of the item's name/path).
+    fn thumb_name(&self, i: usize) -> String {
+        let name = self.core.source.name(i);
+        name.rsplit(['/', '\\']).next().unwrap_or(name).to_string()
+    }
+
+    /// Item-type badge: 0 none, 1 video, 2 Live Photo, 3 animated. Live/animated
+    /// appear once their (lazily filled) caches know; video is always known.
+    fn thumb_badge(&self, i: usize) -> u8 {
+        if matches!(
+            pb_app_core::video::item_kind(self.core.source.as_ref(), i),
+            pb_app_core::LibraryItemKind::Video(_)
+        ) {
+            return 1;
+        }
+        if matches!(self.core.live_motion_cache.get(&i), Some(Some(_))) {
+            return 2;
+        }
+        if self
+            .core
+            .meta_cache
+            .get(&i)
+            .is_some_and(|m| m.animated.is_some())
+        {
+            return 3;
+        }
+        0
+    }
+
+    /// The item's session rotation override in clockwise quarter turns (0..=3) —
+    /// applied at draw so the strip matches the viewer (fixed cells: no reflow).
+    fn thumb_rotation(&self, i: usize) -> u8 {
+        match self.core.rotations.get(&i) {
+            Some(pb_render::Rotation::R90) => 1,
+            Some(pb_render::Rotation::R180) => 2,
+            Some(pb_render::Rotation::R270) => 3,
+            _ => 0,
+        }
+    }
+
+    /// Whether the item's decode failed (broken-image glyph, never a spinner).
+    fn thumb_failed(&self, i: usize) -> bool {
+        self.core.failed.contains(&i) || self.core.thumbs.failed.contains(&i)
+    }
+
+    /// A strip cell click: absolute jump + the instant thumb-preview present.
+    fn thumb_click(&mut self, i: usize) {
+        self.core.thumb_jump(i);
+    }
+
+    /// The shell's visible + overscan cell ranges (inclusive playlist indices) —
+    /// the demand window fills and eviction protect. Reported on scroll.
+    fn thumbs_set_viewport(
+        &mut self,
+        vis_lo: usize,
+        vis_hi: usize,
+        over_lo: usize,
+        over_hi: usize,
+    ) {
+        self.core.thumbs.viewport = Some(((vis_lo, vis_hi), (over_lo, over_hi)));
+        if let Some(cur) = self.core.playlist.current() {
+            let demand = self.core.thumbs.demand(cur);
+            self.core.thumbs.cache.rebalance(&demand);
+        }
+        self.core.request_prefetch();
+    }
+
+    /// The user grabbed the list (not our own animation): detach auto-follow.
+    fn thumbs_user_scrolled(&mut self) {
+        self.core.thumbs.follow.user_scrolled();
+    }
+
+    /// The pending follow-scroll command's target (-1 = none) + generation.
+    /// Swift reads both, starts the scroll, calls `take_thumb_scroll`, and
+    /// reports `thumbs_scroll_done(gen)` when the animation lands.
+    fn thumb_scroll_item(&self) -> i64 {
+        self.core
+            .thumbs
+            .pending_scroll
+            .map(|c| c.item as i64)
+            .unwrap_or(-1)
+    }
+
+    fn thumb_scroll_gen(&self) -> u64 {
+        self.core.thumbs.pending_scroll.map(|c| c.gen).unwrap_or(0)
+    }
+
+    fn take_thumb_scroll(&mut self) {
+        self.core.thumbs.pending_scroll = None;
+    }
+
+    fn thumbs_scroll_done(&mut self, gen: u64) {
+        self.core.thumbs.follow.programmatic_done(gen);
     }
 
     /// The current photo's folder path — the host keys "scroll the current row into view"
@@ -2973,6 +3124,33 @@ mod ffi {
         fn tree_row_has_children(&self, i: usize) -> bool;
         fn tree_row_expanded(&self, i: usize) -> bool;
         fn tree_row_loading(&self, i: usize) -> bool;
+        // The Thumbnails strip (task #83).
+        fn thumbs_visible(&self) -> bool;
+        fn left_tab(&self) -> u8;
+        fn thumb_count(&self) -> usize;
+        fn thumb_current(&self) -> i64;
+        fn thumb_dirty(&self) -> u64;
+        fn thumb_gen(&self, i: usize) -> u64;
+        fn thumb_width(&self, i: usize) -> u32;
+        fn thumb_height(&self, i: usize) -> u32;
+        fn thumb_rgba(&self, i: usize) -> Vec<u8>;
+        fn thumb_name(&self, i: usize) -> String;
+        fn thumb_badge(&self, i: usize) -> u8;
+        fn thumb_rotation(&self, i: usize) -> u8;
+        fn thumb_failed(&self, i: usize) -> bool;
+        fn thumb_click(&mut self, i: usize);
+        fn thumbs_set_viewport(
+            &mut self,
+            vis_lo: usize,
+            vis_hi: usize,
+            over_lo: usize,
+            over_hi: usize,
+        );
+        fn thumbs_user_scrolled(&mut self);
+        fn thumb_scroll_item(&self) -> i64;
+        fn thumb_scroll_gen(&self) -> u64;
+        fn take_thumb_scroll(&mut self);
+        fn thumbs_scroll_done(&mut self, gen: u64);
         fn tree_row_count_badge(&self, i: usize) -> i64;
         fn tree_row_has_target(&self, i: usize) -> bool;
         fn tree_current_path(&self) -> String;
