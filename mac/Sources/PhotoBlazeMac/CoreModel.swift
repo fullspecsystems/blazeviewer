@@ -1871,6 +1871,8 @@ final class CoreModel {
             liveAudio?.play()
         case .PlayVideo(let path, let sessionId, let muted):
             playNativeVideo(path: path.toString(), sessionId: sessionId, muted: muted)
+        case .PlayVideoBytes(let name, let sessionId, let muted):
+            playNativeVideoBytes(name: name.toString(), sessionId: sessionId, muted: muted)
         case .StopVideo(let sessionId):
             // Session-gated: a StopVideo for a superseded session must not tear down
             // the current one (a newer PlayVideo may already have replaced it).
@@ -2236,6 +2238,28 @@ final class CoreModel {
         resetVideoControls() // start the new clip's scrubber at 0, not the last clip's spot
         nativeVideo = NativeVideoPlayer(
             url: URL(fileURLWithPath: path), muted: muted, sessionId: sessionId,
+            scaleMode: core.menu_state().scale, canvas: canvas, model: self)
+    }
+
+    /// `CoreEffect::PlayVideoBytes` (macOS archive video, task #30): the core stashed the
+    /// entry's in-RAM container bytes — pull them once and open an `AVPlayer` backed by a
+    /// resource loader that serves them on demand (never written to disk; privacy #2).
+    private func playNativeVideoBytes(name: String, sessionId: UInt64, muted: Bool) {
+        nativeVideo?.stop()
+        nativeVideo = nil
+        guard let canvas = canvasView else {
+            log("PlayVideoBytes: no canvas view to present into")
+            return
+        }
+        let bytes = core.take_pending_video_bytes()
+        guard bytes.len() > 0 else {
+            log("PlayVideoBytes: no bytes stashed for \(name)")
+            return
+        }
+        let data = Data(bytes: UnsafeRawPointer(bytes.as_ptr()), count: bytes.len())
+        resetVideoControls()
+        nativeVideo = NativeVideoPlayer(
+            data: data, name: name, muted: muted, sessionId: sessionId,
             scaleMode: core.menu_state().scale, canvas: canvas, model: self)
     }
 

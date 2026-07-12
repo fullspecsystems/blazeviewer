@@ -1280,6 +1280,13 @@ impl AppCoreHandle {
         self.core.flash_video_controls();
     }
 
+    /// Pull the in-RAM archive-video container bytes stashed for a `PlayVideoBytes` effect
+    /// (macOS archive playback). The host wraps them in a resource loader for `AVPlayer`.
+    /// Consumes the stash; empty if none pending.
+    fn take_pending_video_bytes(&mut self) -> Vec<u8> {
+        self.core.take_pending_video_bytes()
+    }
+
     /// The current item's video-layer placement (task 79.9 phase 3) — the still
     /// renderer's geometry, so the host places the `AVPlayerLayer` identically to a photo.
     fn video_placement(&self) -> ffi::VideoPlacementFfi {
@@ -2526,6 +2533,11 @@ fn map_effect(e: contract::CoreEffect) -> ffi::CoreEffectFfi {
             session_id,
             muted,
         } => E::PlayVideo(path.to_string_lossy().into_owned(), session_id.0, muted),
+        C::PlayVideoBytes {
+            name,
+            session_id,
+            muted,
+        } => E::PlayVideoBytes(name, session_id.0, muted),
         C::StopVideo { session_id } => E::StopVideo(session_id.0),
         C::PauseVideo { session_id } => E::PauseVideo(session_id.0),
         C::ResumeVideo { session_id } => E::ResumeVideo(session_id.0),
@@ -2623,6 +2635,10 @@ mod ffi {
         // poster shows until then). StopVideo(session_id) tears the player down
         // (navigate / delete / failure); stale callbacks are rejected by session id.
         PlayVideo(String, u64, bool),
+        // Play an archive (ZIP/7z) entry from in-RAM bytes (name, session_id, muted): no
+        // file URL, so the host pulls the container bytes via take_pending_video_bytes()
+        // and serves them to AVPlayer through a custom resource loader (never to disk).
+        PlayVideoBytes(String, u64, bool),
         StopVideo(u64),
         // Pause / resume the native player (session_id). ResumeVideo also serves replay:
         // when the player is parked at EOS the host seeks to 0 before playing.
@@ -2942,6 +2958,7 @@ mod ffi {
         fn info_line_is_animated(&self) -> bool;
         fn info_line_is_video(&self) -> bool;
         fn flash_video_controls(&mut self);
+        fn take_pending_video_bytes(&mut self) -> Vec<u8>;
         fn video_placement(&self) -> VideoPlacementFfi;
         fn info_line_align(&self) -> u8;
         fn play_hint_kind(&self) -> u8;

@@ -97,6 +97,7 @@ impl AppCore {
             view: ViewTransform::default(),
             last_cursor: None,
             content_top_inset: 0,
+            pending_video_bytes: None,
             dragging: false,
             rotations: std::collections::HashMap::new(),
             zoom_started: None,
@@ -3516,6 +3517,13 @@ impl AppCore {
     /// `(x, y, w, h, rotation)` in **physical px, top-left origin**; `w`/`h` are the
     /// *rotated* footprint and `rotation` is the CW quadrant (0/1/2/3 = 0/90/180/270) the
     /// shell rotates the layer by about its center. `None` before the renderer/fit exist.
+    /// Take the in-RAM container bytes stashed for a `PlayVideoBytes` (macOS archive
+    /// video) — the shell pulls them once and serves them to `AVPlayer` via a resource
+    /// loader. Empty if none pending. Consumes the stash.
+    pub fn take_pending_video_bytes(&mut self) -> Vec<u8> {
+        self.pending_video_bytes.take().unwrap_or_default()
+    }
+
     pub fn video_placement(&self) -> Option<(f32, f32, f32, f32, u8)> {
         let (iw, ih, sw, sh) = self.screen_and_image()?;
         let content_h = sh.saturating_sub(self.content_top_inset).max(1);
@@ -6186,23 +6194,42 @@ impl AppCore {
         // state back through the `native_video_*` callbacks (79.9 phase 2).
         #[cfg(target_os = "macos")]
         {
-            let Some(path) = self.source.path(item).map(Path::to_path_buf) else {
-                // An archive entry: the native AVPlayer plays by URL, and feeding
-                // it in-RAM bytes (a custom resource loader) is future parity work.
-                self.show_toast("Videos inside archives can't play on macOS yet");
-                return;
-            };
             self.video_seq += 1;
             let id = crate::video::VideoSessionId(self.video_seq);
             let muted = self.effective_mute();
-            self.video = Some(ActiveVideoBackend::Native(
-                crate::video_native::NativeVideoProxy::new(item, id, muted),
-            ));
-            self.effects.push(contract::CoreEffect::PlayVideo {
-                path,
-                session_id: id,
-                muted,
-            });
+            if let Some(path) = self.source.path(item).map(Path::to_path_buf) {
+                self.video = Some(ActiveVideoBackend::Native(
+                    crate::video_native::NativeVideoProxy::new(item, id, muted),
+                ));
+                self.effects.push(contract::CoreEffect::PlayVideo {
+                    path,
+                    session_id: id,
+                    muted,
+                });
+            } else {
+                // Archive entry: no file URL. Read the container bytes (RAM-only, never to
+                // disk — privacy #2) and hand them to the shell, which serves them to
+                // `AVPlayer` through a custom resource loader. Read here on the event loop
+                // for the spike; moving the inflate off-thread is a follow-up.
+                match self.source.bytes(item) {
+                    Ok(data) => {
+                        let name = self.source.name(item).to_string();
+                        self.pending_video_bytes = Some(data);
+                        self.video = Some(ActiveVideoBackend::Native(
+                            crate::video_native::NativeVideoProxy::new(item, id, muted),
+                        ));
+                        self.effects.push(contract::CoreEffect::PlayVideoBytes {
+                            name,
+                            session_id: id,
+                            muted,
+                        });
+                    }
+                    Err(e) => {
+                        self.show_toast(&format!("couldn't read the video from the archive: {e}"));
+                        return;
+                    }
+                }
+            }
             self.anim_hint_shown_for = Some(item); // engaged — retire the hint
             self.draw();
         }
@@ -9555,6 +9582,17 @@ mod tests {
         core.effects.clear();
         core.video_seek(false);
         assert_eq!(seek_of(&core), Some((7, 3, 10_000)));
+    }
+
+    /// The macOS archive-video byte stash is pulled exactly once — a second pull (a stale
+    /// or superseded session) gets nothing, never another session's container.
+    #[test]
+    fn pending_video_bytes_is_taken_once() {
+        let mut core = test_core();
+        assert!(core.take_pending_video_bytes().is_empty(), "none by default");
+        core.pending_video_bytes = Some(vec![1, 2, 3, 4]);
+        assert_eq!(core.take_pending_video_bytes(), vec![1, 2, 3, 4]);
+        assert!(core.take_pending_video_bytes().is_empty(), "consumed once");
     }
 
     /// Frame-step on the native backend emits a `StepVideo` intent for the displayed item,

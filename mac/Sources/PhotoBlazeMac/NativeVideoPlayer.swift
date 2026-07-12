@@ -22,6 +22,9 @@ final class NativeVideoPlayer {
     private let player: AVPlayer
     private let item: AVPlayerItem
     private let playerLayer: AVPlayerLayer
+    /// Retained for an archive clip: the `AVAssetResourceLoader` only weakly holds its
+    /// delegate, so the player must keep the bytes-serving loader alive for the session.
+    private let resourceLoader: ArchiveVideoLoader?
     private weak var canvas: MetalCanvasNSView?
     private weak var model: CoreModel?
 
@@ -39,15 +42,42 @@ final class NativeVideoPlayer {
     /// video honors 8/9/0 like a still. Zoom/pan/rotation parity is a later increment.
     private var scaleMode: UInt8
 
-    init(
+    /// Play a loose file by URL.
+    convenience init(
         url: URL, muted: Bool, sessionId: UInt64, scaleMode: UInt8, canvas: MetalCanvasNSView,
         model: CoreModel
+    ) {
+        self.init(
+            item: AVPlayerItem(url: url), loader: nil, muted: muted, sessionId: sessionId,
+            scaleMode: scaleMode, canvas: canvas, model: model)
+    }
+
+    /// Play an archive (ZIP/7z) entry from in-RAM `data` — no file URL, so an
+    /// `AVAssetResourceLoaderDelegate` serves the bytes to a custom-scheme `AVURLAsset`
+    /// on demand (never written to disk; privacy #2). `name` gives the real extension so
+    /// the loader can resolve the content type AVPlayer needs.
+    convenience init(
+        data: Data, name: String, muted: Bool, sessionId: UInt64, scaleMode: UInt8,
+        canvas: MetalCanvasNSView, model: CoreModel
+    ) {
+        let loader = ArchiveVideoLoader(data: data, name: name)
+        let asset = AVURLAsset(url: loader.url)
+        asset.resourceLoader.setDelegate(loader, queue: loader.queue)
+        self.init(
+            item: AVPlayerItem(asset: asset), loader: loader, muted: muted, sessionId: sessionId,
+            scaleMode: scaleMode, canvas: canvas, model: model)
+    }
+
+    init(
+        item: AVPlayerItem, loader: ArchiveVideoLoader?, muted: Bool, sessionId: UInt64,
+        scaleMode: UInt8, canvas: MetalCanvasNSView, model: CoreModel
     ) {
         self.sessionId = sessionId
         self.scaleMode = scaleMode
         self.canvas = canvas
         self.model = model
-        item = AVPlayerItem(url: url)
+        self.resourceLoader = loader
+        self.item = item
         player = AVPlayer(playerItem: item)
         player.isMuted = muted
         // Hold the last frame at EOS (parity: end-of-stream parks; `P` replays).
@@ -114,7 +144,8 @@ final class NativeVideoPlayer {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.publishProgress() }
         }
-        pbTrace("native video \(sessionId): opening \(url.lastPathComponent) muted=\(muted)")
+        let src = resourceLoader == nil ? "file" : "archive-bytes"
+        pbTrace("native video \(sessionId): opening (\(src)) muted=\(muted)")
     }
 
     /// Push the current position/duration/playing to the model for the scrubber row.

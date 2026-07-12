@@ -2644,6 +2644,7 @@ impl App {
                     // drives the Windows/Linux `VideoSession` + its separate audio player above).
                     // Matched explicitly (the no-wildcard rule) and inert here.
                     contract::CoreEffect::PlayVideo { .. }
+                    | contract::CoreEffect::PlayVideoBytes { .. }
                     | contract::CoreEffect::PauseVideo { .. }
                     | contract::CoreEffect::ResumeVideo { .. }
                     | contract::CoreEffect::SeekVideoBy { .. }

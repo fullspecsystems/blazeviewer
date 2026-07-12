@@ -513,6 +513,11 @@ pub struct AppCore {
     /// Monotonic source of `VideoSessionId`s — a fresh id per session so straggler
     /// frames from a torn-down producer can never touch a newer session.
     pub video_seq: u64,
+    /// macOS archive-video handoff: the in-RAM container bytes for the session the core
+    /// just emitted `PlayVideoBytes` for, stashed for the shell to pull once
+    /// (`take_pending_video_bytes`) and serve to `AVPlayer` via a resource loader. RAM-only,
+    /// never written to disk (privacy #2). `None` except in the brief emit→pull window.
+    pub pending_video_bytes: Option<Vec<u8>>,
     /// Last held-key video seek step (task #79 phase 6): the app's own repeat
     /// timer (OS key-repeat stays ignored, like every other held action).
     pub video_seek_last: Option<Instant>,

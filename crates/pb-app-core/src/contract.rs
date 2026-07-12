@@ -470,6 +470,16 @@ pub enum CoreEffect {
         session_id: crate::video::VideoSessionId,
         muted: bool,
     },
+    /// Play a video from **in-RAM bytes** — an archive (ZIP/7z) entry, which has no file
+    /// URL (task #30 macOS parity). The container bytes are stashed for the shell to pull
+    /// (`AppCore::take_pending_video_bytes`), then served to `AVPlayer` through a custom
+    /// resource loader — never extracted to disk (privacy #2). `name` carries the entry's
+    /// real extension so the shell can resolve the content type.
+    PlayVideoBytes {
+        name: String,
+        session_id: crate::video::VideoSessionId,
+        muted: bool,
+    },
     /// Pause the native player (`P` while playing; rebuffer never applies — the
     /// system player owns buffering).
     PauseVideo {
