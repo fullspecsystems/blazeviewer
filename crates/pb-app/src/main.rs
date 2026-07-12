@@ -357,8 +357,11 @@ struct App {
     /// of these panels and drives this instead.
     egui_overlay: Option<egui_overlay::EguiOverlay>,
     /// The last snapshotted info line + its appear/vanish stamps, driving the
-    /// ~100 ms fade (the line keeps drawing briefly after the core hides it).
+    /// fade (the line keeps drawing briefly after the core hides it). Stamps are
+    /// set by `update_overlay` on the visibility EDGE (it runs every turn;
+    /// renders don't), never inside the render itself.
     last_info_line: Option<panels_ui::InfoLine>,
+    info_line_was_visible: bool,
     info_shown_at: Option<Instant>,
     info_vanished_at: Option<Instant>,
     /// Whether the egui panel texture needs re-rendering next turn — set on a panel
@@ -709,6 +712,7 @@ impl App {
             requested_wake: None,
             egui_overlay: None,
             last_info_line: None,
+            info_line_was_visible: false,
             info_shown_at: None,
             info_vanished_at: None,
             overlay_dirty: false,
@@ -1357,6 +1361,24 @@ impl App {
     /// Retained — a nav frame with a static panel open re-renders nothing. Returns egui's
     /// next timed-repaint deadline for the wake calc.
     fn update_overlay(&mut self, now: Instant) -> Option<Instant> {
+        // The info-line fade stamps live HERE, on the visibility edge — this runs
+        // every turn, while renders don't. (Stamping inside the render was the
+        // owner-reported inconsistency: hide-without-a-render popped the line and
+        // left a stale appear stamp, so the NEXT show popped too.)
+        let line_now = self.core.info_line_visible();
+        if line_now != self.info_line_was_visible {
+            self.info_line_was_visible = line_now;
+            if line_now {
+                self.info_shown_at = Some(now);
+                self.info_vanished_at = None;
+            } else {
+                self.info_shown_at = None;
+                if self.last_info_line.is_some() {
+                    self.info_vanished_at = Some(now);
+                }
+            }
+            self.overlay_dirty = true;
+        }
         if !self.overlay_visible() {
             // Nothing open: drop the composited layer once, on the visibility edge.
             if self.overlay_active {
@@ -1408,17 +1430,21 @@ impl App {
         let now = Instant::now();
         match frame.info.take() {
             Some(mut line) => {
-                let shown = *self.info_shown_at.get_or_insert(now);
-                line.fade =
-                    (now.duration_since(shown).as_secs_f32() / INFO_FADE_IN.as_secs_f32()).min(1.0);
-                self.info_vanished_at = None;
+                // Ramp from the appear stamp `update_overlay` set on the edge.
+                line.fade = self
+                    .info_shown_at
+                    .map(|s| now.duration_since(s).as_secs_f32() / INFO_FADE_IN.as_secs_f32())
+                    .unwrap_or(1.0)
+                    .min(1.0);
                 self.last_info_line = Some(line.clone());
                 frame.info = Some(line);
             }
             None => {
-                self.info_shown_at = None;
-                if let Some(last) = self.last_info_line.as_ref() {
-                    let gone = *self.info_vanished_at.get_or_insert(now);
+                // Fade the LAST line out from the vanish stamp (the core has
+                // already hidden it; the shell keeps drawing through the ramp).
+                if let (Some(last), Some(gone)) =
+                    (self.last_info_line.as_ref(), self.info_vanished_at)
+                {
                     let t = now.duration_since(gone).as_secs_f32() / INFO_FADE_OUT.as_secs_f32();
                     if t < 1.0 {
                         let mut line = last.clone();
@@ -1426,6 +1452,7 @@ impl App {
                         frame.info = Some(line);
                     } else {
                         self.last_info_line = None;
+                        self.info_vanished_at = None;
                     }
                 }
             }
