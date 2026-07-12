@@ -122,11 +122,19 @@ Key files: `pb-app-core/src/video.rs` (classify/item_kind/companion helpers),
 (`video_placeholder` + dispatch), `default_app.rs`, `main.rs`, release-linux.sh,
 Info-swift-host.plist.
 
-**Next: subtask 79.9 — Linux/macOS video parity** (needs those machines; producer per
-platform behind the unchanged protocol; details in the subtask). **Owner smoke queue:**
-the 4K60 monster clip at full screen after the audio double-decode fix — if it still
-can't hold 60 fps, the next lever is `IMF2DBuffer::Lock2D` / NV12 (see the ceiling note
-above); 4K30 and 1080p are comfortable regardless.
+**Owner verdict on 4K60 full-screen: still not smooth after the double-decode fix —
+the ADR-012 gate has tripped. NEW subtask 79.10: GPU-accelerated decode** (spike ladder
+in the subtask: NV12 + in-shader YUV → MF hardware decode via D3D manager → full
+zero-copy; measure each rung; also try `IMF2DBuffer::Lock2D` on the current path).
+
+**Position pill replaced per owner design (2026-07-11):** the info line (`i`) now grows
+a **playback row** while a video plays —
+`filename · W×H · codec` / `0:42 ▰▰▰▱▱▱ 9:01` — via `hud::render_panel_progress`.
+Width = max(summary row, bar minimum) so it's constant for a clip (no 1 Hz jitter);
+re-rastered only when the displayed second changes (`update_video_progress`); one block,
+one `i` toggle = the show/hide. The `video_pill` renderer layer was removed.
+
+**Next:** 79.10 (GPU decode — the performance unblock) then 79.9 (Linux/macOS parity).
 
 `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, the featured
 clippy (`libheif,dav1d`), and `fmt --check` all pass.

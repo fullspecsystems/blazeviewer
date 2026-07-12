@@ -225,6 +225,17 @@ pub enum Row {
     Pair { label: String, value: String },
 }
 
+/// The playback progress row appended to the info line while a video plays
+/// ([`Hud::render_panel_progress`], task #79): `elapsed ▰▰▰▱▱ total`. Pure data.
+pub struct ProgressRow {
+    pub elapsed: String,
+    /// `None` when the container reports no duration — the bar then renders as
+    /// an unfilled track after the elapsed label.
+    pub total: Option<String>,
+    /// 0..=1 of the bar filled (0 when the duration is unknown).
+    pub fraction: f32,
+}
+
 /// One section of the keyboard-shortcuts overlay ([`Hud::render_shortcuts`]): a semibold
 /// heading over its rows. Each row is `(description, shortcut)`; the description is left-aligned
 /// (white) and the shortcut is right-aligned and dimmed (menu-accelerator style). An empty
@@ -511,6 +522,107 @@ impl Hud {
             self.theme.text,
             px,
         );
+        Some((canvas.into_rgba(), pw, ph))
+    }
+
+    /// The info line with a **playback progress row** under it (task #79, owner
+    /// design): `filename · W×H · codec` on top, `0:42 ▰▰▰▱▱▱ 9:01` below. The
+    /// panel width is the top row's natural width, floored so the bar stays
+    /// usable when the file summary is short — constant for a whole clip, so the
+    /// once-a-second re-raster never jitters.
+    pub fn render_panel_progress(
+        &self,
+        text: &str,
+        progress: &ProgressRow,
+        px: f32,
+        pad: u32,
+        bg: [u8; 4],
+    ) -> Option<(Vec<u8>, u32, u32)> {
+        let line_h = self.line_height(px)?;
+        let pad_x = ((pad as f32) * tokens::PAD_X).round() as u32;
+        let (top_glyphs, top_adv) = self.layout(text, px, Weight::Regular);
+
+        // Time labels slightly smaller than the summary row.
+        let tpx = (px * 0.9).max(8.0);
+        let tline_h = self.line_height(tpx)?;
+        let (el_glyphs, el_adv) = self.layout(&progress.elapsed, tpx, Weight::Regular);
+        let total_text = progress.total.as_deref().unwrap_or("");
+        let (tot_glyphs, tot_adv) = self.layout(total_text, tpx, Weight::Regular);
+
+        // Width: the top row's natural width, floored so the bar is never a
+        // sliver (labels + a minimum bar span).
+        let label_gap = (tpx * 0.55).round().max(4.0) as u32;
+        let min_bar = (tpx * 7.0).round() as u32;
+        let gaps = if total_text.is_empty() { 1 } else { 2 } * label_gap;
+        let row_min = el_adv.ceil() as u32 + tot_adv.ceil() as u32 + gaps + min_bar;
+        let inner_w = (top_adv.ceil() as u32).max(row_min);
+        let pw = inner_w + 2 * pad_x;
+
+        let row_gap = ((pad as f32) * 0.5).round().max(2.0) as u32;
+        let ph = pad + line_h + row_gap + tline_h + pad;
+        let mut canvas = Canvas::new(pw, ph, bg, (px * tokens::RADIUS_PANEL).round());
+
+        // Row 1: the file summary.
+        let baseline1 = pad as f32 + self.ascent(px)?;
+        self.draw_line(
+            &mut canvas,
+            pad_x as f32,
+            baseline1,
+            &top_glyphs,
+            self.theme.text,
+            px,
+        );
+
+        // Row 2: elapsed left, total right, the bar filling the span between.
+        let row_top = pad + line_h + row_gap;
+        let baseline2 = row_top as f32 + self.ascent(tpx)?;
+        self.draw_line(
+            &mut canvas,
+            pad_x as f32,
+            baseline2,
+            &el_glyphs,
+            self.theme.text,
+            tpx,
+        );
+        let total_x = pad_x + inner_w - tot_adv.ceil() as u32;
+        if !total_text.is_empty() {
+            self.draw_line(
+                &mut canvas,
+                total_x as f32,
+                baseline2,
+                &tot_glyphs,
+                self.theme.text,
+                tpx,
+            );
+        }
+        let bar_x0 = (pad_x + el_adv.ceil() as u32 + label_gap) as i32;
+        let bar_x1 = if total_text.is_empty() {
+            (pad_x + inner_w) as i32
+        } else {
+            (total_x - label_gap) as i32
+        };
+        let bar_w = bar_x1 - bar_x0;
+        if bar_w > 4 {
+            let bar_h = (tpx * 0.30).round().max(3.0) as i32;
+            let bar_y = row_top as i32 + (tline_h as i32 - bar_h) / 2;
+            let r = bar_h as f32 / 2.0;
+            // Track (dim) under the elapsed fill (bright); the fill never renders
+            // shorter than its own rounding so a just-started clip shows a dot.
+            canvas.fill_round_rect(bar_x0, bar_y, bar_w, bar_h, r, self.theme.text, 0.22);
+            let frac = progress.fraction.clamp(0.0, 1.0);
+            let fill_w = ((bar_w as f32) * frac).round() as i32;
+            if fill_w > 0 {
+                canvas.fill_round_rect(
+                    bar_x0,
+                    bar_y,
+                    fill_w.max(bar_h),
+                    bar_h,
+                    r,
+                    self.theme.text,
+                    0.95,
+                );
+            }
+        }
         Some((canvas.into_rgba(), pw, ph))
     }
 
@@ -2099,6 +2211,60 @@ fn bold_font_faces() -> Vec<(PathBuf, f32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Task #79: the info line's playback row — the panel takes the top row's
+    /// width (floored for a usable bar), stays a constant size across fractions
+    /// (no once-a-second jitter), and a short summary still gets the bar minimum.
+    #[test]
+    fn progress_panel_width_is_stable_and_floored() {
+        let Some(hud) = Hud::load() else {
+            eprintln!("no system UI font — skipping");
+            return;
+        };
+        let row = |frac: f32| ProgressRow {
+            elapsed: "0:42".into(),
+            total: Some("9:01".into()),
+            fraction: frac,
+        };
+        let long = "IMG_1281.MOV · 3840×2160 · HEVC · and then some extra width";
+        let (_, w0, h0) = hud
+            .render_panel_progress(long, &row(0.0), 15.0, 7, [0, 0, 0, 160])
+            .expect("render");
+        let (_, w1, h1) = hud
+            .render_panel_progress(long, &row(0.97), 15.0, 7, [0, 0, 0, 160])
+            .expect("render");
+        assert_eq!(
+            (w0, h0),
+            (w1, h1),
+            "fraction must not change the panel size"
+        );
+        // Two rows: taller than the single-row panel of the same text.
+        let (_, _, single_h) = hud
+            .render_panel(long, 15.0, 7, [0, 0, 0, 160])
+            .expect("render");
+        assert!(h0 > single_h, "the playback row adds height");
+
+        // A short summary is floored so the bar stays usable.
+        let (_, short_w, _) = hud
+            .render_panel_progress("a.mp4", &row(0.5), 15.0, 7, [0, 0, 0, 160])
+            .expect("render");
+        let (_, short_plain_w, _) = hud
+            .render_panel("a.mp4", 15.0, 7, [0, 0, 0, 160])
+            .expect("render");
+        assert!(
+            short_w > short_plain_w,
+            "bar minimum must widen a short panel ({short_w} vs {short_plain_w})"
+        );
+        // An unknown duration still renders (elapsed + bare track).
+        let no_dur = ProgressRow {
+            elapsed: "0:42".into(),
+            total: None,
+            fraction: 0.0,
+        };
+        assert!(hud
+            .render_panel_progress("a.mp4", &no_dur, 15.0, 7, [0, 0, 0, 160])
+            .is_some());
+    }
 
     #[test]
     fn embolden_widens_glyph_and_advance() {

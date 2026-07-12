@@ -1353,9 +1353,6 @@ pub struct WgpuRenderer {
     /// The transient bottom-center status toast, drawn as its own overlay layer
     /// (independent of the info panel) — e.g. "Recursive folders: on".
     toast: Option<OverlayDraw>,
-    /// The persistent video position pill (task #79): bottom-center, inset above
-    /// the toast strip, shown while a video session is active.
-    video_pill: Option<OverlayDraw>,
     /// The top-right "loading" pie, shown while the next photo isn't ready yet
     /// (its own overlay layer, composited above the photo + panels).
     pie: Option<OverlayDraw>,
@@ -1631,7 +1628,6 @@ impl WgpuRenderer {
             overlay: None,
             info_line: None,
             toast: None,
-            video_pill: None,
             pie: None,
             chip: None,
             upload,
@@ -1751,50 +1747,6 @@ impl Renderer for WgpuRenderer {
                     .device
                     .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("toast-vbuf"),
-                        contents: bytemuck::cast_slice(&toast_quad_vertices(
-                            w,
-                            h,
-                            self.config.width,
-                            self.config.height,
-                            bottom_margin,
-                        )),
-                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                    });
-                Some(OverlayDraw {
-                    bind_group,
-                    vbuf,
-                    panel_w: w,
-                    panel_h: h,
-                    margin: bottom_margin,
-                    margin_top: 0,
-                })
-            }
-            None => None,
-        };
-    }
-
-    /// Set or clear the persistent video position pill (task #79): bottom-center
-    /// like the toast, at its own (higher) inset and on its own layer.
-    fn set_video_pill(&mut self, panel: Option<(&[u8], u32, u32)>, bottom_margin: u32) {
-        self.video_pill = match panel {
-            Some((rgba, w, h)) => {
-                let scale = self.scene_scale(false);
-                let bind_group = upload_image(
-                    &self.device,
-                    &self.queue,
-                    &self.bgl,
-                    self.upload.as_mut(),
-                    rgba,
-                    w,
-                    h,
-                    &ColorTransform::srgb(),
-                    false,
-                    scale,
-                );
-                let vbuf = self
-                    .device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("video-pill-vbuf"),
                         contents: bytemuck::cast_slice(&toast_quad_vertices(
                             w,
                             h,
@@ -1992,15 +1944,6 @@ impl Renderer for WgpuRenderer {
                 0,
                 bytemuck::cast_slice(&toast_quad_vertices(
                     t.panel_w, t.panel_h, width, height, t.margin,
-                )),
-            );
-        }
-        if let Some(vp) = &self.video_pill {
-            self.queue.write_buffer(
-                &vp.vbuf,
-                0,
-                bytemuck::cast_slice(&toast_quad_vertices(
-                    vp.panel_w, vp.panel_h, width, height, vp.margin,
                 )),
             );
         }
@@ -2466,29 +2409,6 @@ impl Renderer for WgpuRenderer {
             rp.set_pipeline(&self.overlay_pipeline);
             rp.set_bind_group(0, &t.bind_group, &[]);
             rp.set_vertex_buffer(0, t.vbuf.slice(..));
-            rp.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint16);
-            rp.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
-        }
-        // Pass 2b': the persistent video position pill (bottom-center, above the
-        // toast strip), under the toast so a transient message wins visually.
-        if let Some(vp) = &self.video_pill {
-            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("video-pill"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &intermediate_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            rp.set_pipeline(&self.overlay_pipeline);
-            rp.set_bind_group(0, &vp.bind_group, &[]);
-            rp.set_vertex_buffer(0, vp.vbuf.slice(..));
             rp.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint16);
             rp.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
         }

@@ -1108,7 +1108,7 @@ impl AppCore {
         // present the due one, run the preroll/rebuffer state machine, keep the
         // position pill's second in step.
         self.poll_video();
-        self.update_video_pill();
+        self.update_video_progress();
 
         // 1c. Pick up a finished off-thread text scan (OCR + QR, task #45): cache it,
         // refresh the `T` panel's busy state, run a deferred copy.
@@ -4064,7 +4064,13 @@ impl AppCore {
         let pad = (7.0 * self.viewport.scale_factor).round().max(2.0) as u32;
         let theme = hud.theme();
         let info_bg = theme.bg_for_opacity(self.settings.info_opacity);
-        let Some((bitmap, w, h)) = hud.render_panel(&text, px, pad, info_bg) else {
+        // While a video session is live on the displayed item, the line gains its
+        // playback row (`0:42 ▰▰▰▱▱ 9:01`, task #79 — owner design): one block,
+        // one `i` toggle, the bar filling whatever width the summary establishes.
+        let Some((bitmap, w, h)) = (match self.video_progress_row() {
+            Some(row) => hud.render_panel_progress(&text, &row, px, pad, info_bg),
+            None => hud.render_panel(&text, px, pad, info_bg),
+        }) else {
             return;
         };
         let margin = self.overlay_margin();
@@ -5856,7 +5862,7 @@ impl AppCore {
         if let Some(mut v) = self.video.take() {
             v.session.stop();
             self.effects.push(contract::CoreEffect::StopVideoAudio);
-            self.update_video_pill(); // clears the position pill promptly
+            self.update_video_progress(); // drops the playback row promptly
         }
     }
 
@@ -5942,44 +5948,46 @@ impl AppCore {
         }
     }
 
-    /// Keep the persistent position pill (`m:ss / m:ss`) in step with the session
-    /// (task #79 phase 7). Re-rasterizes only when the displayed second changes —
-    /// a tiny HUD pill once per second, never per frame. Shown for the session's
-    /// whole life including Paused/Ended (the parked frame keeps its position);
-    /// cleared when the session goes away.
-    pub fn update_video_pill(&mut self) {
-        let desired: Option<String> = self.video.as_ref().and_then(|v| {
-            use crate::video::VideoSessionState::*;
-            if matches!(v.session.state(), Failed | Stopped) {
-                return None;
-            }
-            let pos = v.session.desired_position(self.now);
-            Some(match v.session.duration {
-                Some(d) => format!(
-                    "{} / {}",
-                    crate::video::format_video_duration(pos),
-                    crate::video::format_video_duration(d)
-                ),
-                None => crate::video::format_video_duration(pos),
-            })
-        });
+    /// The info line's playback row for the displayed item's live video session
+    /// (`None` on stills / dead sessions — the line renders single-row as always).
+    fn video_progress_row(&self) -> Option<hud::ProgressRow> {
+        let v = self.video.as_ref()?;
+        if Some(v.item) != self.displayed_item {
+            return None;
+        }
+        use crate::video::VideoSessionState::*;
+        if matches!(v.session.state(), Failed | Stopped) {
+            return None;
+        }
+        let pos = v.session.desired_position(self.now);
+        let (total, fraction) = match v.session.duration {
+            Some(d) if !d.is_zero() => (
+                Some(crate::video::format_video_duration(d)),
+                (pos.as_secs_f32() / d.as_secs_f32()).clamp(0.0, 1.0),
+            ),
+            _ => (None, 0.0),
+        };
+        Some(hud::ProgressRow {
+            elapsed: crate::video::format_video_duration(pos),
+            total,
+            fraction,
+        })
+    }
+
+    /// Keep the info line's playback row in step with the session (task #79):
+    /// re-raster the line only when the displayed second (or the row's presence)
+    /// changes — once per second while playing, never per frame.
+    pub fn update_video_progress(&mut self) {
+        let desired = self
+            .video_progress_row()
+            .map(|r| (r.elapsed, r.total.unwrap_or_default()))
+            .map(|(a, b)| format!("{a}/{b}"));
         if desired == self.video_pill_text {
             return;
         }
-        self.video_pill_text = desired.clone();
-        let rendered = desired.and_then(|text| {
-            let px = (15.0 * self.viewport.scale_factor).max(10.0);
-            let pad = (8.0 * self.viewport.scale_factor).round().max(3.0) as u32;
-            let hud = self.hud.as_ref()?;
-            hud.render_panel_icon(&text, px, pad, None, hud.theme().bg)
-        });
-        // The pill sits above the toast strip (64 px scaled) so the two never collide.
-        let margin = (112.0 * self.viewport.scale_factor).round().max(16.0) as u32;
-        if let Some(a) = self.renderer.as_mut() {
-            match &rendered {
-                Some((rgba, w, h)) => a.set_video_pill(Some((rgba, *w, *h)), margin),
-                None => a.set_video_pill(None, 0),
-            }
+        self.video_pill_text = desired;
+        if self.info_line_visible() {
+            self.show_info_line(); // re-raster with (or without) the playback row
         }
     }
 
