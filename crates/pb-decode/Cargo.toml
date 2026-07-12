@@ -92,4 +92,6 @@ required-features = ["libheif"]
 # Win32_System_Com_StructuredStorage + Win32_System_Variant: PROPVARIANT for the Source
 # Reader's duration attribute + SetCurrentPosition (video seek — task #79 spike, then the
 # real producer; the reader's seek/attribute methods are cfg-gated on BOTH features).
-windows = { version = "0.62.2", features = ["Win32_Graphics_Imaging", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_Foundation", "Win32_Media_MediaFoundation"] }
+# Win32_Graphics_Direct3D + Direct3D11: the IMFDXGIDeviceManager for MF hardware video
+# decode (task 79.10 — the copybench spike, then the production producer).
+windows = { version = "0.62.2", features = ["Win32_Graphics_Imaging", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_Foundation", "Win32_Media_MediaFoundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi"] }
