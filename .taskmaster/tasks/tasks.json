@@ -1045,6 +1045,36 @@
             "status": "pending"
           }
         ]
+      },
+      {
+        "id": 81,
+        "title": "macOS video: displayed-frame capture for Copy / OCR / Describe / Compare",
+        "description": "On macOS the CaptureNativeVideoFrame CoreEffect is emitted by the core but dropped by the FFI (map_effect → Other) and unconsumed on the Swift side, so Copy, OCR, Describe, and Compare-pin operate on the poster or not at all — not the frame currently on screen. Wire an AVPlayerItemVideoOutput copy path: on CaptureNativeVideoFrame, grab the displayed pixel buffer, convert to the shared RGBA8, and reply via AppCore::native_video_frame_ready (request_id + session_id + item gated so a frame captured before a navigation is rejected). On-demand only — never a continuous copy path (privacy). Then the four consumers operate on the live frame, matching Windows.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          79
+        ],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "AVPlayerItemVideoOutput capture path (Swift)",
+            "description": "Attach an AVPlayerItemVideoOutput to the item; on CaptureNativeVideoFrame copy the pixel buffer for the current time, convert to RGBA8, and call back native_video_frame_ready with the request_id/session_id/item. Handle no-frame-available gracefully.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "FFI: map CaptureNativeVideoFrame + the frame-ready reply",
+            "description": "Add a CoreEffectFfi variant for CaptureNativeVideoFrame (session_id, item, purpose, request_id) in map_effect, and the Swift→core native_video_frame_ready callback carrying the pixels.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "Verify the four consumers use the live frame",
+            "description": "Copy, OCR, Describe, and Compare-pin operate on the captured displayed frame (not the poster). Define + confirm auto-describe behavior on a video. No-trace: capture is on-demand only.",
+            "status": "pending"
+          }
+        ]
       }
     ]
   }

@@ -37,10 +37,14 @@ pub fn decode_video_poster(
         .max(1);
 
     // The streaming reader is the Live-Photo decoder, whose header hardcodes
-    // codec = "Live Photo" — wrong for a plain video. Label from the container until
-    // the macOS `probe_video_stream` (a later phase) can report the real codec (H.264/
-    // HEVC), consistent with how image badges show a format.
-    let codec = container_label(path);
+    // codec = "Live Photo" — wrong for a plain video. A cheap read-only metadata probe
+    // (no frame decode) reports the real codec (H.264/HEVC/…) and precise native
+    // dimensions, matching the Windows poster; fall back to the container label if the
+    // probe can't open the stream (a container AVFoundation won't parse). Posters are off
+    // the hot path (decode pool, cached), so the extra open is fine.
+    let probe = crate::livephoto::probe_video_stream(path).ok();
+    let codec = probe.as_ref().map_or_else(|| container_label(path), |p| p.codec);
+    let native_dims = probe.as_ref().map(pb_probe_dims);
 
     let mut chosen: Option<(Vec<u8>, u32, u32)> = None; // first bright frame
     let mut last: Option<(Vec<u8>, u32, u32)> = None; // fallback (dark clip / long black lead)
@@ -98,13 +102,14 @@ pub fn decode_video_poster(
         }
     };
 
+    let (orig_width, orig_height) = native_dims.unwrap_or((width, height));
     Ok(DecodedImage {
         width,
         height,
-        // The streaming reader already fitted the frame; report those dims. Precise
-        // native resolution rides the (later) macOS `probe_video_stream`.
-        orig_width: width,
-        orig_height: height,
+        // The streaming reader already fitted the frame; the probe supplies the precise
+        // native (display-oriented) resolution, falling back to the fitted dims.
+        orig_width,
+        orig_height,
         codec,
         format: PixelFormat::Rgba8,
         pixels,
@@ -115,8 +120,13 @@ pub fn decode_video_poster(
     })
 }
 
-/// A container label for the codec badge, from the file extension — a stand-in until
-/// the macOS probe reports the real codec (H.264/HEVC). Never "Live Photo".
+/// The probe's display-oriented (rotation-applied) native dimensions, for `orig_*`.
+fn pb_probe_dims(p: &crate::video::VideoStreamInfo) -> (u32, u32) {
+    p.display_dims()
+}
+
+/// A container label for the codec badge, from the file extension — the fallback when the
+/// metadata probe can't open the stream. Never "Live Photo".
 fn container_label(path: &Path) -> &'static str {
     match path
         .extension()

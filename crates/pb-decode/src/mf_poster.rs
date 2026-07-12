@@ -48,40 +48,9 @@ use crate::mf_video::{ensure_mf, native_color, sample_to_rgba};
 use crate::video::{poster_frame_bright_enough, POSTER_MAX_FRAMES, POSTER_MAX_MEDIA};
 use crate::{common, ColorTransform, DecodeError, DecodedImage, FitBox, PixelFormat};
 
-/// What one open of the container reports — the reader-sourced facts behind
-/// `pb_app_core::video::VideoMetadata` and the poster's `DecodedImage` fields.
-/// Unknowns stay `None`/default; nothing here ever comes from a RAM read.
-#[derive(Debug, Clone)]
-pub struct VideoStreamInfo {
-    /// Codec display name for known subtypes ("H.264", "HEVC", …), else "Video".
-    /// `&'static str` so it can ride `DecodedImage::codec`.
-    pub codec: &'static str,
-    /// Native (pre-rotation) pixel dimensions.
-    pub width: u32,
-    pub height: u32,
-    /// Container rotation in degrees CW (0/90/180/270). The advanced video
-    /// processor applies it to decoded output, so *pixels* are already upright;
-    /// this is reported for metadata display and the dimension swap.
-    pub rotation: u32,
-    /// Average frame rate as reported (`MF_MT_FRAME_RATE`); 0.0 = unknown.
-    pub fps: f64,
-    pub duration: Option<Duration>,
-    pub has_audio: bool,
-    /// Source color read from the native media type — the same
-    /// [`native_color`] policy the Live Photo path (and future playback) uses.
-    pub color: ColorTransform,
-}
-
-impl VideoStreamInfo {
-    /// Dimensions as displayed (after the container rotation the processor applies).
-    pub fn display_dims(&self) -> (u32, u32) {
-        if self.rotation % 180 == 90 {
-            (self.height, self.width)
-        } else {
-            (self.width, self.height)
-        }
-    }
-}
+// `VideoStreamInfo` is the platform-neutral probe result (`crate::video`); both this
+// Media Foundation probe and the macOS AVFoundation one construct the same type.
+pub use crate::video::VideoStreamInfo;
 
 /// Open the container and report the video stream's facts. Read-only, no frame
 /// decode, no RAM read of the file. ~15–25 ms; the panel caches the result.

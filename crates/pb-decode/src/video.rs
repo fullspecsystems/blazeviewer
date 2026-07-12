@@ -43,6 +43,41 @@ impl SeekGeneration {
     }
 }
 
+/// What one read-only open of a video container reports — the reader-sourced facts
+/// behind the inspector's video rows and the poster's [`crate::DecodedImage`] fields.
+/// Platform-neutral so both the Windows Media Foundation probe (`mf_poster`) and the
+/// macOS AVFoundation probe (`livephoto::probe_video_stream`) construct the same type.
+/// Unknowns stay `None`/default; nothing here ever comes from a RAM read of the file.
+#[derive(Debug, Clone)]
+pub struct VideoStreamInfo {
+    /// Codec display name for known subtypes ("H.264", "HEVC", …), else "Video".
+    /// `&'static str` so it can ride [`crate::DecodedImage::codec`].
+    pub codec: &'static str,
+    /// Native (pre-rotation) pixel dimensions.
+    pub width: u32,
+    pub height: u32,
+    /// Container rotation in degrees CW (0/90/180/270); pixels are already upright by
+    /// the time they're decoded — this is for metadata display and the dimension swap.
+    pub rotation: u32,
+    /// Average frame rate as reported; 0.0 = unknown.
+    pub fps: f64,
+    pub duration: Option<Duration>,
+    pub has_audio: bool,
+    /// Source color read from the native media type (same policy the poster uses).
+    pub color: ColorTransform,
+}
+
+impl VideoStreamInfo {
+    /// Dimensions as displayed (after the container rotation is applied).
+    pub fn display_dims(&self) -> (u32, u32) {
+        if self.rotation % 180 == 90 {
+            (self.height, self.width)
+        } else {
+            (self.width, self.height)
+        }
+    }
+}
+
 /// YUV→RGB matrix coefficients for subsampled ([`PixelFormat::Nv12`]) frames
 /// (task 79.10). Inert for RGB pixel formats (the producer already converted).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

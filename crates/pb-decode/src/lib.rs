@@ -121,10 +121,11 @@ pub use jxl::JxlDecoder;
 #[cfg(heic_libheif)]
 pub use libheif::LibHeifDecoder;
 #[cfg(target_os = "macos")]
-pub use livephoto::{decode_live_motion, decode_live_motion_streaming};
+pub use livephoto::{decode_live_motion, decode_live_motion_streaming, probe_video_stream};
 pub use metadata::read_exif_fields;
 #[cfg(windows)]
-pub use mf_poster::{decode_video_poster, probe_video_stream, VideoStreamInfo};
+pub use mf_poster::{decode_video_poster, probe_video_stream};
+pub use video::VideoStreamInfo;
 #[cfg(windows)]
 pub use mf_video::{decode_live_motion, decode_live_motion_streaming};
 #[cfg(windows)]

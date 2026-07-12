@@ -50,6 +50,7 @@ use std::time::Duration;
 
 use crate::animation::{MotionCollector, MAX_DECODED_BYTES};
 use crate::common::{bgra_to_rgba_tight, downscale_to_fit, rotate_rgba, transform_to_quadrant};
+use crate::video::VideoStreamInfo;
 use crate::{AnimFrame, Animation, ColorTransform, DecodeError, FitBox, MotionChunk, MotionHeader};
 
 /// Safety cap on decoded frames — a real Live Photo is ~3 s, so this is only a
@@ -120,12 +121,17 @@ extern "C" {
 #[link(name = "AVFoundation", kind = "framework")]
 extern "C" {
     static AVMediaTypeVideo: Id;
+    static AVMediaTypeAudio: Id;
 }
 
 #[link(name = "CoreMedia", kind = "framework")]
 extern "C" {
     fn CMSampleBufferGetImageBuffer(sbuf: *const c_void) -> *const c_void;
     fn CMSampleBufferGetDuration(sbuf: *const c_void) -> CMTime;
+    /// Seconds for a `CMTime` (NaN if indefinite/invalid) — used by the stream probe.
+    fn CMTimeGetSeconds(time: CMTime) -> f64;
+    /// The FourCC media subtype (codec) of a `CMFormatDescription` (e.g. 'avc1', 'hvc1').
+    fn CMFormatDescriptionGetMediaSubType(desc: *const c_void) -> u32;
 }
 
 #[link(name = "CoreVideo", kind = "framework")]
@@ -284,6 +290,17 @@ unsafe fn send_ret_transform(obj: Id, s: Sel) -> CGAffineTransform {
     let f: unsafe extern "C" fn(Id, Sel) -> CGAffineTransform = std::mem::transmute(entry);
     f(obj, s)
 }
+/// A 24-byte `CMTime` return (e.g. `-[AVAsset duration]`). Like the transform above it's
+/// an indirect struct return: plain `objc_msgSend` (x8) on arm64, `_stret` on x86_64.
+#[inline]
+unsafe fn send_ret_cmtime(obj: Id, s: Sel) -> CMTime {
+    #[cfg(target_arch = "aarch64")]
+    let entry = objc_msgSend as unsafe extern "C" fn();
+    #[cfg(target_arch = "x86_64")]
+    let entry = objc_msgSend_stret as unsafe extern "C" fn();
+    let f: unsafe extern "C" fn(Id, Sel) -> CMTime = std::mem::transmute(entry);
+    f(obj, s)
+}
 
 // --- RAII guards --------------------------------------------------------------------
 
@@ -352,6 +369,110 @@ pub fn decode_live_motion_streaming(
     };
     let _pool = Pool::new();
     unsafe { stream_inner(&cpath, max_long_edge, cancel, emit) }
+}
+
+/// Read-only probe of a video container's first video stream (macOS AVFoundation) — the
+/// inspector's video facts: codec, native dimensions, container rotation, frame rate,
+/// duration, and whether there's an audio track. The AVFoundation twin of the Windows
+/// [`crate::mf_poster::probe_video_stream`], sharing this module's `objc_msgSend` harness.
+/// **No frame decode and no RAM read of the file** — it opens an `AVURLAsset` and reads
+/// track metadata only (privacy #2: the view path stays read-only). Tens of ms; the
+/// caller (the inspector's per-item cache) memoizes the result for the item's lifetime.
+pub fn probe_video_stream(path: &Path) -> Result<VideoStreamInfo, DecodeError> {
+    let cpath = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| DecodeError::Corrupt("video path has an interior NUL".into()))?;
+    let _pool = Pool::new();
+    unsafe { probe_inner(&cpath) }
+}
+
+unsafe fn probe_inner(cpath: &CStr) -> Result<VideoStreamInfo, DecodeError> {
+    let corrupt = |m: &str| DecodeError::Corrupt(m.to_string());
+    let path_ns = send_cstr(class(c"NSString"), sel(c"stringWithUTF8String:"), cpath.as_ptr());
+    if path_ns.is_null() {
+        return Err(corrupt("video path is not valid UTF-8"));
+    }
+    let url = send_id(class(c"NSURL"), sel(c"fileURLWithPath:"), path_ns);
+    if url.is_null() {
+        return Err(corrupt("could not form a file URL for the video"));
+    }
+    let asset = send_id2(
+        class(c"AVURLAsset"),
+        sel(c"URLAssetWithURL:options:"),
+        url,
+        std::ptr::null_mut(),
+    );
+    if asset.is_null() {
+        return Err(corrupt("AVURLAsset creation failed"));
+    }
+    let vtracks = send_id(asset, sel(c"tracksWithMediaType:"), AVMediaTypeVideo);
+    let track = if vtracks.is_null() {
+        std::ptr::null_mut()
+    } else {
+        send(vtracks, sel(c"firstObject"))
+    };
+    if track.is_null() {
+        return Err(corrupt("the container has no video track"));
+    }
+
+    // Native (pre-rotation) dimensions + the container rotation quadrant.
+    let nat = send_ret_size(track, sel(c"naturalSize"));
+    let (width, height) = (nat.width.max(0.0) as u32, nat.height.max(0.0) as u32);
+    let t = send_ret_transform(track, sel(c"preferredTransform"));
+    let rotation = transform_to_quadrant(t.a, t.b, t.c, t.d)
+        .unwrap_or(0)
+        .rem_euclid(360) as u32;
+
+    // Frame rate (0.0 = unknown, matching the Windows probe).
+    let raw_fps = send_f32(track, sel(c"nominalFrameRate"));
+    let fps = if raw_fps > 0.05 { raw_fps as f64 } else { 0.0 };
+
+    // Codec from the first format description's FourCC media subtype.
+    let fmts = send(track, sel(c"formatDescriptions"));
+    let desc = if fmts.is_null() {
+        std::ptr::null_mut()
+    } else {
+        send(fmts, sel(c"firstObject"))
+    };
+    let codec = if desc.is_null() {
+        "Video"
+    } else {
+        codec_name_from_fourcc(CMFormatDescriptionGetMediaSubType(desc as *const c_void))
+    };
+
+    // Duration (asset-level; NaN/≤0 → unknown).
+    let secs = CMTimeGetSeconds(send_ret_cmtime(asset, sel(c"duration")));
+    let duration = (secs.is_finite() && secs > 0.0).then(|| Duration::from_secs_f64(secs));
+
+    // Audio-track presence.
+    let atracks = send_id(asset, sel(c"tracksWithMediaType:"), AVMediaTypeAudio);
+    let has_audio = !atracks.is_null() && !send(atracks, sel(c"firstObject")).is_null();
+
+    Ok(VideoStreamInfo {
+        codec,
+        width,
+        height,
+        rotation,
+        fps,
+        duration,
+        has_audio,
+        color: ColorTransform::default(),
+    })
+}
+
+/// Map a CoreMedia FourCC video subtype to a display codec name (aligned with the Windows
+/// `codec_name` labels). Unknown → "Video".
+fn codec_name_from_fourcc(fourcc: u32) -> &'static str {
+    match &fourcc.to_be_bytes() {
+        b"avc1" | b"avc3" => "H.264",
+        b"hvc1" | b"hev1" => "HEVC",
+        b"av01" => "AV1",
+        b"vp09" => "VP9",
+        b"vp08" => "VP8",
+        b"mp4v" => "MPEG-4",
+        b"mjpg" | b"jpeg" => "Motion JPEG",
+        b"apch" | b"apcn" | b"apcs" | b"apco" | b"ap4h" | b"ap4x" => "ProRes",
+        _ => "Video",
+    }
 }
 
 /// Decode the Live Photo motion `.mov` at `path` into a whole [`Animation`], capping each
@@ -889,5 +1010,42 @@ mod tests {
         assert!(anim.width.max(anim.height) <= 1440, "decode-to-fit cap");
         let f = &anim.frames[0];
         assert_eq!((f.width, f.height), (anim.width, anim.height));
+    }
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/video")
+            .join(name)
+    }
+
+    /// The FourCC → codec-name map (pure; the values align with the Windows probe labels).
+    #[test]
+    fn fourcc_maps_to_codec_names() {
+        let cc = |s: &[u8; 4]| u32::from_be_bytes(*s);
+        assert_eq!(codec_name_from_fourcc(cc(b"avc1")), "H.264");
+        assert_eq!(codec_name_from_fourcc(cc(b"hvc1")), "HEVC");
+        assert_eq!(codec_name_from_fourcc(cc(b"hev1")), "HEVC");
+        assert_eq!(codec_name_from_fourcc(cc(b"av01")), "AV1");
+        assert_eq!(codec_name_from_fourcc(cc(b"ap4h")), "ProRes");
+        assert_eq!(codec_name_from_fourcc(cc(b"zzzz")), "Video");
+    }
+
+    /// The AVFoundation stream probe reports the committed fixture's facts — the macOS
+    /// twin of `mf_poster::probe_reports_the_fixtures_stream_facts` (same fixture/values).
+    #[test]
+    fn probe_reports_the_fixtures_stream_facts() {
+        let info = probe_video_stream(&fixture("black_then_color.mp4")).expect("probe");
+        assert_eq!(info.codec, "H.264");
+        assert_eq!(info.display_dims(), (64, 64));
+        assert!(info.fps > 29.0 && info.fps < 31.0, "fps {}", info.fps);
+        let dur = info.duration.expect("mp4 reports duration");
+        assert!(dur > Duration::from_millis(800) && dur < Duration::from_millis(1500));
+        assert!(!info.has_audio);
+    }
+
+    /// A missing file is a clean error, not a panic (hostile-input parity with the decoder).
+    #[test]
+    fn probe_missing_file_errors_cleanly() {
+        assert!(probe_video_stream(Path::new("/nonexistent/clip.mp4")).is_err());
     }
 }
