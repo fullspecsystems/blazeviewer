@@ -884,25 +884,28 @@
             "id": 7,
             "title": "pb-mac-ffi links pb-cli + parse_launch_args FFI (full argv incl. argv[0])",
             "description": "Add pb-cli dep (macOS target). FFI entry parse_launch_args(argv, version): argv is the FULL ProcessInfo.arguments (clap consumes element 0 as the program name - NEVER dropFirst, P0 regression test required). version comes from Swift (bundle CFBundleShortVersionString + build id) - pb-mac-ffi CARGO_PKG_VERSION is 0.1.0, never use it. Returns LaunchParseFfi{proceed, text, use_stderr, exit_code} (render clap::Error in Rust; no process::exit). On proceed: stash paths + apply_launch_overrides immediately. take_launch_paths() -> Vec<String> consumed-once (stash-pull). --pb-open becomes a hidden clap path alias.",
-            "status": "pending",
+            "status": "done",
             "priority": "medium",
-            "parentId": "undefined"
+            "parentId": "undefined",
+            "updatedAt": "2026-07-11T23:59:00Z"
           },
           {
             "id": 8,
             "title": "Swift launch preflight (parse BEFORE window/Sparkle) + output policy",
             "description": "P0: parse at CoreModel construction / app bootstrap, NOT onAppear (a terminal --help must not flash a window or start Sparkle). Typed LaunchDisposition{proceed(paths)/emit(text,useStderr,exitCode)}. Output policy (isatty-on-stdout alone is WRONG): always write help/version->stdout, errors->stderr (pipes/redirects must receive output, e.g. --help | less); NSAlert ONLY for a real error on a genuine GUI launch (no meaningful sink); preserve clap exit codes. One Swift helper encodes the terminal/pipe/GUI truth table (the Mac analog of win_console have_output). Sparkle + window work gated behind .proceed. Paths opened via take_launch_paths once the canvas exists.",
-            "status": "pending",
+            "status": "done",
             "priority": "medium",
-            "parentId": "undefined"
+            "parentId": "undefined",
+            "updatedAt": "2026-07-11T23:59:00Z"
           },
           {
             "id": 9,
             "title": "Effective-value wiring (--theme/--mute/window-mode actually show)",
             "description": "Rule: settings_form() stays raw (preference editing); runtime reads go effective_*. applyAppearance -> effective_appearance() (new FFI accessor). apply_menu_state (lib.rs:1536) passes raw settings.mute_live_audio -> stale Mute checkmark under --mute; switch to effective_mute(). startup_fullscreen() folds launch.windowed over saved start_fullscreen(). Ordering is structural: overrides applied inside the parse FFI, before any first read. First frame already in the overridden theme/mode - no visible correction.",
-            "status": "pending",
+            "status": "done",
             "priority": "medium",
-            "parentId": "undefined"
+            "parentId": "undefined",
+            "updatedAt": "2026-07-11T23:59:00Z"
           },
           {
             "id": 10,
@@ -915,8 +918,8 @@
           {
             "id": 11,
             "title": "Shell-owned parity: path validation, recursive override, --metrics",
-            "description": "apply_launch_overrides covers core state only; mirror the three winit shell behaviors. (1) Path existence validation in Rust (identical message: photoblaze: no such file or folder: <path>, exit 2, via the output policy). (2) Recursive: Mac open_paths builds open::plan unchanged -> dirs always scan recursive=true; after plan, mutate Source::Scan.recursive = launch.recursive.unwrap_or(settings.recursive) (winit main.rs:3717) - also fixes the latent saved-preference gap. (3) --metrics IMPLEMENTED (full-parity scope): StageTimes lives on AppCore (core.metrics) so set StageTimes::enabled() on proceed + emit the report on quit; check whether the host decode path needs a METRICS_ON_FLAG analog, and label any untimed stage rather than printing zero.",
-            "status": "pending",
+            "description": "apply_launch_overrides covers core state only; mirror the three winit shell behaviors. (1) Path existence validation in Rust (identical message: photoblaze: no such file or folder: <path>, exit 2, via the output policy). (2) Recursive: Mac open_paths builds open::plan unchanged -> dirs always scan recursive=true; after plan, mutate Source::Scan.recursive = launch.recursive.unwrap_or(settings.recursive) (winit main.rs:3717) - also fixes the latent saved-preference gap. (3) --metrics IMPLEMENTED (full-parity scope): StageTimes lives on AppCore (core.metrics) so set StageTimes::enabled() on proceed + emit the report on quit; check whether the host decode path needs a METRICS_ON_FLAG analog, and label any untimed stage rather than printing zero. PROGRESS 2026-07-11: (1) path validation DONE (cli_preflight, winit-identical message, verified against the built .app); (2) recursive override DONE (open_launch_paths mutates Source::Scan.recursive, tested); (3) --metrics REMAINING.",
+            "status": "in-progress",
             "priority": "medium",
             "parentId": "undefined"
           },
@@ -932,9 +935,10 @@
             "id": 13,
             "title": "--slideshow unit suffixes (3s / 0.5m) - shared pb-cli parser",
             "description": "Owner call 2026-07-11. Custom clap value_parser (string -> seconds): bare number = seconds (back-compat), Ns = seconds, Nm = minutes, case-insensitive; anything else = clap value error. Existing [0.1s,60s] clamp applies AFTER conversion (5m clamps to 60s - matches the runtime slider ceiling; Mixed strictness). Tests: 5, 3s, 0.5m, 1m=60s, 5m clamps, 3h/abc error. Update help value_name + README + EXAMPLES. Benefits Windows too (shared crate).",
-            "status": "pending",
+            "status": "done",
             "priority": "medium",
-            "parentId": "undefined"
+            "parentId": "undefined",
+            "updatedAt": "2026-07-11T23:59:00Z"
           },
           {
             "id": 14,
