@@ -161,6 +161,7 @@ impl<T> ThumbCache<T> {
     /// replaces (a re-derive after rotation-save carries fresher pixels). Evicts
     /// strictly lower-protection entries to make room; refuses rather than evict
     /// an equal-or-better class (so churn can't thrash the pinned set).
+    #[allow(clippy::too_many_arguments)] // primitives, each self-describing
     pub fn insert(
         &mut self,
         item: usize,
@@ -359,9 +360,9 @@ mod tests {
         put(&mut c, 10, 300, &d); // visible
         put(&mut c, 13, 300, &d); // overscan
         put(&mut c, 40, 300, &d); // warm (|40-10| <= 64)
-        // Inserting another visible item must evict the *warm* one, not overscan.
+                                  // Inserting another visible item must evict the *warm* one, not overscan.
         assert_eq!(put(&mut c, 11, 300, &d), InsertOutcome::Stored);
-        assert!(c.get(&40 - 0).is_none() || c.get(40).is_none(), "warm evicted");
+        assert!(c.get(40).is_none(), "warm evicted");
         assert!(c.get(10).is_some());
         assert!(c.get(13).is_some());
         assert!(c.get(11).is_some());
@@ -478,7 +479,10 @@ mod tests {
         let plan = c.fill_plan(&d, 100, 64);
         // Visible first (11 is the midpoint), then overscan remainder, then warm.
         assert_eq!(&plan[..3], &[11, 10, 12], "visible near-to-far");
-        assert!(plan[3..].starts_with(&[9, 13, 8, 14]), "overscan next: {plan:?}");
+        assert!(
+            plan[3..].starts_with(&[9, 13, 8, 14]),
+            "overscan next: {plan:?}"
+        );
         // Warm ±3 around 11 → nothing new (8..=14 already covers it).
         assert_eq!(plan.len(), 7);
     }

@@ -475,6 +475,12 @@ pub struct AppCore {
     /// The `FsTree`'s off-thread `read_dir` channel + in-flight set + the deck root it was
     /// built for (a change re-roots it). Created with the tree; dropped when it clears.
     pub fs_tree_io: Option<FsTreeIo>,
+    /// The left pane's active tab (task #83): Folders (the tree) or Thumbnails.
+    /// `folder_tree_open` stays the pane's open flag; this picks its content.
+    pub left_tab: crate::overlay::LeftTab,
+    /// Thumbnails-strip state (task #83): the RAM-only thumb cache + derive
+    /// thread + auto-follow. Zero cost until the panel is first opened.
+    pub thumbs: crate::thumbs::Thumbs,
 
     // --- Rendering (NS0 5.4) ---
     /// The HUD text/overlay compositor (`pb-hud`), or `None` if no system font was found.
@@ -539,7 +545,8 @@ pub struct AppCore {
     /// entry reads its container bytes on a worker (a large ZIP inflate mustn't block the
     /// event loop), then the tick — if the session is still current — stashes them and emits
     /// `PlayVideoBytes`. Payload: `(session_id, entry_name, muted, bytes)`; empty = read error.
-    pub video_read_tx: std::sync::mpsc::Sender<(crate::video::VideoSessionId, String, bool, Vec<u8>)>,
+    pub video_read_tx:
+        std::sync::mpsc::Sender<(crate::video::VideoSessionId, String, bool, Vec<u8>)>,
     pub video_read_rx: Receiver<(crate::video::VideoSessionId, String, bool, Vec<u8>)>,
     /// Last held-key video seek step (task #79 phase 6): the app's own repeat
     /// timer (OS key-repeat stays ignored, like every other held action).

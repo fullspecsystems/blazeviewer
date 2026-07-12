@@ -100,6 +100,11 @@ pub enum Action {
     /// top-left corner. Rows click-to-open; the "… n more" markers page the window
     /// (see `.taskmaster/docs/folder-tree-plan.md`).
     FolderTree,
+    /// Toggle the Thumbnails strip (`Shift+T`, task #83): the left pane's second tab
+    /// beside Folders — a scrollable vertical strip of neighbor thumbnails with
+    /// click-to-jump. Inspector-style per-tab semantics: opens the pane on the
+    /// Thumbnails tab, switches if Folders is showing, closes if already showing.
+    Thumbnails,
     /// Toggle rich-panel visibility (`Tab`, task #54 — the Photoshop idiom): hides the
     /// Inspector/Help/folder-tree panels without closing them; pressing again (or any
     /// panel toggle) reveals. No-op with no panel open. The ephemeral HUD (toasts,
@@ -178,6 +183,7 @@ impl Action {
         Action::FullExif,
         Action::Help,
         Action::FolderTree,
+        Action::Thumbnails,
         Action::TogglePanels,
         Action::OpenParent,
         Action::PrevFolder,
@@ -237,6 +243,7 @@ impl Action {
             Action::FullExif => "full_exif",
             Action::Help => "help",
             Action::FolderTree => "folder_tree",
+            Action::Thumbnails => "thumbnails",
             Action::TogglePanels => "toggle_panels",
             Action::OpenParent => "open_parent",
             Action::PrevFolder => "prev_folder",
@@ -318,6 +325,7 @@ impl Action {
             Action::FullExif => "Detailed info panel",
             Action::Help => "Keyboard help",
             Action::FolderTree => "Folder tree",
+            Action::Thumbnails => "Thumbnails",
             Action::TogglePanels => "Hide/show panels",
             Action::OpenParent => "Open parent folder",
             Action::PrevFolder => "Previous folder",

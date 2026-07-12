@@ -500,7 +500,10 @@ mod tests {
     }
 
     fn targets(items: &[usize]) -> Vec<Want> {
-        items.iter().map(|&i| Want::display(i, None, false)).collect()
+        items
+            .iter()
+            .map(|&i| Want::display(i, None, false))
+            .collect()
     }
 
     fn thumb_box() -> FitBox {
@@ -710,8 +713,8 @@ mod tests {
         let src = source();
         pool.set_targets(1, &src, &targets(&[0, 1, 2]));
         started_rx.recv_timeout(Duration::from_secs(5)).unwrap(); // 0 in-flight
-        // Re-issue the same display wants PLUS thumb wants — the display jobs
-        // (queued and in-flight) must be untouched: no cancellation, no re-decode.
+                                                                  // Re-issue the same display wants PLUS thumb wants — the display jobs
+                                                                  // (queued and in-flight) must be untouched: no cancellation, no re-decode.
         let mut wants = targets(&[0, 1, 2]);
         wants.push(Want::thumb(1, thumb_box()));
         wants.push(Want::thumb(2, thumb_box()));
@@ -809,7 +812,9 @@ mod tests {
         let o = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         let img = o.into_image().expect("ok result");
         assert_eq!(img.pixels.len(), 256);
-        let o2 = rx.recv_timeout(Duration::from_secs(5)).expect("budget freed");
+        let o2 = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("budget freed");
         drop(o2);
     }
 }

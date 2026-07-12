@@ -288,7 +288,10 @@ mod tests {
         assert_eq!(t.format, PixelFormat::Rgba8);
         assert_eq!((t.width, t.height), (2, 2));
         let v = t.pixels[0];
-        assert!((191..=195).contains(&v), "tone-mapped SDR white ≈193, got {v}");
+        assert!(
+            (191..=195).contains(&v),
+            "tone-mapped SDR white ≈193, got {v}"
+        );
         assert_eq!(t.pixels[3], 255);
         assert_eq!(t.peak, 1.0);
     }

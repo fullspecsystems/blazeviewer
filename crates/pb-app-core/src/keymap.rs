@@ -577,6 +577,9 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         (Action::Help, vec![p("/"), p("Shift+/")]),
         // The folder-tree overlay — Shift+F beside bare-F fullscreen (distinct chords).
         one(Action::FolderTree, "Shift+F"),
+        // The Thumbnails strip — Shift+T beside Shift+F: the left pane's tab pair
+        // (bare T is ShowImageText). Task #83.
+        one(Action::Thumbnails, "Shift+T"),
         // Hide/show all rich panels without closing them (the Photoshop idiom) —
         // bare Tab (task #54); a no-op when no panel is open.
         one(Action::TogglePanels, "Tab"),

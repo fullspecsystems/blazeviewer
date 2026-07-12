@@ -196,6 +196,8 @@ impl AppCore {
             chip_sig: None,
             chip_built: Instant::now(),
             folder_tree_open: false,
+            left_tab: Default::default(),
+            thumbs: Default::default(),
             folder_tree_sig: None,
             folder_tree_panel: None,
             folder_tree_counts: None,
@@ -274,6 +276,9 @@ impl AppCore {
             // batches (and the delayed Scanning-dialog reveal) even when the event queue is
             // quiet — without this, a slow walk on an idle app waits for the next OS event.
             || self.scanning
+            // A thumbnail derive in flight (task #83) keeps the loop polling so
+            // `tick` lands it into the strip promptly.
+            || self.thumbs.working()
             // An off-thread animation decode in flight keeps the loop polling so
             // `poll_anim_decode` picks it up promptly (active playback drives its own
             // precise next-frame wake via `tick_playback`, not this frame poll).
@@ -354,6 +359,7 @@ impl AppCore {
             Action::FullExif => self.toggle_info(true),
             Action::Help => self.toggle_help(),
             Action::FolderTree => self.toggle_folder_tree(),
+            Action::Thumbnails => self.toggle_thumbnails(),
             Action::TogglePanels => self.toggle_panels(),
             Action::OpenParent => self.open_parent_cmd(),
             Action::PrevFolder => self.open_sibling_cmd(-1),
@@ -1163,6 +1169,12 @@ impl AppCore {
             self.request_archive_posters();
         }
 
+        // 1a'. Land finished thumbnail derives (task #83); re-signal the strip so
+        // the shell re-pulls tiles as they stream in.
+        if self.thumbs.poll(self.playlist.current().unwrap_or(0)) && self.thumbs_visible() {
+            self.emit_panels_changed();
+        }
+
         // 1a. Bound the regenerable per-item caches so browsing tens of thousands of photos
         // can't grow them without limit. Cheap when under the high-water mark (length checks).
         self.trim_caches();
@@ -1804,15 +1816,145 @@ impl AppCore {
             // rule): the tree opens/re-draws and any hidden Inspector/Help panel
             // comes back with it — `hidden` is one master flag, the Photoshop idiom.
             self.folder_tree_open = true;
+            self.left_tab = crate::overlay::LeftTab::Folders;
             self.show_folder_tree();
             self.refresh_slot();
             return;
         }
+        if self.folder_tree_open && self.left_tab == crate::overlay::LeftTab::Thumbnails {
+            // ⇧F while the Thumbnails tab is showing: switch tabs, don't close —
+            // the Inspector's per-tab semantics for the left pane (task #83).
+            self.left_tab = crate::overlay::LeftTab::Folders;
+            self.show_folder_tree();
+            self.emit_panels_changed();
+            return;
+        }
         self.folder_tree_open = !self.folder_tree_open;
+        self.left_tab = crate::overlay::LeftTab::Folders;
         if self.folder_tree_open {
             self.show_folder_tree();
         } else {
             self.hide_folder_tree();
+        }
+        self.emit_panels_changed();
+    }
+
+    /// Whether the Thumbnails strip is the visible left-pane content (task #83).
+    pub fn thumbs_visible(&self) -> bool {
+        self.folder_tree_open
+            && self.left_tab == crate::overlay::LeftTab::Thumbnails
+            && !self.panels.hidden
+    }
+
+    /// `Shift+T` (task #83) — the Inspector's per-tab semantics for the left
+    /// pane's Thumbnails tab: open the pane on it, switch to it if Folders is
+    /// showing, close the pane if it's already showing. While Tab-hidden:
+    /// reveal + show, never close (the reveal rule).
+    pub fn toggle_thumbnails(&mut self) {
+        use crate::overlay::LeftTab;
+        if self.panels.reveal() {
+            self.folder_tree_open = true;
+            self.left_tab = LeftTab::Thumbnails;
+            self.on_thumbs_opened();
+            return;
+        }
+        if self.folder_tree_open && self.left_tab == LeftTab::Thumbnails {
+            self.folder_tree_open = false;
+            self.hide_folder_tree();
+            self.emit_panels_changed();
+            return;
+        }
+        self.folder_tree_open = true;
+        self.left_tab = LeftTab::Thumbnails;
+        // The HUD/native tree yields the pane; its bitmaps clear here (the strip
+        // is the pane's content now).
+        self.hide_folder_tree_visuals_for_tab_switch();
+        self.on_thumbs_opened();
+    }
+
+    /// Clear the drawn tree's visuals without closing the pane (a tab switch to
+    /// Thumbnails): the CPU tree quad / panel state drops; `folder_tree_open`
+    /// stays true because the pane is still open — on the Thumbnails tab.
+    fn hide_folder_tree_visuals_for_tab_switch(&mut self) {
+        let was_open = self.folder_tree_open;
+        self.hide_folder_tree();
+        self.folder_tree_open = was_open;
+    }
+
+    /// First-open / re-open bookkeeping for the strip (task #83): enable capture
+    /// (the T0 byproduct hook costs nothing until this), land the follow scroll
+    /// on the current item, and kick fills.
+    fn on_thumbs_opened(&mut self) {
+        self.thumbs.enable();
+        if let Some(cur) = self.playlist.current() {
+            if let Some(cmd) = self.thumbs.follow.panel_opened(cur) {
+                self.thumbs.pending_scroll = Some(cmd);
+            }
+        }
+        self.request_prefetch();
+        self.emit_panels_changed();
+    }
+
+    /// A strip click (task #83): absolute jump + the instant thumb-preview
+    /// present for cold targets — preview-first applied to jumps. The cached
+    /// thumb rides the normal synthetic-outcome upload path (the macOS
+    /// archive-poster pattern): it lands as a resident *preview*, presents, and
+    /// the real decode — queued at top priority by `request_prefetch` — upgrades
+    /// it in place. No flash of black, no wait, and the ring is never evicted
+    /// out-of-policy (the target legitimately owns a slot now).
+    pub fn thumb_jump(&mut self, item: usize) {
+        self.flush_pending_delete();
+        if item >= self.source.len() {
+            return;
+        }
+        if self.displayed_item != Some(item) {
+            self.stop_playback();
+            self.playlist.jump_to(item);
+            self.target_item = self.playlist.current();
+            if !self.try_present_target() {
+                if let Some(e) = self.thumbs.cache.get(item) {
+                    let img = pb_decode::DecodedImage {
+                        width: e.w,
+                        height: e.h,
+                        orig_width: e.payload.orig_w,
+                        orig_height: e.payload.orig_h,
+                        codec: e.payload.codec,
+                        format: pb_decode::PixelFormat::Rgba8,
+                        pixels: e.payload.rgba.clone(),
+                        is_preview: true,
+                        color: pb_decode::ColorTransform::srgb(),
+                        peak: 1.0,
+                        animated: None,
+                    };
+                    self.pending_uploads
+                        .push(crate::decode_pool::Outcome::synthetic(
+                            item,
+                            self.epoch,
+                            Ok(img),
+                        ));
+                    // A click is a discrete pointer action, not the keypress
+                    // frame: a <=1 MiB upload lands now (plan §4).
+                    self.drain_results();
+                }
+            }
+            self.request_prefetch();
+        }
+        if let Some(cmd) = self.thumbs.follow.jump(item) {
+            self.thumbs.pending_scroll = Some(cmd);
+        }
+        self.emit_panels_changed();
+    }
+
+    /// T0 capture (task #83): the ring upload just finished with this outcome's
+    /// CPU buffer — hand it to the derive thread instead of dropping it. O(1)
+    /// (a bounded `try_send`); a no-op until the strip is first opened.
+    fn thumbs_capture(&mut self, o: crate::decode_pool::Outcome) {
+        if !self.thumbs.enabled || o.key.purpose != crate::decode_pool::Purpose::Display {
+            return;
+        }
+        let item = o.key.item;
+        if let Some(img) = o.into_image() {
+            self.thumbs.offer(item, img);
         }
     }
 
@@ -2577,6 +2719,8 @@ impl AppCore {
         self.describe_gen += 1;
         self.live_motion_cache.clear();
         self.failed.clear();
+        self.thumbs.clear_deck();
+        self.emit_panels_changed();
         self.preview_resident.clear();
         // Drop any in-flight archive-video poster requests: item indices are deck-relative,
         // so a straggler callback must not upgrade a same-index item in the new deck.
@@ -2675,6 +2819,8 @@ impl AppCore {
         self.describe_gen += 1;
         self.live_motion_cache.clear();
         self.failed.clear();
+        self.thumbs.clear_deck();
+        self.emit_panels_changed();
         self.preview_resident.clear();
         // Drop any in-flight archive-video poster requests: item indices are deck-relative,
         // so a straggler callback must not upgrade a same-index item in the new deck.
@@ -2882,6 +3028,16 @@ impl AppCore {
         // previous frame while the decode (fit-sized or full-res) lands.
         self.try_present_target();
         self.request_prefetch();
+        // The strip follows the nav (task #83) — same signal cadence as the
+        // info line's per-photo refresh.
+        if self.thumbs_visible() {
+            if let Some(cur) = self.playlist.current() {
+                if let Some(cmd) = self.thumbs.follow.navigation(cur) {
+                    self.thumbs.pending_scroll = Some(cmd);
+                }
+            }
+            self.emit_panels_changed();
+        }
     }
 
     // --- Flicker compare (task #43): pin one photo, `Y` flips between it and the
@@ -3552,7 +3708,9 @@ impl AppCore {
     /// Take the archive-video **poster** bytes stashed for `request_id` (macOS). The shell
     /// pulls them, generates a poster frame, and returns it via `video_poster_ready`. Consumes.
     pub fn take_pending_poster_bytes(&mut self, request_id: u64) -> Vec<u8> {
-        self.pending_poster_bytes.remove(&request_id).unwrap_or_default()
+        self.pending_poster_bytes
+            .remove(&request_id)
+            .unwrap_or_default()
     }
 
     /// macOS: keep Swift-generated posters flowing for archive videos — the displayed one
@@ -3662,11 +3820,18 @@ impl AppCore {
     /// it into the resident ring as a synthetic full-decode [`Outcome`](crate::decode_pool::Outcome),
     /// upgrading the preview placeholder in place through the normal `drain_results` path
     /// (so retention + prefetch come for free). Dropped if the pixel count is wrong.
-    pub fn video_poster_ready(&mut self, request_id: u64, item: usize, w: u32, h: u32, rgba: Vec<u8>) {
+    pub fn video_poster_ready(
+        &mut self,
+        request_id: u64,
+        item: usize,
+        w: u32,
+        h: u32,
+        rgba: Vec<u8>,
+    ) {
         let _ = request_id; // paired the round-trip; the stash was consumed on pull
-        // Drop a straggler whose request we no longer expect (a deck change cleared the
-        // in-flight set) — item indices are deck-relative, so it must not upgrade a same-
-        // index item in a new deck. The normal callback's item is still in the set here.
+                            // Drop a straggler whose request we no longer expect (a deck change cleared the
+                            // in-flight set) — item indices are deck-relative, so it must not upgrade a same-
+                            // index item in a new deck. The normal callback's item is still in the set here.
         if !self.poster_inflight.remove(&item) {
             return;
         }
@@ -3687,7 +3852,11 @@ impl AppCore {
             animated: None,
         };
         self.pending_uploads
-            .push(crate::decode_pool::Outcome::synthetic(item, self.epoch, Ok(img)));
+            .push(crate::decode_pool::Outcome::synthetic(
+                item,
+                self.epoch,
+                Ok(img),
+            ));
     }
 
     /// Cache the inspector's video-fact rows for a macOS archive video, probed by the shell
@@ -3712,7 +3881,10 @@ impl AppCore {
             rows.push(("Video codec".into(), codec));
         }
         if fps_milli > 0 {
-            rows.push(("Frame rate".into(), format!("{:.2} fps", f64::from(fps_milli) / 1000.0)));
+            rows.push((
+                "Frame rate".into(),
+                format!("{:.2} fps", f64::from(fps_milli) / 1000.0),
+            ));
         }
         rows.push(("Audio".into(), if has_audio { "Yes" } else { "No" }.into()));
         let size = self.source.size_hint(item).unwrap_or(0);
@@ -4692,6 +4864,28 @@ impl AppCore {
         let mut jobs = head;
         jobs.append(&mut previews);
         jobs.append(&mut fulls);
+        // Thumbnails fills (task #83): appended BELOW every display want (the
+        // merged-scheduler order), only while the strip is visible and the user
+        // is parked — an expensive cold fill must never race a fly. T0 capture
+        // covers the strip during flight anyway.
+        if self.thumbs.enabled && self.thumbs_visible() && self.held_nav().is_none() {
+            if let Some(cur) = self.playlist.current() {
+                let demand = self.thumbs.demand(cur);
+                for it in self.thumbs.cache.fill_plan(
+                    &demand,
+                    self.playlist.len(),
+                    crate::thumbs::THUMB_MAX_FILL_JOBS,
+                ) {
+                    if self.failed.contains(&it)
+                        || self.thumbs.failed.contains(&it)
+                        || pending.contains(&it)
+                    {
+                        continue;
+                    }
+                    jobs.push(Job::thumb(it, crate::thumbs::thumb_fit()));
+                }
+            }
+        }
         self.pool.set_targets(self.epoch, &self.source, &jobs);
     }
 
@@ -5458,6 +5652,26 @@ impl AppCore {
         while let Ok(o) = self.results.try_recv() {
             ready.push(o);
         }
+        // Thumb-purpose results (task #83) feed the thumb store, never the ring.
+        // Geometry-epoch staleness doesn't apply to them (thumbs are display-
+        // geometry-independent); deck staleness is fenced by the cache's own
+        // deck generation at insert.
+        let mut i = 0;
+        while i < ready.len() {
+            if ready[i].key.purpose == crate::decode_pool::Purpose::Thumb {
+                let o = ready.remove(i);
+                let item = o.key.item;
+                match o.into_image() {
+                    Some(img) => self.thumbs.offer(item, img),
+                    // A failed thumb fill is never re-planned (no retry loop).
+                    None => {
+                        self.thumbs.failed.insert(item);
+                    }
+                }
+            } else {
+                i += 1;
+            }
+        }
         let mut target_failed: Option<usize> = None;
         ready.retain(|o| {
             if o.key.epoch != self.epoch {
@@ -5581,6 +5795,7 @@ impl AppCore {
                     }
                     self.draw();
                 }
+                self.thumbs_capture(outcome);
                 continue;
             }
             if let Some(res) = self
@@ -5611,7 +5826,9 @@ impl AppCore {
                     self.present_item(item, res.slot);
                 }
             }
-            // reserve == None (no longer wanted): drop the outcome, freeing budget.
+            // reserve == None (no longer wanted): the thumb store still gets the
+            // pixels we paid to decode (the fly-past case IS the behind-strip).
+            self.thumbs_capture(outcome);
         }
         self.pending_uploads = leftover;
     }
@@ -9778,7 +9995,10 @@ mod tests {
     #[test]
     fn pending_video_bytes_is_taken_once() {
         let mut core = test_core();
-        assert!(core.take_pending_video_bytes().is_empty(), "none by default");
+        assert!(
+            core.take_pending_video_bytes().is_empty(),
+            "none by default"
+        );
         core.pending_video_bytes = Some(vec![1, 2, 3, 4]);
         assert_eq!(core.take_pending_video_bytes(), vec![1, 2, 3, 4]);
         assert!(core.take_pending_video_bytes().is_empty(), "consumed once");
@@ -9794,8 +10014,14 @@ mod tests {
         // Wrong pixel count (claims 4x4 but sends 10 bytes) → dropped, guard still cleared.
         core.poster_inflight.insert(3);
         core.video_poster_ready(1, 3, 4, 4, vec![0u8; 10]);
-        assert!(!core.poster_inflight.contains(&3), "in-flight cleared even on a bad frame");
-        assert!(core.pending_uploads.is_empty(), "bad pixel count is dropped");
+        assert!(
+            !core.poster_inflight.contains(&3),
+            "in-flight cleared even on a bad frame"
+        );
+        assert!(
+            core.pending_uploads.is_empty(),
+            "bad pixel count is dropped"
+        );
 
         // Correct 2x2 RGBA8 (16 bytes) → queued as a full (non-preview) outcome for item 5.
         core.poster_inflight.insert(5);
@@ -9819,7 +10045,9 @@ mod tests {
         core.archive_video_meta_ready(2, "HEVC".to_string(), 30_000, 5_000, true);
         let (_, rows) = core.exif_cache.get(&2).expect("rows cached for item 2");
         assert!(rows.iter().any(|(k, v)| k == "Video codec" && v == "HEVC"));
-        assert!(rows.iter().any(|(k, v)| k == "Frame rate" && v == "30.00 fps"));
+        assert!(rows
+            .iter()
+            .any(|(k, v)| k == "Frame rate" && v == "30.00 fps"));
         assert!(rows.iter().any(|(k, _)| k == "Duration"));
         assert!(rows.iter().any(|(k, v)| k == "Audio" && v == "Yes"));
         assert!(core
@@ -9830,8 +10058,14 @@ mod tests {
         // Unknown duration (-1) is omitted; no audio reads "No".
         core.archive_video_meta_ready(3, "H.264".to_string(), 0, -1, false);
         let (_, rows) = core.exif_cache.get(&3).unwrap();
-        assert!(!rows.iter().any(|(k, _)| k == "Duration"), "unknown duration omitted");
-        assert!(!rows.iter().any(|(k, _)| k == "Frame rate"), "unknown fps omitted");
+        assert!(
+            !rows.iter().any(|(k, _)| k == "Duration"),
+            "unknown duration omitted"
+        );
+        assert!(
+            !rows.iter().any(|(k, _)| k == "Frame rate"),
+            "unknown fps omitted"
+        );
         assert!(rows.iter().any(|(k, v)| k == "Audio" && v == "No"));
     }
 
@@ -9840,9 +10074,15 @@ mod tests {
     fn pending_poster_bytes_keyed_and_taken_once() {
         let mut core = test_core();
         core.pending_poster_bytes.insert(7, vec![9, 8, 7]);
-        assert!(core.take_pending_poster_bytes(99).is_empty(), "wrong id → nothing");
+        assert!(
+            core.take_pending_poster_bytes(99).is_empty(),
+            "wrong id → nothing"
+        );
         assert_eq!(core.take_pending_poster_bytes(7), vec![9, 8, 7]);
-        assert!(core.take_pending_poster_bytes(7).is_empty(), "consumed once");
+        assert!(
+            core.take_pending_poster_bytes(7).is_empty(),
+            "consumed once"
+        );
     }
 
     /// Frame-step on the native backend emits a `StepVideo` intent for the displayed item,
@@ -10149,5 +10389,153 @@ mod tests {
         let prepared = core.prepared.as_ref().expect("eager stash filled");
         assert_eq!(prepared.item, 0);
         assert_eq!(prepared.anim.frame_count(), 2);
+    }
+
+    // ---- Thumbnails strip (task #83) ----
+
+    fn thumb_test_core() -> AppCore {
+        let mut core = test_core();
+        core.source = five_photos();
+        core.playlist = Playlist::new(5, 0);
+        core.ring = ResidentRing::new(4);
+        core
+    }
+
+    fn tiny_thumb(w: u32, h: u32) -> crate::thumbs::ThumbPixels {
+        crate::thumbs::ThumbPixels {
+            rgba: vec![200; (w * h * 4) as usize],
+            orig_w: 4000,
+            orig_h: 3000,
+            codec: "JPEG",
+        }
+    }
+
+    #[test]
+    fn shift_t_and_shift_f_share_the_left_pane_with_tab_semantics() {
+        let mut core = thumb_test_core();
+        assert!(!core.thumbs_visible());
+        // Shift+T opens the pane on Thumbnails and enables capture.
+        core.toggle_thumbnails();
+        assert!(core.thumbs_visible());
+        assert!(core.folder_tree_open);
+        assert!(core.thumbs.enabled);
+        assert_eq!(core.left_tab, crate::overlay::LeftTab::Thumbnails);
+        // Shift+F switches tabs — the pane stays open.
+        core.toggle_folder_tree();
+        assert!(!core.thumbs_visible());
+        assert!(core.folder_tree_open);
+        assert_eq!(core.left_tab, crate::overlay::LeftTab::Folders);
+        // Shift+T switches back.
+        core.toggle_thumbnails();
+        assert!(core.thumbs_visible());
+        // Shift+T on the showing tab closes the pane.
+        core.toggle_thumbnails();
+        assert!(!core.folder_tree_open);
+        assert!(!core.thumbs_visible());
+        // Capture stays enabled after close (accumulates for the reopen).
+        assert!(core.thumbs.enabled);
+    }
+
+    #[test]
+    fn opening_thumbnails_lands_a_follow_scroll_on_current() {
+        let mut core = thumb_test_core();
+        core.playlist.jump_to(3);
+        core.toggle_thumbnails();
+        let cmd = core.thumbs.pending_scroll.expect("open scrolls to current");
+        assert_eq!(cmd.item, 3);
+    }
+
+    #[test]
+    fn thumb_jump_presents_the_cached_thumb_instantly_as_a_preview() {
+        let mut core = thumb_test_core();
+        core.toggle_thumbnails();
+        // A cached thumb for a cold (non-resident) item…
+        let demand = core.thumbs.demand(0);
+        core.thumbs.cache.insert(
+            3,
+            pb_core::ThumbTier::Full,
+            12,
+            8,
+            12 * 8 * 4,
+            tiny_thumb(12, 8),
+            &demand,
+        );
+        core.thumb_jump(3);
+        // …presents NOW as a resident preview (the synthetic-outcome path).
+        assert_eq!(core.displayed_item, Some(3), "no wait, no black flash");
+        assert!(
+            core.preview_resident.contains(&3),
+            "lands as a preview so the real decode upgrades in place"
+        );
+        // The info panel sees the TRUE source facts, not the thumb's size.
+        assert_eq!(
+            core.meta_cache.get(&3).map(|m| (m.w, m.h)),
+            Some((4000, 3000))
+        );
+        // Follow re-engaged onto the click target.
+        assert_eq!(core.thumbs.pending_scroll.map(|c| c.item), Some(3));
+    }
+
+    #[test]
+    fn thumb_jump_without_a_cached_thumb_still_jumps() {
+        let mut core = thumb_test_core();
+        core.toggle_thumbnails();
+        core.thumb_jump(2);
+        assert_eq!(core.playlist.current(), Some(2));
+        assert_eq!(core.target_item, Some(2));
+        assert_eq!(core.displayed_item, None, "cold: waits for the decode");
+    }
+
+    #[test]
+    fn display_capture_lands_in_the_thumb_cache_via_the_derive_thread() {
+        let mut core = thumb_test_core();
+        core.toggle_thumbnails();
+        let img = pb_decode::DecodedImage {
+            width: 128,
+            height: 64,
+            orig_width: 128,
+            orig_height: 64,
+            codec: "PNG",
+            format: pb_decode::PixelFormat::Rgba8,
+            pixels: vec![7; 128 * 64 * 4],
+            is_preview: false,
+            color: pb_decode::ColorTransform::srgb(),
+            peak: 1.0,
+            animated: None,
+        };
+        core.thumbs_capture(Outcome::synthetic(2, core.epoch, Ok(img)));
+        assert!(
+            core.thumbs.working(),
+            "derive in flight keeps the pump awake"
+        );
+        for _ in 0..200 {
+            if core.thumbs.poll(0) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let e = core.thumbs.cache.get(2).expect("captured");
+        assert_eq!((e.w, e.h), (128, 64));
+        assert_eq!(e.tier, pb_core::ThumbTier::Full);
+    }
+
+    #[test]
+    fn deck_rebuild_clears_thumbs_and_bumps_generation() {
+        let mut core = thumb_test_core();
+        core.toggle_thumbnails();
+        let demand = core.thumbs.demand(0);
+        core.thumbs.cache.insert(
+            1,
+            pb_core::ThumbTier::Full,
+            4,
+            4,
+            64,
+            tiny_thumb(4, 4),
+            &demand,
+        );
+        let g0 = core.thumbs.cache.deck_gen();
+        core.rebuild_playlist(five_photos(), PathBuf::from("photos"), None, false, 0);
+        assert_eq!(core.thumbs.cache.len(), 0, "index-keyed thumbs dropped");
+        assert!(core.thumbs.cache.deck_gen() > g0);
     }
 }

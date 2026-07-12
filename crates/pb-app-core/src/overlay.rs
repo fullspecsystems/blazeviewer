@@ -37,6 +37,17 @@ pub enum InspectorTab {
     Describe,
 }
 
+/// Which tab of the **left pane** (task #83): the folder tree (`Shift+F`) or the
+/// Thumbnails strip (`Shift+T`). The pane's open flag stays
+/// `AppCore::folder_tree_open` (one pane, two tabs — the Inspector idiom);
+/// this picks what it shows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum LeftTab {
+    #[default]
+    Folders,
+    Thumbnails,
+}
+
 /// What the rich layer contributes to the shared HUD overlay slot: Help, or the
 /// Inspector's active tab. (The basic `i` info line is the ephemeral layer's —
 /// see [`SlotContent`].)

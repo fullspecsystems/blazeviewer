@@ -1297,7 +1297,15 @@ impl AppCoreHandle {
     /// host's RGBA8 pixels (`w*h*4`), copied here into the resident ring via the normal
     /// upload path. `ptr` must be valid for `len` bytes for this synchronous call (the host
     /// passes it from `Data.withUnsafeBytes`, which outlives the call).
-    fn video_poster_ready(&mut self, request_id: u64, item: u64, w: u32, h: u32, data_ptr: usize, len: usize) {
+    fn video_poster_ready(
+        &mut self,
+        request_id: u64,
+        item: u64,
+        w: u32,
+        h: u32,
+        data_ptr: usize,
+        len: usize,
+    ) {
         let rgba = if data_ptr == 0 || len == 0 {
             Vec::new()
         } else {

@@ -115,7 +115,6 @@ pub use animation::{
 #[cfg(target_os = "macos")]
 pub use av_poster::decode_video_poster;
 pub use color::ColorTransform;
-pub use thumb::{derive_thumbnail, exif_thumbnail};
 #[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
 pub use ff_live::{
     decode_image_sequence, decode_image_sequence_cancellable, decode_live_motion,
@@ -136,6 +135,7 @@ pub use mf_poster::{
 };
 #[cfg(windows)]
 pub use mf_stream::mem_istream;
+pub use thumb::{derive_thumbnail, exif_thumbnail};
 // Platform-neutral (defined in `video`); both platform probes construct it.
 #[cfg(windows)]
 pub use mf_video::{decode_live_motion, decode_live_motion_streaming};
