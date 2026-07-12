@@ -5906,7 +5906,11 @@ impl AppCore {
     pub fn native_video_opened(&mut self, session_id: u64, duration_ms: i64, has_audio: bool) {
         let sid = crate::video::VideoSessionId(session_id);
         let duration = (duration_ms >= 0).then(|| Duration::from_millis(duration_ms as u64));
-        if let Some(p) = self.video.as_mut().and_then(ActiveVideoBackend::as_native_mut) {
+        if let Some(p) = self
+            .video
+            .as_mut()
+            .and_then(ActiveVideoBackend::as_native_mut)
+        {
             p.on_opened(sid, duration, has_audio);
         }
         self.update_video_progress();
@@ -5949,10 +5953,19 @@ impl AppCore {
 
     /// A seek acknowledged (`finished` = landed cleanly; `false` = superseded by a
     /// newer seek). Clears the proxy's in-flight flag for the current generation.
-    pub fn native_video_seek_completed(&mut self, session_id: u64, generation: u64, finished: bool) {
+    pub fn native_video_seek_completed(
+        &mut self,
+        session_id: u64,
+        generation: u64,
+        finished: bool,
+    ) {
         let sid = crate::video::VideoSessionId(session_id);
         let gen = crate::video::SeekGeneration(generation);
-        if let Some(p) = self.video.as_mut().and_then(ActiveVideoBackend::as_native_mut) {
+        if let Some(p) = self
+            .video
+            .as_mut()
+            .and_then(ActiveVideoBackend::as_native_mut)
+        {
             p.on_seek_completed(sid, gen, finished);
         }
     }
