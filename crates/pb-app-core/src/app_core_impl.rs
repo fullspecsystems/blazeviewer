@@ -5823,36 +5823,160 @@ impl AppCore {
         let existing = self.video.as_ref().map(|v| (v.item(), v.state()));
         match existing {
             Some((playing_item, state)) if playing_item == item => match state {
-                Playing => {
-                    let now = self.now;
-                    if self.session_mut().map(|v| v.session.pause(now)).is_some() {
-                        self.effects.push(contract::CoreEffect::PauseVideoAudio);
-                        self.draw();
-                    }
-                }
-                Paused => {
-                    let now = self.now;
-                    if self.session_mut().map(|v| v.session.resume(now)).is_some() {
-                        self.effects.push(contract::CoreEffect::ResumeVideoAudio);
-                        self.draw();
-                    }
-                }
-                // Replay from the top: a seek to 0 on the SAME session (the
-                // producer parks after EOS precisely for this).
-                Ended => {
-                    let now = self.now;
-                    if let Some(target) = self.session_mut().and_then(|v| v.session.replay(now)) {
-                        self.effects
-                            .push(contract::CoreEffect::SeekVideoAudio { position: target });
-                        self.draw();
-                    }
-                }
+                Playing => self.video_pause_current(),
+                Paused => self.video_resume_current(),
+                Ended => self.video_replay_current(),
                 Failed | Stopped => self.start_video_session(item),
                 // Starting up (or mid-seek later): let it be.
                 Opening | Buffering | Seeking => {}
             },
             // A different item's session (stale) or none: start fresh.
             _ => self.start_video_session(item),
+        }
+    }
+
+    /// Pause the current video — the Session path pauses the `VideoSession` (+ its
+    /// audio player); the Native (macOS) path commands the shell's `AVPlayer`. Each
+    /// arm returns the effect to emit so the `self.video` borrow is released before
+    /// `self.effects`/`self.draw` (disjoint-field borrows aside, this stays clean).
+    fn video_pause_current(&mut self) {
+        let now = self.now;
+        let cmd = match self.video.as_mut() {
+            Some(ActiveVideoBackend::Session(v)) => {
+                v.session.pause(now);
+                Some(contract::CoreEffect::PauseVideoAudio)
+            }
+            Some(ActiveVideoBackend::Native(p)) => Some(contract::CoreEffect::PauseVideo {
+                session_id: p.session_id,
+            }),
+            None => None,
+        };
+        if let Some(cmd) = cmd {
+            self.effects.push(cmd);
+            self.draw();
+        }
+    }
+
+    /// Resume the current video (from `Paused`).
+    fn video_resume_current(&mut self) {
+        let now = self.now;
+        let cmd = match self.video.as_mut() {
+            Some(ActiveVideoBackend::Session(v)) => {
+                v.session.resume(now);
+                Some(contract::CoreEffect::ResumeVideoAudio)
+            }
+            Some(ActiveVideoBackend::Native(p)) => Some(contract::CoreEffect::ResumeVideo {
+                session_id: p.session_id,
+            }),
+            None => None,
+        };
+        if let Some(cmd) = cmd {
+            self.effects.push(cmd);
+            self.draw();
+        }
+    }
+
+    /// Replay from the top (`P` at `Ended`). Session: a seek to 0 on the SAME session
+    /// (the producer parks after EOS for this). Native: `ResumeVideo`, which the shell
+    /// resolves as seek-to-0-then-play when the player is parked at the end.
+    fn video_replay_current(&mut self) {
+        let now = self.now;
+        let cmd = match self.video.as_mut() {
+            Some(ActiveVideoBackend::Session(v)) => v
+                .session
+                .replay(now)
+                .map(|target| contract::CoreEffect::SeekVideoAudio { position: target }),
+            Some(ActiveVideoBackend::Native(p)) => Some(contract::CoreEffect::ResumeVideo {
+                session_id: p.session_id,
+            }),
+            None => None,
+        };
+        if let Some(cmd) = cmd {
+            self.effects.push(cmd);
+            self.draw();
+        }
+    }
+
+    /// Shell → core callbacks for the macOS native player (task 79.9 phase 2). The
+    /// shell's `AVPlayer` is the timing/lifecycle authority; these advance the passive
+    /// `NativeVideoProxy` so the core's play/pause/replay dispatch + policy see real
+    /// state. Each is session-gated inside the proxy (a stale player is ignored).
+
+    /// The player finished opening: record duration + audio presence.
+    pub fn native_video_opened(&mut self, session_id: u64, duration_ms: i64, has_audio: bool) {
+        let sid = crate::video::VideoSessionId(session_id);
+        let duration = (duration_ms >= 0).then(|| Duration::from_millis(duration_ms as u64));
+        if let Some(p) = self.video.as_mut().and_then(ActiveVideoBackend::as_native_mut) {
+            p.on_opened(sid, duration, has_audio);
+        }
+        self.update_video_progress();
+    }
+
+    /// The player's playback state changed (`state`: 0 Opening / 1 Buffering / 2 Playing
+    /// / 3 Paused — `Ended`/`Failed` have their own callbacks).
+    pub fn native_video_state_changed(&mut self, session_id: u64, state: u8) {
+        let sid = crate::video::VideoSessionId(session_id);
+        let st = match state {
+            1 => crate::video::VideoSessionState::Buffering,
+            2 => crate::video::VideoSessionState::Playing,
+            3 => crate::video::VideoSessionState::Paused,
+            _ => crate::video::VideoSessionState::Opening,
+        };
+        let changed = self
+            .video
+            .as_mut()
+            .and_then(ActiveVideoBackend::as_native_mut)
+            .is_some_and(|p| p.on_state_changed(sid, st));
+        if changed {
+            self.update_video_progress();
+            self.draw();
+        }
+    }
+
+    /// The player reached end-of-stream (parks the last frame; `P` replays).
+    pub fn native_video_ended(&mut self, session_id: u64) {
+        let sid = crate::video::VideoSessionId(session_id);
+        let applied = self
+            .video
+            .as_mut()
+            .and_then(ActiveVideoBackend::as_native_mut)
+            .is_some_and(|p| p.on_ended(sid));
+        if applied {
+            self.update_video_progress();
+            self.draw();
+        }
+    }
+
+    /// A seek acknowledged (`finished` = landed cleanly; `false` = superseded by a
+    /// newer seek). Clears the proxy's in-flight flag for the current generation.
+    pub fn native_video_seek_completed(&mut self, session_id: u64, generation: u64, finished: bool) {
+        let sid = crate::video::VideoSessionId(session_id);
+        let gen = crate::video::SeekGeneration(generation);
+        if let Some(p) = self.video.as_mut().and_then(ActiveVideoBackend::as_native_mut) {
+            p.on_seek_completed(sid, gen, finished);
+        }
+    }
+
+    /// The player failed (missing codec, unreadable file). Surface the error and return
+    /// to the poster — mirrors the Session `poll_video` failure path.
+    pub fn native_video_failed(&mut self, session_id: u64, error: String) {
+        let sid = crate::video::VideoSessionId(session_id);
+        let applied = self
+            .video
+            .as_mut()
+            .and_then(ActiveVideoBackend::as_native_mut)
+            .is_some_and(|p| p.on_failed(sid, error.clone()));
+        if applied {
+            self.effects
+                .push(contract::CoreEffect::StopVideo { session_id: sid });
+            self.video = None;
+            self.update_video_progress();
+            let msg = if error.is_empty() {
+                "Video playback failed".to_string()
+            } else {
+                error
+            };
+            self.show_toast(&msg);
         }
     }
 

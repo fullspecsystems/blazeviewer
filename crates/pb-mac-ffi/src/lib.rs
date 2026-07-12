@@ -872,6 +872,28 @@ impl AppCoreHandle {
         self.core.motion_playing()
     }
 
+    // ── Native video callbacks (task 79.9 phase 2): the shell's AVPlayer reports its
+    //    authoritative state back so the core's passive proxy advances (making P /
+    //    toolbar pause/resume/replay work + failures return to the poster). All
+    //    session-gated inside the proxy.
+    fn native_video_opened(&mut self, session_id: u64, duration_ms: i64, has_audio: bool) {
+        self.core
+            .native_video_opened(session_id, duration_ms, has_audio);
+    }
+    fn native_video_state_changed(&mut self, session_id: u64, state: u8) {
+        self.core.native_video_state_changed(session_id, state);
+    }
+    fn native_video_ended(&mut self, session_id: u64) {
+        self.core.native_video_ended(session_id);
+    }
+    fn native_video_seek_completed(&mut self, session_id: u64, generation: u64, finished: bool) {
+        self.core
+            .native_video_seek_completed(session_id, generation, finished);
+    }
+    fn native_video_failed(&mut self, session_id: u64, error: String) {
+        self.core.native_video_failed(session_id, error);
+    }
+
     fn menu_state(&self) -> ffi::MenuStateFfi {
         let s = &self.last_menu_state;
         ffi::MenuStateFfi {
@@ -2441,6 +2463,8 @@ fn map_effect(e: contract::CoreEffect) -> ffi::CoreEffectFfi {
             muted,
         } => E::PlayVideo(path.to_string_lossy().into_owned(), session_id.0, muted),
         C::StopVideo { session_id } => E::StopVideo(session_id.0),
+        C::PauseVideo { session_id } => E::PauseVideo(session_id.0),
+        C::ResumeVideo { session_id } => E::ResumeVideo(session_id.0),
         // The borderless fullscreen speed mode (F) ↔ windowed. `true` = fullscreen.
         C::SetWindowMode(mode) => {
             E::SetWindowMode(matches!(mode, contract::WindowMode::Fullscreen))
@@ -2526,6 +2550,10 @@ mod ffi {
         // (navigate / delete / failure); stale callbacks are rejected by session id.
         PlayVideo(String, u64, bool),
         StopVideo(u64),
+        // Pause / resume the native player (session_id). ResumeVideo also serves replay:
+        // when the player is parked at EOS the host seeks to 0 before playing.
+        PauseVideo(u64),
+        ResumeVideo(u64),
         // true = enter the borderless fullscreen speed mode; false = restore windowed.
         SetWindowMode(bool),
         // Hide the window (the Esc-teardown step before Quit).
@@ -2730,6 +2758,11 @@ mod ffi {
         fn current_has_motion(&mut self) -> bool;
         fn animation_playing(&self) -> bool;
         fn motion_playing(&self) -> bool;
+        fn native_video_opened(&mut self, session_id: u64, duration_ms: i64, has_audio: bool);
+        fn native_video_state_changed(&mut self, session_id: u64, state: u8);
+        fn native_video_ended(&mut self, session_id: u64);
+        fn native_video_seek_completed(&mut self, session_id: u64, generation: u64, finished: bool);
+        fn native_video_failed(&mut self, session_id: u64, error: String);
         fn context_menu(&mut self);
 
         // The native Help panel (task #54, mac-first): on a PanelsChanged marker call

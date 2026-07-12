@@ -1809,6 +1809,10 @@ final class CoreModel {
                 nativeVideo?.stop()
                 nativeVideo = nil
             }
+        case .PauseVideo(let sessionId):
+            if nativeVideo?.sessionId == sessionId { nativeVideo?.pause() }
+        case .ResumeVideo(let sessionId):
+            if nativeVideo?.sessionId == sessionId { nativeVideo?.resume() }
         case .SetWindowMode(let fullscreen):
             log("SetWindowMode(fullscreen: \(fullscreen))")
             setWindowMode(fullscreen: fullscreen)
@@ -2147,7 +2151,37 @@ final class CoreModel {
             return
         }
         nativeVideo = NativeVideoPlayer(
-            url: URL(fileURLWithPath: path), muted: muted, sessionId: sessionId, canvas: canvas)
+            url: URL(fileURLWithPath: path), muted: muted, sessionId: sessionId, canvas: canvas,
+            model: self)
+    }
+
+    // ── Native video callbacks (task 79.9 phase 2): the player reports its authoritative
+    //    state back so the core proxy advances (P/toolbar pause/resume/replay, failures).
+    //    Same drain pattern as menuAction — the core may emit effects (a toast, StopVideo).
+    func nativeVideoOpened(_ sessionId: UInt64, durationMs: Int64, hasAudio: Bool) {
+        core.native_video_opened(sessionId, durationMs, hasAudio)
+        kick()
+        drainEffects()
+    }
+    func nativeVideoStateChanged(_ sessionId: UInt64, state: UInt8) {
+        core.native_video_state_changed(sessionId, state)
+        kick()
+        drainEffects()
+    }
+    func nativeVideoEnded(_ sessionId: UInt64) {
+        core.native_video_ended(sessionId)
+        kick()
+        drainEffects()
+    }
+    func nativeVideoSeekCompleted(_ sessionId: UInt64, generation: UInt64, finished: Bool) {
+        core.native_video_seek_completed(sessionId, generation, finished)
+        kick()
+        drainEffects()
+    }
+    func nativeVideoFailed(_ sessionId: UInt64, error: String) {
+        core.native_video_failed(sessionId, error)
+        kick()
+        drainEffects()
     }
 
     /// `CoreEffect::WriteClipboard` (via the marker + accessors): text goes on as a string;
