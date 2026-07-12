@@ -126,6 +126,9 @@ pub struct AppCoreHandle {
     /// [`open_launch_paths`](Self::open_launch_paths) after the canvas exists — the
     /// stash-pull pattern (clipboard/dialog), so `Vec<String>` never crosses back to Swift.
     pending_launch_paths: Vec<String>,
+    /// The never-consumed copy of the CLI launch paths (see `launch_path_count`) —
+    /// the host's Apple-Event echo filter reads it after the stash is consumed.
+    launch_paths_record: Vec<String>,
 }
 
 /// One flattened folder-tree row for the native list. `path` is the disk path (Finder
@@ -183,6 +186,7 @@ impl AppCoreHandle {
             inspector_snapshot: Vec::new(),
             tree_snapshot: Vec::new(),
             pending_launch_paths: Vec::new(),
+            launch_paths_record: Vec::new(),
         }
     }
 
@@ -621,6 +625,23 @@ impl AppCoreHandle {
             .iter()
             .map(|p| p.to_string_lossy().into_owned())
             .collect();
+        // A permanent (never-consumed) copy for the host's double-delivery dedup: a
+        // bare-path launch delivers the same path twice — parsed argv AND an AppKit
+        // document-open Apple Event — and Swift drops the echo against this record.
+        self.launch_paths_record = self.pending_launch_paths.clone();
+    }
+
+    /// How many positional launch paths the CLI carried — the never-consumed record
+    /// behind [`launch_path_at`](Self::launch_path_at) (unlike the open stash, which
+    /// `open_launch_paths` consumes). The host reads these to build its Apple-Event
+    /// echo filter for bare-path launches.
+    fn launch_path_count(&self) -> usize {
+        self.launch_paths_record.len()
+    }
+
+    /// The `i`th recorded launch path ("" out of range) — see `launch_path_count`.
+    fn launch_path_at(&self, i: usize) -> String {
+        self.launch_paths_record.get(i).cloned().unwrap_or_default()
     }
 
     /// The `--metrics` end-of-run summary (task #78): the core's per-stage p50/p95/p99
@@ -2862,6 +2883,10 @@ mod ffi {
         ) -> LaunchPreflightFfi;
         fn apply_launch_args(&mut self, argv: Vec<String>, version: String);
         fn open_launch_paths(&mut self) -> bool;
+        // The never-consumed launch-path record — the host's Apple-Event echo filter
+        // (a bare-path launch delivers the same path via argv AND a document-open).
+        fn launch_path_count(&self) -> usize;
+        fn launch_path_at(&self, i: usize) -> String;
         // The --metrics end-of-run summary ("" when off) — printed by the host on quit.
         fn metrics_report(&self) -> String;
 

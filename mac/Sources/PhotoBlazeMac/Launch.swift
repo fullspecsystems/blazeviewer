@@ -102,6 +102,43 @@ enum Launch {
         return .emit(text: r.text.toString(), useStderr: r.use_stderr, exitCode: r.exit_code)
     }
 
+    // MARK: - The bare-path double-delivery dedup (task #78.10)
+
+    /// The argv launch paths (standardized), consumed as AppKit's document-open echo
+    /// arrives. A bare `photoblaze ~/Photos` delivers that path TWICE: once parsed from
+    /// argv (opened via `open_launch_paths`), and once as an odoc Apple Event
+    /// (`application(_:open:)`) because AppKit treats a bare `argv[1]` path as a
+    /// document launch. Without the filter, the echo's second open supersedes the
+    /// first scan.
+    private static var argvEchoPaths: Set<String> = []
+    /// The dedup only applies during launch; a later Finder open of the SAME folder is
+    /// a real user action and must pass through.
+    private static let launchedAt = Date()
+
+    /// Record the parsed launch paths (CoreModel, right after `apply_launch_args`).
+    static func recordArgvPaths(_ paths: [String]) {
+        argvEchoPaths = Set(paths.map { URL(fileURLWithPath: $0).standardizedFileURL.path })
+    }
+
+    /// Drop the document-open echo of argv paths: each recorded path is consumed at
+    /// most once, and only within the launch window. Everything else passes through.
+    static func filterLaunchEcho(_ urls: [URL]) -> [URL] {
+        guard !argvEchoPaths.isEmpty else { return urls }
+        guard Date().timeIntervalSince(launchedAt) < 10 else {
+            // Launch is long over — retire the filter entirely.
+            argvEchoPaths.removeAll()
+            return urls
+        }
+        return urls.filter { url in
+            let p = url.standardizedFileURL.path
+            if argvEchoPaths.contains(p) {
+                argvEchoPaths.remove(p)
+                return false
+            }
+            return true
+        }
+    }
+
     /// Perform an `.emit` disposition: write the text to the chosen stream (always — a
     /// pipe/redirect must receive it; harmless when nobody reads it), alert only for a
     /// real error on a GUI launch, then exit with clap's code. Never returns for
