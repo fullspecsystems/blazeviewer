@@ -157,29 +157,38 @@ final class CoreModel {
         )
         log("AppCoreHandle created (\(Int(frame.width * scale))×\(Int(frame.height * scale)) @\(scale)x)")
 
+        // Apply the CLI session overrides (task #78) IMMEDIATELY — before anything reads
+        // `startup_fullscreen` / `effective_appearance` / the menu state, so a `--theme` /
+        // `--fullscreen` / `--mute` launch wears its override from the first frame. The
+        // preflight (Launch.preflight, in the App init) already gated help/version/usage
+        // errors, so this parse cannot fail; the positional paths it stashes are opened by
+        // `openLaunchPathIfAny` once the canvas exists.
+        core.apply_launch_args(Launch.argvVec(), RustString(Launch.versionString))
+
         installInputForwarding()
     }
 
     /// Deferred launch work, run from the view's `onAppear` (the window + canvas exist by
     /// then — the winit shell defers its launch into `resumed()` for the same reason):
-    /// a path passed as `--pb-open /photos` (i.e. `open …/PhotoBlazeMac.app --args
-    /// --pb-open /photos`) opens like the winit CLI arg — folder → recursive scan, image →
-    /// its folder with the cursor on it, .zip/.7z → the archive contents.
+    /// the CLI's positional paths — stashed Rust-side by `apply_launch_args` in `init` —
+    /// open like the winit CLI args: folder → recursive scan (honoring `--recursive` /
+    /// `--no-recursive`, else the saved preference), image → its folder with the cursor
+    /// on it, .zip/.7z → the archive contents. Consumed exactly once (`open_launch_paths`
+    /// is a no-op on a second call).
     ///
-    /// **Why a flag, not a bare path (the great windowless-app hunt):** AppKit treats a
-    /// bare path in `argv[1]` as a document-open launch, and then *suppresses the initial
-    /// WindowGroup window entirely* — the app runs windowless with a live menu bar. A
-    /// `-`-prefixed argument is ignored by that machinery. Finder-drop +
-    /// `application:openURLs:` land with the input adapter (item 4); the native open panel
-    /// with the menus (item 8).
+    /// **The windowless-app gotcha lives on:** AppKit treats a bare path in `argv[1]` as
+    /// a document-open launch and *suppresses the initial WindowGroup window entirely* —
+    /// the app runs windowless with a live menu bar. A `-`-prefixed first argument is
+    /// ignored by that machinery, so flag-first invocations (and the hidden `--pb-open
+    /// <path>` alias, now parsed by the shared pb-cli surface) work today; forcing the
+    /// window for bare-path launches is task #78.10. Finder-drop +
+    /// `application:openURLs:` land via the open handler as before.
     func openLaunchPathIfAny() {
         guard !launchPathOpened else { return }
         launchPathOpened = true
-        let args = ProcessInfo.processInfo.arguments
-        if let flag = args.firstIndex(of: "--pb-open"), args.indices.contains(flag + 1) {
-            let path = args[flag + 1]
-            core.open_path(path)
-            log("open_path(\(path))")
+        if core.open_launch_paths() {
+            log("open_launch_paths()")
+            kick() // the scan/open worker needs the pump polling (as openPaths does)
             drainEffects()
         }
         // A bare launch opens the empty state — nothing is auto-opened (owner call,
@@ -1200,7 +1209,10 @@ final class CoreModel {
     /// `viewDidChangeEffectiveAppearance` then reports the resulting effective theme
     /// back to the core, which keeps `Appearance: System` resolving live.
     func applyAppearancePreference() {
-        switch core.settings_form().appearance_mode {
+        // Effective, not the raw saved form: a `--theme` launch override (task #78) must
+        // wear from the first frame. An explicit Settings change clears the override
+        // core-side, so the dialog keeps working; `settings_form()` stays raw for editing.
+        switch core.effective_appearance() {
         case 1: NSApp.appearance = NSAppearance(named: .aqua)
         case 2: NSApp.appearance = NSAppearance(named: .darkAqua)
         default: NSApp.appearance = nil

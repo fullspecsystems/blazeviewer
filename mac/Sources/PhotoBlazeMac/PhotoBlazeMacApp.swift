@@ -67,7 +67,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct PhotoBlazeMacApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
-    @State private var model = CoreModel()
+    @State private var model: CoreModel
+
+    init() {
+        // The CLI preflight (task #78) runs before ANYTHING: a terminal `--help` /
+        // `--version` / usage error prints and exits here — no window, no Sparkle, no
+        // decode-pool engine. `model` is deliberately constructed in this init (not a
+        // property initializer, which would run first) so a non-proceed launch never
+        // builds it. On proceed, CoreModel.init feeds the same argv through
+        // `apply_launch_args` for the session overrides.
+        Launch.act(on: Launch.preflight())
+        _model = State(initialValue: CoreModel())
+    }
 
     var body: some Scene {
         WindowGroup("PhotoBlaze") {
