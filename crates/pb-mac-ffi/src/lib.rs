@@ -850,6 +850,12 @@ impl AppCoreHandle {
         self.core.animation_playing()
     }
 
+    /// Any motion playing — animation/Live Photo OR a video (task 79.9). The toolbar
+    /// Play/Pause glyph reads this so it reflects a playing video, not just an animation.
+    fn motion_playing(&self) -> bool {
+        self.core.motion_playing()
+    }
+
     fn menu_state(&self) -> ffi::MenuStateFfi {
         let s = &self.last_menu_state;
         ffi::MenuStateFfi {
@@ -1187,6 +1193,12 @@ impl AppCoreHandle {
     /// mark by the codec. Mutually exclusive with `info_line_is_live`.
     fn info_line_is_animated(&self) -> bool {
         self.core.info_line_is_animated()
+    }
+
+    /// Whether the current item is a video (task 79.9) — the host shows a film mark by the
+    /// codec. Mutually exclusive with the live/animated marks.
+    fn info_line_is_video(&self) -> bool {
+        self.core.info_line_is_video()
     }
 
     // ── The native play hint (▶/Live Photo on a motion item): the last HUD overlay to go
@@ -2701,6 +2713,7 @@ mod ffi {
         // Motion state for the toolbar's Play-Animation button (task #55).
         fn current_has_motion(&mut self) -> bool;
         fn animation_playing(&self) -> bool;
+        fn motion_playing(&self) -> bool;
         fn context_menu(&mut self);
 
         // The native Help panel (task #54, mac-first): on a PanelsChanged marker call
@@ -2777,6 +2790,7 @@ mod ffi {
         fn info_line_codec(&self) -> String;
         fn info_line_is_live(&self) -> bool;
         fn info_line_is_animated(&self) -> bool;
+        fn info_line_is_video(&self) -> bool;
         fn info_line_align(&self) -> u8;
         fn play_hint_kind(&self) -> u8;
         fn play_hint_seq(&self) -> u64;

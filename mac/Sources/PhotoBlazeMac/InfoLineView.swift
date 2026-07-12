@@ -28,10 +28,14 @@ struct InfoLineView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             // A Live Photo shows the livephoto mark by the codec (instead of the word "Live");
-            // any other animated image (GIF/APNG/…) shows a motion mark. Swap `animationMark`
-            // for the final SF Symbol once picked.
+            // a video shows a film mark; any other animated image (GIF/APNG/…) shows a motion
+            // mark. Swap `animationMark` for the final SF Symbol once picked.
             if model.infoLineIsLive {
                 Image(systemName: "livephoto")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else if model.infoLineIsVideo {
+                Image(systemName: "film")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             } else if model.infoLineIsAnimated {

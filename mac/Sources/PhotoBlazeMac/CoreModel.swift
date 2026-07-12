@@ -70,6 +70,7 @@ final class CoreModel {
     private(set) var infoLineCodec = ""
     private(set) var infoLineIsLive = false
     private(set) var infoLineIsAnimated = false
+    private(set) var infoLineIsVideo = false
     private(set) var infoLineAlign = 2
 
     /// The native play hint (▶ / Live Photo on a motion item) — the last on-image HUD overlay
@@ -552,7 +553,7 @@ final class CoreModel {
             treeVisible: treeVisible,
             slideshowInterval: core.slideshow_interval_display().toString(),
             hasMotion: core.current_has_motion(),
-            playing: core.animation_playing()
+            playing: core.motion_playing()
         )
     }
 
@@ -1368,6 +1369,7 @@ final class CoreModel {
             infoLineCodec = core.info_line_codec().toString()
             infoLineIsLive = core.info_line_is_live()
             infoLineIsAnimated = core.info_line_is_animated()
+            infoLineIsVideo = core.info_line_is_video()
             infoLineAlign = Int(core.info_line_align())
         }
         if infoVis != infoLineVisible {

@@ -4040,6 +4040,14 @@ impl AppCore {
         !self.info_line_is_live() && self.current.as_ref().is_some_and(|m| m.animated.is_some())
     }
 
+    /// Whether the displayed item is a video (task 79.9): the info line shows a film
+    /// mark by the codec, the way a Live Photo shows the livephoto glyph. Distinct
+    /// from `info_line_is_animated` (GIF/APNG) — a video is a `LibraryItemKind::Video`,
+    /// not a `PhotoMeta.animated`.
+    pub fn info_line_is_video(&self) -> bool {
+        self.current.is_some() && self.displayed_item.is_some_and(|i| self.item_is_video(i))
+    }
+
     /// The current photo's codec label (e.g. `JPEG`) for the info readout's pill — empty when
     /// the codec field is toggled off (so the shell omits the badge).
     pub fn info_line_codec(&self) -> String {
@@ -5024,7 +5032,7 @@ impl AppCore {
         };
         let state = contract::ContextMenuState {
             has_image: true,
-            has_motion: self.has_motion(item),
+            has_motion: self.has_motion(item) || self.item_is_video(item),
             can_reveal: self.source.path(item).is_some(),
             fullscreen: !self.windowed,
             compare_pinned: self.compare_pin.is_some(),
@@ -6764,17 +6772,26 @@ impl AppCore {
     }
 
     /// Whether the currently displayed item has a playable motion component — the macOS
-    /// toolbar dims its Play-Animation button on stills (task #55). `&mut` because Live-Photo
-    /// pairing is resolved + cached on first check (cheap cache hit after; the display path
-    /// has usually primed it already).
+    /// toolbar dims its Play button on stills (task #55). Includes **video** (task 79.9):
+    /// a video is playable motion too, so the toolbar Play button enables on it. `&mut`
+    /// because Live-Photo pairing is resolved + cached on first check (cheap cache hit
+    /// after; the display path has usually primed it already).
     pub fn current_has_motion(&mut self) -> bool {
-        self.displayed_item.is_some_and(|i| self.has_motion(i))
+        self.displayed_item
+            .is_some_and(|i| self.has_motion(i) || self.item_is_video(i))
     }
 
     /// Whether an animation / Live Photo is actively playing — the toolbar lights its
     /// Play-Animation button while it runs.
     pub fn animation_playing(&self) -> bool {
         self.playback.as_ref().is_some_and(|pb| pb.is_playing())
+    }
+
+    /// Whether *any* motion is playing — an animation/Live Photo **or** a video (task
+    /// 79.9). The toolbar's Play/Pause glyph reads this so it reflects a playing video,
+    /// not just an animation (`animation_playing` is video-blind by design).
+    pub fn motion_playing(&self) -> bool {
+        self.animation_playing() || self.video_playing()
     }
 
     /// Kick the whole-sequence decode for `item` on a worker thread so a big GIF/WebP (or
