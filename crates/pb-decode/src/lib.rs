@@ -25,6 +25,10 @@ mod imageio;
 // streaming (tasks #38 / #69: frames emit as they decode, so playback starts immediately).
 #[cfg(target_os = "macos")]
 mod livephoto;
+// macOS video poster (task 79.9 phase 4): the first non-black frame, via the Live-Photo
+// streaming reader (poster ≡ playback rotation/color/fit). Pure Rust; no objc of its own.
+#[cfg(target_os = "macos")]
+mod av_poster;
 // The Windows mirror: the same .mov decode via Media Foundation, streaming (tasks #39 / #69:
 // frames emit as they decode, so playback starts immediately).
 #[cfg(windows)]
@@ -102,6 +106,8 @@ pub use animation::{
     decode_animation, decode_animation_cancellable, detect_animation, AnimFrame, Animation,
     AnimationKind, MotionChunk, MotionHeader,
 };
+#[cfg(target_os = "macos")]
+pub use av_poster::decode_video_poster;
 pub use color::ColorTransform;
 #[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
 pub use ff_live::{
