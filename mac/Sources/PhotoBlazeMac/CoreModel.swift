@@ -2202,6 +2202,7 @@ final class CoreModel {
             log("PlayVideo: no canvas view to present into")
             return
         }
+        resetVideoControls() // start the new clip's scrubber at 0, not the last clip's spot
         nativeVideo = NativeVideoPlayer(
             url: URL(fileURLWithPath: path), muted: muted, sessionId: sessionId,
             scaleMode: core.menu_state().scale, canvas: canvas, model: self)
@@ -2233,8 +2234,24 @@ final class CoreModel {
         guard nativeVideo?.sessionId == sessionId else { return }
         videoElapsed = Self.formatTime(elapsed)
         videoTotal = total > 0 ? Self.formatTime(total) : ""
-        videoFraction = total > 0 ? min(1.0, max(0.0, elapsed / total)) : 0.0
         videoPlaying = playing
+        let frac = total > 0 ? min(1.0, max(0.0, elapsed / total)) : 0.0
+        // Glide the knob only for a normal forward playback step; any jump — a new video,
+        // replay-to-0, a scrubber seek, a big skip — snaps instantly (no scroll-to-zero).
+        if playing, frac >= videoFraction, frac - videoFraction < 0.1 {
+            withAnimation(.linear(duration: 0.22)) { videoFraction = frac }
+        } else {
+            videoFraction = frac
+        }
+    }
+
+    /// Zero the scrubber for a fresh video so it never inherits the previous clip's position
+    /// (and never glides down to 0). Plain assignments → instant.
+    private func resetVideoControls() {
+        videoElapsed = "0:00"
+        videoTotal = ""
+        videoFraction = 0
+        videoPlaying = false
     }
 
     /// The info-line scrubber was dragged/clicked to `fraction` of the duration. Seeks the

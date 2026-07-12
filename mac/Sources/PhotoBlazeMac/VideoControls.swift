@@ -10,12 +10,12 @@ struct VideoPlaybackRow: View {
     let model: CoreModel
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 11) {
             Button(action: { model.toggleVideoPlay() }) {
                 Image(systemName: model.videoPlaying ? "pause.fill" : "play.fill")
-                    .font(.callout)
+                    .font(.system(size: 15))
                     .foregroundStyle(.primary)
-                    .frame(width: 16, height: 16)
+                    .frame(width: 20, height: 20)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -23,7 +23,7 @@ struct VideoPlaybackRow: View {
             .accessibilityLabel(model.videoPlaying ? "Pause" : "Play")
 
             Text(model.videoElapsed)
-                .font(.caption)
+                .font(.callout)
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
 
@@ -31,7 +31,7 @@ struct VideoPlaybackRow: View {
 
             if !model.videoTotal.isEmpty {
                 Text(model.videoTotal)
-                    .font(.caption)
+                    .font(.callout)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
             }
@@ -43,7 +43,8 @@ struct VideoPlaybackRow: View {
 /// A click/drag seek bar. While dragging, the knob follows the pointer locally (a periodic
 /// AVPlayer update must not yank it away); seeks are throttled by time and the final
 /// position is always sent on release. The bar's displayed fraction is the player's when
-/// idle, the pointer's while dragging.
+/// idle, the pointer's while dragging. The track is inset by the knob radius so the knob
+/// stays within the bar's bounds at 0 % / 100 % (never overhanging the time labels).
 struct VideoScrubber: View {
     let model: CoreModel
 
@@ -52,7 +53,7 @@ struct VideoScrubber: View {
     @State private var lastSeek = Date.distantPast
 
     private let trackHeight: CGFloat = 4
-    private let knobRadius: CGFloat = 6
+    private let knobRadius: CGFloat = 7
     /// At most ~16 live seeks/s while scrubbing (AVPlayer also coalesces); the release
     /// always sends a final, unthrottled seek.
     private let seekInterval: TimeInterval = 0.06
@@ -60,30 +61,35 @@ struct VideoScrubber: View {
     var body: some View {
         GeometryReader { geo in
             let width = max(1, geo.size.width)
+            // The knob center travels [knobRadius, width − knobRadius], so it never overhangs.
+            let usable = max(1, width - knobRadius * 2)
             let fraction = dragging ? dragFraction : model.videoFraction
-            let fillW = width * CGFloat(fraction)
+            let knobX = knobRadius + usable * CGFloat(fraction)
 
             ZStack(alignment: .leading) {
                 Capsule()
                     .fill(Color.secondary.opacity(0.35))
-                    .frame(height: trackHeight)
+                    .frame(width: usable, height: trackHeight)
+                    .offset(x: knobRadius)
                 Capsule()
                     .fill(Color.accentColor)
-                    .frame(width: max(trackHeight, fillW), height: trackHeight)
+                    .frame(width: max(trackHeight, knobX - knobRadius), height: trackHeight)
+                    .offset(x: knobRadius)
                 Circle()
                     .fill(dragging ? Color.accentColor : Color.primary)
                     .frame(width: knobRadius * 2, height: knobRadius * 2)
-                    .offset(x: fillW - knobRadius)
+                    .offset(x: knobX - knobRadius)
             }
             .frame(maxHeight: .infinity)
-            // Glide the knob between the ~5 Hz position updates while playing; snap while dragging.
-            .animation(dragging ? nil : .linear(duration: 0.2), value: model.videoFraction)
+            // The glide comes from the model (it animates only normal forward playback steps
+            // via withAnimation; jumps snap). No implicit animation here — that would glide the
+            // jump-to-0 on a new video/replay too.
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
                         dragging = true
-                        dragFraction = clamp(value.location.x / width)
+                        dragFraction = clamp((value.location.x - knobRadius) / usable)
                         let now = Date()
                         if now.timeIntervalSince(lastSeek) >= seekInterval {
                             lastSeek = now
@@ -91,7 +97,7 @@ struct VideoScrubber: View {
                         }
                     }
                     .onEnded { value in
-                        model.seekVideoFraction(clamp(value.location.x / width)) // final, unthrottled
+                        model.seekVideoFraction(clamp((value.location.x - knobRadius) / usable))
                         dragging = false
                     }
             )
