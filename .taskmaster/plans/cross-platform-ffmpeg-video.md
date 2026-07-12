@@ -7,6 +7,21 @@ by discipline (owner declined a feature-flag gate), Linux HDR = pipeline-correct
 output (confirmed), archive posters keep both paths with FFmpeg as fallback (owner call),
 libva/VAAPI runtime-dep audit, task #83 thumbs interaction. **Ready for execution.**
 
+> **Execution progress (2026-07-12, task #84):** phases **1–3 COMPLETE** on main —
+> shared foundation (`pb-decode/src/ffmpeg/{init,io,probe,color,convert}`), the
+> `run_ff_video_producer` protocol producer + poster (42 tests incl. VP8/VP9/MKV/rotation/
+> HDR fixtures), the fp16 HDR path (§9: PQ/HLG → scene-linear scRGB + the
+> `present_video_frame` fix + `VideoColorInfo::peak`), and Linux integration (playback/
+> posters/probe behind `ffvideo`; validated in the appimage container: tests + clippy
+> clean). The custom-AVIO + cancellation spike (§6) is folded into `io.rs` with its
+> teardown/hostile-input tests — phase-0 gates #2 proved in-code; #1/#3/#4 (packaging,
+> VideoToolbox+HDR interop, audio clock) remain open for their phases. `has_audio: false`
+> muted interim active (§7). CHANGELOG entry deliberately deferred to phase 7
+> (ship-gating: the feature isn't in any ship build yet). **Next: phase 4, the macOS
+> dual-backend (§8) — needs owner-in-the-loop smoke testing by design.** Also fixed
+> in passing: the winit shell had 9 AppCore fields missing from its constructor
+> (pb-app didn't compile on Linux/Windows since the macOS archive-video work).
+
 > **Owner decisions locked (2026-07-12):**
 > 1. **HDR is implemented properly from the start** — not SDR-only-with-tone-map. The fp16/P010
 >    output path (§9 option c) is a v1 requirement, or we're back here in days.

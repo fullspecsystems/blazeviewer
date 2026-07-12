@@ -1203,13 +1203,13 @@
             "id": 3,
             "title": "fp16 HDR present-path fix",
             "description": "present_video_frame honors Rgba16F + VideoColorInfo peak through the fp16 scene-linear path (mirrors is_hdr stills); producer emits fp16 scRGB for PQ/HLG sources",
-            "status": "in-progress"
+            "status": "done"
           },
           {
             "id": 4,
             "title": "Linux video integration",
             "description": "Route Linux video -> Session via the FFmpeg producer in start_video_session; FFmpeg poster in decode_item_cancellable; muted interim (has_audio=false); compile+test in the appimage container",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 5,
