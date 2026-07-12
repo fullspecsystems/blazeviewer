@@ -105,9 +105,10 @@ final class NativeVideoPlayer {
             }
         }
         // Drive the info-line scrubber's position (the core keeps no video clock, so the
-        // player is the source). ~5 Hz text; SwiftUI glides the knob between samples.
+        // player is the source). ~20 Hz so the knob tracks the true playhead directly — no
+        // animation glide (which would lag a sample behind and snap forward on pause).
         timeObserver = player.addPeriodicTimeObserver(
-            forInterval: CMTime(seconds: 0.2, preferredTimescale: 600), queue: .main
+            forInterval: CMTime(seconds: 0.05, preferredTimescale: 600), queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.publishProgress() }
         }

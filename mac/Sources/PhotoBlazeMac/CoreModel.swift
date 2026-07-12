@@ -2232,17 +2232,15 @@ final class CoreModel {
     /// Session-gated. Formats the time labels; the fraction drives the bar + knob.
     func updateVideoProgress(_ sessionId: UInt64, elapsed: Double, total: Double, playing: Bool) {
         guard nativeVideo?.sessionId == sessionId else { return }
-        videoElapsed = Self.formatTime(elapsed)
-        videoTotal = total > 0 ? Self.formatTime(total) : ""
-        videoPlaying = playing
-        let frac = total > 0 ? min(1.0, max(0.0, elapsed / total)) : 0.0
-        // Glide the knob only for a normal forward playback step; any jump — a new video,
-        // replay-to-0, a scrubber seek, a big skip — snaps instantly (no scroll-to-zero).
-        if playing, frac >= videoFraction, frac - videoFraction < 0.1 {
-            withAnimation(.linear(duration: 0.22)) { videoFraction = frac }
-        } else {
-            videoFraction = frac
-        }
+        // The fraction updates ~20 Hz to track the real playhead (no animation — that lagged
+        // a sample behind and jumped forward on pause). The labels change ~1 Hz, so guard
+        // them to avoid needless re-renders at the fraction's rate.
+        videoFraction = total > 0 ? min(1.0, max(0.0, elapsed / total)) : 0.0
+        let e = Self.formatTime(elapsed)
+        if e != videoElapsed { videoElapsed = e }
+        let t = total > 0 ? Self.formatTime(total) : ""
+        if t != videoTotal { videoTotal = t }
+        if playing != videoPlaying { videoPlaying = playing }
     }
 
     /// Zero the scrubber for a fresh video so it never inherits the previous clip's position
