@@ -121,6 +121,14 @@ pub struct AppCoreHandle {
     /// or the v1 `folder_tree_panel` for archive/empty decks — snapshotted by `tree_refresh`
     /// on a `PanelsChanged` marker so the indexed accessors + actions share one stable view.
     tree_snapshot: Vec<TreeRowFfi>,
+    /// The CLI's positional paths (task #78), stashed by [`apply_launch_args`]
+    /// (Self::apply_launch_args) and consumed exactly once by
+    /// [`open_launch_paths`](Self::open_launch_paths) after the canvas exists — the
+    /// stash-pull pattern (clipboard/dialog), so `Vec<String>` never crosses back to Swift.
+    pending_launch_paths: Vec<String>,
+    /// The never-consumed copy of the CLI launch paths (see `launch_path_count`) —
+    /// the host's Apple-Event echo filter reads it after the stash is consumed.
+    launch_paths_record: Vec<String>,
 }
 
 /// One flattened folder-tree row for the native list. `path` is the disk path (Finder
@@ -177,6 +185,8 @@ impl AppCoreHandle {
             help_snapshot: Vec::new(),
             inspector_snapshot: Vec::new(),
             tree_snapshot: Vec::new(),
+            pending_launch_paths: Vec::new(),
+            launch_paths_record: Vec::new(),
         }
     }
 
@@ -585,12 +595,101 @@ impl AppCoreHandle {
         self.open_paths(vec![path.to_string()]);
     }
 
+    /// Parse the launch command line (task #78) and apply it: session-only overrides land
+    /// on the core immediately (`AppCore::apply_launch_overrides` — safe pre-window; later
+    /// reads like `startup_fullscreen` / `effective_appearance` consume them), and the
+    /// positional paths are stashed for [`open_launch_paths`](Self::open_launch_paths).
+    ///
+    /// `argv` is the **full** `ProcessInfo.processInfo.arguments` — argv[0] included; clap
+    /// consumes the first element as the program name (dropping it would eat the first real
+    /// flag or path). `version` is the bundle's version string (`CFBundleShortVersionString`
+    /// + build id — this crate's own `CARGO_PKG_VERSION` is meaningless here).
+    ///
+    /// A parse error is a no-op: [`cli_preflight`] already gated help/version/usage errors
+    /// before the engine was built, so an `Err` here means the host skipped the preflight —
+    /// the launch degrades to "no CLI", never a crash.
+    fn apply_launch_args(&mut self, argv: Vec<String>, version: String) {
+        let Ok(cli) = pb_cli::parse_from(argv, &version) else {
+            return;
+        };
+        self.core.apply_launch_overrides(&cli.to_overrides());
+        // `--metrics`: swap in a recording StageTimes (the winit shell passes
+        // `StageTimes::enabled()` into `App::new` the same way). The core records the
+        // stages itself (decode/upload/render/present/drain); the host prints
+        // [`metrics_report`](Self::metrics_report) on quit.
+        if self.core.launch.metrics {
+            self.core.metrics = pb_app_core::metrics::StageTimes::enabled();
+        }
+        self.pending_launch_paths = cli
+            .launch_paths()
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        // A permanent (never-consumed) copy for the host's double-delivery dedup: a
+        // bare-path launch delivers the same path twice — parsed argv AND an AppKit
+        // document-open Apple Event — and Swift drops the echo against this record.
+        self.launch_paths_record = self.pending_launch_paths.clone();
+    }
+
+    /// How many positional launch paths the CLI carried — the never-consumed record
+    /// behind [`launch_path_at`](Self::launch_path_at) (unlike the open stash, which
+    /// `open_launch_paths` consumes). The host reads these to build its Apple-Event
+    /// echo filter for bare-path launches.
+    fn launch_path_count(&self) -> usize {
+        self.launch_paths_record.len()
+    }
+
+    /// The `i`th recorded launch path ("" out of range) — see `launch_path_count`.
+    fn launch_path_at(&self, i: usize) -> String {
+        self.launch_paths_record.get(i).cloned().unwrap_or_default()
+    }
+
+    /// The `--metrics` end-of-run summary (task #78): the core's per-stage p50/p95/p99
+    /// table, or "" when metrics are off / nothing was recorded. The host prints it to
+    /// stdout on quit — the winit shell's post-`run_app` report, minus that shell's
+    /// pool-thread extras (its `POOL_DECODE_MS` is winit-local plumbing; the core's
+    /// `decode` row covers the same stage here).
+    fn metrics_report(&self) -> String {
+        self.core.metrics.report()
+    }
+
+    /// Open the paths stashed by [`apply_launch_args`](Self::apply_launch_args) — called by
+    /// the host once the canvas exists (the winit shell defers its launch open into
+    /// `resumed()` the same way). Consumed exactly once: a second call returns `false` and
+    /// opens nothing (the idempotence guard the double-delivery arbitration leans on).
+    ///
+    /// A directory launch honors `--recursive` / `--no-recursive`, else the saved
+    /// preference — the winit shell's exact startup logic (its `main()` mutates
+    /// `Source::Scan.recursive` the same way). Non-launch opens (drop, panel, Finder)
+    /// keep `open::plan`'s own policy, matching Windows.
+    fn open_launch_paths(&mut self) -> bool {
+        if self.pending_launch_paths.is_empty() {
+            return false;
+        }
+        let paths = std::mem::take(&mut self.pending_launch_paths);
+        let recursive = self
+            .core
+            .launch
+            .recursive
+            .unwrap_or(self.core.settings.recursive);
+        self.open_paths_inner(paths, Some(recursive));
+        true
+    }
+
     /// Open launch/drop/panel paths — the winit shell's `classify_inputs` mirrored (ADR-019):
     /// a lone directory scans recursively, a lone `.zip`/`.7z` opens to its contents, files
     /// scan/list per the launch policy (a single file → its folder flat, cursor on it). Routed
     /// through the core's `open_plan`, whose `Begin*` effects this crate executes on its
     /// worker threads. Empty / all-empty input is ignored (never blanks the current photo).
     fn open_paths(&mut self, paths: Vec<String>) {
+        self.open_paths_inner(paths, None);
+    }
+
+    /// The shared open-plan body: `recursive_override = Some(r)` forces a directory scan's
+    /// recursion (the CLI launch, where a flag or the saved preference decides — see
+    /// [`open_launch_paths`](Self::open_launch_paths)); `None` keeps `open::plan`'s own
+    /// policy (every non-launch entry point).
+    fn open_paths_inner(&mut self, paths: Vec<String>, recursive_override: Option<bool>) {
         self.core.now = Instant::now();
         let paths: Vec<PathBuf> = paths
             .into_iter()
@@ -614,7 +713,10 @@ impl AppCoreHandle {
                 LaunchInput::Files(files)
             }
         };
-        let plan = open::plan(input);
+        let mut plan = open::plan(input);
+        if let (Some(r), Source::Scan { recursive, .. }) = (recursive_override, &mut plan.source) {
+            *recursive = r;
+        }
         self.core.open_plan(plan.source, plan.cursor);
     }
 
@@ -785,6 +887,47 @@ impl AppCoreHandle {
         self.core.animation_playing()
     }
 
+    /// The current theme-aware letterbox/background fill (sRGB), packed `0x00RRGGBB` — the
+    /// same color photos letterbox with. The video presentation uses it so a letterboxed /
+    /// Original video sits on the user's background, consistent with stills (task 79.9).
+    fn effective_letterbox_rgb(&self) -> u32 {
+        let [r, g, b] = self.core.effective_letterbox();
+        (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)
+    }
+
+    /// Any motion playing — animation/Live Photo OR a video (task 79.9). The toolbar
+    /// Play/Pause glyph reads this so it reflects a playing video, not just an animation.
+    fn motion_playing(&self) -> bool {
+        self.core.motion_playing()
+    }
+
+    // ── Native video callbacks (task 79.9 phase 2): the shell's AVPlayer reports its
+    //    authoritative state back so the core's passive proxy advances (making P /
+    //    toolbar pause/resume/replay work + failures return to the poster). All
+    //    session-gated inside the proxy.
+    /// The active native-video session id (0 = none) — the host reconciles its AVPlayer
+    /// against this each pump so a missed teardown can't leave a second video playing.
+    fn native_video_session_id(&self) -> u64 {
+        self.core.native_video_session_id()
+    }
+    fn native_video_opened(&mut self, session_id: u64, duration_ms: i64, has_audio: bool) {
+        self.core
+            .native_video_opened(session_id, duration_ms, has_audio);
+    }
+    fn native_video_state_changed(&mut self, session_id: u64, state: u8) {
+        self.core.native_video_state_changed(session_id, state);
+    }
+    fn native_video_ended(&mut self, session_id: u64) {
+        self.core.native_video_ended(session_id);
+    }
+    fn native_video_seek_completed(&mut self, session_id: u64, generation: u64, finished: bool) {
+        self.core
+            .native_video_seek_completed(session_id, generation, finished);
+    }
+    fn native_video_failed(&mut self, session_id: u64, error: String) {
+        self.core.native_video_failed(session_id, error);
+    }
+
     fn menu_state(&self) -> ffi::MenuStateFfi {
         let s = &self.last_menu_state;
         ffi::MenuStateFfi {
@@ -820,11 +963,30 @@ impl AppCoreHandle {
     /// Resolve the startup window mode from settings (`StartupMode` + the remembered
     /// last mode) — call once right after attach. `true` = enter the borderless speed
     /// mode; the core's `windowed` mirror is set here WITHOUT re-saving settings (this
-    /// restores state, unlike the F toggle which changes it).
+    /// restores state, unlike the F toggle which changes it). A `--windowed` /
+    /// `--fullscreen` launch override wins over the saved preference (task #78 — the
+    /// winit shell resolves `overrides.windowed` the same way, pre-window); requires
+    /// `apply_launch_args` to have run first (it has: the host preflights before attach).
     fn startup_fullscreen(&mut self) -> bool {
-        let fs = self.core.settings.start_fullscreen();
+        let fs = match self.core.launch.windowed {
+            Some(windowed) => !windowed,
+            None => self.core.settings.start_fullscreen(),
+        };
         self.core.windowed = !fs;
         fs
+    }
+
+    /// The appearance the app should ACTUALLY wear right now — the saved preference
+    /// unless a `--theme` launch override is live (task #78). Same 0 system / 1 light /
+    /// 2 dark encoding as `SettingsFormFfi::appearance_mode`. The host's
+    /// `applyAppearancePreference` reads THIS; `settings_form()` stays the raw saved
+    /// value (it edits the preference, and must not show a session override as saved).
+    fn effective_appearance(&self) -> u8 {
+        match self.core.effective_appearance() {
+            pb_app_core::settings::AppearanceMode::System => 0,
+            pb_app_core::settings::AppearanceMode::Light => 1,
+            pb_app_core::settings::AppearanceMode::Dark => 2,
+        }
     }
 
     /// The saved windowed geometry (`present == false` when none was ever saved).
@@ -1103,6 +1265,12 @@ impl AppCoreHandle {
     /// mark by the codec. Mutually exclusive with `info_line_is_live`.
     fn info_line_is_animated(&self) -> bool {
         self.core.info_line_is_animated()
+    }
+
+    /// Whether the current item is a video (task 79.9) — the host shows a film mark by the
+    /// codec. Mutually exclusive with the live/animated marks.
+    fn info_line_is_video(&self) -> bool {
+        self.core.info_line_is_video()
     }
 
     // ── The native play hint (▶/Live Photo on a motion item): the last HUD overlay to go
@@ -1532,7 +1700,9 @@ impl AppCoreHandle {
             self.core.recursive,
             !self.core.windowed, // `windowed` is the inverse of the fullscreen checkbox
             self.core.slideshow.on,
-            self.core.settings.mute_live_audio,
+            // Effective, not raw: a `--mute` launch override must show as a checked
+            // menu item (the winit shell passes `effective_mute()` here too).
+            self.core.effective_mute(),
             self.core.can_save_rotation(),
             self.core.can_reveal(),
             self.dir_scan.is_some(),
@@ -2149,6 +2319,72 @@ fn fold_settings_form(
     s
 }
 
+/// The launch-preflight CLI parse (task #78): the Swift host calls this FIRST — before
+/// any window, before Sparkle, before the engine is built — with the **full**
+/// `ProcessInfo.processInfo.arguments` (argv[0] included; clap consumes the first element
+/// as the program name) and the bundle's version string. A free function on purpose: a
+/// terminal `--help` must never construct the decode pool just to print text.
+///
+/// The outcome mirrors the winit shell's `report_cli_error_and_exit` split:
+/// - `proceed = true` → run the app normally (`text` is empty). The host later feeds the
+///   same argv through [`AppCoreHandle::apply_launch_args`] to apply the overrides.
+/// - `proceed = false` → render `text` (help / version / a usage error) to the stream
+///   `use_stderr` picks and exit with `exit_code` (clap's own: 0 help/version, 2 usage).
+///
+/// Mixed strictness (the winit contract): a nonexistent positional path is a usage error
+/// here — same message text, exit 2 — so a typo'd path never launches an empty viewer.
+///
+/// `stdout_tty` / `stderr_tty`: whether each stream is a terminal (Swift's `isatty`).
+/// The winit shell gets colored help for free (`clap::Error::print` styles at print
+/// time), but here the text crosses the FFI as a plain string — so the render picks
+/// ANSI or plain per the stream the host will actually write to. A pipe / redirect
+/// stays clean; a terminal gets the same bold-yellow/cyan/green help Windows shows.
+fn cli_preflight(
+    argv: Vec<String>,
+    version: String,
+    stdout_tty: bool,
+    stderr_tty: bool,
+) -> ffi::LaunchPreflightFfi {
+    match pb_cli::parse_from(argv, &version) {
+        Ok(cli) => {
+            for p in cli.launch_paths() {
+                if !p.exists() {
+                    return ffi::LaunchPreflightFfi {
+                        proceed: false,
+                        text: format!("photoblaze: no such file or folder: {}", p.display()),
+                        use_stderr: true,
+                        exit_code: 2,
+                    };
+                }
+            }
+            ffi::LaunchPreflightFfi {
+                proceed: true,
+                text: String::new(),
+                use_stderr: false,
+                exit_code: 0,
+            }
+        }
+        Err(e) => {
+            let rendered = e.render();
+            let tty = if e.use_stderr() {
+                stderr_tty
+            } else {
+                stdout_tty
+            };
+            ffi::LaunchPreflightFfi {
+                proceed: false,
+                text: if tty {
+                    rendered.ansi().to_string()
+                } else {
+                    rendered.to_string()
+                },
+                use_stderr: e.use_stderr(),
+                exit_code: e.exit_code(),
+            }
+        }
+    }
+}
+
 /// The AI settings tab's **Test connection** probe (task #44): GET the endpoint's model
 /// list, summarize reachability + model count, and warn when no served model looks
 /// vision-capable (describe needs a VLM). Stateless + blocking — Swift calls it off the
@@ -2254,6 +2490,15 @@ fn map_effect(e: contract::CoreEffect) -> ffi::CoreEffectFfi {
         C::StopLiveAudio => E::StopLiveAudio,
         C::PauseLiveAudio => E::PauseLiveAudio,
         C::ResumeLiveAudio => E::ResumeLiveAudio,
+        // macOS native video (task 79.9): the shell owns AVPlayer + AVPlayerLayer.
+        C::PlayVideo {
+            path,
+            session_id,
+            muted,
+        } => E::PlayVideo(path.to_string_lossy().into_owned(), session_id.0, muted),
+        C::StopVideo { session_id } => E::StopVideo(session_id.0),
+        C::PauseVideo { session_id } => E::PauseVideo(session_id.0),
+        C::ResumeVideo { session_id } => E::ResumeVideo(session_id.0),
         // The borderless fullscreen speed mode (F) ↔ windowed. `true` = fullscreen.
         C::SetWindowMode(mode) => {
             E::SetWindowMode(matches!(mode, contract::WindowMode::Fullscreen))
@@ -2332,6 +2577,17 @@ mod ffi {
         StopLiveAudio,
         PauseLiveAudio,
         ResumeLiveAudio,
+        // macOS native video (task 79.9): the whole media pipeline is the host's
+        // AVPlayer + AVPlayerLayer. PlayVideo(path, session_id, muted) opens the clip
+        // and presents it over the Metal canvas (revealed on the first frame; the
+        // poster shows until then). StopVideo(session_id) tears the player down
+        // (navigate / delete / failure); stale callbacks are rejected by session id.
+        PlayVideo(String, u64, bool),
+        StopVideo(u64),
+        // Pause / resume the native player (session_id). ResumeVideo also serves replay:
+        // when the player is parked at EOS the host seeks to 0 before playing.
+        PauseVideo(u64),
+        ResumeVideo(u64),
         // true = enter the borderless fullscreen speed mode; false = restore windowed.
         SetWindowMode(bool),
         // Hide the window (the Esc-teardown step before Quit).
@@ -2444,6 +2700,17 @@ mod ffi {
         models: String,
     }
 
+    // The launch-preflight CLI parse outcome (task #78) — see `cli_preflight`.
+    // proceed=false means: write `text` to stdout/stderr (per `use_stderr`) when the
+    // process has a shell, alert only for a real error on a GUI launch, exit(exit_code).
+    #[swift_bridge(swift_repr = "struct")]
+    struct LaunchPreflightFfi {
+        proceed: bool,
+        text: String,
+        use_stderr: bool,
+        exit_code: i32,
+    }
+
     // The native menu's check/enabled state — the mirror of contract::MenuState (scale:
     // 0 fit / 1 fill / 2 original; info: 0 hidden / 1 basic / 2 full-exif).
     #[swift_bridge(swift_repr = "struct")]
@@ -2524,6 +2791,14 @@ mod ffi {
         // Motion state for the toolbar's Play-Animation button (task #55).
         fn current_has_motion(&mut self) -> bool;
         fn animation_playing(&self) -> bool;
+        fn motion_playing(&self) -> bool;
+        fn effective_letterbox_rgb(&self) -> u32;
+        fn native_video_session_id(&self) -> u64;
+        fn native_video_opened(&mut self, session_id: u64, duration_ms: i64, has_audio: bool);
+        fn native_video_state_changed(&mut self, session_id: u64, state: u8);
+        fn native_video_ended(&mut self, session_id: u64);
+        fn native_video_seek_completed(&mut self, session_id: u64, generation: u64, finished: bool);
+        fn native_video_failed(&mut self, session_id: u64, error: String);
         fn context_menu(&mut self);
 
         // The native Help panel (task #54, mac-first): on a PanelsChanged marker call
@@ -2600,6 +2875,7 @@ mod ffi {
         fn info_line_codec(&self) -> String;
         fn info_line_is_live(&self) -> bool;
         fn info_line_is_animated(&self) -> bool;
+        fn info_line_is_video(&self) -> bool;
         fn info_line_align(&self) -> u8;
         fn play_hint_kind(&self) -> u8;
         fn play_hint_seq(&self) -> u64;
@@ -2610,6 +2886,24 @@ mod ffi {
         // an HTTP GET /models), so it's safe to call from a Swift background task without
         // touching the core. Blocking; the caller runs it off the main thread.
         fn probe_describe_endpoint(url: String) -> ProbeResultFfi;
+
+        // The CLI (task #78). cli_preflight runs FIRST (free fn — no engine for --help);
+        // apply_launch_args re-parses on the built handle (overrides + path stash);
+        // open_launch_paths consumes the stash once the canvas exists (consumed-once).
+        fn cli_preflight(
+            argv: Vec<String>,
+            version: String,
+            stdout_tty: bool,
+            stderr_tty: bool,
+        ) -> LaunchPreflightFfi;
+        fn apply_launch_args(&mut self, argv: Vec<String>, version: String);
+        fn open_launch_paths(&mut self) -> bool;
+        // The never-consumed launch-path record — the host's Apple-Event echo filter
+        // (a bare-path launch delivers the same path via argv AND a document-open).
+        fn launch_path_count(&self) -> usize;
+        fn launch_path_at(&self, i: usize) -> String;
+        // The --metrics end-of-run summary ("" when off) — printed by the host on quit.
+        fn metrics_report(&self) -> String;
 
         // The Shortcuts editor (NS2.6): a Rust-side draft keymap; rows by (group, index),
         // edits by stable action id; chords display as macOS glyphs.
@@ -2639,6 +2933,9 @@ mod ffi {
 
         // Startup window state + geometry persistence (finalize item 2).
         fn startup_fullscreen(&mut self) -> bool;
+        // The live appearance (saved preference, or the --theme launch override):
+        // 0 system / 1 light / 2 dark — what applyAppearancePreference wears.
+        fn effective_appearance(&self) -> u8;
         fn saved_geometry(&self) -> WindowGeometryFfi;
         fn note_window_geometry(&mut self, x: i32, y: i32, w: u32, h: u32);
 
@@ -2701,6 +2998,189 @@ mod tests {
         let mut h = test_handle(800, 600, 1.0);
         h.key_down("NotAKey", false, false, false, false, false);
         assert!(drain(&mut h).is_empty());
+    }
+
+    /// The launch-preflight outcome mapping (task #78): help/version/usage-error/missing
+    /// path each produce the right (proceed, stream, exit code) triple — and the argv[0]
+    /// regression guard: clap consumes element 0 as the program name, so the first REAL
+    /// flag must still be seen.
+    #[test]
+    fn cli_preflight_outcomes() {
+        // Piped/redirected streams (both flags false) — the plain-text render.
+        let pf = |args: &[&str]| {
+            cli_preflight(
+                args.iter().map(|s| s.to_string()).collect(),
+                "9.9.9-test".to_string(),
+                false,
+                false,
+            )
+        };
+        // argv[0] regression: --help is argv[1] and must parse as help, not the bin name.
+        let help = pf(&["photoblaze", "--help"]);
+        assert!(!help.proceed);
+        assert_eq!(help.exit_code, 0);
+        assert!(!help.use_stderr, "help goes to stdout");
+        assert!(help.text.contains("--slideshow"), "renders the real help");
+        assert!(
+            !help.text.contains('\u{1b}'),
+            "no ANSI styling into a pipe/redirect"
+        );
+
+        // A terminal stdout gets the colored help (the styling Windows shows).
+        let colored = cli_preflight(
+            vec!["photoblaze".into(), "--help".into()],
+            "9.9.9-test".into(),
+            true,
+            false,
+        );
+        assert!(
+            colored.text.contains('\u{1b}'),
+            "TTY stdout renders ANSI-styled help"
+        );
+
+        let ver = pf(&["photoblaze", "--version"]);
+        assert!(!ver.proceed);
+        assert_eq!(ver.exit_code, 0);
+        assert!(
+            ver.text.contains("9.9.9-test"),
+            "--version prints the host-supplied bundle string"
+        );
+        assert!(
+            ver.text.contains("PhotoBlaze"),
+            "--version wears the product name (display_name), not the bin name"
+        );
+
+        let bad = pf(&["photoblaze", "--nope"]);
+        assert!(!bad.proceed);
+        assert_eq!(bad.exit_code, 2);
+        assert!(bad.use_stderr, "usage errors go to stderr");
+
+        // Mixed strictness: a nonexistent path is a usage error with the winit shell's
+        // exact message (argv[0] regression for positionals too — the path is argv[1]).
+        let missing = pf(&["photoblaze", "/definitely/not/here.jpg"]);
+        assert!(!missing.proceed);
+        assert_eq!(missing.exit_code, 2);
+        assert!(missing.use_stderr);
+        assert!(missing
+            .text
+            .contains("no such file or folder: /definitely/not/here.jpg"));
+
+        // A clean flag-only launch proceeds with no text.
+        let ok = pf(&["photoblaze", "--shuffle", "--theme", "dark"]);
+        assert!(ok.proceed);
+        assert!(ok.text.is_empty());
+        assert_eq!(ok.exit_code, 0);
+    }
+
+    /// `apply_launch_args` applies the session overrides to the core (theme folds into
+    /// `effective_appearance`, --shuffle into the launch nav) and stashes the paths —
+    /// including the hidden `--pb-open` back-compat alias.
+    #[test]
+    fn apply_launch_args_applies_overrides_and_stashes_paths() {
+        let mut h = test_handle(800, 600, 1.0);
+        // The handle loads the developer's real settings; snapshot to prove the override
+        // never lands there (whatever the saved values are).
+        let saved_appearance = h.core.settings.appearance_mode;
+        let saved_mute = h.core.settings.mute_live_audio;
+        let dir = std::env::temp_dir();
+        h.apply_launch_args(
+            vec![
+                "photoblaze".into(),
+                "--theme".into(),
+                "dark".into(),
+                "--shuffle".into(),
+                "--mute".into(),
+                "--pb-open".into(),
+                dir.to_string_lossy().into_owned(),
+            ],
+            "9.9.9-test".into(),
+        );
+        assert_eq!(
+            h.core.effective_appearance(),
+            pb_app_core::settings::AppearanceMode::Dark,
+            "--theme is a live override, not a settings write"
+        );
+        assert!(h.core.effective_mute(), "--mute folds into effective_mute");
+        assert_eq!(h.core.last_nav, pb_app_core::Nav::Random);
+        assert_eq!(
+            h.pending_launch_paths,
+            vec![dir.to_string_lossy().into_owned()]
+        );
+        // And the no-trace guarantee: the raw settings were not mutated.
+        assert_eq!(
+            h.core.settings.appearance_mode, saved_appearance,
+            "overrides never land in Settings"
+        );
+        assert_eq!(h.core.settings.mute_live_audio, saved_mute);
+    }
+
+    /// A `--windowed` / `--fullscreen` launch override wins over the saved startup mode
+    /// (deterministic in both directions, whatever the developer's real settings say),
+    /// and the `effective_appearance` accessor folds a `--theme` override in the
+    /// settings-form encoding (0 system / 1 light / 2 dark).
+    #[test]
+    fn launch_overrides_fold_into_startup_reads() {
+        let mut h = test_handle(800, 600, 1.0);
+        h.apply_launch_args(
+            vec![
+                "photoblaze".into(),
+                "--fullscreen".into(),
+                "--theme".into(),
+                "dark".into(),
+            ],
+            "v".into(),
+        );
+        assert!(
+            h.startup_fullscreen(),
+            "--fullscreen wins over the saved mode"
+        );
+        assert!(!h.core.windowed, "the windowed mirror follows");
+        assert_eq!(h.effective_appearance(), 2, "--theme dark reads as 2");
+
+        let mut w = test_handle(800, 600, 1.0);
+        w.apply_launch_args(
+            vec![
+                "photoblaze".into(),
+                "-w".into(),
+                "--theme".into(),
+                "light".into(),
+            ],
+            "v".into(),
+        );
+        assert!(
+            !w.startup_fullscreen(),
+            "--windowed wins over the saved mode"
+        );
+        assert!(w.core.windowed);
+        assert_eq!(w.effective_appearance(), 1);
+
+        // No override: the accessor mirrors the saved preference's encoding.
+        let plain = test_handle(800, 600, 1.0);
+        let saved = match plain.core.settings.appearance_mode {
+            pb_app_core::settings::AppearanceMode::System => 0,
+            pb_app_core::settings::AppearanceMode::Light => 1,
+            pb_app_core::settings::AppearanceMode::Dark => 2,
+        };
+        assert_eq!(plain.effective_appearance(), saved);
+    }
+
+    /// `open_launch_paths` consumes the stash exactly once — the idempotence guard the
+    /// bare-path double-delivery arbitration leans on. (No drain: the BeginDirScan effect
+    /// stays queued, so no walker thread is spawned in the test.)
+    #[test]
+    fn open_launch_paths_is_consumed_once() {
+        let mut h = test_handle(800, 600, 1.0);
+        let dir = std::env::temp_dir().to_string_lossy().into_owned();
+        h.apply_launch_args(
+            vec!["photoblaze".into(), "--pb-open".into(), dir],
+            "v".into(),
+        );
+        assert!(h.open_launch_paths(), "first call opens the stashed paths");
+        assert!(!h.open_launch_paths(), "second call is a no-op");
+        // With nothing stashed at all, it is also a no-op.
+        let mut empty = test_handle(800, 600, 1.0);
+        empty.apply_launch_args(vec!["photoblaze".into()], "v".into());
+        assert!(!empty.open_launch_paths());
     }
 
     /// NS1 item 3 end-to-end (no Swift, no GPU): `open_path` on a real folder → the core's

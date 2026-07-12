@@ -70,7 +70,18 @@ final class CoreModel {
     private(set) var infoLineCodec = ""
     private(set) var infoLineIsLive = false
     private(set) var infoLineIsAnimated = false
+    private(set) var infoLineIsVideo = false
     private(set) var infoLineAlign = 2
+
+    /// The info-line **playback row** (task 79.9 phase 5): a play/pause button + a
+    /// click/drag scrubber + elapsed/total, shown while a native video is active and the
+    /// info line is visible. Driven by the AVPlayer's periodic time observer (the core
+    /// keeps no video clock), so these advance during playback and the knob glides.
+    private(set) var videoControlsVisible = false
+    private(set) var videoElapsed = "0:00"
+    private(set) var videoTotal = ""
+    private(set) var videoFraction = 0.0
+    private(set) var videoPlaying = false
 
     /// The native play hint (▶ / Live Photo on a motion item) — the last on-image HUD overlay
     /// to go native. `kind`: 0 none / 1 Live Photo / 2 animation. It flashes for ~3s on a fresh
@@ -125,6 +136,8 @@ final class CoreModel {
 
     @ObservationIgnored private var keyMonitor: Any?
     @ObservationIgnored private var focusObserver: NSObjectProtocol?
+    /// Prints the `--metrics` report on quit (task #78) — see `init`.
+    @ObservationIgnored private var metricsObserver: NSObjectProtocol?
     @ObservationIgnored private var keyLossObserver: NSObjectProtocol?
     @ObservationIgnored private var keyGainObserver: NSObjectProtocol?
     @ObservationIgnored private var menuTrackObservers: [NSObjectProtocol] = []
@@ -157,29 +170,59 @@ final class CoreModel {
         )
         log("AppCoreHandle created (\(Int(frame.width * scale))×\(Int(frame.height * scale)) @\(scale)x)")
 
+        // Apply the CLI session overrides (task #78) IMMEDIATELY — before anything reads
+        // `startup_fullscreen` / `effective_appearance` / the menu state, so a `--theme` /
+        // `--fullscreen` / `--mute` launch wears its override from the first frame. The
+        // preflight (Launch.preflight, in the App init) already gated help/version/usage
+        // errors, so this parse cannot fail; the positional paths it stashes are opened by
+        // `openLaunchPathIfAny` once the canvas exists.
+        core.apply_launch_args(Launch.argvVec(), RustString(Launch.versionString))
+        // Arm the Apple-Event echo filter: a bare-path launch re-delivers the argv
+        // path as a document-open (see Launch.filterLaunchEcho).
+        Launch.recordArgvPaths(
+            (0..<core.launch_path_count()).map { core.launch_path_at($0).toString() }
+        )
+
+        // `--metrics` (task #78): print the core's per-stage p50/p95/p99 summary on quit
+        // — the winit shell's post-`run_app` report. Always observed; the report is ""
+        // unless the launch enabled metrics, so it's a no-op read otherwise (and stdout
+        // on a GUI launch goes to the void, harmlessly).
+        metricsObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let report = self?.core.metrics_report().toString(), !report.isEmpty
+                else { return }
+                try? FileHandle.standardOutput.write(contentsOf: Data("\n\(report)".utf8))
+            }
+        }
+
         installInputForwarding()
     }
 
     /// Deferred launch work, run from the view's `onAppear` (the window + canvas exist by
     /// then — the winit shell defers its launch into `resumed()` for the same reason):
-    /// a path passed as `--pb-open /photos` (i.e. `open …/PhotoBlazeMac.app --args
-    /// --pb-open /photos`) opens like the winit CLI arg — folder → recursive scan, image →
-    /// its folder with the cursor on it, .zip/.7z → the archive contents.
+    /// the CLI's positional paths — stashed Rust-side by `apply_launch_args` in `init` —
+    /// open like the winit CLI args: folder → recursive scan (honoring `--recursive` /
+    /// `--no-recursive`, else the saved preference), image → its folder with the cursor
+    /// on it, .zip/.7z → the archive contents. Consumed exactly once (`open_launch_paths`
+    /// is a no-op on a second call).
     ///
-    /// **Why a flag, not a bare path (the great windowless-app hunt):** AppKit treats a
-    /// bare path in `argv[1]` as a document-open launch, and then *suppresses the initial
-    /// WindowGroup window entirely* — the app runs windowless with a live menu bar. A
-    /// `-`-prefixed argument is ignored by that machinery. Finder-drop +
-    /// `application:openURLs:` land with the input adapter (item 4); the native open panel
-    /// with the menus (item 8).
+    /// **The windowless-app gotcha lives on:** AppKit treats a bare path in `argv[1]` as
+    /// a document-open launch and *suppresses the initial WindowGroup window entirely* —
+    /// the app runs windowless with a live menu bar. A `-`-prefixed first argument is
+    /// ignored by that machinery, so flag-first invocations (and the hidden `--pb-open
+    /// <path>` alias, now parsed by the shared pb-cli surface) work today; forcing the
+    /// window for bare-path launches is task #78.10. Finder-drop +
+    /// `application:openURLs:` land via the open handler as before.
     func openLaunchPathIfAny() {
         guard !launchPathOpened else { return }
         launchPathOpened = true
-        let args = ProcessInfo.processInfo.arguments
-        if let flag = args.firstIndex(of: "--pb-open"), args.indices.contains(flag + 1) {
-            let path = args[flag + 1]
-            core.open_path(path)
-            log("open_path(\(path))")
+        if core.open_launch_paths() {
+            log("open_launch_paths()")
+            kick() // the scan/open worker needs the pump polling (as openPaths does)
             drainEffects()
         }
         // A bare launch opens the empty state — nothing is auto-opened (owner call,
@@ -326,7 +369,11 @@ final class CoreModel {
         // classify-and-open path as a drop. Buffered by AppDelegate if they arrive before
         // this handler is installed (a cold double-click launch).
         AppDelegate.installOpenHandler { [weak self] urls in
-            self?.openPaths(urls.map(\.path))
+            // Drop the document-open echo of a bare-path CLI launch (the same path
+            // arrives via parsed argv too); real Finder opens pass through untouched.
+            let fresh = Launch.filterLaunchEcho(urls)
+            guard !fresh.isEmpty else { return }
+            self?.openPaths(fresh.map(\.path))
         }
     }
 
@@ -538,13 +585,17 @@ final class CoreModel {
     /// toolbar — the toolbar twin of `menuBar?.sync`. Called on `MenuStateChanged` and
     /// `PanelsChanged`, the same markers that re-sync the menu bar / panels.
     private func syncToolbar() {
+        let menu = core.menu_state()
         toolbarController?.sync(
-            core.menu_state(),
+            menu,
             treeVisible: treeVisible,
             slideshowInterval: core.slideshow_interval_display().toString(),
             hasMotion: core.current_has_motion(),
-            playing: core.animation_playing()
+            playing: core.motion_playing()
         )
+        // Mirror the scale mode (8/9/0 / the View menu) onto a playing video so it fits/
+        // crops like a still. Cheap; re-lays-out only on a real change.
+        nativeVideo?.setScaleMode(menu.scale)
     }
 
     /// The last motion state pushed to the toolbar's Play-Animation button — so the pump
@@ -1200,7 +1251,10 @@ final class CoreModel {
     /// `viewDidChangeEffectiveAppearance` then reports the resulting effective theme
     /// back to the core, which keeps `Appearance: System` resolving live.
     func applyAppearancePreference() {
-        switch core.settings_form().appearance_mode {
+        // Effective, not the raw saved form: a `--theme` launch override (task #78) must
+        // wear from the first frame. An explicit Settings change clears the override
+        // core-side, so the dialog keeps working; `settings_form()` stays raw for editing.
+        switch core.effective_appearance() {
         case 1: NSApp.appearance = NSAppearance(named: .aqua)
         case 2: NSApp.appearance = NSAppearance(named: .darkAqua)
         default: NSApp.appearance = nil
@@ -1297,6 +1351,14 @@ final class CoreModel {
     /// Open dropped / Finder-opened paths (multi-select aware — the launch policy classifies).
     func openPaths(_ paths: [String]) {
         guard !paths.isEmpty else { return }
+        // Take focus. A drag-drop or Finder "Open With" targets PhotoBlaze, but macOS does
+        // NOT auto-activate a background app that only receives a drag/open — so without
+        // this the user lands on an unfocused window and has to click before interacting.
+        // Bring ourselves forward + make the window key; a no-op when already active (the
+        // in-app picker path). `hostWindow` is nil only on a cold pre-window launch, where
+        // applicationDidFinishLaunching already activates.
+        NSApp.activate()
+        hostWindow?.makeKeyAndOrderFront(nil)
         let vec = RustVec<RustString>()
         for p in paths {
             vec.push(value: RustString(p))
@@ -1319,6 +1381,21 @@ final class CoreModel {
         canvasView?.reconcileSizeIfNeeded()
         core.tick()
         drainEffects()
+        // Reconcile the native video against the core's authority: if we hold a player the
+        // core no longer has (a torn-down/replaced session whose StopVideo we somehow
+        // missed), tear it down now — so a stale video can never keep playing behind a new
+        // item. Cheap: one u64 read per tick.
+        if let nv = nativeVideo, nv.sessionId != core.native_video_session_id() {
+            nv.stop()
+            nativeVideo = nil
+        }
+        // Keep the video container's background on the current letterbox color (theme
+        // switch / Settings edit) — repaint only on a real change.
+        let lb = core.effective_letterbox_rgb()
+        if nativeVideo != nil, lb != lastVideoLetterbox {
+            lastVideoLetterbox = lb
+            canvasView?.setVideoLetterbox(videoLetterboxCGColor)
+        }
         // Refresh the shown progress sheet from the Rust-side handles (a cheap read; the
         // pump is already running while a scan/open worker is in flight).
         if activeSheet == .loading || activeSheet == .scanning {
@@ -1356,6 +1433,7 @@ final class CoreModel {
             infoLineCodec = core.info_line_codec().toString()
             infoLineIsLive = core.info_line_is_live()
             infoLineIsAnimated = core.info_line_is_animated()
+            infoLineIsVideo = core.info_line_is_video()
             infoLineAlign = Int(core.info_line_align())
         }
         if infoVis != infoLineVisible {
@@ -1363,6 +1441,12 @@ final class CoreModel {
             // `toastBottomInset` animation) — so it matches the panels and stays smooth
             // even when nothing else on screen moves.
             withAnimation(Layout.chromeFade) { infoLineVisible = infoVis }
+        }
+        // The playback row shows while a native video is active and the info line is on
+        // (task 79.9 phase 5; pointer-reveal — showing it without `i` — is a follow-up).
+        let controls = infoVis && nativeVideo != nil
+        if controls != videoControlsVisible {
+            withAnimation(Layout.chromeFade) { videoControlsVisible = controls }
         }
         // The native play hint: kind 0 = playing / a still (hide), 1/2 = a motion item. A seq
         // bump is the "fresh motion item — flash it" trigger.
@@ -1685,6 +1769,11 @@ final class CoreModel {
     /// (`reportSizeNow`) when AppKit doesn't re-fire the view's `layout()` on its own.
     @ObservationIgnored weak var canvasView: MetalCanvasNSView?
 
+    /// The active native video player (task 79.9): `AVPlayer` + `AVPlayerLayer` over the
+    /// canvas, commanded by the core's `PlayVideo`/`StopVideo` effects. macOS-only; the
+    /// single media authority (the Rust core keeps only a passive proxy).
+    @ObservationIgnored private var nativeVideo: NativeVideoPlayer?
+
     // MARK: - Effects out
 
     /// Pull the effect queue dry and execute each effect — always on the main actor.
@@ -1763,6 +1852,19 @@ final class CoreModel {
             liveAudio?.pause()
         case .ResumeLiveAudio:
             liveAudio?.play()
+        case .PlayVideo(let path, let sessionId, let muted):
+            playNativeVideo(path: path.toString(), sessionId: sessionId, muted: muted)
+        case .StopVideo(let sessionId):
+            // Session-gated: a StopVideo for a superseded session must not tear down
+            // the current one (a newer PlayVideo may already have replaced it).
+            if nativeVideo?.sessionId == sessionId {
+                nativeVideo?.stop()
+                nativeVideo = nil
+            }
+        case .PauseVideo(let sessionId):
+            if nativeVideo?.sessionId == sessionId { nativeVideo?.pause() }
+        case .ResumeVideo(let sessionId):
+            if nativeVideo?.sessionId == sessionId { nativeVideo?.resume() }
         case .SetWindowMode(let fullscreen):
             log("SetWindowMode(fullscreen: \(fullscreen))")
             setWindowMode(fullscreen: fullscreen)
@@ -1857,13 +1959,17 @@ final class CoreModel {
         panel.allowsMultipleSelection = !choosingFolders
         panel.directoryURL = URL(fileURLWithPath: startDir, isDirectory: true)
         if !choosingFolders {
-            // Images + archives — mirror IMAGE_FILTER_EXTS (+zip/7z) in pb-app/src/main.rs.
-            // (No "All files" escape hatch here — NSOpenPanel has no filter popup like
-            // Windows'; anything exotic can come in via the folder panel or a drop.)
+            // Images + video + archives — mirror IMAGE_FILTER_EXTS + VIDEO_FILTER_EXTS
+            // (+zip/7z) in pb-app/src/main.rs. A container AVFoundation can't play still
+            // shows here but fails gracefully on open (nativeVideoFailed → Message dialog),
+            // same as an unreadable archive. (No "All files" escape hatch — NSOpenPanel has
+            // no filter popup like Windows'; anything exotic comes in via a folder or a drop.)
             let exts = [
                 "jpg", "jpeg", "jpe", "jfif", "png", "gif", "bmp", "tif", "tiff", "webp",
                 "tga", "qoi", "jxl", "svg", "svgz", "heic", "heif", "avif", "hdr", "exr",
                 "arw", "nef", "cr2", "cr3", "dng", "raf", "rw2", "orf", "srw", "pef", "raw",
+                "mp4", "m4v", "mov", "qt", "mkv", "webm", "avi", "wmv", "asf", "mpg", "mpeg",
+                "mts", "m2ts", "3gp", "3g2",
                 "zip", "7z",
             ]
             panel.allowedContentTypes = exts.compactMap { UTType(filenameExtension: $0) }
@@ -2088,6 +2194,121 @@ final class CoreModel {
         liveAudio = try? AVAudioPlayer(contentsOf: URL(fileURLWithPath: path))
         liveAudio?.currentTime = max(0, atSecs)
         liveAudio?.play()
+    }
+
+    /// `CoreEffect::PlayVideo` (task 79.9): open the clip in a native `AVPlayer` and
+    /// present it over the canvas. Replaces any prior player. The `AVPlayerLayer` shows
+    /// only once its first frame is ready — the wgpu poster holds until then.
+    private func playNativeVideo(path: String, sessionId: UInt64, muted: Bool) {
+        nativeVideo?.stop()
+        nativeVideo = nil
+        guard let canvas = canvasView else {
+            log("PlayVideo: no canvas view to present into")
+            return
+        }
+        resetVideoControls() // start the new clip's scrubber at 0, not the last clip's spot
+        nativeVideo = NativeVideoPlayer(
+            url: URL(fileURLWithPath: path), muted: muted, sessionId: sessionId,
+            scaleMode: core.menu_state().scale, canvas: canvas, model: self)
+    }
+
+    /// Re-lay-out the native video layer against the current canvas bounds (resize /
+    /// fullscreen / display move). The player owns the frame/gravity math.
+    func relayoutNativeVideo() {
+        nativeVideo?.relayout()
+    }
+
+    /// The theme-aware letterbox/background fill (sRGB) photos use — the video container's
+    /// background, so a letterboxed / Original video sits on the user's chosen background.
+    var videoLetterboxCGColor: CGColor {
+        let rgb = core.effective_letterbox_rgb()
+        return CGColor(
+            srgbRed: CGFloat((rgb >> 16) & 0xFF) / 255,
+            green: CGFloat((rgb >> 8) & 0xFF) / 255,
+            blue: CGFloat(rgb & 0xFF) / 255,
+            alpha: 1)
+    }
+    /// Last letterbox value pushed to the video container, so the pump repaints it only on a
+    /// real change (a theme switch / a Settings edit), not every tick.
+    @ObservationIgnored private var lastVideoLetterbox: UInt32 = 0xFFFF_FFFF
+
+    /// Player → model: the scrubber's position/duration/playing (task 79.9 phase 5).
+    /// Session-gated. Formats the time labels; the fraction drives the bar + knob.
+    func updateVideoProgress(_ sessionId: UInt64, elapsed: Double, total: Double, playing: Bool) {
+        guard nativeVideo?.sessionId == sessionId else { return }
+        // The fraction updates ~20 Hz to track the real playhead (no animation — that lagged
+        // a sample behind and jumped forward on pause). The labels change ~1 Hz, so guard
+        // them to avoid needless re-renders at the fraction's rate.
+        videoFraction = total > 0 ? min(1.0, max(0.0, elapsed / total)) : 0.0
+        let e = Self.formatTime(elapsed)
+        if e != videoElapsed { videoElapsed = e }
+        let t = total > 0 ? Self.formatTime(total) : ""
+        if t != videoTotal { videoTotal = t }
+        if playing != videoPlaying { videoPlaying = playing }
+    }
+
+    /// Zero the scrubber for a fresh video so it never inherits the previous clip's position
+    /// (and never glides down to 0). Plain assignments → instant.
+    private func resetVideoControls() {
+        videoElapsed = "0:00"
+        videoTotal = ""
+        videoFraction = 0
+        videoPlaying = false
+    }
+
+    /// The info-line scrubber was dragged/clicked to `fraction` of the duration. Seeks the
+    /// native player directly (it owns the clock); the play/pause button routes through the
+    /// core action so it matches `P`.
+    func seekVideoFraction(_ fraction: Double) {
+        nativeVideo?.seek(toFraction: fraction)
+    }
+
+    /// The playback row's play/pause button — same path as `P` / the toolbar.
+    func toggleVideoPlay() {
+        menuAction("play_pause")
+    }
+
+    /// `m:ss` under an hour, `h:mm:ss` above — mirrors the core's `format_video_duration`.
+    static func formatTime(_ seconds: Double) -> String {
+        let t = Int(seconds.rounded())
+        let (h, m, s) = (t / 3600, (t % 3600) / 60, t % 60)
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
+    }
+
+    // ── Native video callbacks (task 79.9 phase 2): the player reports its authoritative
+    //    state back so the core proxy advances (P/toolbar pause/resume/replay, failures).
+    //    Same drain pattern as menuAction — the core may emit effects (a toast, StopVideo).
+    func nativeVideoOpened(_ sessionId: UInt64, durationMs: Int64, hasAudio: Bool) {
+        core.native_video_opened(sessionId, durationMs, hasAudio)
+        kick()
+        drainEffects()
+    }
+    func nativeVideoStateChanged(_ sessionId: UInt64, state: UInt8) {
+        core.native_video_state_changed(sessionId, state)
+        kick()
+        drainEffects()
+        // Re-sync the toolbar Play glyph: unlike an animation (whose pump ticks
+        // continuously and keeps syncToolbar running), a video's play/pause is an
+        // isolated state change — without this the button only reflects motion_playing()
+        // on the next unrelated event (a key press), so it never re-lights after a pause.
+        syncToolbar()
+    }
+    func nativeVideoEnded(_ sessionId: UInt64) {
+        core.native_video_ended(sessionId)
+        kick()
+        drainEffects()
+        syncToolbar() // ended → no longer playing → drop the blue
+    }
+    func nativeVideoSeekCompleted(_ sessionId: UInt64, generation: UInt64, finished: Bool) {
+        core.native_video_seek_completed(sessionId, generation, finished)
+        kick()
+        drainEffects()
+    }
+    func nativeVideoFailed(_ sessionId: UInt64, error: String) {
+        core.native_video_failed(sessionId, error)
+        kick()
+        drainEffects()
+        syncToolbar() // failure cleared the session → drop the blue
     }
 
     /// `CoreEffect::WriteClipboard` (via the marker + accessors): text goes on as a string;

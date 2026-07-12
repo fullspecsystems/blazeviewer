@@ -22,7 +22,7 @@
 //! Privacy (task #2): every frame produced here is a RAM-only cache, dropped when
 //! playback stops or the user navigates away. Nothing is serialized.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use crate::{common, ColorTransform, DecodeError, FitBox};
@@ -601,7 +601,7 @@ fn collect_frames(
     let (mut canvas_w, mut canvas_h) = (0u32, 0u32);
 
     for frame in frames {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(DecodeError::Corrupt("cancelled".into()));
         }
         if out.len() >= MAX_FRAMES {

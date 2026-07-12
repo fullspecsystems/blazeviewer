@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import QuartzCore
 import SwiftUI
 
@@ -28,6 +29,16 @@ final class MetalCanvasNSView: NSView {
     /// The input adapter (NS1 item 4): pointer + gestures + drops forward to the model.
     weak var model: CoreModel?
     private var attached = false
+
+    /// The native video presentation (task 79.9): an **opaque black container** layer that
+    /// always covers the canvas, holding the `AVPlayerLayer` (placed within it per the scale
+    /// mode). Opaque so it fully hides the wgpu canvas while a video shows — no letterbox/
+    /// Original-surround bleed-through of a stale poster ("ghost"), and a background video can
+    /// never show through a foreground one. SwiftUI overlays still composite above it. There is
+    /// exactly one; a new attach nukes any prior/orphaned video layers.
+    private(set) var videoContainer: CALayer?
+    /// The identifying `name` on the container, so a stray orphan can always be found + removed.
+    private static let videoLayerName = "pb.video.container"
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -241,6 +252,7 @@ final class MetalCanvasNSView: NSView {
         lastReported = (size, scale)
         pbTrace("report px=\(Int(size.width))x\(Int(size.height)) scale=\(scale) bounds=\(Int(bounds.width))x\(Int(bounds.height)) onResize=\(onResize != nil)")
         onResize?(size, scale)
+        syncVideoLayerFrame()
     }
 
     override func layout() {
@@ -249,6 +261,7 @@ final class MetalCanvasNSView: NSView {
         // usually fired for this same change already, and re-reporting an unchanged
         // size would re-render a full frame per live-resize step for nothing.
         reconcileSizeIfNeeded()
+        syncVideoLayerFrame()
     }
 
     /// The backing scale changed with no bounds change — a bare scale flip does NOT
@@ -311,7 +324,78 @@ final class MetalCanvasNSView: NSView {
         pump?.invalidate()
         pump = nil
         model?.framePump = nil
+        detachVideoLayer()
         onDetach?()
+    }
+
+    // MARK: - Native video layer (task 79.9 Phase-0A spike)
+
+    /// Attach an `AVPlayerLayer` inside a fresh opaque black container over the Metal layer,
+    /// hidden until the caller reveals it on the first displayable frame (so the wgpu poster
+    /// shows until then — no black/stale flash). Nukes any prior/orphaned video layers first,
+    /// so there is never a second (background) video showing through.
+    func attachVideoLayer(_ playerLayer: AVPlayerLayer) {
+        detachVideoLayer()
+        let container = CALayer()
+        container.name = Self.videoLayerName
+        // The user's theme-aware letterbox color (what photos letterbox with) — falls back
+        // to black only if the model isn't wired. Opaque so it hides the wgpu canvas.
+        container.backgroundColor = model?.videoLetterboxCGColor ?? NSColor.black.cgColor
+        container.isOpaque = true
+        // Hide the *whole container* (not just the inner player) until the first frame is
+        // displayable, so the opaque fill doesn't cover the wgpu poster before there's a real
+        // video frame to show — that gap is the "blackout" flash. `revealVideoLayer()` unhides
+        // it (called from the player's isReadyForDisplay callback), swapping poster→video in
+        // one step with nothing solid in between.
+        container.isHidden = true
+        playerLayer.videoGravity = .resizeAspect
+        playerLayer.isHidden = true
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        container.frame = layer?.bounds ?? bounds
+        container.contentsScale = backingScale
+        playerLayer.frame = container.bounds
+        playerLayer.contentsScale = backingScale
+        container.addSublayer(playerLayer)
+        layer?.addSublayer(container)
+        CATransaction.commit()
+        videoContainer = container
+    }
+
+    /// Reveal the video container once the player has its first displayable frame (called from
+    /// `NativeVideoPlayer`'s `isReadyForDisplay` observer). Until this fires the wgpu poster
+    /// shows through the hidden container — this is the poster→video swap with no black flash.
+    func revealVideoLayer() {
+        videoContainer?.isHidden = false
+    }
+
+    /// Update the video container's background to the current letterbox color (theme switch /
+    /// Settings edit). No-op when no video is showing.
+    func setVideoLetterbox(_ color: CGColor) {
+        videoContainer?.backgroundColor = color
+    }
+
+    /// Remove the video container (and its player layer). Idempotent, and sweeps any orphan
+    /// container left by a mistimed teardown so two videos can never coexist.
+    func detachVideoLayer() {
+        videoContainer?.removeFromSuperlayer()
+        videoContainer = nil
+        for sub in layer?.sublayers ?? [] where sub.name == Self.videoLayerName {
+            sub.removeFromSuperlayer()
+        }
+    }
+
+    /// Keep the video presentation placed correctly across live resize, fullscreen
+    /// transitions, and 1x↔2x display moves. The container fills the canvas; the player owns
+    /// its own frame within it (scale-mode + presentation-size dependent).
+    private func syncVideoLayerFrame() {
+        guard let container = videoContainer else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        container.frame = layer?.bounds ?? bounds
+        container.contentsScale = backingScale
+        CATransaction.commit()
+        model?.relayoutNativeVideo()
     }
 
     private var backingScale: CGFloat {

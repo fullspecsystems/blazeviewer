@@ -2638,6 +2638,20 @@ impl App {
                             a.seek(position);
                         }
                     }
+                    // macOS-native video (task 79.9): on macOS the whole media pipeline is the
+                    // SwiftUI host's `AVPlayer`, so these commands are emitted ONLY when the core
+                    // holds a `Native` video backend — which this winit shell never constructs (it
+                    // drives the Windows/Linux `VideoSession` + its separate audio player above).
+                    // Matched explicitly (the no-wildcard rule) and inert here.
+                    contract::CoreEffect::PlayVideo { .. }
+                    | contract::CoreEffect::PauseVideo { .. }
+                    | contract::CoreEffect::ResumeVideo { .. }
+                    | contract::CoreEffect::SeekVideoBy { .. }
+                    | contract::CoreEffect::SeekVideoFraction { .. }
+                    | contract::CoreEffect::StepVideo { .. }
+                    | contract::CoreEffect::SetVideoMuted { .. }
+                    | contract::CoreEffect::StopVideo { .. }
+                    | contract::CoreEffect::CaptureNativeVideoFrame { .. } => {}
                     // The core routed a flow action (dialog / window / scan / file edit / quit) it
                     // doesn't own end-to-end yet — run the shell half.
                     contract::CoreEffect::ShellFlowAction(action) => {
@@ -3860,8 +3874,10 @@ fn main() {
     let metrics_on = overrides.metrics;
 
     // Mixed strictness: a nonexistent positional path is a usage error (exit 2), reported to the
-    // console when there is one, else a dialog — never a silent exit.
-    for p in &cli.paths {
+    // console when there is one, else a dialog — never a silent exit. `launch_paths()` folds in
+    // the hidden `--pb-open` alias (macOS back-compat; accepted uniformly across shells).
+    let launch_paths = cli.launch_paths();
+    for p in &launch_paths {
         if !p.exists() {
             let msg = format!("photoblaze: no such file or folder: {}", p.display());
             if have_output {
@@ -3877,7 +3893,7 @@ fn main() {
     // same pure plan: classify the paths, decide the source + cursor, then scan. A bare launch
     // opens the empty state (nothing is auto-opened). A folder opens recursively by default;
     // `--recursive` / `--no-recursive` override the saved preference.
-    let mut plan = open::plan(classify_inputs(cli.paths.clone()));
+    let mut plan = open::plan(classify_inputs(launch_paths));
     if let Source::Scan { recursive, .. } = &mut plan.source {
         *recursive = overrides.recursive.unwrap_or(startup_settings.recursive);
     }

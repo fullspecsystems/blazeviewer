@@ -10,9 +10,12 @@ import SwiftUI
 /// Also the future home of `application:openURLs:`/`openFile:` (NS1 item 4).
 ///
 /// NOTE the launch gotcha that was chased for a whole evening: it was NOT activation —
-/// AppKit treats a bare path in `argv[1]` as a document-open launch and suppresses the
-/// initial `WindowGroup` window entirely (windowless app, live menu bar). Hence the
-/// `--pb-open <path>` flag (see `CoreModel.openLaunchPathIfAny`).
+/// AppKit treats a bare path in `argv[1]` as a document-open launch and (racily)
+/// suppresses the initial `WindowGroup` window (windowless app, live menu bar).
+/// **Resolved** (task #78.10): `PhotoBlazeMacApp.init` registers
+/// `NSTreatUnknownArgumentsAsOpen = NO`, so AppKit never converts argv paths to
+/// document-opens — the shared pb-cli parser owns argv, and `photoblaze ~/Photos`
+/// works bare. `--pb-open <path>` survives as a hidden compat alias.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Finder / Dock / "Open with" URLs. May fire before the model installs its handler
     /// (a cold double-click launch), so early arrivals are buffered and replayed.
@@ -67,7 +70,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct PhotoBlazeMacApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
-    @State private var model = CoreModel()
+    @State private var model: CoreModel
+
+    init() {
+        // Kill AppKit's argv-as-documents behavior (the "great windowless-app hunt",
+        // resolved): with it on, a bare path in argv[1] becomes a document-open launch
+        // that BOTH re-delivers the path as an odoc Apple Event AND — racily —
+        // suppresses the initial WindowGroup window (release builds usually win that
+        // race; debug builds reliably lose it: windowless app, live menu bar —
+        // measured 2026-07-12). We parse argv ourselves (the shared pb-cli surface),
+        // so the AppKit scan is pure hazard. Finder / Dock / `open` launches arrive
+        // as Apple Events, not argv — unaffected. Registered before NSApplication
+        // finishes launching, which is when the scan reads it.
+        UserDefaults.standard.register(defaults: ["NSTreatUnknownArgumentsAsOpen": "NO"])
+        // The CLI preflight (task #78) runs before ANYTHING ELSE: a terminal `--help` /
+        // `--version` / usage error prints and exits here — no window, no Sparkle, no
+        // decode-pool engine. `model` is deliberately constructed in this init (not a
+        // property initializer, which would run first) so a non-proceed launch never
+        // builds it. On proceed, CoreModel.init feeds the same argv through
+        // `apply_launch_args` for the session overrides.
+        Launch.act(on: Launch.preflight())
+        _model = State(initialValue: CoreModel())
+    }
 
     var body: some Scene {
         WindowGroup("PhotoBlaze") {
@@ -246,7 +270,10 @@ struct ContentView: View {
                         } action: { infoLineFrame = $0 }
                         .padding(.horizontal, edge)
                         .padding(.bottom, edge)
-                        .allowsHitTesting(false)
+                        // Interactive only when the video playback row is present (its
+                        // play/pause + scrubber need clicks/drags); otherwise the corner pill
+                        // stays click-through so it never swallows canvas input (task 79.9).
+                        .allowsHitTesting(model.videoControlsVisible)
                         // Explicit (was the implicit default) so it reads the same as the
                         // corner panels; the fade is driven by `withAnimation` in the model.
                         .transition(.opacity)

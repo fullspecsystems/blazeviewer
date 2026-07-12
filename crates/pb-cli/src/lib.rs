@@ -35,7 +35,7 @@ pub use clap;
 const AFTER_HELP: &str = "\
 EXAMPLES:
   photoblaze ~/Photos
-  photoblaze ~/Photos --slideshow=5 --shuffle
+  photoblaze ~/Photos --slideshow=3s --shuffle
   photoblaze album.zip --fullscreen --scale fill
   photoblaze ~/Photos --reverse --start-at 100";
 
@@ -98,9 +98,16 @@ pub struct Cli {
     #[arg(long)]
     pub folders: bool,
 
-    /// Start a slideshow, optionally at SECS per slide (e.g. --slideshow or
-    /// --slideshow=5). Out-of-range values are clamped to 0.1..60 seconds.
-    #[arg(long, value_name = "SECS", num_args = 0..=1, require_equals = true)]
+    /// Start a slideshow, optionally at a per-slide interval: seconds by default,
+    /// or with a unit suffix (e.g. --slideshow, --slideshow=5, --slideshow=3s,
+    /// --slideshow=0.5m). Out-of-range values are clamped to 0.1..60 seconds.
+    #[arg(
+        long,
+        value_name = "SECS",
+        num_args = 0..=1,
+        require_equals = true,
+        value_parser = parse_interval
+    )]
     pub slideshow: Option<Option<f64>>,
 
     /// Navigate in the precomputed random (shuffle) order.
@@ -130,6 +137,13 @@ pub struct Cli {
     #[arg(long, hide = true)]
     pub new_window: bool,
 
+    /// Hidden macOS back-compat: the pre-CLI launch flag (`open … --args --pb-open
+    /// <path>`), kept working because a bare path in `argv[1]` triggers AppKit's
+    /// document-open machinery (the windowless-WindowGroup gotcha) — a `--`-prefixed
+    /// form dodges it. Folded into the positional paths by [`Cli::launch_paths`].
+    #[arg(long = "pb-open", value_name = "PATH", hide = true)]
+    pub pb_open: Option<PathBuf>,
+
     /// Print per-stage decode/timing report on exit (dev).
     #[arg(long, hide = true)]
     pub metrics: bool,
@@ -152,6 +166,15 @@ pub enum ThemeArg {
 }
 
 impl Cli {
+    /// Every path the command line asked to open: the positionals plus the hidden
+    /// `--pb-open` back-compat alias. Shells consume this, not `paths`, so the alias
+    /// can never be silently dropped.
+    pub fn launch_paths(&self) -> Vec<PathBuf> {
+        let mut all = self.paths.clone();
+        all.extend(self.pb_open.clone());
+        all
+    }
+
     /// Map the parsed command line into the session-only [`LaunchOverrides`] the core
     /// consumes. Pure — no I/O, no `std::env`, no exit.
     pub fn to_overrides(&self) -> LaunchOverrides {
@@ -200,10 +223,30 @@ where
     // run, so leaking one small copy at startup is fine and keeps a `'static` bound off
     // every caller.
     let version: &'static str = Box::leak(version.to_string().into_boxed_str());
-    let cmd = Cli::command().version(version);
+    let cmd = Cli::command()
+        .version(version)
+        // The ripgrep convention (binary `rg`, version line "ripgrep X.Y"): usage lines
+        // keep the lowercase COMMAND the user types (`photoblaze`, the bin/repo name);
+        // the PRODUCT-name contexts wear the brand — `--version` prints
+        // "PhotoBlaze <version>" via display_name, and the help header (about) below.
+        .display_name("PhotoBlaze")
+        .about(BRANDED_ABOUT.as_str());
     let matches = cmd.try_get_matches_from(args)?;
     Cli::from_arg_matches(&matches)
 }
+
+/// The branded help header: the product name + the shared tagline ("PhotoBlaze — an
+/// ultra-fast, capable image viewer"). Composed from [`pb_app_core::TAGLINE`] at first
+/// use so the one-tagline rule holds (About box, file association, and here can never
+/// drift); the first letter is lowercased to read naturally after the em dash.
+static BRANDED_ABOUT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    let t = pb_app_core::TAGLINE;
+    let mut c = t.chars();
+    match c.next() {
+        Some(first) => format!("PhotoBlaze — {}{}", first.to_lowercase(), c.as_str()),
+        None => "PhotoBlaze".to_string(),
+    }
+});
 
 /// Resolve a positive/negative flag pair into a tri-state override. Positive wins if
 /// both are somehow set (shouldn't happen under `overrides_with`).
@@ -215,6 +258,25 @@ fn tri(positive: bool, negative: bool) -> Option<bool> {
     } else {
         None
     }
+}
+
+/// Parse a `--slideshow` interval value into seconds: a bare number is seconds
+/// (back-compat: `--slideshow=5`), a trailing `s` / `m` (case-insensitive) is an
+/// explicit seconds / minutes unit (`3s`, `0.5m`). Anything else — other units,
+/// internal whitespace (`3 s`), garbage — is a clap value error, not a clamp. The
+/// numeric value itself is clamped downstream ([`clamp_interval_secs`]), so `5m`
+/// parses to 300 s and then clamps to the 60 s ceiling (Mixed strictness).
+fn parse_interval(s: &str) -> Result<f64, String> {
+    let t = s.trim();
+    let (num, mult) = match t.to_ascii_lowercase().as_str() {
+        u if u.ends_with('s') => (&t[..t.len() - 1], 1.0),
+        u if u.ends_with('m') => (&t[..t.len() - 1], 60.0),
+        _ => (t, 1.0),
+    };
+    // f64::from_str rejects embedded/trailing whitespace, so "3 s" fails here.
+    num.parse::<f64>()
+        .map(|n| n * mult)
+        .map_err(|_| format!("not a duration: '{s}' (seconds, or a unit: 3s, 0.5m)"))
 }
 
 /// Clamp a `--slideshow=SECS` value into `[MIN_INTERVAL, MAX_INTERVAL]` (Mixed
@@ -348,6 +410,24 @@ mod tests {
     }
 
     #[test]
+    fn slideshow_unit_suffixes() {
+        let secs = |args: &[&str]| overrides(args).slideshow.unwrap().interval_secs;
+        // Explicit seconds, fractional minutes, case-insensitive.
+        assert_eq!(secs(&["--slideshow=3s"]), Some(3.0));
+        assert_eq!(secs(&["--slideshow=0.5m"]), Some(30.0));
+        assert_eq!(secs(&["--slideshow=1m"]), Some(60.0));
+        assert_eq!(secs(&["--slideshow=3S"]), Some(3.0));
+        // Minutes above the ceiling clamp (Mixed strictness), same as bare seconds.
+        assert_eq!(secs(&["--slideshow=5m"]), Some(60.0));
+        // Unknown units / internal whitespace / bare unit are parse errors.
+        assert!(Cli::try_parse_from(["photoblaze", "--slideshow=3h"]).is_err());
+        assert!(Cli::try_parse_from(["photoblaze", "--slideshow=3 s"]).is_err());
+        assert!(Cli::try_parse_from(["photoblaze", "--slideshow=m"]).is_err());
+        // "100ms" strips the trailing s and fails on "100m" — not silently milliseconds.
+        assert!(Cli::try_parse_from(["photoblaze", "--slideshow=100ms"]).is_err());
+    }
+
+    #[test]
     fn shuffle_and_reverse_drive_the_launch_direction() {
         assert_eq!(overrides(&[]).launch_nav(), Nav::Forward);
         assert_eq!(overrides(&["--reverse"]).launch_nav(), Nav::Backward);
@@ -391,6 +471,25 @@ mod tests {
         );
         assert!(overrides(&["--new-window"]).new_window);
         assert!(overrides(&["--metrics"]).metrics);
+    }
+
+    #[test]
+    fn pb_open_is_a_hidden_path_alias() {
+        // The macOS back-compat flag lands in launch_paths() after the positionals.
+        let cli = parse(&["a.jpg", "--pb-open", "/photos"]);
+        assert_eq!(
+            cli.launch_paths(),
+            vec![PathBuf::from("a.jpg"), PathBuf::from("/photos")]
+        );
+        // Alone, it is the whole path set; without it, positionals pass through.
+        assert_eq!(
+            parse(&["--pb-open", "/photos"]).launch_paths(),
+            vec![PathBuf::from("/photos")]
+        );
+        assert_eq!(
+            parse(&["a.jpg"]).launch_paths(),
+            vec![PathBuf::from("a.jpg")]
+        );
     }
 
     #[test]
