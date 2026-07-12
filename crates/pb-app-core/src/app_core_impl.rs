@@ -1454,8 +1454,10 @@ impl AppCore {
                 // Resume the playback the resize paused — unless the user paused
                 // it themselves meanwhile (the state must still be Paused).
                 if std::mem::take(&mut self.video_paused_by_resize) {
-                    if let Some(s) =
-                        self.video.as_mut().and_then(ActiveVideoBackend::as_session_mut)
+                    if let Some(s) = self
+                        .video
+                        .as_mut()
+                        .and_then(ActiveVideoBackend::as_session_mut)
                     {
                         if s.session.state() == crate::video::VideoSessionState::Paused {
                             s.session.resume(now);
