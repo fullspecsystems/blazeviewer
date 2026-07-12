@@ -887,6 +887,14 @@ impl AppCoreHandle {
         self.core.animation_playing()
     }
 
+    /// The current theme-aware letterbox/background fill (sRGB), packed `0x00RRGGBB` — the
+    /// same color photos letterbox with. The video presentation uses it so a letterboxed /
+    /// Original video sits on the user's background, consistent with stills (task 79.9).
+    fn effective_letterbox_rgb(&self) -> u32 {
+        let [r, g, b] = self.core.effective_letterbox();
+        (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)
+    }
+
     /// Any motion playing — animation/Live Photo OR a video (task 79.9). The toolbar
     /// Play/Pause glyph reads this so it reflects a playing video, not just an animation.
     fn motion_playing(&self) -> bool {
@@ -2784,6 +2792,7 @@ mod ffi {
         fn current_has_motion(&mut self) -> bool;
         fn animation_playing(&self) -> bool;
         fn motion_playing(&self) -> bool;
+        fn effective_letterbox_rgb(&self) -> u32;
         fn native_video_session_id(&self) -> u64;
         fn native_video_opened(&mut self, session_id: u64, duration_ms: i64, has_audio: bool);
         fn native_video_state_changed(&mut self, session_id: u64, state: u8);

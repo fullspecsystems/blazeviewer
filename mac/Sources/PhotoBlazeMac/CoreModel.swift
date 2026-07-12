@@ -1389,6 +1389,13 @@ final class CoreModel {
             nv.stop()
             nativeVideo = nil
         }
+        // Keep the video container's background on the current letterbox color (theme
+        // switch / Settings edit) — repaint only on a real change.
+        let lb = core.effective_letterbox_rgb()
+        if nativeVideo != nil, lb != lastVideoLetterbox {
+            lastVideoLetterbox = lb
+            canvasView?.setVideoLetterbox(videoLetterboxCGColor)
+        }
         // Refresh the shown progress sheet from the Rust-side handles (a cheap read; the
         // pump is already running while a scan/open worker is in flight).
         if activeSheet == .loading || activeSheet == .scanning {
@@ -2205,6 +2212,20 @@ final class CoreModel {
     func relayoutNativeVideo() {
         nativeVideo?.relayout()
     }
+
+    /// The theme-aware letterbox/background fill (sRGB) photos use — the video container's
+    /// background, so a letterboxed / Original video sits on the user's chosen background.
+    var videoLetterboxCGColor: CGColor {
+        let rgb = core.effective_letterbox_rgb()
+        return CGColor(
+            srgbRed: CGFloat((rgb >> 16) & 0xFF) / 255,
+            green: CGFloat((rgb >> 8) & 0xFF) / 255,
+            blue: CGFloat(rgb & 0xFF) / 255,
+            alpha: 1)
+    }
+    /// Last letterbox value pushed to the video container, so the pump repaints it only on a
+    /// real change (a theme switch / a Settings edit), not every tick.
+    @ObservationIgnored private var lastVideoLetterbox: UInt32 = 0xFFFF_FFFF
 
     /// Player → model: the scrubber's position/duration/playing (task 79.9 phase 5).
     /// Session-gated. Formats the time labels; the fraction drives the bar + knob.

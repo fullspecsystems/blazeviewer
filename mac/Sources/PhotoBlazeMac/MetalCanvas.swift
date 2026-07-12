@@ -338,7 +338,9 @@ final class MetalCanvasNSView: NSView {
         detachVideoLayer()
         let container = CALayer()
         container.name = Self.videoLayerName
-        container.backgroundColor = NSColor.black.cgColor
+        // The user's theme-aware letterbox color (what photos letterbox with) — falls back
+        // to black only if the model isn't wired. Opaque so it hides the wgpu canvas.
+        container.backgroundColor = model?.videoLetterboxCGColor ?? NSColor.black.cgColor
         container.isOpaque = true
         playerLayer.videoGravity = .resizeAspect
         playerLayer.isHidden = true
@@ -352,6 +354,12 @@ final class MetalCanvasNSView: NSView {
         layer?.addSublayer(container)
         CATransaction.commit()
         videoContainer = container
+    }
+
+    /// Update the video container's background to the current letterbox color (theme switch /
+    /// Settings edit). No-op when no video is showing.
+    func setVideoLetterbox(_ color: CGColor) {
+        videoContainer?.backgroundColor = color
     }
 
     /// Remove the video container (and its player layer). Idempotent, and sweeps any orphan
