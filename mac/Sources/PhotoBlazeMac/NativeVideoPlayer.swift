@@ -142,6 +142,42 @@ final class NativeVideoPlayer {
         publishProgress() // immediate feedback; the observer catches up
     }
 
+    /// Seek by a signed millisecond delta from the current time — the ±2 s / Shift ±10 s
+    /// arrow-seek (and hold-to-scrub). Clamps to `[0, duration]`. Reports completion tagged
+    /// with the core's `generation` so a superseded seek (a newer press cancels this one:
+    /// `finished == false`) is told apart from a clean landing, keeping the proxy's
+    /// in-flight bookkeeping honest. A small tolerance keeps rapid held seeks responsive.
+    func seek(byMilliseconds deltaMs: Int64, generation: UInt64) {
+        let dur = item.duration
+        guard dur.isNumeric else { return }
+        let total = CMTimeGetSeconds(dur)
+        ended = false
+        let target = max(
+            0.0, min(total, CMTimeGetSeconds(player.currentTime()) + Double(deltaMs) / 1000.0))
+        player.seek(
+            to: CMTime(seconds: target, preferredTimescale: 600),
+            toleranceBefore: CMTime(seconds: 0.1, preferredTimescale: 600),
+            toleranceAfter: CMTime(seconds: 0.1, preferredTimescale: 600)
+        ) { [weak self] finished in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.model?.nativeVideoSeekCompleted(
+                    self.sessionId, generation: generation, finished: finished)
+            }
+        }
+        publishProgress()
+    }
+
+    /// Frame-step one frame (`,`/`.`). Stepping is scrubbing, not playback: pause first (the
+    /// `AVPlayerItem` steps only while paused), then no-op when the item can't step that way.
+    func step(forward: Bool) {
+        if player.timeControlStatus != .paused { player.pause() }
+        ended = false
+        guard forward ? item.canStepForward : item.canStepBackward else { return }
+        item.step(byCount: forward ? 1 : -1)
+        publishProgress()
+    }
+
     /// Tell the core the clip opened (duration + audio presence), once.
     private func reportOpened() {
         guard !reportedOpened else { return }

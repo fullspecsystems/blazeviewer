@@ -2506,6 +2506,13 @@ fn map_effect(e: contract::CoreEffect) -> ffi::CoreEffectFfi {
         C::StopVideo { session_id } => E::StopVideo(session_id.0),
         C::PauseVideo { session_id } => E::PauseVideo(session_id.0),
         C::ResumeVideo { session_id } => E::ResumeVideo(session_id.0),
+        C::SeekVideoBy {
+            session_id,
+            generation,
+            delta_ms,
+        } => E::SeekVideoBy(session_id.0, generation.0, delta_ms),
+        C::StepVideo { session_id, forward } => E::StepVideo(session_id.0, forward),
+        C::SetVideoMuted { session_id, muted } => E::SetVideoMuted(session_id.0, muted),
         // The borderless fullscreen speed mode (F) ↔ windowed. `true` = fullscreen.
         C::SetWindowMode(mode) => {
             E::SetWindowMode(matches!(mode, contract::WindowMode::Fullscreen))
@@ -2595,6 +2602,16 @@ mod ffi {
         // when the player is parked at EOS the host seeks to 0 before playing.
         PauseVideo(u64),
         ResumeVideo(u64),
+        // Seek the native player by a signed millisecond delta (session_id, generation,
+        // delta_ms) — the ±2 s / Shift ±10 s arrow-seek. The host resolves it against
+        // AVPlayer's clock, clamps to the seekable range, and reports back via
+        // native_video_seek_completed(session_id, generation, finished).
+        SeekVideoBy(u64, u64, i64),
+        // Frame-step one frame forward/back (session_id, forward). The host pauses first
+        // and no-ops when the item can't step that direction.
+        StepVideo(u64, bool),
+        // Mute/unmute the native player in place (session_id, muted).
+        SetVideoMuted(u64, bool),
         // true = enter the borderless fullscreen speed mode; false = restore windowed.
         SetWindowMode(bool),
         // Hide the window (the Esc-teardown step before Quit).

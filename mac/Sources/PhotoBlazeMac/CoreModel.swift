@@ -1878,6 +1878,16 @@ final class CoreModel {
             if nativeVideo?.sessionId == sessionId { nativeVideo?.pause() }
         case .ResumeVideo(let sessionId):
             if nativeVideo?.sessionId == sessionId { nativeVideo?.resume() }
+        case .SeekVideoBy(let sessionId, let generation, let deltaMs):
+            // Arrow-key seek (±2s / Shift ±10s). The player resolves + clamps the delta and
+            // reports back so the proxy's in-flight/generation bookkeeping stays honest.
+            if nativeVideo?.sessionId == sessionId {
+                nativeVideo?.seek(byMilliseconds: deltaMs, generation: generation)
+            }
+        case .StepVideo(let sessionId, let forward):
+            if nativeVideo?.sessionId == sessionId { nativeVideo?.step(forward: forward) }
+        case .SetVideoMuted(let sessionId, let muted):
+            if nativeVideo?.sessionId == sessionId { nativeVideo?.setMuted(muted) }
         case .SetWindowMode(let fullscreen):
             log("SetWindowMode(fullscreen: \(fullscreen))")
             setWindowMode(fullscreen: fullscreen)

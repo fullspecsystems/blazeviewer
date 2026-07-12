@@ -370,8 +370,17 @@ impl AppCore {
                     // Silence any playing clip now; a slashed-speaker icon pill = muted.
                     self.effects.push(contract::CoreEffect::StopLiveAudio);
                     // A playing video mutes in place — its clock keeps running, so
-                    // A/V sync is unaffected (task #79 phase 5).
-                    if self.video.is_some() {
+                    // A/V sync is unaffected (task #79 phase 5). Native (macOS): the
+                    // AVPlayer owns audio, so mute the player itself.
+                    if let Some(p) =
+                        self.video.as_mut().and_then(ActiveVideoBackend::as_native_mut)
+                    {
+                        p.set_muted(true);
+                        self.effects.push(contract::CoreEffect::SetVideoMuted {
+                            session_id: p.session_id,
+                            muted: true,
+                        });
+                    } else if self.video.is_some() {
                         self.effects
                             .push(contract::CoreEffect::SetVideoAudioMuted(true));
                     }
@@ -388,8 +397,17 @@ impl AppCore {
                             }
                         }
                     }
-                    // A muted video unmutes in place (its audio kept pace muted).
-                    if self.video.is_some() {
+                    // A muted video unmutes in place (its audio kept pace muted). Native
+                    // (macOS): unmute the AVPlayer itself.
+                    if let Some(p) =
+                        self.video.as_mut().and_then(ActiveVideoBackend::as_native_mut)
+                    {
+                        p.set_muted(false);
+                        self.effects.push(contract::CoreEffect::SetVideoMuted {
+                            session_id: p.session_id,
+                            muted: false,
+                        });
+                    } else if self.video.is_some() {
                         self.effects
                             .push(contract::CoreEffect::SetVideoAudioMuted(false));
                     }
@@ -6140,9 +6158,25 @@ impl AppCore {
         } else {
             Duration::from_secs(2)
         };
+        // Native backend (macOS): AVPlayer owns the clock, so the core issues only a
+        // relative, generation-gated seek *intent*; the shell resolves it against the
+        // player and clamps to the seekable range (the proxy holds no position). The
+        // live position comes back through the periodic progress observer.
+        if let Some(p) = self.video.as_mut().and_then(ActiveVideoBackend::as_native_mut) {
+            let session_id = p.session_id;
+            let generation = p.begin_seek();
+            let delta = i64::try_from(step.as_millis()).unwrap_or(i64::MAX);
+            self.effects.push(contract::CoreEffect::SeekVideoBy {
+                session_id,
+                generation,
+                delta_ms: if back { -delta } else { delta },
+            });
+            self.arm_video_line_flash(); // reveal the controls during a keyboard seek
+            return;
+        }
         let now = self.now;
         let Some(v) = self.session_mut() else {
-            return; // macOS drives seeks through the native player (79.9 phase 3)
+            return; // no active session backend
         };
         let Some(target) = v.session.seek_by(back, step, now) else {
             return;
@@ -6179,6 +6213,21 @@ impl AppCore {
     /// landing). Returns whether an active video consumed the step.
     pub fn video_frame_step(&mut self, delta: i32) -> bool {
         use crate::video::VideoSessionState::*;
+        // Native backend (macOS): the shell drives AVPlayerItem.step(byCount:) — it pauses
+        // first and no-ops when the item can't step that direction. The proxy's paused state
+        // syncs back via the state_changed callback.
+        if let Some(p) = self.video.as_ref().and_then(ActiveVideoBackend::as_native) {
+            if Some(p.item) != self.displayed_item || matches!(p.state(), Failed | Stopped) {
+                return false;
+            }
+            let session_id = p.session_id;
+            self.effects.push(contract::CoreEffect::StepVideo {
+                session_id,
+                forward: delta > 0,
+            });
+            self.arm_video_line_flash();
+            return true;
+        }
         let now = self.now;
         let displayed = self.displayed_item;
         let outcome = {
@@ -9333,6 +9382,79 @@ mod tests {
         core.flash_video_controls();
         assert!(core.video_osd_until.is_none(), "no video → no flash");
         drop(io);
+    }
+
+    /// Arrow-seek on the macOS **native** backend emits a relative, generation-bumped
+    /// `SeekVideoBy` intent (±2 s, Shift ±10 s; the shell resolves it against AVPlayer).
+    #[test]
+    fn native_arrow_seek_emits_relative_seek_intent() {
+        use crate::video::VideoSessionId;
+        use crate::video_native::{ActiveVideoBackend, NativeVideoProxy};
+
+        fn seek_of(core: &AppCore) -> Option<(u64, u64, i64)> {
+            core.effects.iter().find_map(|e| match e {
+                contract::CoreEffect::SeekVideoBy {
+                    session_id,
+                    generation,
+                    delta_ms,
+                } => Some((session_id.0, generation.0, *delta_ms)),
+                _ => None,
+            })
+        }
+
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        core.video = Some(ActiveVideoBackend::Native(NativeVideoProxy::new(
+            0,
+            VideoSessionId(7),
+            false,
+        )));
+
+        // Forward ±2 s; generation bumps off FIRST(0) → 1.
+        core.effects.clear();
+        core.video_seek(false);
+        assert_eq!(seek_of(&core), Some((7, 1, 2000)));
+
+        // Backward is a negative delta; generation keeps climbing.
+        core.effects.clear();
+        core.video_seek(true);
+        assert_eq!(seek_of(&core), Some((7, 2, -2000)));
+
+        // Shift widens the step to ±10 s.
+        core.mods.shift = true;
+        core.effects.clear();
+        core.video_seek(false);
+        assert_eq!(seek_of(&core), Some((7, 3, 10_000)));
+    }
+
+    /// Frame-step on the native backend emits a `StepVideo` intent for the displayed item,
+    /// and no-ops for a stale/mismatched item.
+    #[test]
+    fn native_frame_step_emits_step_intent() {
+        use crate::video::VideoSessionId;
+        use crate::video_native::{ActiveVideoBackend, NativeVideoProxy};
+
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        core.video = Some(ActiveVideoBackend::Native(NativeVideoProxy::new(
+            0,
+            VideoSessionId(9),
+            false,
+        )));
+
+        core.effects.clear();
+        assert!(core.video_frame_step(1));
+        assert!(core.effects.iter().any(|e| matches!(e,
+            contract::CoreEffect::StepVideo { session_id, forward: true } if session_id.0 == 9)));
+
+        // Displayed item moved on: the step is dropped (a stale key press).
+        core.displayed_item = Some(5);
+        core.effects.clear();
+        assert!(!core.video_frame_step(-1));
+        assert!(!core
+            .effects
+            .iter()
+            .any(|e| matches!(e, contract::CoreEffect::StepVideo { .. })));
     }
 
     /// Owner-reported (79.10 smoke): a resize drag stalls the presenter (the OS
