@@ -57,7 +57,23 @@ pub struct DecodeKey {
 pub struct Outcome {
     pub key: DecodeKey,
     pub result: Result<DecodedImage, DecodeError>,
-    _budget: BudgetGuard,
+    /// The pool's byte-budget RAII (freed on drop). `None` for a *synthetic* outcome not
+    /// produced by the pool — a macOS archive-video poster the shell generated and fed back
+    /// in (`Outcome::synthetic`); it carries no pool budget.
+    _budget: Option<BudgetGuard>,
+}
+
+impl Outcome {
+    /// A result that did **not** come from the decode pool — the macOS shell's archive-video
+    /// poster (generated via `AVAssetImageGenerator`), fed into the resident ring through the
+    /// normal `drain_results` upload path. Carries no pool byte-budget.
+    pub fn synthetic(item: usize, epoch: u64, result: Result<DecodedImage, DecodeError>) -> Self {
+        Outcome {
+            key: DecodeKey { item, epoch },
+            result,
+            _budget: None,
+        }
+    }
 }
 
 struct BudgetGuard {
@@ -290,10 +306,10 @@ fn worker_loop(shared: Arc<Shared>) {
         let outcome = Outcome {
             key: job.key,
             result,
-            _budget: BudgetGuard {
+            _budget: Some(BudgetGuard {
                 shared: shared.clone(),
                 bytes,
-            },
+            }),
         };
         if shared.results_tx.send(outcome).is_err() {
             return; // receiver gone; the guard frees the bytes as it drops

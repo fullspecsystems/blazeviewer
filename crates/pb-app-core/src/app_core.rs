@@ -518,6 +518,17 @@ pub struct AppCore {
     /// (`take_pending_video_bytes`) and serve to `AVPlayer` via a resource loader. RAM-only,
     /// never written to disk (privacy #2). `None` except in the brief emit→pull window.
     pub pending_video_bytes: Option<Vec<u8>>,
+    /// macOS archive-video **poster** handoff: container bytes stashed per request id for the
+    /// shell to pull (`take_pending_poster_bytes`), generate a poster frame with
+    /// `AVAssetImageGenerator`, and feed back via `video_poster_ready`. RAM-only. Keyed by id
+    /// so multiple prefetch posters can be in flight. See the plan doc.
+    pub pending_poster_bytes: std::collections::HashMap<u64, Vec<u8>>,
+    /// Monotonic poster-request id (pairs a `RequestVideoPoster` with its `video_poster_ready`).
+    pub poster_req_seq: u64,
+    /// Archive-video items with a poster request **in flight** (macOS), so the tick doesn't
+    /// re-request while one is pending. Cleared when `video_poster_ready` lands (or the deck
+    /// changes) — so a revisit after ring eviction re-requests and regenerates the poster.
+    pub poster_inflight: std::collections::HashSet<usize>,
     /// Last held-key video seek step (task #79 phase 6): the app's own repeat
     /// timer (OS key-repeat stays ignored, like every other held action).
     pub video_seek_last: Option<Instant>,

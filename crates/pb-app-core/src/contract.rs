@@ -480,6 +480,18 @@ pub enum CoreEffect {
         session_id: crate::video::VideoSessionId,
         muted: bool,
     },
+    /// Ask the shell to generate a **poster** frame for a macOS archive (ZIP/7z) video
+    /// (task #30). The core stashed the entry's in-RAM bytes for the shell to pull
+    /// (`AppCore::take_pending_poster_bytes`); the shell grabs a frame via
+    /// `AVAssetImageGenerator` off the same resource loader and returns the pixels through
+    /// `AppCore::video_poster_ready`, which feeds them into the resident ring. `max_edge`
+    /// caps the poster's long edge to the decode-fit target. RAM-only (privacy #2).
+    RequestVideoPoster {
+        request_id: u64,
+        item: usize,
+        name: String,
+        max_edge: u32,
+    },
     /// Pause the native player (`P` while playing; rebuffer never applies — the
     /// system player owns buffering).
     PauseVideo {

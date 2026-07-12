@@ -1873,6 +1873,9 @@ final class CoreModel {
             playNativeVideo(path: path.toString(), sessionId: sessionId, muted: muted)
         case .PlayVideoBytes(let name, let sessionId, let muted):
             playNativeVideoBytes(name: name.toString(), sessionId: sessionId, muted: muted)
+        case .RequestVideoPoster(let requestId, let item, let name, let maxEdge):
+            generateArchivePoster(
+                requestId: requestId, item: item, name: name.toString(), maxEdge: maxEdge)
         case .StopVideo(let sessionId):
             // Session-gated: a StopVideo for a superseded session must not tear down
             // the current one (a newer PlayVideo may already have replaced it).
@@ -2261,6 +2264,72 @@ final class CoreModel {
         nativeVideo = NativeVideoPlayer(
             data: data, name: name, muted: muted, sessionId: sessionId,
             scaleMode: core.menu_state().scale, canvas: canvas, model: self)
+    }
+
+    /// `CoreEffect::RequestVideoPoster` (macOS archive-video posters, task #30): pull the
+    /// entry's in-RAM bytes, grab a frame with `AVAssetImageGenerator` off the same
+    /// resource-loader asset playback uses, convert to RGBA8, and hand it to the core, which
+    /// uploads it into the resident ring (replacing the placeholder). Off the event loop:
+    /// the frame decode is async; only the quick byte copy + asset build run here.
+    private func generateArchivePoster(
+        requestId: UInt64, item: UInt64, name: String, maxEdge: UInt32
+    ) {
+        let bytes = core.take_pending_poster_bytes(requestId)
+        guard bytes.len() > 0 else { return }
+        let data = Data(bytes: UnsafeRawPointer(bytes.as_ptr()), count: bytes.len())
+        let loader = ArchiveVideoLoader(data: data, name: name)
+        let asset = AVURLAsset(url: loader.url)
+        asset.resourceLoader.setDelegate(loader, queue: loader.queue)
+        let gen = AVAssetImageGenerator(asset: asset)
+        gen.appliesPreferredTrackTransform = true  // upright poster (rotation baked in)
+        // Loose tolerance: any nearby keyframe is fine for a poster and decodes faster.
+        gen.requestedTimeToleranceBefore = CMTime(seconds: 1.0, preferredTimescale: 600)
+        gen.requestedTimeToleranceAfter = CMTime(seconds: 1.0, preferredTimescale: 600)
+        // ~0.5 s in dodges a black lead-in frame without a full brightness walk.
+        let target = CMTime(seconds: 0.5, preferredTimescale: 600)
+        gen.generateCGImagesAsynchronously(forTimes: [NSValue(time: target)]) {
+            [weak self] _, cg, _, result, _ in
+            _ = loader  // retain the resource loader until generation completes
+            guard let self, result == .succeeded, let cg,
+                let poster = CoreModel.cgImageToRGBA(cg, maxEdge: Int(maxEdge))
+            else { return }
+            Task { @MainActor in
+                poster.data.withUnsafeBytes { raw in
+                    self.core.video_poster_ready(
+                        requestId, item, UInt32(poster.w), UInt32(poster.h),
+                        UInt(bitPattern: raw.baseAddress), UInt(raw.count))
+                }
+                self.kick()  // let the next tick's drain_results upload it into the ring
+            }
+        }
+    }
+
+    /// A `CGImage` → straight RGBA8 (`w*h*4`), fitted so the long edge ≤ `maxEdge` (the
+    /// decode-fit target), matching what the Rust poster path hands the ring.
+    private static func cgImageToRGBA(_ cg: CGImage, maxEdge: Int) -> (w: Int, h: Int, data: Data)?
+    {
+        let (srcW, srcH) = (cg.width, cg.height)
+        guard srcW > 0, srcH > 0 else { return nil }
+        var (w, h) = (srcW, srcH)
+        let longEdge = max(srcW, srcH)
+        if maxEdge > 0, longEdge > maxEdge {
+            let s = Double(maxEdge) / Double(longEdge)
+            w = max(1, Int((Double(srcW) * s).rounded()))
+            h = max(1, Int((Double(srcH) * s).rounded()))
+        }
+        let bytesPerRow = w * 4
+        var buf = Data(count: bytesPerRow * h)
+        let ok = buf.withUnsafeMutableBytes { raw -> Bool in
+            guard
+                let ctx = CGContext(
+                    data: raw.baseAddress, width: w, height: h, bitsPerComponent: 8,
+                    bytesPerRow: bytesPerRow, space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return false }
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        return ok ? (w, h, buf) : nil
     }
 
     /// Re-lay-out the native video layer against the current canvas bounds (resize /

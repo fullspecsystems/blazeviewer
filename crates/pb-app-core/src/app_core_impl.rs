@@ -98,6 +98,9 @@ impl AppCore {
             last_cursor: None,
             content_top_inset: 0,
             pending_video_bytes: None,
+            pending_poster_bytes: std::collections::HashMap::new(),
+            poster_req_seq: 0,
+            poster_inflight: std::collections::HashSet::new(),
             dragging: false,
             rotations: std::collections::HashMap::new(),
             zoom_started: None,
@@ -1145,6 +1148,10 @@ impl AppCore {
         self.poll_delete_retry();
         // 1. Absorb finished decodes (uploads; presents the target if it arrived).
         self.drain_results();
+        // 1'. macOS: kick off a Swift-generated poster for the displayed archive video (its
+        // placeholder is a preview; the poster upgrades it in place — see the plan doc).
+        #[cfg(target_os = "macos")]
+        self.request_archive_poster_if_needed();
 
         // 1a. Bound the regenerable per-item caches so browsing tens of thousands of photos
         // can't grow them without limit. Cheap when under the high-water mark (length checks).
@@ -2561,6 +2568,10 @@ impl AppCore {
         self.live_motion_cache.clear();
         self.failed.clear();
         self.preview_resident.clear();
+        // Drop any in-flight archive-video poster requests: item indices are deck-relative,
+        // so a straggler callback must not upgrade a same-index item in the new deck.
+        self.poster_inflight.clear();
+        self.pending_poster_bytes.clear();
         self.upgrade_done.clear();
         self.last_upgrade_set.clear();
         self.undo_stack.clear();
@@ -2655,6 +2666,10 @@ impl AppCore {
         self.live_motion_cache.clear();
         self.failed.clear();
         self.preview_resident.clear();
+        // Drop any in-flight archive-video poster requests: item indices are deck-relative,
+        // so a straggler callback must not upgrade a same-index item in the new deck.
+        self.poster_inflight.clear();
+        self.pending_poster_bytes.clear();
         self.upgrade_done.clear();
         self.last_upgrade_set.clear();
         // Undo entries reference the old source's indices/paths — drop them too.
@@ -3522,6 +3537,86 @@ impl AppCore {
     /// loader. Empty if none pending. Consumes the stash.
     pub fn take_pending_video_bytes(&mut self) -> Vec<u8> {
         self.pending_video_bytes.take().unwrap_or_default()
+    }
+
+    /// Take the archive-video **poster** bytes stashed for `request_id` (macOS). The shell
+    /// pulls them, generates a poster frame, and returns it via `video_poster_ready`. Consumes.
+    pub fn take_pending_poster_bytes(&mut self, request_id: u64) -> Vec<u8> {
+        self.pending_poster_bytes.remove(&request_id).unwrap_or_default()
+    }
+
+    /// macOS: request a Swift-generated poster for the displayed archive video if it still
+    /// shows the placeholder (a resident *preview*) and no request is already in flight.
+    /// Reads the entry's bytes (RAM-only) and stashes them for the shell to pull. Phase 1:
+    /// current item only (the prefetch window follows). Called once per landing from the tick.
+    #[cfg(target_os = "macos")]
+    pub fn request_archive_poster_if_needed(&mut self) {
+        let Some(item) = self.displayed_item else {
+            return;
+        };
+        // In flight already, a loose file (the pool posters those), or not an archive video.
+        if self.poster_inflight.contains(&item)
+            || self.source.path(item).is_some()
+            || !self.item_is_video(item)
+        {
+            return;
+        }
+        // Only while the placeholder (a resident preview) is still showing — once the real
+        // poster upgraded it, the item leaves `preview_resident` and we stop.
+        if !self.preview_resident.contains(&item) {
+            return;
+        }
+        let Ok(data) = self.source.bytes(item) else {
+            return;
+        };
+        self.poster_req_seq += 1;
+        let request_id = self.poster_req_seq;
+        let name = self.source.name(item).to_string();
+        let max_edge = self
+            .decode_fit()
+            .map(|f| f.max_width.max(f.max_height))
+            .unwrap_or(2048)
+            .max(1);
+        self.pending_poster_bytes.insert(request_id, data);
+        self.poster_inflight.insert(item);
+        self.effects.push(contract::CoreEffect::RequestVideoPoster {
+            request_id,
+            item,
+            name,
+            max_edge,
+        });
+    }
+
+    /// A macOS archive-video poster the shell generated (via `AVAssetImageGenerator`) — feed
+    /// it into the resident ring as a synthetic full-decode [`Outcome`](crate::decode_pool::Outcome),
+    /// upgrading the preview placeholder in place through the normal `drain_results` path
+    /// (so retention + prefetch come for free). Dropped if the pixel count is wrong.
+    pub fn video_poster_ready(&mut self, request_id: u64, item: usize, w: u32, h: u32, rgba: Vec<u8>) {
+        let _ = request_id; // paired the round-trip; the stash was consumed on pull
+        // Drop a straggler whose request we no longer expect (a deck change cleared the
+        // in-flight set) — item indices are deck-relative, so it must not upgrade a same-
+        // index item in a new deck. The normal callback's item is still in the set here.
+        if !self.poster_inflight.remove(&item) {
+            return;
+        }
+        if w == 0 || h == 0 || rgba.len() != (w as usize) * (h as usize) * 4 {
+            return;
+        }
+        let img = pb_decode::DecodedImage {
+            width: w,
+            height: h,
+            orig_width: w,
+            orig_height: h,
+            codec: "Video",
+            format: pb_decode::PixelFormat::Rgba8,
+            pixels: rgba,
+            is_preview: false,
+            color: pb_decode::ColorTransform::srgb(),
+            peak: 1.0,
+            animated: None,
+        };
+        self.pending_uploads
+            .push(crate::decode_pool::Outcome::synthetic(item, self.epoch, Ok(img)));
     }
 
     pub fn video_placement(&self) -> Option<(f32, f32, f32, f32, u8)> {
@@ -9593,6 +9688,43 @@ mod tests {
         core.pending_video_bytes = Some(vec![1, 2, 3, 4]);
         assert_eq!(core.take_pending_video_bytes(), vec![1, 2, 3, 4]);
         assert!(core.take_pending_video_bytes().is_empty(), "consumed once");
+    }
+
+    /// A shell-generated archive-video poster becomes a synthetic full-decode `Outcome`
+    /// queued for the ring; a wrong-sized frame is dropped, but the in-flight guard always
+    /// clears so a later revisit can re-request.
+    #[test]
+    fn video_poster_ready_queues_a_synthetic_outcome() {
+        let mut core = test_core();
+
+        // Wrong pixel count (claims 4x4 but sends 10 bytes) → dropped, guard still cleared.
+        core.poster_inflight.insert(3);
+        core.video_poster_ready(1, 3, 4, 4, vec![0u8; 10]);
+        assert!(!core.poster_inflight.contains(&3), "in-flight cleared even on a bad frame");
+        assert!(core.pending_uploads.is_empty(), "bad pixel count is dropped");
+
+        // Correct 2x2 RGBA8 (16 bytes) → queued as a full (non-preview) outcome for item 5.
+        core.poster_inflight.insert(5);
+        core.video_poster_ready(2, 5, 2, 2, vec![255u8; 16]);
+        assert!(!core.poster_inflight.contains(&5));
+        assert_eq!(core.pending_uploads.len(), 1);
+        let o = &core.pending_uploads[0];
+        assert_eq!(o.key.item, 5);
+        assert_eq!(o.key.epoch, core.epoch);
+        assert!(o
+            .result
+            .as_ref()
+            .is_ok_and(|img| img.width == 2 && img.height == 2 && !img.is_preview));
+    }
+
+    /// Poster byte stashes are keyed by request id and consumed once.
+    #[test]
+    fn pending_poster_bytes_keyed_and_taken_once() {
+        let mut core = test_core();
+        core.pending_poster_bytes.insert(7, vec![9, 8, 7]);
+        assert!(core.take_pending_poster_bytes(99).is_empty(), "wrong id → nothing");
+        assert_eq!(core.take_pending_poster_bytes(7), vec![9, 8, 7]);
+        assert!(core.take_pending_poster_bytes(7).is_empty(), "consumed once");
     }
 
     /// Frame-step on the native backend emits a `StepVideo` intent for the displayed item,

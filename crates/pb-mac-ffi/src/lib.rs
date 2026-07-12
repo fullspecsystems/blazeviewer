@@ -1287,6 +1287,27 @@ impl AppCoreHandle {
         self.core.take_pending_video_bytes()
     }
 
+    /// Pull the archive-video **poster** bytes stashed for `request_id` (macOS). The host
+    /// generates a poster frame from them and returns it via `video_poster_ready`.
+    fn take_pending_poster_bytes(&mut self, request_id: u64) -> Vec<u8> {
+        self.core.take_pending_poster_bytes(request_id)
+    }
+
+    /// Deliver a shell-generated archive-video poster (macOS): `ptr`/`len` point at the
+    /// host's RGBA8 pixels (`w*h*4`), copied here into the resident ring via the normal
+    /// upload path. `ptr` must be valid for `len` bytes for this synchronous call (the host
+    /// passes it from `Data.withUnsafeBytes`, which outlives the call).
+    fn video_poster_ready(&mut self, request_id: u64, item: u64, w: u32, h: u32, data_ptr: usize, len: usize) {
+        let rgba = if data_ptr == 0 || len == 0 {
+            Vec::new()
+        } else {
+            // SAFETY: the Swift host passes a live `Data` buffer pointer for the call's duration.
+            unsafe { std::slice::from_raw_parts(data_ptr as *const u8, len).to_vec() }
+        };
+        self.core
+            .video_poster_ready(request_id, item as usize, w, h, rgba);
+    }
+
     /// The current item's video-layer placement (task 79.9 phase 3) — the still
     /// renderer's geometry, so the host places the `AVPlayerLayer` identically to a photo.
     fn video_placement(&self) -> ffi::VideoPlacementFfi {
@@ -2538,6 +2559,12 @@ fn map_effect(e: contract::CoreEffect) -> ffi::CoreEffectFfi {
             session_id,
             muted,
         } => E::PlayVideoBytes(name, session_id.0, muted),
+        C::RequestVideoPoster {
+            request_id,
+            item,
+            name,
+            max_edge,
+        } => E::RequestVideoPoster(request_id, item as u64, name, max_edge),
         C::StopVideo { session_id } => E::StopVideo(session_id.0),
         C::PauseVideo { session_id } => E::PauseVideo(session_id.0),
         C::ResumeVideo { session_id } => E::ResumeVideo(session_id.0),
@@ -2639,6 +2666,10 @@ mod ffi {
         // file URL, so the host pulls the container bytes via take_pending_video_bytes()
         // and serves them to AVPlayer through a custom resource loader (never to disk).
         PlayVideoBytes(String, u64, bool),
+        // Generate a poster for a macOS archive video (request_id, item, name, max_edge): the
+        // host pulls the entry's bytes via take_pending_poster_bytes(request_id), grabs a
+        // frame with AVAssetImageGenerator, and returns it via video_poster_ready().
+        RequestVideoPoster(u64, u64, String, u32),
         StopVideo(u64),
         // Pause / resume the native player (session_id). ResumeVideo also serves replay:
         // when the player is parked at EOS the host seeks to 0 before playing.
@@ -2959,6 +2990,16 @@ mod ffi {
         fn info_line_is_video(&self) -> bool;
         fn flash_video_controls(&mut self);
         fn take_pending_video_bytes(&mut self) -> Vec<u8>;
+        fn take_pending_poster_bytes(&mut self, request_id: u64) -> Vec<u8>;
+        fn video_poster_ready(
+            &mut self,
+            request_id: u64,
+            item: u64,
+            w: u32,
+            h: u32,
+            data_ptr: usize,
+            len: usize,
+        );
         fn video_placement(&self) -> VideoPlacementFfi;
         fn info_line_align(&self) -> u8;
         fn play_hint_kind(&self) -> u8;
