@@ -35,6 +35,7 @@ use crate::panels::{
     TextPanel,
 };
 use crate::pb_key::PbKey;
+use crate::video_native::ActiveVideoBackend;
 use crate::{
     settings, slideshow, timing, Action, AppCore, InspectorTab, NativeToast, Nav, Panels,
     SlotContent, Toast, ToastIcon, UndoAction,
@@ -268,7 +269,7 @@ impl AppCore {
             // `poll_anim_stream` drains newly decoded frames as they arrive.
             || self.anim_stream.is_some()
             // Active video playback (task #79): `poll_video` paces frames off this loop.
-            || self.video.as_ref().is_some_and(|v| v.session.is_active())
+            || self.video.as_ref().is_some_and(|v| v.is_active())
             // A delete waiting out a retiring video reader (bounded retry).
             || self.pending_delete_retry.is_some()
             // A tree-io job (the folder tree's read_dir derivation / a Go sibling
@@ -588,7 +589,7 @@ impl AppCore {
         // Release media handles FIRST (task #79 action matrix): a playing video's
         // reader holds the file open; stopping starts its (async) retirement so
         // the delete — or its brief retry below — can succeed.
-        if self.video.as_ref().is_some_and(|v| v.item == item) {
+        if self.video.as_ref().is_some_and(|v| v.item() == item) {
             self.stop_video();
         }
         let res = if permanent {
@@ -1159,7 +1160,7 @@ impl AppCore {
         // action matrix) — the slideshow otherwise lands on posters and moves on normally.
         let video_playing = self.video.as_ref().is_some_and(|v| {
             !matches!(
-                v.session.state(),
+                v.state(),
                 crate::video::VideoSessionState::Ended
                     | crate::video::VideoSessionState::Failed
                     | crate::video::VideoSessionState::Stopped
@@ -4224,7 +4225,7 @@ impl AppCore {
         if self
             .video
             .as_ref()
-            .is_some_and(|v| Some(v.item) == self.displayed_item)
+            .is_some_and(|v| Some(v.item()) == self.displayed_item)
         {
             let past_delay = timing::elapsed_since(self.framestep_started, now, self.initial_delay);
             let due = timing::elapsed_since(self.framestep_last, now, FRAME_STEP_REPEAT);
@@ -5785,28 +5786,49 @@ impl AppCore {
         )
     }
 
+    /// The active video's Windows/Linux [`VideoSession`] bundle, if the backend is
+    /// `Session` (`None` on macOS, where playback is the shell's native `AVPlayer`
+    /// and there is no session to drive). The producer-driving methods below funnel
+    /// through these so they naturally no-op on the `Native` backend.
+    fn session_ref(&self) -> Option<&crate::video_session::ActiveVideo> {
+        self.video.as_ref().and_then(ActiveVideoBackend::as_session)
+    }
+    fn session_mut(&mut self) -> Option<&mut crate::video_session::ActiveVideo> {
+        self.video
+            .as_mut()
+            .and_then(ActiveVideoBackend::as_session_mut)
+    }
+
     /// `P` on a video item (task #79 phase 4): toggle the streaming session —
     /// pause/resume while it runs, start (or restart after end/failure) otherwise.
+    /// On macOS (the `Native` backend) the session-op arms are inert — pause/
+    /// resume/replay of a live native player are wired with input parity (79.9
+    /// phase 3) via the `PauseVideo`/`ResumeVideo`/`SeekVideoFraction` commands;
+    /// the "start fresh" default still opens playback through `start_video_session`.
     pub fn video_play_pause(&mut self, item: usize) {
         use crate::video::VideoSessionState::*;
-        let existing = self.video.as_ref().map(|v| (v.item, v.session.state()));
+        let existing = self.video.as_ref().map(|v| (v.item(), v.state()));
         match existing {
             Some((playing_item, state)) if playing_item == item => match state {
                 Playing => {
-                    self.video.as_mut().unwrap().session.pause(self.now);
-                    self.effects.push(contract::CoreEffect::PauseVideoAudio);
-                    self.draw();
+                    let now = self.now;
+                    if self.session_mut().map(|v| v.session.pause(now)).is_some() {
+                        self.effects.push(contract::CoreEffect::PauseVideoAudio);
+                        self.draw();
+                    }
                 }
                 Paused => {
-                    self.video.as_mut().unwrap().session.resume(self.now);
-                    self.effects.push(contract::CoreEffect::ResumeVideoAudio);
-                    self.draw();
+                    let now = self.now;
+                    if self.session_mut().map(|v| v.session.resume(now)).is_some() {
+                        self.effects.push(contract::CoreEffect::ResumeVideoAudio);
+                        self.draw();
+                    }
                 }
                 // Replay from the top: a seek to 0 on the SAME session (the
                 // producer parks after EOS precisely for this).
                 Ended => {
                     let now = self.now;
-                    if let Some(target) = self.video.as_mut().unwrap().session.replay(now) {
+                    if let Some(target) = self.session_mut().and_then(|v| v.session.replay(now)) {
                         self.effects
                             .push(contract::CoreEffect::SeekVideoAudio { position: target });
                         self.draw();
@@ -5846,15 +5868,40 @@ impl AppCore {
             std::thread::spawn(move || {
                 pb_decode::run_video_producer(&path, fit, id, generation, io.events, io.msgs);
             });
-            self.video = Some(crate::video_session::ActiveVideo {
-                session,
-                item,
-                audio_started: false,
+            self.video = Some(ActiveVideoBackend::Session(
+                crate::video_session::ActiveVideo {
+                    session,
+                    item,
+                    audio_started: false,
+                },
+            ));
+            self.anim_hint_shown_for = Some(item); // engaged — retire the hint
+            self.draw();
+        }
+        // macOS (task 79.9): the shell's native `AVPlayer` owns the whole pipeline.
+        // The core keeps only a passive `Native` proxy and commands the player via
+        // `PlayVideo`; the shell reveals the layer on the first frame and reports
+        // state back through the `native_video_*` callbacks (79.9 phase 2).
+        #[cfg(target_os = "macos")]
+        {
+            let Some(path) = self.source.path(item).map(Path::to_path_buf) else {
+                return; // videos are path-only by construction
+            };
+            self.video_seq += 1;
+            let id = crate::video::VideoSessionId(self.video_seq);
+            let muted = self.effective_mute();
+            self.video = Some(ActiveVideoBackend::Native(
+                crate::video_native::NativeVideoProxy::new(item, id, muted),
+            ));
+            self.effects.push(contract::CoreEffect::PlayVideo {
+                path,
+                session_id: id,
+                muted,
             });
             self.anim_hint_shown_for = Some(item); // engaged — retire the hint
             self.draw();
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "macos")))]
         {
             let _ = item;
             self.show_toast("Video playback is not available yet on this platform");
@@ -5871,8 +5918,8 @@ impl AppCore {
             Duration::from_secs(2)
         };
         let now = self.now;
-        let Some(v) = self.video.as_mut() else {
-            return;
+        let Some(v) = self.session_mut() else {
+            return; // macOS drives seeks through the native player (79.9 phase 3)
         };
         let Some(target) = v.session.seek_by(back, step, now) else {
             return;
@@ -5887,8 +5934,8 @@ impl AppCore {
     /// the keyboard — playing resumes at the target, paused shows it and stays.
     pub fn video_seek_fraction(&mut self, frac: f32) {
         let now = self.now;
-        let Some(v) = self.video.as_mut() else {
-            return;
+        let Some(v) = self.session_mut() else {
+            return; // macOS drives seeks through the native player (79.9 phase 3)
         };
         let Some(d) = v.session.duration else {
             return; // no duration → no bar to click
@@ -5912,8 +5959,14 @@ impl AppCore {
         let now = self.now;
         let displayed = self.displayed_item;
         let outcome = {
-            let Some(v) = self.video.as_mut() else {
-                return false;
+            // Inline the field borrow (not the `session_mut` helper): `v` must borrow
+            // only `self.video` so `self.effects` stays usable alongside it below.
+            let Some(v) = self
+                .video
+                .as_mut()
+                .and_then(ActiveVideoBackend::as_session_mut)
+            else {
+                return false; // macOS: native player frame-step (79.9 phase 3)
             };
             if Some(v.item) != displayed || matches!(v.session.state(), Failed | Stopped) {
                 return false;
@@ -5964,7 +6017,7 @@ impl AppCore {
             }
             return;
         }
-        let osd = match self.video.as_ref().and_then(|v| v.session.duration) {
+        let osd = match self.video.as_ref().and_then(|v| v.duration()) {
             Some(d) => format!(
                 "{} / {}",
                 crate::video::format_video_duration(target),
@@ -5978,9 +6031,20 @@ impl AppCore {
     /// Stop and drop any active video session (navigation, delete, teardown). The
     /// currently displayed frame stays on screen; the caller decides what replaces it.
     pub fn stop_video(&mut self) {
-        if let Some(mut v) = self.video.take() {
-            v.session.stop();
-            self.effects.push(contract::CoreEffect::StopVideoAudio);
+        if let Some(v) = self.video.take() {
+            match v {
+                ActiveVideoBackend::Session(mut s) => {
+                    s.session.stop();
+                    self.effects.push(contract::CoreEffect::StopVideoAudio);
+                }
+                // macOS: tear down the native player (which owns its own audio);
+                // stale callbacks are rejected by session id.
+                ActiveVideoBackend::Native(p) => {
+                    self.effects.push(contract::CoreEffect::StopVideo {
+                        session_id: p.session_id,
+                    });
+                }
+            }
             self.update_video_progress(); // drops the playback row promptly
                                           // A flashed seek OSD dies with its session (don't linger a bare line).
             if self.video_osd_until.take().is_some() {
@@ -5993,10 +6057,19 @@ impl AppCore {
     /// due frame through the reusable present path, keep the shell audio player in
     /// lockstep with the session state, surface failures.
     pub fn poll_video(&mut self) {
-        let Some(v) = self.video.as_mut() else {
+        // Session backends only (Windows/Linux). macOS has no session to pump —
+        // its native `AVPlayer` runs itself and reports back via callbacks.
+        // Inline the field borrow (not the helper) so `v` borrows only `self.video`,
+        // leaving `self.now`/`self.effects`/`self.source` usable below.
+        let now = self.now;
+        let Some(v) = self
+            .video
+            .as_mut()
+            .and_then(ActiveVideoBackend::as_session_mut)
+        else {
             return;
         };
-        let update = v.session.poll(self.now);
+        let update = v.session.poll(now);
         let state = v.session.state();
         let started = v.session.has_started();
         let item = v.item;
@@ -6039,8 +6112,7 @@ impl AppCore {
             match state {
                 crate::video::VideoSessionState::Failed => {
                     let msg = self
-                        .video
-                        .as_ref()
+                        .session_ref()
                         .and_then(|v| v.session.error.clone())
                         .unwrap_or_else(|| "Video playback failed".into());
                     self.video = None;
@@ -6089,8 +6161,10 @@ impl AppCore {
     /// (task #79 phase 5). Routed to the active session, which uses it as the
     /// master clock while both sides play.
     pub fn video_audio_clock(&mut self, sample: crate::video::AudioClockSample) {
-        if let Some(v) = self.video.as_mut() {
-            v.session.on_audio_clock(sample, self.now);
+        // Session backends only — on macOS the native `AVPlayer` is its own clock.
+        let now = self.now;
+        if let Some(v) = self.session_mut() {
+            v.session.on_audio_clock(sample, now);
         }
     }
 
@@ -6099,7 +6173,10 @@ impl AppCore {
     /// Public: the winit shell's egui info line (and later the macOS SwiftUI one)
     /// reads it to draw the `elapsed ▰▰▰▱▱ total` row natively.
     pub fn video_progress_row(&self) -> Option<hud::ProgressRow> {
-        let v = self.video.as_ref()?;
+        // Session backends only: the row is computed from the session's clock. On
+        // macOS the SwiftUI info row reads the native `AVPlayer` directly (79.9
+        // phase 5), so the core provides no progress there.
+        let v = self.session_ref()?;
         if Some(v.item) != self.displayed_item {
             return None;
         }
@@ -6128,10 +6205,9 @@ impl AppCore {
     /// between the once-a-second text refreshes; anything paused/parked keeps
     /// the overlay fully retained.
     pub fn video_playing(&self) -> bool {
-        self.video.as_ref().is_some_and(|v| {
-            Some(v.item) == self.displayed_item
-                && v.session.state() == crate::video::VideoSessionState::Playing
-        })
+        self.video
+            .as_ref()
+            .is_some_and(|v| Some(v.item()) == self.displayed_item && v.is_playing())
     }
 
     /// Keep the info line's playback row in step with the session (task #79):
@@ -8656,7 +8732,23 @@ mod tests {
                 "the failure surfaces to the user"
             );
         }
-        #[cfg(not(windows))]
+        // macOS (task 79.9): `P` starts a `Native` backend and commands the shell's
+        // AVPlayer via `PlayVideo` — no Rust producer/session.
+        #[cfg(target_os = "macos")]
+        {
+            assert!(core.video.is_some(), "P starts a native video session");
+            assert!(
+                core.video.as_ref().unwrap().as_native().is_some(),
+                "macOS uses the Native backend, not a VideoSession"
+            );
+            assert!(
+                core.effects
+                    .iter()
+                    .any(|e| matches!(e, contract::CoreEffect::PlayVideo { .. })),
+                "the native player is commanded to open the clip"
+            );
+        }
+        #[cfg(all(not(windows), not(target_os = "macos")))]
         assert!(core.video.is_none(), "no producer on this platform yet");
     }
 
@@ -8689,11 +8781,11 @@ mod tests {
         assert!(core.info_line_visible(), "precondition: the line is on");
 
         let (session, io) = VideoSession::new(VideoSessionId(1), 1024);
-        core.video = Some(ActiveVideo {
+        core.video = Some(ActiveVideoBackend::Session(ActiveVideo {
             session,
             item: 0,
             audio_started: false,
-        });
+        }));
         io.events
             .send(VideoProducerEvent::Opened {
                 session_id: VideoSessionId(1),
@@ -8748,11 +8840,11 @@ mod tests {
 
         let sid = VideoSessionId(1);
         let (session, io) = VideoSession::new(sid, 4);
-        core.video = Some(ActiveVideo {
+        core.video = Some(ActiveVideoBackend::Session(ActiveVideo {
             session,
             item: 0,
             audio_started: false,
-        });
+        }));
         io.events
             .send(VideoProducerEvent::Opened {
                 session_id: sid,
@@ -8779,13 +8871,13 @@ mod tests {
             .unwrap();
         core.poll_video(); // → Playing, presents pts 0
         assert_eq!(
-            core.video.as_ref().unwrap().session.state(),
+            core.video.as_ref().unwrap().state(),
             VideoSessionState::Playing
         );
 
         core.effects.clear();
         core.frame_step(1);
-        let v = core.video.as_ref().unwrap();
+        let v = core.video.as_ref().unwrap().as_session().unwrap();
         assert_eq!(
             v.session.state(),
             VideoSessionState::Paused,
@@ -8817,7 +8909,7 @@ mod tests {
         // A backward step launches a paused one-frame seek.
         core.frame_step(-1);
         assert_eq!(
-            core.video.as_ref().unwrap().session.state(),
+            core.video.as_ref().unwrap().state(),
             VideoSessionState::Seeking
         );
 

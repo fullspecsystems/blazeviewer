@@ -499,10 +499,12 @@ pub struct AppCore {
     /// arrive. Set on every platform with a motion decoder: the Linux FFmpeg, macOS
     /// AVAssetReader, and Windows Media Foundation paths.
     pub anim_stream: Option<AnimStream>,
-    /// Active **video** playback (task #79 phase 4): the streaming `VideoSession` +
-    /// the item it plays. Entirely separate from `playback` (animations retain
-    /// frames; video is forward-only with constant memory).
-    pub video: Option<crate::video_session::ActiveVideo>,
+    /// Active **video** playback: the [`ActiveVideoBackend`](crate::video_native::ActiveVideoBackend)
+    /// for the item on screen. `Session` (Windows/Linux) drives the streaming
+    /// `VideoSession` + a decode producer; `Native` (macOS) is a passive mirror of
+    /// the shell's `AVPlayer` (task 79.9). Entirely separate from `playback`
+    /// (animations retain frames; video is forward-only with constant memory).
+    pub video: Option<crate::video_native::ActiveVideoBackend>,
     /// Monotonic source of `VideoSessionId`s — a fresh id per session so straggler
     /// frames from a torn-down producer can never touch a newer session.
     pub video_seq: u64,
