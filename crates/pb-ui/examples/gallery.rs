@@ -184,6 +184,8 @@ impl Gallery {
                 Icon::Success,
                 Icon::Help,
                 Icon::Trash,
+                Icon::Play,
+                Icon::Pause,
             ] {
                 pb_ui::icon::image(ui, ic, 22.0, Tone::Neutral, p);
                 ui.add_space(SPACE);

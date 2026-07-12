@@ -302,8 +302,32 @@ impl Keymap {
             for w in km.merge_toml(&text) {
                 eprintln!("PhotoBlaze keymap: {w}");
             }
+            km.migrate_seek_chords();
         }
         km
+    }
+
+    /// Heal saved keymaps that predate the `Shift+Left`/`Shift+Right` defaults:
+    /// `to_toml` writes **every** action, so a `keymap.toml` saved before those
+    /// chords existed freezes them out forever and the video seek's Shift step
+    /// (task #79) silently never fires. If the shift chord is unbound and the bare
+    /// arrow still pans, ride the shift chord on the same pan action (the
+    /// out-of-the-box behavior). A user who rebound either key keeps their intent:
+    /// a bound shift chord, or a bare arrow that no longer pans, is left alone.
+    fn migrate_seek_chords(&mut self) {
+        for (bare, shifted, action) in [
+            ("Left", "Shift+Left", Action::PanLeft),
+            ("Right", "Shift+Right", Action::PanRight),
+        ] {
+            let (Some(bare), Some(shifted)) = (KeyChord::parse(bare), KeyChord::parse(shifted))
+            else {
+                continue;
+            };
+            if self.action_for(&shifted).is_none() && self.action_for(&bare) == Some(action) {
+                self.by_action.entry(action).or_default().push(shifted);
+            }
+        }
+        self.rebuild_index();
     }
 
     /// The action bound to `chord`, if any (the input-dispatch lookup).
@@ -500,8 +524,9 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
             vec![p("Shift+Enter"), p("Shift+NumpadEnter")],
         ),
         // Shift+Left/Right ride the same pan actions so the video-seek context
-        // (task #79 phase 6: bare = ±2 s, Shift = ±15 s) works out of the box;
-        // outside a video they just pan, same as bare.
+        // (task #79 phase 6: bare = ±2 s, Shift = ±10 s) works out of the box;
+        // outside a video they just pan, same as bare. (`migrate_seek_chords`
+        // heals saved keymaps that predate these chords.)
         (Action::PanLeft, vec![p("Left"), p("Shift+Left")]),
         (Action::PanRight, vec![p("Right"), p("Shift+Right")]),
         one(Action::PanUp, "Up"),
@@ -640,6 +665,36 @@ pub fn macos_menu_chord(action: Action) -> Option<KeyChord> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `keymap.toml` saved before Shift+Left/Right became defaults wipes those
+    /// chords (`to_toml` writes every action) — the migration must restore them,
+    /// but never override a deliberate rebind.
+    #[test]
+    fn migrate_seek_chords_heals_a_pre_shift_seek_keymap() {
+        let shl = KeyChord::parse("Shift+Left").unwrap();
+        let shr = KeyChord::parse("Shift+Right").unwrap();
+
+        // The stale file froze the pan actions at their old, bare-arrow bindings.
+        let mut km = Keymap::defaults();
+        let _ = km.merge_toml("[keys]\npan_left = [\"Left\"]\npan_right = [\"Right\"]\n");
+        assert_eq!(km.action_for(&shl), None, "stale file wiped the chord");
+        km.migrate_seek_chords();
+        assert_eq!(km.action_for(&shl), Some(Action::PanLeft));
+        assert_eq!(km.action_for(&shr), Some(Action::PanRight));
+
+        // A deliberate rebind of the shift chord is respected…
+        let mut km = Keymap::defaults();
+        let _ =
+            km.merge_toml("[keys]\npan_right = [\"Right\"]\nnext = [\"Space\", \"Shift+Right\"]\n");
+        km.migrate_seek_chords();
+        assert_eq!(km.action_for(&shr), Some(Action::Next));
+
+        // …and so is a bare arrow that no longer pans (nothing to ride on).
+        let mut km = Keymap::defaults();
+        let _ = km.merge_toml("[keys]\npan_left = []\nprev = [\"Backspace\", \"Left\"]\n");
+        km.migrate_seek_chords();
+        assert_eq!(km.action_for(&shl), None, "no pan on Left → no shift chord");
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

@@ -203,6 +203,7 @@ impl AppCore {
             video_seek_last: None,
             pending_delete_retry: None,
             video_pill_text: None,
+            video_osd_until: None,
             prepared: None,
             anim_gen: 0,
             anim_hint_shown_for: None,
@@ -1454,6 +1455,17 @@ impl AppCore {
         let anim_wake = self.tick_playback(now);
         let framestep_active = self.tick_frame_step(now);
 
+        // 4f'. The flashed video-seek OSD (the info line standing in for the old
+        // position toast) lapses at its deadline — the shell re-pulls and drops it.
+        let osd_wake = match self.video_osd_until {
+            Some(at) if now >= at => {
+                self.video_osd_until = None;
+                self.emit_panels_changed();
+                None
+            }
+            other => other,
+        };
+
         // 4g'. A finished Live Photo reverts to the crisp still once the linger beat elapsed.
         // Drops the finished playback but keeps the decoded motion (`prepared`) so replay is
         // instant. The motion (and its audio) is done → stop the audio (shell owns the player).
@@ -1508,7 +1520,7 @@ impl AppCore {
         // The earliest of the viewer's poll, the animation's next-frame deadline, the eager-prep
         // dwell, and the Live-Photo-revert deadline; `None` = idle. (The host mins in its own
         // dialog-repaint clock.)
-        let wake = [base_wake, anim_wake, prep_wake, revert_wake]
+        let wake = [base_wake, anim_wake, prep_wake, revert_wake, osd_wake]
             .into_iter()
             .flatten()
             .min();
@@ -3027,6 +3039,11 @@ impl AppCore {
     /// pausing playback. Uses the eager prep when ready; otherwise upgrades an in-flight
     /// prep (or kicks one) so the held-key scrub steps once frames land. No-op on a still.
     pub fn frame_step(&mut self, delta: i32) {
+        // A live video session steps through the session, not `playback` — and a
+        // video can't have Live Photo audio, so the silencing below stays animation's.
+        if self.video_frame_step(delta) {
+            return;
+        }
         // Scrubbing is not continuous playback — silence any Live Photo audio.
         self.effects.push(contract::CoreEffect::StopLiveAudio);
         if self.playback.is_some() {
@@ -3992,7 +4009,9 @@ impl AppCore {
     /// the winit HUD rasterizer's own drawn-state bookkeeping) — so `panels.hidden`
     /// belongs here, not just in the HUD-side `refresh_info_line_visibility`.
     pub fn info_line_visible(&self) -> bool {
-        self.info_line
+        // `video_osd_until` flashes the line as the video seek/step position OSD
+        // even when the user's `i` toggle is off (it replaces the position toast).
+        (self.info_line || self.video_osd_until.is_some())
             && !self.panels.hidden
             && self.info_line_content().is_some_and(|s| !s.is_empty())
     }
@@ -4198,6 +4217,22 @@ impl AppCore {
             self.framestep_started = None;
             self.framestep_last = None;
             return false;
+        }
+        // A live video session scrubs through the session, not `playback` (task
+        // #79 follow-up). Forward repeats serve queued frames; backward repeats
+        // chain paused seeks (latest-value coalescing absorbs any landing lag).
+        if self
+            .video
+            .as_ref()
+            .is_some_and(|v| Some(v.item) == self.displayed_item)
+        {
+            let past_delay = timing::elapsed_since(self.framestep_started, now, self.initial_delay);
+            let due = timing::elapsed_since(self.framestep_last, now, FRAME_STEP_REPEAT);
+            if past_delay && due {
+                self.video_frame_step(dir);
+                self.framestep_last = Some(now);
+            }
+            return true;
         }
         // Need a decoded sequence to scrub; while it's still decoding, keep ticking.
         if self.playback.is_none() {
@@ -5826,12 +5861,12 @@ impl AppCore {
         }
     }
 
-    /// One seek step on the active video (task #79 phase 6): ±2 s, Shift ±15 s,
+    /// One seek step on the active video (task #79 phase 6): ±2 s, Shift ±10 s,
     /// relative to the **desired** target so a held key scrubs the intent. Seeks
-    /// audio alongside and flashes the position OSD (`m:ss / m:ss`).
+    /// audio alongside and surfaces the position feedback.
     pub fn video_seek(&mut self, back: bool) {
         let step = if self.mods.shift {
-            Duration::from_secs(15)
+            Duration::from_secs(10)
         } else {
             Duration::from_secs(2)
         };
@@ -5842,10 +5877,103 @@ impl AppCore {
         let Some(target) = v.session.seek_by(back, step, now) else {
             return;
         };
-        let duration = v.session.duration;
         self.effects
             .push(contract::CoreEffect::SeekVideoAudio { position: target });
-        let osd = match duration {
+        self.video_position_feedback(target);
+    }
+
+    /// Absolute seek from the playback bar (a click/drag on the info line's bar,
+    /// task #79 follow-up): `frac` of the clip's duration. Same seek semantics as
+    /// the keyboard — playing resumes at the target, paused shows it and stays.
+    pub fn video_seek_fraction(&mut self, frac: f32) {
+        let now = self.now;
+        let Some(v) = self.video.as_mut() else {
+            return;
+        };
+        let Some(d) = v.session.duration else {
+            return; // no duration → no bar to click
+        };
+        let target = Duration::from_secs_f64(d.as_secs_f64() * f64::from(frac.clamp(0.0, 1.0)));
+        let Some(target) = v.session.seek_to(target, now, None) else {
+            return;
+        };
+        self.effects
+            .push(contract::CoreEffect::SeekVideoAudio { position: target });
+        self.update_video_progress();
+    }
+
+    /// `,`/`.` on a video item (task #79 follow-up): step one frame, pausing
+    /// playback first (the same contract as animation frame-step). Forward serves
+    /// the next decoded frame straight from the session queue — instant; backward
+    /// is a paused one-frame seek (the reader re-runs the GOP, a normal seek
+    /// landing). Returns whether an active video consumed the step.
+    pub fn video_frame_step(&mut self, delta: i32) -> bool {
+        use crate::video::VideoSessionState::*;
+        let now = self.now;
+        let displayed = self.displayed_item;
+        let outcome = {
+            let Some(v) = self.video.as_mut() else {
+                return false;
+            };
+            if Some(v.item) != displayed || matches!(v.session.state(), Failed | Stopped) {
+                return false;
+            }
+            // Stepping is scrubbing, not playback: pause first (like animations).
+            if v.session.state() == Playing {
+                v.session.pause(now);
+                self.effects.push(contract::CoreEffect::PauseVideoAudio);
+            }
+            v.session.step_frame(delta > 0, now)
+        };
+        match outcome {
+            crate::video_session::FrameStep::Present(frame) => {
+                let pts = frame.pts;
+                if let Some(a) = self.renderer.as_mut() {
+                    a.set_image(
+                        &frame.pixels,
+                        frame.width,
+                        frame.height,
+                        render_color(&frame.color.transform),
+                        false,
+                        1.0,
+                    );
+                }
+                // Keep the paused audio player at the stepped position, so a later
+                // resume doesn't yank the clock back to where audio was left.
+                self.effects
+                    .push(contract::CoreEffect::SeekVideoAudio { position: pts });
+                self.draw();
+                self.video_position_feedback(pts);
+            }
+            crate::video_session::FrameStep::Seeking(target) => {
+                self.effects
+                    .push(contract::CoreEffect::SeekVideoAudio { position: target });
+                self.video_position_feedback(target);
+            }
+            crate::video_session::FrameStep::None => {}
+        }
+        true
+    }
+
+    /// Surface a video seek/step position to the user. The info line's playback
+    /// row is the readout (owner call 2026-07-11): if the line is on it already
+    /// tracks the target; if it's off, **flash the line** for a beat instead of
+    /// the old `m:ss / m:ss` toast — the line looks better and does more. The
+    /// toast survives only where the line can't flash (HUD shells, Tab-hidden).
+    fn video_position_feedback(&mut self, target: Duration) {
+        if self.info_line && self.info_line_visible() {
+            return; // the persistent line's row tracks the seek already
+        }
+        if self.native_info && !self.panels.hidden && self.current.is_some() {
+            let fresh = self.video_osd_until.is_none();
+            self.video_osd_until = Some(self.now + VIDEO_OSD_HOLD);
+            if fresh {
+                self.show_info_line();
+                self.emit_panels_changed();
+            }
+            return;
+        }
+        let osd = match self.video.as_ref().and_then(|v| v.session.duration) {
             Some(d) => format!(
                 "{} / {}",
                 crate::video::format_video_duration(target),
@@ -5863,6 +5991,10 @@ impl AppCore {
             v.session.stop();
             self.effects.push(contract::CoreEffect::StopVideoAudio);
             self.update_video_progress(); // drops the playback row promptly
+                                          // A flashed seek OSD dies with its session (don't linger a bare line).
+            if self.video_osd_until.take().is_some() {
+                self.emit_panels_changed();
+            }
         }
     }
 
@@ -5973,6 +6105,18 @@ impl AppCore {
             elapsed: crate::video::format_video_duration(pos),
             total,
             fraction,
+        })
+    }
+
+    /// Whether the displayed item's video is playing right now (session
+    /// `Playing`). The winit shell's playback row uses it two ways: the
+    /// play/pause button's glyph, and a timed egui repaint so the knob glides
+    /// between the once-a-second text refreshes; anything paused/parked keeps
+    /// the overlay fully retained.
+    pub fn video_playing(&self) -> bool {
+        self.video.as_ref().is_some_and(|v| {
+            Some(v.item) == self.displayed_item
+                && v.session.state() == crate::video::VideoSessionState::Playing
         })
     }
 
@@ -6430,7 +6574,7 @@ impl AppCore {
 
         // Contextual seek (task #79 phase 6): while a video plays and the image has
         // no horizontal overflow to pan, the horizontal pan actions seek instead
-        // (±2 s, Shift ±15 s, self-timed repeat — OS key-repeat stays ignored).
+        // (±2 s, Shift ±10 s, self-timed repeat — OS key-repeat stays ignored).
         // Pan wins when zoomed with horizontal overflow; vertical pan is untouched.
         let (raw_px, py) = self.pan_held();
         let mut px = raw_px;
@@ -8559,6 +8703,113 @@ mod tests {
             core.info_line_shown,
             "update_video_progress must re-raster the info line"
         );
+    }
+
+    /// `,`/`.` on a playing video (task #79 follow-up): stepping pauses the
+    /// session, serves the next queued frame, keeps the paused audio player in
+    /// step, and — with the `i` toggle off on a native-info shell — flashes the
+    /// info line as the position OSD instead of toasting. A backward step then
+    /// launches a paused seek.
+    #[test]
+    fn frame_step_on_video_pauses_steps_and_flashes_the_info_line() {
+        use crate::video::{VideoProducerEvent, VideoSessionId, VideoSessionState};
+        use crate::video_session::{ActiveVideo, VideoSession};
+        use pb_decode::video::VideoColorInfo;
+
+        let mut core = test_core();
+        core.native_info = true;
+        core.info_line = false; // the toggle is OFF — feedback must flash the line
+        core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
+            r"C:\nope\clip.mp4",
+        )]));
+        core.displayed_item = Some(0);
+        core.current = Some(crate::meta::PhotoMeta {
+            rel: "clip.mp4".into(),
+            w: 64,
+            h: 64,
+            codec: "MP4",
+            animated: None,
+        });
+
+        let sid = VideoSessionId(1);
+        let (session, io) = VideoSession::new(sid, 4);
+        core.video = Some(ActiveVideo {
+            session,
+            item: 0,
+            audio_started: false,
+        });
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: sid,
+                duration: Some(Duration::from_secs(10)),
+                width: 1,
+                height: 1,
+                has_audio: false,
+            })
+            .unwrap();
+        let frame = |pts_ms: u64| pb_decode::VideoFrame {
+            session_id: sid,
+            seek_generation: crate::video::SeekGeneration::FIRST,
+            pts: Duration::from_millis(pts_ms),
+            width: 1,
+            height: 1,
+            format: pb_decode::PixelFormat::Rgba8,
+            pixels: vec![0; 4],
+            color: VideoColorInfo::srgb(),
+        };
+        io.events.send(VideoProducerEvent::Frame(frame(0))).unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(33)))
+            .unwrap();
+        core.poll_video(); // → Playing, presents pts 0
+        assert_eq!(
+            core.video.as_ref().unwrap().session.state(),
+            VideoSessionState::Playing
+        );
+
+        core.effects.clear();
+        core.frame_step(1);
+        let v = core.video.as_ref().unwrap();
+        assert_eq!(
+            v.session.state(),
+            VideoSessionState::Paused,
+            "stepping pauses playback, like animations"
+        );
+        assert_eq!(v.session.current_pts, Some(Duration::from_millis(33)));
+        assert!(
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::PauseVideoAudio)),
+            "the shell audio player pauses with the session"
+        );
+        assert!(
+            core.effects.iter().any(|e| matches!(
+                e,
+                contract::CoreEffect::SeekVideoAudio { position } if *position == Duration::from_millis(33)
+            )),
+            "the paused audio player follows the stepped position"
+        );
+        assert!(
+            core.video_osd_until.is_some() && core.info_line_visible(),
+            "with `i` off, the position feedback flashes the info line"
+        );
+        assert!(
+            core.toast_native.is_none() && core.toast.is_none(),
+            "no `m:ss / m:ss` toast when the line is the readout"
+        );
+
+        // A backward step launches a paused one-frame seek.
+        core.frame_step(-1);
+        assert_eq!(
+            core.video.as_ref().unwrap().session.state(),
+            VideoSessionState::Seeking
+        );
+
+        // The flash lapses at its deadline (tick clears it + notifies the shell).
+        core.video_osd_until = Some(core.now - Duration::from_millis(1));
+        core.handle(contract::CoreEvent::Tick(Instant::now()));
+        assert!(core.video_osd_until.is_none(), "the OSD flash expires");
+        assert!(!core.info_line_visible(), "the flashed line drops");
     }
 
     #[test]

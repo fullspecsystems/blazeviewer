@@ -97,6 +97,11 @@ pub enum PanelAction {
     OpenFolder,
     /// The play hint was clicked — play the motion item (same as the `P` key).
     PlayPause,
+    /// The info line's playback bar was clicked/dragged (task #79 follow-up):
+    /// seek the active video to this fraction of its duration.
+    SeekVideo(f32),
+    /// The playback row's play/pause button — toggle the video (same as `P`).
+    VideoPlayPause,
     /// The pointer moved onto (`true`) / off (`false`) the play hint — the shell pins its
     /// auto-fade open while hovered.
     PlayHintHover(bool),
@@ -169,6 +174,11 @@ pub struct InfoProgress {
     pub total: Option<String>,
     /// 0..=1 of the bar filled.
     pub fraction: f32,
+    /// Whether the video is playing right now (session Playing). Picks the
+    /// play/pause button's glyph, and drives a timed egui repaint so the knob
+    /// glides instead of stepping once a second (the retained overlay otherwise
+    /// re-renders only on the second tick-over); paused/ended stays retained.
+    pub playing: bool,
 }
 
 /// The first-run **welcome / empty-state** surface (no photos open): centered Open File /
@@ -278,6 +288,7 @@ impl PanelFrame {
                     elapsed: r.elapsed,
                     total: r.total,
                     fraction: r.fraction,
+                    playing: core.video_playing(),
                 }),
             });
         let welcome = core.open_panel_visible().then(|| WelcomePanel {
@@ -340,7 +351,7 @@ pub fn build(ctx: &egui::Context, frame: &PanelFrame, actions: &mut Vec<PanelAct
     };
 
     if let Some(info) = &frame.info {
-        info_line(ctx, &p, alpha, info);
+        info_line(ctx, &p, alpha, info, actions);
     }
     // The play hint rides the bottom-center, `EDGE` above the info line (or `EDGE` off the
     // bottom when the line is hidden), sharing the toast's spot (SwiftUI parity).
@@ -773,6 +784,12 @@ const INFO_ROW_GAP: f32 = 5.0;
 const INFO_BAR_GAP: f32 = 7.0;
 const INFO_BAR_H: f32 = 4.0;
 const INFO_BAR_MIN: f32 = 110.0;
+/// The playback bar's position-knob radius, and how far the click/drag hit band
+/// extends above/below the 4 px track (the bar is a scrubber — task #79 follow-up).
+const INFO_BAR_KNOB_R: f32 = 4.5;
+const INFO_BAR_HIT_PAD: f32 = 6.0;
+/// The playback row's play/pause button: the glyph square at the row's very left.
+const INFO_PLAY_SIZE: f32 = 12.0;
 
 /// The info pill's `(width, height)` in points — used both to lay it out and to duck the panels
 /// above it. Measured from `ctx` fonts (no `Ui`), matching `info_line`'s hand layout exactly.
@@ -810,7 +827,7 @@ fn info_pill_size(ctx: &egui::Context, info: &InfoLine) -> (f32, f32) {
             .as_deref()
             .map(|t| measure(t, INFO_TIME_SIZE).x + INFO_BAR_GAP)
             .unwrap_or(0.0);
-        let row_min = el.x + INFO_BAR_GAP + INFO_BAR_MIN + tot_w;
+        let row_min = INFO_PLAY_SIZE + INFO_BAR_GAP + el.x + INFO_BAR_GAP + INFO_BAR_MIN + tot_w;
         w = w.max(2.0 * INFO_PAD + row_min);
         h += INFO_ROW_GAP + el.y;
     }
@@ -831,8 +848,16 @@ fn snap_rect(rect: egui::Rect, ppp: f32) -> egui::Rect {
 
 /// The one-line info readout: `folder/name · W×H`, an optional Live-Photo / animation mark, and
 /// an optional codec badge (a nested round-rect concentric with the pill). Bottom-corner per the
-/// alignment setting, non-interactive, laid out by hand so everything shares one vertical center.
-fn info_line(ctx: &egui::Context, p: &Palette, alpha: u8, info: &InfoLine) {
+/// alignment setting, laid out by hand so everything shares one vertical center. Non-interactive
+/// on stills; with the playback row (a live video) the bar is a click/drag scrubber and the pill
+/// joins the pointer-routing gate (`App::video_bar_interactive`).
+fn info_line(
+    ctx: &egui::Context,
+    p: &Palette,
+    alpha: u8,
+    info: &InfoLine,
+    actions: &mut Vec<PanelAction>,
+) {
     use pb_app_core::settings::InfoLineAlign as A;
     let (w, pill_h) = info_pill_size(ctx, info);
     // Position by an explicit `fixed_pos` from the *known* pill width — NOT `Area::anchor`,
@@ -855,7 +880,10 @@ fn info_line(ctx: &egui::Context, p: &Palette, alpha: u8, info: &InfoLine) {
         // Center never triggered the clamp (far from any edge), which is why only right/edge
         // alignment was affected. We size the content to `w` ourselves, so no clamp is needed.
         .constrain(false)
-        .interactable(false)
+        // Interactive only while the playback bar is present (a live video): the
+        // plain readout must never intercept clicks meant for the photo.
+        .interactable(info.progress.is_some())
+        .movable(false)
         .order(egui::Order::Middle)
         .show(ctx, |ui| {
             let has_icon = info.is_live || info.is_animated;
@@ -967,6 +995,14 @@ fn info_line(ctx: &egui::Context, p: &Palette, alpha: u8, info: &InfoLine) {
             // The playback row (task #79): elapsed left, total right, the bar
             // filling the span between — brand-accent fill over a dim track.
             if let Some(pr) = &info.progress {
+                // While the video plays, glide: ask egui for a ~30 Hz timed
+                // repaint (the overlay honors `repaint_at`), so the knob moves
+                // smoothly instead of jumping on the once-a-second text refresh.
+                // Paused/ended requests nothing — the texture stays retained.
+                if pr.playing {
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(33));
+                }
                 let time_font = FontId::new(INFO_TIME_SIZE, FontFamily::Proportional);
                 let el_g = galley(
                     ui,
@@ -978,6 +1014,28 @@ fn info_line(ctx: &egui::Context, p: &Palette, alpha: u8, info: &InfoLine) {
                 let row_top = rect.top() + INFO_INSET + row1_h + INFO_ROW_GAP;
                 let rcy = row_top + el_g.size().y / 2.0;
                 let mut bar_x0 = rect.left() + INFO_PAD;
+                // The play/pause button at the row's very left: pause while
+                // playing, play while paused/ended (a click = the `P` key).
+                let btn = snap_rect(sq(bar_x0 + INFO_PLAY_SIZE / 2.0, rcy, INFO_PLAY_SIZE), ppp);
+                let bresp = ui.interact(
+                    btn.expand(3.0),
+                    egui::Id::new("pb_video_play"),
+                    egui::Sense::click(),
+                );
+                if bresp.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                let glyph = if pr.playing { Icon::Pause } else { Icon::Play };
+                // Neutral like the time labels; lifts to full text color on hover.
+                if bresp.hovered() {
+                    pb_ui::icon::paint_tinted(ui, btn, glyph, p.text);
+                } else {
+                    pb_ui::icon::paint(ui, btn, glyph, Tone::Neutral, p);
+                }
+                if bresp.clicked() {
+                    actions.push(PanelAction::VideoPlayPause);
+                }
+                bar_x0 += INFO_PLAY_SIZE + INFO_BAR_GAP;
                 paint_vtext(ui, bar_x0, rcy, &el_g);
                 bar_x0 += el_g.size().x + INFO_BAR_GAP;
                 let mut bar_x1 = rect.right() - INFO_PAD;
@@ -995,16 +1053,67 @@ fn info_line(ctx: &egui::Context, p: &Palette, alpha: u8, info: &InfoLine) {
                         ),
                         ppp,
                     );
+                    // The bar is a scrubber (task #79 follow-up): click/drag seeks
+                    // to that fraction. The hit band is taller than the 4 px track
+                    // so the knob is grabbable without pixel-hunting.
+                    let hit = bar.expand2(egui::vec2(INFO_BAR_KNOB_R, INFO_BAR_HIT_PAD));
+                    let resp = ui.interact(
+                        hit,
+                        egui::Id::new("pb_video_bar"),
+                        egui::Sense::click_and_drag(),
+                    );
+                    let engaged = resp.is_pointer_button_down_on() || resp.dragged();
+                    // One cursor for hover AND drag: the seek-bar convention (the
+                    // moving knob is the drag feedback). Grab/Grabbing has no native
+                    // Windows cursor — winit falls back to a distracting crosshair.
+                    if resp.hovered() || engaged {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    // While engaged, show (and seek to) the pointer's fraction —
+                    // immediate feedback; the core's row catches up on landing.
+                    let mut frac = pr.fraction.clamp(0.0, 1.0);
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        if engaged || resp.clicked() || resp.drag_stopped() {
+                            frac = ((pos.x - bar.left()) / bar.width()).clamp(0.0, 1.0);
+                            // Re-seek only on real movement (≥ 1 px), so holding
+                            // still doesn't flood the producer with reseeks.
+                            let sent = egui::Id::new("pb_video_bar_sent");
+                            let last: Option<f32> = ui.data(|d| d.get_temp(sent));
+                            if last.is_none_or(|l| (l - frac).abs() * bar.width() >= 1.0)
+                                || resp.clicked()
+                                || resp.drag_stopped()
+                            {
+                                ui.data_mut(|d| d.insert_temp(sent, frac));
+                                actions.push(PanelAction::SeekVideo(frac));
+                            }
+                        }
+                    }
                     let round = Rounding::same(bar.height() / 2.0);
                     ui.painter()
                         .rect_filled(bar, round, p.text_secondary.gamma_multiply(0.35));
-                    let frac = pr.fraction.clamp(0.0, 1.0);
                     if frac > 0.0 {
                         let fill_w = (bar.width() * frac).max(bar.height());
                         let fill =
                             egui::Rect::from_min_size(bar.min, egui::vec2(fill_w, bar.height()));
                         ui.painter().rect_filled(fill, round, p.accent);
                     }
+                    // The position knob: a round grab handle riding the fill's
+                    // leading edge, slightly enlarged under the pointer.
+                    let knob_x = bar.left() + bar.width() * frac;
+                    let knob_r = if resp.hovered() || engaged {
+                        INFO_BAR_KNOB_R + 1.0
+                    } else {
+                        INFO_BAR_KNOB_R
+                    };
+                    ui.painter().circle_filled(
+                        egui::pos2(knob_x, bar.center().y),
+                        knob_r,
+                        if resp.hovered() || engaged {
+                            lighten(p.accent, 0.18)
+                        } else {
+                            p.accent
+                        },
+                    );
                 }
             }
         });
@@ -2831,7 +2940,7 @@ mod tests {
             screen_rect: Some(screen),
             ..Default::default()
         };
-        let _ = ctx.run(raw, |ctx| info_line(ctx, &p, 255, line));
+        let _ = ctx.run(raw, |ctx| info_line(ctx, &p, 255, line, &mut Vec::new()));
     }
 
     fn info_rect(ctx: &egui::Context) -> egui::Rect {

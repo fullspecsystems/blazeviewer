@@ -655,6 +655,7 @@ impl App {
             video_seek_last: None,
             pending_delete_retry: None,
             video_pill_text: None,
+            video_osd_until: None,
             prepared: None,
             anim_gen: 0,
             anim_hint_shown_for: None,
@@ -1208,6 +1209,9 @@ impl App {
             || self.core.open_panel_visible()
             // The play hint is interactive (hover pins it, click plays) while it's shown.
             || self.play_hint_shown.is_some()
+            // The info line's playback bar (a live video) is a scrubber — route pointer
+            // events so clicks/drags on it reach egui (it only consumes events over the pill).
+            || self.video_bar_interactive()
             // The Linux windowed menu bar is interactive — route its clicks to egui (egui only
             // consumes a click actually over the bar/dropdown, so the photo stays pannable).
             || self.menu_bar_visible()
@@ -1215,10 +1219,21 @@ impl App {
 
     /// Whether the egui overlay has **any** content to composite — the interactive panels
     /// *or* the non-interactive info readout (`i`). Drives overlay activation/render. (The
-    /// info line is deliberately absent from [`overlay_panel_visible`](Self::overlay_panel_visible),
-    /// which gates *pointer* routing: the readout must never intercept clicks meant for the photo.)
+    /// plain info line is deliberately absent from [`overlay_panel_visible`](Self::overlay_panel_visible),
+    /// which gates *pointer* routing: the readout must never intercept clicks meant for the
+    /// photo. With a live video it joins that gate via `video_bar_interactive` — the playback
+    /// bar is a scrubber.)
     fn overlay_visible(&self) -> bool {
         self.overlay_panel_visible() || self.core.info_line_visible()
+    }
+
+    /// Whether the info line currently carries the interactive video playback bar
+    /// (task #79 follow-up): visible line + a live session's progress row. Runs on
+    /// every pointer event, so the no-video common case short-circuits first.
+    fn video_bar_interactive(&self) -> bool {
+        self.core.video.is_some()
+            && self.core.info_line_visible()
+            && self.core.video_progress_row().is_some()
     }
 
     /// Whether the windowed menu bar should show — **Linux only** (the egui stand-in for the
@@ -1455,6 +1470,11 @@ impl App {
                 self.core.dispatch_action(Action::PlayPause);
             }
             A::PlayHintHover(hovered) => self.play_hint_hovered = hovered,
+            // The playback bar was clicked/dragged — seek the video to that fraction.
+            A::SeekVideo(frac) => self.core.video_seek_fraction(frac),
+            // The playback row's play/pause button — the `P` key's path exactly
+            // (pause/resume a running clip, replay an ended one).
+            A::VideoPlayPause => self.core.dispatch_action(Action::PlayPause),
             // The Linux windowed menu bar dispatches through the very same path the native
             // muda bar uses, so an egui menu click behaves identically to a keyboard action.
             #[cfg(all(unix, not(target_os = "macos")))]

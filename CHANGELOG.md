@@ -15,10 +15,11 @@ with any pre-release suffix carried only by the tag.
   frame rate, audio). **Press `P` to play, with sound** — pause/resume on `P`, replay
   after the clip ends, and the existing mute toggle applies to video too (muting keeps
   perfect sync; unmuting picks up mid-clip). **Seek with the arrow keys while a video
-  plays**: `←`/`→` jump 2 seconds, `Shift+←`/`→` jump 15, holding scrubs, and a small
-  position readout (`0:42 / 1:31`) flashes as you seek. While a video plays, the info
-  line (`i`) grows a playback row — elapsed time, a progress bar, and the total — so
-  position is always visible when the line is on. When you are zoomed in far
+  plays**: `←`/`→` jump 2 seconds, `Shift+←`/`→` jump 10, and holding scrubs (a keymap
+  saved by an earlier version is healed so the Shift chords work there too). While a
+  video plays, the info line (`i`) grows a playback row — elapsed time, a progress bar,
+  and the total — so position is always visible when the line is on; when it is off,
+  seeking flashes the line briefly as the position readout. When you are zoomed in far
   enough that the picture pans horizontally, the arrows keep panning — seeking steps
   aside. A seek while paused updates the frame and stays paused. Playback streams the
   file with constant memory, so a clip of any length plays without loading it into RAM.
@@ -27,6 +28,14 @@ with any pre-release suffix carried only by the tag.
   files are not listed twice: an `IMG_1234.MOV` next to `IMG_1234.HEIC` stays hidden and
   keeps playing through its photo with `P`. Videos never open from inside ZIP/7z archives,
   and viewing them leaves no trace on disk, same as photos.
+- **The video playback bar is interactive.** The progress bar in the info line has a round
+  position knob: click anywhere on the bar to jump there, or drag the knob to scrub. A
+  play/pause button sits at the left of the row (pause while playing, play while paused)
+  and works like the `P` key, and the knob now glides smoothly during playback.
+- **Frame stepping works on videos.** `,` and `.` step one frame back/forward (hold to
+  scrub), pausing playback first — the same behavior animations already had. Stepping
+  forward is instant; stepping backward re-decodes from the nearest keyframe, so it can
+  take a moment on long-GOP clips.
 
 ### Changed
 - **Smoother animation and Live Photo playback.** Showing each frame no longer creates

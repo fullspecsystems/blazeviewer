@@ -89,9 +89,14 @@ pub const PAN_RAMP_SECS: f32 = 0.7;
 pub const FRAME_STEP_REPEAT: Duration = Duration::from_millis(70);
 
 /// Repeat interval for the held video seek (task #79 phase 6): 5 steps/s of ±2 s
-/// (±15 s shifted) — brisk scrubbing, and comfortably above the measured 4K HEVC
+/// (±10 s shifted) — brisk scrubbing, and comfortably above the measured 4K HEVC
 /// seek-landing time (~350 ms) with latest-value coalescing absorbing the rest.
 pub const VIDEO_SEEK_REPEAT: Duration = Duration::from_millis(200);
+
+/// How long the info line stays flashed as the video seek/step OSD when the `i`
+/// toggle is off (each further seek re-arms it). Replaces the `m:ss / m:ss` toast
+/// — the line's playback row is the better readout (owner call 2026-07-11).
+pub const VIDEO_OSD_HOLD: Duration = Duration::from_millis(1800);
 
 /// Deleting a video whose reader is still retiring (HEVC teardown ~1 s) retries
 /// on this cadence, up to [`DELETE_RETRY_MAX`] times (~1.8 s total) — enough to

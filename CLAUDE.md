@@ -126,7 +126,7 @@ backend, cache/eviction policy, present mode, upload strategy.
   - `space` — next photo · `backspace` — previous photo
   - `enter` — random photo (precomputed shuffle order; reversible)
   - arrows — pan; while a **video** plays with no horizontal overflow, `←`/`→` become
-    seek (±2 s, `Shift` ±15 s, hold to scrub — contextual, not a separate binding)
+    seek (±2 s, `Shift` ±10 s, hold to scrub — contextual, not a separate binding)
   - `P` — play/pause (animations, Live Photos, video)
   - `esc` — quit
 - Hold any nav key to iterate as fast as frames become ready.

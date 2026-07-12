@@ -76,6 +76,9 @@ pub enum Icon {
     File,
     /// Play action (the play hint on an animated item — matches SF `play.fill`).
     Play,
+    /// Pause action (the playback bar's play/pause button while a video plays —
+    /// matches SF `pause.fill`).
+    Pause,
 }
 
 /// A **theme-aware** icon color. `Neutral` is the quiet default (a gray that varies
@@ -138,6 +141,7 @@ fn svg(icon: Icon, family: Family) -> &'static str {
         Icon::Keyboard => glyph!("keyboard"),
         Icon::File => glyph!("file"),
         Icon::Play => glyph!("play"),
+        Icon::Pause => glyph!("pause"),
     }
 }
 
@@ -283,6 +287,7 @@ mod tests {
             Icon::Keyboard,
             Icon::File,
             Icon::Play,
+            Icon::Pause,
         ] {
             for family in [Family::Solid, Family::Regular] {
                 let img = rasterize_white(svg(icon, family), 32).expect("icon should rasterize");

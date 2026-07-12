@@ -705,6 +705,7 @@ fn sample_frame(dark: bool, tab: InspectorTab, welcome: bool) -> PanelFrame {
                 elapsed: "0:42".into(),
                 total: Some("9:01".into()),
                 fraction: 0.35,
+                playing: true,
             }),
         }),
         // The ambient scan pill (top-center) — a long sub-folder to exercise truncation.

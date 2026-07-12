@@ -515,6 +515,10 @@ pub struct AppCore {
     /// The text currently shown in the video position pill (`m:ss / m:ss`), so it
     /// re-rasterizes only when the second ticks over — not per frame.
     pub video_pill_text: Option<String>,
+    /// While set, the info line is flashed as the video seek/step OSD (the user's
+    /// `i` toggle is off, but the playback row is the position readout — it
+    /// replaces the old `m:ss / m:ss` toast). Cleared by `tick` at the deadline.
+    pub video_osd_until: Option<Instant>,
     /// An animation decoded ahead (eager prep) and held ready for instant playback.
     pub prepared: Option<Prepared>,
     /// Animation generation; bumped on navigate so a late decode for a past item is discarded.

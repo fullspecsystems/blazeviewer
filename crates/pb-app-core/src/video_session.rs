@@ -45,6 +45,31 @@ const MAX_AUDIO_CORRECTION: Duration = Duration::from_millis(50);
 /// device hiccup): hard re-anchor to the audio position — never smooth across it.
 const AUDIO_HARD_REANCHOR: Duration = Duration::from_millis(500);
 
+/// Fallback inter-frame gap for a back-step before playback has taught us the real
+/// one (30 fps). Presented-frame PTS deltas replace it as soon as they're observed.
+const DEFAULT_FRAME_INTERVAL: Duration = Duration::from_millis(33);
+
+/// A back-step seek lands on "the first frame ≥ target", so it aims slightly
+/// *past* one interval back to absorb VFR jitter/rounding. Must stay under the
+/// shortest real frame interval (120 fps ≈ 8.3 ms) or it would skip a frame.
+const STEP_BACK_GUARD: Duration = Duration::from_millis(5);
+
+/// PTS deltas above this are a hold or discontinuity (a VFR long hold, a seek
+/// landing), not an inter-frame gap worth learning.
+const MAX_FRAME_INTERVAL: Duration = Duration::from_millis(500);
+
+/// What a [`VideoSession::step_frame`] did (task #79 follow-up: `,`/`.` on video).
+#[derive(Debug)]
+pub enum FrameStep {
+    /// A forward step served straight from the decoded queue — present this now.
+    Present(VideoFrame),
+    /// A backward step launched as a paused seek to this target; the landing
+    /// frame presents through `poll` like any paused seek.
+    Seeking(Duration),
+    /// Nothing to step: mid-seek, no decoded frame yet, or at a clip edge.
+    None,
+}
+
 /// The producer's ends of the session channels. Handed to the platform producer
 /// thread (or a test fake). Dropping it fails the session cleanly (disconnect ⇒
 /// `Failed` unless EOS already arrived).
@@ -161,6 +186,9 @@ pub struct VideoSession {
     /// straggler sample carrying the pre-seek position must not yank the clock
     /// back (the audio "ack" of the plan's seek step 6).
     audio_seek_ack: Option<Duration>,
+    /// The learned inter-frame gap (the last consecutive presented-PTS delta) —
+    /// what a one-frame back-step subtracts. `None` until two frames have shown.
+    frame_interval: Option<Duration>,
 }
 
 impl VideoSession {
@@ -202,6 +230,7 @@ impl VideoSession {
             resume_after_seek: true,
             desired_seek: None,
             audio_seek_ack: None,
+            frame_interval: None,
         };
         (
             session,
@@ -318,6 +347,7 @@ impl VideoSession {
                     if due {
                         let frame = self.queue.pop_front().expect("front checked");
                         self.queued_bytes = self.queued_bytes.saturating_sub(frame.byte_len());
+                        self.note_interval(frame.pts);
                         self.current_pts = Some(frame.pts);
                         update.present = Some(frame);
                     } else if self.queue.is_empty() {
@@ -425,6 +455,58 @@ impl VideoSession {
     /// what the OSD shows and what the next relative seek steps from.
     pub fn desired_position(&self, now: Instant) -> Duration {
         self.desired_seek.unwrap_or_else(|| self.position(now))
+    }
+
+    /// One-frame step (task #79 follow-up: `,`/`.` on a video). The caller pauses
+    /// a playing session first (stepping is scrubbing, not playback). Forward pops
+    /// the next decoded frame off the queue and freezes the clock at its PTS —
+    /// instant, no reader work. Backward is a paused seek to one frame interval
+    /// before the desired position (the learned PTS delta, 30 fps before any
+    /// playback): the landing presents once and stays paused, like any paused seek.
+    pub fn step_frame(&mut self, forward: bool, now: Instant) -> FrameStep {
+        use VideoSessionState::*;
+        debug_assert_ne!(self.state, Playing, "pause before stepping");
+        if forward {
+            // Only a settled session can serve from its queue — mid-seek/rebuffer
+            // the queue belongs to an in-flight landing; let it land first.
+            if !matches!(self.state, Paused | Ended) {
+                return FrameStep::None;
+            }
+            let Some(frame) = self.queue.pop_front() else {
+                // Ended (nothing past the last frame) or the producer hasn't
+                // caught up yet — a held key simply retries next repeat.
+                return FrameStep::None;
+            };
+            self.queued_bytes = self.queued_bytes.saturating_sub(frame.byte_len());
+            self.note_interval(frame.pts);
+            self.current_pts = Some(frame.pts);
+            self.clock.position = frame.pts;
+            self.clock.anchor = None;
+            self.grant_credits();
+            FrameStep::Present(frame)
+        } else {
+            let base = self.desired_position(now);
+            if base.is_zero() {
+                return FrameStep::None; // already at the first frame
+            }
+            let step = self.frame_interval.unwrap_or(DEFAULT_FRAME_INTERVAL) + STEP_BACK_GUARD;
+            match self.seek_to(base.saturating_sub(step), now, Some(false)) {
+                Some(target) => FrameStep::Seeking(target),
+                None => FrameStep::None,
+            }
+        }
+    }
+
+    /// Learn the inter-frame gap from a consecutive presented-PTS delta. Guarded:
+    /// a backward jump (a seek landing) or a long hold/discontinuity teaches nothing.
+    fn note_interval(&mut self, pts: Duration) {
+        if let Some(prev) = self.current_pts {
+            if let Some(d) = pts.checked_sub(prev) {
+                if d > Duration::ZERO && d <= MAX_FRAME_INTERVAL {
+                    self.frame_interval = Some(d);
+                }
+            }
+        }
     }
 
     /// Pause (freeze the clock; the current frame holds).
@@ -1332,6 +1414,79 @@ mod tests {
         let u = s.poll(t0 + Duration::from_millis(20));
         assert_eq!(s.state(), VideoSessionState::Playing, "replay resumes");
         assert_eq!(u.present.expect("frame 0 presents").pts, Duration::ZERO);
+    }
+
+    /// Frame stepping (task #79 follow-up): a forward step while paused serves the
+    /// next decoded frame straight from the queue, freezes the clock at its PTS,
+    /// and stays paused; at the end of the queue it's a no-op.
+    #[test]
+    fn step_forward_pops_the_queue_and_freezes_at_its_pts() {
+        let (mut s, io) = VideoSession::new(SID, FRAME_BYTES);
+        let t0 = Instant::now();
+        opened(&io, 10_000);
+        io.events.send(VideoProducerEvent::Frame(frame(0))).unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(33)))
+            .unwrap();
+        s.poll(t0); // → Playing, presents pts 0
+        s.pause(t0);
+
+        let stepped = match s.step_frame(true, t0) {
+            FrameStep::Present(f) => f,
+            other => panic!("expected a queued frame, got {other:?}"),
+        };
+        assert_eq!(stepped.pts, Duration::from_millis(33));
+        assert_eq!(
+            s.state(),
+            VideoSessionState::Paused,
+            "stepping stays paused"
+        );
+        assert_eq!(
+            s.position(t0 + Duration::from_secs(60)),
+            Duration::from_millis(33),
+            "clock frozen at the stepped frame"
+        );
+        s.assert_budget_invariant();
+
+        // Queue drained: the next forward step is a no-op until frames arrive.
+        assert!(matches!(s.step_frame(true, t0), FrameStep::None));
+    }
+
+    /// A backward step is a paused seek to one learned frame interval back — it
+    /// lands exactly on the previous frame for CFR content and stays paused.
+    #[test]
+    fn step_backward_seeks_one_interval_back_and_stays_paused() {
+        let (mut s, io) = VideoSession::new(SID, FRAME_BYTES);
+        let t0 = Instant::now();
+        opened(&io, 10_000);
+        io.events.send(VideoProducerEvent::Frame(frame(0))).unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(33)))
+            .unwrap();
+        s.poll(t0); // presents pts 0
+        let _ = s.poll(t0 + Duration::from_millis(34)); // presents pts 33 (interval learned)
+        s.pause(t0 + Duration::from_millis(35));
+
+        let target = match s.step_frame(false, t0 + Duration::from_millis(35)) {
+            FrameStep::Seeking(t) => t,
+            other => panic!("expected a paused seek, got {other:?}"),
+        };
+        // Position froze ~35 ms; one 33 ms interval + the guard back ⇒ the first
+        // frame ≥ target is pts 0 — the previous frame.
+        assert!(target < Duration::from_millis(33), "target {target:?}");
+        assert_eq!(s.state(), VideoSessionState::Seeking);
+        let mut land = frame(0);
+        land.seek_generation = SeekGeneration(1);
+        io.events.send(VideoProducerEvent::Frame(land)).unwrap();
+        let u = s.poll(t0 + Duration::from_millis(100));
+        assert_eq!(u.present.expect("landing frame shows").pts, Duration::ZERO);
+        assert_eq!(s.state(), VideoSessionState::Paused, "stays paused");
+
+        // At the first frame, stepping back again is a no-op.
+        assert!(matches!(
+            s.step_frame(false, t0 + Duration::from_millis(101)),
+            FrameStep::None
+        ));
     }
 
     /// End to end on Windows: the real MF producer streaming the committed H.264
