@@ -205,6 +205,7 @@ impl AppCore {
             pending_delete_retry: None,
             video_pill_text: None,
             video_osd_until: None,
+            video_geometry_stale: false,
             prepared: None,
             anim_gen: 0,
             anim_hint_shown_for: None,
@@ -1424,9 +1425,7 @@ impl AppCore {
             Some(at) if now >= at => {
                 self.resize_settle_at = None;
                 self.invalidate_geometry();
-                self.load_current_sync();
-                self.target_item = self.playlist.current();
-                self.request_prefetch();
+                self.refresh_after_geometry_change();
                 // Re-place a visible panel against the settled surface size (a fullscreen toggle
                 // otherwise leaves it jammed in the corner — #3).
                 if self.overlay_shown {
@@ -4270,12 +4269,34 @@ impl AppCore {
         self.push_view();
         if changed {
             self.invalidate_geometry();
-            self.load_current_sync();
-            self.target_item = self.playlist.current();
-            self.request_prefetch();
+            self.refresh_after_geometry_change();
         } else {
             self.draw();
         }
+    }
+
+    /// Re-decode the display for a settled geometry change (resize / scale-mode) —
+    /// **unless a live video owns it**. The session's output geometry is fixed by
+    /// design (plan #79: the GPU rescales during a resize; a new fit applies on the
+    /// next play), so there is nothing to re-decode *now* — and doing it anyway was
+    /// the owner-reported fullscreen→windowed jerkiness: a synchronous poster
+    /// decode of the playing clip over the live frame, plus a ring refill whose
+    /// neighbor poster decodes (30 frames of 4K each, in a video folder) saturate
+    /// every core mid-playback. Deferred instead: [`stop_video`] re-issues the
+    /// prefetch once playback ends (navigation stops the video before loading, so
+    /// nothing is ever missed).
+    fn refresh_after_geometry_change(&mut self) {
+        use crate::video::VideoSessionState::*;
+        let video_live = self.video.as_ref().is_some_and(|v| {
+            Some(v.item) == self.displayed_item && !matches!(v.session.state(), Failed | Stopped)
+        });
+        if video_live {
+            self.video_geometry_stale = true;
+            return;
+        }
+        self.load_current_sync();
+        self.target_item = self.playlist.current();
+        self.request_prefetch();
     }
 
     /// Grow the playlist in place as a streaming scan delivers more images: swap in the
@@ -6199,6 +6220,13 @@ impl AppCore {
                                           // A flashed seek OSD dies with its session (don't linger a bare line).
             if self.video_osd_until.take().is_some() {
                 self.emit_panels_changed();
+            }
+            // A geometry change deferred while this video played: refill the ring
+            // now that the decode pool can't jerk the playback (the displayed
+            // frame stays; navigation's own load handles the current item).
+            if std::mem::take(&mut self.video_geometry_stale) {
+                self.target_item = self.playlist.current();
+                self.request_prefetch();
             }
         }
     }
@@ -9077,6 +9105,53 @@ mod tests {
         core.handle(contract::CoreEvent::Tick(Instant::now()));
         assert!(core.video_osd_until.is_none(), "the OSD flash expires");
         assert!(!core.info_line_visible(), "the flashed line drops");
+    }
+
+    /// Owner-reported (79.10 smoke): toggling fullscreen while a video played went
+    /// jerky — the resize-settle re-decode ran a synchronous poster decode over the
+    /// live frame and refilled the whole ring (neighbor poster storms) mid-playback.
+    /// A live video must defer the refresh; stopping the video re-issues it.
+    #[test]
+    fn geometry_change_during_video_defers_the_ring_refill() {
+        use crate::video::{VideoProducerEvent, VideoSessionId};
+        use crate::video_session::{ActiveVideo, VideoSession};
+
+        let mut core = test_core();
+        core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
+            r"C:\nope\clip.mp4",
+        )]));
+        core.playlist = Playlist::new(1, 0);
+        core.displayed_item = Some(0);
+        let (session, io) = VideoSession::new(VideoSessionId(1), 1024);
+        core.video = Some(ActiveVideo {
+            session,
+            item: 0,
+            audio_started: false,
+        });
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: VideoSessionId(1),
+                duration: Some(Duration::from_secs(10)),
+                width: 64,
+                height: 64,
+                has_audio: false,
+                frame_bytes: 64 * 64 * 4,
+            })
+            .unwrap();
+        core.poll_video();
+
+        // The settled geometry change defers instead of re-decoding.
+        core.refresh_after_geometry_change();
+        assert!(core.video_geometry_stale, "refresh deferred while playing");
+
+        // Stopping the video re-issues the prefetch (targets recomputed).
+        core.targets.clear();
+        core.stop_video();
+        assert!(!core.video_geometry_stale, "flag consumed");
+        assert!(
+            !core.targets.is_empty(),
+            "ring refill re-issued once playback ended"
+        );
     }
 
     #[test]

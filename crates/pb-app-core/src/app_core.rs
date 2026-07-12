@@ -521,6 +521,10 @@ pub struct AppCore {
     /// `i` toggle is off, but the playback row is the position readout — it
     /// replaces the old `m:ss / m:ss` toast). Cleared by `tick` at the deadline.
     pub video_osd_until: Option<Instant>,
+    /// A geometry change (resize / scale mode) landed while a video owned the
+    /// display: the re-decode + ring refill were deferred (they'd saturate the
+    /// pool mid-playback); `stop_video` re-issues the prefetch.
+    pub video_geometry_stale: bool,
     /// An animation decoded ahead (eager prep) and held ready for instant playback.
     pub prepared: Option<Prepared>,
     /// Animation generation; bumped on navigate so a late decode for a past item is discarded.
