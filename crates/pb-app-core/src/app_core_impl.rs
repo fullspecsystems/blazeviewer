@@ -732,6 +732,7 @@ impl AppCore {
                 self.last_cursor = Some(p);
                 self.update_tree_hover();
                 self.refresh_cursor();
+                self.video_hover_reveal(y);
             }
             // Trackpad pinch (macOS): magnify about the cursor (+ spread in / − pinch out).
             CoreEvent::Pinch { delta } => {
@@ -6007,13 +6008,7 @@ impl AppCore {
         if self.info_line && self.info_line_visible() {
             return; // the persistent line's row tracks the seek already
         }
-        if self.native_info && !self.panels.hidden && self.current.is_some() {
-            let fresh = self.video_osd_until.is_none();
-            self.video_osd_until = Some(self.now + VIDEO_OSD_HOLD);
-            if fresh {
-                self.show_info_line();
-                self.emit_panels_changed();
-            }
+        if self.arm_video_line_flash() {
             return;
         }
         let osd = match self.video.as_ref().and_then(|v| v.session.duration) {
@@ -6111,6 +6106,46 @@ impl AppCore {
                 // Ended parks on the last presented frame; P replays.
                 _ => self.draw(),
             }
+        }
+    }
+
+    /// Arm (or refresh) the transient info-line reveal while a video is active —
+    /// shared by the seek/step OSD and the pointer hover reveal. `true` when the
+    /// flash path applies (native-line shells, chrome not Tab-hidden); the tick
+    /// arm drops the line at the deadline.
+    fn arm_video_line_flash(&mut self) -> bool {
+        if !self.native_info || self.panels.hidden || self.current.is_none() {
+            return false;
+        }
+        let fresh = self.video_osd_until.is_none();
+        self.video_osd_until = Some(self.now + VIDEO_OSD_HOLD);
+        if fresh {
+            self.show_info_line();
+            self.emit_panels_changed();
+        }
+        true
+    }
+
+    /// Pointer hover over the **controls zone** — the bottom quarter of the
+    /// window, where the info line lives — reveals the playback controls while a
+    /// video is active, like every video player (owner request). It's the same
+    /// transient reveal the seek OSD uses: refreshed on every pointer move inside
+    /// the zone, decaying via the tick arm once the pointer leaves. Shell-neutral
+    /// policy: pointer moves arrive as `CoreEvent::PointerMoved` from every shell
+    /// (the macOS SwiftUI shell shares this the moment it forwards its hovers).
+    pub fn video_hover_reveal(&mut self, y: f32) {
+        use crate::video::VideoSessionState::*;
+        if self.info_line {
+            return; // the persistent line already shows the controls
+        }
+        if y < self.viewport.height as f32 * (1.0 - VIDEO_HOVER_ZONE) {
+            return;
+        }
+        let active = self.video.as_ref().is_some_and(|v| {
+            Some(v.item) == self.displayed_item && !matches!(v.session.state(), Failed | Stopped)
+        });
+        if active {
+            self.arm_video_line_flash();
         }
     }
 
@@ -8887,6 +8922,66 @@ mod tests {
         core.handle(contract::CoreEvent::Tick(Instant::now()));
         assert!(core.video_osd_until.is_none(), "the OSD flash expires");
         assert!(!core.info_line_visible(), "the flashed line drops");
+    }
+
+    /// Hovering the bottom controls zone reveals the playback controls while a
+    /// video is active (owner request — the video-player convention); the top of
+    /// the window doesn't, and the persistent `i` line needs no flash.
+    #[test]
+    fn hovering_the_controls_zone_reveals_the_playback_line() {
+        use crate::video::{VideoProducerEvent, VideoSessionId};
+        use crate::video_session::{ActiveVideo, VideoSession};
+
+        let mut core = test_core();
+        core.native_info = true;
+        core.info_line = false;
+        core.viewport.width = 800;
+        core.viewport.height = 1000;
+        core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
+            r"C:\nope\clip.mp4",
+        )]));
+        core.displayed_item = Some(0);
+        core.current = Some(crate::meta::PhotoMeta {
+            rel: "clip.mp4".into(),
+            w: 64,
+            h: 64,
+            codec: "MP4",
+            animated: None,
+        });
+        let (session, io) = VideoSession::new(VideoSessionId(1), 16);
+        core.video = Some(ActiveVideo {
+            session,
+            item: 0,
+            audio_started: false,
+        });
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: VideoSessionId(1),
+                duration: Some(Duration::from_secs(10)),
+                width: 2,
+                height: 2,
+                has_audio: false,
+                frame_bytes: 16,
+            })
+            .unwrap();
+        core.poll_video();
+
+        // Above the zone: nothing.
+        core.video_hover_reveal(100.0);
+        assert!(core.video_osd_until.is_none(), "top hover reveals nothing");
+        // Inside the bottom quarter: the line flashes on.
+        core.video_hover_reveal(900.0);
+        assert!(core.video_osd_until.is_some() && core.info_line_visible());
+
+        // With the persistent line on, hover never arms the flash.
+        core.video_osd_until = None;
+        core.info_line = true;
+        core.video_hover_reveal(900.0);
+        assert!(
+            core.video_osd_until.is_none(),
+            "persistent line needs no flash"
+        );
+        drop(io);
     }
 
     /// Owner-reported (79.10 smoke): a resize drag stalls the presenter (the OS

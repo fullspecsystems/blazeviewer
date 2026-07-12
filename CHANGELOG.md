@@ -31,7 +31,9 @@ with any pre-release suffix carried only by the tag.
 - **The video playback bar is interactive.** The progress bar in the info line has a round
   position knob: click anywhere on the bar to jump there, or drag the knob to scrub. A
   play/pause button sits at the left of the row (pause while playing, play while paused)
-  and works like the `P` key, and the knob now glides smoothly during playback.
+  and works like the `P` key, and the knob now glides smoothly during playback. Moving the
+  mouse over the bottom of the window while a video is active reveals the controls even
+  when the info line is off, like other video players; they fade away on their own.
 - **Frame stepping works on videos.** `,` and `.` step one frame back/forward (hold to
   scrub), pausing playback first — the same behavior animations already had. Stepping
   forward is instant; stepping backward re-decodes from the nearest keyframe, so it can
