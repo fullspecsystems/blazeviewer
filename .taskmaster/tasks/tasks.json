@@ -879,6 +879,70 @@
             "status": "done",
             "updatedAt": "2026-07-11T21:40:00Z",
             "parentId": "undefined"
+          },
+          {
+            "id": 7,
+            "title": "pb-mac-ffi links pb-cli + parse_launch_args FFI (full argv incl. argv[0])",
+            "description": "Add pb-cli dep (macOS target). FFI entry parse_launch_args(argv, version): argv is the FULL ProcessInfo.arguments (clap consumes element 0 as the program name - NEVER dropFirst, P0 regression test required). version comes from Swift (bundle CFBundleShortVersionString + build id) - pb-mac-ffi CARGO_PKG_VERSION is 0.1.0, never use it. Returns LaunchParseFfi{proceed, text, use_stderr, exit_code} (render clap::Error in Rust; no process::exit). On proceed: stash paths + apply_launch_overrides immediately. take_launch_paths() -> Vec<String> consumed-once (stash-pull). --pb-open becomes a hidden clap path alias.",
+            "status": "pending",
+            "priority": "medium",
+            "parentId": "undefined"
+          },
+          {
+            "id": 8,
+            "title": "Swift launch preflight (parse BEFORE window/Sparkle) + output policy",
+            "description": "P0: parse at CoreModel construction / app bootstrap, NOT onAppear (a terminal --help must not flash a window or start Sparkle). Typed LaunchDisposition{proceed(paths)/emit(text,useStderr,exitCode)}. Output policy (isatty-on-stdout alone is WRONG): always write help/version->stdout, errors->stderr (pipes/redirects must receive output, e.g. --help | less); NSAlert ONLY for a real error on a genuine GUI launch (no meaningful sink); preserve clap exit codes. One Swift helper encodes the terminal/pipe/GUI truth table (the Mac analog of win_console have_output). Sparkle + window work gated behind .proceed. Paths opened via take_launch_paths once the canvas exists.",
+            "status": "pending",
+            "priority": "medium",
+            "parentId": "undefined"
+          },
+          {
+            "id": 9,
+            "title": "Effective-value wiring (--theme/--mute/window-mode actually show)",
+            "description": "Rule: settings_form() stays raw (preference editing); runtime reads go effective_*. applyAppearance -> effective_appearance() (new FFI accessor). apply_menu_state (lib.rs:1536) passes raw settings.mute_live_audio -> stale Mute checkmark under --mute; switch to effective_mute(). startup_fullscreen() folds launch.windowed over saved start_fullscreen(). Ordering is structural: overrides applied inside the parse FFI, before any first read. First frame already in the overridden theme/mode - no visible correction.",
+            "status": "pending",
+            "priority": "medium",
+            "parentId": "undefined"
+          },
+          {
+            "id": 10,
+            "title": "Force the window on a bare-path launch (option B) + double-delivery dedup - spike first",
+            "description": "Highest risk, spike first (timebox ~1 day; fallback = ship the rest with --pb-open + leading-flag forms). Detect the windowless document-open launch, materialize the window (openWindow(id:) first, NSApp.windows force-create fallback). Success = same CoreModel, ContentView.onAppear wiring runs exactly once (menus, FFI, open handlers, openSettingsAction), canvas attached, Settings scene reachable - NOT just a-window-appears. P1 dedup: the bare path ALSO arrives via application(_:open:)/pendingURLs - record argv launch paths as standardized file URLs, filter the FIRST open-URLs batch against them, never filter later Finder opens; prove ONE open_paths / ONE scan_gen.",
+            "status": "pending",
+            "priority": "medium",
+            "parentId": "undefined"
+          },
+          {
+            "id": 11,
+            "title": "Shell-owned parity: path validation, recursive override, --metrics",
+            "description": "apply_launch_overrides covers core state only; mirror the three winit shell behaviors. (1) Path existence validation in Rust (identical message: photoblaze: no such file or folder: <path>, exit 2, via the output policy). (2) Recursive: Mac open_paths builds open::plan unchanged -> dirs always scan recursive=true; after plan, mutate Source::Scan.recursive = launch.recursive.unwrap_or(settings.recursive) (winit main.rs:3717) - also fixes the latent saved-preference gap. (3) --metrics IMPLEMENTED (full-parity scope): StageTimes lives on AppCore (core.metrics) so set StageTimes::enabled() on proceed + emit the report on quit; check whether the host decode path needs a METRICS_ON_FLAG analog, and label any untimed stage rather than printing zero.",
+            "status": "pending",
+            "priority": "medium",
+            "parentId": "undefined"
+          },
+          {
+            "id": 12,
+            "title": "Tests + smoke matrix + docs (macOS CLI)",
+            "description": "Rust: argv[0] regression, outcome mapping (help/version/bad flag/proceed), take_launch_paths consumed-once, effective_* + menu-mute folding, recursive 4-combo, no-trace (settings.toml untouched). Smoke: direct binary help/version/bad-flag/bad-path with correct stream+exit code, piped + redirected output received, no alert/window flash; open -a --args with spaces+Unicode paths; bare positional folder/image/archive = one window/one open/one scan_gen; --pb-open compat; saved prefs crossed with each override; first-frame theme/mode; --metrics report on quit. Docs: README macOS invocation (open detaches stdout - use the direct binary for CLI output) + CHANGELOG.",
+            "status": "pending",
+            "priority": "low",
+            "parentId": "undefined"
+          },
+          {
+            "id": 13,
+            "title": "--slideshow unit suffixes (3s / 0.5m) - shared pb-cli parser",
+            "description": "Owner call 2026-07-11. Custom clap value_parser (string -> seconds): bare number = seconds (back-compat), Ns = seconds, Nm = minutes, case-insensitive; anything else = clap value error. Existing [0.1s,60s] clamp applies AFTER conversion (5m clamps to 60s - matches the runtime slider ceiling; Mixed strictness). Tests: 5, 3s, 0.5m, 1m=60s, 5m clamps, 3h/abc error. Update help value_name + README + EXAMPLES. Benefits Windows too (shared crate).",
+            "status": "pending",
+            "priority": "medium",
+            "parentId": "undefined"
+          },
+          {
+            "id": 14,
+            "title": "photoblaze PATH shim - opt-in install action (macOS)",
+            "description": "Owner call 2026-07-11; agent-first rationale (AI agents driving the CLI is a primary use case). OPT-IN only (VS Code/iTerm pattern): Settings row / menu item \"Install command-line tool...\" creates a symlink photoblaze -> the embedded binary at its stable /Applications path (survives Sparkle updates - contents replaced, path stable). Target /usr/local/bin when writable, else ~/.local/bin; same action detects+repairs a stale link and can remove it. Never automatic (bad citizenship, may need admin). Verify Bundle.main + Sparkle feed resolve through the symlink. ADR-018-clean: explicit user-initiated write. README uninstall note. Windows PATH via Velopack hook = separate task.",
+            "status": "pending",
+            "priority": "medium",
+            "parentId": "undefined"
           }
         ],
         "updatedAt": "2026-07-11T21:10:16.794Z"
