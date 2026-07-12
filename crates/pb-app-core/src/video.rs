@@ -441,9 +441,14 @@ mod tests {
             classify_library_file(&PathBuf::from(r"C:\pics\a.JPG")),
             Some(LibraryItemKind::Image)
         );
+        // HEIC is an image only where a still decoder exists (WIC on Windows, ImageIO on
+        // macOS, `libheif` on Linux). Mirror `is_supported_extension` so classify's answer
+        // is asserted correctly in every build config rather than assuming Windows/macOS.
+        let heic_kind =
+            pb_decode::is_supported_extension("heic").then_some(LibraryItemKind::Image);
         assert_eq!(
             classify_library_file(&PathBuf::from(r"C:\pics\a.heic")),
-            Some(LibraryItemKind::Image)
+            heic_kind
         );
         assert_eq!(
             classify_library_file(&PathBuf::from(r"C:\pics\clip.MP4")),

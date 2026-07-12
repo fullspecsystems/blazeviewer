@@ -9497,7 +9497,26 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, contract::CoreEffect::StartLiveAudio { .. }))
             .count();
-        assert_eq!(audio_starts, 1, "audio starts exactly once, at install");
+        // Live Photo audio resolves via `live_motion_path`, which is wired on macOS and
+        // Windows always, and on Linux only under `--features livephoto` (see its cfg). Where
+        // it isn't wired the install still happens, just with no audio effect — assert the
+        // count that matches this build so the test is correct on every platform/config.
+        #[cfg(any(
+            target_os = "macos",
+            windows,
+            all(unix, not(target_os = "macos"), feature = "livephoto")
+        ))]
+        let expected_audio_starts = 1;
+        #[cfg(not(any(
+            target_os = "macos",
+            windows,
+            all(unix, not(target_os = "macos"), feature = "livephoto")
+        )))]
+        let expected_audio_starts = 0;
+        assert_eq!(
+            audio_starts, expected_audio_starts,
+            "audio starts exactly once at install where Live audio is wired"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

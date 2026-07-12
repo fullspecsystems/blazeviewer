@@ -724,15 +724,18 @@ mod dedup_tests {
 
     #[test]
     fn companion_mov_is_hidden_next_to_a_same_stem_image() {
+        // The still is a `.jpg` so the pair resolves in every build config: HEIC is an
+        // image only where a still decoder exists (WIC/ImageIO, or Linux + `libheif`),
+        // and this test asserts the companion-dedup mechanics, not the still's format.
         let got = dedup_companions(
             vec![
-                p(r"D:\x\IMG_1.HEIC"),
+                p(r"D:\x\IMG_1.jpg"),
                 p(r"D:\x\IMG_1.MOV"),
                 p(r"D:\x\IMG_2.jpg"),
             ],
             None,
         );
-        assert_eq!(got, vec![p(r"D:\x\IMG_1.HEIC"), p(r"D:\x\IMG_2.jpg")]);
+        assert_eq!(got, vec![p(r"D:\x\IMG_1.jpg"), p(r"D:\x\IMG_2.jpg")]);
     }
 
     #[test]
@@ -762,15 +765,18 @@ mod dedup_tests {
 
     #[test]
     fn pairing_is_per_directory_and_case_insensitive() {
+        // Forward-slash paths so the directory split is real on every platform (Windows
+        // Path treats `/` as a separator too; `D:\a\…` would collapse to one component on
+        // Unix and defeat the per-directory check). A `.jpg` still resolves in every config.
         let got = dedup_companions(
             vec![
-                p(r"D:\a\img_1.heic"),
-                p(r"D:\a\IMG_1.MOV"), // pairs (case-insensitive stem, same dir)
-                p(r"D:\b\IMG_1.MOV"), // different dir — no still there, stays
+                p("/a/img_1.jpg"),
+                p("/a/IMG_1.MOV"), // pairs (case-insensitive stem, same dir)
+                p("/b/IMG_1.MOV"), // different dir — no still there, stays
             ],
             None,
         );
-        assert_eq!(got, vec![p(r"D:\a\img_1.heic"), p(r"D:\b\IMG_1.MOV")]);
+        assert_eq!(got, vec![p("/a/img_1.jpg"), p("/b/IMG_1.MOV")]);
     }
 
     #[test]
@@ -828,7 +834,10 @@ mod stream_video_tests {
         let dir = std::env::temp_dir().join(format!("pb_scanvid_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("sub")).unwrap();
-        for name in ["IMG_1.heic", "IMG_1.mov", "clip.mp4", "photo.jpg"] {
+        // `.jpg` still (not `.heic`) so the companion pairs in every build config — HEIC
+        // is only a recognized image where a still decoder exists (WIC/ImageIO, or Linux
+        // + `libheif`); this test is about the scanner hiding the companion, not the format.
+        for name in ["IMG_1.jpg", "IMG_1.mov", "clip.mp4", "photo.jpg"] {
             std::fs::write(dir.join(name), b"x").unwrap();
         }
         std::fs::write(dir.join("sub").join("solo.mov"), b"x").unwrap();
@@ -871,7 +880,7 @@ mod stream_video_tests {
         // Case-insensitive name order: clip < IMG_1 < photo, then the subfolder.
         let expect = [
             dir.join("clip.mp4"),
-            dir.join("IMG_1.heic"),
+            dir.join("IMG_1.jpg"),
             dir.join("photo.jpg"),
             dir.join("sub").join("solo.mov"),
         ];
