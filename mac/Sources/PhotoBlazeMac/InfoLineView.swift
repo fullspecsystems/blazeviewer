@@ -1,7 +1,8 @@
 // The one-line info readout (`i`) — the last HUD element converted to native SwiftUI. A small
 // bottom-corner pill showing `folder/name · W×H · CODEC[· Live]`, reusing the shared
 // panelBackground so it matches the rest of the chrome. Placement follows the Settings
-// "info line alignment" (left / center / right, default right). Non-interactive.
+// "info line alignment" (left / center / right, default right). For a video it grows a second,
+// interactive **playback row** (play/pause + scrubber + elapsed/total — task 79.9 phase 5).
 
 import SwiftUI
 
@@ -20,6 +21,31 @@ struct InfoLineView: View {
     static let animationMark = "circle.dotted.and.circle"
 
     var body: some View {
+        if model.videoControlsVisible {
+            // Two-row pill: the summary on top, the interactive playback row below. Uniform
+            // padding (the badge-concentric trailing trick is a single-row nicety).
+            VStack(alignment: .leading, spacing: 6) {
+                summaryRow
+                VideoPlaybackRow(model: model)
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, inset)
+            .panelBackground(cornerRadius: pillRadius, opacity: model.panelOpacity)
+        } else {
+            // Single row (stills, and video with `i` off) — unchanged from before.
+            let hasCodec = !model.infoLineCodec.isEmpty
+            summaryRow
+                .padding(.leading, 11)
+                // Trailing padding collapses to the vertical inset when the badge is present,
+                // so it's spaced equally on the exposed sides and the concentric corners align.
+                .padding(.trailing, hasCodec ? inset : 11)
+                .padding(.vertical, inset)
+                .panelBackground(cornerRadius: pillRadius, opacity: model.panelOpacity)
+        }
+    }
+
+    /// The `folder/name · W×H`, motion mark, and codec badge — the always-present summary.
+    @ViewBuilder private var summaryRow: some View {
         let hasCodec = !model.infoLineCodec.isEmpty
         HStack(spacing: 8) {
             Text(model.infoLineText)
@@ -58,11 +84,5 @@ struct InfoLineView: View {
                     )
             }
         }
-        .padding(.leading, 11)
-        // Trailing padding collapses to the vertical inset when the badge is present, so it's
-        // spaced equally on the exposed sides and the concentric corners line up.
-        .padding(.trailing, hasCodec ? inset : 11)
-        .padding(.vertical, inset)
-        .panelBackground(cornerRadius: pillRadius, opacity: model.panelOpacity)
     }
 }

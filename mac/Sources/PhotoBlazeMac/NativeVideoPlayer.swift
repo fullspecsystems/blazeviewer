@@ -28,6 +28,9 @@ final class NativeVideoPlayer {
     private var statusObs: NSKeyValueObservation?
     private var timeControlObs: NSKeyValueObservation?
     private var endObs: NSObjectProtocol?
+    /// Periodic time observer driving the info-line scrubber's position (~5 Hz; SwiftUI
+    /// animates the knob between updates). Removed on stop/deinit (it retains the player).
+    private var timeObserver: Any?
     private var revealed = false
     private var reportedOpened = false
     private var ended = false
@@ -101,7 +104,40 @@ final class NativeVideoPlayer {
                 self.model?.nativeVideoEnded(self.sessionId)
             }
         }
+        // Drive the info-line scrubber's position (the core keeps no video clock, so the
+        // player is the source). ~5 Hz text; SwiftUI glides the knob between samples.
+        timeObserver = player.addPeriodicTimeObserver(
+            forInterval: CMTime(seconds: 0.2, preferredTimescale: 600), queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.publishProgress() }
+        }
         pbTrace("native video \(sessionId): opening \(url.lastPathComponent) muted=\(muted)")
+    }
+
+    /// Push the current position/duration/playing to the model for the scrubber row.
+    private func publishProgress() {
+        let dur = item.duration
+        let total = dur.isNumeric ? max(0, CMTimeGetSeconds(dur)) : 0
+        let pos = max(0, CMTimeGetSeconds(player.currentTime()))
+        model?.updateVideoProgress(
+            sessionId,
+            elapsed: pos.isFinite ? pos : 0,
+            total: total.isFinite ? total : 0,
+            playing: player.timeControlStatus == .playing)
+    }
+
+    /// Seek to `fraction` (0…1) of the duration — the info-line scrubber. Precise enough
+    /// for scrubbing; AVPlayer coalesces a rapid series (a new seek supersedes a pending).
+    func seek(toFraction fraction: Double) {
+        let dur = item.duration
+        guard dur.isNumeric, CMTimeGetSeconds(dur) > 0 else { return }
+        ended = false
+        let secs = max(0.0, min(1.0, fraction)) * CMTimeGetSeconds(dur)
+        player.seek(
+            to: CMTime(seconds: secs, preferredTimescale: 600),
+            toleranceBefore: CMTime(seconds: 0.25, preferredTimescale: 600),
+            toleranceAfter: CMTime(seconds: 0.25, preferredTimescale: 600))
+        publishProgress() // immediate feedback; the observer catches up
     }
 
     /// Tell the core the clip opened (duration + audio presence), once.
@@ -182,6 +218,10 @@ final class NativeVideoPlayer {
         statusObs = nil
         timeControlObs?.invalidate()
         timeControlObs = nil
+        if let timeObserver {
+            player.removeTimeObserver(timeObserver)
+            self.timeObserver = nil
+        }
         if let endObs {
             NotificationCenter.default.removeObserver(endObs)
             self.endObs = nil
@@ -195,6 +235,9 @@ final class NativeVideoPlayer {
         readyObs?.invalidate()
         statusObs?.invalidate()
         timeControlObs?.invalidate()
+        if let timeObserver {
+            player.removeTimeObserver(timeObserver)
+        }
         if let endObs {
             NotificationCenter.default.removeObserver(endObs)
         }

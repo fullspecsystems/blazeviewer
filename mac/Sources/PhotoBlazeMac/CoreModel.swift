@@ -73,6 +73,16 @@ final class CoreModel {
     private(set) var infoLineIsVideo = false
     private(set) var infoLineAlign = 2
 
+    /// The info-line **playback row** (task 79.9 phase 5): a play/pause button + a
+    /// click/drag scrubber + elapsed/total, shown while a native video is active and the
+    /// info line is visible. Driven by the AVPlayer's periodic time observer (the core
+    /// keeps no video clock), so these advance during playback and the knob glides.
+    private(set) var videoControlsVisible = false
+    private(set) var videoElapsed = "0:00"
+    private(set) var videoTotal = ""
+    private(set) var videoFraction = 0.0
+    private(set) var videoPlaying = false
+
     /// The native play hint (▶ / Live Photo on a motion item) — the last on-image HUD overlay
     /// to go native. `kind`: 0 none / 1 Live Photo / 2 animation. It flashes for ~3s on a fresh
     /// motion item, hover holds it open, and a click (or P) plays.
@@ -1417,6 +1427,12 @@ final class CoreModel {
             // even when nothing else on screen moves.
             withAnimation(Layout.chromeFade) { infoLineVisible = infoVis }
         }
+        // The playback row shows while a native video is active and the info line is on
+        // (task 79.9 phase 5; pointer-reveal — showing it without `i` — is a follow-up).
+        let controls = infoVis && nativeVideo != nil
+        if controls != videoControlsVisible {
+            withAnimation(Layout.chromeFade) { videoControlsVisible = controls }
+        }
         // The native play hint: kind 0 = playing / a still (hide), 1/2 = a motion item. A seq
         // bump is the "fresh motion item — flash it" trigger.
         let phKind = Int(core.play_hint_kind())
@@ -2180,6 +2196,35 @@ final class CoreModel {
     /// fullscreen / display move). The player owns the frame/gravity math.
     func relayoutNativeVideo() {
         nativeVideo?.relayout()
+    }
+
+    /// Player → model: the scrubber's position/duration/playing (task 79.9 phase 5).
+    /// Session-gated. Formats the time labels; the fraction drives the bar + knob.
+    func updateVideoProgress(_ sessionId: UInt64, elapsed: Double, total: Double, playing: Bool) {
+        guard nativeVideo?.sessionId == sessionId else { return }
+        videoElapsed = Self.formatTime(elapsed)
+        videoTotal = total > 0 ? Self.formatTime(total) : ""
+        videoFraction = total > 0 ? min(1.0, max(0.0, elapsed / total)) : 0.0
+        videoPlaying = playing
+    }
+
+    /// The info-line scrubber was dragged/clicked to `fraction` of the duration. Seeks the
+    /// native player directly (it owns the clock); the play/pause button routes through the
+    /// core action so it matches `P`.
+    func seekVideoFraction(_ fraction: Double) {
+        nativeVideo?.seek(toFraction: fraction)
+    }
+
+    /// The playback row's play/pause button — same path as `P` / the toolbar.
+    func toggleVideoPlay() {
+        menuAction("play_pause")
+    }
+
+    /// `m:ss` under an hour, `h:mm:ss` above — mirrors the core's `format_video_duration`.
+    static func formatTime(_ seconds: Double) -> String {
+        let t = Int(seconds.rounded())
+        let (h, m, s) = (t / 3600, (t % 3600) / 60, t % 60)
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
     }
 
     // ── Native video callbacks (task 79.9 phase 2): the player reports its authoritative

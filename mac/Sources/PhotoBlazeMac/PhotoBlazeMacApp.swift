@@ -270,7 +270,10 @@ struct ContentView: View {
                         } action: { infoLineFrame = $0 }
                         .padding(.horizontal, edge)
                         .padding(.bottom, edge)
-                        .allowsHitTesting(false)
+                        // Interactive only when the video playback row is present (its
+                        // play/pause + scrubber need clicks/drags); otherwise the corner pill
+                        // stays click-through so it never swallows canvas input (task 79.9).
+                        .allowsHitTesting(model.videoControlsVisible)
                         // Explicit (was the implicit default) so it reads the same as the
                         // corner panels; the fade is driven by `withAnimation` in the model.
                         .transition(.opacity)
