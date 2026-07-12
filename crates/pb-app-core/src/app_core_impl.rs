@@ -5923,6 +5923,18 @@ impl AppCore {
     // `NativeVideoProxy` so the core's play/pause/replay dispatch + policy see real
     // state. Each is session-gated inside the proxy (a stale player is ignored).
 
+    /// The session id of the active macOS native video (`0` = none). The shell reconciles
+    /// its `AVPlayer` against this each pump: if it holds a player the core no longer has
+    /// (a torn-down/replaced session), it tears that player down — a belt-and-suspenders
+    /// against a missed `StopVideo` leaving a second video playing.
+    pub fn native_video_session_id(&self) -> u64 {
+        self.video
+            .as_ref()
+            .and_then(ActiveVideoBackend::as_native)
+            .map(|p| p.session_id.0)
+            .unwrap_or(0)
+    }
+
     /// The player finished opening: record duration + audio presence.
     pub fn native_video_opened(&mut self, session_id: u64, duration_ms: i64, has_audio: bool) {
         let sid = crate::video::VideoSessionId(session_id);

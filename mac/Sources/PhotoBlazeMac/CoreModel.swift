@@ -1381,6 +1381,14 @@ final class CoreModel {
         canvasView?.reconcileSizeIfNeeded()
         core.tick()
         drainEffects()
+        // Reconcile the native video against the core's authority: if we hold a player the
+        // core no longer has (a torn-down/replaced session whose StopVideo we somehow
+        // missed), tear it down now — so a stale video can never keep playing behind a new
+        // item. Cheap: one u64 read per tick.
+        if let nv = nativeVideo, nv.sessionId != core.native_video_session_id() {
+            nv.stop()
+            nativeVideo = nil
+        }
         // Refresh the shown progress sheet from the Rust-side handles (a cheap read; the
         // pump is already running while a scan/open worker is in flight).
         if activeSheet == .loading || activeSheet == .scanning {

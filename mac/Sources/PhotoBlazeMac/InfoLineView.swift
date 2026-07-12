@@ -22,12 +22,16 @@ struct InfoLineView: View {
 
     var body: some View {
         if model.videoControlsVisible {
-            // Two-row pill: the summary on top, the interactive playback row below. Uniform
-            // padding (the badge-concentric trailing trick is a single-row nicety).
-            VStack(alignment: .leading, spacing: 6) {
+            // Two-row pill: the summary on top, the interactive playback row below. A
+            // reasonable min width so the scrubber is usable on short configs, capped so a
+            // long filename truncates rather than spanning the screen; the summary centers
+            // when it's narrower than the scrubber row. Uniform padding (the badge-concentric
+            // trailing trick is a single-row nicety).
+            VStack(alignment: .center, spacing: 6) {
                 summaryRow
                 VideoPlaybackRow(model: model)
             }
+            .frame(minWidth: 300, maxWidth: 560)
             .padding(.horizontal, 11)
             .padding(.vertical, inset)
             .panelBackground(cornerRadius: pillRadius, opacity: model.panelOpacity)

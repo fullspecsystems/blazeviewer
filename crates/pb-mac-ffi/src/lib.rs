@@ -897,6 +897,11 @@ impl AppCoreHandle {
     //    authoritative state back so the core's passive proxy advances (making P /
     //    toolbar pause/resume/replay work + failures return to the poster). All
     //    session-gated inside the proxy.
+    /// The active native-video session id (0 = none) — the host reconciles its AVPlayer
+    /// against this each pump so a missed teardown can't leave a second video playing.
+    fn native_video_session_id(&self) -> u64 {
+        self.core.native_video_session_id()
+    }
     fn native_video_opened(&mut self, session_id: u64, duration_ms: i64, has_audio: bool) {
         self.core
             .native_video_opened(session_id, duration_ms, has_audio);
@@ -2779,6 +2784,7 @@ mod ffi {
         fn current_has_motion(&mut self) -> bool;
         fn animation_playing(&self) -> bool;
         fn motion_playing(&self) -> bool;
+        fn native_video_session_id(&self) -> u64;
         fn native_video_opened(&mut self, session_id: u64, duration_ms: i64, has_audio: bool);
         fn native_video_state_changed(&mut self, session_id: u64, state: u8);
         fn native_video_ended(&mut self, session_id: u64);

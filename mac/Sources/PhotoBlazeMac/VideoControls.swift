@@ -36,7 +36,7 @@ struct VideoPlaybackRow: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .frame(minWidth: 240)
+        // Width is governed by the info-line pill (min/max); the scrubber fills what's left.
     }
 }
 

@@ -30,11 +30,15 @@ final class MetalCanvasNSView: NSView {
     weak var model: CoreModel?
     private var attached = false
 
-    /// The native video layer (task 79.9 Phase-0A): an `AVPlayerLayer` presented as a
-    /// **sublayer of the `CAMetalLayer`** (the "first-choice" topology under test).
-    /// SwiftUI overlays composite above it (they're separate views over this
-    /// representable). Its frame + scale track the canvas on every resize.
-    private(set) var videoLayer: AVPlayerLayer?
+    /// The native video presentation (task 79.9): an **opaque black container** layer that
+    /// always covers the canvas, holding the `AVPlayerLayer` (placed within it per the scale
+    /// mode). Opaque so it fully hides the wgpu canvas while a video shows — no letterbox/
+    /// Original-surround bleed-through of a stale poster ("ghost"), and a background video can
+    /// never show through a foreground one. SwiftUI overlays still composite above it. There is
+    /// exactly one; a new attach nukes any prior/orphaned video layers.
+    private(set) var videoContainer: CALayer?
+    /// The identifying `name` on the container, so a stray orphan can always be found + removed.
+    private static let videoLayerName = "pb.video.container"
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -326,35 +330,50 @@ final class MetalCanvasNSView: NSView {
 
     // MARK: - Native video layer (task 79.9 Phase-0A spike)
 
-    /// Attach a native `AVPlayerLayer` as a sublayer of the Metal layer, hidden until
-    /// the caller reveals it on the first displayable frame (so the wgpu poster shows
-    /// until then — no black/stale flash, no audio-before-picture). Replaces any prior
-    /// video layer. `videoGravity = .resizeAspect` matches the still fit (never cropped).
+    /// Attach an `AVPlayerLayer` inside a fresh opaque black container over the Metal layer,
+    /// hidden until the caller reveals it on the first displayable frame (so the wgpu poster
+    /// shows until then — no black/stale flash). Nukes any prior/orphaned video layers first,
+    /// so there is never a second (background) video showing through.
     func attachVideoLayer(_ playerLayer: AVPlayerLayer) {
         detachVideoLayer()
+        let container = CALayer()
+        container.name = Self.videoLayerName
+        container.backgroundColor = NSColor.black.cgColor
+        container.isOpaque = true
         playerLayer.videoGravity = .resizeAspect
         playerLayer.isHidden = true
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        playerLayer.frame = layer?.bounds ?? bounds
+        container.frame = layer?.bounds ?? bounds
+        container.contentsScale = backingScale
+        playerLayer.frame = container.bounds
         playerLayer.contentsScale = backingScale
-        layer?.addSublayer(playerLayer)
+        container.addSublayer(playerLayer)
+        layer?.addSublayer(container)
         CATransaction.commit()
-        videoLayer = playerLayer
+        videoContainer = container
     }
 
-    /// Remove the native video layer (stop / navigate / teardown). Idempotent.
+    /// Remove the video container (and its player layer). Idempotent, and sweeps any orphan
+    /// container left by a mistimed teardown so two videos can never coexist.
     func detachVideoLayer() {
-        videoLayer?.removeFromSuperlayer()
-        videoLayer = nil
+        videoContainer?.removeFromSuperlayer()
+        videoContainer = nil
+        for sub in layer?.sublayers ?? [] where sub.name == Self.videoLayerName {
+            sub.removeFromSuperlayer()
+        }
     }
 
-    /// Keep the video layer placed correctly across live resize, fullscreen transitions,
-    /// and 1x↔2x display moves (gate item: geometry parity). The player owns the actual
-    /// frame/gravity (they depend on the scale mode + the video's presentation size), so
-    /// this just asks it to re-lay-out against the current bounds.
+    /// Keep the video presentation placed correctly across live resize, fullscreen
+    /// transitions, and 1x↔2x display moves. The container fills the canvas; the player owns
+    /// its own frame within it (scale-mode + presentation-size dependent).
     private func syncVideoLayerFrame() {
-        guard videoLayer != nil else { return }
+        guard let container = videoContainer else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        container.frame = layer?.bounds ?? bounds
+        container.contentsScale = backingScale
+        CATransaction.commit()
         model?.relayoutNativeVideo()
     }
 
