@@ -82,6 +82,10 @@ final class CoreModel {
     private(set) var videoTotal = ""
     private(set) var videoFraction = 0.0
     private(set) var videoPlaying = false
+    /// True while the user is actively dragging the info-line scrubber. A drag captures the
+    /// pointer, so canvas hover moves stop and the reveal flash would decay mid-drag — the
+    /// pump keeps the controls up while this is set (not `@Published`; only `pump()` reads it).
+    var videoScrubbing = false
 
     /// The native play hint (▶ / Live Photo on a motion item) — the last on-image HUD overlay
     /// to go native. `kind`: 0 none / 1 Live Photo / 2 animation. It flashes for ~3s on a fresh
@@ -388,6 +392,12 @@ final class CoreModel {
     /// Pointer moved over the canvas, in physical px, top-left origin (the winit convention).
     func pointerMoved(x: Float, y: Float) {
         core.pointer_moved(x, y)
+        // Wake the pump: a move over the bottom controls zone arms the video-line flash
+        // (`video_hover_reveal`), which only surfaces as `videoControlsVisible` when `pump()`
+        // reconciles. During native playback the pump is otherwise paused (AVPlayer composites
+        // itself), so without this a hover would never reveal the controls. The pump re-pauses
+        // itself once the flash decays.
+        kick()
         drainEffects()
     }
 
@@ -1442,9 +1452,12 @@ final class CoreModel {
             // even when nothing else on screen moves.
             withAnimation(Layout.chromeFade) { infoLineVisible = infoVis }
         }
-        // The playback row shows while a native video is active and the info line is on
-        // (task 79.9 phase 5; pointer-reveal — showing it without `i` — is a follow-up).
-        let controls = infoVis && nativeVideo != nil
+        // The playback row shows while a native video is active and the info line is on —
+        // either the persistent `i` line or the transient hover-reveal flash (armed by a
+        // pointer move over the bottom controls zone; `info_line_visible()` folds both in).
+        // An in-flight scrubber drag also pins it up: the drag captures the pointer, so the
+        // hover flash would decay out from under the user's own knob (see `videoScrubbing`).
+        let controls = (infoVis || videoScrubbing) && nativeVideo != nil
         if controls != videoControlsVisible {
             withAnimation(Layout.chromeFade) { videoControlsVisible = controls }
         }
@@ -2261,6 +2274,17 @@ final class CoreModel {
     /// core action so it matches `P`.
     func seekVideoFraction(_ fraction: Double) {
         nativeVideo?.seek(toFraction: fraction)
+    }
+
+    /// The scrubber drag started/ended. While scrubbing, `pump()` pins the controls up (the
+    /// drag captures the pointer, so the hover flash stops refreshing). On release, re-arm the
+    /// core flash so the controls fade out on the normal 1.8s timer instead of snapping away.
+    func scrubbingChanged(_ active: Bool) {
+        videoScrubbing = active
+        if !active {
+            core.flash_video_controls()
+        }
+        kick()
     }
 
     /// The playback row's play/pause button — same path as `P` / the toolbar.

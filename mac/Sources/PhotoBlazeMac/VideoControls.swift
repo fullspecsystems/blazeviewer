@@ -88,6 +88,7 @@ struct VideoScrubber: View {
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
+                        if !dragging { model.scrubbingChanged(true) } // pin the controls up
                         dragging = true
                         dragFraction = clamp((value.location.x - knobRadius) / usable)
                         let now = Date()
@@ -99,6 +100,7 @@ struct VideoScrubber: View {
                     .onEnded { value in
                         model.seekVideoFraction(clamp((value.location.x - knobRadius) / usable))
                         dragging = false
+                        model.scrubbingChanged(false) // let the reveal fade on its normal timer
                     }
             )
             .onHover { $0 ? NSCursor.pointingHand.set() : NSCursor.arrow.set() }

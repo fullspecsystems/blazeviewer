@@ -6391,6 +6391,24 @@ impl AppCore {
         }
     }
 
+    /// Re-arm the transient controls reveal directly (no hover geometry). The macOS shell
+    /// calls this when the user releases the info-line scrubber: a SwiftUI drag captures the
+    /// pointer, so canvas pointer-moves — and thus [`video_hover_reveal`] — stop firing, and
+    /// the flash would snap away the instant the drag ends. This lets it fade out gracefully
+    /// instead. Same active guard as the hover path so it can't flash the line for a still.
+    pub fn flash_video_controls(&mut self) {
+        use crate::video::VideoSessionState::*;
+        if self.info_line {
+            return; // the persistent line is already up
+        }
+        let active = self.video.as_ref().is_some_and(|v| {
+            Some(v.item()) == self.displayed_item && !matches!(v.state(), Failed | Stopped)
+        });
+        if active {
+            self.arm_video_line_flash();
+        }
+    }
+
     /// Upload one decoded video frame through the reusable present path,
     /// dispatching on its pixel format (task 79.10): RGBA8 rides `set_image`
     /// exactly as before; NV12 splits its planes and goes through the renderer's
@@ -9253,6 +9271,64 @@ mod tests {
             core.video_osd_until.is_none(),
             "persistent line needs no flash"
         );
+        drop(io);
+    }
+
+    /// `flash_video_controls` (the scrubber-release re-arm) reveals the line for an active
+    /// video regardless of pointer position, but never for a still or when `i` is already on.
+    #[test]
+    fn flash_video_controls_re_arms_the_reveal() {
+        use crate::video::{VideoProducerEvent, VideoSessionId};
+        use crate::video_native::ActiveVideoBackend;
+        use crate::video_session::{ActiveVideo, VideoSession};
+
+        let mut core = test_core();
+        core.native_info = true;
+        core.info_line = false;
+        core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
+            r"C:\nope\clip.mp4",
+        )]));
+        core.displayed_item = Some(0);
+        core.current = Some(crate::meta::PhotoMeta {
+            rel: "clip.mp4".into(),
+            w: 64,
+            h: 64,
+            codec: "MP4",
+            animated: None,
+        });
+        let (session, io) = VideoSession::new(VideoSessionId(1), 16);
+        core.video = Some(ActiveVideoBackend::Session(ActiveVideo {
+            session,
+            item: 0,
+            audio_started: false,
+        }));
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: VideoSessionId(1),
+                duration: Some(Duration::from_secs(10)),
+                width: 2,
+                height: 2,
+                has_audio: false,
+                frame_bytes: 16,
+            })
+            .unwrap();
+        core.poll_video();
+
+        // Active video: the flash arms with no geometry (a mid-drag re-arm).
+        core.flash_video_controls();
+        assert!(core.video_osd_until.is_some() && core.info_line_visible());
+
+        // Persistent `i` line up: nothing to re-arm.
+        core.video_osd_until = None;
+        core.info_line = true;
+        core.flash_video_controls();
+        assert!(core.video_osd_until.is_none(), "persistent line needs no flash");
+
+        // No active video: never arms (can't flash a still's line).
+        core.info_line = false;
+        core.video = None;
+        core.flash_video_controls();
+        assert!(core.video_osd_until.is_none(), "no video → no flash");
         drop(io);
     }
 
