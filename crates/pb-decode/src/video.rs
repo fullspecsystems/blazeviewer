@@ -109,6 +109,48 @@ impl VideoFrame {
 }
 
 // ---------------------------------------------------------------------------
+// Producer ⇄ session protocol (task #79 phase 4).
+// ---------------------------------------------------------------------------
+
+/// Producer → session events. Every event carries the session id (and frames the
+/// seek generation) so a straggler from a torn-down producer can never touch a
+/// newer session, no matter how channels are (mis)wired.
+#[derive(Debug)]
+pub enum VideoProducerEvent {
+    /// The reader opened; stream facts the session may use (duration for the
+    /// HUD/seek clamp — `None` stays honest for unbounded/unknown streams).
+    Opened {
+        session_id: VideoSessionId,
+        duration: Option<Duration>,
+        width: u32,
+        height: u32,
+    },
+    Frame(VideoFrame),
+    EndOfStream {
+        session_id: VideoSessionId,
+        seek_generation: SeekGeneration,
+    },
+    /// Producer is dead (open failure, decode error). Terminal for the session.
+    Failed {
+        session_id: VideoSessionId,
+        error: String,
+    },
+}
+
+/// Session → producer messages, on a **single merged channel** — the design that
+/// makes backpressure unable to deafen control (plan rev2): the producer's only
+/// blocking point is `recv()` on this channel, so a `Stop` gets through even when
+/// zero credits are outstanding. A credit is permission to decode + send exactly
+/// one frame; the session grants them only while the byte/frame budget admits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoProducerMsg {
+    /// Decode and send one frame (or `EndOfStream` if the stream is done).
+    Credit,
+    /// Tear down now. Channel disconnection means the same thing.
+    Stop,
+}
+
+// ---------------------------------------------------------------------------
 // Poster selection (task #79 phase 2): the first-non-black mean-luma walk.
 // Pure math, shared by every platform's poster backend and unit-tested here.
 // ---------------------------------------------------------------------------

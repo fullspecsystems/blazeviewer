@@ -198,6 +198,8 @@ impl AppCore {
             anim_frame_shown_at: None,
             anim_decode: None,
             anim_stream: None,
+            video: None,
+            video_seq: 0,
             prepared: None,
             anim_gen: 0,
             anim_hint_shown_for: None,
@@ -261,6 +263,8 @@ impl AppCore {
             // A streaming Live Photo decode (task #69) likewise keeps the loop polling so
             // `poll_anim_stream` drains newly decoded frames as they arrive.
             || self.anim_stream.is_some()
+            // Active video playback (task #79): `poll_video` paces frames off this loop.
+            || self.video.as_ref().is_some_and(|v| v.session.is_active())
             // A tree-io job (the folder tree's read_dir derivation / a Go sibling
             // lookup) keeps the loop polling so `tick` installs it when it lands.
             || self.tree_io.is_some()
@@ -1023,6 +1027,9 @@ impl AppCore {
         // 1b'. Drain any newly decoded frames from a streaming Live Photo decode (task #69):
         // install/extend the playing sequence so it plays while the rest still decodes.
         self.poll_anim_stream();
+        // 1b''. Drive active video playback (task #79 phase 4): absorb producer frames,
+        // present the due one, run the preroll/rebuffer state machine.
+        self.poll_video();
 
         // 1c. Pick up a finished off-thread text scan (OCR + QR, task #45): cache it,
         // refresh the `T` panel's busy state, run a deferred copy.
@@ -2891,11 +2898,10 @@ impl AppCore {
         let Some(item) = self.displayed_item else {
             return;
         };
-        // A video item (task #79): playback lands in later phases. Say so honestly
-        // rather than silently ignoring a P press under a play badge — and never
-        // enter the animation decode machinery (it would read the file into RAM).
+        // A video item (task #79 phase 4): its own streaming session — never the
+        // animation decode machinery (that would read the file into RAM).
         if self.item_is_video(item) {
-            self.show_toast("Video playback is not available yet");
+            self.video_play_pause(item);
             return;
         }
         // Eagerly prepared on dwell → play instantly (no decode wait).
@@ -3225,6 +3231,10 @@ impl AppCore {
         self.playback = None;
         self.anim_frame_shown_at = None;
         self.cancel_anim_decode(); // stop an in-flight decode, don't just orphan it
+                                   // Video rides the same teardown points (navigate / delete / new source):
+                                   // stop the session; the producer exits on the Stop/disconnect and its
+                                   // reader retires on a detached thread (never joined here).
+        self.stop_video();
         self.prepared = None;
         self.framestep_started = None;
         self.framestep_last = None;
@@ -5642,6 +5652,116 @@ impl AppCore {
             crate::video::item_kind(self.source.as_ref(), item),
             crate::video::LibraryItemKind::Video(_)
         )
+    }
+
+    /// `P` on a video item (task #79 phase 4): toggle the streaming session —
+    /// pause/resume while it runs, start (or restart after end/failure) otherwise.
+    pub fn video_play_pause(&mut self, item: usize) {
+        use crate::video::VideoSessionState::*;
+        let existing = self.video.as_ref().map(|v| (v.item, v.session.state()));
+        match existing {
+            Some((playing_item, state)) if playing_item == item => match state {
+                Playing => {
+                    self.video.as_mut().unwrap().session.pause(self.now);
+                    self.draw();
+                }
+                Paused => {
+                    self.video.as_mut().unwrap().session.resume(self.now);
+                    self.draw();
+                }
+                // Replay from the top (phase 6 turns this into a seek-to-0 on the
+                // same session; a fresh session is the phase-4 equivalent).
+                Ended | Failed | Stopped => self.start_video_session(item),
+                // Starting up (or mid-seek later): let it be.
+                Opening | Buffering | Seeking => {}
+            },
+            // A different item's session (stale) or none: start fresh.
+            _ => self.start_video_session(item),
+        }
+    }
+
+    /// Start silent video playback of `item` (task #79 phase 4): a fresh
+    /// `VideoSession` fed by a dedicated Media Foundation reader thread. The
+    /// thread is never joined — teardown is a Stop message / channel disconnect,
+    /// and the reader retires on its own detached thread (bounded; spike D).
+    pub fn start_video_session(&mut self, item: usize) {
+        self.stop_video();
+        #[cfg(windows)]
+        {
+            let Some(path) = self.source.path(item).map(Path::to_path_buf) else {
+                return; // videos are path-only by construction
+            };
+            let fit = self.decode_fit();
+            // Credit-granting estimate of one fitted RGBA8 frame. The fit box is a
+            // conservative bound (aspect makes real frames smaller); no fit
+            // (Fill/Original modes) assumes 4K.
+            let frame_bytes = fit
+                .map(|f| f.max_width as u64 * f.max_height as u64 * 4)
+                .unwrap_or(3840 * 2160 * 4);
+            self.video_seq += 1;
+            let id = crate::video::VideoSessionId(self.video_seq);
+            let (session, io) = crate::video_session::VideoSession::new(id, frame_bytes);
+            let generation = crate::video::SeekGeneration::FIRST;
+            std::thread::spawn(move || {
+                pb_decode::run_video_producer(&path, fit, id, generation, io.events, io.msgs);
+            });
+            self.video = Some(crate::video_session::ActiveVideo { session, item });
+            self.anim_hint_shown_for = Some(item); // engaged — retire the hint
+            self.draw();
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = item;
+            self.show_toast("Video playback is not available yet on this platform");
+        }
+    }
+
+    /// Stop and drop any active video session (navigation, delete, teardown). The
+    /// currently displayed frame stays on screen; the caller decides what replaces it.
+    pub fn stop_video(&mut self) {
+        if let Some(mut v) = self.video.take() {
+            v.session.stop();
+        }
+    }
+
+    /// Per-tick video drive (task #79 phase 4): poll the session, present the due
+    /// frame through the reusable present path, surface failures.
+    pub fn poll_video(&mut self) {
+        let Some(v) = self.video.as_mut() else {
+            return;
+        };
+        let update = v.session.poll(self.now);
+        let state = v.session.state();
+        if let Some(frame) = update.present {
+            if let Some(a) = self.renderer.as_mut() {
+                a.set_image(
+                    &frame.pixels,
+                    frame.width,
+                    frame.height,
+                    render_color(&frame.color.transform),
+                    false,
+                    1.0,
+                );
+            }
+            // The frame (and its CPU pixels) drops here — released after upload.
+            self.draw();
+            return;
+        }
+        if update.state_changed {
+            match state {
+                crate::video::VideoSessionState::Failed => {
+                    let msg = self
+                        .video
+                        .as_ref()
+                        .and_then(|v| v.session.error.clone())
+                        .unwrap_or_else(|| "Video playback failed".into());
+                    self.video = None;
+                    self.show_toast(&msg);
+                }
+                // Ended parks on the last presented frame; P replays.
+                _ => self.draw(),
+            }
+        }
     }
 
     /// Corner inset (physical px) for the info/EXIF/help panel. Scales with the
@@ -8076,11 +8196,12 @@ mod tests {
         })
     }
 
-    /// Task #79 phase 2: `P` on a video item is an honest toast — it must never enter
-    /// the animation decode machinery (which would read the file into RAM), and the
-    /// hint plumbing must classify the item as a playable kind (badge = play ▶).
+    /// Task #79 phase 4: `P` on a video item starts a `VideoSession` — never the
+    /// animation decode machinery (which would read the file into RAM). A producer
+    /// that can't open the file fails the session cleanly through `poll_video`,
+    /// which surfaces a toast and clears the session.
     #[test]
-    fn p_on_a_video_item_toasts_and_never_starts_an_animation_decode() {
+    fn p_on_a_video_item_starts_a_session_never_the_animation_machinery() {
         let mut core = test_core();
         core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
             r"C:\nope\clip.mp4",
@@ -8093,16 +8214,29 @@ mod tests {
         core.toggle_play_pause();
         assert!(
             core.playback.is_none(),
-            "no playback machinery for video yet"
+            "video never uses the animation playback"
         );
         assert!(core.anim_decode.is_none(), "no batch decode kicked");
         assert!(core.anim_stream.is_none(), "no stream kicked");
-        assert!(
-            core.toast_native
-                .as_ref()
-                .is_some_and(|t| t.message.contains("not available")),
-            "P must explain itself with a toast"
-        );
+        #[cfg(windows)]
+        {
+            assert!(core.video.is_some(), "P starts the video session");
+            // The missing file fails the producer; the session surfaces it via
+            // poll (bounded wait — the producer thread races this assert).
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while core.video.is_some() && Instant::now() < deadline {
+                core.now = Instant::now();
+                core.poll_video();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(core.video.is_none(), "failure clears the session");
+            assert!(
+                core.toast_native.is_some(),
+                "the failure surfaces to the user"
+            );
+        }
+        #[cfg(not(windows))]
+        assert!(core.video.is_none(), "no producer on this platform yet");
     }
 
     #[test]

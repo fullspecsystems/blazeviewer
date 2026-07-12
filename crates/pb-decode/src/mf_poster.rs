@@ -117,7 +117,7 @@ pub fn decode_video_poster(
 
 /// Source reader with the playback-identical configuration: advanced video
 /// processing (YUV→RGB + rotation), all streams deselected, video selected.
-unsafe fn open_video_reader(path: &Path) -> Result<IMFSourceReader, DecodeError> {
+pub(crate) unsafe fn open_video_reader(path: &Path) -> Result<IMFSourceReader, DecodeError> {
     let inner = || -> windows::core::Result<IMFSourceReader> {
         let mut attrs: Option<IMFAttributes> = None;
         MFCreateAttributes(&mut attrs, 1)?;
@@ -137,7 +137,7 @@ unsafe fn open_video_reader(path: &Path) -> Result<IMFSourceReader, DecodeError>
 
 /// Diagnostic open/negotiate error text: name the fix when one exists (the same
 /// Store-extension pattern as HEIC stills / Live Photo HEVC).
-fn mf_open_msg(e: windows::core::Error) -> String {
+pub(crate) fn mf_open_msg(e: windows::core::Error) -> String {
     match e.code().0 as u32 {
         // MF_E_TOPO_CODEC_NOT_FOUND — container opened, codec missing.
         0xC00D_5212 => "no codec for this video (a Store codec extension may add it, \
@@ -151,7 +151,7 @@ fn mf_open_msg(e: windows::core::Error) -> String {
     }
 }
 
-unsafe fn stream_info(reader: &IMFSourceReader) -> Result<VideoStreamInfo, DecodeError> {
+pub(crate) unsafe fn stream_info(reader: &IMFSourceReader) -> Result<VideoStreamInfo, DecodeError> {
     let video = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
     let native = reader
         .GetNativeMediaType(video, 0)
@@ -279,7 +279,7 @@ unsafe fn poster_inner(
     })
 }
 
-unsafe fn negotiate_rgb32(
+pub(crate) unsafe fn negotiate_rgb32(
     reader: &IMFSourceReader,
     size: Option<(u32, u32)>,
 ) -> windows::core::Result<(u32, u32, i32)> {
@@ -303,7 +303,7 @@ unsafe fn negotiate_rgb32(
 
 /// Aspect-preserving fit of `(w, h)` into `fit`, never upscaling, even dims (keeps
 /// YUV-derived pipelines happy — same rule the phase-0 spike used).
-fn fit_dims(w: u32, h: u32, fit: FitBox) -> (u32, u32) {
+pub(crate) fn fit_dims(w: u32, h: u32, fit: FitBox) -> (u32, u32) {
     if w == 0 || h == 0 {
         return (fit.max_width.max(2), fit.max_height.max(2));
     }
@@ -366,7 +366,7 @@ static PENDING_RETIREMENTS: AtomicUsize = AtomicUsize::new(0);
 /// worker (every caller runs [`ensure_mf`], which `CoInitializeEx(MULTITHREADED)`s
 /// the thread), MF objects are free-threaded, and the retirement thread joins the
 /// MTA before releasing — so cross-thread release is within the COM rules.
-fn retire_reader(reader: IMFSourceReader) {
+pub(crate) fn retire_reader(reader: IMFSourceReader) {
     struct SendReader {
         _reader: IMFSourceReader, // held only for its Drop (the MFT shutdown)
     }

@@ -54,6 +54,7 @@ pub mod slideshow;
 pub mod timing;
 pub mod undo;
 pub mod video;
+pub mod video_session;
 
 pub use action::{Action, ActionKind};
 pub use app_core::{AppCore, ArchiveScope, Nav, Viewport};

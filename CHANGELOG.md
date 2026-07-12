@@ -12,7 +12,9 @@ with any pre-release suffix carried only by the tag.
   MKV, WebM, AVI, and other common containers) are listed alongside photos when you browse
   a folder. Each clip shows its first non-black frame as a poster (with the correct
   rotation and colors), a play badge, and its details in the info panel (duration, codec,
-  frame rate, audio). Playback itself is coming next; pressing `P` says so for now. A clip
+  frame rate, audio). **Press `P` to play** — silent for now (audio is coming next), with
+  pause/resume on `P` and replay after the clip ends. Playback streams the file with
+  constant memory, so a clip of any length plays without loading it into RAM. A clip
   Windows has no codec for shows a plain dark tile instead of an error. Live Photo motion
   files are not listed twice: an `IMG_1234.MOV` next to `IMG_1234.HEIC` stays hidden and
   keeps playing through its photo with `P`. Videos never open from inside ZIP/7z archives,

@@ -12,7 +12,10 @@
 use std::path::Path;
 use std::time::Duration;
 
-pub use pb_decode::video::{SeekGeneration, VideoColorInfo, VideoFrame, VideoSessionId};
+pub use pb_decode::video::{
+    SeekGeneration, VideoColorInfo, VideoFrame, VideoProducerEvent, VideoProducerMsg,
+    VideoSessionId,
+};
 use pb_source::PhotoSource;
 
 // ---------------------------------------------------------------------------

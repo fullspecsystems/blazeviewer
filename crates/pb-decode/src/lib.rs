@@ -33,6 +33,10 @@ mod mf_video;
 // first non-black frame and its reader-sourced stream facts, no RAM reads.
 #[cfg(windows)]
 mod mf_poster;
+// The Windows video playback producer (task #79 phase 4): a demand-driven MF reader
+// thread speaking the VideoProducerEvent/Msg protocol to the VideoSession.
+#[cfg(windows)]
+mod mf_video_producer;
 // The Linux mirror: .mov motion + audio decode via FFmpeg, behind the `livephoto` feature.
 #[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
 mod ff_live;
@@ -113,10 +117,15 @@ pub use metadata::read_exif_fields;
 pub use mf_poster::{decode_video_poster, probe_video_stream, VideoStreamInfo};
 #[cfg(windows)]
 pub use mf_video::{decode_live_motion, decode_live_motion_streaming};
+#[cfg(windows)]
+pub use mf_video_producer::run_video_producer;
 pub use psd::PsdDecoder;
 pub use raw::{is_raw_extension, RawPreviewDecoder};
 pub use svg::SvgDecoder;
-pub use video::{SeekGeneration, VideoColorInfo, VideoFrame, VideoSessionId};
+pub use video::{
+    SeekGeneration, VideoColorInfo, VideoFrame, VideoProducerEvent, VideoProducerMsg,
+    VideoSessionId,
+};
 #[cfg(windows)]
 pub use wic::WicDecoder;
 pub use zune::ZuneJpegDecoder;

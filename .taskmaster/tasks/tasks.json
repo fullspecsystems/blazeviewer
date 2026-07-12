@@ -919,8 +919,8 @@
           {
             "id": 5,
             "title": "Phase 4: silent bounded playback (VideoSession core)",
-            "description": "State machine Opening->Buffering->Playing<->Paused->Seeking->Ended (+Failed/Stopped) on FAKE producers first; PTS scheduling with session-relative origin; preroll + rebuffer policy; byte-budgeted credit-driven queue; duration-independence proven as plateau slope; VFR + EOS before audio exists.",
-            "status": "pending"
+            "description": "State machine Opening->Buffering->Playing<->Paused->Seeking->Ended (+Failed/Stopped) on FAKE producers first; PTS scheduling with session-relative origin; preroll + rebuffer policy; byte-budgeted credit-driven queue; duration-independence proven as plateau slope; VFR + EOS before audio exists. DONE 2026-07-11 (awaiting owner smoke): VideoSession core (pb-app-core/src/video_session.rs, injected-time, 11 unit tests on fake producers + a real-producer E2E over the committed fixture): preroll(2)/rebuffer-don't-drift/pause/EOS-parks/VFR/stale-generation-discard/credit-budget-invariant/10k-frame plateau. Protocol (pb-decode::video): VideoProducerEvent{Opened/Frame/EndOfStream/Failed} + a SINGLE merged msg channel (Credit|Stop) so backpressure can never deafen control - the producer's only blocking point is recv(). Real producer pb-decode/src/mf_video_producer.rs (mf_poster reader config, fitted RGB32, first-PTS normalization, mid-stream stride re-query, off-thread reader retirement; 3 integration tests incl. stop-while-credit-starved). AppCore wiring: P starts/pauses/resumes/replays via video_play_pause; poll_video in tick presents through the phase-3 reusable set_image path; stop_video rides stop_playback (navigate/delete/new-source); work_pending keeps the loop ticking. KNOWN LIMITATION: deleting the currently-playing video may fail while the reader retires (~1s HEVC) - handle in phase 7 failure polish (retry after retirement). Seeking = phase 6; audio = phase 5.",
+            "status": "review"
           },
           {
             "id": 6,

@@ -2,7 +2,28 @@
 
 _Last updated: 2026-07-11 (late). Supersedes the morning handoff (#76 shipped / #79 planned)._
 
-## State: main, #79 phases 0-3 done (Windows scope), all gates green
+## State: main, #79 phases 0-4 done (Windows scope), all gates green
+
+**Phase 4 (silent bounded playback) landed — subtask 79.5 `review` (owner smoke: open a
+video, press P; pause/resume on P; replay after end; navigate away mid-play).**
+- `pb-app-core/src/video_session.rs`: the `VideoSession` — injected-time state machine
+  (preroll 2, rebuffer-don't-drift with a frozen clock + hard re-anchor, EOS parks the
+  last frame, VFR, stale-generation discard), demand-driven credit queue enforcing the
+  `VideoQueueBudget` invariant (credits count as in-flight bytes). 11 fake-producer unit
+  tests + a REAL end-to-end (MF producer over the committed fixture plays to `Ended` at
+  wall duration with the invariant asserted every poll).
+- Protocol (pb-decode::video): `VideoProducerEvent` {Opened, Frame, EndOfStream, Failed} +
+  **one merged msg channel** (`Credit`|`Stop`) — the producer's only blocking point is
+  `recv()`, so Stop can never be deafened by backpressure (no crossbeam needed).
+- `pb-decode/src/mf_video_producer.rs`: the Windows producer thread — mf_poster's reader
+  config (fitted RGB32, advanced processing, streams deselected), first-PTS
+  normalization, mid-stream stride re-query, off-thread reader retirement. 3 integration
+  tests incl. stop-while-credit-starved.
+- AppCore: P → `video_play_pause` (start/pause/resume/replay), `poll_video` in `tick`
+  presents through the phase-3 reusable `set_image` path, `stop_video` rides
+  `stop_playback` (navigation/delete/new source), `work_pending` keeps the loop ticking.
+- ⚠ Known limitation (phase-7 polish): deleting the *currently playing* video can fail
+  while its reader retires (~1 s HEVC) — needs retry-after-retirement.
 
 **Phase 3 (reusable GPU presentation path) landed — subtask 79.4 done (closes the #76 perf
 follow-up).** `set_image` (the per-frame animation/video present path) now runs through a
@@ -44,13 +65,13 @@ Key files: `pb-app-core/src/video.rs` (classify/item_kind/companion helpers),
 (`video_placeholder` + dispatch), `default_app.rs`, `main.rs`, release-linux.sh,
 Info-swift-host.plist.
 
-**Next: phase 4 (silent bounded playback — the VideoSession core, subtask 79.5).** Pure
-state machine on FAKE producers first (unit tests; the contracts in `pb-app-core::video`
-are the spec: states + transitions, `VideoQueueBudget` credits, session_id/seek_generation
-discard rules), PTS scheduling with session-relative origin, preroll + rebuffer-don't-drift,
-then the real Windows MF producer (mf_poster's reader config is the template; seek =
-recreate reader per the spike). Duration-independence proven as plateau slope; VFR + EOS
-before audio exists (audio is phase 5).
+**Next: phase 5 (audio + clock bridge, subtask 79.6).** Bidirectional `AudioClockSample`
+events (contract already in `pb-app-core::video`); Windows audio via
+`MediaPlaybackSession` (position/state/buffering); master clock swaps from monotonic to
+audio-position when audio is present + playing (extrapolate between ~4 Hz samples, hard
+re-anchor on discontinuities); readiness joins the preroll condition; no-audio/failure →
+silent playback on the monotonic clock (already the phase-4 behavior). Then phase 6 =
+seeking + contextual pan-action input (spike says: recreate the reader per seek).
 
 `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, the featured
 clippy (`libheif,dav1d`), and `fmt --check` all pass.
