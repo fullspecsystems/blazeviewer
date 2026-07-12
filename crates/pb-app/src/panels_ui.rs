@@ -148,13 +148,27 @@ pub struct ArchiveTreeRow {
 }
 
 /// The one-line info readout (`i`): `folder/name · W×H`, a codec badge, and a Live-Photo /
-/// animation mark — placed in a bottom corner per the alignment setting.
+/// animation mark — placed in a bottom corner per the alignment setting. While a video
+/// session is live it grows a second row (`progress`): elapsed left, total right, a
+/// progress bar filling the span between (task #79, owner design).
 pub struct InfoLine {
     pub main: String,
     pub codec: String,
     pub is_live: bool,
     pub is_animated: bool,
     pub align: pb_app_core::settings::InfoLineAlign,
+    pub progress: Option<InfoProgress>,
+}
+
+/// The playback row's data: `0:42 ▰▰▰▱▱▱ 9:01`. The pill's width is the summary
+/// row's natural width, floored so the bar stays usable — constant for a clip, so
+/// the once-a-second refresh never jitters.
+pub struct InfoProgress {
+    pub elapsed: String,
+    /// `None` when the container reports no duration (bare track, no right label).
+    pub total: Option<String>,
+    /// 0..=1 of the bar filled.
+    pub fraction: f32,
 }
 
 /// The first-run **welcome / empty-state** surface (no photos open): centered Open File /
@@ -260,6 +274,11 @@ impl PanelFrame {
                 is_live,
                 is_animated,
                 align: core.settings.info_line_align,
+                progress: core.video_progress_row().map(|r| InfoProgress {
+                    elapsed: r.elapsed,
+                    total: r.total,
+                    fraction: r.fraction,
+                }),
             });
         let welcome = core.open_panel_visible().then(|| WelcomePanel {
             file_key: core.shortcut_for(Action::OpenFile),
@@ -747,6 +766,13 @@ const INFO_INSET: f32 = 6.0;
 const INFO_PAD: f32 = 11.0;
 const INFO_TEXT_SIZE: f32 = 13.5;
 const INFO_CODEC_SIZE: f32 = 11.0;
+/// The playback row (task #79): time-label size, row gap, bar↔label gap, bar
+/// thickness, and the bar-span floor that keeps a short filename's bar usable.
+const INFO_TIME_SIZE: f32 = 11.5;
+const INFO_ROW_GAP: f32 = 5.0;
+const INFO_BAR_GAP: f32 = 7.0;
+const INFO_BAR_H: f32 = 4.0;
+const INFO_BAR_MIN: f32 = 110.0;
 
 /// The info pill's `(width, height)` in points — used both to lay it out and to duck the panels
 /// above it. Measured from `ctx` fonts (no `Ui`), matching `info_line`'s hand layout exactly.
@@ -774,7 +800,21 @@ fn info_pill_size(ctx: &egui::Context, info: &InfoLine) -> (f32, f32) {
     } else {
         INFO_PAD
     };
-    (w, text.y + 2.0 * INFO_INSET)
+    let mut h = text.y + 2.0 * INFO_INSET;
+    // The playback row (task #79): floor the width so the bar is usable even under
+    // a short filename; add the row's height. Same numbers as `info_line`'s layout.
+    if let Some(pr) = &info.progress {
+        let el = measure(&pr.elapsed, INFO_TIME_SIZE);
+        let tot_w = pr
+            .total
+            .as_deref()
+            .map(|t| measure(t, INFO_TIME_SIZE).x + INFO_BAR_GAP)
+            .unwrap_or(0.0);
+        let row_min = el.x + INFO_BAR_GAP + INFO_BAR_MIN + tot_w;
+        w = w.max(2.0 * INFO_PAD + row_min);
+        h += INFO_ROW_GAP + el.y;
+    }
+    (w, h)
 }
 
 /// Snap a rect's origin and size to the physical pixel grid at `ppp`, so egui's rounded
@@ -871,8 +911,14 @@ fn info_line(ctx: &egui::Context, p: &Palette, alpha: u8, info: &InfoLine) {
                 separator(p),
             );
 
-            // Content, all on one vertical center.
-            let cy = rect.center().y;
+            // Content: a single row centers on the pill; with the playback row
+            // (task #79), the summary owns the top band and the row sits below.
+            let row1_h = text_g.size().y;
+            let cy = if info.progress.is_some() {
+                rect.top() + INFO_INSET + row1_h / 2.0
+            } else {
+                rect.center().y
+            };
             let mut x = rect.left() + INFO_PAD;
             paint_vtext(ui, x, cy, &text_g);
             x += text_w + gap;
@@ -912,6 +958,50 @@ fn info_line(ctx: &egui::Context, p: &Palette, alpha: u8, info: &InfoLine) {
                 // box-centering reads high in the badge — center on the galley's ink bounds
                 // instead, which is exact for any case.
                 paint_text_centered(ui, badge.center(), &cg);
+            }
+
+            // The playback row (task #79): elapsed left, total right, the bar
+            // filling the span between — brand-accent fill over a dim track.
+            if let Some(pr) = &info.progress {
+                let time_font = FontId::new(INFO_TIME_SIZE, FontFamily::Proportional);
+                let el_g = galley(
+                    ui,
+                    &pr.elapsed,
+                    time_font.clone(),
+                    p.text_secondary,
+                    f32::INFINITY,
+                );
+                let row_top = rect.top() + INFO_INSET + row1_h + INFO_ROW_GAP;
+                let rcy = row_top + el_g.size().y / 2.0;
+                let mut bar_x0 = rect.left() + INFO_PAD;
+                paint_vtext(ui, bar_x0, rcy, &el_g);
+                bar_x0 += el_g.size().x + INFO_BAR_GAP;
+                let mut bar_x1 = rect.right() - INFO_PAD;
+                if let Some(total) = &pr.total {
+                    let tot_g = galley(ui, total, time_font, p.text_secondary, f32::INFINITY);
+                    let tx = rect.right() - INFO_PAD - tot_g.size().x;
+                    paint_vtext(ui, tx, rcy, &tot_g);
+                    bar_x1 = tx - INFO_BAR_GAP;
+                }
+                if bar_x1 - bar_x0 > 8.0 {
+                    let bar = snap_rect(
+                        egui::Rect::from_min_max(
+                            egui::pos2(bar_x0, rcy - INFO_BAR_H / 2.0),
+                            egui::pos2(bar_x1, rcy + INFO_BAR_H / 2.0),
+                        ),
+                        ppp,
+                    );
+                    let round = Rounding::same(bar.height() / 2.0);
+                    ui.painter()
+                        .rect_filled(bar, round, p.text_secondary.gamma_multiply(0.35));
+                    let frac = pr.fraction.clamp(0.0, 1.0);
+                    if frac > 0.0 {
+                        let fill_w = (bar.width() * frac).max(bar.height());
+                        let fill =
+                            egui::Rect::from_min_size(bar.min, egui::vec2(fill_w, bar.height()));
+                        ui.painter().rect_filled(fill, round, p.accent);
+                    }
+                }
             }
         });
 }
@@ -2599,6 +2689,7 @@ mod tests {
             is_live: false,
             is_animated: false,
             align,
+            progress: None,
         }
     }
 

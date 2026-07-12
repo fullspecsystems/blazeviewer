@@ -16,7 +16,9 @@ with any pre-release suffix carried only by the tag.
   after the clip ends, and the existing mute toggle applies to video too (muting keeps
   perfect sync; unmuting picks up mid-clip). **Seek with the arrow keys while a video
   plays**: `←`/`→` jump 2 seconds, `Shift+←`/`→` jump 15, holding scrubs, and a small
-  position readout (`0:42 / 1:31`) flashes as you seek. When you are zoomed in far
+  position readout (`0:42 / 1:31`) flashes as you seek. While a video plays, the info
+  line (`i`) grows a playback row — elapsed time, a progress bar, and the total — so
+  position is always visible when the line is on. When you are zoomed in far
   enough that the picture pans horizontally, the arrows keep panning — seeking steps
   aside. A seek while paused updates the frame and stays paused. Playback streams the
   file with constant memory, so a clip of any length plays without loading it into RAM.

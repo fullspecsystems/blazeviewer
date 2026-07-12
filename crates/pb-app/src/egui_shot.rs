@@ -700,6 +700,12 @@ fn sample_frame(dark: bool, tab: InspectorTab, welcome: bool) -> PanelFrame {
             is_live: true,
             is_animated: false,
             align: pb_app_core::settings::InfoLineAlign::Right,
+            // Preview the video playback row (task #79) in the design shot.
+            progress: Some(panels_ui::InfoProgress {
+                elapsed: "0:42".into(),
+                total: Some("9:01".into()),
+                fraction: 0.35,
+            }),
         }),
         // The ambient scan pill (top-center) — a long sub-folder to exercise truncation.
         scan: (!tree_only).then(|| panels_ui::ScanPill {

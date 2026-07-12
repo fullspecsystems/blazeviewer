@@ -5950,7 +5950,9 @@ impl AppCore {
 
     /// The info line's playback row for the displayed item's live video session
     /// (`None` on stills / dead sessions — the line renders single-row as always).
-    fn video_progress_row(&self) -> Option<hud::ProgressRow> {
+    /// Public: the winit shell's egui info line (and later the macOS SwiftUI one)
+    /// reads it to draw the `elapsed ▰▰▰▱▱ total` row natively.
+    pub fn video_progress_row(&self) -> Option<hud::ProgressRow> {
         let v = self.video.as_ref()?;
         if Some(v.item) != self.displayed_item {
             return None;
@@ -5975,8 +5977,10 @@ impl AppCore {
     }
 
     /// Keep the info line's playback row in step with the session (task #79):
-    /// re-raster the line only when the displayed second (or the row's presence)
-    /// changes — once per second while playing, never per frame.
+    /// refresh the line only when the displayed second (or the row's presence)
+    /// changes — once per second while playing, never per frame. A natively-drawn
+    /// line (the winit egui overlay, macOS) gets a panels-changed marker so the
+    /// shell re-pulls; the HUD path re-rasterizes directly.
     pub fn update_video_progress(&mut self) {
         let desired = self
             .video_progress_row()
@@ -5986,7 +5990,12 @@ impl AppCore {
             return;
         }
         self.video_pill_text = desired;
-        if self.info_line_visible() {
+        if !self.info_line_visible() {
+            return;
+        }
+        if self.native_info {
+            self.emit_panels_changed(); // the shell re-renders its info line
+        } else {
             self.show_info_line(); // re-raster with (or without) the playback row
         }
     }
@@ -8491,6 +8500,65 @@ mod tests {
         }
         #[cfg(not(windows))]
         assert!(core.video.is_none(), "no producer on this platform yet");
+    }
+
+    /// Owner-reported: the info line showed no playback row during video playback.
+    /// This drives the real chain — session → update_video_progress →
+    /// show_info_line — and asserts each link.
+    #[test]
+    fn video_playback_grows_the_info_line_row() {
+        use crate::video::{VideoProducerEvent, VideoSessionId};
+        use crate::video_session::{ActiveVideo, VideoSession};
+
+        let mut core = test_core();
+        core.hud = pb_hud::hud::Hud::load();
+        if core.hud.is_none() {
+            eprintln!("no system UI font — skipping");
+            return;
+        }
+        core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
+            r"C:\nope\clip.mp4",
+        )]));
+        core.displayed_item = Some(0);
+        core.info_line = true;
+        core.current = Some(crate::meta::PhotoMeta {
+            rel: "clip.mp4".into(),
+            w: 64,
+            h: 64,
+            codec: "MP4",
+            animated: None,
+        });
+        assert!(core.info_line_visible(), "precondition: the line is on");
+
+        let (session, io) = VideoSession::new(VideoSessionId(1), 1024);
+        core.video = Some(ActiveVideo {
+            session,
+            item: 0,
+            audio_started: false,
+        });
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: VideoSessionId(1),
+                duration: Some(Duration::from_secs(10)),
+                width: 64,
+                height: 64,
+                has_audio: false,
+            })
+            .unwrap();
+        core.poll_video();
+        assert!(
+            core.video_progress_row().is_some(),
+            "a live session on the displayed item must yield a progress row"
+        );
+        core.update_video_progress();
+        assert!(
+            core.video_pill_text.is_some(),
+            "the row text must be computed"
+        );
+        assert!(
+            core.info_line_shown,
+            "update_video_progress must re-raster the info line"
+        );
     }
 
     #[test]
