@@ -87,7 +87,7 @@ struct ThumbnailsPanelView: View {
     /// (owner polish #1: ONE cell background, photo breathing room inside it).
     private let stripPad: CGFloat = 8
     private let cellInnerPad: CGFloat = 7
-    private let labelHeight: CGFloat = 16
+    private let labelHeight: CGFloat = 15
     private let cellGap: CGFloat = 6
     private var paneWidth: CGFloat { min(model.thumbsWidth, maxWidth) }
     private var cellWidth: CGFloat { max(80, paneWidth - 2 * stripPad) }
@@ -97,7 +97,9 @@ struct ThumbnailsPanelView: View {
     /// reflow the strip and scroll↔index stays O(1).
     private var boxHeight: CGFloat { (boxWidth * 2 / 3).rounded() }
     private var cellHeight: CGFloat {
-        boxHeight + labelHeight + 3 + 2 * cellInnerPad
+        // Photo box + label band + three EQUAL gaps (above the photo, between
+        // photo and label, below the label) — the owner's vertical-rhythm rule.
+        boxHeight + labelHeight + 3 * cellInnerPad
     }
     private var rowHeight: CGFloat { cellHeight + cellGap }
     private var visibleRows: Int { max(1, Int((maxHeight - chromeHeight) / rowHeight)) }
@@ -231,7 +233,7 @@ struct ThumbCell: View {
     @State private var hovered = false
 
     var body: some View {
-        VStack(spacing: 3) {
+        VStack(spacing: innerPad) {
             ZStack {
                 cellImage
                 badge
@@ -239,12 +241,15 @@ struct ThumbCell: View {
             .frame(width: boxWidth, height: boxHeight)
             .clipShape(RoundedRectangle(cornerRadius: 5))
 
+            // An exact-height, centered label band: the gap above the label
+            // (the VStack spacing) and below it (the cell padding) both equal
+            // the top-of-cell gap, so the filename sits visually centered.
             Text(model.thumbName(index))
                 .font(.caption)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .foregroundStyle(isCurrent ? Color.primary : Color.panelSecondary)
-                .frame(maxWidth: boxWidth, maxHeight: labelHeight)
+                .frame(width: boxWidth, height: labelHeight)
         }
         .padding(innerPad)
         // ONE background for the whole cell (owner polish #1): a subtle
@@ -323,7 +328,7 @@ struct ThumbCell: View {
         switch kind {
         case 1: return "play.fill"
         case 2: return "livephoto"
-        default: return "square.stack.3d.forward.dottedline"
+        default: return InfoLineView.animationMark
         }
     }
 }

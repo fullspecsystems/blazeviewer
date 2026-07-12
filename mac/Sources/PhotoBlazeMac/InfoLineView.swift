@@ -18,7 +18,9 @@ struct InfoLineView: View {
 
     /// The SF Symbol marking an animated (non-Live-Photo) image beside the codec. Placeholder
     /// until the final glyph is chosen — one place to swap it.
-    static let animationMark = "circle.dotted.and.circle"
+    /// The animated-image mark (owner pick, 2026-07-12 — promoted from the
+    /// Thumbnails strip's badge, which reuses this constant).
+    static let animationMark = "square.stack.3d.forward.dottedline"
 
     var body: some View {
         if model.videoControlsVisible {
@@ -58,8 +60,8 @@ struct InfoLineView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             // A Live Photo shows the livephoto mark by the codec (instead of the word "Live");
-            // a video shows a film mark; any other animated image (GIF/APNG/…) shows a motion
-            // mark. Swap `animationMark` for the final SF Symbol once picked.
+            // a video shows a film mark; any other animated image (GIF/APNG/…) shows the
+            // motion mark (`animationMark`).
             if model.infoLineIsLive {
                 Image(systemName: "livephoto")
                     .font(.callout)
