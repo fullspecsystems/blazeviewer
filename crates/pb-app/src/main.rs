@@ -140,9 +140,10 @@ const SCAN_CARD_REFRESH: Duration = Duration::from_millis(120);
 const PLAY_HINT_FADE_IN: Duration = Duration::from_millis(200);
 const PLAY_HINT_HOLD: Duration = Duration::from_secs(3);
 const PLAY_HINT_FADE_OUT: Duration = Duration::from_millis(250);
-/// The info line's fade in/out (macOS-shell parity; the pop was most visible on
-/// the video hover reveal).
-const INFO_FADE: Duration = Duration::from_millis(100);
+/// The info line's fade: quick in (it should feel immediate), slower out (the
+/// video controls' auto-hide reads as a deliberate dissolve, not a glitch).
+const INFO_FADE_IN: Duration = Duration::from_millis(100);
+const INFO_FADE_OUT: Duration = Duration::from_millis(250);
 
 /// Whether an Escape press should quit, given an optional "ignore Esc until"
 /// guard set briefly after the file picker closes (to swallow the stray Esc that
@@ -1242,7 +1243,7 @@ impl App {
             // Keep compositing (and re-rendering) through the info line's fade-out.
             || self
                 .info_vanished_at
-                .is_some_and(|at| at.elapsed() < INFO_FADE)
+                .is_some_and(|at| at.elapsed() < INFO_FADE_OUT)
     }
 
     /// Whether the info line currently carries the interactive video playback bar
@@ -1409,7 +1410,7 @@ impl App {
             Some(mut line) => {
                 let shown = *self.info_shown_at.get_or_insert(now);
                 line.fade =
-                    (now.duration_since(shown).as_secs_f32() / INFO_FADE.as_secs_f32()).min(1.0);
+                    (now.duration_since(shown).as_secs_f32() / INFO_FADE_IN.as_secs_f32()).min(1.0);
                 self.info_vanished_at = None;
                 self.last_info_line = Some(line.clone());
                 frame.info = Some(line);
@@ -1418,7 +1419,7 @@ impl App {
                 self.info_shown_at = None;
                 if let Some(last) = self.last_info_line.as_ref() {
                     let gone = *self.info_vanished_at.get_or_insert(now);
-                    let t = now.duration_since(gone).as_secs_f32() / INFO_FADE.as_secs_f32();
+                    let t = now.duration_since(gone).as_secs_f32() / INFO_FADE_OUT.as_secs_f32();
                     if t < 1.0 {
                         let mut line = last.clone();
                         line.fade = 1.0 - t;

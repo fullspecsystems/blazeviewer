@@ -33,6 +33,15 @@ pub fn round_rect(
     border_w: f32,
     border: Color32,
 ) {
+    // Honor the Ui's opacity factor (`Ui::set_opacity` — the info-line fade):
+    // paint callbacks bypass egui's shape-color multiplication, so without this
+    // the SDF backgrounds stayed opaque while the text faded (owner-reported).
+    let o = ui.opacity();
+    let (fill, border) = if o < 1.0 {
+        (fill.gamma_multiply(o), border.gamma_multiply(o))
+    } else {
+        (fill, border)
+    };
     ui.painter()
         .add(round_rect_shape(rect, radius, fill, border_w, border));
 }
