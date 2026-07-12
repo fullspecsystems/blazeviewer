@@ -135,7 +135,6 @@ pub use mf_poster::{
 #[cfg(windows)]
 pub use mf_stream::mem_istream;
 // Platform-neutral (defined in `video`); both platform probes construct it.
-pub use video::VideoStreamInfo;
 #[cfg(windows)]
 pub use mf_video::{decode_live_motion, decode_live_motion_streaming};
 #[cfg(windows)]
@@ -143,6 +142,7 @@ pub use mf_video_producer::run_video_producer;
 pub use psd::PsdDecoder;
 pub use raw::{is_raw_extension, RawPreviewDecoder};
 pub use svg::SvgDecoder;
+pub use video::VideoStreamInfo;
 pub use video::{
     SeekGeneration, VideoColorInfo, VideoFrame, VideoInput, VideoProducerEvent, VideoProducerMsg,
     VideoSessionId, YuvMatrix,

@@ -46,7 +46,7 @@ use windows::Win32::System::Variant::{VT_I8, VT_UI8};
 
 use crate::mf_video::{ensure_mf, native_color, sample_to_rgba};
 use crate::video::{poster_frame_bright_enough, POSTER_MAX_FRAMES, POSTER_MAX_MEDIA};
-use crate::{common, ColorTransform, DecodeError, DecodedImage, FitBox, PixelFormat};
+use crate::{common, DecodeError, DecodedImage, FitBox, PixelFormat};
 
 // `VideoStreamInfo` is the platform-neutral probe result (`crate::video`); both this
 // Media Foundation probe and the macOS AVFoundation one construct the same type.

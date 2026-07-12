@@ -387,7 +387,11 @@ pub fn probe_video_stream(path: &Path) -> Result<VideoStreamInfo, DecodeError> {
 
 unsafe fn probe_inner(cpath: &CStr) -> Result<VideoStreamInfo, DecodeError> {
     let corrupt = |m: &str| DecodeError::Corrupt(m.to_string());
-    let path_ns = send_cstr(class(c"NSString"), sel(c"stringWithUTF8String:"), cpath.as_ptr());
+    let path_ns = send_cstr(
+        class(c"NSString"),
+        sel(c"stringWithUTF8String:"),
+        cpath.as_ptr(),
+    );
     if path_ns.is_null() {
         return Err(corrupt("video path is not valid UTF-8"));
     }

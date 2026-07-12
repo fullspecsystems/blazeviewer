@@ -2511,7 +2511,10 @@ fn map_effect(e: contract::CoreEffect) -> ffi::CoreEffectFfi {
             generation,
             delta_ms,
         } => E::SeekVideoBy(session_id.0, generation.0, delta_ms),
-        C::StepVideo { session_id, forward } => E::StepVideo(session_id.0, forward),
+        C::StepVideo {
+            session_id,
+            forward,
+        } => E::StepVideo(session_id.0, forward),
         C::SetVideoMuted { session_id, muted } => E::SetVideoMuted(session_id.0, muted),
         // The borderless fullscreen speed mode (F) ↔ windowed. `true` = fullscreen.
         C::SetWindowMode(mode) => {

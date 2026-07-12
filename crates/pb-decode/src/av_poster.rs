@@ -43,7 +43,9 @@ pub fn decode_video_poster(
     // probe can't open the stream (a container AVFoundation won't parse). Posters are off
     // the hot path (decode pool, cached), so the extra open is fine.
     let probe = crate::livephoto::probe_video_stream(path).ok();
-    let codec = probe.as_ref().map_or_else(|| container_label(path), |p| p.codec);
+    let codec = probe
+        .as_ref()
+        .map_or_else(|| container_label(path), |p| p.codec);
     let native_dims = probe.as_ref().map(pb_probe_dims);
 
     let mut chosen: Option<(Vec<u8>, u32, u32)> = None; // first bright frame

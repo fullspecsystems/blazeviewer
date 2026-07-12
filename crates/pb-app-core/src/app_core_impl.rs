@@ -372,8 +372,10 @@ impl AppCore {
                     // A playing video mutes in place — its clock keeps running, so
                     // A/V sync is unaffected (task #79 phase 5). Native (macOS): the
                     // AVPlayer owns audio, so mute the player itself.
-                    if let Some(p) =
-                        self.video.as_mut().and_then(ActiveVideoBackend::as_native_mut)
+                    if let Some(p) = self
+                        .video
+                        .as_mut()
+                        .and_then(ActiveVideoBackend::as_native_mut)
                     {
                         p.set_muted(true);
                         self.effects.push(contract::CoreEffect::SetVideoMuted {
@@ -399,8 +401,10 @@ impl AppCore {
                     }
                     // A muted video unmutes in place (its audio kept pace muted). Native
                     // (macOS): unmute the AVPlayer itself.
-                    if let Some(p) =
-                        self.video.as_mut().and_then(ActiveVideoBackend::as_native_mut)
+                    if let Some(p) = self
+                        .video
+                        .as_mut()
+                        .and_then(ActiveVideoBackend::as_native_mut)
                     {
                         p.set_muted(false);
                         self.effects.push(contract::CoreEffect::SetVideoMuted {
@@ -5728,10 +5732,7 @@ impl AppCore {
             // The Windows (Media Foundation) and macOS (AVFoundation) probes below both
             // fill `rows`; on other platforms it stays empty, so `mut` reads as unused —
             // suppress it there rather than drop `mut` (it's needed where a probe runs).
-            #[cfg_attr(
-                not(any(windows, target_os = "macos")),
-                allow(unused_mut)
-            )]
+            #[cfg_attr(not(any(windows, target_os = "macos")), allow(unused_mut))]
             let mut rows: Vec<(String, String)> = Vec::new();
             #[cfg(any(windows, target_os = "macos"))]
             if let Some(path) = self.source.path(item) {
@@ -6201,7 +6202,11 @@ impl AppCore {
         // relative, generation-gated seek *intent*; the shell resolves it against the
         // player and clamps to the seekable range (the proxy holds no position). The
         // live position comes back through the periodic progress observer.
-        if let Some(p) = self.video.as_mut().and_then(ActiveVideoBackend::as_native_mut) {
+        if let Some(p) = self
+            .video
+            .as_mut()
+            .and_then(ActiveVideoBackend::as_native_mut)
+        {
             let session_id = p.session_id;
             let generation = p.begin_seek();
             let delta = i64::try_from(step.as_millis()).unwrap_or(i64::MAX);
