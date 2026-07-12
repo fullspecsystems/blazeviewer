@@ -149,6 +149,18 @@ pub struct VideoSession {
     audio_failed: bool,
     /// When preroll first started waiting on audio readiness (bounds the wait).
     audio_wait_since: Option<Instant>,
+    /// Whether the landing of the in-flight seek resumes playback (`false` = the
+    /// pre-seek state was paused: land, present one frame, stay paused). `true`
+    /// outside of seeks (the normal fill promotes to Playing).
+    resume_after_seek: bool,
+    /// The **desired** seek target while one is in flight — held keys scrub
+    /// relative to this (the intent), not to whatever last landed. Cleared on
+    /// landing.
+    desired_seek: Option<Duration>,
+    /// Ignore audio-clock corrections until a sample lands near this target: a
+    /// straggler sample carrying the pre-seek position must not yank the clock
+    /// back (the audio "ack" of the plan's seek step 6).
+    audio_seek_ack: Option<Duration>,
 }
 
 impl VideoSession {
@@ -187,6 +199,9 @@ impl VideoSession {
             audio_last: None,
             audio_failed: false,
             audio_wait_since: None,
+            resume_after_seek: true,
+            desired_seek: None,
+            audio_seek_ack: None,
         };
         (
             session,
@@ -242,13 +257,29 @@ impl VideoSession {
                     }
                 }
                 Buffering => {
-                    if self.preroll_satisfied(now) {
+                    // A paused seek needs only its landing frame: present it once
+                    // and hold (the plan: "a seek while paused stays paused but
+                    // updates the displayed frame").
+                    if !self.resume_after_seek && !self.queue.is_empty() {
+                        let frame = self.queue.pop_front().expect("checked non-empty");
+                        self.queued_bytes = self.queued_bytes.saturating_sub(frame.byte_len());
+                        self.clock.position = frame.pts;
+                        self.clock.anchor = None;
+                        self.current_pts = Some(frame.pts);
+                        self.desired_seek = None;
+                        self.started = true;
+                        self.resume_after_seek = true; // one-shot; back to default
+                        update.present = Some(frame);
+                        self.transition(Paused, &mut update);
+                    } else if self.preroll_satisfied(now) {
                         if let Some(front_pts) = self.queue.front().map(|f| f.pts) {
-                            // Initial fill starts the clock at the first frame's
-                            // PTS; a rebuffer resumes from the frozen position
-                            // (hard re-anchor — the stall never advances media
-                            // time).
-                            let from = if self.started {
+                            // Initial fill and seek landings anchor at the landed
+                            // frame's PTS (within one frame interval of the seek
+                            // target — the documented tolerance); a plain rebuffer
+                            // resumes from the frozen position. Hard re-anchor in
+                            // every case — the stall never advances media time.
+                            let landing = self.desired_seek.take().is_some();
+                            let from = if self.started && !landing {
                                 self.clock.position
                             } else {
                                 front_pts
@@ -258,11 +289,21 @@ impl VideoSession {
                             self.transition(Playing, &mut update);
                             continue;
                         } else if self.eos {
-                            // EOS with nothing queued: an empty stream (or a
-                            // rebuffer that drained straight into EOS) — park.
+                            // EOS with nothing queued: an empty stream, a rebuffer
+                            // that drained into EOS, or a seek landing at the very
+                            // end — park where the clock froze.
+                            self.desired_seek = None;
                             self.clock.freeze(now);
                             self.transition(Ended, &mut update);
                         }
+                    }
+                }
+                Seeking => {
+                    // The landing frame (new generation — stale ones were discarded
+                    // in the drain) or the stream's end moves us into the refill.
+                    if !self.queue.is_empty() || self.eos {
+                        self.transition(Buffering, &mut update);
+                        continue;
                     }
                 }
                 Playing => {
@@ -293,13 +334,97 @@ impl VideoSession {
                         }
                     }
                 }
-                Paused | Seeking | Ended | Failed | Stopped => {}
+                Paused | Ended | Failed | Stopped => {}
             }
             break;
         }
 
         self.grant_credits();
         update
+    }
+
+    /// Seek by a signed step from the **desired** position (task #79 phase 6) —
+    /// the in-flight seek target when one exists, else the current position — so
+    /// a held key scrubs the intent even while landings lag behind. Returns the
+    /// clamped target (for the shell's audio seek + OSD).
+    pub fn seek_by(&mut self, back: bool, step: Duration, now: Instant) -> Option<Duration> {
+        let base = self.desired_seek.unwrap_or_else(|| self.position(now));
+        let target = if back {
+            base.saturating_sub(step)
+        } else {
+            base + step
+        };
+        self.seek_to(target, now, None)
+    }
+
+    /// Replay from the top (P on an ended clip): a seek to 0 that resumes.
+    pub fn replay(&mut self, now: Instant) -> Option<Duration> {
+        self.seek_to(Duration::ZERO, now, Some(true))
+    }
+
+    /// Land a seek per the plan's 8-step spec (task #79 phase 6): clamp, bump the
+    /// generation + flush, tell the producer (it recreates its reader positioned
+    /// at the target and decodes forward), then the landing frame arrives under
+    /// the new generation and `poll` re-anchors — resuming only if playing before
+    /// (`resume`: `None` derives from the current state; `Some` overrides, for
+    /// replay). Latest-value: calling again supersedes every stage of the last.
+    /// Returns the clamped target, `None` if the session can't seek right now.
+    pub fn seek_to(
+        &mut self,
+        target: Duration,
+        _now: Instant,
+        resume: Option<bool>,
+    ) -> Option<Duration> {
+        use VideoSessionState::*;
+        if matches!(self.state, Opening | Failed | Stopped) {
+            return None;
+        }
+        // Clamp inside the end: MF errors (0xC00D36E5) on a past-EOS position
+        // rather than clamping, so the session clamps FIRST (spike-verified).
+        let target = match self.duration {
+            Some(d) => target.min(d.saturating_sub(Duration::from_millis(100))),
+            None => target,
+        };
+        // Resume intent: keep a playing clip playing; a paused seek stays paused
+        // but shows its landing frame. Chained seeks keep the original intent.
+        self.resume_after_seek = resume.unwrap_or(match self.state {
+            Playing => true,
+            Paused | Ended => false,
+            Buffering | Seeking => self.resume_after_seek,
+            Opening | Failed | Stopped => unreachable!("filtered above"),
+        });
+        // Flush: a bumped generation makes every in-flight frame stale (the
+        // consumer-side discard), and the queue empties now. Credits reset —
+        // the SeekTo zeroes the producer's balance, so only the fresh grants
+        // (sent after it, in channel order) count.
+        self.generation = self.generation.next();
+        self.queue.clear();
+        self.queued_bytes = 0;
+        self.credits_out = 0;
+        self.eos = false;
+        self.desired_seek = Some(target);
+        self.audio_seek_ack = Some(target);
+        // Freeze the clock AT the target: the HUD shows where we're going while
+        // the landing is in flight; the landing frame re-anchors precisely.
+        self.clock.position = target;
+        self.clock.anchor = None;
+        let _ = self.to_producer.send(VideoProducerMsg::SeekTo {
+            target,
+            generation: self.generation,
+        });
+        if self.state != VideoSessionState::Seeking {
+            self.state = VideoSessionState::Seeking;
+        }
+        // Fresh credits follow the SeekTo immediately so the landing frame (which
+        // consumes one) never waits a tick.
+        self.grant_credits();
+        Some(target)
+    }
+
+    /// The desired seek target if one is in flight, else the current position —
+    /// what the OSD shows and what the next relative seek steps from.
+    pub fn desired_position(&self, now: Instant) -> Duration {
+        self.desired_seek.unwrap_or_else(|| self.position(now))
     }
 
     /// Pause (freeze the clock; the current frame holds).
@@ -371,6 +496,18 @@ impl VideoSession {
             self.audio_failed = true;
             self.audio_last = None;
             return;
+        }
+        // The audio "ack" after a seek (plan step 6): until a sample lands near
+        // the target, its position is the stale pre-seek one — record readiness
+        // but apply no correction (a stale sample must not yank the clock back).
+        if let Some(target) = self.audio_seek_ack {
+            let gap = sample.position.abs_diff(target);
+            if gap <= Duration::from_secs(1) {
+                self.audio_seek_ack = None; // acked — corrections resume below
+            } else {
+                self.audio_last = Some((sample, now));
+                return;
+            }
         }
         if self.state == VideoSessionState::Playing && sample.state == AudioClockState::Playing {
             let target = sample.position;
@@ -1005,6 +1142,196 @@ mod tests {
         );
         // Frames still pace on the monotonic clock.
         assert!(s.poll(t0 + Duration::from_millis(34)).present.is_some());
+    }
+
+    /// Phase 6: a seek while playing flushes, bumps the generation (stale frames
+    /// can never present), lands on the new-generation frame, and resumes.
+    #[test]
+    fn seek_while_playing_flushes_lands_and_resumes() {
+        let (mut s, io) = VideoSession::new(SID, FRAME_BYTES);
+        let t0 = Instant::now();
+        opened(&io, 60_000);
+        io.events.send(VideoProducerEvent::Frame(frame(0))).unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(33)))
+            .unwrap();
+        s.poll(t0); // Playing, presents 0
+        drain_credits(&io);
+
+        let target = s
+            .seek_to(Duration::from_secs(10), t0, None)
+            .expect("seekable");
+        assert_eq!(target, Duration::from_secs(10));
+        assert_eq!(s.state(), VideoSessionState::Seeking);
+        assert_eq!(
+            s.position(t0),
+            Duration::from_secs(10),
+            "HUD shows the target"
+        );
+        // The producer got the SeekTo followed by fresh credits.
+        let mut saw_seek = false;
+        let mut fresh = 0;
+        while let Ok(m) = io.msgs.try_recv() {
+            match m {
+                VideoProducerMsg::SeekTo { target, generation } => {
+                    assert_eq!(target, Duration::from_secs(10));
+                    assert_eq!(generation, SeekGeneration(1));
+                    saw_seek = true;
+                }
+                VideoProducerMsg::Credit => {
+                    assert!(saw_seek, "credits must follow the SeekTo");
+                    fresh += 1;
+                }
+                VideoProducerMsg::Stop => panic!("no stop"),
+            }
+        }
+        assert!(saw_seek);
+        assert!(fresh >= 2, "fresh credits for the landing, got {fresh}");
+
+        // A stale (old-generation) frame that raced the flush is discarded.
+        io.events
+            .send(VideoProducerEvent::Frame(frame(66)))
+            .unwrap();
+        s.poll(t0);
+        assert_eq!(s.state(), VideoSessionState::Seeking, "stale frame ignored");
+
+        // The landing frames (new generation, ≥ target) arrive → refill → resume.
+        let mut land = frame(10_005);
+        land.seek_generation = SeekGeneration(1);
+        io.events.send(VideoProducerEvent::Frame(land)).unwrap();
+        let mut next = frame(10_038);
+        next.seek_generation = SeekGeneration(1);
+        io.events.send(VideoProducerEvent::Frame(next)).unwrap();
+        let u = s.poll(t0 + Duration::from_millis(400));
+        assert_eq!(
+            s.state(),
+            VideoSessionState::Playing,
+            "was playing → resumes"
+        );
+        let f = u.present.expect("landing frame presents");
+        assert_eq!(f.pts, Duration::from_millis(10_005));
+        assert_eq!(
+            s.position(t0 + Duration::from_millis(400)),
+            Duration::from_millis(10_005),
+            "re-anchored at the landed frame"
+        );
+    }
+
+    /// Phase 6: a paused seek stays paused but shows its landing frame; relative
+    /// seeks step from the desired target (the intent), and targets clamp inside
+    /// the duration.
+    #[test]
+    fn paused_seek_presents_once_and_relative_seeks_scrub_the_intent() {
+        let (mut s, io) = VideoSession::new(SID, FRAME_BYTES);
+        let t0 = Instant::now();
+        opened(&io, 10_000);
+        io.events.send(VideoProducerEvent::Frame(frame(0))).unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(33)))
+            .unwrap();
+        s.poll(t0);
+        s.pause(t0);
+        assert_eq!(s.state(), VideoSessionState::Paused);
+
+        // Two quick relative steps: the second steps from the first's DESIRED
+        // target, not from the (unmoved) landed position.
+        let t1 = s.seek_by(false, Duration::from_secs(2), t0).unwrap();
+        assert_eq!(t1, Duration::from_secs(2));
+        let t2 = s.seek_by(false, Duration::from_secs(2), t0).unwrap();
+        assert_eq!(t2, Duration::from_secs(4), "scrubs the intent");
+        // And clamping: +15 s from 4 s in a 10 s clip pins inside the end.
+        let t3 = s.seek_by(false, Duration::from_secs(15), t0).unwrap();
+        assert_eq!(t3, Duration::from_millis(9_900), "clamped inside EOS");
+
+        // Landing (newest generation = 3 after three seeks) presents ONE frame
+        // and stays paused.
+        let mut land = frame(9_900);
+        land.seek_generation = SeekGeneration(3);
+        io.events.send(VideoProducerEvent::Frame(land)).unwrap();
+        let u = s.poll(t0 + Duration::from_millis(100));
+        assert_eq!(
+            s.state(),
+            VideoSessionState::Paused,
+            "paused seek stays paused"
+        );
+        assert_eq!(
+            u.present.expect("landing frame shows").pts,
+            Duration::from_millis(9_900)
+        );
+        // Frozen there — no drift while paused.
+        assert_eq!(
+            s.position(t0 + Duration::from_secs(60)),
+            Duration::from_millis(9_900)
+        );
+    }
+
+    /// Phase 6: after a seek, a stale audio sample (pre-seek position) is ignored
+    /// until audio acks near the target — then corrections resume.
+    #[test]
+    fn audio_ack_gates_corrections_after_a_seek() {
+        let (mut s, io) = VideoSession::new(SID, FRAME_BYTES);
+        let t0 = Instant::now();
+        opened_audio(&io, 60_000, true);
+        io.events.send(VideoProducerEvent::Frame(frame(0))).unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(33)))
+            .unwrap();
+        s.on_audio_clock(audio_sample(0, AudioClockState::Paused), t0);
+        s.poll(t0); // Playing
+
+        s.seek_to(Duration::from_secs(30), t0, None);
+        let mut land = frame(30_000);
+        land.seek_generation = SeekGeneration(1);
+        io.events.send(VideoProducerEvent::Frame(land)).unwrap();
+        let mut next = frame(30_033);
+        next.seek_generation = SeekGeneration(1);
+        io.events.send(VideoProducerEvent::Frame(next)).unwrap();
+        s.poll(t0);
+        assert_eq!(s.state(), VideoSessionState::Playing);
+
+        // A straggler sample still at the PRE-seek position must not yank the
+        // clock back 30 s.
+        s.on_audio_clock(audio_sample(1_000, AudioClockState::Playing), t0);
+        assert!(
+            s.position(t0) >= Duration::from_secs(30),
+            "stale audio ignored, got {:?}",
+            s.position(t0)
+        );
+        // Once audio lands near the target, corrections resume (hard band).
+        s.on_audio_clock(audio_sample(30_400, AudioClockState::Playing), t0);
+        s.on_audio_clock(audio_sample(31_000, AudioClockState::Playing), t0);
+        assert_eq!(
+            s.position(t0),
+            Duration::from_secs(31),
+            "post-ack discontinuity re-anchors to audio"
+        );
+    }
+
+    /// Phase 6: P on an ended clip replays via a seek to zero on the SAME session.
+    #[test]
+    fn replay_after_ended_seeks_to_zero_and_resumes() {
+        let (mut s, io) = VideoSession::new(SID, FRAME_BYTES);
+        let t0 = Instant::now();
+        opened(&io, 100);
+        io.events.send(VideoProducerEvent::Frame(frame(0))).unwrap();
+        eos(&io);
+        s.poll(t0); // 1 frame + EOS → plays it…
+        let _ = s.poll(t0 + Duration::from_millis(5));
+        let u = s.poll(t0 + Duration::from_millis(10));
+        assert_eq!(s.state(), VideoSessionState::Ended);
+        let _ = u;
+
+        assert_eq!(s.replay(t0), Some(Duration::ZERO));
+        assert_eq!(s.state(), VideoSessionState::Seeking);
+        let mut land = frame(0);
+        land.seek_generation = SeekGeneration(1);
+        io.events.send(VideoProducerEvent::Frame(land)).unwrap();
+        let mut next = frame(33);
+        next.seek_generation = SeekGeneration(1);
+        io.events.send(VideoProducerEvent::Frame(next)).unwrap();
+        let u = s.poll(t0 + Duration::from_millis(20));
+        assert_eq!(s.state(), VideoSessionState::Playing, "replay resumes");
+        assert_eq!(u.present.expect("frame 0 presents").pts, Duration::ZERO);
     }
 
     /// End to end on Windows: the real MF producer streaming the committed H.264

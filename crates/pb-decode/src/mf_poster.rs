@@ -341,6 +341,25 @@ fn codec_name(sub: &windows::core::GUID) -> &'static str {
     "Video"
 }
 
+/// A `VT_I8` PROPVARIANT holding a 100 ns media position — what
+/// `IMFSourceReader::SetCurrentPosition` takes (the video seek, task #79).
+pub(crate) fn propvariant_i8(value: i64) -> PROPVARIANT {
+    use windows::Win32::System::Com::StructuredStorage::{
+        PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
+    };
+    PROPVARIANT {
+        Anonymous: PROPVARIANT_0 {
+            Anonymous: std::mem::ManuallyDrop::new(PROPVARIANT_0_0 {
+                vt: VT_I8,
+                wReserved1: 0,
+                wReserved2: 0,
+                wReserved3: 0,
+                Anonymous: PROPVARIANT_0_0_0 { hVal: value },
+            }),
+        },
+    }
+}
+
 fn propvariant_u64(pv: &PROPVARIANT) -> Option<u64> {
     unsafe {
         let inner = &pv.Anonymous.Anonymous;

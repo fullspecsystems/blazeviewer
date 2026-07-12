@@ -237,6 +237,7 @@ impl VideoSessionState {
                 | (Buffering, Playing)
                 | (Buffering, Paused)   // seek-while-paused refills, then stays paused
                 | (Buffering, Ended)
+                | (Buffering, Seeking)  // a held scrub supersedes mid-fill (latest-value)
                 | (Playing, Paused)
                 | (Playing, Seeking)
                 | (Playing, Buffering)  // rebuffer-don't-drift underrun
@@ -566,8 +567,8 @@ mod tests {
         );
         assert!(!Seeking.can_transition_to(Playing), "a seek refills first");
         assert!(
-            !Buffering.can_transition_to(Seeking),
-            "land or fill, then seek"
+            Buffering.can_transition_to(Seeking),
+            "a held scrub supersedes mid-fill (latest-value)"
         );
         for s in ALL {
             assert!(!s.can_transition_to(s), "no self-loops: {s:?}");

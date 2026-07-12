@@ -442,6 +442,10 @@ pub enum CoreEffect {
     StopVideoAudio,
     /// Pause the video audio (session paused or rebuffering — freeze together).
     PauseVideoAudio,
+    /// Seek the video audio to `position` (task #79 phase 6). The ack is implicit:
+    /// the clock bridge ignores samples until one reports a position near the
+    /// target, so a stale pre-seek sample can never re-anchor the session.
+    SeekVideoAudio { position: std::time::Duration },
     /// Start/resume the video audio (session entered `Playing` — resume together).
     ResumeVideoAudio,
     /// Mute/unmute the video audio in place (the mute toggle while a video plays).

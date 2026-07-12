@@ -649,6 +649,7 @@ impl App {
             anim_stream: None,
             video: None,
             video_seq: 0,
+            video_seek_last: None,
             prepared: None,
             anim_gen: 0,
             anim_hint_shown_for: None,
@@ -2433,6 +2434,11 @@ impl App {
                     contract::CoreEffect::SetVideoAudioMuted(muted) => {
                         if let Some(a) = &self.video_audio {
                             a.set_muted(muted);
+                        }
+                    }
+                    contract::CoreEffect::SeekVideoAudio { position } => {
+                        if let Some(a) = &self.video_audio {
+                            a.seek(position);
                         }
                     }
                     // The core routed a flow action (dialog / window / scan / file edit / quit) it

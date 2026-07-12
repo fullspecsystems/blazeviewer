@@ -14,9 +14,13 @@ with any pre-release suffix carried only by the tag.
   rotation and colors), a play badge, and its details in the info panel (duration, codec,
   frame rate, audio). **Press `P` to play, with sound** — pause/resume on `P`, replay
   after the clip ends, and the existing mute toggle applies to video too (muting keeps
-  perfect sync; unmuting picks up mid-clip). Playback streams the file with constant
-  memory, so a clip of any length plays without loading it into RAM. A clip whose audio
-  cannot start still plays, silently. A clip
+  perfect sync; unmuting picks up mid-clip). **Seek with the arrow keys while a video
+  plays**: `←`/`→` jump 2 seconds, `Shift+←`/`→` jump 15, holding scrubs, and a small
+  position readout (`0:42 / 1:31`) flashes as you seek. When you are zoomed in far
+  enough that the picture pans horizontally, the arrows keep panning — seeking steps
+  aside. A seek while paused updates the frame and stays paused. Playback streams the
+  file with constant memory, so a clip of any length plays without loading it into RAM.
+  A clip whose audio cannot start still plays, silently. A clip
   Windows has no codec for shows a plain dark tile instead of an error. Live Photo motion
   files are not listed twice: an `IMG_1234.MOV` next to `IMG_1234.HEIC` stays hidden and
   keeps playing through its photo with `P`. Videos never open from inside ZIP/7z archives,

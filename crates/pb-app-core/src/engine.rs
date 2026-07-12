@@ -88,6 +88,11 @@ pub const PAN_RAMP_SECS: f32 = 0.7;
 /// delay (`initial_delay`). ~14 fps — quick enough to scrub, slow enough to read (#37).
 pub const FRAME_STEP_REPEAT: Duration = Duration::from_millis(70);
 
+/// Repeat interval for the held video seek (task #79 phase 6): 5 steps/s of ±2 s
+/// (±15 s shifted) — brisk scrubbing, and comfortably above the measured 4K HEVC
+/// seek-landing time (~350 ms) with latest-value coalescing absorbing the rest.
+pub const VIDEO_SEEK_REPEAT: Duration = Duration::from_millis(200);
+
 /// How long the user must rest on an animated still before we eagerly decode the whole
 /// sequence in the background (so a slow WebP/AVIF plays instantly on `P`). Long enough
 /// that tapping straight through a folder of animations never kicks a decode (#37).

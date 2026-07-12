@@ -35,6 +35,7 @@ mod imp {
         pub fn pause(&self) {}
         pub fn resume(&self) {}
         pub fn set_muted(&self, _muted: bool) {}
+        pub fn seek(&self, _position: std::time::Duration) {}
         pub fn sample(&self) -> Option<AudioClockSample> {
             None
         }
@@ -86,6 +87,16 @@ mod imp {
         /// Mute in place — playback (and the clock) keeps running.
         pub fn set_muted(&self, muted: bool) {
             let _ = self.player.SetIsMuted(muted);
+        }
+
+        /// Seek to `position` (task #79 phase 6). The session treats the next
+        /// near-target sample as the ack, so no completion event is needed here.
+        pub fn seek(&self, position: std::time::Duration) {
+            if let Ok(session) = self.player.PlaybackSession() {
+                let _ = session.SetPosition(windows::Foundation::TimeSpan {
+                    Duration: (position.as_nanos() / 100) as i64,
+                });
+            }
         }
 
         /// One audio clock sample: the player's state + position right now. The

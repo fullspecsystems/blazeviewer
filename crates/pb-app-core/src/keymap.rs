@@ -499,8 +499,11 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
             Action::RandomPrev,
             vec![p("Shift+Enter"), p("Shift+NumpadEnter")],
         ),
-        one(Action::PanLeft, "Left"),
-        one(Action::PanRight, "Right"),
+        // Shift+Left/Right ride the same pan actions so the video-seek context
+        // (task #79 phase 6: bare = ±2 s, Shift = ±15 s) works out of the box;
+        // outside a video they just pan, same as bare.
+        (Action::PanLeft, vec![p("Left"), p("Shift+Left")]),
+        (Action::PanRight, vec![p("Right"), p("Shift+Right")]),
         one(Action::PanUp, "Up"),
         one(Action::PanDown, "Down"),
         (Action::ZoomIn, vec![p("="), p("NumpadAdd")]),

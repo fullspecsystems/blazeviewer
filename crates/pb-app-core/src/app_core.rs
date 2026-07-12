@@ -494,6 +494,9 @@ pub struct AppCore {
     /// Monotonic source of `VideoSessionId`s — a fresh id per session so straggler
     /// frames from a torn-down producer can never touch a newer session.
     pub video_seq: u64,
+    /// Last held-key video seek step (task #79 phase 6): the app's own repeat
+    /// timer (OS key-repeat stays ignored, like every other held action).
+    pub video_seek_last: Option<Instant>,
     /// An animation decoded ahead (eager prep) and held ready for instant playback.
     pub prepared: Option<Prepared>,
     /// Animation generation; bumped on navigate so a late decode for a past item is discarded.

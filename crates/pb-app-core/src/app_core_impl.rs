@@ -200,6 +200,7 @@ impl AppCore {
             anim_stream: None,
             video: None,
             video_seq: 0,
+            video_seek_last: None,
             prepared: None,
             anim_gen: 0,
             anim_hint_shown_for: None,
@@ -5682,9 +5683,17 @@ impl AppCore {
                     self.effects.push(contract::CoreEffect::ResumeVideoAudio);
                     self.draw();
                 }
-                // Replay from the top (phase 6 turns this into a seek-to-0 on the
-                // same session; a fresh session is the phase-4 equivalent).
-                Ended | Failed | Stopped => self.start_video_session(item),
+                // Replay from the top: a seek to 0 on the SAME session (the
+                // producer parks after EOS precisely for this).
+                Ended => {
+                    let now = self.now;
+                    if let Some(target) = self.video.as_mut().unwrap().session.replay(now) {
+                        self.effects
+                            .push(contract::CoreEffect::SeekVideoAudio { position: target });
+                        self.draw();
+                    }
+                }
+                Failed | Stopped => self.start_video_session(item),
                 // Starting up (or mid-seek later): let it be.
                 Opening | Buffering | Seeking => {}
             },
@@ -5731,6 +5740,36 @@ impl AppCore {
             let _ = item;
             self.show_toast("Video playback is not available yet on this platform");
         }
+    }
+
+    /// One seek step on the active video (task #79 phase 6): ±2 s, Shift ±15 s,
+    /// relative to the **desired** target so a held key scrubs the intent. Seeks
+    /// audio alongside and flashes the position OSD (`m:ss / m:ss`).
+    pub fn video_seek(&mut self, back: bool) {
+        let step = if self.mods.shift {
+            Duration::from_secs(15)
+        } else {
+            Duration::from_secs(2)
+        };
+        let now = self.now;
+        let Some(v) = self.video.as_mut() else {
+            return;
+        };
+        let Some(target) = v.session.seek_by(back, step, now) else {
+            return;
+        };
+        let duration = v.session.duration;
+        self.effects
+            .push(contract::CoreEffect::SeekVideoAudio { position: target });
+        let osd = match duration {
+            Some(d) => format!(
+                "{} / {}",
+                crate::video::format_video_duration(target),
+                crate::video::format_video_duration(d)
+            ),
+            None => crate::video::format_video_duration(target),
+        };
+        self.show_toast(&osd);
     }
 
     /// Stop and drop any active video session (navigation, delete, teardown). The
@@ -6190,6 +6229,15 @@ impl AppCore {
         Some((iw, ih, fit.max_width, fit.max_height))
     }
 
+    /// Whether the image overflows the viewport **horizontally** — the condition
+    /// under which the horizontal pan keys keep panning during video playback
+    /// instead of seeking (task #79 phase 6: pan wins when zoomed).
+    pub fn pannable_horizontally(&self) -> bool {
+        self.screen_and_image()
+            .map(|(iw, ih, sw, sh)| self.view.max_pan(iw, ih, sw, sh)[0] > 0.0)
+            .unwrap_or(false)
+    }
+
     /// Whether the image currently overflows the viewport (so panning does
     /// something). Drives the grab-hand cursor affordance.
     pub fn pannable(&self) -> bool {
@@ -6243,7 +6291,25 @@ impl AppCore {
             }
         }
 
-        let (px, py) = self.pan_held();
+        // Contextual seek (task #79 phase 6): while a video plays and the image has
+        // no horizontal overflow to pan, the horizontal pan actions seek instead
+        // (±2 s, Shift ±15 s, self-timed repeat — OS key-repeat stays ignored).
+        // Pan wins when zoomed with horizontal overflow; vertical pan is untouched.
+        let (raw_px, py) = self.pan_held();
+        let mut px = raw_px;
+        if raw_px != 0.0 && self.video.is_some() && !self.pannable_horizontally() {
+            let due = self
+                .video_seek_last
+                .is_none_or(|t| now.saturating_duration_since(t) >= VIDEO_SEEK_REPEAT);
+            if due {
+                self.video_seek_last = Some(now);
+                self.video_seek(raw_px > 0.0); // PanLeft (+1) = seek backward
+            }
+            px = 0.0; // consumed — never also pans
+            changed = true; // keep ticking so the held repeat fires
+        } else {
+            self.video_seek_last = None;
+        }
         if px != 0.0 || py != 0.0 {
             let start = *self.pan_started.get_or_insert(now);
             let last = self.pan_last.replace(now).unwrap_or(start);

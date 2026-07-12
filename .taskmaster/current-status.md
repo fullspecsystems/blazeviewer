@@ -2,7 +2,26 @@
 
 _Last updated: 2026-07-11 (late). Supersedes the morning handoff (#76 shipped / #79 planned)._
 
-## State: main, #79 phases 0-5 done (Windows scope), all gates green
+## State: main, #79 phases 0-6 done (Windows scope), all gates green
+
+**Phase 6 (seeking + contextual input) landed — subtask 79.7 `review` (owner smoke:
+arrows seek ±2 s / Shift ±15 s while a video plays, hold to scrub, OSD shows
+`m:ss / m:ss`; zoomed-with-overflow keeps panning; paused seek updates the frame and
+stays paused; P after the end replays from 0 on the same session).** Also mid-session:
+the owner-reported 4K-at-⅔-speed bug was fixed (credit starvation — frame_bytes now
+corrected from `Opened`'s negotiated size; budget 3×4K + frame cap 4 to cover the
+in-flight credit accounting; commit 387860b).
+Phase-6 mechanics: producer `SeekTo` zeroes its credit balance (flush race-free by
+channel order), retires + recreates the reader positioned before first read
+(spike-locked), decodes forward to ≥ target, supersedes at every stage
+(never flashes), and **parks after EOS** so replay seeks work; session clamps inside
+duration (MF errors past EOS), bumps generation + flushes, freezes the clock at the
+target, lands via Seeking→Buffering (Buffering→Seeking now legal for held scrubs),
+resumes only if it was playing, gates audio corrections until the post-seek ack sample;
+`seek_by` scrubs the DESIRED target. Input: horizontal pan actions contextually seek
+(no new bindings; default keymap adds Shift+Left/Right → the pan actions), self-timed
+200 ms repeat, `pannable_horizontally()` keeps pan-wins-when-zoomed. HUD persistent
+position pill deferred to phase-7 polish (the seek OSD toast covers feedback).
 
 **Phase 5 (audio + clock bridge) landed — subtask 79.6 `review` (owner smoke: play a clip
 WITH sound; check lip-sync by eye; mute/unmute mid-play; pause/resume keeps sync).**
@@ -82,18 +101,16 @@ Key files: `pb-app-core/src/video.rs` (classify/item_kind/companion helpers),
 (`video_placeholder` + dispatch), `default_app.rs`, `main.rs`, release-linux.sh,
 Info-swift-host.plist.
 
-**Next: phase 6 (seeking + contextual input, subtask 79.7).** The plan's 8-step seek spec
-(clamp → bump seek_generation + flush → reposition → decode-forward → publish first ≥
-target → seek audio + ack → hard re-anchor → resume-if-was-playing). Spike-locked
-strategy: **recreate the reader per seek** (open ~20 ms, position-before-first-read
-~0 ms; repositioning a warm HEVC reader blocks ~1 s) — i.e. the producer gets a SeekTo
-message that tears down + reopens its reader at the target (or the session spawns a
-fresh producer with a start offset + bumped generation, reusing the existing identity
-discard rules). Seek-past-EOS errors (0xC00D36E5) — clamp FIRST. Input: contextual
-rewrite of the PAN actions while a video plays (±2 s, Shift ±15 s, self-timed hold with
-latest-value coalescing; pan wins when zoomed with horizontal overflow); audio seek =
-`MediaPlaybackSession.SetPosition` + await its position ack; HUD position pill
-(`m:ss / m:ss` via `format_video_duration`). Custom-keymap tests per the plan.
+**Next: phase 7 (parity, failures, packaging, docs — subtask 79.8).** Linux (FFmpeg
+producer + incremental PCM audio) then macOS (AVAssetReader producer + AVAudioPlayer
+clock) parity matrices; codec-missing/corrupt-file UI polish (the play error naming the
+Store extension); delete-while-playing retry-after-retirement (known limitation from
+phase 4); persistent HUD position pill; privacy audit (extend the no-trace test over a
+video playback session, not just viewing); perf corpus (P→first-frame p50/p95 for
+H.264 + HEVC, 4K steady-state no-Lanczos check — the reusable present path + fitted MF
+output already guarantee the structure); CLAUDE.md (fix the stale v0 keymap list +
+document video) + CHANGELOG roll-up. Also owner-flagged: verify the phase-5/6 audio
+sync on the 4K60 monster clip after the 387860b credit fix.
 
 `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, the featured
 clippy (`libheif,dav1d`), and `fmt --check` all pass.

@@ -149,6 +149,17 @@ pub enum VideoProducerEvent {
 pub enum VideoProducerMsg {
     /// Decode and send one frame (or `EndOfStream` if the stream is done).
     Credit,
+    /// Land a seek (task #79 phase 6): recreate the reader positioned at `target`
+    /// (session-relative; spike-locked — repositioning a warm HEVC reader blocks
+    /// ~1 s, a fresh one positions in ~0 ms), decode forward discarding frames
+    /// before it, and stamp everything after with `generation`. Latest-value: a
+    /// newer `SeekTo` supersedes every stage of an older one, and a `SeekTo`
+    /// **zeroes the producer's credit balance** — only credits received after it
+    /// count, which makes the session's flush + regrant race-free by channel order.
+    SeekTo {
+        target: Duration,
+        generation: SeekGeneration,
+    },
     /// Tear down now. Channel disconnection means the same thing.
     Stop,
 }
