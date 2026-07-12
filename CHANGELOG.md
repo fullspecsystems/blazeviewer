@@ -51,6 +51,9 @@ with any pre-release suffix carried only by the tag.
   lays the presentation groundwork for video playback.
 
 ### Fixed
+- **Dropping files onto the window now focuses PhotoBlaze.** Previously the drag's source
+  (usually Explorer) kept keyboard focus, so the freshly opened photos ignored the arrow
+  keys and Space until you clicked the window.
 - **The folder tree (Shift+F) now shows for ZIP and 7z archives.** Opening an archive that has
   internal folders showed an empty "Folders" panel. The panel was reading only the on-disk folder
   browser, which does not apply to an archive, so the archive's folder list never appeared. It now
