@@ -885,11 +885,30 @@ impl AppCoreHandle {
     /// Resolve the startup window mode from settings (`StartupMode` + the remembered
     /// last mode) — call once right after attach. `true` = enter the borderless speed
     /// mode; the core's `windowed` mirror is set here WITHOUT re-saving settings (this
-    /// restores state, unlike the F toggle which changes it).
+    /// restores state, unlike the F toggle which changes it). A `--windowed` /
+    /// `--fullscreen` launch override wins over the saved preference (task #78 — the
+    /// winit shell resolves `overrides.windowed` the same way, pre-window); requires
+    /// `apply_launch_args` to have run first (it has: the host preflights before attach).
     fn startup_fullscreen(&mut self) -> bool {
-        let fs = self.core.settings.start_fullscreen();
+        let fs = match self.core.launch.windowed {
+            Some(windowed) => !windowed,
+            None => self.core.settings.start_fullscreen(),
+        };
         self.core.windowed = !fs;
         fs
+    }
+
+    /// The appearance the app should ACTUALLY wear right now — the saved preference
+    /// unless a `--theme` launch override is live (task #78). Same 0 system / 1 light /
+    /// 2 dark encoding as `SettingsFormFfi::appearance_mode`. The host's
+    /// `applyAppearancePreference` reads THIS; `settings_form()` stays the raw saved
+    /// value (it edits the preference, and must not show a session override as saved).
+    fn effective_appearance(&self) -> u8 {
+        match self.core.effective_appearance() {
+            pb_app_core::settings::AppearanceMode::System => 0,
+            pb_app_core::settings::AppearanceMode::Light => 1,
+            pb_app_core::settings::AppearanceMode::Dark => 2,
+        }
     }
 
     /// The saved windowed geometry (`present == false` when none was ever saved).
@@ -1597,7 +1616,9 @@ impl AppCoreHandle {
             self.core.recursive,
             !self.core.windowed, // `windowed` is the inverse of the fullscreen checkbox
             self.core.slideshow.on,
-            self.core.settings.mute_live_audio,
+            // Effective, not raw: a `--mute` launch override must show as a checked
+            // menu item (the winit shell passes `effective_mute()` here too).
+            self.core.effective_mute(),
             self.core.can_save_rotation(),
             self.core.can_reveal(),
             self.dir_scan.is_some(),
@@ -2765,6 +2786,9 @@ mod ffi {
 
         // Startup window state + geometry persistence (finalize item 2).
         fn startup_fullscreen(&mut self) -> bool;
+        // The live appearance (saved preference, or the --theme launch override):
+        // 0 system / 1 light / 2 dark — what applyAppearancePreference wears.
+        fn effective_appearance(&self) -> u8;
         fn saved_geometry(&self) -> WindowGeometryFfi;
         fn note_window_geometry(&mut self, x: i32, y: i32, w: u32, h: u32);
 
@@ -2918,6 +2942,56 @@ mod tests {
             "overrides never land in Settings"
         );
         assert_eq!(h.core.settings.mute_live_audio, saved_mute);
+    }
+
+    /// A `--windowed` / `--fullscreen` launch override wins over the saved startup mode
+    /// (deterministic in both directions, whatever the developer's real settings say),
+    /// and the `effective_appearance` accessor folds a `--theme` override in the
+    /// settings-form encoding (0 system / 1 light / 2 dark).
+    #[test]
+    fn launch_overrides_fold_into_startup_reads() {
+        let mut h = test_handle(800, 600, 1.0);
+        h.apply_launch_args(
+            vec![
+                "photoblaze".into(),
+                "--fullscreen".into(),
+                "--theme".into(),
+                "dark".into(),
+            ],
+            "v".into(),
+        );
+        assert!(
+            h.startup_fullscreen(),
+            "--fullscreen wins over the saved mode"
+        );
+        assert!(!h.core.windowed, "the windowed mirror follows");
+        assert_eq!(h.effective_appearance(), 2, "--theme dark reads as 2");
+
+        let mut w = test_handle(800, 600, 1.0);
+        w.apply_launch_args(
+            vec![
+                "photoblaze".into(),
+                "-w".into(),
+                "--theme".into(),
+                "light".into(),
+            ],
+            "v".into(),
+        );
+        assert!(
+            !w.startup_fullscreen(),
+            "--windowed wins over the saved mode"
+        );
+        assert!(w.core.windowed);
+        assert_eq!(w.effective_appearance(), 1);
+
+        // No override: the accessor mirrors the saved preference's encoding.
+        let plain = test_handle(800, 600, 1.0);
+        let saved = match plain.core.settings.appearance_mode {
+            pb_app_core::settings::AppearanceMode::System => 0,
+            pb_app_core::settings::AppearanceMode::Light => 1,
+            pb_app_core::settings::AppearanceMode::Dark => 2,
+        };
+        assert_eq!(plain.effective_appearance(), saved);
     }
 
     /// `open_launch_paths` consumes the stash exactly once — the idempotence guard the
