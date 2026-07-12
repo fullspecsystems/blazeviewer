@@ -29,7 +29,9 @@ the featured clippy (`libheif,dav1d`), and `fmt --check` all pass.
   used to refuse the whole 7z); `PhotoSource::size_hint` feeds the panel's size row
   (probe skipped for archive videos — duration arrives via `Opened`). No-trace holds:
   the zip no-trace test now includes a video poster. **macOS**: archive videos list but
-  toast "can't play yet" (AVPlayer is URL-based; resource-loader parity is future work).
+  toast "can't play yet" (AVPlayer is URL-based) — parity is **task #82** (bytes-backed
+  AVAsset via a resource loader; FFI, player, poster, no-trace subtasks; #81 was taken
+  concurrently by the mac agent's frame-capture task).
   Verified end to end: real-MF tests (producer streams+seeks from bytes, poster/probe
   from bytes, WinRT audio opens from bytes) + app smoke on a corpus video-only zip.
 

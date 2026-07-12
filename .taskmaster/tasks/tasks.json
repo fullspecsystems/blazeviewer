@@ -1075,6 +1075,42 @@
             "status": "pending"
           }
         ]
+      },
+      {
+        "id": 82,
+        "title": "macOS: play videos inside ZIP/7z archives (bytes-backed AVAsset parity)",
+        "description": "Archive videos are indexed and typed on every platform (shipped with the Windows VideoInput::Bytes work, commit 2fb1317), but on macOS they show a placeholder poster and P toasts 'Videos inside archives can't play on macOS yet' — the native AVPlayer backend and av_poster.rs open media by URL, and an archive entry has no path. Bring macOS to parity by serving the entry's in-RAM bytes to AVFoundation via a custom AVAssetResourceLoaderDelegate (fake scheme -> AVURLAsset), preserving the no-trace guarantee: never extract to disk. Windows is the reference: one Arc'd buffer feeds poster, playback, seeks, and audio.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          79
+        ],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "FFI: carry the entry bytes to the Swift shell",
+            "description": "PlayVideo currently carries a path. Extend the core->shell contract (pb-mac-ffi CoreEffectFfi + CoreModel.swift dispatch) so a pathless video item hands the shell the Arc-shared container bytes + entry name, fetched off the main thread (mirror the Windows producer-thread fetch in start_video_session; reuse ActiveVideo::media / VideoInput::Bytes). Remove the 'can't play yet' toast arm once wired.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "Swift: AVAssetResourceLoaderDelegate over in-RAM bytes",
+            "description": "In NativeVideoPlayer.swift, build an AVURLAsset on a custom scheme whose resource loader serves contentInformation (length, UTI from the entry extension) + byte ranges straight from the buffer. Play it through the existing AVPlayer pipeline (audio, seeks, scrubber, hover controls unchanged). Verify seeking and EOS-replay behave like file-backed clips.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "Posters for archive videos (av_poster parity)",
+            "description": "av_poster.rs is path-based AVFoundation, so archive entries show the placeholder tile. Route it through the same bytes-backed asset (or an equivalent) so archive videos get a real first-non-black-frame poster with correct rotation/color, matching the Windows decode_video_poster_input path.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "Guarantee + tests: RAM-only end to end",
+            "description": "Assert no temp-file fallback anywhere (the easy AVFoundation shortcut violates the no-trace guarantee). Extend the archive no-trace coverage to the mac path, and owner-smoke a video-only zip: opens, posters, plays with audio, seeks.",
+            "status": "pending"
+          }
+        ]
       }
     ]
   }
