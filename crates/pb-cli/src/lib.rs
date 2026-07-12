@@ -137,6 +137,13 @@ pub struct Cli {
     #[arg(long, hide = true)]
     pub new_window: bool,
 
+    /// Hidden macOS back-compat: the pre-CLI launch flag (`open … --args --pb-open
+    /// <path>`), kept working because a bare path in `argv[1]` triggers AppKit's
+    /// document-open machinery (the windowless-WindowGroup gotcha) — a `--`-prefixed
+    /// form dodges it. Folded into the positional paths by [`Cli::launch_paths`].
+    #[arg(long = "pb-open", value_name = "PATH", hide = true)]
+    pub pb_open: Option<PathBuf>,
+
     /// Print per-stage decode/timing report on exit (dev).
     #[arg(long, hide = true)]
     pub metrics: bool,
@@ -159,6 +166,15 @@ pub enum ThemeArg {
 }
 
 impl Cli {
+    /// Every path the command line asked to open: the positionals plus the hidden
+    /// `--pb-open` back-compat alias. Shells consume this, not `paths`, so the alias
+    /// can never be silently dropped.
+    pub fn launch_paths(&self) -> Vec<PathBuf> {
+        let mut all = self.paths.clone();
+        all.extend(self.pb_open.clone());
+        all
+    }
+
     /// Map the parsed command line into the session-only [`LaunchOverrides`] the core
     /// consumes. Pure — no I/O, no `std::env`, no exit.
     pub fn to_overrides(&self) -> LaunchOverrides {
@@ -435,6 +451,25 @@ mod tests {
         );
         assert!(overrides(&["--new-window"]).new_window);
         assert!(overrides(&["--metrics"]).metrics);
+    }
+
+    #[test]
+    fn pb_open_is_a_hidden_path_alias() {
+        // The macOS back-compat flag lands in launch_paths() after the positionals.
+        let cli = parse(&["a.jpg", "--pb-open", "/photos"]);
+        assert_eq!(
+            cli.launch_paths(),
+            vec![PathBuf::from("a.jpg"), PathBuf::from("/photos")]
+        );
+        // Alone, it is the whole path set; without it, positionals pass through.
+        assert_eq!(
+            parse(&["--pb-open", "/photos"]).launch_paths(),
+            vec![PathBuf::from("/photos")]
+        );
+        assert_eq!(
+            parse(&["a.jpg"]).launch_paths(),
+            vec![PathBuf::from("a.jpg")]
+        );
     }
 
     #[test]

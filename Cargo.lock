@@ -4015,6 +4015,7 @@ name = "pb-mac-ffi"
 version = "0.1.0"
 dependencies = [
  "pb-app-core",
+ "pb-cli",
  "pb-core",
  "pb-render",
  "pb-source",

@@ -121,6 +121,11 @@ pub struct AppCoreHandle {
     /// or the v1 `folder_tree_panel` for archive/empty decks — snapshotted by `tree_refresh`
     /// on a `PanelsChanged` marker so the indexed accessors + actions share one stable view.
     tree_snapshot: Vec<TreeRowFfi>,
+    /// The CLI's positional paths (task #78), stashed by [`apply_launch_args`]
+    /// (Self::apply_launch_args) and consumed exactly once by
+    /// [`open_launch_paths`](Self::open_launch_paths) after the canvas exists — the
+    /// stash-pull pattern (clipboard/dialog), so `Vec<String>` never crosses back to Swift.
+    pending_launch_paths: Vec<String>,
 }
 
 /// One flattened folder-tree row for the native list. `path` is the disk path (Finder
@@ -177,6 +182,7 @@ impl AppCoreHandle {
             help_snapshot: Vec::new(),
             inspector_snapshot: Vec::new(),
             tree_snapshot: Vec::new(),
+            pending_launch_paths: Vec::new(),
         }
     }
 
@@ -585,12 +591,68 @@ impl AppCoreHandle {
         self.open_paths(vec![path.to_string()]);
     }
 
+    /// Parse the launch command line (task #78) and apply it: session-only overrides land
+    /// on the core immediately (`AppCore::apply_launch_overrides` — safe pre-window; later
+    /// reads like `startup_fullscreen` / `effective_appearance` consume them), and the
+    /// positional paths are stashed for [`open_launch_paths`](Self::open_launch_paths).
+    ///
+    /// `argv` is the **full** `ProcessInfo.processInfo.arguments` — argv[0] included; clap
+    /// consumes the first element as the program name (dropping it would eat the first real
+    /// flag or path). `version` is the bundle's version string (`CFBundleShortVersionString`
+    /// + build id — this crate's own `CARGO_PKG_VERSION` is meaningless here).
+    ///
+    /// A parse error is a no-op: [`cli_preflight`] already gated help/version/usage errors
+    /// before the engine was built, so an `Err` here means the host skipped the preflight —
+    /// the launch degrades to "no CLI", never a crash.
+    fn apply_launch_args(&mut self, argv: Vec<String>, version: String) {
+        let Ok(cli) = pb_cli::parse_from(argv, &version) else {
+            return;
+        };
+        self.core.apply_launch_overrides(&cli.to_overrides());
+        self.pending_launch_paths = cli
+            .launch_paths()
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+    }
+
+    /// Open the paths stashed by [`apply_launch_args`](Self::apply_launch_args) — called by
+    /// the host once the canvas exists (the winit shell defers its launch open into
+    /// `resumed()` the same way). Consumed exactly once: a second call returns `false` and
+    /// opens nothing (the idempotence guard the double-delivery arbitration leans on).
+    ///
+    /// A directory launch honors `--recursive` / `--no-recursive`, else the saved
+    /// preference — the winit shell's exact startup logic (its `main()` mutates
+    /// `Source::Scan.recursive` the same way). Non-launch opens (drop, panel, Finder)
+    /// keep `open::plan`'s own policy, matching Windows.
+    fn open_launch_paths(&mut self) -> bool {
+        if self.pending_launch_paths.is_empty() {
+            return false;
+        }
+        let paths = std::mem::take(&mut self.pending_launch_paths);
+        let recursive = self
+            .core
+            .launch
+            .recursive
+            .unwrap_or(self.core.settings.recursive);
+        self.open_paths_inner(paths, Some(recursive));
+        true
+    }
+
     /// Open launch/drop/panel paths — the winit shell's `classify_inputs` mirrored (ADR-019):
     /// a lone directory scans recursively, a lone `.zip`/`.7z` opens to its contents, files
     /// scan/list per the launch policy (a single file → its folder flat, cursor on it). Routed
     /// through the core's `open_plan`, whose `Begin*` effects this crate executes on its
     /// worker threads. Empty / all-empty input is ignored (never blanks the current photo).
     fn open_paths(&mut self, paths: Vec<String>) {
+        self.open_paths_inner(paths, None);
+    }
+
+    /// The shared open-plan body: `recursive_override = Some(r)` forces a directory scan's
+    /// recursion (the CLI launch, where a flag or the saved preference decides — see
+    /// [`open_launch_paths`](Self::open_launch_paths)); `None` keeps `open::plan`'s own
+    /// policy (every non-launch entry point).
+    fn open_paths_inner(&mut self, paths: Vec<String>, recursive_override: Option<bool>) {
         self.core.now = Instant::now();
         let paths: Vec<PathBuf> = paths
             .into_iter()
@@ -614,7 +676,10 @@ impl AppCoreHandle {
                 LaunchInput::Files(files)
             }
         };
-        let plan = open::plan(input);
+        let mut plan = open::plan(input);
+        if let (Some(r), Source::Scan { recursive, .. }) = (recursive_override, &mut plan.source) {
+            *recursive = r;
+        }
         self.core.open_plan(plan.source, plan.cursor);
     }
 
@@ -2149,6 +2214,49 @@ fn fold_settings_form(
     s
 }
 
+/// The launch-preflight CLI parse (task #78): the Swift host calls this FIRST — before
+/// any window, before Sparkle, before the engine is built — with the **full**
+/// `ProcessInfo.processInfo.arguments` (argv[0] included; clap consumes the first element
+/// as the program name) and the bundle's version string. A free function on purpose: a
+/// terminal `--help` must never construct the decode pool just to print text.
+///
+/// The outcome mirrors the winit shell's `report_cli_error_and_exit` split:
+/// - `proceed = true` → run the app normally (`text` is empty). The host later feeds the
+///   same argv through [`AppCoreHandle::apply_launch_args`] to apply the overrides.
+/// - `proceed = false` → render `text` (help / version / a usage error) to the stream
+///   `use_stderr` picks and exit with `exit_code` (clap's own: 0 help/version, 2 usage).
+///
+/// Mixed strictness (the winit contract): a nonexistent positional path is a usage error
+/// here — same message text, exit 2 — so a typo'd path never launches an empty viewer.
+fn cli_preflight(argv: Vec<String>, version: String) -> ffi::LaunchPreflightFfi {
+    match pb_cli::parse_from(argv, &version) {
+        Ok(cli) => {
+            for p in cli.launch_paths() {
+                if !p.exists() {
+                    return ffi::LaunchPreflightFfi {
+                        proceed: false,
+                        text: format!("photoblaze: no such file or folder: {}", p.display()),
+                        use_stderr: true,
+                        exit_code: 2,
+                    };
+                }
+            }
+            ffi::LaunchPreflightFfi {
+                proceed: true,
+                text: String::new(),
+                use_stderr: false,
+                exit_code: 0,
+            }
+        }
+        Err(e) => ffi::LaunchPreflightFfi {
+            proceed: false,
+            text: e.render().to_string(),
+            use_stderr: e.use_stderr(),
+            exit_code: e.exit_code(),
+        },
+    }
+}
+
 /// The AI settings tab's **Test connection** probe (task #44): GET the endpoint's model
 /// list, summarize reachability + model count, and warn when no served model looks
 /// vision-capable (describe needs a VLM). Stateless + blocking — Swift calls it off the
@@ -2444,6 +2552,17 @@ mod ffi {
         models: String,
     }
 
+    // The launch-preflight CLI parse outcome (task #78) — see `cli_preflight`.
+    // proceed=false means: write `text` to stdout/stderr (per `use_stderr`) when the
+    // process has a shell, alert only for a real error on a GUI launch, exit(exit_code).
+    #[swift_bridge(swift_repr = "struct")]
+    struct LaunchPreflightFfi {
+        proceed: bool,
+        text: String,
+        use_stderr: bool,
+        exit_code: i32,
+    }
+
     // The native menu's check/enabled state — the mirror of contract::MenuState (scale:
     // 0 fit / 1 fill / 2 original; info: 0 hidden / 1 basic / 2 full-exif).
     #[swift_bridge(swift_repr = "struct")]
@@ -2611,6 +2730,13 @@ mod ffi {
         // touching the core. Blocking; the caller runs it off the main thread.
         fn probe_describe_endpoint(url: String) -> ProbeResultFfi;
 
+        // The CLI (task #78). cli_preflight runs FIRST (free fn — no engine for --help);
+        // apply_launch_args re-parses on the built handle (overrides + path stash);
+        // open_launch_paths consumes the stash once the canvas exists (consumed-once).
+        fn cli_preflight(argv: Vec<String>, version: String) -> LaunchPreflightFfi;
+        fn apply_launch_args(&mut self, argv: Vec<String>, version: String);
+        fn open_launch_paths(&mut self) -> bool;
+
         // The Shortcuts editor (NS2.6): a Rust-side draft keymap; rows by (group, index),
         // edits by stable action id; chords display as macOS glyphs.
         fn keymap_begin_edit(&mut self);
@@ -2701,6 +2827,116 @@ mod tests {
         let mut h = test_handle(800, 600, 1.0);
         h.key_down("NotAKey", false, false, false, false, false);
         assert!(drain(&mut h).is_empty());
+    }
+
+    /// The launch-preflight outcome mapping (task #78): help/version/usage-error/missing
+    /// path each produce the right (proceed, stream, exit code) triple — and the argv[0]
+    /// regression guard: clap consumes element 0 as the program name, so the first REAL
+    /// flag must still be seen.
+    #[test]
+    fn cli_preflight_outcomes() {
+        let pf = |args: &[&str]| {
+            cli_preflight(
+                args.iter().map(|s| s.to_string()).collect(),
+                "9.9.9-test".to_string(),
+            )
+        };
+        // argv[0] regression: --help is argv[1] and must parse as help, not the bin name.
+        let help = pf(&["photoblaze", "--help"]);
+        assert!(!help.proceed);
+        assert_eq!(help.exit_code, 0);
+        assert!(!help.use_stderr, "help goes to stdout");
+        assert!(help.text.contains("--slideshow"), "renders the real help");
+
+        let ver = pf(&["photoblaze", "--version"]);
+        assert!(!ver.proceed);
+        assert_eq!(ver.exit_code, 0);
+        assert!(
+            ver.text.contains("9.9.9-test"),
+            "--version prints the host-supplied bundle string"
+        );
+
+        let bad = pf(&["photoblaze", "--nope"]);
+        assert!(!bad.proceed);
+        assert_eq!(bad.exit_code, 2);
+        assert!(bad.use_stderr, "usage errors go to stderr");
+
+        // Mixed strictness: a nonexistent path is a usage error with the winit shell's
+        // exact message (argv[0] regression for positionals too — the path is argv[1]).
+        let missing = pf(&["photoblaze", "/definitely/not/here.jpg"]);
+        assert!(!missing.proceed);
+        assert_eq!(missing.exit_code, 2);
+        assert!(missing.use_stderr);
+        assert!(missing
+            .text
+            .contains("no such file or folder: /definitely/not/here.jpg"));
+
+        // A clean flag-only launch proceeds with no text.
+        let ok = pf(&["photoblaze", "--shuffle", "--theme", "dark"]);
+        assert!(ok.proceed);
+        assert!(ok.text.is_empty());
+        assert_eq!(ok.exit_code, 0);
+    }
+
+    /// `apply_launch_args` applies the session overrides to the core (theme folds into
+    /// `effective_appearance`, --shuffle into the launch nav) and stashes the paths —
+    /// including the hidden `--pb-open` back-compat alias.
+    #[test]
+    fn apply_launch_args_applies_overrides_and_stashes_paths() {
+        let mut h = test_handle(800, 600, 1.0);
+        // The handle loads the developer's real settings; snapshot to prove the override
+        // never lands there (whatever the saved values are).
+        let saved_appearance = h.core.settings.appearance_mode;
+        let saved_mute = h.core.settings.mute_live_audio;
+        let dir = std::env::temp_dir();
+        h.apply_launch_args(
+            vec![
+                "photoblaze".into(),
+                "--theme".into(),
+                "dark".into(),
+                "--shuffle".into(),
+                "--mute".into(),
+                "--pb-open".into(),
+                dir.to_string_lossy().into_owned(),
+            ],
+            "9.9.9-test".into(),
+        );
+        assert_eq!(
+            h.core.effective_appearance(),
+            pb_app_core::settings::AppearanceMode::Dark,
+            "--theme is a live override, not a settings write"
+        );
+        assert!(h.core.effective_mute(), "--mute folds into effective_mute");
+        assert_eq!(h.core.last_nav, pb_app_core::Nav::Random);
+        assert_eq!(
+            h.pending_launch_paths,
+            vec![dir.to_string_lossy().into_owned()]
+        );
+        // And the no-trace guarantee: the raw settings were not mutated.
+        assert_eq!(
+            h.core.settings.appearance_mode, saved_appearance,
+            "overrides never land in Settings"
+        );
+        assert_eq!(h.core.settings.mute_live_audio, saved_mute);
+    }
+
+    /// `open_launch_paths` consumes the stash exactly once — the idempotence guard the
+    /// bare-path double-delivery arbitration leans on. (No drain: the BeginDirScan effect
+    /// stays queued, so no walker thread is spawned in the test.)
+    #[test]
+    fn open_launch_paths_is_consumed_once() {
+        let mut h = test_handle(800, 600, 1.0);
+        let dir = std::env::temp_dir().to_string_lossy().into_owned();
+        h.apply_launch_args(
+            vec!["photoblaze".into(), "--pb-open".into(), dir],
+            "v".into(),
+        );
+        assert!(h.open_launch_paths(), "first call opens the stashed paths");
+        assert!(!h.open_launch_paths(), "second call is a no-op");
+        // With nothing stashed at all, it is also a no-op.
+        let mut empty = test_handle(800, 600, 1.0);
+        empty.apply_launch_args(vec!["photoblaze".into()], "v".into());
+        assert!(!empty.open_launch_paths());
     }
 
     /// NS1 item 3 end-to-end (no Swift, no GPU): `open_path` on a real folder → the core's

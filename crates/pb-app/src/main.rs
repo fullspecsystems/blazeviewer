@@ -3697,8 +3697,10 @@ fn main() {
     let metrics_on = overrides.metrics;
 
     // Mixed strictness: a nonexistent positional path is a usage error (exit 2), reported to the
-    // console when there is one, else a dialog — never a silent exit.
-    for p in &cli.paths {
+    // console when there is one, else a dialog — never a silent exit. `launch_paths()` folds in
+    // the hidden `--pb-open` alias (macOS back-compat; accepted uniformly across shells).
+    let launch_paths = cli.launch_paths();
+    for p in &launch_paths {
         if !p.exists() {
             let msg = format!("photoblaze: no such file or folder: {}", p.display());
             if have_output {
@@ -3714,7 +3716,7 @@ fn main() {
     // same pure plan: classify the paths, decide the source + cursor, then scan. A bare launch
     // opens the empty state (nothing is auto-opened). A folder opens recursively by default;
     // `--recursive` / `--no-recursive` override the saved preference.
-    let mut plan = open::plan(classify_inputs(cli.paths.clone()));
+    let mut plan = open::plan(classify_inputs(launch_paths));
     if let Source::Scan { recursive, .. } = &mut plan.source {
         *recursive = overrides.recursive.unwrap_or(startup_settings.recursive);
     }

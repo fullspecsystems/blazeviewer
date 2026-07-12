@@ -36,6 +36,10 @@ pb-source = { workspace = true }
 # `cfg`'d out (see lib.rs), so the crate builds to an empty staticlib and never pulls the
 # swift-bridge graph. Keeps the existing `--workspace` CI on Windows/Linux untouched.
 [target.'cfg(target_os = "macos")'.dependencies]
+# The shared CLI parser (task #78): the Swift host feeds ProcessInfo.arguments through
+# the SAME clap surface the winit shell uses — one source of truth for the flags.
+# macOS-target-only like swift-bridge (it's only used inside the cfg'd ffi module).
+pb-cli = { workspace = true }
 swift-bridge = "0.1"
 swift-bridge-build = { version = "0.1", optional = true }
 
