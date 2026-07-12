@@ -1,7 +1,16 @@
 # Cross-platform FFmpeg video — Linux playback + macOS codec fallback
 
-**Status:** planned, **rev2** (2026-07-12) — Codex review incorporated; awaiting owner sign-off
-before execution.
+**Status:** planned, **rev3** (2026-07-12) — Codex review incorporated + owner decisions locked;
+awaiting final sign-off before execution.
+
+> **Owner decisions locked (2026-07-12):**
+> 1. **HDR is implemented properly from the start** — not SDR-only-with-tone-map. The fp16/P010
+>    output path (§9 option c) is a v1 requirement, or we're back here in days.
+> 2. **Hardware decode or go home** — without real HW decode (**VideoToolbox on macOS at
+>    minimum, the owner-testable gate**) the feature is useless (never smooth on real-world 4K).
+>    Software decode is an internal bring-up milestone only; it is **not** a shippable outcome.
+> 3. **Linux audio** — reuse the proven `pw-cat` *output* (the cpal/ALSA-on-PipeWire underrun
+>    disaster is documented, commit `3a6c538d`); the open question is only the *clock* (§7).
 **Relates to:** task #79 (video tier 2 — "Windows shipped; Linux/macOS = parity work"; the
 Windows-side authoritative plan is `.taskmaster/plans/79-video-playback-tier2.md`), task #79.10
 (**GPU decode REQUIRED to ship** — owner decision), task #77 (LGPL/GPL compliance — **hard gate
@@ -75,13 +84,19 @@ phase** is required (§8).
 
 Each is a spike that *decides and proves* an unknown, mirroring the Windows #79 phase-0 discipline:
 
-1. **Reproducible, LGPL-compatible FFmpeg build + package spike on macOS *and* Linux** (§9).
-2. **Custom AVIO + cancellation spike** (§6a) — in-RAM archive bytes + abortable blocking work.
-3. **Software-decode benchmark** — VP9/AV1/H.264/HEVC at 1080p30/60 + 4K30/60, 5-min run, on
-   Apple Silicon and representative Linux Intel/AMD (§10). Feeds the ship-scope decision.
-4. **Audio-sink clock spike** on both platforms (§7) — prove an *honest* played-position clock.
-5. **Decisions locked by Phase 0:** the SDR-only-vs-HDR guarantee (§9-color), and the
-   **hardware-decode release scope** (§10) — because #79.10 makes SW-only unshippable for high-res.
+1. **Reproducible, LGPL-compatible FFmpeg build + package spike on macOS *and* Linux** (§9), with
+   VideoToolbox (macOS) / VAAPI (Linux) enabled in the build.
+2. **Custom AVIO + cancellation spike** (§6) — in-RAM archive bytes + abortable blocking work.
+3. **macOS hardware-decode + HDR interop spike (the biggest unknown; HW + HDR are both required).**
+   Prove end-to-end: FFmpeg VideoToolbox `hwaccel` decodes VP9/AV1/HEVC → `CVPixelBuffer`
+   (NV12/P010, incl. a 10-bit HDR clip) → minimal/zero-copy to a wgpu texture (IOSurface/Metal
+   interop) → through the fp16 scene-linear present path → correct on screen. This validates §9
+   (HDR-now) + §10 (HW-required) together. Benchmark SW vs HW on the §10 gates as the baseline.
+4. **Audio-sink clock spike** on both platforms (§7) — prove an *honest* played-position clock
+   (macOS `AVAudioEngine` render time; Linux `pipewire-rs` stream-time or characterized `pw-cat`
+   latency).
+5. **Confirm the locked decisions hold** (HDR-now / HW-required / `pw-cat`-output) survive contact
+   with the spikes; surface any that don't **before** committing to the build phases.
 
 ## 5. Producer contract — observable protocol from MF, FFmpeg-native internals
 
@@ -145,10 +160,20 @@ Design requirements:
 - **macOS:** `AVAudioEngine`/`AVAudioPlayerNode` (Session audio only; `Native` videos keep
   AVPlayer's own audio). Define the clock source (render/sample time) + how output latency is
   included.
-- **Linux:** "evaluate `pw-cat`" is too loose for an A/V-sync acceptance gate — a child process
-  with bytes-written telemetry isn't an honest clock. Pick + spike one: direct PipeWire API with
-  stream-time reporting; a characterized `pw-cat` protocol with measurable queue/device latency;
-  or another sink proven free of the earlier underrun issue.
+- **Linux (decision — reuse `pw-cat` output; spike the clock):** the audio *output* is already
+  solved and proven — `pb-app/src/live_audio.rs` pipes raw f32 PCM to PipeWire's `pw-cat` and
+  plays clean. **Do NOT reach for cpal/rodio:** commit `3a6c538d` documents that cpal's ALSA path
+  on a PipeWire desktop advertises `buffer_size min: 1` and underruns nondeterministically
+  (audible machine-gun clicks) under *every* buffer/config strategy tried — `pw-cat` (talking to
+  PipeWire directly) was the fix. Also carry forward the FFmpeg-8 audio gotcha: deprecated
+  `channel_layout()` reads empty, so a swresample ctx built from it rejects frames
+  (`AVERROR_INPUT_CHANGED`) — interleave by hand or set the layout explicitly. **The only open
+  question is the master clock:** a `pw-cat` *pipe* reports bytes *written*, not what the device
+  has *played* (queued latency), and video makes audio the clock master. Phase-0 spike picks:
+  (a) direct PipeWire via `pipewire-rs` for stream-time/latency (the robust honest clock — the
+  earlier grief was cpal's ALSA emulation, **not** PipeWire itself), or (b) keep `pw-cat` output
+  and derive the clock from bytes-written minus a *characterized* fixed queue/device latency
+  offset. Reuse the SIGSTOP/SIGCONT pause + EOF-exit + no-disk streaming from `live_audio.rs`.
 - **Muted interim** (Phases 2–4 ship video-only): report `has_audio = false` to the session **or**
   inject one `AudioClockState::Failed` sample. Simply omitting a sink after `has_audio = true`
   adds a ~1 s preroll before silent fallback under the current state machine.
@@ -191,13 +216,20 @@ cancellation / unrelated I/O; record which backend was tried to avoid loops.
   (dims/codec). Map **primaries, transfer, matrix, range separately**. swscale applies matrix +
   range during YUV→RGB — the app must **not** re-apply those; the resulting RGB still needs correct
   primaries/transfer interpretation.
-- RGBA8 can't hold PQ/HLG headroom. State one and hold to it: (a) FFmpeg v1 is **tested-SDR only**
-  and explicitly **tone-maps HDR→SDR** before RGBA8; (b) HDR fallback is **refused** with an honest
-  error; or (c) add a correct **fp16/P010** path now. Do **not** claim HDR is "reserved for later"
-  while accepting HDR VP9/AV1 as working.
-- **`present_video_frame` fix:** it currently treats every non-NV12 format as ordinary non-HDR
-  image data (`app_core_impl.rs:6754`); that path must be corrected before fp16 video can be
-  claimed.
+- **Decision (owner): implement HDR properly now — option (c).** RGBA8 can't hold PQ/HLG headroom,
+  so v1 produces a correct **fp16 (scene-linear scRGB) / P010** output for HDR sources, not
+  tone-mapped RGBA8. SDR sources stay on the cheaper RGBA8 path. This reuses the renderer's
+  **existing fp16 scRGB HDR pipeline** (the stills/HDR-AVIF/HEIC path: `Rgba16Float` scene-linear
+  intermediate + present-pass tone-map/encode + `primary_hdr()` swapchain detection) — video
+  frames slot into the same present path rather than a new one.
+- **`present_video_frame` fix (required for HDR video):** it currently treats every non-NV12 format
+  as ordinary non-HDR image data (`app_core_impl.rs:6754`) — it must honor `Rgba16F`/P010 +
+  `VideoColorInfo` (PQ/HLG transfer, wide primaries, peak) and route through the fp16 HDR present
+  path, mirroring how `is_hdr(img)` + the fp16 intermediate work for HDR stills. This lands in the
+  shared foundation, not deferred.
+- **HW-decode interaction (§10):** VideoToolbox/VAAPI HDR decode yields **P010/NV12 (10-bit)**
+  buffers — design the HW path, NV12/P010 upload, and the fp16 HDR present together (they're one
+  coupled subsystem, not sequential add-ons).
 
 ### FFmpeg distribution — a proof gate (esp. macOS)
 
@@ -236,16 +268,25 @@ unselectable. (A future refactor could collapse 1+3+4+5 into one shared list.)
 
 ## 10. Performance / hardware decode — REQUIRED to ship (reconciled with #79.10)
 
-Task #79.10 is authoritative: *"GPU decode is NOT optional — software playback is only acceptable
-for the lowest-resolution videos; treat this as REQUIRED for the video feature to ship."* VP9/AV1
-(the whole point of the macOS fallback) are the expensive software formats, so this bites here.
+Task #79.10 + the owner's 2026-07-12 call are authoritative and aligned: **hardware decode is
+REQUIRED, not deferred.** *"GPU decode is NOT optional — software playback is only acceptable for
+the lowest-resolution videos."* / *"HW decode or go home — otherwise it'll never be smooth in most
+real-world playback."* VP9/AV1 (the whole point of the macOS fallback) are the expensive software
+formats, so this bites hardest exactly here.
 
-**Honest outcome (choose, don't hand-wave):**
-- Software-RGBA is an **internal functional milestone, not release acceptance**; NV12 delivery +
-  hardware decode (VideoToolbox on macOS: VP9 Apple-Silicon, AV1 M3+; VAAPI on Linux) land **before**
-  Linux parity or macOS fallback is declared shipped — **or**
-- Acceptance is **narrowed to a measured resolution/frame-rate envelope**, explicitly stating that
-  4K/high-frame-rate remains incomplete.
+**Decision:** software-RGBA is an **internal bring-up milestone only, never a shippable outcome.**
+Hardware decode + 10-bit (P010/NV12) delivery through the fp16 HDR present path (§9) must work
+**before** the macOS fallback or Linux playback is declared shipped.
+- **macOS = the hard gate (owner-testable):** FFmpeg VideoToolbox `hwaccel` (or a native
+  `VTDecompressionSession`) for VP9 (Apple Silicon) / AV1 (M3+) / H.264 / HEVC → `CVPixelBuffer`
+  (NV12/P010). Prefer a **zero-copy or minimal-copy** path to the wgpu texture (IOSurface/Metal
+  interop) over a CPU readback. The owner validates this directly on Apple Silicon.
+- **Linux = implement, but validation-limited:** FFmpeg VAAPI `hwaccel`. **The owner cannot test
+  Linux hardware** (§16 risk) — so Linux HW decode ships behind whatever validation we *can* get
+  (CI/software-fallback parity, a Linux tester, or a documented "HW path present but
+  owner-unvalidated" caveat). Linux always retains the SW fallback for machines without VAAPI.
+- **NV12/P010 + fp16 present** is the shared plumbing both platforms' HW paths deliver into
+  (extends the phase-3 `ReuseSlot` two-plane work already reserved on the Windows side).
 
 **Benchmark gates** (run before deciding VideoToolbox/VAAPI can defer): P→first-presented-frame
 p50/p95; sustained decode throughput vs clip fps; frame misses/rebuffers over ≥5 min; CPU + power;
@@ -275,7 +316,9 @@ between Native and FFmpeg-backed macOS items.
 0. **Proof gates** (§4): packaging (mac+Linux), AVIO+bytes+seek+cancel, 5-min SW benchmark, audio
    clock, and the SDR/HDR + HW-scope decisions.
 1. **Shared FFmpeg foundation** — feature structure, init, custom I/O, stream selection, timing,
-   color, rotation/SAR, probe. **Compiles + tests on macOS *and* Linux from the first PR.**
+   color (incl. the **fp16 HDR present-path fix** in `present_video_frame`, §9), rotation/SAR,
+   probe. **Compiles + tests on macOS *and* Linux from the first PR.** *(SW decode here is the
+   bring-up milestone, not a ship gate — see phase 6.)*
 2. **Video producer + poster** — path input first, then bytes; session protocol, seek, EOS park,
    cancellation, corrupt-input limits; backend-independent poster/probe dispatcher.
 3. **Linux video-only integration** — route *all* Linux video → Session. The simplest honest proof
@@ -284,8 +327,10 @@ between Native and FFmpeg-backed macOS items.
    state; SwiftUI controls + lifecycle parity; native formats stay AVPlayer.
 5. **Streaming audio** (§7) — shared decoder; macOS + Linux sinks; honest clock; seek/rebuffer/
    device-loss. **Neither platform is "complete" before this.**
-6. **Performance / hardware** — NV12 first where it cuts copies; VideoToolbox + VAAPI per the
-   measured corpus + #79.10; retest the §10 gates.
+6. **Hardware decode — REQUIRED, not optional** (§10) — VideoToolbox on macOS (the owner-tested
+   hard gate) + VAAPI on Linux, delivering NV12/P010 into the fp16 HDR present path; retest the
+   §10 benchmark gates. **Neither platform ships on the SW path.** (Linux VAAPI is
+   validation-limited — owner can't test Linux HW; SW fallback retained.)
 7. **Distribution / release** — DMG/AppImage dependency closure, signing, notarization, notices,
    license artifacts, clean-machine matrix; resolve #77.
 
@@ -316,16 +361,25 @@ playback (no-trace); runtime dependency closure + clean-machine launch for DMG +
 - Memory plateaus independent of duration.
 - Stop/navigation retires visible playback within one frame; all worker/native resources within a
   measured bound.
-- The measured **codec/resolution matrix meets real-time playback**; unsupported perf tiers are
-  **not** called shipped (§10 / #79.10).
-- SDR color/range golden-tested; HDR correctly preserved/tone-mapped **or** explicitly rejected.
+- **Hardware decode works** — macOS VideoToolbox owner-validated on Apple Silicon (the hard
+  gate); Linux VAAPI implemented (validation-limited). The measured **codec/resolution matrix
+  (incl. 4K VP9/AV1) meets real-time playback on the HW path**; the SW path is **not** a shippable
+  outcome (§10 / #79.10).
+- SDR color/range golden-tested; **HDR (PQ/HLG) is correctly preserved** through the fp16 scene-
+  linear present path (option c) — not tone-mapped-only, not refused.
 - DMG + AppImage launch on **clean machines** with no external FFmpeg/Homebrew/package-manager dep.
 - Every bundled FFmpeg component/codec is in the **#77 compliance manifest**.
 - No passive playback path writes files or viewing history.
 
 ## 16. Risks / open questions (carried)
 
-Scale (producer ≈ `mf_video_producer`, + audio + packaging — multi-phase); `ffmpeg-next` seek/
-custom-I/O API surface; audio-clock accuracy; #77 licensing gate; macOS binary size (drop codecs
-AVPlayer already covers); feature-flag interaction with `livephoto`/`dav1d`/`libheif` + CI lanes
-(keep non-video/headless/bench builds clean).
+Scale (producer ≈ `mf_video_producer`, + audio + **HW decode + HDR** + packaging — the required
+scope grew with the owner decisions; genuinely multi-phase). **macOS VideoToolbox → wgpu HW-frame
+interop** (IOSurface/Metal, ideally zero-copy) is the biggest technical unknown — Phase-0 gate #3.
+**Linux HW decode (VAAPI) is owner-unvalidated** (no Linux test hardware) yet HW is a ship
+requirement — mitigate via CI/a Linux tester/the SW fallback + a documented "HW present,
+owner-unvalidated" caveat; do **not** let it block the macOS gate. Other: `ffmpeg-next` seek/
+custom-I/O + `hwaccel` API surface; audio-clock accuracy; **#77 licensing gate** (now also covers
+the HW-decode libs' license posture); macOS binary size (drop codecs AVPlayer already covers);
+feature-flag interaction with `livephoto`/`dav1d`/`libheif` + CI lanes (keep non-video/headless/
+bench builds clean).
