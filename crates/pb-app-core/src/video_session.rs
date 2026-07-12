@@ -427,11 +427,21 @@ impl VideoSession {
                     session_id,
                     duration,
                     has_audio,
-                    ..
+                    width,
+                    height,
                 }) => {
                     if session_id == self.id {
                         self.duration = duration;
                         self.has_audio = Some(has_audio);
+                        // Correct the credit-granting frame size to the producer's
+                        // REAL negotiated output. The construction-time value is a
+                        // ceiling from the fit box (the window), which can be ~2×
+                        // the fitted frame — left uncorrected it starves credits
+                        // and serializes decode (measured: 4K60 playing at 2/3×).
+                        let real = width as u64 * height as u64 * 4;
+                        if real > 0 {
+                            self.frame_bytes = real;
+                        }
                     }
                 }
                 Ok(VideoProducerEvent::Frame(frame)) => {
@@ -593,7 +603,7 @@ mod tests {
         assert!(u.state_changed);
         assert_eq!(s.state(), VideoSessionState::Buffering);
         s.assert_budget_invariant();
-        assert_eq!(drain_credits(&io), 3, "initial credits up to the frame cap");
+        assert_eq!(drain_credits(&io), 4, "initial credits up to the frame cap");
 
         // One frame is not preroll.
         io.events.send(VideoProducerEvent::Frame(frame(0))).unwrap();
@@ -635,9 +645,9 @@ mod tests {
         let t0 = Instant::now();
         opened(&io, 10_000);
         s.poll(t0);
-        assert_eq!(drain_credits(&io), 3);
+        assert_eq!(drain_credits(&io), 4);
 
-        // Producer honors all 3 credits. The fill poll goes straight to Playing
+        // Producer honors 3 of the credits. The fill poll goes straight to Playing
         // and presents the first frame — which frees exactly one slot.
         for pts in [0u64, 33, 66] {
             io.events
@@ -665,16 +675,52 @@ mod tests {
         assert_eq!(drain_credits(&io), 1);
     }
 
+    /// The owner-reported 2/3×-speed bug: the construction-time frame-size estimate
+    /// comes from the fit box (the window), which can be ~2× the real fitted frame —
+    /// credits must re-derive from `Opened`'s negotiated output or decode serializes.
+    #[test]
+    fn opened_corrects_the_credit_frame_size_to_the_negotiated_output() {
+        let budget = VideoQueueBudget {
+            max_bytes: 100,
+            max_frames: 4,
+        };
+        // Ceiling estimate = the whole budget → exactly one credit flows.
+        let (mut s, io) = VideoSession::with_budget(SID, 100, budget);
+        let t0 = Instant::now();
+        s.poll(t0);
+        assert_eq!(drain_credits(&io), 1, "ceiling estimate serializes decode");
+
+        // Opened reports the real output (2×2 RGBA8 = 16 bytes): credits jump to
+        // the frame cap and the pipeline parallelizes.
+        opened(&io, 10_000);
+        s.poll(t0);
+        assert_eq!(
+            drain_credits(&io),
+            3,
+            "corrected size fills the pipeline (4 total)"
+        );
+    }
+
     #[test]
     fn oversized_frames_use_the_one_frame_exception() {
-        // A "frame" bigger than the whole budget: exactly one credit at a time.
+        // A frame bigger than the whole budget: exactly one credit at a time. The
+        // Opened dims must AGREE with the oversize (25×10×4 = 1000 bytes) — the
+        // session re-derives the credit size from them.
         let budget = VideoQueueBudget {
             max_bytes: 100,
             max_frames: 3,
         };
         let (mut s, io) = VideoSession::with_budget(SID, 1000, budget);
         let t0 = Instant::now();
-        opened(&io, 1_000);
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: SID,
+                duration: Some(Duration::from_secs(1)),
+                width: 25,
+                height: 10,
+                has_audio: false,
+            })
+            .unwrap();
         s.poll(t0);
         assert_eq!(drain_credits(&io), 1, "one-frame exception: single credit");
     }
@@ -1053,6 +1099,6 @@ mod tests {
             s.assert_budget_invariant();
             credits += drain_credits(&io);
         }
-        assert!(sent - presented <= 3, "lookahead stays within the cap");
+        assert!(sent - presented <= 4, "lookahead stays within the cap");
     }
 }

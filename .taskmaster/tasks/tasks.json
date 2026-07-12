@@ -932,7 +932,7 @@
             "id": 7,
             "title": "Phase 6: seeking + contextual input",
             "description": "Generation-safe latest-value seeks; keyframe + decode-forward landing (MF SetCurrentPosition / av_seek_frame+flush / AVAssetReader recreate); audio ack before resume; PAN-action contextual rewrite (+/-2s, Shift +/-15s, self-timed hold, custom-keymap tests); HUD position pill; paused/buffering/EOS/superseded cases.",
-            "status": "pending"
+            "status": "in-progress"
           },
           {
             "id": 8,

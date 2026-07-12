@@ -292,13 +292,20 @@ pub struct AudioClockSample {
 // Byte-budgeted queue admission (locked decision: bytes, not frames).
 // ---------------------------------------------------------------------------
 
-/// Hard frame-count ceiling on the decoded-frame queue: 2-3 frames of lookahead.
-pub const VIDEO_QUEUE_MAX_FRAMES: usize = 3;
+/// Hard frame-count ceiling on decoded frames **queued plus in flight**: the
+/// session's accounting charges granted credits against this cap too (stricter
+/// than the plan's queue-only invariant), so 4 = the plan's 2-3 queued frames of
+/// lookahead + the one the producer is decoding against a credit.
+pub const VIDEO_QUEUE_MAX_FRAMES: usize = 4;
 
-/// The queue's byte budget: ≈ 2× one fitted 4K RGBA8 frame. Constant and documented
-/// (the plan's ~64 MiB); admission enforces `queued_bytes ≤ max(budget, one_frame)`
-/// with the one-frame exception when a single fitted frame exceeds the budget.
-pub const VIDEO_QUEUE_BYTE_BUDGET: u64 = 2 * 3840 * 2160 * 4;
+/// The byte budget for queued + in-flight decoded frames: 3× one fitted 4K RGBA8
+/// frame (~95 MiB, constant). Sized so a 4K60 stream keeps 2-3 frames of real
+/// lookahead (~50 ms — enough to ride the measured 30-100 ms GOP-boundary decode
+/// spikes) *after* charging the in-flight credit; anything smaller serializes the
+/// credit round-trip and playback runs below real time (the owner-reported 2/3×
+/// on a 4K60 HEVC clip). Admission still enforces the one-frame exception when a
+/// single fitted frame exceeds the whole budget.
+pub const VIDEO_QUEUE_BYTE_BUDGET: u64 = 3 * 3840 * 2160 * 4;
 
 /// Pure admission rule for the producer→session frame queue. The session owns one;
 /// the producer receives *credits* only when `admits` says the next frame fits, so
@@ -573,33 +580,35 @@ mod tests {
     const FRAME_4K: u64 = 3840 * 2160 * 4;
 
     #[test]
-    fn budget_is_two_fitted_4k_frames() {
-        assert_eq!(VIDEO_QUEUE_BYTE_BUDGET, 2 * FRAME_4K);
-        // ~63 MiB — the plan's documented constant.
+    fn budget_is_three_fitted_4k_frames() {
+        assert_eq!(VIDEO_QUEUE_BYTE_BUDGET, 3 * FRAME_4K);
+        // ~95 MiB — constant and documented (queue + in-flight, see the consts).
         let b = VideoQueueBudget::default();
-        assert!(b.max_bytes < 68 * 1024 * 1024);
+        assert!(b.max_bytes < 100 * 1024 * 1024);
         assert_eq!(b.max_frames, VIDEO_QUEUE_MAX_FRAMES);
     }
 
     #[test]
     fn admits_within_budget_up_to_the_frame_cap() {
         let b = VideoQueueBudget::default();
-        // A small (1080p) frame: byte budget allows many, the frame cap binds at 3.
+        // A small (1080p) frame: byte budget allows many, the frame cap binds at 4.
         let f = 1920 * 1080 * 4u64;
         assert!(b.admits(0, 0, f));
         assert!(b.admits(f, 1, f));
         assert!(b.admits(2 * f, 2, f));
-        assert!(!b.admits(3 * f, 3, f), "frame cap");
+        assert!(b.admits(3 * f, 3, f));
+        assert!(!b.admits(4 * f, 4, f), "frame cap");
     }
 
     #[test]
     fn byte_budget_binds_for_4k() {
         let b = VideoQueueBudget::default();
         assert!(b.admits(0, 0, FRAME_4K));
-        assert!(b.admits(FRAME_4K, 1, FRAME_4K), "exactly at budget");
+        assert!(b.admits(FRAME_4K, 1, FRAME_4K));
+        assert!(b.admits(2 * FRAME_4K, 2, FRAME_4K), "exactly at budget");
         assert!(
-            !b.admits(2 * FRAME_4K, 2, FRAME_4K),
-            "third 4K frame exceeds bytes"
+            !b.admits(3 * FRAME_4K, 3, FRAME_4K),
+            "fourth 4K frame exceeds bytes before the frame cap"
         );
     }
 
