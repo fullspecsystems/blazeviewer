@@ -1,5 +1,20 @@
 # Task #78 — macOS CLI parity (rev 2, post-Codex review)
 
+> **OUTCOME (2026-07-12): SHIPPED — all sections landed.** Notable deviations from
+> the plan below: (a) §6's forced-window mechanism became
+> `NSTreatUnknownArgumentsAsOpen = NO` (registered in `PhotoBlazeMacApp.init`) — the
+> spike proved the WindowGroup suppression is a *race* (release wins, debug reliably
+> loses), and SceneBuilder rejects the `#available` branch the macOS-15
+> `defaultLaunchBehavior(.presented)` route needed; killing AppKit's argv-as-documents
+> scan at the root fixes every macOS version and prevents the double delivery too (the
+> §6 echo filter is kept as defense in depth). (b) §9's shim has no `~/.local/bin`
+> fallback (not on the default PATH — an installed-but-broken link); it's
+> `/usr/local/bin` with one admin escalation. (c) §8's `--slideshow` units +
+> §branding (`display_name` "PhotoBlaze", branded about line) + TTY-aware ANSI help
+> landed in the shared crate, so Windows gained them too. Owner live-GUI smoke
+> (first-frame theme, `open --args` unicode paths, settings.toml untouched) is the
+> remaining verification, tracked on #78.12.
+
 **Goal:** bring the Windows/winit CLI (task #78, `feat/cli-clap`) to the macOS SwiftUI
 host so `PhotoBlaze.app`'s embedded binary honors the same flag surface. The parser
 (`pb-cli`) and the override application (`AppCore::apply_launch_overrides`) already exist

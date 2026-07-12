@@ -92,6 +92,11 @@ with any pre-release suffix carried only by the tag.
   `--start-at N|NAME` to begin at a given photo. `--help` and `--version` also work. Every option
   applies only to that launch and never writes to your settings. On Windows the help and version
   text now print into the terminal you launched from.
+- **The command line works on macOS too.** Install the `photoblaze` command once from
+  **PhotoBlaze ▸ Install Command-Line Tool…**, then every option above works from the Terminal —
+  including bare paths (`photoblaze ~/Photos`), colored `--help` on a TTY (plain when piped), and
+  `--version` printing the same version the About panel shows. Launching from Finder or the Dock is
+  unchanged; a bad option on a GUI launch shows a dialog instead of failing silently.
 - **The About dialog now shows the build's CPU architecture** next to the build id (e.g.
   `Build 1ad1043 · ARM64`), so you can confirm at a glance whether you're running the native
   Windows ARM64 build or the x64 one.

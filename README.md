@@ -77,6 +77,25 @@ and never changes your saved settings.
 Encrypted archives are opened by entering the password in the viewer, not on the
 command line.
 
+#### macOS
+
+The same options work on macOS. Install the `photoblaze` command once via
+**PhotoBlaze ▸ Install Command-Line Tool…** (creates
+`/usr/local/bin/photoblaze`; the same menu item removes or repairs it), then:
+
+```sh
+photoblaze ~/Photos --slideshow=3s --shuffle
+```
+
+- Bare paths work (`photoblaze ~/Photos`); the older `--pb-open <path>` form
+  remains as a compatibility alias.
+- `--help` / `--version` / errors print to the terminal — colored on a TTY,
+  plain when piped or redirected. A Finder/Dock launch with a bad option shows
+  a dialog instead of failing silently.
+- `open -a PhotoBlaze --args --theme dark ~/Photos` also works, but `open`
+  detaches the terminal — use the installed `photoblaze` command when you want
+  `--help`/`--version` output.
+
 ### Keys
 
 | Key | Action |
