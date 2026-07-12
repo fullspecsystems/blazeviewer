@@ -1395,6 +1395,71 @@ mod tests {
         assert!(s.duration.is_some(), "Opened carried the duration");
     }
 
+    /// Opt-in perf measurement (task #79 phase 7 acceptance): `P` → first
+    /// presented frame, over several fresh sessions against a real clip.
+    /// `PB_VIDEO_PERF_CLIP=<path> cargo test -p pb-app-core --release
+    ///  opt_in_p_to_first_frame -- --nocapture`
+    #[cfg(windows)]
+    #[test]
+    fn opt_in_p_to_first_frame_latency() {
+        let Ok(clip) = std::env::var("PB_VIDEO_PERF_CLIP") else {
+            eprintln!("PB_VIDEO_PERF_CLIP not set — skipping");
+            return;
+        };
+        let path = std::path::PathBuf::from(clip);
+        const RUNS: usize = 8;
+        let mut ms: Vec<f64> = Vec::new();
+        for i in 0..RUNS {
+            let sid = VideoSessionId(100 + i as u64);
+            let (mut s, io) = VideoSession::new(sid, 3840 * 2160 * 4);
+            // No shell audio player in this harness: report it failed up front so
+            // the measurement is the VIDEO pipeline, not the audio-ready timeout.
+            s.on_audio_clock(
+                AudioClockSample {
+                    session_id: sid,
+                    state: AudioClockState::Failed,
+                    position: Duration::ZERO,
+                    sampled_at_monotonic: Duration::ZERO,
+                },
+                Instant::now(),
+            );
+            let p = path.clone();
+            std::thread::spawn(move || {
+                pb_decode::run_video_producer(
+                    &p,
+                    None,
+                    sid,
+                    SeekGeneration::FIRST,
+                    io.events,
+                    io.msgs,
+                );
+            });
+            let t0 = Instant::now();
+            loop {
+                if s.poll(Instant::now()).present.is_some() {
+                    ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+                    break;
+                }
+                assert!(
+                    t0.elapsed() < Duration::from_secs(20),
+                    "first frame must arrive"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            s.stop();
+            // Give the retiring reader a beat so runs don't contend.
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        ms.sort_by(f64::total_cmp);
+        let pct = |p: f64| ms[((ms.len() - 1) as f64 * p).round() as usize];
+        eprintln!(
+            "P → first frame over {RUNS} runs: p50={:.0}ms p95={:.0}ms ({})",
+            pct(0.5),
+            pct(0.95),
+            path.display(),
+        );
+    }
+
     /// Duration independence as a structural property: stream 10 000 frames
     /// through and assert the queue + credit budget invariant after every poll —
     /// the plateau, not a fixed delta.

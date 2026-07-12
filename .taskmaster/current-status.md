@@ -2,7 +2,28 @@
 
 _Last updated: 2026-07-11 (late). Supersedes the morning handoff (#76 shipped / #79 planned)._
 
-## State: main, #79 phases 0-6 done (Windows scope), all gates green
+## State: main, #79 phases 0-7 done (Windows scope), all gates green
+
+**Phase 7 (Windows scope) landed — subtask 79.8 `review`; Linux/macOS parity split to
+NEW subtask 79.9 (pending; the session core + contracts are platform-neutral).**
+- Slideshow suspends while a video plays, resumes at Ended (action matrix).
+- Delete-while-playing: handles released FIRST, then a bounded off-loop retry
+  (300 ms × 6 via `poll_delete_retry`) outlasts the ~1 s HEVC reader retirement.
+- Persistent position pill: new `video_pill` renderer layer (bottom-center, above the
+  toast strip), re-rasterized once per second, cleared with the session.
+- Privacy: `playing_a_video_writes_nothing_to_disk` — poster + probe + playback + seek
+  over a sandboxed fixture, tree byte-identical.
+- Perf (opt-in test, audio-failed harness = pure video path): **P→first-frame 4K60 HEVC
+  p50 183 ms / p95 320 ms; H.264 p50 53 ms**.
+- **Owner-reported 4K60 stutter at full screen, fixed two ways:** (1) the audio
+  `MediaPlayer` was double-decoding the picture — it now gets a `MediaPlaybackItem`
+  with video tracks **deselected** (audio-only decode); (2) audio sampling is adaptive
+  (30 ms while opening, 250 ms after) so the 4 Hz grid no longer quantizes preroll.
+- Known ceiling (documented in CLAUDE.md): 4K60 software HEVC at full-size output is
+  borderline — decode ~14.5 ms + BGRX→RGBA ~12.6 ms/frame (memory-bound, incl. MF's own
+  `ConvertToContiguousBuffer` copy). Reserved escalations: `IMF2DBuffer::Lock2D` (skip
+  MF's copy), NV12 + in-shader YUV (2.7× less data), hardware decode (ADR-012 gate).
+- CLAUDE.md: stale v0 keymap list fixed; video architecture documented.
 
 **Phase 6 (seeking + contextual input) landed — subtask 79.7 `review` (owner smoke:
 arrows seek ±2 s / Shift ±15 s while a video plays, hold to scrub, OSD shows
@@ -101,16 +122,11 @@ Key files: `pb-app-core/src/video.rs` (classify/item_kind/companion helpers),
 (`video_placeholder` + dispatch), `default_app.rs`, `main.rs`, release-linux.sh,
 Info-swift-host.plist.
 
-**Next: phase 7 (parity, failures, packaging, docs — subtask 79.8).** Linux (FFmpeg
-producer + incremental PCM audio) then macOS (AVAssetReader producer + AVAudioPlayer
-clock) parity matrices; codec-missing/corrupt-file UI polish (the play error naming the
-Store extension); delete-while-playing retry-after-retirement (known limitation from
-phase 4); persistent HUD position pill; privacy audit (extend the no-trace test over a
-video playback session, not just viewing); perf corpus (P→first-frame p50/p95 for
-H.264 + HEVC, 4K steady-state no-Lanczos check — the reusable present path + fitted MF
-output already guarantee the structure); CLAUDE.md (fix the stale v0 keymap list +
-document video) + CHANGELOG roll-up. Also owner-flagged: verify the phase-5/6 audio
-sync on the 4K60 monster clip after the 387860b credit fix.
+**Next: subtask 79.9 — Linux/macOS video parity** (needs those machines; producer per
+platform behind the unchanged protocol; details in the subtask). **Owner smoke queue:**
+the 4K60 monster clip at full screen after the audio double-decode fix — if it still
+can't hold 60 fps, the next lever is `IMF2DBuffer::Lock2D` / NV12 (see the ceiling note
+above); 4K30 and 1080p are comfortable regardless.
 
 `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, the featured
 clippy (`libheif,dav1d`), and `fmt --check` all pass.

@@ -91,6 +91,18 @@ pub struct Viewport {
 /// field groups off the winit shell; the shell holds one `AppCore` and reaches its state
 /// through `self.core.*` (fields are `pub` during the incremental move — they collapse
 /// behind `handle(CoreEvent)` / accessors once the split is complete).
+/// A delete attempt deferred because the file's video reader was still retiring
+/// (HEVC teardown blocks ~1 s off-thread) — retried a bounded number of times
+/// from `tick`, never blocking the event loop (task #79 phase 7).
+#[derive(Debug, Clone)]
+pub struct DeleteRetry {
+    pub at: Instant,
+    pub item: usize,
+    pub path: std::path::PathBuf,
+    pub permanent: bool,
+    pub tries_left: u32,
+}
+
 pub struct AppCore {
     /// The injected wall-clock "now" for this event/tick — **the core never calls
     /// `Instant::now()`** (NS0 5.5 / Phase 0.3). The shell stamps it at each event-loop entry
@@ -497,6 +509,12 @@ pub struct AppCore {
     /// Last held-key video seek step (task #79 phase 6): the app's own repeat
     /// timer (OS key-repeat stays ignored, like every other held action).
     pub video_seek_last: Option<Instant>,
+    /// A delete blocked by a still-retiring video reader, awaiting its bounded
+    /// retry (task #79 phase 7 — the delete-while-playing case).
+    pub pending_delete_retry: Option<DeleteRetry>,
+    /// The text currently shown in the video position pill (`m:ss / m:ss`), so it
+    /// re-rasterizes only when the second ticks over — not per frame.
+    pub video_pill_text: Option<String>,
     /// An animation decoded ahead (eager prep) and held ready for instant playback.
     pub prepared: Option<Prepared>,
     /// Animation generation; bumped on navigate so a late decode for a past item is discarded.

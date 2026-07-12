@@ -170,6 +170,11 @@ pub trait Renderer {
     /// fades it by re-uploading with scaled alpha. `bottom_margin` is the gap from
     /// the bottom edge.
     fn set_toast(&mut self, panel: Option<(&[u8], u32, u32)>, bottom_margin: u32);
+    /// Set or clear the persistent **video position pill** (task #79: `m:ss / m:ss`
+    /// while a video session is active). Bottom-center like the toast but its own
+    /// layer at a higher inset, so a transient toast never collides with it.
+    /// Default no-op so presenters without overlay layers ignore it.
+    fn set_video_pill(&mut self, _panel: Option<(&[u8], u32, u32)>, _bottom_margin: u32) {}
     /// Set or clear the top-right "loading" pie (shown while the next photo isn't
     /// ready). Its own overlay layer, composited above the photo and the panels;
     /// the caller animates the fill / fade by re-uploading. `margin` is the gap from

@@ -47,17 +47,26 @@ mod imp {
     use super::*;
     use std::time::Duration;
 
-    use pb_app_core::video::AudioClockState;
-    use windows::core::HSTRING;
-    use windows::Foundation::Uri;
-    use windows::Media::Core::MediaSource;
-    use windows::Media::Playback::{MediaPlaybackState, MediaPlayer};
+    use std::cell::Cell;
 
-    /// A WinRT `MediaPlayer` over the video file, playing (only audibly) its audio
-    /// track. Closed on drop, which stops playback and releases the pipeline.
+    use pb_app_core::video::AudioClockState;
+    use windows::core::{Interface, HSTRING};
+    use windows::Foundation::Uri;
+    use windows::Media::Core::{ISingleSelectMediaTrackList, MediaSource};
+    use windows::Media::Playback::{MediaPlaybackItem, MediaPlaybackState, MediaPlayer};
+
+    /// A WinRT `MediaPlayer` over the video file, playing its audio track ONLY —
+    /// the picture is the `VideoSession`'s job, so the item's video tracks are
+    /// deselected (below) to avoid a second, wasted 4K decode that starves both
+    /// pipelines (owner-observed: stuttering audio + slow video on a 4K60 clip).
+    /// Closed on drop, which stops playback and releases the pipeline.
     pub struct VideoAudio {
         player: MediaPlayer,
+        /// Kept for the video-track deselection: track lists populate async after
+        /// the source opens, so [`Self::sample`] retries until it lands.
+        item: MediaPlaybackItem,
         session_id: VideoSessionId,
+        video_deselected: Cell<bool>,
     }
 
     impl VideoAudio {
@@ -67,11 +76,39 @@ mod imp {
         pub fn open(path: &Path, session_id: VideoSessionId, muted: bool) -> Option<VideoAudio> {
             let uri = Uri::CreateUri(&HSTRING::from(crate::live_audio::file_uri(path)?)).ok()?;
             let source = MediaSource::CreateFromUri(&uri).ok()?;
+            let item = MediaPlaybackItem::Create(&source).ok()?;
             let player = MediaPlayer::new().ok()?;
             player.SetAutoPlay(false).ok()?;
             player.SetIsMuted(muted).ok()?;
-            player.SetSource(&source).ok()?;
-            Some(VideoAudio { player, session_id })
+            player.SetSource(&item).ok()?;
+            Some(VideoAudio {
+                player,
+                item,
+                session_id,
+                video_deselected: Cell::new(false),
+            })
+        }
+
+        /// Deselect the item's video track(s) so the player decodes audio only.
+        /// The track list is empty until the source finishes opening, so this is
+        /// retried from [`Self::sample`] (fast cadence while opening) until it
+        /// takes. Harmless when the item has no video tracks.
+        fn try_deselect_video(&self) {
+            if self.video_deselected.get() {
+                return;
+            }
+            let Ok(tracks) = self.item.VideoTracks() else {
+                return;
+            };
+            let populated = tracks.Size().map(|n| n > 0).unwrap_or(false);
+            if !populated {
+                return; // not opened yet — retry on the next sample
+            }
+            if let Ok(select) = tracks.cast::<ISingleSelectMediaTrackList>() {
+                if select.SetSelectedIndex(-1).is_ok() {
+                    self.video_deselected.set(true);
+                }
+            }
         }
 
         /// Pause (session paused / rebuffering) — keeps the position.
@@ -103,6 +140,7 @@ mod imp {
         /// core routes it to the active session (stale session ids are dropped
         /// there).
         pub fn sample(&self) -> Option<AudioClockSample> {
+            self.try_deselect_video();
             let session = self.player.PlaybackSession().ok()?;
             let raw = session.PlaybackState().ok()?;
             let state = if raw == MediaPlaybackState::Playing {

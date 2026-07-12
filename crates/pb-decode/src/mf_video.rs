@@ -375,12 +375,17 @@ pub(crate) unsafe fn sample_to_rgba(
             break; // short buffer — keep the rows we got rather than fail the frame
         };
         let dst = &mut out[y * row_bytes..(y + 1) * row_bytes];
-        for x in 0..w {
-            // RGB32 is little-endian BGRX in memory.
-            dst[x * 4] = row[x * 4 + 2];
-            dst[x * 4 + 1] = row[x * 4 + 1];
-            dst[x * 4 + 2] = row[x * 4];
-            dst[x * 4 + 3] = 255;
+        // RGB32 is little-endian BGRX in memory: swap B↔R, force alpha opaque.
+        // Word-wise shuffle (not per-byte indexing) so LLVM vectorizes it — this
+        // runs per video frame at up to 4K (task #79: ~12 ms/frame scalar was a
+        // real slice of the 60 fps budget).
+        for (d, s) in dst.chunks_exact_mut(4).zip(row.chunks_exact(4)) {
+            let bgrx = u32::from_le_bytes([s[0], s[1], s[2], s[3]]);
+            let rgba = (bgrx & 0x0000_FF00)          // G stays
+                | ((bgrx & 0x0000_00FF) << 16)       // B → byte 2
+                | ((bgrx & 0x00FF_0000) >> 16)       // R → byte 0
+                | 0xFF00_0000; // opaque alpha (RGB32's fourth byte is undefined)
+            d.copy_from_slice(&rgba.to_le_bytes());
         }
     }
     buffer.Unlock()?;

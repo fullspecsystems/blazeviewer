@@ -201,6 +201,8 @@ impl AppCore {
             video: None,
             video_seq: 0,
             video_seek_last: None,
+            pending_delete_retry: None,
+            video_pill_text: None,
             prepared: None,
             anim_gen: 0,
             anim_hint_shown_for: None,
@@ -266,6 +268,8 @@ impl AppCore {
             || self.anim_stream.is_some()
             // Active video playback (task #79): `poll_video` paces frames off this loop.
             || self.video.as_ref().is_some_and(|v| v.session.is_active())
+            // A delete waiting out a retiring video reader (bounded retry).
+            || self.pending_delete_retry.is_some()
             // A tree-io job (the folder tree's read_dir derivation / a Go sibling
             // lookup) keeps the loop polling so `tick` installs it when it lands.
             || self.tree_io.is_some()
@@ -580,16 +584,44 @@ impl AppCore {
     /// user-initiated file removal — never the passive view path (privacy #2). The trash / remove
     /// I/O is cross-platform (`crate::delete`), so this is a pure core method.
     pub fn do_delete(&mut self, item: usize, path: &Path, permanent: bool) {
+        // Release media handles FIRST (task #79 action matrix): a playing video's
+        // reader holds the file open; stopping starts its (async) retirement so
+        // the delete — or its brief retry below — can succeed.
+        if self.video.as_ref().is_some_and(|v| v.item == item) {
+            self.stop_video();
+        }
         let res = if permanent {
             crate::delete::delete_permanently(path)
         } else {
             crate::delete::send_to_trash(path)
         };
         if let Err(e) = res {
+            // A video's decoder can still be retiring (~1 s on HEVC) — the handle
+            // clears momentarily, so retry off the event loop instead of failing.
+            if self.item_is_video(item) {
+                eprintln!(
+                    "delete blocked (retrying while the reader retires): {}: {e}",
+                    path.display()
+                );
+                self.pending_delete_retry = Some(crate::app_core::DeleteRetry {
+                    at: self.now + DELETE_RETRY_INTERVAL,
+                    item,
+                    path: path.to_path_buf(),
+                    permanent,
+                    tries_left: DELETE_RETRY_MAX,
+                });
+                return;
+            }
             eprintln!("delete failed: {}: {e}", path.display());
             self.show_toast("Delete failed");
             return;
         }
+        self.finish_delete(item, permanent);
+    }
+
+    /// The post-I/O half of a successful delete: freeze playback, flash the icon
+    /// pill, defer the playlist advance a beat.
+    fn finish_delete(&mut self, item: usize, permanent: bool) {
         // Deleting a playing animation stops playback so the doomed photo freezes on its current
         // frame under the trash icon (rather than animating until removal).
         self.stop_playback();
@@ -601,6 +633,37 @@ impl AppCore {
         };
         self.show_toast_icon("", icon);
         self.pending_delete = Some((self.now + DELETE_ADVANCE_DELAY, item));
+    }
+
+    /// Drive a scheduled delete retry (a video whose reader was still retiring).
+    /// Called from `tick`; bounded — after the tries run out it reports honestly.
+    pub fn poll_delete_retry(&mut self) {
+        let due = self
+            .pending_delete_retry
+            .as_ref()
+            .is_some_and(|r| self.now >= r.at);
+        if !due {
+            return;
+        }
+        let mut retry = self.pending_delete_retry.take().expect("checked above");
+        let res = if retry.permanent {
+            crate::delete::delete_permanently(&retry.path)
+        } else {
+            crate::delete::send_to_trash(&retry.path)
+        };
+        match res {
+            Ok(()) => self.finish_delete(retry.item, retry.permanent),
+            Err(e) => {
+                retry.tries_left = retry.tries_left.saturating_sub(1);
+                if retry.tries_left == 0 {
+                    eprintln!("delete failed: {}: {e}", retry.path.display());
+                    self.show_toast("Delete failed");
+                } else {
+                    retry.at = self.now + DELETE_RETRY_INTERVAL;
+                    self.pending_delete_retry = Some(retry);
+                }
+            }
+        }
     }
 
     /// Drive the core from a single shell-neutral [`CoreEvent`] — the entry point a non-winit
@@ -1026,6 +1089,8 @@ impl AppCore {
         if self.pending_delete.is_some_and(|(at, _)| now >= at) {
             self.flush_pending_delete();
         }
+        // 0'. A delete blocked by a retiring video reader retries here (bounded).
+        self.poll_delete_retry();
         // 1. Absorb finished decodes (uploads; presents the target if it arrived).
         self.drain_results();
 
@@ -1040,8 +1105,10 @@ impl AppCore {
         // install/extend the playing sequence so it plays while the rest still decodes.
         self.poll_anim_stream();
         // 1b''. Drive active video playback (task #79 phase 4): absorb producer frames,
-        // present the due one, run the preroll/rebuffer state machine.
+        // present the due one, run the preroll/rebuffer state machine, keep the
+        // position pill's second in step.
         self.poll_video();
+        self.update_video_pill();
 
         // 1c. Pick up a finished off-thread text scan (OCR + QR, task #45): cache it,
         // refresh the `T` panel's busy state, run a deferred copy.
@@ -1087,7 +1154,18 @@ impl AppCore {
 
         // 3c. Slideshow auto-advance (task #23): on, not overridden by a held nav key or an open
         // dialog, and readiness-gated like hold-to-fly (a not-ready slide holds, never skips).
-        let slideshow_running = self.slideshow.on && self.held_nav().is_none() && !self.dialog_open;
+        // An explicitly-played video suspends the advance until playback ends/stops (task #79
+        // action matrix) — the slideshow otherwise lands on posters and moves on normally.
+        let video_playing = self.video.as_ref().is_some_and(|v| {
+            !matches!(
+                v.session.state(),
+                crate::video::VideoSessionState::Ended
+                    | crate::video::VideoSessionState::Failed
+                    | crate::video::VideoSessionState::Stopped
+            )
+        });
+        let slideshow_running =
+            self.slideshow.on && self.held_nav().is_none() && !self.dialog_open && !video_playing;
         if slideshow_running {
             let caught_up = self.displayed_item == self.target_item;
             let since_shown = self
@@ -5778,6 +5856,7 @@ impl AppCore {
         if let Some(mut v) = self.video.take() {
             v.session.stop();
             self.effects.push(contract::CoreEffect::StopVideoAudio);
+            self.update_video_pill(); // clears the position pill promptly
         }
     }
 
@@ -5860,6 +5939,47 @@ impl AppCore {
     pub fn video_audio_clock(&mut self, sample: crate::video::AudioClockSample) {
         if let Some(v) = self.video.as_mut() {
             v.session.on_audio_clock(sample, self.now);
+        }
+    }
+
+    /// Keep the persistent position pill (`m:ss / m:ss`) in step with the session
+    /// (task #79 phase 7). Re-rasterizes only when the displayed second changes —
+    /// a tiny HUD pill once per second, never per frame. Shown for the session's
+    /// whole life including Paused/Ended (the parked frame keeps its position);
+    /// cleared when the session goes away.
+    pub fn update_video_pill(&mut self) {
+        let desired: Option<String> = self.video.as_ref().and_then(|v| {
+            use crate::video::VideoSessionState::*;
+            if matches!(v.session.state(), Failed | Stopped) {
+                return None;
+            }
+            let pos = v.session.desired_position(self.now);
+            Some(match v.session.duration {
+                Some(d) => format!(
+                    "{} / {}",
+                    crate::video::format_video_duration(pos),
+                    crate::video::format_video_duration(d)
+                ),
+                None => crate::video::format_video_duration(pos),
+            })
+        });
+        if desired == self.video_pill_text {
+            return;
+        }
+        self.video_pill_text = desired.clone();
+        let rendered = desired.and_then(|text| {
+            let px = (15.0 * self.viewport.scale_factor).max(10.0);
+            let pad = (8.0 * self.viewport.scale_factor).round().max(3.0) as u32;
+            let hud = self.hud.as_ref()?;
+            hud.render_panel_icon(&text, px, pad, None, hud.theme().bg)
+        });
+        // The pill sits above the toast strip (64 px scaled) so the two never collide.
+        let margin = (112.0 * self.viewport.scale_factor).round().max(16.0) as u32;
+        if let Some(a) = self.renderer.as_mut() {
+            match &rendered {
+                Some((rgba, w, h)) => a.set_video_pill(Some((rgba, *w, *h)), margin),
+                None => a.set_video_pill(None, 0),
+            }
         }
     }
 

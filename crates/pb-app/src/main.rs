@@ -329,8 +329,11 @@ struct App {
     /// (a platform object); driven by the `*VideoAudio` effects; sampled ~4×/s into
     /// `AppCore::video_audio_clock`. `None` = no video playing / silent clip.
     video_audio: Option<video_audio::VideoAudio>,
-    /// Last time the video audio clock was sampled (throttles to ~4 Hz).
+    /// Last time the video audio clock was sampled (throttles the bridge).
     video_audio_sampled_at: Instant,
+    /// Whether the audio player has reported a non-Opening state yet — drives the
+    /// adaptive sampling cadence (fast while opening, ~4 Hz after).
+    video_audio_ready: bool,
 
     /// A dialog the orchestration layer asked the shell to open, deferred so the opener
     /// methods don't need the `ActiveEventLoop` (window creation lives in the shell's
@@ -650,6 +653,8 @@ impl App {
             video: None,
             video_seq: 0,
             video_seek_last: None,
+            pending_delete_retry: None,
+            video_pill_text: None,
             prepared: None,
             anim_gen: 0,
             anim_hint_shown_for: None,
@@ -687,6 +692,7 @@ impl App {
             live_audio: None,
             video_audio: None,
             video_audio_sampled_at: Instant::now(),
+            video_audio_ready: false,
             pending_dialog: None,
             requested_wake: None,
             egui_overlay: None,
@@ -2406,6 +2412,7 @@ impl App {
                         session_id,
                         muted,
                     } => {
+                        self.video_audio_ready = false; // fast sampling until it opens
                         self.video_audio = video_audio::VideoAudio::open(&path, session_id, muted);
                         if self.video_audio.is_none() {
                             // No player (creation failed / platform stub): tell the
@@ -3155,11 +3162,21 @@ impl ApplicationHandler for App {
             self.open_input(classify_inputs(drops));
         }
         // 0c. Video audio clock bridge (task #79 phase 5): sample the player's
-        // position/state ~4×/s into the core — the master clock while audio plays.
+        // position/state into the core — the master clock while audio plays.
+        // Cadence is adaptive (phase 7): FAST while the player is still opening,
+        // because preroll waits on "audio ready" and a 250 ms grid would quantize
+        // P → first-frame; ~4 Hz once it's up (plenty for the clock).
         if let Some(va) = &self.video_audio {
-            if self.video_audio_sampled_at.elapsed() >= Duration::from_millis(250) {
+            let cadence = if self.video_audio_ready {
+                Duration::from_millis(250)
+            } else {
+                Duration::from_millis(30)
+            };
+            if self.video_audio_sampled_at.elapsed() >= cadence {
                 self.video_audio_sampled_at = Instant::now();
                 if let Some(sample) = va.sample() {
+                    self.video_audio_ready =
+                        !matches!(sample.state, pb_app_core::video::AudioClockState::Opening);
                     self.core.video_audio_clock(sample);
                 }
             }
@@ -4149,6 +4166,78 @@ mod tests {
             "a view session must create or modify no files"
         );
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Privacy (task #79 phase 7): the no-trace guarantee holds through actual video
+    /// PLAYBACK, not just viewing — poster + metadata probes, a real producer/session
+    /// run, and a seek (which recreates the reader) against a sandboxed copy of the
+    /// fixture must create or modify nothing on disk.
+    #[cfg(windows)]
+    #[test]
+    fn playing_a_video_writes_nothing_to_disk() {
+        use pb_app_core::video::{SeekGeneration, VideoSessionId, VideoSessionState};
+        use pb_app_core::video_session::VideoSession;
+
+        let dir = std::env::temp_dir().join(format!("pb_video_notrace_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("mkdir sandbox");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../pb-decode/tests/fixtures/video/black_then_color.mp4");
+        let clip = dir.join("clip.mp4");
+        fs::copy(&fixture, &clip).expect("seed clip");
+
+        let before = snapshot_tree(&dir);
+
+        // Poster + metadata probes (the browse path).
+        let _ = pb_decode::probe_video_stream(&clip).expect("probe");
+        let _ =
+            pb_decode::decode_video_poster(&clip, None, &std::sync::atomic::AtomicBool::new(false))
+                .expect("poster");
+
+        // A real playback session: play, seek forward (recreates the reader), play out.
+        let sid = VideoSessionId(1);
+        let (mut session, io) = VideoSession::new(sid, 64 * 64 * 4);
+        let path = clip.clone();
+        std::thread::spawn(move || {
+            pb_decode::run_video_producer(
+                &path,
+                None,
+                sid,
+                SeekGeneration::FIRST,
+                io.events,
+                io.msgs,
+            );
+        });
+        let t0 = Instant::now();
+        let mut sought = false;
+        loop {
+            let now = Instant::now();
+            let _ = session.poll(now);
+            if !sought && session.position(now) > Duration::from_millis(200) {
+                sought = true;
+                session.seek_to(Duration::from_millis(600), now, None);
+            }
+            match session.state() {
+                VideoSessionState::Ended => break,
+                VideoSessionState::Failed => panic!("playback failed: {:?}", session.error),
+                _ => {}
+            }
+            assert!(
+                t0.elapsed() < Duration::from_secs(15),
+                "fixture must finish"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        session.stop();
+        // Let the retiring reader threads run their course before the diff.
+        std::thread::sleep(Duration::from_millis(300));
+
+        let after = snapshot_tree(&dir);
+        assert_eq!(
+            before, after,
+            "video playback must create or modify no files"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

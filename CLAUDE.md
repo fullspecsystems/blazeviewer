@@ -122,10 +122,12 @@ backend, cache/eviction policy, present mode, upload strategy.
 - Borderless, chrome-less window; borderless-fullscreen at native res (enables
   DXGI Independent Flip for lowest latency).
 - Image fit to screen, centered, **never cropped** (`pb-render::fit_rect`).
-- Keymap:
-  - `space` / `→` — next photo
-  - `backspace` / `←` — previous photo
+- Keymap (defaults; fully remappable via `keymap.toml` — `keymap.rs` is the source of truth):
+  - `space` — next photo · `backspace` — previous photo
   - `enter` — random photo (precomputed shuffle order; reversible)
+  - arrows — pan; while a **video** plays with no horizontal overflow, `←`/`→` become
+    seek (±2 s, `Shift` ±15 s, hold to scrub — contextual, not a separate binding)
+  - `P` — play/pause (animations, Live Photos, video)
   - `esc` — quit
 - Hold any nav key to iterate as fast as frames become ready.
 - Key handling tracks **held physical keys** (`Pressed`/`Released`), ignoring OS
@@ -391,6 +393,23 @@ pragmatic crate choices differ from the table above and are the current baseline
      fp16 scene-linear via WIC `128bppRGBAFloat` (`PixelFormat::Rgba16F`); brightness is baked
      in the scene pass (SDR×SDR-white-scale, HDR×1.0 absolute). P3 shows wider and HDR gets
      real headroom on a capable panel.
+- **Video playback (tier 2, task #79 — Windows shipped; Linux/macOS = parity work).**
+  Filesystem videos (one cross-platform container recognition list; per-file playability is
+  a runtime property of the OS codecs) are **typed items** — `LibraryItemKind`, dispatched
+  in `decode_item` *before* any `bytes()` read; path-only, never indexed inside archives;
+  Live-Photo companion `.mov`s are hidden by same-stem-per-directory dedup at scan.
+  Poster = the clip's first non-black frame via an MF reader configured identically to
+  playback (rotation/color parity by construction); panel facts come from a ~20 ms
+  header-only probe. Playback = a forward-only `VideoSession` (pb-app-core, injected-time,
+  fully unit-tested on fake producers) fed by a demand-driven MF reader thread (pb-decode):
+  one credit = one frame over a **single merged command channel** (Stop/SeekTo can never be
+  deafened by backpressure), byte/frame-budgeted queue (constant memory at any clip
+  length), rebuffer-don't-drift, audio = a shell WinRT `MediaPlayer` (video tracks
+  deselected — audio only) whose position is the master clock via ~4 Hz
+  `AudioClockSample`s. Seek recreates the reader positioned at the target (repositioning a
+  warm HEVC reader blocks ~1 s — spike-measured); the producer parks after EOS so `P`
+  replays via seek-to-0. 4K30 software decode is comfortable; 4K60 is borderline — NV12 +
+  in-shader YUV or hardware decode is the reserved escalation (ADR-012).
 - **Archive viewing (ZIP + 7z)** (tasks.json #30) is wired in the new `pb-source` crate
   behind the `PhotoSource` seam, decoded via `pb_decode::decode_named_bytes` (bytes +
   extension hint). ZIP = lazy per-entry (handle pool for parallel reads); 7z = **eager

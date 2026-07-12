@@ -93,6 +93,13 @@ pub const FRAME_STEP_REPEAT: Duration = Duration::from_millis(70);
 /// seek-landing time (~350 ms) with latest-value coalescing absorbing the rest.
 pub const VIDEO_SEEK_REPEAT: Duration = Duration::from_millis(200);
 
+/// Deleting a video whose reader is still retiring (HEVC teardown ~1 s) retries
+/// on this cadence, up to [`DELETE_RETRY_MAX`] times (~1.8 s total) — enough to
+/// outlast the measured retirement, bounded so a genuinely locked file still
+/// reports "Delete failed" promptly.
+pub const DELETE_RETRY_INTERVAL: Duration = Duration::from_millis(300);
+pub const DELETE_RETRY_MAX: u32 = 6;
+
 /// How long the user must rest on an animated still before we eagerly decode the whole
 /// sequence in the background (so a slow WebP/AVIF plays instantly on `P`). Long enough
 /// that tapping straight through a folder of animations never kicks a decode (#37).
