@@ -96,6 +96,7 @@ impl AppCore {
             fit: None,
             view: ViewTransform::default(),
             last_cursor: None,
+            content_top_inset: 0,
             dragging: false,
             rotations: std::collections::HashMap::new(),
             zoom_started: None,
@@ -3501,9 +3502,32 @@ impl AppCore {
     /// driven (the macOS glass-toolbar mode sets it on attach + resize); `0` = classic opaque
     /// bar. A no-op before the renderer stands up.
     pub fn set_content_top_inset(&mut self, px: u32) {
+        self.content_top_inset = px;
         if let Some(r) = self.renderer.as_mut() {
             r.set_content_top_inset(px);
         }
+    }
+
+    /// The current item's on-screen placement for the **macOS native video layer**
+    /// (task 79.9 phase 3): the same geometry the wgpu still renderer computes in
+    /// `quad_vertices` — `ViewTransform::placement` against the content region below the
+    /// top-bar inset, then slid down by the inset — so the `AVPlayerLayer` tracks Fit/Fill/
+    /// Original, zoom, pan, and rotation identically to a photo. Returns
+    /// `(x, y, w, h, rotation)` in **physical px, top-left origin**; `w`/`h` are the
+    /// *rotated* footprint and `rotation` is the CW quadrant (0/1/2/3 = 0/90/180/270) the
+    /// shell rotates the layer by about its center. `None` before the renderer/fit exist.
+    pub fn video_placement(&self) -> Option<(f32, f32, f32, f32, u8)> {
+        let (iw, ih, sw, sh) = self.screen_and_image()?;
+        let content_h = sh.saturating_sub(self.content_top_inset).max(1);
+        let mut p = self.view.placement(iw, ih, sw, content_h);
+        p.y += self.content_top_inset as f32;
+        let rotation = match self.view.rotation {
+            Rotation::R0 => 0,
+            Rotation::R90 => 1,
+            Rotation::R180 => 2,
+            Rotation::R270 => 3,
+        };
+        Some((p.x, p.y, p.w, p.h, rotation))
     }
 
     /// Apply the settings the user saved in the dialog: swap in the new model, apply

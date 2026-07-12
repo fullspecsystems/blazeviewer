@@ -1399,6 +1399,10 @@ final class CoreModel {
             nv.stop()
             nativeVideo = nil
         }
+        // Track the view transform: zoom/pan/rotation/scale-mode changes reach the video
+        // layer here (they only touch the core's `view`, never a menu/effect). Cheap —
+        // `relayout()` re-applies only when the placement actually changed.
+        nativeVideo?.relayout()
         // Keep the video container's background on the current letterbox color (theme
         // switch / Settings edit) — repaint only on a real change.
         let lb = core.effective_letterbox_rgb()
@@ -2284,6 +2288,13 @@ final class CoreModel {
     /// core action so it matches `P`.
     func seekVideoFraction(_ fraction: Double) {
         nativeVideo?.seek(toFraction: fraction)
+    }
+
+    /// The current item's video-layer placement (physical px, top-left origin) — the
+    /// still renderer's geometry, so the `AVPlayerLayer` tracks Fit/Fill/Original + zoom +
+    /// pan + rotation like a photo. `NativeVideoPlayer.relayout()` consumes it.
+    func videoPlacement() -> VideoPlacementFfi {
+        core.video_placement()
     }
 
     /// The scrubber drag started/ended. While scrubbing, `pump()` pins the controls up (the

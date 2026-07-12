@@ -1,5 +1,6 @@
 import AVFoundation
 import AppKit
+import PbMacFfi
 
 /// The native macOS video player (task 79.9). On macOS the whole media pipeline is
 /// `AVPlayer` + `AVPlayerLayer` — system decode, color, HDR, audio, timing, buffering,
@@ -196,37 +197,84 @@ final class NativeVideoPlayer {
         relayout()
     }
 
-    /// Place the `AVPlayerLayer` per the scale mode — coordinate-safe: Fit/Fill fill the
-    /// canvas (aspect / aspect-fill); Original sizes the layer to the video's native pixel
-    /// dimensions and *centers* it (symmetric, so no top/bottom-origin ambiguity). Zoom/
-    /// pan/rotation parity (off-center placement) is a later increment.
+    /// The last placement applied, to skip redundant CALayer writes when the pump ticks
+    /// with no view change (steady playback). Raw px + rotation + scale + canvas size.
+    private struct PlacementKey: Equatable {
+        let x, y, w, h: Float
+        let rot: UInt8
+        let scale, cw, ch: CGFloat
+    }
+    private var lastPlacement: PlacementKey?
+
+    /// Place the `AVPlayerLayer` to match the core's still geometry — Fit/Fill/Original,
+    /// zoom, pan, and rotation, all in parity with a photo (task 79.9 phase 3). Pulls the
+    /// core's computed placement (physical px, top-left) and converts it to the layer's
+    /// point / bottom-left-origin space, applying rotation as a center transform. Before the
+    /// renderer/fit exist (pre-first-frame) it falls back to a scale-mode-only placement.
     func relayout() {
         guard let canvas else { return }
         let bounds = canvas.bounds
         let scale = canvas.window?.backingScaleFactor ?? 2.0
+        let p = model?.videoPlacement()
+        if let p, p.valid, p.w > 0.5, p.h > 0.5 {
+            applyPlacement(p, bounds: bounds, scale: scale)
+        } else {
+            lastPlacement = nil
+            relayoutScaleMode(bounds: bounds, scale: scale)
+        }
+    }
+
+    /// Apply the core's placement. `x/y/w/h` are physical px, top-left; `w/h` are the
+    /// *rotated* footprint. We size the layer to the *unrotated* displayed size (so the
+    /// video fills it at its true aspect with `.resize`), center it on the footprint, and
+    /// rotate about that center. The core owns fit/zoom/pan, so the result matches the still.
+    private func applyPlacement(_ p: VideoPlacementFfi, bounds: CGRect, scale: CGFloat) {
+        let key = PlacementKey(
+            x: p.x, y: p.y, w: p.w, h: p.h, rot: p.rotation,
+            scale: scale, cw: bounds.width, ch: bounds.height)
+        if lastPlacement == key { return } // unchanged — skip the CALayer writes
+        lastPlacement = key
+
+        let footW = CGFloat(p.w) / scale
+        let footH = CGFloat(p.h) / scale
+        // Footprint center: core top-left px → layer point, bottom-left origin (y-flip).
+        let centerX = (CGFloat(p.x) + CGFloat(p.w) / 2) / scale
+        let centerY = bounds.height - (CGFloat(p.y) + CGFloat(p.h) / 2) / scale
+        // The footprint is the rotated size; un-swap for 90°/270° to get the layer's own
+        // (unrotated) bounds, which then carry the video's native aspect.
+        let swaps = p.rotation == 1 || p.rotation == 3
+        let bw = swaps ? footH : footW
+        let bh = swaps ? footW : footH
+        // CW quadrants. The layer's geometry is y-up (bottom-left), where a positive
+        // z-rotation is counter-clockwise, so negate to rotate clockwise like the still.
+        let angle = -CGFloat(p.rotation) * .pi / 2
+
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
         playerLayer.contentsScale = scale
+        playerLayer.videoGravity = .resize // bounds already carry the displayed aspect
+        playerLayer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+        playerLayer.bounds = CGRect(x: 0, y: 0, width: bw, height: bh)
+        playerLayer.position = CGPoint(x: centerX, y: centerY)
+        playerLayer.transform = CATransform3DMakeRotation(angle, 0, 0, 1)
+    }
+
+    /// Pre-first-frame fallback (no renderer/fit yet): scale-mode-only placement, no zoom/
+    /// pan/rotation. Resets any prior rotation transform so `frame` is well-defined.
+    private func relayoutScaleMode(bounds: CGRect, scale: CGFloat) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        playerLayer.transform = CATransform3DIdentity
+        playerLayer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+        playerLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
+        playerLayer.bounds = CGRect(x: 0, y: 0, width: bounds.width, height: bounds.height)
+        playerLayer.contentsScale = scale
         switch scaleMode {
-        case 1: // Fill — cover the canvas, cropping the overflow
-            playerLayer.videoGravity = .resizeAspectFill
-            playerLayer.frame = bounds
-        case 2: // Original — native 1:1, centered (clipped by the canvas if larger)
-            let ps = player.currentItem?.presentationSize ?? .zero
-            if ps.width > 0, ps.height > 0 {
-                let w = ps.width / scale
-                let h = ps.height / scale
-                playerLayer.videoGravity = .resize // fill the exact 1:1 frame
-                playerLayer.frame = CGRect(
-                    x: (bounds.width - w) / 2, y: (bounds.height - h) / 2, width: w, height: h)
-            } else {
-                playerLayer.videoGravity = .resizeAspect
-                playerLayer.frame = bounds
-            }
-        default: // Fit — contain, letterboxed
-            playerLayer.videoGravity = .resizeAspect
-            playerLayer.frame = bounds
+        case 1: playerLayer.videoGravity = .resizeAspectFill // Fill
+        case 2: playerLayer.videoGravity = .resizeAspect // Original (pre-size — refined once placed)
+        default: playerLayer.videoGravity = .resizeAspect // Fit
         }
     }
 

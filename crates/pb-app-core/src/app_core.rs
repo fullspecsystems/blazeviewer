@@ -159,6 +159,11 @@ pub struct AppCore {
     /// Last cursor position in physical px — the pinch/wheel-zoom anchor and the
     /// drag-to-pan reference. `None` until the pointer first moves over the window.
     pub last_cursor: Option<[f32; 2]>,
+    /// The translucent-top-bar inset (physical px) last pushed to the renderer via
+    /// [`set_content_top_inset`](AppCore::set_content_top_inset). Cached here so the
+    /// macOS native-video placement (`video_placement`) can reproduce the still
+    /// renderer's inset handling (`quad_vertices`) exactly. `0` = classic opaque bar.
+    pub content_top_inset: u32,
     /// Whether the left mouse button is held — drives drag-to-pan.
     pub dragging: bool,
     /// Per-image in-RAM rotation overrides (`r` / `Shift+R`), applied as a GPU transform

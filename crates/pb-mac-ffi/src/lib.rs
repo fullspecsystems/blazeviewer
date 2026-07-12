@@ -1280,6 +1280,29 @@ impl AppCoreHandle {
         self.core.flash_video_controls();
     }
 
+    /// The current item's video-layer placement (task 79.9 phase 3) — the still
+    /// renderer's geometry, so the host places the `AVPlayerLayer` identically to a photo.
+    fn video_placement(&self) -> ffi::VideoPlacementFfi {
+        match self.core.video_placement() {
+            Some((x, y, w, h, rotation)) => ffi::VideoPlacementFfi {
+                valid: true,
+                x,
+                y,
+                w,
+                h,
+                rotation,
+            },
+            None => ffi::VideoPlacementFfi {
+                valid: false,
+                x: 0.0,
+                y: 0.0,
+                w: 0.0,
+                h: 0.0,
+                rotation: 0,
+            },
+        }
+    }
+
     // ── The native play hint (▶/Live Photo on a motion item): the last HUD overlay to go
     // native. The core signals *when* to flash it (seq) + *what* it is (kind); the host owns
     // the pill, its 3s fade, hover-to-hold, and click-to-play (via menu_action "play_pause").──
@@ -2655,6 +2678,21 @@ mod ffi {
         h: u32,
     }
 
+    // The current item's on-screen placement for the native video layer (task 79.9
+    // phase 3) — the same geometry the wgpu still renderer uses, so the AVPlayerLayer
+    // tracks Fit/Fill/Original + zoom + pan + rotation like a photo. x/y/w/h are physical
+    // px, top-left origin; w/h are the *rotated* footprint; rotation is the CW quadrant
+    // (0/1/2/3 = 0/90/180/270). valid = false before the renderer/fit exist.
+    #[swift_bridge(swift_repr = "struct")]
+    struct VideoPlacementFfi {
+        valid: bool,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        rotation: u8,
+    }
+
     // A live progress snapshot for the shown dialog — poll via dialog_progress() each
     // pump while a Loading (fraction 0..1) or Scanning (found + current_dir) sheet is up.
     #[swift_bridge(swift_repr = "struct")]
@@ -2904,6 +2942,7 @@ mod ffi {
         fn info_line_is_animated(&self) -> bool;
         fn info_line_is_video(&self) -> bool;
         fn flash_video_controls(&mut self);
+        fn video_placement(&self) -> VideoPlacementFfi;
         fn info_line_align(&self) -> u8;
         fn play_hint_kind(&self) -> u8;
         fn play_hint_seq(&self) -> u64;

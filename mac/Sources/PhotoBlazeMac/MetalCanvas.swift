@@ -342,6 +342,10 @@ final class MetalCanvasNSView: NSView {
         // to black only if the model isn't wired. Opaque so it hides the wgpu canvas.
         container.backgroundColor = model?.videoLetterboxCGColor ?? NSColor.black.cgColor
         container.isOpaque = true
+        // Clip the player layer to the canvas: a zoomed / Fill / rotated video overflows its
+        // footprint, and the overflow must be cropped to the window like a still (not spill
+        // over the chrome). The container fills the canvas, so this bounds the video to it.
+        container.masksToBounds = true
         // Hide the *whole container* (not just the inner player) until the first frame is
         // displayable, so the opaque fill doesn't cover the wgpu poster before there's a real
         // video frame to show — that gap is the "blackout" flash. `revealVideoLayer()` unhides
