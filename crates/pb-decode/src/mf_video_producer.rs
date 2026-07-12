@@ -63,36 +63,78 @@ pub fn run_video_producer(
     };
     let (disp_w, disp_h) = info.display_dims();
     let fitted = fit.map(|f| fit_dims(disp_w, disp_h, f));
-    let negotiated = unsafe {
-        match fitted {
-            Some(dims) => {
-                negotiate_rgb32(&reader, Some(dims)).or_else(|_| negotiate_rgb32(&reader, None))
+
+    // 79.10: heavy **SDR** clips take the hardware path (NVDEC via the DXGI
+    // device manager + NV12 output + in-shader YUV) when the whole setup chain
+    // succeeds. Anything else — the pixel-rate policy saying no, a PQ/HLG
+    // transfer (the shader must not mis-map HDR; MF SDR-converts it on the RGB32
+    // path), a device/negotiation failure, odd output dims — stays on the
+    // software RGB32 path byte-for-byte unchanged. `PB_VIDEO_FORCE_HW` overrides
+    // the policy (A/B + tests), never the failure fallbacks.
+    let (yuv_matrix, full_range, sdr) = unsafe { crate::mf_hw::native_yuv(&reader, info.height) };
+    let want_hw = crate::mf_hw::hw_override()
+        .unwrap_or_else(|| crate::mf_hw::pixel_rate_wants_hw(info.width, info.height, info.fps))
+        && sdr;
+    let mut manager = None;
+    let mut hw_open = None;
+    if want_hw {
+        if let Some(mgr) = unsafe { crate::mf_hw::dxgi_manager() } {
+            match unsafe { crate::mf_hw::open_nv12_reader(path, &mgr, fitted) } {
+                Ok((r, hw_w, hw_h)) if hw_w > 0 && hw_h > 0 && hw_w % 2 == 0 && hw_h % 2 == 0 => {
+                    hw_open = Some((r, hw_w, hw_h));
+                    manager = Some(mgr);
+                }
+                Ok((r, _, _)) => retire_reader(r), // odd/zero dims → software
+                Err(_) => {}
             }
-            None => negotiate_rgb32(&reader, None),
         }
-    };
-    let (w, h, mut stride) = match negotiated {
-        Ok(n) => n,
-        Err(e) => {
-            retire_reader(reader);
-            return fail(mf_open_msg(e));
+    }
+    let (active_reader, mut kind, w, h) = match hw_open {
+        Some((hw_reader, hw_w, hw_h)) => {
+            retire_reader(reader); // the plain probe reader is done
+            (hw_reader, OutKind::Nv12, hw_w, hw_h)
+        }
+        None => {
+            let negotiated = unsafe {
+                match fitted {
+                    Some(dims) => negotiate_rgb32(&reader, Some(dims))
+                        .or_else(|_| negotiate_rgb32(&reader, None)),
+                    None => negotiate_rgb32(&reader, None),
+                }
+            };
+            match negotiated {
+                Ok((w, h, stride)) => (reader, OutKind::Rgb32 { stride }, w, h),
+                Err(e) => {
+                    retire_reader(reader);
+                    return fail(mf_open_msg(e));
+                }
+            }
         }
     };
     if w == 0 || h == 0 {
-        retire_reader(reader);
+        retire_reader(active_reader);
         return fail("video has no frames".into());
     }
+    let format = kind.format();
     let _ = events.send(VideoProducerEvent::Opened {
         session_id,
         duration: info.duration,
         width: w,
         height: h,
         has_audio: info.has_audio,
+        frame_bytes: format.frame_bytes(w, h) as u64,
     });
     let color = VideoColorInfo {
         transform: info.color,
         cicp: None,
-        full_range: true,
+        // The single-application contract: RGB32 output arrives with the YUV
+        // matrix + range already applied by MF (fields inert); NV12 arrives raw
+        // and the renderer's convert applies exactly these, exactly once.
+        full_range: match kind {
+            OutKind::Nv12 => full_range,
+            OutKind::Rgb32 { .. } => true,
+        },
+        yuv_matrix,
     };
 
     // The credit/command/seek loop. Blocking recv IS the select: a Stop or a
@@ -103,7 +145,7 @@ pub fn run_video_producer(
     let mut gen = generation;
     let mut credits: usize = 0;
     let mut pending: Option<(Duration, crate::video::SeekGeneration)> = None;
-    let mut active: Option<IMFSourceReader> = Some(reader);
+    let mut active: Option<IMFSourceReader> = Some(active_reader);
 
     'outer: loop {
         // 1. Absorb messages; block only when there is nothing to do.
@@ -143,9 +185,9 @@ pub fn run_video_producer(
             let abs_target = origin
                 .unwrap_or(0)
                 .saturating_add((target.as_nanos() / 100) as i64);
-            let reader = match unsafe { reopen_at(path, (w, h), abs_target) } {
-                Ok((r, s)) => {
-                    stride = s;
+            let reader = match unsafe { reopen_at(path, (w, h), abs_target, manager.as_ref()) } {
+                Ok((r, k)) => {
+                    kind = k;
                     r
                 }
                 Err(e) => {
@@ -169,7 +211,7 @@ pub fn run_video_producer(
                     Err(_) => break 'outer,
                 }
                 let reader = active.as_ref().expect("reader set above");
-                match unsafe { read_one(reader, w, h, &mut stride) } {
+                match unsafe { read_one(reader, w, h, &mut kind) } {
                     Ok(Read1::Eos) => {
                         // Sought at/near the end: the stream is over under the
                         // new generation; the reader is spent.
@@ -183,9 +225,9 @@ pub fn run_video_producer(
                         break;
                     }
                     Ok(Read1::Gap) => {}
-                    Ok(Read1::Frame { ts, rgba }) => {
+                    Ok(Read1::Frame { ts, pixels }) => {
                         if ts >= abs_target {
-                            landed = Some((ts, rgba));
+                            landed = Some((ts, pixels));
                             break;
                         }
                         // Keyframe→target run-up: discard, keep decoding forward.
@@ -196,7 +238,7 @@ pub fn run_video_producer(
                     }
                 }
             }
-            if let Some((ts, rgba)) = landed {
+            if let Some((ts, pixels)) = landed {
                 // The landing frame consumes a credit like any other (the session
                 // granted fresh ones right behind the SeekTo). Block for one if
                 // needed — Stop/SeekTo still interrupt.
@@ -221,8 +263,8 @@ pub fn run_video_producer(
                     pts: Duration::from_nanos(pts_hns * 100),
                     width: w,
                     height: h,
-                    format: PixelFormat::Rgba8,
-                    pixels: rgba,
+                    format,
+                    pixels,
                     color: color.clone(),
                 };
                 if events.send(VideoProducerEvent::Frame(frame)).is_err() {
@@ -241,7 +283,7 @@ pub fn run_video_producer(
                 credits = 0;
                 continue;
             };
-            match unsafe { read_one(reader, w, h, &mut stride) } {
+            match unsafe { read_one(reader, w, h, &mut kind) } {
                 Ok(Read1::Eos) => {
                     let _ = events.send(VideoProducerEvent::EndOfStream {
                         session_id,
@@ -254,7 +296,7 @@ pub fn run_video_producer(
                     }
                 }
                 Ok(Read1::Gap) => {}
-                Ok(Read1::Frame { ts, rgba }) => {
+                Ok(Read1::Frame { ts, pixels }) => {
                     let o = *origin.get_or_insert(ts);
                     let pts_hns = (ts - o).max(0) as u64;
                     let frame = VideoFrame {
@@ -263,8 +305,8 @@ pub fn run_video_producer(
                         pts: Duration::from_nanos(pts_hns * 100),
                         width: w,
                         height: h,
-                        format: PixelFormat::Rgba8,
-                        pixels: rgba,
+                        format,
+                        pixels,
                         color: color.clone(),
                     };
                     if events.send(VideoProducerEvent::Frame(frame)).is_err() {
@@ -284,10 +326,30 @@ pub fn run_video_producer(
     }
 }
 
+/// Which decoded output this producer negotiated (task 79.10) — fixed for the
+/// session; a seek recreates the reader in the same kind.
+#[derive(Clone, Copy)]
+enum OutKind {
+    /// Software decode, RGB32 output, BGRX→RGBA swizzle (the shipping path).
+    Rgb32 { stride: i32 },
+    /// Hardware decode (DXGI manager), NV12 planes via `Lock2DSize`.
+    Nv12,
+}
+
+impl OutKind {
+    fn format(self) -> PixelFormat {
+        match self {
+            OutKind::Rgb32 { .. } => PixelFormat::Rgba8,
+            OutKind::Nv12 => PixelFormat::Nv12,
+        }
+    }
+}
+
 /// One `ReadSample` step, handling gap ticks, mid-stream stride requery, and the
-/// size-change failure. `Frame`'s `ts` is the reader's raw (container) timestamp.
+/// size-change failure. `Frame`'s `ts` is the reader's raw (container) timestamp;
+/// `pixels` is packed per `OutKind` (RGBA8, or Y+UV planes).
 enum Read1 {
-    Frame { ts: i64, rgba: Vec<u8> },
+    Frame { ts: i64, pixels: Vec<u8> },
     Eos,
     Gap,
 }
@@ -296,7 +358,7 @@ unsafe fn read_one(
     reader: &windows::Win32::Media::MediaFoundation::IMFSourceReader,
     w: u32,
     h: u32,
-    stride: &mut i32,
+    kind: &mut OutKind,
 ) -> Result<Read1, String> {
     let video = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
     let mut flags = 0u32;
@@ -316,44 +378,74 @@ unsafe fn read_one(
         return Ok(Read1::Eos);
     }
     // A mid-stream media-type change can move the stride (the size is fixed by
-    // our negotiated output type); re-query it.
+    // our negotiated output type); re-query it. NV12 reads its pitch per sample
+    // (`Lock2DSize`), so only the size check applies there.
     if flags != 0 {
         if let Ok((nw, nh, ns)) = negotiate_current(reader) {
             if (nw, nh) != (w, h) {
                 return Err("video changed size mid-stream".into());
             }
-            *stride = ns;
+            if let OutKind::Rgb32 { stride } = kind {
+                *stride = ns;
+            }
         }
     }
     let Some(sample) = sample else {
         return Ok(Read1::Gap);
     };
-    let rgba =
-        sample_to_rgba(&sample, w, h, *stride).map_err(|e| format!("Media Foundation: {e}"))?;
-    Ok(Read1::Frame { ts, rgba })
+    let pixels = match *kind {
+        OutKind::Rgb32 { stride } => {
+            sample_to_rgba(&sample, w, h, stride).map_err(|e| format!("Media Foundation: {e}"))?
+        }
+        OutKind::Nv12 => crate::mf_hw::sample_to_nv12(&sample, w, h)
+            .map_err(|e| format!("Media Foundation: {e}"))?,
+    };
+    Ok(Read1::Frame { ts, pixels })
 }
 
-/// Fresh reader for a seek landing: open + negotiate the SAME output geometry the
-/// session fixed at start, then position **before the first read** (~0 ms; spike E).
+/// Fresh reader for a seek landing: open + negotiate the SAME output kind and
+/// geometry the session fixed at start, then position **before the first read**
+/// (~0 ms; spike E). The hw path reuses the producer's one DXGI manager.
 unsafe fn reopen_at(
     path: &Path,
     dims: (u32, u32),
     position_hns: i64,
-) -> Result<(windows::Win32::Media::MediaFoundation::IMFSourceReader, i32), String> {
-    let reader = open_video_reader(path).map_err(|e| e.to_string())?;
-    let (nw, nh, stride) = negotiate_rgb32(&reader, Some(dims))
-        .or_else(|_| negotiate_rgb32(&reader, None))
-        .map_err(mf_open_msg)?;
-    if (nw, nh) != dims {
-        retire_reader(reader);
-        return Err("video output size changed across a seek".into());
-    }
+    manager: Option<&windows::Win32::Media::MediaFoundation::IMFDXGIDeviceManager>,
+) -> Result<
+    (
+        windows::Win32::Media::MediaFoundation::IMFSourceReader,
+        OutKind,
+    ),
+    String,
+> {
+    let (reader, kind) = match manager {
+        Some(mgr) => {
+            let (reader, nw, nh) =
+                crate::mf_hw::open_nv12_reader(path, mgr, Some(dims)).map_err(mf_open_msg)?;
+            if (nw, nh) != dims {
+                retire_reader(reader);
+                return Err("video output size changed across a seek".into());
+            }
+            (reader, OutKind::Nv12)
+        }
+        None => {
+            let reader = open_video_reader(path).map_err(|e| e.to_string())?;
+            let (nw, nh, stride) = negotiate_rgb32(&reader, Some(dims))
+                .or_else(|_| negotiate_rgb32(&reader, None))
+                .map_err(mf_open_msg)?;
+            if (nw, nh) != dims {
+                retire_reader(reader);
+                return Err("video output size changed across a seek".into());
+            }
+            (reader, OutKind::Rgb32 { stride })
+        }
+    };
     let pos = crate::mf_poster::propvariant_i8(position_hns.max(0));
     if let Err(e) = reader.SetCurrentPosition(&windows::core::GUID::zeroed(), &pos) {
         retire_reader(reader);
         return Err(mf_open_msg(e));
     }
-    Ok((reader, stride))
+    Ok((reader, kind))
 }
 
 /// Re-read the negotiated output geometry/stride after a media-type-change tick.
@@ -408,11 +500,13 @@ mod tests {
                 width,
                 height,
                 has_audio,
+                frame_bytes,
             } => {
                 assert_eq!(session_id, SID);
                 assert_eq!((width, height), (64, 64));
                 assert!(duration.expect("mp4 duration") > Duration::from_millis(800));
                 assert!(!has_audio, "the black/color fixture is silent");
+                assert_eq!(frame_bytes, 64 * 64 * 4, "credit size = negotiated output");
             }
             other => panic!("expected Opened, got {other:?}"),
         }
@@ -588,6 +682,51 @@ mod tests {
                 assert!(has_audio, "the tone fixture has an AAC track");
             }
             other => panic!("expected Opened, got {other:?}"),
+        }
+    }
+
+    /// Task 79.10: the hardware reader plumbing decodes the committed fixture to
+    /// well-formed NV12 planes (even dims, packed Y+UV). Skips gracefully where
+    /// no D3D11 hardware device exists (CI VM without a GPU) — the producer's
+    /// fallback covers that case in production.
+    #[test]
+    fn hw_reader_decodes_the_fixture_to_nv12() {
+        ensure_mf();
+        unsafe {
+            let Some(mgr) = crate::mf_hw::dxgi_manager() else {
+                eprintln!("no D3D11 hardware device — skipping");
+                return;
+            };
+            let (reader, w, h) = match crate::mf_hw::open_nv12_reader(&fixture(), &mgr, None) {
+                Ok(x) => x,
+                Err(e) => {
+                    eprintln!("hw NV12 open failed ({e}) — skipping (fallback covers this)");
+                    return;
+                }
+            };
+            assert!(w > 0 && h > 0 && w % 2 == 0 && h % 2 == 0, "{w}x{h}");
+            let mut kind = OutKind::Nv12;
+            let mut frames = 0usize;
+            for _ in 0..40 {
+                match read_one(&reader, w, h, &mut kind) {
+                    Ok(Read1::Frame { pixels, .. }) => {
+                        assert_eq!(
+                            pixels.len(),
+                            PixelFormat::Nv12.frame_bytes(w, h),
+                            "packed NV12 planes"
+                        );
+                        frames += 1;
+                        if frames >= 5 {
+                            break;
+                        }
+                    }
+                    Ok(Read1::Eos) => break,
+                    Ok(Read1::Gap) => {}
+                    Err(e) => panic!("hw read failed: {e}"),
+                }
+            }
+            assert!(frames >= 1, "the hw path produced NV12 frames");
+            retire_reader(reader);
         }
     }
 

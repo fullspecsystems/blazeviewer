@@ -185,6 +185,19 @@ pub fn is_hdr(img: &DecodedImage) -> bool {
     img.format == PixelFormat::Rgba16F
 }
 
+/// Translate a video frame's YUV parameters into the renderer's (task 79.10) —
+/// same crate-decoupling shim as [`render_color`].
+pub fn render_yuv(c: &pb_decode::VideoColorInfo) -> pb_render::YuvParams {
+    pb_render::YuvParams {
+        matrix: match c.yuv_matrix {
+            pb_decode::YuvMatrix::Bt601 => pb_render::YuvMatrix::Bt601,
+            pb_decode::YuvMatrix::Bt709 => pb_render::YuvMatrix::Bt709,
+            pb_decode::YuvMatrix::Bt2020 => pb_render::YuvMatrix::Bt2020,
+        },
+        full_range: c.full_range,
+    }
+}
+
 /// The navigation direction for a nav [`Action`], or `None` for any non-nav action.
 /// Bridges the central keymap vocabulary to the engine's `Nav` (used by the press
 /// handler and `held_nav`).
@@ -563,6 +576,9 @@ pub fn to_clipboard_rgba8(img: &DecodedImage) -> Vec<u8> {
             }
             out
         }
+        // Stills never carry NV12 (it's a video-session frame format — task
+        // 79.10); an empty buffer keeps this total without inventing YUV params.
+        PixelFormat::Nv12 => Vec::new(),
     }
 }
 

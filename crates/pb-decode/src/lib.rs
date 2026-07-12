@@ -37,6 +37,10 @@ mod mf_poster;
 // thread speaking the VideoProducerEvent/Msg protocol to the VideoSession.
 #[cfg(windows)]
 mod mf_video_producer;
+// Hardware decode support (task 79.10): the D3D11/DXGI device manager, NV12
+// negotiation, and the pixel-rate policy picking hw vs the software path.
+#[cfg(windows)]
+mod mf_hw;
 // The Linux mirror: .mov motion + audio decode via FFmpeg, behind the `livephoto` feature.
 #[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
 mod ff_live;
@@ -124,7 +128,7 @@ pub use raw::{is_raw_extension, RawPreviewDecoder};
 pub use svg::SvgDecoder;
 pub use video::{
     SeekGeneration, VideoColorInfo, VideoFrame, VideoProducerEvent, VideoProducerMsg,
-    VideoSessionId,
+    VideoSessionId, YuvMatrix,
 };
 #[cfg(windows)]
 pub use wic::WicDecoder;
@@ -141,13 +145,33 @@ pub enum PixelFormat {
     /// as **scene-linear scRGB** (linear, BT.709 primaries, extended range), ready
     /// to present to an fp16 scRGB swapchain.
     Rgba16F,
+    /// 4:2:0 planar YUV (task 79.10): a full-res Y plane followed by a half-res
+    /// interleaved UV plane — 12 bits/px, even dimensions required. **Video
+    /// frames only** (the hardware-decode producer); stills never produce it.
+    /// The consumer applies the YUV matrix + range from `VideoColorInfo`
+    /// exactly once (nothing upstream has).
+    Nv12,
 }
 
 impl PixelFormat {
+    /// Bytes per pixel of the packed RGBA formats. NV12 is subsampled (12 bits/px)
+    /// and has no whole per-pixel byte count — use [`PixelFormat::frame_bytes`];
+    /// calling this on it is a programming error.
     pub fn bytes_per_pixel(self) -> usize {
         match self {
             PixelFormat::Rgba8 => 4,
             PixelFormat::Rgba16F => 8,
+            PixelFormat::Nv12 => panic!("NV12 is subsampled; use PixelFormat::frame_bytes"),
+        }
+    }
+
+    /// Total tightly-packed byte length of a `width × height` frame in this format.
+    pub fn frame_bytes(self, width: u32, height: u32) -> usize {
+        let (w, h) = (width as usize, height as usize);
+        match self {
+            PixelFormat::Rgba8 => w * h * 4,
+            PixelFormat::Rgba16F => w * h * 8,
+            PixelFormat::Nv12 => w * h * 3 / 2,
         }
     }
 }

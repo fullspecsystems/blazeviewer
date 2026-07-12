@@ -14,11 +14,16 @@ pub mod fit;
 pub mod gpu;
 pub mod upload;
 pub mod view;
+pub mod yuv;
 
 pub use fit::{cover_rect, fit_rect, original_rect, FitRect};
-pub use gpu::{render_offscreen, render_offscreen_color, test_pattern, WgpuRenderer, LETTERBOX};
+pub use gpu::{
+    render_offscreen, render_offscreen_color, render_offscreen_nv12, test_pattern, WgpuRenderer,
+    LETTERBOX,
+};
 pub use upload::{StagingUpload, UploadStrategy};
 pub use view::{Placement, Rotation, ViewTransform, MAX_ZOOM, MIN_ZOOM};
+pub use yuv::{YuvMatrix, YuvParams};
 
 /// Serializes GPU-device creation across this crate's tests. The libtest harness runs
 /// tests in parallel by default, and some virtual GPU drivers — notably **VMware SVGA 3D**
@@ -107,6 +112,25 @@ pub trait Renderer {
         hdr: bool,
         peak: f32,
     );
+    /// Display one NV12 video frame (task 79.10): `y` is the `width×height` luma
+    /// plane, `uv` the interleaved half-res chroma plane (`width×height/2` bytes).
+    /// The convert applies `yuv` (matrix + range) **exactly once** — NV12 pixels
+    /// arrive raw — then `color` (primaries + transfer) like any SDR image. This
+    /// default implementation converts on CPU via [`yuv::nv12_to_rgba`] (the
+    /// correctness/portability fallback); `WgpuRenderer` overrides it with the
+    /// two-plane in-shader path.
+    fn set_video_nv12(
+        &mut self,
+        y: &[u8],
+        uv: &[u8],
+        width: u32,
+        height: u32,
+        yuv: YuvParams,
+        color: ColorTransform,
+    ) {
+        let rgba = yuv::nv12_to_rgba(y, uv, width, height, yuv);
+        self.set_image(&rgba, width, height, color, false, 1.0);
+    }
     /// Drop the displayed image and show a blank background (the letterbox fill)
     /// instead — the bare-launch / no-images / last-photo-deleted empty state. The
     /// next [`set_image`](Renderer::set_image) / [`present_slot`](Renderer::present_slot)

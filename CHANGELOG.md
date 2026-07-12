@@ -38,6 +38,12 @@ with any pre-release suffix carried only by the tag.
   take a moment on long-GOP clips.
 
 ### Changed
+- **4K video now plays using your graphics card.** High-resolution clips (above 4K30 —
+  where software decoding could not keep up full screen) decode on the GPU and convert
+  color on the GPU, roughly tripling the playback headroom on 4K60 HEVC footage and
+  starting playback faster. Lighter clips keep the proven software path, which also
+  remains the automatic fallback on machines without a capable GPU. HDR (HLG/Dolby
+  Vision) clips stay on the software path for now so their brightness stays correct.
 - **Smoother animation and Live Photo playback.** Showing each frame no longer creates
   fresh GPU resources: frames now reuse one resident texture and upload buffer, which
   removes the worst-case per-frame hitches (95th-percentile frame-present overhead dropped
