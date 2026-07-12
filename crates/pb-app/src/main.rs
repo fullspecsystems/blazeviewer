@@ -657,6 +657,7 @@ impl App {
             video_pill_text: None,
             video_osd_until: None,
             video_geometry_stale: false,
+            video_paused_by_resize: false,
             prepared: None,
             anim_gen: 0,
             anim_hint_shown_for: None,

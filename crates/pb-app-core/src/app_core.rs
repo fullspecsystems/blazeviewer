@@ -523,6 +523,10 @@ pub struct AppCore {
     /// display: the re-decode + ring refill were deferred (they'd saturate the
     /// pool mid-playback); `stop_video` re-issues the prefetch.
     pub video_geometry_stale: bool,
+    /// A resize in flight paused the playback (freeze together, resume
+    /// together — the modal drag loop stalls the presenter while audio would
+    /// play on); the resize-settle arm resumes it.
+    pub video_paused_by_resize: bool,
     /// An animation decoded ahead (eager prep) and held ready for instant playback.
     pub prepared: Option<Prepared>,
     /// Animation generation; bumped on navigate so a late decode for a past item is discarded.

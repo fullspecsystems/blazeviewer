@@ -205,6 +205,7 @@ impl AppCore {
             video_pill_text: None,
             video_osd_until: None,
             video_geometry_stale: false,
+            video_paused_by_resize: false,
             prepared: None,
             anim_gen: 0,
             anim_hint_shown_for: None,
@@ -1033,6 +1034,25 @@ impl AppCore {
         if let Some(r) = self.renderer.as_mut() {
             r.resize(width, height);
         }
+        // A resize in flight pauses playback — freeze together, resume together.
+        // The modal drag loop stalls the presenter while audio plays on; every
+        // clock-catch-up scheme afterward either races the backlog or churns
+        // seeks (tried, regressed, reverted). Pausing both sides loses nothing:
+        // the settle arm below resumes exactly where playback froze.
+        if self
+            .video
+            .as_ref()
+            .is_some_and(|v| v.session.state() == crate::video::VideoSessionState::Playing)
+        {
+            let now = self.now;
+            self.video
+                .as_mut()
+                .expect("checked above")
+                .session
+                .pause(now);
+            self.effects.push(contract::CoreEffect::PauseVideoAudio);
+            self.video_paused_by_resize = true;
+        }
         // Deferred crisp decode-to-fit + ring refill once the size settles (`self.now` is stamped
         // by the host at the start of the event).
         self.resize_settle_at = Some(self.now + Duration::from_millis(180));
@@ -1425,6 +1445,17 @@ impl AppCore {
                 self.resize_settle_at = None;
                 self.invalidate_geometry();
                 self.refresh_after_geometry_change();
+                // Resume the playback the resize paused — unless the user paused
+                // it themselves meanwhile (the state must still be Paused).
+                if std::mem::take(&mut self.video_paused_by_resize) {
+                    if let Some(v) = self.video.as_mut() {
+                        if v.session.state() == crate::video::VideoSessionState::Paused {
+                            v.session.resume(now);
+                            self.effects.push(contract::CoreEffect::ResumeVideoAudio);
+                            self.draw();
+                        }
+                    }
+                }
                 // Re-place a visible panel against the settled surface size (a fullscreen toggle
                 // otherwise leaves it jammed in the corner — #3).
                 if self.overlay_shown {
@@ -6014,6 +6045,8 @@ impl AppCore {
                 self.target_item = self.playlist.current();
                 self.request_prefetch();
             }
+            // A resize-pause dies with its session (never resume a later one).
+            self.video_paused_by_resize = false;
         }
     }
 
@@ -8854,6 +8887,92 @@ mod tests {
         core.handle(contract::CoreEvent::Tick(Instant::now()));
         assert!(core.video_osd_until.is_none(), "the OSD flash expires");
         assert!(!core.info_line_visible(), "the flashed line drops");
+    }
+
+    /// Owner-reported (79.10 smoke): a resize drag stalls the presenter (the OS
+    /// modal loop) while audio plays on — playback must freeze *together* and
+    /// resume together at settle, exactly where it froze. (The clock-catch-up
+    /// alternative raced or seek-churned — tried, regressed, reverted.)
+    #[test]
+    fn resize_pauses_playback_and_settle_resumes_it() {
+        use crate::video::{VideoProducerEvent, VideoSessionId, VideoSessionState};
+        use crate::video_session::{ActiveVideo, VideoSession};
+
+        let mut core = test_core();
+        core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
+            r"C:\nope\clip.mp4",
+        )]));
+        core.playlist = Playlist::new(1, 0);
+        core.displayed_item = Some(0);
+        let (session, io) = VideoSession::new(VideoSessionId(1), 16);
+        core.video = Some(ActiveVideo {
+            session,
+            item: 0,
+            audio_started: false,
+        });
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: VideoSessionId(1),
+                duration: Some(Duration::from_secs(10)),
+                width: 2,
+                height: 2,
+                has_audio: false,
+                frame_bytes: 16,
+            })
+            .unwrap();
+        let frame = |pts_ms: u64| pb_decode::VideoFrame {
+            session_id: VideoSessionId(1),
+            seek_generation: crate::video::SeekGeneration::FIRST,
+            pts: Duration::from_millis(pts_ms),
+            width: 2,
+            height: 2,
+            format: pb_decode::PixelFormat::Rgba8,
+            pixels: vec![0; 16],
+            color: pb_decode::video::VideoColorInfo::srgb(),
+        };
+        io.events.send(VideoProducerEvent::Frame(frame(0))).unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(33)))
+            .unwrap();
+        core.poll_video();
+        assert_eq!(
+            core.video.as_ref().unwrap().session.state(),
+            VideoSessionState::Playing
+        );
+
+        // A resize lands mid-playback: freeze together.
+        core.effects.clear();
+        core.resize(320, 200, 1.0);
+        assert_eq!(
+            core.video.as_ref().unwrap().session.state(),
+            VideoSessionState::Paused,
+            "resize pauses the session"
+        );
+        assert!(
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::PauseVideoAudio)),
+            "…and the audio with it"
+        );
+        assert!(core.video_paused_by_resize);
+
+        // The settle deadline passes: resume together, exactly where frozen.
+        core.effects.clear();
+        core.resize_settle_at = Some(core.now - Duration::from_millis(1));
+        core.handle(contract::CoreEvent::Tick(Instant::now()));
+        assert_eq!(
+            core.video.as_ref().unwrap().session.state(),
+            VideoSessionState::Playing,
+            "settle resumes the session"
+        );
+        assert!(
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::ResumeVideoAudio)),
+            "…and the audio with it"
+        );
+        assert!(!core.video_paused_by_resize, "one-shot");
+        drop(io);
     }
 
     /// Owner-reported (79.10 smoke): toggling fullscreen while a video played went
