@@ -349,16 +349,13 @@ final class MetalCanvasNSView: NSView {
         videoLayer = nil
     }
 
-    /// Keep the video layer covering the canvas across live resize, fullscreen
-    /// transitions, and 1x↔2x display moves (gate item: geometry parity). No implicit
-    /// CA animation — the frame must track the bounds atomically like the Metal layer.
+    /// Keep the video layer placed correctly across live resize, fullscreen transitions,
+    /// and 1x↔2x display moves (gate item: geometry parity). The player owns the actual
+    /// frame/gravity (they depend on the scale mode + the video's presentation size), so
+    /// this just asks it to re-lay-out against the current bounds.
     private func syncVideoLayerFrame() {
-        guard let vl = videoLayer else { return }
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        vl.frame = layer?.bounds ?? bounds
-        vl.contentsScale = backingScale
-        CATransaction.commit()
+        guard videoLayer != nil else { return }
+        model?.relayoutNativeVideo()
     }
 
     private var backingScale: CGFloat {

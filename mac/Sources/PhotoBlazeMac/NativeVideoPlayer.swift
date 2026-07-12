@@ -31,9 +31,16 @@ final class NativeVideoPlayer {
     private var revealed = false
     private var reportedOpened = false
     private var ended = false
+    /// The core's scale mode (0 Fit / 1 Fill / 2 Original), mirrored onto the layer so
+    /// video honors 8/9/0 like a still. Zoom/pan/rotation parity is a later increment.
+    private var scaleMode: UInt8
 
-    init(url: URL, muted: Bool, sessionId: UInt64, canvas: MetalCanvasNSView, model: CoreModel) {
+    init(
+        url: URL, muted: Bool, sessionId: UInt64, scaleMode: UInt8, canvas: MetalCanvasNSView,
+        model: CoreModel
+    ) {
         self.sessionId = sessionId
+        self.scaleMode = scaleMode
         self.canvas = canvas
         self.model = model
         item = AVPlayerItem(url: url)
@@ -43,6 +50,7 @@ final class NativeVideoPlayer {
         player.actionAtItemEnd = .pause
         playerLayer = AVPlayerLayer(player: player)
         canvas.attachVideoLayer(playerLayer) // hidden until the first frame
+        relayout() // apply the initial scale mode (Fit/Fill now; Original once ready)
 
         // Reveal on the first displayable frame, then start playback — the poster
         // (drawn by wgpu into the Metal layer) shows until this fires.
@@ -104,6 +112,48 @@ final class NativeVideoPlayer {
         let durationMs: Int64 = d.isNumeric ? Int64((CMTimeGetSeconds(d) * 1000).rounded()) : -1
         let hasAudio = item.tracks.contains { $0.assetTrack?.mediaType == .audio }
         model?.nativeVideoOpened(sessionId, durationMs: durationMs, hasAudio: hasAudio)
+        relayout() // presentationSize is known now → Original can size 1:1
+    }
+
+    /// Mirror the core's scale mode (8/9/0) onto the layer. Re-lays-out on a real change.
+    func setScaleMode(_ mode: UInt8) {
+        guard mode != scaleMode else { return }
+        scaleMode = mode
+        relayout()
+    }
+
+    /// Place the `AVPlayerLayer` per the scale mode — coordinate-safe: Fit/Fill fill the
+    /// canvas (aspect / aspect-fill); Original sizes the layer to the video's native pixel
+    /// dimensions and *centers* it (symmetric, so no top/bottom-origin ambiguity). Zoom/
+    /// pan/rotation parity (off-center placement) is a later increment.
+    func relayout() {
+        guard let canvas else { return }
+        let bounds = canvas.bounds
+        let scale = canvas.window?.backingScaleFactor ?? 2.0
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        playerLayer.contentsScale = scale
+        switch scaleMode {
+        case 1: // Fill — cover the canvas, cropping the overflow
+            playerLayer.videoGravity = .resizeAspectFill
+            playerLayer.frame = bounds
+        case 2: // Original — native 1:1, centered (clipped by the canvas if larger)
+            let ps = player.currentItem?.presentationSize ?? .zero
+            if ps.width > 0, ps.height > 0 {
+                let w = ps.width / scale
+                let h = ps.height / scale
+                playerLayer.videoGravity = .resize // fill the exact 1:1 frame
+                playerLayer.frame = CGRect(
+                    x: (bounds.width - w) / 2, y: (bounds.height - h) / 2, width: w, height: h)
+            } else {
+                playerLayer.videoGravity = .resizeAspect
+                playerLayer.frame = bounds
+            }
+        default: // Fit — contain, letterboxed
+            playerLayer.videoGravity = .resizeAspect
+            playerLayer.frame = bounds
+        }
     }
 
     func setMuted(_ muted: Bool) {

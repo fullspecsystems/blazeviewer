@@ -575,13 +575,17 @@ final class CoreModel {
     /// toolbar — the toolbar twin of `menuBar?.sync`. Called on `MenuStateChanged` and
     /// `PanelsChanged`, the same markers that re-sync the menu bar / panels.
     private func syncToolbar() {
+        let menu = core.menu_state()
         toolbarController?.sync(
-            core.menu_state(),
+            menu,
             treeVisible: treeVisible,
             slideshowInterval: core.slideshow_interval_display().toString(),
             hasMotion: core.current_has_motion(),
             playing: core.motion_playing()
         )
+        // Mirror the scale mode (8/9/0 / the View menu) onto a playing video so it fits/
+        // crops like a still. Cheap; re-lays-out only on a real change.
+        nativeVideo?.setScaleMode(menu.scale)
     }
 
     /// The last motion state pushed to the toolbar's Play-Animation button — so the pump
@@ -2168,8 +2172,14 @@ final class CoreModel {
             return
         }
         nativeVideo = NativeVideoPlayer(
-            url: URL(fileURLWithPath: path), muted: muted, sessionId: sessionId, canvas: canvas,
-            model: self)
+            url: URL(fileURLWithPath: path), muted: muted, sessionId: sessionId,
+            scaleMode: core.menu_state().scale, canvas: canvas, model: self)
+    }
+
+    /// Re-lay-out the native video layer against the current canvas bounds (resize /
+    /// fullscreen / display move). The player owns the frame/gravity math.
+    func relayoutNativeVideo() {
+        nativeVideo?.relayout()
     }
 
     // ── Native video callbacks (task 79.9 phase 2): the player reports its authoritative
