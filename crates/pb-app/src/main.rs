@@ -2468,6 +2468,20 @@ impl App {
                             a.seek(position);
                         }
                     }
+                    // macOS-native video (task 79.9): on macOS the whole media pipeline is the
+                    // SwiftUI host's `AVPlayer`, so these commands are emitted ONLY when the core
+                    // holds a `Native` video backend — which this winit shell never constructs (it
+                    // drives the Windows/Linux `VideoSession` + its separate audio player above).
+                    // Matched explicitly (the no-wildcard rule) and inert here.
+                    contract::CoreEffect::PlayVideo { .. }
+                    | contract::CoreEffect::PauseVideo { .. }
+                    | contract::CoreEffect::ResumeVideo { .. }
+                    | contract::CoreEffect::SeekVideoBy { .. }
+                    | contract::CoreEffect::SeekVideoFraction { .. }
+                    | contract::CoreEffect::StepVideo { .. }
+                    | contract::CoreEffect::SetVideoMuted { .. }
+                    | contract::CoreEffect::StopVideo { .. }
+                    | contract::CoreEffect::CaptureNativeVideoFrame { .. } => {}
                     // The core routed a flow action (dialog / window / scan / file edit / quit) it
                     // doesn't own end-to-end yet — run the shell half.
                     contract::CoreEffect::ShellFlowAction(action) => {

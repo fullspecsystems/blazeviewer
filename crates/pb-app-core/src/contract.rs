@@ -450,6 +450,76 @@ pub enum CoreEffect {
     ResumeVideoAudio,
     /// Mute/unmute the video audio in place (the mute toggle while a video plays).
     SetVideoAudioMuted(bool),
+    // ── macOS native video (task 79.9) ───────────────────────────────────────
+    // On macOS the whole media pipeline is the shell's native `AVPlayer` +
+    // `AVPlayerLayer` (system decode/color/HDR/audio/timing/seeking) — NOT the
+    // Windows/Linux `VideoSession` + its separate audio player (the effects
+    // above). These command that player; `AppCore` keeps only a passive
+    // `NativeVideoProxy` mirror (see `video_native`). Every command carries a
+    // `session_id` so a stale player is ignored; seeks carry a `generation` token
+    // so a superseded seek's async completion can't affect the current session.
+    // AVPlayer is the single timing authority — the core issues no position, only
+    // relative/fractional intent it resolves against its own clock.
+    /// Open `path` in the native player for `session_id`, honoring `muted`. The
+    /// shell opens paused, prerolls, reveals the layer on the first displayable
+    /// frame, then plays (so audio never leads the picture over the poster).
+    PlayVideo {
+        path: PathBuf,
+        session_id: crate::video::VideoSessionId,
+        muted: bool,
+    },
+    /// Pause the native player (`P` while playing; rebuffer never applies — the
+    /// system player owns buffering).
+    PauseVideo {
+        session_id: crate::video::VideoSessionId,
+    },
+    /// Resume the native player (`P` while paused).
+    ResumeVideo {
+        session_id: crate::video::VideoSessionId,
+    },
+    /// Seek by a signed delta from the player's current time (the ±2 s / Shift
+    /// ±10 s arrow-seek + hold-scrub). The core owns the delta magnitude; the
+    /// shell resolves it against `AVPlayer`'s clock and clamps to the seekable
+    /// range. `generation` supersedes any older in-flight seek.
+    SeekVideoBy {
+        session_id: crate::video::VideoSessionId,
+        generation: crate::video::SeekGeneration,
+        delta_ms: i64,
+    },
+    /// Seek to `fraction` (0..=1) of the duration — the info-line scrubber. Same
+    /// generation contract as [`SeekVideoBy`](Self::SeekVideoBy).
+    SeekVideoFraction {
+        session_id: crate::video::VideoSessionId,
+        generation: crate::video::SeekGeneration,
+        fraction: f32,
+    },
+    /// Frame-step while paused (native `AVPlayerItem.step(byCount:)`; the shell
+    /// honors `canStepForward`/`canStepBackward` and no-ops when unsupported).
+    StepVideo {
+        session_id: crate::video::VideoSessionId,
+        forward: bool,
+    },
+    /// Mute/unmute the native player in place.
+    SetVideoMuted {
+        session_id: crate::video::VideoSessionId,
+        muted: bool,
+    },
+    /// Tear down the native player (navigate away / delete / stop / failure). The
+    /// shell hides + detaches the layer and cancels all observers; stale callbacks
+    /// are rejected by `session_id`.
+    StopVideo {
+        session_id: crate::video::VideoSessionId,
+    },
+    /// Capture the *displayed* frame for an explicit user command (Copy / OCR /
+    /// Describe / Compare). The shell replies via `AppCore::native_video_frame_ready`
+    /// with the pixels; `request_id` + `session_id` + `item` reject a frame captured
+    /// before a navigation. On-demand only — never a continuous copy path.
+    CaptureNativeVideoFrame {
+        session_id: crate::video::VideoSessionId,
+        item: usize,
+        purpose: crate::video::NativeCapturePurpose,
+        request_id: u64,
+    },
     /// Perform a genuinely **host-side command** — one whose execution *is* a platform
     /// operation, not core orchestration. After NS0 5.6 this carries the residue that can't be
     /// pure core: **DeletePermanent** (opens the themed confirm dialog; the Yes then calls the

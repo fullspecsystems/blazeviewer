@@ -183,6 +183,24 @@ pub fn format_video_duration(d: Duration) -> String {
     }
 }
 
+/// Why the macOS shell is being asked to capture the *displayed* video frame
+/// (task 79.9, finding #5). The native `AVPlayer` owns the pixels, so an explicit
+/// user command (never a passive path) asks the shell for one frame, which the
+/// core then routes into the pixel-based clipboard / OCR / describe / compare job.
+/// Carried on `CoreEffect::CaptureNativeVideoFrame` with a `request_id` so a frame
+/// captured before a navigation can't feed the next item's job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeCapturePurpose {
+    /// Copy the displayed frame to the clipboard.
+    Copy,
+    /// Run OCR (text scan) over the displayed frame.
+    Ocr,
+    /// Run AI-describe over the displayed frame.
+    Describe,
+    /// Freeze the displayed frame as a Compare pin (no hidden continued playback).
+    Compare,
+}
+
 // ---------------------------------------------------------------------------
 // Session state machine: states + legal transitions (pure rules, tested).
 // ---------------------------------------------------------------------------
