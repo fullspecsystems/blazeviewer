@@ -170,6 +170,27 @@ VAAPI (Linux). This mirrors the Windows 79.10 hw-decode path and is gated on a m
 - **Out of scope / graceful floor:** DRM-protected streams; exotic/rare codecs FFmpeg's build
   omits → the existing placeholder + "can't play" toast.
 
+## 9a. Format registration (extensions, pickers, associations)
+
+**The target set is already fully registered** — MKV/WebM/AVI/WMV/ASF/MPG/MPEG/MTS/M2TS/3GP/
+3G2 were added to every list when they became *recognized-but-unplayable*, so this plan only
+adds *playback*, not selectability. Audited 2026-07-12, all present:
+
+1. **Recognition** — `VideoContainer::from_extension` + `LibraryItemKind` (`pb-app-core/src/video.rs`)
+2. **Archive byte-stream MIME** — `video_content_type` (`pb-decode/src/video.rs`) — needed so
+   archive-entry playback resolves the container handler
+3. **Windows Open picker** — `VIDEO_FILTER_EXTS` (`pb-app/src/main.rs`)
+4. **macOS Open panel** — the ext list in `presentOpenPanel` (`mac/…/CoreModel.swift`)
+5. **Windows default-app / file-association** — `VIDEO_EXTS` (`pb-app/src/default_app.rs`)
+6. **Linux desktop MIME** — the `MimeType=` line in the generated `.desktop`
+   (`scripts/release-linux.sh`)
+
+**Checklist — if FFmpeg lets us opportunistically enable a container NOT in the target set
+above** (e.g. FLV, OGV/OGG, TS, VOB, MXF, F4V), add its extension(s) to **all six** sites in
+lockstep, or it will decode but be unselectable / not open-with-able. This is the easily-missed
+step; treat it as part of "adding a format," not an afterthought. (A future refactor could
+collapse 1+3+4+5 to one shared list to make drift impossible — noted, not required here.)
+
 ## 10. Risks / open questions
 
 - **Scale.** The producer alone ≈ `mf_video_producer` (substantial: demand-driven, seek,
