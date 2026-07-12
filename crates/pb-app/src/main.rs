@@ -559,22 +559,25 @@ impl App {
              item,
              fit,
              allow_preview,
+             purpose,
              cancel: &std::sync::atomic::AtomicBool| {
                 if !METRICS_ON_FLAG.load(std::sync::atomic::Ordering::Relaxed) {
-                    return pb_app_core::engine::decode_item_cancellable(
+                    return pb_app_core::engine::decode_item_for(
                         src,
                         item,
                         fit,
                         allow_preview,
+                        purpose,
                         cancel,
                     );
                 }
                 let t0 = Instant::now();
-                let r = pb_app_core::engine::decode_item_cancellable(
+                let r = pb_app_core::engine::decode_item_for(
                     src,
                     item,
                     fit,
                     allow_preview,
+                    purpose,
                     cancel,
                 );
                 let ms = t0.elapsed().as_secs_f64() * 1e3;

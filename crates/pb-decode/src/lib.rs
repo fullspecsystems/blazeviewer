@@ -100,6 +100,7 @@ pub mod orientation;
 mod psd;
 mod raw;
 mod svg;
+mod thumb;
 pub mod video;
 #[cfg(windows)]
 mod wic;
@@ -114,6 +115,7 @@ pub use animation::{
 #[cfg(target_os = "macos")]
 pub use av_poster::decode_video_poster;
 pub use color::ColorTransform;
+pub use thumb::{derive_thumbnail, exif_thumbnail};
 #[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
 pub use ff_live::{
     decode_image_sequence, decode_image_sequence_cancellable, decode_live_motion,

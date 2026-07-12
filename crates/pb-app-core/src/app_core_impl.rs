@@ -70,7 +70,7 @@ impl AppCore {
         // A 1-worker pool whose decode always errors: a headless core has no photos, so it's
         // never invoked. A real host installs a decode closure over its `PhotoSource`.
         let decode: Arc<crate::decode_pool::DecodeFn> =
-            Arc::new(|_src, _item, _fit, _prev, _cancel| {
+            Arc::new(|_src, _item, _fit, _prev, _purpose, _cancel| {
                 Err(pb_decode::DecodeError::Corrupt("headless".into()))
             });
         let (pool, results) = crate::decode_pool::DecodePool::new(1, 1 << 20, decode);
@@ -241,8 +241,8 @@ impl AppCore {
     pub fn new_host(viewport: crate::Viewport) -> AppCore {
         let mut core = AppCore::headless(viewport);
         let decode: Arc<crate::decode_pool::DecodeFn> =
-            Arc::new(|src, item, fit, allow_preview, cancel| {
-                crate::engine::decode_item_cancellable(src, item, fit, allow_preview, cancel)
+            Arc::new(|src, item, fit, allow_preview, purpose, cancel| {
+                crate::engine::decode_item_for(src, item, fit, allow_preview, purpose, cancel)
             });
         let (pool, results) = crate::decode_pool::DecodePool::new(
             crate::decode_pool::recommended_workers(),
@@ -4668,7 +4668,7 @@ impl AppCore {
         //      behind every preview, so a fast fly stays smooth (these decode only in
         //      the pool's spare capacity) and the fulls land ahead of where you're
         //      heading — a stop finds the photo already sharp.
-        type Job = (usize, Option<FitBox>, bool);
+        type Job = crate::decode_pool::Want;
         let (mut head, mut previews, mut fulls): (Vec<Job>, Vec<Job>, Vec<Job>) =
             (Vec::new(), Vec::new(), Vec::new());
         for &t in &self.targets {
@@ -4681,11 +4681,11 @@ impl AppCore {
                 continue; // already full
             }
             if !resident {
-                previews.push((t, fit, true));
+                previews.push(Job::display(t, fit, true));
             } else if Some(t) == sharpen {
-                head.push((t, fit, false));
+                head.push(Job::display(t, fit, false));
             } else if ring.contains(&t) {
-                fulls.push((t, fit, false));
+                fulls.push(Job::display(t, fit, false));
             }
             // else: resident preview not in the ring → leave it as a preview
         }

@@ -264,6 +264,39 @@ pub fn decode_item(
     decode_item_cancellable(source, item, fit, allow_preview, &AtomicBool::new(false))
 }
 
+/// The pool's purpose-aware decode entry (task #83): a `Thumb`-purpose request
+/// first tries the cheap embedded-thumbnail extraction (the EXIF IFD1 JPEG —
+/// header-parse only, no full decode) before falling through to the normal
+/// routing; a `Display` request never does (its previews come from the
+/// format backends' own `allow_preview` paths at display size).
+pub fn decode_item_for(
+    source: &dyn PhotoSource,
+    item: usize,
+    fit: Option<FitBox>,
+    allow_preview: bool,
+    purpose: crate::decode_pool::Purpose,
+    cancel: &AtomicBool,
+) -> Result<DecodedImage, DecodeError> {
+    if purpose == crate::decode_pool::Purpose::Thumb {
+        // Videos poster through the normal routing below (already thumb-friendly);
+        // for images, a cheap embedded EXIF thumbnail beats any full decode.
+        if !matches!(
+            crate::video::item_kind(source, item),
+            crate::video::LibraryItemKind::Video(_)
+        ) {
+            if let Ok(bytes) = source.bytes(item) {
+                if let Some(img) = pb_decode::exif_thumbnail(&bytes) {
+                    return Ok(img);
+                }
+                // No embedded thumb: decode the already-read bytes to the thumb
+                // box (preview-friendly) rather than re-reading via decode_item.
+                return decode_named_bytes(source.name(item), &bytes, fit, allow_preview);
+            }
+        }
+    }
+    decode_item_cancellable(source, item, fit, allow_preview, cancel)
+}
+
 /// [`decode_item`] with a mid-job cancel flag — what the decode pool runs, so a
 /// superseded video **poster probe** (task #79 phase 2: an open reader walking
 /// frames) stops between samples instead of finishing a walk nobody wants. Image
