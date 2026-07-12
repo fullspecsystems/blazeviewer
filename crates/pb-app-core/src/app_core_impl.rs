@@ -5918,10 +5918,10 @@ impl AppCore {
         }
     }
 
-    /// Shell → core callbacks for the macOS native player (task 79.9 phase 2). The
-    /// shell's `AVPlayer` is the timing/lifecycle authority; these advance the passive
-    /// `NativeVideoProxy` so the core's play/pause/replay dispatch + policy see real
-    /// state. Each is session-gated inside the proxy (a stale player is ignored).
+    // Shell → core callbacks for the macOS native player (task 79.9 phase 2). The
+    // shell's `AVPlayer` is the timing/lifecycle authority; these advance the passive
+    // `NativeVideoProxy` so the core's play/pause/replay dispatch + policy see real
+    // state. Each is session-gated inside the proxy (a stale player is ignored).
 
     /// The player finished opening: record duration + audio presence.
     pub fn native_video_opened(&mut self, session_id: u64, duration_ms: i64, has_audio: bool) {
