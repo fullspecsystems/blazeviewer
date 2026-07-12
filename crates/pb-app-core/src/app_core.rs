@@ -529,6 +529,12 @@ pub struct AppCore {
     /// re-request while one is pending. Cleared when `video_poster_ready` lands (or the deck
     /// changes) — so a revisit after ring eviction re-requests and regenerates the poster.
     pub poster_inflight: std::collections::HashSet<usize>,
+    /// Off-thread archive-video poster byte reads (macOS): a worker reads the entry's bytes
+    /// (a ZIP inflate mustn't block the event loop, esp. when prefetching several ahead) and
+    /// sends `(request_id, item, bytes)`; the tick drains this, stashes the bytes, and emits
+    /// `RequestVideoPoster`. Empty bytes = a read error (the tick clears the in-flight guard).
+    pub poster_read_tx: std::sync::mpsc::Sender<(u64, usize, Vec<u8>)>,
+    pub poster_read_rx: Receiver<(u64, usize, Vec<u8>)>,
     /// Last held-key video seek step (task #79 phase 6): the app's own repeat
     /// timer (OS key-repeat stays ignored, like every other held action).
     pub video_seek_last: Option<Instant>,

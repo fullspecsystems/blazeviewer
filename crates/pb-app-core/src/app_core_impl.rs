@@ -74,6 +74,7 @@ impl AppCore {
                 Err(pb_decode::DecodeError::Corrupt("headless".into()))
             });
         let (pool, results) = crate::decode_pool::DecodePool::new(1, 1 << 20, decode);
+        let (poster_read_tx, poster_read_rx) = std::sync::mpsc::channel();
         let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(Vec::new()));
         let settings = settings::Settings::default();
         AppCore {
@@ -101,6 +102,8 @@ impl AppCore {
             pending_poster_bytes: std::collections::HashMap::new(),
             poster_req_seq: 0,
             poster_inflight: std::collections::HashSet::new(),
+            poster_read_tx,
+            poster_read_rx,
             dragging: false,
             rotations: std::collections::HashMap::new(),
             zoom_started: None,
@@ -1148,10 +1151,11 @@ impl AppCore {
         self.poll_delete_retry();
         // 1. Absorb finished decodes (uploads; presents the target if it arrived).
         self.drain_results();
-        // 1'. macOS: kick off a Swift-generated poster for the displayed archive video (its
-        // placeholder is a preview; the poster upgrades it in place — see the plan doc).
+        // 1'. macOS: keep Swift-generated posters flowing for archive videos — the displayed
+        // one and the prefetch window ahead (off-thread reads; upgrades placeholders in
+        // place). See .taskmaster/plans/macos-archive-video-posters.md.
         #[cfg(target_os = "macos")]
-        self.request_archive_poster_if_needed();
+        self.request_archive_posters();
 
         // 1a. Bound the regenerable per-item caches so browsing tens of thousands of photos
         // can't grow them without limit. Cheap when under the high-water mark (length checks).
@@ -3545,46 +3549,77 @@ impl AppCore {
         self.pending_poster_bytes.remove(&request_id).unwrap_or_default()
     }
 
-    /// macOS: request a Swift-generated poster for the displayed archive video if it still
-    /// shows the placeholder (a resident *preview*) and no request is already in flight.
-    /// Reads the entry's bytes (RAM-only) and stashes them for the shell to pull. Phase 1:
-    /// current item only (the prefetch window follows). Called once per landing from the tick.
+    /// macOS: keep Swift-generated posters flowing for archive videos — the displayed one
+    /// **and the prefetch window ahead**, so advancing to the next clip shows its poster
+    /// with no placeholder gap. Two steps each tick:
+    ///
+    /// 1. Drain finished off-thread byte reads → stash + emit `RequestVideoPoster` (or clear
+    ///    the in-flight guard if the read failed).
+    /// 2. For archive-video placeholders (resident *previews*) not already in flight — the
+    ///    displayed item first, then the direction-biased prefetch targets — spawn an
+    ///    off-thread byte read, up to a small concurrency cap (bounds transient RAM: each
+    ///    read holds one container copy until Swift consumes it).
+    ///
+    /// A poster upgrades its placeholder in place and the item leaves `preview_resident`, so
+    /// it stops being a candidate; a ring eviction re-placeholders it and it re-qualifies.
     #[cfg(target_os = "macos")]
-    pub fn request_archive_poster_if_needed(&mut self) {
-        let Some(item) = self.displayed_item else {
-            return;
-        };
-        // In flight already, a loose file (the pool posters those), or not an archive video.
-        if self.poster_inflight.contains(&item)
-            || self.source.path(item).is_some()
-            || !self.item_is_video(item)
-        {
+    pub fn request_archive_posters(&mut self) {
+        // Cap concurrent reads/generations: the displayed clip + a couple ahead covers the
+        // advance gap without holding many full containers in RAM at once.
+        const MAX_INFLIGHT: usize = 3;
+
+        // 1. Finished reads: stash the bytes + ask the shell to generate the poster.
+        while let Ok((request_id, item, bytes)) = self.poster_read_rx.try_recv() {
+            if bytes.is_empty() {
+                self.poster_inflight.remove(&item); // read failed — allow a later retry
+                continue;
+            }
+            let name = self.source.name(item).to_string();
+            let max_edge = self
+                .decode_fit()
+                .map(|f| f.max_width.max(f.max_height))
+                .unwrap_or(2048)
+                .max(1);
+            self.pending_poster_bytes.insert(request_id, bytes);
+            self.effects.push(contract::CoreEffect::RequestVideoPoster {
+                request_id,
+                item,
+                name,
+                max_edge,
+            });
+        }
+
+        // 2. Spawn reads for the next placeholders, in priority order, up to the cap.
+        if self.poster_inflight.len() >= MAX_INFLIGHT {
             return;
         }
-        // Only while the placeholder (a resident preview) is still showing — once the real
-        // poster upgraded it, the item leaves `preview_resident` and we stop.
-        if !self.preview_resident.contains(&item) {
-            return;
+        let mut candidates: Vec<usize> = Vec::new();
+        if let Some(d) = self.displayed_item {
+            candidates.push(d);
         }
-        let Ok(data) = self.source.bytes(item) else {
-            return;
-        };
-        self.poster_req_seq += 1;
-        let request_id = self.poster_req_seq;
-        let name = self.source.name(item).to_string();
-        let max_edge = self
-            .decode_fit()
-            .map(|f| f.max_width.max(f.max_height))
-            .unwrap_or(2048)
-            .max(1);
-        self.pending_poster_bytes.insert(request_id, data);
-        self.poster_inflight.insert(item);
-        self.effects.push(contract::CoreEffect::RequestVideoPoster {
-            request_id,
-            item,
-            name,
-            max_edge,
-        });
+        candidates.extend(self.targets.iter().copied());
+        for item in candidates {
+            if self.poster_inflight.len() >= MAX_INFLIGHT {
+                break;
+            }
+            if self.poster_inflight.contains(&item) // already in flight (also dedups this list)
+                || self.source.path(item).is_some() // loose file — the pool posters those
+                || !self.preview_resident.contains(&item) // placeholder not resident yet
+                || !self.item_is_video(item)
+            {
+                continue;
+            }
+            self.poster_req_seq += 1;
+            let request_id = self.poster_req_seq;
+            self.poster_inflight.insert(item);
+            let source = self.source.clone();
+            let tx = self.poster_read_tx.clone();
+            // Off the event loop: a ZIP entry inflates here (7z copies from resident RAM).
+            std::thread::spawn(move || {
+                let bytes = source.bytes(item).unwrap_or_default();
+                let _ = tx.send((request_id, item, bytes));
+            });
+        }
     }
 
     /// A macOS archive-video poster the shell generated (via `AVAssetImageGenerator`) — feed
