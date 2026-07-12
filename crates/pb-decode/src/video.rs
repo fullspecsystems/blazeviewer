@@ -298,10 +298,12 @@ pub const POSTER_MAX_MEDIA: Duration = Duration::from_secs(1);
 pub const POSTER_MAX_FRAMES: usize = 30;
 
 /// Mean-luma floor for "not black": fade-ins and lead-in black frames sit near 0;
-/// this is ~6% gray. A genuinely dark first scene can still be picked (documented
-/// limitation — the fallback is the last sampled frame, and night-clip fixtures in
-/// the corpus keep the trade-off deliberate).
-pub const POSTER_LUMA_MIN: f32 = 0.06;
+/// this is ~10% gray. Raised from 0.06 (owner feedback, 2026-07-12): frames barely
+/// past the old floor were accepted and still read as near-black tiles, so the walk
+/// now skips those and lands on a genuinely visible frame. A dark-throughout clip
+/// still gets *a* poster — the walk's fallback is the last sampled frame — so
+/// raising the floor never costs a poster, only walks a little further.
+pub const POSTER_LUMA_MIN: f32 = 0.10;
 
 /// Mean Rec.601 luma of a tightly packed RGBA8 buffer, in 0..=1. Samples every
 /// `stride`-th pixel (pass 1 to read them all) — a poster-sized frame subsampled
@@ -413,6 +415,20 @@ mod tests {
         // Near-black (fade-in) stays under the floor.
         let faint: Vec<u8> = [8u8, 8, 8, 255].repeat(64 * 64);
         assert!(!poster_frame_bright_enough(&faint));
+
+        // The raised floor (0.06 → 0.10): a frame at ~8% gray used to pass and
+        // read as a near-black tile — it must be walked past now, while ~12%
+        // (dim but visible) is accepted. Uniform (v,v,v) has mean luma v/255.
+        let dim_8pct: Vec<u8> = [20u8, 20, 20, 255].repeat(64 * 64);
+        assert!(
+            !poster_frame_bright_enough(&dim_8pct),
+            "~8% gray is still a near-black tile — keep walking"
+        );
+        let dim_12pct: Vec<u8> = [30u8, 30, 30, 255].repeat(64 * 64);
+        assert!(
+            poster_frame_bright_enough(&dim_12pct),
+            "~12% gray is visible content — accept"
+        );
     }
 
     #[test]
