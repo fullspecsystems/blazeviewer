@@ -3967,6 +3967,7 @@ dependencies = [
  "ureq 3.3.0",
  "walkdir",
  "windows 0.62.2",
+ "zip 2.4.2",
 ]
 
 [[package]]
@@ -3999,6 +4000,7 @@ dependencies = [
  "rawloader",
  "resvg",
  "windows 0.62.2",
+ "windows-core 0.62.2",
  "zune-jpeg 0.4.21",
 ]
 

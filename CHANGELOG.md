@@ -26,8 +26,14 @@ with any pre-release suffix carried only by the tag.
   A clip whose audio cannot start still plays, silently. A clip
   Windows has no codec for shows a plain dark tile instead of an error. Live Photo motion
   files are not listed twice: an `IMG_1234.MOV` next to `IMG_1234.HEIC` stays hidden and
-  keeps playing through its photo with `P`. Videos never open from inside ZIP/7z archives,
-  and viewing them leaves no trace on disk, same as photos.
+  keeps playing through its photo with `P`. Viewing videos leaves no trace on disk, same
+  as photos.
+- **Videos inside ZIP and 7z archives play too.** An archive's videos are listed alongside
+  its photos — an archive of nothing but videos now opens instead of being refused — with
+  the same posters, playback, sound, and seeking as loose files. Everything stays in
+  memory: the clip is never extracted to disk, so viewing an archive still leaves no trace.
+  Entries over 1 GiB are skipped (extract those to play them), and on macOS archive videos
+  are listed but do not play yet.
 - **The video playback bar is interactive.** The progress bar in the info line has a round
   position knob: click anywhere on the bar to jump there, or drag the knob to scrub. A
   play/pause button sits at the left of the row (pause while playing, play while paused)

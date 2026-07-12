@@ -93,6 +93,18 @@ pub trait PhotoSource: Send + Sync {
     fn random_access(&self) -> bool {
         true
     }
+
+    /// The (uncompressed) byte size of item `i`, when the source knows it without
+    /// I/O: ZIP reads it from the central directory, 7z from its resident bytes.
+    /// `None` for a filesystem listing (callers stat the [`path`] instead) or
+    /// out-of-range `i`. Feeds the info panel's file-size row for archive entries
+    /// that are never read whole (videos), and pre-flight size checks.
+    ///
+    /// [`path`]: PhotoSource::path
+    fn size_hint(&self, i: usize) -> Option<u64> {
+        let _ = i;
+        None
+    }
 }
 
 /// A plain filesystem listing — today's behavior behind the seam. Holds the
@@ -252,6 +264,9 @@ struct ZipEntry {
     name: String,
     /// Whether this entry's *contents* are encrypted.
     encrypted: bool,
+    /// Declared uncompressed size (central directory) — the panel's size row and
+    /// the video play path's pre-flight, without inflating the entry.
+    size: u64,
 }
 
 /// A ZIP archive read per entry, on demand, into RAM.
@@ -307,10 +322,17 @@ impl ZipSource {
             if !is_supported(&ext_of(&name)) {
                 continue;
             }
+            // An entry that could never be read (over the per-entry RAM ceiling —
+            // `bytes` would refuse it) is not indexed at all: an item that can
+            // never render or play shouldn't occupy a playlist slot.
+            if entry.size() > MAX_ENTRY_BYTES {
+                continue;
+            }
             entries.push(ZipEntry {
                 zip_index: i,
                 name,
                 encrypted: entry.encrypted(),
+                size: entry.size(),
             });
         }
         entries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -413,6 +435,10 @@ impl PhotoSource for ZipSource {
         self.checkin(archive);
         Ok(buf)
     }
+
+    fn size_hint(&self, i: usize) -> Option<u64> {
+        self.entries.get(i).map(|e| e.size)
+    }
 }
 
 impl Drop for ZipSource {
@@ -482,7 +508,14 @@ pub fn seven_z_projected_bytes(
     let total = archive
         .files
         .iter()
-        .filter(|f| !f.is_directory() && f.has_stream() && is_supported(&ext_of(f.name())))
+        .filter(|f| {
+            // Mirror the open's index rule exactly: oversized supported entries are
+            // drained, never held resident, so they don't count toward the budget.
+            !f.is_directory()
+                && f.has_stream()
+                && is_supported(&ext_of(f.name()))
+                && f.size() <= MAX_ENTRY_BYTES
+        })
         .map(|f| f.size())
         .sum();
     Ok(total)
@@ -583,7 +616,12 @@ impl SevenZSource {
                         .iter()
                         .filter(|e| !e.is_directory() && e.has_stream())
                 };
-                if streamed().any(|e| is_supported(&ext_of(e.name()))) {
+                // A block earns a decode only if it holds a supported entry that will
+                // actually be kept — an oversized one (over the per-entry ceiling) is
+                // drained, never indexed, so a block of nothing else stays skipped.
+                if streamed()
+                    .any(|e| is_supported(&ext_of(e.name())) && e.size() <= MAX_ENTRY_BYTES)
+                {
                     *has = true;
                     total += streamed().map(|e| e.size()).sum::<u64>();
                 }
@@ -664,9 +702,16 @@ impl SevenZSource {
                                         return Ok(true);
                                     }
                                     let size = entry.size();
-                                    if !is_supported(&ext_of(entry.name())) {
-                                        // Drain a non-image entry (in cancellable chunks) so
-                                        // the rest of a solid block stays byte-aligned.
+                                    // Skip (never index) an unsupported entry — or a supported
+                                    // one over the per-entry RAM ceiling (a decompression bomb,
+                                    // or a video too large to ever hold resident): drain it in
+                                    // cancellable chunks so the rest of a solid block stays
+                                    // byte-aligned, bounded memory throughout. Skipping (not
+                                    // refusing the whole archive) keeps the rest viewable; the
+                                    // projection (`seven_z_projected_bytes`) excludes these too.
+                                    if !is_supported(&ext_of(entry.name()))
+                                        || size > MAX_ENTRY_BYTES
+                                    {
                                         if !read_cancellable(rd, size, &mut io::sink(), &cancel)? {
                                             cancel_hit.store(true, Ordering::Relaxed);
                                             return Ok(false);
@@ -675,14 +720,6 @@ impl SevenZSource {
                                             p.add_done(size);
                                         }
                                         return Ok(true);
-                                    }
-                                    // Refuse an absurd declared size (a decompression bomb),
-                                    // reserve recoverably, and read in cancellable chunks so a
-                                    // large entry can be aborted mid-stream (not only between
-                                    // blocks — which for a solid archive could mean "never").
-                                    if size > MAX_ENTRY_BYTES {
-                                        oom.store(true, Ordering::Relaxed);
-                                        return Ok(false);
                                     }
                                     let mut buf = Vec::new();
                                     if buf.try_reserve_exact(size as usize).is_err() {
@@ -750,6 +787,10 @@ impl PhotoSource for SevenZSource {
         let entry = self.entries.get(i).ok_or_else(out_of_range)?;
         Ok(entry.bytes.clone())
     }
+
+    fn size_hint(&self, i: usize) -> Option<u64> {
+        self.entries.get(i).map(|e| e.bytes.len() as u64)
+    }
 }
 
 /// A prefix-scoped view of another source — the deck for one internal archive
@@ -801,6 +842,10 @@ impl PhotoSource for ScopedSource {
     fn random_access(&self) -> bool {
         self.inner.random_access()
     }
+
+    fn size_hint(&self, i: usize) -> Option<u64> {
+        self.inner.size_hint(*self.index.get(i)?)
+    }
 }
 
 /// Whether entry `name` lives at or under the folder `prefix` — i.e. `name` is
@@ -838,12 +883,14 @@ fn block_pack_size(archive: &SevenZArchive, bi: usize) -> u64 {
     sizes[start..end].iter().sum()
 }
 
-/// Refuse a single archived image larger than this — a sanity ceiling against a
+/// Skip a single archived entry larger than this — a sanity ceiling against a
 /// decompression bomb or a bogus entry that would otherwise reserve/read gigabytes
 /// before the decoder ever sees it. Generous: real encoded photos are far smaller
-/// (RAW ~100 MB; even a huge TIFF/PSD rarely approaches this). A genuinely larger file
-/// can be extracted and opened directly.
-const MAX_ENTRY_BYTES: u64 = 1 << 30; // 1 GiB
+/// (RAW ~100 MB; even a huge TIFF/PSD rarely approaches this), and it leaves real
+/// headroom for archived *videos*, which play from RAM (the whole container must be
+/// resident). Oversized entries are never indexed — the item could never render —
+/// so a genuinely larger file must be extracted and opened directly.
+pub const MAX_ENTRY_BYTES: u64 = 1 << 30; // 1 GiB
 
 /// Read up to `size` bytes from `rd` into `out` in chunks, checking `cancel` between
 /// chunks so a large entry aborts within one chunk's latency rather than only at the
@@ -1093,6 +1140,46 @@ mod tests {
         let _ = std::fs::remove_file(&zip);
     }
 
+    /// Archive video playback (the predicate union): a video-extension entry is
+    /// indexed when the caller's predicate admits it, `size_hint` reports the
+    /// directory's uncompressed size without inflating anything, and `bytes`
+    /// round-trips the container for the RAM-only playback path.
+    #[test]
+    fn zip_indexes_videos_under_a_union_predicate_with_size_hints() {
+        let is_lib = |ext: &str| is_img(ext) || ext == "mp4" || ext == "mov";
+        let zip = write_zip(
+            "vids",
+            &[
+                ("clip.mp4", b"fake mp4 container bytes".as_slice()),
+                ("photo.jpg", b"J"),
+                ("notes.txt", b"text"),
+            ],
+            None,
+        );
+        let src = ZipSource::open(&zip, None, is_lib).unwrap();
+        let names: Vec<&str> = (0..src.len()).map(|i| src.name(i)).collect();
+        assert_eq!(
+            names,
+            vec!["clip.mp4", "photo.jpg"],
+            "video indexed, txt not"
+        );
+        assert_eq!(
+            src.size_hint(0),
+            Some(24),
+            "central-directory size, no inflate"
+        );
+        assert_eq!(src.size_hint(1), Some(1));
+        assert_eq!(src.size_hint(99), None, "out of range");
+        assert_eq!(src.bytes(0).unwrap(), b"fake mp4 container bytes");
+
+        // The images-only predicate still excludes videos (nothing regressed).
+        let imgs_only = ZipSource::open(&zip, None, is_img).unwrap();
+        assert_eq!(imgs_only.len(), 1);
+        assert_eq!(imgs_only.name(0), "photo.jpg");
+
+        let _ = std::fs::remove_file(&zip);
+    }
+
     #[test]
     fn zip_lists_supported_images_sorted_excluding_others() {
         let zip = write_zip(
@@ -1258,6 +1345,30 @@ mod tests {
         compress_encrypted(&dir, dest, SevenZPassword::from(password)).expect("compress encrypted");
         let _ = std::fs::remove_dir_all(&dir);
         path
+    }
+
+    /// Archive video playback, 7z half: a union predicate indexes the video into
+    /// resident RAM (the eager model), `size_hint` reports its decompressed size,
+    /// and the pre-flight projection counts it — projection ≡ what open keeps.
+    #[test]
+    fn seven_z_indexes_videos_under_a_union_predicate_and_projects_them() {
+        let is_lib = |ext: &str| is_img(ext) || ext == "mp4";
+        let z = write_7z(
+            "vids",
+            &[
+                ("clip.mp4", b"fake mp4 container".as_slice()),
+                ("photo.jpg", b"JJ"),
+                ("notes.txt", b"text"),
+            ],
+        );
+        let projected = seven_z_projected_bytes(&z, None, is_lib).unwrap();
+        assert_eq!(projected, 18 + 2, "video + image, never the txt");
+        let src = SevenZSource::open(&z, None, is_lib).unwrap();
+        let names: Vec<&str> = (0..src.len()).map(|i| src.name(i)).collect();
+        assert_eq!(names, vec!["clip.mp4", "photo.jpg"]);
+        assert_eq!(src.bytes(0).unwrap(), b"fake mp4 container");
+        assert_eq!(src.size_hint(0), Some(18));
+        let _ = std::fs::remove_file(&z);
     }
 
     #[test]

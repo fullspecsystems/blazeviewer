@@ -1,14 +1,37 @@
 # PhotoBlaze — Current Status (session handoff)
 
-_Last updated: 2026-07-12 (GPU decode + playback controls + macOS merge). Supersedes everything prior._
+_Last updated: 2026-07-12 (archive video playback; earlier same day: GPU decode + playback
+controls + macOS merge). Supersedes everything prior._
 
-## State: main @ `023ecea`, pushed, all gates green
+## State: main, all gates green
 
-`cargo test --workspace` (≈710 tests), `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
 the featured clippy (`libheif,dav1d`), and `fmt --check` all pass.
 **`feat/mac-video-playback` is fully merged into main** (verified `HEAD..origin/...` empty).
 
 ## What shipped since the last handoff
+
+- **Videos inside ZIP/7z archives now list and play (Windows).** The reported bug: a
+  video-only archive refused with "Empty". Root cause was by-design — the archive
+  predicate was images-only ("video items are path-only"). Now:
+  `scan::is_supported_archive_entry` (images ∪ video containers) feeds ZipSource /
+  SevenZSource / the 7z preflight; `item_kind` classifies by entry **name** (was path);
+  playback runs through the new `pb_decode::VideoInput { Path | Bytes }` seam — a
+  zero-copy read-only `IStream` over `Arc<Vec<u8>>` (`mf_stream.rs`, windows-core
+  `#[implement]`) wrapped by `MFCreateMFByteStreamOnStream` → poster/probe/software
+  producer/NVDEC/seek-reopen are configuration-identical for path and bytes. Audio plays
+  the SAME Arc via `CreateRandomAccessStreamOverStream` → `MediaSource::CreateFromStream`
+  (`StartVideoAudio` now carries `VideoInput`; the shared-buffer handoff is
+  `ActiveVideo::media`, an `Arc<OnceLock<VideoInput>>` the fetch thread fills before
+  `Opened` can land). The bytes fetch happens on the producer thread — never the event
+  loop. Guardrails: entries > `pb_source::MAX_ENTRY_BYTES` (1 GiB) are **skipped at
+  index time** everywhere (zip open, 7z open drain, 7z projection — an oversized entry
+  used to refuse the whole 7z); `PhotoSource::size_hint` feeds the panel's size row
+  (probe skipped for archive videos — duration arrives via `Opened`). No-trace holds:
+  the zip no-trace test now includes a video poster. **macOS**: archive videos list but
+  toast "can't play yet" (AVPlayer is URL-based; resource-loader parity is future work).
+  Verified end to end: real-MF tests (producer streams+seeks from bytes, poster/probe
+  from bytes, WinRT audio opens from bytes) + app smoke on a corpus video-only zip.
 
 - **79.10 GPU decode (Windows) — implemented, in `review` pending owner smoke.**
   NVDEC via the DXGI device manager + NV12 output + `Lock2DSize` readback + YUV→RGB

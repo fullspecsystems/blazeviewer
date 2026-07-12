@@ -5690,11 +5690,13 @@ impl AppCore {
         if self.exif_cache.contains_key(&item) {
             return;
         }
-        // A video's encoded bytes never enter RAM (task #79 path-only invariant): the
-        // panel's file size comes from a stat, and its facts (duration/codec/fps/
-        // audio) from a reader-metadata probe — container headers only, ~15-25 ms
-        // once, cached for the item's lifetime (comparable to the sync fs::read the
-        // image path below already does here).
+        // A video's encoded bytes never enter RAM here (only playback fetches them):
+        // the panel's file size comes from a stat (or the archive directory's size
+        // hint for an entry), and its facts (duration/codec/fps/audio) from a
+        // reader-metadata probe — container headers only, ~15-25 ms once, cached for
+        // the item's lifetime (comparable to the sync fs::read the image path below
+        // already does here). An archive entry skips the probe: it would inflate the
+        // whole entry on the event loop; playback's `Opened` carries duration anyway.
         if let crate::video::LibraryItemKind::Video(_) =
             crate::video::item_kind(self.source.as_ref(), item)
         {
@@ -5703,6 +5705,7 @@ impl AppCore {
                 .path(item)
                 .and_then(|p| std::fs::metadata(p).ok())
                 .map(|m| m.len())
+                .or_else(|| self.source.size_hint(item))
                 .unwrap_or(0);
             // Only the `#[cfg(windows)]` probe below mutates `rows` today; the macOS
             // async probe (79.9 phase 4) will too. Elsewhere it stays empty, so `mut`
@@ -6074,9 +6077,6 @@ impl AppCore {
         self.stop_video();
         #[cfg(windows)]
         {
-            let Some(path) = self.source.path(item).map(Path::to_path_buf) else {
-                return; // videos are path-only by construction
-            };
             let fit = self.decode_fit();
             // Credit-granting estimate of one fitted RGBA8 frame. The fit box is a
             // conservative bound (aspect makes real frames smaller); no fit
@@ -6088,14 +6088,48 @@ impl AppCore {
             let id = crate::video::VideoSessionId(self.video_seq);
             let (session, io) = crate::video_session::VideoSession::new(id, frame_bytes);
             let generation = crate::video::SeekGeneration::FIRST;
-            std::thread::spawn(move || {
-                pb_decode::run_video_producer(&path, fit, id, generation, io.events, io.msgs);
-            });
+            // The media slot `poll_video`'s audio start reads; the producer thread
+            // shares the same Arc, so both pipelines read ONE copy of the container.
+            let media: std::sync::Arc<std::sync::OnceLock<crate::video::VideoInput>> =
+                std::sync::Arc::new(std::sync::OnceLock::new());
+            if let Some(path) = self.source.path(item).map(Path::to_path_buf) {
+                let input = crate::video::VideoInput::Path(path);
+                let _ = media.set(input.clone());
+                std::thread::spawn(move || {
+                    pb_decode::run_video_producer(&input, fit, id, generation, io.events, io.msgs);
+                });
+            } else {
+                // Archive entry: fetch the container bytes OFF the event loop (a
+                // ZIP entry inflates; a 7z copies from its resident RAM), publish
+                // them through the media slot — before the producer can report
+                // `Opened`, so the audio start always finds them — then run the
+                // same producer through the bytes seam. RAM-only end to end:
+                // nothing is ever extracted to disk (privacy #2).
+                let source = self.source.clone();
+                let name = self.source.name(item).to_string();
+                let media_slot = media.clone();
+                std::thread::spawn(move || {
+                    let data = match source.bytes(item) {
+                        Ok(data) => std::sync::Arc::new(data),
+                        Err(e) => {
+                            let _ = io.events.send(crate::video::VideoProducerEvent::Failed {
+                                session_id: id,
+                                error: format!("couldn't read the video from the archive: {e}"),
+                            });
+                            return;
+                        }
+                    };
+                    let input = crate::video::VideoInput::Bytes { data, name };
+                    let _ = media_slot.set(input.clone());
+                    pb_decode::run_video_producer(&input, fit, id, generation, io.events, io.msgs);
+                });
+            }
             self.video = Some(ActiveVideoBackend::Session(
                 crate::video_session::ActiveVideo {
                     session,
                     item,
                     audio_started: false,
+                    media,
                 },
             ));
             self.anim_hint_shown_for = Some(item); // engaged — retire the hint
@@ -6108,7 +6142,10 @@ impl AppCore {
         #[cfg(target_os = "macos")]
         {
             let Some(path) = self.source.path(item).map(Path::to_path_buf) else {
-                return; // videos are path-only by construction
+                // An archive entry: the native AVPlayer plays by URL, and feeding
+                // it in-RAM bytes (a custom resource loader) is future parity work.
+                self.show_toast("Videos inside archives can't play on macOS yet");
+                return;
             };
             self.video_seq += 1;
             let id = crate::video::VideoSessionId(self.video_seq);
@@ -6298,24 +6335,29 @@ impl AppCore {
         let update = v.session.poll(now);
         let state = v.session.state();
         let started = v.session.has_started();
-        let item = v.item;
         let session_id = v.session.id;
         // Start the shell audio player the moment the producer reports a track
         // (Opened), paused — it opens in parallel with the video preroll and the
-        // two resume together. Silent clips never create a player.
+        // two resume together. Silent clips never create a player. The player
+        // opens the SAME container the producer reads (the media slot): a path,
+        // or an archive entry's shared in-RAM bytes. The slot is always set by
+        // the time `Opened` lands (the producer thread fills it first).
         let start_audio = !v.audio_started && v.session.has_audio() == Some(true);
         if start_audio {
             v.audio_started = true;
         }
-        if start_audio {
-            if let Some(path) = self.source.path(item).map(Path::to_path_buf) {
-                let muted = self.effective_mute();
-                self.effects.push(contract::CoreEffect::StartVideoAudio {
-                    path,
-                    session_id,
-                    muted,
-                });
-            }
+        let audio_input = if start_audio {
+            v.media.get().cloned()
+        } else {
+            None
+        };
+        if let Some(input) = audio_input {
+            let muted = self.effective_mute();
+            self.effects.push(contract::CoreEffect::StartVideoAudio {
+                input,
+                session_id,
+                muted,
+            });
         }
         // Session state drives the audio player (freeze together, resume
         // together): Playing = resume; a mid-play rebuffer or the end = pause.
@@ -9074,11 +9116,7 @@ mod tests {
         assert!(core.info_line_visible(), "precondition: the line is on");
 
         let (session, io) = VideoSession::new(VideoSessionId(1), 1024);
-        core.video = Some(ActiveVideoBackend::Session(ActiveVideo {
-            session,
-            item: 0,
-            audio_started: false,
-        }));
+        core.video = Some(ActiveVideoBackend::Session(ActiveVideo::new(session, 0)));
         io.events
             .send(VideoProducerEvent::Opened {
                 session_id: VideoSessionId(1),
@@ -9133,11 +9171,7 @@ mod tests {
 
         let sid = VideoSessionId(1);
         let (session, io) = VideoSession::new(sid, 4);
-        core.video = Some(ActiveVideoBackend::Session(ActiveVideo {
-            session,
-            item: 0,
-            audio_started: false,
-        }));
+        core.video = Some(ActiveVideoBackend::Session(ActiveVideo::new(session, 0)));
         io.events
             .send(VideoProducerEvent::Opened {
                 session_id: sid,
@@ -9213,6 +9247,79 @@ mod tests {
         assert!(!core.info_line_visible(), "the flashed line drops");
     }
 
+    /// Archive video playback: when the producer reports an audio track, the
+    /// `StartVideoAudio` effect carries the SAME `Arc`-shared in-RAM container the
+    /// producer reads (the `ActiveVideo::media` slot) — an archive entry has no
+    /// path, and the one-copy contract is the point of the slot.
+    #[test]
+    fn archive_video_audio_starts_from_the_shared_bytes() {
+        use crate::video::{VideoInput, VideoProducerEvent, VideoSessionId};
+        use crate::video_session::{ActiveVideo, VideoSession};
+
+        struct FakeArchive;
+        impl pb_source::PhotoSource for FakeArchive {
+            fn len(&self) -> usize {
+                1
+            }
+            fn name(&self, _i: usize) -> &str {
+                "folder/clip.mp4"
+            }
+            fn bytes(&self, _i: usize) -> std::io::Result<Vec<u8>> {
+                Ok(b"fake".to_vec())
+            }
+        }
+
+        let mut core = test_core();
+        core.source = Arc::new(FakeArchive);
+        core.displayed_item = Some(0);
+
+        let sid = VideoSessionId(1);
+        let (session, io) = VideoSession::new(sid, 4);
+        let av = ActiveVideo::new(session, 0);
+        let data = std::sync::Arc::new(b"fake mp4 container".to_vec());
+        av.media
+            .set(VideoInput::Bytes {
+                data: data.clone(),
+                name: "folder/clip.mp4".into(),
+            })
+            .expect("fresh slot");
+        core.video = Some(ActiveVideoBackend::Session(av));
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: sid,
+                duration: Some(Duration::from_secs(2)),
+                width: 1,
+                height: 1,
+                has_audio: true,
+                frame_bytes: 4,
+            })
+            .unwrap();
+        core.effects.clear();
+        core.poll_video();
+
+        let started = core.effects.iter().find_map(|e| match e {
+            contract::CoreEffect::StartVideoAudio {
+                input, session_id, ..
+            } => Some((input.clone(), *session_id)),
+            _ => None,
+        });
+        let (input, got_sid) =
+            started.expect("Opened(has_audio) must start the shell audio player");
+        assert_eq!(got_sid, sid);
+        match input {
+            VideoInput::Bytes { data: d, name } => {
+                assert!(
+                    std::sync::Arc::ptr_eq(&d, &data),
+                    "the audio player must read the SAME buffer (one resident copy)"
+                );
+                assert_eq!(name, "folder/clip.mp4");
+            }
+            VideoInput::Path(_) => {
+                panic!("an archive entry must start audio from bytes, not a path")
+            }
+        }
+    }
+
     /// Hovering the bottom controls zone reveals the playback controls while a
     /// video is active (owner request — the video-player convention); the top of
     /// the window doesn't, and the persistent `i` line needs no flash.
@@ -9239,11 +9346,7 @@ mod tests {
             animated: None,
         });
         let (session, io) = VideoSession::new(VideoSessionId(1), 16);
-        core.video = Some(ActiveVideoBackend::Session(ActiveVideo {
-            session,
-            item: 0,
-            audio_started: false,
-        }));
+        core.video = Some(ActiveVideoBackend::Session(ActiveVideo::new(session, 0)));
         io.events
             .send(VideoProducerEvent::Opened {
                 session_id: VideoSessionId(1),
@@ -9297,11 +9400,7 @@ mod tests {
             animated: None,
         });
         let (session, io) = VideoSession::new(VideoSessionId(1), 16);
-        core.video = Some(ActiveVideoBackend::Session(ActiveVideo {
-            session,
-            item: 0,
-            audio_started: false,
-        }));
+        core.video = Some(ActiveVideoBackend::Session(ActiveVideo::new(session, 0)));
         io.events
             .send(VideoProducerEvent::Opened {
                 session_id: VideoSessionId(1),
@@ -9352,11 +9451,7 @@ mod tests {
         core.playlist = Playlist::new(1, 0);
         core.displayed_item = Some(0);
         let (session, io) = VideoSession::new(VideoSessionId(1), 16);
-        core.video = Some(ActiveVideoBackend::Session(ActiveVideo {
-            session,
-            item: 0,
-            audio_started: false,
-        }));
+        core.video = Some(ActiveVideoBackend::Session(ActiveVideo::new(session, 0)));
         io.events
             .send(VideoProducerEvent::Opened {
                 session_id: VideoSessionId(1),
@@ -9438,11 +9533,7 @@ mod tests {
         core.playlist = Playlist::new(1, 0);
         core.displayed_item = Some(0);
         let (session, io) = VideoSession::new(VideoSessionId(1), 1024);
-        core.video = Some(ActiveVideoBackend::Session(ActiveVideo {
-            session,
-            item: 0,
-            audio_started: false,
-        }));
+        core.video = Some(ActiveVideoBackend::Session(ActiveVideo::new(session, 0)));
         io.events
             .send(VideoProducerEvent::Opened {
                 session_id: VideoSessionId(1),

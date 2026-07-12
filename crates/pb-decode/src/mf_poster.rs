@@ -28,18 +28,18 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use windows::core::HSTRING;
 use windows::Win32::Media::MediaFoundation::{
     IMFAttributes, IMFSourceReader, MFCreateAttributes, MFCreateMediaType,
-    MFCreateSourceReaderFromURL, MFMediaType_Video, MFVideoFormat_AV1, MFVideoFormat_H263,
-    MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_HEVC_ES, MFVideoFormat_MJPG,
-    MFVideoFormat_MP43, MFVideoFormat_MP4V, MFVideoFormat_MPEG2, MFVideoFormat_RGB32,
-    MFVideoFormat_VP80, MFVideoFormat_VP90, MFVideoFormat_WMV1, MFVideoFormat_WMV2,
-    MFVideoFormat_WMV3, MFVideoFormat_WVC1, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE,
-    MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_MT_VIDEO_ROTATION, MF_PD_DURATION,
-    MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READER_ALL_STREAMS,
-    MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_AUDIO_STREAM,
-    MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READER_MEDIASOURCE,
+    MFCreateSourceReaderFromByteStream, MFCreateSourceReaderFromURL, MFMediaType_Video,
+    MFVideoFormat_AV1, MFVideoFormat_H263, MFVideoFormat_H264, MFVideoFormat_HEVC,
+    MFVideoFormat_HEVC_ES, MFVideoFormat_MJPG, MFVideoFormat_MP43, MFVideoFormat_MP4V,
+    MFVideoFormat_MPEG2, MFVideoFormat_RGB32, MFVideoFormat_VP80, MFVideoFormat_VP90,
+    MFVideoFormat_WMV1, MFVideoFormat_WMV2, MFVideoFormat_WMV3, MFVideoFormat_WVC1,
+    MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
+    MF_MT_VIDEO_ROTATION, MF_PD_DURATION, MF_SOURCE_READERF_ENDOFSTREAM,
+    MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING,
+    MF_SOURCE_READER_FIRST_AUDIO_STREAM, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+    MF_SOURCE_READER_MEDIASOURCE,
 };
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::Win32::System::Variant::{VT_I8, VT_UI8};
@@ -86,9 +86,15 @@ impl VideoStreamInfo {
 /// Open the container and report the video stream's facts. Read-only, no frame
 /// decode, no RAM read of the file. ~15–25 ms; the panel caches the result.
 pub fn probe_video_stream(path: &Path) -> Result<VideoStreamInfo, DecodeError> {
+    probe_video_input(&crate::VideoInput::Path(path.to_path_buf()))
+}
+
+/// [`probe_video_stream`] over any [`VideoInput`](crate::VideoInput) — the archive
+/// case probes the entry's in-RAM bytes (already fetched; no disk involved).
+pub fn probe_video_input(input: &crate::VideoInput) -> Result<VideoStreamInfo, DecodeError> {
     ensure_mf();
     unsafe {
-        let reader = open_video_reader(path)?;
+        let reader = open_video_reader(input)?;
         let info = stream_info(&reader);
         retire_reader(reader);
         info
@@ -104,9 +110,19 @@ pub fn decode_video_poster(
     fit: Option<FitBox>,
     cancel: &AtomicBool,
 ) -> Result<DecodedImage, DecodeError> {
+    decode_video_poster_input(&crate::VideoInput::Path(path.to_path_buf()), fit, cancel)
+}
+
+/// [`decode_video_poster`] over any [`VideoInput`](crate::VideoInput) — how an
+/// archived video (in-RAM bytes, no path) gets its poster.
+pub fn decode_video_poster_input(
+    input: &crate::VideoInput,
+    fit: Option<FitBox>,
+    cancel: &AtomicBool,
+) -> Result<DecodedImage, DecodeError> {
     ensure_mf();
     unsafe {
-        let reader = open_video_reader(path)?;
+        let reader = open_video_reader(input)?;
         let result = poster_inner(&reader, fit, cancel);
         // Mid-stream reader teardown blocks ~1 s on HEVC — retire off-thread so the
         // decode worker moves on to the next item immediately.
@@ -117,14 +133,22 @@ pub fn decode_video_poster(
 
 /// Source reader with the playback-identical configuration: advanced video
 /// processing (YUV→RGB + rotation), all streams deselected, video selected.
-pub(crate) unsafe fn open_video_reader(path: &Path) -> Result<IMFSourceReader, DecodeError> {
+/// A path opens by URL; in-RAM bytes (an archive entry) through a fresh tagged
+/// byte stream (`mf_stream`) — everything downstream is identical.
+pub(crate) unsafe fn open_video_reader(
+    input: &crate::VideoInput,
+) -> Result<IMFSourceReader, DecodeError> {
     let inner = || -> windows::core::Result<IMFSourceReader> {
         let mut attrs: Option<IMFAttributes> = None;
         MFCreateAttributes(&mut attrs, 1)?;
         let attrs = attrs.expect("MFCreateAttributes succeeded");
         attrs.SetUINT32(&MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1)?;
-        let reader: IMFSourceReader =
-            MFCreateSourceReaderFromURL(&HSTRING::from(path.as_os_str()), &attrs)?;
+        let reader: IMFSourceReader = match crate::mf_stream::ReaderSource::new(input)? {
+            crate::mf_stream::ReaderSource::Url(url) => MFCreateSourceReaderFromURL(&url, &attrs)?,
+            crate::mf_stream::ReaderSource::Stream(bs) => {
+                MFCreateSourceReaderFromByteStream(&bs, &attrs)?
+            }
+        };
         // Deselect everything, then select only video: a selected-but-unread stream
         // queues samples indefinitely (MF documented behavior; audio is played by a
         // separate player in later phases, never read from this reader).
@@ -445,6 +469,36 @@ mod tests {
             crate::video::poster_frame_bright_enough(&img.pixels),
             "poster must skip the black lead-in (mean luma {})",
             crate::video::mean_luma_rgba8(&img.pixels, 1),
+        );
+    }
+
+    /// The archive seam: probing + poster-decoding the same fixture from in-RAM
+    /// bytes (no path) must agree with the path versions — configuration-identical
+    /// readers by construction.
+    #[test]
+    fn probe_and_poster_from_bytes_match_the_path_versions() {
+        let data =
+            std::sync::Arc::new(std::fs::read(fixture("black_then_color.mp4")).expect("bytes"));
+        let input = crate::VideoInput::Bytes {
+            data,
+            name: "folder/black_then_color.mp4".into(),
+        };
+        let info = probe_video_input(&input).expect("probe from bytes");
+        assert_eq!(info.codec, "H.264");
+        assert_eq!((info.width, info.height), (64, 64));
+        let img = decode_video_poster_input(
+            &input,
+            Some(FitBox {
+                max_width: 64,
+                max_height: 64,
+            }),
+            &AtomicBool::new(false),
+        )
+        .expect("poster from bytes");
+        assert!(img.is_well_formed());
+        assert!(
+            crate::video::poster_frame_bright_enough(&img.pixels),
+            "bytes poster must skip the black lead-in too"
         );
     }
 

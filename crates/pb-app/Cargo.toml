@@ -152,6 +152,11 @@ windows = { version = "0.62", features = [
     # IVectorView over the playback item's track lists — deselecting the video track
     # on the video-audio player so it never double-decodes the picture (task #79).
     "Foundation_Collections",
+    # Archive video audio: CreateRandomAccessStreamOverStream wraps the entry's
+    # in-RAM IStream (pb_decode::mem_istream) into the IRandomAccessStream the
+    # WinRT MediaPlayer's MediaSource::CreateFromStream takes.
+    "Win32_System_WinRT",
+    "Storage_Streams",
     # RegisteredApplications/Capabilities self-registration so "Set default…" can
     # deep-link PhotoBlaze's own Default-apps page (task #14, src/default_app.rs).
     # Win32_Security: RegCreateKeyExW's SECURITY_ATTRIBUTES parameter lives there.

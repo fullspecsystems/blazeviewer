@@ -277,19 +277,41 @@ pub fn decode_item_cancellable(
     cancel: &AtomicBool,
 ) -> Result<DecodedImage, DecodeError> {
     let _ = cancel; // referenced only on windows/macOS today (the video poster path)
-                    // Typed dispatch BEFORE any bytes request (task #79 phase 1): a video item is
-                    // path-only — the platform readers stream it from disk; its encoded bytes must
-                    // never be pulled into RAM. Phase 2: the poster is the clip's first non-black
-                    // frame via the OS reader, rotation + color identical to the future playback
-                    // path; any failure (missing codec, no container handler, corrupt file)
-                    // degrades to the flat placeholder tile — the item stays visible, and the
-                    // *play* attempt is where a precise error will surface (phases 4-6).
+                    // Typed dispatch BEFORE any bytes request (task #79 phase 1): a
+                    // filesystem video is streamed by the platform readers — its encoded
+                    // bytes never enter RAM here. Phase 2: the poster is the clip's first
+                    // non-black frame via the OS reader, rotation + color identical to the
+                    // playback path; any failure (missing codec, no container handler,
+                    // corrupt file) degrades to the flat placeholder tile — the item stays
+                    // visible, and the *play* attempt is where a precise error surfaces.
     if let crate::video::LibraryItemKind::Video(container) = crate::video::item_kind(source, item) {
         #[cfg(any(windows, target_os = "macos"))]
         if let Some(path) = source.path(item) {
             match pb_decode::decode_video_poster(path, fit, cancel) {
                 Ok(img) => return Ok(img),
                 Err(e) => eprintln!("video poster failed: {}: {e}", path.display()),
+            }
+        }
+        // An archive entry (no path): Windows posters it from the entry's in-RAM
+        // bytes through the same MF reader configuration — a transient fetch this
+        // decode worker drops after the poster (playback re-fetches and holds one
+        // Arc for its session). macOS/Linux show the placeholder for now.
+        #[cfg(windows)]
+        if source.path(item).is_none() {
+            match source.bytes(item) {
+                Ok(data) => {
+                    let input = pb_decode::VideoInput::Bytes {
+                        data: std::sync::Arc::new(data),
+                        name: source.name(item).to_string(),
+                    };
+                    match pb_decode::decode_video_poster_input(&input, fit, cancel) {
+                        Ok(img) => return Ok(img),
+                        Err(e) => {
+                            eprintln!("video poster failed: {}: {e}", source.name(item));
+                        }
+                    }
+                }
+                Err(e) => eprintln!("video poster read failed: {}: {e}", source.name(item)),
             }
         }
         return Ok(video_placeholder(container));

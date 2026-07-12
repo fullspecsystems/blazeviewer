@@ -109,14 +109,20 @@ pub enum ScanUpdate {
 const SCAN_BATCH_INTERVAL: Duration = Duration::from_millis(150);
 
 /// Whether a path's extension is a supported image format (the decoder's single
-/// source of truth — see `pb_decode::is_supported_extension`). The **archive** predicate:
-/// pb-source callers keep receiving exactly this, so videos inside a ZIP/7z are never
-/// indexed (task #79: video items are path-only).
+/// source of truth — see `pb_decode::is_supported_extension`).
 pub fn is_supported_image(p: &Path) -> bool {
     p.extension()
         .and_then(|e| e.to_str())
         .map(is_supported_extension)
         .unwrap_or(false)
+}
+
+/// The **archive** entry predicate: a supported image extension, or a recognized
+/// video container. Archived videos are indexed like loose ones (they play from
+/// RAM through the `VideoInput::Bytes` seam — no longer path-only); recognition ≠
+/// playability, same as the filesystem scanner's rule.
+pub fn is_supported_archive_entry(ext: &str) -> bool {
+    is_supported_extension(ext) || crate::video::VideoContainer::from_extension(ext).is_some()
 }
 
 /// Whether a path is a library item the **filesystem scanner** lists: a supported image
@@ -615,7 +621,7 @@ pub fn open_archive(
         load_seven_z(path, password, &pb_source::OpenProgress::new(), mt_headroom)
     } else {
         let has_password = password.is_some();
-        let zs = ZipSource::open(path, password, is_supported_extension)?;
+        let zs = ZipSource::open(path, password, is_supported_archive_entry)?;
         // Encrypted but no password supplied -> prompt for one.
         if zs.needs_password() {
             return Err(crate::archive::ArchiveOpenError::PasswordRequired);
@@ -658,7 +664,7 @@ pub fn seven_z_preflight_within(
     password: Option<&str>,
     budget: u64,
 ) -> Result<u64, crate::archive::ArchiveOpenError> {
-    let needed = seven_z_projected_bytes(path, password, is_supported_extension)?;
+    let needed = seven_z_projected_bytes(path, password, is_supported_archive_entry)?;
     if needed > budget {
         return Err(crate::archive::ArchiveOpenError::TooLarge { needed, budget });
     }
@@ -683,7 +689,7 @@ pub fn load_seven_z(
     let src = SevenZSource::open_with_progress(
         path,
         password,
-        is_supported_extension,
+        is_supported_archive_entry,
         Some(progress),
         mt_headroom,
     )?;
@@ -710,6 +716,103 @@ pub fn resolve_playlist(source: &Source, cursor: &open::Cursor) -> Resolved {
                 Resolved::empty()
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod archive_video_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_zip(tag: &str, files: &[(&str, &[u8])]) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "pb_scan_av_{tag}_{}_{}.zip",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("t").len()
+        ));
+        let f = std::fs::File::create(&path).unwrap();
+        let mut zw = zip::ZipWriter::new(f);
+        for (name, bytes) in files {
+            zw.start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zw.write_all(bytes).unwrap();
+        }
+        zw.finish().unwrap();
+        path
+    }
+
+    #[test]
+    fn the_archive_predicate_unions_images_and_video_containers() {
+        for ext in ["jpg", "PNG", "mp4", "MOV", "mkv", "webm"] {
+            assert!(is_supported_archive_entry(ext), "{ext} must be indexable");
+        }
+        for ext in ["txt", "exe", "pdf", ""] {
+            assert!(!is_supported_archive_entry(ext), "{ext} must be excluded");
+        }
+    }
+
+    /// The reported bug: an archive containing ONLY videos refused to open
+    /// (`ArchiveOpenError::Empty`). It must open as a playlist of typed video items.
+    #[test]
+    fn a_video_only_zip_opens_with_typed_video_items() {
+        let zip = write_zip(
+            "vidonly",
+            &[
+                ("b_clip.MOV", b"fake mov".as_slice()),
+                ("a_clip.mp4", b"fake mp4"),
+            ],
+        );
+        let r = open_archive(&zip, None).expect("a video-only archive must open");
+        assert_eq!(r.source.len(), 2);
+        let names: Vec<&str> = (0..2).map(|i| r.source.name(i)).collect();
+        assert_eq!(names, vec!["a_clip.mp4", "b_clip.MOV"]);
+        for i in 0..2 {
+            assert!(
+                matches!(
+                    crate::video::item_kind(r.source.as_ref(), i),
+                    crate::video::LibraryItemKind::Video(_)
+                ),
+                "entry {i} must classify as a video"
+            );
+        }
+        let _ = std::fs::remove_file(&zip);
+    }
+
+    /// Mixed archives interleave images and videos in one sorted deck, and the
+    /// classification per entry follows the name.
+    #[test]
+    fn a_mixed_zip_lists_images_and_videos_together() {
+        let zip = write_zip(
+            "mixed",
+            &[
+                ("photo.jpg", b"J".as_slice()),
+                ("clip.mp4", b"fake mp4"),
+                ("notes.txt", b"never indexed"),
+            ],
+        );
+        let r = open_archive(&zip, None).expect("open");
+        let names: Vec<&str> = (0..r.source.len()).map(|i| r.source.name(i)).collect();
+        assert_eq!(names, vec!["clip.mp4", "photo.jpg"]);
+        assert!(matches!(
+            crate::video::item_kind(r.source.as_ref(), 0),
+            crate::video::LibraryItemKind::Video(crate::video::VideoContainer::Mp4)
+        ));
+        assert!(matches!(
+            crate::video::item_kind(r.source.as_ref(), 1),
+            crate::video::LibraryItemKind::Image
+        ));
+        let _ = std::fs::remove_file(&zip);
+    }
+
+    /// A truly empty archive (nothing indexable at all) still refuses with `Empty`.
+    #[test]
+    fn a_zip_with_no_indexable_entries_still_reports_empty() {
+        let zip = write_zip("empty", &[("readme.txt", b"nope".as_slice())]);
+        match open_archive(&zip, None) {
+            Err(crate::archive::ArchiveOpenError::Empty) => {}
+            other => panic!("expected Empty, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(&zip);
     }
 }
 

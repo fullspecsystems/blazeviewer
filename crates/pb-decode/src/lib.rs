@@ -45,6 +45,11 @@ mod mf_video_producer;
 // negotiation, and the pixel-rate policy picking hw vs the software path.
 #[cfg(windows)]
 mod mf_hw;
+// In-RAM IStream/IMFByteStream over shared bytes — archive video playback's
+// input: the MF readers (and the WinRT audio player) read an archive entry's
+// decompressed bytes without a file ever touching disk.
+#[cfg(windows)]
+mod mf_stream;
 // The Linux mirror: .mov motion + audio decode via FFmpeg, behind the `livephoto` feature.
 #[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
 mod ff_live;
@@ -124,7 +129,12 @@ pub use libheif::LibHeifDecoder;
 pub use livephoto::{decode_live_motion, decode_live_motion_streaming};
 pub use metadata::read_exif_fields;
 #[cfg(windows)]
-pub use mf_poster::{decode_video_poster, probe_video_stream, VideoStreamInfo};
+pub use mf_poster::{
+    decode_video_poster, decode_video_poster_input, probe_video_input, probe_video_stream,
+    VideoStreamInfo,
+};
+#[cfg(windows)]
+pub use mf_stream::mem_istream;
 #[cfg(windows)]
 pub use mf_video::{decode_live_motion, decode_live_motion_streaming};
 #[cfg(windows)]
@@ -133,7 +143,7 @@ pub use psd::PsdDecoder;
 pub use raw::{is_raw_extension, RawPreviewDecoder};
 pub use svg::SvgDecoder;
 pub use video::{
-    SeekGeneration, VideoColorInfo, VideoFrame, VideoProducerEvent, VideoProducerMsg,
+    SeekGeneration, VideoColorInfo, VideoFrame, VideoInput, VideoProducerEvent, VideoProducerMsg,
     VideoSessionId, YuvMatrix,
 };
 #[cfg(windows)]

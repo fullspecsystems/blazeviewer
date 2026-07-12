@@ -12,9 +12,7 @@
 
 #![cfg(windows)]
 
-use std::path::Path;
-
-use windows::core::{Interface, HSTRING};
+use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11Multithread, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
@@ -23,15 +21,15 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Media::MediaFoundation::{
     IMF2DBuffer2, IMFAttributes, IMFDXGIDeviceManager, IMFSample, IMFSourceReader,
     MF2DBuffer_LockFlags_Read, MFCreateAttributes, MFCreateDXGIDeviceManager, MFCreateMediaType,
-    MFCreateSourceReaderFromURL, MFMediaType_Video, MFVideoFormat_NV12, MFVideoTransFunc_2084,
-    MFVideoTransFunc_HLG, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
-    MF_MT_TRANSFER_FUNCTION, MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_YUV_MATRIX,
-    MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MF_SOURCE_READER_ALL_STREAMS,
+    MFCreateSourceReaderFromByteStream, MFCreateSourceReaderFromURL, MFMediaType_Video,
+    MFVideoFormat_NV12, MFVideoTransFunc_2084, MFVideoTransFunc_HLG, MF_MT_FRAME_SIZE,
+    MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_MT_TRANSFER_FUNCTION, MF_MT_VIDEO_NOMINAL_RANGE,
+    MF_MT_YUV_MATRIX, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MF_SOURCE_READER_ALL_STREAMS,
     MF_SOURCE_READER_D3D_MANAGER, MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING,
     MF_SOURCE_READER_FIRST_VIDEO_STREAM,
 };
 
-use crate::video::YuvMatrix;
+use crate::video::{VideoInput, YuvMatrix};
 
 /// The pixel-rate threshold (native `w·h·fps`) above which hardware decode wins.
 /// Sits just past 4K30 (248.8 M px/s) — measured "comfortable" on software, and
@@ -96,7 +94,7 @@ pub(crate) unsafe fn dxgi_manager() -> Option<IMFDXGIDeviceManager> {
 /// fitted size (falling back to native size). Errors bubble so the caller can
 /// fall back to the software path.
 pub(crate) unsafe fn open_nv12_reader(
-    path: &Path,
+    input: &VideoInput,
     manager: &IMFDXGIDeviceManager,
     fit: Option<(u32, u32)>,
 ) -> windows::core::Result<(IMFSourceReader, u32, u32)> {
@@ -106,8 +104,12 @@ pub(crate) unsafe fn open_nv12_reader(
     attrs.SetUINT32(&MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1)?;
     attrs.SetUnknown(&MF_SOURCE_READER_D3D_MANAGER, manager)?;
     attrs.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)?;
-    let reader: IMFSourceReader =
-        MFCreateSourceReaderFromURL(&HSTRING::from(path.as_os_str()), &attrs)?;
+    let reader: IMFSourceReader = match crate::mf_stream::ReaderSource::new(input)? {
+        crate::mf_stream::ReaderSource::Url(url) => MFCreateSourceReaderFromURL(&url, &attrs)?,
+        crate::mf_stream::ReaderSource::Stream(bs) => {
+            MFCreateSourceReaderFromByteStream(&bs, &attrs)?
+        }
+    };
     reader.SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS.0 as u32, false)?;
     reader.SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32, true)?;
     let (w, h) = match fit {
