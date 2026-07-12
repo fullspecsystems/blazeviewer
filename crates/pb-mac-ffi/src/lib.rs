@@ -2249,7 +2249,18 @@ fn fold_settings_form(
 ///
 /// Mixed strictness (the winit contract): a nonexistent positional path is a usage error
 /// here — same message text, exit 2 — so a typo'd path never launches an empty viewer.
-fn cli_preflight(argv: Vec<String>, version: String) -> ffi::LaunchPreflightFfi {
+///
+/// `stdout_tty` / `stderr_tty`: whether each stream is a terminal (Swift's `isatty`).
+/// The winit shell gets colored help for free (`clap::Error::print` styles at print
+/// time), but here the text crosses the FFI as a plain string — so the render picks
+/// ANSI or plain per the stream the host will actually write to. A pipe / redirect
+/// stays clean; a terminal gets the same bold-yellow/cyan/green help Windows shows.
+fn cli_preflight(
+    argv: Vec<String>,
+    version: String,
+    stdout_tty: bool,
+    stderr_tty: bool,
+) -> ffi::LaunchPreflightFfi {
     match pb_cli::parse_from(argv, &version) {
         Ok(cli) => {
             for p in cli.launch_paths() {
@@ -2269,12 +2280,24 @@ fn cli_preflight(argv: Vec<String>, version: String) -> ffi::LaunchPreflightFfi 
                 exit_code: 0,
             }
         }
-        Err(e) => ffi::LaunchPreflightFfi {
-            proceed: false,
-            text: e.render().to_string(),
-            use_stderr: e.use_stderr(),
-            exit_code: e.exit_code(),
-        },
+        Err(e) => {
+            let rendered = e.render();
+            let tty = if e.use_stderr() {
+                stderr_tty
+            } else {
+                stdout_tty
+            };
+            ffi::LaunchPreflightFfi {
+                proceed: false,
+                text: if tty {
+                    rendered.ansi().to_string()
+                } else {
+                    rendered.to_string()
+                },
+                use_stderr: e.use_stderr(),
+                exit_code: e.exit_code(),
+            }
+        }
     }
 }
 
@@ -2768,7 +2791,12 @@ mod ffi {
         // The CLI (task #78). cli_preflight runs FIRST (free fn — no engine for --help);
         // apply_launch_args re-parses on the built handle (overrides + path stash);
         // open_launch_paths consumes the stash once the canvas exists (consumed-once).
-        fn cli_preflight(argv: Vec<String>, version: String) -> LaunchPreflightFfi;
+        fn cli_preflight(
+            argv: Vec<String>,
+            version: String,
+            stdout_tty: bool,
+            stderr_tty: bool,
+        ) -> LaunchPreflightFfi;
         fn apply_launch_args(&mut self, argv: Vec<String>, version: String);
         fn open_launch_paths(&mut self) -> bool;
 
@@ -2873,10 +2901,13 @@ mod tests {
     /// flag must still be seen.
     #[test]
     fn cli_preflight_outcomes() {
+        // Piped/redirected streams (both flags false) — the plain-text render.
         let pf = |args: &[&str]| {
             cli_preflight(
                 args.iter().map(|s| s.to_string()).collect(),
                 "9.9.9-test".to_string(),
+                false,
+                false,
             )
         };
         // argv[0] regression: --help is argv[1] and must parse as help, not the bin name.
@@ -2885,6 +2916,22 @@ mod tests {
         assert_eq!(help.exit_code, 0);
         assert!(!help.use_stderr, "help goes to stdout");
         assert!(help.text.contains("--slideshow"), "renders the real help");
+        assert!(
+            !help.text.contains('\u{1b}'),
+            "no ANSI styling into a pipe/redirect"
+        );
+
+        // A terminal stdout gets the colored help (the styling Windows shows).
+        let colored = cli_preflight(
+            vec!["photoblaze".into(), "--help".into()],
+            "9.9.9-test".into(),
+            true,
+            false,
+        );
+        assert!(
+            colored.text.contains('\u{1b}'),
+            "TTY stdout renders ANSI-styled help"
+        );
 
         let ver = pf(&["photoblaze", "--version"]);
         assert!(!ver.proceed);
@@ -2892,6 +2939,10 @@ mod tests {
         assert!(
             ver.text.contains("9.9.9-test"),
             "--version prints the host-supplied bundle string"
+        );
+        assert!(
+            ver.text.contains("PhotoBlaze"),
+            "--version wears the product name (display_name), not the bin name"
         );
 
         let bad = pf(&["photoblaze", "--nope"]);

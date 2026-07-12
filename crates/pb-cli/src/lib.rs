@@ -223,10 +223,30 @@ where
     // run, so leaking one small copy at startup is fine and keeps a `'static` bound off
     // every caller.
     let version: &'static str = Box::leak(version.to_string().into_boxed_str());
-    let cmd = Cli::command().version(version);
+    let cmd = Cli::command()
+        .version(version)
+        // The ripgrep convention (binary `rg`, version line "ripgrep X.Y"): usage lines
+        // keep the lowercase COMMAND the user types (`photoblaze`, the bin/repo name);
+        // the PRODUCT-name contexts wear the brand — `--version` prints
+        // "PhotoBlaze <version>" via display_name, and the help header (about) below.
+        .display_name("PhotoBlaze")
+        .about(BRANDED_ABOUT.as_str());
     let matches = cmd.try_get_matches_from(args)?;
     Cli::from_arg_matches(&matches)
 }
+
+/// The branded help header: the product name + the shared tagline ("PhotoBlaze — an
+/// ultra-fast, capable image viewer"). Composed from [`pb_app_core::TAGLINE`] at first
+/// use so the one-tagline rule holds (About box, file association, and here can never
+/// drift); the first letter is lowercased to read naturally after the em dash.
+static BRANDED_ABOUT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    let t = pb_app_core::TAGLINE;
+    let mut c = t.chars();
+    match c.next() {
+        Some(first) => format!("PhotoBlaze — {}{}", first.to_lowercase(), c.as_str()),
+        None => "PhotoBlaze".to_string(),
+    }
+});
 
 /// Resolve a positive/negative flag pair into a tri-state override. Positive wins if
 /// both are somehow set (shouldn't happen under `overrides_with`).

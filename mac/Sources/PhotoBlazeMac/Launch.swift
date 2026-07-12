@@ -86,11 +86,18 @@ enum Launch {
     }
 
     /// Parse the command line through the shared `pb-cli` surface. Pure decision —
-    /// [`act(on:)`] performs the emit/exit.
+    /// [`act(on:)`] performs the emit/exit. The per-stream TTY-ness rides along so the
+    /// Rust render styles help/errors with ANSI on a terminal (the color Windows shows)
+    /// and stays plain into a pipe or redirect.
     static func preflight() -> Disposition {
         // RustString explicitly: the generated generic ties the vec's element type and
         // the version parameter to one IntoRustString type.
-        let r = cli_preflight(argvVec(), RustString(versionString))
+        let r = cli_preflight(
+            argvVec(),
+            RustString(versionString),
+            isatty(STDOUT_FILENO) != 0,
+            isatty(STDERR_FILENO) != 0
+        )
         if r.proceed { return .proceed }
         return .emit(text: r.text.toString(), useStderr: r.use_stderr, exitCode: r.exit_code)
     }
