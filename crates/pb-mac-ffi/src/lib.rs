@@ -1308,6 +1308,20 @@ impl AppCoreHandle {
             .video_poster_ready(request_id, item as usize, w, h, rgba);
     }
 
+    /// Deliver an archive video's stream facts (macOS), probed by the host via AVFoundation
+    /// since Rust can't open an `AVAsset` from bytes — populates the inspector's video rows.
+    fn archive_video_meta_ready(
+        &mut self,
+        item: u64,
+        codec: String,
+        fps_milli: u32,
+        duration_ms: i64,
+        has_audio: bool,
+    ) {
+        self.core
+            .archive_video_meta_ready(item as usize, codec, fps_milli, duration_ms, has_audio);
+    }
+
     /// The current item's video-layer placement (task 79.9 phase 3) — the still
     /// renderer's geometry, so the host places the `AVPlayerLayer` identically to a photo.
     fn video_placement(&self) -> ffi::VideoPlacementFfi {
@@ -2999,6 +3013,14 @@ mod ffi {
             h: u32,
             data_ptr: usize,
             len: usize,
+        );
+        fn archive_video_meta_ready(
+            &mut self,
+            item: u64,
+            codec: String,
+            fps_milli: u32,
+            duration_ms: i64,
+            has_audio: bool,
         );
         fn video_placement(&self) -> VideoPlacementFfi;
         fn info_line_align(&self) -> u8;

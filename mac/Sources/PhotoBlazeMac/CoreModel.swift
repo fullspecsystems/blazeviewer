@@ -2280,33 +2280,117 @@ final class CoreModel {
         let loader = ArchiveVideoLoader(data: data, name: name)
         let asset = AVURLAsset(url: loader.url)
         asset.resourceLoader.setDelegate(loader, queue: loader.queue)
-        let gen = AVAssetImageGenerator(asset: asset)
-        gen.appliesPreferredTrackTransform = true  // upright poster (rotation baked in)
-        // Loose tolerance: any nearby keyframe is fine for a poster and decodes faster.
-        gen.requestedTimeToleranceBefore = CMTime(seconds: 1.0, preferredTimescale: 600)
-        gen.requestedTimeToleranceAfter = CMTime(seconds: 1.0, preferredTimescale: 600)
-        // ~0.5 s in dodges a black lead-in frame without a full brightness walk.
-        let target = CMTime(seconds: 0.5, preferredTimescale: 600)
-        gen.generateCGImagesAsynchronously(forTimes: [NSValue(time: target)]) {
-            [weak self] _, cg, _, result, _ in
-            _ = loader  // retain the resource loader until generation completes
-            guard let self, result == .succeeded, let cg,
-                let poster = CoreModel.cgImageToRGBA(cg, maxEdge: Int(maxEdge))
-            else { return }
-            Task { @MainActor in
-                poster.data.withUnsafeBytes { raw in
-                    self.core.video_poster_ready(
-                        requestId, item, UInt32(poster.w), UInt32(poster.h),
-                        UInt(bitPattern: raw.baseAddress), UInt(raw.count))
+        // Poster: brightness-walk a few candidate times off the main thread; deliver the
+        // first bright-enough frame (falling back to the last one so a dark clip still gets
+        // *a* poster — parity with the Rust loose-file walk, POSTER_LUMA_MIN = 0.10).
+        Task.detached { [weak self] in
+            let gen = AVAssetImageGenerator(asset: asset)
+            gen.appliesPreferredTrackTransform = true  // upright (rotation baked in)
+            gen.requestedTimeToleranceBefore = CMTime(seconds: 1.0, preferredTimescale: 600)
+            gen.requestedTimeToleranceAfter = CMTime(seconds: 1.0, preferredTimescale: 600)
+            var fallback: (w: Int, h: Int, data: Data)?
+            for secs in [0.5, 2.0, 5.0] {  // times past the clip's end just fail → skipped
+                let time = CMTime(seconds: secs, preferredTimescale: 600)
+                guard let cg = try? await gen.image(at: time).image,
+                    let poster = CoreModel.cgImageToRGBA(cg, maxEdge: Int(maxEdge))
+                else { continue }
+                if CoreModel.meanLuma(poster.data) > 0.10 {
+                    await self?.deliverArchivePoster(requestId: requestId, item: item, poster: poster)
+                    _ = loader
+                    return
                 }
-                self.kick()  // let the next tick's drain_results upload it into the ring
+                fallback = poster
             }
+            if let fb = fallback {
+                await self?.deliverArchivePoster(requestId: requestId, item: item, poster: fb)
+            }
+            _ = loader  // retain the resource loader until generation completes
+        }
+
+        // Metadata: probe the stream facts (codec/fps/duration/audio) for the inspector,
+        // off-actor via the async load APIs, then hand them to the core.
+        Task.detached { [weak self] in
+            guard let track = try? await asset.loadTracks(withMediaType: .video).first else {
+                _ = loader
+                return
+            }
+            let fps = (try? await track.load(.nominalFrameRate)) ?? 0
+            let formats = (try? await track.load(.formatDescriptions)) ?? []
+            let codec =
+                formats.first.map { CoreModel.fourccName(CMFormatDescriptionGetMediaSubType($0)) }
+                ?? "Video"
+            let durSecs = (try? await asset.load(.duration)).map { CMTimeGetSeconds($0) } ?? 0
+            let hasAudio = !(((try? await asset.loadTracks(withMediaType: .audio)) ?? []).isEmpty)
+            let durMs = Int64((durSecs.isFinite && durSecs > 0) ? durSecs * 1000 : -1)
+            let fpsMilli = UInt32(max(0, (Double(fps) * 1000).rounded()))
+            await self?.deliverArchiveVideoMeta(
+                item: item, codec: codec, fpsMilli: fpsMilli, durationMs: durMs, hasAudio: hasAudio)
+            _ = loader
+        }
+    }
+
+    /// Hand a generated archive-video poster to the core (main actor): copy the RGBA8 into
+    /// the resident ring and kick the pump so the next tick uploads it.
+    @MainActor private func deliverArchivePoster(
+        requestId: UInt64, item: UInt64, poster: (w: Int, h: Int, data: Data)
+    ) {
+        poster.data.withUnsafeBytes { raw in
+            core.video_poster_ready(
+                requestId, item, UInt32(poster.w), UInt32(poster.h),
+                UInt(bitPattern: raw.baseAddress), UInt(raw.count))
+        }
+        kick()
+    }
+
+    /// Hand an archive-video's probed stream facts to the core (main actor) for the inspector.
+    @MainActor private func deliverArchiveVideoMeta(
+        item: UInt64, codec: String, fpsMilli: UInt32, durationMs: Int64, hasAudio: Bool
+    ) {
+        core.archive_video_meta_ready(item, codec, fpsMilli, durationMs, hasAudio)
+        kick()
+    }
+
+    /// Mean luma (0…1) of an RGBA8 buffer, sampled every 8th pixel — the black-lead-in
+    /// gate for the poster walk (matches `pb_decode`'s `mean_luma_rgba8` stride + range).
+    nonisolated private static func meanLuma(_ data: Data) -> Double {
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Double in
+            let p = raw.bindMemory(to: UInt8.self)
+            var sum = 0.0
+            var n = 0
+            var i = 0
+            let step = 8 * 4
+            while i + 2 < p.count {
+                sum += (Double(p[i]) + Double(p[i + 1]) + Double(p[i + 2])) / 3.0 / 255.0
+                n += 1
+                i += step
+            }
+            return n > 0 ? sum / Double(n) : 0
+        }
+    }
+
+    /// A CoreMedia FourCC video subtype → display codec name (matches the Rust
+    /// `codec_name_from_fourcc` labels). Unknown → "Video".
+    nonisolated private static func fourccName(_ cc: FourCharCode) -> String {
+        let b = [
+            UInt8((cc >> 24) & 0xff), UInt8((cc >> 16) & 0xff),
+            UInt8((cc >> 8) & 0xff), UInt8(cc & 0xff),
+        ]
+        switch String(bytes: b, encoding: .ascii) {
+        case "avc1", "avc3": return "H.264"
+        case "hvc1", "hev1": return "HEVC"
+        case "av01": return "AV1"
+        case "vp09": return "VP9"
+        case "vp08": return "VP8"
+        case "mp4v": return "MPEG-4"
+        case "mjpg", "jpeg": return "Motion JPEG"
+        case "apch", "apcn", "apcs", "apco", "ap4h", "ap4x": return "ProRes"
+        default: return "Video"
         }
     }
 
     /// A `CGImage` → straight RGBA8 (`w*h*4`), fitted so the long edge ≤ `maxEdge` (the
     /// decode-fit target), matching what the Rust poster path hands the ring.
-    private static func cgImageToRGBA(_ cg: CGImage, maxEdge: Int) -> (w: Int, h: Int, data: Data)?
+    nonisolated private static func cgImageToRGBA(_ cg: CGImage, maxEdge: Int) -> (w: Int, h: Int, data: Data)?
     {
         let (srcW, srcH) = (cg.width, cg.height)
         guard srcW > 0, srcH > 0 else { return nil }

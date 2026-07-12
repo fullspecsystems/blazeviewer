@@ -75,6 +75,7 @@ impl AppCore {
             });
         let (pool, results) = crate::decode_pool::DecodePool::new(1, 1 << 20, decode);
         let (poster_read_tx, poster_read_rx) = std::sync::mpsc::channel();
+        let (video_read_tx, video_read_rx) = std::sync::mpsc::channel();
         let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(Vec::new()));
         let settings = settings::Settings::default();
         AppCore {
@@ -104,6 +105,8 @@ impl AppCore {
             poster_inflight: std::collections::HashSet::new(),
             poster_read_tx,
             poster_read_rx,
+            video_read_tx,
+            video_read_rx,
             dragging: false,
             rotations: std::collections::HashMap::new(),
             zoom_started: None,
@@ -1151,11 +1154,14 @@ impl AppCore {
         self.poll_delete_retry();
         // 1. Absorb finished decodes (uploads; presents the target if it arrived).
         self.drain_results();
-        // 1'. macOS: keep Swift-generated posters flowing for archive videos — the displayed
-        // one and the prefetch window ahead (off-thread reads; upgrades placeholders in
-        // place). See .taskmaster/plans/macos-archive-video-posters.md.
+        // 1'. macOS archive video (off the event loop): land a finished playback byte read
+        // (→ PlayVideoBytes), then keep Swift-generated posters flowing for the displayed
+        // clip + the prefetch window ahead. See .taskmaster/plans/macos-archive-video-posters.md.
         #[cfg(target_os = "macos")]
-        self.request_archive_posters();
+        {
+            self.drain_archive_video_read();
+            self.request_archive_posters();
+        }
 
         // 1a. Bound the regenerable per-item caches so browsing tens of thousands of photos
         // can't grow them without limit. Cheap when under the high-water mark (length checks).
@@ -3562,6 +3568,36 @@ impl AppCore {
     ///
     /// A poster upgrades its placeholder in place and the item leaves `preview_resident`, so
     /// it stops being a candidate; a ring eviction re-placeholders it and it re-qualifies.
+    /// macOS: land a finished off-thread archive-video **playback** read — if the session is
+    /// still current, stash the bytes and emit `PlayVideoBytes`; a stale read (the user
+    /// navigated away) is dropped, an empty one (read error) surfaces a toast.
+    #[cfg(target_os = "macos")]
+    pub fn drain_archive_video_read(&mut self) {
+        while let Ok((id, name, muted, bytes)) = self.video_read_rx.try_recv() {
+            let current = self
+                .video
+                .as_ref()
+                .and_then(ActiveVideoBackend::as_native)
+                .map(|p| p.session_id)
+                == Some(id);
+            if !current {
+                continue; // a newer session (or none) — the read is stale
+            }
+            if bytes.is_empty() {
+                self.show_toast("couldn't read the video from the archive");
+                self.video = None;
+                self.update_video_progress();
+                continue;
+            }
+            self.pending_video_bytes = Some(bytes);
+            self.effects.push(contract::CoreEffect::PlayVideoBytes {
+                name,
+                session_id: id,
+                muted,
+            });
+        }
+    }
+
     #[cfg(target_os = "macos")]
     pub fn request_archive_posters(&mut self) {
         // Cap concurrent reads/generations: the displayed clip + a couple ahead covers the
@@ -3652,6 +3688,36 @@ impl AppCore {
         };
         self.pending_uploads
             .push(crate::decode_pool::Outcome::synthetic(item, self.epoch, Ok(img)));
+    }
+
+    /// Cache the inspector's video-fact rows for a macOS archive video, probed by the shell
+    /// via AVFoundation (Rust can't build an `AVAsset` from bytes). Mirrors the row set the
+    /// Windows/loose-file probe produces (`ensure_exif_cached`): Duration / Video codec /
+    /// Frame rate / Audio. Overwrites any placeholder and re-signals the panel so an already-
+    /// open inspector refreshes. `fps_milli` = fps×1000; `duration_ms` < 0 = unknown.
+    pub fn archive_video_meta_ready(
+        &mut self,
+        item: usize,
+        codec: String,
+        fps_milli: u32,
+        duration_ms: i64,
+        has_audio: bool,
+    ) {
+        let mut rows: Vec<(String, String)> = Vec::new();
+        if duration_ms > 0 {
+            let d = std::time::Duration::from_millis(duration_ms as u64);
+            rows.push(("Duration".into(), crate::video::format_video_duration(d)));
+        }
+        if !codec.is_empty() {
+            rows.push(("Video codec".into(), codec));
+        }
+        if fps_milli > 0 {
+            rows.push(("Frame rate".into(), format!("{:.2} fps", f64::from(fps_milli) / 1000.0)));
+        }
+        rows.push(("Audio".into(), if has_audio { "Yes" } else { "No" }.into()));
+        let size = self.source.size_hint(item).unwrap_or(0);
+        self.exif_cache.insert(item, (size, rows));
+        self.emit_panels_changed();
     }
 
     pub fn video_placement(&self) -> Option<(f32, f32, f32, f32, u8)> {
@@ -6337,28 +6403,21 @@ impl AppCore {
                     muted,
                 });
             } else {
-                // Archive entry: no file URL. Read the container bytes (RAM-only, never to
-                // disk — privacy #2) and hand them to the shell, which serves them to
-                // `AVPlayer` through a custom resource loader. Read here on the event loop
-                // for the spike; moving the inflate off-thread is a follow-up.
-                match self.source.bytes(item) {
-                    Ok(data) => {
-                        let name = self.source.name(item).to_string();
-                        self.pending_video_bytes = Some(data);
-                        self.video = Some(ActiveVideoBackend::Native(
-                            crate::video_native::NativeVideoProxy::new(item, id, muted),
-                        ));
-                        self.effects.push(contract::CoreEffect::PlayVideoBytes {
-                            name,
-                            session_id: id,
-                            muted,
-                        });
-                    }
-                    Err(e) => {
-                        self.show_toast(&format!("couldn't read the video from the archive: {e}"));
-                        return;
-                    }
-                }
+                // Archive entry: no file URL. Read the container bytes OFF the event loop (a
+                // large ZIP inflates; 7z copies from resident RAM), then — once they arrive
+                // (drained in the tick) — hand them to the shell, which serves them to
+                // `AVPlayer` through a resource loader. RAM-only, never to disk (privacy #2).
+                // The proxy is live now so the session is gated; the poster holds until play.
+                self.video = Some(ActiveVideoBackend::Native(
+                    crate::video_native::NativeVideoProxy::new(item, id, muted),
+                ));
+                let name = self.source.name(item).to_string();
+                let source = self.source.clone();
+                let tx = self.video_read_tx.clone();
+                std::thread::spawn(move || {
+                    let bytes = source.bytes(item).unwrap_or_default();
+                    let _ = tx.send((id, name, muted, bytes));
+                });
             }
             self.anim_hint_shown_for = Some(item); // engaged — retire the hint
             self.draw();
@@ -9750,6 +9809,30 @@ mod tests {
             .result
             .as_ref()
             .is_ok_and(|img| img.width == 2 && img.height == 2 && !img.is_preview));
+    }
+
+    /// A shell-probed archive-video's facts become the inspector's rows (codec/fps/duration/
+    /// audio) and re-signal the panel; unknown duration is omitted.
+    #[test]
+    fn archive_video_meta_ready_builds_inspector_rows() {
+        let mut core = test_core();
+        core.archive_video_meta_ready(2, "HEVC".to_string(), 30_000, 5_000, true);
+        let (_, rows) = core.exif_cache.get(&2).expect("rows cached for item 2");
+        assert!(rows.iter().any(|(k, v)| k == "Video codec" && v == "HEVC"));
+        assert!(rows.iter().any(|(k, v)| k == "Frame rate" && v == "30.00 fps"));
+        assert!(rows.iter().any(|(k, _)| k == "Duration"));
+        assert!(rows.iter().any(|(k, v)| k == "Audio" && v == "Yes"));
+        assert!(core
+            .effects
+            .iter()
+            .any(|e| matches!(e, contract::CoreEffect::PanelsChanged)));
+
+        // Unknown duration (-1) is omitted; no audio reads "No".
+        core.archive_video_meta_ready(3, "H.264".to_string(), 0, -1, false);
+        let (_, rows) = core.exif_cache.get(&3).unwrap();
+        assert!(!rows.iter().any(|(k, _)| k == "Duration"), "unknown duration omitted");
+        assert!(!rows.iter().any(|(k, _)| k == "Frame rate"), "unknown fps omitted");
+        assert!(rows.iter().any(|(k, v)| k == "Audio" && v == "No"));
     }
 
     /// Poster byte stashes are keyed by request id and consumed once.

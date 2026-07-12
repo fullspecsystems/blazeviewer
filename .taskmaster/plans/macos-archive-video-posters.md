@@ -1,8 +1,17 @@
 # macOS archive-video posters — Swift poster gen, ring-integrated
 
-**Status:** planned (2026-07-12). Depends on the shipped macOS archive-video *playback*
-spike (`PlayVideoBytes` + `ArchiveVideoLoader`, committed 90485072). Relates to tasks
-#30 (archive viewing) and #79 (video).
+**Status:** **DONE** (2026-07-12) — owner-verified posters + prefetch. Built on the macOS
+archive-video *playback* spike (`PlayVideoBytes` + `ArchiveVideoLoader`, 90485072). Relates
+to tasks #30 (archive viewing) and #79 (video).
+
+Shipped: Phase 1 (current-item poster, ring-integrated, retention), Phase 2 (prefetch window,
+off-thread reads), Phase 3 (off-thread *playback* byte read; brightness-walk black-lead-in
+avoidance; archive-video codec/fps/duration/audio in the inspector via a Swift AVFoundation
+probe → `archive_video_meta_ready`). Poster cancellation was intentionally skipped — a late
+poster still lands in the ring and is used unless the item was already evicted. Remaining
+nice-to-haves: MKV/WebM stay on the placeholder (no AVFoundation handler); a mac no-trace
+integration test for archive-video viewing (the Rust path adds no `fs::write`; poster gen is
+Swift-side).
 
 ## Problem
 

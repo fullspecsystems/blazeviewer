@@ -535,6 +535,12 @@ pub struct AppCore {
     /// `RequestVideoPoster`. Empty bytes = a read error (the tick clears the in-flight guard).
     pub poster_read_tx: std::sync::mpsc::Sender<(u64, usize, Vec<u8>)>,
     pub poster_read_rx: Receiver<(u64, usize, Vec<u8>)>,
+    /// Off-thread archive-video **playback** byte read (macOS): pressing `P` on an archive
+    /// entry reads its container bytes on a worker (a large ZIP inflate mustn't block the
+    /// event loop), then the tick — if the session is still current — stashes them and emits
+    /// `PlayVideoBytes`. Payload: `(session_id, entry_name, muted, bytes)`; empty = read error.
+    pub video_read_tx: std::sync::mpsc::Sender<(crate::video::VideoSessionId, String, bool, Vec<u8>)>,
+    pub video_read_rx: Receiver<(crate::video::VideoSessionId, String, bool, Vec<u8>)>,
     /// Last held-key video seek step (task #79 phase 6): the app's own repeat
     /// timer (OS key-repeat stays ignored, like every other held action).
     pub video_seek_last: Option<Instant>,
