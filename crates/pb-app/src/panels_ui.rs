@@ -112,12 +112,14 @@ pub enum PanelAction {
 }
 
 /// The Inspector's visible state for one frame.
+#[derive(Clone)]
 pub struct InspectorFrame {
     pub tab: InspectorTab,
     pub snapshot: InspectorSnapshot,
 }
 
 /// The folder tree's visible state for one frame.
+#[derive(Clone)]
 pub struct TreeFrame {
     /// Disk-deck rows (the Finder-style [`fs_tree::FsTree`]); empty for archive/empty decks.
     pub rows: Vec<fs_tree::Row>,
@@ -136,6 +138,7 @@ pub struct TreeFrame {
 /// collapse marker, or the "up out of the archive" affordance. The winit skin's view of a
 /// core `folder_tree_panel` row: no chevrons, because an archive folder **re-scopes** the
 /// deck on click rather than expanding in place.
+#[derive(Clone)]
 pub struct ArchiveTreeRow {
     /// Position in the core `folder_tree_panel` — the argument to `AppCore::tree_activate`.
     pub index: usize,
@@ -249,6 +252,10 @@ pub struct PanelFrame {
     /// in the shell), so `snapshot` leaves it `0.0` and the shell fills it in
     /// `render_overlay_frame`. `0.0` on Windows/macOS (their menu is OS chrome, not in-client).
     pub top_inset: f32,
+    /// Show/hide fade ramps (0..=1) for the tree and Inspector — shell-owned like
+    /// the info line's `fade` (the shell retains the last frame for the out leg).
+    pub tree_fade: f32,
+    pub inspector_fade: f32,
 }
 
 impl PanelFrame {
@@ -315,6 +322,9 @@ impl PanelFrame {
             panel_alpha: opacity_to_alpha(core.settings.info_opacity),
             // Shell-owned (menu-bar visibility lives in the shell); set in render_overlay_frame.
             top_inset: 0.0,
+            // Shell-owned fade ramps; set in render_overlay_frame.
+            tree_fade: 1.0,
+            inspector_fade: 1.0,
         }
     }
 }
@@ -370,14 +380,14 @@ pub fn build(ctx: &egui::Context, frame: &PanelFrame, actions: &mut Vec<PanelAct
     let top = frame.top_inset;
     if let Some(tree) = &frame.tree {
         let r = duck(screen.left() + EDGE, screen.left() + EDGE + TREE_WIDTH);
-        tree_panel(ctx, &p, alpha, top, r, tree, actions);
+        tree_panel(ctx, &p, alpha, top, r, tree, frame.tree_fade, actions);
     }
     if let Some(insp) = &frame.inspector {
         let r = duck(
             screen.right() - EDGE - INSPECTOR_WIDTH,
             screen.right() - EDGE,
         );
-        inspector_panel(ctx, &p, alpha, top, r, insp, actions);
+        inspector_panel(ctx, &p, alpha, top, r, insp, frame.inspector_fade, actions);
     }
     // The scan pill rides the top-center, above the corner panels but below Help
     // (SwiftUI z-order) — drawn before Help so Help composites over it.
@@ -1214,6 +1224,7 @@ fn scan_pill(
         f32::INFINITY,
         SCAN_RADIUS,
         egui::Margin::symmetric(SCAN_PAD_H, SCAN_PAD_V),
+        1.0,
         |ui| {
             ui.set_width(content_w);
             let (rect, _) =
@@ -1577,6 +1588,7 @@ fn sdf_panel(
     max_h: f32,
     radius: f32,
     margin: egui::Margin,
+    fade: f32,
     content: impl FnOnce(&mut egui::Ui),
 ) {
     let shown = egui::Window::new(id)
@@ -1588,6 +1600,13 @@ fn sdf_panel(
         .max_height(max_h)
         .frame(egui::Frame::none().inner_margin(margin))
         .show(ctx, |ui| {
+            // Mid-fade (the tree/inspector show-hide ramp): scale everything the
+            // content paints and keep frames coming until the ramp lands.
+            if fade < 1.0 {
+                ui.set_opacity(fade.clamp(0.0, 1.0));
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(16));
+            }
             let shadow = ui.painter().add(egui::Shape::Noop);
             let bg = ui.painter().add(egui::Shape::Noop);
             content(ui);
@@ -1607,13 +1626,16 @@ fn sdf_panel(
     // Enclose whichever is larger: the window's (possibly stale) frame or the real content.
     let rect = shown.response.rect.union(content_rect);
     let painter = ctx.layer_painter(shown.response.layer_id);
+    // The backfilled shadow + SDF background bypass the Ui's opacity (they're
+    // set on the layer painter after the fact) — scale their colors by the
+    // fade explicitly so the whole panel dissolves as one.
     painter.set(
         shadow_idx,
         egui::epaint::Shadow {
             offset: egui::vec2(0.0, 5.0),
             blur: 18.0,
             spread: 0.0,
-            color: Color32::from_black_alpha(70),
+            color: Color32::from_black_alpha(70).gamma_multiply(fade),
         }
         .as_shape(rect, Rounding::same(radius)),
     );
@@ -1623,9 +1645,10 @@ fn sdf_panel(
         crate::sdf_rect::round_rect_shape(
             rect,
             radius,
-            Color32::from_rgba_unmultiplied(fill.r(), fill.g(), fill.b(), alpha),
+            Color32::from_rgba_unmultiplied(fill.r(), fill.g(), fill.b(), alpha)
+                .gamma_multiply(fade),
             1.0,
-            separator(p),
+            separator(p).gamma_multiply(fade),
         ),
     );
 }
@@ -1941,6 +1964,7 @@ fn help_panel(
         max_h,
         PANEL_RADIUS,
         egui::Margin::ZERO,
+        1.0,
         |ui| {
             ui.set_width(HELP_WIDTH);
             ui.set_max_width(HELP_WIDTH);
@@ -2159,6 +2183,7 @@ fn badge_colors(p: &Palette) -> (Color32, Color32) {
 
 // ── Inspector panel ──────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn inspector_panel(
     ctx: &egui::Context,
     p: &Palette,
@@ -2166,6 +2191,7 @@ fn inspector_panel(
     top_inset: f32,
     duck: f32,
     insp: &InspectorFrame,
+    fade: f32,
     actions: &mut Vec<PanelAction>,
 ) {
     let max_h = panel_max_height(ctx, 200.0, top_inset, duck);
@@ -2179,6 +2205,7 @@ fn inspector_panel(
         max_h,
         PANEL_RADIUS,
         egui::Margin::ZERO,
+        fade,
         |ui| {
             ui.set_width(INSPECTOR_WIDTH);
             ui.set_max_width(INSPECTOR_WIDTH);
@@ -2481,6 +2508,7 @@ fn describe_header(ui: &mut egui::Ui, p: &Palette, actions: &mut Vec<PanelAction
 
 // ── Folder-tree panel ────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn tree_panel(
     ctx: &egui::Context,
     p: &Palette,
@@ -2488,6 +2516,7 @@ fn tree_panel(
     top_inset: f32,
     duck: f32,
     tree: &TreeFrame,
+    fade: f32,
     actions: &mut Vec<PanelAction>,
 ) {
     let max_h = panel_max_height(ctx, 200.0, top_inset, duck);
@@ -2501,6 +2530,7 @@ fn tree_panel(
         max_h,
         PANEL_RADIUS,
         egui::Margin::ZERO,
+        fade,
         |ui| {
             ui.set_width(TREE_WIDTH);
             ui.set_max_width(TREE_WIDTH);

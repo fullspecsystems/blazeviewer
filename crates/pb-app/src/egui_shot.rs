@@ -303,6 +303,8 @@ async fn run(out: &Path, dark: bool, tab: InspectorTab, welcome: bool) -> Result
         dark,
         panel_alpha: 242,
         top_inset: frame.top_inset,
+        tree_fade: 1.0,
+        inspector_fade: 1.0,
     });
     for _ in 0..warmups {
         let warm_target = warm_frame.as_ref().unwrap_or(&frame);
@@ -502,6 +504,8 @@ fn sample_frame(dark: bool, tab: InspectorTab, welcome: bool) -> PanelFrame {
             dark,
             panel_alpha: 242,
             top_inset: 0.0,
+            tree_fade: 1.0,
+            inspector_fade: 1.0,
         };
     }
     let help = HelpPanel {
@@ -725,5 +729,7 @@ fn sample_frame(dark: bool, tab: InspectorTab, welcome: bool) -> PanelFrame {
         dark,
         panel_alpha: 242, // ≈95% — the shot previews the panels near-opaque
         top_inset: 0.0,   // Linux overrides this in `run()` (menu bar reserves the top strip)
+        tree_fade: 1.0,
+        inspector_fade: 1.0,
     }
 }

@@ -140,10 +140,85 @@ const SCAN_CARD_REFRESH: Duration = Duration::from_millis(120);
 const PLAY_HINT_FADE_IN: Duration = Duration::from_millis(200);
 const PLAY_HINT_HOLD: Duration = Duration::from_secs(3);
 const PLAY_HINT_FADE_OUT: Duration = Duration::from_millis(250);
-/// The info line's fade: quick in (it should feel immediate), slower out (the
-/// video controls' auto-hide reads as a deliberate dissolve, not a glitch).
+/// The overlay fade (info line / tree / Inspector): quick in (appearing should
+/// feel immediate), slower out (auto-hide reads as a deliberate dissolve).
 const INFO_FADE_IN: Duration = Duration::from_millis(100);
 const INFO_FADE_OUT: Duration = Duration::from_millis(250);
+
+/// Shell-side fade bookkeeping for one overlay layer: stamps are set on the
+/// visibility **edge** (`edge`, called every turn — renders aren't guaranteed),
+/// and the last content is retained so the out-ramp keeps drawing after the
+/// core has hidden it (`resolve`, folded into the snapshot per render).
+struct PanelFade<T> {
+    last: Option<T>,
+    was_visible: bool,
+    shown_at: Option<Instant>,
+    vanished_at: Option<Instant>,
+}
+
+impl<T: Clone> PanelFade<T> {
+    fn new() -> Self {
+        Self {
+            last: None,
+            was_visible: false,
+            shown_at: None,
+            vanished_at: None,
+        }
+    }
+
+    /// Track a visibility edge; `true` when the overlay needs a re-render.
+    fn edge(&mut self, visible: bool, now: Instant) -> bool {
+        if visible == self.was_visible {
+            return false;
+        }
+        self.was_visible = visible;
+        if visible {
+            self.shown_at = Some(now);
+            self.vanished_at = None;
+        } else {
+            self.shown_at = None;
+            if self.last.is_some() {
+                self.vanished_at = Some(now);
+            }
+        }
+        true
+    }
+
+    /// Still mid fade-out — keeps the overlay compositing + rendering.
+    fn fading_out(&self) -> bool {
+        self.vanished_at
+            .is_some_and(|at| at.elapsed() < INFO_FADE_OUT)
+    }
+
+    /// Fold the fade into a snapshot slot: ramp a present value in; replay the
+    /// retained one on the way out. Returns the fade for the drawn content.
+    fn resolve(&mut self, slot: &mut Option<T>, now: Instant) -> f32 {
+        match slot.take() {
+            Some(v) => {
+                let fade = self
+                    .shown_at
+                    .map(|s| now.duration_since(s).as_secs_f32() / INFO_FADE_IN.as_secs_f32())
+                    .unwrap_or(1.0)
+                    .min(1.0);
+                self.last = Some(v.clone());
+                *slot = Some(v);
+                fade
+            }
+            None => {
+                if let (Some(last), Some(gone)) = (self.last.as_ref(), self.vanished_at) {
+                    let t = now.duration_since(gone).as_secs_f32() / INFO_FADE_OUT.as_secs_f32();
+                    if t < 1.0 {
+                        *slot = Some(last.clone());
+                        return 1.0 - t;
+                    }
+                    self.last = None;
+                    self.vanished_at = None;
+                }
+                1.0
+            }
+        }
+    }
+}
 
 /// Whether an Escape press should quit, given an optional "ignore Esc until"
 /// guard set briefly after the file picker closes (to swallow the stray Esc that
@@ -364,6 +439,9 @@ struct App {
     info_line_was_visible: bool,
     info_shown_at: Option<Instant>,
     info_vanished_at: Option<Instant>,
+    /// Fade ramps for the folder tree + Inspector (same 100 ms in / 250 ms out).
+    tree_fade: PanelFade<panels_ui::TreeFrame>,
+    inspector_fade: PanelFade<panels_ui::InspectorFrame>,
     /// Whether the egui panel texture needs re-rendering next turn — set on a panel
     /// state/content change (`CoreEffect::PanelsChanged`), an egui-consumed event, or a
     /// timed egui repaint. When clear and a panel is open, the retained texture is reused
@@ -715,6 +793,8 @@ impl App {
             info_line_was_visible: false,
             info_shown_at: None,
             info_vanished_at: None,
+            tree_fade: PanelFade::new(),
+            inspector_fade: PanelFade::new(),
             overlay_dirty: false,
             overlay_active: false,
             #[cfg(all(unix, not(target_os = "macos")))]
@@ -1244,10 +1324,12 @@ impl App {
     fn overlay_visible(&self) -> bool {
         self.overlay_panel_visible()
             || self.core.info_line_visible()
-            // Keep compositing (and re-rendering) through the info line's fade-out.
+            // Keep compositing (and re-rendering) through any layer's fade-out.
             || self
                 .info_vanished_at
                 .is_some_and(|at| at.elapsed() < INFO_FADE_OUT)
+            || self.tree_fade.fading_out()
+            || self.inspector_fade.fading_out()
     }
 
     /// Whether the info line currently carries the interactive video playback bar
@@ -1379,6 +1461,14 @@ impl App {
             }
             self.overlay_dirty = true;
         }
+        // Same edge tracking for the faded panels (tree / Inspector).
+        if self.tree_fade.edge(self.core.tree_panel_visible(), now)
+            | self
+                .inspector_fade
+                .edge(self.core.inspector_panel_visible(), now)
+        {
+            self.overlay_dirty = true;
+        }
         if !self.overlay_visible() {
             // Nothing open: drop the composited layer once, on the visibility edge.
             if self.overlay_active {
@@ -1428,6 +1518,10 @@ impl App {
         // drawing the *last* line briefly with `fade` ramping down. The line
         // itself requests egui repaints while fading.
         let now = Instant::now();
+        // The tree + Inspector share the same ramp mechanics (retained content
+        // draws through the out leg after the core hides the panel).
+        frame.tree_fade = self.tree_fade.resolve(&mut frame.tree, now);
+        frame.inspector_fade = self.inspector_fade.resolve(&mut frame.inspector, now);
         match frame.info.take() {
             Some(mut line) => {
                 // Ramp from the appear stamp `update_overlay` set on the edge.
