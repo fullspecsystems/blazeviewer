@@ -938,7 +938,11 @@ fn info_line(ctx: &egui::Context, p: &Palette, alpha: u8, info: &InfoLine) {
                 x += icon_sz + gap;
             }
             if let Some(cg) = codec_g {
-                let badge_h = pill_h - 2.0 * INFO_INSET;
+                // The badge belongs to the summary ROW, not the pill: with the
+                // playback row present, `pill_h` spans both rows and a pill-height
+                // badge bleeds down over the bar (owner-reported). `row1_h` equals
+                // the old `pill_h - 2·INSET` in the single-row case exactly.
+                let badge_h = row1_h;
                 let badge = snap_rect(
                     egui::Rect::from_min_size(
                         egui::pos2(x, cy - badge_h / 2.0),
