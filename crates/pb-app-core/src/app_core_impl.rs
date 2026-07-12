@@ -6185,25 +6185,41 @@ impl AppCore {
                 .map(|m| m.len())
                 .or_else(|| self.source.size_hint(item))
                 .unwrap_or(0);
-            // The Windows (Media Foundation) and macOS (AVFoundation) probes below both
-            // fill `rows`; on other platforms it stays empty, so `mut` reads as unused —
-            // suppress it there rather than drop `mut` (it's needed where a probe runs).
-            #[cfg_attr(not(any(windows, target_os = "macos")), allow(unused_mut))]
+            // The Windows (Media Foundation), macOS (AVFoundation), and Linux (FFmpeg,
+            // task #84) probes below fill `rows`; on other platforms it stays empty, so
+            // `mut` reads as unused — suppress it there rather than drop `mut`.
+            #[cfg_attr(
+                not(any(windows, target_os = "macos", all(unix, feature = "ffvideo"))),
+                allow(unused_mut)
+            )]
             let mut rows: Vec<(String, String)> = Vec::new();
+            // One shared row builder so the three platform probes can't drift on copy.
+            #[cfg(any(windows, target_os = "macos", all(unix, feature = "ffvideo")))]
+            let mut fill_rows = |info: &pb_decode::VideoStreamInfo| {
+                if let Some(d) = info.duration {
+                    rows.push(("Duration".into(), crate::video::format_video_duration(d)));
+                }
+                rows.push(("Video codec".into(), info.codec.to_string()));
+                if info.fps > 0.0 {
+                    rows.push(("Frame rate".into(), format!("{:.2} fps", info.fps)));
+                }
+                rows.push((
+                    "Audio".into(),
+                    if info.has_audio { "Yes" } else { "No" }.into(),
+                ));
+            };
             #[cfg(any(windows, target_os = "macos"))]
             if let Some(path) = self.source.path(item) {
                 if let Ok(info) = pb_decode::probe_video_stream(path) {
-                    if let Some(d) = info.duration {
-                        rows.push(("Duration".into(), crate::video::format_video_duration(d)));
-                    }
-                    rows.push(("Video codec".into(), info.codec.to_string()));
-                    if info.fps > 0.0 {
-                        rows.push(("Frame rate".into(), format!("{:.2} fps", info.fps)));
-                    }
-                    rows.push((
-                        "Audio".into(),
-                        if info.has_audio { "Yes" } else { "No" }.into(),
-                    ));
+                    fill_rows(&info);
+                }
+            }
+            // Linux (task #84): the FFmpeg probe, path or in-RAM archive bytes alike.
+            #[cfg(all(unix, not(target_os = "macos"), feature = "ffvideo"))]
+            if let Some(path) = self.source.path(item) {
+                let input = crate::video::VideoInput::Path(path.to_path_buf());
+                if let Ok(info) = pb_decode::ff_probe_video_input(&input) {
+                    fill_rows(&info);
                 }
             }
             self.exif_cache.insert(item, (size, rows));
@@ -6547,12 +6563,13 @@ impl AppCore {
     }
 
     /// Start silent video playback of `item` (task #79 phase 4): a fresh
-    /// `VideoSession` fed by a dedicated Media Foundation reader thread. The
-    /// thread is never joined — teardown is a Stop message / channel disconnect,
-    /// and the reader retires on its own detached thread (bounded; spike D).
+    /// `VideoSession` fed by a dedicated reader thread — Media Foundation on
+    /// Windows, the FFmpeg producer on Linux (task #84), both speaking the same
+    /// producer protocol (see [`run_platform_video_producer`]). The thread is
+    /// never joined — teardown is a Stop message / channel disconnect.
     pub fn start_video_session(&mut self, item: usize) {
         self.stop_video();
-        #[cfg(windows)]
+        #[cfg(any(windows, all(unix, not(target_os = "macos"), feature = "ffvideo")))]
         {
             let fit = self.decode_fit();
             // Credit-granting estimate of one fitted RGBA8 frame. The fit box is a
@@ -6573,7 +6590,7 @@ impl AppCore {
                 let input = crate::video::VideoInput::Path(path);
                 let _ = media.set(input.clone());
                 std::thread::spawn(move || {
-                    pb_decode::run_video_producer(&input, fit, id, generation, io.events, io.msgs);
+                    run_platform_video_producer(&input, fit, id, generation, io.events, io.msgs);
                 });
             } else {
                 // Archive entry: fetch the container bytes OFF the event loop (a
@@ -6598,7 +6615,7 @@ impl AppCore {
                     };
                     let input = crate::video::VideoInput::Bytes { data, name };
                     let _ = media_slot.set(input.clone());
-                    pb_decode::run_video_producer(&input, fit, id, generation, io.events, io.msgs);
+                    run_platform_video_producer(&input, fit, id, generation, io.events, io.msgs);
                 });
             }
             self.video = Some(ActiveVideoBackend::Session(
@@ -6650,7 +6667,7 @@ impl AppCore {
             self.anim_hint_shown_for = Some(item); // engaged — retire the hint
             self.draw();
         }
-        #[cfg(not(any(windows, target_os = "macos")))]
+        #[cfg(not(any(windows, target_os = "macos", all(unix, feature = "ffvideo"))))]
         {
             let _ = item;
             self.show_toast("Video playback is not available yet on this platform");
@@ -7838,6 +7855,27 @@ impl AppCore {
         }
         dir.signum()
     }
+}
+
+/// The platform's streaming video producer behind one name (task #84): the
+/// Windows Media Foundation reader, or the FFmpeg producer everywhere else the
+/// `ffvideo` feature reaches (Linux today; the macOS dual-backend fallback
+/// routes here in a later phase). Both speak the identical
+/// `VideoProducerEvent`/`Msg` protocol, so `start_video_session` and the whole
+/// `VideoSession` state machine are backend-blind.
+#[cfg(any(windows, all(unix, not(target_os = "macos"), feature = "ffvideo")))]
+fn run_platform_video_producer(
+    input: &crate::video::VideoInput,
+    fit: Option<pb_decode::FitBox>,
+    id: crate::video::VideoSessionId,
+    generation: crate::video::SeekGeneration,
+    events: std::sync::mpsc::Sender<crate::video::VideoProducerEvent>,
+    msgs: std::sync::mpsc::Receiver<crate::video::VideoProducerMsg>,
+) {
+    #[cfg(windows)]
+    pb_decode::run_video_producer(input, fit, id, generation, events, msgs);
+    #[cfg(all(unix, not(target_os = "macos"), feature = "ffvideo"))]
+    pb_decode::run_ff_video_producer(input, fit, id, generation, events, msgs);
 }
 
 #[cfg(test)]
@@ -9578,7 +9616,9 @@ mod tests {
         );
         assert!(core.anim_decode.is_none(), "no batch decode kicked");
         assert!(core.anim_stream.is_none(), "no stream kicked");
-        #[cfg(windows)]
+        // Session platforms: Windows (MF) and Linux with the FFmpeg producer
+        // (task #84) — same protocol, same failure contract.
+        #[cfg(any(windows, all(unix, not(target_os = "macos"), feature = "ffvideo")))]
         {
             assert!(core.video.is_some(), "P starts the video session");
             // The missing file fails the producer; the session surfaces it via
@@ -9611,7 +9651,7 @@ mod tests {
                 "the native player is commanded to open the clip"
             );
         }
-        #[cfg(all(not(windows), not(target_os = "macos")))]
+        #[cfg(not(any(windows, target_os = "macos", all(unix, feature = "ffvideo"))))]
         assert!(core.video.is_none(), "no producer on this platform yet");
     }
 

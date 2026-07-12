@@ -61,6 +61,12 @@ base64 = "0.22"
 # Linux motion-decode + pairing paths in engine.rs / app_core_impl.rs. Off by default (macOS
 # and Windows have their own backends, always on). See pb-decode's `livephoto` feature.
 livephoto = ["pb-decode/livephoto"]
+# Cross-platform FFmpeg video (task #84): routes Linux video playback through the
+# shared VideoSession fed by pb-decode's FFmpeg producer, and flips on the FFmpeg
+# poster/probe paths for items the OS backends can't open. Off by default (links
+# native C, ADR-015). On macOS it (later) backs the dual-backend fallback (plan §8);
+# on Windows it's inert (Media Foundation covers tier 2).
+ffvideo = ["pb-decode/ffvideo"]
 
 [dev-dependencies]
 # Generate QR bitmaps for the image_text decode tests (never shipped). Default features

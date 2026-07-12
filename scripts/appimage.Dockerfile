@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       clang libclang-dev \
       libgtk-3-dev libxdo-dev \
       libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
-      libavcodec-dev libavformat-dev libswscale-dev \
+      libavcodec-dev libavformat-dev libswscale-dev libswresample-dev \
       libheif-dev libheif-plugin-libde265 libde265-0 libheif-plugin-aomdec \
     && rm -rf /var/lib/apt/lists/*
 

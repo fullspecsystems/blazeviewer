@@ -325,10 +325,34 @@ pub fn decode_item_cancellable(
                 Err(e) => eprintln!("video poster failed: {}: {e}", path.display()),
             }
         }
+        // Linux (task #84): the FFmpeg poster covers path and archive-byte items
+        // alike (one in-process reader; the thumbs strip gets these for free).
+        #[cfg(all(unix, not(target_os = "macos"), feature = "ffvideo"))]
+        {
+            let input = match source.path(item) {
+                Some(p) => Some(pb_decode::VideoInput::Path(p.to_path_buf())),
+                None => match source.bytes(item) {
+                    Ok(data) => Some(pb_decode::VideoInput::Bytes {
+                        data: std::sync::Arc::new(data),
+                        name: source.name(item).to_string(),
+                    }),
+                    Err(e) => {
+                        eprintln!("video poster read failed: {}: {e}", source.name(item));
+                        None
+                    }
+                },
+            };
+            if let Some(input) = input {
+                match pb_decode::ff_decode_video_poster(&input, fit, cancel) {
+                    Ok(img) => return Ok(img),
+                    Err(e) => eprintln!("video poster failed: {}: {e}", source.name(item)),
+                }
+            }
+        }
         // An archive entry (no path): Windows posters it from the entry's in-RAM
         // bytes through the same MF reader configuration — a transient fetch this
         // decode worker drops after the poster (playback re-fetches and holds one
-        // Arc for its session). macOS/Linux show the placeholder for now.
+        // Arc for its session).
         #[cfg(windows)]
         if source.path(item).is_none() {
             match source.bytes(item) {

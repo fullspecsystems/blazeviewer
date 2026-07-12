@@ -23,6 +23,12 @@ dav1d = ["pb-decode/dav1d"]
 # `pw-cat`. Off by default; Linux-only in effect (Windows/macOS have native backends).
 # Needs system FFmpeg; audio needs `pw-cat` (from pipewire) on PATH at runtime.
 livephoto = ["pb-app-core/livephoto", "pb-decode/livephoto", "dep:libc"]
+# Cross-platform FFmpeg video (task #84): Linux video playback + posters through
+# pb-decode's FFmpeg producer behind the shared VideoSession. Off by default (links
+# system FFmpeg); Linux-only in effect for this winit shell (Windows uses Media
+# Foundation). NOT in the Linux ship feature set until plan phases 5–6 pass
+# (ship-gating by discipline, plan §13).
+ffvideo = ["pb-app-core/ffvideo", "pb-decode/ffvideo"]
 
 [dependencies]
 # Platform-neutral orchestration model (actions, key model, keymap) — shared with

@@ -21,6 +21,11 @@ required-features = ["package"]
 [features]
 # Enables the `create-package` bin (pulls swift-bridge-build in as a regular dependency).
 package = ["dep:swift-bridge-build"]
+# Cross-platform FFmpeg video (task #84): forwards to pb-app-core so the macOS
+# dual-backend fallback (plan §8 — MKV/WebM/VP8/VP9 through the FFmpeg producer
+# behind AVPlayer) can be built into the Swift host. Off by default; the macOS
+# integration phase wires it.
+ffvideo = ["pb-app-core/ffvideo"]
 
 [dependencies]
 pb-app-core = { workspace = true }
