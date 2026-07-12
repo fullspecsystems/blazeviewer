@@ -53,6 +53,16 @@ mod mf_stream;
 // The Linux mirror: .mov motion + audio decode via FFmpeg, behind the `livephoto` feature.
 #[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
 mod ff_live;
+// The shared FFmpeg media backend (task #84 plan §3): `init`/`io`/`probe`/`color` are
+// the foundation `ff_live` (Live Photo) and the `ffvideo` modules both build on — so
+// stream-selection/timing/rotation/color policy can't drift between them — and
+// `video_producer`/`poster` (gated on `ffvideo` inside) are the cross-platform
+// streaming producer + poster: ALL video on Linux, the containers/codecs AVFoundation
+// refuses on macOS (MKV/WebM/VP8/VP9/AV1). The producer speaks the same
+// VideoProducerEvent/Msg protocol as the Windows MF producer, against the same
+// unit-tested VideoSession.
+#[cfg(feature = "ffmpeg")]
+mod ffmpeg;
 // The dav1d AV1 backend for animated AVIF (avis) playback — Windows-only, task #76.
 // `av1_dav1d` is set by build.rs when the `dav1d` feature is on for a Windows target
 // (macOS plays avis via Image I/O, Linux via FFmpeg; elsewhere the feature is a no-op).
@@ -120,6 +130,13 @@ pub use ff_live::{
     decode_image_sequence, decode_image_sequence_cancellable, decode_live_motion,
     decode_live_motion_cancellable, decode_live_motion_streaming, decode_motion_audio, MotionAudio,
 };
+// The FFmpeg producer/poster/probe (task #84). `ff_`-prefixed everywhere so the macOS
+// dual-backend dispatcher can hold both (AVFoundation poster + FFmpeg poster) at once;
+// Linux integration routes these under its own cfg (there is no competing backend there).
+#[cfg(feature = "ffvideo")]
+pub use ffmpeg::poster::{ff_decode_video_poster, ff_probe_video_input};
+#[cfg(feature = "ffvideo")]
+pub use ffmpeg::video_producer::run_ff_video_producer;
 pub use image_backend::ImageCrateDecoder;
 #[cfg(target_os = "macos")]
 pub use imageio::ImageIoDecoder;

@@ -31,11 +31,13 @@ resvg = { version = "0.47.0", default-features = false }
 flate2 = "1"
 imagepipe = "0.5.0"
 rawloader = "0.37.1"
-# Live Photo motion + audio decode on Linux (task: Linux Live Photo). Optional: links
-# system FFmpeg (libavcodec/format/swscale/swresample) via `--features livephoto`, so the
-# pure-Rust core has zero native build risk without it (ADR-015). Windows uses Media
-# Foundation, macOS AVFoundation — this backend is the Linux mirror behind the same seam.
-ffmpeg-next = { version = "8.1", default-features = false, features = ["codec", "format", "software-scaling"], optional = true }
+# FFmpeg (libavcodec/format/swscale/swresample), shared by two features (task #84 plan):
+# `livephoto` (Linux Live Photo / animated-HEIF motion) and `ffvideo` (the cross-platform
+# streaming video producer/poster: Linux playback + the macOS MKV/WebM/VP8/VP9 fallback).
+# Optional so the pure-Rust core has zero native build risk without it (ADR-015).
+# `software-resampling` pulls libswresample for the ffvideo audio decoder (plan §7).
+# (NOT `resampling` — that one maps to the long-removed libavresample.)
+ffmpeg-next = { version = "8.1", default-features = false, features = ["codec", "format", "software-scaling", "software-resampling"], optional = true }
 # Photoshop .psd is decoded in-crate (`src/psd.rs`): the merged composite in the
 # final image-data section is a small, well-specified format (planar channels, raw
 # or PackBits/RLE), and both `psd` (panicked on real files) and `zune-psd` (no
@@ -55,11 +57,20 @@ ffmpeg-next = { version = "8.1", default-features = false, features = ["codec", 
 # build.rs sets the `heic_libheif` cfg the backend gates on. macOS uses Image I/O,
 # so it ignores this feature.
 libheif = []
-# Linux Live Photo motion + audio via FFmpeg (`ff_live.rs`). Off by default: links system
-# FFmpeg (native C), so it must never block the pure-Rust core (ADR-015). Only meaningful on
-# Linux/BSD — Windows (Media Foundation) and macOS (AVFoundation) have their own backends and
-# ignore it. `apt install libavcodec-dev libavformat-dev libswscale-dev libswresample-dev clang`.
-livephoto = ["dep:ffmpeg-next"]
+# Internal: the FFmpeg dep + the shared `ffmpeg/` helper modules (init, custom AVIO,
+# probe, color). Not meant to be enabled directly — `livephoto` and `ffvideo` both pull
+# it. Links system FFmpeg (native C), so it must never block the pure-Rust core (ADR-015).
+# `apt install libavcodec-dev libavformat-dev libswscale-dev libswresample-dev clang`.
+ffmpeg = ["dep:ffmpeg-next"]
+# Linux Live Photo motion + audio via FFmpeg (`ff_live.rs`). Off by default. Only meaningful
+# on Linux/BSD — Windows (Media Foundation) and macOS (AVFoundation) have their own backends
+# and ignore it.
+livephoto = ["ffmpeg"]
+# Cross-platform streaming video via FFmpeg (task #84): the `VideoProducerEvent`/`Msg`
+# producer + poster/probe for the containers/codecs the OS backends can't handle — ALL
+# video on Linux (which has no OS backend), MKV/WebM/VP8/VP9/AV1 fallback on macOS.
+# Off by default (ADR-015); Windows ignores it (Media Foundation covers tier 2).
+ffvideo = ["ffmpeg"]
 # Animated AVIF (avis) playback on Windows via a vcpkg static dav1d (task #76). OFF by
 # default: links a native C lib (ADR-015). build.rs sets the `av1_dav1d` cfg the backend
 # gates on and compiles the C accessor shim (csrc/dav1d_shim.c) against the pinned vcpkg
