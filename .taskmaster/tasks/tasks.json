@@ -1021,6 +1021,30 @@
             "status": "in-progress"
           }
         ]
+      },
+      {
+        "id": 80,
+        "title": "Slideshow + video: define and fix behaviour when a clip is on screen",
+        "description": "Slideshow (s) does nothing when a video is playing — it will not advance/play. Before fixing, resolve the design question of how a slideshow should treat a video item, then implement it consistently across platforms (macOS native AVPlayer + Windows/Linux VideoSession). Deferred by owner for a later evaluation pass.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          79
+        ],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Decide the slideshow-video policy",
+            "description": "Pick between: (a) play the video to completion, then advance; (b) treat it as a still (show the poster for the normal slideshow interval, no playback); (c) play the video but cap it at the slideshow interval, then advance; or a hybrid (e.g. play up to min(clip length, interval)). Consider muted/audio, hold-to-fly interaction, and very long clips.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "Fix slideshow advancing while a video is active",
+            "description": "Slideshow currently stalls when a video item is current — the advance timer does not fire / the video blocks it. Make the slideshow tick reach video items and drive them per the chosen policy on all shells (macOS native player, winit/egui VideoSession).",
+            "status": "pending"
+          }
+        ]
       }
     ]
   }
