@@ -140,6 +140,9 @@ const SCAN_CARD_REFRESH: Duration = Duration::from_millis(120);
 const PLAY_HINT_FADE_IN: Duration = Duration::from_millis(200);
 const PLAY_HINT_HOLD: Duration = Duration::from_secs(3);
 const PLAY_HINT_FADE_OUT: Duration = Duration::from_millis(250);
+/// The info line's fade in/out (macOS-shell parity; the pop was most visible on
+/// the video hover reveal).
+const INFO_FADE: Duration = Duration::from_millis(100);
 
 /// Whether an Escape press should quit, given an optional "ignore Esc until"
 /// guard set briefly after the file picker closes (to swallow the stray Esc that
@@ -352,6 +355,11 @@ struct App {
     /// shell sets the `native_*` panel flags so the core suppresses the CPU-HUD versions
     /// of these panels and drives this instead.
     egui_overlay: Option<egui_overlay::EguiOverlay>,
+    /// The last snapshotted info line + its appear/vanish stamps, driving the
+    /// ~100 ms fade (the line keeps drawing briefly after the core hides it).
+    last_info_line: Option<panels_ui::InfoLine>,
+    info_shown_at: Option<Instant>,
+    info_vanished_at: Option<Instant>,
     /// Whether the egui panel texture needs re-rendering next turn — set on a panel
     /// state/content change (`CoreEffect::PanelsChanged`), an egui-consumed event, or a
     /// timed egui repaint. When clear and a panel is open, the retained texture is reused
@@ -699,6 +707,9 @@ impl App {
             pending_dialog: None,
             requested_wake: None,
             egui_overlay: None,
+            last_info_line: None,
+            info_shown_at: None,
+            info_vanished_at: None,
             overlay_dirty: false,
             overlay_active: false,
             #[cfg(all(unix, not(target_os = "macos")))]
@@ -1226,7 +1237,12 @@ impl App {
     /// photo. With a live video it joins that gate via `video_bar_interactive` — the playback
     /// bar is a scrubber.)
     fn overlay_visible(&self) -> bool {
-        self.overlay_panel_visible() || self.core.info_line_visible()
+        self.overlay_panel_visible()
+            || self.core.info_line_visible()
+            // Keep compositing (and re-rendering) through the info line's fade-out.
+            || self
+                .info_vanished_at
+                .is_some_and(|at| at.elapsed() < INFO_FADE)
     }
 
     /// Whether the info line currently carries the interactive video playback bar
@@ -1383,6 +1399,36 @@ impl App {
             return;
         };
         let mut frame = panels_ui::PanelFrame::snapshot(&self.core);
+        // Fade the info line in/out over ~100 ms (macOS-shell parity — its SwiftUI
+        // overlays transition; the egui line used to pop, most visibly on the
+        // video hover reveal). Appearances ramp `fade` up; a disappearance keeps
+        // drawing the *last* line briefly with `fade` ramping down. The line
+        // itself requests egui repaints while fading.
+        let now = Instant::now();
+        match frame.info.take() {
+            Some(mut line) => {
+                let shown = *self.info_shown_at.get_or_insert(now);
+                line.fade =
+                    (now.duration_since(shown).as_secs_f32() / INFO_FADE.as_secs_f32()).min(1.0);
+                self.info_vanished_at = None;
+                self.last_info_line = Some(line.clone());
+                frame.info = Some(line);
+            }
+            None => {
+                self.info_shown_at = None;
+                if let Some(last) = self.last_info_line.as_ref() {
+                    let gone = *self.info_vanished_at.get_or_insert(now);
+                    let t = now.duration_since(gone).as_secs_f32() / INFO_FADE.as_secs_f32();
+                    if t < 1.0 {
+                        let mut line = last.clone();
+                        line.fade = 1.0 - t;
+                        frame.info = Some(line);
+                    } else {
+                        self.last_info_line = None;
+                    }
+                }
+            }
+        }
         // Scan state is shell-owned (`dir_scan`), so the pill is filled in here rather than
         // by `snapshot` (which only reaches the core).
         frame.scan = self.scan_pill_frame();
