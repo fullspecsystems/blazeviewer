@@ -177,6 +177,10 @@ final class MenuBar: NSObject {
         ] + updateMenuItems() + [
             sep(),
             item("settings", "Settings…", key: ","),
+            // The opt-in `photoblaze` CLI symlink (task #78.14) — host-native
+            // target-action (like Check for Updates), not a core Action id: it's pure
+            // shell-side filesystem work. Below Settings, the iTerm convention.
+            CliTool.shared.menuItem(),
             sep(),
             system("Hide PhotoBlaze", #selector(NSApplication.hide(_:)), key: "h"),
             {
