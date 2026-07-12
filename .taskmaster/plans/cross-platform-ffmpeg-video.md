@@ -1,10 +1,11 @@
 # Cross-platform FFmpeg video — Linux playback + macOS codec fallback
 
-**Status:** planned, **rev4** (2026-07-12) — Claude pre-execution review: anchors re-verified
-against the working tree (line refs → symbol names), VP8 HW carve-out, macOS codec-set
-correction (MKV wraps H.264/HEVC — can't drop them), `ffvideo` ship-gating mechanism,
-libva/VAAPI runtime-dep audit, task #83 thumbs interaction, macOS archive-poster
-unification candidate. Awaiting final sign-off before execution.
+**Status:** planned, **rev4** (2026-07-12) — Claude pre-execution review + owner rulings:
+anchors re-verified against the working tree (line refs → symbol names), VP8 HW carve-out
+(confirmed), macOS codec-set correction (MKV wraps H.264/HEVC — can't drop them), ship-gating
+by discipline (owner declined a feature-flag gate), Linux HDR = pipeline-correct/tone-mapped
+output (confirmed), archive posters keep both paths with FFmpeg as fallback (owner call),
+libva/VAAPI runtime-dep audit, task #83 thumbs interaction. **Ready for execution.**
 
 > **Owner decisions locked (2026-07-12):**
 > 1. **HDR is implemented properly from the start** — not SDR-only-with-tone-map. The fp16/P010
@@ -14,6 +15,12 @@ unification candidate. Awaiting final sign-off before execution.
 >    Software decode is an internal bring-up milestone only; it is **not** a shippable outcome.
 > 3. **Linux audio** — reuse the proven `pw-cat` *output* (the cpal/ALSA-on-PipeWire underrun
 >    disaster is documented, commit `3a6c538d`); the open question is only the *clock* (§7).
+> 4. **Linux is a second-class platform (owner policy, 2026-07-12):** support what falls out
+>    cheap and easy from the cross-platform architecture; do **not** hold Linux to the
+>    Windows/macOS bar or build Linux-specific machinery for features Linux lacks robust
+>    platform support for (full HDR output, exhaustive VAAPI robustness). Concretely: the
+>    macOS VideoToolbox gate is hard; Linux HW decode is **best-effort** and never blocks
+>    shipping; Linux HDR output is out of scope.
 **Relates to:** task #79 (video tier 2 — "Windows shipped; Linux/macOS = parity work"; the
 Windows-side authoritative plan is `.taskmaster/plans/79-video-playback-tier2.md`), task #79.10
 (**GPU decode REQUIRED to ship** — owner decision), task #77 (LGPL/GPL compliance — **hard gate
@@ -262,8 +269,9 @@ cancellation / unrelated I/O; record which backend was tried to avoid loops.
   `hdr_surface_wants_edr`), so HDR video gets real headroom there; on Linux
   `display::primary_hdr()` currently returns SDR (no desktop HDR detection), so PQ/HLG video
   correctly **tone-maps through the fp16 present pass** — right colors, SDR ceiling. That is
-  the intended v1 Linux behavior, not a violation of decision #1; Linux HDR *output* arrives
-  whenever `primary_hdr()` grows a Wayland/KMS path, with zero video-side changes.
+  the intended v1 Linux behavior, not a violation of decision #1 (owner confirmed this reading
+  2026-07-12); Linux HDR *output* arrives whenever `primary_hdr()` grows a Wayland/KMS path,
+  with zero video-side changes.
 
 ### FFmpeg distribution — a proof gate (esp. macOS)
 
@@ -320,10 +328,13 @@ Hardware decode + 10-bit (P010/NV12) delivery through the fp16 HDR present path 
   `VTDecompressionSession`) for VP9 (Apple Silicon) / AV1 (M3+) / H.264 / HEVC → `CVPixelBuffer`
   (NV12/P010). Prefer a **zero-copy or minimal-copy** path to the wgpu texture (IOSurface/Metal
   interop) over a CPU readback. The owner validates this directly on Apple Silicon.
-- **Linux = implement, but validation-limited:** FFmpeg VAAPI `hwaccel`. **The owner cannot test
-  Linux hardware** (§16 risk) — so Linux HW decode ships behind whatever validation we *can* get
-  (CI/software-fallback parity, a Linux tester, or a documented "HW path present but
-  owner-unvalidated" caveat). Linux always retains the SW fallback for machines without VAAPI.
+- **Linux = best-effort (owner policy, decision #4):** FFmpeg VAAPI `hwaccel` is implemented
+  *because it's cheap* — the NV12/P010 delivery + fp16 present plumbing is shared with the
+  macOS path, so the marginal cost is the hwaccel setup. **The owner cannot test Linux
+  hardware** (§16 risk), so it ships with whatever validation we can get (CI/SW parity, a
+  Linux tester, or a documented "present but owner-unvalidated" caveat) — and if VAAPI turns
+  into a rabbit hole (driver quirks, interop bugs), **Linux ships on the SW path without
+  blocking anything**. Linux always retains the SW fallback for machines without VAAPI.
 - **NV12/P010 + fp16 present** is the shared plumbing both platforms' HW paths deliver into
   (extends the `ReuseSlot` upload-reuse machinery already in `pb-render/src/gpu.rs`).
 - **VP8 carve-out (hardware reality, not a choice):** no shipping silicon hardware-decodes VP8 —
@@ -372,10 +383,10 @@ between Native and FFmpeg-backed macOS items.
    state; SwiftUI controls + lifecycle parity; native formats stay AVPlayer.
 5. **Streaming audio** (§7) — shared decoder; macOS + Linux sinks; honest clock; seek/rebuffer/
    device-loss. **Neither platform is "complete" before this.**
-6. **Hardware decode — REQUIRED, not optional** (§10) — VideoToolbox on macOS (the owner-tested
-   hard gate) + VAAPI on Linux, delivering NV12/P010 into the fp16 HDR present path; retest the
-   §10 benchmark gates. **Neither platform ships on the SW path.** (Linux VAAPI is
-   validation-limited — owner can't test Linux HW; SW fallback retained.)
+6. **Hardware decode — REQUIRED on macOS, best-effort on Linux** (§10, decision #4) —
+   VideoToolbox on macOS (the owner-tested hard gate) + VAAPI on Linux, delivering NV12/P010
+   into the fp16 HDR present path; retest the §10 benchmark gates. **macOS does not ship on
+   the SW path**; Linux ships VAAPI if it comes cheap, SW otherwise (fallback always retained).
 7. **Distribution / release** — DMG/AppImage dependency closure, signing, notarization, notices,
    license artifacts, clean-machine matrix; resolve #77.
 
@@ -398,7 +409,9 @@ the same clip; a clip where native macOS open fails and FFmpeg succeeds; a clip 
 
 **Tests:** no stale frame after a superseded seek; Stop latency while opening/reading/decoding/
 seeking; A/V drift over 5 and 30 min; audio underrun → coordinated rebuffer (not video drift);
-fallback with no poster flash / duplicate toast; native MP4 stays on AVPlayer; Session controls
+fallback with no poster flash / duplicate toast; **poster parity** — the same clip postered via
+AVFoundation and via FFmpeg matches in color/rotation within a perceptual tolerance (the §8
+keep-both decision makes this a standing invariant, not a one-off); native MP4 stays on AVPlayer; Session controls
 work through SwiftUI (FFI/Swift contract tests); no files created/modified during loose + archive
 playback (no-trace); runtime dependency closure + clean-machine launch for DMG + AppImage.
 
@@ -414,11 +427,12 @@ playback (no-trace); runtime dependency closure + clean-machine launch for DMG +
 - Memory plateaus independent of duration.
 - Stop/navigation retires visible playback within one frame; all worker/native resources within a
   measured bound.
-- **Hardware decode works** — macOS VideoToolbox owner-validated on Apple Silicon (the hard
-  gate); Linux VAAPI implemented (validation-limited). The measured **codec/resolution matrix
-  (incl. 4K VP9/AV1) meets real-time playback on the HW path** for H.264/HEVC/VP9/AV1; VP8 +
-  legacy codecs meet real-time on the SW path at their native resolutions (the §10 carve-out).
-  Beyond that carve-out the SW path is **not** a shippable outcome (§10 / #79.10).
+- **Hardware decode works on macOS** — VideoToolbox owner-validated on Apple Silicon (the hard
+  gate). The measured **codec/resolution matrix (incl. 4K VP9/AV1) meets real-time playback on
+  the HW path** for H.264/HEVC/VP9/AV1; VP8 + legacy codecs meet real-time on the SW path at
+  their native resolutions (the §10 carve-out). Beyond that carve-out the SW path is **not** a
+  shippable outcome *on macOS* (§10 / #79.10). **Linux:** VAAPI present is the goal, but SW-only
+  is an acceptable Linux ship per decision #4 (second-class platform; SW fallback always kept).
 - SDR color/range golden-tested; **HDR (PQ/HLG) is correctly preserved** through the fp16 scene-
   linear present path (option c) — not tone-mapped-only, not refused.
 - DMG + AppImage launch on **clean machines** with no external FFmpeg/Homebrew/package-manager dep.
@@ -430,9 +444,10 @@ playback (no-trace); runtime dependency closure + clean-machine launch for DMG +
 Scale (producer ≈ `mf_video_producer`, + audio + **HW decode + HDR** + packaging — the required
 scope grew with the owner decisions; genuinely multi-phase). **macOS VideoToolbox → wgpu HW-frame
 interop** (IOSurface/Metal, ideally zero-copy) is the biggest technical unknown — Phase-0 gate #3.
-**Linux HW decode (VAAPI) is owner-unvalidated** (no Linux test hardware) yet HW is a ship
-requirement — mitigate via CI/a Linux tester/the SW fallback + a documented "HW present,
-owner-unvalidated" caveat; do **not** let it block the macOS gate. Other: `ffmpeg-next` seek/
+**Linux HW decode (VAAPI) is owner-unvalidated** (no Linux test hardware) — per decision #4 it
+is best-effort, not a ship requirement: mitigate via CI/a Linux tester/the SW fallback + a
+documented "HW present, owner-unvalidated" caveat; it never blocks the macOS gate or a Linux
+SW-path ship. Other: `ffmpeg-next` seek/
 custom-I/O + `hwaccel` API surface; audio-clock accuracy; **#77 licensing gate** (now also covers
 the HW-decode libs' license posture); macOS binary size — **corrected (rev4): H.264/HEVC/AAC
 decoders CANNOT be dropped** ("AVPlayer already covers them" conflated codec with container:

@@ -145,6 +145,8 @@ final class CoreModel {
     /// User-resizable panel widths (drag the inner edge). The defaults are the minimums;
     /// session-persistent (survive close/reopen) — disk persistence is a later slice.
     var treeWidth: CGFloat = 280
+    /// The Thumbnails tab remembers its own width (it can go narrower than the tree).
+    var thumbsWidth: CGFloat = 280
     var inspectorWidth: CGFloat = 360
     /// The shared native-panel background opacity (0.5–1.0), from the Settings "Panel opacity"
     /// slider — fed to `panelBackground`. Refreshed on load + on every settings edit so a

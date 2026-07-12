@@ -17,7 +17,9 @@ struct LeftPaneTabBar: View {
     let closeHelp: String
     let onClose: () -> Void
 
-    private var compactTabs: Bool { width < 300 }
+    /// Two segments fit icon+label down to ~250pt (the Inspector's 300 is for
+    /// three); below that the icons hide and the labels stay (owner polish #4).
+    private var compactTabs: Bool { width < 250 }
     private let segMargin: CGFloat = 6
     private let trackPad: CGFloat = 2
     private var segTrackHeight: CGFloat { PanelMetrics.headerHeight - 2 * segMargin }
@@ -81,14 +83,23 @@ struct ThumbnailsPanelView: View {
     @State private var lastCentered = -1
 
     private let chromeHeight = PanelMetrics.headerHeight + 2
-    private let cellPad: CGFloat = 10
-    private var paneWidth: CGFloat { min(model.treeWidth, maxWidth) }
-    private var boxWidth: CGFloat { max(60, paneWidth - 2 * cellPad) }
+    /// Strip side inset + the cell's own inner padding around the photo
+    /// (owner polish #1: ONE cell background, photo breathing room inside it).
+    private let stripPad: CGFloat = 8
+    private let cellInnerPad: CGFloat = 7
+    private let labelHeight: CGFloat = 16
+    private let cellGap: CGFloat = 6
+    private var paneWidth: CGFloat { min(model.thumbsWidth, maxWidth) }
+    private var cellWidth: CGFloat { max(80, paneWidth - 2 * stripPad) }
+    private var boxWidth: CGFloat { cellWidth - 2 * cellInnerPad }
     /// Fixed ~3:2 landscape box (the camera-library common case); portraits and
     /// panoramas letterbox inside it — cells NEVER vary, so rotation can't
     /// reflow the strip and scroll↔index stays O(1).
     private var boxHeight: CGFloat { (boxWidth * 2 / 3).rounded() }
-    private var rowHeight: CGFloat { boxHeight + 20 }
+    private var cellHeight: CGFloat {
+        boxHeight + labelHeight + 3 + 2 * cellInnerPad
+    }
+    private var rowHeight: CGFloat { cellHeight + cellGap }
     private var visibleRows: Int { max(1, Int((maxHeight - chromeHeight) / rowHeight)) }
 
     var body: some View {
@@ -109,28 +120,32 @@ struct ThumbnailsPanelView: View {
         .frame(width: paneWidth)
         .panelBackground(opacity: model.panelOpacity)
         .overlay(alignment: .trailing) {
+            // Narrower floor than the tree (owner polish #3): thumbnails stay
+            // useful well below the tree's comfortable minimum.
             ResizeHandle(
                 model: model,
-                width: Binding(get: { model.treeWidth }, set: { model.treeWidth = $0 }),
-                minWidth: 280, maxWidth: maxWidth, sign: 1)
+                width: Binding(get: { model.thumbsWidth }, set: { model.thumbsWidth = $0 }),
+                minWidth: 200, maxWidth: maxWidth, sign: 1)
         }
         .arrowCursorOnHover()
     }
 
     private var scrollBody: some View {
         let scroll = ScrollView {
-            LazyVStack(spacing: 0) {
+            LazyVStack(spacing: cellGap) {
                 ForEach(0..<max(model.thumbCount, 0), id: \.self) { i in
                     ThumbCell(
                         model: model,
                         index: i,
                         boxWidth: boxWidth,
                         boxHeight: boxHeight,
+                        innerPad: cellInnerPad,
+                        labelHeight: labelHeight,
                         isCurrent: i == model.thumbCurrent,
                         dirty: model.thumbDirty
                     )
                     .id(i)
-                    .frame(height: rowHeight)
+                    .frame(height: cellHeight)
                     .onAppear {
                         realized.insert(i)
                         scheduleViewportReport()
@@ -185,7 +200,7 @@ struct ThumbnailsPanelView: View {
         let near = lastCentered >= 0 && abs(item - lastCentered) <= visibleRows * 2
         lastCentered = item
         if near {
-            withAnimation(.easeInOut(duration: 0.25)) {
+            withAnimation(.easeOut(duration: 0.14)) {
                 proxy.scrollTo(item, anchor: .center)
             } completion: {
                 model.thumbsScrollDone(gen)
@@ -208,6 +223,8 @@ struct ThumbCell: View {
     let index: Int
     let boxWidth: CGFloat
     let boxHeight: CGFloat
+    let innerPad: CGFloat
+    let labelHeight: CGFloat
     let isCurrent: Bool
     let dirty: UInt64
 
@@ -216,29 +233,37 @@ struct ThumbCell: View {
     var body: some View {
         VStack(spacing: 3) {
             ZStack {
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(.quaternary.opacity(0.5))
                 cellImage
                 badge
             }
             .frame(width: boxWidth, height: boxHeight)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .clipShape(RoundedRectangle(cornerRadius: 5))
 
             Text(model.thumbName(index))
                 .font(.caption)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .foregroundStyle(isCurrent ? Color.primary : Color.panelSecondary)
-                .frame(maxWidth: boxWidth)
+                .frame(maxWidth: boxWidth, maxHeight: labelHeight)
         }
-        .padding(.vertical, 4)
-        .padding(.horizontal, 6)
+        .padding(innerPad)
+        // ONE background for the whole cell (owner polish #1): a subtle
+        // translucent card with a hairline border; the current item tints the
+        // same card accent instead of stacking a second box.
         .background(
             RoundedRectangle(cornerRadius: 8)
                 .fill(
                     isCurrent
-                        ? Color.accentColor.opacity(0.22)
-                        : hovered ? Color.primary.opacity(0.07) : Color.clear)
+                        ? AnyShapeStyle(Color.accentColor.opacity(0.24))
+                        : hovered
+                            ? AnyShapeStyle(Color.primary.opacity(0.09))
+                            : AnyShapeStyle(.quaternary.opacity(0.45)))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(
+                    isCurrent ? Color.accentColor.opacity(0.8) : Color.primary.opacity(0.08),
+                    lineWidth: isCurrent ? 1.5 : 1)
         )
         .contentShape(Rectangle())
         .onHover { hovered = $0 }
