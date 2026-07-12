@@ -44,7 +44,7 @@ struct FolderTreePanelView: View {
         VStack(spacing: 0) {
             // The left pane's shared tab bar (task #83): Folders | Thumbnails.
             LeftPaneTabBar(
-                model: model, width: min(model.treeWidth, maxWidth),
+                model: model, selected: 0, width: min(model.treeWidth, maxWidth),
                 closeHelp: "Close (⇧F)"
             ) { model.closeTree() }
             PanelDivider()
@@ -89,7 +89,7 @@ struct FolderTreePanelView: View {
             ResizeHandle(
                 model: model,
                 width: Binding(get: { model.treeWidth }, set: { model.treeWidth = $0 }),
-                minWidth: 280, maxWidth: maxWidth, sign: 1)
+                minWidth: 200, maxWidth: maxWidth, sign: 1)
         }
         .arrowCursorOnHover()
     }

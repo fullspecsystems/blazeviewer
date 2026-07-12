@@ -13,6 +13,11 @@ import SwiftUI
 /// pane reads as one panel with two facets.
 struct LeftPaneTabBar: View {
     let model: CoreModel
+    /// The selected segment is supplied by the HOSTING panel (0 = Folders in
+    /// FolderTreePanelView, 1 = Thumbnails in ThumbnailsPanelView): the mount
+    /// condition already encodes which tab is showing, so the highlight can
+    /// never go stale against the visible content (the ⇧F-switch bug class).
+    let selected: Int
     let width: CGFloat
     let closeHelp: String
     let onClose: () -> Void
@@ -45,7 +50,7 @@ struct LeftPaneTabBar: View {
     }
 
     private func tab(_ index: Int, _ label: String, _ icon: String) -> some View {
-        let selected = model.leftTab == index
+        let selected = self.selected == index
         return Button(action: { model.showLeftTab(index) }) {
             HStack(spacing: 4) {
                 if !compactTabs {
@@ -88,9 +93,13 @@ struct ThumbnailsPanelView: View {
     /// (owner polish #1: ONE cell background, photo breathing room inside it).
     private let stripPad: CGFloat = 8
     private let cellInnerPad: CGFloat = 7
+    /// The label band's own gaps run TIGHTER than the image margin (4 vs 7):
+    /// the caption's internal leading adds ~3pt of visual air, so equal
+    /// constants read as a bottom-heavy cell (owner note, 2026-07-12).
+    private let labelGap: CGFloat = 4
     private let labelHeight: CGFloat = 15
     private let cellGap: CGFloat = 6
-    private var paneWidth: CGFloat { min(model.thumbsWidth, maxWidth) }
+    private var paneWidth: CGFloat { min(model.treeWidth, maxWidth) }
     private var cellWidth: CGFloat { max(80, paneWidth - 2 * stripPad) }
     private var boxWidth: CGFloat { cellWidth - 2 * cellInnerPad }
     /// Fixed ~3:2 landscape box (the camera-library common case); portraits and
@@ -98,9 +107,8 @@ struct ThumbnailsPanelView: View {
     /// reflow the strip and scroll↔index stays O(1).
     private var boxHeight: CGFloat { (boxWidth * 2 / 3).rounded() }
     private var cellHeight: CGFloat {
-        // Photo box + label band + three EQUAL gaps (above the photo, between
-        // photo and label, below the label) — the owner's vertical-rhythm rule.
-        boxHeight + labelHeight + 3 * cellInnerPad
+        // Photo box + its top margin + the label band with its two tighter gaps.
+        boxHeight + cellInnerPad + labelHeight + 2 * labelGap
     }
     private var rowHeight: CGFloat { cellHeight + cellGap }
     private var visibleRows: Int { max(1, Int((maxHeight - chromeHeight) / rowHeight)) }
@@ -108,7 +116,7 @@ struct ThumbnailsPanelView: View {
     var body: some View {
         VStack(spacing: 0) {
             LeftPaneTabBar(
-                model: model, width: paneWidth,
+                model: model, selected: 1, width: paneWidth,
                 closeHelp: "Close (⇧T)"
             ) { model.closeThumbs() }
             PanelDivider()
@@ -123,11 +131,11 @@ struct ThumbnailsPanelView: View {
         .frame(width: paneWidth)
         .panelBackground(opacity: model.panelOpacity)
         .overlay(alignment: .trailing) {
-            // Narrower floor than the tree (owner polish #3): thumbnails stay
-            // useful well below the tree's comfortable minimum.
+            // The SHARED left-pane width (both tabs, one knob — the Inspector
+            // idiom); 200pt floor for both, long folder names truncate.
             ResizeHandle(
                 model: model,
-                width: Binding(get: { model.thumbsWidth }, set: { model.thumbsWidth = $0 }),
+                width: Binding(get: { model.treeWidth }, set: { model.treeWidth = $0 }),
                 minWidth: 200, maxWidth: maxWidth, sign: 1)
         }
         .arrowCursorOnHover()
@@ -143,6 +151,7 @@ struct ThumbnailsPanelView: View {
                         boxWidth: boxWidth,
                         boxHeight: boxHeight,
                         innerPad: cellInnerPad,
+                        labelGap: labelGap,
                         labelHeight: labelHeight,
                         isCurrent: i == model.thumbCurrent,
                         dirty: model.thumbDirty
@@ -227,6 +236,7 @@ struct ThumbCell: View {
     let boxWidth: CGFloat
     let boxHeight: CGFloat
     let innerPad: CGFloat
+    let labelGap: CGFloat
     let labelHeight: CGFloat
     let isCurrent: Bool
     let dirty: UInt64
@@ -234,7 +244,7 @@ struct ThumbCell: View {
     @State private var hovered = false
 
     var body: some View {
-        VStack(spacing: innerPad) {
+        VStack(spacing: labelGap) {
             ZStack {
                 cellImage
                 badge
@@ -252,7 +262,9 @@ struct ThumbCell: View {
                 .foregroundStyle(isCurrent ? Color.primary : Color.panelSecondary)
                 .frame(width: boxWidth, height: labelHeight)
         }
-        .padding(innerPad)
+        .padding(.top, innerPad)
+        .padding(.horizontal, innerPad)
+        .padding(.bottom, labelGap)
         // ONE background for the whole cell (owner polish #1): a subtle
         // translucent card with a hairline border; the current item tints the
         // same card accent instead of stacking a second box.

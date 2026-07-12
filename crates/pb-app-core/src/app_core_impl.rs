@@ -10630,4 +10630,31 @@ mod tests {
         assert_eq!(before, after, "a thumbnail session must touch no files");
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn shift_f_from_thumbnails_switches_tab_and_ffi_state() {
+        let mut core = thumb_test_core();
+        core.native_tree = true; // the mac shell's flags
+        core.toggle_thumbnails();
+        assert!(core.thumbs_visible());
+        core.effects.clear();
+        // ⇧F while Thumbnails shows: switch, don't close.
+        core.dispatch_action(Action::FolderTree);
+        assert_eq!(core.left_tab, crate::overlay::LeftTab::Folders, "tab switched");
+        assert!(core.folder_tree_open, "pane stays open");
+        assert!(!core.thumbs_visible());
+        assert!(core.tree_panel_visible(), "native tree now visible");
+        assert!(
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::PanelsChanged)),
+            "the shell is re-signalled so both tab bars re-pull"
+        );
+        // And ⇧T switches back without closing.
+        core.effects.clear();
+        core.dispatch_action(Action::Thumbnails);
+        assert_eq!(core.left_tab, crate::overlay::LeftTab::Thumbnails);
+        assert!(core.thumbs_visible());
+        assert!(!core.tree_panel_visible());
+    }
 }
