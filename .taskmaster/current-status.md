@@ -1,15 +1,36 @@
 # PhotoBlaze — Current Status (session handoff)
 
-_Last updated: 2026-07-12 evening (task #84 cross-platform FFmpeg video, phases 1–5 +
-crash fix). Supersedes everything prior; the pre-#84 Windows-video loose ends are
-carried at the bottom._
+_Last updated: 2026-07-13 (task #84 cross-platform FFmpeg video, phases 1–6 done +
+phase 7 foundation). Supersedes everything prior; the pre-#84 Windows-video loose ends
+are carried at the bottom._
 
-## State: main, all gates green, everything pushed
+## State: main, all gates green, everything pushed (latest 238cd556)
 
 Task **#84** (plan: `.taskmaster/plans/cross-platform-ffmpeg-video.md`, **rev4** — owner
-rulings locked in the header) executed phases 0–5 in one day. macOS/Linux tests, clippy
-`-D warnings` (all feature flavors), fmt: green. Owner-confirmed on hardware: **WebM and
-MKV play on macOS, including a 4K MKV film streamed over the network, with audio.**
+rulings locked in the header) executed phases 0–6 + the phase-7 foundation.
+macOS/Linux tests, clippy `-D warnings` (all feature flavors), fmt: green.
+Owner-confirmed on hardware: **WebM and MKV play on macOS, including a 4K MKV film
+streamed over the network, with audio.**
+
+## Overnight additions (2026-07-13)
+
+- **Phase 6 — hardware decode (VideoToolbox/VAAPI), on main (`2abf5d38`).**
+  `crates/pb-decode/src/ffmpeg/hw.rs` attaches a VideoToolbox device (macOS, default-on)
+  / VAAPI (Linux, opt-in `PB_ENABLE_VAAPI`), then `av_hwframe_transfer_data`s the GPU
+  surface to a CPU NV12/P010 frame the existing `FrameConverter` takes unchanged — the
+  same GPU-decode → CPU-readback → re-upload pattern the Windows MF path ships. Offloads
+  the dominant CPU cost (VP9/AV1/HEVC decode). SW fallback is structural (libavcodec
+  get_format re-query; VP8 carve-out; `PB_NO_HWACCEL`). **Validated engaging** on a real
+  HEVC clip (`VIDEOTOOLBOX` surfaces → NV12 1920×1440). Deferred by design (measure-first):
+  the NV12-in-shader fast path (skip CPU swscale) + true zero-copy IOSurface→wgpu.
+  **Owner: launch a 4K VP9/AV1/HEVC clip and watch CPU/smoothness — that's the §10 gate.**
+- **Phase 7 — distribution foundation, on main (`238cd556`).** A pinned, LGPL, decode-only,
+  VideoToolbox, `@rpath` FFmpeg (`scripts/build-ffmpeg-macos.sh`, ~14 MB) + bundling +
+  closure audit (`scripts/bundle-ffmpeg-macos.sh`) + `build-swift-host.sh --bundle-ffmpeg`.
+  Proven end-to-end: dyld loads all 5 FFmpeg dylibs from the app's own Frameworks, **zero
+  Homebrew**. `THIRD-PARTY-NOTICES.md` FFmpeg section + `.taskmaster/docs/ffmpeg-compliance.md`
+  (#77 manifest). **Owner-gated remainder** (creds/HW): release-macos.sh integration +
+  Developer-ID inside-out signing + notarization + add ffvideo to ship features + CHANGELOG.
 
 ## What shipped today (all on main)
 
@@ -59,30 +80,37 @@ MKV play on macOS, including a 4K MKV film streamed over the network, with audio
 
 ## Build / test the macOS app
 
-`scripts/build-swift-host.sh --ffvideo` → `target/swift-host/release/PhotoBlaze.app`.
-**DEV-ONLY**: links Homebrew FFmpeg (`brew install ffmpeg` required); never add to
-release scripts (ship-gating is by discipline — owner ruling; phase 7 bundles properly).
+- `scripts/build-swift-host.sh --ffvideo` → `target/swift-host/release/PhotoBlaze.app`
+  (DEV: links Homebrew FFmpeg, `brew install ffmpeg` required).
+- `scripts/build-swift-host.sh --bundle-ffmpeg` → the same but **self-contained** (bundles
+  the pinned LGPL FFmpeg into `Contents/Frameworks`, no Homebrew needed to run; ad-hoc
+  signed). Builds FFmpeg on first use (~10-20 min), then instant.
+- **Neither is in any release script** — ship-gating is by discipline (owner ruling) until
+  phases 5–6 are hardware-validated and the Developer-ID signing integration lands.
 
-## Next (in order)
+## Next (in order) — mostly owner-in-the-loop now
 
-1. **Phase 6 — VideoToolbox hardware decode (§10)**, the owner's "HW or go home" gate and
-   the biggest unknown: FFmpeg VideoToolbox hwaccel → `CVPixelBuffer` (NV12/P010) →
-   zero/minimal-copy IOSurface→wgpu-Metal interop → existing NV12 shader path + fp16 HDR
-   (P010). Start with the interop spike. VP8 is carved out (no silicon decodes it).
-   Owner tests on Apple Silicon. Linux VAAPI = best-effort after (owner decision #4:
-   Linux is second-class; SW-only Linux ship is acceptable).
-2. **Phase 7 — distribution (§9-dist + task #77)**: own pinned LGPL FFmpeg build
-   (decode-only, `--disable-everything` + our demuxers/decoders; keep H.264/HEVC —
-   MKV wraps them; dav1d optional) bundled in `Contents/Frameworks` (~10–14 MB),
-   `@rpath` + inside-out signing + notarization + `otool -L` closure check; AppImage
-   audit; compliance manifest. CHANGELOG entry for ffvideo lands here, not before.
-3. **Cleanup**: A/V drift measurement vs the ≤50 ms target (owner heard possible minor
-   glitches on the 4K-over-network test — screen sharing is the prime suspect per the
-   known HP-screen-sharing artifacts; SW-decode starvation the second; recheck locally
-   and after HW decode); §14 corpus expansion (VFR, B-frame-heavy, nonzero start-PTS);
-   §11 displayed-frame Copy/OCR for session videos (overlaps #81); re-run the Linux
-   container validation of the pcm.rs fix (OrbStack was down; code is platform-neutral
-   and macOS-tested); rebuild the appimage builder image (picks up libswresample-dev).
+1. **Owner morning validation** (the point of the overnight work):
+   - **Phase 6 §10 gate**: launch a 4K VP9/AV1/HEVC clip, watch CPU + smoothness with HW
+     decode on (default) vs `PB_NO_HWACCEL=1`. That decides whether the deferred
+     NV12-in-shader fast path (skip CPU swscale) is even needed.
+   - Confirm phases 5–6 (audio, dual-backend) hold on real content; re-check the possible
+     4K-over-network audio glitches locally (screen sharing is the prime suspect).
+   - Try `--bundle-ffmpeg` and confirm the self-contained .app plays video.
+2. **Phase 7 ship integration (owner-gated, needs creds/HW)**: wire `build-ffmpeg-macos.sh`
+   + `bundle-ffmpeg-macos.sh` into `release-macos.sh`; Developer-ID **inside-out** signing
+   (FFmpeg dylibs before the app) + notarization + a clean-machine launch; add `ffvideo` to
+   the macOS ship feature set; the Linux clean-container AppImage audit; universal-vs-arm64
+   decision; PGP-verify the pinned tarball. Then the **CHANGELOG** entry. See
+   `.taskmaster/docs/ffmpeg-compliance.md` for the full remaining-tasks list.
+3. **Deferred phase-6 optimizations** (measure-first): NV12-in-shader fast path (emit
+   `PixelFormat::Nv12`, reuse Windows `set_video_nv12`/`upload_nv12_reusable`; gate on
+   SAR=1 + no-rotation) and true zero-copy IOSurface→wgpu (no external-texture ingest
+   exists in the renderer). Only if the owner's perf test shows swscale is the bottleneck.
+4. **Cleanup**: A/V drift measurement vs the ≤50 ms target; §14 corpus expansion (VFR,
+   B-frame-heavy, nonzero start-PTS); §11 displayed-frame Copy/OCR for session videos
+   (overlaps #81); re-run the Linux container validation of the pcm.rs fix (OrbStack was
+   down); rebuild the appimage builder image (picks up libswresample-dev).
 
 ## Session gotchas (also in auto-memory `ffvideo-progress.md`)
 
