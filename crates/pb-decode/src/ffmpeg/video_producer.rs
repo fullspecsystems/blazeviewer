@@ -253,6 +253,11 @@ struct Reader {
     last_ts: i64,
     /// Per-frame color, cached once the first frame resolves it.
     color: Option<VideoColorInfo>,
+    /// Hardware decode device (VideoToolbox/VAAPI), kept alive for the decoder's
+    /// lifetime; `None` when decoding in software. Declared after `decoder` so
+    /// it drops after it (both hold refcounted device refs — order-independent —
+    /// this is for tidiness).
+    _hw: Option<super::hw::HwSession>,
 }
 
 impl Reader {
@@ -264,14 +269,41 @@ impl Reader {
         if facts.width == 0 || facts.height == 0 {
             return Err("video has no frames".into());
         }
-        let stream = opened
-            .ctx()
-            .streams()
-            .find(|s| s.index() == facts.index)
-            .ok_or("video stream vanished")?;
-        let decoder = ff::codec::context::Context::from_parameters(stream.parameters())
-            .and_then(|c| c.decoder().video())
-            .map_err(|e| format!("FFmpeg decoder: {e}"))?;
+        // Build the decoder context from stream parameters, then try to attach
+        // a hardware decode device (VideoToolbox/VAAPI) before opening. The
+        // parameters are copied into the context, so no borrow of `opened`
+        // outlives this block.
+        let (mut ctx, codec_id) = {
+            let stream = opened
+                .ctx()
+                .streams()
+                .find(|s| s.index() == facts.index)
+                .ok_or("video stream vanished")?;
+            let params = stream.parameters();
+            let id = params.id();
+            let ctx = ff::codec::context::Context::from_parameters(params)
+                .map_err(|e| format!("FFmpeg decoder: {e}"))?;
+            (ctx, id)
+        };
+        let mut hw = super::hw::try_enable(&mut ctx, codec_id);
+        let decoder = match ctx.decoder().video() {
+            Ok(d) => d,
+            // A rare open failure with hardware attached: drop the device and
+            // retry pure software (libavcodec normally degrades internally, so
+            // this is belt-and-suspenders rather than the expected path).
+            Err(_) if hw.is_some() => {
+                hw = None;
+                let stream = opened
+                    .ctx()
+                    .streams()
+                    .find(|s| s.index() == facts.index)
+                    .ok_or("video stream vanished")?;
+                ff::codec::context::Context::from_parameters(stream.parameters())
+                    .and_then(|c| c.decoder().video())
+                    .map_err(|e| format!("FFmpeg decoder: {e}"))?
+            }
+            Err(e) => return Err(format!("FFmpeg decoder: {e}")),
+        };
         // Output geometry: fit the SAR-corrected display dims, mapped back to
         // pre-rotation axes for the scaler (the converter rotates after).
         let (disp_w, disp_h) = facts.display_dims();
@@ -301,6 +333,7 @@ impl Reader {
             origin: None,
             last_ts: 0,
             color: None,
+            _hw: hw,
         })
     }
 
@@ -322,7 +355,13 @@ impl Reader {
         loop {
             if self.decoder.receive_frame(&mut decoded).is_ok() {
                 let ts = self.stamp(decoded.timestamp());
-                let (rgba, _, _) = self.conv.convert(&decoded)?;
+                // A hardware decode leaves the frame on the GPU (VideoToolbox /
+                // VAAPI surface) — pull it to a CPU NV12/P010 frame before
+                // conversion; software frames pass straight through.
+                let (rgba, _, _) = match super::hw::transfer_if_hw(&decoded)? {
+                    Some(sw) => self.conv.convert(&sw)?,
+                    None => self.conv.convert(&decoded)?,
+                };
                 return Ok(Some((ts, rgba)));
             }
             if self.eof_sent {

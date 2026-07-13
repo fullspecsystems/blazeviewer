@@ -7,19 +7,33 @@ by discipline (owner declined a feature-flag gate), Linux HDR = pipeline-correct
 output (confirmed), archive posters keep both paths with FFmpeg as fallback (owner call),
 libva/VAAPI runtime-dep audit, task #83 thumbs interaction. **Ready for execution.**
 
-> **Execution progress (2026-07-12, task #84):** phases **1–3 COMPLETE** on main —
+> **Execution progress (2026-07-12, task #84):** phases **1–6 COMPLETE** on main —
 > shared foundation (`pb-decode/src/ffmpeg/{init,io,probe,color,convert}`), the
-> `run_ff_video_producer` protocol producer + poster (42 tests incl. VP8/VP9/MKV/rotation/
-> HDR fixtures), the fp16 HDR path (§9: PQ/HLG → scene-linear scRGB + the
-> `present_video_frame` fix + `VideoColorInfo::peak`), and Linux integration (playback/
-> posters/probe behind `ffvideo`; validated in the appimage container: tests + clippy
-> clean). The custom-AVIO + cancellation spike (§6) is folded into `io.rs` with its
-> teardown/hostile-input tests — phase-0 gates #2 proved in-code; #1/#3/#4 (packaging,
-> VideoToolbox+HDR interop, audio clock) remain open for their phases. `has_audio: false`
-> muted interim active (§7). CHANGELOG entry deliberately deferred to phase 7
-> (ship-gating: the feature isn't in any ship build yet). **Next: phase 4, the macOS
-> dual-backend (§8) — needs owner-in-the-loop smoke testing by design.** Also fixed
-> in passing: the winit shell had 9 AppCore fields missing from its constructor
+> `run_ff_video_producer` protocol producer + poster (VP8/VP9/MKV/rotation/HDR fixtures),
+> the fp16 HDR path (§9), Linux integration (validated in the appimage container),
+> the **macOS dual-backend** (§8 — capability routing + classified fallback, FFI +
+> Swift tests), **streaming audio** (§7 — pull-based `FfAudioDecoder`, AVAudioEngine
+> sink on macOS / pw-cat streaming sink on Linux; owner-confirmed WebM/MKV + 4K-network
+> MKV playback with audio), and now **hardware decode** (§10, phase 6):
+> `ffmpeg/hw.rs` attaches a **VideoToolbox** device on macOS (default-on) / **VAAPI**
+> on Linux (opt-in `PB_ENABLE_VAAPI`) to the decoder, then `av_hwframe_transfer_data`s
+> the GPU surface to a CPU NV12/P010 frame the existing `FrameConverter` takes unchanged
+> — the same GPU-decode → CPU-readback → re-upload pattern the Windows MF path ships.
+> Graceful SW fallback is structural (libavcodec's `get_format` re-query on hwaccel-init
+> failure; VP8 carve-out; `PB_NO_HWACCEL` kill switch). **Validated engaging on real
+> content** (an HEVC clip decodes as `VIDEOTOOLBOX` surfaces → transfers to NV12 1920×1440);
+> the 64×64 fixtures degrade to SW (below VideoToolbox's minimum) but stay correct.
+> The custom-AVIO + cancellation spike (§6) is folded into `io.rs`. Phase-0 gates: #2
+> proved in-code, #3 (VideoToolbox interop) now proved via the readback path.
+> **Deferred within phase 6, by design (measure-don't-guess):** the **NV12-in-shader
+> fast path** (emit `PixelFormat::Nv12` to skip CPU swscale color conversion — the
+> proven Windows `set_video_nv12`/`upload_nv12_reusable` machinery, gated on SAR=1 +
+> no-rotation eligibility) and **true zero-copy** IOSurface→wgpu import (no external-
+> texture ingest exists in the renderer yet) — both need on-display owner validation
+> and only pay off if the owner's 4K perf testing shows the residual swscale is the
+> bottleneck. **Next: phase 7, distribution** (bundle a pinned LGPL FFmpeg; #77
+> compliance). CHANGELOG entry deferred to phase 7 (ship-gating). Also fixed in passing
+> (phase 3): the winit shell had 9 AppCore fields missing from its constructor
 > (pb-app didn't compile on Linux/Windows since the macOS archive-video work).
 
 > **Owner decisions locked (2026-07-12):**

@@ -1227,7 +1227,7 @@
             "id": 7,
             "title": "Hardware decode",
             "description": "Plan section 10: VideoToolbox (macOS hard gate) + VAAPI (Linux best-effort), NV12/P010 into the fp16 present path",
-            "status": "pending"
+            "status": "review"
           },
           {
             "id": 8,
