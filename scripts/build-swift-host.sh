@@ -10,14 +10,19 @@
 #      PhotoBlaze / com.jdlien.PhotoBlaze — the only macOS build since task #70)
 #
 # Usage:
-#   scripts/build-swift-host.sh [--debug|--release] [--run] [--ffvideo|--bundle-ffmpeg]
-#   (default: --release)
+#   scripts/build-swift-host.sh [--debug|--release] [--run] [--ffvideo|--no-ffvideo|--bundle-ffmpeg]
+#   (default: --release, and --ffvideo ON — override with --no-ffvideo or PB_FFVIDEO=0)
 #
 # --ffvideo (task #84, DEV-ONLY): builds the Rust engine with the FFmpeg video backend
 # (MKV/WebM/VP8/VP9/AV1 playback + posters via the dual-backend §8 routing) and links the
 # HOMEBREW FFmpeg dylibs — the resulting .app runs only on a machine with `brew install
-# ffmpeg`. NEVER for a release/DMG (phase 7 bundles FFmpeg properly; release-macos.sh
-# must not pass this).
+# ffmpeg`. NOW THE DEFAULT for this dev script (a local Homebrew-linked build is fine; the
+# license/bundling concern is only about shipping). If Homebrew FFmpeg is missing the default
+# falls back to a no-video build; an explicit --ffvideo hard-errors. NEVER used for a
+# release/DMG — phase 7 bundles FFmpeg properly (release-macos.sh passes --bundle-ffmpeg,
+# not this).
+#
+# --no-ffvideo: force the video backend OFF (e.g. a quick UI-only build, or no Homebrew FFmpeg).
 #
 # --bundle-ffmpeg (task #84 phase 7): implies --ffvideo, then bundles the pinned LGPL FFmpeg
 # (scripts/build-ffmpeg-macos.sh) into Contents/Frameworks so the .app runs with NO Homebrew
@@ -34,20 +39,28 @@ set -euo pipefail
 
 PROFILE=release
 RUN=0
-FFVIDEO="${PB_FFVIDEO:-0}"
+# Dev builds default to the FFmpeg video backend (--ffvideo) — a local build linking
+# Homebrew FFmpeg is fine; the license/bundling concern is only about SHIPPING (the
+# release path uses --bundle-ffmpeg with the pinned LGPL build). Override with
+# --no-ffvideo or PB_FFVIDEO=0. When ffvideo is the DEFAULT (not asked for explicitly)
+# and Homebrew FFmpeg is missing, we warn and build without video instead of failing;
+# an explicit --ffvideo/--bundle-ffmpeg still hard-errors.
+FFVIDEO="${PB_FFVIDEO:-1}"
+FFVIDEO_EXPLICIT=0
 BUNDLE_FFMPEG=0
 for a in "$@"; do
 	case "$a" in
 		--debug) PROFILE=debug ;;
 		--release) PROFILE=release ;;
 		--run) RUN=1 ;;
-		--ffvideo) FFVIDEO=1 ;;
+		--ffvideo) FFVIDEO=1; FFVIDEO_EXPLICIT=1 ;;
+		--no-ffvideo) FFVIDEO=0 ;;
 		# --bundle-ffmpeg (task #84 phase 7): implies --ffvideo, then bundles the pinned
 		# LGPL FFmpeg into Contents/Frameworks so the .app runs with NO Homebrew dependency.
 		# Ad-hoc signed here; release-macos.sh passes this for the shipping build and re-signs
 		# the FFmpeg dylibs inside-out with the Developer ID before notarizing.
-		--bundle-ffmpeg) FFVIDEO=1; BUNDLE_FFMPEG=1 ;;
-		*) echo "unknown arg: $a (usage: build-swift-host.sh [--debug|--release] [--run] [--ffvideo] [--bundle-ffmpeg])" >&2; exit 2 ;;
+		--bundle-ffmpeg) FFVIDEO=1; FFVIDEO_EXPLICIT=1; BUNDLE_FFMPEG=1 ;;
+		*) echo "unknown arg: $a (usage: build-swift-host.sh [--debug|--release] [--run] [--ffvideo|--no-ffvideo|--bundle-ffmpeg])" >&2; exit 2 ;;
 	esac
 done
 
@@ -66,14 +79,21 @@ echo "==> cargo build -p pb-mac-ffi ($PROFILE, aarch64-apple-darwin)"
 FEATURE_ARGS=""
 FF_LINK_ARGS=""
 if [[ "$FFVIDEO" == "1" ]]; then
-	FEATURE_ARGS="--features ffvideo"
 	FF_LIBDIR="$(pkg-config --variable=libdir libavcodec 2>/dev/null || true)"
 	if [[ -z "$FF_LIBDIR" ]]; then
-		echo "--ffvideo needs Homebrew FFmpeg (pkg-config can't find libavcodec)" >&2
-		exit 2
+		if [[ "$FFVIDEO_EXPLICIT" == "1" ]]; then
+			echo "--ffvideo needs Homebrew FFmpeg (pkg-config can't find libavcodec)" >&2
+			exit 2
+		fi
+		# ffvideo is the default, not an explicit ask — don't break a machine without
+		# Homebrew FFmpeg; build without the video backend and say so.
+		echo "==> ffvideo (default) skipped: Homebrew FFmpeg not found — building WITHOUT video." >&2
+		echo "    (brew install ffmpeg to enable it, or pass --no-ffvideo to silence this.)" >&2
+	else
+		FEATURE_ARGS="--features ffvideo"
+		FF_LINK_ARGS="-Xlinker -L$FF_LIBDIR -Xlinker -lavcodec -Xlinker -lavformat -Xlinker -lavutil -Xlinker -lswscale -Xlinker -lswresample"
+		echo "==> ffvideo: linking FFmpeg from $FF_LIBDIR (dev-only build)"
 	fi
-	FF_LINK_ARGS="-Xlinker -L$FF_LIBDIR -Xlinker -lavcodec -Xlinker -lavformat -Xlinker -lavutil -Xlinker -lswscale -Xlinker -lswresample"
-	echo "==> ffvideo: linking FFmpeg from $FF_LIBDIR (dev-only build)"
 fi
 
 if [[ "$PROFILE" == "release" ]]; then

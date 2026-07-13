@@ -180,4 +180,7 @@ jobs:
         # PB_LIVE_TEST_MOV, but the CI-safe ones still run).
         run: cargo test --locked -p pb-mac-ffi -p pb-app-core -p pb-decode
       - name: Build the SwiftUI host (.app)
-        run: ./scripts/build-swift-host.sh --debug
+        # --no-ffvideo: keep CI's build video-less as it has always been. The dev script
+        # now defaults --ffvideo ON (local convenience), and GitHub's macOS runners ship
+        # Homebrew ffmpeg — so without this CI would silently start doing a video build.
+        run: ./scripts/build-swift-host.sh --debug --no-ffvideo

@@ -65,6 +65,10 @@ if [[ $BUNDLE_VIDEO == 1 ]]; then
 		exit 1
 	}
 	BUILD_CMD="$BUILD_CMD --bundle-ffmpeg"
+else
+	# A video-less DMG must NOT link Homebrew FFmpeg (build-swift-host.sh now defaults
+	# --ffvideo ON for dev convenience; a shipped DMG can't depend on Homebrew dylibs).
+	BUILD_CMD="$BUILD_CMD --no-ffvideo"
 fi
 DMG="$DIST/$APP_NAME-$SHORT_VERSION.dmg"
 
