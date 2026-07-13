@@ -535,4 +535,91 @@ mod tests {
         .expect_err("cancel must abort");
         assert!(err.to_string().contains("cancelled"));
     }
+
+    /// Diagnostic (opt-in): can the low-level `IMFSourceReader` decode a clip's
+    /// AUDIO stream to PCM? The WinRT `MediaPlayer` refuses to *play* old
+    /// MJPEG-in-AVI camera clips (opens, but the clock never advances → no sound),
+    /// while the Source Reader plays their *video* fine. This probes whether the
+    /// same permissive API can decode their audio — the deciding fact for an
+    /// MF-native audio fix (Source Reader → PCM → WASAPI) vs pulling FFmpeg onto
+    /// the Windows build.
+    /// `PB_AUDIO_PROBE_CLIP=<path> cargo test -p pb-decode opt_in_source_reader_audio -- --nocapture`
+    #[test]
+    fn opt_in_source_reader_audio() {
+        use windows::core::HSTRING;
+        use windows::Win32::Media::MediaFoundation::{
+            IMFSourceReader, MFAudioFormat_PCM, MFCreateMediaType, MFCreateSourceReaderFromURL,
+            MFMediaType_Audio, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SOURCE_READERF_ENDOFSTREAM,
+            MF_SOURCE_READER_ALL_STREAMS,
+        };
+
+        let Ok(clip) = std::env::var("PB_AUDIO_PROBE_CLIP") else {
+            eprintln!("PB_AUDIO_PROBE_CLIP not set — skipping");
+            return;
+        };
+        ensure_mf();
+        unsafe {
+            let reader: IMFSourceReader =
+                MFCreateSourceReaderFromURL(&HSTRING::from(clip.as_str()), None)
+                    .expect("open source reader");
+            let audio = MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32;
+            reader
+                .SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS.0 as u32, false)
+                .unwrap();
+            reader.SetStreamSelection(audio, true).unwrap();
+
+            // Ask for uncompressed PCM out (MF inserts the decoder + resampler).
+            let out = MFCreateMediaType().unwrap();
+            out.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio).unwrap();
+            out.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM).unwrap();
+            match reader.SetCurrentMediaType(audio, None, &out) {
+                Ok(()) => eprintln!("PCM output negotiated ✓"),
+                Err(e) => {
+                    eprintln!(
+                        "PCM negotiation FAILED: {e} — Source Reader can't decode this audio"
+                    );
+                    return;
+                }
+            }
+
+            let mut total = 0usize;
+            let mut reads = 0;
+            while reads < 40 {
+                let mut flags = 0u32;
+                let mut ts = 0i64;
+                let mut sample = None;
+                reader
+                    .ReadSample(
+                        audio,
+                        0,
+                        None,
+                        Some(&mut flags),
+                        Some(&mut ts),
+                        Some(&mut sample),
+                    )
+                    .expect("read audio sample");
+                if flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
+                    eprintln!("EOS after {reads} reads");
+                    break;
+                }
+                if let Some(s) = sample {
+                    let buf = s.ConvertToContiguousBuffer().unwrap();
+                    let mut ptr = std::ptr::null_mut();
+                    let mut len = 0u32;
+                    buf.Lock(&mut ptr, None, Some(&mut len)).unwrap();
+                    total += len as usize;
+                    buf.Unlock().unwrap();
+                }
+                reads += 1;
+            }
+            eprintln!(
+                "Source Reader decoded {total} PCM bytes over {reads} reads — audio decode {}",
+                if total > 0 {
+                    "WORKS ✓"
+                } else {
+                    "produced NOTHING ✗"
+                }
+            );
+        }
+    }
 }
