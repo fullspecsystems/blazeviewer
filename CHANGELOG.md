@@ -10,7 +10,8 @@ with any pre-release suffix carried only by the tag.
 ### Added
 - **PhotoBlaze now matches your Windows accent color.** Buttons, tabs, selection, and other
   highlights follow your system accent (the color you pick in Windows Settings) out of the box,
-  so the app looks at home on your desktop. You can change this in Settings under Appearance ▸
+  so the app looks at home on your desktop, and update the moment you change your Windows accent
+  (no restart needed). You can change this in Settings under Appearance ▸
   Accent color: **System** (follow Windows), **Custom** (pick any color), or **Blaze Orange**
   (the PhotoBlaze color). Any color you pick is honored — if it would be too faint to see it is
   nudged just enough to stay visible against the panels, and button text automatically switches

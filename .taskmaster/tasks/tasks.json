@@ -1236,6 +1236,40 @@
             "status": "in-progress"
           }
         ]
+      },
+      {
+        "id": 85,
+        "title": "macOS: accent color source (System / Custom / Blaze Orange) - parity with Windows",
+        "description": "The Windows/egui shell now has a configurable chrome accent (Settings > Appearance > Accent color: System / Custom / Blaze Orange; default System; a legibility nudge keeps a chosen color visible and button text auto-picks black/white by luminance; landed 2026-07-12). The macOS SwiftUI shell ALREADY follows the system accent by default: every panel uses Color.accentColor / .tint with no .tint()/.accentColor() override and no AccentColor asset catalog, so the default already matches Windows. The gap is only the Custom and Blaze Orange options. Add parity: (1) surface the shared settings::AccentSource + accent_custom over the FFI (CoreModel) like the other settings; (2) apply a root .tint(...) on the SwiftUI scene by source: System = no override (system accent), Custom = the chosen color, Blaze Orange = the brand #FF4915; (3) port pb_ui::ensure_legible (hue-preserving luminance nudge to a min contrast vs the panel) + text_on_accent so a chosen color stays readable: SwiftUI .borderedProminent handles its own button text, but the hand-drawn accent fills (inspector/left-pane tab pills, thumbnail selection) need the on-accent color; (4) add an Accent color row to the macOS SettingsView (a menu/segmented control + a ColorPicker for Custom), mirroring the Windows dialog. Optional: live update on a system accent change via the AppleColorPreferencesChangedNotification distributed notification (the Windows equivalent, UISettings.ColorValuesChanged, already ships). Windows reference: crates/pb-app/src/accent.rs, crates/pb-ui/src/lib.rs (set_accent / ensure_legible / text_on_accent), crates/pb-app-core/src/settings.rs (AccentSource / accent_custom), crates/pb-app/src/dialog.rs (the Settings UI). Needs a Mac to build + test (SwiftUI).",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Surface AccentSource + accent_custom over the FFI (CoreModel)",
+            "description": "Read the shared settings fields into the Swift CoreModel like the other settings.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "Apply a root .tint per source on the SwiftUI scene",
+            "description": "System = no override (system accent), Custom = chosen color, Blaze Orange = #FF4915.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "Port ensure_legible + text_on_accent for hand-drawn accent fills",
+            "description": "Keep a chosen color visible on the panels and its on-accent pill/text legible.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "Add the Accent color picker to macOS SettingsView",
+            "description": "Menu/segmented control + a ColorPicker for Custom, mirroring the Windows dialog.",
+            "status": "pending"
+          }
+        ]
       }
     ]
   }

@@ -46,3 +46,61 @@ pub fn resolve(settings: &Settings, dark: bool) -> Color32 {
 pub fn apply(settings: &Settings, dark: bool) {
     pb_ui::set_accent(Some(resolve(settings, dark)));
 }
+
+/// Set when the OS accent/theme colors change under us (Windows `ColorValuesChanged`), so the
+/// event loop re-resolves the accent live. Always `false` off Windows.
+#[cfg(windows)]
+static ACCENT_DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Take + clear the "OS accent changed" flag. `true` means the shell should invalidate its
+/// accent change-guard and re-resolve this turn (the System source re-reads the OS accent).
+pub fn take_os_accent_changed() -> bool {
+    #[cfg(windows)]
+    {
+        ACCENT_DIRTY.swap(false, std::sync::atomic::Ordering::Relaxed)
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/// A live subscription to the OS accent-color change signal. Held by the shell so the callback
+/// stays registered — the handler lives as long as this `UISettings` instance (COM refcount), so
+/// there's no token to keep; dropping the watcher releases it. Empty off Windows.
+#[cfg(windows)]
+pub struct AccentWatcher {
+    _settings: windows::UI::ViewManagement::UISettings,
+}
+#[cfg(not(windows))]
+pub struct AccentWatcher;
+
+/// Subscribe to Windows accent/theme color changes. On a change it flags
+/// [`take_os_accent_changed`] and pokes `window` so the event loop wakes and re-resolves the
+/// accent with no restart. Returns the watcher to keep alive (`None` if the WinRT settings
+/// object can't be created). No-op (returns `None`) off Windows.
+#[cfg(windows)]
+pub fn watch_system_accent(window: std::sync::Arc<winit::window::Window>) -> Option<AccentWatcher> {
+    use std::sync::atomic::Ordering;
+    use windows::Foundation::TypedEventHandler;
+    use windows::UI::ViewManagement::UISettings;
+    let settings = UISettings::new().ok()?;
+    // The delegate runs on a WinRT thread-pool thread — flag the change, then request a redraw
+    // (thread-safe on Windows: it posts a message) so the loop wakes and polls the flag.
+    let handler = TypedEventHandler::new(move |_sender, _args| {
+        ACCENT_DIRTY.store(true, Ordering::Relaxed);
+        window.request_redraw();
+        Ok(())
+    });
+    settings.ColorValuesChanged(&handler).ok()?;
+    Some(AccentWatcher {
+        _settings: settings,
+    })
+}
+
+#[cfg(not(windows))]
+pub fn watch_system_accent(
+    _window: std::sync::Arc<winit::window::Window>,
+) -> Option<AccentWatcher> {
+    None
+}

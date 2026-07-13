@@ -384,6 +384,11 @@ struct App {
     /// the source, the custom color, or the theme (the legibility guard is theme-dependent)
     /// actually changes. `None` = not yet applied.
     applied_accent: Option<(settings::AccentSource, [u8; 3], bool)>,
+    /// Live OS-accent subscription (Windows `ColorValuesChanged`) — held so the callback stays
+    /// registered; on a change it flags `accent::take_os_accent_changed`, which invalidates
+    /// `applied_accent` so the next turn re-resolves. Kept alive for its `Drop`, not read.
+    #[allow(dead_code)]
+    accent_watcher: Option<accent::AccentWatcher>,
     /// The open egui dialog window (Settings / About), or `None`. At most one at a
     /// time; its events are routed by window id in `window_event`.
     dialog: Option<dialog::DialogWindow>,
@@ -839,6 +844,7 @@ impl App {
             pending_drops: Vec::new(),
             applied_appearance: None,
             applied_accent: None,
+            accent_watcher: None,
             menu: None,
             save_rotation_item: None,
             reveal_item: None,
@@ -3236,6 +3242,13 @@ impl ApplicationHandler for App {
         self.core.refresh_theme();
         self.apply_chrome_theme();
         self.apply_accent();
+        // Live OS-accent updates: re-resolve the chrome accent when the user changes their
+        // system accent color, no restart needed (Windows; a no-op elsewhere). Subscribe once.
+        if self.accent_watcher.is_none() {
+            if let Some(w) = self.window.clone() {
+                self.accent_watcher = accent::watch_system_accent(w);
+            }
+        }
         self.core.request_prefetch();
 
         // Now that the window + engine are live, kick off any launch we deferred (an archive
@@ -3607,7 +3620,12 @@ impl ApplicationHandler for App {
         // no-ops unless the preference changed (e.g. a Settings save this turn).
         self.apply_chrome_theme();
         // Same for the chrome accent (System/Custom/Brand) — no-op unless the source, custom
-        // color, or resolved theme changed (a Settings save, or an OS light↔dark flip).
+        // color, or resolved theme changed (a Settings save, or an OS light↔dark flip). An OS
+        // accent-color change (Windows `ColorValuesChanged`) isn't in the guard key, so clear it
+        // to force a re-resolve of the live System accent this turn.
+        if accent::take_os_accent_changed() {
+            self.applied_accent = None;
+        }
         self.apply_accent();
         // 0. Native menu-bar clicks (windowed mode). Map each id to the same action
         // the keyboard triggers and dispatch it; an unknown/foreign id is ignored.
