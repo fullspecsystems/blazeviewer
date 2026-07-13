@@ -1221,7 +1221,7 @@
             "id": 6,
             "title": "Streaming audio",
             "description": "Plan section 7: shared FFmpeg audio decoder, AVAudioEngine (macOS) + pw-cat (Linux) sinks, honest clock",
-            "status": "pending"
+            "status": "review"
           },
           {
             "id": 7,
