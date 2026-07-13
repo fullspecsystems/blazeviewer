@@ -603,7 +603,45 @@ impl AppCore {
                     }
                 }
             }
+            // Undo a delete: restore the file from the Recycle Bin and re-insert it into the
+            // playlist at its old position, navigating to it so the "Restored …" toast lands on
+            // the recovered photo.
+            UndoAction::Deletion {
+                index,
+                path,
+                name,
+                handle,
+            } => match crate::delete::restore(handle) {
+                Ok(()) => {
+                    self.reinsert_after_restore(index, &path);
+                    self.show_toast_icon(&format!("Restored {name}"), ToastIcon::Undo);
+                }
+                Err(e) => {
+                    eprintln!("undo delete failed: {}: {e}", path.display());
+                    // A collision (a file already occupies the original path) is the usual
+                    // failure; either way the file stays recoverable in the Recycle Bin, so the
+                    // entry is spent (the handle was consumed) and we just report it.
+                    self.show_toast("Couldn't restore");
+                }
+            },
         }
+    }
+
+    /// Restore a just-undeleted file to the playlist: rebuild the `FsSource` from the current
+    /// paths with `path` re-inserted at `index` (its position when deleted, clamped to the current
+    /// length), and navigate to it. A same-deck rebuild — the root is unchanged — so any *other*
+    /// pending Deletion undo entries survive.
+    fn reinsert_after_restore(&mut self, index: usize, path: &Path) {
+        let mut paths: Vec<PathBuf> = (0..self.source.len())
+            .filter_map(|i| self.source.path(i).map(Path::to_path_buf))
+            .collect();
+        let at = index.min(paths.len());
+        paths.insert(at, path.to_path_buf());
+        let src: Arc<dyn PhotoSource> = Arc::new(FsSource::new(paths));
+        let root = self.root.clone();
+        let scan_root = self.scan_root.clone();
+        let recursive = self.recursive;
+        self.rebuild_playlist(src, root, scan_root, recursive, at);
     }
 
     /// **Delete to Trash** (`Del`): send the displayed photo to the OS Recycle Bin / Trash
@@ -619,6 +657,16 @@ impl AppCore {
             self.show_toast("Can't delete this"); // archive entry — no file
             return;
         };
+        // On a drive configured to bypass the Recycle Bin, a "recycle" would silently permanently
+        // delete (the shell honors the per-volume NukeOnDelete policy) — no undo, and (via the
+        // trash crate's FOF_NO_UI) no warning. Route Del through the permanent-delete confirmation
+        // instead: the shell opens the themed confirm dialog, whose Yes calls do_delete(.., true).
+        if !crate::delete::will_recycle(&path) {
+            self.effects.push(contract::CoreEffect::ShellFlowAction(
+                Action::DeletePermanent,
+            ));
+            return;
+        }
         self.do_delete(item, &path, false);
     }
 
@@ -661,20 +709,38 @@ impl AppCore {
             self.show_toast("Delete failed");
             return;
         }
-        self.finish_delete(item, permanent);
+        self.finish_delete(item, path, permanent);
     }
 
     /// The post-I/O half of a successful delete: freeze playback, flash the icon
-    /// pill, defer the playlist advance a beat.
-    fn finish_delete(&mut self, item: usize, permanent: bool) {
+    /// pill, defer the playlist advance a beat. For the recoverable path it also verifies the
+    /// file actually reached a restorable Recycle Bin and, if so, records the Edit ▸ Undo entry.
+    fn finish_delete(&mut self, item: usize, path: &Path, permanent: bool) {
         // Deleting a playing animation stops playback so the doomed photo freezes on its current
         // frame under the trash icon (rather than animating until removal).
         self.stop_playback();
-        // Recycle-bin icon for the recoverable delete, trash for a permanent one.
         let icon = if permanent {
+            // Explicit Shift+Del / confirmed permanent delete: trash icon, no undo.
             ToastIcon::Delete
         } else {
-            ToastIcon::Recycle
+            // Recoverable delete: confirm the file actually reached a restorable bin. If it did,
+            // record an undo entry (Ctrl+Z / Edit ▸ Undo). If a bypass-the-bin volume slipped past
+            // `will_recycle` and nuked it, show the permanent icon rather than a misleading recycle
+            // one; if the platform can't inspect the trash (macOS), assume recycle without an undo.
+            match crate::delete::verify_recycled(path) {
+                crate::delete::RecycleOutcome::Recycled(handle) => {
+                    let name = crate::engine::file_name_of(&path.to_string_lossy());
+                    self.undo_stack.push(UndoAction::Deletion {
+                        index: item,
+                        path: path.to_path_buf(),
+                        name,
+                        handle,
+                    });
+                    ToastIcon::Recycle
+                }
+                crate::delete::RecycleOutcome::Permanent => ToastIcon::Delete,
+                crate::delete::RecycleOutcome::Unknown => ToastIcon::Recycle,
+            }
         };
         self.show_toast_icon("", icon);
         self.pending_delete = Some((self.now + DELETE_ADVANCE_DELAY, item));
@@ -697,7 +763,7 @@ impl AppCore {
             crate::delete::send_to_trash(&retry.path)
         };
         match res {
-            Ok(()) => self.finish_delete(retry.item, retry.permanent),
+            Ok(()) => self.finish_delete(retry.item, &retry.path, retry.permanent),
             Err(e) => {
                 retry.tries_left = retry.tries_left.saturating_sub(1);
                 if retry.tries_left == 0 {
@@ -2725,7 +2791,10 @@ impl AppCore {
         self.pending_poster_bytes.clear();
         self.upgrade_done.clear();
         self.last_upgrade_set.clear();
-        self.undo_stack.clear();
+        // Keep any Deletion undo entry (path/handle-based, deck-independent) so the delete that
+        // emptied the deck can still be undone — the restore rebuilds a one-photo deck. The
+        // index-based rotation entries can't survive the reindex.
+        self.undo_stack.retain(|a| a.survives_rebuild());
         self.invalidate_geometry();
         self.displayed_item = None;
         self.target_item = None;
@@ -2767,6 +2836,11 @@ impl AppCore {
             return;
         }
         let start = start.min(source.len() - 1);
+        // Whether this is the *same* deck reshaped (a delete-advance, recursive toggle, or the
+        // undo-restore reinsert) vs a genuinely new one (open, archive, folder switch). Deletion
+        // undo entries survive the former (the delete's own rebuild would otherwise wipe the entry
+        // it just recorded) but not the latter. Captured before `self.root` is reassigned below.
+        let same_root = root == self.root;
         self.pending_delete = None; // any rebuild supersedes a deferred delete-advance
         self.stop_playback(); // a new source drops any playback of the old one (#2)
                               // A rebuild is a new deck: drop any archive scoping. The archive paths
@@ -2825,8 +2899,14 @@ impl AppCore {
         self.pending_poster_bytes.clear();
         self.upgrade_done.clear();
         self.last_upgrade_set.clear();
-        // Undo entries reference the old source's indices/paths — drop them too.
-        self.undo_stack.clear();
+        // Index-based undo entries (SaveRotation) are invalidated by the reindex; path/handle-based
+        // ones (Deletion) survive a same-deck rebuild — notably the delete's own advance rebuild,
+        // which is the whole point of the delete-undo. A genuinely new deck clears everything.
+        if same_root {
+            self.undo_stack.retain(|a| a.survives_rebuild());
+        } else {
+            self.undo_stack.clear();
+        }
         // Invalidate the ring + bump the epoch (discards in-flight old decodes),
         // then synchronously show the new current photo and refill around it.
         self.invalidate_geometry();
@@ -7999,6 +8079,52 @@ mod tests {
                 .map(|n| PathBuf::from(format!("photos/{n}.jpg")))
                 .collect(),
         ))
+    }
+
+    #[test]
+    fn reinsert_after_restore_puts_the_photo_back_at_its_original_index() {
+        // After deleting index 1 from [a,b,c,d] the live deck is [a,c,d]; undoing the delete
+        // restores "b" at index 1, giving [a,b,c,d] again, and lands on it (so the "Restored …"
+        // toast shows on the recovered photo).
+        let mut core = test_core();
+        let root = PathBuf::from("photos");
+        let deck = |names: &[&str]| -> Arc<dyn PhotoSource> {
+            Arc::new(FsSource::new(
+                names
+                    .iter()
+                    .map(|n| root.join(format!("{n}.jpg")))
+                    .collect(),
+            ))
+        };
+        core.rebuild_playlist(deck(&["a", "c", "d"]), root.clone(), None, false, 1);
+        core.reinsert_after_restore(1, &root.join("b.jpg"));
+        let paths: Vec<_> = (0..core.source.len())
+            .map(|i| core.source.path(i).unwrap().to_path_buf())
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                root.join("a.jpg"),
+                root.join("b.jpg"),
+                root.join("c.jpg"),
+                root.join("d.jpg"),
+            ]
+        );
+        assert_eq!(core.displayed_item, Some(1));
+    }
+
+    #[test]
+    fn reinsert_after_restore_clamps_a_now_out_of_range_index_to_the_end() {
+        // The deck shrank since the delete, so the recorded original index no longer fits — the
+        // restored photo is appended rather than lost or panicking.
+        let mut core = test_core();
+        let root = PathBuf::from("photos");
+        let src: Arc<dyn PhotoSource> = Arc::new(FsSource::new(vec![root.join("a.jpg")]));
+        core.rebuild_playlist(src, root.clone(), None, false, 0);
+        core.reinsert_after_restore(9, &root.join("z.jpg"));
+        assert_eq!(core.source.len(), 2);
+        assert_eq!(core.source.path(1).unwrap(), root.join("z.jpg").as_path());
+        assert_eq!(core.displayed_item, Some(1));
     }
 
     #[test]

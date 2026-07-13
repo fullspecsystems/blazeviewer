@@ -7,7 +7,19 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Added
+- **Undo a delete with `Ctrl+Z`.** Sent a photo to the Recycle Bin by mistake? Press `Ctrl+Z`
+  (or Edit ▸ Undo Delete) to restore it — the photo comes back in place and PhotoBlaze jumps to
+  it with a "Restored <name>" message. Works even if it was the last photo in the folder.
+  (Windows and Linux; a permanent `Shift+Del` can't be undone.)
+
 ### Changed
+- **`Del` no longer silently loses a photo on drives that skip the Recycle Bin.** If a drive is
+  set to permanently delete instead of recycling (Recycle Bin Properties ▸ "Don't move files to
+  the Recycle Bin"), pressing `Del` now asks you to confirm first — the same prompt as
+  `Shift+Del` — instead of quietly deleting with no warning and no way to undo. When a file
+  really is gone for good, the on-screen icon now shows a permanent delete rather than a
+  recycle. (Windows.)
 - **Settings now save as you change them.** The Settings dialog on Windows and Linux
   applies each change live and keeps it, the same way it already worked on macOS. There is
   no more Save or Cancel button. Adjust a slider, toggle, or color and you see it take

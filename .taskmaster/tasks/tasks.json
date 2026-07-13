@@ -1270,6 +1270,28 @@
             "status": "pending"
           }
         ]
+      },
+      {
+        "id": 86,
+        "title": "Undelete: undo a recycled photo (Ctrl+Z) + confirm delete on bypass-the-bin drives",
+        "description": "Let Ctrl+Z / Edit ▸ Undo restore a photo sent to the Recycle Bin (reinsert it into the playlist at its old spot, navigate to it, \"Restored <name>\" toast), and stop Del from silently permanently deleting on drives configured to bypass the Recycle Bin (NukeOnDelete) by routing those through the Shift+Del confirmation and showing an honest permanent-vs-recycle icon.",
+        "status": "done",
+        "priority": "high",
+        "dependencies": [],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Windows/Linux: recycle-bin awareness + undo-delete",
+            "description": "delete::will_recycle (per-volume NukeOnDelete + group-policy NoRecycleFiles via volume GUID), verify_recycled (os_limited::list ground truth -> honest icon + restorable handle), restore (restore_all). UndoAction::Deletion survives the delete's same-deck rebuild; undo reinserts + navigates + \"Restored <name>\" toast. Verified on the real Recycle Bin (C: recycles, D: nukes).",
+            "status": "done"
+          },
+          {
+            "id": 2,
+            "title": "macOS: undelete backend (Put Back) behind the delete seam",
+            "description": "The trash crate's os_limited (list/restore) is Windows/Linux only, so verify_recycled returns Unknown on macOS today (delete still recycles, no in-app undo). Implement the macOS restore via a native path (Finder \"Put Back\" reads .DS_Store / trash metadata) so RecycleOutcome::Recycled + restore work there too. No NukeOnDelete equivalent on macOS, so will_recycle stays true.",
+            "status": "pending"
+          }
+        ]
       }
     ]
   }

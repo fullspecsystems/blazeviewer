@@ -85,6 +85,12 @@ windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_System_SystemInformation",
     "Win32_System_Com",
+    # Recycle-Bin policy probe for the Delete command (task #86): resolve a path's volume
+    # GUID (Storage_FileSystem) and read the per-volume `NukeOnDelete` / group-policy
+    # `NoRecycleFiles` values (System_Registry) so Del on a bypass-the-bin drive routes to
+    # the permanent-delete confirmation instead of silently nuking with no undo.
+    "Win32_Storage_FileSystem",
+    "Win32_System_Registry",
     "Foundation",
     "Foundation_Collections",
     "Globalization",
