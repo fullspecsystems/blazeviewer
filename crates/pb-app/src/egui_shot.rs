@@ -259,7 +259,7 @@ async fn run(out: &Path, dark: bool, tab: InspectorTab, welcome: bool) -> Result
             save_rotation_enabled: true,
             reveal_enabled: true,
             compare_pin_enabled: true,
-            undo: Some("Undo Rotate Right"),
+            undo: Some("Undo Rotate photo.jpg".to_string()),
             ..Default::default()
         };
         crate::menu::menu_bar_spec(&keymap, &state)

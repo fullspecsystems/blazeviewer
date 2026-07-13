@@ -8,198 +8,117 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
-- **Undo a delete with `Ctrl+Z`.** Sent a photo to the Recycle Bin by mistake? Press `Ctrl+Z`
-  (or Edit ▸ Undo Delete) to restore it — the photo comes back in place and PhotoBlaze jumps to
-  it with a "Restored <name>" message. Works even if it was the last photo in the folder.
-  (Windows and Linux; a permanent `Shift+Del` can't be undone.)
+- **Videos in your library.** Camera clips (MP4, MOV, MKV, WebM, AVI, and other common
+  containers) are listed alongside photos, each with a poster frame (first non-black frame,
+  correct rotation and color), a play badge, and details in the info panel (duration, codec,
+  frame rate, audio). Press `P` to play with sound; mute with `M`, and it replays when it ends.
+  Seek with `←`/`→` (±2 s, `Shift` ±10 s, hold to scrub) when you're not panning a zoomed photo,
+  and step frames with `,` / `.`. The info line grows an interactive playback bar — click or drag
+  the knob to scrub, with a play/pause button — that appears on mouse-over even when the line is
+  off. Playback streams the file at constant memory, so any length plays without loading into RAM;
+  a codec Windows can't decode shows a dark tile, not an error. Live Photo motion files stay hidden
+  (they play through their photo). Leaves no trace on disk.
+- **Videos inside ZIP and 7z archives play too**, with the same posters, playback, sound, and
+  seeking — decoded entirely in memory, never extracted to disk. An archive of only videos now
+  opens instead of being refused. Entries over 1 GiB are skipped.
+- **Undo a delete — `Ctrl+Z` (`⌘Z` on macOS).** Restore a photo you sent to the Trash / Recycle
+  Bin by mistake (also Edit ▸ Undo Delete); it comes back in place and PhotoBlaze jumps to it, even
+  if it was the last photo in the folder. All platforms now. A permanent delete (`Shift+Del`, or
+  `⌥⌘⌫` on macOS) can't be undone.
+- **A toolbar for mouse control (Windows/Linux).** A button row under the menu in windowed mode:
+  previous/next and random (hold to fly), previous/next folder, play/pause, slideshow, rotate,
+  delete, panel toggles, a photo counter, and fullscreen. Toggles fill with your accent color. On
+  by default; turn it off from **View ▸ Show Toolbar** or Settings ▸ Appearance to give the photo
+  the whole window. (macOS has its own native toolbar.)
+- **A Thumbnails panel — `Shift+T`.** The left pane gains Folders / Thumbnails tabs (`Shift+F` /
+  `Shift+T`, or click). The strip shows previews around your position with the current one
+  highlighted, filenames, and badges for videos, Live Photos, and animations. Click any to jump —
+  a far jump shows the thumbnail instantly while the full image loads, so there's no black flash.
+  It follows as you navigate (hand-scrolling pauses that until your next input), reflects your
+  rotations, and is resizable with sharp thumbnails. Generated from decode work already happening,
+  memory-only — no thumbnail files or database written. All platforms.
+- **PhotoBlaze follows your Windows accent color.** Buttons, tabs, and selection match the accent
+  you pick in Windows Settings, updating live. Choose **System**, **Custom**, or **Blaze Orange**
+  under Settings ▸ Appearance ▸ Accent color; a too-faint custom color is nudged to stay visible,
+  and button text flips light/dark for contrast. macOS already follows the system accent; Linux
+  keeps Blaze Orange for now.
+- **Command-line options — `photoblaze --help`.** Point it at files, a folder, or a `.zip`/`.7z`,
+  and shape a single launch without changing your saved settings: `--slideshow[=SECS]`, `--shuffle`,
+  `--reverse`, `--scale fit|fill|original`, `--theme light|dark|system`, `--windowed`/`--fullscreen`,
+  `--recursive`/`--no-recursive`, `--info`/`--no-info`, `--details`, `--folders`, `--mute`,
+  `--start-at N|NAME`, plus `--help`/`--version`. On macOS, install the command once from
+  **PhotoBlaze ▸ Install Command-Line Tool…** first; bare paths and colored `--help` on a TTY work
+  there too.
+- **Animated AVIF now plays (Windows and Linux).** Multi-frame `.avif` (`avis`) files loop like a
+  GIF with correct timing and wide-gamut color; on Linux, HEIC image sequences animate too. HDR
+  animated AVIFs stay on the still path (full HDR rather than a clamped animation), and animated
+  HEIC stays first-frame-static on Windows.
+- **Photoshop files without a flattened preview now show something.** A `.psd` saved without
+  "Maximize Compatibility" falls back to Photoshop's embedded preview thumbnail (low-res, but
+  visible) instead of a blank error. On macOS, less-common PSDs (CMYK and others) render at full
+  resolution via the system decoder.
+- **Linux updates itself.** The AppImage checks for a new version in the background, verifies it,
+  and swaps in on next quit — the hands-off updating Windows and macOS already have. Checks send
+  only your version and CPU architecture. (Skipped if the AppImage isn't writable.)
+- **The About dialog shows the build's CPU architecture** (e.g. `Build 1ad1043 · ARM64`), so you
+  can tell the native ARM64 build from x64 at a glance.
 
 ### Changed
-- **`Del` no longer silently loses a photo on drives that skip the Recycle Bin.** If a drive is
-  set to permanently delete instead of recycling (Recycle Bin Properties ▸ "Don't move files to
-  the Recycle Bin"), pressing `Del` now asks you to confirm first — the same prompt as
-  `Shift+Del` — instead of quietly deleting with no warning and no way to undo. When a file
-  really is gone for good, the on-screen icon now shows a permanent delete rather than a
-  recycle. (Windows.)
-- **Settings now save as you change them.** The Settings dialog on Windows and Linux
-  applies each change live and keeps it, the same way it already worked on macOS. There is
-  no more Save or Cancel button. Adjust a slider, toggle, or color and you see it take
-  effect on your photos right away, then click Done to close. "Reset settings" still puts
-  everything back to defaults.
-- **Renamed "Show All EXIF Info" to "Show Detailed Info"** in the View menu, matching the
-  Details panel it opens (and consistent across Windows, Linux, and macOS).
-- **`F` is now shown everywhere as the full screen shortcut.** The View menu (and the toolbar's
-  exit hint) advertise `F` — the memorable, cross-platform key — instead of `F11`, which is still
-  bound as a secondary. If an older keymap had dropped `F`, it's restored automatically on
-  launch (F11 and Alt+Enter still work).
+- **`Del` no longer silently loses a photo when the Recycle Bin / Trash is unavailable.** On a
+  Windows drive set to skip the Recycle Bin, or a macOS volume with no Trash (read-only or network),
+  `Del` / `⌘⌫` now asks you to confirm a permanent delete — the same prompt as `Shift+Del` / `⌥⌘⌫` —
+  instead of quietly deleting (Windows) or just failing (macOS). The on-screen icon shows a
+  permanent delete when the file is truly gone.
+- **Edit ▸ Undo names what it will undo.** The menu item now reads "Undo Delete a.jpg" or "Undo
+  Rotate a.jpg" (long names shortened) instead of a bare "Undo", so you can see exactly what the
+  next `Ctrl+Z` / `⌘Z` reverses. All platforms.
+- **Settings save as you change them (Windows/Linux).** Each change applies live and sticks, the
+  way it already worked on macOS — no more Save/Cancel, just Done to close. "Reset settings" still
+  restores defaults.
+- **4K video plays on your graphics card.** Clips above 4K30 decode and color-convert on the GPU —
+  roughly tripling 4K60 HEVC headroom and starting faster. Lighter clips keep the software path
+  (also the fallback without a capable GPU). HDR (HLG/Dolby Vision) stays on software so brightness
+  stays correct.
+- **Live Photos start playing almost immediately, every platform.** `P` begins playback as soon as
+  the first frames are ready and extends it while the rest decodes, instead of waiting for the whole
+  clip. On Windows this drops a typical ~1–2 s wait to a fraction; P3 clips keep correct color.
+  Playback may briefly pause on a slow machine, then resume.
+- **Smoother animation and Live Photo playback.** Frames reuse one resident texture and upload
+  buffer instead of allocating per frame, removing worst-case hitches (95th-percentile present
+  overhead down ~3× at 1080p) and steady memory growth. (Also groundwork for video.)
+- **`F` is the full screen shortcut everywhere.** The View menu and toolbar exit hint show `F`
+  (memorable, cross-platform) instead of `F11`, which stays bound as a secondary. A keymap that had
+  dropped `F` is healed on launch (F11 and Alt+Enter still work).
+- **Renamed "Show All EXIF Info" to "Show Detailed Info"** (View menu), matching the panel it
+  opens. All platforms.
 
 ### Fixed
-- **Icons are crisp at 125%/150% display scaling.** Toolbar and dialog icons were slightly
-  blurred and looked flattened at the bottom on fractional display scales (and worse over Remote
-  Desktop); they now render pixel-aligned and sharp.
-
-### Added
-- **A toolbar for mouse control (Windows/Linux).** A row of buttons now sits under the menu
-  in windowed mode: previous/next and random (hold to fly, just like the keys), previous/next
-  folder, play/pause, slideshow, rotate left/right, delete, and toggles for the info line,
-  all-info panel, and folder tree — with the photo counter and a fullscreen button on the
-  right. Buttons light up on hover, and a toggle (or the play button while something is
-  playing) fills with your accent color. It is on by default; turn it off from **View ▸ Show
-  Toolbar** or under Settings ▸ Appearance ▸ **Show toolbar** to give the photo the whole
-  window. The keyboard still does everything without it.
-- **PhotoBlaze now matches your Windows accent color.** Buttons, tabs, selection, and other
-  highlights follow your system accent (the color you pick in Windows Settings) out of the box,
-  so the app looks at home on your desktop, and update the moment you change your Windows accent
-  (no restart needed). You can change this in Settings under Appearance ▸
-  Accent color: **System** (follow Windows), **Custom** (pick any color), or **Blaze Orange**
-  (the PhotoBlaze color). Any color you pick is honored — if it would be too faint to see it is
-  nudged just enough to stay visible against the panels, and button text automatically switches
-  between light and dark to stay readable. (Linux and macOS keep Blaze Orange for now.)
-- **A Thumbnails panel: press `Shift+T` for a scrollable strip of your photos.**
-  The left pane now has two tabs — Folders and Thumbnails — sharing one panel (`Shift+F`
-  and `Shift+T` switch between them; clicking the tabs works too). The strip shows small
-  previews of the photos around where you are, with the current one highlighted, each
-  cell labeled with its filename, and badges for videos, Live Photos, and animations.
-  **Click any thumbnail to jump straight to it** — if you jump somewhere far away, the
-  thumbnail itself appears instantly while the full image loads, so there is never a
-  black flash or a wait. The strip follows along as you navigate (scrolling it by hand
-  pauses the following; your next keypress or click brings it back), rotations you make
-  show in the strip, and the panel is resizable — thumbnails stay sharp when you widen
-  it. Thumbnails are generated from decode work the viewer is already doing, so browsing
-  speed is unaffected, and everything stays in memory only: no thumbnail files or
-  databases are ever written to disk. Available on all platforms now (Windows, Linux, and
-  macOS); on Windows and Linux the left pane and the info panel resize by dragging their
-  edge, and the tabs shrink to fit as you narrow them.
-
-### Added
-- **Videos now appear in your library, with real poster frames.** Camera clips (MP4, MOV,
-  MKV, WebM, AVI, and other common containers) are listed alongside photos when you browse
-  a folder. Each clip shows its first non-black frame as a poster (with the correct
-  rotation and colors), a play badge, and its details in the info panel (duration, codec,
-  frame rate, audio). **Press `P` to play, with sound** — pause/resume on `P`, replay
-  after the clip ends, and the existing mute toggle applies to video too (muting keeps
-  perfect sync; unmuting picks up mid-clip). **Seek with the arrow keys while a video
-  plays**: `←`/`→` jump 2 seconds, `Shift+←`/`→` jump 10, and holding scrubs (a keymap
-  saved by an earlier version is healed so the Shift chords work there too). While a
-  video plays, the info line (`i`) grows a playback row — elapsed time, a progress bar,
-  and the total — so position is always visible when the line is on; when it is off,
-  seeking flashes the line briefly as the position readout. When you are zoomed in far
-  enough that the picture pans horizontally, the arrows keep panning — seeking steps
-  aside. A seek while paused updates the frame and stays paused. Playback streams the
-  file with constant memory, so a clip of any length plays without loading it into RAM.
-  A clip whose audio cannot start still plays, silently. A clip
-  Windows has no codec for shows a plain dark tile instead of an error. Live Photo motion
-  files are not listed twice: an `IMG_1234.MOV` next to `IMG_1234.HEIC` stays hidden and
-  keeps playing through its photo with `P`. Viewing videos leaves no trace on disk, same
-  as photos.
-- **Videos inside ZIP and 7z archives play too.** An archive's videos are listed alongside
-  its photos — an archive of nothing but videos now opens instead of being refused — with
-  the same posters, playback, sound, and seeking as loose files. Everything stays in
-  memory: the clip is never extracted to disk, so viewing an archive still leaves no trace.
-  Entries over 1 GiB are skipped (extract those to play them), and on macOS archive videos
-  are listed but do not play yet.
-- **The video playback bar is interactive.** The progress bar in the info line has a round
-  position knob: click anywhere on the bar to jump there, or drag the knob to scrub. A
-  play/pause button sits at the left of the row (pause while playing, play while paused)
-  and works like the `P` key, and the knob now glides smoothly during playback. Moving the
-  mouse over the bottom of the window while a video is active reveals the controls even
-  when the info line is off, like other video players; they fade away on their own.
-- **Frame stepping works on videos.** `,` and `.` step one frame back/forward (hold to
-  scrub), pausing playback first — the same behavior animations already had. Stepping
-  forward is instant; stepping backward re-decodes from the nearest keyframe, so it can
-  take a moment on long-GOP clips.
-
-### Changed
-- **4K video now plays using your graphics card.** High-resolution clips (above 4K30 —
-  where software decoding could not keep up full screen) decode on the GPU and convert
-  color on the GPU, roughly tripling the playback headroom on 4K60 HEVC footage and
-  starting playback faster. Lighter clips keep the proven software path, which also
-  remains the automatic fallback on machines without a capable GPU. HDR (HLG/Dolby
-  Vision) clips stay on the software path for now so their brightness stays correct.
-- **Smoother animation and Live Photo playback.** Showing each frame no longer creates
-  fresh GPU resources: frames now reuse one resident texture and upload buffer, which
-  removes the worst-case per-frame hitches (95th-percentile frame-present overhead dropped
-  about 3x at 1080p) and stops playback from continuously allocating memory. This also
-  lays the presentation groundwork for video playback.
-
-### Fixed
-- **Older camera clips now play with sound on Windows.** Some legacy clips — notably Motion
-  JPEG AVIs from 2000s-era point-and-shoots (like `.AVI` files from Canon and Fujifilm
-  cameras) — played their video but stayed silent, because the previous audio player refused
-  to open those files. Audio now goes through the same media layer that already decodes the
-  picture, so anything Windows can play the video of, it can now play the sound of too. Modern
-  MP4/MOV clips are unaffected and stay in sync.
-- **Dropping files onto the window now focuses PhotoBlaze.** Previously the drag's source
-  (usually Explorer) kept keyboard focus, so the freshly opened photos ignored the arrow
-  keys and Space until you clicked the window.
-- **The folder tree (Shift+F) now shows for ZIP and 7z archives.** Opening an archive that has
-  internal folders showed an empty "Folders" panel. The panel was reading only the on-disk folder
-  browser, which does not apply to an archive, so the archive's folder list never appeared. It now
-  falls back to the archive's own folder tree (the same way it already worked on macOS), and
-  clicking a folder re-scopes the view to it.
-- **ZIP/7z archives now open on machines with less RAM.** The memory check that guards against
-  opening an archive too large to fit in RAM was too conservative and could refuse *every* archive
-  — even a tiny one — on a machine with around 8 GB of RAM. It now reserves memory before applying
-  its safety margin, so normal archives open on smaller machines while genuinely oversized ones are
-  still refused.
-- **The About and Settings dialogs now open on virtual machines / GPUs without a low-power
-  Direct3D adapter.** On some setups (notably a Parallels VM on Apple Silicon) opening a dialog
-  picked an OpenGL compatibility adapter that couldn't be initialized, so the dialog never
-  appeared and the photo behind it was left stretched. Dialogs now use the same Direct3D backend
-  as the viewer, so they open reliably and the main view is undisturbed.
-- **The Keyboard Shortcuts panel (`/` or `?`) no longer clips its last rows** on shorter windows.
-  Its rows and spacing were tightened and it now uses more of the available window height, so all
-  the shortcuts stay visible instead of the bottom of the list being cut off.
-- **The play hint (the `▶ Play` / Live Photo pill) now fades out cleanly.** Its background, border,
-  and shortcut keycap fade together with the label, instead of the label fading while the pill's
-  shell lingered on screen — and on Linux it no longer stays stuck until you move the mouse.
-
-### Changed
-- **Live Photos start playing almost immediately on every platform.** Pressing `P` now begins
-  playback as soon as the first frames are ready and keeps extending the motion while the rest of
-  the clip decodes in the background, instead of waiting for the whole clip first. On Windows this
-  cuts the wait from about one to two seconds on a typical Live Photo down to a fraction of that,
-  and wide-gamut (P3) clips keep their correct color. On a slow machine playback may briefly pause
-  if decoding can't keep up, then resume, which is a fair trade for a near-instant start.
-
-### Added
-- **PhotoBlaze now takes command-line options.** Run `photoblaze --help` to see them all. You can
-  point it at files, a folder, or a `.zip` / `.7z`, and shape a single launch without changing your
-  saved settings: `--slideshow[=SECS]` (optionally with a per-slide time — `5`, `3s`, or
-  `0.5m`), `--shuffle` and
-  `--reverse` (together they play a reverse shuffle), `--scale fit|fill|original`,
-  `--theme light|dark|system`, `--windowed` / `--fullscreen`, `--recursive` / `--no-recursive`,
-  `--info` / `--no-info`, `--details` and `--folders` (open those panels), `--mute`, and
-  `--start-at N|NAME` to begin at a given photo. `--help` and `--version` also work. Every option
-  applies only to that launch and never writes to your settings. On Windows the help and version
-  text now print into the terminal you launched from.
-- **The command line works on macOS too.** Install the `photoblaze` command once from
-  **PhotoBlaze ▸ Install Command-Line Tool…**, then every option above works from the Terminal —
-  including bare paths (`photoblaze ~/Photos`), colored `--help` on a TTY (plain when piped), and
-  `--version` printing the same version the About panel shows. Launching from Finder or the Dock is
-  unchanged; a bad option on a GUI launch shows a dialog instead of failing silently.
-- **The About dialog now shows the build's CPU architecture** next to the build id (e.g.
-  `Build 1ad1043 · ARM64`), so you can confirm at a glance whether you're running the native
-  Windows ARM64 build or the x64 one.
-- **Linux now updates itself.** The AppImage checks for a new version in the background and, when
-  one is available, downloads and verifies it, then swaps itself in the next time you quit — the
-  same hands-off updating Windows and macOS already have, so you no longer re-download the AppImage
-  by hand. Update checks send only your version and CPU architecture, never anything about the
-  photos you view. (If the AppImage is installed somewhere you can't write to, it's left untouched.)
-- **Animated AVIF now plays on Windows.** Files with an AVIF image sequence (the `avis` format)
-  show the play hint and loop like a GIF, with correct frame timing and wide-gamut color.
-  HDR animated AVIFs deliberately stay on the still path, where they render in full HDR
-  quality rather than a washed-out clamped animation. Animated HEIC stays first-frame-static
-  on Windows (it uses HEVC, which this decoder does not handle).
-- **Animated AVIF now plays on Linux.** Multi-frame `.avif` files (and HEIC image sequences) show
-  the first frame as usual and play the full animation on `P`, looping like a GIF — previously they
-  were stuck on the first frame. (Wide-gamut/HDR sequences play but their colors read a touch
-  oversaturated for now; full per-sequence color management is a follow-up.)
-- **Photoshop files without a flattened preview now show something instead of nothing.** A `.psd`
-  saved *without* "Maximize Compatibility" has no merged image inside — only the layer stack — so
-  it used to open to a blank error. PhotoBlaze now falls back to the small preview thumbnail
-  Photoshop embeds in every file (the image Finder shows): low resolution, but you can see the
-  photo. On macOS, less-common PSDs (CMYK and others, when a flattened image *is* present) render
-  at full resolution via the system decoder.
+- **Undo no longer forgets an earlier edit after you delete a photo.** Saving a rotation and then
+  deleting a photo used to silently drop the rotation from the undo history, so `Ctrl+Z` / `⌘Z`
+  couldn't reach past the delete to reverse it. Undo now keeps every action — rotations and deletes,
+  in any mix — until you open a different folder. All platforms.
+- **Older camera clips play with sound on Windows.** Legacy clips — notably Motion JPEG AVIs from
+  2000s point-and-shoots (Canon, Fujifilm `.AVI`) — played silently because the old audio player
+  wouldn't open them. Audio now goes through the same media layer that decodes the picture; modern
+  MP4/MOV are unaffected and stay in sync.
+- **Icons are crisp at 125%/150% display scaling.** Toolbar and dialog icons were blurred and
+  looked flattened at fractional scales (worse over Remote Desktop); they now render pixel-aligned.
+- **Dropping files onto the window focuses PhotoBlaze.** The drag source (usually Explorer) used to
+  keep keyboard focus, so the new photos ignored the arrow keys and Space until you clicked.
+- **The folder tree (`Shift+F`) shows for ZIP and 7z archives.** It was reading only the on-disk
+  folder browser; it now falls back to the archive's own folder tree (as it already did on macOS),
+  and clicking a folder re-scopes the view.
+- **ZIP/7z archives open on machines with less RAM.** The over-conservative memory guard could
+  refuse every archive — even a tiny one — on an ~8 GB machine; it now reserves memory before
+  applying its safety margin.
+- **The About and Settings dialogs open on VMs / GPUs without a low-power Direct3D adapter**
+  (e.g. Parallels on Apple Silicon), where they previously never appeared and left the photo
+  stretched. They now use the same Direct3D backend as the viewer.
+- **The Keyboard Shortcuts panel (`/` or `?`) no longer clips its last rows** on short windows —
+  tighter rows and more of the window height keep every shortcut visible.
+- **The play hint (`▶ Play` / Live Photo pill) fades out cleanly** — background, border, and keycap
+  fade with the label instead of lingering — and on Linux it no longer stays stuck until you move
+  the mouse.
 
 ## [0.1.1] - 2026-07-08
 

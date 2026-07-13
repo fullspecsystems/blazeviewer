@@ -129,7 +129,11 @@ pub enum DialogKind {
 /// [`ScaleMode`]; the info/panel toggles are independent booleans (the basic line
 /// and the Inspector's Details tab decoupled in task #54) — the shell maps those
 /// onto its individual items.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+///
+/// Not `Copy`: the Edit ▸ Undo label (`undo`) is an owned `String` (it names the specific file,
+/// e.g. "Undo Delete a.jpg"), so this clones instead — it's built at most once per menu-state
+/// change, never on the photo hot path.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct MenuState {
     /// View ▸ scale group (exactly one checked).
     pub scale: ScaleMode,
@@ -169,9 +173,9 @@ pub struct MenuState {
     pub cancel_scan_enabled: bool,
     /// Edit ▸ Undo — the dynamic title/enabled state mirroring the top of the undo
     /// stack: `None` = nothing to undo (disabled, shown as the bare "Undo"); `Some(label)`
-    /// = enabled, the item titled with `label` (e.g. "Undo Save Rotation"). The shell
-    /// supplies the static label strings, so the core stays unaware of the edit kinds.
-    pub undo: Option<&'static str>,
+    /// = enabled, the item titled with `label` — which now names the specific file (e.g.
+    /// "Undo Delete a.jpg", long names middle-elided). Built by [`crate::undo::UndoAction::menu_label`].
+    pub undo: Option<String>,
     /// macOS only: whether native (Spaces) full-screen is engaged, so the shell can
     /// flip the item's "Enter/Exit Full Screen" label. Always `false` on Windows.
     pub native_fullscreen_engaged: bool,

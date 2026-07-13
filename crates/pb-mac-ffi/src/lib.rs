@@ -1279,7 +1279,7 @@ impl AppCoreHandle {
             reveal_enabled: s.reveal_enabled,
             cancel_scan_enabled: s.cancel_scan_enabled,
             undo_enabled: s.undo.is_some(),
-            undo_label: s.undo.unwrap_or("Undo").to_string(),
+            undo_label: s.undo.as_deref().unwrap_or("Undo").to_string(),
         }
     }
 

@@ -563,7 +563,6 @@ impl AppCore {
                 self.target_item = self.playlist.current();
                 self.request_prefetch();
                 self.undo_stack.push(UndoAction::SaveRotation {
-                    item,
                     path: path.clone(),
                     prev,
                 });
@@ -585,28 +584,42 @@ impl AppCore {
             return;
         };
         match action {
-            UndoAction::SaveRotation { item, path, prev } => {
+            UndoAction::SaveRotation { path, prev } => {
                 match crate::save_rotation::set_orientation(&path, prev) {
                     Ok(()) => {
-                        self.rotations.remove(&item);
-                        self.meta_cache.remove(&item);
-                        self.exif_cache.remove(&item); // EXIF Orientation reverted on disk
-                        self.failed.remove(&item);
-                        self.preview_resident.remove(&item);
-                        self.upgrade_done.remove(&item);
-                        self.invalidate_geometry();
-                        self.load_current_sync();
-                        self.target_item = self.playlist.current();
-                        self.request_prefetch();
+                        // Re-resolve the photo's *current* index by path — an intervening delete
+                        // may have reshaped the deck since the save — to drop its stale cached
+                        // decode so it re-reads the reverted orientation.
+                        let idx = self.index_of_path(&path);
+                        if let Some(idx) = idx {
+                            self.rotations.remove(&idx);
+                            self.meta_cache.remove(&idx);
+                            self.exif_cache.remove(&idx); // EXIF Orientation reverted on disk
+                            self.failed.remove(&idx);
+                            self.preview_resident.remove(&idx);
+                            self.upgrade_done.remove(&idx);
+                        }
+                        // Refresh the view only if the reverted photo is the one on screen; if it
+                        // scrolled off (or is no longer in the deck), the cache drop above is
+                        // enough — it re-decodes reverted next time it's shown.
+                        if idx == self.displayed_item {
+                            self.invalidate_geometry();
+                            self.load_current_sync();
+                            self.target_item = self.playlist.current();
+                            self.request_prefetch();
+                        }
                         self.show_toast_icon("Rotation undone", ToastIcon::Undo);
                     }
                     Err(e) => {
                         eprintln!("undo rotation failed: {}: {e}", path.display());
                         self.show_toast("Undo failed");
-                        // The file wasn't changed, so the edit is still reversible — keep it on
-                        // the stack for a retry.
-                        self.undo_stack
-                            .push(UndoAction::SaveRotation { item, path, prev });
+                        // A transient I/O error leaves the file unchanged, so keep the entry for a
+                        // retry. But a *vanished* file (e.g. permanently deleted after the
+                        // rotation) is unrecoverable — drop it rather than jam the stack.
+                        if path.exists() {
+                            self.undo_stack
+                                .push(UndoAction::SaveRotation { path, prev });
+                        }
                     }
                 }
             }
@@ -651,6 +664,13 @@ impl AppCore {
         self.rebuild_playlist(src, root, scan_root, recursive, at);
     }
 
+    /// The current playlist index of the photo at `path`, if it's still in the deck. Undo entries
+    /// are keyed by stable path (see [`crate::undo`]); this re-resolves the transient index they
+    /// need at apply time, since a rebuild between record and undo reassigns indices.
+    fn index_of_path(&self, path: &Path) -> Option<usize> {
+        (0..self.source.len()).find(|&i| self.source.path(i) == Some(path))
+    }
+
     /// **Delete to Trash** (`Del`): send the displayed photo to the OS Recycle Bin / Trash
     /// (recoverable, no prompt). Archive entries have no file on disk → a toast, no-op. The
     /// playlist advance is deferred a beat by [`do_delete`](Self::do_delete).
@@ -691,63 +711,90 @@ impl AppCore {
             self.stop_video();
         }
         let res = if permanent {
-            crate::delete::delete_permanently(path)
+            crate::delete::delete_permanently(path).map(|()| None)
         } else {
-            crate::delete::send_to_trash(path)
+            crate::delete::recycle(path).map(Some)
         };
-        if let Err(e) = res {
-            // A video's decoder can still be retiring (~1 s on HEVC) — the handle
-            // clears momentarily, so retry off the event loop instead of failing.
-            if self.item_is_video(item) {
-                eprintln!(
-                    "delete blocked (retrying while the reader retires): {}: {e}",
-                    path.display()
-                );
-                self.pending_delete_retry = Some(crate::app_core::DeleteRetry {
-                    at: self.now + DELETE_RETRY_INTERVAL,
-                    item,
-                    path: path.to_path_buf(),
-                    permanent,
-                    tries_left: DELETE_RETRY_MAX,
-                });
-                return;
+        match res {
+            Ok(outcome) => self.finish_delete(item, path, permanent, outcome),
+            Err(e) => {
+                // A video's decoder can still be retiring (~1 s on HEVC) — the handle
+                // clears momentarily, so retry off the event loop instead of failing.
+                if self.item_is_video(item) {
+                    eprintln!(
+                        "delete blocked (retrying while the reader retires): {}: {e}",
+                        path.display()
+                    );
+                    self.pending_delete_retry = Some(crate::app_core::DeleteRetry {
+                        at: self.now + DELETE_RETRY_INTERVAL,
+                        item,
+                        path: path.to_path_buf(),
+                        permanent,
+                        tries_left: DELETE_RETRY_MAX,
+                    });
+                    return;
+                }
+                // A recoverable delete the OS refused (a read-only / no-Trash volume — common on
+                // macOS network shares) would otherwise dead-end on "Delete failed". Offer the
+                // permanent-delete confirmation instead (the same themed dialog Shift+Del uses),
+                // so the user can still remove the file deliberately. A *permanent* delete that
+                // fails is a genuine error with nowhere left to escalate.
+                if !permanent {
+                    eprintln!(
+                        "trash refused, offering permanent delete: {}: {e}",
+                        path.display()
+                    );
+                    self.effects.push(contract::CoreEffect::ShellFlowAction(
+                        Action::DeletePermanent,
+                    ));
+                    return;
+                }
+                eprintln!("delete failed: {}: {e}", path.display());
+                self.show_toast("Delete failed");
             }
-            eprintln!("delete failed: {}: {e}", path.display());
-            self.show_toast("Delete failed");
-            return;
         }
-        self.finish_delete(item, path, permanent);
     }
 
     /// The post-I/O half of a successful delete: freeze playback, flash the icon
-    /// pill, defer the playlist advance a beat. For the recoverable path it also verifies the
-    /// file actually reached a restorable Recycle Bin and, if so, records the Edit ▸ Undo entry.
-    fn finish_delete(&mut self, item: usize, path: &Path, permanent: bool) {
+    /// pill, defer the playlist advance a beat. `outcome` is `None` for a permanent delete;
+    /// for the recoverable path it carries whether the file actually reached a restorable Recycle
+    /// Bin / Trash (from [`crate::delete::recycle`]) — captured at delete time because macOS can't
+    /// re-derive the Trash location from the original path afterward. When restorable, records the
+    /// Edit ▸ Undo entry.
+    fn finish_delete(
+        &mut self,
+        item: usize,
+        path: &Path,
+        permanent: bool,
+        outcome: Option<crate::delete::RecycleOutcome>,
+    ) {
         // Deleting a playing animation stops playback so the doomed photo freezes on its current
         // frame under the trash icon (rather than animating until removal).
         self.stop_playback();
-        let icon = if permanent {
+        debug_assert_eq!(
+            permanent,
+            outcome.is_none(),
+            "a permanent delete carries no recycle outcome; a recoverable one always does"
+        );
+        let _ = permanent;
+        let icon = match outcome {
             // Explicit Shift+Del / confirmed permanent delete: trash icon, no undo.
-            ToastIcon::Delete
-        } else {
-            // Recoverable delete: confirm the file actually reached a restorable bin. If it did,
-            // record an undo entry (Ctrl+Z / Edit ▸ Undo). If a bypass-the-bin volume slipped past
-            // `will_recycle` and nuked it, show the permanent icon rather than a misleading recycle
-            // one; if the platform can't inspect the trash (macOS), assume recycle without an undo.
-            match crate::delete::verify_recycled(path) {
-                crate::delete::RecycleOutcome::Recycled(handle) => {
-                    let name = crate::engine::file_name_of(&path.to_string_lossy());
-                    self.undo_stack.push(UndoAction::Deletion {
-                        index: item,
-                        path: path.to_path_buf(),
-                        name,
-                        handle,
-                    });
-                    ToastIcon::Recycle
-                }
-                crate::delete::RecycleOutcome::Permanent => ToastIcon::Delete,
-                crate::delete::RecycleOutcome::Unknown => ToastIcon::Recycle,
+            None => ToastIcon::Delete,
+            // Recoverable delete that reached a restorable bin: record an undo entry
+            // (Ctrl+Z / Edit ▸ Undo) and show the recycle icon.
+            Some(crate::delete::RecycleOutcome::Recycled(handle)) => {
+                let name = crate::engine::file_name_of(&path.to_string_lossy());
+                self.undo_stack.push(UndoAction::Deletion {
+                    index: item,
+                    path: path.to_path_buf(),
+                    name,
+                    handle,
+                });
+                ToastIcon::Recycle
             }
+            // A bypass-the-bin volume slipped past `will_recycle` and nuked it (Windows/Linux):
+            // show the permanent icon rather than a misleading recycle one, and record no undo.
+            Some(crate::delete::RecycleOutcome::Permanent) => ToastIcon::Delete,
         };
         self.show_toast_icon("", icon);
         self.pending_delete = Some((self.now + DELETE_ADVANCE_DELAY, item));
@@ -765,12 +812,12 @@ impl AppCore {
         }
         let mut retry = self.pending_delete_retry.take().expect("checked above");
         let res = if retry.permanent {
-            crate::delete::delete_permanently(&retry.path)
+            crate::delete::delete_permanently(&retry.path).map(|()| None)
         } else {
-            crate::delete::send_to_trash(&retry.path)
+            crate::delete::recycle(&retry.path).map(Some)
         };
         match res {
-            Ok(()) => self.finish_delete(retry.item, &retry.path, retry.permanent),
+            Ok(outcome) => self.finish_delete(retry.item, &retry.path, retry.permanent, outcome),
             Err(e) => {
                 retry.tries_left = retry.tries_left.saturating_sub(1);
                 if retry.tries_left == 0 {
@@ -1743,7 +1790,7 @@ impl AppCore {
         save_rotation_enabled: bool,
         reveal_enabled: bool,
         cancel_scan_enabled: bool,
-        undo: Option<&'static str>,
+        undo: Option<String>,
         native_fullscreen_engaged: bool,
         displayed_item: Option<usize>,
         compare_pin: Option<usize>,
@@ -2801,10 +2848,9 @@ impl AppCore {
         self.pending_poster_bytes.clear();
         self.upgrade_done.clear();
         self.last_upgrade_set.clear();
-        // Keep any Deletion undo entry (path/handle-based, deck-independent) so the delete that
-        // emptied the deck can still be undone — the restore rebuilds a one-photo deck. The
-        // index-based rotation entries can't survive the reindex.
-        self.undo_stack.retain(|a| a.survives_rebuild());
+        // Keep every undo entry (all path-keyed, deck-independent) so the delete that emptied the
+        // deck — and any rotation recorded before it — stay undoable; the restore rebuilds a
+        // one-photo deck.
         self.invalidate_geometry();
         self.displayed_item = None;
         self.target_item = None;
@@ -2909,12 +2955,12 @@ impl AppCore {
         self.pending_poster_bytes.clear();
         self.upgrade_done.clear();
         self.last_upgrade_set.clear();
-        // Index-based undo entries (SaveRotation) are invalidated by the reindex; path/handle-based
-        // ones (Deletion) survive a same-deck rebuild — notably the delete's own advance rebuild,
-        // which is the whole point of the delete-undo. A genuinely new deck clears everything.
-        if same_root {
-            self.undo_stack.retain(|a| a.survives_rebuild());
-        } else {
+        // Every undo entry is keyed by stable path (see `crate::undo`), so all survive a same-deck
+        // rebuild — the delete-advance that just recorded a Deletion, a recursive toggle, an
+        // undo-restore reinsert. This is what lets rotation- and delete-undo entries coexist: a
+        // delete's rebuild no longer wipes a rotation recorded before it. A genuinely new deck
+        // (different root) clears the whole stack.
+        if !same_root {
             self.undo_stack.clear();
         }
         // Invalidate the ring + bump the epoch (discards in-flight old decodes),
@@ -8586,6 +8632,46 @@ mod tests {
         assert_ne!(
             first, second,
             "two opens of the same-size deck must not shuffle identically"
+        );
+    }
+
+    #[test]
+    fn a_rotation_undo_survives_a_same_root_rebuild_but_clears_on_a_new_deck() {
+        // Regression: a SaveRotation undo entry used to be keyed by playlist *index*, so *any*
+        // rebuild dropped it — deleting a photo after a Save Rotation silently wiped the
+        // rotation-undo (the "rotate→save, delete, delete, Ctrl+Z ×3" report: the 3rd undo was
+        // gone). Now every undo entry is path-keyed and survives a same-deck rebuild; only a
+        // genuinely new deck (different root) clears the stack.
+        let mut core = test_core();
+        let dir = std::env::temp_dir();
+        let paths: Vec<PathBuf> = (0..3).map(|i| dir.join(format!("{i}.jpg"))).collect();
+        let source: Arc<dyn PhotoSource> = Arc::new(FsSource::new(paths));
+        core.rebuild_playlist(source, dir.clone(), Some(dir.clone()), true, 0);
+
+        core.undo_stack.push(crate::undo::UndoAction::SaveRotation {
+            path: dir.join("1.jpg"),
+            prev: 1,
+        });
+
+        // A same-root rebuild — e.g. the advance after deleting a *different* photo — keeps it,
+        // and the label still names the (path-resolved) file.
+        let remaining: Arc<dyn PhotoSource> =
+            Arc::new(FsSource::new(vec![dir.join("0.jpg"), dir.join("1.jpg")]));
+        core.rebuild_playlist(remaining, dir.clone(), Some(dir.clone()), true, 0);
+        assert_eq!(
+            core.undo_stack.len(),
+            1,
+            "a path-keyed rotation undo survives a same-root rebuild"
+        );
+        assert_eq!(core.undo_stack[0].menu_label(), "Undo Rotate 1.jpg");
+
+        // A genuinely new deck (different root) clears the whole stack.
+        let other = dir.join("pb_other_deck");
+        let fresh: Arc<dyn PhotoSource> = Arc::new(FsSource::new(vec![other.join("z.jpg")]));
+        core.rebuild_playlist(fresh, other.clone(), Some(other), false, 0);
+        assert!(
+            core.undo_stack.is_empty(),
+            "opening a new deck clears the undo stack"
         );
     }
 

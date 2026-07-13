@@ -127,6 +127,14 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSString",
     "NSDictionary",
     "NSEnumerator",
+    # In-app Undo of a delete (macOS parity, task #86): move a photo to the Trash via
+    # `NSFileManager trashItemAtURL:resultingItemURL:` and keep the resulting Trash URL so a
+    # later Undo moves it straight back. The `trash` crate discards that URL and has no restore
+    # on macOS (its `os_limited` list/restore is Windows/Linux only), so we call Foundation
+    # directly in `delete::macos`. `NSError` gates the `trashItemAtURL…` binding + its error text.
+    "NSFileManager",
+    "NSURL",
+    "NSError",
 ] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = [
     "std",

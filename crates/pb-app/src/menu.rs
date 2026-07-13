@@ -682,7 +682,7 @@ pub fn menu_bar_spec(keymap: &Keymap, s: &crate::contract::MenuState) -> Vec<Men
             items: vec![
                 item(
                     MenuAction::Undo,
-                    &format!("{}\tCtrl+Z", s.undo.unwrap_or("Undo")),
+                    &format!("{}\tCtrl+Z", s.undo.as_deref().unwrap_or("Undo")),
                     s.undo.is_some(),
                 ),
                 sep(),

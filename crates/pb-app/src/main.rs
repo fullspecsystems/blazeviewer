@@ -1496,7 +1496,8 @@ impl App {
         // Translucency experiment (#61): the toolbar rides the same *Info panel opacity* slider
         // the info panels use, so one control tunes all the chrome. `info_opacity` is a 0–100
         // percentage; map it linearly to a 0–255 alpha (egui alpha-blends, no material remap).
-        let alpha = ((self.core.settings.info_opacity.min(100) as f32 / 100.0) * 255.0).round() as u8;
+        let alpha =
+            ((self.core.settings.info_opacity.min(100) as f32 / 100.0) * 255.0).round() as u8;
         toolbar::ToolbarState {
             dark: self.core.hud_dark,
             alpha,
@@ -2378,7 +2379,7 @@ impl App {
         }
         // Edit ▸ Undo title + enabled state (Windows appends the `\tCtrl+Z` hint).
         if let Some(it) = self.undo_item.as_ref() {
-            let base = state.undo.unwrap_or("Undo");
+            let base = state.undo.as_deref().unwrap_or("Undo");
             it.set_text(format!("{base}\tCtrl+Z"));
             it.set_enabled(state.undo.is_some());
         }
@@ -5289,12 +5290,12 @@ mod tests {
             false, // save_rotation_enabled
             false, // reveal_enabled
             false, // cancel_scan_enabled
-            Some("Undo Save Rotation"),
+            Some("Undo Save Rotation".to_string()),
             false,
             None,
             None,
         );
-        assert_eq!(with_undo.undo, Some("Undo Save Rotation"));
+        assert_eq!(with_undo.undo.as_deref(), Some("Undo Save Rotation"));
     }
 
     #[test]
