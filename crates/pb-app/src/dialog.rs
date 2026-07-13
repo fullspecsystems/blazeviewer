@@ -132,6 +132,8 @@ struct SettingsDraft {
     recursive: bool,
     scale_mode: usize,      // 0 = Fit, 1 = Fill, 2 = Original
     appearance: usize,      // 0 = System, 1 = Light, 2 = Dark (#46)
+    accent_source: usize,   // 0 = System, 1 = Custom, 2 = Blaze Orange (accent color)
+    accent_custom: [u8; 3], // sRGB bytes — the custom accent (egui `color_edit_button_srgb`)
     info_line_align: usize, // 0 = Left, 1 = Center, 2 = Right (task #54)
     // Image-info readout (`i`): the launch default + which fields it lists (task #54).
     show_image_info: bool,
@@ -190,6 +192,12 @@ impl SettingsDraft {
                 settings::AppearanceMode::Light => 1,
                 settings::AppearanceMode::Dark => 2,
             },
+            accent_source: match s.accent_source {
+                settings::AccentSource::System => 0,
+                settings::AccentSource::Custom => 1,
+                settings::AccentSource::Brand => 2,
+            },
+            accent_custom: s.accent_custom,
             info_line_align: match s.info_line_align {
                 settings::InfoLineAlign::Left => 0,
                 settings::InfoLineAlign::Center => 1,
@@ -261,6 +269,12 @@ impl SettingsDraft {
             2 => settings::AppearanceMode::Dark,
             _ => settings::AppearanceMode::System,
         };
+        s.accent_source = match self.accent_source {
+            1 => settings::AccentSource::Custom,
+            2 => settings::AccentSource::Brand,
+            _ => settings::AccentSource::System,
+        };
+        s.accent_custom = self.accent_custom;
         s.info_line_align = match self.info_line_align {
             0 => settings::InfoLineAlign::Left,
             1 => settings::InfoLineAlign::Center,
@@ -2187,6 +2201,37 @@ fn display_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
                     });
             },
         );
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Accent color",
+            Some("Buttons, tabs, and highlights; System follows your OS accent"),
+            |ui| {
+                egui::ComboBox::from_id_salt("accent_source")
+                    .width(150.0)
+                    .selected_text(["System", "Custom", "Blaze Orange"][d.accent_source])
+                    .show_ui(ui, |ui| {
+                        pbui::apply_to_ui(ui, p.dark);
+                        ui.selectable_value(&mut d.accent_source, 0, "System");
+                        ui.selectable_value(&mut d.accent_source, 1, "Custom");
+                        ui.selectable_value(&mut d.accent_source, 2, "Blaze Orange");
+                    });
+            },
+        );
+        // The custom-color picker only when Custom is chosen (otherwise it's inert).
+        if d.accent_source == 1 {
+            pbui::card_row(
+                ui,
+                p,
+                None,
+                "Custom accent color",
+                Some("Pick any color; it is kept readable against the panels"),
+                |ui| {
+                    ui.color_edit_button_srgb(&mut d.accent_custom);
+                },
+            );
+        }
         pbui::card_row(
             ui,
             p,

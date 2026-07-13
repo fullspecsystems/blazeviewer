@@ -57,6 +57,20 @@ pub enum AppearanceMode {
     Dark,
 }
 
+/// Where the chrome accent color comes from (task: brand-vs-system accent). `System` (the
+/// default) follows the OS accent — the user's Windows *Settings ▸ Colors* pick — falling back
+/// to the brand when the OS has none (Linux today) or the pick is illegible; `Custom` uses
+/// [`Settings::accent_custom`]; `Brand` pins the PhotoBlaze orange. The shell resolves this to a
+/// concrete color (with a contrast guard) and pushes it to `pb_ui::set_accent`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AccentSource {
+    #[default]
+    System,
+    Custom,
+    Brand,
+}
+
 /// Horizontal placement of the basic info line (`i`) along the bottom edge
 /// (task #54). `Right` (the default) keeps today's behavior and shares the corner
 /// with the Inspector, which lifts above it; `Left` shares with the folder tree
@@ -141,6 +155,13 @@ pub struct Settings {
     pub scale_mode: ScaleModePref,
     /// Light/dark preference (task #46): System follows the OS; Light/Dark pin it.
     pub appearance_mode: AppearanceMode,
+    /// Where the chrome accent comes from: `System` (follow the OS accent), `Custom`
+    /// ([`accent_custom`](Self::accent_custom)), or `Brand` (the PhotoBlaze orange).
+    pub accent_source: AccentSource,
+    /// The custom accent color (sRGB) used when [`accent_source`](Self::accent_source) is
+    /// `Custom`. Defaults to the Windows accent blue — a good, neutral starting point to tweak
+    /// from (rather than the brand orange, which the `Brand` option already covers).
+    pub accent_custom: [u8; 3],
     /// Where the basic info line (`i`) sits along the bottom edge (task #54).
     /// Default `Right` (today's placement).
     pub info_line_align: InfoLineAlign,
@@ -247,6 +268,9 @@ impl Default for Settings {
             scroll_action: ScrollAction::Pan, // scroll pans; Ctrl+scroll zooms
             scale_mode: ScaleModePref::Fit,
             appearance_mode: AppearanceMode::System, // follow the OS light/dark theme
+            accent_source: AccentSource::System,     // follow the OS accent (brand fallback)
+            accent_custom: [0x00, 0x78, 0xd4],       // Windows accent blue — a good neutral
+                                                     // starting point when you switch to Custom
             info_line_align: InfoLineAlign::Right,   // today's bottom-right placement
             show_image_info: false,                  // off until opted in (unchanged launch)
             glass_toolbar: true,                     // transparent toolbar on by default (#59)

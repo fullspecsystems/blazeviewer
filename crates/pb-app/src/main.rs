@@ -53,6 +53,7 @@ use pb_decode::{decode_bytes, FitBox};
 use pb_render::{Renderer, ViewTransform, WgpuRenderer};
 use pb_source::PhotoSource;
 
+mod accent;
 mod clipboard;
 #[cfg(windows)]
 mod darkmode;
@@ -374,6 +375,11 @@ struct App {
     /// touches the window when the preference actually changes. `None` = not yet
     /// applied.
     applied_appearance: Option<settings::AppearanceMode>,
+    /// The `(accent source, custom color, resolved dark)` last pushed to `pb_ui::set_accent`, so
+    /// `apply_accent` (checked each `about_to_wait` turn) only re-resolves the chrome accent when
+    /// the source, the custom color, or the theme (the legibility guard is theme-dependent)
+    /// actually changes. `None` = not yet applied.
+    applied_accent: Option<(settings::AccentSource, [u8; 3], bool)>,
     /// The open egui dialog window (Settings / About), or `None`. At most one at a
     /// time; its events are routed by window id in `window_event`.
     dialog: Option<dialog::DialogWindow>,
@@ -826,6 +832,7 @@ impl App {
             core,
             pending_drops: Vec::new(),
             applied_appearance: None,
+            applied_accent: None,
             menu: None,
             save_rotation_item: None,
             reveal_item: None,
@@ -2275,6 +2282,31 @@ impl App {
         }
     }
 
+    /// Resolve the chrome accent from the chosen source (System / Custom / Brand) and push it to
+    /// `pb_ui` — but only when the inputs changed (source, custom color, or the resolved theme,
+    /// since the legibility guard is theme-dependent). Checked every `about_to_wait` turn behind
+    /// that guard, so it catches a Settings save from any path and an OS light↔dark flip; on a
+    /// real change it re-renders the overlay so open panels repaint in the new accent.
+    fn apply_accent(&mut self) {
+        let dark = self.core.hud_dark;
+        let key = (
+            self.core.settings.accent_source,
+            self.core.settings.accent_custom,
+            dark,
+        );
+        if self.applied_accent == Some(key) {
+            return;
+        }
+        self.applied_accent = Some(key);
+        accent::apply(&self.core.settings, dark);
+        // Repaint the retained chrome (open panels) in the new accent. Dialogs rebuild their
+        // palette on the next frame; the overlay needs an explicit re-render nudge.
+        self.overlay_dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
     /// Run a menu action by mapping it to the central [`Action`] and dispatching it —
     /// the menu and the keyboard share one dispatcher, so they can never drift. The
     /// id→`MenuAction` mapping is the pure, unit-tested `menu::action_for`.
@@ -3195,6 +3227,7 @@ impl ApplicationHandler for App {
         // (title bar + menu) — a pinned Light/Dark must match from the first frame.
         self.core.refresh_theme();
         self.apply_chrome_theme();
+        self.apply_accent();
         self.core.request_prefetch();
 
         // Now that the window + engine are live, kick off any launch we deferred (an archive
@@ -3565,6 +3598,9 @@ impl ApplicationHandler for App {
         // Keep the OS-drawn chrome (title bar, menu) on the Appearance preference;
         // no-ops unless the preference changed (e.g. a Settings save this turn).
         self.apply_chrome_theme();
+        // Same for the chrome accent (System/Custom/Brand) — no-op unless the source, custom
+        // color, or resolved theme changed (a Settings save, or an OS light↔dark flip).
+        self.apply_accent();
         // 0. Native menu-bar clicks (windowed mode). Map each id to the same action
         // the keyboard triggers and dispatch it; an unknown/foreign id is ignored.
         while let Ok(ev) = muda::MenuEvent::receiver().try_recv() {

@@ -2455,7 +2455,7 @@ fn inspector_tabs(
             crate::sdf_rect::round_rect(ui, seg, 5.0, p.accent, 0.0, Color32::TRANSPARENT);
         }
         let color = if selected {
-            Color32::WHITE
+            p.on_accent
         } else {
             panel_secondary(p)
         };
@@ -3136,7 +3136,7 @@ fn left_pane_tabs(
             crate::sdf_rect::round_rect(ui, seg, 5.0, p.accent, 0.0, Color32::TRANSPARENT);
         }
         let color = if is_sel {
-            Color32::WHITE
+            p.on_accent
         } else {
             panel_secondary(p)
         };

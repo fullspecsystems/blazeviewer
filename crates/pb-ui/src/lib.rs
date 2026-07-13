@@ -22,6 +22,109 @@ use egui::{Color32, FontFamily, FontId, Margin, Rounding, Stroke, TextStyle};
 
 pub mod icon;
 
+// ── Accent color (brand-first, with an OS/custom override) ───────────────────
+/// The PhotoBlaze brand accent — the logo orange. The default, and the always-safe fallback
+/// when no override is set or a chosen accent would be illegible.
+pub const BRAND_ACCENT: Color32 = Color32::from_rgb(0xff, 0x49, 0x15);
+
+/// Packed `0x00RR_GGBB` accent override; [`NO_OVERRIDE`] means "use the brand". Process-wide
+/// (the accent is one brand-wide value), set by the shell after resolving the chosen source +
+/// theme. Every [`Palette::new`] reads it, so all chrome — the overlay panels and the dialogs —
+/// tracks it live with no threading.
+static ACCENT_OVERRIDE: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(NO_OVERRIDE);
+const NO_OVERRIDE: u32 = 0xFFFF_FFFF;
+
+/// Set the process-wide accent. `None` restores the brand. Pass the **already-guarded** color
+/// (see [`legible_accent_or_brand`]); this only stores it. Cheap + lock-free — safe to call on a
+/// settings/theme change.
+pub fn set_accent(color: Option<Color32>) {
+    let packed = match color {
+        Some(c) => ((c.r() as u32) << 16) | ((c.g() as u32) << 8) | c.b() as u32,
+        None => NO_OVERRIDE,
+    };
+    ACCENT_OVERRIDE.store(packed, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The effective accent: the stored override, else [`BRAND_ACCENT`].
+pub fn accent() -> Color32 {
+    let v = ACCENT_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
+    if v == NO_OVERRIDE {
+        BRAND_ACCENT
+    } else {
+        Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
+    }
+}
+
+/// sRGB channel (0–255) → linear (0–1), for relative-luminance math.
+fn srgb_to_linear(c: u8) -> f32 {
+    let c = c as f32 / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// WCAG relative luminance (0–1) of an sRGB color.
+fn relative_luminance(c: Color32) -> f32 {
+    0.2126 * srgb_to_linear(c.r()) + 0.7152 * srgb_to_linear(c.g()) + 0.0722 * srgb_to_linear(c.b())
+}
+
+/// WCAG contrast ratio between two colors (1.0 = identical … 21.0 = black-on-white).
+fn contrast_ratio(a: Color32, b: Color32) -> f32 {
+    let (la, lb) = (relative_luminance(a), relative_luminance(b));
+    let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// The legible text/knob color to paint **on** an accent-filled surface: white unless the
+/// accent is light enough that white would wash out, then near-black. Tuned so the brand orange
+/// (and typical saturated accents) keep white text, and only genuinely pale accents flip to dark.
+pub fn text_on_accent(accent: Color32) -> Color32 {
+    if relative_luminance(accent) > 0.6 {
+        Color32::from_gray(0x1a)
+    } else {
+        Color32::WHITE
+    }
+}
+
+/// The minimum accent-vs-page contrast [`ensure_legible`] guarantees. Low (an accent can read as
+/// a subtle tint), but enough that a thin indicator — a tab underline, the slider fill, selection
+/// — never fully disappears into the panel.
+const MIN_ACCENT_CONTRAST: f32 = 1.5;
+
+/// Return a chosen accent **honored** — its hue kept — but nudged only as far as needed to stay
+/// visible on the given theme's page background. A color with enough contrast is returned
+/// unchanged; a too-faint one is blended toward the readable end (lighter on a dark theme, darker
+/// on a light one) just until it clears [`MIN_ACCENT_CONTRAST`]. This respects the user's pick
+/// (never silently swaps it for the brand — that surprised the owner) while keeping the chrome
+/// legible. The shell calls it before [`set_accent`], for the current OS theme.
+pub fn ensure_legible(candidate: Color32, dark: bool) -> Color32 {
+    let page = Palette::new(dark).page;
+    if contrast_ratio(candidate, page) >= MIN_ACCENT_CONTRAST {
+        return candidate;
+    }
+    // Blend toward the readable extreme for this theme; binary-search the smallest blend that
+    // clears the floor, so we change the color as little as possible (converges — the extreme
+    // itself has maximal contrast against the page).
+    let target = if dark {
+        Color32::WHITE
+    } else {
+        Color32::from_gray(0x14)
+    };
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    for _ in 0..14 {
+        let mid = 0.5 * (lo + hi);
+        if contrast_ratio(lerp_color(candidate, target, mid), page) >= MIN_ACCENT_CONTRAST {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    lerp_color(candidate, target, hi)
+}
+
 // ── Spacing scale (4px grid, named like a type/space scale) ──────────────────
 pub const SPACE_1: f32 = 4.0;
 pub const SPACE_2: f32 = 8.0;
@@ -114,9 +217,13 @@ pub struct Palette {
     pub text: Color32,
     /// Secondary text (a card subtitle, a hint).
     pub text_secondary: Color32,
-    /// The accent (primary buttons, selection, slider fill, a toggle's "on" track).
-    /// PhotoBlaze brand orange, centered on `#FF4614`.
+    /// The accent (primary buttons, selection, slider fill, a toggle's "on" track). Defaults to
+    /// the PhotoBlaze brand orange (`#FF4915`), but follows the OS/custom override set via
+    /// [`set_accent`] — one process-wide value, read fresh here each build.
     pub accent: Color32,
+    /// The legible text/knob color to paint **on** an [`accent`](Palette::accent) fill — white
+    /// for the brand and saturated accents, near-black for pale ones ([`text_on_accent`]).
+    pub on_accent: Color32,
     /// The destructive action color (Delete fills, danger-tone icons) — a darker, redder
     /// sibling of [`accent`](Palette::accent), kept distinct so a destructive action never
     /// reads as the primary one.
@@ -127,6 +234,10 @@ pub struct Palette {
 
 impl Palette {
     pub fn new(dark: bool) -> Self {
+        // The live accent (brand default, or the OS/custom override) + its legible on-color.
+        // Read once here so the whole palette is internally consistent.
+        let acc = accent();
+        let on_acc = text_on_accent(acc);
         if dark {
             Palette {
                 dark,
@@ -137,9 +248,10 @@ impl Palette {
                 control_hover: Color32::from_gray(0x3f),
                 text: Color32::from_gray(0xe8),
                 text_secondary: Color32::from_gray(0x9e),
-                // The brand orange — same `#FF4915` as light mode (white button text reads
-                // on it either way), kept identical across themes per the owner's call.
-                accent: Color32::from_rgb(0xff, 0x49, 0x15),
+                // The live accent (brand `#FF4915` by default) — identical across themes; the
+                // OS/custom override, when set, is resolved once by the shell per theme.
+                accent: acc,
+                on_accent: on_acc,
                 // The darker-red destructive sibling. Same deep red as light mode (white
                 // text reads on it either way) — a lighter dark-mode red looked too close
                 // to the orange accent.
@@ -156,8 +268,9 @@ impl Palette {
                 control_hover: Color32::from_gray(0xf0),
                 text: Color32::from_gray(0x1a),
                 text_secondary: Color32::from_gray(0x5e),
-                // The PhotoBlaze brand orange (the logo color) at full strength.
-                accent: Color32::from_rgb(0xff, 0x49, 0x15),
+                // The live accent (brand orange, the logo color, by default).
+                accent: acc,
+                on_accent: on_acc,
                 // A darker, redder version of the brand for destructive actions — deep
                 // enough that white text clears WCAG AA.
                 danger: Color32::from_rgb(0xc4, 0x24, 0x12),
@@ -619,22 +732,25 @@ pub fn danger_button(ui: &mut egui::Ui, p: &Palette, text: &str) -> egui::Respon
 fn filled_button(ui: &mut egui::Ui, base: Color32, text: &str) -> egui::Response {
     let hover = lerp_color(base, Color32::WHITE, 0.10);
     let active = lerp_color(base, Color32::BLACK, 0.12);
+    // Legible text on this fill — white for the brand/danger and saturated accents, near-black
+    // for a pale accent (so a light custom/OS accent doesn't wash the label out).
+    let fg = text_on_accent(base);
     ui.scope(|ui| {
         let v = ui.visuals_mut();
         v.widgets.inactive.weak_bg_fill = base;
         v.widgets.hovered.weak_bg_fill = hover;
         v.widgets.active.weak_bg_fill = active;
-        // No border; white text in every state (a filled button).
+        // No border; the on-fill text color in every state (a filled button).
         for w in [
             &mut v.widgets.inactive,
             &mut v.widgets.hovered,
             &mut v.widgets.active,
         ] {
             w.bg_stroke = Stroke::NONE;
-            w.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
+            w.fg_stroke = Stroke::new(1.0_f32, fg);
         }
         ui.add(
-            egui::Button::new(egui::RichText::new(text).color(Color32::WHITE))
+            egui::Button::new(egui::RichText::new(text).color(fg))
                 .min_size(egui::vec2(BUTTON_W, CONTROL_H)),
         )
     })
@@ -896,6 +1012,50 @@ mod tests {
         assert_eq!(lerp_color(a, b, 1.0), b);
         // Midpoint is the average.
         assert_eq!(lerp_color(a, b, 0.5), Color32::from_rgb(50, 100, 25));
+    }
+
+    #[test]
+    fn on_accent_is_white_for_saturated_dark_for_pale() {
+        // The brand orange (and a typical saturated OS accent) keep white text.
+        assert_eq!(text_on_accent(BRAND_ACCENT), Color32::WHITE);
+        assert_eq!(
+            text_on_accent(Color32::from_rgb(0x00, 0x78, 0xd4)), // Windows default blue
+            Color32::WHITE
+        );
+        // A pale accent flips to dark text so the label stays legible.
+        assert_eq!(
+            text_on_accent(Color32::from_rgb(0xf0, 0xe0, 0x40)), // pale yellow
+            Color32::from_gray(0x1a)
+        );
+    }
+
+    #[test]
+    fn ensure_legible_keeps_good_colors_and_lifts_faint_ones() {
+        // A clearly legible accent is returned unchanged in both themes.
+        let blue = Color32::from_rgb(0x00, 0x78, 0xd4);
+        assert_eq!(ensure_legible(blue, false), blue);
+        assert_eq!(ensure_legible(blue, true), blue);
+        // A too-faint pick is honored (never swapped for the brand) but nudged until it clears
+        // the contrast floor.
+        let faint_on_dark = Color32::from_rgb(0x28, 0x28, 0x2c); // ~the dark page tone
+        let out = ensure_legible(faint_on_dark, true);
+        assert_ne!(out, BRAND_ACCENT);
+        assert!(contrast_ratio(out, Palette::new(true).page) >= MIN_ACCENT_CONTRAST);
+        let faint_on_light = Color32::from_rgb(0xf0, 0xf0, 0xf0); // ~the light page tone
+        let out = ensure_legible(faint_on_light, false);
+        assert_ne!(out, BRAND_ACCENT);
+        assert!(contrast_ratio(out, Palette::new(false).page) >= MIN_ACCENT_CONTRAST);
+    }
+
+    #[test]
+    fn accent_override_packs_round_trips_and_clears() {
+        // Exercises the RGB pack/unpack (a shift bug would corrupt the color) and the
+        // brand fallback; resets to the default so no other test observes the override.
+        let c = Color32::from_rgb(1, 2, 3);
+        set_accent(Some(c));
+        assert_eq!(accent(), c);
+        set_accent(None);
+        assert_eq!(accent(), BRAND_ACCENT);
     }
 
     #[test]

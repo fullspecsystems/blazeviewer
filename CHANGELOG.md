@@ -8,6 +8,13 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
+- **PhotoBlaze now matches your Windows accent color.** Buttons, tabs, selection, and other
+  highlights follow your system accent (the color you pick in Windows Settings) out of the box,
+  so the app looks at home on your desktop. You can change this in Settings under Appearance ▸
+  Accent color: **System** (follow Windows), **Custom** (pick any color), or **Blaze Orange**
+  (the PhotoBlaze color). Any color you pick is honored — if it would be too faint to see it is
+  nudged just enough to stay visible against the panels, and button text automatically switches
+  between light and dark to stay readable. (Linux and macOS keep Blaze Orange for now.)
 - **A Thumbnails panel: press `Shift+T` for a scrollable strip of your photos.**
   The left pane now has two tabs — Folders and Thumbnails — sharing one panel (`Shift+F`
   and `Shift+T` switch between them; clicking the tabs works too). The strip shows small
