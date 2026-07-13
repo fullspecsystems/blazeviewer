@@ -1493,9 +1493,13 @@ impl App {
         // The menu-state toggles (info line / Details tab / reveal-enabled) — the same source
         // the native menu checkmarks read, so the toolbar's on-states can't drift from them.
         let ms = self.current_menu_state();
+        // Translucency experiment (#61): the toolbar rides the same *Info panel opacity* slider
+        // the info panels use, so one control tunes all the chrome. `info_opacity` is a 0–100
+        // percentage; map it linearly to a 0–255 alpha (egui alpha-blends, no material remap).
+        let alpha = ((self.core.settings.info_opacity.min(100) as f32 / 100.0) * 255.0).round() as u8;
         toolbar::ToolbarState {
             dark: self.core.hud_dark,
-            alpha: 255,
+            alpha,
             counter,
             has_motion,
             playing,

@@ -51,7 +51,8 @@ const EDGE_PAD: f32 = 8.0;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ToolbarState {
     pub dark: bool,
-    /// Surface alpha (0–255), floored high for legibility over zoomed content that rides under.
+    /// Surface alpha (0–255), from the shared *Info panel opacity* slider so the toolbar and the
+    /// info panels stay in visual lockstep (translucency experiment, #61).
     pub alpha: u8,
     /// `(idx+1, count)` of the *displayed* photo, or `None` before the first present.
     pub counter: Option<(usize, usize)>,
@@ -260,7 +261,7 @@ pub fn toolbar(
 ) {
     let p = Palette::new(st.dark);
     let base = p.page;
-    let bg = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), st.alpha.max(245));
+    let bg = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), st.alpha);
     let plan = plan(ctx.screen_rect().width());
 
     // A tooltip = a short name + the action's **live** first binding, read from the keymap so a
