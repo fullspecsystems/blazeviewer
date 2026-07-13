@@ -860,18 +860,8 @@ impl AppCore {
                 self.effects.push(E::CloseDialog);
                 self.ask_describe(question);
             }
-            // Settings: Save applies + persists the edited model; Cancel/Esc discard.
-            R::SettingsSaved { settings, keymap } => {
-                self.effects.push(E::CloseDialog);
-                if let Some(new) = settings {
-                    self.apply_settings(*new);
-                }
-                if let Some(km) = keymap {
-                    self.apply_keymap(km);
-                }
-            }
-            // A live edit from an auto-saving Settings window: apply + persist like Save,
-            // but the window stays open — no CloseDialog.
+            // A live edit from an auto-saving Settings window (both shells now): apply +
+            // persist the edited model immediately; the window stays open — no CloseDialog.
             R::SettingsEdited { settings, keymap } => {
                 if let Some(new) = settings {
                     self.apply_settings(*new);
