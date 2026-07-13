@@ -267,16 +267,41 @@
       {
         "id": 61,
         "title": "Windows/egui toolbar — mouse affordances (sibling of macOS NSToolbar #55)",
-        "description": "The Windows/winit-shell counterpart to the macOS NSToolbar (#55): a togglable egui toolbar giving mouse-driven access to next/previous/random nav, Inspector + folder-tree toggles, and other frequent actions (rotate/open/delete?). Rides the egui presenter seam built in #54 (egui_winit + egui_wgpu into the shared surface). Every button fires an EXISTING Action/PanelAction through the same CoreEvent path a keypress uses — a discoverability layer, not new behavior. Prime-directive tension (chrome-less window): hidden by default, revealed on demand (hotkey and/or reveal-on-mouse-to-top-edge like fullscreen video players), never persistent chrome that eats the fit-to-screen area. Owner asked 2026-07-07 — the egui HUD/panels are 'basically done' (#54) but the toolbar is still needed on Windows.",
-        "status": "pending",
+        "description": "The Windows/Linux winit-shell counterpart to the macOS NSToolbar (#55): a docked egui toolbar giving mouse-driven access to next/previous/random nav, folder nav, play/pause, slideshow, rotate, delete, and Info/Details/folder-tree toggles, plus a photo counter and fullscreen. Rides the #54 egui overlay (shared surface, no second device). Every button fires an EXISTING Action through the same CoreEvent/pointer-nav path a keypress uses — a discoverability layer, not new behavior. OWNER DECISION 2026-07-13 (supersedes the old 'hidden by default / no reserved strip / reveal-on-demand' framing): a plain docked strip under the menu bar, PERSISTENT in windowed mode, ON BY DEFAULT for onboarding, reserving its height (fit photo sits below it, never cropped); a Settings toggle (show_toolbar) hides it. Windowed-only; the fullscreen speed path stays chrome-free. Full design in .taskmaster/plans/61-windows-toolbar.md.",
+        "status": "in-progress",
         "priority": "medium",
         "dependencies": [
           54,
           55
         ],
-        "details": "Reuse the egui presenter surface/present path from #54 (do NOT spin a second wgpu device — #54's ADR-023 note explicitly warns against cribbing dialog.rs, which owns a separate device). Buttons dispatch Action ids already in the keymap (Next/Previous/Random, ShowInspectorTab, ToggleTree, TogglePanels, Rotate*, Open*); if an action isn't yet a first-class Action, add it to the keymap/editor so toolbar and hotkey share one path. Match the macOS toolbar's affordance SET (#55) so the two platforms stay conceptually identical even though rendering differs (NSToolbar vs egui). Reveal model: settle with owner — pure hotkey toggle, edge-reveal, or both; must fully hide (no reserved strip) so a fit photo is never cropped. FA solid glyphs consistent with the HUD icon set.",
-        "testStrategy": "Toolbar hidden = zero render/layout cost and frame timing identical to today (scripted keypress-to-photon parity via the #54 replay harness; no repaint wake while hidden). Each button dispatches the same CoreEvent as its hotkey (unit-testable at the Action layer). Manual: reveal, click through nav + panel toggles, confirm fit-mode photo is never cropped by the bar, and that it hides cleanly.",
-        "subtasks": []
+        "details": "SHIPPED core impl 2026-07-13 (winit shell, Windows+Linux). Rendered in the #54 egui overlay (crates/pb-app/src/toolbar.rs) as an egui TopBottomPanel, composited by pb-render; dispatches via PanelAction::ToolbarAction (one-shot) and ToolbarNavPress/Release (hold-to-fly through the core's begin/end_pointer_nav, which already existed). State via a separate Copy+Eq ToolbarState diffed each turn (NOT MenuState, which re-syncs the native menu) — counter from display_counter()/displayed_item (present-truth, hides on cold start), video-aware current_has_motion()/motion_playing(). Top inset reuses set_content_top_inset (chrome_inset_px = menu + toolbar); refresh_chrome_inset re-fits on a live toggle. Icons: 10 FA glyphs vendored BOTH families (the glyph! macro requires solid+regular) + a paint_tinted_flipped mirror API for random-prev. Styling from pb_ui tokens/Palette (hover fill, sunken press, accent for active toggle / playing). Settings: show_toolbar (default true, serde(default) via struct) with a Display>Appearance toggle, live-applied. Button set matches #55 minus power features; ADDS Delete. Non-occlusion is Fit-only (Fill/zoom/pan ride under, per the #59 spike). REMAINING (see subtasks): the pb-ui gallery/atom promotion, DPI-overlap + fullscreen-round-trip tests, the 8K/120 windowed on/off perf A/B gate, and visual polish iteration with the owner.",
+        "testStrategy": "Landed: pure width-plan tests (collapse order folder-nav>rotate>random, monotonic); display_counter present-truth test (counter stays on displayed_item during a ring miss); the core's pointer_nav hold-to-fly test. Pending: button->Action mapping table test; pointer quick-click = one advance vs hold lifecycle; left/right no-overlap at 100/125/150/200% DPI; old settings (no show_toolbar) default enabled; fullscreen round-trip has no stale-toolbar frame; headless light/dark snapshots; the 8K/120 A/B perf gate. Manual: click through every button, confirm accent-on-active + play-accent-while-playing, hold nav to fly, toggle show_toolbar live and see the photo reflow.",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "pb-ui gallery + promote the icon button atom",
+            "description": "Add the toolbar (and its states) to the pb-ui gallery for light/dark A-B; promote toolbar.rs icon_button into pb-ui as a reusable atom once the look settles.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "Remaining tests (mapping, input lifecycle, DPI, fullscreen)",
+            "description": "Button->Action mapping table; quick-click=one-advance vs hold/release/drag-off; left/right no-overlap at 100-200% DPI; old-settings-default-enabled; fullscreen round-trip no stale frame; headless snapshots.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "8K/120 windowed toolbar-on/off perf A/B gate",
+            "description": "Scripted keypress workload, toolbar on vs off, report CPU/GPU p50/p95/p99 + missed refreshes + keypress-to-photon; if the full-window composite is measurable, escalate to a strip-sized retained target.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "Visual polish iteration with owner",
+            "description": "Tune surface/opacity, hover/press/accent tones, group spacing/divider, icon set + counter format, overflow behavior — iterate until beautiful.",
+            "status": "pending"
+          }
+        ]
       },
       {
         "id": 62,
@@ -1292,6 +1317,14 @@
             "status": "pending"
           }
         ]
+      },
+      {
+        "id": 87,
+        "title": "Windows video audio: ~1s silent gap at playback start (video/audio stay in sync)",
+        "description": "Owner-reported (2026-07-13, D:\\Media\\Pictures\\2010\\2010-01-05 - Dazed and Confused in Oslo\\SANY0501.MP4): video starts immediately but Windows audio is absent for roughly one second, then remains in sync. Quick investigation rules out encoded leading silence (audio PTS 0; signal in the first 100 ms) and makes a generic one-second MF decoder warm-up unlikely (the existing Source Reader probe decoded 40 chunks in about 10 ms). The primary code risk is now `Engine::fill`: after bounded no-sample pulls/errors/EOS it zero-fills the requested WASAPI region, counts those generated frames in the published audio clock, and still lets the engine report Paused/ready. That can advance video and the audio clock together through fabricated silence. This is not yet confirmed; a cold WASAPI endpoint remains the main alternative. Instrument production MF reads, fill accounting, Resume/Start, the audio clock, and WASAPI loopback before choosing the fix. Do not amplitude-gate readiness: legitimate source silence counts as decoded audio. Authoritative deferred-fix plan: .taskmaster/plans/87-windows-video-audio-cold-start.md.",
+        "status": "pending",
+        "priority": "low",
+        "dependencies": []
       }
     ]
   }
