@@ -10,7 +10,13 @@
 #      PhotoBlaze / com.jdlien.PhotoBlaze — the only macOS build since task #70)
 #
 # Usage:
-#   scripts/build-swift-host.sh [--debug|--release] [--run]   (default: --release)
+#   scripts/build-swift-host.sh [--debug|--release] [--run] [--ffvideo]   (default: --release)
+#
+# --ffvideo (task #84, DEV-ONLY): builds the Rust engine with the FFmpeg video backend
+# (MKV/WebM/VP8/VP9/AV1 playback + posters via the dual-backend §8 routing) and links the
+# HOMEBREW FFmpeg dylibs — the resulting .app runs only on a machine with `brew install
+# ffmpeg`. NEVER for a release/DMG (phase 7 bundles FFmpeg properly; release-macos.sh
+# must not pass this).
 #
 # This is the only macOS build now — the old egui/winit "strangler-fig" bundle was retired
 # in task #70 (pb-app no longer compiles on macOS; the guard lives in crates/pb-app/build.rs).
@@ -21,12 +27,14 @@ set -euo pipefail
 
 PROFILE=release
 RUN=0
+FFVIDEO="${PB_FFVIDEO:-0}"
 for a in "$@"; do
 	case "$a" in
 		--debug) PROFILE=debug ;;
 		--release) PROFILE=release ;;
 		--run) RUN=1 ;;
-		*) echo "unknown arg: $a (usage: build-swift-host.sh [--debug|--release] [--run])" >&2; exit 2 ;;
+		--ffvideo) FFVIDEO=1 ;;
+		*) echo "unknown arg: $a (usage: build-swift-host.sh [--debug|--release] [--run] [--ffvideo])" >&2; exit 2 ;;
 	esac
 done
 
@@ -38,17 +46,34 @@ echo "==> cargo build -p pb-mac-ffi ($PROFILE, aarch64-apple-darwin)"
 # (otherwise ld warns: object built for newer macOS than being linked). No flag array:
 # expanding an EMPTY array under `set -u` is "unbound variable" on the macOS runners'
 # bash 3.2 (fixed in bash 4.4) — the CI failure that taught us.
+# --ffvideo: the feature flag for cargo, and the Homebrew FFmpeg link line for the Swift
+# link (a staticlib carries no link flags; passed at `swift build` time — NOT in
+# Package.swift — so no SwiftPM manifest-cache staleness when toggling). No arrays: bash
+# 3.2 under `set -u` (see the CI note above); Homebrew paths have no spaces.
+FEATURE_ARGS=""
+FF_LINK_ARGS=""
+if [[ "$FFVIDEO" == "1" ]]; then
+	FEATURE_ARGS="--features ffvideo"
+	FF_LIBDIR="$(pkg-config --variable=libdir libavcodec 2>/dev/null || true)"
+	if [[ -z "$FF_LIBDIR" ]]; then
+		echo "--ffvideo needs Homebrew FFmpeg (pkg-config can't find libavcodec)" >&2
+		exit 2
+	fi
+	FF_LINK_ARGS="-Xlinker -L$FF_LIBDIR -Xlinker -lavcodec -Xlinker -lavformat -Xlinker -lavutil -Xlinker -lswscale -Xlinker -lswresample"
+	echo "==> ffvideo: linking FFmpeg from $FF_LIBDIR (dev-only build)"
+fi
+
 if [[ "$PROFILE" == "release" ]]; then
-	MACOSX_DEPLOYMENT_TARGET=14.0 cargo build -p pb-mac-ffi --release --target aarch64-apple-darwin
+	MACOSX_DEPLOYMENT_TARGET=14.0 cargo build -p pb-mac-ffi --release --target aarch64-apple-darwin $FEATURE_ARGS
 else
-	MACOSX_DEPLOYMENT_TARGET=14.0 cargo build -p pb-mac-ffi --target aarch64-apple-darwin
+	MACOSX_DEPLOYMENT_TARGET=14.0 cargo build -p pb-mac-ffi --target aarch64-apple-darwin $FEATURE_ARGS
 fi
 
 echo "==> create-package (swift-bridge glue + staticlib → Swift package)"
 cargo run -q -p pb-mac-ffi --features package --bin create-package -- "--$PROFILE"
 
 echo "==> swift build ($PROFILE)"
-swift build --package-path mac -c "$PROFILE"
+swift build --package-path mac -c "$PROFILE" $FF_LINK_ARGS
 BIN="$(swift build --package-path mac -c "$PROFILE" --show-bin-path)/PhotoBlazeMac"
 [[ -x "$BIN" ]] || { echo "error: $BIN not found" >&2; exit 1; }
 

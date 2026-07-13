@@ -1075,8 +1075,41 @@ impl AppCoreHandle {
         self.core
             .native_video_seek_completed(session_id, generation, finished);
     }
-    fn native_video_failed(&mut self, session_id: u64, error: String) {
-        self.core.native_video_failed(session_id, error);
+    /// `recoverable` = the Swift shell's error classification (task #84 §8a):
+    /// demux/codec-shaped failures are FFmpeg-fallback-eligible; missing-file /
+    /// permission / DRM / network failures are not.
+    fn native_video_failed(&mut self, session_id: u64, error: String, recoverable: bool) {
+        self.core
+            .native_video_failed(session_id, error, recoverable);
+    }
+
+    // ── Session-backed video (task #84 §8): the FFmpeg fallback renders through
+    // the wgpu canvas and reports through these instead of the AVPlayer observer.
+
+    /// Whether the displayed item plays through the cross-platform `VideoSession`
+    /// (the FFmpeg route) — the host keys controls visibility + scrubber routing
+    /// on this alongside its own `nativeVideo` checks.
+    fn video_session_active(&self) -> bool {
+        self.core.video_session_active()
+    }
+
+    /// The session's playhead / duration in seconds (`0` = none/unknown) and
+    /// whether it's actively playing — the SwiftUI scrubber's raw inputs, read
+    /// each pump while a session is active (~display rate; cheap).
+    fn video_session_elapsed_secs(&self) -> f64 {
+        self.core.video_session_elapsed_secs()
+    }
+    fn video_session_duration_secs(&self) -> f64 {
+        self.core.video_session_duration_secs()
+    }
+    fn video_session_playing(&self) -> bool {
+        self.core.video_playing()
+    }
+
+    /// Absolute scrubber seek to `frac` of the duration — the Session twin of the
+    /// native player's `seek(toFraction:)`; no-op on the Native backend.
+    fn video_seek_fraction(&mut self, frac: f32) {
+        self.core.video_seek_fraction(frac);
     }
 
     fn menu_state(&self) -> ffi::MenuStateFfi {
@@ -3083,7 +3116,12 @@ mod ffi {
         fn native_video_state_changed(&mut self, session_id: u64, state: u8);
         fn native_video_ended(&mut self, session_id: u64);
         fn native_video_seek_completed(&mut self, session_id: u64, generation: u64, finished: bool);
-        fn native_video_failed(&mut self, session_id: u64, error: String);
+        fn native_video_failed(&mut self, session_id: u64, error: String, recoverable: bool);
+        fn video_session_active(&self) -> bool;
+        fn video_session_elapsed_secs(&self) -> f64;
+        fn video_session_duration_secs(&self) -> f64;
+        fn video_session_playing(&self) -> bool;
+        fn video_seek_fraction(&mut self, frac: f32);
         fn context_menu(&mut self);
 
         // The native Help panel (task #54, mac-first): on a PanelsChanged marker call

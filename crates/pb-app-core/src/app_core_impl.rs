@@ -215,6 +215,7 @@ impl AppCore {
             anim_stream: None,
             video: None,
             video_seq: 0,
+            video_ffmpeg_fallback: None,
             video_seek_last: None,
             pending_delete_retry: None,
             video_pill_text: None,
@@ -6210,8 +6211,20 @@ impl AppCore {
             };
             #[cfg(any(windows, target_os = "macos"))]
             if let Some(path) = self.source.path(item) {
-                if let Ok(info) = pb_decode::probe_video_stream(path) {
-                    fill_rows(&info);
+                match pb_decode::probe_video_stream(path) {
+                    Ok(info) => fill_rows(&info),
+                    // macOS + ffvideo (task #84 §8): AVFoundation can't probe the
+                    // containers the FFmpeg backend plays (MKV/WebM/…) — same
+                    // fallback split as playback, so the inspector rows appear.
+                    #[cfg(all(target_os = "macos", feature = "ffvideo"))]
+                    Err(_) => {
+                        let input = crate::video::VideoInput::Path(path.to_path_buf());
+                        if let Ok(info) = pb_decode::ff_probe_video_input(&input) {
+                            fill_rows(&info);
+                        }
+                    }
+                    #[cfg(not(all(target_os = "macos", feature = "ffvideo")))]
+                    Err(_) => {}
                 }
             }
             // Linux (task #84): the FFmpeg probe, path or in-RAM archive bytes alike.
@@ -6539,37 +6552,66 @@ impl AppCore {
         }
     }
 
-    /// The player failed (missing codec, unreadable file). Surface the error and return
-    /// to the poster — mirrors the Session `poll_video` failure path.
-    pub fn native_video_failed(&mut self, session_id: u64, error: String) {
+    /// The player failed. `recoverable` is the shell's error classification
+    /// (task #84 §8a level 2): `true` for demux/codec-shaped failures where the
+    /// FFmpeg fallback is worth attempting; `false` for missing-file /
+    /// permission / DRM / network errors, which no other backend can fix.
+    ///
+    /// With `ffvideo` built in, a recoverable failure on the displayed item
+    /// **retries through the FFmpeg session before any error surfaces** — the
+    /// user sees exactly one final error only if both backends fail (the
+    /// session's own failure path owns that toast). Otherwise: surface the
+    /// error and return to the poster, mirroring the Session `poll_video`
+    /// failure path.
+    pub fn native_video_failed(&mut self, session_id: u64, error: String, recoverable: bool) {
         let sid = crate::video::VideoSessionId(session_id);
-        let applied = self
+        let failed_item = self
             .video
             .as_mut()
             .and_then(ActiveVideoBackend::as_native_mut)
-            .is_some_and(|p| p.on_failed(sid, error.clone()));
-        if applied {
-            self.effects
-                .push(contract::CoreEffect::StopVideo { session_id: sid });
-            self.video = None;
-            self.update_video_progress();
-            let msg = if error.is_empty() {
-                "Video playback failed".to_string()
-            } else {
-                error
-            };
-            self.show_toast(&msg);
+            .and_then(|p| p.on_failed(sid, error.clone()).then_some(p.item));
+        let Some(item) = failed_item else { return };
+        // Stop + detach the failed AVPlayer either way.
+        self.effects
+            .push(contract::CoreEffect::StopVideo { session_id: sid });
+        self.video = None;
+        self.update_video_progress();
+        #[cfg(all(target_os = "macos", feature = "ffvideo"))]
+        if recoverable && Some(item) == self.displayed_item {
+            // §8a fallback: no toast before the FFmpeg attempt; the flag makes
+            // the very next start route to the session, consumed there.
+            self.video_ffmpeg_fallback = Some(item);
+            self.start_video_session(item);
+            return;
         }
+        #[cfg(not(all(target_os = "macos", feature = "ffvideo")))]
+        let _ = (recoverable, item);
+        let msg = if error.is_empty() {
+            "Video playback failed".to_string()
+        } else {
+            error
+        };
+        self.show_toast(&msg);
     }
 
-    /// Start silent video playback of `item` (task #79 phase 4): a fresh
+    /// Start video playback of `item` (task #79 phase 4 / task #84 §8a): a fresh
     /// `VideoSession` fed by a dedicated reader thread — Media Foundation on
-    /// Windows, the FFmpeg producer on Linux (task #84), both speaking the same
-    /// producer protocol (see [`run_platform_video_producer`]). The thread is
-    /// never joined — teardown is a Stop message / channel disconnect.
+    /// Windows, the FFmpeg producer on Linux and for the macOS fallback — or, on
+    /// macOS for nominally-native containers, the shell's `AVPlayer`. The
+    /// producer thread is never joined — teardown is a Stop message / channel
+    /// disconnect.
     pub fn start_video_session(&mut self, item: usize) {
         self.stop_video();
-        #[cfg(any(windows, all(unix, not(target_os = "macos"), feature = "ffvideo")))]
+        // macOS routing (§8a): AVPlayer for what it handles well; the FFmpeg
+        // session for known-unsupported containers and the level-2 fallback.
+        #[cfg(target_os = "macos")]
+        if self.macos_native_route(item) {
+            self.start_native_video(item);
+            return;
+        }
+        // Session platforms: Windows (MF), Linux (FFmpeg), and the macOS FFmpeg
+        // route above falling through (task #84 §8a).
+        #[cfg(any(windows, all(unix, feature = "ffvideo")))]
         {
             let fit = self.decode_fit();
             // Credit-granting estimate of one fitted RGBA8 frame. The fit box is a
@@ -6629,49 +6671,76 @@ impl AppCore {
             self.anim_hint_shown_for = Some(item); // engaged — retire the hint
             self.draw();
         }
-        // macOS (task 79.9): the shell's native `AVPlayer` owns the whole pipeline.
-        // The core keeps only a passive `Native` proxy and commands the player via
-        // `PlayVideo`; the shell reveals the layer on the first frame and reports
-        // state back through the `native_video_*` callbacks (79.9 phase 2).
-        #[cfg(target_os = "macos")]
-        {
-            self.video_seq += 1;
-            let id = crate::video::VideoSessionId(self.video_seq);
-            let muted = self.effective_mute();
-            if let Some(path) = self.source.path(item).map(Path::to_path_buf) {
-                self.video = Some(ActiveVideoBackend::Native(
-                    crate::video_native::NativeVideoProxy::new(item, id, muted),
-                ));
-                self.effects.push(contract::CoreEffect::PlayVideo {
-                    path,
-                    session_id: id,
-                    muted,
-                });
-            } else {
-                // Archive entry: no file URL. Read the container bytes OFF the event loop (a
-                // large ZIP inflates; 7z copies from resident RAM), then — once they arrive
-                // (drained in the tick) — hand them to the shell, which serves them to
-                // `AVPlayer` through a resource loader. RAM-only, never to disk (privacy #2).
-                // The proxy is live now so the session is gated; the poster holds until play.
-                self.video = Some(ActiveVideoBackend::Native(
-                    crate::video_native::NativeVideoProxy::new(item, id, muted),
-                ));
-                let name = self.source.name(item).to_string();
-                let source = self.source.clone();
-                let tx = self.video_read_tx.clone();
-                std::thread::spawn(move || {
-                    let bytes = source.bytes(item).unwrap_or_default();
-                    let _ = tx.send((id, name, muted, bytes));
-                });
-            }
-            self.anim_hint_shown_for = Some(item); // engaged — retire the hint
-            self.draw();
-        }
         #[cfg(not(any(windows, target_os = "macos", all(unix, feature = "ffvideo"))))]
         {
             let _ = item;
             self.show_toast("Video playback is not available yet on this platform");
         }
+    }
+
+    /// macOS §8a routing: `true` = try the shell's `AVPlayer`. Known-unsupported
+    /// containers (MKV/WebM/WMV/MPEG-PS/AVCHD) route to the FFmpeg session
+    /// (level 1), and a just-failed classified native attempt forces the
+    /// session exactly once (level 2 — the flag is consumed here, so a later
+    /// fresh open retries native first). Without `ffvideo` there is no FFmpeg
+    /// backend and everything stays native (the failure toast is the outcome).
+    #[cfg(target_os = "macos")]
+    fn macos_native_route(&mut self, item: usize) -> bool {
+        #[cfg(not(feature = "ffvideo"))]
+        {
+            let _ = item;
+            true
+        }
+        #[cfg(feature = "ffvideo")]
+        {
+            if self.video_ffmpeg_fallback.take() == Some(item) {
+                return false;
+            }
+            match crate::video::item_kind(self.source.as_ref(), item) {
+                crate::video::LibraryItemKind::Video(c) => c.macos_native(),
+                // Not a video (unreachable from the play paths) — native no-op.
+                crate::video::LibraryItemKind::Image => true,
+            }
+        }
+    }
+
+    /// macOS native playback (task 79.9): the shell's `AVPlayer` owns the whole
+    /// pipeline. The core keeps only a passive `Native` proxy and commands the
+    /// player via `PlayVideo`; the shell reveals the layer on the first frame and
+    /// reports state back through the `native_video_*` callbacks (79.9 phase 2).
+    #[cfg(target_os = "macos")]
+    fn start_native_video(&mut self, item: usize) {
+        self.video_seq += 1;
+        let id = crate::video::VideoSessionId(self.video_seq);
+        let muted = self.effective_mute();
+        if let Some(path) = self.source.path(item).map(Path::to_path_buf) {
+            self.video = Some(ActiveVideoBackend::Native(
+                crate::video_native::NativeVideoProxy::new(item, id, muted),
+            ));
+            self.effects.push(contract::CoreEffect::PlayVideo {
+                path,
+                session_id: id,
+                muted,
+            });
+        } else {
+            // Archive entry: no file URL. Read the container bytes OFF the event loop (a
+            // large ZIP inflates; 7z copies from resident RAM), then — once they arrive
+            // (drained in the tick) — hand them to the shell, which serves them to
+            // `AVPlayer` through a resource loader. RAM-only, never to disk (privacy #2).
+            // The proxy is live now so the session is gated; the poster holds until play.
+            self.video = Some(ActiveVideoBackend::Native(
+                crate::video_native::NativeVideoProxy::new(item, id, muted),
+            ));
+            let name = self.source.name(item).to_string();
+            let source = self.source.clone();
+            let tx = self.video_read_tx.clone();
+            std::thread::spawn(move || {
+                let bytes = source.bytes(item).unwrap_or_default();
+                let _ = tx.send((id, name, muted, bytes));
+            });
+        }
+        self.anim_hint_shown_for = Some(item); // engaged — retire the hint
+        self.draw();
     }
 
     /// One seek step on the active video (task #79 phase 6): ±2 s, Shift ±10 s,
@@ -7068,6 +7137,40 @@ impl AppCore {
             total,
             fraction,
         })
+    }
+
+    /// Whether the DISPLAYED item plays through the cross-platform
+    /// `VideoSession` backend — on macOS that's the FFmpeg route (task #84 §8),
+    /// and the SwiftUI shell keys its controls visibility + scrubber routing on
+    /// this (its `nativeVideo` checks cover only the `Native` backend).
+    pub fn video_session_active(&self) -> bool {
+        use crate::video::VideoSessionState::*;
+        self.session_ref().is_some_and(|v| {
+            Some(v.item) == self.displayed_item && !matches!(v.session.state(), Failed | Stopped)
+        })
+    }
+
+    /// The active session's playhead in seconds — raw numbers for the SwiftUI
+    /// scrubber (the winit shell reads the formatted [`Self::video_progress_row`]
+    /// instead). `0.0` when no session is active.
+    pub fn video_session_elapsed_secs(&self) -> f64 {
+        match self.session_ref() {
+            Some(v) if self.video_session_active() => {
+                v.session.desired_position(self.now).as_secs_f64()
+            }
+            _ => 0.0,
+        }
+    }
+
+    /// The active session's duration in seconds; `0.0` when unknown/none (the
+    /// scrubber renders duration-less streams without a bar, like the native path).
+    pub fn video_session_duration_secs(&self) -> f64 {
+        match self.session_ref() {
+            Some(v) if self.video_session_active() => {
+                v.session.duration.map(|d| d.as_secs_f64()).unwrap_or(0.0)
+            }
+            _ => 0.0,
+        }
     }
 
     /// Whether the displayed item's video is playing right now (session
@@ -7859,11 +7962,11 @@ impl AppCore {
 
 /// The platform's streaming video producer behind one name (task #84): the
 /// Windows Media Foundation reader, or the FFmpeg producer everywhere else the
-/// `ffvideo` feature reaches (Linux today; the macOS dual-backend fallback
-/// routes here in a later phase). Both speak the identical
+/// `ffvideo` feature reaches — ALL Linux video, and the macOS containers/codecs
+/// AVFoundation refuses (§8a routing). Both speak the identical
 /// `VideoProducerEvent`/`Msg` protocol, so `start_video_session` and the whole
 /// `VideoSession` state machine are backend-blind.
-#[cfg(any(windows, all(unix, not(target_os = "macos"), feature = "ffvideo")))]
+#[cfg(any(windows, all(unix, feature = "ffvideo")))]
 fn run_platform_video_producer(
     input: &crate::video::VideoInput,
     fit: Option<pb_decode::FitBox>,
@@ -7874,7 +7977,7 @@ fn run_platform_video_producer(
 ) {
     #[cfg(windows)]
     pb_decode::run_video_producer(input, fit, id, generation, events, msgs);
-    #[cfg(all(unix, not(target_os = "macos"), feature = "ffvideo"))]
+    #[cfg(all(unix, feature = "ffvideo"))]
     pb_decode::run_ff_video_producer(input, fit, id, generation, events, msgs);
 }
 
@@ -9653,6 +9756,93 @@ mod tests {
         }
         #[cfg(not(any(windows, target_os = "macos", all(unix, feature = "ffvideo"))))]
         assert!(core.video.is_none(), "no producer on this platform yet");
+    }
+
+    /// macOS §8a level-1 routing (task #84): a known-unsupported container (MKV)
+    /// goes straight to the FFmpeg session — no `AVPlayer`, no `PlayVideo`
+    /// effect — and a missing file fails it through the session's own path.
+    #[cfg(all(target_os = "macos", feature = "ffvideo"))]
+    #[test]
+    fn mkv_routes_to_the_ffmpeg_session_on_macos() {
+        let mut core = test_core();
+        core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
+            "/nope/clip.mkv",
+        )]));
+        core.displayed_item = Some(0);
+        core.native_toast = true;
+        core.toggle_play_pause();
+        let v = core.video.as_ref().expect("P starts playback");
+        assert!(
+            v.as_session().is_some(),
+            "MKV routes to the FFmpeg session, not AVPlayer"
+        );
+        assert!(
+            !core
+                .effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::PlayVideo { .. })),
+            "no native player is commanded"
+        );
+        // The missing file fails the producer; the session surfaces it via poll.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while core.video.is_some() && Instant::now() < deadline {
+            core.now = Instant::now();
+            core.poll_video();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(core.video.is_none(), "failure clears the session");
+        assert!(core.toast_native.is_some(), "the failure surfaces");
+    }
+
+    /// macOS §8a level-2 fallback (task #84): a *recoverable* native failure on
+    /// a nominally-native container retries through the FFmpeg session with no
+    /// toast before the attempt; an unrecoverable one surfaces immediately.
+    #[cfg(all(target_os = "macos", feature = "ffvideo"))]
+    #[test]
+    fn recoverable_native_failure_falls_back_to_the_ffmpeg_session() {
+        let mut core = test_core();
+        core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
+            "/nope/clip.mp4",
+        )]));
+        core.displayed_item = Some(0);
+        core.native_toast = true;
+        core.toggle_play_pause();
+        assert!(
+            core.video.as_ref().unwrap().as_native().is_some(),
+            "MP4 tries AVPlayer first"
+        );
+        let sid = core.native_video_session_id();
+        assert!(sid > 0);
+        // The shell classifies a demux/codec failure as recoverable.
+        core.native_video_failed(sid, "no codec for this video".into(), true);
+        assert!(
+            core.video
+                .as_ref()
+                .is_some_and(|v| v.as_session().is_some()),
+            "fallback started the FFmpeg session"
+        );
+        assert!(
+            core.toast_native.is_none(),
+            "no error surfaces before the fallback attempt"
+        );
+        // The flag was consumed — it never loops.
+        assert_eq!(core.video_ffmpeg_fallback, None);
+    }
+
+    #[cfg(all(target_os = "macos", feature = "ffvideo"))]
+    #[test]
+    fn unrecoverable_native_failure_surfaces_without_fallback() {
+        let mut core = test_core();
+        core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
+            "/nope/clip.mp4",
+        )]));
+        core.displayed_item = Some(0);
+        core.native_toast = true;
+        core.toggle_play_pause();
+        let sid = core.native_video_session_id();
+        core.native_video_failed(sid, "The file couldn't be opened".into(), false);
+        assert!(core.video.is_none(), "no fallback for missing-file/DRM");
+        assert!(core.toast_native.is_some(), "the error surfaces at once");
     }
 
     /// Owner-reported: the info line showed no playback row during video playback.

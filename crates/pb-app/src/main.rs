@@ -754,6 +754,7 @@ impl App {
             anim_stream: None,
             video: None,
             video_seq: 0,
+            video_ffmpeg_fallback: None,
             content_top_inset: 0,
             pending_video_bytes: None,
             pending_poster_bytes: std::collections::HashMap::new(),

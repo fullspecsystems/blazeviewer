@@ -86,6 +86,28 @@ impl VideoContainer {
         })
     }
 
+    /// Whether AVFoundation nominally handles this container — the macOS
+    /// dual-backend's **level-1 route** (task #84 plan §8a): known-unsupported
+    /// containers go straight to the FFmpeg session (MKV/WebM — no demuxer;
+    /// WMV/ASF, MPEG-PS, AVCHD's MPEG-TS — likewise); nominally-native ones try
+    /// `AVPlayer` first and fall back only on a classified failure (level 2 —
+    /// which also catches the codec-inside-container cases this extension test
+    /// can't see, e.g. an AVI whose codec QuickTime never shipped).
+    pub fn macos_native(self) -> bool {
+        match self {
+            VideoContainer::Mp4
+            | VideoContainer::Mov
+            | VideoContainer::ThreeGp
+            // AVFoundation opens *some* AVIs (MJPEG-era); level 2 catches the rest.
+            | VideoContainer::Avi => true,
+            VideoContainer::Mkv
+            | VideoContainer::Webm
+            | VideoContainer::Wmv
+            | VideoContainer::Mpeg
+            | VideoContainer::Avchd => false,
+        }
+    }
+
     /// Display name for HUD/panel/error copy.
     pub fn name(self) -> &'static str {
         match self {
