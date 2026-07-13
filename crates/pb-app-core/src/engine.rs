@@ -322,7 +322,38 @@ pub fn decode_item_cancellable(
         if let Some(path) = source.path(item) {
             match pb_decode::decode_video_poster(path, fit, cancel) {
                 Ok(img) => return Ok(img),
-                Err(e) => eprintln!("video poster failed: {}: {e}", path.display()),
+                Err(e) => {
+                    // macOS + ffvideo (task #84 §8, owner keep-both decision):
+                    // AVFoundation stays primary; FFmpeg posters only what it
+                    // refuses (MKV/WebM/… — the same split as playback).
+                    #[cfg(all(target_os = "macos", feature = "ffvideo"))]
+                    {
+                        let input = pb_decode::VideoInput::Path(path.to_path_buf());
+                        if let Ok(img) = pb_decode::ff_decode_video_poster(&input, fit, cancel) {
+                            return Ok(img);
+                        }
+                    }
+                    eprintln!("video poster failed: {}: {e}", path.display());
+                }
+            }
+        }
+        // macOS archive entry with a container AVFoundation can't open: the Swift
+        // AVAssetImageGenerator round-trip below would never produce a poster —
+        // FFmpeg posters it in-process from the entry's bytes (task #84 §8).
+        #[cfg(all(target_os = "macos", feature = "ffvideo"))]
+        if source.path(item).is_none() && !container.macos_native() {
+            match source.bytes(item) {
+                Ok(data) => {
+                    let input = pb_decode::VideoInput::Bytes {
+                        data: std::sync::Arc::new(data),
+                        name: source.name(item).to_string(),
+                    };
+                    match pb_decode::ff_decode_video_poster(&input, fit, cancel) {
+                        Ok(img) => return Ok(img),
+                        Err(e) => eprintln!("video poster failed: {}: {e}", source.name(item)),
+                    }
+                }
+                Err(e) => eprintln!("video poster read failed: {}: {e}", source.name(item)),
             }
         }
         // Linux (task #84): the FFmpeg poster covers path and archive-byte items

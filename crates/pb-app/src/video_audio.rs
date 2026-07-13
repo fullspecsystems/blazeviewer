@@ -10,7 +10,10 @@
 //! clock while audio plays. Mute is applied on the player only, so the clock keeps
 //! running muted and A/V sync is mute-independent.
 //!
-//! Windows-only for now (WinRT `MediaPlayer`); the stub keeps call sites cfg-free —
+//! Two real backends: Windows (WinRT `MediaPlayer` — the OS demuxes and plays the
+//! file itself) and Linux with `ffvideo` (task #84 §7: the FFmpeg audio decoder
+//! streamed to PipeWire's `pw-cat` — the proven Live-Photo output path, now
+//! streaming instead of whole-clip). The stub keeps call sites cfg-free —
 //! `open` returning `None` makes the shell report `Failed`, and the session
 //! degrades to silent playback on its monotonic clock.
 
@@ -18,12 +21,12 @@ use pb_app_core::video::{AudioClockSample, VideoInput, VideoSessionId};
 
 pub use imp::VideoAudio;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, all(unix, not(target_os = "macos"), feature = "ffvideo"))))]
 mod imp {
     use super::*;
 
-    /// No-op stub where there's no video audio backend yet (macOS/Linux video
-    /// playback is phase-7 parity work).
+    /// No-op stub where there's no video audio backend (macOS uses the SwiftUI
+    /// shell's AVAudioEngine sink; Linux needs the `ffvideo` feature).
     pub struct VideoAudio;
 
     impl VideoAudio {
@@ -40,6 +43,315 @@ mod imp {
         pub fn seek(&self, _position: std::time::Duration) {}
         pub fn sample(&self) -> Option<AudioClockSample> {
             None
+        }
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos"), feature = "ffvideo"))]
+mod imp {
+    use super::*;
+    use std::io::Write;
+    use std::process::{Child, Command, Stdio};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use pb_app_core::video::AudioClockState;
+    use pb_decode::FfAudioDecoder;
+
+    /// The plan's §7 option (b) clock: `pw-cat` reports nothing, so the played
+    /// position is frames-written minus a **characterized queue estimate** — the
+    /// ~64 KiB stdin pipe plus pw-cat's quantum (`--latency` below). Constant,
+    /// so A/V sync error is a fixed offset, not drift. Second-class-platform
+    /// honest: documented estimate, not a measured device clock (pipewire-rs is
+    /// the upgrade path if a Linux tester reports audible offset).
+    const QUEUE_ESTIMATE: Duration = Duration::from_millis(150);
+    /// One write chunk (~50 ms @ 48 kHz) — also the control-latency bound: the
+    /// feeder polls its control channel between chunk writes.
+    const CHUNK_FRAMES: usize = 2400;
+
+    /// Streaming video audio for Linux: a feeder thread pulls PCM from the
+    /// FFmpeg decoder and pipes it to `pw-cat` (see `live_audio.rs` for why
+    /// pw-cat beats cpal/rodio on a PipeWire desktop); pipe backpressure paces
+    /// it, so a 2-hour clip stays constant-memory.
+    pub struct VideoAudio {
+        session_id: VideoSessionId,
+        rate: u32,
+        ctl: Sender<Ctl>,
+        shared: Arc<Shared>,
+        feeder: Option<std::thread::JoinHandle<()>>,
+    }
+
+    struct Shared {
+        /// Interleaved frames written to the pipe since the last (re)anchor.
+        frames_written: AtomicU64,
+        /// Media position (µs) of the write counter's zero.
+        anchor_us: AtomicU64,
+        paused: AtomicBool,
+        muted: AtomicBool,
+        /// The decoder drained — the tail is in the pipe/device queue.
+        ended: AtomicBool,
+        failed: AtomicBool,
+    }
+
+    enum Ctl {
+        Pause,
+        Resume,
+        Seek(Duration),
+        Stop,
+    }
+
+    impl VideoAudio {
+        /// Open the decoder + spawn `pw-cat` **paused** (SIGSTOP right after
+        /// spawn; the core's `ResumeVideoAudio` starts it with the video
+        /// preroll). `None` when there's no track, the decoder fails, or
+        /// `pw-cat` isn't on PATH — the caller reports `Failed` and the session
+        /// plays silently.
+        pub fn open(
+            input: &VideoInput,
+            session_id: VideoSessionId,
+            muted: bool,
+        ) -> Option<VideoAudio> {
+            let decoder = FfAudioDecoder::open(input).ok()?;
+            let (rate, channels) = (decoder.rate(), decoder.channels());
+            if rate == 0 || channels == 0 {
+                return None;
+            }
+            let child = spawn_pw_cat(rate, channels)?;
+            let shared = Arc::new(Shared {
+                frames_written: AtomicU64::new(0),
+                anchor_us: AtomicU64::new(0),
+                paused: AtomicBool::new(true),
+                muted: AtomicBool::new(muted),
+                ended: AtomicBool::new(false),
+                failed: AtomicBool::new(false),
+            });
+            // Freeze immediately: opened-paused is the contract.
+            signal(&child, libc::SIGSTOP);
+            let (ctl_tx, ctl_rx) = std::sync::mpsc::channel();
+            let feeder = std::thread::spawn({
+                let shared = shared.clone();
+                move || feeder_loop(decoder, child, rate, channels, shared, ctl_rx)
+            });
+            Some(VideoAudio {
+                session_id,
+                rate,
+                ctl: ctl_tx,
+                shared,
+                feeder: Some(feeder),
+            })
+        }
+
+        pub fn pause(&self) {
+            self.shared.paused.store(true, Ordering::Relaxed);
+            let _ = self.ctl.send(Ctl::Pause);
+        }
+        pub fn resume(&self) {
+            self.shared.paused.store(false, Ordering::Relaxed);
+            let _ = self.ctl.send(Ctl::Resume);
+        }
+        /// Mute = the feeder zeroes samples; the stream (and clock) keeps running.
+        pub fn set_muted(&self, muted: bool) {
+            self.shared.muted.store(muted, Ordering::Relaxed);
+        }
+        pub fn seek(&self, position: Duration) {
+            let _ = self.ctl.send(Ctl::Seek(position));
+        }
+
+        /// One clock sample: anchor + written-frames time, minus the queue
+        /// estimate (never below the anchor — right after a seek nothing of the
+        /// new position has actually played yet).
+        pub fn sample(&self) -> Option<AudioClockSample> {
+            let s = &self.shared;
+            let state = if s.failed.load(Ordering::Relaxed) {
+                AudioClockState::Failed
+            } else if s.ended.load(Ordering::Relaxed) {
+                AudioClockState::Ended
+            } else if s.paused.load(Ordering::Relaxed) {
+                AudioClockState::Paused
+            } else {
+                AudioClockState::Playing
+            };
+            let anchor = Duration::from_micros(s.anchor_us.load(Ordering::Relaxed));
+            let written = Duration::from_secs_f64(
+                s.frames_written.load(Ordering::Relaxed) as f64 / self.rate.max(1) as f64,
+            );
+            let position = anchor + written.saturating_sub(QUEUE_ESTIMATE.min(written));
+            Some(AudioClockSample {
+                session_id: self.session_id,
+                state,
+                position,
+                sampled_at_monotonic: Duration::ZERO, // delivered immediately
+            })
+        }
+    }
+
+    impl Drop for VideoAudio {
+        fn drop(&mut self) {
+            let _ = self.ctl.send(Ctl::Stop);
+            if let Some(f) = self.feeder.take() {
+                let _ = f.join(); // bounded: the feeder polls ctl every ~50 ms chunk
+            }
+        }
+    }
+
+    /// The feeder: pull ~50 ms PCM chunks, apply mute, pipe to pw-cat (blocking
+    /// writes = pacing), polling the control channel between chunks. Owns the
+    /// decoder and the child; a seek repositions the decoder and **respawns**
+    /// pw-cat (dropping the old child flushes its queued audio instantly).
+    fn feeder_loop(
+        mut decoder: FfAudioDecoder,
+        mut child: Child,
+        rate: u32,
+        channels: u16,
+        shared: Arc<Shared>,
+        ctl: Receiver<Ctl>,
+    ) {
+        let mut stdin = child.stdin.take();
+        'outer: loop {
+            // 1. Control (block while paused/ended — no busy spin).
+            let blocking = shared.paused.load(Ordering::Relaxed)
+                || (shared.ended.load(Ordering::Relaxed))
+                || shared.failed.load(Ordering::Relaxed);
+            let msg = if blocking {
+                match ctl.recv() {
+                    Ok(m) => Some(m),
+                    Err(_) => break 'outer,
+                }
+            } else {
+                match ctl.try_recv() {
+                    Ok(m) => Some(m),
+                    Err(TryRecvError::Empty) => None,
+                    Err(_) => break 'outer,
+                }
+            };
+            match msg {
+                Some(Ctl::Stop) => break 'outer,
+                Some(Ctl::Pause) => {
+                    signal(&child, libc::SIGSTOP);
+                    continue;
+                }
+                Some(Ctl::Resume) => {
+                    signal(&child, libc::SIGCONT);
+                    continue;
+                }
+                Some(Ctl::Seek(target)) => {
+                    // Kill the old sink (drops its queued audio), reposition,
+                    // respawn, re-anchor the clock at the landing.
+                    let _ = stdin.take();
+                    signal(&child, libc::SIGCONT);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    if decoder.seek(target).is_err() {
+                        shared.failed.store(true, Ordering::Relaxed);
+                        continue;
+                    }
+                    // Land the discard so `position()` reports the real anchor.
+                    let landing = decoder.read(1).unwrap_or_default();
+                    let anchor = decoder.position();
+                    match spawn_pw_cat(rate, channels) {
+                        Some(mut c) => {
+                            stdin = c.stdin.take();
+                            child = c;
+                            if shared.paused.load(Ordering::Relaxed) {
+                                signal(&child, libc::SIGSTOP);
+                            }
+                        }
+                        None => {
+                            shared.failed.store(true, Ordering::Relaxed);
+                            continue;
+                        }
+                    }
+                    shared
+                        .anchor_us
+                        .store(anchor.as_micros() as u64, Ordering::Relaxed);
+                    shared.frames_written.store(0, Ordering::Relaxed);
+                    shared.ended.store(false, Ordering::Relaxed);
+                    // Don't lose the landing frame.
+                    if !landing.is_empty()
+                        && write_chunk(&mut stdin, &landing, &shared, channels).is_err()
+                    {
+                        shared.failed.store(true, Ordering::Relaxed);
+                    }
+                    continue;
+                }
+                None => {}
+            }
+
+            // 2. One chunk of audio.
+            match decoder.read(CHUNK_FRAMES) {
+                Ok(chunk) if chunk.is_empty() => {
+                    shared.ended.store(true, Ordering::Relaxed);
+                }
+                Ok(chunk) => {
+                    if write_chunk(&mut stdin, &chunk, &shared, channels).is_err() {
+                        shared.failed.store(true, Ordering::Relaxed);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("video audio decode failed: {e}");
+                    shared.failed.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+        signal(&child, libc::SIGCONT);
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// Write one interleaved chunk (muted → zeros; the clock advances either way).
+    fn write_chunk(
+        stdin: &mut Option<std::process::ChildStdin>,
+        chunk: &[f32],
+        shared: &Shared,
+        channels: u16,
+    ) -> std::io::Result<()> {
+        let Some(w) = stdin.as_mut() else {
+            return Err(std::io::Error::other("pw-cat stdin gone"));
+        };
+        let muted = shared.muted.load(Ordering::Relaxed);
+        let mut bytes = Vec::with_capacity(chunk.len() * 4);
+        for &s in chunk {
+            let v = if muted { 0.0f32 } else { s };
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        w.write_all(&bytes)?;
+        shared.frames_written.fetch_add(
+            (chunk.len() / channels.max(1) as usize) as u64,
+            Ordering::Relaxed,
+        );
+        Ok(())
+    }
+
+    fn spawn_pw_cat(rate: u32, channels: u16) -> Option<Child> {
+        Command::new("pw-cat")
+            .args([
+                "--playback",
+                "--raw",
+                "--format",
+                "f32",
+                "--rate",
+                &rate.to_string(),
+                "--channels",
+                &channels.max(1).to_string(),
+                // A small quantum keeps pw-cat's own queue (part of the clock's
+                // QUEUE_ESTIMATE) tight.
+                "--latency",
+                "50ms",
+                "-",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()
+    }
+
+    fn signal(child: &Child, sig: libc::c_int) {
+        // SIGSTOP/SIGCONT need no state tracking (redundant deliveries no-op).
+        unsafe {
+            libc::kill(child.id() as libc::pid_t, sig);
         }
     }
 }

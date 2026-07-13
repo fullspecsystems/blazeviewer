@@ -12,6 +12,11 @@
 # untracked paths included. (Safe to delete; it's stale once the dep is repointed to crates.io.)
 /vendor/
 
+# Locally-built FFmpeg (task #84 phase 7, scripts/build-ffmpeg-macos.sh): the source tree,
+# object files, and installed LGPL dylibs bundled into the macOS .app. Reproducible from the
+# pinned tarball — never committed (also kept out of the -dirty check, like /vendor/).
+/third_party/
+
 # Coverage / profiling output
 *.profraw
 *.profdata

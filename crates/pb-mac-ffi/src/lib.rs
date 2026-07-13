@@ -129,6 +129,15 @@ pub struct AppCoreHandle {
     /// The never-consumed copy of the CLI launch paths (see `launch_path_count`) —
     /// the host's Apple-Event echo filter reads it after the stash is consumed.
     launch_paths_record: Vec<String>,
+    /// The `StartVideoAudio` effect's container input, stashed for
+    /// `video_audio_open` (a `VideoInput` can't cross the FFI — stash + pull,
+    /// like the clipboard). Task #84 §7.
+    #[cfg(feature = "ffvideo")]
+    pending_audio_input: Option<pb_app_core::video::VideoInput>,
+    /// The open FFmpeg audio decoder feeding the host's AVAudioEngine sink —
+    /// driven entirely through the `video_audio_*` accessors on the main actor.
+    #[cfg(feature = "ffvideo")]
+    session_audio: Option<pb_app_core::FfAudioDecoder>,
 }
 
 /// One flattened folder-tree row for the native list. `path` is the disk path (Finder
@@ -186,6 +195,10 @@ impl AppCoreHandle {
             help_snapshot: Vec::new(),
             inspector_snapshot: Vec::new(),
             tree_snapshot: Vec::new(),
+            #[cfg(feature = "ffvideo")]
+            pending_audio_input: None,
+            #[cfg(feature = "ffvideo")]
+            session_audio: None,
             pending_launch_paths: Vec::new(),
             launch_paths_record: Vec::new(),
         }
@@ -1075,8 +1088,172 @@ impl AppCoreHandle {
         self.core
             .native_video_seek_completed(session_id, generation, finished);
     }
-    fn native_video_failed(&mut self, session_id: u64, error: String) {
-        self.core.native_video_failed(session_id, error);
+    /// `recoverable` = the Swift shell's error classification (task #84 §8a):
+    /// demux/codec-shaped failures are FFmpeg-fallback-eligible; missing-file /
+    /// permission / DRM / network failures are not.
+    fn native_video_failed(&mut self, session_id: u64, error: String, recoverable: bool) {
+        self.core
+            .native_video_failed(session_id, error, recoverable);
+    }
+
+    // ── Session-backed video (task #84 §8): the FFmpeg fallback renders through
+    // the wgpu canvas and reports through these instead of the AVPlayer observer.
+
+    /// Whether the displayed item plays through the cross-platform `VideoSession`
+    /// (the FFmpeg route) — the host keys controls visibility + scrubber routing
+    /// on this alongside its own `nativeVideo` checks.
+    fn video_session_active(&self) -> bool {
+        self.core.video_session_active()
+    }
+
+    /// The session's playhead / duration in seconds (`0` = none/unknown) and
+    /// whether it's actively playing — the SwiftUI scrubber's raw inputs, read
+    /// each pump while a session is active (~display rate; cheap).
+    fn video_session_elapsed_secs(&self) -> f64 {
+        self.core.video_session_elapsed_secs()
+    }
+    fn video_session_duration_secs(&self) -> f64 {
+        self.core.video_session_duration_secs()
+    }
+    fn video_session_playing(&self) -> bool {
+        self.core.video_playing()
+    }
+
+    /// Absolute scrubber seek to `frac` of the duration — the Session twin of the
+    /// native player's `seek(toFraction:)`; no-op on the Native backend.
+    fn video_seek_fraction(&mut self, frac: f32) {
+        self.core.video_seek_fraction(frac);
+    }
+
+    // ── Session-video audio (task #84 §7): the Rust FFmpeg decoder behind the
+    // host's AVAudioEngine sink. All main-actor (decoding a chunk is ~1 ms).
+    // Without ffvideo these are inert stubs — no session video exists then.
+
+    /// Open the decoder over the container the `StartVideoAudio` effect stashed.
+    /// `false` = no track / open failure — the host reports a `Failed` clock
+    /// sample and the session plays silently on its monotonic clock.
+    fn video_audio_open(&mut self) -> bool {
+        #[cfg(feature = "ffvideo")]
+        {
+            self.session_audio = None;
+            if let Some(input) = self.pending_audio_input.take() {
+                // Capped at stereo: AVAudioEngine's graph rejects wider standard
+                // formats (the MKV-5.1 abort) — 5.1/7.1 folds down in the decoder.
+                match pb_app_core::FfAudioDecoder::open_capped(&input, 2) {
+                    Ok(d) => {
+                        self.session_audio = Some(d);
+                        return true;
+                    }
+                    Err(e) => eprintln!("video audio open failed: {e}"),
+                }
+            }
+            false
+        }
+        #[cfg(not(feature = "ffvideo"))]
+        false
+    }
+
+    fn video_audio_rate(&self) -> u32 {
+        #[cfg(feature = "ffvideo")]
+        let r = self.session_audio.as_ref().map_or(0, |d| d.rate());
+        #[cfg(not(feature = "ffvideo"))]
+        let r = 0;
+        r
+    }
+
+    fn video_audio_channels(&self) -> u32 {
+        #[cfg(feature = "ffvideo")]
+        let r = self
+            .session_audio
+            .as_ref()
+            .map_or(0, |d| u32::from(d.channels()));
+        #[cfg(not(feature = "ffvideo"))]
+        let r = 0;
+        r
+    }
+
+    /// Decode up to `max_frames` interleaved f32 sample frames. Empty = end of
+    /// stream (or a decode failure, which closes the decoder — the host sees
+    /// `at_eof` and lets the clock end). ~100 ms chunks at a ~4 Hz top-up
+    /// cadence keep this far off any real-time path.
+    fn video_audio_read(&mut self, max_frames: u32) -> Vec<f32> {
+        #[cfg(feature = "ffvideo")]
+        let r = match self.session_audio.as_mut() {
+            Some(d) => match d.read(max_frames as usize) {
+                Ok(chunk) => chunk,
+                Err(e) => {
+                    eprintln!("video audio read failed: {e}");
+                    self.session_audio = None;
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        };
+        #[cfg(not(feature = "ffvideo"))]
+        let r = {
+            let _ = max_frames;
+            Vec::new()
+        };
+        r
+    }
+
+    /// The stream is drained (or the decoder is gone) — an empty read is final.
+    fn video_audio_at_eof(&self) -> bool {
+        #[cfg(feature = "ffvideo")]
+        let r = self.session_audio.as_ref().is_none_or(|d| d.at_eof());
+        #[cfg(not(feature = "ffvideo"))]
+        let r = true;
+        r
+    }
+
+    /// Seek the decoder; returns the new clock anchor in seconds (the host's
+    /// scheduling epoch — landing is within one audio frame of the target).
+    fn video_audio_seek(&mut self, secs: f64) -> f64 {
+        #[cfg(feature = "ffvideo")]
+        let r = match self.session_audio.as_mut() {
+            Some(d) => match d.seek(std::time::Duration::from_secs_f64(secs.max(0.0))) {
+                Ok(anchor) => anchor.as_secs_f64(),
+                Err(e) => {
+                    eprintln!("video audio seek failed: {e}");
+                    self.session_audio = None;
+                    secs
+                }
+            },
+            None => secs,
+        };
+        #[cfg(not(feature = "ffvideo"))]
+        let r = secs;
+        r
+    }
+
+    fn video_audio_close(&mut self) {
+        #[cfg(feature = "ffvideo")]
+        {
+            self.session_audio = None;
+            self.pending_audio_input = None;
+        }
+    }
+
+    /// Host → core: one audio clock sample (the shell half of the clock bridge
+    /// the winit shell implements in `video_audio.rs`). `state`: 0 Opening,
+    /// 1 Playing, 2 Paused, 3 Buffering, 4 Ended, 5 Failed, 6 Absent.
+    fn video_audio_clock(&mut self, session_id: u64, state: u8, position_secs: f64) {
+        use pb_app_core::video::{AudioClockSample, AudioClockState, VideoSessionId};
+        let state = match state {
+            1 => AudioClockState::Playing,
+            2 => AudioClockState::Paused,
+            3 => AudioClockState::Buffering,
+            4 => AudioClockState::Ended,
+            5 => AudioClockState::Failed,
+            6 => AudioClockState::Absent,
+            _ => AudioClockState::Opening,
+        };
+        self.core.video_audio_clock(AudioClockSample {
+            session_id: VideoSessionId(session_id),
+            state,
+            position: std::time::Duration::from_secs_f64(position_secs.max(0.0)),
+            sampled_at_monotonic: std::time::Duration::ZERO, // delivered immediately
+        });
     }
 
     fn menu_state(&self) -> ffi::MenuStateFfi {
@@ -2129,6 +2306,19 @@ impl AppCoreHandle {
                     self.last_menu_state = state;
                     return Some(ffi::CoreEffectFfi::MenuStateChanged);
                 }
+                // Session-video audio (task #84 §7): stash the container input for
+                // `video_audio_open`, surface the marker with the FFI-able fields.
+                // Without ffvideo the arm is unreachable in practice (no session
+                // exists on macOS), but stays total via map_effect's fallthrough.
+                #[cfg(feature = "ffvideo")]
+                C::StartVideoAudio {
+                    input,
+                    session_id,
+                    muted,
+                } => {
+                    self.pending_audio_input = Some(input);
+                    return Some(ffi::CoreEffectFfi::StartVideoAudio(session_id.0, muted));
+                }
                 // A natively-presented panel changed (task #54) — the host calls
                 // `help_refresh()` + `help_visible()` and updates its SwiftUI view.
                 C::PanelsChanged => return Some(ffi::CoreEffectFfi::PanelsChanged),
@@ -2789,6 +2979,14 @@ fn map_effect(e: contract::CoreEffect) -> ffi::CoreEffectFfi {
         // archive. (CloseDialog is handled in `next_effect` — it updates the shown-dialog
         // mirror there.)
         C::SetDialogChecking => E::SetDialogChecking,
+        // Session-video audio (task #84 §7): the host owns the AVAudioEngine sink; the
+        // Rust FFmpeg decoder behind it is driven through the video_audio_* accessors.
+        // (StartVideoAudio is intercepted in `next_effect` — the input must be stashed.)
+        C::StopVideoAudio => E::StopVideoAudio,
+        C::PauseVideoAudio => E::PauseVideoAudio,
+        C::ResumeVideoAudio => E::ResumeVideoAudio,
+        C::SeekVideoAudio { position } => E::SeekVideoAudio(position.as_secs_f64()),
+        C::SetVideoAudioMuted(muted) => E::SetVideoAudioMuted(muted),
         _ => E::Other,
     }
 }
@@ -2858,6 +3056,18 @@ mod ffi {
         StepVideo(u64, bool),
         // Mute/unmute the native player in place (session_id, muted).
         SetVideoMuted(u64, bool),
+        // Session-video audio (task #84 §7): open the FFmpeg audio decoder for the
+        // playing VideoSession (session_id, muted) — the host calls video_audio_open()
+        // (the input is stashed Rust-side), builds its AVAudioEngine sink over the
+        // video_audio_read/seek accessors, and reports the played-position clock back
+        // ~4x/s via video_audio_clock(). Opens PAUSED; ResumeVideoAudio starts it with
+        // the video preroll.
+        StartVideoAudio(u64, bool),
+        StopVideoAudio,
+        PauseVideoAudio,
+        ResumeVideoAudio,
+        SeekVideoAudio(f64),
+        SetVideoAudioMuted(bool),
         // true = enter the borderless fullscreen speed mode; false = restore windowed.
         SetWindowMode(bool),
         // Hide the window (the Esc-teardown step before Quit).
@@ -3083,7 +3293,22 @@ mod ffi {
         fn native_video_state_changed(&mut self, session_id: u64, state: u8);
         fn native_video_ended(&mut self, session_id: u64);
         fn native_video_seek_completed(&mut self, session_id: u64, generation: u64, finished: bool);
-        fn native_video_failed(&mut self, session_id: u64, error: String);
+        fn native_video_failed(&mut self, session_id: u64, error: String, recoverable: bool);
+        fn video_session_active(&self) -> bool;
+        fn video_session_elapsed_secs(&self) -> f64;
+        fn video_session_duration_secs(&self) -> f64;
+        fn video_session_playing(&self) -> bool;
+        fn video_seek_fraction(&mut self, frac: f32);
+        // Session-video audio (task #84 §7): the FFmpeg decoder behind the host's
+        // AVAudioEngine sink, plus the audio clock bridge back into the core.
+        fn video_audio_open(&mut self) -> bool;
+        fn video_audio_rate(&self) -> u32;
+        fn video_audio_channels(&self) -> u32;
+        fn video_audio_read(&mut self, max_frames: u32) -> Vec<f32>;
+        fn video_audio_at_eof(&self) -> bool;
+        fn video_audio_seek(&mut self, secs: f64) -> f64;
+        fn video_audio_close(&mut self);
+        fn video_audio_clock(&mut self, session_id: u64, state: u8, position_secs: f64);
         fn context_menu(&mut self);
 
         // The native Help panel (task #54, mac-first): on a PanelsChanged marker call

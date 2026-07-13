@@ -74,14 +74,18 @@ final class CoreModel {
     private(set) var infoLineAlign = 2
 
     /// The info-line **playback row** (task 79.9 phase 5): a play/pause button + a
-    /// click/drag scrubber + elapsed/total, shown while a native video is active and the
-    /// info line is visible. Driven by the AVPlayer's periodic time observer (the core
-    /// keeps no video clock), so these advance during playback and the knob glides.
+    /// click/drag scrubber + elapsed/total, shown while a video is active and the
+    /// info line is visible. Two clock sources behind the same vars: a native
+    /// video's AVPlayer periodic time observer, or — for a session-backed (FFmpeg,
+    /// task #84 §8) video — the pump polling the core's session clock.
     private(set) var videoControlsVisible = false
     private(set) var videoElapsed = "0:00"
     private(set) var videoTotal = ""
     private(set) var videoFraction = 0.0
     private(set) var videoPlaying = false
+    /// Whether the displayed item plays through the core's `VideoSession` (the FFmpeg
+    /// route) — edge-tracked in `pump()` to reset the scrubber on a fresh session.
+    @ObservationIgnored private var sessionVideoActive = false
     /// True while the user is actively dragging the info-line scrubber. A drag captures the
     /// pointer, so canvas hover moves stop and the reveal flash would decay mid-drag — the
     /// pump keeps the controls up while this is set (not `@Published`; only `pump()` reads it).
@@ -1575,12 +1579,31 @@ final class CoreModel {
             // even when nothing else on screen moves.
             withAnimation(Layout.chromeFade) { infoLineVisible = infoVis }
         }
-        // The playback row shows while a native video is active and the info line is on —
-        // either the persistent `i` line or the transient hover-reveal flash (armed by a
-        // pointer move over the bottom controls zone; `info_line_visible()` folds both in).
-        // An in-flight scrubber drag also pins it up: the drag captures the pointer, so the
-        // hover flash would decay out from under the user's own knob (see `videoScrubbing`).
-        let controls = (infoVis || videoScrubbing) && nativeVideo != nil
+        // Session-backed video (task #84 §8): the FFmpeg fallback renders through the
+        // wgpu canvas and has no AVPlayer observer, so the pump reads its scrubber
+        // state each tick (cheap FFI; the link is alive whenever a session is active).
+        let sessionVideo = core.video_session_active()
+        if sessionVideo != sessionVideoActive {
+            sessionVideoActive = sessionVideo
+            if sessionVideo { resetVideoControls() } // fresh clip — scrubber starts at 0
+        }
+        if sessionVideo { updateSessionVideoProgress() }
+        // Session-video audio clock (task #84 §7): ~4 Hz played-position samples to
+        // the core — the session's master clock while audio plays — plus a
+        // scheduling top-up safety net (completion callbacks are the primary driver).
+        if let sa = sessionAudio, Date().timeIntervalSince(sessionAudioSampledAt) >= 0.25 {
+            sessionAudioSampledAt = Date()
+            sa.topUp()
+            let (state, position) = sa.sample()
+            core.video_audio_clock(sa.sessionId, state, position)
+        }
+        // The playback row shows while a video is active — native OR session-backed —
+        // and the info line is on: either the persistent `i` line or the transient
+        // hover-reveal flash (armed by a pointer move over the bottom controls zone;
+        // `info_line_visible()` folds both in). An in-flight scrubber drag also pins it
+        // up: the drag captures the pointer, so the hover flash would decay out from
+        // under the user's own knob (see `videoScrubbing`).
+        let controls = (infoVis || videoScrubbing) && (nativeVideo != nil || sessionVideo)
         if controls != videoControlsVisible {
             withAnimation(Layout.chromeFade) { videoControlsVisible = controls }
         }
@@ -1910,6 +1933,13 @@ final class CoreModel {
     /// single media authority (the Rust core keeps only a passive proxy).
     @ObservationIgnored private var nativeVideo: NativeVideoPlayer?
 
+    /// The session-video audio sink (task #84 §7): AVAudioEngine over the Rust FFmpeg
+    /// audio decoder, for session-backed (FFmpeg) videos — commanded by the core's
+    /// `StartVideoAudio`/`StopVideoAudio`/… effects; its clock samples flow back ~4×/s
+    /// from `pump()`.
+    @ObservationIgnored private var sessionAudio: SessionAudioPlayer?
+    @ObservationIgnored private var sessionAudioSampledAt = Date.distantPast
+
     // MARK: - Effects out
 
     /// Pull the effect queue dry and execute each effect — always on the main actor.
@@ -1988,6 +2018,28 @@ final class CoreModel {
             liveAudio?.pause()
         case .ResumeLiveAudio:
             liveAudio?.play()
+        // Session-video audio (task #84 §7): the FFmpeg-backed sink for session
+        // videos. Opens PAUSED (the core resumes it with the video preroll); a
+        // failed open reports one Failed clock sample so the session degrades to
+        // silent immediately instead of waiting out the readiness timeout.
+        case .StartVideoAudio(let sessionId, let muted):
+            sessionAudio?.stop()
+            sessionAudio = SessionAudioPlayer(core: core, sessionId: sessionId, muted: muted)
+            sessionAudioSampledAt = Date.distantPast // sample immediately (readiness)
+            if sessionAudio == nil {
+                core.video_audio_clock(sessionId, 5, 0) // Failed
+            }
+        case .StopVideoAudio:
+            sessionAudio?.stop()
+            sessionAudio = nil
+        case .PauseVideoAudio:
+            sessionAudio?.pause()
+        case .ResumeVideoAudio:
+            sessionAudio?.resume()
+        case .SeekVideoAudio(let seconds):
+            sessionAudio?.seek(toSeconds: seconds)
+        case .SetVideoAudioMuted(let muted):
+            sessionAudio?.setMuted(muted)
         case .PlayVideo(let path, let sessionId, let muted):
             playNativeVideo(path: path.toString(), sessionId: sessionId, muted: muted)
         case .PlayVideoBytes(let name, let sessionId, let muted):
@@ -2580,11 +2632,34 @@ final class CoreModel {
         videoPlaying = false
     }
 
-    /// The info-line scrubber was dragged/clicked to `fraction` of the duration. Seeks the
-    /// native player directly (it owns the clock); the play/pause button routes through the
+    /// The session-backed (FFmpeg, task #84 §8) twin of `updateVideoProgress`: the pump
+    /// polls the core's session clock while a session is active. Same change-guards so
+    /// the ~1 Hz labels don't re-render at the pump's rate.
+    private func updateSessionVideoProgress() {
+        let elapsed = core.video_session_elapsed_secs()
+        let total = core.video_session_duration_secs()
+        videoFraction = total > 0 ? min(1.0, max(0.0, elapsed / total)) : 0.0
+        let e = Self.formatTime(elapsed)
+        if e != videoElapsed { videoElapsed = e }
+        let t = total > 0 ? Self.formatTime(total) : ""
+        if t != videoTotal { videoTotal = t }
+        let playing = core.video_session_playing()
+        if playing != videoPlaying { videoPlaying = playing }
+    }
+
+    /// The info-line scrubber was dragged/clicked to `fraction` of the duration. A native
+    /// video seeks its player directly (it owns the clock); a session-backed video routes
+    /// through the core's fractional seek (task #84 §8 — the same `video_seek_fraction`
+    /// the winit shell's playback bar uses). The play/pause button routes through the
     /// core action so it matches `P`.
     func seekVideoFraction(_ fraction: Double) {
-        nativeVideo?.seek(toFraction: fraction)
+        if let nv = nativeVideo {
+            nv.seek(toFraction: fraction)
+        } else if sessionVideoActive {
+            core.video_seek_fraction(Float(fraction))
+            kick()
+            drainEffects()
+        }
     }
 
     /// The current item's video-layer placement (physical px, top-left origin) — the
@@ -2646,8 +2721,10 @@ final class CoreModel {
         kick()
         drainEffects()
     }
-    func nativeVideoFailed(_ sessionId: UInt64, error: String) {
-        core.native_video_failed(sessionId, error)
+    func nativeVideoFailed(_ sessionId: UInt64, error: String, recoverable: Bool) {
+        // A `recoverable` demux/codec failure retries through the FFmpeg session
+        // core-side before any error surfaces (task #84 §8a level 2).
+        core.native_video_failed(sessionId, error, recoverable)
         kick()
         drainEffects()
         syncToolbar() // failure cleared the session → drop the blue

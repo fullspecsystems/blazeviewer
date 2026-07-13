@@ -270,11 +270,11 @@ impl Default for Settings {
             appearance_mode: AppearanceMode::System, // follow the OS light/dark theme
             accent_source: AccentSource::System,     // follow the OS accent (brand fallback)
             accent_custom: [0x00, 0x78, 0xd4],       // Windows accent blue — a good neutral
-                                                     // starting point when you switch to Custom
-            info_line_align: InfoLineAlign::Right,   // today's bottom-right placement
-            show_image_info: false,                  // off until opted in (unchanged launch)
-            glass_toolbar: true,                     // transparent toolbar on by default (#59)
-            info_show_folder: false,                 // opt-in — filename alone by default
+            // starting point when you switch to Custom
+            info_line_align: InfoLineAlign::Right, // today's bottom-right placement
+            show_image_info: false,                // off until opted in (unchanged launch)
+            glass_toolbar: true,                   // transparent toolbar on by default (#59)
+            info_show_folder: false,               // opt-in — filename alone by default
             info_show_filename: true,
             info_show_resolution: true,
             info_show_codec: true,

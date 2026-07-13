@@ -796,6 +796,8 @@ impl App {
             anim_stream: None,
             video: None,
             video_seq: 0,
+            // The macOS FFmpeg dual-backend fallback session (inert on the winit shell).
+            video_ffmpeg_fallback: None,
             // macOS-only archive-video handoff state (inert on the winit shell — see the
             // channel note above): pending bytes for the shell to pull, poster-request
             // bookkeeping, and the off-thread read channels. (`content_top_inset` is set with
@@ -1755,7 +1757,9 @@ impl App {
             .as_ref()
             .map(|o| o.pixels_per_point())
             .unwrap_or(1.0);
-        let pt = self.last_pointer.map(|(x, y)| (x as f32 / ppp, y as f32 / ppp));
+        let pt = self
+            .last_pointer
+            .map(|(x, y)| (x as f32 / ppp, y as f32 / ppp));
         let in_zone = |zone: Option<[f32; 4]>, open: bool| -> bool {
             match (open, zone, pt) {
                 (true, Some(z), Some((px, py))) => {

@@ -9,6 +9,8 @@
 //!   rotation / SAR / duration / fps / audio-presence facts.
 //! - [`color`] — FFmpeg color metadata (H.273 CICP) → [`crate::ColorTransform`]
 //!   / [`crate::video::VideoColorInfo`], plus correct swscale coefficients.
+//! - [`hw`] *(`ffvideo`)* — hardware decode setup (VideoToolbox / VAAPI) +
+//!   the GPU-surface → CPU NV12/P010 transfer the producer feeds the converter.
 //! - [`poster`] *(`ffvideo`)* — the first-non-black poster walk + input probe.
 //! - [`video_producer`] *(`ffvideo`)* — the streaming producer speaking the
 //!   `VideoProducerEvent`/`Msg` protocol.
@@ -20,8 +22,13 @@ pub mod color;
 pub mod convert;
 pub mod init;
 pub mod io;
+pub mod pcm;
 pub mod probe;
 
+#[cfg(feature = "ffvideo")]
+pub mod audio_decoder;
+#[cfg(feature = "ffvideo")]
+pub mod hw;
 #[cfg(feature = "ffvideo")]
 pub mod poster;
 #[cfg(feature = "ffvideo")]

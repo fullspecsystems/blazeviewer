@@ -1215,25 +1215,25 @@
             "id": 5,
             "title": "macOS dual-backend integration",
             "description": "Plan section 8: capability routing, FFI progress/backend state, SwiftUI controls parity, poster dispatcher (keep-both, FFmpeg fallback)",
-            "status": "pending"
+            "status": "review"
           },
           {
             "id": 6,
             "title": "Streaming audio",
             "description": "Plan section 7: shared FFmpeg audio decoder, AVAudioEngine (macOS) + pw-cat (Linux) sinks, honest clock",
-            "status": "pending"
+            "status": "review"
           },
           {
             "id": 7,
             "title": "Hardware decode",
             "description": "Plan section 10: VideoToolbox (macOS hard gate) + VAAPI (Linux best-effort), NV12/P010 into the fp16 present path",
-            "status": "pending"
+            "status": "review"
           },
           {
             "id": 8,
             "title": "Distribution + compliance",
             "description": "Plan section 9-dist: DMG/AppImage FFmpeg closure, signing, task 77 manifest",
-            "status": "pending"
+            "status": "in-progress"
           }
         ]
       }

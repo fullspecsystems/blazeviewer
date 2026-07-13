@@ -22,9 +22,14 @@ let package = Package(
         .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.9.4"),
     ],
     targets: [
+        // Objective-C exception-catch shim (task #84 §7): AVFoundation's audio
+        // engine throws NSExceptions Swift can't catch — this wraps them into
+        // NSErrors so a format/device failure degrades instead of abort()ing.
+        .target(name: "PBCatch"),
         .executableTarget(
             name: "PhotoBlazeMac",
             dependencies: [
+                "PBCatch",
                 .product(name: "PbMacFfi", package: "PbMacFfi"),
                 .product(name: "Sparkle", package: "Sparkle"),
             ],

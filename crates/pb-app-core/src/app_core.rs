@@ -524,6 +524,12 @@ pub struct AppCore {
     /// Monotonic source of `VideoSessionId`s — a fresh id per session so straggler
     /// frames from a torn-down producer can never touch a newer session.
     pub video_seq: u64,
+    /// macOS dual-backend (task #84 §8a level 2): the item whose `AVPlayer` just
+    /// failed with a *classified* (recoverable) error — the very next
+    /// `start_video_session` for it routes to the FFmpeg session instead, then
+    /// the flag is consumed (a fresh open later retries native first). Never a
+    /// loop: a session failure surfaces the error, it never re-arms this.
+    pub video_ffmpeg_fallback: Option<usize>,
     /// macOS archive-video handoff: the in-RAM container bytes for the session the core
     /// just emitted `PlayVideoBytes` for, stashed for the shell to pull once
     /// (`take_pending_video_bytes`) and serve to `AVPlayer` via a resource loader. RAM-only,

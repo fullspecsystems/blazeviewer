@@ -42,6 +42,34 @@ final class NativeVideoPlayer {
     /// video honors 8/9/0 like a still. Zoom/pan/rotation parity is a later increment.
     private var scaleMode: UInt8
 
+    /// Classify a playback failure for the FFmpeg-fallback decision (task #84
+    /// §8a level 2): demux/codec-shaped failures are worth retrying through the
+    /// FFmpeg session; missing-file / permission / network / DRM failures are
+    /// not — no other backend can fix those, so the error should surface now.
+    /// Unknown errors default to eligible (worst case: one extra failed open
+    /// before the same error surfaces from the session).
+    static func isFallbackEligible(_ error: Error?) -> Bool {
+        guard let e = error as NSError? else { return true }
+        switch e.domain {
+        case NSURLErrorDomain:
+            return false // network/file-URL resolution — not a codec problem
+        case NSCocoaErrorDomain:
+            return ![
+                NSFileReadNoSuchFileError, NSFileNoSuchFileError, NSFileReadNoPermissionError,
+            ].contains(e.code)
+        case AVFoundationErrorDomain:
+            return ![
+                AVError.contentIsProtected.rawValue,
+                AVError.contentIsNotAuthorized.rawValue,
+                AVError.applicationIsNotAuthorized.rawValue,
+            ].contains(e.code)
+        case NSPOSIXErrorDomain:
+            return ![Int(ENOENT), Int(EACCES), Int(EPERM)].contains(e.code)
+        default:
+            return true
+        }
+    }
+
     /// Play a loose file by URL.
     convenience init(
         url: URL, muted: Bool, sessionId: UInt64, scaleMode: UInt8, canvas: MetalCanvasNSView,
@@ -109,7 +137,9 @@ final class NativeVideoPlayer {
                 case .failed:
                     let msg = item.error?.localizedDescription ?? "Video playback failed"
                     pbTrace("native video \(self.sessionId): FAILED \(msg)")
-                    self.model?.nativeVideoFailed(self.sessionId, error: msg)
+                    self.model?.nativeVideoFailed(
+                        self.sessionId, error: msg,
+                        recoverable: Self.isFallbackEligible(item.error))
                 default:
                     break
                 }
