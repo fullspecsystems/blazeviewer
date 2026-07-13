@@ -33,13 +33,29 @@ const POSTER_DEADLINE: Duration = Duration::from_secs(15);
 const POSTER_HEAD_FRAMES: usize = POSTER_MAX_FRAMES;
 
 /// Only *seek* past the intro for clips at least this long — short clips are
-/// already fully covered by the head walk, so seeking would just re-scan them.
-const POSTER_DEEP_MIN: Duration = Duration::from_secs(20);
+/// already covered by the head walk (and the cap collapses the offsets to almost
+/// nothing anyway).
+const POSTER_DEEP_MIN: Duration = Duration::from_secs(10);
 
-/// Never sample deeper than this into a clip when hunting a poster: 5 minutes is
-/// well past any studio-logo/title sequence, and going further risks spoilers
-/// and wasted decode on a 2-hour film (owner guidance: not past ~5 min / 50 %).
-const POSTER_DEEP_CAP: Duration = Duration::from_secs(300);
+/// Deep-seek probe points, **shallow → deep**: where an intro-having clip is
+/// sampled after the head walk falls through. Anchored to how long real intros
+/// actually run (a studio-logo/fade sequence is usually done by ~20–40 s), NOT to
+/// a fraction of the clip — so a 2-hour film is sampled at ~8 s first, not ~90 s.
+/// Each is clamped to [`poster_deep_cap`] and the walk stops at the first good
+/// frame, so it returns the *earliest* genuinely-visible frame.
+const POSTER_SEEK_OFFSETS: [Duration; 4] = [
+    Duration::from_secs(8),
+    Duration::from_secs(20),
+    Duration::from_secs(45),
+    Duration::from_secs(90),
+];
+
+/// Never sample deeper than this: min(half the clip, 5 min). 5 minutes is well
+/// past any title sequence; going further risks spoilers and wasted decode on a
+/// long film (owner guidance: not past ~5 min / 50 %).
+fn poster_deep_cap(duration: Duration) -> Duration {
+    duration.mul_f64(0.5).min(Duration::from_secs(300))
+}
 
 /// Frames to decode-and-score at each deep seek point before moving to the next.
 const POSTER_BURST_FRAMES: usize = 12;
@@ -283,18 +299,24 @@ fn poster_inner(
         return walk.finish(best, disp_w, disp_h);
     }
 
-    // Phase 2 — seek past the intro (feature-film case). Only for clips long
-    // enough to have one; sample a few points spread up to ~5 min / 50 %.
+    // Phase 2 — seek past the intro (feature-film case), shallow → deep, stopping
+    // at the first good frame so the poster is as early as the intro allows.
     if let Some(dur) = duration {
         if dur >= POSTER_DEEP_MIN {
-            let deep_end = dur.mul_f64(0.5).min(POSTER_DEEP_CAP);
-            for frac in [0.3_f64, 0.6, 1.0] {
+            let cap = poster_deep_cap(dur);
+            let mut last = Duration::ZERO;
+            for off in POSTER_SEEK_OFFSETS {
+                let target = off.min(cap);
+                // Skip offsets the head walk already covered (~1 s) and duplicates
+                // (a short clip collapses the deeper offsets onto the cap).
+                if target <= Duration::from_secs(1) || target <= last {
+                    continue;
+                }
+                last = target;
                 if walk.opened.cancelled() {
                     return Err("cancelled".into());
                 }
-                if walk.seek(deep_end.mul_f64(frac)).is_ok()
-                    && walk.scan(POSTER_BURST_FRAMES, &mut best)?
-                {
+                if walk.seek(target).is_ok() && walk.scan(POSTER_BURST_FRAMES, &mut best)? {
                     return walk.finish(best, disp_w, disp_h);
                 }
             }
