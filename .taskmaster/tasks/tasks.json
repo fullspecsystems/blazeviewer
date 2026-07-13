@@ -1215,7 +1215,7 @@
             "id": 5,
             "title": "macOS dual-backend integration",
             "description": "Plan section 8: capability routing, FFI progress/backend state, SwiftUI controls parity, poster dispatcher (keep-both, FFmpeg fallback)",
-            "status": "pending"
+            "status": "review"
           },
           {
             "id": 6,
