@@ -580,12 +580,6 @@ pub struct AppCore {
     /// together — the modal drag loop stalls the presenter while audio would
     /// play on); the resize-settle arm resumes it.
     pub video_paused_by_resize: bool,
-    /// A scale-mode toggle (8/9/0) that changed a live Session video's *decode*
-    /// resolution restarts the session at the new fit (the producer's scaler is
-    /// fixed at spawn). The fresh session begins at 0/Opening, so the position +
-    /// play-state to restore ride here until it can accept a seek (`poll_video`
-    /// applies it). `(saved_position, was_playing)`.
-    pub video_restore_seek: Option<(Duration, bool)>,
     /// An animation decoded ahead (eager prep) and held ready for instant playback.
     pub prepared: Option<Prepared>,
     /// Animation generation; bumped on navigate so a late decode for a past item is discarded.

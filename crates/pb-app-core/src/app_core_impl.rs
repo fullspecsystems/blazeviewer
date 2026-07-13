@@ -222,7 +222,6 @@ impl AppCore {
             video_osd_until: None,
             video_geometry_stale: false,
             video_paused_by_resize: false,
-            video_restore_seek: None,
             prepared: None,
             anim_gen: 0,
             anim_hint_shown_for: None,
@@ -4860,64 +4859,16 @@ impl AppCore {
     /// the current mode's key just re-frames, no re-decode.
     pub fn set_scale_mode(&mut self, mode: ScaleMode) {
         let changed = self.view.mode != mode;
-        // A live Session video decodes at a resolution fixed when it started
-        // (Fit → window-fit, Fill/Original → full native). If this mode change
-        // moves it between those, the running clip must be re-decoded at the new
-        // size (owner: true native on toggle) — capture the old fit first.
-        let prev_fit = self.decode_fit();
         self.view.mode = mode;
         self.view.zoom = 1.0;
         self.view.pan = [0.0, 0.0];
         self.push_view();
-        if !changed {
+        if changed {
+            self.invalidate_geometry();
+            self.refresh_after_geometry_change();
+        } else {
             self.draw();
-            return;
         }
-        // Session video whose *decode* resolution actually changed (Fit⇄Fill,
-        // Fit⇄Original): restart it at the new fit, restoring position + play
-        // state. Fill⇄Original keep the same native decode, so they fall through
-        // to the normal re-frame (the next presented frame carries the new mode).
-        if self.session_video_live() && self.decode_fit() != prev_fit {
-            self.restart_session_video_at_new_fit();
-            return;
-        }
-        self.invalidate_geometry();
-        self.refresh_after_geometry_change();
-    }
-
-    /// Is a Session-backed video (Windows MF / Linux + macOS FFmpeg) live and
-    /// owning the display? Native-backend (AVPlayer) video returns `false` — its
-    /// scale mode is a live CALayer transform that needs no re-decode.
-    fn session_video_live(&self) -> bool {
-        use crate::video::VideoSessionState::{Failed, Stopped};
-        self.video
-            .as_ref()
-            .and_then(ActiveVideoBackend::as_session)
-            .is_some_and(|v| {
-                Some(v.item) == self.displayed_item
-                    && !matches!(v.session.state(), Failed | Stopped)
-            })
-    }
-
-    /// Restart the live Session video so its producer decodes at the *new* scale
-    /// mode's resolution, then restore where the user was (position + play/pause).
-    /// The fresh session starts at 0/Opening; `poll_video` applies the saved seek
-    /// once it can accept one. See [`AppCore::set_scale_mode`].
-    fn restart_session_video_at_new_fit(&mut self) {
-        let now = self.now;
-        let Some(v) = self.video.as_ref().and_then(ActiveVideoBackend::as_session) else {
-            return;
-        };
-        let item = v.item;
-        let pos = v.session.desired_position(now);
-        let was_playing = v.session.state() == crate::video::VideoSessionState::Playing;
-        // Neighbours' fit changed too — rebuild the still-photo ring (matches the
-        // old scale-change path); `start_video_session` re-reads `decode_fit()`.
-        self.invalidate_geometry();
-        // `start_video_session` clears any stale restore first, so set ours after
-        // it — this restore belongs to the session we're about to spawn.
-        self.start_video_session(item);
-        self.video_restore_seek = Some((pos, was_playing));
     }
 
     /// Re-decode the display for a settled geometry change (resize / scale-mode) —
@@ -6781,10 +6732,6 @@ impl AppCore {
     #[allow(clippy::needless_return)]
     pub fn start_video_session(&mut self, item: usize) {
         self.stop_video();
-        // Any pending scale-restart position belongs to a session we're replacing;
-        // a plain open/navigate must not inherit it. The restart path re-sets it
-        // right after this call.
-        self.video_restore_seek = None;
         // macOS routing (§8a): AVPlayer for what it handles well; the FFmpeg
         // session for known-unsupported containers and the level-2 fallback.
         #[cfg(target_os = "macos")]
@@ -7151,23 +7098,6 @@ impl AppCore {
                 session_id,
                 muted,
             });
-        }
-        // A scale-mode restart (set_scale_mode) left a position to restore: the
-        // fresh session starts at 0/Opening, so seek to the saved spot the moment
-        // it can accept one (Buffering onward). Cleared once applied — whether or
-        // not the session is still seekable — so it never retries forever. Uses a
-        // fresh session borrow (the outer `v` is done above), not the outer one.
-        if let Some((pos, resume)) = self.video_restore_seek {
-            if !matches!(state, crate::video::VideoSessionState::Opening) {
-                let target = self
-                    .session_mut()
-                    .and_then(|s| s.session.seek_to(pos, now, Some(resume)));
-                if let Some(target) = target {
-                    self.effects
-                        .push(contract::CoreEffect::SeekVideoAudio { position: target });
-                }
-                self.video_restore_seek = None;
-            }
         }
         // Session state drives the audio player (freeze together, resume
         // together): Playing = resume; a mid-play rebuffer or the end = pause.
@@ -10798,64 +10728,6 @@ mod tests {
         assert!(
             !core.targets.is_empty(),
             "ring refill re-issued once playback ended"
-        );
-    }
-
-    /// #5: a scale-mode toggle that changes a video's decode resolution restarts
-    /// the session at the new fit; the saved position rides `video_restore_seek`
-    /// and `poll_video` applies it as a seek once the fresh session can accept one
-    /// (past `Opening`), realigning the audio and clearing the pending restore.
-    #[test]
-    fn poll_applies_a_pending_scale_restart_seek() {
-        use crate::video::{VideoProducerEvent, VideoSessionId, VideoSessionState};
-        use crate::video_session::{ActiveVideo, VideoSession};
-
-        let mut core = test_core();
-        core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
-            r"C:\nope\clip.mp4",
-        )]));
-        core.playlist = Playlist::new(1, 0);
-        core.displayed_item = Some(0);
-        let (session, io) = VideoSession::new(VideoSessionId(1), 1024);
-        core.video = Some(ActiveVideoBackend::Session(ActiveVideo::new(session, 0)));
-
-        // Still Opening (no Opened yet): a pending restore must NOT fire — the
-        // fresh session can't take a seek until it prerolls.
-        core.video_restore_seek = Some((Duration::from_secs(12), true));
-        core.poll_video();
-        assert!(
-            core.video_restore_seek.is_some(),
-            "restore held while the session is still Opening"
-        );
-
-        io.events
-            .send(VideoProducerEvent::Opened {
-                session_id: VideoSessionId(1),
-                duration: Some(Duration::from_secs(30)),
-                width: 64,
-                height: 64,
-                has_audio: false,
-                frame_bytes: 64 * 64 * 4,
-            })
-            .unwrap();
-        core.effects.clear();
-        core.poll_video();
-
-        assert!(
-            core.video_restore_seek.is_none(),
-            "restore applied and cleared once past Opening"
-        );
-        assert_eq!(
-            core.video.as_ref().unwrap().state(),
-            VideoSessionState::Seeking,
-            "the session issued the restore seek"
-        );
-        assert!(
-            core.effects.iter().any(|e| matches!(
-                e,
-                contract::CoreEffect::SeekVideoAudio { position } if *position >= Duration::from_secs(11)
-            )),
-            "audio realigned to the restored position"
         );
     }
 

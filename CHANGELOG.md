@@ -13,10 +13,6 @@ with any pre-release suffix carried only by the tag.
   fresh installs.)
 
 ### Fixed
-- **Aspect/zoom keys (8 fit · 9 fill · 0 original) now work on a playing video.** Switching to
-  fill or 1:1 original size mid-playback used to show the frame at the wrong (start-time)
-  resolution and could stall; the clip is now re-decoded at the new size and resumes right where
-  you were. (1:1 on a large 4K clip is inherently heavy — it decodes full resolution.)
 - **Video poster frames for feature films.** Long films that open on a studio logo over black
   or a slow fade-in used to get an all-black thumbnail. The poster picker now seeks past the
   intro and chooses the most visually detailed frame it finds, so you get a real picture.
