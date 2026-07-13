@@ -1317,6 +1317,67 @@
             "status": "pending"
           }
         ]
+      },
+      {
+        "id": 88,
+        "title": "Explore supporting the Apple Photos Library (.photoslibrary) as a PhotoSource",
+        "description": "Feasibility spike: point PhotoBlaze at a macOS Photos library (~/Pictures/Photos Library.photoslibrary) and browse it in-place — photos, videos, and Live Photos — without exporting first. The library is a package: originals/<hex>/<uuid>.<ext> master files, resources/ derivatives, and database/Photos.sqlite (Core Data Z_-tables) holding names/dates/albums/Live-Photo pairings. Two routes: (a) direct read-only SQLite + filesystem — works cross-platform (Win + Mac) on any local/copied library, but chases an undocumented schema and can't reach iCloud 'optimize storage' cloud-only originals; (b) macOS PhotoKit (PHAsset/PHImageManager/PHLivePhoto) — robust + iCloud-aware but Mac-only. Fits the existing PhotoSource seam (like Zip/7z sources) and the synthetic folder-tree seam (albums/years/moments as 'folders'); the decode + video + Live-Photo pipelines already handle exactly this content. Output a go/no-go with recommended architecture and effort. Read-only only — never write to the library (no-trace guarantee).",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          79,
+          84
+        ],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Map the .photoslibrary structure + Photos.sqlite schema",
+            "description": "Document originals/ hex-fanout layout, resources/derivatives, and the Z_-prefixed Core Data tables (ZASSET, ZADDITIONALASSETATTRIBUTES, ZGENERICALBUM, ZASSETCONTRIBUTOR…): asset uuid -> original filename, capture date, kind (photo/video), favorite, album membership, Live-Photo pairing id, and the iCloud local-vs-cloud flags. Catalog schema drift across macOS 13/14/15/26. Lean on osxphotos (MIT) as a schema reference — knowledge, not code.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "Prototype a read-only asset reader (rusqlite, immutable=1)",
+            "description": "New pb-source backend that opens Photos.sqlite read-only/immutable (safe while Photos.app holds a WAL lock), lists assets, and resolves each to its originals/<hex>/<uuid>.<ext> path. Yield bytes/paths through the existing PhotoSource 'encoded bytes + name for item i' contract. Confirm rusqlite is low build-risk cross-platform.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "Assess iCloud 'optimize storage' reality (the cross-platform gate)",
+            "description": "Measure, on a real library, how many originals are actually on disk vs cloud-only. If cloud-only is common, direct-FS is weak: define the derivative fallback (resources/derivatives rendered JPEG) or a 'cloud only' placeholder. This decides whether the cross-platform direct-FS route is viable or macOS PhotoKit is required for a good experience.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "Evaluate the macOS PhotoKit backend",
+            "description": "PHAsset/PHFetchResult/PHImageManager/PHAssetResourceManager + PHLivePhoto in the SwiftUI shell: async request-based access, transparent iCloud download, native Live-Photo pairing, albums/moments/smart-albums. Note the NSPhotoLibraryUsageDescription consent prompt + entitlement. Compare robustness/iCloud vs the direct-FS route; sketch it as a second PhotoSource impl. STRATEGIC: PhotoKit is the SAME framework on iOS — this backend is the foundation for a future iOS version, where it is the ONLY viable photo source (iOS has no filesystem access to the library, so the direct-FS route gives iOS nothing). Keep it seam-clean so it ports.",
+            "status": "pending"
+          },
+          {
+            "id": 5,
+            "title": "Map albums / years / moments onto the folder-tree seam",
+            "description": "Reuse the synthetic folder-tree the archive sources already provide (Shift+F): represent Albums (and/or Years > Months) as navigable 'folders' scoping the deck. Sketch PhotosLibrarySource: PhotoSource + its tree provider.",
+            "status": "pending"
+          },
+          {
+            "id": 6,
+            "title": "Prove the decode/video/Live-Photo pipeline works unchanged on library bytes",
+            "description": "Smoke-test that HEIC stills, plain videos, and a still+.mov Live-Photo pair sourced from the library flow through the existing decode + video + Live-Photo players with no pipeline changes on both Windows and macOS.",
+            "status": "pending"
+          },
+          {
+            "id": 7,
+            "title": "Privacy + safety review",
+            "description": "Guarantee read-only: never write to the library, open the DB immutable, handle the locked WAL without copying originals to disk. Re-run the no-trace audit/integration test so viewing a library writes nothing.",
+            "status": "pending"
+          },
+          {
+            "id": 8,
+            "title": "Write up go/no-go + recommended architecture",
+            "description": "Recommend: cross-platform direct-FS MVP, macOS PhotoKit, or both-behind-one-seam. Include effort estimate, schema-maintenance burden, and the value vs. 'just export from Photos' baseline (the win is in-place browsing + a fast single-query scan over a huge library).",
+            "status": "pending"
+          }
+        ]
       }
     ]
   }
