@@ -10,12 +10,14 @@
 //! clock while audio plays. Mute is applied on the player only, so the clock keeps
 //! running muted and A/V sync is mute-independent.
 //!
-//! Two real backends: Windows (WinRT `MediaPlayer` — the OS demuxes and plays the
-//! file itself) and Linux with `ffvideo` (task #84 §7: the FFmpeg audio decoder
-//! streamed to PipeWire's `pw-cat` — the proven Live-Photo output path, now
-//! streaming instead of whole-clip). The stub keeps call sites cfg-free —
-//! `open` returning `None` makes the shell report `Failed`, and the session
-//! degrades to silent playback on its monotonic clock.
+//! Two real backends: Windows (an MF Source Reader → **WASAPI** render engine,
+//! `wasapi_audio.rs` — decodes and plays any audio MF can, including legacy
+//! MJPEG-in-AVI/PCM the old WinRT `MediaPlayer` opened but refused to play) and
+//! Linux with `ffvideo` (task #84 §7: the FFmpeg audio decoder streamed to
+//! PipeWire's `pw-cat` — the proven Live-Photo output path, now streaming instead
+//! of whole-clip). The stub keeps call sites cfg-free — `open` returning `None`
+//! makes the shell report `Failed`, and the session degrades to silent playback on
+//! its monotonic clock.
 
 use pb_app_core::video::{AudioClockSample, VideoInput, VideoSessionId};
 
@@ -359,149 +361,56 @@ mod imp {
 #[cfg(windows)]
 mod imp {
     use super::*;
-    use std::time::Duration;
 
-    use std::cell::Cell;
-
-    use pb_app_core::video::AudioClockState;
-    use windows::core::{Interface, HSTRING};
-    use windows::Foundation::Uri;
-    use windows::Media::Core::{ISingleSelectMediaTrackList, MediaSource};
-    use windows::Media::Playback::{MediaPlaybackItem, MediaPlaybackState, MediaPlayer};
-    use windows::Storage::Streams::IRandomAccessStream;
-    use windows::Win32::System::WinRT::{CreateRandomAccessStreamOverStream, BSOS_DEFAULT};
-
-    /// A WinRT `MediaPlayer` over the video file, playing its audio track ONLY —
-    /// the picture is the `VideoSession`'s job, so the item's video tracks are
-    /// deselected (below) to avoid a second, wasted 4K decode that starves both
-    /// pipelines (owner-observed: stuttering audio + slow video on a 4K60 clip).
-    /// Closed on drop, which stops playback and releases the pipeline.
-    pub struct VideoAudio {
-        player: MediaPlayer,
-        /// Kept for the video-track deselection: track lists populate async after
-        /// the source opens, so [`Self::sample`] retries until it lands.
-        item: MediaPlaybackItem,
-        session_id: VideoSessionId,
-        video_deselected: Cell<bool>,
-    }
+    /// The Windows video-audio backend: an MF Source Reader → WASAPI render engine
+    /// (`crate::wasapi_audio`). It replaced the WinRT `MediaPlayer`, which opens but
+    /// won't *play* legacy MJPEG-in-AVI camera clips (clock frozen at 0 → silent);
+    /// the Source Reader decodes their audio like it already decodes their video, so
+    /// audio and video share one permissive MF layer. This is a thin front — all the
+    /// WASAPI/MF work runs on the engine's own thread. Dropped on stop, which
+    /// disconnects the command channel and tears the engine down.
+    pub struct VideoAudio(crate::wasapi_audio::WasapiAudio);
 
     impl VideoAudio {
-        /// Open the container's audio **paused** (`AutoPlay` off, no `Play()` yet):
-        /// the source loads on Media Foundation's own threads while the video
-        /// preroll fills, and the core's `ResumeVideoAudio` starts the two together.
-        /// A path opens by URI; an archive entry's in-RAM bytes through a WinRT
-        /// stream over the same `Arc`-shared buffer the video producer reads —
-        /// RAM-only, one resident copy.
+        /// Open the container's audio **paused** (the engine prerolls, then the
+        /// core's `ResumeVideoAudio` starts it with the video). A path opens by
+        /// URL; an archive entry's in-RAM bytes through the same `Arc`-shared
+        /// buffer the video producer reads (RAM-only, one resident copy).
         pub fn open(
             input: &VideoInput,
             session_id: VideoSessionId,
             muted: bool,
         ) -> Option<VideoAudio> {
-            let source = match input {
-                VideoInput::Path(path) => {
-                    let uri =
-                        Uri::CreateUri(&HSTRING::from(crate::live_audio::file_uri(path)?)).ok()?;
-                    MediaSource::CreateFromUri(&uri).ok()?
-                }
-                VideoInput::Bytes { data, name } => {
-                    let istream = pb_decode::mem_istream(data.clone());
-                    let stream: IRandomAccessStream =
-                        unsafe { CreateRandomAccessStreamOverStream(&istream, BSOS_DEFAULT).ok()? };
-                    let ct = pb_app_core::video::video_content_type(name).unwrap_or("video/mp4");
-                    MediaSource::CreateFromStream(&stream, &HSTRING::from(ct)).ok()?
-                }
-            };
-            let item = MediaPlaybackItem::Create(&source).ok()?;
-            let player = MediaPlayer::new().ok()?;
-            player.SetAutoPlay(false).ok()?;
-            player.SetIsMuted(muted).ok()?;
-            player.SetSource(&item).ok()?;
-            Some(VideoAudio {
-                player,
-                item,
-                session_id,
-                video_deselected: Cell::new(false),
-            })
-        }
-
-        /// Deselect the item's video track(s) so the player decodes audio only.
-        /// The track list is empty until the source finishes opening, so this is
-        /// retried from [`Self::sample`] (fast cadence while opening) until it
-        /// takes. Harmless when the item has no video tracks.
-        fn try_deselect_video(&self) {
-            if self.video_deselected.get() {
-                return;
-            }
-            let Ok(tracks) = self.item.VideoTracks() else {
-                return;
-            };
-            let populated = tracks.Size().map(|n| n > 0).unwrap_or(false);
-            if !populated {
-                return; // not opened yet — retry on the next sample
-            }
-            if let Ok(select) = tracks.cast::<ISingleSelectMediaTrackList>() {
-                if select.SetSelectedIndex(-1).is_ok() {
-                    self.video_deselected.set(true);
-                }
-            }
+            crate::wasapi_audio::WasapiAudio::open(input, session_id, muted).map(VideoAudio)
         }
 
         /// Pause (session paused / rebuffering) — keeps the position.
         pub fn pause(&self) {
-            let _ = self.player.Pause();
+            self.0.pause();
         }
 
         /// Start/resume (session entered `Playing`).
         pub fn resume(&self) {
-            let _ = self.player.Play();
+            self.0.resume();
         }
 
-        /// Mute in place — playback (and the clock) keeps running.
+        /// Mute in place — rendering (and the clock) keeps running, so A/V sync is
+        /// mute-independent.
         pub fn set_muted(&self, muted: bool) {
-            let _ = self.player.SetIsMuted(muted);
+            self.0.set_muted(muted);
         }
 
         /// Seek to `position` (task #79 phase 6). The session treats the next
         /// near-target sample as the ack, so no completion event is needed here.
         pub fn seek(&self, position: std::time::Duration) {
-            if let Ok(session) = self.player.PlaybackSession() {
-                let _ = session.SetPosition(windows::Foundation::TimeSpan {
-                    Duration: (position.as_nanos() / 100) as i64,
-                });
-            }
+            self.0.seek(position);
         }
 
-        /// One audio clock sample: the player's state + position right now. The
+        /// One audio clock sample: the engine's state + position right now. The
         /// core routes it to the active session (stale session ids are dropped
         /// there).
         pub fn sample(&self) -> Option<AudioClockSample> {
-            self.try_deselect_video();
-            let session = self.player.PlaybackSession().ok()?;
-            let raw = session.PlaybackState().ok()?;
-            let state = if raw == MediaPlaybackState::Playing {
-                AudioClockState::Playing
-            } else if raw == MediaPlaybackState::Paused {
-                AudioClockState::Paused
-            } else if raw == MediaPlaybackState::Buffering {
-                AudioClockState::Buffering
-            } else {
-                // Opening / None: not ready yet.
-                AudioClockState::Opening
-            };
-            let pos = session.Position().ok()?;
-            Some(AudioClockSample {
-                session_id: self.session_id,
-                state,
-                position: Duration::from_nanos(pos.Duration.max(0) as u64 * 100),
-                sampled_at_monotonic: Duration::ZERO, // delivered immediately after sampling
-            })
-        }
-    }
-
-    impl Drop for VideoAudio {
-        fn drop(&mut self) {
-            let _ = self.player.Pause();
-            let _ = self.player.Close(); // IClosable — tears down the media pipeline
+            self.0.sample()
         }
     }
 }
@@ -511,10 +420,12 @@ mod tests {
     use super::*;
     use pb_app_core::video::AudioClockState;
 
-    /// The archive audio path end to end: a WinRT `MediaPlayer` over the tone
-    /// fixture's **in-RAM bytes** (`CreateRandomAccessStreamOverStream` over the
-    /// shared `IStream`) must open and report a non-`Opening` clock state — no
-    /// path, no disk, the same source shape a played archive entry uses.
+    /// The archive audio path: the WASAPI backend over the tone fixture's **in-RAM
+    /// bytes** must construct (the MF Source Reader opens the byte stream, the
+    /// engine inits) and leave `Opening` within a bounded time — no path, no disk,
+    /// no hang. It settles at `Paused` (ready) on a machine with an audio endpoint,
+    /// or `Failed` on a headless one (both valid; the session degrades to silent on
+    /// `Failed`). The point is the byte-stream plumbing never stalls or panics.
     #[test]
     fn video_audio_opens_from_in_ram_bytes() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -525,12 +436,17 @@ mod tests {
             name: "sub/clip.mp4".into(),
         };
         // Muted: the test must not make noise; the clock runs regardless.
-        let audio = VideoAudio::open(&input, VideoSessionId(9), true).expect("player");
+        let audio = VideoAudio::open(&input, VideoSessionId(9), true).expect("engine spawns");
         let t0 = std::time::Instant::now();
         loop {
             if let Some(s) = audio.sample() {
                 if s.state != AudioClockState::Opening {
-                    break; // opened (paused) — the byte-stream source works
+                    assert!(
+                        matches!(s.state, AudioClockState::Paused | AudioClockState::Failed),
+                        "byte-stream audio must settle Paused (ready) or Failed, got {:?}",
+                        s.state
+                    );
+                    break;
                 }
             }
             assert!(
@@ -539,5 +455,49 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+    }
+
+    /// Opt-in real-playback check (needs an audio endpoint + makes sound):
+    /// resume the tone fixture and confirm the clock actually advances — the whole
+    /// decode → WASAPI render → clock loop end to end.
+    /// `PB_AUDIO_PLAY_TEST=1 cargo test -p pb-app video_audio_clock_advances -- --nocapture`
+    #[test]
+    fn video_audio_clock_advances_on_resume() {
+        if std::env::var("PB_AUDIO_PLAY_TEST").is_err() {
+            eprintln!("PB_AUDIO_PLAY_TEST not set — skipping (needs an audio device)");
+            return;
+        }
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../pb-decode/tests/fixtures/video/color_with_tone.mp4");
+        let input = VideoInput::Path(fixture);
+        let audio = VideoAudio::open(&input, VideoSessionId(1), true).expect("engine");
+        // Wait until it's ready (Paused), then resume. Skip if the engine reports
+        // Failed — this host has no default render endpoint (headless / RDP), so
+        // there is nothing to play; that's the environment, not a code fault.
+        let t0 = std::time::Instant::now();
+        loop {
+            match audio.sample().map(|s| s.state) {
+                Some(AudioClockState::Paused) => break,
+                Some(AudioClockState::Failed) => {
+                    eprintln!("no audio endpoint on this host — skipping playback assertion");
+                    return;
+                }
+                _ => {}
+            }
+            assert!(
+                t0.elapsed() < std::time::Duration::from_secs(5),
+                "never became ready"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        audio.resume();
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let s = audio.sample().expect("sample");
+        assert_eq!(s.state, AudioClockState::Playing, "resumed → Playing");
+        assert!(
+            s.position >= std::time::Duration::from_millis(200),
+            "the clock must advance during playback, got {:?}",
+            s.position
+        );
     }
 }

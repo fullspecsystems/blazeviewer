@@ -83,6 +83,12 @@ with any pre-release suffix carried only by the tag.
   lays the presentation groundwork for video playback.
 
 ### Fixed
+- **Older camera clips now play with sound on Windows.** Some legacy clips — notably Motion
+  JPEG AVIs from 2000s-era point-and-shoots (like `.AVI` files from Canon and Fujifilm
+  cameras) — played their video but stayed silent, because the previous audio player refused
+  to open those files. Audio now goes through the same media layer that already decodes the
+  picture, so anything Windows can play the video of, it can now play the sound of too. Modern
+  MP4/MOV clips are unaffected and stay in sync.
 - **Dropping files onto the window now focuses PhotoBlaze.** Previously the drag's source
   (usually Explorer) kept keyboard focus, so the freshly opened photos ignored the arrow
   keys and Space until you clicked the window.

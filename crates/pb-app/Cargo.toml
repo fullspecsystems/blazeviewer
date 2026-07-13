@@ -173,6 +173,15 @@ windows = { version = "0.62", features = [
     # System accent-source option (src/accent.rs). UIColorType + Color live under UI.
     "UI",
     "UI_ViewManagement",
+    # WASAPI video-audio render engine (src/wasapi_audio.rs, task #79): the MF Source
+    # Reader decodes any audio (incl. legacy MJPEG-AVI/PCM the WinRT MediaPlayer won't
+    # play) → shared-mode event-driven WASAPI. Audio = IMMDeviceEnumerator/IAudioClient/
+    # IAudioRenderClient/IAudioClock + WAVEFORMATEX(TENSIBLE) (Audio_Apo). Threading =
+    # the render event handle (WaitForSingleObject); Kernel for the KSDATAFORMAT GUIDs.
+    "Win32_Media_Audio",
+    "Win32_Media_KernelStreaming",
+    "Win32_Media_Multimedia",
+    "Win32_System_Threading",
 ] }
 
 # Test-only: build archive fixtures for the no-trace integration tests. Same crates

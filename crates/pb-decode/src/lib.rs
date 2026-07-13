@@ -50,6 +50,11 @@ mod mf_hw;
 // decompressed bytes without a file ever touching disk.
 #[cfg(windows)]
 mod mf_stream;
+// MF Source Reader audio decode → interleaved f32: the Windows twin of
+// FfAudioDecoder, feeding the shell's WASAPI render engine. Decodes legacy
+// MJPEG-in-AVI / PCM audio the WinRT MediaPlayer refuses to play.
+#[cfg(windows)]
+mod mf_audio;
 // The Linux mirror: .mov motion + audio decode via FFmpeg, behind the `livephoto` feature.
 #[cfg(all(unix, not(target_os = "macos"), feature = "livephoto"))]
 mod ff_live;
@@ -148,6 +153,8 @@ pub use libheif::LibHeifDecoder;
 #[cfg(target_os = "macos")]
 pub use livephoto::{decode_live_motion, decode_live_motion_streaming, probe_video_stream};
 pub use metadata::read_exif_fields;
+#[cfg(windows)]
+pub use mf_audio::{MfAudioDecoder, MfAudioFormat};
 #[cfg(windows)]
 pub use mf_poster::{
     decode_video_poster, decode_video_poster_input, probe_video_input, probe_video_stream,

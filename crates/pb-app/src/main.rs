@@ -70,6 +70,10 @@ mod pb_key_winit;
 mod reveal;
 mod sdf_rect;
 mod video_audio;
+// WASAPI shared-mode render engine for the Windows video-audio backend (MF Source
+// Reader → PCM → WASAPI); the video_audio.rs Windows imp is a thin front over it.
+#[cfg(windows)]
+mod wasapi_audio;
 // Velopack per-user installer lifecycle hooks + background auto-update (Windows ship path).
 mod update;
 mod win_console;

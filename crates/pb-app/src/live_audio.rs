@@ -18,8 +18,6 @@
 
 use std::path::Path;
 
-#[cfg(windows)]
-pub(crate) use imp::file_uri;
 pub use imp::LiveAudio;
 
 #[cfg(not(any(
