@@ -2289,10 +2289,10 @@ impl App {
                 return;
             }
             let next = self.current_menu_state();
-            if self.menu_state == Some(next) {
+            if self.menu_state.as_ref() == Some(&next) {
                 return;
             }
-            self.menu_state = Some(next);
+            self.menu_state = Some(next.clone());
             self.core
                 .effects
                 .push(contract::CoreEffect::SetMenuState(next));
