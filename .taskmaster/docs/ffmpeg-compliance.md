@@ -111,17 +111,24 @@ resolve it; it flags it.
 
 ## Remaining owner tasks before a public ship
 
-1. **Release integration** — wire `build-ffmpeg-macos.sh` + `bundle-ffmpeg-macos.sh` into
-   `release-macos.sh`, and add `ffvideo` to the macOS ship feature set. **Deliberately not done
-   yet:** ship-gating by discipline (owner) keeps `ffvideo` out of release scripts until phases
-   5–6 are owner-validated on hardware.
-2. **Inside-out signing** — the FFmpeg dylibs must be Developer-ID signed **before** the app
-   binary (like Sparkle's helpers), then the app, then notarized. `bundle-ffmpeg-macos.sh`
-   ad-hoc-signs for local runs; `release-macos.sh`'s signing block must gain the FFmpeg dylibs.
-3. **Clean-machine validation** — `otool -L` closure (the bundle script's audit) + a launch on a
-   Mac **without** Homebrew FFmpeg, confirming playback with zero external dependency.
-4. **PGP-verify** the pinned tarball; decide **universal vs arm64-only**.
-5. **Patent-licensing decision** (above) for public/commercial distribution.
+1. ~~**Release integration**~~ — **DONE (2026-07-13).** `release-macos.sh` now builds the
+   shipping app via `build-swift-host.sh --bundle-ffmpeg` by default (which pulls the `ffvideo`
+   feature and bundles the pinned LGPL FFmpeg through `bundle-ffmpeg-macos.sh`). `--no-video`
+   opts out; the script hard-fails if `nasm` (the FFmpeg build's one non-Xcode prereq) is absent
+   rather than silently shipping a video-less DMG.
+2. ~~**Inside-out signing**~~ — **DONE (2026-07-13).** `release-macos.sh`'s signing block re-signs
+   every bundled `libav*/libsw*` dylib with the Developer ID + `--options runtime --timestamp`
+   **before** the app binary (mirroring the Sparkle-helper step), so hardened-runtime library
+   validation is satisfied by our own Team ID and notarization gets a secure timestamp. The
+   existing `codesign --verify --deep --strict` seals them.
+3. **Clean-machine validation** — `otool -L` closure (the bundle script's audit, run automatically
+   during the build) + a launch on a Mac **without** Homebrew FFmpeg, confirming playback with
+   zero external dependency. **Owner-run** (needs a second/clean machine).
+4. **PGP-verify** the pinned tarball (the sha256 is verified on fetch; a PGP check against
+   FFmpeg's release signature is the extra belt); decide **universal vs arm64-only** —
+   arm64-only matches the app's single slice (ADR-021), so this defaults settled unless an
+   x86_64 build is ever wanted.
+5. **Patent-licensing decision** (above) for public/commercial distribution. **Owner decision.**
 6. **Linux audit** — the AppImage already bundles FFmpeg shared; add the clean-container `ldd` +
    isolated-launch per-codec check the plan calls for (dynamically-loaded codec libs may not be
    discovered from the main exe).

@@ -19,11 +19,11 @@
 # ffmpeg`. NEVER for a release/DMG (phase 7 bundles FFmpeg properly; release-macos.sh
 # must not pass this).
 #
-# --bundle-ffmpeg (task #84 phase 7, DEV-ONLY): implies --ffvideo, then bundles the pinned
-# LGPL FFmpeg (scripts/build-ffmpeg-macos.sh) into Contents/Frameworks so the .app runs with
-# NO Homebrew dependency, and audits the closure. Ad-hoc signed — the release integration
-# (Developer-ID inside-out signing + notarization) is still owner-gated; release-macos.sh
-# must not pass this until phases 5–6 are hardware-validated.
+# --bundle-ffmpeg (task #84 phase 7): implies --ffvideo, then bundles the pinned LGPL FFmpeg
+# (scripts/build-ffmpeg-macos.sh) into Contents/Frameworks so the .app runs with NO Homebrew
+# dependency, and audits the closure. Ad-hoc signed here; release-macos.sh NOW passes this for
+# the shipping build and re-signs the FFmpeg dylibs inside-out with the Developer ID before
+# notarizing (pass release-macos.sh --no-video to opt out).
 #
 # This is the only macOS build now — the old egui/winit "strangler-fig" bundle was retired
 # in task #70 (pb-app no longer compiles on macOS; the guard lives in crates/pb-app/build.rs).
@@ -44,9 +44,8 @@ for a in "$@"; do
 		--ffvideo) FFVIDEO=1 ;;
 		# --bundle-ffmpeg (task #84 phase 7): implies --ffvideo, then bundles the pinned
 		# LGPL FFmpeg into Contents/Frameworks so the .app runs with NO Homebrew dependency.
-		# Still DEV-ONLY (unsigned/ad-hoc; release-macos.sh must not call this — the ship
-		# integration adds Developer-ID inside-out signing). Lets the owner verify a
-		# self-contained build before the release wiring lands.
+		# Ad-hoc signed here; release-macos.sh passes this for the shipping build and re-signs
+		# the FFmpeg dylibs inside-out with the Developer ID before notarizing.
 		--bundle-ffmpeg) FFVIDEO=1; BUNDLE_FFMPEG=1 ;;
 		*) echo "unknown arg: $a (usage: build-swift-host.sh [--debug|--release] [--run] [--ffvideo] [--bundle-ffmpeg])" >&2; exit 2 ;;
 	esac
