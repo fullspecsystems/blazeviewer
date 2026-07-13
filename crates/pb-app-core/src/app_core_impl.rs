@@ -6600,6 +6600,10 @@ impl AppCore {
     /// macOS for nominally-native containers, the shell's `AVPlayer`. The
     /// producer thread is never joined — teardown is a Stop message / channel
     /// disconnect.
+    // The early return is load-bearing when the session block below compiles in
+    // (macOS + ffvideo); without the feature it's the trailing statement and
+    // clippy calls it needless — allow rather than fork the body per cfg.
+    #[allow(clippy::needless_return)]
     pub fn start_video_session(&mut self, item: usize) {
         self.stop_video();
         // macOS routing (§8a): AVPlayer for what it handles well; the FFmpeg

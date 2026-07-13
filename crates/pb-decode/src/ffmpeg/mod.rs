@@ -20,8 +20,11 @@ pub mod color;
 pub mod convert;
 pub mod init;
 pub mod io;
+pub mod pcm;
 pub mod probe;
 
+#[cfg(feature = "ffvideo")]
+pub mod audio_decoder;
 #[cfg(feature = "ffvideo")]
 pub mod poster;
 #[cfg(feature = "ffvideo")]

@@ -1588,6 +1588,15 @@ final class CoreModel {
             if sessionVideo { resetVideoControls() } // fresh clip — scrubber starts at 0
         }
         if sessionVideo { updateSessionVideoProgress() }
+        // Session-video audio clock (task #84 §7): ~4 Hz played-position samples to
+        // the core — the session's master clock while audio plays — plus a
+        // scheduling top-up safety net (completion callbacks are the primary driver).
+        if let sa = sessionAudio, Date().timeIntervalSince(sessionAudioSampledAt) >= 0.25 {
+            sessionAudioSampledAt = Date()
+            sa.topUp()
+            let (state, position) = sa.sample()
+            core.video_audio_clock(sa.sessionId, state, position)
+        }
         // The playback row shows while a video is active — native OR session-backed —
         // and the info line is on: either the persistent `i` line or the transient
         // hover-reveal flash (armed by a pointer move over the bottom controls zone;
@@ -1924,6 +1933,13 @@ final class CoreModel {
     /// single media authority (the Rust core keeps only a passive proxy).
     @ObservationIgnored private var nativeVideo: NativeVideoPlayer?
 
+    /// The session-video audio sink (task #84 §7): AVAudioEngine over the Rust FFmpeg
+    /// audio decoder, for session-backed (FFmpeg) videos — commanded by the core's
+    /// `StartVideoAudio`/`StopVideoAudio`/… effects; its clock samples flow back ~4×/s
+    /// from `pump()`.
+    @ObservationIgnored private var sessionAudio: SessionAudioPlayer?
+    @ObservationIgnored private var sessionAudioSampledAt = Date.distantPast
+
     // MARK: - Effects out
 
     /// Pull the effect queue dry and execute each effect — always on the main actor.
@@ -2002,6 +2018,28 @@ final class CoreModel {
             liveAudio?.pause()
         case .ResumeLiveAudio:
             liveAudio?.play()
+        // Session-video audio (task #84 §7): the FFmpeg-backed sink for session
+        // videos. Opens PAUSED (the core resumes it with the video preroll); a
+        // failed open reports one Failed clock sample so the session degrades to
+        // silent immediately instead of waiting out the readiness timeout.
+        case .StartVideoAudio(let sessionId, let muted):
+            sessionAudio?.stop()
+            sessionAudio = SessionAudioPlayer(core: core, sessionId: sessionId, muted: muted)
+            sessionAudioSampledAt = Date.distantPast // sample immediately (readiness)
+            if sessionAudio == nil {
+                core.video_audio_clock(sessionId, 5, 0) // Failed
+            }
+        case .StopVideoAudio:
+            sessionAudio?.stop()
+            sessionAudio = nil
+        case .PauseVideoAudio:
+            sessionAudio?.pause()
+        case .ResumeVideoAudio:
+            sessionAudio?.resume()
+        case .SeekVideoAudio(let seconds):
+            sessionAudio?.seek(toSeconds: seconds)
+        case .SetVideoAudioMuted(let muted):
+            sessionAudio?.setMuted(muted)
         case .PlayVideo(let path, let sessionId, let muted):
             playNativeVideo(path: path.toString(), sessionId: sessionId, muted: muted)
         case .PlayVideoBytes(let name, let sessionId, let muted):

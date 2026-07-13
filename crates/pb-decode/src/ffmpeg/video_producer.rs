@@ -24,9 +24,10 @@
 //! rate. B-frame reorder/delay is drained at EOF (`send_eof` + drain).
 //!
 //! Reads only, RAM-only: the no-trace guarantee holds on this path exactly as
-//! it does for stills. Audio is a **separate subsystem** (plan §7) — until it
-//! lands, `Opened` reports `has_audio: false` so the session never waits on an
-//! audio preroll that has no sink (the "muted interim" contract).
+//! it does for stills. Audio is a **separate subsystem** (plan §7): a second
+//! FFmpeg instance (`audio_decoder.rs`) feeds the platform sink; `Opened`
+//! reports the track's real presence, and a shell without a sink reports a
+//! Failed clock so playback degrades to silent immediately.
 
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
@@ -76,10 +77,11 @@ pub fn run_ff_video_producer(
         duration: reader.facts.duration,
         width: out_w,
         height: out_h,
-        // Muted interim (plan §7): the audio subsystem is a later phase, so the
-        // session must not hold preroll for an audio clock that has no sink.
-        // Flips to the real track presence when the FFmpeg audio decoder lands.
-        has_audio: false,
+        // Honest track presence (plan §7 — the muted interim ended when the
+        // FFmpeg audio decoder + platform sinks landed): the session starts the
+        // shell audio player for real tracks; a shell with no sink reports a
+        // Failed clock immediately and playback degrades to silent.
+        has_audio: reader.facts.has_audio,
         // Format-aware (task 79.10): an fp16 HDR clip charges 8 bytes/px, so
         // the session's byte budget isn't under-credited 2× on PQ/HLG sources.
         frame_bytes: reader.conv.output_format().frame_bytes(out_w, out_h) as u64,
@@ -757,18 +759,27 @@ mod tests {
         );
     }
 
-    /// The muted-interim contract (plan §7): until the FFmpeg audio subsystem
-    /// lands, `Opened` reports no audio even for clips WITH a track, so the
-    /// session never waits ~1 s for an audio clock that has no sink.
+    /// `Opened` reports the audio track's presence honestly (plan §7) — the
+    /// signal that starts the shell audio sink; silent clips never get one.
     #[test]
-    fn opened_reports_no_audio_during_the_muted_interim() {
+    fn opened_reports_audio_presence_honestly() {
         let (_msgs, events) = spawn(fixture("color_with_tone.mp4"));
         match events
             .recv_timeout(Duration::from_secs(10))
             .expect("opened")
         {
             VideoProducerEvent::Opened { has_audio, .. } => {
-                assert!(!has_audio, "muted interim: no audio sink exists yet");
+                assert!(has_audio, "the tone fixture has an AAC track");
+            }
+            other => panic!("expected Opened, got {other:?}"),
+        }
+        let (_msgs, events) = spawn(fixture("black_then_color.mp4"));
+        match events
+            .recv_timeout(Duration::from_secs(10))
+            .expect("opened")
+        {
+            VideoProducerEvent::Opened { has_audio, .. } => {
+                assert!(!has_audio, "the silent fixture reports none");
             }
             other => panic!("expected Opened, got {other:?}"),
         }

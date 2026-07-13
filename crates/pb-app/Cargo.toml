@@ -28,7 +28,8 @@ livephoto = ["pb-app-core/livephoto", "pb-decode/livephoto", "dep:libc"]
 # system FFmpeg); Linux-only in effect for this winit shell (Windows uses Media
 # Foundation). NOT in the Linux ship feature set until plan phases 5–6 pass
 # (ship-gating by discipline, plan §13).
-ffvideo = ["pb-app-core/ffvideo", "pb-decode/ffvideo"]
+# dep:libc = the pw-cat SIGSTOP/SIGCONT pause control in video_audio.rs (Linux).
+ffvideo = ["pb-app-core/ffvideo", "pb-decode/ffvideo", "dep:libc"]
 
 [dependencies]
 # Platform-neutral orchestration model (actions, key model, keymap) — shared with
