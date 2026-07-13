@@ -1257,8 +1257,8 @@
           {
             "id": 8,
             "title": "Distribution + compliance",
-            "description": "Plan section 9-dist: DMG/AppImage FFmpeg closure, signing, task 77 manifest",
-            "status": "in-progress"
+            "description": "Plan §9-dist: DMG FFmpeg closure + inside-out signing + task #77 manifest. DONE + locally verified (2026-07-13): release-macos.sh builds via build-swift-host.sh --bundle-ffmpeg by default (ffvideo feature + pinned LGPL FFmpeg in Contents/Frameworks, --no-video opts out) and re-signs the libav*/libsw* dylibs inside-out with the Developer ID (runtime+timestamp) before the app binary. Verified: closure audit OK (zero external deps), codesign --verify --deep --strict PASS, dylibs carry runtime flag + Team ID + secure timestamp, app loads FFmpeg via @rpath, spctl accepted=Developer ID. Compliance manifest updated. OWNER-REMAINING (not code): run the real notarized release + clean-machine launch test; PGP-verify the pinned tarball (sha256 already gated); patent-licensing decision; the Linux clean-container per-codec audit (subtask carried separately).",
+            "status": "review"
           }
         ]
       },

@@ -18,7 +18,14 @@
 # Locally you can skip CSC_LINK: if a "Developer ID Application" identity is already in
 # your login keychain it's used directly (no base64 dance).
 #
-# Usage: scripts/release-macos.sh [--release|--debug]
+# FFmpeg video (task #84): the release build ships the cross-platform FFmpeg backend by
+# default — build-swift-host.sh --bundle-ffmpeg links the ffvideo feature and bundles the
+# pinned LGPL FFmpeg dylibs (scripts/build-ffmpeg-macos.sh) into Contents/Frameworks. The
+# signing block below re-signs those dylibs with the Developer ID inside-out (before the
+# app binary), so hardened-runtime library validation + notarization accept them. Pass
+# --no-video for a video-less DMG (skips the FFmpeg build/bundle entirely).
+#
+# Usage: scripts/release-macos.sh [--release|--debug] [--no-video]
 #   Builds the SwiftUI host (PhotoBlaze.app via build-swift-host.sh) — it IS PhotoBlaze on
 #   macOS since the 2026-07-02 cutover (the old egui/winit bundle was retired in task #70).
 #   Runs fine LOCALLY with a Developer ID identity in the login keychain + the three APPLE_*
@@ -26,12 +33,14 @@
 set -euo pipefail
 
 PROFILE="release"
+BUNDLE_VIDEO=1   # ship the FFmpeg video backend by default (task #84); --no-video opts out
 for a in "$@"; do
 	case "$a" in
 		--debug) PROFILE="debug" ;;
 		--release) PROFILE="release" ;;
+		--no-video) BUNDLE_VIDEO=0 ;;
 		--swift-host) ;; # accepted for compat; the SwiftUI host is the only target now
-		*) echo "unknown arg: $a (usage: release-macos.sh [--release|--debug])" >&2; exit 2 ;;
+		*) echo "unknown arg: $a (usage: release-macos.sh [--release|--debug] [--no-video])" >&2; exit 2 ;;
 	esac
 done
 
@@ -45,6 +54,18 @@ APP_NAME="PhotoBlaze"
 BIN_NAME="PhotoBlaze"
 APP="target/swift-host/$PROFILE/$APP_NAME.app"
 BUILD_CMD="./scripts/build-swift-host.sh --$PROFILE"
+if [[ $BUNDLE_VIDEO == 1 ]]; then
+	# --bundle-ffmpeg implies --ffvideo, then bundles the pinned LGPL FFmpeg into
+	# Contents/Frameworks (building it on first run, ~10-20 min, if third_party/ffmpeg is
+	# absent). nasm is that build's one non-Xcode prereq — fail loud rather than silently
+	# ship a video-less DMG.
+	command -v nasm >/dev/null || {
+		echo "error: shipping video needs nasm for the FFmpeg build ('brew install nasm')." >&2
+		echo "       Pass --no-video to build a DMG without the video backend." >&2
+		exit 1
+	}
+	BUILD_CMD="$BUILD_CMD --bundle-ffmpeg"
+fi
 DMG="$DIST/$APP_NAME-$SHORT_VERSION.dmg"
 
 # Local credentials, two ways (CI keeps using repo-secret env vars):
@@ -130,8 +151,22 @@ if [[ -n "$IDENTITY" ]]; then
 		codesign --force --options runtime --timestamp --sign "$IDENTITY" "$FW"
 	fi
 
+	# Bundled FFmpeg dylibs (task #84): re-sign the pinned LGPL FFmpeg with OUR Developer ID +
+	# hardened runtime, inside-out (BEFORE the app binary), exactly like Sparkle's helpers.
+	# build-swift-host.sh --bundle-ffmpeg copied them into Contents/Frameworks and ad-hoc-signed
+	# them; hardened-runtime library validation then requires OUR Team ID on every loaded dylib,
+	# and notarization requires a secure timestamp — hence --options runtime --timestamp here.
+	# The glob stays literal when nothing matches (a --no-video build), so `-f` skips it cleanly.
+	ff_signed=0
+	for dylib in "$APP/Contents/Frameworks"/libav*.dylib "$APP/Contents/Frameworks"/libsw*.dylib; do
+		[[ -f "$dylib" ]] || continue
+		[[ $ff_signed == 0 ]] && echo "==> Signing bundled FFmpeg dylibs (inside-out)" && ff_signed=1
+		codesign --force --options runtime --timestamp --sign "$IDENTITY" "$dylib"
+	done
+
 	# Sign the executable, then the bundle (inside-out; the app holds only the one binary
-	# plus non-code resources — Assets.car / .icns — and Sparkle.framework, signed above).
+	# plus non-code resources — Assets.car / .icns — Sparkle.framework, and the FFmpeg dylibs,
+	# all signed above).
 	# No `--entitlements`: a non-sandboxed Rust app needs no hardened-runtime exceptions, so
 	# `--options runtime` alone is correct (an empty entitlements file is a no-op and AMFI's
 	# XML parser is fussy about it).
