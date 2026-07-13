@@ -2657,7 +2657,7 @@ impl AppCoreHandle {
 /// Fold an edited Settings form back onto `base`, preserving the fields the form doesn't
 /// expose (the remembered fullscreen state, window geometry), clamped to valid ranges —
 /// the egui `SettingsDraft::to_settings` mirrored. Pure (no I/O), so it's unit-testable
-/// without touching the user's real settings.toml (`SettingsSaved` → `apply_settings`
+/// without touching the user's real settings.toml (`SettingsEdited` → `apply_settings`
 /// persists).
 fn fold_settings_form(
     base: &pb_app_core::settings::Settings,

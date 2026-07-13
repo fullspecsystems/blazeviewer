@@ -7,6 +7,13 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Changed
+- **Settings now save as you change them.** The Settings dialog on Windows and Linux
+  applies each change live and keeps it, the same way it already worked on macOS. There is
+  no more Save or Cancel button. Adjust a slider, toggle, or color and you see it take
+  effect on your photos right away, then click Done to close. "Reset settings" still puts
+  everything back to defaults.
+
 ### Added
 - **PhotoBlaze now matches your Windows accent color.** Buttons, tabs, selection, and other
   highlights follow your system accent (the color you pick in Windows Settings) out of the box,

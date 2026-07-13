@@ -78,8 +78,8 @@ pub enum DialogKind {
     Scanning,
 }
 
-/// Which section of the Settings dialog is showing. The bottom Save/Cancel bar is
-/// global (it commits every tab's edits at once); tabs only switch what's visible.
+/// Which section of the Settings dialog is showing. Edits auto-save live across every
+/// tab (the bottom bar is just **Done**); tabs only switch what's visible.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum SettingsTab {
     #[default]
@@ -120,7 +120,7 @@ enum ConnTest {
 /// The egui-facing edit state for the Settings form — the same fields as
 /// [`settings::Settings`] but in shapes the egui widgets want (a combo index, an
 /// `f32` color). Built from the live settings on open ([`SettingsDraft::from_settings`])
-/// and folded back on Save ([`SettingsDraft::to_settings`]).
+/// and folded back live on every edit ([`SettingsDraft::to_settings`]) — auto-save.
 struct SettingsDraft {
     /// Display refresh in Hz — caps the max-speed slider (not persisted).
     refresh_hz: u32,
@@ -332,11 +332,11 @@ impl SettingsDraft {
 /// [`DialogWindow::handle_capture_event`] (raw winit events), not in egui — egui only
 /// arms a slot and renders the result.
 struct KbEdit<'a> {
-    /// The draft keymap being edited (a clone of the live one; committed on Save).
+    /// The draft keymap being edited (a clone of the live one; auto-saved on change).
     keymap: &'a mut Keymap,
     /// The slot awaiting a keypress (`Some((action, slot))`), or `None` when idle.
     capturing: &'a mut Option<(Action, usize)>,
-    /// Whether any binding changed (so Save knows to persist + apply the keymap).
+    /// Whether a binding changed this frame (so `render` emits a live keymap edit).
     dirty: &'a mut bool,
     /// A transient note shown atop the section, e.g. "Moved Ctrl+C from Copy".
     note: &'a mut Option<String>,
@@ -385,18 +385,23 @@ pub struct DialogWindow {
     /// on demand via `pb_ui::icon`, not stored here.
     icon: Option<egui::TextureHandle>,
     draft: SettingsDraft,
-    /// The settings as they were when the dialog opened — the base the edited draft
-    /// is folded onto on Save (so unexposed fields survive) and the Cancel baseline.
+    /// The live settings the draft folds onto — seeded at open, then advanced every
+    /// time a live edit is applied, so the next fold diffs against the applied state
+    /// (an idle frame or a load-time echo is a no-op) and unexposed fields survive.
     settings_base: settings::Settings,
-    /// The edited settings the user committed with **Save** (a [`DialogKind::Settings`]
-    /// dialog), taken by [`take_settings_result`] right after the answering frame.
+    /// A live settings edit produced during a render frame (the folded draft differed
+    /// from [`settings_base`]): the auto-saving idiom. Taken by the shell right after
+    /// [`render`] and routed as [`contract::DialogResult::SettingsEdited`], which applies
+    /// + persists without closing the window — parity with the macOS shell.
     ///
-    /// [`take_settings_result`]: DialogWindow::take_settings_result
-    submitted_settings: Option<settings::Settings>,
+    /// [`settings_base`]: DialogWindow::settings_base
+    /// [`render`]: DialogWindow::render
+    pending_settings_edit: Option<settings::Settings>,
     /// The draft keymap edited by the inline keybinding editor (a clone of the live
-    /// one, seeded at open). Committed on Save, discarded on Cancel.
+    /// one, seeded at open). Auto-saved: a change is applied + persisted live.
     keymap_draft: Keymap,
-    /// Whether any binding was changed (so Save only persists/applies if it was).
+    /// Set when a binding changed this frame; `render` drains it into a live keymap
+    /// edit (then clears it) so only a real change persists.
     keymap_dirty: bool,
     /// The slot awaiting a keypress for rebinding (`Some((action, slot))`), else idle.
     capturing: Option<(Action, usize)>,
@@ -414,11 +419,12 @@ pub struct DialogWindow {
     conn_test: ConnTest,
     /// Models the last probe listed (vision-capable first) — fills the Model picker.
     describe_models: Vec<String>,
-    /// The edited keymap committed with **Save** (only set when it actually changed),
-    /// taken by [`take_keymap_result`].
+    /// A live keymap edit produced during a render frame (a binding actually changed):
+    /// rides the same auto-save channel as [`pending_settings_edit`], applied + persisted
+    /// without closing the window.
     ///
-    /// [`take_keymap_result`]: DialogWindow::take_keymap_result
-    submitted_keymap: Option<Keymap>,
+    /// [`pending_settings_edit`]: DialogWindow::pending_settings_edit
+    pending_keymap_edit: Option<Keymap>,
     /// The prompt for a [`DialogKind::Confirm`]/[`Message`]/[`Password`] dialog.
     ///
     /// [`Message`]: DialogKind::Message
@@ -634,6 +640,13 @@ impl DialogWindow {
         let egui_renderer = egui_wgpu::Renderer::new(&device, format, None, 1, false);
         let icon = load_icon_texture(&egui_ctx);
 
+        // Seed the fold baseline from the *normalized* round-trip, not the raw settings:
+        // `to_settings` trims/clamps, so a non-normalized stored value would otherwise make
+        // the first frame's fold differ and spuriously auto-save on mere open. Normalizing
+        // the baseline makes "open Settings, change nothing, close" a guaranteed zero-write.
+        let draft = SettingsDraft::from_settings(settings, refresh_hz);
+        let settings_base = draft.to_settings(settings);
+
         let mut dlg = DialogWindow {
             window,
             kind,
@@ -647,9 +660,9 @@ impl DialogWindow {
             egui_renderer,
             dark_ui,
             icon,
-            draft: SettingsDraft::from_settings(settings, refresh_hz),
-            settings_base: settings.clone(),
-            submitted_settings: None,
+            draft,
+            settings_base,
+            pending_settings_edit: None,
             keymap_draft: keymap.clone(),
             keymap_dirty: false,
             capturing: None,
@@ -661,7 +674,7 @@ impl DialogWindow {
             settings_tab: SettingsTab::default(),
             conn_test: ConnTest::default(),
             describe_models: Vec::new(),
-            submitted_keymap: None,
+            pending_keymap_edit: None,
             confirm_msg: message.to_string(),
             confirm_result: None,
             password_input: String::new(),
@@ -718,18 +731,19 @@ impl DialogWindow {
         self.submitted_ask.take()
     }
 
-    /// Take the edited settings the user committed with **Save** on a
-    /// [`DialogKind::Settings`] dialog, set during the answering frame. `None` until
-    /// then. The caller pairs this with a `take_confirm_result()` of `Some(true)`.
-    pub fn take_settings_result(&mut self) -> Option<settings::Settings> {
-        self.submitted_settings.take()
-    }
-
-    /// Take the edited keymap committed with **Save**, set during the answering frame
-    /// *only if a binding actually changed*. `None` otherwise. Paired with a
-    /// `take_confirm_result()` of `Some(true)`.
-    pub fn take_keymap_result(&mut self) -> Option<Keymap> {
-        self.submitted_keymap.take()
+    /// Take a live Settings edit produced this render frame (auto-save): the settings
+    /// (when the form changed) and/or the keymap (when a binding changed). `None` when
+    /// the frame changed nothing. Polled by the shell after every [`render`] and routed
+    /// as [`contract::DialogResult::SettingsEdited`] — apply + persist, window stays open.
+    ///
+    /// [`render`]: DialogWindow::render
+    #[allow(clippy::type_complexity)]
+    pub fn take_settings_edit(
+        &mut self,
+    ) -> Option<(Option<Box<settings::Settings>>, Option<Keymap>)> {
+        let s = self.pending_settings_edit.take();
+        let k = self.pending_keymap_edit.take();
+        (s.is_some() || k.is_some()).then(|| (s.map(Box::new), k))
     }
 
     /// Whether the keybinding editor is waiting for a keypress to bind. While true the
@@ -911,7 +925,8 @@ impl DialogWindow {
             }
             DialogKind::Settings => {
                 // Pinned action bar at the bottom, then the scrolling settings page.
-                // Save / Cancel both answer the dialog → the main loop closes it.
+                // The lone Done button answers the dialog → the main loop closes it
+                // (edits already auto-saved live; see the post-frame fold below).
                 confirm_click = settings_button_bar(ctx);
                 egui::CentralPanel::default()
                     .frame(egui::Frame::default().fill(ctx.style().visuals.panel_fill))
@@ -956,6 +971,21 @@ impl DialogWindow {
             .unwrap_or(Duration::MAX);
         // The focus request (if any) was issued this frame; don't repeat it.
         self.focus_password = false;
+        // Settings auto-save: the form edits `draft`/`keymap_draft` live (no Save button).
+        // After the frame ran, fold the draft onto the live baseline; a real diff is a live
+        // edit the shell routes as `SettingsEdited` (apply + persist, window stays open).
+        // An idle frame or the open-time load echo folds equal → no-op, so disk is untouched.
+        if kind == DialogKind::Settings {
+            let folded = self.draft.to_settings(&self.settings_base);
+            if folded != self.settings_base {
+                self.settings_base = folded.clone();
+                self.pending_settings_edit = Some(folded);
+            }
+            if self.keymap_dirty {
+                self.keymap_dirty = false;
+                self.pending_keymap_edit = Some(self.keymap_draft.clone());
+            }
+        }
         if confirm_click.is_some() {
             self.confirm_result = confirm_click;
             // On Unlock/Enter, snapshot the entered text for the app to validate.
@@ -966,14 +996,8 @@ impl DialogWindow {
             if confirm_click == Some(true) && kind == DialogKind::AskImage {
                 self.submitted_ask = Some(self.ask_input.clone());
             }
-            // On Save, fold the edited draft onto the open-time base for the app to apply.
-            if confirm_click == Some(true) && kind == DialogKind::Settings {
-                self.submitted_settings = Some(self.draft.to_settings(&self.settings_base));
-                // Hand back the edited keymap only if a binding actually changed.
-                if self.keymap_dirty {
-                    self.submitted_keymap = Some(self.keymap_draft.clone());
-                }
-            }
+            // Settings' "Done" (and Esc/close) just closes — every edit was already applied
+            // + persisted live above, so there is nothing to commit on the way out.
         }
 
         self.egui_state
@@ -1579,20 +1603,19 @@ fn scrub(s: &mut String) {
     s.clear();
 }
 
-/// The pinned bottom action bar for the Settings dialog: a right-aligned
-/// `[Save] [Cancel]` pair (Save accent-filled). Returns `Some(true)` on Save,
-/// `Some(false)` on Cancel, else `None`. On Save the main loop takes the edited
-/// settings ([`DialogWindow::take_settings_result`]) and applies + persists them;
-/// Cancel / Esc just close, discarding the draft.
+/// The pinned bottom action bar for the Settings dialog: a single right-aligned
+/// accent **Done** button. Returns `Some(true)` when clicked, else `None`. The form
+/// auto-saves — every edit is applied + persisted live via [`DialogWindow::take_settings_edit`]
+/// as it happens — so Done (and Esc / close) only close the window; there is nothing to
+/// commit or revert.
 fn settings_button_bar(ctx: &egui::Context) -> Option<bool> {
     let p = pbui::Palette::new(ctx.style().visuals.dark_mode);
     let mut result = None;
-    // Same shared bar as every other dialog — uniform inset + button gap, no hand-spacing.
+    // Auto-saving form (like macOS): every edit already applied + persisted live, so the
+    // bar is a single **Done** that just closes. No Save (nothing to commit) and no Cancel
+    // (nothing to revert). Same shared bar as every other dialog — uniform inset + gap.
     button_bar(ctx, "settings_bar", |ui| {
-        if pbui::secondary_button(ui, "Cancel").clicked() {
-            result = Some(false);
-        }
-        if pbui::primary_button(ui, &p, "Save").clicked() {
+        if pbui::primary_button(ui, &p, "Done").clicked() {
             result = Some(true);
         }
     });
@@ -1602,7 +1625,8 @@ fn settings_button_bar(ctx: &egui::Context) -> Option<bool> {
 /// The Settings form, laid out as Windows-11-style **grouped setting cards** — related
 /// settings share one card under a semibold heading (far less scrolling than a card per
 /// setting). Built on the `pbui` design system. The controls edit `d`, a draft built
-/// from the live settings on open; Save folds it back via [`SettingsDraft::to_settings`].
+/// from the live settings on open; each change is folded back + applied live (auto-save)
+/// via [`SettingsDraft::to_settings`] — no Save button.
 fn settings_ui(
     ui: &mut egui::Ui,
     d: &mut SettingsDraft,
@@ -1618,8 +1642,8 @@ fn settings_ui(
         *kb.capturing = None;
     }
 
-    // Pinned tab strip, then the scrolling content for the active tab. Save/Cancel
-    // (the bottom bar) is global — it commits every tab's edits at once.
+    // Pinned tab strip, then the scrolling content for the active tab. Edits on any
+    // tab auto-save live; the bottom bar is just Done.
     settings_tab_bar(ui, tab);
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -2167,11 +2191,11 @@ fn general_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
             p,
             None,
             "Reset settings",
-            Some("Restore every setting to its default (applies on Save)"),
+            Some("Restore every setting to its default"),
             |ui| {
                 if pbui::secondary_button(ui, "Reset").clicked() {
-                    // Repopulate the form with the defaults; Save commits, Cancel still
-                    // reverts (nothing is written yet).
+                    // Repopulate the form with the defaults; the post-frame fold sees the
+                    // diff and applies + persists it live, same as any other edit.
                     let hz = d.refresh_hz;
                     *d = SettingsDraft::from_settings(&settings::Settings::default(), hz);
                 }
@@ -2328,7 +2352,8 @@ fn display_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
 /// The inline keyboard-shortcut editor: grouped cards (matching the menu), each
 /// command with a Primary and Secondary chord slot. Clicking a slot arms key capture
 /// (handled outside egui in [`DialogWindow::handle_capture_event`]); the actual edits
-/// land on the draft keymap in `kb`, committed on the dialog's Save.
+/// land on the draft keymap in `kb` and auto-save live (a changed binding is applied +
+/// persisted the same frame).
 fn keybindings_ui(ui: &mut egui::Ui, p: &pbui::Palette, kb: &mut KbEdit) {
     // A capture prompt while a slot is armed, else a transient "moved from …" note.
     if kb.capturing.is_some() {
@@ -2411,7 +2436,45 @@ fn clamp_to_monitor(pos: (f64, f64), size: (f64, f64), mon: (f64, f64, f64, f64)
 
 #[cfg(test)]
 mod tests {
-    use super::{clamp_to_monitor, elide_path, fmt_count};
+    use super::{clamp_to_monitor, elide_path, fmt_count, settings, SettingsDraft};
+
+    // Auto-save invariant #1 (privacy-critical): opening Settings and changing nothing must
+    // write nothing. The dialog seeds its fold baseline from the *normalized* round-trip, so
+    // even a non-normalized stored value (an untrimmed endpoint, an over-range advance rate)
+    // folds equal on the first frame → no `SettingsEdited`, no `settings.toml` write.
+    #[test]
+    fn opening_settings_with_no_change_is_a_noop() {
+        let s = settings::Settings {
+            describe_endpoint: "  http://localhost:11434  ".to_string(), // to_settings trims
+            max_advance_rate: 100_000, // clamps to "uncapped" (0) against any real refresh
+            ..settings::Settings::default()
+        };
+        let hz = 120;
+        let draft = SettingsDraft::from_settings(&s, hz);
+        let base = draft.to_settings(&s); // what DialogWindow stores as `settings_base`
+                                          // The first render frame re-folds the same (unedited) draft against `base`:
+        assert_eq!(
+            draft.to_settings(&base),
+            base,
+            "opening Settings with no change must not differ from the baseline"
+        );
+    }
+
+    // Auto-save invariant #2: a genuine edit is detected against the normalized baseline, so
+    // it *does* emit a live `SettingsEdited`.
+    #[test]
+    fn an_edit_is_detected_against_the_baseline() {
+        let s = settings::Settings::default();
+        let hz = 120;
+        let mut draft = SettingsDraft::from_settings(&s, hz);
+        let base = draft.to_settings(&s);
+        draft.recursive = !draft.recursive; // as a toggle click would
+        assert_ne!(
+            draft.to_settings(&base),
+            base,
+            "a real edit must differ from the baseline (emits SettingsEdited)"
+        );
+    }
 
     #[test]
     fn fmt_count_groups_thousands() {

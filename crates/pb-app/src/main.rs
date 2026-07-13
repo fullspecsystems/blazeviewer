@@ -567,14 +567,16 @@ enum DialogOutcome {
     /// The "Ask about image" question submitted (task #44). `None` shouldn't happen on Ask
     /// but folds to an empty question the core ignores.
     AskSubmitted(Option<String>),
-    /// Settings saved, carrying the (optionally) edited settings + keymap. `settings` is
-    /// boxed to keep this variant small (the struct grew with the AI-describe fields — else
-    /// `clippy::large_enum_variant`).
-    SettingsSaved {
+    /// A live Settings edit from the auto-saving dialog, carrying the (optionally) edited
+    /// settings + keymap for the frame. Applied + persisted immediately; the window stays
+    /// open. `settings` is boxed to keep this variant small (the struct grew with the
+    /// AI-describe fields — else `clippy::large_enum_variant`).
+    SettingsEdited {
         settings: Option<Box<settings::Settings>>,
         keymap: Option<Keymap>,
     },
-    /// Settings dialog's Cancel (its Esc goes through [`DialogOutcome::Dismissed`]).
+    /// Settings dialog closed (Done). Edits were already applied live, so this only clears
+    /// the dialog-open state. (Esc / close go through [`DialogOutcome::Dismissed`].)
     SettingsCancelled,
     /// The archive "Opening…" dialog's Cancel.
     LoadingCancelled,
@@ -2428,6 +2430,9 @@ impl App {
         // Render the dialog and pick up a button answer (if one was clicked).
         let kind = self.dialog.as_ref().map(|d| d.kind());
         let mut answer: Option<bool> = None;
+        // A live Settings edit produced by this render frame (auto-save); routed below
+        // once the `d` borrow is released.
+        let mut live_edit: Option<(Option<Box<settings::Settings>>, Option<Keymap>)> = None;
         if let Some(d) = self.dialog.as_mut() {
             let repaint = d.on_event(&event);
             match &event {
@@ -2438,6 +2443,7 @@ impl App {
                 WindowEvent::RedrawRequested => {
                     d.render();
                     answer = d.take_confirm_result();
+                    live_edit = d.take_settings_edit();
                 }
                 _ => {
                     if repaint {
@@ -2445,6 +2451,10 @@ impl App {
                     }
                 }
             }
+        }
+        // Apply + persist a live Settings edit (the auto-save path — window stays open).
+        if let Some((settings, keymap)) = live_edit {
+            self.route_dialog_outcome(DialogOutcome::SettingsEdited { settings, keymap });
         }
         if let Some(confirmed) = answer {
             // Turn the button answer into an outcome, extracting any egui-side payload here
@@ -2463,15 +2473,8 @@ impl App {
                     self.dialog.as_mut().and_then(|d| d.take_ask_result()),
                 ),
                 Some(dialog::DialogKind::AskImage) => DialogOutcome::Closed, // Ask cancel = close
-                Some(dialog::DialogKind::Settings) if confirmed => {
-                    let (settings, keymap) = self.dialog.as_mut().map_or((None, None), |d| {
-                        (d.take_settings_result(), d.take_keymap_result())
-                    });
-                    DialogOutcome::SettingsSaved {
-                        settings: settings.map(Box::new),
-                        keymap,
-                    }
-                }
+                // Auto-save dialog: Done (or any close) just clears the open state —
+                // every edit was already applied + persisted live via `live_edit` above.
                 Some(dialog::DialogKind::Settings) => DialogOutcome::SettingsCancelled,
                 Some(dialog::DialogKind::Loading) => DialogOutcome::LoadingCancelled,
                 Some(dialog::DialogKind::Scanning) => DialogOutcome::ScanningCancelled,
@@ -2497,8 +2500,8 @@ impl App {
             DialogOutcome::AskSubmitted(q) => {
                 contract::DialogResult::AskSubmitted(q.unwrap_or_default())
             }
-            DialogOutcome::SettingsSaved { settings, keymap } => {
-                contract::DialogResult::SettingsSaved { settings, keymap }
+            DialogOutcome::SettingsEdited { settings, keymap } => {
+                contract::DialogResult::SettingsEdited { settings, keymap }
             }
             DialogOutcome::SettingsCancelled => contract::DialogResult::SettingsCancelled,
             DialogOutcome::LoadingCancelled => contract::DialogResult::LoadingCancelled,

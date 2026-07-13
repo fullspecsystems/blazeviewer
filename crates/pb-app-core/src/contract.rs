@@ -239,17 +239,11 @@ pub enum DialogResult {
     /// An ask-about-image question was submitted (task #44): run it through the describe
     /// backend for the current photo. Empty/whitespace is ignored by the core.
     AskSubmitted(String),
-    /// Settings saved, carrying the (optionally) edited settings + keymap. The
-    /// settings payload is boxed: it rides inside [`CoreEvent`], which travels on
-    /// every keypress — the rare dialog result pays the indirection so the hot
-    /// event stays small (clippy `large_enum_variant`).
-    SettingsSaved {
-        settings: Option<Box<crate::settings::Settings>>,
-        keymap: Option<Keymap>,
-    },
-    /// A live edit from an auto-saving Settings window (the macOS idiom — no Save
-    /// button): apply + persist the payload immediately, but the window stays open,
-    /// so — unlike [`DialogResult::SettingsSaved`] — no `CloseDialog` is emitted.
+    /// A live edit from an auto-saving Settings window (both shells — no Save button):
+    /// apply + persist the payload immediately, but the window stays open, so no
+    /// `CloseDialog` is emitted. The settings payload is boxed: it rides inside
+    /// [`CoreEvent`], which travels on every keypress — the rare dialog result pays the
+    /// indirection so the hot event stays small (clippy `large_enum_variant`).
     SettingsEdited {
         settings: Option<Box<crate::settings::Settings>>,
         keymap: Option<Keymap>,
