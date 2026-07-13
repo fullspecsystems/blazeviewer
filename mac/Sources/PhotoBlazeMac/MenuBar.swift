@@ -263,7 +263,7 @@ final class MenuBar: NSObject {
             item("slideshow_slower", "Slideshow Slower"),
             sep(),
             item("info", "Show Image Info"),
-            item("full_exif", "Show All EXIF Info", key: "i"),
+            item("full_exif", "Show Detailed Info", key: "i"),
             item("folder_tree", "Show Folder Tree"),
             item("thumbnails", "Show Thumbnails"),
             item("toggle_panels", "Hide Panels"),

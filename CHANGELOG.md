@@ -25,8 +25,27 @@ with any pre-release suffix carried only by the tag.
   no more Save or Cancel button. Adjust a slider, toggle, or color and you see it take
   effect on your photos right away, then click Done to close. "Reset settings" still puts
   everything back to defaults.
+- **Renamed "Show All EXIF Info" to "Show Detailed Info"** in the View menu, matching the
+  Details panel it opens (and consistent across Windows, Linux, and macOS).
+- **`F` is now shown everywhere as the full screen shortcut.** The View menu (and the toolbar's
+  exit hint) advertise `F` — the memorable, cross-platform key — instead of `F11`, which is still
+  bound as a secondary. If an older keymap had dropped `F`, it's restored automatically on
+  launch (F11 and Alt+Enter still work).
+
+### Fixed
+- **Icons are crisp at 125%/150% display scaling.** Toolbar and dialog icons were slightly
+  blurred and looked flattened at the bottom on fractional display scales (and worse over Remote
+  Desktop); they now render pixel-aligned and sharp.
 
 ### Added
+- **A toolbar for mouse control (Windows/Linux).** A row of buttons now sits under the menu
+  in windowed mode: previous/next and random (hold to fly, just like the keys), previous/next
+  folder, play/pause, slideshow, rotate left/right, delete, and toggles for the info line,
+  all-info panel, and folder tree — with the photo counter and a fullscreen button on the
+  right. Buttons light up on hover, and a toggle (or the play button while something is
+  playing) fills with your accent color. It is on by default; turn it off from **View ▸ Show
+  Toolbar** or under Settings ▸ Appearance ▸ **Show toolbar** to give the photo the whole
+  window. The keyboard still does everything without it.
 - **PhotoBlaze now matches your Windows accent color.** Buttons, tabs, selection, and other
   highlights follow your system accent (the color you pick in Windows Settings) out of the box,
   so the app looks at home on your desktop, and update the moment you change your Windows accent

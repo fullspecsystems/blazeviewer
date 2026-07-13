@@ -480,7 +480,14 @@ impl AppCore {
             // and Quit's window teardown. Routed through the one `ShellFlowAction` seam so the
             // whole action vocabulary still dispatches here; the host runs the native op (see the
             // effect's doc). The core-owned commands were lifted out into their own arms above.
-            Action::DeletePermanent | Action::Recursive | Action::CancelScan | Action::Quit => self
+            // `ToggleToolbar` (#61) also routes here: the docked toolbar is a Windows/Linux-shell
+            // concept (macOS has its native toolbar), so the shell owns flipping `show_toolbar`,
+            // persisting it, and re-reserving the photo's top inset — the core stays agnostic.
+            Action::DeletePermanent
+            | Action::Recursive
+            | Action::CancelScan
+            | Action::Quit
+            | Action::ToggleToolbar => self
                 .effects
                 .push(contract::CoreEffect::ShellFlowAction(action)),
         }
@@ -1756,6 +1763,9 @@ impl AppCore {
             recursive,
             fullscreen,
             slideshow,
+            // The docked toolbar (#61) is a shell-honored setting, not derived from view state,
+            // so the choke point defaults it off and the shell overrides it from `settings`.
+            show_toolbar: false,
             mute_live_audio,
             // Compare (task #43): both raw states cross so the derivation lives HERE,
             // the one choke point, instead of drifting per shell.
@@ -7834,6 +7844,16 @@ impl AppCore {
         self.animation_playing() || self.video_playing()
     }
 
+    /// The **displayed** photo's 1-based position and total count, for the toolbar counter
+    /// (task #61) — mirrors the window title's `(idx+1/n)` (`title_for`). Derived from
+    /// [`displayed_item`](Self::displayed_item), the *present-truth* index, **not** the nav
+    /// target: during a resident-ring miss the target advances while the old photo is still
+    /// on screen, so a target-based counter would lie. `None` until the first image is
+    /// presented (the counter hides on a cold start / empty deck).
+    pub fn display_counter(&self) -> Option<(usize, usize)> {
+        self.displayed_item.map(|i| (i + 1, self.source.len()))
+    }
+
     /// Kick the whole-sequence decode for `item` on a worker thread so a big GIF/WebP (or
     /// a Live Photo `.mov`) never stalls the event loop; the still first frame stays on
     /// screen until it lands (picked up by `poll_anim_decode`). `want` decides what
@@ -9721,6 +9741,25 @@ mod tests {
         });
         assert!(!core.held.contains_key(&PbKey::ArrowLeft));
         assert!(core.held.contains_key(&PbKey::ArrowRight));
+    }
+
+    #[test]
+    fn display_counter_tracks_the_displayed_item_not_the_nav_target() {
+        // The toolbar counter (task #61) must read *present-truth* (`displayed_item`), so a
+        // resident-ring miss — where the target has advanced but the old photo is still on
+        // screen — never makes the counter lie.
+        let mut core = test_core();
+        core.source = five_photos();
+        // Cold start: nothing presented yet → the counter hides.
+        core.displayed_item = None;
+        assert_eq!(core.display_counter(), None);
+        // Presenting item 2 (0-based) shows "3 / 5".
+        core.displayed_item = Some(2);
+        assert_eq!(core.display_counter(), Some((3, 5)));
+        // The nav target races ahead to item 4 while the ring is still catching up — the counter
+        // stays on the *displayed* item, not the target.
+        core.target_item = Some(4);
+        assert_eq!(core.display_counter(), Some((3, 5)));
     }
 
     #[test]

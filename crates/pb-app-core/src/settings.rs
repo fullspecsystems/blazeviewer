@@ -172,6 +172,12 @@ pub struct Settings {
     /// toolbar so a zoomed/cropped image shows under it (fit mode is unchanged). Default `true`
     /// (the most Mac-like look); a legibility scrim keeps the title readable. Windowed-mode only.
     pub glass_toolbar: bool,
+    /// Show the windowed **toolbar** — the docked, mouse-driven strip of nav / view
+    /// affordances under the menu bar (task #61, Windows/Linux winit shell). Default `true`
+    /// for discoverability; a power user turns it off to reclaim the strip (the keyboard does
+    /// everything without it). Windowed-mode only — the fullscreen speed mode is chrome-free.
+    /// Applied live. macOS uses its native toolbar (Hide Toolbar), so it ignores this key.
+    pub show_toolbar: bool,
     /// Which fields the info line shows: folder, file name, resolution (W×H), codec. Applied
     /// live. Folder is prepended to the file name with a `/` (the relative dir when the scan is
     /// recursive, else the containing folder's name). The line hides if the enabled fields
@@ -274,6 +280,7 @@ impl Default for Settings {
             info_line_align: InfoLineAlign::Right, // today's bottom-right placement
             show_image_info: false,                // off until opted in (unchanged launch)
             glass_toolbar: true,                   // transparent toolbar on by default (#59)
+            show_toolbar: true,                    // docked toolbar on by default (#61)
             info_show_folder: false,               // opt-in — filename alone by default
             info_show_filename: true,
             info_show_resolution: true,

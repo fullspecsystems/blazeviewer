@@ -303,6 +303,7 @@ impl Keymap {
                 eprintln!("PhotoBlaze keymap: {w}");
             }
             km.migrate_seek_chords();
+            km.migrate_fullscreen_f();
         }
         km
     }
@@ -325,6 +326,25 @@ impl Keymap {
             };
             if self.action_for(&shifted).is_none() && self.action_for(&bare) == Some(action) {
                 self.by_action.entry(action).or_default().push(shifted);
+            }
+        }
+        self.rebuild_index();
+    }
+
+    /// Heal saved keymaps that predate **`F`** becoming the primary fullscreen key (it used to be
+    /// `F11` on Windows): `to_toml` writes every action, so a `keymap.toml` saved back then froze
+    /// Fullscreen without `F` — and the memorable, cross-platform primary the menu badge, help
+    /// overlay, and toolbar/exit hints all advertise silently never works. If `F` is unbound and
+    /// Fullscreen is still bound (the old default), make `F` its **primary** (slot 0). A user who
+    /// bound `F` to another action, or cleared Fullscreen entirely, is left alone.
+    fn migrate_fullscreen_f(&mut self) {
+        let Some(f) = KeyChord::parse("F") else {
+            return;
+        };
+        if self.action_for(&f).is_none() && !self.bindings_for(Action::Fullscreen).is_empty() {
+            let chords = self.by_action.entry(Action::Fullscreen).or_default();
+            if !chords.contains(&f) {
+                chords.insert(0, f);
             }
         }
         self.rebuild_index();
@@ -622,6 +642,8 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         one(Action::FrameNext, "."),
         one(Action::FramePrev, ","),
         one(Action::MuteLiveAudio, "M"),
+        // Show/hide the docked windowed toolbar (#61) — View-menu only, no default key.
+        (Action::ToggleToolbar, vec![]),
         one(Action::Settings, "Ctrl+,"),
         // About is menu-only (no default key).
         (Action::About, vec![]),
@@ -697,6 +719,39 @@ mod tests {
         let _ = km.merge_toml("[keys]\npan_left = []\nprev = [\"Backspace\", \"Left\"]\n");
         km.migrate_seek_chords();
         assert_eq!(km.action_for(&shl), None, "no pan on Left → no shift chord");
+    }
+
+    /// A `keymap.toml` saved before `F` became the primary fullscreen key froze Fullscreen at
+    /// `["F11", "Alt+Enter"]` — the migration must restore `F` as the primary without disturbing
+    /// a deliberate rebind.
+    #[test]
+    fn migrate_fullscreen_f_restores_the_primary_key() {
+        let f = KeyChord::parse("F").unwrap();
+
+        // Stale file: F11-first, no F. The migration prepends F as slot 0.
+        let mut km = Keymap::defaults();
+        let _ = km.merge_toml("[keys]\nfullscreen = [\"F11\", \"Alt+Enter\"]\n");
+        assert_eq!(km.action_for(&f), None, "stale file has no F");
+        km.migrate_fullscreen_f();
+        assert_eq!(km.action_for(&f), Some(Action::Fullscreen));
+        assert_eq!(
+            km.slot(Action::Fullscreen, 0),
+            Some(f),
+            "F is the primary now"
+        );
+
+        // A user who bound F to another action keeps it — no re-add to Fullscreen.
+        let mut km = Keymap::defaults();
+        let _ = km.merge_toml("[keys]\nfullscreen = [\"F11\"]\nrotate_cw = [\"F\"]\n");
+        km.migrate_fullscreen_f();
+        assert_eq!(km.action_for(&f), Some(Action::RotateCw));
+        assert!(!km.bindings_for(Action::Fullscreen).contains(&f));
+
+        // A cleared Fullscreen (deliberately no binding) is left empty.
+        let mut km = Keymap::defaults();
+        let _ = km.merge_toml("[keys]\nfullscreen = []\n");
+        km.migrate_fullscreen_f();
+        assert!(km.bindings_for(Action::Fullscreen).is_empty());
     }
 
     #[cfg(target_os = "macos")]

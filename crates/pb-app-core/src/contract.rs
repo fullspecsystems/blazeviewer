@@ -135,7 +135,7 @@ pub struct MenuState {
     pub scale: ScaleMode,
     /// View ▸ Show Image Info — the ephemeral basic `i` line.
     pub info_basic: bool,
-    /// View ▸ Show All EXIF Info — the Inspector open on its Details tab (checked
+    /// View ▸ Show Detailed Info — the Inspector open on its Details tab (checked
     /// even while `Tab`-hidden: hidden ≠ closed, and Hide Panels explains it).
     pub info_full: bool,
     /// View ▸ Hide Panels — checked while rich panels are `Tab`-hidden (task #54).
@@ -149,6 +149,9 @@ pub struct MenuState {
     pub fullscreen: bool,
     /// View ▸ Slideshow.
     pub slideshow: bool,
+    /// View ▸ Show Toolbar — checked when the docked windowed toolbar is on (#61). A
+    /// Windows/Linux-shell setting; macOS ignores it (it has a native toolbar).
+    pub show_toolbar: bool,
     /// Image ▸ Mute Live Photo Audio — checked when Live Photo audio is muted (#38).
     pub mute_live_audio: bool,
     /// Image ▸ Pin for Compare — enabled with a photo on screen (task #43).

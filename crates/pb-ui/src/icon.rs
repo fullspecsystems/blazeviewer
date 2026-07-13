@@ -81,6 +81,31 @@ pub enum Icon {
     /// Pause action (the playback bar's play/pause button while a video plays —
     /// matches SF `pause.fill`).
     Pause,
+    /// Toolbar: previous photo (matches SF `chevron.left`).
+    ChevronLeft,
+    /// Toolbar: next photo (matches SF `chevron.right`).
+    ChevronRight,
+    /// Toolbar: previous folder (matches SF `chevron.left.2`).
+    AnglesLeft,
+    /// Toolbar: next folder (matches SF `chevron.right.2`).
+    AnglesRight,
+    /// Toolbar: random photo (matches SF `shuffle`; the random-prev button paints it
+    /// mirrored — see [`paint_tinted_flipped`]).
+    Shuffle,
+    /// Toolbar: rotate counter-clockwise (matches SF `rotate.left`).
+    RotateLeft,
+    /// Toolbar: rotate clockwise (matches SF `rotate.right`).
+    RotateRight,
+    /// Toolbar: Details / all-EXIF panel toggle (matches SF `info.circle`, but a table
+    /// glyph so it reads distinct from the basic info line's [`Info`](Self::Info)).
+    TableList,
+    /// Toolbar: the basic bottom **info line** toggle — a plain, uncircled `i` (FA `info`),
+    /// deliberately distinct from the circled [`Info`](Self::Info) that toggles the info panel.
+    InfoLine,
+    /// Toolbar: folder-tree panel toggle (matches SF `folder.circle`).
+    FolderTree,
+    /// Toolbar: enter fullscreen (matches SF `arrow.up.left.and.arrow.down.right`).
+    Expand,
 }
 
 /// A **theme-aware** icon color. `Neutral` is the quiet default (a gray that varies
@@ -145,6 +170,17 @@ fn svg(icon: Icon, family: Family) -> &'static str {
         Icon::File => glyph!("file"),
         Icon::Play => glyph!("play"),
         Icon::Pause => glyph!("pause"),
+        Icon::ChevronLeft => glyph!("chevron-left"),
+        Icon::ChevronRight => glyph!("chevron-right"),
+        Icon::AnglesLeft => glyph!("angles-left"),
+        Icon::AnglesRight => glyph!("angles-right"),
+        Icon::Shuffle => glyph!("shuffle"),
+        Icon::RotateLeft => glyph!("rotate-left"),
+        Icon::RotateRight => glyph!("rotate-right"),
+        Icon::TableList => glyph!("table-list"),
+        Icon::InfoLine => glyph!("info"),
+        Icon::FolderTree => glyph!("folder-tree"),
+        Icon::Expand => glyph!("up-right-and-down-left-from-center"),
     }
 }
 
@@ -224,11 +260,42 @@ pub fn paint(ui: &egui::Ui, rect: egui::Rect, icon: Icon, tone: Tone, p: &Palett
 /// of the semantic [`Tone`]s (e.g. an inspector tab's icon that goes white when selected and
 /// panel-secondary otherwise).
 pub fn paint_tinted(ui: &egui::Ui, rect: egui::Rect, icon: Icon, tint: Color32) {
-    let side = rect.width().max(rect.height());
-    let px = (side * ui.ctx().pixels_per_point()).round().max(1.0) as u32;
-    let tex = texture(ui.ctx(), icon, ACTIVE_FAMILY, px);
-    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-    ui.painter().image(tex.id(), rect, uv, tint);
+    paint_sprite(ui, rect, icon, tint, false);
+}
+
+/// Like [`paint_tinted`], but **mirrored horizontally** — the sprite is drawn flipped
+/// left-to-right by swapping the U texture coordinates. The toolbar's random-*previous*
+/// button uses it so the `shuffle` glyph points the other way (the macOS
+/// `shuffleImage(flipped:)` trick), giving a symmetric back/forward pair from one asset.
+pub fn paint_tinted_flipped(ui: &egui::Ui, rect: egui::Rect, icon: Icon, tint: Color32) {
+    paint_sprite(ui, rect, icon, tint, true);
+}
+
+/// Shared painter for [`paint_tinted`] / [`paint_tinted_flipped`]: rasterize the sprite at the
+/// **exact physical-pixel size** of the destination and draw it into a **pixel-snapped** square,
+/// so the texture maps 1:1 to pixels. Without this, a 17 pt icon at 150% DPI wants 25.5 physical
+/// px but the sprite rounds to 26 and lands in a fractionally-placed box — the GPU then minifies
+/// 26→25.5 with linear filtering (blur) and clamps the edge texel row (flattening the bottom of
+/// round glyphs). Snapping makes both go away; at 100% it was already ~1:1 (why it looked fine
+/// locally but got compounded by Remote Desktop's own frame compression).
+fn paint_sprite(ui: &egui::Ui, rect: egui::Rect, icon: Icon, tint: Color32, mirror: bool) {
+    let ppp = ui.ctx().pixels_per_point();
+    // Whole-pixel sprite size, and a destination sized to exactly that many physical pixels.
+    let px = (rect.width().max(rect.height()) * ppp).round().max(1.0);
+    // Snap the top-left onto the physical grid so texel centers land on pixel centers.
+    let min = egui::pos2(
+        (rect.min.x * ppp).round() / ppp,
+        (rect.min.y * ppp).round() / ppp,
+    );
+    let dst = egui::Rect::from_min_size(min, egui::Vec2::splat(px / ppp));
+    let tex = texture(ui.ctx(), icon, ACTIVE_FAMILY, px as u32);
+    // U runs 1→0 across the rect for the mirror, 0→1 otherwise.
+    let uv = if mirror {
+        egui::Rect::from_min_max(egui::pos2(1.0, 0.0), egui::pos2(0.0, 1.0))
+    } else {
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))
+    };
+    ui.painter().image(tex.id(), dst, uv, tint);
 }
 
 /// An icon **inline** with a single line of text — sized to the body text. Add it before
@@ -291,6 +358,17 @@ mod tests {
             Icon::File,
             Icon::Play,
             Icon::Pause,
+            Icon::ChevronLeft,
+            Icon::ChevronRight,
+            Icon::AnglesLeft,
+            Icon::AnglesRight,
+            Icon::Shuffle,
+            Icon::RotateLeft,
+            Icon::RotateRight,
+            Icon::TableList,
+            Icon::InfoLine,
+            Icon::FolderTree,
+            Icon::Expand,
         ] {
             for family in [Family::Solid, Family::Regular] {
                 let img = rasterize_white(svg(icon, family), 32).expect("icon should rasterize");

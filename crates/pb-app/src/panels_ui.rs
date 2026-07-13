@@ -158,6 +158,15 @@ pub enum PanelAction {
     /// dispatches it through `App::dispatch_menu`, the same path the native muda bar uses.
     #[cfg(all(unix, not(target_os = "macos")))]
     Menu(crate::menu::MenuAction),
+    /// A **toolbar** button (task #61) fired a one-shot action — the shell dispatches it through
+    /// `AppCore::dispatch_action`, the same path a keypress uses.
+    ToolbarAction(pb_app_core::Action),
+    /// A toolbar nav/random button was **pressed** — begin pointer hold-to-fly for the action
+    /// (`AppCore::begin_pointer_nav`): an initial advance now, then the self-paced fly while held.
+    ToolbarNavPress(pb_app_core::Action),
+    /// The held toolbar nav/random button was **released** (or the pointer left it) — stop flying
+    /// (`AppCore::end_pointer_nav`).
+    ToolbarNavRelease,
 }
 
 /// The Inspector's visible state for one frame.

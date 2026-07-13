@@ -135,6 +135,8 @@ struct SettingsDraft {
     accent_source: usize,   // 0 = System, 1 = Custom, 2 = Blaze Orange (accent color)
     accent_custom: [u8; 3], // sRGB bytes — the custom accent (egui `color_edit_button_srgb`)
     info_line_align: usize, // 0 = Left, 1 = Center, 2 = Right (task #54)
+    // The docked windowed toolbar (task #61).
+    show_toolbar: bool,
     // Image-info readout (`i`): the launch default + which fields it lists (task #54).
     show_image_info: bool,
     info_show_folder: bool,
@@ -203,6 +205,7 @@ impl SettingsDraft {
                 settings::InfoLineAlign::Center => 1,
                 settings::InfoLineAlign::Right => 2,
             },
+            show_toolbar: s.show_toolbar,
             show_image_info: s.show_image_info,
             info_show_folder: s.info_show_folder,
             info_show_filename: s.info_show_filename,
@@ -280,6 +283,7 @@ impl SettingsDraft {
             1 => settings::InfoLineAlign::Center,
             _ => settings::InfoLineAlign::Right,
         };
+        s.show_toolbar = self.show_toolbar;
         s.show_image_info = self.show_image_info;
         s.info_show_folder = self.info_show_folder;
         s.info_show_filename = self.info_show_filename;
@@ -2322,6 +2326,16 @@ fn display_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
                         ui.selectable_value(&mut d.info_line_align, 1, "Center");
                         ui.selectable_value(&mut d.info_line_align, 2, "Right");
                     });
+            },
+        );
+        pbui::card_row(
+            ui,
+            p,
+            None,
+            "Show toolbar",
+            Some("A row of buttons under the menu for mouse control (the keyboard does it all without it)"),
+            |ui| {
+                pbui::toggle(ui, p, &mut d.show_toolbar);
             },
         );
         pbui::card_row(

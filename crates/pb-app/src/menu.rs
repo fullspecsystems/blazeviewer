@@ -56,6 +56,8 @@ pub mod ids {
     pub const SLIDESHOW: &str = "slideshow";
     pub const SLIDESHOW_FASTER: &str = "slideshow_faster";
     pub const SLIDESHOW_SLOWER: &str = "slideshow_slower";
+    /// Matches `Action::ToggleToolbar.id()` (task #61).
+    pub const TOOLBAR: &str = "toggle_toolbar";
     pub const INFO: &str = "info";
     pub const FULL_EXIF: &str = "full_exif";
     pub const FOLDER_TREE: &str = "folder_tree";
@@ -113,6 +115,7 @@ pub enum MenuAction {
     Slideshow,
     SlideshowFaster,
     SlideshowSlower,
+    ToggleToolbar,
     Info,
     FullExif,
     FolderTree,
@@ -169,6 +172,7 @@ impl MenuAction {
             MenuAction::Slideshow => Action::SlideshowToggle,
             MenuAction::SlideshowFaster => Action::SlideshowFaster,
             MenuAction::SlideshowSlower => Action::SlideshowSlower,
+            MenuAction::ToggleToolbar => Action::ToggleToolbar,
             MenuAction::Info => Action::Info,
             MenuAction::FullExif => Action::FullExif,
             MenuAction::FolderTree => Action::FolderTree,
@@ -226,6 +230,7 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         SLIDESHOW => MenuAction::Slideshow,
         SLIDESHOW_FASTER => MenuAction::SlideshowFaster,
         SLIDESHOW_SLOWER => MenuAction::SlideshowSlower,
+        TOOLBAR => MenuAction::ToggleToolbar,
         INFO => MenuAction::Info,
         FULL_EXIF => MenuAction::FullExif,
         FOLDER_TREE => MenuAction::FolderTree,
@@ -311,6 +316,8 @@ pub struct ViewChecks {
     pub recursive: CheckMenuItem,
     pub fullscreen: CheckMenuItem,
     pub slideshow: CheckMenuItem,
+    /// View ▸ Show Toolbar (#61): checked while the docked windowed toolbar is on.
+    pub toolbar: CheckMenuItem,
     /// The two info overlays are mutually exclusive toggles (basic vs. full EXIF);
     /// exactly one — or neither — is checked, mirroring `App::info`.
     pub info: CheckMenuItem,
@@ -423,10 +430,17 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
     let fill = check_item(ids::FILL, "Crop to Fill\t9");
     let original = check_item(ids::ORIGINAL, "Original 1:1\t0");
     let recursive = check_item(ids::RECURSIVE, "Recursive (This Folder)\tCtrl+R");
-    let fullscreen = check_item(ids::FULLSCREEN, "Quick Full Screen\tF11");
+    // Derive the hint from the keymap (F is the primary now, cross-platform), not a hardcoded
+    // F11 — so the menu, the help overlay, and the toolbar's exit toast all advertise one key.
+    let fullscreen = check_item(
+        ids::FULLSCREEN,
+        &labeled(keymap, "Quick Full Screen", Action::Fullscreen),
+    );
     let slideshow = check_item(ids::SLIDESHOW, "Slideshow\tS");
+    // The docked windowed toolbar (#61) — unbound by default, so no shortcut hint.
+    let toolbar = check_item(ids::TOOLBAR, "Show Toolbar");
     let info = check_item(ids::INFO, "Show Image Info\tI");
-    let full_exif = check_item(ids::FULL_EXIF, "Show All EXIF Info\tShift+I");
+    let full_exif = check_item(ids::FULL_EXIF, "Show Detailed Info\tShift+I");
     let toggle_panels = check_item(ids::TOGGLE_PANELS, "Hide Panels\tTab");
     let mute_live_audio = check_item(ids::MUTE_LIVE_AUDIO, "Mute Live Photo Audio\tM");
 
@@ -445,6 +459,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
         &item(ids::SLIDESHOW_FASTER, "Slideshow Faster\t["),
         &item(ids::SLIDESHOW_SLOWER, "Slideshow Slower\t]"),
         &sep(),
+        &toolbar,
         &info,
         &full_exif,
         &item(
@@ -552,6 +567,7 @@ pub fn build_menu(keymap: &Keymap) -> BuiltMenu {
             recursive,
             fullscreen,
             slideshow,
+            toolbar,
             info,
             full_exif,
             toggle_panels,
@@ -717,7 +733,7 @@ pub fn menu_bar_spec(keymap: &Keymap, s: &crate::contract::MenuState) -> Vec<Men
                 sep(),
                 check(
                     MenuAction::Fullscreen,
-                    "Quick Full Screen\tF11",
+                    &l("Quick Full Screen", Action::Fullscreen),
                     true,
                     s.fullscreen,
                 ),
@@ -731,10 +747,16 @@ pub fn menu_bar_spec(keymap: &Keymap, s: &crate::contract::MenuState) -> Vec<Men
                 item(MenuAction::SlideshowFaster, "Slideshow Faster\t[", true),
                 item(MenuAction::SlideshowSlower, "Slideshow Slower\t]", true),
                 sep(),
+                check(
+                    MenuAction::ToggleToolbar,
+                    "Show Toolbar",
+                    true,
+                    s.show_toolbar,
+                ),
                 check(MenuAction::Info, "Show Image Info\tI", true, s.info_basic),
                 check(
                     MenuAction::FullExif,
-                    "Show All EXIF Info\tShift+I",
+                    "Show Detailed Info\tShift+I",
                     true,
                     s.info_full,
                 ),
@@ -1331,6 +1353,7 @@ mod tests {
             action_for(ids::SLIDESHOW_SLOWER),
             Some(MenuAction::SlideshowSlower)
         );
+        assert_eq!(action_for(ids::TOOLBAR), Some(MenuAction::ToggleToolbar));
         assert_eq!(action_for(ids::INFO), Some(MenuAction::Info));
         assert_eq!(action_for(ids::FULL_EXIF), Some(MenuAction::FullExif));
         assert_eq!(

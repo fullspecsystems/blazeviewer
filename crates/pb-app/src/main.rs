@@ -69,6 +69,7 @@ mod panels_ui;
 mod pb_key_winit;
 mod reveal;
 mod sdf_rect;
+mod toolbar;
 mod video_audio;
 // WASAPI shared-mode render engine for the Windows video-audio backend (MF Source
 // Reader → PCM → WASAPI); the video_audio.rs Windows imp is a thin front over it.
@@ -149,6 +150,9 @@ const PLAY_HINT_FADE_OUT: Duration = Duration::from_millis(250);
 /// feel immediate), slower out (auto-hide reads as a deliberate dissolve).
 const INFO_FADE_IN: Duration = Duration::from_millis(100);
 const INFO_FADE_OUT: Duration = Duration::from_millis(250);
+/// Delay before the toolbar's "Press F to exit" fullscreen hint appears, so it lands after the
+/// borderless-fullscreen transition has settled rather than flickering over the windowed frame.
+const FULLSCREEN_HINT_DELAY: Duration = Duration::from_millis(500);
 
 /// Shell-side fade bookkeeping for one overlay layer: stamps are set on the
 /// visibility **edge** (`edge`, called every turn — renders aren't guaranteed),
@@ -446,6 +450,22 @@ struct App {
     /// shell sets the `native_*` panel flags so the core suppresses the CPU-HUD versions
     /// of these panels and drives this instead.
     egui_overlay: Option<egui_overlay::EguiOverlay>,
+    /// The toolbar's last-drawn state (task #61), diffed each turn so the overlay re-renders
+    /// only when a button's state actually changes (the counter/play state change on nav).
+    last_toolbar_state: Option<toolbar::ToolbarState>,
+    /// When the egui overlay was last (re)rendered, used to floor animation-driven repaints to
+    /// the refresh interval. egui asks for ASAP repaints while a control is hovered (tooltip)
+    /// or a nav button is held; an unthrottled render→request_redraw loop would spin the event
+    /// loop far above vsync (audible GPU coil-whine). See `update_overlay`.
+    last_overlay_render: Option<Instant>,
+    /// The single toolbar nav/random button currently pressed-and-held (hold-to-fly). The core
+    /// tracks one `pointer_nav`; this mirrors which button owns it so press/release edges are
+    /// detected across frames. Cleared on release; the core also has a focus-loss safety net.
+    toolbar_nav_held: Option<pb_app_core::Action>,
+    /// A toast queued to appear at a later instant (message + fire time). Used for the toolbar's
+    /// "Press F to exit" fullscreen hint: shown a beat *after* the click so it lands once the
+    /// borderless-fullscreen transition has settled, not flickering over the windowed frame first.
+    pending_toast: Option<(Instant, String)>,
     /// The last snapshotted info line + its appear/vanish stamps, driving the
     /// fade (the line keeps drawing briefly after the core hides it). Stamps are
     /// set by `update_overlay` on the visibility EDGE (it runs every turn;
@@ -870,6 +890,10 @@ impl App {
             pending_dialog: None,
             requested_wake: None,
             egui_overlay: None,
+            last_toolbar_state: None,
+            last_overlay_render: None,
+            toolbar_nav_held: None,
+            pending_toast: None,
             last_info_line: None,
             info_line_was_visible: false,
             info_shown_at: None,
@@ -1408,6 +1432,80 @@ impl App {
             // The Linux windowed menu bar is interactive — route its clicks to egui (egui only
             // consumes a click actually over the bar/dropdown, so the photo stays pannable).
             || self.menu_bar_visible()
+            // The docked toolbar (task #61) is interactive — route pointer events to it (egui
+            // only consumes a click actually over the strip, so the photo below stays pannable).
+            || self.toolbar_visible()
+    }
+
+    /// Whether the docked toolbar (task #61) should show: the setting is on and we're in
+    /// windowed mode. Hidden in the chrome-free fullscreen speed mode (like the menu bar).
+    /// macOS uses its own native toolbar, so this winit strip is off there.
+    fn toolbar_visible(&self) -> bool {
+        cfg!(not(target_os = "macos")) && self.core.windowed && self.core.settings.show_toolbar
+    }
+
+    /// Physical-pixel strip the toolbar reserves at the top (below any menu bar), 0 when hidden.
+    /// Added to the renderer's `content_top_inset` so a fit photo sits below the bar, not under it.
+    fn toolbar_inset_px(&self) -> u32 {
+        if self.toolbar_visible() {
+            (toolbar::TOOLBAR_H * self.core.viewport.scale_factor).round() as u32
+        } else {
+            0
+        }
+    }
+
+    /// Total top chrome inset (physical px): the Linux menu bar plus the toolbar. The renderer
+    /// reserves this so fit content clears all in-client top chrome.
+    fn chrome_inset_px(&self) -> u32 {
+        self.menu_inset_px() + self.toolbar_inset_px()
+    }
+
+    /// Re-reserve/free the top chrome band after something that can change it (a live
+    /// `show_toolbar` settings toggle, task #61). Re-fits the photo below the new inset and
+    /// re-renders the overlay so the strip appears/disappears on the same frame — the atomic
+    /// swap the plan calls for. No-op when the inset is unchanged (the common settings edit).
+    fn refresh_chrome_inset(&mut self) {
+        let inset = self.chrome_inset_px();
+        if self.core.content_top_inset != inset {
+            self.core.set_content_top_inset(inset);
+            // Re-push the current view so the renderer rebuilds the photo quad against the new
+            // content region (the setter only stores the inset; `render` reuses the cached
+            // geometry). Without this the image keeps its old fit and doesn't grow/shrink into
+            // the space the toolbar freed or took — Fit/Fill re-fit, zoom/pan overflow rides under.
+            self.core.push_view();
+            self.core.draw();
+        }
+        self.overlay_dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Build the toolbar's live state from the core (task #61). `&mut` because `current_has_motion`
+    /// resolves + caches Live-Photo pairing on first touch. Reads present-truth (`display_counter`
+    /// from `displayed_item`), the video-aware motion accessors, and the menu-state toggles.
+    fn build_toolbar_state(&mut self) -> toolbar::ToolbarState {
+        let has_motion = self.core.current_has_motion();
+        let playing = self.core.motion_playing();
+        let counter = self.core.display_counter();
+        let tree_visible = self.core.tree_panel_visible();
+        let slideshow_interval = self.core.slideshow.interval;
+        // The menu-state toggles (info line / Details tab / reveal-enabled) — the same source
+        // the native menu checkmarks read, so the toolbar's on-states can't drift from them.
+        let ms = self.current_menu_state();
+        toolbar::ToolbarState {
+            dark: self.core.hud_dark,
+            alpha: 255,
+            counter,
+            has_motion,
+            playing,
+            slideshow: ms.slideshow,
+            slideshow_interval,
+            info_basic: ms.info_basic,
+            info_full: ms.info_full,
+            tree_visible,
+            can_delete: ms.reveal_enabled,
+        }
     }
 
     /// Whether the egui overlay has **any** content to composite — the interactive panels
@@ -1418,6 +1516,7 @@ impl App {
     /// bar is a scrubber.)
     fn overlay_visible(&self) -> bool {
         self.overlay_panel_visible()
+            || self.toolbar_visible()
             || self.core.info_line_visible()
             // Keep compositing (and re-rendering) through any layer's fade-out.
             || self
@@ -1564,6 +1663,22 @@ impl App {
         {
             self.overlay_dirty = true;
         }
+        // Toolbar (task #61): re-render when a button's state changes (counter, play, toggles)
+        // or while a nav button is held (so the mouse-up release edge is observed within a tick,
+        // even if the fly loop is momentarily idle). Retained otherwise — a static toolbar over a
+        // still photo re-renders nothing.
+        if self.toolbar_visible() {
+            let st = self.build_toolbar_state();
+            if self.last_toolbar_state != Some(st) {
+                self.last_toolbar_state = Some(st);
+                self.overlay_dirty = true;
+            }
+            if self.toolbar_nav_held.is_some() {
+                self.overlay_dirty = true;
+            }
+        } else if self.last_toolbar_state.take().is_some() {
+            self.overlay_dirty = true;
+        }
         if !self.overlay_visible() {
             // Nothing open: drop the composited layer once, on the visibility edge.
             if self.overlay_active {
@@ -1578,23 +1693,50 @@ impl App {
             }
             return None;
         }
-        // A panel is open. Re-render egui only when it changed, an egui animation frame is
-        // due, or it just became visible — never per nav frame (retained texture).
+        // A panel is open. Re-render egui only when it changed, an egui animation frame is due,
+        // or it just became visible — never per nav frame (retained texture). Renders are
+        // FLOORED to the refresh interval: egui asks for ASAP repaints while a control is hovered
+        // (tooltip fade) or a nav button is held, and an unthrottled render→request_redraw→render
+        // loop would spin the event loop far above vsync (audible GPU coil-whine). First
+        // activation renders immediately (no blank frame); everything else waits out the frame,
+        // so any deferred work is picked up on the next slot (≤ one refresh later, imperceptible).
+        let frame = self.core.frame_interval;
+        let throttled = self
+            .last_overlay_render
+            .is_some_and(|t| now.saturating_duration_since(t) < frame);
         let repaint_due = self
             .egui_overlay
             .as_ref()
             .and_then(|o| o.repaint_at())
             .is_some_and(|at| now >= at);
-        if self.overlay_dirty || repaint_due || !self.overlay_active {
+        let want = self.overlay_dirty || repaint_due;
+        if !self.overlay_active || (want && !throttled) {
             self.render_overlay_frame();
+            self.last_overlay_render = Some(now);
             self.overlay_dirty = false;
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
             }
         }
-        self.egui_overlay
+        // Next wake. If we still owe a render (a dirty or a due repaint we throttled), ask to wake
+        // one frame after the last render — never "now", which would busy-spin the loop above. Any
+        // genuinely future egui repaint stands on its own; an ASAP request floors to that slot.
+        let next_slot = self.last_overlay_render.map(|t| t + frame);
+        let owe = self.overlay_dirty
+            || self
+                .egui_overlay
+                .as_ref()
+                .and_then(|o| o.repaint_at())
+                .is_some_and(|at| now >= at);
+        let future_repaint = self
+            .egui_overlay
             .as_ref()
             .and_then(|o| o.repaint_at())
+            .filter(|&at| at > now);
+        [owe.then_some(next_slot).flatten(), future_repaint]
+            .into_iter()
+            .flatten()
+            .min()
             .filter(|&at| at > now)
     }
 
@@ -1606,6 +1748,9 @@ impl App {
         let Some(window) = self.window.clone() else {
             return;
         };
+        // The toolbar's state (task #61), computed before the immutable-borrow closure below
+        // (`current_has_motion` needs `&mut`). `None` when the toolbar is hidden.
+        let toolbar_state = self.toolbar_visible().then(|| self.build_toolbar_state());
         let mut frame = panels_ui::PanelFrame::snapshot(&self.core);
         // Fade the info line in/out over ~100 ms (macOS-shell parity — its SwiftUI
         // overlays transition; the egui line used to pop, most visibly on the
@@ -1658,6 +1803,10 @@ impl App {
         if self.menu_bar_visible() {
             frame.top_inset = panels_ui::MENU_BAR_H;
         }
+        // The toolbar (task #61) stacks below any menu bar, so the top-anchored panels clear both.
+        if toolbar_state.is_some() {
+            frame.top_inset += toolbar::TOOLBAR_H;
+        }
         let mut actions: Vec<panels_ui::PanelAction> = Vec::new();
         // The Thumbnails strip (task #83) is rendered after `build` in the same egui frame — it
         // reads the core's RAM thumb store live and owns an egui texture cache, so it can't be a
@@ -1698,6 +1847,10 @@ impl App {
             // cache inside the closure alongside the `&mut self.egui_overlay` borrow.
             let thumb_core = &self.core;
             let thumb_strip = &mut self.thumb_strip;
+            // The toolbar's held-nav slot (task #61), a disjoint field-local for the closure.
+            let toolbar_nav_held = &mut self.toolbar_nav_held;
+            // The live keymap, so the toolbar's tooltips show each action's real binding.
+            let toolbar_keymap = &self.core.keymap;
             let (device, queue) = match self.core.renderer.as_ref() {
                 Some(r) => (r.device(), r.queue()),
                 None => return,
@@ -1729,6 +1882,10 @@ impl App {
                             menu_nav,
                             &mut actions,
                         );
+                    }
+                    // The docked toolbar (task #61) — after the menu bar so it stacks below it.
+                    if let Some(st) = &toolbar_state {
+                        toolbar::toolbar(ctx, st, toolbar_keymap, toolbar_nav_held, &mut actions);
                     }
                 });
             }
@@ -1868,6 +2025,36 @@ impl App {
             // muda bar uses, so an egui menu click behaves identically to a keyboard action.
             #[cfg(all(unix, not(target_os = "macos")))]
             A::Menu(action) => self.dispatch_menu(action),
+            // A toolbar one-shot button: the exact `Action` path a keypress/menu item takes.
+            A::ToolbarAction(action) => {
+                self.core.dispatch_action(action);
+                // Entering the (windowed-only) toolbar's Full Screen button hides the toolbar
+                // itself, so teach the exit key — the strip can't offer a "come back" button.
+                // Only on this click path, never the hotkey/menu (the user already knows those).
+                // Mirrors the macOS toolbar's one-shot hint; the key is read live from the keymap
+                // so a remap tracks, and it's skipped if Fullscreen has been unbound entirely.
+                if action == Action::Fullscreen && !self.core.windowed {
+                    let key = self
+                        .core
+                        .keymap
+                        .bindings_for(Action::Fullscreen)
+                        .first()
+                        .map(|c| c.shortcut_label());
+                    if let Some(key) = key {
+                        // Queue it, don't show it now: the borderless-fullscreen switch happens on
+                        // a later effect drain, so an immediate toast flickers over the windowed
+                        // frame first. Fire it after a short delay, once fullscreen has settled.
+                        self.pending_toast = Some((
+                            Instant::now() + FULLSCREEN_HINT_DELAY,
+                            format!("Press {key} to exit Quick Full Screen"),
+                        ));
+                    }
+                }
+            }
+            // A toolbar nav/random press: begin pointer hold-to-fly (an initial advance now, the
+            // self-paced fly while held). A quick click is begin→release = one advance.
+            A::ToolbarNavPress(action) => self.core.begin_pointer_nav(action),
+            A::ToolbarNavRelease => self.core.end_pointer_nav(),
         }
         self.overlay_dirty = true;
     }
@@ -1904,9 +2091,10 @@ impl App {
             height,
             scale: self.core.viewport.scale_factor,
         });
-        // Re-reserve the menu-bar strip for the new size/DPI/mode (0 in fullscreen) before the
-        // redraw below picks up the new geometry — keeps the photo below the Linux menu bar.
-        let inset = self.menu_inset_px();
+        // Re-reserve the top chrome strip (Linux menu bar + toolbar, task #61; 0 in fullscreen)
+        // for the new size/DPI/mode before the redraw below picks up the new geometry — keeps the
+        // photo below the in-client chrome.
+        let inset = self.chrome_inset_px();
         self.core.set_content_top_inset(inset);
         if fit_changed {
             self.core.draw();
@@ -2114,7 +2302,7 @@ impl App {
         // item, so it's always `false`.
         let native_fullscreen = false;
 
-        AppCore::menu_state_from(
+        let mut state = AppCore::menu_state_from(
             self.core.view.mode,
             self.core.info_line,
             self.core.panels,
@@ -2131,7 +2319,12 @@ impl App {
             native_fullscreen,
             self.core.displayed_item,
             self.core.compare_pin,
-        )
+        );
+        // The docked toolbar (#61) is a shell-honored setting, not derived view state, so it's
+        // set here (the choke point defaults it off). It rides `MenuState` so the View ▸ Show
+        // Toolbar checkmark tracks it through the same per-tick diff as every other check.
+        state.show_toolbar = self.core.settings.show_toolbar;
+        state
     }
 
     /// The shell side of [`CoreEffect::SetMenuState`]: mirror a [`contract::MenuState`] onto
@@ -2151,6 +2344,7 @@ impl App {
             c.recursive.set_checked(state.recursive);
             c.fullscreen.set_checked(state.fullscreen);
             c.slideshow.set_checked(state.slideshow);
+            c.toolbar.set_checked(state.show_toolbar);
             c.mute_live_audio.set_checked(state.mute_live_audio);
             c.info.set_checked(state.info_basic);
             c.full_exif.set_checked(state.info_full);
@@ -2342,6 +2536,14 @@ impl App {
             Action::Recursive => self.toggle_recursive(),
             Action::CancelScan => self.cancel_scan_command(),
             Action::Quit => self.begin_exit(),
+            // Toggle the docked windowed toolbar (#61): flip + persist the setting, then
+            // re-reserve/free the photo's top inset and re-render so it appears/disappears
+            // immediately (the same atomic swap the live Settings toggle uses).
+            Action::ToggleToolbar => {
+                self.core.settings.show_toolbar = !self.core.settings.show_toolbar;
+                self.core.settings.save();
+                self.refresh_chrome_inset();
+            }
             _ => {}
         }
     }
@@ -2455,6 +2657,9 @@ impl App {
         // Apply + persist a live Settings edit (the auto-save path — window stays open).
         if let Some((settings, keymap)) = live_edit {
             self.route_dialog_outcome(DialogOutcome::SettingsEdited { settings, keymap });
+            // The edit may have toggled the toolbar (task #61): re-reserve/free the photo's top
+            // inset and re-render so the strip appears/disappears immediately (no restart).
+            self.refresh_chrome_inset();
         }
         if let Some(confirmed) = answer {
             // Turn the button answer into an outcome, extracting any egui-side payload here
@@ -3194,9 +3399,10 @@ impl ApplicationHandler for App {
             renderer.clear_image();
         }
 
-        // Reserve the top strip for the Linux windowed menu bar so even the first (hidden)
-        // frame places the photo below it — no top-edge clip on reveal. No-op elsewhere.
-        renderer.set_content_top_inset(self.menu_inset_px());
+        // Reserve the top strip for the in-client chrome (Linux menu bar + toolbar, task #61)
+        // so even the first (hidden) frame places the photo below it — no top-edge clip on
+        // reveal. No-op in fullscreen / when the toolbar is off.
+        renderer.set_content_top_inset(self.chrome_inset_px());
 
         // Present the first frame WHILE HIDDEN, then reveal — no white startup gap.
         let _ = renderer.render();
@@ -3611,6 +3817,19 @@ impl ApplicationHandler for App {
         // instead of calling `Instant::now()`, so all timing this tick is consistent.
         self.core.now = Instant::now();
         let now = self.core.now;
+        // Fire a queued toast (the toolbar's delayed fullscreen "Press F to exit" hint) once its
+        // delay elapses — but only if we're still in fullscreen (a quick exit within the delay
+        // would make it stale). The core tick below then owns its fade via `toast_active`.
+        if self
+            .pending_toast
+            .as_ref()
+            .is_some_and(|(at, _)| now >= *at)
+        {
+            let (_, msg) = self.pending_toast.take().unwrap();
+            if !self.core.windowed {
+                self.core.show_toast(&msg);
+            }
+        }
         // A background download finished: tell the user once (it installs when they quit).
         if update::newly_ready() {
             self.core
@@ -3736,6 +3955,8 @@ impl ApplicationHandler for App {
             dialog_wake,
             overlay_wake,
             self.play_hint_wake,
+            // The delayed fullscreen hint's fire time (already-due ones fired above).
+            self.pending_toast.as_ref().map(|(at, _)| *at),
         ]
         .into_iter()
         .flatten()
