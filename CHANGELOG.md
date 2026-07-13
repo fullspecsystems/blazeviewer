@@ -7,6 +7,17 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Changed
+- The info line (`i`) now defaults to the **bottom-center** of the screen instead of the
+  bottom-right. (Existing users keep whatever position they've already set; this only affects
+  fresh installs.)
+
+### Fixed
+- **Video poster frames for feature films.** Long films that open on a studio logo over black
+  or a slow fade-in used to get an all-black thumbnail. The poster picker now seeks past the
+  intro and chooses the most visually detailed frame it finds, so you get a real picture.
+  (Mac MKV/WebM and all Linux video for now; MP4/MOV on Mac and Windows to follow.)
+
 ## [0.2.0] - 2026-07-13
 
 ### Highlights

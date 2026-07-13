@@ -72,15 +72,15 @@ pub enum AccentSource {
 }
 
 /// Horizontal placement of the basic info line (`i`) along the bottom edge
-/// (task #54). `Right` (the default) keeps today's behavior and shares the corner
-/// with the Inspector, which lifts above it; `Left` shares with the folder tree
-/// (which caps its height); `Center` shares with the toast (which stacks above).
+/// (task #54). `Center` (the default) shares the bottom-center with the toast
+/// (which stacks above); `Right` shares the corner with the Inspector (which
+/// lifts above it); `Left` shares with the folder tree (which caps its height).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InfoLineAlign {
     Left,
-    Center,
     #[default]
+    Center,
     Right,
 }
 
@@ -163,7 +163,7 @@ pub struct Settings {
     /// from (rather than the brand orange, which the `Brand` option already covers).
     pub accent_custom: [u8; 3],
     /// Where the basic info line (`i`) sits along the bottom edge (task #54).
-    /// Default `Right` (today's placement).
+    /// Default `Center`.
     pub info_line_align: InfoLineAlign,
     /// Whether the info line (`i`) starts shown on a fresh launch — the default state; the `i`
     /// key still toggles it live, and flipping this in Settings applies at once (task #54).
@@ -277,7 +277,7 @@ impl Default for Settings {
             accent_source: AccentSource::System,     // follow the OS accent (brand fallback)
             accent_custom: [0x00, 0x78, 0xd4],       // Windows accent blue — a good neutral
             // starting point when you switch to Custom
-            info_line_align: InfoLineAlign::Right, // today's bottom-right placement
+            info_line_align: InfoLineAlign::Center, // bottom-center, stacks with the toast
             show_image_info: false,                // off until opted in (unchanged launch)
             glass_toolbar: true,                   // transparent toolbar on by default (#59)
             show_toolbar: true,                    // docked toolbar on by default (#61)

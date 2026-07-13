@@ -1378,6 +1378,98 @@
             "status": "pending"
           }
         ]
+      },
+      {
+        "id": 89,
+        "title": "Explore image conversion / export — a Squoosh-style convert mode",
+        "description": "Feasibility + UX spike for an in-app image converter: press a key to enter a 'conversion mode', pick a target format / quality / size, see a Squoosh-style before/after preview with a live output-size readout, and apply to the current photo OR a batch of selected ones. PhotoBlaze currently only DECODES; this needs an encode seam (JPEG/WebP/AVIF/JXL/PNG + resize) mirroring the decode seam, kept pure-Rust where possible for cross-platform build safety. The real challenge (owner's call) is UX, not codecs — a converter that feels good, not a settings dump. Writing files is an EXPLICIT user action (the privacy guarantee's allowed 'user edits their own files' category, ADR-018) — never on the view path, gated + confirmed, never passive. Synergizes with the RAM-only selection/batch-ops concept from mobile-vision.md ('go through a bunch of photos' + batch convert). Output: go/no-go, an MVP scope (single-image convert) vs the ambition (batch + live preview), effort, and an honest read on whether a converter earns a place in a speed-first VIEWER or is feature creep.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Product-fit + scope decision",
+            "description": "Does a converter belong in a speed-first viewer, or is it a distraction? Define the MVP (convert the current photo) vs the ambition (Squoosh-style batch with live preview). Confirm it's an explicit-user-action feature (privacy-allowed writes, never passive). Decide before building anything.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "Encoder seam survey",
+            "description": "PB only decodes today. Survey encoders per format for quality/speed/build-risk, pure-Rust preferred: JPEG (jpeg-encoder / mozjpeg), WebP (image lossless vs libwebp), AVIF (ravif/rav1e), JXL (jxl-oxide/jpegxl-rs), PNG (oxipng), and resize (fast_image_resize — already used for decode-to-fit Lanczos). Sketch a pb-encode seam mirroring the ImageDecoder seam; note which formats pull in C deps.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "Conversion-mode UX (the hard part)",
+            "description": "The enter-mode gesture/key; format + quality + resize controls; the Squoosh signature = a split before/after preview with a LIVE output-file-size readout that re-encodes as you drag quality; apply-to-current vs apply-to-selected. Design it to feel fast and legible, not a settings dump. This is where the real work is per the owner.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "Batch pipeline",
+            "description": "Reuse the RAM-only selection set (mobile-vision.md): convert N selected in one operation. Destination folder + naming scheme + overwrite guard, progress + cancel, encode OFF the event-loop thread (same discipline as decode — never block the hot path).",
+            "status": "pending"
+          },
+          {
+            "id": 5,
+            "title": "Privacy + safety",
+            "description": "Writes are explicit-user-action (allowed, ADR-018) — confirm destination, never write on the view/decode path, never passive. Re-run the no-trace audit/integration test to prove viewing still writes nothing (convert is reachable only from a deliberate command).",
+            "status": "pending"
+          },
+          {
+            "id": 6,
+            "title": "Cross-platform + perf",
+            "description": "Verify the chosen encoders build/run on Windows/Mac/Linux; measure encode time (esp. AVIF/JXL, which are slow) and keep it off the flick-through hot path; consider a live-preview re-encode budget so the quality slider stays responsive.",
+            "status": "pending"
+          },
+          {
+            "id": 7,
+            "title": "Write up go/no-go + MVP scope",
+            "description": "Recommend MVP vs full ambition, effort estimate, C-dependency footprint, and the honest verdict on whether a converter fits PhotoBlaze's identity or belongs as a separate tool.",
+            "status": "pending"
+          }
+        ]
+      },
+      {
+        "id": 90,
+        "title": "Text subtitles for video playback (SRT/mov_text/WebVTT) + legibility settings",
+        "description": "Render text subtitles over playing video, with user-facing appearance controls (size, opacity, shadow/outline, position). Scoped to the TEXT tier only — SubRip (.srt sidecar), MP4 mov_text/tx3g, and WebVTT — decoded through the existing FFmpeg backend (task #84) and drawn with the resvg/usvg/tiny-skia text stack the HUD already uses, synced to the audio master clock. Deliberately EXCLUDES styled ASS/SSA (would want libass, a C build-risk dep this project avoids) and bitmap PGS/VobSub (separate RGBA-overlay pipeline) — log those as a stretch, don't build them. FFmpeg-backend only at first: on macOS that's MKV/WebM (+ .srt sidecars for any container); Windows MF and macOS AVFoundation get it later or route through FFmpeg. Owner's driving requirement (2026-07-13, 0.2.0 beta feedback): subtitles must be LEGIBLE and CONTROLLABLE — nothing worse than subs that fill half the screen or are unreadably small — so the appearance settings are core to this task, not a nice-to-have. Out of scope for a photo viewer's core mission, but a contained, high-value addition for anyone who actually watches films in PhotoBlaze. Cross-platform (pure-Rust text render). Split out of the 0.2.0 beta punch-list; not started this session.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [79, 84],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Subtitle stream + sidecar discovery",
+            "description": "Enumerate embedded text subtitle tracks (mov_text/tx3g in MP4, SRT/ASS/VTT in MKV) via the FFmpeg demuxer, and detect a same-stem .srt/.vtt sidecar next to the video (read-only, never written — honors the no-trace guarantee). Expose available tracks + language tags. Filter to the supported text codecs; ignore ASS-styled/bitmap tracks (or degrade ASS to plain text). Track selection UI/keybinding (cycle subtitle track / off).",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "Decode text cues to timed plain text",
+            "description": "Route the subtitle stream through libavcodec's subtitle decoders (subrip/mov_text/webvtt) to (start, end, text) cues; strip inline markup we don't render. Handle multi-line cues and overlapping cues. Sidecar SRT/VTT: parse directly (small pure-Rust parser or FFmpeg). Store the active clip's cue list in RAM only.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "Timed overlay render + audio-clock sync",
+            "description": "Show the cue whose [start,end) contains the current playback time — driven by the SAME audio-master clock the video pump uses (video.rs / VideoSession), so subs stay in lockstep on rebuffer/seek/pause. Render text with the resvg/usvg/tiny-skia stack (like the HUD toasts) into an RGBA overlay, composited as an alpha-blended quad — rebuilt only when the cue or settings change, never per frame, off the photo hot path. Word-wrap to a max width; bottom-centered by default with a safe-area margin.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "Legibility settings (the owner's core requirement)",
+            "description": "Add subtitle appearance settings to pb-app-core Settings (serde) + BOTH shells' settings UI (egui dialog.rs and macOS pb-mac-ffi): font size (as a % of screen height so it scales across displays — the fix for 'half the screen' / 'unreadably small'), text opacity, outline/shadow strength, and vertical position (bottom/top). Sensible defaults tuned for a 4K screen. These live alongside info_line_align etc. Wire live re-render on change.",
+            "status": "pending"
+          },
+          {
+            "id": 5,
+            "title": "Cross-platform + backend coverage",
+            "description": "Ship on the FFmpeg backend first (macOS MKV/WebM + sidecars, all Linux). Decide the path for Windows MF and macOS AVFoundation: either add a text-cue extraction there too, or route subtitle-bearing playback through the FFmpeg backend. Verify build/run on all three. Note bitmap PGS/VobSub and styled ASS as explicit non-goals (stretch: libass behind a feature flag, PGS RGBA overlay).",
+            "status": "pending"
+          }
+        ]
       }
     ]
   }

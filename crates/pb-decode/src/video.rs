@@ -334,6 +334,51 @@ pub fn poster_frame_bright_enough(pixels: &[u8]) -> bool {
     mean_luma_rgba8(pixels, 8) > POSTER_LUMA_MIN
 }
 
+/// Mean and standard deviation of Rec.601 luma over a tightly packed RGBA8
+/// buffer, both in 0..=1, subsampled every `stride`-th pixel. One pass
+/// (sum + sum-of-squares). The std-dev is the frame's *contrast* — near-zero for
+/// a black or flat single-color frame, high for a detailed scene — which is what
+/// separates a real poster frame from a studio-logo-on-black or a fade.
+pub fn luma_stats_rgba8(pixels: &[u8], stride: usize) -> (f32, f32) {
+    let stride = stride.max(1);
+    let mut sum = 0f64;
+    let mut sum_sq = 0f64;
+    let mut n = 0u64;
+    for px in pixels.chunks_exact(4).step_by(stride) {
+        let y = ((77 * px[0] as u32 + 150 * px[1] as u32 + 29 * px[2] as u32) >> 8) as f64 / 255.0;
+        sum += y;
+        sum_sq += y * y;
+        n += 1;
+    }
+    if n == 0 {
+        return (0.0, 0.0);
+    }
+    let mean = sum / n as f64;
+    let var = (sum_sq / n as f64 - mean * mean).max(0.0);
+    (mean as f32, var.sqrt() as f32)
+}
+
+/// Score a candidate poster frame — higher is a better poster. Combines
+/// *brightness* (must clear the black floor) with *contrast* (luma std-dev, the
+/// prior-art "interestingness" measure ffmpegthumbnailer / imagorvideo use to
+/// dodge black and flat frames). A frame below [`POSTER_LUMA_MIN`] scores near
+/// zero so a black lead-in never wins; among visible frames the one with the
+/// most detail wins, with a light bonus for brightness. Range ~0..~0.4.
+pub fn poster_frame_score(pixels: &[u8]) -> f32 {
+    let (mean, std) = luma_stats_rgba8(pixels, 8);
+    if mean < POSTER_LUMA_MIN {
+        // Rank black/fade frames strictly below any visible one, but keep them
+        // ordered by brightness so the fallback still picks the least-black.
+        return mean * 0.01;
+    }
+    std + 0.15 * mean
+}
+
+/// Score at/above which a frame is a *clearly good* poster and the walk stops
+/// early (no need to seek deeper). A detailed scene's luma std-dev is typically
+/// 0.15–0.3; a near-flat or dim frame sits well below this.
+pub const POSTER_GOOD_SCORE: f32 = 0.12;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,6 +491,64 @@ mod tests {
         // Degenerate inputs never panic.
         assert_eq!(mean_luma_rgba8(&[], 8), 0.0);
         assert_eq!(mean_luma_rgba8(&[1, 2, 3], 8), 0.0);
+    }
+
+    #[test]
+    fn poster_score_prefers_detailed_scenes_over_flat_or_black() {
+        let w = 64usize;
+        let h = 64usize;
+
+        // Black and near-black (fade) frames score essentially zero.
+        let black = vec![0u8; w * h * 4];
+        assert!(poster_frame_score(&black) < 0.01);
+        let faint: Vec<u8> = [8u8, 8, 8, 255].repeat(w * h);
+        assert!(poster_frame_score(&faint) < 0.01);
+
+        // A studio-logo-on-black: a small bright patch on an otherwise black
+        // field. Mean luma stays under the floor, so it is *not* a good poster
+        // and scores near zero — the whole point of the contrast+brightness gate.
+        let mut logo = vec![0u8; w * h * 4];
+        for y in 28..34 {
+            for x in 28..34 {
+                let i = (y * w + x) * 4;
+                logo[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
+            }
+        }
+        assert!(
+            poster_frame_score(&logo) < POSTER_GOOD_SCORE,
+            "logo-on-black must not read as a good poster"
+        );
+
+        // A flat mid-gray frame is visible but dull (no contrast): above black,
+        // but below the good-poster bar, so the walk keeps looking.
+        let gray: Vec<u8> = [128u8, 128, 128, 255].repeat(w * h);
+        let gray_score = poster_frame_score(&gray);
+        assert!(gray_score > poster_frame_score(&black));
+        assert!(gray_score < POSTER_GOOD_SCORE, "flat gray is not 'good' {gray_score}");
+
+        // A high-contrast, detailed frame (checkerboard) clears the good bar and
+        // outscores every frame above.
+        let mut scene = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let v = if (x + y) % 2 == 0 { 220 } else { 20 };
+                let i = (y * w + x) * 4;
+                scene[i..i + 4].copy_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let scene_score = poster_frame_score(&scene);
+        assert!(scene_score >= POSTER_GOOD_SCORE, "detailed scene should be 'good' {scene_score}");
+        assert!(scene_score > gray_score && scene_score > poster_frame_score(&logo));
+    }
+
+    #[test]
+    fn luma_stats_zero_for_flat_frames_nonzero_for_varied() {
+        let flat: Vec<u8> = [100u8, 100, 100, 255].repeat(32 * 32);
+        let (mean, std) = luma_stats_rgba8(&flat, 1);
+        assert!((mean - 100.0 / 255.0).abs() < 0.01);
+        assert!(std < 0.001, "a flat frame has ~zero contrast, got {std}");
+        // Degenerate inputs never panic.
+        assert_eq!(luma_stats_rgba8(&[], 8), (0.0, 0.0));
     }
 
     #[test]
