@@ -1317,14 +1317,6 @@
             "status": "pending"
           }
         ]
-      },
-      {
-        "id": 87,
-        "title": "Windows video audio: ~1s silent gap at playback start (video/audio stay in sync)",
-        "description": "Owner-reported (2026-07-13, D:\\Media\\Pictures\\2010\\2010-01-05 - Dazed and Confused in Oslo\\SANY0501.MP4): video starts immediately but Windows audio is absent for roughly one second, then remains in sync. Quick investigation rules out encoded leading silence (audio PTS 0; signal in the first 100 ms) and makes a generic one-second MF decoder warm-up unlikely (the existing Source Reader probe decoded 40 chunks in about 10 ms). The primary code risk is now `Engine::fill`: after bounded no-sample pulls/errors/EOS it zero-fills the requested WASAPI region, counts those generated frames in the published audio clock, and still lets the engine report Paused/ready. That can advance video and the audio clock together through fabricated silence. This is not yet confirmed; a cold WASAPI endpoint remains the main alternative. Instrument production MF reads, fill accounting, Resume/Start, the audio clock, and WASAPI loopback before choosing the fix. Do not amplitude-gate readiness: legitimate source silence counts as decoded audio. Authoritative deferred-fix plan: .taskmaster/plans/87-windows-video-audio-cold-start.md.",
-        "status": "pending",
-        "priority": "low",
-        "dependencies": []
       }
     ]
   }
