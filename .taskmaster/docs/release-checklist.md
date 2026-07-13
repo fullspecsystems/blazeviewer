@@ -27,6 +27,10 @@ Companion docs: signing setup → `release-signing.md`; runner/box provisioning 
       leave a fresh empty `[Unreleased]`, update the compare links at the bottom. Write
       **real, curated, user-facing** notes — `changelog-section.sh` reads this for release
       notes. (Never `generate_release_notes`.)
+- [ ] **Write the `### Highlights` block** (first subsection of the version, above `### Added`):
+      a ~7-line plain-English "what's new" for regular users. **macOS Sparkle shows *only* this**
+      in the update dialog (`generate-mac-appcast.sh` extracts it; falls back to the full section
+      if absent). Keep the full `Added/Changed/Fixed` detail for the curious + the GitHub release.
 - [ ] **Commit + push to `main`.** (Fetch/merge `origin/main` first — a parallel Windows
       agent may push there too.)
 - [ ] `git status` is **clean** — `build.rs` stamps `-dirty` on *any* porcelain output,

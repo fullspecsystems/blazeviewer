@@ -69,7 +69,18 @@ md_to_html() {
 		print join("", @out);
 	'
 }
-NOTES_HTML="$(bash scripts/changelog-section.sh "$VERSION" 2>/dev/null | md_to_html)"
+# Sparkle shows this in the update dialog, so it wants a SHORT "what's new" — regular users just
+# want "oh cool, it does video now", not the full 34-bullet changelog. Prefer the version's
+# `### Highlights` subsection (a ~7-line summary); fall back to the entire section for any version
+# that predates the convention. The full detail always stays in CHANGELOG.md for the curious, and
+# the (manual) GitHub release body still uses the whole section via changelog-section.sh.
+SECTION="$(bash scripts/changelog-section.sh "$VERSION" 2>/dev/null)"
+HIGHLIGHTS="$(printf '%s\n' "$SECTION" | awk '
+	/^###[[:space:]]+[Hh]ighlights[[:space:]]*$/ { grab = 1; next }
+	grab && /^###[[:space:]]/ { exit }
+	grab { print }
+')"
+NOTES_HTML="$(printf '%s\n' "${HIGHLIGHTS:-$SECTION}" | md_to_html)"
 
 mkdir -p "$(dirname "$OUT")"
 cat > "$OUT" <<XML

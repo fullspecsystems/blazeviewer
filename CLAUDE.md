@@ -557,7 +557,11 @@ To cut a release:
 1. **Roll the `CHANGELOG.md`.** Move `## [Unreleased]` into `## [<version>] - <YYYY-MM-DD>`,
    leave a fresh empty `[Unreleased]`, and update the compare links at the bottom. The crate
    version (`crates/pb-app/Cargo.toml`) must match the tag's numeric core (a `-beta.N` suffix
-   lives only on the tag).
+   lives only on the tag). **Write a `### Highlights` block** (a ~7-line, plain-English "what's
+   new" — regular users, not contributors) as the first subsection of the version, above
+   `### Added` — the macOS **Sparkle** update dialog shows *only* that block
+   (`generate-mac-appcast.sh` extracts it; it falls back to the whole section if absent), while the
+   full `Added/Changed/Fixed` detail stays in the file for the curious and the GitHub release body.
 2. **Windows:** `pwsh scripts/release-windows.ps1 -Upload` from this machine (with `.env.release`
    signing creds). **Run it from native PowerShell, not the Bash tool / Git Bash** — the ssh
    config's YubiKey `Match exec` hook has a Windows path that Git Bash mangles, so the upload fails
