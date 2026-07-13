@@ -60,6 +60,34 @@ Linux AppImage; not used on macOS (Image I/O). Homepage: https://github.com/stru
 Statically linked on Windows alongside libheif; bundled in the Linux AppImage.
 Homepage: https://github.com/strukturag/libde265 — see the compliance note above.
 
+## FFmpeg (video/audio decode) — LGPL-2.1-or-later
+
+Provides cross-platform video playback and the macOS codec fallback (MKV/WebM/VP8/VP9/AV1
+and their audio; task #84). **Bundled as *shared* dylibs** — `libavcodec`, `libavformat`,
+`libavutil`, `libswscale`, `libswresample` — in the macOS `.app`'s `Contents/Frameworks`
+and in the Linux AppImage's `usr/lib`. **Windows does not use FFmpeg** (Media Foundation
+handles video there).
+
+Built from a **pinned source with a decode-only, LGPL configuration** — no `--enable-gpl`,
+no `--enable-nonfree` — by `scripts/build-ffmpeg-macos.sh` (macOS) and the AppImage build
+(Linux). Homepage: https://ffmpeg.org
+
+**LGPL relink condition — satisfied by design.** Unlike the Windows libheif/libde265 static
+link above, FFmpeg is linked **dynamically against shared libraries the user can replace**:
+dropping a modified, ABI-compatible `libav*.dylib` into `Contents/Frameworks` (macOS) or the
+AppImage's `usr/lib` (Linux) relinks the application, which is exactly what LGPL-2.1 §6(b)
+requires. The **corresponding source** is the pinned upstream tarball (recorded with its
+sha256 in `scripts/build-ffmpeg-macos.sh`) plus that build script as the reproducible
+configuration. FFmpeg's own license texts (`COPYING.LGPLv2.1`, etc.) accompany its source.
+
+> **Patent note (orthogonal to the copyright license):** FFmpeg's H.264/HEVC/etc. *decoders*
+> are LGPL-licensed, but those codecs are patent-encumbered. Patent licensing is a separate
+> question from the software license and is an owner consideration before any public or
+> commercial distribution — the same posture as the OS-codec paths on Windows/macOS.
+
+A full per-component compliance manifest (configure flags, enabled decoders/demuxers,
+license map) lives in `.taskmaster/docs/ffmpeg-compliance.md`.
+
 ## Linux AppImage bundled libraries
 
 `scripts/release-linux.sh` bundles the specialized decode stack — FFmpeg (LGPL-2.1+

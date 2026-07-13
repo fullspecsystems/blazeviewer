@@ -10,13 +10,20 @@
 #      PhotoBlaze / com.jdlien.PhotoBlaze — the only macOS build since task #70)
 #
 # Usage:
-#   scripts/build-swift-host.sh [--debug|--release] [--run] [--ffvideo]   (default: --release)
+#   scripts/build-swift-host.sh [--debug|--release] [--run] [--ffvideo|--bundle-ffmpeg]
+#   (default: --release)
 #
 # --ffvideo (task #84, DEV-ONLY): builds the Rust engine with the FFmpeg video backend
 # (MKV/WebM/VP8/VP9/AV1 playback + posters via the dual-backend §8 routing) and links the
 # HOMEBREW FFmpeg dylibs — the resulting .app runs only on a machine with `brew install
 # ffmpeg`. NEVER for a release/DMG (phase 7 bundles FFmpeg properly; release-macos.sh
 # must not pass this).
+#
+# --bundle-ffmpeg (task #84 phase 7, DEV-ONLY): implies --ffvideo, then bundles the pinned
+# LGPL FFmpeg (scripts/build-ffmpeg-macos.sh) into Contents/Frameworks so the .app runs with
+# NO Homebrew dependency, and audits the closure. Ad-hoc signed — the release integration
+# (Developer-ID inside-out signing + notarization) is still owner-gated; release-macos.sh
+# must not pass this until phases 5–6 are hardware-validated.
 #
 # This is the only macOS build now — the old egui/winit "strangler-fig" bundle was retired
 # in task #70 (pb-app no longer compiles on macOS; the guard lives in crates/pb-app/build.rs).
@@ -28,13 +35,20 @@ set -euo pipefail
 PROFILE=release
 RUN=0
 FFVIDEO="${PB_FFVIDEO:-0}"
+BUNDLE_FFMPEG=0
 for a in "$@"; do
 	case "$a" in
 		--debug) PROFILE=debug ;;
 		--release) PROFILE=release ;;
 		--run) RUN=1 ;;
 		--ffvideo) FFVIDEO=1 ;;
-		*) echo "unknown arg: $a (usage: build-swift-host.sh [--debug|--release] [--run] [--ffvideo])" >&2; exit 2 ;;
+		# --bundle-ffmpeg (task #84 phase 7): implies --ffvideo, then bundles the pinned
+		# LGPL FFmpeg into Contents/Frameworks so the .app runs with NO Homebrew dependency.
+		# Still DEV-ONLY (unsigned/ad-hoc; release-macos.sh must not call this — the ship
+		# integration adds Developer-ID inside-out signing). Lets the owner verify a
+		# self-contained build before the release wiring lands.
+		--bundle-ffmpeg) FFVIDEO=1; BUNDLE_FFMPEG=1 ;;
+		*) echo "unknown arg: $a (usage: build-swift-host.sh [--debug|--release] [--run] [--ffvideo] [--bundle-ffmpeg])" >&2; exit 2 ;;
 	esac
 done
 
@@ -114,6 +128,19 @@ SPARKLE_FW="$(find mac/.build/artifacts -type d -name 'Sparkle.framework' -path 
 echo "==> Embedding Sparkle.framework"
 mkdir -p "$APP_DIR/Contents/Frameworks"
 cp -R "$SPARKLE_FW" "$APP_DIR/Contents/Frameworks/"
+
+# --bundle-ffmpeg: make the .app self-contained (no Homebrew FFmpeg dependency). Builds the
+# pinned LGPL FFmpeg on first run, copies its dylibs into Frameworks, rewrites the binary's
+# load commands to @rpath, and audits the closure. DEV-ONLY (ad-hoc signed).
+if [[ "$BUNDLE_FFMPEG" == "1" ]]; then
+	FF_LIBDIR="$REPO_ROOT/third_party/ffmpeg/$(uname -m)/lib"
+	if [[ ! -e "$FF_LIBDIR/libavcodec.dylib" ]]; then
+		echo "==> Building pinned LGPL FFmpeg (first run; ~10-20 min)"
+		"$REPO_ROOT/scripts/build-ffmpeg-macos.sh"
+	fi
+	echo "==> Bundling FFmpeg into $APP_DIR (self-contained)"
+	"$REPO_ROOT/scripts/bundle-ffmpeg-macos.sh" "$APP_DIR" --libdir "$FF_LIBDIR"
+fi
 
 echo "==> Done: $APP_DIR"
 if [[ "$RUN" == 1 ]]; then

@@ -31,10 +31,24 @@ libva/VAAPI runtime-dep audit, task #83 thumbs interaction. **Ready for executio
 > no-rotation eligibility) and **true zero-copy** IOSurface→wgpu import (no external-
 > texture ingest exists in the renderer yet) — both need on-display owner validation
 > and only pay off if the owner's 4K perf testing shows the residual swscale is the
-> bottleneck. **Next: phase 7, distribution** (bundle a pinned LGPL FFmpeg; #77
-> compliance). CHANGELOG entry deferred to phase 7 (ship-gating). Also fixed in passing
-> (phase 3): the winit shell had 9 AppCore fields missing from its constructor
-> (pb-app didn't compile on Linux/Windows since the macOS archive-video work).
+> bottleneck. **Phase 7 (distribution) foundation is BUILT + end-to-end validated**
+> (the scriptable/testable parts that don't need owner credentials):
+> `scripts/build-ffmpeg-macos.sh` produces a **pinned (8.1.1), LGPL, decode-only,
+> VideoToolbox, `@rpath`** FFmpeg (~14 MB, 5 dylibs, sonames matching ffmpeg-sys-next
+> 8.1; self-verifies no stray external deps — it caught + fixed an auto-linked Homebrew
+> libX11); `scripts/bundle-ffmpeg-macos.sh` copies them into `Contents/Frameworks`,
+> rewrites the binary to `@rpath`, ad-hoc signs, and **audits the closure** (fails on any
+> non-bundled/non-system dep). Proven end-to-end: dyld loads all 5 FFmpeg dylibs from the
+> app's own Frameworks, **zero Homebrew**. `build-swift-host.sh --bundle-ffmpeg` is the
+> one-command self-contained dev build. `THIRD-PARTY-NOTICES.md` gained an FFmpeg (LGPL)
+> section; the full compliance manifest is `.taskmaster/docs/ffmpeg-compliance.md` (#77
+> deliverable: config flags, license mode, relink story, patent note, coverage).
+> **Owner-gated remainder** (needs credentials / hardware validation of phases 5–6): wire
+> into `release-macos.sh` + Developer-ID **inside-out** signing of the FFmpeg dylibs
+> before the app + notarization + clean-machine launch, add `ffvideo` to the ship feature
+> set, the Linux clean-container audit, universal-vs-arm64, and the CHANGELOG entry. Also
+> fixed in passing (phase 3): the winit shell had 9 AppCore fields missing from its
+> constructor (pb-app didn't compile on Linux/Windows since the macOS archive-video work).
 
 > **Owner decisions locked (2026-07-12):**
 > 1. **HDR is implemented properly from the start** — not SDR-only-with-tone-map. The fp16/P010
