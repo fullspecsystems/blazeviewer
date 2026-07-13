@@ -1137,7 +1137,9 @@ impl AppCoreHandle {
         {
             self.session_audio = None;
             if let Some(input) = self.pending_audio_input.take() {
-                match pb_app_core::FfAudioDecoder::open(&input) {
+                // Capped at stereo: AVAudioEngine's graph rejects wider standard
+                // formats (the MKV-5.1 abort) — 5.1/7.1 folds down in the decoder.
+                match pb_app_core::FfAudioDecoder::open_capped(&input, 2) {
                     Ok(d) => {
                         self.session_audio = Some(d);
                         return true;

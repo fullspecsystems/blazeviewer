@@ -16,6 +16,13 @@ use ffmpeg_next as ff;
 /// (AAC/Opus/Vorbis → FLTP) plus the common integer/packed variants. Returns
 /// `Err(format-name)` for anything else. Bytes are read with `from_le_bytes`
 /// (not a `cast_slice`) so no alignment assumption is made.
+///
+/// Plane access goes through the raw `extended_data` pointers with lengths we
+/// compute from `samples()` — NOT `ffmpeg-next`'s `frame.data(i)`, which sizes
+/// every plane from `linesize[i]`, and FFmpeg only fills `linesize[0]` for
+/// audio: planes 1+ read as empty there, which silently zeroed every channel
+/// but the first (stereo played left-only; a 5.1 center-channel track played
+/// as silence — the owner's MKV bug, 2026-07-12).
 pub fn append_interleaved_f32(
     frame: &ff::frame::Audio,
     ch: usize,
@@ -26,9 +33,6 @@ pub fn append_interleaved_f32(
     if ch == 0 || n == 0 {
         return Ok(());
     }
-    // Read the i-th sample of channel `c` from a plane, given the per-sample stride in bytes
-    // and a byte→f32 decoder. Planar: one plane per channel; packed: plane 0, channels
-    // interleaved.
     let planar = matches!(
         frame.format(),
         Sample::U8(Type::Planar)
@@ -42,6 +46,27 @@ pub fn append_interleaved_f32(
         Sample::I32(_) | Sample::F32(_) => 4,
         other => return Err(format!("{other:?}")),
     };
+    // A plane's valid bytes: per-channel for planar, all channels for packed.
+    let plane_len = if planar {
+        n * sample_bytes
+    } else {
+        n * ch * sample_bytes
+    };
+    // SAFETY: `extended_data` has one live pointer per plane (== `data` for ≤8
+    // channels, heap-extended beyond); each planar plane holds ≥ `samples()`
+    // samples and a packed plane `samples() × channels` — the lengths FFmpeg
+    // guarantees for a decoded frame. A null plane (never seen from a real
+    // decoder; belt-and-suspenders) reads as silence.
+    let plane = |c: usize| -> Option<&[u8]> {
+        unsafe {
+            let ptr = (*frame.as_ptr()).extended_data.add(c).read();
+            if ptr.is_null() {
+                None
+            } else {
+                Some(std::slice::from_raw_parts(ptr, plane_len))
+            }
+        }
+    };
     let decode = |b: &[u8]| -> f32 {
         match frame.format() {
             Sample::U8(_) => (b[0] as f32 - 128.0) / 128.0,
@@ -53,13 +78,13 @@ pub fn append_interleaved_f32(
     out.reserve(n * ch);
     for i in 0..n {
         for c in 0..ch {
-            let (plane, idx) = if planar { (c, i) } else { (0, i * ch + c) };
-            let data = frame.data(plane);
+            let (plane_idx, idx) = if planar { (c, i) } else { (0, i * ch + c) };
             let off = idx * sample_bytes;
-            if off + sample_bytes <= data.len() {
-                out.push(decode(&data[off..off + sample_bytes]));
-            } else {
-                out.push(0.0);
+            match plane(plane_idx) {
+                Some(data) if off + sample_bytes <= data.len() => {
+                    out.push(decode(&data[off..off + sample_bytes]));
+                }
+                _ => out.push(0.0),
             }
         }
     }

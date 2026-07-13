@@ -35,7 +35,13 @@ pub struct FfAudioDecoder {
     index: usize,
     decoder: ff::decoder::Audio,
     rate: u32,
+    /// The source's native channel count (the decode/interleave stride).
     channels: u16,
+    /// Channels actually emitted: `min(channels, cap)` — >2-channel sources
+    /// fold to stereo for sinks whose graphs only take mono/stereo
+    /// (AVAudioEngine; the MKV-5.1 crash). Native when uncapped (PipeWire
+    /// downmixes itself).
+    out_channels: u16,
     /// Stream time base (num, den) for PTS↔Duration.
     time_base: (i32, i32),
     /// First-frame PTS (stream units) — the session-relative zero.
@@ -64,9 +70,18 @@ pub struct FfAudioDecoder {
 unsafe impl Send for FfAudioDecoder {}
 
 impl FfAudioDecoder {
-    /// Open the container's best audio stream. `Err` when there is none (the
-    /// caller treats that as `AudioClockState::Absent`, not a failure).
+    /// Open the container's best audio stream at its native channel count.
+    /// `Err` when there is none (the caller treats that as
+    /// `AudioClockState::Absent`, not a failure).
     pub fn open(input: &VideoInput) -> Result<FfAudioDecoder, String> {
+        Self::open_capped(input, u16::MAX)
+    }
+
+    /// [`open`](Self::open) with an output channel ceiling: sources wider than
+    /// `max_channels` (5.1/7.1) are folded to stereo (center/LFE to both sides,
+    /// surrounds to their side, ATSC-style clip guard). The macOS sink uses 2 —
+    /// AVAudioEngine's graph rejects wider-than-stereo standard formats there.
+    pub fn open_capped(input: &VideoInput, max_channels: u16) -> Result<FfAudioDecoder, String> {
         let mut opened = FfInput::open(input, None)?;
         let (index, rate, channels, time_base, start_time) = {
             let ctx = opened.ctx();
@@ -103,12 +118,18 @@ impl FfAudioDecoder {
         let decoder = ff::codec::context::Context::from_parameters(stream.parameters())
             .and_then(|c| c.decoder().audio())
             .map_err(|e| format!("FFmpeg audio decoder: {e}"))?;
+        let out_channels = if channels > max_channels.max(2) {
+            2
+        } else {
+            channels
+        };
         Ok(FfAudioDecoder {
             input: opened,
             index,
             decoder,
             rate,
             channels,
+            out_channels,
             time_base,
             origin: None,
             start_time,
@@ -125,9 +146,13 @@ impl FfAudioDecoder {
     pub fn rate(&self) -> u32 {
         self.rate
     }
-    /// Native channel count (interleaved stride of [`read`](Self::read)'s output).
+    /// Emitted channel count (the interleaved stride of [`read`](Self::read)'s
+    /// output) — native, or 2 when a wider source is folded down. Deliberately
+    /// NOT the `channels` field (clippy misreads the name-mismatch): the
+    /// sinks must size buffers by what leaves this decoder, not the source.
+    #[allow(clippy::misnamed_getters)]
     pub fn channels(&self) -> u16 {
-        self.channels
+        self.out_channels
     }
     /// The stream is fully drained — an empty [`read`](Self::read) is final.
     pub fn at_eof(&self) -> bool {
@@ -145,7 +170,7 @@ impl FfAudioDecoder {
     }
 
     fn read_inner(&mut self, max_frames: usize) -> Result<Vec<f32>, String> {
-        let want = max_frames.saturating_mul(self.channels as usize);
+        let want = max_frames.saturating_mul(self.out_channels as usize);
         let mut fed = 0usize;
         while self.pending.len() < want && !self.at_eof {
             let mut decoded = ff::frame::Audio::empty();
@@ -177,7 +202,7 @@ impl FfAudioDecoder {
         }
         let take = want.min(self.pending.len());
         let out: Vec<f32> = self.pending.drain(..take).collect();
-        self.pending_pts += self.frames_to_units(take / self.channels.max(1) as usize);
+        self.pending_pts += self.frames_to_units(take / self.out_channels.max(1) as usize);
         Ok(out)
     }
 
@@ -196,8 +221,16 @@ impl FfAudioDecoder {
             self.pending.clear();
             self.pending_pts = ts;
         }
-        append_interleaved_f32(decoded, self.channels as usize, &mut self.pending)
-            .map_err(|fmt| format!("unsupported audio sample format: {fmt}"))
+        if self.out_channels == self.channels {
+            append_interleaved_f32(decoded, self.channels as usize, &mut self.pending)
+                .map_err(|fmt| format!("unsupported audio sample format: {fmt}"))
+        } else {
+            let mut native = Vec::new();
+            append_interleaved_f32(decoded, self.channels as usize, &mut native)
+                .map_err(|fmt| format!("unsupported audio sample format: {fmt}"))?;
+            fold_to_stereo(&native, self.channels as usize, &mut self.pending);
+            Ok(())
+        }
     }
 
     /// In-place seek: demuxer to ≤ `to`, decoder flushed, forward discard to
@@ -275,6 +308,47 @@ impl FfAudioDecoder {
             return 0;
         }
         (d.as_secs_f64() * den as f64 / num as f64).round() as i64
+    }
+}
+
+/// Fold interleaved multichannel PCM to stereo, appending to `out`. FFmpeg's
+/// default channel order is FL FR FC LFE BL BR (then side/extra pairs): center
+/// and LFE feed both sides, surrounds their own side at −3 dB, with the
+/// ATSC-style 1/(1+√½+√½) ≈ 0.414 scale as the clip guard. Deliberately simple
+/// — correct-sounding beats bit-exact for a v1 downmix.
+fn fold_to_stereo(samples: &[f32], src_ch: usize, out: &mut Vec<f32>) {
+    const SIDE: f32 = std::f32::consts::FRAC_1_SQRT_2;
+    // Worst 5.1 sum per side: front(1) + center(√½) + LFE(0.5) + surround(√½).
+    const GUARD: f32 =
+        1.0 / (1.0 + std::f32::consts::FRAC_1_SQRT_2 + 0.5 + std::f32::consts::FRAC_1_SQRT_2);
+    if src_ch < 2 {
+        out.extend_from_slice(samples);
+        return;
+    }
+    out.reserve(samples.len() / src_ch * 2);
+    for frame in samples.chunks_exact(src_ch) {
+        let mut l = frame[0];
+        let mut r = frame[1];
+        for (i, &s) in frame.iter().enumerate().skip(2) {
+            match i {
+                2 => {
+                    // Front center — both sides.
+                    l += SIDE * s;
+                    r += SIDE * s;
+                }
+                3 => {
+                    // LFE — both sides, quieter.
+                    l += 0.5 * s;
+                    r += 0.5 * s;
+                }
+                // Surround/side pairs: even index = left of the pair.
+                i if i % 2 == 0 => l += SIDE * s,
+                _ => r += SIDE * s,
+            }
+        }
+        // 7.1's extra pair can still exceed the 5.1-sized guard — hard-clamp.
+        out.push((l * GUARD).clamp(-1.0, 1.0));
+        out.push((r * GUARD).clamp(-1.0, 1.0));
     }
 }
 
@@ -361,6 +435,54 @@ mod tests {
         }
         let secs = total as f64 / (a.rate() as f64 * a.channels() as f64);
         assert!((0.6..=1.3).contains(&secs), "remaining {secs:.2}s");
+    }
+
+    /// The MKV-5.1 crash regression (owner crash report, 2026-07-12): a
+    /// 6-channel source opened with the macOS cap folds to stereo — the engine
+    /// graph never sees a wider-than-stereo format — and keeps real energy
+    /// (the fixture's tone sits in the center channel, which feeds both sides).
+    /// Uncapped (the Linux/pw-cat path) it stays native 6-channel.
+    #[test]
+    fn surround_source_folds_to_stereo_when_capped() {
+        let mut capped = FfAudioDecoder::open_capped(&VideoInput::Path(fixture("tone_51.mp4")), 2)
+            .expect("open capped");
+        assert_eq!(capped.channels(), 2, "5.1 folds to stereo");
+        let chunk = capped.read(4800).expect("chunk");
+        assert_eq!(chunk.len(), 4800 * 2);
+        // The tone lives in the center channel (plane 2) — energy in BOTH fold
+        // sides proves the extended_data plane read (planes 1+ used to read as
+        // empty via linesize[i], silencing everything but channel 0).
+        let left: Vec<f32> = chunk.iter().step_by(2).copied().collect();
+        let right: Vec<f32> = chunk.iter().skip(1).step_by(2).copied().collect();
+        assert!(rms(&left) > 0.01, "left carries the center: {}", rms(&left));
+        assert!(
+            rms(&right) > 0.01,
+            "right carries the center: {}",
+            rms(&right)
+        );
+
+        let native = open("tone_51.mp4");
+        assert_eq!(native.channels(), 6, "uncapped stays native");
+    }
+
+    /// The fold math: center feeds both sides equally; a hard-left source stays
+    /// left; stereo/mono inputs pass through untouched.
+    #[test]
+    fn fold_to_stereo_routes_channels() {
+        // One 5.1 frame with only FC lit.
+        let mut out = Vec::new();
+        fold_to_stereo(&[0.0, 0.0, 1.0, 0.0, 0.0, 0.0], 6, &mut out);
+        assert_eq!(out.len(), 2);
+        assert!((out[0] - out[1]).abs() < 1e-6, "center is equal in both");
+        assert!(out[0] > 0.2, "audibly present: {}", out[0]);
+        // Only FL lit → right stays silent.
+        out.clear();
+        fold_to_stereo(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0], 6, &mut out);
+        assert!(out[0] > 0.3 && out[1].abs() < 1e-6);
+        // Full-scale everywhere never exceeds ±1 (the clip guard).
+        out.clear();
+        fold_to_stereo(&[1.0; 6], 6, &mut out);
+        assert!(out[0] <= 1.0 && out[1] <= 1.0, "{out:?}");
     }
 
     /// Silent clips are `Err` at open — the sink layer maps that to

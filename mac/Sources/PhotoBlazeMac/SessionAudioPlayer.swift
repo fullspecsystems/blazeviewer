@@ -1,4 +1,5 @@
 import AVFoundation
+import PBCatch
 import PbMacFfi
 
 /// The **session-video audio sink** (task #84 plan §7): plays the audio track of a
@@ -10,7 +11,16 @@ import PbMacFfi
 /// Streaming, constant-memory: ~250 ms `AVAudioPCMBuffer`s are pulled on the main
 /// actor (decoding a chunk is ~1 ms) and scheduled on the player node, topped up
 /// from each buffer's completion callback (plus a pump-driven belt-and-suspenders
-/// top-up). The engine converts the source's native rate/channels to the device.
+/// top-up). The engine converts the source's native rate to the device; the Rust
+/// decoder caps channels at stereo (5.1/7.1 folds down there), because the engine
+/// graph only reliably takes mono/stereo **standard** (deinterleaved) formats —
+/// an interleaved or 6-channel connect throws an NSException (the owner's MKV
+/// crash, 2026-07-12).
+///
+/// Every AVAudioEngine call that can throw an *Objective-C* exception (connect,
+/// start, play, scheduleBuffer — Swift `catch` can't see those) runs inside the
+/// `PBCatchException` shim: a format/device failure makes the sink report a
+/// `Failed` clock and playback degrades to silent, never an abort().
 ///
 /// The clock: `playerNode.playerTime(forNodeTime:)` gives the sample time actually
 /// **rendered** (it freezes on pause and resets on `stop()`, i.e. on seek), minus
@@ -47,16 +57,19 @@ final class SessionAudioPlayer {
 
     /// Opens the Rust decoder over the stashed container and stands the engine up
     /// **paused** (the core resumes audio with the video preroll). `nil` = no audio
-    /// track / open failure — the caller reports a `Failed` clock sample and the
-    /// session degrades to silent playback immediately.
+    /// track / open failure / the audio graph refused the format or device — the
+    /// caller reports a `Failed` clock sample and the session degrades to silent
+    /// playback immediately.
     init?(core: AppCoreHandle, sessionId: UInt64, muted: Bool) {
         guard core.video_audio_open() else { return nil }
         let rate = core.video_audio_rate()
         let channels = core.video_audio_channels()
-        guard rate > 0, channels > 0,
+        // Standard = deinterleaved Float32 — the ONE format family the engine
+        // graph accepts everywhere. The Rust cap guarantees channels ≤ 2.
+        guard rate > 0, channels > 0, channels <= 2,
             let format = AVAudioFormat(
-                commonFormat: .pcmFormatFloat32, sampleRate: Double(rate),
-                channels: AVAudioChannelCount(channels), interleaved: true)
+                standardFormatWithSampleRate: Double(rate),
+                channels: AVAudioChannelCount(channels))
         else {
             core.video_audio_close()
             return nil
@@ -67,13 +80,21 @@ final class SessionAudioPlayer {
         self.rate = Double(rate)
         self.channels = channels
         self.epochSecs = 0
-        engine.attach(node)
-        engine.connect(node, to: engine.mainMixerNode, format: format)
         node.volume = muted ? 0 : 1
-        do {
-            try engine.start()
-        } catch {
-            pbTrace("session audio \(sessionId): engine start failed: \(error)")
+        // Graph assembly + start, shielded: AVFAudio reports failure by NSException
+        // (device in flux, aggregate-device weirdness, format refusal).
+        let graphError = PBCatchException { [engine, node, format] in
+            engine.attach(node)
+            engine.connect(node, to: engine.mainMixerNode, format: format)
+            try? engine.start()
+        }
+        if let graphError {
+            pbTrace("session audio \(sessionId): graph failed: \(graphError.localizedDescription)")
+            core.video_audio_close()
+            return nil
+        }
+        guard engine.isRunning else {
+            pbTrace("session audio \(sessionId): engine did not start")
             core.video_audio_close()
             return nil
         }
@@ -91,31 +112,47 @@ final class SessionAudioPlayer {
                 sourceDrained = true
                 return
             }
-            let frames = AVAudioFrameCount(sampleCount / Int(channels))
+            let ch = Int(channels)
+            let frames = AVAudioFrameCount(sampleCount / ch)
             guard let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames),
-                let dst = buf.floatChannelData?[0]
+                let dst = buf.floatChannelData
             else {
                 failed = true
                 return
             }
-            // Interleaved float32: channel 0's pointer is the packed buffer.
-            dst.update(from: chunk.as_ptr(), count: sampleCount)
-            buf.frameLength = frames
-            inFlight += 1
-            node.scheduleBuffer(buf) { [weak self] in
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    self.inFlight -= 1
-                    self.topUp()
+            // Deinterleave the Rust chunk into the standard format's planes.
+            let src = chunk.as_ptr()
+            let n = Int(frames)
+            for c in 0..<ch {
+                let plane = dst[c]
+                for i in 0..<n {
+                    plane[i] = src[i * ch + c]
                 }
             }
+            buf.frameLength = frames
+            let scheduleError = PBCatchException { [node] in
+                node.scheduleBuffer(buf) { [weak self] in
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        self.inFlight -= 1
+                        self.topUp()
+                    }
+                }
+            }
+            if scheduleError != nil {
+                failed = true
+                return
+            }
+            inFlight += 1
         }
     }
 
     /// Session entered `Playing` (or replay after a seek) — start/resume rendering.
     func resume() {
         paused = false
-        node.play()
+        if PBCatchException({ [node] in node.play() }) != nil {
+            failed = true
+        }
     }
 
     /// Session paused / rebuffering — freeze (keeps position; the clock freezes
@@ -140,7 +177,7 @@ final class SessionAudioPlayer {
         sourceDrained = false
         epochSecs = core.video_audio_seek(target)
         topUp()
-        if !paused { node.play() }
+        if !paused { resume() }
     }
 
     /// One clock sample: (state, played position in seconds). The position is the
