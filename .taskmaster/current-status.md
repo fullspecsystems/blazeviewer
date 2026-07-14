@@ -28,22 +28,26 @@ backends — the FFmpeg backend already shipped). Session findings/gotchas: auto
 - **Phase 1 1A–1D** (see the doc's §7 table for commits): feasible preroll (R1 deadlock dead),
   audio-continuous starvation (R2), drop-late (R3), one-audio-commit-per-seek coordinator (R4).
   Owner-confirmed playback + seeking feel much smoother. `frames_to_units` untangle (`f6fafc3a`, 1E prep).
+- **Phase 1 1E — owned off-main audio decoder** (R5 + R10 + R12): **code-complete + unit-tested,
+  audio quality pending owner-listen** (untestable in a headless agent). The FFmpeg audio decoder
+  moved off `@MainActor` behind a **usize-pointer FFI** (`open_stashed_session_audio` + `session_audio_*`
+  free fns over a thread-safe global stash), driven on a Swift serial feeder queue
+  (`OwnedAudioDecoder`, frees once in `deinit`); `SessionAudioPlayer` rewritten async (Opening clock
+  during the open gap, generation-gated reads). R10 = disposition-aware track selection (forced >
+  default > best). R12 = `session_audio_state` reports Failed distinctly from EOF; stash survives a
+  failed open. Full app builds (`build-swift-host.sh`). Details + owner-listen checklist in the doc's §7/1E.
 
 ## Next (in order)
 
-1. **1E — owned off-main audio decoder** (the immediate task; the last audio-glitch leg, R5).
-   Extract the decoder out of the shared `&mut` handle behind a **usize-pointer FFI** (swift-bridge
-   0.1.59 can't return owned opaque), open/read/seek/free on a Swift feeder queue, fold in **R10**
-   (track selection) + **R12** (error state ≠ EOF). **The concrete file:line seam is in the doc's
-   §7/1E.** Untestable-here for audio → build → owner-listen → iterate.
-2. **1G — lifecycle/failure containment** (session replace/nav/quit cancel + reject stale by
+1. **1G — lifecycle/failure containment** (session replace/nav/quit cancel + reject stale by
    `session_id`; sleep/wake/device-change reprime; one-error-not-toast-loops; the two audit
-   fragilities tagged 1G).
-3. **1F — network read-ahead** (original beta item #1, R9): **BLOCKED on the 0D SMB
+   fragilities tagged 1G; plus the 1E leftovers: session-identity on the audio effects + the
+   pause-forever fallback timeout if a final seek landing never arrives).
+2. **1F — network read-ahead** (original beta item #1, R9): **BLOCKED on the 0D SMB
    characterization spike** — needs the owner's NAS (`/Volumes/{JD,Media,appdata}`). Do 0D first.
-4. **Phase 2 — GPU P010/NV12 shader** (the "proper HW HDR"): removes the CPU color convert +
+3. **Phase 2 — GPU P010/NV12 shader** (the "proper HW HDR"): removes the CPU color convert +
    retires the R8 parallel stopgap; cross-platform + macOS Apple-can't-decode fallback.
-5. **Phase 3 — Apple `AVSampleBuffer` presenter**: FFmpeg-demux → system decode/HDR/**correct
+4. **Phase 3 — Apple `AVSampleBuffer` presenter**: FFmpeg-demux → system decode/HDR/**correct
    DoVi**/one clock; also delivers #5 zoom/pan via layer transform. The macOS end-state.
 
 ## Build / test the macOS app

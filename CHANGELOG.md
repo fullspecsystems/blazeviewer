@@ -17,8 +17,18 @@ with any pre-release suffix carried only by the tag.
 - The info line (`i`) now defaults to the **bottom-center** of the screen instead of the
   bottom-right. (Existing users keep whatever position they've already set; this only affects
   fresh installs.)
+- **Videos with several audio tracks pick a track deliberately.** A file that carries more
+  than one audio track (say Dolby TrueHD plus a stereo mix) now honors the one the container
+  marks as default or forced, instead of a blind guess.
 
 ### Fixed
+- **Demanding video audio no longer competes with the interface (macOS).** The audio for
+  session-backed videos (MKV/WebM and other FFmpeg-decoded formats) is now decoded on its own
+  background thread instead of the main UI thread, so heavy tracks (Dolby TrueHD/Atmos, large
+  surround mixes) and rapid seeks stay smooth and don't hitch the window.
+- **A corrupted audio tail is no longer mistaken for the clean end of a video.** A decode error
+  partway through the audio now surfaces as an error rather than silently "ending" playback as if
+  the stream had finished.
 - **Holding a seek key no longer crackles or restarts the audio for every hop.** While
   you hold an arrow (or drag the playback bar), audio now pauses once, the video scrubs
   freely, and when you let go the audio rejoins in sync at the final position with a

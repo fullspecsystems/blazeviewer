@@ -2018,17 +2018,15 @@ final class CoreModel {
             liveAudio?.pause()
         case .ResumeLiveAudio:
             liveAudio?.play()
-        // Session-video audio (task #84 §7): the FFmpeg-backed sink for session
-        // videos. Opens PAUSED (the core resumes it with the video preroll); a
-        // failed open reports one Failed clock sample so the session degrades to
-        // silent immediately instead of waiting out the readiness timeout.
+        // Session-video audio (task #84 §7, plan §7/1E): the FFmpeg-backed sink for
+        // session videos, now decoded OFF the main actor (R5). Open is async:
+        // until it lands the clock reports Opening; a no-audio / open / graph
+        // failure reports Failed and the session degrades to silent — so init is
+        // non-failable and there is no nil check here.
         case .StartVideoAudio(let sessionId, let muted):
             sessionAudio?.stop()
-            sessionAudio = SessionAudioPlayer(core: core, sessionId: sessionId, muted: muted)
+            sessionAudio = SessionAudioPlayer(sessionId: sessionId, muted: muted)
             sessionAudioSampledAt = Date.distantPast // sample immediately (readiness)
-            if sessionAudio == nil {
-                core.video_audio_clock(sessionId, 5, 0) // Failed
-            }
         case .StopVideoAudio:
             sessionAudio?.stop()
             sessionAudio = nil

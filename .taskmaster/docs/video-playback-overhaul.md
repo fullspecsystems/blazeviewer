@@ -14,10 +14,12 @@ also leave a durable fallback for codecs Apple cannot decode and must not regres
 ## 0. Status (2026-07-13)
 
 - **DONE:** Phase 0 0A/0C (corpus characterized; remux controls at `~/Downloads/pb-remux-control-*.mp4`);
-  **Phase 1 1A–1D** on `main` (see §7 table for commits) — deadlock (R1) + post-seek audio glitches
-  (R2/R4) fixed, owner-confirmed smoother; plus the seek perf work + `frames_to_units` untangle (1E prep).
-- **NEXT (Opus session):** **1E** — owned off-main audio decoder (usize-pointer FFI) + R10 selection +
-  R12 error-state; the last audio-glitch leg (R5). Concrete seam is in §7/1E. Then **1G** lifecycle.
+  **Phase 1 1A–1E** on `main` (see §7 table for commits) — deadlock (R1) + post-seek audio glitches
+  (R2/R4) fixed, owner-confirmed smoother; plus the seek perf work + `frames_to_units` untangle.
+  **1E** (owned off-main audio decoder, R5 + R10 + R12) is **code-complete + unit-tested; audio quality
+  pending owner-listen** (untestable in a headless agent).
+- **NEXT (Opus session):** **1G** — lifecycle/failure containment (session-identity on the audio
+  effects; the pause-forever fallback timeout; the two audit fragilities tagged 1G). Then Phase 2/3.
 - **BLOCKED:** **1F** network read-ahead needs the **0D SMB spike** first (owner's NAS
   `/Volumes/{JD,Media,appdata}`). **Phase 2** (GPU P010 — the "proper HW HDR", retires the R8 stopgap)
   and **Phase 3** (Apple `AVSampleBuffer` — the DoVi end-state) are the big post-Phase-1 wins.
@@ -412,63 +414,37 @@ Also landed this session (pre-1E foundation): seek run-up convert-skip `d1760d0c
 
 **Still open from the 1D contract** (fold into 1E/1G): session-identity fields on the audio effects (ride 1E's owned-handle rework); the pause-forever fallback timeout if a final landing never arrives (1G watchdog).
 
-### 1E. Remove audio decode/refill from `@MainActor`
+### 1E. Remove audio decode/refill from `@MainActor` — CODE-COMPLETE (2026-07-13; audio pending owner-listen)
 
-Create an exclusively owned audio-decoder handle rather than calling through the shared mutable
-`AppCoreHandle`:
+The session-video audio decoder no longer lives in an `Option<FfAudioDecoder>` on the
+`@MainActor`-bound `AppCoreHandle` (where every open/read/seek/refill contended with the UI +
+pump, R5). It is now an exclusively-owned decoder behind a raw `usize` pointer, opened and driven
+on a dedicated serial feeder `DispatchQueue` — **off the main actor** — with only the AVAudioEngine
+control + played-position clock left on the main actor.
 
-- Rust owns allocation and exposes create/read/seek/eof/cancel/drop operations through a narrow
-  FFI handle. If swift-bridge still cannot return an opaque owned type, wrap a nonzero `usize`
-  pointer in a Swift `final` owner whose deinit/drop is exactly once.
-- All decoder operations occur on one dedicated serial queue/worker; no concurrent read and seek.
-- The main actor receives only prepared buffers/state changes and performs the minimum required
-  AVAudioEngine control work.
-- Buffer completion cannot call into a freed decoder. Stop first gates callbacks, cancels worker
-  I/O, drains ownership, then releases engine resources without blocking the main actor.
-- Preserve timestamps and channel layout. Avoid a per-buffer nested Swift deinterleave loop if
-  FFmpeg/Rust can produce the sink's required planar layout directly.
-- Keep scheduled audio duration bounded and observable. Tune chunk size/count for refill margin
-  versus seek latency; do not hard-code 3 × 250 ms without measurement.
+What landed (test-first where testable; audio is untestable in a headless agent → **owner-listen**):
 
-The raw handle is an implementation constraint, not permission for an unowned lifetime. Add
-double-drop, use-after-stop, seek/read serialization, and replacement-session tests.
+| Area | What | Where |
+|---|---|---|
+| **R10** track selection | `choose_audio` (pure, unit-tested) + `select_audio_stream` glue: forced > default > FFmpeg `best` > first; `PB_VIDEO_DIAG` prints the chosen stream + reason. Cost-based downgrade deferred (route-level, measurement-gated). | `pb-decode/src/ffmpeg/audio_decoder.rs` |
+| **usize-pointer FFI** | `SessionAudioDecoder { inner, failed }` boxed → `Box::into_raw`; free fns `open_stashed_session_audio(session_id)->usize` + `session_audio_{rate,channels,read,state,seek,free}(ptr,…)`; a thread-safe global `AUDIO_STASH` replaces the `pending_audio_input`/`session_audio` handle fields. `StartVideoAudio` stashes into the global. | `pb-mac-ffi/src/lib.rs` |
+| **R12** error≠EOF | `session_audio_state(ptr)` → 0 Ok / 1 Eof / **2 Failed**; a read/seek error latches `failed`, a null ptr reads Failed (never a clean EOF). | `pb-mac-ffi/src/lib.rs` |
+| stash survives failed open | open **consumes on success, keeps on failure** (clones out of the stash) → the host can retry without the core re-issuing the effect (fixes the old consume-on-failure bug). | `pb-mac-ffi/src/lib.rs` |
+| **Swift off-main** | `OwnedAudioDecoder` (`@unchecked Sendable`): serial feeder queue owns the ptr, frees exactly once in `deinit`; async `open`/`read`/`seek` hop results back to the main actor FIFO. `SessionAudioPlayer` rewritten: **async non-failable init** (clock reports `Opening` during the gap; failure → `Failed`), generation-gated reads across seeks, deferred resume/seek until open lands. `CoreModel.StartVideoAudio` drops the `== nil` check + `core:` arg. | `mac/.../SessionAudioPlayer.swift`, `CoreModel.swift` |
 
-Also fold in the audit-confirmed audio-decoder defects while this seam is open:
+`frames_to_units` origin untangle was already done (`f6fafc3a`, pre-1E).
 
-- **R12:** a decode/seek error must surface as a distinct error state, not read back as EOF.
-- The stashed audio input must survive a failed open (no one-shot `take()` on the failure path).
-- Untangle `frames_to_units`'s origin-mutation side effect from unit conversion.
-- Apply the R10 track-selection policy at open instead of blind `best(Audio)`.
+Tests: `choose_audio_honors_disposition_intent`, `select_audio_stream_picks_the_lone_track`
+(pb-decode); `open_failure_keeps_the_stash_for_retry`, `open_success_consumes_stash_and_streams_to_eof`,
+`state_maps_failure_apart_from_eof` (R12/null), `owned_decoder_seeks_and_continues` (pb-mac-ffi,
+`--features ffvideo`). All green; `build-swift-host.sh` links the full app.
 
-**Implementation seam (mapped 2026-07-13 — current file:line, for the Opus session):**
-
-- `crates/pb-decode/src/ffmpeg/audio_decoder.rs`: `FfAudioDecoder` is already `Send` + single-owner
-  (its `unsafe impl Send` note pre-blesses moving it to a feeder thread); `frames_to_units` origin
-  untangle already done (`f6fafc3a`). R10 = the blind `best(ff::media::Type::Audio)` at ~line 88 →
-  a disposition/language-aware `select_audio_stream` (honor default/forced first; diagnostics-
-  visible index; defer the cost-based downgrade — it's route-level/measurement-gated).
-- **FFI to REPLACE** in `crates/pb-mac-ffi/src/lib.rs`: `video_audio_open/rate/channels/read/at_eof/
-  seek/close` (~1135–1235) on `AppCoreHandle` + the `session_audio` / `pending_audio_input` fields.
-  The R12 bug — `read`/`seek` error does `session_audio = None`, then `at_eof` returns true (`is_none_or`)
-  → error reads as clean EOF — is at ~1184 and ~1216. **Keep `video_audio_clock`** (host→core master
-  clock) on the handle.
-- **New usize-pointer seam** (mirror `attach_layer(layer_ptr: usize)` at ~2143 / decl ~3502;
-  swift-bridge 0.1.59 can't return an owned opaque): the `VideoInput` still can't cross the bridge,
-  so `StartVideoAudio` (currently `self.pending_audio_input = Some(input)` at ~2319) stashes it in a
-  **thread-safe global**; a free fn `open_stashed_session_audio(session_id) -> usize` opens **off the
-  main actor** (R10 select; box a `SessionAudioDecoder { inner: FfAudioDecoder, failed: bool }`;
-  `Box::into_raw`; `0` = failure, and **do NOT consume the stash on failure**), plus free fns
-  `session_audio_{rate,channels,read,state,seek,free}(ptr,…)`. `state()` returns Ok/Eof/**Failed** so
-  R12 is a distinct state, not EOF. `free` = `drop(Box::from_raw(..))`, exactly once.
-- **Swift** `mac/Sources/PhotoBlazeMac/SessionAudioPlayer.swift` (today `@MainActor`, calls
-  `core.video_audio_*` in `topUp/seek/sample/stop`): becomes **async two-phase** — a serial feeder
-  `DispatchQueue` owns the pointer (open→read→seek→free all on it), the main actor only builds/controls
-  the `AVAudioEngine` + reads the clock behind a small lock; an `OwnedAudioDecoder` class frees exactly
-  once in `deinit` (guard against double-free). Keep the deinterleave + `sample()` clock code as-is.
-  `CoreModel.StartVideoAudio` (~2027) drops the `== nil` check (open is async; failure → the clock
-  sample reports `Failed`). Tune the 3×250 ms lookahead against corpus/seek data (don't hard-code).
-- **Tests:** double-free guard, use-after-stop, seek/read serialization, replacement-session,
-  R12 error-distinct-from-EOF, and `open_stashed` stash-survives-a-failed-open.
+**Still open (fold into 1G):** session-identity on the audio effects (the owned handle is
+generation-gated Swift-side, but the effects themselves aren't session-tagged); the pause-forever
+fallback timeout if a final seek landing never arrives. Chunk lookahead is still 3×250 ms — tune
+against corpus/seek traces when the owner profiles. **Owner-listen checklist:** heavy-codec
+(TrueHD/Atmos) start smoothness, no UI hitch during rapid seeks, clean post-seek audio resume,
+no start glitch from the async-open gap, multi-track files pick the intended track.
 
 ### 1F. Bounded compressed read-ahead and network recovery
 

@@ -29,6 +29,74 @@ const OP_DEADLINE: Duration = Duration::from_secs(10);
 /// Packets fed without producing a frame before declaring the input stuck.
 const MAX_PACKETS_PER_READ: usize = 4096;
 
+/// Opt-in per-open diagnostics (`PB_VIDEO_DIAG=1`) — shares the video producer's
+/// switch so a single env var lights up the whole session pipeline. Kept off the
+/// read/seek hot path (open-time only).
+fn diag() -> bool {
+    std::env::var_os("PB_VIDEO_DIAG").is_some()
+}
+
+/// One audio stream's selection-relevant facts (R10). Pure data so the
+/// [`choose_audio`] policy is unit-testable without a multi-track fixture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AudioCandidate {
+    index: usize,
+    default: bool,
+    forced: bool,
+}
+
+/// The R10 audio track-selection policy: an explicit, tested choice among a
+/// container's audio streams instead of FFmpeg's blind `best(Audio)`.
+///
+/// Order of intent: an explicitly **forced** track wins (a rare but deliberate
+/// "play this" signal), then the container's **default** track, then FFmpeg's
+/// `best` heuristic (channel count / bitrate — passed in as `best`), then the
+/// first audio stream as a last resort. Returns the chosen index plus a short
+/// reason for `PB_VIDEO_DIAG`.
+///
+/// The **cost-based downgrade** (prefer a cheaper Apple-decodable codec — AC-3 /
+/// FLAC over TrueHD — when the premium track is a measured reliability/cost
+/// problem) is deliberately deferred: it is route-level and measurement-gated
+/// (plan §5.2), and we never silently downgrade a track that plays fine. This
+/// seam picks one stream index at open; in-session track switching stays a
+/// non-goal but is not precluded.
+fn choose_audio(cands: &[AudioCandidate], best: Option<usize>) -> Option<(usize, &'static str)> {
+    if let Some(c) = cands.iter().find(|c| c.forced) {
+        return Some((c.index, "forced disposition"));
+    }
+    if let Some(c) = cands.iter().find(|c| c.default) {
+        return Some((c.index, "default disposition"));
+    }
+    if let Some(b) = best {
+        return Some((b, "best heuristic"));
+    }
+    cands.first().map(|c| (c.index, "first audio track"))
+}
+
+/// Apply [`choose_audio`] over a live FFmpeg input: collect the audio streams'
+/// dispositions in stream order and fold in FFmpeg's `best(Audio)` pick as the
+/// heuristic fallback. `None` when the container carries no audio.
+fn select_audio_stream(ctx: &ff::format::context::Input) -> Option<(usize, &'static str)> {
+    use ff::format::stream::Disposition;
+    let cands: Vec<AudioCandidate> = ctx
+        .streams()
+        .filter(|s| s.parameters().medium() == ff::media::Type::Audio)
+        .map(|s| {
+            let d = s.disposition();
+            AudioCandidate {
+                index: s.index(),
+                default: d.contains(Disposition::DEFAULT),
+                forced: d.contains(Disposition::FORCED),
+            }
+        })
+        .collect();
+    let best = ctx
+        .streams()
+        .best(ff::media::Type::Audio)
+        .map(|s| s.index());
+    choose_audio(&cands, best)
+}
+
 pub struct FfAudioDecoder {
     input: FfInput<'static>,
     /// Selected audio stream index — the packet filter.
@@ -85,10 +153,15 @@ impl FfAudioDecoder {
         let mut opened = FfInput::open(input, None)?;
         let (index, rate, channels, time_base, start_time) = {
             let ctx = opened.ctx();
+            // R10: an explicit, tested track-selection policy, not blind `best(Audio)`.
+            let (index, reason) = select_audio_stream(ctx).ok_or("no audio track")?;
+            if diag() {
+                eprintln!("[pb-video] audio track: stream #{index} ({reason})");
+            }
             let stream = ctx
                 .streams()
-                .best(ff::media::Type::Audio)
-                .ok_or("no audio track")?;
+                .find(|s| s.index() == index)
+                .ok_or("selected audio stream vanished")?;
             let par = stream.parameters();
             let (rate, channels) = unsafe {
                 let p = par.as_ptr();
@@ -100,7 +173,7 @@ impl FfAudioDecoder {
             let tb = stream.time_base();
             let st = stream.start_time();
             (
-                stream.index(),
+                index,
                 rate,
                 channels,
                 (tb.numerator(), tb.denominator()),
@@ -518,6 +591,49 @@ mod tests {
         .expect("open");
         let chunk = a.read(4800).expect("chunk");
         assert!(rms(&chunk) > 0.05);
+    }
+
+    /// R10 track-selection policy: forced beats default beats best-heuristic
+    /// beats first; a container with one audio track just picks it.
+    #[test]
+    fn choose_audio_honors_disposition_intent() {
+        let cand = |index, default, forced| AudioCandidate {
+            index,
+            default,
+            forced,
+        };
+        // Forced wins even over a later default track.
+        assert_eq!(
+            choose_audio(&[cand(1, true, false), cand(2, false, true)], Some(1),),
+            Some((2, "forced disposition"))
+        );
+        // No forced → the container's default track, over FFmpeg's `best`.
+        assert_eq!(
+            choose_audio(&[cand(1, false, false), cand(3, true, false)], Some(1),),
+            Some((3, "default disposition"))
+        );
+        // No disposition → fall back to FFmpeg's best-heuristic pick.
+        assert_eq!(
+            choose_audio(&[cand(1, false, false), cand(2, false, false)], Some(2)),
+            Some((2, "best heuristic"))
+        );
+        // No disposition and no best → the first audio stream.
+        assert_eq!(
+            choose_audio(&[cand(4, false, false), cand(5, false, false)], None),
+            Some((4, "first audio track"))
+        );
+        // No audio at all.
+        assert_eq!(choose_audio(&[], None), None);
+    }
+
+    /// The single-track fixtures select their one audio stream (exercises the
+    /// live `select_audio_stream` glue end-to-end, not just the pure policy).
+    #[test]
+    fn select_audio_stream_picks_the_lone_track() {
+        let mut opened = FfInput::open(&VideoInput::Path(fixture("color_with_tone.mp4")), None)
+            .expect("open input");
+        let picked = select_audio_stream(opened.ctx());
+        assert!(matches!(picked, Some((_, _))), "found an audio stream");
     }
 
     /// Hostile bytes fail bounded, never hang (watchdog + packet budget).

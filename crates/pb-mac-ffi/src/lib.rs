@@ -129,15 +129,6 @@ pub struct AppCoreHandle {
     /// The never-consumed copy of the CLI launch paths (see `launch_path_count`) —
     /// the host's Apple-Event echo filter reads it after the stash is consumed.
     launch_paths_record: Vec<String>,
-    /// The `StartVideoAudio` effect's container input, stashed for
-    /// `video_audio_open` (a `VideoInput` can't cross the FFI — stash + pull,
-    /// like the clipboard). Task #84 §7.
-    #[cfg(feature = "ffvideo")]
-    pending_audio_input: Option<pb_app_core::video::VideoInput>,
-    /// The open FFmpeg audio decoder feeding the host's AVAudioEngine sink —
-    /// driven entirely through the `video_audio_*` accessors on the main actor.
-    #[cfg(feature = "ffvideo")]
-    session_audio: Option<pb_app_core::FfAudioDecoder>,
 }
 
 /// One flattened folder-tree row for the native list. `path` is the disk path (Finder
@@ -195,10 +186,6 @@ impl AppCoreHandle {
             help_snapshot: Vec::new(),
             inspector_snapshot: Vec::new(),
             tree_snapshot: Vec::new(),
-            #[cfg(feature = "ffvideo")]
-            pending_audio_input: None,
-            #[cfg(feature = "ffvideo")]
-            session_audio: None,
             pending_launch_paths: Vec::new(),
             launch_paths_record: Vec::new(),
         }
@@ -1125,114 +1112,11 @@ impl AppCoreHandle {
         self.core.video_seek_fraction(frac);
     }
 
-    // ── Session-video audio (task #84 §7): the Rust FFmpeg decoder behind the
-    // host's AVAudioEngine sink. All main-actor (decoding a chunk is ~1 ms).
-    // Without ffvideo these are inert stubs — no session video exists then.
-
-    /// Open the decoder over the container the `StartVideoAudio` effect stashed.
-    /// `false` = no track / open failure — the host reports a `Failed` clock
-    /// sample and the session plays silently on its monotonic clock.
-    fn video_audio_open(&mut self) -> bool {
-        #[cfg(feature = "ffvideo")]
-        {
-            self.session_audio = None;
-            if let Some(input) = self.pending_audio_input.take() {
-                // Capped at stereo: AVAudioEngine's graph rejects wider standard
-                // formats (the MKV-5.1 abort) — 5.1/7.1 folds down in the decoder.
-                match pb_app_core::FfAudioDecoder::open_capped(&input, 2) {
-                    Ok(d) => {
-                        self.session_audio = Some(d);
-                        return true;
-                    }
-                    Err(e) => eprintln!("video audio open failed: {e}"),
-                }
-            }
-            false
-        }
-        #[cfg(not(feature = "ffvideo"))]
-        false
-    }
-
-    fn video_audio_rate(&self) -> u32 {
-        #[cfg(feature = "ffvideo")]
-        let r = self.session_audio.as_ref().map_or(0, |d| d.rate());
-        #[cfg(not(feature = "ffvideo"))]
-        let r = 0;
-        r
-    }
-
-    fn video_audio_channels(&self) -> u32 {
-        #[cfg(feature = "ffvideo")]
-        let r = self
-            .session_audio
-            .as_ref()
-            .map_or(0, |d| u32::from(d.channels()));
-        #[cfg(not(feature = "ffvideo"))]
-        let r = 0;
-        r
-    }
-
-    /// Decode up to `max_frames` interleaved f32 sample frames. Empty = end of
-    /// stream (or a decode failure, which closes the decoder — the host sees
-    /// `at_eof` and lets the clock end). ~100 ms chunks at a ~4 Hz top-up
-    /// cadence keep this far off any real-time path.
-    fn video_audio_read(&mut self, max_frames: u32) -> Vec<f32> {
-        #[cfg(feature = "ffvideo")]
-        let r = match self.session_audio.as_mut() {
-            Some(d) => match d.read(max_frames as usize) {
-                Ok(chunk) => chunk,
-                Err(e) => {
-                    eprintln!("video audio read failed: {e}");
-                    self.session_audio = None;
-                    Vec::new()
-                }
-            },
-            None => Vec::new(),
-        };
-        #[cfg(not(feature = "ffvideo"))]
-        let r = {
-            let _ = max_frames;
-            Vec::new()
-        };
-        r
-    }
-
-    /// The stream is drained (or the decoder is gone) — an empty read is final.
-    fn video_audio_at_eof(&self) -> bool {
-        #[cfg(feature = "ffvideo")]
-        let r = self.session_audio.as_ref().is_none_or(|d| d.at_eof());
-        #[cfg(not(feature = "ffvideo"))]
-        let r = true;
-        r
-    }
-
-    /// Seek the decoder; returns the new clock anchor in seconds (the host's
-    /// scheduling epoch — landing is within one audio frame of the target).
-    fn video_audio_seek(&mut self, secs: f64) -> f64 {
-        #[cfg(feature = "ffvideo")]
-        let r = match self.session_audio.as_mut() {
-            Some(d) => match d.seek(std::time::Duration::from_secs_f64(secs.max(0.0))) {
-                Ok(anchor) => anchor.as_secs_f64(),
-                Err(e) => {
-                    eprintln!("video audio seek failed: {e}");
-                    self.session_audio = None;
-                    secs
-                }
-            },
-            None => secs,
-        };
-        #[cfg(not(feature = "ffvideo"))]
-        let r = secs;
-        r
-    }
-
-    fn video_audio_close(&mut self) {
-        #[cfg(feature = "ffvideo")]
-        {
-            self.session_audio = None;
-            self.pending_audio_input = None;
-        }
-    }
+    // ── Session-video audio (task #84 §7, plan §7/1E): the FFmpeg audio decoder
+    // that feeds the host's AVAudioEngine sink now lives behind an owned
+    // usize-pointer handle (the free functions below), opened + driven on the
+    // host's serial feeder queue — OFF the main actor (R5). Only the clock sample
+    // still rides the core handle (main-actor, cheap).
 
     /// Host → core: one audio clock sample (the shell half of the clock bridge
     /// the winit shell implements in `video_audio.rs`). `state`: 0 Opening,
@@ -2306,17 +2190,18 @@ impl AppCoreHandle {
                     self.last_menu_state = state;
                     return Some(ffi::CoreEffectFfi::MenuStateChanged);
                 }
-                // Session-video audio (task #84 §7): stash the container input for
-                // `video_audio_open`, surface the marker with the FFI-able fields.
-                // Without ffvideo the arm is unreachable in practice (no session
-                // exists on macOS), but stays total via map_effect's fallthrough.
+                // Session-video audio (task #84 §7, plan §7/1E): stash the container
+                // input in the thread-safe global; the host pulls it OFF the main
+                // actor via `open_stashed_session_audio(session_id)`. Without ffvideo
+                // the arm is unreachable in practice (no session exists on macOS),
+                // but stays total via map_effect's fallthrough.
                 #[cfg(feature = "ffvideo")]
                 C::StartVideoAudio {
                     input,
                     session_id,
                     muted,
                 } => {
-                    self.pending_audio_input = Some(input);
+                    stash_audio_input(session_id.0, input);
                     return Some(ffi::CoreEffectFfi::StartVideoAudio(session_id.0, muted));
                 }
                 // A natively-presented panel changed (task #54) — the host calls
@@ -2991,6 +2876,237 @@ fn map_effect(e: contract::CoreEffect) -> ffi::CoreEffectFfi {
     }
 }
 
+// ── Session-video audio: the owned off-main decoder seam (task #84 §7, plan §7/1E) ──
+//
+// The FFmpeg audio decoder used to live in an `Option<FfAudioDecoder>` field on the
+// `@MainActor`-bound `AppCoreHandle`, so every open/read/seek/refill contended with
+// the UI + pump (R5). It now lives behind a raw `usize` pointer the host wraps in a
+// Swift `OwnedAudioDecoder` and drives on a dedicated serial feeder queue — off the
+// main actor. swift-bridge 0.1.59 cannot return an owned opaque type, hence the
+// pointer (mirrors `attach_layer`'s `layer_ptr: usize`). A `VideoInput` also cannot
+// cross the bridge, so `StartVideoAudio` stashes it in the thread-safe global below
+// and the host pulls it via `open_stashed_session_audio` from the feeder queue.
+
+/// The boxed, exclusively-owned session-audio decoder handed to Swift as a raw
+/// `usize`. `failed` records a mid-stream decode/seek error so [`session_audio_state`]
+/// reports it **distinctly from a clean EOF** (R12): a corrupt tail is no longer
+/// indistinguishable from the end of the stream.
+#[cfg(feature = "ffvideo")]
+struct SessionAudioDecoder {
+    inner: pb_app_core::FfAudioDecoder,
+    failed: bool,
+}
+
+/// One-slot stash for the `StartVideoAudio` container input, keyed by session id.
+/// Written on the main actor (in `next_effect`), read on the host's feeder queue
+/// (in `open_stashed_session_audio`) — the `Mutex` bridges the two. `VideoInput`
+/// is `Send` (a path, or an `Arc<Vec<u8>>` for archive bytes).
+#[cfg(feature = "ffvideo")]
+static AUDIO_STASH: std::sync::Mutex<Option<(u64, pb_app_core::video::VideoInput)>> =
+    std::sync::Mutex::new(None);
+
+/// Stash the container input for `session_id`, replacing any prior slot (a new
+/// session supersedes an old, never-opened one).
+#[cfg(feature = "ffvideo")]
+fn stash_audio_input(session_id: u64, input: pb_app_core::video::VideoInput) {
+    *AUDIO_STASH.lock().unwrap_or_else(|e| e.into_inner()) = Some((session_id, input));
+}
+
+/// Open the audio decoder over the container `StartVideoAudio` stashed for
+/// `session_id`, **off the main actor**. Returns a nonzero pointer to a boxed
+/// [`SessionAudioDecoder`] on success, or `0` for no-audio / open failure. The
+/// stash is **consumed on success and kept on failure** so the host can retry the
+/// open without the core re-issuing the effect — fixing the old
+/// consume-on-failure bug (the audit's "`video_audio_open` consumes the stashed
+/// input on failure").
+fn open_stashed_session_audio(session_id: u64) -> usize {
+    #[cfg(feature = "ffvideo")]
+    {
+        let input = {
+            let guard = AUDIO_STASH.lock().unwrap_or_else(|e| e.into_inner());
+            match guard.as_ref() {
+                Some((id, input)) if *id == session_id => input.clone(),
+                _ => return 0,
+            }
+        };
+        // Capped at stereo: AVAudioEngine's graph rejects wider standard formats
+        // (the MKV-5.1 abort) — 5.1/7.1 folds down in the decoder. R10 track
+        // selection happens inside `open_capped`.
+        match pb_app_core::FfAudioDecoder::open_capped(&input, 2) {
+            Ok(inner) => {
+                let mut guard = AUDIO_STASH.lock().unwrap_or_else(|e| e.into_inner());
+                if guard.as_ref().is_some_and(|(id, _)| *id == session_id) {
+                    *guard = None; // consumed on success
+                }
+                Box::into_raw(Box::new(SessionAudioDecoder {
+                    inner,
+                    failed: false,
+                })) as usize
+            }
+            Err(e) => {
+                eprintln!("video audio open failed: {e}"); // stash survives for retry
+                0
+            }
+        }
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = session_id;
+        0
+    }
+}
+
+/// Native sample rate of the owned decoder (`0` if `ptr` is null). `ptr` must come
+/// from [`open_stashed_session_audio`] and not yet be freed; the host serializes
+/// all pointer calls on its feeder queue.
+fn session_audio_rate(ptr: usize) -> u32 {
+    #[cfg(feature = "ffvideo")]
+    {
+        if ptr == 0 {
+            return 0;
+        }
+        // SAFETY: nonzero `ptr` is a live `Box::into_raw(SessionAudioDecoder)`;
+        // the host guarantees single-threaded, non-freed access (feeder queue).
+        let d = unsafe { &*(ptr as *const SessionAudioDecoder) };
+        d.inner.rate()
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = ptr;
+        0
+    }
+}
+
+/// Emitted channel count of the owned decoder (native, or 2 when a wider source
+/// folded down). `0` if `ptr` is null. Same pointer contract as [`session_audio_rate`].
+fn session_audio_channels(ptr: usize) -> u32 {
+    #[cfg(feature = "ffvideo")]
+    {
+        if ptr == 0 {
+            return 0;
+        }
+        // SAFETY: see `session_audio_rate`.
+        let d = unsafe { &*(ptr as *const SessionAudioDecoder) };
+        u32::from(d.inner.channels())
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = ptr;
+        0
+    }
+}
+
+/// Decode up to `max_frames` interleaved f32 sample frames. Empty = end of stream
+/// **or** a decode failure — the caller reads [`session_audio_state`] to tell them
+/// apart. A read error latches `failed` (R12). Same pointer contract as
+/// [`session_audio_rate`], plus exclusive `&mut` (no concurrent read/seek).
+fn session_audio_read(ptr: usize, max_frames: u32) -> Vec<f32> {
+    #[cfg(feature = "ffvideo")]
+    {
+        if ptr == 0 {
+            return Vec::new();
+        }
+        // SAFETY: see `session_audio_rate`; the feeder queue serializes read/seek.
+        let d = unsafe { &mut *(ptr as *mut SessionAudioDecoder) };
+        if d.failed {
+            return Vec::new();
+        }
+        match d.inner.read(max_frames as usize) {
+            Ok(chunk) => chunk,
+            Err(e) => {
+                eprintln!("video audio read failed: {e}");
+                d.failed = true;
+                Vec::new()
+            }
+        }
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = (ptr, max_frames);
+        Vec::new()
+    }
+}
+
+/// The decoder's stream state: `0` Ok (more to read), `1` Eof (clean end), `2`
+/// Failed (a latched decode/seek error, R12 — distinct from EOF). A null pointer
+/// reads as Failed, never as a clean EOF. Same pointer contract as
+/// [`session_audio_rate`].
+fn session_audio_state(ptr: usize) -> u8 {
+    #[cfg(feature = "ffvideo")]
+    {
+        if ptr == 0 {
+            return 2; // Failed — a missing decoder is an error, not a clean end
+        }
+        // SAFETY: see `session_audio_rate`.
+        let d = unsafe { &*(ptr as *const SessionAudioDecoder) };
+        if d.failed {
+            2
+        } else if d.inner.at_eof() {
+            1
+        } else {
+            0
+        }
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = ptr;
+        2
+    }
+}
+
+/// Seek the owned decoder; returns the new clock anchor in seconds (the host's
+/// scheduling epoch — landing is within one audio frame of the target). A seek
+/// error latches `failed` (R12) and returns the requested position. Same pointer
+/// contract as [`session_audio_read`].
+fn session_audio_seek(ptr: usize, secs: f64) -> f64 {
+    #[cfg(feature = "ffvideo")]
+    {
+        if ptr == 0 {
+            return secs;
+        }
+        // SAFETY: see `session_audio_rate`; the feeder queue serializes read/seek.
+        let d = unsafe { &mut *(ptr as *mut SessionAudioDecoder) };
+        if d.failed {
+            return secs;
+        }
+        match d
+            .inner
+            .seek(std::time::Duration::from_secs_f64(secs.max(0.0)))
+        {
+            Ok(anchor) => anchor.as_secs_f64(),
+            Err(e) => {
+                eprintln!("video audio seek failed: {e}");
+                d.failed = true;
+                secs
+            }
+        }
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = (ptr, secs);
+        secs
+    }
+}
+
+/// Free the owned decoder. Must be called **exactly once** per non-null pointer
+/// from [`open_stashed_session_audio`] (the Swift `OwnedAudioDecoder` guards this
+/// in `deinit`); a null pointer is a no-op. After this the pointer is dangling —
+/// no accessor may touch it.
+fn session_audio_free(ptr: usize) {
+    #[cfg(feature = "ffvideo")]
+    {
+        if ptr != 0 {
+            // SAFETY: nonzero `ptr` is a live box from `open_stashed_session_audio`,
+            // freed exactly once by the host's `deinit`-once contract.
+            drop(unsafe { Box::from_raw(ptr as *mut SessionAudioDecoder) });
+        }
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = ptr;
+    }
+}
+
 // NOTE: inside `#[swift_bridge::bridge]`, use `//` comments only — a `///` doc comment
 // becomes a `#[doc]` attribute that swift-bridge-ir's parser rejects (panics in codegen).
 #[swift_bridge::bridge]
@@ -3299,15 +3415,20 @@ mod ffi {
         fn video_session_duration_secs(&self) -> f64;
         fn video_session_playing(&self) -> bool;
         fn video_seek_fraction(&mut self, frac: f32);
-        // Session-video audio (task #84 §7): the FFmpeg decoder behind the host's
-        // AVAudioEngine sink, plus the audio clock bridge back into the core.
-        fn video_audio_open(&mut self) -> bool;
-        fn video_audio_rate(&self) -> u32;
-        fn video_audio_channels(&self) -> u32;
-        fn video_audio_read(&mut self, max_frames: u32) -> Vec<f32>;
-        fn video_audio_at_eof(&self) -> bool;
-        fn video_audio_seek(&mut self, secs: f64) -> f64;
-        fn video_audio_close(&mut self);
+        // Session-video audio (task #84 §7, plan §7/1E): the FFmpeg decoder is
+        // owned OFF the main actor behind a usize pointer — the host opens it via
+        // open_stashed_session_audio() (input stashed Rust-side by StartVideoAudio)
+        // on its serial feeder queue, drives it through the session_audio_*(ptr,…)
+        // free functions, and frees it exactly once. session_audio_state(ptr)
+        // returns 0 Ok / 1 Eof / 2 Failed so a decode error is distinct from EOF.
+        // Only the clock sample still rides the core handle (main-actor, cheap).
+        fn open_stashed_session_audio(session_id: u64) -> usize;
+        fn session_audio_rate(ptr: usize) -> u32;
+        fn session_audio_channels(ptr: usize) -> u32;
+        fn session_audio_read(ptr: usize, max_frames: u32) -> Vec<f32>;
+        fn session_audio_state(ptr: usize) -> u8;
+        fn session_audio_seek(ptr: usize, secs: f64) -> f64;
+        fn session_audio_free(ptr: usize);
         fn video_audio_clock(&mut self, session_id: u64, state: u8, position_secs: f64);
         fn context_menu(&mut self);
 
@@ -4242,5 +4363,108 @@ mod tests {
         assert_eq!(out.describe_backend, 2);
         assert_eq!(out.describe_endpoint, "http://gremlin:1234/v1");
         assert_eq!(out.describe_prompt, "", "None crosses as empty");
+    }
+
+    // ── Session-video audio: the owned off-main decoder seam (plan §7/1E) ──
+    //
+    // These exercise the usize-pointer FFI (open/read/seek/state/free) + the
+    // global stash directly, the way the Swift `OwnedAudioDecoder` will on its
+    // feeder queue. The `AUDIO_STASH` is one global slot, so the tests serialize
+    // through `AUDIO_TEST_LOCK` (cargo runs tests in parallel by default).
+    #[cfg(feature = "ffvideo")]
+    mod session_audio {
+        use super::*;
+        use pb_app_core::video::VideoInput;
+        use std::sync::{Arc, Mutex};
+
+        static AUDIO_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+        fn stash_present(session_id: u64) -> bool {
+            AUDIO_STASH
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|(id, _)| *id == session_id)
+        }
+
+        /// A valid audio container (the pb-decode AAC-tone fixture) as in-RAM
+        /// bytes — no path, so the test is location-independent.
+        fn valid_input() -> VideoInput {
+            let bytes = include_bytes!("../../pb-decode/tests/fixtures/video/color_with_tone.mp4");
+            VideoInput::Bytes {
+                data: Arc::new(bytes.to_vec()),
+                name: "clip.mp4".into(),
+            }
+        }
+
+        /// The audit's consume-on-failure bug (plan §3/§7/1E): a failed open must
+        /// LEAVE the stash so the host can retry without the core re-issuing the
+        /// effect. Garbage bytes fail to open; the stash survives.
+        #[test]
+        fn open_failure_keeps_the_stash_for_retry() {
+            let _g = AUDIO_TEST_LOCK.lock().unwrap();
+            let junk = VideoInput::Bytes {
+                data: Arc::new(vec![0x77u8; 4096]),
+                name: "junk.mp4".into(),
+            };
+            stash_audio_input(101, junk);
+            assert_eq!(open_stashed_session_audio(101), 0, "junk fails to open");
+            assert!(stash_present(101), "stash survives a failed open");
+            // A mismatched session id never opens someone else's stash.
+            assert_eq!(open_stashed_session_audio(999), 0);
+            assert!(stash_present(101), "and leaves it in place");
+            *AUDIO_STASH.lock().unwrap() = None; // clean up the slot
+        }
+
+        /// Success consumes the stash and yields a live pointer; the full
+        /// lifecycle (rate/channels/read → Eof → free) runs off the handle.
+        #[test]
+        fn open_success_consumes_stash_and_streams_to_eof() {
+            let _g = AUDIO_TEST_LOCK.lock().unwrap();
+            stash_audio_input(202, valid_input());
+            let ptr = open_stashed_session_audio(202);
+            assert_ne!(ptr, 0, "the fixture opens");
+            assert!(!stash_present(202), "consumed on success");
+
+            assert!(session_audio_rate(ptr) >= 22_050);
+            assert!(session_audio_channels(ptr) >= 1);
+            assert_eq!(session_audio_state(ptr), 0, "Ok: more to read");
+
+            let first = session_audio_read(ptr, 4800);
+            assert!(!first.is_empty(), "real audio");
+            // Drain to the end.
+            while !session_audio_read(ptr, 48_000).is_empty() {}
+            assert_eq!(session_audio_state(ptr), 1, "clean EOF, not Failed");
+
+            session_audio_free(ptr); // exactly once
+        }
+
+        /// R12: a decoder error is a DISTINCT state, never a clean EOF. A null
+        /// pointer (the host's "no decoder" sentinel) reads as Failed, not Eof —
+        /// so a corrupt/absent tail is never mistaken for the end of the stream.
+        #[test]
+        fn state_maps_failure_apart_from_eof() {
+            let _g = AUDIO_TEST_LOCK.lock().unwrap();
+            assert_eq!(session_audio_state(0), 2, "null → Failed");
+            assert_eq!(session_audio_read(0, 4800).len(), 0, "null read is empty");
+            assert_eq!(session_audio_rate(0), 0);
+            assert_eq!(session_audio_channels(0), 0);
+            session_audio_free(0); // null free is a no-op
+        }
+
+        /// Seek repositions the owned decoder and returns a plausible landing
+        /// anchor; reads continue afterward (the post-seek clock epoch).
+        #[test]
+        fn owned_decoder_seeks_and_continues() {
+            let _g = AUDIO_TEST_LOCK.lock().unwrap();
+            stash_audio_input(303, valid_input());
+            let ptr = open_stashed_session_audio(303);
+            assert_ne!(ptr, 0);
+            let _ = session_audio_read(ptr, 4800); // establish origin
+            let anchor = session_audio_seek(ptr, 0.5);
+            assert!(anchor >= 0.0, "landing anchor is a real position");
+            assert_eq!(session_audio_state(ptr), 0, "still Ok after seek");
+            session_audio_free(ptr);
+        }
     }
 }
