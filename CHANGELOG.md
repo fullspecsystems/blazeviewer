@@ -18,6 +18,10 @@ with any pre-release suffix carried only by the tag.
   photo, or selecting several and pressing Open, hands them to the PhotoBlaze you already have open
   instead of launching a separate copy for each file. A multi-selection opens as one playlist, and
   the existing window comes to the front.
+- **About now credits the open-source libraries PhotoBlaze builds on** — libheif, libde265, dav1d
+  and FFmpeg — with each one's copyright and license. Their full license texts now ship alongside
+  the app (in the `licenses` folder next to it on Windows and Linux, or inside the app bundle on
+  macOS).
 
 ### Changed
 - **Keyboard zoom and pan ease in more gently.** Holding the zoom/pan keys now starts slower and

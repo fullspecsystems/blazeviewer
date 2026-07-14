@@ -72,8 +72,12 @@ $Version = ((cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).pac
 # VC++ redist framework that Setup installs if missing, and the Velopack channel. x64 keeps the
 # historical `win` channel so existing x64 installs keep updating; arm64 gets its own `win-arm64`.
 $ArchCfg = @{
-    x64   = @{ Triplet = "x64-windows-static-md";   Target = "x86_64-pc-windows-msvc";  Framework = "vcredist143-x64";   Channel = "win" }
-    arm64 = @{ Triplet = "arm64-windows-static-md"; Target = "aarch64-pc-windows-msvc"; Framework = "vcredist143-arm64"; Channel = "win-arm64" }
+    # The DLL triplets (no `-static-md`). Not a preference: libheif/libde265 (LGPL-3.0 §4) and
+    # FFmpeg (LGPL-2.1 §6) require that a user can relink the app against a modified library,
+    # which a static link into a proprietary binary does not permit (task #77). Measured cost of
+    # the switch: +0.8 MB on disk.
+    x64   = @{ Triplet = "x64-windows";   Target = "x86_64-pc-windows-msvc";  Framework = "vcredist143-x64";   Channel = "win" }
+    arm64 = @{ Triplet = "arm64-windows"; Target = "aarch64-pc-windows-msvc"; Framework = "vcredist143-arm64"; Channel = "win-arm64" }
 }[$Arch]
 $HostArch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
 Write-Host "==> PhotoBlaze $Version (Windows / Velopack / $Arch → channel '$($ArchCfg.Channel)')" -ForegroundColor Cyan
@@ -83,17 +87,27 @@ if ($Arch -ne $HostArch) {
     throw "Requested -Arch $Arch on a $HostArch host. This script builds for the host arch only — run it on a $Arch machine."
 }
 
-# ── 2. libheif + dav1d are the ship config — locate the vcpkg tree pb-decode/build.rs links
-#      (this arch's triplet). Both static libs come from the same pinned tree (task #76).
+# ── 2. libheif + dav1d + FFmpeg are the ship config — locate the vcpkg tree pb-decode/build.rs
+#      links (this arch's triplet). All three come from the same pinned tree (tasks #76 / #100).
 $Triplet = $ArchCfg.Triplet
 if (-not $env:VCPKG_ROOT) {
     $env:VCPKG_ROOT = @("C:\vcpkg-pb", "$env:USERPROFILE\vcpkg") |
-        Where-Object { (Test-Path "$_\installed\$Triplet\lib\heif.lib") -and (Test-Path "$_\installed\$Triplet\lib\dav1d.lib") } |
+        Where-Object { (Test-Path "$_\installed\$Triplet\bin\heif.dll") -and (Test-Path "$_\installed\$Triplet\bin\dav1d.dll") } |
         Select-Object -First 1
 }
-foreach ($lib in "heif.lib", "dav1d.lib", "avcodec.lib", "avformat.lib") {
-    if (-not $env:VCPKG_ROOT -or -not (Test-Path "$env:VCPKG_ROOT\installed\$Triplet\lib\$lib")) {
-        throw "$lib ($Triplet) not found (checked VCPKG_ROOT, C:\vcpkg-pb, ~\vcpkg). Run ``scripts/setup-libheif.ps1 -Triplet $Triplet`` first — the release ships --features libheif,dav1d,ffprobe."
+# Probe the **bin** dir, not lib: an import lib and a static lib have the same name, so
+# checking `lib\heif.lib` would happily accept the static tree and ship a non-compliant
+# binary (task #77). Only the DLL triplet has bin\*.dll.
+foreach ($dll in "heif.dll", "libde265.dll", "dav1d.dll") {
+    if (-not $env:VCPKG_ROOT -or -not (Test-Path "$env:VCPKG_ROOT\installed\$Triplet\bin\$dll")) {
+        throw "$dll ($Triplet) not found (checked VCPKG_ROOT, C:\vcpkg-pb, ~\vcpkg). Run ``scripts/setup-libheif.ps1 -Triplet $Triplet`` first — the release ships --features libheif,dav1d,ffprobe against the DLL triplet (LGPL relink, task #77)."
+    }
+}
+# FFmpeg's DLLs carry their soname (avcodec-62.dll), so match by prefix rather than by a
+# version that would rot at the next bump.
+foreach ($stem in "avcodec", "avformat") {
+    if (-not (Get-ChildItem "$env:VCPKG_ROOT\installed\$Triplet\bin" -Filter "$stem-*.dll" -ErrorAction SilentlyContinue)) {
+        throw "$stem-*.dll ($Triplet) not found. Run ``scripts/setup-libheif.ps1 -Triplet $Triplet`` first."
     }
 }
 Write-Host "==> native decode libs: $env:VCPKG_ROOT ($Triplet)"
@@ -153,9 +167,55 @@ $Feed = Join-Path $RepoRoot "dist\feed"
 if (Test-Path $Stage) { Remove-Item -Recurse -Force $Stage }
 New-Item -ItemType Directory -Force $Stage, $Feed | Out-Null
 Copy-Item $Exe (Join-Path $Stage "photoblaze.exe") -Force
+
+# ── 6a. The native libraries ship as DLLs beside the exe (task #77). This *is* the LGPL
+#       compliance mechanism, not packaging trivia: shipping libheif/libde265 (LGPL-3.0 §4) and
+#       FFmpeg (LGPL-2.1 §6) as replaceable shared libraries is what lets a user relink the app
+#       against a modified copy. Drop these and the binary is back to being non-distributable.
+#
+#       The set is computed from the exe's real import table rather than hardcoded, because
+#       FFmpeg's DLLs carry their soname (avcodec-62.dll) — any fixed list silently rots at the
+#       next FFmpeg bump, and "silently" here means shipping a package that cannot start.
+#       vpk signs DLLs in the pack dir by default (we never pass --signSkipDll), so staging them
+#       is also what gets them signed.
+$VcpkgBin = Join-Path $env:VCPKG_ROOT "installed\$Triplet\bin"
+$dllSeen = @{}
+$dllQueue = [System.Collections.Queue]::new()
+& dumpbin /nologo /dependents $Exe | ForEach-Object {
+    if ($_ -match '^\s{4}(\S+\.dll)\s*$') { $dllQueue.Enqueue($Matches[1]) }
+}
+while ($dllQueue.Count) {
+    $d = $dllQueue.Dequeue()
+    if ($dllSeen.ContainsKey($d.ToLower())) { continue }
+    $src = Join-Path $VcpkgBin $d
+    # Not in the vcpkg tree => an OS DLL (kernel32, mfplat, …). Never ours to redistribute.
+    if (-not (Test-Path $src)) { continue }
+    $dllSeen[$d.ToLower()] = $true
+    Copy-Item $src $Stage -Force
+    & dumpbin /nologo /dependents $src | ForEach-Object {
+        if ($_ -match '^\s{4}(\S+\.dll)\s*$') { $dllQueue.Enqueue($Matches[1]) }
+    }
+}
+if ($dllSeen.Count -eq 0) {
+    throw "No vcpkg DLLs were staged. The exe imports none, which means it was built against the STATIC triplet — that build cannot ship (LGPL relink, task #77). Check PB_VCPKG_STATIC is unset and that $Triplet is the DLL tree."
+}
+Write-Host "==> staged $($dllSeen.Count) native DLLs: $($dllSeen.Keys -join ', ')"
+
 # Third-party license notices ship next to the exe — dav1d's BSD-2 (and friends) require the
 # license text to accompany binary distributions (see THIRD-PARTY-NOTICES.md, task #76).
 Copy-Item (Join-Path $RepoRoot "THIRD-PARTY-NOTICES.md") $Stage -Force
+# ...and the license TEXTS themselves, which the notices file only summarizes (task #77).
+# This is not optional politeness: LGPL-2.1 §6 says "You must supply a copy of this License"
+# (FFmpeg) and LGPL-3.0 §4(b) says to accompany the work with "a copy of the GNU GPL and this
+# License" (libheif/libde265). The About dialog points users here by name, so the folder name
+# is load-bearing — keep them in step.
+$LicSrc = Join-Path $RepoRoot "licenses"
+$LicDst = Join-Path $Stage "licenses"
+New-Item -ItemType Directory -Force $LicDst | Out-Null
+Copy-Item (Join-Path $LicSrc "*") $LicDst -Recurse -Force
+foreach ($lic in "libheif-COPYING.txt", "libde265-COPYING.txt", "ffmpeg-COPYING.LGPLv2.1.txt", "dav1d-COPYING.txt") {
+    if (-not (Test-Path (Join-Path $LicDst $lic))) { throw "licenses\$lic missing from the package — LGPL requires the license text to ship with the binary." }
+}
 
 $packArgs = @(
     "pack",

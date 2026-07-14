@@ -47,7 +47,7 @@
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSHumanReadableCopyright</key>
-	<string>© JD Lien 2026</string>
+	<string>© FullSpec Systems Inc. 2026</string>
 
 	<!-- Sparkle auto-update (task #65). The app checks this EdDSA-signed appcast next to
 	     the DMG on downloads.fullspec.ca and, when a newer version is published, downloads
