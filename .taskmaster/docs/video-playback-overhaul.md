@@ -2,6 +2,9 @@
 
 > Status: **review-hardened, ready for implementation spikes** · Owner: JD
 > Started 2026-07-13 from 0.2.0 beta feedback · Revised 2026-07-13 after live-code review
+> Revised again 2026-07-13: code audit confirmed R1–R9 with exact constants, added R10–R12 +
+> secondary fragilities, recorded the 0A corpus characterization (DoVi 8.1, four audio tracks,
+> 15 s GOP), and resolved the first §14 open decision.
 > Scope: smooth, seekable, glitch-free playback for native containers and FFmpeg-backed
 > MKV/WebM/other fallback media, with correct SDR/HDR behavior and bounded resource use.
 
@@ -55,6 +58,16 @@ producer. `VideoSession` is shared; acquisition, audio, and presentation are pla
 
 ### Evidence from the corpus and current code
 
+- **Corpus characterization (0A, recorded 2026-07-13; facts only, no path persisted):** HEVC
+  Main 10 (L153), 3840×2076 yuv420p10le @ 24000/1001 fps, bt2020nc/PQ (smpte2084), limited range.
+  **Dolby Vision profile 8.1** (`dv_profile=8`, `bl_signal_compatibility_id=1`): single-layer
+  BL+RPU, **no enhancement layer, HDR10-compatible base layer** — the exact profile Apple's
+  sample-buffer/AVPlayer stack supports as `dvhe.08`. HDR10 static metadata present (mastering
+  0.0001–1000 nits, MaxCLL 1000 / MaxFALL 400). Container ~39.9 Mbps overall, ~83 min.
+  **Four audio tracks:** TrueHD+Atmos 7.1 48 kHz, FLAC stereo, AC-3 5.1 (640 kbps), AC-3 stereo
+  (192 kbps) — plus 11 subtitle tracks. **Long GOP, B-heavy:** sampled head = 9.2 s average /
+  15.0 s max keyframe spacing, 84% B-frames — which is why deep seek run-ups decoded 50–124
+  frames, and why compressed-packet shedding must discard whole dependency runs.
 - VideoToolbox **is** engaged on the MKV route (`hwaccel=VideoToolbox`). The residual path is
   VideoToolbox surface → CPU P010/NV12 transfer → swscale RGBA64 → CPU PQ/HLG-to-scRGB pack →
   RGBA16F upload.
@@ -67,9 +80,27 @@ producer. `VideoSession` is shared; acquisition, audio, and presentation are pla
 - HDR conversion cost scales with output area: approximately 2036×1100 was smooth while
   approximately 2940×1588 stuttered in the observed run.
 - The existing tests pass but do not cover a full-size 4K RGBA16F preroll feasibility failure.
+  Verified constants: `VIDEO_QUEUE_BYTE_BUDGET` = 94.92 MiB (`video.rs:351`), `PREROLL_FRAMES` = 2
+  (`video_session.rs:33`), a 4K fp16 frame = 63.28 MiB — the second frame is always rejected
+  (63.3 + 63.3 > 94.9) and `preroll_satisfied` has no capacity clamp, so any frame size in
+  (47.5 MiB, 94.9 MiB] deadlocks preroll. The one-frame exception in `admits` fires only when a
+  single frame exceeds the whole budget, which 63.3 MiB does not.
 - The FFmpeg video producer and audio decoder each own a separate `FfInput`/demuxer over the same
   path. On a network share this can read/demux the interleaved container twice; local page caching
   can hide the cost, so duplicated source bytes must be measured rather than assumed harmless.
+  In fact playback start can run **up to four** independent `avformat_open_input` +
+  `find_stream_info` passes over the same clip: video producer, audio decoder, poster, and probe.
+- The FFmpeg interrupt-callback cancellation seam exists (`io.rs`), but the borrowed cancel flag
+  is **null on both hot paths** — `Reader::open` and `FfAudioDecoder::open` pass `None`; only the
+  poster path arms a real flag. A blocked producer/audio read today can be aborted only by the
+  per-op watchdog (10 s read/seek, 20 s open). Harmless on local files; unacceptable over SMB.
+- `PB_VIDEO_DIAG` today prints only an open banner and a per-seek timing line in
+  `video_producer.rs`. `pb-app-core` (VideoSession poll/starvation/rebuffer/seek/audio) is
+  entirely uninstrumented — Phase 0B is greenfield there, not an extension.
+- pb-render's reusable NV12 texture slot + YUV shader exist (`gpu.rs`, `fs_scene_nv12`) but are
+  fed **only by the Windows MF path**. The FFmpeg route CPU-converts to RGBA and uploads through
+  the plain image slot, so Phase 2 is "make the FFmpeg producer ship planar frames end-to-end,"
+  not merely "widen the texture slot to P010."
 
 ## 3. Root-cause inventory
 
@@ -82,11 +113,38 @@ producer. `VideoSession` is shared; acquisition, audio, and presentation are pla
 | R5 | Audio open/read/seek/deinterleave/refill is performed through a shared core handle on `@MainActor` | Heavy codecs and seeks contend with the UI/pump | `SessionAudioPlayer.swift`, `pb-mac-ffi` |
 | R6 | HDR steady state creates CPU P010/NV12, RGBA64, and RGBA16F traffic, then uploads 8 B/px | CPU-bound large-window playback | `ffmpeg/hw.rs`, `ffmpeg/convert.rs` |
 | R7 | macOS route selection is container-extension based; MKV always takes the full custom session even when its codec is Apple-decodable | Native decode/presentation capabilities are left unused | `VideoContainer::macos_native`, `start_video_session` |
-| R8 | The stopgap creates up to `available_parallelism()` OS threads per converted frame | Burst scheduling jitter and unnecessary thread churn | `pack_scrgb_f16` |
+| R8 | The stopgap spawns fresh scoped OS threads (`available_parallelism()−2`, clamped to `[1, rows]`) per converted frame | Burst scheduling jitter and unnecessary thread churn | `pack_scrgb_f16` |
 | R9 | Video and audio independently open/demux the same path and have no coordinated compressed-packet read-ahead | SMB jitter or duplicate reads can drain the streams at different times; seeks multiply remote I/O | `ffmpeg/io.rs`, `video_producer.rs`, `audio_decoder.rs` |
+| R10 | Audio track selection is a blind `best(Audio)` pick; no policy chooses among multiple tracks (the corpus carries TrueHD+Atmos 7.1 **and** FLAC stereo **and** AC-3 5.1/stereo) | The most expensive, least platform-friendly codec is decoded when cheaper Apple-decodable tracks sit unused | `audio_decoder.rs`, route probing |
+| R11 | The HDR tone-map `peak` is a monotonic running max that never decays | One bright frame permanently raises the SDR white point for the rest of the session, dimming everything after it | `convert.rs` |
+| R12 | A mid-stream audio decode/seek error silently drops the decoder (`session_audio = None`) and reads back as EOF | A corrupt audio tail is indistinguishable from a clean end of stream; playback "ends" audio without any error | `pb-mac-ffi/lib.rs`, `SessionAudioPlayer.swift` |
 
 R6 is real, but it is not sufficient to explain R1–R5 or R9. GPU color conversion alone will not
 make audio reliable, and decoded-frame buffering is the wrong way to hide network jitter.
+
+Secondary fragilities confirmed by audit (fix inside the owning phase; each needs a test):
+
+- **Upward frame-size renegotiation can overshoot the byte budget.** `Opened` overwrites
+  `frame_bytes` after credits were granted at the old estimate and credits are never revoked, so
+  `queued + credited` can transiently exceed `max_bytes`. Tests only cover downward correction.
+  (Phase 1A.)
+- **Credit-reset-on-seek is an unchecked cross-component invariant** — `seek_to` zeroes
+  `credits_out` and *assumes* the producer zeroes its balance on `SeekTo`. (Phase 1A/1D tests.)
+- **Replay after producer exit is fragile:** replay sends `SeekTo` assuming the producer parked
+  after EOS; if the thread exited, the send is silently dropped and the disconnect path turns
+  replay into a spurious failure toast. (Phase 1G.)
+- **`audio_seek_ack` uses a hardcoded 1 s proximity window**, so a seek near the stale pre-seek
+  position can ack against a not-yet-updated audio sample. (Phase 1D.)
+- **Back-step before any presented frame uses a 30 fps default interval** — interval learning
+  only updates from consecutive presented PTS, never from paused-seek landings. (Phase 1C.)
+- **Terminal sessions keep `is_active` true** — `Ended`/`Failed` never drain `queued_bytes`, so
+  the tick loop spins until the backend drops. (Phase 1G.)
+- **`video_audio_open` consumes the stashed input on failure** — no retry without the shell
+  re-issuing `StartVideoAudio`. (Phase 1E.)
+- **`frames_to_units` mutates the clock origin as a side effect** of a unit-conversion helper —
+  refactor hazard in the audio epoch logic. (Phase 1E.)
+- **HDR/poster downscale is bilinear** (`ScaleFlags::BILINEAR`), below the Lanczos bar used
+  elsewhere; revisit when the planar GPU path makes swscale quality moot. (Phase 2.)
 
 ## 4. Locked architectural rules
 
@@ -151,6 +209,7 @@ Probe off-main, then select by actual stream capabilities—not just extension:
    -> FFmpeg demux -> compressed video CMSampleBuffers -> SampleBufferPresenter
 
    Audio sub-route, independently:
+   0. select the audio *track* first (see track-selection policy below)
    a. compressed audio renderer accepts the codec -> enqueue compressed samples
    b. otherwise FFmpeg decodes -> timestamped LPCM CMSampleBuffers
 
@@ -160,6 +219,19 @@ Probe off-main, then select by actual stream capabilities—not just extension:
 
 Each attempt may occur at most once per session. The fallback graph records attempted backends so
 an error cannot loop Native → SampleBuffer → Session → Native.
+
+**Audio track-selection policy (all backends, R10).** Real remux containers carry several audio
+tracks (the corpus has four). Selection must be an explicit, tested policy, not FFmpeg's
+`best(Audio)`:
+
+1. Honor the container's default/forced disposition and language where present.
+2. Among otherwise-equal candidates, prefer a track the active audio route handles cheaply and
+   natively (e.g. AC-3/AAC/FLAC over TrueHD for the FFmpeg-decode or compressed-enqueue routes)
+   **only when** measurement shows the premium track is a reliability or cost problem on that
+   route; never silently downgrade when the preferred track plays fine.
+3. The chosen track and the reason are diagnostics-visible; switching tracks in-session is a
+   non-goal for this overhaul, but the seam (one selected stream index, chosen at open) must not
+   preclude it.
 
 ### 5.3 Windows and Linux
 
@@ -208,6 +280,10 @@ seekable path / archive bytes
 No production architecture is selected from intuition alone.
 
 ### 0A. Reproducible corpus characterization
+
+> Stream/HDR/GOP/audio-track characterization recorded 2026-07-13 — see §2 evidence. Still open:
+> the remux controls (below), display/EDR facts per test display, and rolling-window peak bitrate
+> (fold into 0D).
 
 Record, without persisting viewed paths:
 
@@ -265,7 +341,9 @@ Build an isolated on-device spike before integrating a new presenter. It must pr
 
 For audio, test the corpus TrueHD stream separately. If compressed enqueue is unsupported, prove
 FFmpeg-decoded, timestamped LPCM under the same synchronizer. Record whether channels are preserved
-or downmixed; do not represent PCM output as Atmos.
+or downmixed; do not represent PCM output as Atmos. Also test the corpus **AC-3 5.1 track** as the
+compressed-enqueue candidate (AC-3 is a system-decodable codec, unlike TrueHD) — if it enqueues
+cleanly, the R10 track-selection policy may make the whole TrueHD problem optional on this route.
 
 **Gate:** Phase 3 proceeds only if the spike is at least as smooth as the AVPlayer remux control,
 has one stable timebase, preserves required HDR metadata, and survives repeated flush/seek/stop.
@@ -319,8 +397,11 @@ effective_preroll = min(PREROLL_FRAMES, max(1, capacity_frames))
 - Recompute admission atomically when `Opened` reports the negotiated format/size; outstanding
   estimates and credits must remain within the new cap.
 
-Tests: 4K RGBA16F, 4K P010, 8K oversized-one-frame mode, tiny frames, frame-size renegotiation,
-and the invariant `queued + credited bytes <= max(byte_cap, one explicitly admitted frame)`.
+Tests: 4K RGBA16F, 4K P010, 8K oversized-one-frame mode, tiny frames, frame-size renegotiation
+in **both directions** (the upward case must clamp/revoke — today credits granted at the old
+estimate are never revoked and can overshoot the budget), the producer/session credit-reset
+handshake on seek, and the invariant
+`queued + credited bytes <= max(byte_cap, one explicitly admitted frame)`.
 
 ### 1B. Audio-continuous starvation policy
 
@@ -386,6 +467,13 @@ Create an exclusively owned audio-decoder handle rather than calling through the
 The raw handle is an implementation constraint, not permission for an unowned lifetime. Add
 double-drop, use-after-stop, seek/read serialization, and replacement-session tests.
 
+Also fold in the audit-confirmed audio-decoder defects while this seam is open:
+
+- **R12:** a decode/seek error must surface as a distinct error state, not read back as EOF.
+- The stashed audio input must survive a failed open (no one-shot `take()` on the failure path).
+- Untangle `frames_to_units`'s origin-mutation side effect from unit conversion.
+- Apply the R10 track-selection policy at open instead of blind `best(Audio)`.
+
 ### 1F. Bounded compressed read-ahead and network recovery
 
 Land the Phase 0D winner behind the packet-source seam; do not solve SMB playback by inflating the
@@ -393,6 +481,9 @@ decoded `VideoFrame` queue.
 
 - One demux worker performs sequential read-ahead and feeds bounded audio/video packet queues.
   Consumers decode independently, but all packets carry `session_id` and `seek_generation`.
+- Arm the real cancel flag on every `FfInput` this worker owns. Today the producer and audio
+  paths pass a null cancel pointer and rely on the 10–20 s watchdog — that must not survive the
+  packet-source migration.
 - Size the target horizon from bitrate and measured throughput, then clamp it by a hard combined
   byte cap and a maximum PTS span. Keep explicit audio/video reservations and report both horizons.
 - Start playback only when the required audio horizon and minimum video dependency/preroll are
@@ -460,7 +551,10 @@ full RGBA allocation.
 ### 2C. Reusable GPU resources and shader
 
 - Extend the existing NV12 reusable slot to P010: `R16Unorm` Y + `Rg16Unorm` UV after proving
-  filterability/support on wgpu 22 for Metal, DX12, and the supported Linux adapters.
+  filterability/support on wgpu 22 for Metal, DX12, and the supported Linux adapters. Note the
+  NV12 slot is currently fed only by the Windows MF path — wiring the FFmpeg producer to emit
+  planar frames (bypassing swscale/`pack_scrgb_f16` entirely) is the bulk of this phase, not the
+  texture-slot widening.
 - Normalize P010's high-aligned 10-bit samples correctly; use 10-bit limited/full-range constants,
   not the NV12 8-bit constants.
 - Shader order: range expansion → YUV matrix → PQ/HLG EOTF (or SDR transfer) → source-primary to
@@ -473,7 +567,9 @@ full RGBA allocation.
 ### 2D. HDR policy
 
 - HDR10/HLG: use stream/frame metadata; tone-map SDR output from mastering/MaxCLL when trustworthy,
-  otherwise a stable documented default. Do not CPU-scan every frame for peak.
+  otherwise a stable documented default. Do not CPU-scan every frame for peak. This also retires
+  R11 (the current running-max peak that never decays); if any adaptive peak survives, it must
+  decay or reset on seek, and the corpus provides MaxCLL 1000 so metadata should win here.
 - Dolby Vision: the planar fallback may render only a verified HDR10-compatible base layer unless
   dynamic-metadata processing is explicitly implemented. Surface this internally as a capability,
   not as “Dolby Vision correct.”
@@ -675,10 +771,15 @@ Use the AVPlayer remux control as the system baseline where applicable. Phase 3 
 
 ## 14. Open decisions that must be resolved by evidence
 
-- Exact Dolby Vision profile/config and whether the corpus contains a usable HDR10 base layer.
+- ~~Exact Dolby Vision profile/config and whether the corpus contains a usable HDR10 base layer.~~
+  **Resolved 2026-07-13 (0A):** DoVi profile 8.1, BL+RPU, no EL, HDR10-compatible base layer with
+  full HDR10 static metadata — the Apple-supported `dvhe.08` profile.
 - Whether the supported macOS versions' sample-buffer renderer preserves and presents that Dolby
   Vision profile correctly from reconstructed format descriptions and packets.
 - Whether compressed TrueHD is accepted (do not expect it); required LPCM channel layout/downmix.
+- Whether compressed AC-3 enqueue works and whether the R10 track-selection policy should prefer
+  the AC-3 5.1 track over TrueHD on the sample-buffer and Session routes (measure TrueHD decode
+  cost off-main first; do not downgrade quality without evidence of a problem).
 - The Session short-starvation threshold and audio chunk/lookahead sizes.
 - The shared packet-source byte/time caps, reconnect count/backoff, and qualifying SMB profile from
   Phase 0D; do not hard-code these from a single “gigabit” run.
