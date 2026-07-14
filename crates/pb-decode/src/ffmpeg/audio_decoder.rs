@@ -36,6 +36,39 @@ fn diag() -> bool {
     std::env::var_os("PB_VIDEO_DIAG").is_some()
 }
 
+/// A [`read`](FfAudioDecoder::read) / [`seek`](FfAudioDecoder::seek) failure,
+/// classified for recovery (plan 1G). `Interrupted` is the per-operation
+/// watchdog/cancel abort — **transient**: a slow network read tripped the deadline,
+/// and retrying may succeed (the sink rebuffers rather than dying). `Fatal` is a
+/// genuine decode/format/corruption error — terminal. `Display` renders both, so
+/// callers that only log/`.to_string()` the error are unaffected by the type change.
+#[derive(Debug)]
+pub enum AudioError {
+    /// The op-deadline watchdog (or a cancel flag) aborted a blocking read/seek —
+    /// recoverable; retry with a fresh deadline.
+    Interrupted,
+    /// A terminal decode/format error — do not retry.
+    Fatal(String),
+}
+
+impl AudioError {
+    /// A transient watchdog/cancel abort the caller may retry (vs. a `Fatal` error).
+    pub fn is_transient(&self) -> bool {
+        matches!(self, AudioError::Interrupted)
+    }
+}
+
+impl std::fmt::Display for AudioError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AudioError::Interrupted => write!(f, "audio read/seek interrupted (watchdog/cancel)"),
+            AudioError::Fatal(m) => write!(f, "{m}"),
+        }
+    }
+}
+
+impl std::error::Error for AudioError {}
+
 /// One audio stream's selection-relevant facts (R10). Pure data so the
 /// [`choose_audio`] policy is unit-testable without a multi-track fixture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -233,16 +266,17 @@ impl FfAudioDecoder {
     }
 
     /// Decode and return up to `max_frames` interleaved sample frames
-    /// (`len == n * channels`). Empty only at end-of-stream. Bounded on
-    /// hostile input by the interrupt watchdog + a packet budget.
-    pub fn read(&mut self, max_frames: usize) -> Result<Vec<f32>, String> {
+    /// (`len == n * channels`). Empty only at end-of-stream. Bounded on hostile
+    /// input by the interrupt watchdog + a packet budget; a watchdog abort surfaces
+    /// as [`AudioError::Interrupted`] (transient — the caller may retry).
+    pub fn read(&mut self, max_frames: usize) -> Result<Vec<f32>, AudioError> {
         self.input.set_op_deadline(Some(OP_DEADLINE));
         let r = self.read_inner(max_frames);
         self.input.set_op_deadline(None);
         r
     }
 
-    fn read_inner(&mut self, max_frames: usize) -> Result<Vec<f32>, String> {
+    fn read_inner(&mut self, max_frames: usize) -> Result<Vec<f32>, AudioError> {
         let want = max_frames.saturating_mul(self.out_channels as usize);
         // Packets fed to the decoder SINCE THE LAST PRODUCED FRAME — the true
         // "decoder is stuck / corrupt" signal. It must NOT count packets during a
@@ -264,7 +298,9 @@ impl FfAudioDecoder {
                 break;
             }
             if stuck >= MAX_PACKETS_PER_READ {
-                return Err("audio stream produced no frame (corrupt input?)".into());
+                return Err(AudioError::Fatal(
+                    "audio stream produced no frame (corrupt input?)".into(),
+                ));
             }
             match self.packet.read(self.input.ctx()) {
                 Ok(()) => {
@@ -278,7 +314,11 @@ impl FfAudioDecoder {
                     self.eof_sent = true;
                 }
                 Err(ff::Error::Other { errno }) if errno == ff::util::error::EAGAIN => {}
-                Err(e) => return Err(format!("FFmpeg audio read: {e}")),
+                // The op-deadline watchdog (or a cancel flag) aborted the read —
+                // transient (a slow network read), not corruption. Let the caller
+                // rebuffer and retry (plan 1G) rather than treat it as terminal.
+                Err(ff::Error::Exit) => return Err(AudioError::Interrupted),
+                Err(e) => return Err(AudioError::Fatal(format!("FFmpeg audio read: {e}"))),
             }
         }
         let take = want.min(self.pending.len());
@@ -294,7 +334,7 @@ impl FfAudioDecoder {
     }
 
     /// Fold one decoded frame into `pending`, honoring a post-seek discard.
-    fn absorb(&mut self, decoded: &ff::frame::Audio) -> Result<(), String> {
+    fn absorb(&mut self, decoded: &ff::frame::Audio) -> Result<(), AudioError> {
         let ts = decoded.timestamp().unwrap_or(self.pending_pts);
         if self.pending.is_empty() {
             self.pending_pts = ts;
@@ -310,11 +350,12 @@ impl FfAudioDecoder {
         }
         if self.out_channels == self.channels {
             append_interleaved_f32(decoded, self.channels as usize, &mut self.pending)
-                .map_err(|fmt| format!("unsupported audio sample format: {fmt}"))
+                .map_err(|fmt| AudioError::Fatal(format!("unsupported audio sample format: {fmt}")))
         } else {
             let mut native = Vec::new();
-            append_interleaved_f32(decoded, self.channels as usize, &mut native)
-                .map_err(|fmt| format!("unsupported audio sample format: {fmt}"))?;
+            append_interleaved_f32(decoded, self.channels as usize, &mut native).map_err(
+                |fmt| AudioError::Fatal(format!("unsupported audio sample format: {fmt}")),
+            )?;
             fold_to_stereo(&native, self.channels as usize, &mut self.pending);
             Ok(())
         }
@@ -324,7 +365,7 @@ impl FfAudioDecoder {
     /// the target inside [`read`](Self::read). Returns the target's normalized
     /// position (the sink's new clock epoch — audio frames are ~20 ms, so the
     /// landing is within one frame of it).
-    pub fn seek(&mut self, to: Duration) -> Result<Duration, String> {
+    pub fn seek(&mut self, to: Duration) -> Result<Duration, AudioError> {
         let base = self.origin.or(self.start_time).unwrap_or(0);
         let target = base.saturating_add(self.duration_to_units(to));
         // Seek the DEFAULT stream (index -1, AV_TIME_BASE units), NOT the audio
@@ -365,7 +406,13 @@ impl FfAudioDecoder {
         };
         self.input.set_op_deadline(None);
         if rc < 0 {
-            return Err(format!("audio seek failed: {}", ff::Error::from(rc)));
+            // A watchdog/cancel abort mid-seek is transient (a slow network seek) —
+            // recoverable; anything else is a real seek failure (plan 1G).
+            return Err(if ff::Error::from(rc) == ff::Error::Exit {
+                AudioError::Interrupted
+            } else {
+                AudioError::Fatal(format!("audio seek failed: {}", ff::Error::from(rc)))
+            });
         }
         self.decoder.flush();
         self.eof_sent = false;
@@ -735,6 +782,17 @@ mod tests {
         );
         // No audio at all.
         assert_eq!(choose_audio(&[], None), None);
+    }
+
+    /// `AudioError` classifies recovery (plan 1G): a watchdog/cancel abort is
+    /// transient (retry), a decode/format error is fatal. Display renders both so
+    /// log-only callers are unaffected by the typed error.
+    #[test]
+    fn audio_error_classifies_transient_vs_fatal() {
+        assert!(AudioError::Interrupted.is_transient());
+        assert!(!AudioError::Fatal("boom".into()).is_transient());
+        assert_eq!(AudioError::Fatal("boom".into()).to_string(), "boom");
+        assert!(AudioError::Interrupted.to_string().contains("interrupted"));
     }
 
     /// The single-track fixtures select their one audio stream (exercises the

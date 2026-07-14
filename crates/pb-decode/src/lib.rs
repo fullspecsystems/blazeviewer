@@ -139,7 +139,7 @@ pub use ff_live::{
 // dual-backend dispatcher can hold both (AVFoundation poster + FFmpeg poster) at once;
 // Linux integration routes these under its own cfg (there is no competing backend there).
 #[cfg(feature = "ffvideo")]
-pub use ffmpeg::audio_decoder::FfAudioDecoder;
+pub use ffmpeg::audio_decoder::{AudioError, FfAudioDecoder};
 #[cfg(feature = "ffvideo")]
 pub use ffmpeg::poster::{ff_decode_video_poster, ff_probe_video_input};
 #[cfg(feature = "ffvideo")]

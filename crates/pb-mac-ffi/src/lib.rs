@@ -2901,14 +2901,24 @@ fn map_effect(e: contract::CoreEffect) -> ffi::CoreEffectFfi {
 // cross the bridge, so `StartVideoAudio` stashes it in the thread-safe global below
 // and the host pulls it via `open_stashed_session_audio` from the feeder queue.
 
+/// Consecutive transient (watchdog/cancel) read/seek stalls tolerated before the
+/// decoder is declared failed (plan 1G). At the 10 s op-deadline that's up to ~60 s
+/// of a network share being unreachable before audio gives up honestly — long
+/// enough to ride out a real hiccup, bounded so a dead share can't retry forever.
+#[cfg(feature = "ffvideo")]
+const MAX_TRANSIENT_STRIKES: u32 = 6;
+
 /// The boxed, exclusively-owned session-audio decoder handed to Swift as a raw
 /// `usize`. `failed` records a mid-stream decode/seek error so [`session_audio_state`]
 /// reports it **distinctly from a clean EOF** (R12): a corrupt tail is no longer
-/// indistinguishable from the end of the stream.
+/// indistinguishable from the end of the stream. `transient_strikes` counts
+/// consecutive recoverable stalls (a slow network read) so playback rebuffers and
+/// retries rather than dying, up to [`MAX_TRANSIENT_STRIKES`] (plan 1G).
 #[cfg(feature = "ffvideo")]
 struct SessionAudioDecoder {
     inner: pb_app_core::FfAudioDecoder,
     failed: bool,
+    transient_strikes: u32,
 }
 
 /// One-slot stash for the `StartVideoAudio` container input, keyed by session id.
@@ -2955,6 +2965,7 @@ fn open_stashed_session_audio(session_id: u64) -> usize {
                 Box::into_raw(Box::new(SessionAudioDecoder {
                     inner,
                     failed: false,
+                    transient_strikes: 0,
                 })) as usize
             }
             Err(e) => {
@@ -3010,9 +3021,12 @@ fn session_audio_channels(ptr: usize) -> u32 {
     }
 }
 
-/// Decode up to `max_frames` interleaved f32 sample frames. Empty = end of stream
-/// **or** a decode failure — the caller reads [`session_audio_state`] to tell them
-/// apart. A read error latches `failed` (R12). Same pointer contract as
+/// Decode up to `max_frames` interleaved f32 sample frames. Empty = end of stream,
+/// a **transient** stall (rebuffering), or a decode failure — the caller reads
+/// [`session_audio_state`] to tell them apart. A fatal error latches `failed` (R12);
+/// a transient watchdog abort (a slow network read) counts a strike and rebuffers,
+/// only latching `failed` after [`MAX_TRANSIENT_STRIKES`] in a row (plan 1G). A
+/// successful read clears the strike count. Same pointer contract as
 /// [`session_audio_rate`], plus exclusive `&mut` (no concurrent read/seek).
 fn session_audio_read(ptr: usize, max_frames: u32) -> Vec<f32> {
     #[cfg(feature = "ffvideo")]
@@ -3026,7 +3040,22 @@ fn session_audio_read(ptr: usize, max_frames: u32) -> Vec<f32> {
             return Vec::new();
         }
         match d.inner.read(max_frames as usize) {
-            Ok(chunk) => chunk,
+            Ok(chunk) => {
+                d.transient_strikes = 0; // the read landed — the stall (if any) is over
+                chunk
+            }
+            Err(e) if e.is_transient() => {
+                // A slow read tripped the watchdog — rebuffer + retry, don't die.
+                d.transient_strikes += 1;
+                if d.transient_strikes >= MAX_TRANSIENT_STRIKES {
+                    eprintln!(
+                        "video audio: giving up after {} stalled reads: {e}",
+                        d.transient_strikes
+                    );
+                    d.failed = true;
+                }
+                Vec::new()
+            }
             Err(e) => {
                 eprintln!("video audio read failed: {e}");
                 d.failed = true;
@@ -3042,7 +3071,8 @@ fn session_audio_read(ptr: usize, max_frames: u32) -> Vec<f32> {
 }
 
 /// The decoder's stream state: `0` Ok (more to read), `1` Eof (clean end), `2`
-/// Failed (a latched decode/seek error, R12 — distinct from EOF). A null pointer
+/// Failed (a latched decode/seek error, R12 — distinct from EOF), `3` Rebuffering (a
+/// transient stall — empty now, but keep retrying, not EOF; plan 1G). A null pointer
 /// reads as Failed, never as a clean EOF. Same pointer contract as
 /// [`session_audio_rate`].
 fn session_audio_state(ptr: usize) -> u8 {
@@ -3057,6 +3087,8 @@ fn session_audio_state(ptr: usize) -> u8 {
             2
         } else if d.inner.at_eof() {
             1
+        } else if d.transient_strikes > 0 {
+            3 // a transient stall is in progress — rebuffer, don't treat as EOF
         } else {
             0
         }
@@ -3087,7 +3119,17 @@ fn session_audio_seek(ptr: usize, secs: f64) -> f64 {
             .inner
             .seek(std::time::Duration::from_secs_f64(secs.max(0.0)))
         {
-            Ok(anchor) => anchor.as_secs_f64(),
+            Ok(anchor) => {
+                d.transient_strikes = 0;
+                anchor.as_secs_f64()
+            }
+            // A watchdog-aborted seek is transient (slow network) — don't latch
+            // failed; the next read/seek retries. Return the requested position so
+            // the host's clock epoch is sane meanwhile (plan 1G).
+            Err(e) if e.is_transient() => {
+                eprintln!("video audio: seek stalled (will retry): {e}");
+                secs
+            }
             Err(e) => {
                 eprintln!("video audio seek failed: {e}");
                 d.failed = true;

@@ -135,6 +135,10 @@ final class SessionAudioPlayer {
     private var reading = 0
     /// The decoder is drained; when the last buffer completes the clock reports Ended.
     private var sourceDrained = false
+    /// A transient decoder stall is in progress (slow network read, plan 1G): reads
+    /// come back empty but it is NOT end-of-stream, so the clock reports Buffering and
+    /// the pump keeps retrying until a chunk lands (or the decoder gives up → Failed).
+    private var rebuffering = false
     private var paused = true
     private var failed = false
     /// The decoder opened and the engine is running — until then the clock is Opening.
@@ -234,10 +238,18 @@ final class SessionAudioPlayer {
             failed = true
             return
         }
-        if samples.isEmpty {  // Eof
-            sourceDrained = true
+        if samples.isEmpty {
+            if state == 3 {
+                // Transient stall (slow network read, plan 1G): rebuffer and keep
+                // trying — the pump re-tops-up. NOT end-of-stream.
+                rebuffering = true
+                topUp()
+            } else {
+                sourceDrained = true  // clean EOF (state 1)
+            }
             return
         }
+        rebuffering = false  // a chunk landed — the stall (if any) is over
         let ch = Int(channels)
         let frames = samples.count / max(ch, 1)
         guard ch > 0, frames > 0, let format,
@@ -320,6 +332,7 @@ final class SessionAudioPlayer {
         inFlight = 0
         reading = 0
         sourceDrained = false
+        rebuffering = false
         seekGen &+= 1  // invalidate in-flight reads and any older seek
         let gen = seekGen
         decoder.seek(target) { [weak self] anchor in
@@ -335,7 +348,7 @@ final class SessionAudioPlayer {
     /// One clock sample: (state, played position in seconds). The position is the
     /// rendered sample time since the last anchor minus the output's presentation
     /// latency — the plan's "position actually played", not PCM bytes written.
-    /// States: 0 Opening, 1 Playing, 2 Paused, 4 Ended, 5 Failed.
+    /// States: 0 Opening, 1 Playing, 2 Paused, 3 Buffering, 4 Ended, 5 Failed.
     func sample() -> (state: UInt8, positionSecs: Double) {
         if failed { return (5, epochSecs) }  // Failed
         if !opened { return (0, 0) }  // Opening — the async open is still in flight
@@ -348,6 +361,10 @@ final class SessionAudioPlayer {
             played = max(0, Double(playerTime.sampleTime) / rate - latency)
         }
         let position = epochSecs + played
+        // A transient stall (slow network read): report Buffering at the frozen
+        // position so the core doesn't treat the stalled clock as authoritative
+        // (plan 1G) — it re-anchors when a chunk lands and playback resumes.
+        if rebuffering && !sourceDrained { return (3, position) }  // Buffering
         // Ended only on a CLEAN drain (Eof): a Failed read latched `failed` above,
         // so a corrupt tail reports Failed, never a silent Ended (R12).
         if sourceDrained && inFlight == 0 { return (4, position) }  // Ended

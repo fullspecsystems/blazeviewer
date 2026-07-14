@@ -71,7 +71,7 @@ pub use overlay::{InspectorTab, LeftTab, NativeToast, Panels, SlotContent, Toast
 /// The FFmpeg video-audio decoder (task #84 §7), re-exported so the macOS FFI
 /// crate can feed its AVAudioEngine sink without a direct pb-decode edge.
 #[cfg(feature = "ffvideo")]
-pub use pb_decode::FfAudioDecoder;
+pub use pb_decode::{AudioError, FfAudioDecoder};
 pub use pb_key::PbKey;
 pub use slideshow::Slideshow;
 pub use undo::UndoAction;
