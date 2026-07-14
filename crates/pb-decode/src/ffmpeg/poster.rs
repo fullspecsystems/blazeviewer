@@ -17,12 +17,11 @@ use ffmpeg_next as ff;
 use std::time::Duration;
 
 use super::convert::FrameConverter;
+use super::details::decoder_for;
 use super::io::FfInput;
 use super::probe::{fit_dims, video_facts, VideoFacts};
-use crate::video::{
-    poster_frame_score, VideoDetailsProbe, VideoInput, POSTER_GOOD_SCORE, POSTER_MAX_FRAMES,
-};
-use crate::{DecodeError, DecodedImage, FitBox, PixelFormat, VideoStreamInfo};
+use crate::video::{poster_frame_score, VideoInput, POSTER_GOOD_SCORE, POSTER_MAX_FRAMES};
+use crate::{DecodeError, DecodedImage, FitBox, PixelFormat};
 
 /// Overall watchdog for one poster attempt — a poster is a background nicety,
 /// never worth pinning a pool worker longer than this on hostile input.
@@ -72,64 +71,6 @@ pub fn ff_decode_video_poster(
     poster_inner(input, fit, cancel).map_err(DecodeError::Corrupt)
 }
 
-/// One read-only open's stream facts (inspector parity with the Windows
-/// `probe_video_input` / macOS `probe_video_stream`).
-///
-/// **This is the poster/prefetch path** — it runs for every prefetched video, opened or
-/// not, so it stays exactly as cheap as it was: no track enumeration happens here. The
-/// Inspector's richer read is [`ff_probe_video_details`].
-pub fn ff_probe_video_input(input: &VideoInput) -> Result<VideoStreamInfo, DecodeError> {
-    let mut opened = FfInput::open(input, None).map_err(DecodeError::Corrupt)?;
-    let facts = video_facts(opened.ctx()).map_err(DecodeError::Corrupt)?;
-    stream_info(&mut opened, &facts)
-}
-
-/// The **Details** probe (task #98): basic facts + the full track catalog, from one
-/// open. Off-thread only — never call this from the event loop or the poster path.
-pub fn ff_probe_video_details(
-    input: &VideoInput,
-    generation: u64,
-) -> Result<VideoDetailsProbe, DecodeError> {
-    let mut opened = FfInput::open(input, None).map_err(DecodeError::Corrupt)?;
-    let facts = video_facts(opened.ctx()).map_err(DecodeError::Corrupt)?;
-    // One open serves both reads: the catalog walks the same already-parsed stream
-    // table `video_facts` selected from.
-    let tracks = super::tracks::catalog_from_input(opened.ctx(), generation);
-    let video = stream_info(&mut opened, &facts)?;
-    Ok(VideoDetailsProbe { video, tracks })
-}
-
-/// The shared `VideoFacts` → [`VideoStreamInfo`] read, so the basic and details probes
-/// can never drift on codec/rotation/color policy.
-fn stream_info(
-    opened: &mut FfInput<'static>,
-    facts: &super::probe::VideoFacts,
-) -> Result<VideoStreamInfo, DecodeError> {
-    // Decoder-reported color under the shared fallback policy (no frame decode
-    // here — the probe is a ~header-only read, like the Windows one).
-    let decoder = decoder_for(opened.ctx(), facts.index)?;
-    // Posters are stills → always RGBA (no planar GPU path).
-    let conv = FrameConverter::new(
-        (facts.width, facts.height),
-        (1, 1),
-        0,
-        &decoder,
-        false,
-        false,
-    );
-    let sc = conv.source_color();
-    Ok(VideoStreamInfo {
-        codec: facts.codec,
-        width: facts.width,
-        height: facts.height,
-        rotation: facts.rotation.rem_euclid(360) as u32,
-        fps: facts.fps,
-        duration: facts.duration,
-        has_audio: facts.has_audio,
-        color: super::color::sdr_transform(&sc),
-    })
-}
-
 /// The poster walk's accept rule for an fp16 scene-linear frame — the linear
 /// equivalent of [`poster_frame_bright_enough`]'s ~10% sRGB floor (sRGB 0.10
 /// linearizes to ≈0.01). Subsampled like the RGBA8 walk.
@@ -171,19 +112,6 @@ fn scrgb_frame_score(f16_bytes: &[u8]) -> f32 {
 }
 
 /// The decoder for stream `index` of an opened input.
-fn decoder_for(
-    ctx: &mut ff::format::context::Input,
-    index: usize,
-) -> Result<ff::decoder::Video, DecodeError> {
-    let stream = ctx
-        .streams()
-        .find(|s| s.index() == index)
-        .ok_or_else(|| DecodeError::Corrupt("video stream vanished".into()))?;
-    ff::codec::context::Context::from_parameters(stream.parameters())
-        .and_then(|c| c.decoder().video())
-        .map_err(|e| DecodeError::Corrupt(format!("FFmpeg decoder: {e}")))
-}
-
 /// The best-scoring poster candidate seen so far. Only the winning frame is
 /// kept resident; every other decoded frame is scored and dropped.
 struct Best {
@@ -477,8 +405,10 @@ mod tests {
 
     #[test]
     fn probe_reports_the_stream_facts() {
-        let info =
-            ff_probe_video_input(&VideoInput::Path(fixture("color_with_tone.mp4"))).expect("probe");
+        let info = super::super::details::ff_probe_video_input(&VideoInput::Path(fixture(
+            "color_with_tone.mp4",
+        )))
+        .expect("probe");
         assert_eq!(info.codec, "H.264");
         assert!(info.has_audio);
         assert!(info.duration.is_some());

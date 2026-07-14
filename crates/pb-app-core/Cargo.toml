@@ -66,7 +66,11 @@ livephoto = ["pb-decode/livephoto"]
 # poster/probe paths for items the OS backends can't open. Off by default (links
 # native C, ADR-015). On macOS it (later) backs the dual-backend fallback (plan §8);
 # on Windows it's inert (Media Foundation covers tier 2).
-ffvideo = ["pb-decode/ffvideo"]
+# FFmpeg container reading WITHOUT decoding (task #100) — the Windows track catalog.
+# MF keeps poster/playback; FFmpeg only reads the stream table, because MF's media
+# sources cannot see subtitle tracks at all. Implied by `ffvideo`.
+ffprobe = ["pb-decode/ffprobe"]
+ffvideo = ["pb-decode/ffvideo", "ffprobe"]
 
 [dev-dependencies]
 # Generate QR bitmaps for the image_text decode tests (never shipped). Default features

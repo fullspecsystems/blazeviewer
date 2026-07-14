@@ -147,8 +147,18 @@ pub use ff_live::{
 // Linux integration routes these under its own cfg (there is no competing backend there).
 #[cfg(feature = "ffvideo")]
 pub use ffmpeg::audio_decoder::{AudioError, FfAudioDecoder};
+// The catalog-only probe comes with `ffprobe` — Windows takes it *without* the decode
+// path, because MF cannot enumerate subtitle tracks (task #100). It is the only FFmpeg
+// entry point that needs no decoder, which is what makes the demuxers-only build viable.
+#[cfg(feature = "ffprobe")]
+pub use ffmpeg::details::ff_probe_tracks;
+// The stream-facts probes read the video codec's colour metadata through a decoder, so
+// they belong to the builds that have one. Windows deliberately uses Media Foundation
+// for these instead — same reader that decodes its posters.
 #[cfg(feature = "ffvideo")]
-pub use ffmpeg::poster::{ff_decode_video_poster, ff_probe_video_details, ff_probe_video_input};
+pub use ffmpeg::details::{ff_probe_video_details, ff_probe_video_input};
+#[cfg(feature = "ffvideo")]
+pub use ffmpeg::poster::ff_decode_video_poster;
 #[cfg(feature = "ffvideo")]
 pub use ffmpeg::video_producer::run_ff_video_producer;
 pub use image_backend::ImageCrateDecoder;

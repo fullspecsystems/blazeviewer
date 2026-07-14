@@ -156,6 +156,29 @@ pub fn probe_job(source: &dyn PhotoSource, item: usize, generation: u64) -> Item
             #[cfg(not(all(target_os = "macos", feature = "ffvideo")))]
             Err(_) => {}
         }
+
+        // Windows (task #100): Media Foundation gave the video facts above — keep them,
+        // they come from the same reader that decodes the poster, so rotation/color stay
+        // identical to it by construction. But MF's catalog is the weakest of the three
+        // backends: its media sources do not model subtitle tracks *at all* (a source's
+        // presentation descriptor reports 3 streams for a file holding 7), and it exposes
+        // no authored dispositions or named channel layouts. FFmpeg reads the container's
+        // real stream table, so where it can open the file its catalog supersedes.
+        //
+        // MF's catalog stays as the fallback for anything FFmpeg can't open — it is now
+        // the second-choice Windows backend, not the only one. The catalog names its own
+        // `backend`, so the panel stays honest about which one spoke.
+        // Catalog only — `ff_probe_video_details` would also build a VideoStreamInfo,
+        // which needs a video decoder the demuxers-only Windows FFmpeg does not have
+        // (it would fail, and the supersede would silently never happen). MF already
+        // gave us the facts; FFmpeg is asked for exactly the part MF cannot answer.
+        #[cfg(all(windows, feature = "ffprobe"))]
+        {
+            let input = crate::video::VideoInput::Path(path.to_path_buf());
+            if let Ok(tracks) = pb_decode::ff_probe_tracks(&input, generation) {
+                media = Some(tracks);
+            }
+        }
     }
     // Linux (task #84): the FFmpeg probe, path or in-RAM archive bytes alike.
     #[cfg(all(unix, not(target_os = "macos"), feature = "ffvideo"))]
@@ -187,18 +210,27 @@ pub fn probe_job(source: &dyn PhotoSource, item: usize, generation: u64) -> Item
                 // handler — a byte stream has no URL to sniff.
                 name: source.name(item).to_string(),
             };
-            #[cfg(feature = "ffvideo")]
+            // Linux/macOS: FFmpeg owns both the facts and the catalog.
+            #[cfg(all(feature = "ffvideo", not(windows)))]
             if let Ok(probe) = pb_decode::ff_probe_video_details(&input, generation) {
                 fill_rows(&probe.video);
                 media = Some(probe.tracks);
             }
             // Windows: Media Foundation reads the entry through its in-RAM byte stream —
-            // the same reader the filesystem path uses, so an archived video now gets the
-            // same facts *and* the same track catalog (98.5) as a loose one.
-            #[cfg(all(windows, not(feature = "ffvideo")))]
+            // the same reader the filesystem path uses, so an archived video gets the
+            // same facts (98.5) as a loose one.
+            #[cfg(windows)]
             if let Ok(probe) = pb_decode::probe_video_details_input(&input, generation) {
                 fill_rows(&probe.video);
                 media = Some(probe.tracks);
+            }
+            // ...and the catalog goes to FFmpeg exactly as on the filesystem path above
+            // (task #100), so archive parity holds on the thing 98.7 exists to guarantee:
+            // a video in a ZIP reports what the same file reports loose. Without this the
+            // two would now disagree about subtitles.
+            #[cfg(all(windows, feature = "ffprobe"))]
+            if let Ok(tracks) = pb_decode::ff_probe_tracks(&input, generation) {
+                media = Some(tracks);
             }
         }
     }
@@ -210,5 +242,91 @@ pub fn probe_job(source: &dyn PhotoSource, item: usize, generation: u64) -> Item
         media,
         has_audio,
         probe_state: ProbeState::Ready,
+    }
+}
+
+/// Windows track-catalog wiring (task #100).
+///
+/// The interesting assertion is *which backend won*: Media Foundation keeps the video
+/// facts, but its catalog must be superseded by FFmpeg's, because MF cannot enumerate
+/// subtitle tracks at all. Compiling is not evidence of that — only the resolved catalog
+/// is. Runs only where FFmpeg is actually linked.
+#[cfg(all(test, windows, feature = "ffprobe"))]
+mod windows_ffprobe_tests {
+    use super::*;
+    use pb_decode::tracks::{MediaBackend, TrackCompleteness};
+    use pb_source::FsSource;
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../pb-decode/tests/fixtures/video")
+            .join(name)
+    }
+
+    #[test]
+    fn windows_details_take_the_ffmpeg_catalog_and_the_mf_video_facts() {
+        let src = FsSource::new(vec![fixture("multitrack.mkv")]);
+        let d = probe_job(&src, 0, 7);
+
+        // The catalog is FFmpeg's — MF's would carry no subtitles at all.
+        let cat = d.media.expect("a video must produce a catalog");
+        assert_eq!(cat.backend, MediaBackend::FFmpeg);
+        assert_eq!(cat.generation, 7);
+        assert_eq!(cat.subtitles.completeness, TrackCompleteness::Complete);
+        assert_eq!(cat.subtitles.total, Some(4), "MF reports 0 of these 4");
+        assert_eq!(cat.audio.total, Some(2));
+        // The dispositions + named layout MF cannot see.
+        assert!(cat.audio.tracks[0].flags.default);
+        assert_eq!(
+            cat.audio.tracks[1]
+                .audio
+                .as_ref()
+                .unwrap()
+                .layout
+                .as_deref(),
+            Some("5.1(side)")
+        );
+
+        // ...while the video facts still came from Media Foundation's reader — the same
+        // one that decodes the poster, which is what keeps rotation/color identical to it.
+        assert!(d.has_audio == Some(true));
+        let codec = d
+            .fields
+            .iter()
+            .find(|(k, _)| k == "Video codec")
+            .map(|(_, v)| v.clone())
+            .expect("MF fills the video rows");
+        assert_eq!(codec, "H.264");
+    }
+
+    /// Archive parity (98.7's whole point): a video inside a ZIP must report what the
+    /// same file reports loose — including the subtitles FFmpeg adds. Without the
+    /// archive branch's own FFmpeg supersede, the two would silently disagree.
+    #[test]
+    fn an_archived_video_reports_the_same_tracks_as_the_loose_file() {
+        use std::io::Write;
+
+        let loose = probe_job(&FsSource::new(vec![fixture("multitrack.mkv")]), 0, 1)
+            .media
+            .expect("loose catalog");
+
+        let zip_path = std::env::temp_dir().join(format!("pb_md_ff_{}.zip", std::process::id()));
+        {
+            let f = std::fs::File::create(&zip_path).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            zw.start_file("clip.mkv", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zw.write_all(&std::fs::read(fixture("multitrack.mkv")).unwrap())
+                .unwrap();
+            zw.finish().unwrap();
+        }
+        let src =
+            pb_source::ZipSource::open(&zip_path, None, |ext| ext == "mkv").expect("open zip");
+        let archived = probe_job(&src, 0, 1).media.expect("archived catalog");
+        let _ = std::fs::remove_file(&zip_path);
+
+        assert_eq!(archived.backend, loose.backend);
+        assert_eq!(archived.subtitles.total, loose.subtitles.total);
+        assert_eq!(archived.audio.total, loose.audio.total);
     }
 }

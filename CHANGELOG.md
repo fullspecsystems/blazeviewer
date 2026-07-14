@@ -35,11 +35,8 @@ with any pre-release suffix carried only by the tag.
   waits and gives you the complete set rather than a half-filled one. Reading a video's details never
   stalls the viewer — it happens in the background, so a damaged file or one on a slow network share
   can't freeze the window; the panel says "Reading video details…" until it's ready. A video inside a
-  ZIP or 7z now reports exactly what the same file reports loose. *On Windows the audio tracks are
-  listed too, with their language, codec, channel count, sample rate and any commentary marking.
-  Windows itself doesn't report a track's channel layout (so a 5.1 track reads "6 channels"), its
-  default or forced markers, or any subtitle tracks, so PhotoBlaze leaves those out rather than guess
-  at them — a file's subtitles simply aren't listed there yet.*
+  ZIP or 7z now reports exactly what the same file reports loose, and Windows, macOS and Linux all
+  read the same file the same way.
 - The info line (`i`) now defaults to the **bottom-center** of the screen instead of the
   bottom-right. (Existing users keep whatever position they've already set; this only affects
   fresh installs.)
