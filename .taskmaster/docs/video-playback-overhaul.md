@@ -1,226 +1,584 @@
-# Video Playback Overhaul — Plan
+# Video Playback Overhaul — Execution Plan
 
-> Status: **draft / in progress** · Owner: JD · Started 2026-07-13 (0.2.0 beta feedback)
->
-> Goal: a **stable, robust, efficient** foundation for playing back video — especially
-> the codecs/containers AVPlayer can't open (MKV/WebM/…) and demanding content
-> (4K, 10-bit, HDR10/HLG/**Dolby Vision**, high-bitrate lossless audio like TrueHD/Atmos) —
-> as well as the system handles the easy cases.
+> Status: **review-hardened, ready for implementation spikes** · Owner: JD  
+> Started 2026-07-13 from 0.2.0 beta feedback · Revised 2026-07-13 after live-code review  
+> Scope: smooth, seekable, glitch-free playback for native containers and FFmpeg-backed
+> MKV/WebM/other fallback media, with correct SDR/HDR behavior and bounded resource use.
 
----
+The immediate corpus is a 4K Dolby Vision/HDR HEVC MKV with TrueHD/Atmos audio. The plan must
+also leave a durable fallback for codecs Apple cannot decode and must not regress Windows or Linux.
 
-## 1. Context
+## 1. Outcome and non-goals
 
-PhotoBlaze has **two** video routes on macOS:
+### Required outcome
 
-| Route | Used for | Decode | HDR/DoVi | Clock | State |
-|---|---|---|---|---|---|
-| **AVPlayer** (`video_native.rs`, `NativeVideoPlayer.swift`) | MP4/MOV that AVFoundation can demux | system (VideoToolbox) | system, correct | system | solid |
-| **FFmpeg session** (`pb-decode/ffmpeg/*`, `video_session.rs`, `SessionAudioPlayer.swift`) | MKV/WebM/VP8/VP9/AV1 + level-2 fallback | FFmpeg (+ VideoToolbox hwaccel readback) | **CPU** PQ→scRGB | **our** manual A/V bridge | fragile |
+- Playback does not deadlock at 4K HDR in Fit, Fill, or Original.
+- Once preroll completes, a transient video delay does **not** create an audible pause/resume.
+- Audio remains the master clock when present; video repeats or drops frames to recover.
+- Held-key and scrubber seeks are latest-value, generation-safe, and do not repeatedly tear down
+  audio for superseded targets.
+- Hardware-decodable media stays hardware decoded. PQ/HLG color work does not run as a large
+  per-pixel CPU loop in steady state.
+- All queues and pools remain byte-bounded, including 8K/oversized inputs and archive bytes.
+- Stop/navigation/quit/seek can retire work promptly; no stale frame or callback can cross a
+  session or seek generation.
+- Viewing remains read-only and RAM-only under ADR-018.
 
-The FFmpeg session route is also **the only** video route on Windows (MF) and Linux
-(the whole path is shared; only the sink/present differs). So its correctness matters
-cross-platform, not just for macOS MKV.
+### Explicit non-goals for this overhaul
 
-The beta problems are all on the **FFmpeg session route** with a 4K DoVi HDR MKV
-(`Ghost.in.the.Shell…2160p…DoVi.HDR.x265…TrueHD.Atmos.7.1.mkv`).
+- This does **not** promise Atmos object rendering or TrueHD bitstream passthrough. V1 must play
+  such files smoothly and honestly report the output actually produced. Channel-preserving PCM is
+  desirable where the device accepts it; a documented downmix is an acceptable fallback.
+- Subtitles, playback-speed controls, and general-purpose editing/color grading are separate work.
+- Linux-specific HDR output is still out of scope. Linux should inherit the planar decode/present
+  improvements without holding the macOS release bar.
+- Zero-copy is not a requirement if the measured P010/NV12 readback-and-upload path clears the
+  target with margin.
 
-### What we measured this session (facts, not guesses)
+## 2. Current architecture and verified evidence
 
-- **Hardware decode *is* engaging** on the MKV path: `hwaccel=VideoToolbox`, output `Rgba16F`
-  (diag added behind `PB_VIDEO_DIAG=1`). The earlier "HDR forces software" belief was the
-  **Windows** path leaking into a global claim in `CLAUDE.md`; there is **no** macOS HDR→software gate.
-- **Seeking was decode-conversion-bound**, not I/O: `demux ≈ 0–3 ms`, but the keyframe→target
-  run-up ran the full readback + downscale + PQ→scRGB tone-map on every discarded frame
-  (~25 ms/frame). A 56-frame seek = 1405 ms; 124 frames = 3108 ms.
-- **HDR color conversion is CPU-bound and scales with output area** (`convert.rs::pack_scrgb_f16`,
-  a per-pixel LUT + 3×3 matrix + f16 pack). Smooth at ~2036×1100; stutters at ~2940×1588.
-- **Post-seek audio glitches** on TrueHD/Atmos (a heavy, lossless codec decoded on `@MainActor`).
+PhotoBlaze has two product-level video backends:
 
-### Already landed / in flight (this session)
+| Backend | Current use | Media authority | Current status |
+|---|---|---|---|
+| `Native` | macOS AVFoundation-native MP4/MOV/3GP/some AVI | `AVPlayer` owns decode, HDR/color, audio, timing, buffering, and seek | solid |
+| `Session` | Windows Media Foundation; Linux FFmpeg; macOS FFmpeg fallback for MKV/WebM/etc. | `VideoSession` + platform producer + separate audio sink | fragile under demanding MKV/HDR |
 
-- **Committed:** poster frame selection (seek-deep, shallow-first) · info-line default center ·
-  build-script `--ffvideo` default · **seek run-up: skip convert on discarded frames**
-  (`d1760d0c`, ~25 → ~3 ms/frame, 7–10× faster seeks).
-- **In the working tree, not yet committed:** seek **forward-decode** for short forward hops
-  (arrow ±2 s decode forward instead of re-seeking to a keyframe) · **parallelized `pack_scrgb_f16`**
-  across cores (a *stopgap* — see Phase 2) · `PB_VIDEO_DIAG` diagnostics.
-- **Reverted:** the `#5` aspect-toggle "restart at native fit" experiment (froze on 4K; see
-  Phase 3 — the Apple layer gives scale/zoom as a free transform instead).
+Do not call the Windows route “the FFmpeg route”: Windows currently uses the Media Foundation
+producer. `VideoSession` is shared; acquisition, audio, and presentation are platform-specific.
 
----
+### Evidence from the corpus and current code
 
-## 2. Root-cause inventory (verified against the code)
+- VideoToolbox **is** engaged on the MKV route (`hwaccel=VideoToolbox`). The residual path is
+  VideoToolbox surface → CPU P010/NV12 transfer → swscale RGBA64 → CPU PQ/HLG-to-scRGB pack →
+  RGBA16F upload.
+- Before `d1760d0c`, discarded keyframe-to-target seek frames paid the full conversion cost:
+  roughly 25 ms/frame; 56 frames took 1405 ms and 124 took 3108 ms. The committed split now
+  converts only the landing frame and reduced measured run-up to roughly 3 ms/frame.
+- Commit `4244a69f` contains short-forward decode seeks and the parallel CPU HDR conversion
+  stopgap. It is no longer “in the working tree.” The per-frame thread fan-out is temporary and
+  must be removed when Phase 2 lands.
+- HDR conversion cost scales with output area: approximately 2036×1100 was smooth while
+  approximately 2940×1588 stuttered in the observed run.
+- The existing tests pass but do not cover a full-size 4K RGBA16F preroll feasibility failure.
 
-| # | Defect | Symptom it causes | Location | swift-bridge blocked? |
-|---|---|---|---|---|
-| R1 | 2-frame **preroll** can't fit two 4K **RGBA16F** frames (63.3 MiB each) in the 94.9 MiB budget (`3 × 3840×2160×**4**`, RGBA8-sized) | Full-native (Original/Fill) HDR can stay in **Buffering forever** | `video.rs:342,351`; `video_session.rs` preroll | no |
-| R2 | Session enters **Buffering** on the *first* empty-queue poll and **pauses audio**; resumes on 2 frames | Every decode/convert spike → **audible pause/resume** (your post-seek crackle) | `video_session.rs` poll; `app_core_impl.rs:7108` | no |
-| R3 | **Audio seek is not coalesced**: each held/repeated ±2 s seek stops the node, seeks the 2nd FFmpeg decoder, refills ~750 ms PCM, restarts — **on `@MainActor`**, per intermediate target | **Persistent** post-seek audio glitch | `app_core_impl.rs:6905`; `SessionAudioPlayer.swift:104,174` | no (coalescing); partial (off-main) |
-| R4 | **Never drops late frames** ("rebuffer-don't-drift") — can't catch up once behind | Slow recovery after any stall | `video_session.rs` queue policy | no |
-| R5 | HDR path = VideoToolbox → **CPU readback → swscale RGBA64 → per-pixel scRGB → 63 MiB upload** | Steady-state CPU cost; large-window stutter | `hw.rs:191`; `convert.rs:150,228` | no (new P010 shader) |
-| R6 | FFmpeg **audio decode/deinterleave/refill on `@MainActor`** | Network pinwheel; heavy-codec crackle; blocks the pump | `SessionAudioPlayer.swift`; `pb-mac-ffi` `video_audio_*` | **yes** — needs owned-decoder FFI |
+## 3. Root-cause inventory
 
-Note R6's blocker: the audio decoder lives inside the shared `&mut self` FFI handle, so running
-it off-main needs it **extracted into an owned object** the Swift feeder owns exclusively.
-swift-bridge 0.1.59 rejected the clean owned-opaque return; the viable shape is a **raw-pointer
-(usize) handle** (the same trick `attach_layer(layer_ptr: usize)` already uses).
+| ID | Defect | User-visible effect | Primary seam |
+|---|---|---|---|
+| R1 | Two 4K RGBA16F frames (2 × 63.3 MiB) do not fit the fixed 94.9 MiB queue budget | Some HDR geometry modes can remain in `Buffering` forever | `video.rs`, `video_session.rs` |
+| R2 | The first empty-queue poll enters `Buffering`; core immediately pauses audio | A decode spike becomes an audible stop/start | `VideoSession::poll`, `poll_video` |
+| R3 | Playback presents at most one old due frame and never discards late frames | It cannot catch up cleanly once behind | `VideoSession::poll` |
+| R4 | Each repeated seek immediately stops/seeks/refills the independent audio decoder | Crackle and long recovery during/after held seeks | `video_seek*`, `SeekVideoAudio` |
+| R5 | Audio open/read/seek/deinterleave/refill is performed through a shared core handle on `@MainActor` | Heavy codecs and seeks contend with the UI/pump | `SessionAudioPlayer.swift`, `pb-mac-ffi` |
+| R6 | HDR steady state creates CPU P010/NV12, RGBA64, and RGBA16F traffic, then uploads 8 B/px | CPU-bound large-window playback | `ffmpeg/hw.rs`, `ffmpeg/convert.rs` |
+| R7 | macOS route selection is container-extension based; MKV always takes the full custom session even when its codec is Apple-decodable | Native decode/presentation capabilities are left unused | `VideoContainer::macos_native`, `start_video_session` |
+| R8 | The stopgap creates up to `available_parallelism()` OS threads per converted frame | Burst scheduling jitter and unnecessary thread churn | `pack_scrgb_f16` |
+| R9 | Producer and audio decoder demux **synchronously, one packet at a time**; no compressed-packet read-ahead to absorb a slow file/network read | Smooth locally but **stutters/crackles over SMB** even at gigabit (the original beta item #1) | `ffmpeg/video_producer.rs`, `ffmpeg/io.rs`, `audio_decoder.rs` |
 
----
+R6 is real, but it is not sufficient to explain R1–R5. GPU color conversion alone will not make
+audio reliable.
 
-## 3. Target architecture
+## 4. Locked architectural rules
 
-**Principle: lean on the platform's media stack wherever it can decode the content; keep a
-hardened FFmpeg+wgpu path for everything it can't.**
+1. **Audio continuity wins over displaying every video frame.** When audio exists, it is the
+   master clock. Repeat the last video frame during a short miss and drop obsolete video frames
+   to recover. Pause audio only for an actual prolonged rebuffer or an explicit user action.
+2. **Bound memory before decoding.** Queue admission must never require unbounded growth just to
+   satisfy a fixed frame-count preroll.
+3. **Route video and audio capabilities independently.** An MKV may contain Apple-decodable HEVC
+   video and non-Apple-decodable TrueHD audio. That is a mixed route, not an all-or-nothing choice.
+4. **One clock per active playback path.** The macOS sample-buffer route must put video and audio
+   under one `AVSampleBufferRenderSynchronizer`. The Session route keeps one audio-master clock
+   with delivery-delay-aware samples.
+5. **No blocking media work on the main actor/event loop.** Demux, decode, seek run-up, conversion,
+   PCM preparation, and queue refill run on owned workers/serial queues.
+6. **All async work is identity-gated.** Commands and callbacks carry `session_id`; seek-related
+   commands and landings carry `seek_generation`. A stale result is dropped without side effects.
+7. **The fallback remains first-class.** Apple sample-buffer playback is an optimization and
+   correctness win for supported codecs, not permission to leave VP8/exotic/software paths brittle.
+8. **Do not claim Dolby Vision correctness until it is proven.** A static PQ shader can render an
+   HDR10-compatible base layer but does not implement Dolby Vision dynamic metadata.
 
-### macOS routing (end state)
+## 5. Target architecture
 
+### 5.1 Shared product model
+
+Keep `ActiveVideoBackend` at two core-visible variants:
+
+```text
+Native  — macOS shell owns the media mechanics; core holds a passive proxy
+Session — shared VideoSession owns policy; platform producer/sink supply media
 ```
-still / Live Photo / animation ─────────────────────────► wgpu (unchanged)
 
-video:
-  ├─ AVFoundation can demux (MP4/MOV) ──────────────────► AVPlayer            (today)
-  ├─ Apple can DECODE but not demux (HEVC/H.264/DoVi/… in MKV/WebM)
-  │      FFmpeg DEMUX → CMSampleBuffers → AVSampleBuffer* stack  ◄── Phase 3 (new)
-  │        AVSampleBufferDisplayLayer + AVSampleBufferAudioRenderer
-  │        + AVSampleBufferRenderSynchronizer (one timebase)
-  └─ Apple can't decode (VP8, exotic) ──────────────────► FFmpeg + wgpu       (hardened: Phase 1[+2])
+Do **not** add a third core state machine. In the macOS shell, introduce a common native-presenter
+facade implemented by:
+
+```text
+NativeVideoPresenter
+  ├─ AVPlayerPresenter        (today's NativeVideoPlayer)
+  └─ SampleBufferPresenter    (FFmpeg-demuxed, Apple-rendered media)
 ```
 
-### Windows / Linux
+Both expose the same play/pause/seek/step/mute/transform/capture/stop lifecycle and report through
+the existing session/generation-gated native callbacks. This confines platform divergence to the
+shell and avoids duplicating core menu/slideshow/delete/progress behavior.
 
+### 5.2 macOS capability route
+
+Probe off-main, then select by actual stream capabilities—not just extension:
+
+```text
+1. AVFoundation-native container
+   -> AVPlayerPresenter
+
+2. Non-native container (MKV/WebM/...)
+   + compressed video accepted by Apple sample-buffer renderer
+   -> FFmpeg demux -> compressed video CMSampleBuffers -> SampleBufferPresenter
+
+   Audio sub-route, independently:
+   a. compressed audio renderer accepts the codec -> enqueue compressed samples
+   b. otherwise FFmpeg decodes -> timestamped LPCM CMSampleBuffers
+
+3. Sample-buffer setup/decode fails, or video codec unsupported by Apple
+   -> hardened Session backend (FFmpeg decode + planar GPU present + platform audio sink)
 ```
-all video ──► FFmpeg + wgpu (present via MF / pw-cat)  (hardened: Phase 1 + Phase 2 GPU shader)
+
+Each attempt may occur at most once per session. The fallback graph records attempted backends so
+an error cannot loop Native → SampleBuffer → Session → Native.
+
+### 5.3 Windows and Linux
+
+- **Windows:** retain Media Foundation acquisition and the existing Windows audio sink. Reuse the
+  planar `NV12`/future `P010` renderer contract where MF can expose it.
+- **Linux:** retain FFmpeg acquisition and pw-cat/direct PipeWire policy. Reuse planar GPU
+  conversion where the backend provides NV12/P010; software formats keep the compatibility path.
+- Platform acquisition may differ, but `VideoFrame` timing/color/plane contracts and
+  `VideoSession` scheduling policy must remain shared and testable.
+
+## 6. Phase 0 — Baseline and blocking spikes
+
+No production architecture is selected from intuition alone.
+
+### 0A. Reproducible corpus characterization
+
+Record, without persisting viewed paths:
+
+- container; video codec/profile/level; bit depth; pixel format; transfer/primaries/matrix/range;
+  HDR10 mastering/MaxCLL metadata; Dolby Vision profile/config/RPU presence; dimensions/fps/SAR;
+  keyframe spacing and B-frame use;
+- audio codec/profile/channel layout/rate/start offset; whether FFmpeg currently downmixes;
+- display refresh/EDR headroom and Fit/Fill/Original output dimensions.
+
+Run separate controls:
+
+1. Original MKV through the Session route.
+2. **Video-only** stream-copy remux to MOV/MP4 (`-map 0:v:0 -an -c copy`) through AVPlayer.
+3. If needed, a second control with audio transcoded to an AVFoundation-supported format.
+
+The remux isolates whether Apple can play the encoded video stream smoothly. It does **not** prove
+that PhotoBlaze can construct correct `CMSampleBuffer`s or preserve Dolby Vision metadata; that is
+the next spike.
+
+### 0B. Instrumentation that does not perturb the hot path
+
+Extend `PB_VIDEO_DIAG` with batched counters/timers rather than per-frame `eprintln!`:
+
+- demux/read, raw decode, hardware transfer, swscale, HDR pack, upload, draw/present;
+- queue frames/bytes/PTS span, credits outstanding, late frames dropped, repeated frames,
+  starvation duration, rebuffer count/duration;
+- audio scheduled duration, completion-to-refill latency, underrun/device-reset count,
+  pause/resume count and reason;
+- seek request/generation/landing/audio-resume latency and superseded work;
+- p50/p95/p99 plus worst case, never only a mean.
+
+Diagnostics are opt-in, path-redacted, and written only to stderr/tracing for the run. They must not
+create a persistent viewing log.
+
+### 0C. Apple sample-buffer proof gate
+
+Build an isolated on-device spike before integrating a new presenter. It must prove:
+
+- FFmpeg packet/extradata → valid `CMVideoFormatDescription` and compressed
+  `CMSampleBuffer` for the corpus HEVC stream;
+- correct PTS, DTS, duration, sync/dependency attachments, B-frame ordering, and EOS drain;
+- the exact packet representation the renderer requires (length-prefixed versus Annex B), with
+  explicit bitstream filtering where necessary;
+- VPS/SPS/PPS and `hvcC`; Dolby Vision `dvcC`/`dvvC` plus RPU NAL preservation where applicable;
+  HDR mastering/content-light metadata propagation;
+- `AVSampleBufferVideoRenderer`/display-layer backpressure from a background serial queue;
+- first-frame reveal, pause/resume, flush, seek-to-keyframe plus decode-forward, replay, and parked
+  last frame;
+- HDR/EDR and Dolby Vision visual correctness on the physical M2 display, not just “it decoded”;
+- displayed-frame capture for Copy/OCR/Describe/Compare;
+- OS-version API choice for the app's deployment target (renderer receiver APIs versus supported
+  legacy enqueue APIs).
+
+For audio, test the corpus TrueHD stream separately. If compressed enqueue is unsupported, prove
+FFmpeg-decoded, timestamped LPCM under the same synchronizer. Record whether channels are preserved
+or downmixed; do not represent PCM output as Atmos.
+
+**Gate:** Phase 3 proceeds only if the spike is at least as smooth as the AVPlayer remux control,
+has one stable timebase, preserves required HDR metadata, and survives repeated flush/seek/stop.
+
+## 7. Phase 1 — Make the Session backend reliable
+
+This phase is unconditional because the fallback never disappears.
+
+### 1A. Feasible, bounded preroll
+
+Replace the fixed “always two frames” assumption with an explicit capacity calculation:
+
+```text
+capacity_frames = min(frame_cap, byte_budget / negotiated_frame_bytes)
+effective_preroll = min(PREROLL_FRAMES, max(1, capacity_frames))
 ```
 
-### Why the Apple `AVSampleBuffer` stack for the MKV-HEVC/DoVi case
+- For supported 4K output, choose a documented byte budget that normally permits two planar or
+  fp16 frames plus one in-flight decode without accidental serialization.
+- Keep an absolute session byte cap. Do not grow to `3 × frame_bytes` without limit for 8K or
+  malformed dimensions.
+- If only one valid oversized frame fits, start from one frame rather than deadlock. The
+  short-starvation policy below protects continuity.
+- Reject impossible dimensions/allocation arithmetic before opening the queue.
+- Recompute admission atomically when `Opened` reports the negotiated format/size; outstanding
+  estimates and credits must remain within the new cap.
 
-- System **hardware decode**; **correct Dolby Vision** *dynamic* metadata (a static PQ→scRGB
-  shader can't do DoVi properly — Apple explicitly recommends its pipeline for DoVi).
-- **One authoritative A/V clock** (the synchronizer) — deletes our manual clock bridge (R2/R3/R6
-  all partly evaporate).
-- Native frame **scheduling + dropping** and **bounded backpressure** — deletes our credit loop,
-  preroll budget, and rebuffer policy (R1/R4).
-- Layer **transform** gives fit/fill/zoom/pan for free (the thing `#5` tried to hand-roll).
+Tests: 4K RGBA16F, 4K P010, 8K oversized-one-frame mode, tiny frames, frame-size renegotiation,
+and the invariant `queued + credited bytes <= max(byte_cap, one explicitly admitted frame)`.
 
-### Drawbacks (why it's an addition, not a takeover)
+### 1B. Audio-continuous starvation policy
 
-1. **macOS-only.** Windows/Linux keep the FFmpeg+wgpu path — so Phase 2 (GPU shader) is still needed.
-2. **Apple-decodable codecs only.** VP8/exotic still fall to FFmpeg+wgpu → that path can't be retired.
-3. **Presentation is a CALayer**, composited by the window server, not drawn in the wgpu surface.
-   Chrome (info line/scrub/HUD) overlays as a layer (as the AVPlayer path already does). Any effect
-   that needs the *decoded video pixels inside the wgpu pipeline* (unified photo/video color grading,
-   say) wouldn't apply to these clips. Acceptable for a viewer.
-4. **CMSampleBuffer construction** from FFmpeg packets (parameter sets, `CMVideoFormatDescription`,
-   DoVi config record, timing) is fiddly, and **seek = flush + re-feed** from the demux point.
-5. A **third** macOS video path to maintain (AVPlayer, AVSampleBuffer, FFmpeg+wgpu-fallback). The
-   routing table above keeps it comprehensible; a spike must prove the maintenance cost is worth it.
+Add a distinct short-starvation state/clock rather than treating one empty poll as a full rebuffer:
 
----
+- On a transient empty queue: keep audio running, hold the displayed frame, record starvation,
+  grant decode credit immediately.
+- If a fresh frame arrives before the threshold, select against the current audio clock and
+  continue without an audio command.
+- Enter true `Buffering` and pause audio only after a measured time threshold. Start with
+  300 ms behind a tuning constant, then set it from corpus data.
+- A silent clip uses the same policy against the monotonic clock.
+- EOS is not starvation; decoder failure is not starvation; paused playback never accrues it.
+- Report the reason for every audio pause/resume in diagnostics.
 
-## 4. Phased plan
+### 1C. Drop late video frames deterministically
 
-### Phase 0 — Isolate + instrument (cheap, first)
+On each display tick while playing:
 
-- **A/B remux test:** `ffmpeg -i film.mkv -c copy film.mov` → open the `.mov` (AVPlayer route).
-  If it's flawless, it **proves the streams + the M2 decoder are fine** and the entire problem is
-  our FFmpeg-fallback orchestration — and that the Phase 3 Apple-stack path will work (same system
-  pipeline, fed differently). If it *isn't* smooth, re-scope.
-- **Instrumentation** (extend `PB_VIDEO_DIAG`): per-stage timing (raw decode / hw transfer / swscale
-  / scRGB pack / upload), queue depth, video underruns, **audio pause/resume count**, audio scheduled
-  duration, seek generations. Numbers drive every later decision.
+1. Read the authoritative media position once.
+2. Drain all frames whose PTS is due.
+3. Present only the newest due frame; account and drop older due frames.
+4. Never drop the only future frame, a paused-seek landing, a frame-step result, or the true EOS
+   parked frame.
 
-### Phase 1 — Reliability (hardens the FFmpeg+wgpu path; fixes the audible symptoms *now*)
+Keep interval learning based on consecutive presented PTS only when the delta is valid; dropped
+frames get separate metrics. At most one upload/draw occurs per display tick.
 
-All in `pb-app-core` / Swift; **none blocked** by swift-bridge; each unit-testable.
+### 1D. One generation-aware seek coordinator
 
-- **R1 — preroll budget.** Guarantee the queue admits at least `PREROLL_FRAMES × frame_bytes`
-  (+1 in-flight), using the **format-aware** `frame_bytes` (fp16 = 8 B/px). Add a **4K RGBA16F
-  regression test** (the case no current test exercises).
-- **R2 — audio-continuous through short starvation.** Don't pause audio on the first empty poll:
-  **hold/repeat the last video frame**, and only rebuffer (and pause audio) after **sustained**
-  starvation (~250–500 ms). Audio is the master clock; keep it running.
-- **R4 — drop-late-to-recover.** When several frames are already due, present only the **newest due**
-  frame and drop the rest, so playback catches up to audio instead of drifting.
-- **R3 — coalesce audio seeks.** During held-key/scrubber seeking, **pause audio once**, coalesce all
-  intermediate intents, and seek+refill audio **only after the final current-generation video
-  landing** (mirror the video producer's supersede logic). Removes the per-target main-actor churn.
+The current `SeekVideoAudio { position }` lacks session/generation identity and fires for every
+intermediate target. Replace it with an explicit contract:
 
-Exit criteria: your MKV plays with clean audio through seeks, and full-native HDR no longer deadlocks.
+- `BeginVideoScrub { session_id, generation }` pauses audio at most once.
+- `SeekVideo { session_id, generation, target, final_intent }` updates latest intent; video may
+  publish preview landings, but only the current generation affects state.
+- `CommitVideoSeek { session_id, generation, target }` seeks/refills audio once after the final
+  current-generation landing, then resumes only if playback was running before the seek.
+- `CancelVideoSeek`/stop/navigation invalidates all pending work.
 
-### Phase 2 — GPU planar (P010/NV12) shader path (cross-platform perf; retires the CPU convert + the stopgap)
+Held arrows and scrubber drags must send an unconditional final intent on release. A single tap may
+commit immediately; a held/scrub sequence must not restart audio for intermediate targets. Define a
+bounded fallback timeout if the final video landing fails so audio cannot remain paused forever.
 
-Behind the existing `PixelFormat` seam (`convert.rs` / `pb-render/gpu.rs`):
+### 1E. Remove audio decode/refill from `@MainActor`
 
-- Keep the transferred VideoToolbox frame as **P010** (10-bit HDR) / **NV12** (SDR); stop producing
-  RGBA64 + RGBA16F on the CPU.
-- Upload **P010 → `R16Unorm` luma + `Rg16Unorm` chroma** (NV12 → `R8`/`Rg8`). (`gpu.rs` already has an
-  8-bit NV12 planar path to extend.)
-- In the fragment shader: limited/full-range expand → YUV matrix → **PQ/HLG EOTF** →
-  **BT.2020→scRGB** primaries → scale. (New shader work — the current HDR shader consumes *already*
-  scene-linear fp16.)
-- Peak for the SDR tone-map from **mastering/MaxCLL metadata** (or a stable default), **not** a
-  per-frame CPU scan.
-- Keep the RGBA converter as the **compatibility fallback** only.
+Create an exclusively owned audio-decoder handle rather than calling through the shared mutable
+`AppCoreHandle`:
 
-Payoff: queued 4K frame **63.3 → 23.7 MiB** (≈4 fit the budget), **no per-frame CPU color loop**,
-and the per-frame-thread-spawn parallelization stopgap can be **removed**. Needed for Windows/Linux
-and the macOS Apple-can't-decode fallback.
+- Rust owns allocation and exposes create/read/seek/eof/cancel/drop operations through a narrow
+  FFI handle. If swift-bridge still cannot return an opaque owned type, wrap a nonzero `usize`
+  pointer in a Swift `final` owner whose deinit/drop is exactly once.
+- All decoder operations occur on one dedicated serial queue/worker; no concurrent read and seek.
+- The main actor receives only prepared buffers/state changes and performs the minimum required
+  AVAudioEngine control work.
+- Buffer completion cannot call into a freed decoder. Stop first gates callbacks, cancels worker
+  I/O, drains ownership, then releases engine resources without blocking the main actor.
+- Preserve timestamps and channel layout. Avoid a per-buffer nested Swift deinterleave loop if
+  FFmpeg/Rust can produce the sink's required planar layout directly.
+- Keep scheduled audio duration bounded and observable. Tune chunk size/count for refill margin
+  versus seek latency; do not hard-code 3 × 250 ms without measurement.
 
-### Phase 3 — macOS Apple-stack path for Apple-decodable MKV (the end state)
+The raw handle is an implementation constraint, not permission for an unowned lifetime. Add
+double-drop, use-after-stop, seek/read serialization, and replacement-session tests.
 
-- FFmpeg **demux only** (no decode) → build `CMSampleBuffer`s (with `CMVideoFormatDescription`,
-  incl. HDR/DoVi config) → enqueue into `AVSampleBufferDisplayLayer` +
-  `AVSampleBufferAudioRenderer`, coordinated by one `AVSampleBufferRenderSynchronizer`.
-- Route selection: Apple-decodable video codec in a non-AVFoundation container → this path; else the
-  Phase-1/2 FFmpeg+wgpu fallback.
-- Seek = flush both renderers + re-feed from the demux seek point against the synchronizer timeline.
-- Scale/zoom/pan via the layer transform (retire the `#5` approach for these clips).
+### 1F. Lifecycle and failure containment
 
-### Phase 4 — optional escalations (measure first)
+- Session replacement, navigation, delete, window close, and quit must cancel video + audio work
+  and reject stale callbacks by `session_id`.
+- Sleep/wake, display switch, audio-device change, resize/fullscreen, and app activation must have
+  explicit resume/reprime behavior.
+- Corrupt/truncated input, decoder disconnect, audio-device loss, and sample-renderer failure
+  produce one user-facing error after the fallback graph is exhausted—never repeated toasts or a
+  retry loop.
 
-- **Zero-copy** on Apple: `CVPixelBuffer → CVMetalTextureCache` (IOSurface-backed) to drop the
-  readback for the Apple-can't-demux-but-can-decode-and-we-still-use-wgpu case — only if Phase 2's
-  readback proves to be the remaining bottleneck. (wgpu can't import an external Metal texture, so
-  this likely wants a small native Metal presenter — overlaps with Phase 3's machinery.)
+### 1G. Compressed-packet read-ahead for network media
 
----
+The producer and audio decoder block on each `av_read_frame`, so a slow file/network read stalls
+the decode cadence and drains the decoded-frame queue — smooth locally, juddery over SMB (the
+original item #1). The decoded-frame budget is too high a layer to hide read latency.
 
-## 5. Sequencing & dependencies
+- Give the producer a demux read-ahead: a bounded ring of *compressed packets* (KB, not decoded
+  frames) filled by a reader that stays ahead of the decoder, so a stalled read drains the packet
+  ring instead of the frame queue. The FFmpeg analog of the Media Foundation Source Reader's
+  internal read-ahead.
+- Cover the audio decoder's read path too (or share one demux), so audio doesn't underrun on the
+  same stalls.
+- Byte-bounded (rule 2) and identity/cancellation-gated (rules 5–6); a seek flushes the packet ring.
+- On the macOS sample-buffer route (Phase 3) the system renderer's bounded buffering covers this,
+  so this primarily hardens the Session path (Windows/Linux + macOS fallback). **Re-test over a
+  gigabit SMB share** — item #1 was only re-tested locally this session.
 
-1. **Phase 0** (an afternoon): the remux test + instrumentation. Decides confidence in Phase 3.
-2. **Phase 1** next, unconditionally — it fixes the shipping symptom and is needed under *every*
-   strategy (it hardens the fallback that never goes away).
-3. Then **Phase 3** for the macOS common case (HEVC/DoVi MKV) — the strategic win — **and/or**
-   **Phase 2** for Windows/Linux + the macOS fallback. These are parallelizable; Phase 2 is not a
-   prerequisite for Phase 3.
-4. **R6 (audio off `@MainActor`)** — the raw-pointer-FFI feeder — is **subsumed by Phase 3** on the
-   Apple path (the synchronizer owns audio). Still do it for the **FFmpeg+wgpu fallback** (Win/Linux
-   + Apple-can't-decode), where our `SessionAudioPlayer` remains.
+**Phase 1 exit:** the corpus plays through ordinary decoder spikes without an audio interruption;
+full-size HDR never deadlocks; seek spam results in one final audio commit; **playback over a
+gigabit SMB share is smooth**; all new pure-state tests pass.
 
----
+## 8. Phase 2 — Planar GPU color and scale path
 
-## 6. Testing strategy
+This is the durable Session presentation path for Windows/Linux and the macOS fallback.
 
-- **pb-core / pb-app-core** (pure): preroll-budget property test incl. 4K RGBA16F; underrun→hold vs
-  rebuffer thresholds; drop-late selection; seek-coalescing generation ordering. `cargo test`.
-- **pb-decode**: producer seek landing (exists); planar-shader golden pixels vs the CPU converter
-  for a P010 sample (Phase 2).
-- **On-device (owner loop)**: the corpus clip + the remux A/B; `PB_VIDEO_DIAG` numbers before/after
-  each phase (audio pause/resume count is the key regression metric for R2/R3).
-- **No-trace**: unchanged — viewing still writes nothing; demux/decemux are read-only.
+### 2A. Extend the frame contract
 
----
+Add explicit planar formats rather than pretending every frame is one tight RGBA buffer:
 
-## 7. Open questions / risks
+- `NV12` (8-bit 4:2:0) and `P010` (10 valid high bits in 16-bit words);
+- per-plane offset/length/row stride, coded size, visible crop, chroma subsampling/siting;
+- display size/SAR and rotation metadata kept separate from pixel storage;
+- CICP primaries/transfer/matrix/range plus mastering display and content-light metadata;
+- checked byte calculations and even-dimension/crop validation.
 
-- **DoVi profiles**: confirm which profile the corpus clip is (8.1 vs 5 vs 7) — affects whether the
-  Phase-2 static-PQ approximation is even acceptable as a fallback, and how the CMFormatDescription
-  must be built for Phase 3.
-- **CMSampleBuffer from FFmpeg packets**: HEVC parameter-set extraction + DoVi config record is the
-  fiddliest part of Phase 3; spike it early.
-- **Chrome-over-layer** compositing for the AVSampleBuffer path (info line, scrub bar): reuse the
-  AVPlayer path's layer-ordering approach.
-- **Three macOS video paths**: keep the routing table (§3) authoritative and documented so the
-  maintenance surface stays legible.
-```
+Avoid CPU plane rotation and full-frame repacking. Apply rotation/SAR/crop in geometry/UV mapping.
+If the uploader cannot consume source row stride, copy into reusable tight staging bands—not a new
+full RGBA allocation.
+
+### 2B. Acquire planar frames by platform
+
+- macOS FFmpeg hardware path: transfer VideoToolbox surfaces as P010/NV12 for this rung.
+- Windows MF path: request/retain NV12/P010 where the reader and HDR policy permit it.
+- Linux: accept software/VAAPI-derived NV12/P010 when available; retain the software compatibility
+  converter for unsupported formats.
+- If a decoder outputs a different 10-bit layout, convert once to the planar contract or take the
+  compatibility path; never reinterpret bytes silently.
+
+### 2C. Reusable GPU resources and shader
+
+- Extend the existing NV12 reusable slot to P010: `R16Unorm` Y + `Rg16Unorm` UV after proving
+  filterability/support on wgpu 22 for Metal, DX12, and the supported Linux adapters.
+- Normalize P010's high-aligned 10-bit samples correctly; use 10-bit limited/full-range constants,
+  not the NV12 8-bit constants.
+- Shader order: range expansion → YUV matrix → PQ/HLG EOTF (or SDR transfer) → source-primary to
+  scRGB matrix → output scale. Apply each transform exactly once.
+- Preserve the existing fp16 scene intermediate and SDR/HDR present pass.
+- Reuse textures, bind groups, uniforms, and staging buffers across frames. No per-frame texture,
+  thread, or full-size RGBA allocation.
+- Remove the per-frame scoped-thread `pack_scrgb_f16` stopgap once the planar path passes gates.
+
+### 2D. HDR policy
+
+- HDR10/HLG: use stream/frame metadata; tone-map SDR output from mastering/MaxCLL when trustworthy,
+  otherwise a stable documented default. Do not CPU-scan every frame for peak.
+- Dolby Vision: the planar fallback may render only a verified HDR10-compatible base layer unless
+  dynamic-metadata processing is explicitly implemented. Surface this internally as a capability,
+  not as “Dolby Vision correct.”
+- HDR10+/other unsupported dynamic metadata follows the same honest base-layer policy.
+
+### 2E. Correctness and performance gates
+
+- CPU reference versus GPU output golden tests for NV12 and P010 across BT.601/709/2020,
+  limited/full range, SDR/PQ/HLG, black/white/chroma ramps, odd visible crops, and rotation/SAR.
+- Use a high-quality independent reference (FFmpeg zscale/libplacebo or captured AVFoundation
+  output), not only the old CPU implementation, to avoid preserving an existing bug.
+- Physical-display EDR validation for highlight scale and SDR-white behavior.
+- Steady-state conversion/upload p99 must clear the content frame interval with measured margin;
+  queue starvation and audio pauses after preroll must be zero on the hardware-supported corpus.
+
+## 9. Phase 3 — macOS sample-buffer presenter
+
+Proceed only after Phase 0C passes.
+
+### 3A. Demux and sample construction
+
+- FFmpeg demux runs on an owned background worker over `VideoInput::Path` or shared archive bytes.
+- Convert packet time base to `CMTime` without float round-trips. Carry PTS, DTS, duration, sync and
+  dependency flags; preserve B-frame decode/presentation order.
+- Build and retain format descriptions from codec private data. Apply the exact required bitstream
+  normalization and reject unsupported mid-stream description changes cleanly.
+- Bound compressed queues by bytes and timestamp span. Drive enqueue from renderer readiness; never
+  preload the clip or busy-poll `isReadyForMoreMediaData`.
+
+### 3B. One synchronized media timeline
+
+- Attach video and audio renderers to one `AVSampleBufferRenderSynchronizer` before enqueue.
+- Normalize different stream start offsets to one session timeline.
+- Preroll both streams, reveal on the first displayable frame, and start the synchronizer once.
+- Position/progress comes from this timebase. The Rust core receives passive native-state updates;
+  it does not run a competing media clock.
+- Define sustained-buffering, end-of-audio-versus-video, and silent/no-audio behavior explicitly.
+
+### 3C. Audio capability split
+
+- Probe compressed audio acceptance separately from video.
+- If accepted, enqueue compressed audio with correct format description and timing.
+- Otherwise decode with FFmpeg off-main and enqueue timestamped LPCM. Preserve channel layout where
+  supported; apply a documented downmix otherwise.
+- TrueHD/Atmos playback success means clean synchronized audio. Atmos-object preservation requires
+  separate proof and must not be inferred from a filename or source codec.
+
+### 3D. Seek, backpressure, and cancellation
+
+- Pause the synchronizer, bump generation, stop requests, flush both renderers, seek FFmpeg to a
+  suitable keyframe, re-feed decode dependencies, preroll current-generation audio/video, then
+  re-anchor and resume according to pre-seek state.
+- Superseding seeks cancel/replace the pending feed. Only the final generation may reveal/resume.
+- Frame-step and paused seek update exactly one displayed frame without starting audio.
+- Stop/navigation tears down request callbacks before releasing demuxer, renderers, or layer.
+
+### 3E. Shell integration without a third product state machine
+
+- `SampleBufferPresenter` conforms to the same native-presenter facade as `AVPlayerPresenter`.
+- Reuse the proven video-layer host and preserve `MetalCanvasNSView` ownership of pointer, scroll,
+  pinch, context menu, drag/drop, resize, and detach.
+- Reuse transform placement for Fit/Fill/Original/zoom/pan/rotation and letterbox behavior.
+- Keep the poster until `isReadyForDisplay`; park the true last frame at EOS until stop/navigation.
+- Expose `displayedPixelBuffer()` for Copy/OCR/Describe/Compare with explicit HDR/P3-to-consumer
+  conversion policy.
+- Keep native playback controls, hover hit testing, cursor ownership, menu/toolbar state,
+  slideshow suppression, delete, and teardown behavior backend-neutral.
+
+### 3F. Routing and fallback
+
+- Replace the current extension-only `macos_native_route` with the probed capability result.
+- Cache only non-sensitive codec/container capability facts for the active session; do not persist
+  viewed paths or media-derived data.
+- Runtime sample-renderer failure may fall back once to Session, carrying the desired position when
+  safe. Never show an error before the final allowed backend fails.
+
+**Phase 3 exit:** supported HEVC/H.264 MKV matches the AVPlayer remux control for smoothness,
+audio continuity, seek behavior, HDR/EDR output, last-frame parking, capture, and teardown.
+
+## 10. Phase 4 — Optional zero-copy/native Metal escalation
+
+Only pursue this if Phase 2 metrics show hardware-frame transfer/upload is still the limiting stage
+for a codec the sample-buffer presenter cannot cover.
+
+- Map IOSurface-backed `CVPixelBuffer` planes through `CVMetalTextureCache` and keep the pixel
+  buffer/texture alive until GPU completion.
+- Because current wgpu has no external-Metal-texture ingest, prefer a small isolated native Metal
+  presenter over a broad renderer fork.
+- It must conform to the same native-presenter facade and synchronized audio contract; zero-copy is
+  not permission to reintroduce a second clock.
+
+## 11. Sequencing
+
+1. Phase 0A/0B: characterize the exact corpus and capture an honest baseline.
+2. Phase 0C: prove or reject the macOS sample-buffer architecture in isolation.
+3. Phase 1: land Session reliability unconditionally, in test-first slices.
+4. If Phase 0C passes, integrate Phase 3 for Apple-decodable MKV while keeping Session fallback.
+5. Land Phase 2 for Windows/Linux and unsupported macOS codecs; it may proceed alongside Phase 3
+   only when file ownership does not overlap.
+6. Remove the parallel CPU conversion stopgap after Phase 2 is proven.
+7. Consider Phase 4 only from residual measured bottlenecks.
+
+Recommended Phase 1 commit slices:
+
+1. Preroll-capacity test + bounded fix.
+2. Starvation timer/state + audio-continuity tests.
+3. Latest-due frame selection/drop accounting.
+4. Generation-aware seek coordinator and final-on-release contracts.
+5. Owned off-main audio decoder/feeder.
+6. Lifecycle/device/sleep stress fixes and diagnostics.
+
+## 12. Acceptance gates
+
+Use the AVPlayer remux control as the system baseline where applicable. Phase 3 should be within
+20% of its startup/seek latency and should not use materially more CPU during steady playback.
+
+### Steady playback
+
+- Ten-minute corpus run after startup: **zero video-induced audio pauses, underruns, or rebuffers**.
+- No persistent A/V drift. Target p95 absolute A/V error <= 40 ms and worst case <= 80 ms after
+  startup/seek settling, unless the AVPlayer control itself exceeds that on the same device.
+- No deadlock in Fit/Fill/Original, HDR/SDR display mode, or muted playback.
+- Dropped/repeated video frames are measured. For hardware-supported 4K30, target <0.5% steady-state
+  drops; 4K60 is compared against AVPlayer on the same display/refresh.
+- No per-frame OS-thread creation or full RGBA allocation on the planar/native hot paths.
+
+### Seeking and controls
+
+- Record p50/p95/p99 request-to-displayed-frame and final-intent-to-clean-audio-resume.
+- Held seek and scrub spam produce no stale flash, no obsolete audio restart, and exactly one final
+  audio commit.
+- Paused seek stays paused; frame-step presents one frame; replay starts from zero; EOS parks the
+  final frame.
+
+### Robustness
+
+- Navigate/stop/quit during open, preroll, decode, audio refill, and seek.
+- Corrupt/truncated files; missing timestamps; VFR; B-frames; long GOP; no audio; audio-only error;
+  stream start offsets; odd crop/SAR/rotation; 8K oversized input.
+- Resize/fullscreen/scale changes, display switch, sleep/wake, audio-device change, mute, and archive
+  bytes playback.
+- Every failure is bounded, cancellable, session-gated, and produces at most one final user error.
+
+### Privacy and distribution
+
+- Existing viewing-no-write tests remain green for filesystem, ZIP, and 7z video sessions.
+- Diagnostics remain opt-in and path-redacted.
+- macOS bundled FFmpeg closure, signing, notarization, and clean-machine launch remain green.
+
+## 13. Test matrix and file map
+
+### Automated tests
+
+- `pb-app-core`: property/state tests for queue capacity, starvation threshold, latest-due
+  selection, pause/rebuffer reasons, seek generation/coalescing, stale callback rejection, EOS.
+- `pb-decode`: PTS/DTS conversion, packet dependency flags, bitstream normalization, P010/NV12
+  plane/stride/crop validation, seek supersession, corrupt input/cancellation.
+- `pb-render`: independent-reference golden tests for NV12/P010 color and geometry; reusable resource
+  tests; staging stride/alignment tests.
+- `pb-mac-ffi`: owned audio-handle lifecycle, double-drop/use-after-stop prevention, callback
+  identity, capability result round trips.
+- Swift tests: presenter facade parity, sample-buffer backpressure, fallback graph, seek/stop races,
+  audio capability split, last-frame/capture lifecycle.
+
+### Expected implementation seams
+
+- `crates/pb-app-core/src/video.rs`
+- `crates/pb-app-core/src/video_session.rs`
+- `crates/pb-app-core/src/app_core_impl.rs`
+- `crates/pb-app-core/src/contract.rs`
+- `crates/pb-decode/src/ffmpeg/{probe,video_producer,audio_decoder,convert,hw}.rs`
+- `crates/pb-render/src/{gpu,upload,yuv}.rs`
+- `crates/pb-mac-ffi/src/lib.rs`
+- `mac/Sources/PhotoBlazeMac/{CoreModel,NativeVideoPlayer,SessionAudioPlayer,MetalCanvas}.swift`
+- New macOS files should isolate the presenter facade, sample-buffer presenter, and owned audio
+  decoder wrapper rather than growing `CoreModel.swift` further.
+
+## 14. Open decisions that must be resolved by evidence
+
+- Exact Dolby Vision profile/config and whether the corpus contains a usable HDR10 base layer.
+- Whether the supported macOS versions' sample-buffer renderer preserves and presents that Dolby
+  Vision profile correctly from reconstructed format descriptions and packets.
+- Whether compressed TrueHD is accepted (do not expect it); required LPCM channel layout/downmix.
+- The Session short-starvation threshold and audio chunk/lookahead sizes.
+- The bounded 4K/8K queue byte caps after P010 measurements.
+- Whether P010 `R16Unorm`/`Rg16Unorm` sampling meets all supported wgpu backend requirements.
+- Whether Phase 2 readback/upload already clears the target; if yes, do not build Phase 4.
+
+## 15. Definition of done
+
+The overhaul is complete when the corpus and representative SDR/HDR/VFR/no-audio/unsupported-codec
+files meet the acceptance gates; the fallback remains bounded and cancellable; macOS routing is
+capability-based without retry loops; native and Session presenters preserve all existing controls
+and lifecycle behavior; automated tests cover the previously missing 4K HDR/preroll/audio-seek
+cases; the changelog documents user-visible playback improvements; and the task/architecture docs
+describe the shipped routes rather than interim experiments.

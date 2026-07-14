@@ -1437,7 +1437,10 @@
         "description": "Render text subtitles over playing video, with user-facing appearance controls (size, opacity, shadow/outline, position). Scoped to the TEXT tier only — SubRip (.srt sidecar), MP4 mov_text/tx3g, and WebVTT — decoded through the existing FFmpeg backend (task #84) and drawn with the resvg/usvg/tiny-skia text stack the HUD already uses, synced to the audio master clock. Deliberately EXCLUDES styled ASS/SSA (would want libass, a C build-risk dep this project avoids) and bitmap PGS/VobSub (separate RGBA-overlay pipeline) — log those as a stretch, don't build them. FFmpeg-backend only at first: on macOS that's MKV/WebM (+ .srt sidecars for any container); Windows MF and macOS AVFoundation get it later or route through FFmpeg. Owner's driving requirement (2026-07-13, 0.2.0 beta feedback): subtitles must be LEGIBLE and CONTROLLABLE — nothing worse than subs that fill half the screen or are unreadably small — so the appearance settings are core to this task, not a nice-to-have. Out of scope for a photo viewer's core mission, but a contained, high-value addition for anyone who actually watches films in PhotoBlaze. Cross-platform (pure-Rust text render). Split out of the 0.2.0 beta punch-list; not started this session.",
         "status": "pending",
         "priority": "medium",
-        "dependencies": [79, 84],
+        "dependencies": [
+          79,
+          84
+        ],
         "subtasks": [
           {
             "id": 1,
@@ -1467,6 +1470,67 @@
             "id": 5,
             "title": "Cross-platform + backend coverage",
             "description": "Ship on the FFmpeg backend first (macOS MKV/WebM + sidecars, all Linux). Decide the path for Windows MF and macOS AVFoundation: either add a text-cue extraction there too, or route subtitle-bearing playback through the FFmpeg backend. Verify build/run on all three. Note bitmap PGS/VobSub and styled ASS as explicit non-goals (stretch: libass behind a feature flag, PGS RGBA overlay).",
+            "status": "pending"
+          }
+        ]
+      },
+      {
+        "id": 91,
+        "title": "Video playback overhaul (Session backend reliability + planar GPU + macOS sample-buffer)",
+        "description": "Execute the review-hardened plan in .taskmaster/docs/video-playback-overhaul.md (the doc GOVERNS; this task is a phase index). Turn the Session (FFmpeg / Windows MF) video backend into a stable, robust, efficient foundation for demanding media (4K, 10-bit, HDR10/HLG/Dolby Vision, high-bitrate audio) and add a macOS Apple-stack (AVSampleBuffer) presenter for Apple-decodable MKV. Absorbs 0.2.0 beta feedback items #1 (network + steady-state smoothness; see doc R2/R5/R9) and #5 (aspect/zoom, delivered as a layer transform on the Apple path, not the reverted restart). Root causes R1-R9 and locked architectural rules are in the doc. This session already landed: the seek convert-skip (d1760d0c), the forward-decode + parallel-HDR-convert stopgap + PB_VIDEO_DIAG (4244a69f), and measured that HW decode engages, the seek stall was decode-conversion-bound, and HDR convert is CPU-bound.",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [
+          79,
+          84
+        ],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Phase 0 - baseline + blocking spikes",
+            "description": "Doc section 6. 0A: reproducible corpus characterization (DoVi profile, codecs, bitrate). 0B: non-perturbing instrumentation (extend PB_VIDEO_DIAG: per-stage timing, queue depth, underruns, audio pause/resume count, scheduled duration, seek generations). 0C: Apple sample-buffer proof gate - the `ffmpeg -i film.mkv -c copy film.mov` AVPlayer remux control + a minimal AVSampleBuffer spike; Phase 3 proceeds only if the spike is at least as smooth as the control.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "Phase 1 - make the Session backend reliable",
+            "description": "Doc section 7. 1A feasible bounded preroll (+4K RGBA16F test); 1B audio-continuous starvation policy (repeat last frame, rebuffer only on prolonged starvation); 1C drop late frames deterministically; 1D one generation-aware seek coordinator (coalesce audio seeks); 1E remove audio decode/refill from @MainActor (owned decoder via the usize-pointer FFI); 1F lifecycle + failure containment; 1G compressed-packet read-ahead for network media (the original #1; re-test over SMB). All pb-app-core/Swift, testable, none GPU-blocked.",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "Phase 2 - planar GPU color + scale path",
+            "description": "Doc section 8. Extend the frame contract to carry P010/NV12; acquire planar frames per platform; reusable GPU textures (R16/Rg16 for P010) + a shader doing range expand -> YUV matrix -> PQ/HLG EOTF -> BT.2020->scRGB -> scale; HDR policy (mastering/MaxCLL peak, not per-frame CPU scan); correctness + perf gates. Removes the CPU color loop and the R8 per-frame-thread stopgap. Needed for Windows/Linux + the macOS Apple-can't-decode fallback.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "Phase 3 - macOS sample-buffer presenter",
+            "description": "Doc section 9 (only after 0C passes). 3A FFmpeg demux + CMSampleBuffer construction (HEVC parameter sets + DoVi config); 3B one AVSampleBufferRenderSynchronizer timeline; 3C audio capability split (Apple-decodable audio to AVSampleBufferAudioRenderer, else the Session audio path); 3D seek/backpressure/cancellation; 3E shell integration via a NativeVideoPresenter facade (no third core state machine); 3F routing + fallback. Delivers system HW decode, correct Dolby Vision, one A/V clock, native scheduling, and scale/zoom via layer transform (#5).",
+            "status": "pending"
+          }
+        ]
+      },
+      {
+        "id": 92,
+        "title": "Feature-film poster frame selection on the Windows (MF) + macOS (AVFoundation) backends",
+        "description": "The seek-deep, shallow-first, brightness+contrast poster selection (fixes all-black posters for films that open on a studio logo / fade-in) shipped only on the FFmpeg backend (crates/pb-decode/src/ffmpeg/poster.rs; Mac MKV/WebM + Linux). The Windows Media Foundation poster (mf_poster.rs) and the macOS AVFoundation poster (av_poster.rs, MP4/MOV via the Live-Photo streaming reader) still use the old first-non-black mean-luma walk (30 frames / ~1s), so feature-film posters remain black there. Port the same strategy: reuse the shared scoring (crate::video::poster_frame_score / POSTER_GOOD_SCORE / luma_stats_rgba8), add a head-walk then seek deeper (shallow-first offsets ~8/20/45/90s clamped to min(5min, 50%)) and pick the best-scoring frame. MF supports IMFSourceReader::SetCurrentPosition seeking; AVFoundation needs an AVAssetReader timeRange start offset added to the streaming reader (the harder one - the reader currently reads from the start).",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          79
+        ],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Windows MF backend (mf_poster.rs)",
+            "description": "Add seek-deep sampling using IMFSourceReader::SetCurrentPosition; reuse the shared poster_frame_score / best-frame selection. Cannot be tested on the Mac dev box - needs a Windows build/run.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "macOS AVFoundation backend (av_poster.rs)",
+            "description": "Give the Live-Photo streaming reader an AVAssetReader timeRange start offset so decode_video_poster can sample deeper into the clip, then reuse the shared best-frame selection. Covers MP4/MOV feature films on macOS.",
             "status": "pending"
           }
         ]
