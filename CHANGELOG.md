@@ -7,12 +7,23 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Added
+- **Opening photos from Explorer now reuses the running window (Windows).** Double-clicking a
+  photo, or selecting several and pressing Open, hands them to the PhotoBlaze you already have open
+  instead of launching a separate copy for each file. A multi-selection opens as one playlist, and
+  the existing window comes to the front.
+
 ### Changed
 - The info line (`i`) now defaults to the **bottom-center** of the screen instead of the
   bottom-right. (Existing users keep whatever position they've already set; this only affects
   fresh installs.)
 
 ### Fixed
+- **Holding a seek key no longer crackles or restarts the audio for every hop.** While
+  you hold an arrow (or drag the playback bar), audio now pauses once, the video scrubs
+  freely, and when you let go the audio rejoins in sync at the final position with a
+  single clean resume — instead of tearing down and refilling the audio stream for every
+  intermediate ±2 s step.
 - **Video recovers instantly after falling behind.** When decoding briefly couldn't keep
   up, playback used to show every late frame one screen-refresh apart — a slow-motion
   crawl until it caught up. It now skips straight to the newest frame that should be on

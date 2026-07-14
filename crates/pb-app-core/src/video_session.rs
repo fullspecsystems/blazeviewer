@@ -98,6 +98,12 @@ pub struct SessionUpdate {
     pub present: Option<VideoFrame>,
     /// The state changed this poll (HUD/menu refresh hint).
     pub state_changed: bool,
+    /// A seek landed this poll at this position (the landed frame's PTS) — and
+    /// because only the *current* generation's landing clears the in-flight
+    /// target, this fires exactly once per superseding seek run (plan 1D). The
+    /// caller commits the platform audio seek from it, never from intermediate
+    /// targets.
+    pub seek_landed: Option<Duration>,
 }
 
 /// Monotonic session clock (phase 4: no audio, so this *is* the master clock).
@@ -152,6 +158,19 @@ pub struct ActiveVideo {
     /// `Opened`, so the audio start below always finds it). The audio player opens
     /// the same `Arc`-shared bytes: one resident copy per playing clip.
     pub media: std::sync::Arc<std::sync::OnceLock<crate::video::VideoInput>>,
+    /// The shell audio player was paused for an in-flight seek run (plan 1D):
+    /// set once per run at the first seek intent; cleared by the audio commit.
+    /// While set, session `Playing` promotions do NOT resume audio — the commit
+    /// owns the resume, so intermediate landings stay silent.
+    pub scrub_audio_paused: bool,
+    /// A landed seek position awaiting its ONE audio commit (plan 1D). Emitted
+    /// as `SeekVideoAudio` only once the seek intent has settled; superseded by
+    /// any newer seek intent.
+    pub pending_audio_commit: Option<Duration>,
+    /// When the last seek intent was issued — the commit waits until no new
+    /// intent has arrived for the settle window, which coalesces held-key
+    /// repeats and scrubber drags into one audio seek.
+    pub last_seek_intent: Option<Instant>,
 }
 
 impl ActiveVideo {
@@ -163,6 +182,9 @@ impl ActiveVideo {
             item,
             audio_started: false,
             media: std::sync::Arc::new(std::sync::OnceLock::new()),
+            scrub_audio_paused: false,
+            pending_audio_commit: None,
+            last_seek_intent: None,
         }
     }
 }
@@ -334,7 +356,9 @@ impl VideoSession {
                         self.clock.position = frame.pts;
                         self.clock.anchor = None;
                         self.current_pts = Some(frame.pts);
-                        self.desired_seek = None;
+                        if self.desired_seek.take().is_some() {
+                            update.seek_landed = Some(frame.pts);
+                        }
                         self.started = true;
                         self.resume_after_seek = true; // one-shot; back to default
                         update.present = Some(frame);
@@ -347,6 +371,9 @@ impl VideoSession {
                             // resumes from the frozen position. Hard re-anchor in
                             // every case — the stall never advances media time.
                             let landing = self.desired_seek.take().is_some();
+                            if landing {
+                                update.seek_landed = Some(front_pts);
+                            }
                             let from = if self.started && !landing {
                                 self.clock.position
                             } else {

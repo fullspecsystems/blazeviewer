@@ -10,7 +10,7 @@
         "id": 14,
         "title": "Windows: single-instance window reuse + Explorer multi-select as one playlist",
         "description": "Make Windows match the macOS open idiom (LaunchServices already gives the Mac one instance + one openURLs batch). Today each Explorer double-click/Open spawns a FULL new process (decode pool + resident VRAM ring each; settings.toml write races), and multi-select Open invokes one process per file (Explorer blocks >15 selections by default \u2014 MultipleInvokePromptMinimum \u2014 so the blast radius is capped at ~15 processes, but that is still bad). Plan: (a) accept multiple CLI path args -> classify_inputs (the Vec<PathBuf> -> LaunchInput::Files machinery already serves drag-drop/picker); (b) MultiSelectModel=Player on the ProgID (a REG_SZ value written by the existing per-user HKCU self-registration in default_app.rs \u2014 NOT an MSI component; WiX/MSI was retired when Velopack shipped, see archived task #51/#50) so a multi-select arrives as ONE invocation; (c) single-instance: named mutex, loser forwards its paths via WM_COPYDATA to the running instance (-> open_paths -> open_plan) and exits, winner comes to front (AllowSetForegroundWindow) \u2014 this also merges the multiple invocations Explorer emits when a huge selection overflows the ~32K command line. Compare-two-photos is NOT this task: thats #43 (or a future explicit File > New Window command, which the mutex design must not preclude \u2014 e.g. a --new-window flag bypass). MSIX/Store evaluation moved out to decisions.md (revisit only if monetizing). Windows machine required.",
-        "status": "pending",
+        "status": "done",
         "priority": "high",
         "dependencies": [
           13
@@ -27,26 +27,26 @@
           {
             "id": 2,
             "title": "Multi-file CLI args -> explicit-list playlist",
-            "description": "main.rs currently treats argv as a single launch path; feed all non-flag args through classify_inputs (Files list already supported).",
-            "status": "pending"
+            "description": "DONE (already wired by the #78 CLI parity work): pb-cli's `paths: Vec<PathBuf>` collects all positionals -> launch_paths() -> classify_inputs -> LaunchInput::Files -> explicit playlist. Verified by pb-cli's positional_paths_are_collected + pb-app classify tests.",
+            "status": "done"
           },
           {
             "id": 3,
             "title": "MultiSelectModel=Player on the ProgID",
-            "description": "UPDATED 2026-07-13: no MSI anymore (retired when Velopack shipped, see archived #51/#50) \u2014 write MultiSelectModel=Player as a REG_SZ value on the PhotoBlaze.Image ProgId key from default_app.rs::win::register_shell_integration(), the per-user HKCU self-registration already called from the Velopack --veloapp-install/-updated hook, alongside the existing ProgId/Capabilities/RegisteredApplications writes. No installer-side change needed.",
-            "status": "pending"
+            "description": "DONE: default_app.rs register_shell_integration() now writes MultiSelectModel=Player on HKCU\\...\\<ProgId>\\shell\\open for PhotoBlaze.Image and PhotoBlaze.Video (not Archive - a multi-zip selection has no meaningful playlist). No MSI anymore; the Velopack HKCU registration is the only path.",
+            "status": "done"
           },
           {
             "id": 4,
             "title": "Single-instance mutex + WM_COPYDATA forward",
-            "description": "Named mutex at startup; second instance forwards its paths to the first (hidden message window), first opens them (open_paths -> open_plan) + comes to front; merges command-line-overflow split invocations. Leave a --new-window bypass seam for a future explicit multi-window command.",
-            "status": "pending"
+            "description": "DONE: pb-app/src/single_instance.rs. Named mutex (Local\\PhotoBlaze.SingleInstance) elects a primary; a secondary absolutizes its paths, forwards them via WM_COPYDATA to the primary's message-only window, grants foreground (AllowSetForegroundWindow), and exits before any GPU/decode setup. Primary runs the IPC receiver on a background thread, wakes the winit loop via EventLoopProxy, and opens forwarded paths through open_input (same path as drag-drop). --new-window skips election. Retry loop covers the primary-still-starting race.",
+            "status": "done"
           },
           {
             "id": 5,
             "title": "Verify: Ctrl+A a big folder -> one window, one playlist",
-            "description": "2, 15, 100, and 500-file selections; cold launch and while running; confirm no second process survives and the playlist matches the selection.",
-            "status": "pending"
+            "description": "DONE (mechanism verified 2026-07-13): scripted 1/2/6/102-path forwards all exit(0), process count stays 1, primary logs 'opened N forwarded path(s)'; secondary exits ~0.5s; --new-window spawns a 2nd standalone process. The realistic 500-file Explorer Ctrl+A selection stays owner-eyeball (a single argv hits the ~32K cmdline limit ~250 paths; Explorer's Player model + the WM_COPYDATA buffer have no such cap).",
+            "status": "done"
           }
         ]
       },

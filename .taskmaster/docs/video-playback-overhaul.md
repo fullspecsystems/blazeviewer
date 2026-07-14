@@ -453,6 +453,15 @@ Held arrows and scrubber drags must send an unconditional final intent on releas
 commit immediately; a held/scrub sequence must not restart audio for intermediate targets. Define a
 bounded fallback timeout if the final video landing fails so audio cannot remain paused forever.
 
+> **Implemented (2026-07-13) as a core-side coordinator over the existing three effects**, not new
+> command variants: every Session seek intent pauses audio once per run and starts a settle window
+> (`VIDEO_SEEK_AUDIO_SETTLE` = 250 ms > the 200 ms held repeat); the landing (inherently
+> generation-safe — only the current generation clears the in-flight target) stores the commit;
+> `poll_video` emits the ONE `SeekVideoAudio` + resume after the run settles, uniformly coalescing
+> taps, held keys, and scrubber drags. Resume-from-pause flushes a pending commit first. Still
+> open from this contract: session-identity fields on the audio effects (ride 1E's owned-handle
+> rework) and the pause-forever fallback timeout if a landing never arrives (1G's watchdog case).
+
 ### 1E. Remove audio decode/refill from `@MainActor`
 
 Create an exclusively owned audio-decoder handle rather than calling through the shared mutable

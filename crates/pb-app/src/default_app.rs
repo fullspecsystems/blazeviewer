@@ -214,10 +214,15 @@ mod win {
         let folder_cmd = format!("\"{exe}\" \"%V\"");
 
         // ── ProgIds: label + FriendlyTypeName + DefaultIcon + shell\open\command.
-        for (progid, label) in [
-            ("PhotoBlaze.Image", "PhotoBlaze Image"),
-            ("PhotoBlaze.Archive", "PhotoBlaze Archive"),
-            ("PhotoBlaze.Video", "PhotoBlaze Video"),
+        // `multi_player` sets `MultiSelectModel=Player` on the open verb (task #14): with it,
+        // Explorer collapses a multi-select "Open" into **one** launch carrying every selected
+        // path (like a media player) instead of one process per file — which the single-instance
+        // election then reuses. Images and videos get it; archives do not (a multi-select of `.zip`s
+        // has no meaningful playlist and would decode zip bytes as images — an unsupported edge).
+        for (progid, label, multi_player) in [
+            ("PhotoBlaze.Image", "PhotoBlaze Image", true),
+            ("PhotoBlaze.Archive", "PhotoBlaze Archive", false),
+            ("PhotoBlaze.Video", "PhotoBlaze Video", true),
         ] {
             let base = format!("Software\\Classes\\{progid}");
             let k = create_key_str(HKEY_CURRENT_USER, &base)?;
@@ -227,6 +232,10 @@ mod win {
                 create_key_str(HKEY_CURRENT_USER, &format!("{base}\\DefaultIcon"))?.0,
                 &icon,
             )?;
+            let open = create_key_str(HKEY_CURRENT_USER, &format!("{base}\\shell\\open"))?;
+            if multi_player {
+                set_string(open.0, w!("MultiSelectModel"), "Player")?;
+            }
             set_default(
                 create_key_str(HKEY_CURRENT_USER, &format!("{base}\\shell\\open\\command"))?.0,
                 &open_cmd,

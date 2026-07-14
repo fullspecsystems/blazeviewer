@@ -93,6 +93,13 @@ pub const FRAME_STEP_REPEAT: Duration = Duration::from_millis(70);
 /// seek-landing time (~350 ms) with latest-value coalescing absorbing the rest.
 pub const VIDEO_SEEK_REPEAT: Duration = Duration::from_millis(200);
 
+/// How long a seek run must go without a NEW seek intent before its landed
+/// position commits the ONE platform audio seek (+ resume) — plan 1D. Must
+/// exceed [`VIDEO_SEEK_REPEAT`] so a held key or a scrubber drag never restarts
+/// audio for intermediate targets; small enough that a single tap's audio dip
+/// stays a beat, not a pause.
+pub const VIDEO_SEEK_AUDIO_SETTLE: Duration = Duration::from_millis(250);
+
 /// How long the info line stays flashed as the video seek/step OSD when the `i`
 /// toggle is off (each further seek re-arms it). Replaces the `m:ss / m:ss` toast
 /// — the line's playback row is the better readout (owner call 2026-07-11).

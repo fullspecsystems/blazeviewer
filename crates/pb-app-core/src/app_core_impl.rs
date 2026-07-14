@@ -6556,9 +6556,18 @@ impl AppCore {
     /// Resume the current video (from `Paused`).
     fn video_resume_current(&mut self) {
         let now = self.now;
+        let mut flush: Option<Duration> = None;
         let cmd = match self.video.as_mut() {
             Some(ActiveVideoBackend::Session(v)) => {
+                let was_paused = v.session.state() == crate::video::VideoSessionState::Paused;
                 v.session.resume(now);
+                if was_paused {
+                    // Flush a landed-but-uncommitted seek BEFORE the resume, so
+                    // audio rejoins at the seeked position, never the stale one.
+                    flush = v.pending_audio_commit.take();
+                    v.scrub_audio_paused = false;
+                    v.last_seek_intent = None;
+                }
                 Some(contract::CoreEffect::ResumeVideoAudio)
             }
             Some(ActiveVideoBackend::Native(p)) => Some(contract::CoreEffect::ResumeVideo {
@@ -6566,6 +6575,10 @@ impl AppCore {
             }),
             None => None,
         };
+        if let Some(position) = flush {
+            self.effects
+                .push(contract::CoreEffect::SeekVideoAudio { position });
+        }
         if let Some(cmd) = cmd {
             self.effects.push(cmd);
             self.draw();
@@ -6577,19 +6590,31 @@ impl AppCore {
     /// resolves as seek-to-0-then-play when the player is parked at the end.
     fn video_replay_current(&mut self) {
         let now = self.now;
-        let cmd = match self.video.as_mut() {
-            Some(ActiveVideoBackend::Session(v)) => v
-                .session
-                .replay(now)
-                .map(|target| contract::CoreEffect::SeekVideoAudio { position: target }),
-            Some(ActiveVideoBackend::Native(p)) => Some(contract::CoreEffect::ResumeVideo {
-                session_id: p.session_id,
-            }),
+        enum Replay {
+            Session,
+            Native(contract::CoreEffect),
+        }
+        let action = match self.video.as_mut() {
+            Some(ActiveVideoBackend::Session(v)) => v.session.replay(now).map(|_| Replay::Session),
+            Some(ActiveVideoBackend::Native(p)) => {
+                Some(Replay::Native(contract::CoreEffect::ResumeVideo {
+                    session_id: p.session_id,
+                }))
+            }
             None => None,
         };
-        if let Some(cmd) = cmd {
-            self.effects.push(cmd);
-            self.draw();
+        match action {
+            Some(Replay::Session) => {
+                // 1D: audio pauses now; the landing at 0 commits the audio seek
+                // and the resume follows it (in order), via the coordinator.
+                self.note_video_seek_intent();
+                self.draw();
+            }
+            Some(Replay::Native(cmd)) => {
+                self.effects.push(cmd);
+                self.draw();
+            }
+            None => {}
         }
     }
 
@@ -6909,9 +6934,34 @@ impl AppCore {
         let Some(target) = v.session.seek_by(back, step, now) else {
             return;
         };
-        self.effects
-            .push(contract::CoreEffect::SeekVideoAudio { position: target });
+        // 1D: audio pauses once per seek run; the ONE audio seek (+ resume)
+        // commits in `poll_video` after the run settles — never per step.
+        self.note_video_seek_intent();
         self.video_position_feedback(target);
+    }
+
+    /// Register a Session-backend seek intent with the 1D audio coordinator:
+    /// pause the shell audio player once per run, supersede any landed-but-
+    /// uncommitted position, and restart the settle window. `poll_video` emits
+    /// the single `SeekVideoAudio` (+ resume if the clip plays on) once no new
+    /// intent has arrived for [`VIDEO_SEEK_AUDIO_SETTLE`] — so a held key or a
+    /// scrubber drag never stops/seeks/refills the audio decoder per target (R4).
+    fn note_video_seek_intent(&mut self) {
+        let now = self.now;
+        let Some(v) = self
+            .video
+            .as_mut()
+            .and_then(ActiveVideoBackend::as_session_mut)
+        else {
+            return;
+        };
+        v.pending_audio_commit = None;
+        v.last_seek_intent = Some(now);
+        let first_of_run = !v.scrub_audio_paused;
+        v.scrub_audio_paused = true;
+        if first_of_run {
+            self.effects.push(contract::CoreEffect::PauseVideoAudio);
+        }
     }
 
     /// Absolute seek from the playback bar (a click/drag on the info line's bar,
@@ -6926,11 +6976,11 @@ impl AppCore {
             return; // no duration → no bar to click
         };
         let target = Duration::from_secs_f64(d.as_secs_f64() * f64::from(frac.clamp(0.0, 1.0)));
-        let Some(target) = v.session.seek_to(target, now, None) else {
+        if v.session.seek_to(target, now, None).is_none() {
             return;
-        };
-        self.effects
-            .push(contract::CoreEffect::SeekVideoAudio { position: target });
+        }
+        // 1D: drag spam coalesces exactly like held keys — commit on settle.
+        self.note_video_seek_intent();
         self.update_video_progress();
     }
 
@@ -6982,16 +7032,25 @@ impl AppCore {
             crate::video_session::FrameStep::Present(frame) => {
                 let pts = frame.pts;
                 self.present_video_frame(&frame);
-                // Keep the paused audio player at the stepped position, so a later
-                // resume doesn't yank the clock back to where audio was left.
+                // A settled instant step: sync the paused audio player directly
+                // (so a later resume doesn't yank the clock back) and supersede
+                // any landed-but-uncommitted seek — this step is newer intent.
+                if let Some(v) = self
+                    .video
+                    .as_mut()
+                    .and_then(ActiveVideoBackend::as_session_mut)
+                {
+                    v.pending_audio_commit = None;
+                    v.last_seek_intent = None;
+                }
                 self.effects
                     .push(contract::CoreEffect::SeekVideoAudio { position: pts });
                 self.draw();
                 self.video_position_feedback(pts);
             }
             crate::video_session::FrameStep::Seeking(target) => {
-                self.effects
-                    .push(contract::CoreEffect::SeekVideoAudio { position: target });
+                // 1D: the landing commits the audio seek at the landed PTS.
+                self.note_video_seek_intent();
                 self.video_position_feedback(target);
             }
             crate::video_session::FrameStep::None => {}
@@ -7076,6 +7135,30 @@ impl AppCore {
         let state = v.session.state();
         let started = v.session.has_started();
         let session_id = v.session.id;
+        // 1D audio-seek coordinator: a landing stores the commit position (only
+        // the latest generation lands, so this is inherently supersede-safe);
+        // the commit fires once the run settles — no new seek intent for
+        // VIDEO_SEEK_AUDIO_SETTLE — producing exactly ONE audio seek per run.
+        if let Some(pos) = update.seek_landed {
+            v.pending_audio_commit = Some(pos);
+        }
+        let settled = v
+            .last_seek_intent
+            .is_none_or(|t| now.saturating_duration_since(t) >= VIDEO_SEEK_AUDIO_SETTLE);
+        let commit = if settled {
+            v.pending_audio_commit.take()
+        } else {
+            None
+        };
+        let resume_with_commit = if commit.is_some() {
+            let was_scrub_paused = v.scrub_audio_paused;
+            v.scrub_audio_paused = false;
+            v.last_seek_intent = None;
+            was_scrub_paused && state == crate::video::VideoSessionState::Playing
+        } else {
+            false
+        };
+        let scrub_paused = v.scrub_audio_paused;
         // Start the shell audio player the moment the producer reports a track
         // (Opened), paused — it opens in parallel with the video preroll and the
         // two resume together. Silent clips never create a player. The player
@@ -7099,13 +7182,32 @@ impl AppCore {
                 muted,
             });
         }
+        // The settled seek run's ONE audio commit: seek, then resume (in that
+        // order) if the clip plays on. Emitted before the state bridge below so
+        // audio can never resume at a pre-seek position.
+        if let Some(pos) = commit {
+            self.effects
+                .push(contract::CoreEffect::SeekVideoAudio { position: pos });
+            if resume_with_commit {
+                self.effects.push(contract::CoreEffect::ResumeVideoAudio);
+            }
+        }
         // Session state drives the audio player (freeze together, resume
         // together): Playing = resume; a mid-play rebuffer or the end = pause.
+        // While a seek run holds audio paused (`scrub_paused`), Playing
+        // promotions do NOT resume — the commit above owns the resume, so
+        // intermediate landings of a held/scrubbed run stay silent (1D).
         if update.state_changed {
             use crate::video::VideoSessionState::*;
             match state {
-                Playing => self.effects.push(contract::CoreEffect::ResumeVideoAudio),
-                Buffering if started => self.effects.push(contract::CoreEffect::PauseVideoAudio),
+                Playing if !scrub_paused && commit.is_none() => {
+                    self.effects.push(contract::CoreEffect::ResumeVideoAudio);
+                }
+                // A landing's Seeking→Buffering hop while the run already holds
+                // audio paused would just spam redundant pauses — skip those.
+                Buffering if started && !scrub_paused => {
+                    self.effects.push(contract::CoreEffect::PauseVideoAudio);
+                }
                 Ended => self.effects.push(contract::CoreEffect::PauseVideoAudio),
                 _ => {}
             }
@@ -10248,6 +10350,220 @@ mod tests {
         core.handle(contract::CoreEvent::Tick(Instant::now()));
         assert!(core.video_osd_until.is_none(), "the OSD flash expires");
         assert!(!core.info_line_visible(), "the flashed line drops");
+    }
+
+    /// R4 (overhaul plan 1D): a held-seek run pauses audio ONCE and commits ONE
+    /// audio seek + resume (in that order) at the settled final landing — never
+    /// stopping/seeking/refilling the audio decoder per intermediate target.
+    #[test]
+    fn held_seek_run_coalesces_to_one_audio_commit() {
+        use crate::video::{
+            SeekGeneration, VideoProducerEvent, VideoProducerMsg, VideoSessionId, VideoSessionState,
+        };
+        use crate::video_session::{ActiveVideo, VideoSession, VideoSessionIo};
+        use pb_decode::video::VideoColorInfo;
+
+        let mut core = test_core();
+        let sid = VideoSessionId(9);
+        let (session, io) = VideoSession::new(sid, 4);
+        core.video = Some(ActiveVideoBackend::Session(ActiveVideo::new(session, 0)));
+        let frame = |pts_ms: u64, generation: SeekGeneration| pb_decode::VideoFrame {
+            session_id: sid,
+            seek_generation: generation,
+            pts: Duration::from_millis(pts_ms),
+            width: 1,
+            height: 1,
+            format: pb_decode::PixelFormat::Rgba8,
+            pixels: vec![0; 4],
+            color: VideoColorInfo::srgb(),
+        };
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: sid,
+                duration: Some(Duration::from_secs(60)),
+                width: 1,
+                height: 1,
+                has_audio: false,
+                frame_bytes: 4,
+            })
+            .unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(0, SeekGeneration::FIRST)))
+            .unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(33, SeekGeneration::FIRST)))
+            .unwrap();
+        core.poll_video();
+        assert_eq!(
+            core.video.as_ref().unwrap().state(),
+            VideoSessionState::Playing
+        );
+
+        // The generation of the last SeekTo the producer saw (drains the inbox).
+        let last_seek_gen = |io: &VideoSessionIo| {
+            let mut generation = None;
+            while let Ok(msg) = io.msgs.try_recv() {
+                if let VideoProducerMsg::SeekTo { generation: g, .. } = msg {
+                    generation = Some(g);
+                }
+            }
+            generation.expect("a SeekTo reached the producer")
+        };
+
+        core.effects.clear();
+        // Held repeat: two forward seeks 200 ms apart, each landing quickly.
+        core.video_seek(false);
+        let gen1 = last_seek_gen(&io);
+        io.events
+            .send(VideoProducerEvent::Frame(frame(2000, gen1)))
+            .unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(2033, gen1)))
+            .unwrap();
+        core.now += Duration::from_millis(200);
+        core.poll_video(); // gen1 lands mid-run
+        core.video_seek(false);
+        let gen2 = last_seek_gen(&io);
+        io.events
+            .send(VideoProducerEvent::Frame(frame(4000, gen2)))
+            .unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(4033, gen2)))
+            .unwrap();
+        core.now += Duration::from_millis(100);
+        core.poll_video(); // gen2 lands; run not settled yet (100 < 250 ms)
+
+        let pauses = |core: &AppCore| {
+            core.effects
+                .iter()
+                .filter(|e| matches!(e, contract::CoreEffect::PauseVideoAudio))
+                .count()
+        };
+        let seeks = |core: &AppCore| {
+            core.effects
+                .iter()
+                .filter(|e| matches!(e, contract::CoreEffect::SeekVideoAudio { .. }))
+                .count()
+        };
+        let resumes = |core: &AppCore| {
+            core.effects
+                .iter()
+                .filter(|e| matches!(e, contract::CoreEffect::ResumeVideoAudio))
+                .count()
+        };
+        assert_eq!(pauses(&core), 1, "audio pauses once at run begin");
+        assert_eq!(seeks(&core), 0, "no audio seek for intermediate targets");
+        assert_eq!(resumes(&core), 0, "audio stays paused mid-run");
+
+        // The run settles → exactly one commit: seek to the LANDED position,
+        // then resume, in that order.
+        core.now += VIDEO_SEEK_AUDIO_SETTLE;
+        core.poll_video();
+        assert_eq!(pauses(&core), 1);
+        assert_eq!(seeks(&core), 1, "one audio seek per run");
+        assert_eq!(resumes(&core), 1, "one resume per run");
+        let seek_at = core.effects.iter().position(
+            |e| matches!(e, contract::CoreEffect::SeekVideoAudio { position } if *position == Duration::from_millis(4000)),
+        );
+        let resume_at = core
+            .effects
+            .iter()
+            .position(|e| matches!(e, contract::CoreEffect::ResumeVideoAudio));
+        assert!(
+            seek_at.expect("seek to the landed pts") < resume_at.expect("resume"),
+            "audio seeks before it resumes"
+        );
+
+        // A later poll adds nothing — the commit is one-shot.
+        core.now += Duration::from_millis(100);
+        core.poll_video();
+        assert_eq!((seeks(&core), resumes(&core)), (1, 1));
+    }
+
+    /// A paused seek commits the audio position on settle but never resumes —
+    /// paused stays paused (plan 1D).
+    #[test]
+    fn paused_seek_commits_audio_position_without_resume() {
+        use crate::video::{
+            SeekGeneration, VideoProducerEvent, VideoProducerMsg, VideoSessionId, VideoSessionState,
+        };
+        use crate::video_session::{ActiveVideo, VideoSession};
+        use pb_decode::video::VideoColorInfo;
+
+        let mut core = test_core();
+        let sid = VideoSessionId(10);
+        let (session, io) = VideoSession::new(sid, 4);
+        core.video = Some(ActiveVideoBackend::Session(ActiveVideo::new(session, 0)));
+        let frame = |pts_ms: u64, generation: SeekGeneration| pb_decode::VideoFrame {
+            session_id: sid,
+            seek_generation: generation,
+            pts: Duration::from_millis(pts_ms),
+            width: 1,
+            height: 1,
+            format: pb_decode::PixelFormat::Rgba8,
+            pixels: vec![0; 4],
+            color: VideoColorInfo::srgb(),
+        };
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: sid,
+                duration: Some(Duration::from_secs(60)),
+                width: 1,
+                height: 1,
+                has_audio: false,
+                frame_bytes: 4,
+            })
+            .unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(0, SeekGeneration::FIRST)))
+            .unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(33, SeekGeneration::FIRST)))
+            .unwrap();
+        core.poll_video();
+
+        // Pause, then seek: the landing presents once and stays paused.
+        if let Some(v) = core
+            .video
+            .as_mut()
+            .and_then(ActiveVideoBackend::as_session_mut)
+        {
+            v.session.pause(core.now);
+        }
+        core.effects.clear();
+        core.video_seek(false);
+        let generation = {
+            let mut generation = None;
+            while let Ok(msg) = io.msgs.try_recv() {
+                if let VideoProducerMsg::SeekTo { generation: g, .. } = msg {
+                    generation = Some(g);
+                }
+            }
+            generation.expect("a SeekTo reached the producer")
+        };
+        io.events
+            .send(VideoProducerEvent::Frame(frame(2000, generation)))
+            .unwrap();
+        core.now += VIDEO_SEEK_AUDIO_SETTLE;
+        core.poll_video();
+        assert_eq!(
+            core.video.as_ref().unwrap().state(),
+            VideoSessionState::Paused
+        );
+        assert!(
+            core.effects.iter().any(|e| matches!(
+                e,
+                contract::CoreEffect::SeekVideoAudio { position } if *position == Duration::from_millis(2000)
+            )),
+            "the paused audio player follows the landed position"
+        );
+        assert!(
+            !core
+                .effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::ResumeVideoAudio)),
+            "paused stays paused"
+        );
     }
 
     /// Archive video playback: when the producer reports an audio track, the

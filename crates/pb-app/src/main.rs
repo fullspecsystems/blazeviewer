@@ -69,6 +69,10 @@ mod panels_ui;
 mod pb_key_winit;
 mod reveal;
 mod sdf_rect;
+// Windows single-instance: elect one primary process, forward later launches
+// (Explorer double-click / multi-select) to it via WM_COPYDATA (task #14).
+#[cfg(windows)]
+mod single_instance;
 mod toolbar;
 mod video_audio;
 // WASAPI shared-mode render engine for the Windows video-audio backend (MF Source
@@ -3877,6 +3881,23 @@ impl ApplicationHandler for App {
             let drops = std::mem::take(&mut self.pending_drops);
             self.open_input(classify_inputs(drops));
         }
+        // 0b′. Apply any paths forwarded by a secondary launch (task #14): an Explorer
+        // double-click / multi-select on an already-running PhotoBlaze. Same path as a
+        // drop (classify → open_input), plus raise the window to the front — the OS gave
+        // us foreground rights (AllowSetForegroundWindow on the sender) so this sticks.
+        #[cfg(windows)]
+        {
+            let forwarded = single_instance::take_forwarded();
+            if !forwarded.is_empty() {
+                println!("PhotoBlaze: opened {} forwarded path(s)", forwarded.len());
+                if let Some(w) = self.window.as_ref() {
+                    w.set_minimized(false);
+                    w.focus_window();
+                }
+                self.open_input(classify_inputs(forwarded));
+                self.core.effects.push(contract::CoreEffect::RequestRender);
+            }
+        }
         // 0c. Video audio clock bridge (task #79 phase 5): sample the player's
         // position/state into the core — the master clock while audio plays.
         // Cadence is adaptive (phase 7): FAST while the player is still opening,
@@ -4426,6 +4447,31 @@ fn main() {
         }
     }
 
+    // Windows single-instance (task #14): unless `--new-window` opts out, the first launch becomes
+    // the primary and every later launch (an Explorer double-click / multi-select) forwards its
+    // paths to it and exits — reusing the one decode pool + VRAM ring instead of spawning a whole
+    // new process per file. A secondary exits here, *before* the event loop / GPU / decode setup,
+    // so the reuse costs it almost nothing. The `Primary` guard is kept alive for the process; the
+    // IPC receiver is started after the event loop exists (it needs the loop's wake proxy).
+    #[cfg(windows)]
+    let _single_instance = if cli.new_window {
+        None
+    } else {
+        match single_instance::acquire() {
+            single_instance::Instance::Secondary => {
+                if single_instance::forward(&single_instance::absolutize(&launch_paths)) {
+                    // Delivered to the running instance — nothing more to do.
+                    std::process::exit(0);
+                }
+                // The primary vanished (or never finished starting) before we could reach it: fall
+                // through and run standalone rather than lose the open. We don't hold the mutex, so
+                // we won't act as primary either.
+                None
+            }
+            single_instance::Instance::Primary(guard) => Some(guard),
+        }
+    };
+
     // Every entry point (CLI, double-click via association, drag-drop, picker) funnels through the
     // same pure plan: classify the paths, decide the source + cursor, then scan. A bare launch
     // opens the empty state (nothing is auto-opened). A folder opens recursively by default;
@@ -4461,6 +4507,17 @@ fn main() {
 
     let event_loop = build_event_loop().expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
+
+    // As the primary, start the single-instance IPC receiver (task #14): a message-only window
+    // that hands forwarded paths to the app. It wakes the (Wait-blocked) loop via the proxy;
+    // `about_to_wait` then drains the inbox. `send_event(())` is only a wake — the payload is `()`.
+    #[cfg(windows)]
+    if _single_instance.is_some() {
+        let proxy = event_loop.create_proxy();
+        single_instance::serve(move || {
+            let _ = proxy.send_event(());
+        });
+    }
 
     let metrics = if metrics_on {
         METRICS_ON_FLAG.store(true, std::sync::atomic::Ordering::Relaxed);
