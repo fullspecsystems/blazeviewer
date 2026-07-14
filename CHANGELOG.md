@@ -7,6 +7,12 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Added
+- **Opening photos from Explorer now reuses the running window (Windows).** Double-clicking a
+  photo, or selecting several and pressing Open, hands them to the PhotoBlaze you already have open
+  instead of launching a separate copy for each file. A multi-selection opens as one playlist, and
+  the existing window comes to the front.
+
 ### Changed
 - The info line (`i`) now defaults to the **bottom-center** of the screen instead of the
   bottom-right. (Existing users keep whatever position they've already set; this only affects

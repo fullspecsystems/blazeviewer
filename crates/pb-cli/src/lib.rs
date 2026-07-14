@@ -132,8 +132,8 @@ pub struct Cli {
     #[arg(long, value_name = "N|NAME")]
     pub start_at: Option<String>,
 
-    /// Reserved: open a new window. No-op today; the bypass seam for the future
-    /// single-instance behavior (task #1).
+    /// Force a standalone instance: skip the Windows single-instance election so this
+    /// launch opens its own window instead of forwarding to a running one (task #14).
     #[arg(long, hide = true)]
     pub new_window: bool,
 
