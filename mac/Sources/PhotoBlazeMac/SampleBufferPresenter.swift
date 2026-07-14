@@ -190,6 +190,12 @@ final class SampleBufferPresenter {
     private func onDecodeAnchor(_ anchor: CMTime) {
         if !revealed {
             revealed = true
+            // Unhide BOTH the display layer and its container: attachVideoSublayer
+            // hides the inner layer too (belt-and-suspenders), and revealVideoLayer
+            // only unhides the container — so without this the container shows its
+            // opaque black over a still-hidden display layer (black, no video). This
+            // mirrors NativeVideoPlayer.revealAndPlay's `layer.isHidden = false`.
+            displayLayer.isHidden = false
             canvas?.revealVideoLayer()
             pbTrace("sample-buffer video \(sessionId): revealed")
         }
