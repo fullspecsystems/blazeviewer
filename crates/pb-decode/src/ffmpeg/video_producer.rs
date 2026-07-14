@@ -727,29 +727,19 @@ mod tests {
         (msgs_tx, events_rx)
     }
 
-    /// 0D headless margin trace (plan §6.0D): how much faster than real-time the
-    /// 4K video producer decodes off a (network) share — the starvation headroom.
-    /// Grants a small credit pipeline, drains frames to ~30 s of media, and reports
-    /// the speed-up (`media_secs / wall_secs`). >~1.5× = comfortable headroom (no
-    /// starvation on this network); ~1× or a stall = the constrained regime 1F is
-    /// for. Point `PB_NET_TEST_MKV` at a large clip; run:
-    /// `PB_NET_TEST_MKV=/path cargo test -p pb-decode --features ffvideo \
-    ///   net_decode_throughput -- --nocapture --ignored`
-    #[test]
-    #[ignore = "needs PB_NET_TEST_MKV pointing at a large (network) container"]
-    fn net_decode_throughput() {
-        let Ok(path) = std::env::var("PB_NET_TEST_MKV") else {
-            eprintln!("skipping: set PB_NET_TEST_MKV to a large (network) container");
-            return;
-        };
+    /// Drain frames to ~30 s of media at the given producer options and report
+    /// `media/wall` (real-time multiple) + fps. The 0D margin metric (task #91:
+    /// >~1.5× = comfortable headroom). Returns `(real_time_multiple, first_format)`.
+    fn throughput_trace(
+        input: VideoInput,
+        options: crate::VideoProducerOptions,
+        label: &str,
+    ) -> (f64, Option<PixelFormat>) {
         let t_open = Instant::now();
-        let (msgs, events) = spawn(std::path::PathBuf::from(path));
-        match events
-            .recv_timeout(Duration::from_secs(20))
-            .expect("opened")
-        {
+        let (msgs, events) = spawn_input_opts(input, options);
+        match events.recv_timeout(Duration::from_secs(20)).expect("opened") {
             VideoProducerEvent::Opened { width, height, .. } => {
-                eprintln!("[0d] open+probe {:?} — {width}x{height}", t_open.elapsed());
+                eprintln!("[0d {label}] open+probe {:?} — {width}x{height}", t_open.elapsed());
             }
             other => panic!("expected Opened, got {other:?}"),
         }
@@ -759,13 +749,13 @@ mod tests {
             msgs.send(VideoProducerMsg::Credit).unwrap();
         }
         let t = Instant::now();
-        let mut frames = 0u64;
-        let mut last_pts = Duration::ZERO;
+        let (mut frames, mut last_pts, mut fmt) = (0u64, Duration::ZERO, None);
         loop {
             match events.recv_timeout(Duration::from_secs(20)) {
                 Ok(VideoProducerEvent::Frame(f)) => {
                     frames += 1;
                     last_pts = f.pts;
+                    fmt.get_or_insert(f.format);
                     let _ = msgs.send(VideoProducerMsg::Credit); // refill the ring
                     if f.pts >= TARGET {
                         break;
@@ -774,19 +764,44 @@ mod tests {
                 Ok(VideoProducerEvent::EndOfStream { .. }) => break,
                 Ok(_) => {}
                 Err(_) => {
-                    eprintln!("[0d] video decode STALLED after {frames} frames / {last_pts:?}");
+                    eprintln!("[0d {label}] STALLED after {frames} frames / {last_pts:?}");
                     break;
                 }
             }
         }
         let wall = t.elapsed().as_secs_f64();
         let media = last_pts.as_secs_f64();
-        let fps = frames as f64 / wall.max(1e-6);
+        let rt = media / wall.max(1e-6);
         eprintln!(
-            "[0d] video: {frames} frames = {media:.1}s media in {wall:.2}s wall → {:.2}x real-time, {fps:.1} fps decode",
-            media / wall.max(1e-6)
+            "[0d {label}] {frames} frames = {media:.1}s media in {wall:.2}s wall → {rt:.2}x real-time, {:.1} fps ({:?})",
+            frames as f64 / wall.max(1e-6),
+            fmt,
         );
         let _ = msgs.send(VideoProducerMsg::Stop);
+        (rt, fmt)
+    }
+
+    /// 0D headless margin trace (plan §6.0D / task #91 Phase 2), **A/B**: the
+    /// RGBA/fp16 fallback (pre-Phase-2, CPU convert + R8 threads) vs the planar GPU
+    /// color path (P010/NV12, the CPU convert removed). Prints both real-time
+    /// multiples so the Phase-2 decode-headroom win is directly visible. Point
+    /// `PB_NET_TEST_MKV` at a large clip; run:
+    /// `PB_NET_TEST_MKV=/path cargo test -p pb-decode --features ffvideo \
+    ///   net_decode_throughput -- --nocapture --ignored`
+    #[test]
+    #[ignore = "needs PB_NET_TEST_MKV pointing at a large (network) container"]
+    fn net_decode_throughput() {
+        let Ok(path) = std::env::var("PB_NET_TEST_MKV") else {
+            eprintln!("skipping: set PB_NET_TEST_MKV to a large (network) container");
+            return;
+        };
+        let mk = || VideoInput::Path(std::path::PathBuf::from(&path));
+        let (baseline, _) = throughput_trace(mk(), opts(false, false), "RGBA/fp16");
+        let (planar, fmt) = throughput_trace(mk(), opts(true, true), "planar");
+        eprintln!(
+            "[0d] Phase-2 win: {baseline:.2}x → {planar:.2}x real-time ({:.2}× faster) on {fmt:?}",
+            planar / baseline.max(1e-6)
+        );
     }
 
     /// The MF producer's flagship protocol test, ported verbatim: Opened facts,
