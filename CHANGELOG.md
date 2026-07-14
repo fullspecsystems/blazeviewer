@@ -20,6 +20,10 @@ with any pre-release suffix carried only by the tag.
   the existing window comes to the front.
 
 ### Changed
+- **Keyboard zoom and pan ease in more gently.** Holding the zoom/pan keys now starts slower and
+  builds up along a smooth curve instead of ramping linearly, so small taps make fine adjustments
+  (handy for nudging a letterboxed film to fill the screen) while a longer hold still moves quickly.
+  The top speed is also a touch lower.
 - **Video posters appear much faster (macOS/Linux).** The still frame shown for a video (before
   you press play) is generated ~2–4× quicker: it now uses hardware decode and finds the first
   non-black frame at a small scale, converting only the chosen frame at full resolution instead of

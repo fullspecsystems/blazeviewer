@@ -8134,8 +8134,8 @@ impl AppCore {
                 let last = self.zoom_last.replace(now).unwrap_or(start);
                 let dt = (now - last).as_secs_f32().min(0.1);
                 let t = (now - start).as_secs_f32();
-                let rate =
-                    ZOOM_MIN_RATE + (ZOOM_MAX_RATE - ZOOM_MIN_RATE) * (t / ZOOM_RAMP_SECS).min(1.0);
+                let rate = ZOOM_MIN_RATE
+                    + (ZOOM_MAX_RATE - ZOOM_MIN_RATE) * crate::engine::hold_ramp(t, ZOOM_RAMP_SECS);
                 // Exponential (multiplicative) zoom about the screen center.
                 self.view.zoom =
                     (self.view.zoom * (rate * dir * dt).exp()).clamp(MIN_ZOOM, MAX_ZOOM);
@@ -8171,8 +8171,8 @@ impl AppCore {
             let last = self.pan_last.replace(now).unwrap_or(start);
             let dt = (now - last).as_secs_f32().min(0.1);
             let t = (now - start).as_secs_f32();
-            let speed =
-                PAN_MIN_SPEED + (PAN_MAX_SPEED - PAN_MIN_SPEED) * (t / PAN_RAMP_SECS).min(1.0);
+            let speed = PAN_MIN_SPEED
+                + (PAN_MAX_SPEED - PAN_MIN_SPEED) * crate::engine::hold_ramp(t, PAN_RAMP_SECS);
             self.view.pan[0] += px * speed * dt;
             self.view.pan[1] += py * speed * dt;
             if let Some((iw, ih, sw, sh)) = self.screen_and_image() {

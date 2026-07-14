@@ -54,11 +54,21 @@ pub const UPLOADS_PER_TICK: usize = 2;
 pub const MAX_FULL_RING: usize = 24;
 
 /// Hold-to-zoom curve: the e-folding zoom rate (per second) ramps from a gentle
-/// start (fine tuning) to a fast max over `ZOOM_RAMP_SECS`. Time-based so it's
-/// frame-rate independent.
-pub const ZOOM_MIN_RATE: f32 = 0.5;
-pub const ZOOM_MAX_RATE: f32 = 2.5;
-pub const ZOOM_RAMP_SECS: f32 = 0.7;
+/// start (fine tuning) to a fast max over `ZOOM_RAMP_SECS`, along the
+/// **quadratic ease-in** [`hold_ramp`] so a brief tap barely moves — the fine
+/// control the owner asked for. Time-based so it's frame-rate independent.
+pub const ZOOM_MIN_RATE: f32 = 0.35;
+pub const ZOOM_MAX_RATE: f32 = 2.2;
+pub const ZOOM_RAMP_SECS: f32 = 0.9;
+
+/// Eased progress of a hold ramp: `0` at press → `1` after `ramp_secs`, with a
+/// **quadratic ease-in** (`p²`) so the first part of a hold moves slowly (fine
+/// adjustment) and speed builds the longer the key is held. Shared by
+/// hold-to-zoom and hold-to-pan so the two feel identical.
+pub fn hold_ramp(elapsed_secs: f32, ramp_secs: f32) -> f32 {
+    let p = (elapsed_secs / ramp_secs.max(1e-3)).clamp(0.0, 1.0);
+    p * p
+}
 
 /// Scales macOS's incremental trackpad magnification (`PinchGesture` delta) into a zoom
 /// factor (`1 + delta·gain`). Read by `AppCore::handle`'s `Pinch` arm.
@@ -79,10 +89,11 @@ pub const WHEEL_PAN_STEP: f32 = 80.0;
 pub const GESTURE_PAN_DIR: f32 = 1.0;
 
 /// Hold-to-pan curve: pan speed (px/sec) ramps from a gentle start to a fast max
-/// over `PAN_RAMP_SECS`. Time-based, same shape as zoom (per the owner's note).
-pub const PAN_MIN_SPEED: f32 = 450.0;
-pub const PAN_MAX_SPEED: f32 = 3200.0;
-pub const PAN_RAMP_SECS: f32 = 0.7;
+/// over `PAN_RAMP_SECS`, along the same [`hold_ramp`] ease-in as zoom (per the
+/// owner's note). Time-based, frame-rate independent.
+pub const PAN_MIN_SPEED: f32 = 340.0;
+pub const PAN_MAX_SPEED: f32 = 2700.0;
+pub const PAN_RAMP_SECS: f32 = 0.9;
 
 /// Repeat interval for the held frame-step scrub (`,`/`.`), after the initial tap
 /// delay (`initial_delay`). ~14 fps — quick enough to scrub, slow enough to read (#37).
@@ -828,6 +839,30 @@ pub fn companion_motion(still: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hold-to-zoom/pan ease-in (#67): 0 at press, 1 at the ramp end, and a
+    /// quadratic middle (a tap barely moves) — clamped past the ramp, monotonic.
+    #[test]
+    fn hold_ramp_eases_in_quadratically() {
+        assert_eq!(hold_ramp(0.0, 0.9), 0.0);
+        assert!((hold_ramp(0.9, 0.9) - 1.0).abs() < 1e-6);
+        assert!(
+            (hold_ramp(1.8, 0.9) - 1.0).abs() < 1e-6,
+            "clamps past the ramp"
+        );
+        // Half-way through the ramp → a quarter of the range (p² = 0.25), NOT half
+        // (the linear value) — that's the fine-control zone.
+        assert!((hold_ramp(0.45, 0.9) - 0.25).abs() < 1e-4);
+        // Eased is always ≤ linear during the ramp (gentler start), and monotonic.
+        let mut prev = -1.0;
+        for i in 0..=10 {
+            let t = i as f32 / 10.0 * 0.9;
+            let e = hold_ramp(t, 0.9);
+            assert!(e >= prev, "monotonic non-decreasing");
+            assert!(e <= (t / 0.9) + 1e-6, "eased ≤ linear");
+            prev = e;
+        }
+    }
 
     /// Task #94.2 resume policy: remember only a position meaningfully into a
     /// long-enough clip and not near the end, rewound a touch for context.
