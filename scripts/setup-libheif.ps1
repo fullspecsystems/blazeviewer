@@ -34,7 +34,12 @@
 [CmdletBinding()]
 param(
     [string]$VcpkgRoot = $(if ($env:VCPKG_ROOT) { $env:VCPKG_ROOT } else { "$env:USERPROFILE\vcpkg" }),
-    [string]$Triplet = "x64-windows-static-md",
+    # DLLs, not static libs — an LGPL requirement, not a preference (task #77): libheif +
+    # libde265 (LGPL-3.0 §4) and FFmpeg (LGPL-2.1 §6) oblige us to let a user relink the app
+    # against a modified library, which a static link into a proprietary binary does not allow.
+    # vcpkg's plain `x64-windows` / `arm64-windows` triplets are the DLL ones; the historical
+    # `-static-md` default is the non-compliant configuration and must not ship.
+    [string]$Triplet = "x64-windows",
     # The recorded known-good vcpkg commit (2026-06-26 tip: libheif 1.23.0, libde265 1.1.1,
     # dav1d 1.5.3). Override to move the pin deliberately — then update this default so every
     # box (x64, ARM64, CI) builds the same port versions.

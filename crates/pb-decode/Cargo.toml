@@ -121,18 +121,15 @@ windows = { version = "0.62.2", features = ["Win32_Graphics_Imaging", "Win32_Sys
 # The `#[implement]` COM machinery for the in-RAM read-only IStream (`mf_stream.rs`)
 # that feeds archived videos to Media Foundation without a file ever touching disk.
 windows-core = "0.62"
-# Windows links FFmpeg from the **pinned vcpkg tree** (`setup-libheif.ps1`), the same way
-# libheif + dav1d do — task #100. This entry unions onto the base `ffmpeg-next` dep above
-# and exists solely to add `static`, which must NOT be set on Linux/macOS (they link the
-# system's shared FFmpeg via pkg-config).
-#
-# Why `static` is load-bearing here: `ffmpeg-sys-next`'s build.rs reads
-# `CARGO_FEATURE_STATIC`, and when it is *absent* it sets `VCPKGRS_DYNAMIC=1` — which
-# makes the `vcpkg` crate resolve the **dynamic** `x64-windows` triplet instead of the
-# `x64-windows-static-md` one this project pins, and the lookup fails. With `static` on,
-# the vcpkg crate's default triplet is already `x64-windows-static-md` (and
-# `arm64-windows-static-md` on ARM64), so no `VCPKGRS_TRIPLET` is needed.
+# ⚠ There is deliberately **no Windows-specific `ffmpeg-next` entry here**, and its absence is
+# the mechanism rather than an oversight. Windows links FFmpeg from the pinned vcpkg tree
+# (`setup-libheif.ps1`) as **DLLs**, which is what makes the LGPL-2.1 §6 relink condition
+# satisfiable in a proprietary binary (task #77; the same reason macOS and Linux link shared
+# libraries). `ffmpeg-sys-next`'s build.rs sets `VCPKGRS_DYNAMIC=1` for us exactly when its
+# `static` feature is **absent** (build.rs `try_vcpkg`), and the `vcpkg` crate then resolves
+# the dynamic `x64-windows` / `arm64-windows` triplet. So: adding `features = ["static"]` back
+# here silently returns Windows to a **non-compliant static link**. It was there until
+# 2026-07-14 for precisely that reason, and was removed on purpose.
 #
 # ⚠ Requires `VCPKG_ROOT` in the build environment: unlike our own `build.rs`, the `vcpkg`
 # crate has no `~/vcpkg` fallback.
-ffmpeg-next = { version = "8.1", default-features = false, features = ["static"], optional = true }

@@ -55,6 +55,18 @@ fn main() {
     if std::env::var_os("CARGO_FEATURE_FFMPEG").is_some() && target_os == "windows" {
         link_ffmpeg_windows_syslibs();
     }
+
+    // Whichever of the three is on, a DLL build needs its DLLs beside the binaries cargo is
+    // producing (task #77). Done once here rather than per-feature: the copy is by directory,
+    // so `libheif` + `dav1d` + `ffprobe` would otherwise each redo the same work — and a
+    // `ffprobe`-only build needs it just as much, without ever touching the libheif hook.
+    let any_native = ["LIBHEIF", "DAV1D", "FFMPEG"]
+        .iter()
+        .any(|f| std::env::var_os(format!("CARGO_FEATURE_{f}")).is_some());
+    if any_native && target_os == "windows" && vcpkg_dynamic() {
+        let (root, triplet) = vcpkg_tree();
+        copy_vcpkg_dlls(&root, triplet);
+    }
 }
 
 /// Windows: the system libs a **static** vcpkg FFmpeg needs and `ffmpeg-sys-next`
@@ -101,32 +113,98 @@ fn link_ffmpeg_windows_syslibs() {
     }
 }
 
-/// Is this a **DLL** build of the native LGPL libraries? (`PB_VCPKG_DYNAMIC=1`)
+/// Windows links the native libraries as **DLLs** (`true`), with `PB_VCPKG_STATIC=1` as the
+/// escape hatch back to the old static link.
 ///
-/// Task #77 / #100.6: libheif + libde265 (LGPL-3.0 §4) and FFmpeg (LGPL-2.1 §6) are
-/// *statically* linked by default, which does not satisfy the LGPL relink condition in a
-/// proprietary binary. Dynamic linkage does, by construction — it is already how macOS and
-/// Linux comply. This switch builds against the vcpkg **dynamic** triplet so the two can be
-/// compared on real numbers before the owner picks a remedy.
+/// **This is a licence requirement, not a preference (task #77).** libheif + libde265 are
+/// LGPL-3.0 (§4) and FFmpeg is LGPL-2.1 (§6); both oblige us to let a user relink the app
+/// against a modified copy of the library, and a static link in a proprietary binary does not.
+/// A DLL does, by construction — which is why macOS and Linux were always compliant and only
+/// Windows was not. Measured cost of the switch: **+0.8 MB** on-disk (exe 35.07 -> 29.04 plus
+/// 6.82 MB of DLLs); the feared size regression did not materialise.
 ///
-/// ⚠ Not sufficient on its own: `ffmpeg-sys-next` picks its own triplet from
-/// `CARGO_FEATURE_STATIC`, so a dynamic FFmpeg also needs `static` off in the
-/// `ffmpeg-next` dependency (see pb-decode/Cargo.toml).
+/// The escape hatch exists for A/B measurement only. **A `PB_VCPKG_STATIC=1` build must never
+/// ship** — it is the non-compliant configuration by definition.
+///
+/// ⚠ Only half the story: `ffmpeg-sys-next` chooses its own triplet from `CARGO_FEATURE_STATIC`
+/// and runs *before* this build script, so it cannot be steered from here. FFmpeg follows
+/// because pb-decode's `ffmpeg-next` dependency deliberately does **not** enable `static` (see
+/// Cargo.toml) — re-adding it there silently makes FFmpeg static again while these stay DLLs.
 fn vcpkg_dynamic() -> bool {
-    println!("cargo:rerun-if-env-changed=PB_VCPKG_DYNAMIC");
-    std::env::var("PB_VCPKG_DYNAMIC").as_deref() == Ok("1")
+    println!("cargo:rerun-if-env-changed=PB_VCPKG_STATIC");
+    std::env::var("PB_VCPKG_STATIC").as_deref() != Ok("1")
+}
+
+/// Copy the vcpkg DLLs next to the binaries cargo is about to produce.
+///
+/// Windows resolves a DLL from the **executable's own directory** first, and cargo puts the
+/// app in `target/<profile>/` but test binaries in `target/<profile>/deps/`. Without this,
+/// switching to DLLs would leave every `cargo run` and `cargo test` failing to start with a
+/// missing-DLL box — the classic tax for going dynamic on Windows, paid once here rather than
+/// by every developer and CI lane in a PATH dance.
+///
+/// The release script stages its DLLs from `target/release/`, so this is also what makes the
+/// shipped package's DLL set identical to the one the tests ran against.
+fn copy_vcpkg_dlls(root: &str, triplet: &str) {
+    use std::path::{Path, PathBuf};
+
+    let bindir = PathBuf::from(format!("{root}\\installed\\{triplet}\\bin"));
+    // OUT_DIR is target/<profile>/build/<pkg>-<hash>/out — three levels up is target/<profile>.
+    let Ok(out) = std::env::var("OUT_DIR") else {
+        return;
+    };
+    let Some(profile_dir) = Path::new(&out).ancestors().nth(3).map(Path::to_path_buf) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&bindir) else {
+        // No bin dir means a static tree is installed; the link step will report that far
+        // more clearly than a copy failure would.
+        return;
+    };
+    for entry in entries.flatten() {
+        let src = entry.path();
+        if src.extension().and_then(|e| e.to_str()) != Some("dll") {
+            continue;
+        }
+        let Some(name) = src.file_name() else {
+            continue;
+        };
+        for dst_dir in [profile_dir.clone(), profile_dir.join("deps")] {
+            if !dst_dir.is_dir() {
+                continue;
+            }
+            let dst = dst_dir.join(name);
+            // Copy when absent or stale. Racing cargo jobs can both land here, and a failed
+            // copy is not fatal — the loader will say so at run time, loudly.
+            let fresh = std::fs::metadata(&dst)
+                .ok()
+                .zip(entry.metadata().ok())
+                .and_then(|(d, s)| Some((d.modified().ok()?, s.modified().ok()?)))
+                .is_some_and(|(d, s)| d >= s);
+            if !fresh {
+                let _ = std::fs::copy(&src, &dst);
+            }
+        }
+    }
+    println!("cargo:rerun-if-changed={}", bindir.display());
 }
 
 /// The vcpkg tree the Windows native backends link from: `(root, triplet)`.
-/// Root is `VCPKG_ROOT` or the conventional `~/vcpkg`; the triplet tracks the
-/// *target* arch (read from `CARGO_CFG_TARGET_ARCH`, correct under
-/// cross-compilation). static-md = static libs + dynamic CRT, matching Rust's
-/// default MSVC CRT linkage (no DLLs to ship in the installer). Port versions are
-/// pinned by `scripts/setup-libheif.ps1 -VcpkgRef` (libheif 1.23.0, libde265
-/// 1.1.1, dav1d 1.5.3).
 ///
-/// Under [`vcpkg_dynamic`] the triplet drops the `-static-md` suffix — vcpkg's plain
-/// `x64-windows` / `arm64-windows` triplets are the DLL ones.
+/// The triplet tracks the *target* arch (`CARGO_CFG_TARGET_ARCH`, so it stays correct under
+/// cross-compilation) and the link kind from [`vcpkg_dynamic`]: plain `x64-windows` /
+/// `arm64-windows` are vcpkg's DLL triplets and are what we ship; the `-static-md` suffix
+/// (static libs + dynamic CRT) is the `PB_VCPKG_STATIC=1` escape hatch. Port versions are
+/// pinned by `scripts/setup-libheif.ps1 -VcpkgRef` (libheif 1.23.0, libde265 1.1.1,
+/// dav1d 1.5.3).
+///
+/// Root is `VCPKG_ROOT`, else the conventional `~/vcpkg`.
+///
+/// ⚠ `VCPKG_ROOT` is not as stable as it looks: `Enter-VsDevShell` **overwrites** it with the
+/// vcpkg bundled inside Visual Studio, which carries none of our pinned ports — even if the
+/// caller exported the right value first. Since `--features ffprobe` requires a Developer shell
+/// (bindgen), every shipped build goes through one; `scripts/vs-dev-env.ps1` restores the value
+/// afterwards. Anything else entering a VS shell by hand has to do the same.
 fn vcpkg_tree() -> (String, &'static str) {
     let root = std::env::var("VCPKG_ROOT").unwrap_or_else(|_| {
         let home = std::env::var("USERPROFILE").unwrap_or_default();
@@ -162,8 +240,10 @@ fn link_libheif_windows() {
         panic!(
             "feature `libheif` is on but {libdir}\\heif.lib was not found.\n\
              Run Phase 0:  pwsh scripts/setup-libheif.ps1 -Triplet {triplet}\n\
-             (it bootstraps vcpkg + builds a decode-only, plugin-loader-free static\n\
-             libheif for this arch). Or set VCPKG_ROOT if your vcpkg lives elsewhere.",
+             (it bootstraps vcpkg + builds a decode-only, plugin-loader-free\n\
+             libheif for this arch). Or set VCPKG_ROOT if your vcpkg lives elsewhere.\n\
+             Note the triplet: the shipped build links DLLs for LGPL relink compliance\n\
+             (task #77), so the tree must be the dynamic one unless PB_VCPKG_STATIC=1.",
         );
     }
 
@@ -172,11 +252,17 @@ fn link_libheif_windows() {
     // default-lib directives in the objects, so the C++ stdlib resolves automatically
     // under the dynamic CRT (static-md).
     //
-    // Under PB_VCPKG_DYNAMIC these are import libs for heif.dll / libde265.dll (task
-    // #77's LGPL relink remedy) — same file names, different link kind.
-    let kind = if vcpkg_dynamic() { "dylib" } else { "static" };
+    // Under the DLL triplet these are import libs for heif.dll / libde265.dll (task #77's
+    // LGPL relink remedy). ⚠ libde265's *import* lib is `de265.lib` while its *static* lib
+    // is `libde265.lib` — the vcpkg triplets disagree on that one name (heif and dav1d keep
+    // theirs), so the link name has to track the triplet, not just the link kind.
+    let dynamic = vcpkg_dynamic();
+    let kind = if dynamic { "dylib" } else { "static" };
     println!("cargo:rustc-link-lib={kind}=heif");
-    println!("cargo:rustc-link-lib={kind}=libde265");
+    println!(
+        "cargo:rustc-link-lib={kind}={}",
+        if dynamic { "de265" } else { "libde265" }
+    );
     // Relink if the static lib is rebuilt (e.g. a vcpkg reinstall with different
     // options) — Cargo doesn't otherwise track the external lib.
     println!("cargo:rerun-if-changed={libdir}\\heif.lib");
