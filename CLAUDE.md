@@ -356,13 +356,14 @@ A release .app must reference FFmpeg **only** via `@rpath/…` out of
   exposure at all.
 - **Linux** — system/AppImage-bundled shared libheif + FFmpeg via `linuxdeploy`;
   dynamic linkage, so LGPL §4 is satisfied by construction.
-- **Windows** — ⚠️ the open one. `pb-decode/build.rs` links vcpkg **static**
-  libheif + libde265 (`static-md`). Static-linking LGPL into a proprietary binary
-  triggers the §4 relink obligation, which is *not* satisfied by attribution
-  alone. The fix is DLL linkage (ship the two DLLs in the installer); the current
-  static choice was a convenience call ("no DLLs to ship"), not a constraint.
-  **Verify status against task #77 before shipping a paid Windows build.**
-  (`dav1d` is BSD-2-Clause — static is fine, attribution only.)
+- **Windows** — ⚠️ the open one, and as of task #100 it covers **three** libraries, not two.
+  `pb-decode/build.rs` links vcpkg **static** libheif + libde265 (LGPL-3.0, §4) and
+  **FFmpeg** (LGPL-2.1, §6 — demux/metadata only, but LGPL attaches to *linkage*, not to
+  how much of the library you call). Static-linking LGPL into a proprietary binary triggers
+  the relink obligation, which is *not* satisfied by attribution alone. The fix is DLL
+  linkage for all three; the current static choice was a convenience call ("no DLLs to
+  ship"), not a constraint. **Verify status against task #77 before shipping a paid Windows
+  build.** (`dav1d` is BSD-2-Clause — static is fine, attribution only.)
 
 ### Distribution model
 
