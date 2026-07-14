@@ -1111,3 +1111,112 @@ mod order_tests {
         assert_eq!(got, ["a/apple.jpg", "a/zebra.jpg", "a/sub/1.jpg"]);
     }
 }
+
+#[cfg(test)]
+mod scan_timing {
+    use super::*;
+    use std::time::Instant;
+
+    /// Time the streaming walk to the FIRST supported file vs. completion, on a
+    /// real (possibly network) directory — the "why does a tree-structured NAS
+    /// folder wait for the whole scan before a poster" measurement. Run:
+    /// `PB_SCAN_DIR="/Volumes/Media/TV Shows" cargo test -p pb-app-core \
+    ///   scan_timing -- --nocapture --ignored`
+    #[test]
+    #[ignore = "needs PB_SCAN_DIR pointing at a (network) folder"]
+    fn scan_first_file_vs_total() {
+        let Ok(dir) = std::env::var("PB_SCAN_DIR") else {
+            eprintln!("skipping: set PB_SCAN_DIR");
+            return;
+        };
+        let root = std::path::Path::new(&dir);
+        let t = Instant::now();
+        let mut first: Option<std::time::Duration> = None;
+        let mut count = 0usize;
+        let mut dirs = 0usize;
+        for entry in image_walker(root, true) {
+            let Ok(e) = entry else { continue };
+            if e.file_type().is_dir() {
+                dirs += 1;
+            } else if e.file_type().is_file() && is_supported_library_file(e.path()) {
+                if first.is_none() {
+                    first = Some(t.elapsed());
+                    eprintln!(
+                        "[scan] FIRST file after {:?}: {}",
+                        first.unwrap(),
+                        e.path().display()
+                    );
+                }
+                count += 1;
+            }
+        }
+        eprintln!(
+            "[scan] first-file {:?} | total {:?} for {count} files across {dirs} dirs → the gap is what a tree costs before the first poster",
+            first.unwrap_or_default(),
+            t.elapsed()
+        );
+    }
+
+    /// Does the recursive scan walk STARVE the poster's SMB reads? Time the first
+    /// video's poster (a) alone, then (b) while a background thread walks the whole
+    /// tree (what the real scan does). Run:
+    /// `PB_SCAN_DIR="/Volumes/Media/TV Shows" cargo test -p pb-app-core --release \
+    ///   --features ffvideo scan_contends -- --nocapture --ignored`
+    #[cfg(feature = "ffvideo")]
+    #[test]
+    #[ignore = "needs PB_SCAN_DIR pointing at a (network) tree with a video"]
+    fn scan_contends_with_the_poster() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let Ok(dir) = std::env::var("PB_SCAN_DIR") else {
+            eprintln!("skipping: set PB_SCAN_DIR");
+            return;
+        };
+        let root = std::path::PathBuf::from(&dir);
+        // First supported video in the tree.
+        let first_vid = image_walker(&root, true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .map(|e| e.into_path())
+            .find(|p| {
+                let s = p.to_string_lossy().to_lowercase();
+                [".mkv", ".mp4", ".mov", ".m4v", ".avi", ".webm"]
+                    .iter()
+                    .any(|e| s.ends_with(e))
+            });
+        let Some(vid) = first_vid else {
+            eprintln!("no video found under {dir}");
+            return;
+        };
+        let fit = pb_decode::FitBox {
+            max_width: 7680,
+            max_height: 2160,
+        };
+        let poster = |label: &str| {
+            let t = Instant::now();
+            let _ = pb_decode::ff_decode_video_poster(
+                &pb_decode::VideoInput::Path(vid.clone()),
+                Some(fit),
+                &AtomicBool::new(false),
+            );
+            eprintln!("[contend] poster {label}: {:?}", t.elapsed());
+        };
+        poster("ALONE");
+        // Now hammer the tree walk on a background thread and re-time the poster.
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let (r2, s2) = (root.clone(), stop.clone());
+        let walker = std::thread::spawn(move || {
+            while !s2.load(Ordering::Relaxed) {
+                for e in image_walker(&r2, true) {
+                    if s2.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let _ = e.map(|e| e.file_type()); // readdir+stat, like the scan
+                }
+            }
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50)); // let the walk get going
+        poster("DURING SCAN");
+        stop.store(true, Ordering::Relaxed);
+        let _ = walker.join();
+    }
+}
