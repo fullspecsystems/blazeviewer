@@ -32,6 +32,7 @@ pub mod app_core_impl;
 pub mod archive;
 pub mod config;
 pub mod contract;
+pub mod cues;
 pub mod decode_pool;
 pub mod delete;
 pub mod describe;

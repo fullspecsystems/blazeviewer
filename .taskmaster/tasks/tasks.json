@@ -1153,8 +1153,8 @@
           {
             "id": 2,
             "title": "Decode text cues to timed plain text",
-            "description": "Route the subtitle stream through libavcodec's subtitle decoders (subrip/mov_text/webvtt) to (start, end, text) cues; strip inline markup we don't render. Handle multi-line cues and overlapping cues. Sidecar SRT/VTT: parse directly (small pure-Rust parser or FFmpeg). Store the active clip's cue list in RAM only.",
-            "status": "pending"
+            "description": "SIDECAR FORMATS DONE (pb-app-core/src/cues.rs, 21 tests, pure). SubtitleCue { start, end /*[start,end)*/, lines, forced, source_order } + CueTrack (parse/from_cues/active_at/next_boundary_after/shift/set_forced). SubRip + WebVTT via one block parser. Rules DEFINED per the plan: half-open [start,end) so a cue ending exactly when the next begins never double-shows; OVERLAPS KEPT not resolved (authors run a sign + dialogue together; picking one would silently drop the other) and returned in source order; out-of-order sorted by (start, source_order) so the author's order breaks ties; missing/reversed end repaired from the next cue's start, bounded by FALLBACK_CUE=5s and floored at MIN_CUE=200ms so a window is never empty and a typo never drops the text; markup stripped (<i>/<b>/<font>/<v Speaker>/<00:00:01.000>/ASS {\\an8}) + entities decoded with a bare & surviving; timestamps accept BOTH , and . for both formats (SubRip-with-periods is everywhere) and optional hours (WebVTT MM:SS.mmm); CRLF normalized; index line optional; SubRip trailing coordinates and WebVTT cue settings/NOTE/STYLE/REGION ignored. next_boundary_after is the scheduling primitive #90.3 needs (wake on the boundary, never scan per frame). REMAINING: EMBEDDED subtitle streams (mov_text / in-container SubRip) need a demuxer read (FFmpeg subtitle decoder / AVFoundation) — they produce the same SubtitleCue, so nothing here changes when they land.",
+            "status": "in-progress"
           },
           {
             "id": 3,
