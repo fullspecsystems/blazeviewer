@@ -1522,14 +1522,21 @@ final class CoreModel {
             nv.stop()
             nativeVideo = nil
         }
+        // Same self-heal for the sample-buffer presenter (also a Native-proxy backend,
+        // so it shares the core's native-video session authority).
+        if let sbv = sampleBufferVideo, sbv.sessionId != core.native_video_session_id() {
+            sbv.stop()
+            sampleBufferVideo = nil
+        }
         // Track the view transform: zoom/pan/rotation/scale-mode changes reach the video
         // layer here (they only touch the core's `view`, never a menu/effect). Cheap —
         // `relayout()` re-applies only when the placement actually changed.
         nativeVideo?.relayout()
+        sampleBufferVideo?.relayout()
         // Keep the video container's background on the current letterbox color (theme
         // switch / Settings edit) — repaint only on a real change.
         let lb = core.effective_letterbox_rgb()
-        if nativeVideo != nil, lb != lastVideoLetterbox {
+        if (nativeVideo != nil || sampleBufferVideo != nil), lb != lastVideoLetterbox {
             lastVideoLetterbox = lb
             canvasView?.setVideoLetterbox(videoLetterboxCGColor)
         }
@@ -1603,7 +1610,9 @@ final class CoreModel {
         // `info_line_visible()` folds both in). An in-flight scrubber drag also pins it
         // up: the drag captures the pointer, so the hover flash would decay out from
         // under the user's own knob (see `videoScrubbing`).
-        let controls = (infoVis || videoScrubbing) && (nativeVideo != nil || sessionVideo)
+        let controls =
+            (infoVis || videoScrubbing)
+            && (nativeVideo != nil || sampleBufferVideo != nil || sessionVideo)
         if controls != videoControlsVisible {
             withAnimation(Layout.chromeFade) { videoControlsVisible = controls }
         }
@@ -1933,6 +1942,14 @@ final class CoreModel {
     /// single media authority (the Rust core keeps only a passive proxy).
     @ObservationIgnored private var nativeVideo: NativeVideoPlayer?
 
+    /// The active sample-buffer video presenter (video-overhaul Phase 3): FFmpeg
+    /// (Rust) demux → `AVSampleBufferDisplayLayer`, for containers `AVPlayer` can't
+    /// demux (MKV/WebM) — commanded by the core's `PlaySampleBuffer`/`StopVideo`/…
+    /// effects. Mutually exclusive with `nativeVideo` (one Apple presenter at a
+    /// time); it reports state through the same `nativeVideo*` callbacks, so the
+    /// core drives both through one `Native` proxy.
+    @ObservationIgnored private var sampleBufferVideo: SampleBufferPresenter?
+
     /// The session-video audio sink (task #84 §7): AVAudioEngine over the Rust FFmpeg
     /// audio decoder, for session-backed (FFmpeg) videos — commanded by the core's
     /// `StartVideoAudio`/`StopVideoAudio`/… effects; its clock samples flow back ~4×/s
@@ -2044,30 +2061,44 @@ final class CoreModel {
         case .PlayVideoBytes(let name, let sessionId, let muted, let startSecs):
             playNativeVideoBytes(
                 name: name.toString(), sessionId: sessionId, muted: muted, startSecs: startSecs)
+        case .PlaySampleBuffer(let sessionId, let muted, let startSecs):
+            playSampleBufferVideo(sessionId: sessionId, muted: muted, startSecs: startSecs)
         case .RequestVideoPoster(let requestId, let item, let name, let maxEdge):
             generateArchivePoster(
                 requestId: requestId, item: item, name: name.toString(), maxEdge: maxEdge)
         case .StopVideo(let sessionId):
             // Session-gated: a StopVideo for a superseded session must not tear down
-            // the current one (a newer PlayVideo may already have replaced it).
+            // the current one (a newer Play may already have replaced it). Routed to
+            // whichever Apple presenter is active (mutually exclusive).
             if nativeVideo?.sessionId == sessionId {
                 nativeVideo?.stop()
                 nativeVideo = nil
             }
+            if sampleBufferVideo?.sessionId == sessionId {
+                sampleBufferVideo?.stop()
+                sampleBufferVideo = nil
+            }
         case .PauseVideo(let sessionId):
             if nativeVideo?.sessionId == sessionId { nativeVideo?.pause() }
+            if sampleBufferVideo?.sessionId == sessionId { sampleBufferVideo?.pause() }
         case .ResumeVideo(let sessionId):
             if nativeVideo?.sessionId == sessionId { nativeVideo?.resume() }
+            if sampleBufferVideo?.sessionId == sessionId { sampleBufferVideo?.resume() }
         case .SeekVideoBy(let sessionId, let generation, let deltaMs):
             // Arrow-key seek (±2s / Shift ±10s). The player resolves + clamps the delta and
             // reports back so the proxy's in-flight/generation bookkeeping stays honest.
             if nativeVideo?.sessionId == sessionId {
                 nativeVideo?.seek(byMilliseconds: deltaMs, generation: generation)
             }
+            if sampleBufferVideo?.sessionId == sessionId {
+                sampleBufferVideo?.seek(byMilliseconds: deltaMs, generation: generation)
+            }
         case .StepVideo(let sessionId, let forward):
             if nativeVideo?.sessionId == sessionId { nativeVideo?.step(forward: forward) }
+            if sampleBufferVideo?.sessionId == sessionId { sampleBufferVideo?.step(forward: forward) }
         case .SetVideoMuted(let sessionId, let muted):
             if nativeVideo?.sessionId == sessionId { nativeVideo?.setMuted(muted) }
+            if sampleBufferVideo?.sessionId == sessionId { sampleBufferVideo?.setMuted(muted) }
         case .SetWindowMode(let fullscreen):
             log("SetWindowMode(fullscreen: \(fullscreen))")
             setWindowMode(fullscreen: fullscreen)
@@ -2416,6 +2447,26 @@ final class CoreModel {
             scaleMode: core.menu_state().scale, canvas: canvas, model: self, startSecs: startSecs)
     }
 
+    /// `CoreEffect::PlaySampleBuffer` (video-overhaul Phase 3): open the clip in the
+    /// sample-buffer presenter — FFmpeg (Rust) demuxes the container `AVPlayer` can't
+    /// open, and the compressed packets feed an `AVSampleBufferDisplayLayer` (system
+    /// decode + DoVi/HDR). The container input was stashed Rust-side by the effect; the
+    /// presenter's `DemuxReader` opens it off the main actor via `open_stashed_demux`.
+    private func playSampleBufferVideo(sessionId: UInt64, muted: Bool, startSecs: Double) {
+        nativeVideo?.stop()
+        nativeVideo = nil
+        sampleBufferVideo?.stop()
+        sampleBufferVideo = nil
+        guard let canvas = canvasView else {
+            log("PlaySampleBuffer: no canvas view to present into")
+            return
+        }
+        resetVideoControls()
+        sampleBufferVideo = SampleBufferPresenter(
+            sessionId: sessionId, scaleMode: core.menu_state().scale, muted: muted,
+            startSecs: startSecs, canvas: canvas, model: self)
+    }
+
     /// `CoreEffect::PlayVideoBytes` (macOS archive video, task #30): the core stashed the
     /// entry's in-RAM container bytes — pull them once and open an `AVPlayer` backed by a
     /// resource loader that serves them on demand (never written to disk; privacy #2).
@@ -2594,6 +2645,7 @@ final class CoreModel {
     /// fullscreen / display move). The player owns the frame/gravity math.
     func relayoutNativeVideo() {
         nativeVideo?.relayout()
+        sampleBufferVideo?.relayout()
     }
 
     /// The theme-aware letterbox/background fill (sRGB) photos use — the video container's
@@ -2613,7 +2665,8 @@ final class CoreModel {
     /// Player → model: the scrubber's position/duration/playing (task 79.9 phase 5).
     /// Session-gated. Formats the time labels; the fraction drives the bar + knob.
     func updateVideoProgress(_ sessionId: UInt64, elapsed: Double, total: Double, playing: Bool) {
-        guard nativeVideo?.sessionId == sessionId else { return }
+        guard nativeVideo?.sessionId == sessionId || sampleBufferVideo?.sessionId == sessionId
+        else { return }
         // Feed the core's session-only resume map (task #94.2): the core keeps no native
         // clock, so this ~20 Hz report is where "where you left off" comes from. Cheap +
         // session-gated core-side; a near-start/end position is forgotten there.
@@ -2661,6 +2714,8 @@ final class CoreModel {
     func seekVideoFraction(_ fraction: Double) {
         if let nv = nativeVideo {
             nv.seek(toFraction: fraction)
+        } else if let sbv = sampleBufferVideo {
+            sbv.seek(toFraction: fraction)
         } else if sessionVideoActive {
             core.video_seek_fraction(Float(fraction))
             kick()
