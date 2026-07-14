@@ -419,10 +419,12 @@ mod tests {
 
     #[test]
     fn imperceptible_zoom_is_not_pannable_but_a_real_one_is() {
-        // A width-filling video (displayed_w == screen_w at zoom 1).
-        let mut v = ViewTransform::default();
-        // ~0.25 px of overflow per side — an unnoticeable zoom → still seek.
-        v.zoom = 1.0 + 0.5 / 2560.0;
+        // A width-filling video (displayed_w == screen_w at zoom 1), with ~0.25 px of
+        // overflow per side — an unnoticeable zoom → still seek.
+        let mut v = ViewTransform {
+            zoom: 1.0 + 0.5 / 2560.0,
+            ..Default::default()
+        };
         assert!(
             !v.pannable_axes(2560, 1440, 2560, 1440)[0],
             "a sub-pixel zoom must not flip arrows into pan"
