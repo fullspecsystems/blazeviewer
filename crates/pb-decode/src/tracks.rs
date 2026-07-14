@@ -215,6 +215,14 @@ pub struct MediaTrack {
     pub flags: TrackFlags,
     /// `Some` for audio, `None` for subtitles.
     pub audio: Option<AudioFormat>,
+    /// This track is a **file beside the video**, not a stream inside it (#90.1).
+    ///
+    /// A display fact, not a locator: releases routinely ship an embedded English SubRip
+    /// stream *and* an `.eng.srt` of the same content, and without this both render as
+    /// "English · SubRip" — two rows a person cannot tell apart, and (worse) two picker
+    /// entries that look like a bug. The [`TrackLocator`] knows, but it is deliberately
+    /// opaque to the formatter, so the fact lives here.
+    pub external: bool,
 }
 
 /// The tracks of one kind, plus how much of them we actually know.
@@ -755,6 +763,7 @@ mod tests {
             capability: TrackCapability::Playable,
             flags: TrackFlags::none(),
             audio: None,
+            external: false,
         }
     }
 

@@ -97,9 +97,19 @@ pub fn track_summary(track: &MediaTrack) -> String {
     // 5. Stable-ordered disposition tail.
     parts.extend(disposition_tokens(track));
 
-    // 6. An honest note on what we cannot render, so a listed track never reads as an
-    //    offer. (Bitmap/unsupported subtitles are shown in Details but will never be
-    //    selectable in the #99 picker.)
+    // 6. Where it came from — but only when that is the thing telling two rows apart.
+    //
+    // Found on real data: a release ships an embedded English SubRip stream *and* an
+    // `.eng.srt` of the same content beside it, and both rendered as exactly
+    // "English · SubRip". Two identical rows read as a bug, and in the #99 picker they'd
+    // be an unanswerable choice.
+    if track.external {
+        parts.push("External".to_string());
+    }
+
+    // 7. An honest note on what we cannot render, so a listed track never reads as an
+    //    offer. Last, so it is the final word on the row. (Bitmap/unsupported subtitles
+    //    are shown in Details but will never be selectable in the #99 picker.)
     if track.kind == TrackKind::Subtitle && !track.capability.is_renderable_text() {
         parts.push("Unsupported".to_string());
     }
@@ -316,6 +326,7 @@ mod tests {
                 layout: layout.map(str::to_string),
                 sample_rate: rate,
             }),
+            external: false,
         }
     }
 
@@ -333,6 +344,7 @@ mod tests {
             capability: cap,
             flags: TrackFlags::none(),
             audio: None,
+            external: false,
         }
     }
 

@@ -269,6 +269,7 @@ pub fn sidecar_tracks(
                 capability: pb_decode::tracks::subtitle_capability(m.codec_raw),
                 flags: m.flags,
                 audio: None,
+                external: true, // a file beside the video, not a stream inside it
             };
             (track, pb_decode::TrackLocator::Sidecar(m.origin.clone()))
         })
@@ -596,16 +597,65 @@ mod tests {
         assert!(matches!(locator, pb_decode::TrackLocator::Sidecar(_)));
     }
 
-    /// A sidecar describes itself exactly like an embedded track — same codec map, same
-    /// capability map — so the formatter cannot tell them apart.
+    /// A sidecar describes itself through the same maps as an embedded track — but says
+    /// **External**, so a person can tell them apart.
+    ///
+    /// Found on real data (a Grey's Anatomy WEBRip): the release ships an embedded English
+    /// SubRip stream *and* an `.eng.srt` of the same content. Without the marker both
+    /// rendered as exactly "English · SubRip" — two identical rows, and an unanswerable
+    /// choice in the #99 picker.
     #[test]
-    fn a_sidecar_renders_like_an_embedded_track() {
+    fn a_sidecar_is_marked_external_so_it_is_distinguishable() {
         let m = parse("movie.mkv", "movie.en.forced.srt").expect("match");
         let mut next = 0;
-        let (track, _) = sidecar_tracks(&[m], 1, &mut next).remove(0);
+        let (sidecar, _) = sidecar_tracks(&[m], 1, &mut next).remove(0);
+        assert!(sidecar.external);
         assert_eq!(
-            crate::tracks::track_summary(&track),
+            crate::tracks::track_summary(&sidecar),
+            "English · SubRip · Forced · External"
+        );
+
+        // The same track as an embedded stream: identical but for the marker.
+        let embedded = pb_decode::MediaTrack {
+            external: false,
+            ..sidecar.clone()
+        };
+        assert_eq!(
+            crate::tracks::track_summary(&embedded),
             "English · SubRip · Forced"
+        );
+        assert_ne!(
+            crate::tracks::track_summary(&embedded),
+            crate::tracks::track_summary(&sidecar),
+            "an embedded track and a sidecar must never read identically"
+        );
+    }
+
+    /// The real-world shape that exposed this: one embedded `eng` SubRip stream plus one
+    /// `.eng.srt` beside it, neither tagged beyond its language.
+    #[test]
+    fn the_greys_anatomy_case_yields_two_distinguishable_rows() {
+        let m = parse(
+            "Grey's.Anatomy.S01E01.1080p.AMZN.WEBRip.DD5.1.H.264-GA.mkv",
+            "Grey's.Anatomy.S01E01.1080p.AMZN.WEBRip.DD5.1.H.264-GA.eng.srt",
+        )
+        .expect("a heavily dotted release name must still match");
+        assert_eq!(m.language.as_deref(), Some("eng"));
+        assert_eq!(
+            m.title, None,
+            "the release name's dots are in the STEM, so DD5.1/H.264 never reach the tail"
+        );
+
+        let mut next = 3;
+        let (sidecar, _) = sidecar_tracks(&[m], 1, &mut next).remove(0);
+        let embedded = pb_decode::MediaTrack {
+            external: false,
+            ..sidecar.clone()
+        };
+        assert_eq!(crate::tracks::track_summary(&embedded), "English · SubRip");
+        assert_eq!(
+            crate::tracks::track_summary(&sidecar),
+            "English · SubRip · External"
         );
     }
 

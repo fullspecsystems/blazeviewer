@@ -335,6 +335,7 @@ mod tests {
                 ..TrackFlags::none()
             },
             audio: None,
+            external: false,
         }
     }
 
