@@ -7603,6 +7603,12 @@ impl AppCore {
     /// (the A/B lever / safety hatch), reporting the renderer's real P010
     /// capability so 10-bit sources fall back to RGBA/fp16 on adapters without
     /// `TEXTURE_FORMAT_16BIT_NORM`. No renderer (headless) → no planar path.
+    ///
+    /// Gated to match its only call site (the session-platform block in
+    /// `start_video_playback`): on a macOS `--no-ffvideo` build — which is what the
+    /// shipped DMG is — video is the native AVFoundation player, so there is no producer
+    /// to hand options to and this would be dead code (`-D warnings` rejects it).
+    #[cfg(any(windows, all(unix, feature = "ffvideo")))]
     fn planar_video_options(&self) -> pb_decode::VideoProducerOptions {
         let planar = std::env::var_os("PB_VIDEO_NO_PLANAR").is_none() && self.renderer.is_some();
         let supports_p010 = self.renderer.as_ref().is_some_and(|r| r.supports_p010());
