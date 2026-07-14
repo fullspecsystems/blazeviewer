@@ -130,6 +130,30 @@ pub struct ItemDetails {
     /// would be circular: an un-enumerable set is empty either way, so the answer would
     /// always be whatever the emptiness happened to imply. `None` = not probed.
     pub has_audio: Option<bool>,
+    /// How far the (async, video-only) container probe got. Stills are born `Ready`.
+    pub probe_state: crate::media_details::ProbeState,
+}
+
+impl ItemDetails {
+    /// A still's entry: read synchronously, so it is complete the moment it exists.
+    pub fn ready(size: u64, fields: Vec<(String, String)>) -> Self {
+        ItemDetails {
+            size,
+            fields,
+            media: None,
+            has_audio: None,
+            probe_state: crate::media_details::ProbeState::Ready,
+        }
+    }
+
+    /// The placeholder a video's cold miss records while its worker probes. Its presence
+    /// is also what stops a second worker being spawned for the same item.
+    pub fn loading() -> Self {
+        ItemDetails {
+            probe_state: crate::media_details::ProbeState::Loading,
+            ..Default::default()
+        }
+    }
 }
 
 pub struct AppCore {
@@ -230,6 +254,15 @@ pub struct AppCore {
     /// Per-item on-demand Details read (`Shift+I`), so a re-open of the same file is
     /// instant. RAM-only (privacy #2). See [`ItemDetails`].
     pub exif_cache: HashMap<usize, ItemDetails>,
+    /// The in-flight video Details probe, if any (task #98). One at a time: the Inspector
+    /// shows one item, and replacing this drops the old receiver — which *is* the
+    /// cancellation.
+    pub details_probe: Option<crate::media_details::DetailsProbe>,
+    /// Details generation: bumped with `text_gen` on index reassignment, so a probe that
+    /// lands after a deck rebuild — when `item` names a different file — is dropped.
+    /// **Not** [`AppCore::epoch`], which is the *geometry* generation (a window resize
+    /// bumps it) and would both invalidate good catalogs and miss real rebuilds.
+    pub details_gen: u64,
     /// Per-item "text in image" results (`T` / Copy Text from Image, task #45):
     /// on-device OCR lines + QR payloads, cached so a revisit is instant. RAM-only
     /// (privacy #2) — dropped on rebuild and exit, never written anywhere.

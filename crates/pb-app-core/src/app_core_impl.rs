@@ -120,6 +120,8 @@ impl AppCore {
             meta_cache: std::collections::HashMap::new(),
             current: None,
             exif_cache: std::collections::HashMap::new(),
+            details_probe: None,
+            details_gen: 0,
             recognized_text: std::collections::HashMap::new(),
             text_scan: None,
             text_gen: 0,
@@ -309,6 +311,10 @@ impl AppCore {
             // An off-thread describe (task #44) keeps polling so `poll_describe_scan`
             // installs the result promptly.
             || self.describe_scan.is_some()
+            // An off-thread video Details probe (task #98) keeps polling so
+            // `poll_details_probe` swaps the panel off "Reading…" promptly. Without this
+            // an idle app could stop ticking with the result sitting in the channel.
+            || self.details_probe.is_some()
             // The target isn't on screen at the current fit yet (incl. a same-index
             // re-present pending after a geometry change bumped the epoch) — keep polling
             // so `drain_results` presents it (task #18 finding #5).
@@ -1311,6 +1317,7 @@ impl AppCore {
         // 1c. Pick up a finished off-thread text scan (OCR + QR, task #45): cache it,
         // refresh the `T` panel's busy state, run a deferred copy.
         self.poll_text_scan();
+        self.poll_details_probe();
 
         // 1d. Pick up a finished off-thread AI describe (task #44): cache it and refresh
         // the description panel's busy state.
@@ -1463,9 +1470,11 @@ impl AppCore {
             if self.inspector_panel_visible() && self.current.is_some() && !flying {
                 match self.panels.inspector {
                     // Warm the Details EXIF for the *displayed* photo. Cheap and safe (unlike
-                    // the OCR/describe scans below): `ensure_exif_cached` is a synchronous
-                    // metadata parse — bytes read + `read_exif_fields`, bytes dropped — no
-                    // full-res decode, no thread, idempotent (returns early when cached). The
+                    // the OCR/describe scans below): for a still `ensure_exif_cached` is a
+                    // synchronous metadata parse — bytes read + `read_exif_fields`, bytes
+                    // dropped — no full-res decode; for a video it hands the container open to
+                    // a worker (task 98.6) and returns immediately. Either way it never blocks
+                    // on a decode and is idempotent (returns early when cached). The
                     // native path needs this explicitly (the HUD path warmed it in
                     // `show_overlay`, suppressed here); without it the Details tab shows only
                     // the basic rows until a Describe round-trip warms the cache as a side
@@ -2840,6 +2849,8 @@ impl AppCore {
         self.recognized_text.clear();
         self.text_scan = None;
         self.text_gen += 1;
+        self.details_probe = None;
+        self.details_gen += 1;
         self.descriptions.clear();
         self.describe_scan = None;
         self.describe_gen += 1;
@@ -2948,6 +2959,8 @@ impl AppCore {
         self.recognized_text.clear();
         self.text_scan = None;
         self.text_gen += 1;
+        self.details_probe = None;
+        self.details_gen += 1;
         self.descriptions.clear();
         self.describe_scan = None;
         self.describe_gen += 1;
@@ -4061,6 +4074,8 @@ impl AppCore {
                 // `CoreModel` side) to carry a catalog + a stale-guard generation.
                 media: None,
                 has_audio: Some(has_audio),
+                // The shell already probed this one; there is no worker to wait on.
+                probe_state: crate::media_details::ProbeState::Ready,
             },
         );
         self.emit_panels_changed();
@@ -5331,6 +5346,21 @@ impl AppCore {
             return;
         };
         self.ensure_exif_cached(item);
+        // A video's container probe may be in flight (task 98.6). Copying now would hand
+        // the user a table missing its Duration/codec/track rows, so mark the probe
+        // copy-when-done and let `poll_details_probe` re-enter — the same contract
+        // `copy_image_text` uses for a scan that hasn't finished.
+        if self
+            .exif_cache
+            .get(&item)
+            .is_some_and(|d| d.probe_state == crate::media_details::ProbeState::Loading)
+        {
+            if let Some(p) = self.details_probe.as_mut().filter(|p| p.item == item) {
+                p.copy_when_done = true;
+                self.show_toast("Reading video details…");
+                return;
+            }
+        }
         let mut lines: Vec<String> = vec![file_name_of(self.source.name(item)).to_string()];
         if let Some(meta) = &self.current {
             lines.push(format!("Dimensions: {} × {}", meta.w, meta.h));
@@ -5347,6 +5377,16 @@ impl AppCore {
                     continue;
                 }
                 lines.push(format!("{tag}: {val}"));
+            }
+            // The audio/subtitle tracks (task #98) — the same rows the panel shows, so
+            // "Copy Image Details" and the panel can't disagree about the same file.
+            if let Some(catalog) = &details.media {
+                for row in crate::tracks::track_rows(catalog, details.has_audio) {
+                    lines.push(match row {
+                        DetailRow::Span { text, .. } => text,
+                        DetailRow::Pair { label, value } => format!("{label}: {value}"),
+                    });
+                }
             }
         }
         // Only the filename line means there was nothing worth copying.
@@ -6344,6 +6384,16 @@ impl AppCore {
         // File size + EXIF from the memoized read (populated by `ensure_exif_cached`
         // before this is called; a cold miss simply omits them until the next rebuild).
         if let Some(details) = self.exif_cache.get(&item) {
+            // A video's container probe runs on a worker (task #98). Until it lands the
+            // panel says so, rather than showing a table that looks complete but isn't;
+            // `poll_details_probe` re-signals the Inspector when the result arrives.
+            if details.probe_state == crate::media_details::ProbeState::Loading {
+                rows.push(DetailRow::Span {
+                    text: "Reading video details…".to_string(),
+                    bold: false,
+                });
+                return rows;
+            }
             rows.push(DetailRow::Pair {
                 label: "File Size".to_string(),
                 value: format!("{} bytes", hud::format_thousands(details.size)),
@@ -6402,104 +6452,96 @@ impl AppCore {
         if let crate::video::LibraryItemKind::Video(_) =
             crate::video::item_kind(self.source.as_ref(), item)
         {
-            let size = self
-                .source
-                .path(item)
-                .and_then(|p| std::fs::metadata(p).ok())
-                .map(|m| m.len())
-                .or_else(|| self.source.size_hint(item))
-                .unwrap_or(0);
-            // The Windows (Media Foundation), macOS (AVFoundation), and Linux (FFmpeg,
-            // task #84) probes below fill `rows`; on other platforms it stays empty, so
-            // `mut` reads as unused — suppress it there rather than drop `mut`.
-            #[cfg_attr(
-                not(any(windows, target_os = "macos", all(unix, feature = "ffvideo"))),
-                allow(unused_mut)
-            )]
-            let mut rows: Vec<(String, String)> = Vec::new();
-            #[cfg_attr(
-                not(any(windows, target_os = "macos", all(unix, feature = "ffvideo"))),
-                allow(unused_mut)
-            )]
-            let mut media: Option<pb_decode::MediaTrackCatalog> = None;
-            #[cfg_attr(
-                not(any(windows, target_os = "macos", all(unix, feature = "ffvideo"))),
-                allow(unused_mut)
-            )]
-            let mut has_audio: Option<bool> = None;
-            // One shared row builder so the three platform probes can't drift on copy.
-            // The bare `Audio: Yes/No` row it used to add is gone: the real per-track
-            // listing (task #98) supersedes it, and `track_rows` reports "No" from the
-            // catalog's own completeness rather than from a bool.
-            #[cfg(any(windows, target_os = "macos", all(unix, feature = "ffvideo")))]
-            let mut fill_rows = |info: &pb_decode::VideoStreamInfo| {
-                if let Some(d) = info.duration {
-                    rows.push(("Duration".into(), crate::video::format_video_duration(d)));
-                }
-                rows.push(("Video codec".into(), info.codec.to_string()));
-                if info.fps > 0.0 {
-                    rows.push(("Frame rate".into(), format!("{:.2} fps", info.fps)));
-                }
-                has_audio = Some(info.has_audio);
-            };
-            // The catalog generation: the deck epoch, so a catalog minted before a
-            // rebuild can never resolve a `TrackId` against the deck that replaced it.
-            #[cfg(any(windows, target_os = "macos", all(unix, feature = "ffvideo")))]
-            let generation = self.epoch;
-            #[cfg(any(windows, target_os = "macos"))]
-            if let Some(path) = self.source.path(item) {
-                match pb_decode::probe_video_details(path, generation) {
-                    Ok(probe) => {
-                        fill_rows(&probe.video);
-                        media = Some(probe.tracks);
-                    }
-                    // macOS + ffvideo (task #84 §8): AVFoundation can't probe the
-                    // containers the FFmpeg backend plays (MKV/WebM/…) — same
-                    // fallback split as playback, so the inspector rows appear.
-                    #[cfg(all(target_os = "macos", feature = "ffvideo"))]
-                    Err(_) => {
-                        let input = crate::video::VideoInput::Path(path.to_path_buf());
-                        if let Ok(probe) = pb_decode::ff_probe_video_details(&input, generation) {
-                            fill_rows(&probe.video);
-                            media = Some(probe.tracks);
-                        }
-                    }
-                    #[cfg(not(all(target_os = "macos", feature = "ffvideo")))]
-                    Err(_) => {}
-                }
-            }
-            // Linux (task #84): the FFmpeg probe, path or in-RAM archive bytes alike.
-            #[cfg(all(unix, not(target_os = "macos"), feature = "ffvideo"))]
-            if let Some(path) = self.source.path(item) {
-                let input = crate::video::VideoInput::Path(path.to_path_buf());
-                if let Ok(probe) = pb_decode::ff_probe_video_details(&input, generation) {
-                    fill_rows(&probe.video);
-                    media = Some(probe.tracks);
-                }
-            }
-            self.exif_cache.insert(
+            // Off to a worker: opening a container is an unbounded wait (damaged file,
+            // network share, a codec the OS reader labours over), and the event loop must
+            // never take it. Record `Loading` — which the panel shows honestly, and which
+            // also stops a second worker being spawned for this item — and let `tick`
+            // pick the result up.
+            self.exif_cache
+                .insert(item, crate::app_core::ItemDetails::loading());
+            self.details_probe = Some(crate::media_details::spawn(
+                &self.source,
                 item,
-                crate::app_core::ItemDetails {
-                    size,
-                    fields: rows,
-                    media,
-                    has_audio,
-                },
-            );
+                self.details_gen,
+                self.source.name(item).to_string(),
+            ));
             return;
         }
         if let Ok(bytes) = self.source.bytes(item) {
             let fields = read_exif_fields(&bytes);
             self.exif_cache.insert(
                 item,
-                crate::app_core::ItemDetails {
-                    size: bytes.len() as u64,
-                    fields,
-                    media: None,
-                    has_audio: None,
-                },
+                crate::app_core::ItemDetails::ready(bytes.len() as u64, fields),
             );
         }
+    }
+
+    /// Pick up a finished Details probe (called each tick).
+    ///
+    /// Accepts the result only if the deck generation **and** the item's identity still
+    /// match what was requested: a rebuild reassigns indices, so an older result names a
+    /// different file and is dropped rather than cached against the wrong photo. A dead
+    /// worker marks the entry `Failed` — otherwise its `Loading` placeholder would sit on
+    /// "Reading…" forever, and never re-probe (the placeholder is also the spawn guard).
+    pub fn poll_details_probe(&mut self) {
+        use std::sync::mpsc::TryRecvError;
+        let outcome = {
+            let Some(p) = self.details_probe.as_ref() else {
+                return;
+            };
+            match p.rx.try_recv() {
+                Ok(details) => Some((
+                    p.gen,
+                    p.item,
+                    p.identity.clone(),
+                    p.copy_when_done,
+                    Some(details),
+                )),
+                Err(TryRecvError::Empty) => return, // still probing
+                Err(TryRecvError::Disconnected) => {
+                    Some((p.gen, p.item, p.identity.clone(), p.copy_when_done, None))
+                }
+            }
+        };
+        self.details_probe = None;
+        let Some((gen, item, identity, copy, details)) = outcome else {
+            return;
+        };
+        if gen != self.details_gen {
+            return; // deck rebuilt while probing — the indices were reassigned
+        }
+        if self.source.name(item) != identity {
+            return; // same index, different file — not our result
+        }
+        match details {
+            Some(d) => {
+                self.exif_cache.insert(item, d);
+            }
+            None => {
+                // The worker died. Keep the entry (so we don't respawn in a loop) but say so.
+                if let Some(e) = self.exif_cache.get_mut(&item) {
+                    e.probe_state = crate::media_details::ProbeState::Failed;
+                }
+            }
+        }
+        // The open Inspector may be sitting on this item's "Reading…" row.
+        self.emit_panels_changed();
+        if self.slot_content() == Some(SlotContent::Details) && self.displayed_item == Some(item) {
+            self.show_overlay();
+        }
+        // The cache is warm now, so this re-entry takes the normal path (it cannot loop).
+        if copy && self.displayed_item == Some(item) {
+            self.copy_image_details();
+        }
+    }
+
+    /// The old synchronous body, kept only for tests that need a probed entry without a
+    /// tick loop. Never call this from the event loop — that is what
+    /// [`Self::poll_details_probe`] exists to prevent.
+    #[cfg(test)]
+    pub fn probe_details_blocking(&mut self, item: usize) {
+        let d = crate::media_details::probe_job(self.source.as_ref(), item, self.details_gen);
+        self.exif_cache.insert(item, d);
     }
 
     /// Animation facts for the detailed panel: empty for a still. Once the sequence is
@@ -11254,6 +11296,7 @@ mod tests {
                 fields: vec![("Video codec".into(), "HEVC".into())],
                 media,
                 has_audio,
+                probe_state: crate::media_details::ProbeState::Ready,
             },
         );
     }
@@ -11334,6 +11377,271 @@ mod tests {
         let mut core = test_core();
         seed_details(&mut core, 0, None, None);
         assert!(seeded_rows(&core, 0).is_empty());
+    }
+
+    // -- the off-thread Details probe (task 98.6) ---------------------------
+
+    /// Land a probe result as the worker would, so the staleness rules can be driven
+    /// without a real container.
+    fn fake_probe(core: &mut AppCore, gen: u64, item: usize, identity: &str) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(crate::app_core::ItemDetails {
+            size: 99,
+            fields: vec![("Video codec".into(), "HEVC".into())],
+            media: None,
+            has_audio: Some(true),
+            probe_state: crate::media_details::ProbeState::Ready,
+        })
+        .unwrap();
+        core.exif_cache
+            .insert(item, crate::app_core::ItemDetails::loading());
+        core.details_probe = Some(crate::media_details::DetailsProbe {
+            gen,
+            item,
+            identity: identity.to_string(),
+            copy_when_done: false,
+            rx,
+        });
+    }
+
+    #[test]
+    fn a_landed_probe_replaces_the_loading_entry_and_refreshes_the_panel() {
+        let mut core = test_core();
+        core.source = five_photos();
+        core.details_gen = 3;
+        let name = core.source.name(1).to_string();
+        fake_probe(&mut core, 3, 1, &name);
+
+        core.effects.clear();
+        core.poll_details_probe();
+        let d = core.exif_cache.get(&1).expect("cached");
+        assert_eq!(d.probe_state, crate::media_details::ProbeState::Ready);
+        assert_eq!(d.size, 99);
+        assert!(core
+            .effects
+            .iter()
+            .any(|e| matches!(e, contract::CoreEffect::PanelsChanged)));
+        assert!(core.details_probe.is_none());
+    }
+
+    /// The headline staleness rule: a probe that lands after a deck rebuild describes a
+    /// *different file* at that index, so it must be dropped, not cached.
+    #[test]
+    fn a_probe_landing_after_a_deck_rebuild_is_rejected() {
+        let mut core = test_core();
+        core.source = five_photos();
+        let name = core.source.name(1).to_string();
+        fake_probe(&mut core, 3, 1, &name);
+        core.details_gen = 4; // the deck was rebuilt while the worker ran
+
+        core.poll_details_probe();
+        assert_eq!(
+            core.exif_cache.get(&1).map(|d| d.probe_state),
+            Some(crate::media_details::ProbeState::Loading),
+            "the stale result must not overwrite the entry"
+        );
+        assert!(core.details_probe.is_none());
+    }
+
+    /// The subtler one the generation alone can't catch: same deck generation, but index
+    /// `item` now names a different file.
+    #[test]
+    fn a_probe_whose_item_now_names_a_different_file_is_rejected() {
+        let mut core = test_core();
+        core.source = five_photos();
+        fake_probe(&mut core, 0, 1, "some-other-file.mp4");
+
+        core.poll_details_probe();
+        assert_eq!(
+            core.exif_cache.get(&1).map(|d| d.probe_state),
+            Some(crate::media_details::ProbeState::Loading),
+            "identity mismatch must reject the result"
+        );
+    }
+
+    /// A dead worker must not leave the entry stuck on "Reading…" forever — the
+    /// placeholder is also the spawn guard, so a stuck `Loading` would never re-probe.
+    #[test]
+    fn a_dead_worker_marks_the_entry_failed_rather_than_hanging_on_loading() {
+        let mut core = test_core();
+        core.source = five_photos();
+        let name = core.source.name(1).to_string();
+        let (tx, rx) = std::sync::mpsc::channel::<crate::app_core::ItemDetails>();
+        drop(tx); // the worker died without sending
+        core.exif_cache
+            .insert(1, crate::app_core::ItemDetails::loading());
+        core.details_probe = Some(crate::media_details::DetailsProbe {
+            gen: core.details_gen,
+            item: 1,
+            identity: name,
+            copy_when_done: false,
+            rx,
+        });
+
+        core.poll_details_probe();
+        assert_eq!(
+            core.exif_cache.get(&1).map(|d| d.probe_state),
+            Some(crate::media_details::ProbeState::Failed)
+        );
+        assert!(core.details_probe.is_none());
+    }
+
+    /// An in-flight probe keeps the loop ticking, or the result could sit unread in the
+    /// channel on an otherwise idle app.
+    #[test]
+    fn an_in_flight_probe_keeps_the_loop_polling() {
+        let mut core = test_core();
+        core.source = five_photos();
+        let quiet = core.work_pending();
+        let (_tx, rx) = std::sync::mpsc::channel::<crate::app_core::ItemDetails>();
+        core.details_probe = Some(crate::media_details::DetailsProbe {
+            gen: core.details_gen,
+            item: 1,
+            identity: core.source.name(1).to_string(),
+            copy_when_done: false,
+            rx,
+        });
+        assert!(
+            core.work_pending(),
+            "work_pending was {quiet} before the probe"
+        );
+    }
+
+    /// A deck rebuild drops the in-flight probe and bumps the generation, so nothing from
+    /// the old deck can land.
+    #[test]
+    fn entering_the_empty_state_cancels_the_probe_and_bumps_the_generation() {
+        let mut core = test_core();
+        core.source = five_photos();
+        let (_tx, rx) = std::sync::mpsc::channel::<crate::app_core::ItemDetails>();
+        core.details_probe = Some(crate::media_details::DetailsProbe {
+            gen: core.details_gen,
+            item: 1,
+            identity: "x".into(),
+            copy_when_done: false,
+            rx,
+        });
+        let gen = core.details_gen;
+        core.enter_empty_state();
+        assert!(core.details_probe.is_none());
+        assert!(core.details_gen > gen);
+        assert!(core.exif_cache.is_empty());
+    }
+
+    /// The Details generation must NOT be the geometry epoch: a window resize bumps that
+    /// one, and would throw away perfectly good catalogs (and, worse, a rebuild would not
+    /// bump it at all).
+    #[test]
+    fn the_details_generation_is_a_deck_generation_not_the_geometry_epoch() {
+        let mut core = test_core();
+        core.source = five_photos();
+        let gen = core.details_gen;
+        core.epoch += 1; // a resize
+        assert_eq!(
+            core.details_gen, gen,
+            "geometry must not touch the deck gen"
+        );
+    }
+
+    /// "Copy Image Details" during an in-flight probe must not hand over a table missing
+    /// the video's rows — it defers and copies the complete set when the probe lands.
+    #[cfg(any(windows, target_os = "macos", all(unix, feature = "ffvideo")))]
+    #[test]
+    fn copy_details_mid_probe_defers_and_copies_the_complete_set() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../pb-decode/tests/fixtures/video/multitrack.mp4");
+        let mut core = test_core();
+        core.source = Arc::new(FsSource::new(vec![fixture]));
+        core.playlist = Playlist::new(1, 0);
+        core.displayed_item = Some(0);
+
+        core.copy_image_details(); // cold: the probe has only just started
+        assert!(
+            core.details_probe
+                .as_ref()
+                .is_some_and(|p| p.copy_when_done),
+            "the copy must be deferred, not served from a half-empty cache"
+        );
+        assert!(
+            !core.effects.iter().any(|e| matches!(
+                e,
+                contract::CoreEffect::WriteClipboard(contract::ClipboardPayload::Text { .. })
+            )),
+            "nothing may reach the clipboard before the probe lands"
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while core.details_probe.is_some() && std::time::Instant::now() < deadline {
+            core.poll_details_probe();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let copied = core
+            .effects
+            .iter()
+            .find_map(|e| match e {
+                contract::CoreEffect::WriteClipboard(contract::ClipboardPayload::Text {
+                    text,
+                    ..
+                }) => Some(text.clone()),
+                _ => None,
+            })
+            .expect("the deferred copy landed");
+        assert!(copied.contains("Video codec: H.264"), "{copied}");
+        assert!(
+            copied.contains("Audio"),
+            "the tracks are in the copy: {copied}"
+        );
+        assert!(copied.contains("Track 1"), "{copied}");
+    }
+
+    /// The real thing, end to end: a real container, the real worker, the real poll.
+    /// `ensure_exif_cached` must return **without** the catalog (it did not block), and
+    /// the catalog must arrive on a later tick.
+    #[cfg(any(windows, target_os = "macos", all(unix, feature = "ffvideo")))]
+    #[test]
+    fn a_real_video_probes_off_thread_and_lands_its_catalog() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../pb-decode/tests/fixtures/video/multitrack.mp4");
+        assert!(fixture.exists(), "fixture missing: {}", fixture.display());
+
+        let mut core = test_core();
+        core.source = Arc::new(FsSource::new(vec![fixture]));
+        core.playlist = Playlist::new(1, 0);
+        core.displayed_item = Some(0);
+
+        core.ensure_exif_cached(0);
+        // The event loop was not made to wait for the container open.
+        assert_eq!(
+            core.exif_cache.get(&0).map(|d| d.probe_state),
+            Some(crate::media_details::ProbeState::Loading),
+            "ensure_exif_cached must not block on the probe"
+        );
+        assert!(core.details_probe.is_some());
+        assert!(core.work_pending(), "the probe must keep the loop ticking");
+
+        // Spin the poll as `tick` would, with a generous bound so a slow machine can't
+        // flake but a genuine hang still fails.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while core.details_probe.is_some() && std::time::Instant::now() < deadline {
+            core.poll_details_probe();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let d = core.exif_cache.get(&0).expect("cached");
+        assert_eq!(
+            d.probe_state,
+            crate::media_details::ProbeState::Ready,
+            "probe never landed"
+        );
+        let cat = d.media.as_ref().expect("catalog landed");
+        assert_eq!(cat.audio.tracks.len(), 2, "the fixture's two audio tracks");
+        assert_eq!(d.has_audio, Some(true));
+        assert!(d
+            .fields
+            .iter()
+            .any(|(k, v)| k == "Video codec" && v == "H.264"));
+        // ...and it renders as real rows.
+        let rows = crate::tracks::track_rows(cat, d.has_audio);
+        assert!(matches!(&rows[0], DetailRow::Span { text, bold: true } if text == "Audio"));
     }
 
     /// The rows stay `Span`/`Pair`, so the Details copy payload (#32) keeps working

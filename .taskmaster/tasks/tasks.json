@@ -1345,8 +1345,8 @@
           {
             "id": 6,
             "title": "Phase 2 — off-thread, generation-safe Details probe",
-            "description": "NOT DONE. ensure_exif_cached still probes synchronously on the core path (pre-existing behavior, now doing slightly more work). Plan wants an async MediaDetailsProbe pipeline: Inspector cold-miss -> Loading, worker probes, result carries deck epoch + item + source identity + request id, core accepts only on full match, PanelsChanged refreshes, navigation drops stale results.",
-            "status": "pending"
+            "description": "DONE. media_details.rs: the container open runs on a worker; ensure_exif_cached records Loading (also the spawn guard) and returns. poll_details_probe (in tick) accepts only on matching deck generation AND item identity; a dead worker marks Failed so it cannot hang on Reading. New details_gen is a DECK generation bumped with text_gen -- NOT AppCore::epoch, which is the geometry generation. Copy Image Details defers via copy_when_done. Stills stay synchronous.",
+            "status": "done"
           },
           {
             "id": 7,
