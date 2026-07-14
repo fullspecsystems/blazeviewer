@@ -1166,7 +1166,7 @@ fn about_ui(ui: &mut egui::Ui, icon: Option<&egui::TextureHandle>) {
         ui.add_space(10.0);
         ui.label(pb_app_core::TAGLINE);
         ui.add_space(8.0);
-        ui.label("\u{00a9} JD Lien 2026");
+        ui.label("\u{00a9} FullSpec Systems Inc. 2026");
         ui.add_space(12.0);
         ui.hyperlink_to(
             "github.com/jdlien/photoblaze",
