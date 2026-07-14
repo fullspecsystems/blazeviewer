@@ -1351,8 +1351,8 @@
           {
             "id": 7,
             "title": "Phase 2 — archive-video catalog parity",
-            "description": "NOT DONE. archive_video_meta_ready still carries only codec/fps/duration/has_audio, so an archived video keeps the placeholder Audio row while a loose one lists tracks. Needs the round-trip (and Swift CoreModel) widened to carry a catalog + a stale-guard generation.",
-            "status": "pending"
+            "description": "MOSTLY DONE. media_details::probe_job now probes an archive entry over the VideoInput::Bytes seam (the entry has no path, so every probe skipped it before). Verified: a loose MKV and the same MKV in a ZIP produce byte-identical catalogs + rows. Legal now that 98.6 moved the job off the event loop -- the old objection was inflating the entry ON THE EVENT LOOP. Windows archive videos gain real basic facts (they reported nothing before). archive_video_meta_ready got a richer-wins guard so the Swift round-trip cannot clobber the Rust catalog by landing second. REMAINING: on a --no-ffvideo macOS build (what the shipped DMG is) an archived video still uses the thin Swift AVFoundation round-trip, which carries no catalog and has NO stale guard (no request id, unlike the poster path). Closing it = a per-track incremental FFI (begin/track_add/end with a request id) rather than marshalling the nested catalog through swift-bridge.",
+            "status": "review"
           },
           {
             "id": 8,

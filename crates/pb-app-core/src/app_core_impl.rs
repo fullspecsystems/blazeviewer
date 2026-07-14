@@ -4035,9 +4035,16 @@ impl AppCore {
 
     /// Cache the inspector's video-fact rows for a macOS archive video, probed by the shell
     /// via AVFoundation (Rust can't build an `AVAsset` from bytes). Mirrors the row set the
-    /// Windows/loose-file probe produces (`ensure_exif_cached`): Duration / Video codec /
-    /// Frame rate / Audio. Overwrites any placeholder and re-signals the panel so an already-
-    /// open inspector refreshes. `fps_milli` = fps×1000; `duration_ms` < 0 = unknown.
+    /// Windows/loose-file probe produces: Duration / Video codec / Frame rate / Audio.
+    /// Re-signals the panel so an already-open inspector refreshes. `fps_milli` = fps×1000;
+    /// `duration_ms` < 0 = unknown.
+    ///
+    /// **This is the thin path.** It carries no track catalog, so on a build where the
+    /// FFmpeg backend can read the entry's bytes itself (`media_details::probe_job`, task
+    /// 98.7) that probe produces strictly more — and this must not overwrite it. Hence the
+    /// richer-wins guard below rather than a blind `insert`: the two race by construction
+    /// (a detached Swift `Task` vs. a Rust worker) and whichever lands second would
+    /// otherwise win on timing alone.
     pub fn archive_video_meta_ready(
         &mut self,
         item: usize,
@@ -4046,6 +4053,14 @@ impl AppCore {
         duration_ms: i64,
         has_audio: bool,
     ) {
+        // A catalog-bearing entry is strictly richer than anything this path can build.
+        if self
+            .exif_cache
+            .get(&item)
+            .is_some_and(|d| d.media.is_some())
+        {
+            return;
+        }
         let mut rows: Vec<(String, String)> = Vec::new();
         if duration_ms > 0 {
             let d = std::time::Duration::from_millis(duration_ms as u64);
@@ -4067,11 +4082,12 @@ impl AppCore {
             crate::app_core::ItemDetails {
                 size,
                 fields: rows,
-                // TODO(#98 archive parity): the shell's archive round-trip still carries
-                // only codec/fps/duration/has_audio, so an archived video keeps the old
-                // placeholder `Audio: Yes` row while a loose one gets the real per-track
-                // listing. Closing this means widening the round-trip (and the Swift
-                // `CoreModel` side) to carry a catalog + a stale-guard generation.
+                // TODO(98.7 remainder): this shell round-trip still carries no catalog, so
+                // on a **`--no-ffvideo` macOS build** (what the shipped DMG is) an archived
+                // video keeps the placeholder `Audio: Yes` row while a loose one lists its
+                // tracks. `probe_job` closes the gap wherever FFmpeg/MF can read the entry's
+                // bytes; closing it *here* means widening this round-trip (and the Swift
+                // `CoreModel`) to carry a catalog + a stale-guard request id.
                 media: None,
                 has_audio: Some(has_audio),
                 // The shell already probed this one; there is no worker to wait on.
@@ -11592,6 +11608,94 @@ mod tests {
             "the tracks are in the copy: {copied}"
         );
         assert!(copied.contains("Track 1"), "{copied}");
+    }
+
+    /// **The plan's acceptance criterion for 98.7**: a loose MKV and *the same MKV inside a
+    /// ZIP* must show identical Details. Before this, the archived one had no path, so every
+    /// probe skipped it and the panel showed nothing.
+    ///
+    /// `ffvideo`-gated because that is the build where FFmpeg can read the entry's bytes;
+    /// the shipped `--no-ffvideo` macOS build still goes through the thin Swift round-trip.
+    #[cfg(feature = "ffvideo")]
+    #[test]
+    fn an_archived_video_reports_the_same_details_as_the_loose_file() {
+        use std::io::Write;
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../pb-decode/tests/fixtures/video/multitrack.mkv");
+        let bytes = std::fs::read(&fixture).expect("fixture");
+
+        // The loose file's catalog.
+        let loose = crate::media_details::probe_job(&FsSource::new(vec![fixture]), 0, 1);
+        let loose_cat = loose.media.as_ref().expect("loose catalog");
+
+        // The same bytes inside a ZIP.
+        let zip_path = std::env::temp_dir().join(format!("pb_98_7_{}.zip", std::process::id()));
+        {
+            let f = std::fs::File::create(&zip_path).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            zw.start_file("clip.mkv", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zw.write_all(&bytes).unwrap();
+            zw.finish().unwrap();
+        }
+        let zs =
+            pb_source::ZipSource::open(&zip_path, None, |ext| ext == "mkv").expect("open the zip");
+        let archived = crate::media_details::probe_job(&zs, 0, 1);
+        let _ = std::fs::remove_file(&zip_path);
+
+        // The archive entry genuinely has no path — this is the case that used to be skipped.
+        assert!(zs.path(0).is_none(), "the premise: an entry has no path");
+
+        let arch_cat = archived
+            .media
+            .as_ref()
+            .expect("the archived video must get a catalog too");
+        assert_eq!(
+            arch_cat, loose_cat,
+            "a loose MKV and the same MKV in a ZIP must enumerate identically"
+        );
+        assert_eq!(archived.fields, loose.fields, "same basic facts");
+        assert_eq!(archived.has_audio, loose.has_audio);
+        // ...and it renders as the same rows.
+        assert_eq!(
+            crate::tracks::track_rows(arch_cat, archived.has_audio),
+            crate::tracks::track_rows(loose_cat, loose.has_audio)
+        );
+        assert_eq!(arch_cat.audio.tracks.len(), 2);
+        assert_eq!(arch_cat.subtitles.tracks.len(), 4);
+    }
+
+    /// The thin Swift round-trip races the Rust worker by construction, so it must never
+    /// overwrite a richer catalog-bearing entry just by landing second.
+    #[test]
+    fn the_shell_archive_round_trip_never_clobbers_a_richer_catalog() {
+        let mut core = test_core();
+        let cat = pb_decode::MediaTrackCatalog::new(
+            1,
+            pb_decode::MediaBackend::FFmpeg,
+            pb_decode::TrackSet::complete(vec![track("AAC", "eng")]),
+            pb_decode::TrackSet::complete(vec![]),
+        );
+        seed_details(&mut core, 2, Some(cat), Some(true));
+
+        core.archive_video_meta_ready(2, "HEVC".to_string(), 30_000, 5_000, true);
+
+        let d = core.exif_cache.get(&2).expect("still cached");
+        assert!(d.media.is_some(), "the catalog must survive");
+        assert!(
+            !d.fields.iter().any(|(k, _)| k == "Audio"),
+            "the placeholder Audio row must not come back"
+        );
+        // ...but it still populates an entry that has no catalog.
+        core.exif_cache.remove(&2);
+        core.archive_video_meta_ready(2, "HEVC".to_string(), 30_000, 5_000, true);
+        assert!(core
+            .exif_cache
+            .get(&2)
+            .expect("cached")
+            .fields
+            .iter()
+            .any(|(k, v)| k == "Video codec" && v == "HEVC"));
     }
 
     /// The real thing, end to end: a real container, the real worker, the real poll.

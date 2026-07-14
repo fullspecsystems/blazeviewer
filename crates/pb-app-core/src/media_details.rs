@@ -91,10 +91,8 @@ pub fn spawn(
 /// `generation` stamps every [`pb_decode::TrackId`] in the catalog, so a `TrackId` minted
 /// here can never resolve against the deck that replaced this one.
 pub fn probe_job(source: &dyn PhotoSource, item: usize, generation: u64) -> ItemDetails {
-    // A video's encoded bytes never enter RAM here (only playback fetches them): the
-    // panel's file size comes from a stat, or the archive directory's size hint for an
-    // entry. An archive entry skips the container probe — it would have to inflate the
-    // whole entry; playback's `Opened` carries duration anyway.
+    // The panel's file size comes from a stat, or the archive directory's size hint for an
+    // entry — never from reading the file.
     let size = source
         .path(item)
         .and_then(|p| std::fs::metadata(p).ok())
@@ -166,6 +164,42 @@ pub fn probe_job(source: &dyn PhotoSource, item: usize, generation: u64) -> Item
         if let Ok(probe) = pb_decode::ff_probe_video_details(&input, generation) {
             fill_rows(&probe.video);
             media = Some(probe.tracks);
+        }
+    }
+
+    // --- archive entries (task 98.7) --------------------------------------------------
+    //
+    // An archive entry has no path, so every probe above skipped it and the panel showed
+    // a loose MKV and *the same MKV inside a ZIP* differently. The entry's bytes are the
+    // input instead, over the same `VideoInput::Bytes` seam playback already uses.
+    //
+    // This inflates the entry into RAM, which is exactly why it used to be refused here —
+    // but the objection was that it happened **on the event loop**, and 98.6 moved this
+    // whole job to a worker. RAM-only and dropped with the probe, so the no-trace
+    // guarantee is untouched. (7z entries are already resident: that source is
+    // eager-decode-to-RAM.)
+    #[cfg(any(windows, feature = "ffvideo"))]
+    if media.is_none() && source.path(item).is_none() {
+        if let Ok(data) = source.bytes(item) {
+            let input = crate::video::VideoInput::Bytes {
+                data: std::sync::Arc::new(data),
+                // The name carries the real extension, which is what routes the container
+                // handler — a byte stream has no URL to sniff.
+                name: source.name(item).to_string(),
+            };
+            #[cfg(feature = "ffvideo")]
+            if let Ok(probe) = pb_decode::ff_probe_video_details(&input, generation) {
+                fill_rows(&probe.video);
+                media = Some(probe.tracks);
+            }
+            // Windows: Media Foundation reads the entry through its in-RAM byte stream.
+            // The catalog is still `Unavailable` (98.5), but the basic facts are real —
+            // an archived video reported *nothing* before this.
+            #[cfg(all(windows, not(feature = "ffvideo")))]
+            if let Ok(probe) = pb_decode::probe_video_details_input(&input, generation) {
+                fill_rows(&probe.video);
+                media = Some(probe.tracks);
+            }
         }
     }
     let _ = generation; // unused where no platform probe compiles in

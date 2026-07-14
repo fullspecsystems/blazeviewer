@@ -29,9 +29,10 @@ with any pre-release suffix carried only by the tag.
   (`Shift+I` → copy) includes the tracks; if you copy while a video is still being read, the copy
   waits and gives you the complete set rather than a half-filled one. Reading a video's details never
   stalls the viewer — it happens in the background, so a damaged file or one on a slow network share
-  can't freeze the window; the panel says "Reading video details…" until it's ready. *Windows
-  currently reports "Present — details unavailable" for audio pending its own track enumeration;
-  videos inside ZIP/7z archives still show the shorter summary.*
+  can't freeze the window; the panel says "Reading video details…" until it's ready. A video inside a
+  ZIP or 7z now reports exactly what the same file reports loose. *Windows currently reports
+  "Present — details unavailable" for audio pending its own track enumeration, and on macOS an
+  archived video still shows the shorter summary unless the build includes the FFmpeg backend.*
 - The info line (`i`) now defaults to the **bottom-center** of the screen instead of the
   bottom-right. (Existing users keep whatever position they've already set; this only affects
   fresh installs.)
