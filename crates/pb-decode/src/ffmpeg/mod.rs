@@ -31,6 +31,8 @@ pub mod tracks;
 #[cfg(feature = "ffvideo")]
 pub mod audio_decoder;
 #[cfg(feature = "ffvideo")]
+pub mod demux;
+#[cfg(feature = "ffvideo")]
 pub mod hw;
 #[cfg(feature = "ffvideo")]
 pub mod poster;
