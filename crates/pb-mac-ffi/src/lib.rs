@@ -1572,6 +1572,60 @@ impl AppCoreHandle {
         }
     }
 
+    // ── Subtitles (task #90). The core rasterizes the cue to a premultiplied RGBA8 bitmap
+    // (physical px, so it's Retina-sharp) and gives the rect to draw it in (logical points).
+    // Swift pulls the pixels only when the generation changes — the `thumb_rgba` contract.──
+
+    /// Bumped whenever the overlay changes; `0` = nothing showing. Swift caches its
+    /// `NSImage` against this and skips the pixel pull when it's unchanged — which is
+    /// almost every frame, since a cue lives for seconds.
+    fn subtitle_gen(&self) -> u64 {
+        self.core.subtitles.gen()
+    }
+
+    fn subtitle_width(&self) -> u32 {
+        self.core.subtitles.bitmap().map(|b| b.w).unwrap_or(0)
+    }
+
+    fn subtitle_height(&self) -> u32 {
+        self.core.subtitles.bitmap().map(|b| b.h).unwrap_or(0)
+    }
+
+    /// The overlay's **premultiplied** RGBA8 pixels — note the difference from
+    /// `thumb_rgba`, which is straight alpha: the CGImage must be built with
+    /// `.premultipliedLast`, or every antialiased glyph edge and the whole translucent
+    /// background come out wrong.
+    fn subtitle_rgba(&self) -> Vec<u8> {
+        self.core
+            .subtitles
+            .bitmap()
+            .map(|b| b.rgba.clone())
+            .unwrap_or_default()
+    }
+
+    /// Where to draw it, in **logical points**, top-left origin (the `video_placement`
+    /// convention — the Swift view flips to AppKit's bottom-left).
+    fn subtitle_rect(&self) -> ffi::VideoPlacementFfi {
+        match self.core.subtitles.rect() {
+            Some(r) => ffi::VideoPlacementFfi {
+                valid: true,
+                x: r.x,
+                y: r.y,
+                w: r.w,
+                h: r.h,
+                rotation: 0,
+            },
+            None => ffi::VideoPlacementFfi {
+                valid: false,
+                x: 0.0,
+                y: 0.0,
+                w: 0.0,
+                h: 0.0,
+                rotation: 0,
+            },
+        }
+    }
+
     // ── The native play hint (▶/Live Photo on a motion item): the last HUD overlay to go
     // native. The core signals *when* to flash it (seq) + *what* it is (kind); the host owns
     // the pill, its 3s fade, hover-to-hold, and click-to-play (via menu_action "play_pause").──
@@ -3621,6 +3675,14 @@ mod ffi {
             has_audio: bool,
         );
         fn video_placement(&self) -> VideoPlacementFfi;
+
+        // Subtitles (task #90): a premultiplied RGBA8 overlay + where it goes. Pulled on
+        // a generation change only, like the thumbnail pixels.
+        fn subtitle_gen(&self) -> u64;
+        fn subtitle_width(&self) -> u32;
+        fn subtitle_height(&self) -> u32;
+        fn subtitle_rgba(&self) -> Vec<u8>;
+        fn subtitle_rect(&self) -> VideoPlacementFfi;
         fn info_line_align(&self) -> u8;
         fn play_hint_kind(&self) -> u8;
         fn play_hint_seq(&self) -> u64;

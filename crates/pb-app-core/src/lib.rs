@@ -62,6 +62,9 @@ pub mod slideshow;
 // Subtitle selection + style + placement (task #90.3/#90.4): the pure decisions behind
 // the overlay — which track shows, how it looks, and where it goes.
 pub mod subtitle;
+// The runtime that joins them to the screen: workers, the cue clock, and the bitmap +
+// rect both shells composite.
+pub mod subtitle_engine;
 pub mod thumbs;
 pub mod timing;
 // The shared media-track formatter (task #98): one place a track turns into the line

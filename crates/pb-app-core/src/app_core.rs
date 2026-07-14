@@ -263,6 +263,10 @@ pub struct AppCore {
     /// **Not** [`AppCore::epoch`], which is the *geometry* generation (a window resize
     /// bumps it) and would both invalidate good catalogs and miss real rebuilds.
     pub details_gen: u64,
+    /// Subtitle overlay state (task #90): the cue clock, the loaded track, and the
+    /// bitmap + rect the shells composite. Shares `details_gen` as its staleness
+    /// generation — both describe "what file is at index i", which is the same question.
+    pub subtitles: crate::subtitle_engine::SubtitleEngine,
     /// Per-item "text in image" results (`T` / Copy Text from Image, task #45):
     /// on-device OCR lines + QR payloads, cached so a revisit is instant. RAM-only
     /// (privacy #2) — dropped on rebuild and exit, never written anywhere.

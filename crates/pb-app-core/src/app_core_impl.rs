@@ -122,6 +122,18 @@ impl AppCore {
             exif_cache: std::collections::HashMap::new(),
             details_probe: None,
             details_gen: 0,
+            // Subtitles are off until something turns them on. `PB_SUBTITLES=1` is the
+            // **temporary dev gate** for task #90's first slice — the real switch is the
+            // #99 track picker plus a persisted preference (#90.4). It shows the first
+            // renderable sidecar; it does not yet implement `Automatic`'s forced-only rule
+            // (that needs the catalog, which `resolve_track` is already written against).
+            subtitles: crate::subtitle_engine::SubtitleEngine::new(
+                if std::env::var_os("PB_SUBTITLES").is_some_and(|v| v == "1") {
+                    crate::subtitle::SubtitleMode::Automatic
+                } else {
+                    crate::subtitle::SubtitleMode::Off
+                },
+            ),
             recognized_text: std::collections::HashMap::new(),
             text_scan: None,
             text_gen: 0,
@@ -315,6 +327,9 @@ impl AppCore {
             // `poll_details_probe` swaps the panel off "Reading…" promptly. Without this
             // an idle app could stop ticking with the result sitting in the channel.
             || self.details_probe.is_some()
+            // A subtitle worker (the font system / a sidecar read, task #90) keeps
+            // polling so its result installs promptly.
+            || self.subtitles.working()
             // The target isn't on screen at the current fit yet (incl. a same-index
             // re-present pending after a geometry change bumped the epoch) — keep polling
             // so `drain_results` presents it (task #18 finding #5).
@@ -1318,6 +1333,9 @@ impl AppCore {
         // refresh the `T` panel's busy state, run a deferred copy.
         self.poll_text_scan();
         self.poll_details_probe();
+        // 1c'. Rebuild the subtitle overlay for the playhead (task #90). Cheap when
+        // nothing changed and free when subtitles are off.
+        self.tick_subtitles();
 
         // 1d. Pick up a finished off-thread AI describe (task #44): cache it and refresh
         // the description panel's busy state.
@@ -7735,6 +7753,46 @@ impl AppCore {
             }
             _ => 0.0,
         }
+    }
+
+    /// Rebuild the subtitle overlay against the playhead (task #90) — the one call that
+    /// joins discovery, the cue track, placement, and the rasterizer to the screen. Runs
+    /// every tick; both shells then read [`AppCore::subtitles`] and composite.
+    ///
+    /// The clock is the **session's** `desired_position` — the same one the video frames
+    /// are presented against, so a subtitle can't drift from the picture. It covers the
+    /// `VideoSession` backend (FFmpeg on macOS/Linux, MF on Windows). The macOS *native*
+    /// AVPlayer route pushes its position through `native_video_progress` at ~4 Hz, which
+    /// is too coarse to cut a cue on and is only a resume record — so subtitles stay dark
+    /// there until that path exposes a real playhead.
+    pub fn tick_subtitles(&mut self) {
+        self.subtitles.poll(self.details_gen);
+
+        let Some(item) = self.displayed_item.filter(|_| self.video_session_active()) else {
+            self.subtitles.clear_item();
+            return;
+        };
+        // Off costs one branch: no discovery thread, no font system, no work at all.
+        if self.subtitles.mode == crate::subtitle::SubtitleMode::Off {
+            return;
+        }
+        let source = Arc::clone(&self.source);
+        self.subtitles
+            .ensure_loaded(&source, item, self.details_gen);
+
+        let Some((x, y, w, h, _rot)) = self.video_placement() else {
+            return;
+        };
+        let t = Duration::from_secs_f64(self.video_session_elapsed_secs().max(0.0));
+        let vp = (self.viewport.width as f32, self.viewport.height as f32);
+        let video = crate::subtitle::Rect { x, y, w, h };
+        // `controls_h` is 0 until a shell reports its transport bar's height — the lift
+        // exists in `place()`, nothing measures it yet.
+        //
+        // No redraw is requested on a change: a playing video already draws every frame,
+        // which is the only state this runs in.
+        self.subtitles
+            .update(t, vp, video, 0.0, self.viewport.scale_factor);
     }
 
     /// The active session's duration in seconds; `0.0` when unknown/none (the

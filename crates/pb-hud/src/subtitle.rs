@@ -16,7 +16,7 @@
 //! Runs on **cue change only**, never per frame (spike: ~0.15 ms/cue warm against an
 //! 8.3 ms frame).
 
-use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache};
+use cosmic_text::{Align, Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache};
 
 /// A rasterized overlay: tightly packed, **premultiplied** RGBA8.
 ///
@@ -144,6 +144,14 @@ impl SubtitleRasterizer {
             Shaping::Advanced, // the full shaper: contextual forms, bidi
             None,
         );
+        // Center every line against the others — the universal subtitle convention, and
+        // what a two-line cue like "My mother" / "was one of the greats." needs to not
+        // read as ragged left. Alignment is per-`BufferLine`, so it's set after the text.
+        // The block is still shifted to its own ink below, so this centers the lines
+        // *relative to each other*, not against the wrap box.
+        for line in b.lines.iter_mut() {
+            line.set_align(Some(Align::Center));
+        }
         b.shape_until_scroll(false);
 
         // --- measure ------------------------------------------------------
@@ -597,6 +605,44 @@ mod tests {
                 .unwrap_or_else(|| panic!("{s}"));
             assert!(ink(b) > 0, "{s} rendered nothing — fallback failed");
         }
+    }
+
+    /// A multi-line cue centers its lines against each other — the subtitle convention
+    /// every player follows. cosmic-text defaults to left, which rendered a short line
+    /// over a long one as ragged-left and looked plainly wrong.
+    ///
+    /// Measured, not eyeballed: the short line's ink must be centered in the bitmap, so
+    /// its left and right margins match. Left alignment leaves the whole gap on the right.
+    #[test]
+    fn a_short_line_over_a_long_one_is_centered_not_ragged_left() {
+        let mut r = SubtitleRasterizer::new();
+        let b = r
+            .render(
+                &[
+                    "My mother".to_string(),
+                    "was one of the greats.".to_string(),
+                ],
+                &params(),
+            )
+            .expect("rendered");
+
+        // Column extents of the *first* line's ink (the top half of the block).
+        let (w, h) = (b.w as usize, b.h as usize);
+        let (mut lo, mut hi) = (w, 0usize);
+        for y in 0..h / 2 {
+            for x in 0..w {
+                if b.rgba[(y * w + x) * 4 + 3] > 0 {
+                    lo = lo.min(x);
+                    hi = hi.max(x);
+                }
+            }
+        }
+        assert!(lo < hi, "the short line drew nothing");
+        let (left, right) = (lo as i32, (w - 1 - hi) as i32);
+        assert!(
+            (left - right).abs() <= 4,
+            "short line not centered: {left}px left vs {right}px right margin"
+        );
     }
 
     /// Regression: cosmic-text lays an **RTL** run out *right-aligned within the buffer

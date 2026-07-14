@@ -91,6 +91,16 @@ final class CoreModel {
     /// pump keeps the controls up while this is set (not `@Published`; only `pump()` reads it).
     var videoScrubbing = false
 
+    /// The subtitle overlay (task #90): the core rasterizes the cue — shaping, outline,
+    /// shadow, background, placement — and hands us a bitmap and a rect. The whole Swift
+    /// side is "draw this image there", so macOS and winit can never disagree about what a
+    /// subtitle looks like.
+    private(set) var subtitleImage: NSImage?
+    private(set) var subtitleRect: CGRect = .zero
+    /// The generation of `subtitleImage`. A cue lives for seconds, so this is unchanged on
+    /// nearly every frame — and an unchanged generation transfers no pixels.
+    @ObservationIgnored private var subtitleGen: UInt64 = 0
+
     /// The native play hint (▶ / Live Photo on a motion item) — the last on-image HUD overlay
     /// to go native. `kind`: 0 none / 1 Live Photo / 2 animation. It flashes for ~3s on a fresh
     /// motion item, hover holds it open, and a click (or P) plays.
@@ -934,6 +944,47 @@ final class CoreModel {
         return image
     }
 
+    /// Pull the subtitle overlay if it changed (task #90). Runs every tick, so the fast
+    /// path — a cue that's still on screen — must be a single `u64` read and two compares.
+    ///
+    /// The rect is refreshed even when the generation didn't change, because the core
+    /// bumps the generation on a move as well as a repaint; the pixels are only pulled on
+    /// a real change.
+    private func syncSubtitle() {
+        let gen = core.subtitle_gen()
+        if gen == subtitleGen { return }
+        subtitleGen = gen
+
+        let r = core.subtitle_rect()
+        let w = Int(core.subtitle_width())
+        let h = Int(core.subtitle_height())
+        guard gen != 0, r.valid, w > 0, h > 0 else {
+            if subtitleImage != nil { subtitleImage = nil }
+            subtitleRect = .zero
+            return
+        }
+        subtitleRect = CGRect(x: CGFloat(r.x), y: CGFloat(r.y), width: CGFloat(r.w), height: CGFloat(r.h))
+
+        let rgba = core.subtitle_rgba()
+        guard rgba.len() == w * h * 4 else { return }
+        let data = Data(bytes: UnsafeRawPointer(rgba.as_ptr()), count: rgba.len())
+        guard let provider = CGDataProvider(data: data as CFData),
+              let cg = CGImage(
+                  width: w, height: h,
+                  bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,
+                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                  // Premultiplied — unlike `thumbImage`'s straight alpha. The rasterizer
+                  // composites outline/shadow/background itself and emits premultiplied
+                  // pixels; reading them as straight alpha halos every glyph edge.
+                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                  provider: provider, decode: nil, shouldInterpolate: false,
+                  intent: .defaultIntent)
+        else { return }
+        // Size in *points* = the core's rect, so the extra pixels land on the Retina grid
+        // instead of being thrown away — this is what makes the text sharp.
+        subtitleImage = NSImage(cgImage: cg, size: subtitleRect.size)
+    }
+
     func thumbName(_ i: Int) -> String { core.thumb_name(UInt(i)).toString() }
     func thumbBadge(_ i: Int) -> Int { Int(core.thumb_badge(UInt(i))) }
     func thumbRotation(_ i: Int) -> Int { Int(core.thumb_rotation(UInt(i))) }
@@ -1607,6 +1658,7 @@ final class CoreModel {
         if controls != videoControlsVisible {
             withAnimation(Layout.chromeFade) { videoControlsVisible = controls }
         }
+        syncSubtitle()
         // The native play hint: kind 0 = playing / a still (hide), 1/2 = a motion item. A seq
         // bump is the "fresh motion item — flash it" trigger.
         let phKind = Int(core.play_hint_kind())

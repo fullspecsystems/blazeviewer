@@ -297,6 +297,17 @@ struct ContentView: View {
                         .transition(.opacity)
                 }
             }
+            // Subtitles (task #90). The core did all of it — shaping, outline, shadow,
+            // background, placement — so this is a positioned image and nothing more. It
+            // sits under the play hint and toast: transient feedback should win over a
+            // subtitle, not the other way round.
+            .overlay(alignment: .topLeading) {
+                if let img = model.subtitleImage {
+                    Image(nsImage: img)
+                        .offset(x: model.subtitleRect.minX, y: model.subtitleRect.minY)
+                        .allowsHitTesting(false)
+                }
+            }
             // The play hint rides the same bottom-center spot as the toast, just above the info
             // line. Unlike the toast it IS interactive (hover holds it, click plays), so it
             // keeps hit-testing. They rarely co-occur; the toast layers above it when they do.
