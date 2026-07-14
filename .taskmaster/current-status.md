@@ -1,8 +1,37 @@
 # PhotoBlaze — Current Status (session handoff)
 
-_Last updated: 2026-07-14. Supersedes prior status. **0.2.0 shipped** (private beta). The
-video-playback overhaul (task #91) is **functionally complete + owner-validated**; the remaining
-big piece is the **Phase 3 Apple `AVSampleBuffer` presenter** (an enhancement, not a blocker)._
+_Last updated: 2026-07-14 (rev 2). Supersedes prior status. **0.2.0 shipped** (private beta)._
+
+## ⏳ ACTIVE: Phase 3 — macOS sample-buffer presenter (in progress)
+
+The DoVi/HDR end-state for containers `AVPlayer` can't demux (MKV): FFmpeg (Rust) demuxes →
+Swift wraps compressed packets into `CMSampleBuffer`s → `AVSampleBufferDisplayLayer` (system
+decode + correct Dolby Vision). Built in test-first slices, all on `main`:
+
+- **Slice A — Rust demux-only packet source** (`68efdb8f`) ✅ `VideoDemuxer` in `pb-decode`:
+  extradata (hvcC/avcC) + NAL length + **DoVi config** + compressed packets, no decoder. Unit-tested;
+  **verified on the real DoVi corpus** (profile 8.1, `dvvC`, length-prefixed nal_len=4).
+- **Slice B — FFI bridge + routing** (`4799353c`) ✅ `CoreEffect::PlaySampleBuffer` + env-gated
+  (`PB_SAMPLE_BUFFER`) routing; `DemuxHandle` / `open_stashed_demux` / `demux_*` FFI (mirrors the
+  session-audio seam). Reuses the `Native` proxy + `native_video_*` callbacks wholesale.
+- **Slice C — Swift `SampleBufferPresenter` (the 0C spike)** (`d818388a`) ✅ compiles + builds a
+  `PhotoBlaze.app`. `AVSampleBufferDisplayLayer` under an `AVSampleBufferRenderSynchronizer`,
+  reveal-on-first-frame, park-at-EOS, reused AVPlayer transform math; `DemuxReader` builds the
+  `CMVideoFormatDescription` (+ `dvvC` box) and feeds sample buffers on renderer backpressure.
+  **Video-only** so far.
+
+**🚦 GATE (owner, on-device): does DoVi/HDR render correctly?** Run the dev app, set
+`PB_SAMPLE_BUFFER=1`, open an MKV (the Dune corpus), and confirm correct Dolby Vision/HDR on the
+physical display — "it decoded" ≠ "DoVi is right." Env-gated OFF by default, so nothing changes for
+normal use until this passes. If HDR looks washed-out/wrong, the fix is explicit CICP color
+attachments on the format description (cheap follow-up); if it's right, proceed to D/E.
+
+**Remaining Phase 3 slices (after the gate):** D — **audio** under the synchronizer (AC-3 compressed
+enqueue probe, else FFmpeg LPCM); E — **real seek** (flush + re-enqueue + re-anchor, generation-safe),
+frame-step, archive-bytes input, and replacing the extension-only route with a probed capability +
+one-shot Session fallback.
+
+_The rest of task #91 (Phases 0–2) is complete + owner-validated (below)._
 
 ## State: `main`, everything pushed (latest `ed6a2aed`)
 

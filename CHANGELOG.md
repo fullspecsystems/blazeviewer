@@ -61,6 +61,11 @@ with any pre-release suffix carried only by the tag.
   marks as default or forced, instead of a blind guess.
 
 ### Fixed
+- **A video's left/right arrows now seek reliably instead of occasionally doing nothing.** The
+  arrows seek a playing video only when it isn't zoomed in enough to pan sideways. A rounding-level
+  overflow — a video that fills the width, or an imperceptible zoom you didn't notice — could leave
+  a sub-pixel sliver that flipped the arrows into an invisible pan, so they appeared dead even in
+  Fit mode. Overflow smaller than a pixel is now treated as "fits," so the arrows seek.
 - **Resizing the window, switching scale mode, or opening a folder no longer freezes on HEIC
   libraries.** These used to re-decode the current photo on the spot, stalling the app for a
   moment (about a quarter second on a 12-megapixel HEIC, longer on RAW). The current frame now

@@ -8311,17 +8311,19 @@ impl AppCore {
     /// instead of seeking (task #79 phase 6: pan wins when zoomed).
     pub fn pannable_horizontally(&self) -> bool {
         self.screen_and_image()
-            .map(|(iw, ih, sw, sh)| self.view.max_pan(iw, ih, sw, sh)[0] > 0.0)
+            .map(|(iw, ih, sw, sh)| self.view.pannable_axes(iw, ih, sw, sh)[0])
             .unwrap_or(false)
     }
 
     /// Whether the image currently overflows the viewport (so panning does
-    /// something). Drives the grab-hand cursor affordance.
+    /// something). Drives the grab-hand cursor affordance. Uses the same
+    /// rounding deadzone as the seek-vs-pan choice, so a sub-pixel fit overflow
+    /// doesn't show a misleading grab hand on an image that effectively fits.
     pub fn pannable(&self) -> bool {
         self.screen_and_image()
             .map(|(iw, ih, sw, sh)| {
-                let mp = self.view.max_pan(iw, ih, sw, sh);
-                mp[0] > 0.0 || mp[1] > 0.0
+                let p = self.view.pannable_axes(iw, ih, sw, sh);
+                p[0] || p[1]
             })
             .unwrap_or(false)
     }
