@@ -25,6 +25,7 @@
 use std::ffi::{c_int, c_void, CString};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ffmpeg_next as ff;
@@ -48,6 +49,14 @@ struct InterruptState {
     /// Validity for the `FfInput`'s lifetime is guaranteed by the `'a` borrow
     /// on [`FfInput`] itself.
     cancel: *const AtomicBool,
+    /// An OWNED cancel flag armed after open via [`FfInput::set_cancel`] (plan 1F):
+    /// the producer/audio paths share this `Arc` with the session and flip it on
+    /// teardown, so a blocking read aborts inside libav. Owned (not borrowed) so
+    /// the [`FfInput`] stays `'static` — it can be boxed and moved to a worker
+    /// thread. Written once at arm time (before any read) on the reader thread;
+    /// the callback only reads it — no data race on the `Option` itself, and the
+    /// inner `AtomicBool` is set cross-thread atomically.
+    owned_cancel: Option<Arc<AtomicBool>>,
     /// Watchdog epoch.
     t0: Instant,
     /// Abort once `t0.elapsed()` exceeds this many milliseconds. `u64::MAX` = no
@@ -61,6 +70,13 @@ struct InterruptState {
 extern "C" fn interrupt_cb(opaque: *mut c_void) -> c_int {
     let st = unsafe { &*(opaque as *const InterruptState) };
     if !st.cancel.is_null() && unsafe { &*st.cancel }.load(Ordering::Relaxed) {
+        return 1;
+    }
+    if st
+        .owned_cancel
+        .as_ref()
+        .is_some_and(|c| c.load(Ordering::Relaxed))
+    {
         return 1;
     }
     let deadline = st.deadline_ms.load(Ordering::Relaxed);
@@ -137,6 +153,7 @@ impl<'a> FfInput<'a> {
         super::init::ff_init();
         let intr = Box::into_raw(Box::new(InterruptState {
             cancel: cancel.map_or(std::ptr::null(), |c| c as *const AtomicBool),
+            owned_cancel: None,
             t0: Instant::now(),
             deadline_ms: AtomicU64::new(u64::MAX),
         }));
@@ -275,11 +292,27 @@ impl<'a> FfInput<'a> {
         st.deadline_ms.store(v, Ordering::Relaxed);
     }
 
-    /// Whether the caller's cancel flag is set (poster walk early-outs on it
-    /// between frames, without waiting for the next blocking call to abort).
+    /// Arm an OWNED cancel flag after open (plan 1F): the producer/audio paths
+    /// share this `Arc<AtomicBool>` with the session and flip it on teardown, so a
+    /// blocking read aborts inside libav. Additive to any borrowed `cancel`. Call
+    /// once, right after open, before any read — the interrupt callback reads it on
+    /// the same (reader) thread, so there's no race on the `Option` itself.
+    pub fn set_cancel(&mut self, cancel: Arc<AtomicBool>) {
+        // SAFETY: `intr` is heap-pinned for our lifetime (freed only in Drop); this
+        // is the sole writer of `owned_cancel`, sequenced before any callback read.
+        unsafe { (*self.intr).owned_cancel = Some(cancel) };
+    }
+
+    /// Whether either cancel flag (the borrowed decode-pool one or the owned 1F
+    /// one) is set — the poster walk early-outs on it between frames, without
+    /// waiting for the next blocking call to abort.
     pub fn cancelled(&self) -> bool {
         let st = unsafe { &*self.intr };
-        !st.cancel.is_null() && unsafe { &*st.cancel }.load(Ordering::Relaxed)
+        (!st.cancel.is_null() && unsafe { &*st.cancel }.load(Ordering::Relaxed))
+            || st
+                .owned_cancel
+                .as_ref()
+                .is_some_and(|c| c.load(Ordering::Relaxed))
     }
 }
 

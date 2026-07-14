@@ -248,6 +248,14 @@ impl FfAudioDecoder {
         })
     }
 
+    /// Arm an owned cancel flag (plan 1F): the owner (the macOS feeder queue's
+    /// `SessionAudioDecoder`) flips this shared `Arc` on teardown so a blocking
+    /// network read aborts inside libav instead of holding the queue for the full
+    /// op-deadline. No-op-safe to skip (the watchdog is the fallback).
+    pub fn arm_cancel(&mut self, cancel: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.input.set_cancel(cancel);
+    }
+
     /// Native sample rate — the sinks hand this to the device layer verbatim.
     pub fn rate(&self) -> u32 {
         self.rate

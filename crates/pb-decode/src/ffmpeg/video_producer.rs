@@ -29,7 +29,9 @@
 //! reports the track's real presence, and a shell without a sink reports a
 //! Failed clock so playback degrades to silent immediately.
 
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ffmpeg_next as ff;
@@ -77,11 +79,15 @@ pub fn run_ff_video_producer(
     generation: SeekGeneration,
     events: Sender<VideoProducerEvent>,
     msgs: Receiver<VideoProducerMsg>,
+    cancel: Arc<AtomicBool>,
 ) {
     let fail = |error: String| {
         let _ = events.send(VideoProducerEvent::Failed { session_id, error });
     };
-    let mut reader = match Reader::open(input, fit) {
+    // The session sets `cancel` on stop/teardown; the interrupt callback then
+    // aborts a blocking read *inside* libav (plan 1F) — so a stuck network read
+    // retires this thread promptly instead of lingering on the per-op watchdog.
+    let mut reader = match Reader::open(input, fit, cancel) {
         Ok(r) => r,
         Err(e) => return fail(e),
     };
@@ -320,10 +326,17 @@ struct Reader {
 }
 
 impl Reader {
-    fn open(input: &VideoInput, fit: Option<FitBox>) -> Result<Reader, String> {
-        // No borrowed cancel flag on the producer path (the channel + the
-        // per-op watchdog are its control levers), so the input is 'static.
+    fn open(
+        input: &VideoInput,
+        fit: Option<FitBox>,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Reader, String> {
         let mut opened = FfInput::open(input, None)?;
+        // Arm the interrupt cancel flag (plan 1F): the session flips this shared
+        // `Arc` on stop/teardown, and the interrupt callback aborts a blocking read
+        // inside libav — so a stuck network read retires this thread promptly
+        // instead of pinning it to the per-op watchdog.
+        opened.set_cancel(cancel);
         let facts = video_facts(opened.ctx())?;
         if facts.width == 0 || facts.height == 0 {
             return Err("video has no frames".into());
@@ -627,8 +640,9 @@ mod tests {
     fn spawn_input(input: VideoInput) -> (Sender<VideoProducerMsg>, Receiver<VideoProducerEvent>) {
         let (events_tx, events_rx) = channel();
         let (msgs_tx, msgs_rx) = channel();
+        let cancel = Arc::new(AtomicBool::new(false));
         std::thread::spawn(move || {
-            run_ff_video_producer(&input, None, SID, GEN, events_tx, msgs_rx);
+            run_ff_video_producer(&input, None, SID, GEN, events_tx, msgs_rx, cancel);
         });
         (msgs_tx, events_rx)
     }

@@ -6862,7 +6862,9 @@ impl AppCore {
                 let input = crate::video::VideoInput::Path(path);
                 let _ = media.set(input.clone());
                 std::thread::spawn(move || {
-                    run_platform_video_producer(&input, fit, id, generation, io.events, io.msgs);
+                    run_platform_video_producer(
+                        &input, fit, id, generation, io.events, io.msgs, io.cancel,
+                    );
                 });
             } else {
                 // Archive entry: fetch the container bytes OFF the event loop (a
@@ -6887,7 +6889,9 @@ impl AppCore {
                     };
                     let input = crate::video::VideoInput::Bytes { data, name };
                     let _ = media_slot.set(input.clone());
-                    run_platform_video_producer(&input, fit, id, generation, io.events, io.msgs);
+                    run_platform_video_producer(
+                        &input, fit, id, generation, io.events, io.msgs, io.cancel,
+                    );
                 });
             }
             // A remembered position for this item (task #94.2) → resume there once
@@ -8396,11 +8400,19 @@ fn run_platform_video_producer(
     generation: crate::video::SeekGeneration,
     events: std::sync::mpsc::Sender<crate::video::VideoProducerEvent>,
     msgs: std::sync::mpsc::Receiver<crate::video::VideoProducerMsg>,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
+    // The FFmpeg reader honors `cancel` via its interrupt callback (plan 1F). The
+    // Windows MF reader has its own Stop/disconnect teardown and isn't wired to
+    // this flag yet — its reads are local and don't block on network the way SMB
+    // does; revisit if MF network sources need it.
     #[cfg(windows)]
-    pb_decode::run_video_producer(input, fit, id, generation, events, msgs);
+    {
+        let _ = cancel;
+        pb_decode::run_video_producer(input, fit, id, generation, events, msgs);
+    }
     #[cfg(all(unix, feature = "ffvideo"))]
-    pb_decode::run_ff_video_producer(input, fit, id, generation, events, msgs);
+    pb_decode::run_ff_video_producer(input, fit, id, generation, events, msgs, cancel);
 }
 
 #[cfg(test)]

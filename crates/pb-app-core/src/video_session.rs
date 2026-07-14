@@ -19,7 +19,9 @@
 //! every timing behavior is deterministic under test.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::video::{
@@ -88,6 +90,12 @@ pub enum FrameStep {
 pub struct VideoSessionIo {
     pub events: Sender<VideoProducerEvent>,
     pub msgs: Receiver<VideoProducerMsg>,
+    /// The producer's clone of the session's cancel flag (plan 1F): the session
+    /// flips it on [`VideoSession::stop`] and the FFmpeg reader's interrupt callback
+    /// aborts a blocking read, so a stuck network read retires the producer thread
+    /// promptly instead of lingering on the per-op watchdog. Hand it to the
+    /// producer (`run_ff_video_producer`'s `cancel`).
+    pub cancel: Arc<AtomicBool>,
 }
 
 /// What one [`VideoSession::poll`] asks the shell to do.
@@ -210,6 +218,10 @@ pub struct VideoSession {
     frame_bytes: u64,
     events: Receiver<VideoProducerEvent>,
     to_producer: Sender<VideoProducerMsg>,
+    /// Cancel flag shared with the producer (plan 1F): set in [`Self::stop`] to abort
+    /// a blocking reader read promptly (in addition to the `Stop` message, which a
+    /// blocked read can't hear until the watchdog fires).
+    cancel: Arc<AtomicBool>,
     queue: VecDeque<VideoFrame>,
     queued_bytes: u64,
     /// Credits granted whose frames haven't arrived yet. They count against the
@@ -273,6 +285,7 @@ impl VideoSession {
     ) -> (VideoSession, VideoSessionIo) {
         let (events_tx, events_rx) = channel();
         let (msgs_tx, msgs_rx) = channel();
+        let cancel = Arc::new(AtomicBool::new(false));
         let session = VideoSession {
             id,
             generation: SeekGeneration::FIRST,
@@ -281,6 +294,7 @@ impl VideoSession {
             frame_bytes: frame_bytes.max(1),
             events: events_rx,
             to_producer: msgs_tx,
+            cancel: cancel.clone(),
             queue: VecDeque::new(),
             queued_bytes: 0,
             credits_out: 0,
@@ -306,6 +320,7 @@ impl VideoSession {
             VideoSessionIo {
                 events: events_tx,
                 msgs: msgs_rx,
+                cancel,
             },
         )
     }
@@ -631,6 +646,10 @@ impl VideoSession {
     /// resources retire even without this being called.
     pub fn stop(&mut self) {
         if !self.state.is_terminal() {
+            // Flip the shared cancel flag BEFORE the Stop message (plan 1F): a
+            // producer blocked in a network read can't hear Stop, but the interrupt
+            // callback aborts the read at once, so the thread retires promptly.
+            self.cancel.store(true, Ordering::Relaxed);
             let _ = self.to_producer.send(VideoProducerMsg::Stop);
             self.state = VideoSessionState::Stopped;
             self.queue.clear();
