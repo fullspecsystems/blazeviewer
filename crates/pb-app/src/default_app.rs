@@ -14,19 +14,19 @@
 //! Best-effort throughout: any failure falls back to the generic Default-apps page,
 //! which is where the old button always went.
 
-/// The name PhotoBlaze registers under (`RegisteredApplications` value name and the
-/// `ms-settings` URI parameter). Must match the MSI's `AppRegistration` component.
-#[cfg(windows)]
-const APP_NAME: &str = "PhotoBlaze";
-
-/// Open Settings ▸ Default apps, on PhotoBlaze's own page when possible.
+/// Open Settings ▸ Default apps, on the app's own page when possible.
 pub fn open_default_apps() {
     #[cfg(windows)]
     {
+        // The URI names the `RegisteredApplications` *value*, so it must be
+        // `APP_IDENT`, not the display `APP_NAME` — the two diverge under task #101
+        // ("Blaze Viewer" vs "BlazeViewer"), and a space here would need
+        // percent-encoding.
+        let key = pb_app_core::APP_IDENT;
         let uri = if win::machine_registered() {
-            format!("ms-settings:defaultapps?registeredAppMachine={APP_NAME}")
+            format!("ms-settings:defaultapps?registeredAppMachine={key}")
         } else if win::ensure_user_registration().is_ok() {
-            format!("ms-settings:defaultapps?registeredAppUser={APP_NAME}")
+            format!("ms-settings:defaultapps?registeredAppUser={key}")
         } else {
             "ms-settings:defaultapps".to_string()
         };
@@ -47,7 +47,10 @@ pub fn open_default_apps() {
 #[cfg(windows)]
 pub fn register_shell_integration() {
     if let Err(e) = win::register_shell_integration() {
-        eprintln!("PhotoBlaze: file-association registration failed: {e:?}");
+        eprintln!(
+            "{}: file-association registration failed: {e:?}",
+            pb_app_core::APP_NAME
+        );
     }
 }
 
@@ -71,8 +74,60 @@ mod win {
     // Registry deletion is used only by the Velopack `--veloapp-uninstall` cleanup.
     use windows::Win32::System::Registry::{RegDeleteKeyValueW, RegDeleteTreeW};
 
-    /// The image extensions the viewer handles, each mapped to the MSI's
-    /// `PhotoBlaze.Image` ProgId on the Capabilities page. Mirrors the MSI's
+    use pb_app_core::{APP_IDENT, APP_NAME};
+
+    /// Every ProgId we own: `(extensions, ProgId, Explorer label, multi_select_player)`.
+    ///
+    /// **All four** ProgId call sites walk this one list — register, register's
+    /// per-extension `OpenWithProgids`, unregister, and unregister's `OpenWithProgids`.
+    /// That symmetry is load-bearing: a ProgId written by one and missed by the other
+    /// orphans in HKCU **forever** and keeps showing up in Explorer's "Open with" list.
+    /// They used to be four separate literal arrays, which is exactly the drift a rename
+    /// would have introduced (task #101).
+    ///
+    /// `multi_player` sets `MultiSelectModel=Player` on the open verb (task #14): with it,
+    /// Explorer collapses a multi-select "Open" into **one** launch carrying every selected
+    /// path (like a media player) instead of one process per file — which the single-instance
+    /// election then reuses. Images and videos get it; archives do not (a multi-select of
+    /// `.zip`s has no meaningful playlist and would decode zip bytes as images).
+    fn progids() -> [(&'static [&'static str], String, String, bool); 3] {
+        [
+            (
+                IMAGE_EXTS,
+                format!("{APP_IDENT}.Image"),
+                format!("{APP_NAME} Image"),
+                true,
+            ),
+            (
+                ARCHIVE_EXTS,
+                format!("{APP_IDENT}.Archive"),
+                format!("{APP_NAME} Archive"),
+                false,
+            ),
+            (
+                VIDEO_EXTS,
+                format!("{APP_IDENT}.Video"),
+                format!("{APP_NAME} Video"),
+                true,
+            ),
+        ]
+    }
+
+    /// The `SOFTWARE\<APP_IDENT>` registry tree holding our `Capabilities`.
+    fn capabilities_key() -> String {
+        format!("SOFTWARE\\{APP_IDENT}\\Capabilities")
+    }
+
+    /// The two folder-verb keys (right-click a folder, and a folder's background).
+    fn folder_verb_keys() -> [String; 2] {
+        [
+            format!("Software\\Classes\\Directory\\shell\\{APP_IDENT}"),
+            format!("Software\\Classes\\Directory\\Background\\shell\\{APP_IDENT}"),
+        ]
+    }
+
+    /// The image extensions the viewer handles, each mapped to the
+    /// `<APP_IDENT>.Image` ProgId on the Capabilities page. Mirrors the MSI's
     /// `Associations` component — keep the two lists in sync.
     const IMAGE_EXTS: &[&str] = &[
         ".jpg", ".jpeg", ".jpe", ".jfif", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp",
@@ -132,8 +187,9 @@ mod win {
     }
 
     /// Whether the MSI's machine-wide registration is present (an HKLM
-    /// `RegisteredApplications` value named "PhotoBlaze").
+    /// `RegisteredApplications` value named [`APP_IDENT`]).
     pub fn machine_registered() -> bool {
+        let name = wide(APP_IDENT);
         unsafe {
             let mut key = HKEY::default();
             if RegOpenKeyExW(
@@ -148,7 +204,7 @@ mod win {
                 return false;
             }
             let key = Key(key);
-            RegQueryValueExW(key.0, w!("PhotoBlaze"), None, None, None, None).is_ok()
+            RegQueryValueExW(key.0, PCWSTR(name.as_ptr()), None, None, None, None).is_ok()
         }
     }
 
@@ -156,31 +212,25 @@ mod win {
     /// its file associations, and the `RegisteredApplications` pointer to it.
     /// Idempotent — re-running just rewrites the same values.
     pub fn ensure_user_registration() -> windows::core::Result<()> {
-        let caps = create_key(HKEY_CURRENT_USER, w!("SOFTWARE\\PhotoBlaze\\Capabilities"))?;
-        set_string(caps.0, w!("ApplicationName"), super::APP_NAME)?;
+        let caps_path = capabilities_key();
+        let caps = create_key_str(HKEY_CURRENT_USER, &caps_path)?;
+        // `ApplicationName` is *displayed* on the Default-apps page, so it takes the
+        // display name; the registration key below takes the identifier. They diverge
+        // under task #101 ("Blaze Viewer" vs "BlazeViewer").
+        set_string(caps.0, w!("ApplicationName"), APP_NAME)?;
         set_string(caps.0, w!("ApplicationDescription"), pb_app_core::TAGLINE)?;
 
-        let assoc = create_key(
-            HKEY_CURRENT_USER,
-            w!("SOFTWARE\\PhotoBlaze\\Capabilities\\FileAssociations"),
-        )?;
-        for (exts, progid) in [
-            (IMAGE_EXTS, "PhotoBlaze.Image"),
-            (ARCHIVE_EXTS, "PhotoBlaze.Archive"),
-            (VIDEO_EXTS, "PhotoBlaze.Video"),
-        ] {
+        let assoc = create_key_str(HKEY_CURRENT_USER, &format!("{caps_path}\\FileAssociations"))?;
+        for (exts, progid, _, _) in progids() {
             for ext in exts {
                 let name: Vec<u16> = ext.encode_utf16().chain(std::iter::once(0)).collect();
-                set_string(assoc.0, PCWSTR(name.as_ptr()), progid)?;
+                set_string(assoc.0, PCWSTR(name.as_ptr()), &progid)?;
             }
         }
 
         let registered = create_key(HKEY_CURRENT_USER, w!("SOFTWARE\\RegisteredApplications"))?;
-        set_string(
-            registered.0,
-            w!("PhotoBlaze"),
-            "SOFTWARE\\PhotoBlaze\\Capabilities",
-        )
+        let name = wide(APP_IDENT);
+        set_string(registered.0, PCWSTR(name.as_ptr()), &caps_path)
     }
 
     /// UTF-16 (NUL-terminated) buffer for a runtime-built key path or value name.
@@ -214,20 +264,12 @@ mod win {
         let folder_cmd = format!("\"{exe}\" \"%V\"");
 
         // ── ProgIds: label + FriendlyTypeName + DefaultIcon + shell\open\command.
-        // `multi_player` sets `MultiSelectModel=Player` on the open verb (task #14): with it,
-        // Explorer collapses a multi-select "Open" into **one** launch carrying every selected
-        // path (like a media player) instead of one process per file — which the single-instance
-        // election then reuses. Images and videos get it; archives do not (a multi-select of `.zip`s
-        // has no meaningful playlist and would decode zip bytes as images — an unsupported edge).
-        for (progid, label, multi_player) in [
-            ("PhotoBlaze.Image", "PhotoBlaze Image", true),
-            ("PhotoBlaze.Archive", "PhotoBlaze Archive", false),
-            ("PhotoBlaze.Video", "PhotoBlaze Video", true),
-        ] {
+        // See `progids()` for the `multi_player` rationale.
+        for (_, progid, label, multi_player) in progids() {
             let base = format!("Software\\Classes\\{progid}");
             let k = create_key_str(HKEY_CURRENT_USER, &base)?;
-            set_default(k.0, label)?;
-            set_string(k.0, w!("FriendlyTypeName"), label)?;
+            set_default(k.0, &label)?;
+            set_string(k.0, w!("FriendlyTypeName"), &label)?;
             set_default(
                 create_key_str(HKEY_CURRENT_USER, &format!("{base}\\DefaultIcon"))?.0,
                 &icon,
@@ -244,29 +286,23 @@ mod win {
 
         // ── Candidate "Open with" associations (never the default; ADR-018): list the
         // ProgId under each extension's OpenWithProgids (value name = ProgId, empty data).
-        for (exts, progid) in [
-            (IMAGE_EXTS, "PhotoBlaze.Image"),
-            (ARCHIVE_EXTS, "PhotoBlaze.Archive"),
-            (VIDEO_EXTS, "PhotoBlaze.Video"),
-        ] {
+        for (exts, progid, _, _) in progids() {
             for ext in exts {
                 let k = create_key_str(
                     HKEY_CURRENT_USER,
                     &format!("Software\\Classes\\{ext}\\OpenWithProgids"),
                 )?;
-                let name = wide(progid);
+                let name = wide(&progid);
                 set_string(k.0, PCWSTR(name.as_ptr()), "")?;
             }
         }
 
-        // ── Folder right-click verb ("Open with PhotoBlaze" → browse recursively). %V is
+        // ── Folder right-click verb ("Open with <app>" → browse recursively). %V is
         // the folder path; also on the folder background (right-click empty space).
-        for base in [
-            "Software\\Classes\\Directory\\shell\\PhotoBlaze",
-            "Software\\Classes\\Directory\\Background\\shell\\PhotoBlaze",
-        ] {
-            let k = create_key_str(HKEY_CURRENT_USER, base)?;
-            set_default(k.0, "Open with PhotoBlaze")?;
+        let verb_label = format!("Open with {APP_NAME}");
+        for base in folder_verb_keys() {
+            let k = create_key_str(HKEY_CURRENT_USER, &base)?;
+            set_default(k.0, &verb_label)?;
             set_string(k.0, w!("Icon"), &icon)?;
             set_default(
                 create_key_str(HKEY_CURRENT_USER, &format!("{base}\\command"))?.0,
@@ -274,7 +310,7 @@ mod win {
             )?;
         }
 
-        // ── Capabilities + RegisteredApplications → PhotoBlaze's own Default-apps page.
+        // ── Capabilities + RegisteredApplications → our own Default-apps page.
         ensure_user_registration()
     }
 
@@ -299,35 +335,66 @@ mod win {
     /// and out of `RegisteredApplications` — leaving other apps' entries in those shared
     /// keys untouched.
     pub fn unregister_shell_integration() {
-        for progid in ["PhotoBlaze.Image", "PhotoBlaze.Archive", "PhotoBlaze.Video"] {
+        for (exts, progid, _, _) in progids() {
             delete_tree(HKEY_CURRENT_USER, &format!("Software\\Classes\\{progid}"));
-        }
-        for (exts, progid) in [
-            (IMAGE_EXTS, "PhotoBlaze.Image"),
-            (ARCHIVE_EXTS, "PhotoBlaze.Archive"),
-            (VIDEO_EXTS, "PhotoBlaze.Video"),
-        ] {
             for ext in exts {
                 delete_value(
                     HKEY_CURRENT_USER,
                     &format!("Software\\Classes\\{ext}\\OpenWithProgids"),
-                    progid,
+                    &progid,
                 );
             }
         }
-        delete_tree(
-            HKEY_CURRENT_USER,
-            "Software\\Classes\\Directory\\shell\\PhotoBlaze",
-        );
-        delete_tree(
-            HKEY_CURRENT_USER,
-            "Software\\Classes\\Directory\\Background\\shell\\PhotoBlaze",
-        );
-        delete_tree(HKEY_CURRENT_USER, "Software\\PhotoBlaze");
+        for base in folder_verb_keys() {
+            delete_tree(HKEY_CURRENT_USER, &base);
+        }
+        delete_tree(HKEY_CURRENT_USER, &format!("Software\\{APP_IDENT}"));
         delete_value(
             HKEY_CURRENT_USER,
             "Software\\RegisteredApplications",
-            "PhotoBlaze",
+            APP_IDENT,
         );
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Register and unregister must cover the *same* ProgIds. They walk one list now,
+        /// so this mostly guards the invariant against someone re-introducing a literal:
+        /// a ProgId written but never deleted orphans in HKCU forever (task #101).
+        #[test]
+        fn progids_derive_from_the_app_ident() {
+            for (_, progid, label, _) in progids() {
+                assert!(
+                    progid.starts_with(APP_IDENT),
+                    "ProgId {progid} must derive from APP_IDENT ({APP_IDENT})"
+                );
+                assert!(
+                    !progid.contains(' '),
+                    "ProgId {progid} must not contain a space"
+                );
+                assert!(
+                    label.starts_with(APP_NAME),
+                    "label {label} must derive from APP_NAME ({APP_NAME})"
+                );
+            }
+        }
+
+        /// Every extension we advertise must be covered exactly once — a duplicate would
+        /// make the later ProgId silently win the `OpenWithProgids` write.
+        #[test]
+        fn extensions_are_not_claimed_twice() {
+            let mut seen = std::collections::BTreeSet::new();
+            for (exts, progid, _, _) in progids() {
+                for ext in exts {
+                    assert!(
+                        seen.insert(*ext),
+                        "{ext} is claimed by more than one ProgId (last: {progid})"
+                    );
+                    assert!(ext.starts_with('.'), "{ext} should start with a dot");
+                }
+            }
+        }
     }
 }

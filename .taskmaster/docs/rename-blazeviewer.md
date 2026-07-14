@@ -15,6 +15,39 @@ Owner decisions captured:
 | About link | **blazeviewer.app** (repo is private) |
 | `pb-*` crate prefixes | **Keep forever** — internal, brand-neutral, renaming is pure churn |
 
+### Artifact + CLI naming (decided 2026-07-14)
+
+**Spaces appear on macOS and nowhere else** — that isn't an inconsistency, it's each
+platform's own convention:
+
+| Surface | Name | Why |
+|---|---|---|
+| macOS bundle | **`Blaze Viewer.app`** | Mac convention has spaces (`Visual Studio Code.app`); Finder shows the exact brand |
+| macOS `CFBundleExecutable` | **`Blaze Viewer`** | drives the Activity Monitor process name |
+| Windows exe | **`blazeviewer.exe`** | Windows exes never have spaces (`Code.exe`, `chrome.exe`, `Photoshop.exe`) — a space means quoting every command line forever |
+| Linux binary + `.desktop` `Exec` | **`blazeviewer`** | lowercase, no spaces |
+| Linux AppImage | **`BlazeViewer-<v>-<arch>.AppImage`** | you `chmod +x` and type it |
+| CLI (macOS/Linux symlink) | **`blaze`** | the only name a human types |
+| Display name / Start-menu / `packTitle` | **`Blaze Viewer`** | what Spotlight + Windows Search actually match |
+
+**The premise that got tested and failed:** a short `blaze.exe` was floated for
+findability. It doesn't help — **Spotlight matches `CFBundleDisplayName`/`CFBundleName`,
+and Windows Search matches the Start-menu shortcut (`--packTitle`)**. Neither indexes the
+executable name. Typing "blaze" finds "Blaze Viewer" regardless. What the exe name *does*
+touch — Task Manager, crash reports, Event Viewer, AV/EDR allowlists — all favour the
+unambiguous long form. Short pays only where you type, which is the CLI.
+
+Precedent: `CliTool.swift` already cites "the VS Code / iTerm pattern" — VS Code ships
+`Visual Studio Code.app` with a `code` CLI. Long artifact, short command.
+
+⚠ **There is no separate Windows CLI.** `pb-cli` is a *library* that `pb-app` links, so
+`blazeviewer.exe` **is** the Windows CLI. Nothing on Windows puts the install dir on PATH,
+so a `blaze.exe` shim would be new surface for no gain — not planned.
+
+⚠ `blaze` on PATH can collide with Google's pre-Bazel `blaze`. Accepted: the symlink is
+opt-in behind an explicit menu action, and `CliTool.swift` already detects a foreign
+symlink and reports rather than clobbers it.
+
 ---
 
 ## The one rule
@@ -89,8 +122,10 @@ reinstalls. **Land them together, cut one release, reinstall once per box.**
 | What | From | To |
 |---|---|---|
 | Bundle id | `com.jdlien.PhotoBlaze` | `ca.fullspec.BlazeViewer` |
-| macOS app | `PhotoBlaze.app` | `BlazeViewer.app` |
+| macOS app | `PhotoBlaze.app` | `Blaze Viewer.app` (+ `CFBundleExecutable` `Blaze Viewer`) |
+| macOS CLI symlink | `/usr/local/bin/photoblaze` | `/usr/local/bin/blaze` |
 | Windows exe | `photoblaze.exe` | `blazeviewer.exe` |
+| Linux binary + `.desktop` Exec | `photoblaze` | `blazeviewer` |
 | Velopack | `--packId PhotoBlaze` | `--packId BlazeViewer` |
 | ProgIDs | `PhotoBlaze.Image/.Archive/.Video` | `BlazeViewer.*` |
 | Registry | `SOFTWARE\PhotoBlaze\Capabilities` | `SOFTWARE\BlazeViewer\Capabilities` |

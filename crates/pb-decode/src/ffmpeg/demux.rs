@@ -597,7 +597,7 @@ mod tests {
     #[test]
     fn synth_dts_fixes_leading_missing_on_a_bframe_stream() {
         let (fd, mr) = (42i64, 2i64); // ~23.976 fps at 1/1000 time base; has_b_frames=2
-        // (pts, raw_dts) in stream units; None = the container left DTS out.
+                                      // (pts, raw_dts) in stream units; None = the container left DTS out.
         let seq: [(i64, Option<i64>); 5] = [
             (0, None),
             (375, None),
@@ -614,7 +614,10 @@ mod tests {
         }
         assert_eq!(out, vec![-84, -42, 0, 42, 83]);
         // Monotonic non-decreasing (the decode timeline the display layer needs).
-        assert!(out.windows(2).all(|w| w[1] >= w[0]), "not monotonic: {out:?}");
+        assert!(
+            out.windows(2).all(|w| w[1] >= w[0]),
+            "not monotonic: {out:?}"
+        );
         // Every DTS is at or before its PTS.
         for ((pts, _), &d) in seq.iter().zip(&out) {
             assert!(d <= *pts, "dts {d} exceeds pts {pts}");

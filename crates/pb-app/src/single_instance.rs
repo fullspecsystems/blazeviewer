@@ -55,11 +55,21 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 /// The per-user, per-session mutex name. `Local\` scopes it to the login session
 /// (a second RDP/console session for the same user gets its own primary — desired).
-const MUTEX_NAME: &str = "Local\\PhotoBlaze.SingleInstance";
+///
+/// Built at runtime rather than `const` because it derives from
+/// [`pb_app_core::APP_IDENT`]; both are called once at startup, so the allocation is
+/// irrelevant. Renaming the app renames these, which means a build from before the
+/// rename and one from after do not see each other — two primaries. Harmless, and
+/// only during the changeover.
+fn mutex_name() -> String {
+    format!("Local\\{}.SingleInstance", pb_app_core::APP_IDENT)
+}
 
 /// The message-only window's class name. The secondary finds the primary by this
 /// class under `HWND_MESSAGE`; the primary registers it on its IPC thread.
-const WINDOW_CLASS: &str = "PhotoBlaze.SingleInstance.Ipc";
+fn window_class() -> String {
+    format!("{}.SingleInstance.Ipc", pb_app_core::APP_IDENT)
+}
 
 /// `COPYDATASTRUCT::dwData` tag ("PB14") so the primary only accepts a payload that
 /// is actually one of ours, not an unrelated `WM_COPYDATA` from another app.
@@ -104,7 +114,7 @@ fn wide(s: &str) -> Vec<u16> {
 /// secondary. A brand-new mutex → primary; an already-existing one → secondary.
 /// A create failure degrades to primary (no single-instance, but the app still runs).
 pub fn acquire() -> Instance {
-    let name = wide(MUTEX_NAME);
+    let name = wide(&mutex_name());
     unsafe {
         match CreateMutexW(None, false, PCWSTR(name.as_ptr())) {
             Ok(handle) => {
@@ -143,7 +153,7 @@ pub fn absolutize(paths: &[PathBuf]) -> Vec<PathBuf> {
 /// Retries briefly: the primary can hold the mutex a moment before its IPC window
 /// exists (a cold start racing this launch), so we poll for it rather than give up.
 pub fn forward(paths: &[PathBuf]) -> bool {
-    let class = wide(WINDOW_CLASS);
+    let class = wide(&window_class());
     // ~5 s of headroom for a primary that's still coming up; each miss sleeps 100 ms.
     for _ in 0..50 {
         let hwnd = unsafe {
@@ -226,7 +236,7 @@ unsafe fn run_ipc_window() {
         return;
     };
     let hinstance = HINSTANCE(hmodule.0);
-    let class = wide(WINDOW_CLASS);
+    let class = wide(&window_class());
 
     let wc = WNDCLASSW {
         lpfnWndProc: Some(wndproc),

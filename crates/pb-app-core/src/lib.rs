@@ -22,8 +22,31 @@
 /// The one-line product tagline, shared across every surface that shows it — the CLI
 /// `--help` header (`pb-cli`), the About dialog, and the Windows file-association
 /// description — so the three can never drift apart again. Keep it short: it stands
-/// alone atop `--help` and sits under the "PhotoBlaze" name in the About box.
+/// alone atop `--help` and sits under the [`APP_NAME`] in the About box.
 pub const TAGLINE: &str = "An ultra-fast, capable image viewer";
+
+/// The product's **display name** — the form a user reads. The About box, the Windows
+/// `ApplicationName` capability, Explorer's ProgId labels, the folder verb.
+///
+/// Deliberately separate from [`APP_IDENT`]: a display name may contain spaces where an
+/// identifier may not. The two are equal today only because "PhotoBlaze" happens to be
+/// both; the rename to "Blaze Viewer" / "BlazeViewer" splits them (task #101). Do not
+/// collapse them back into one constant.
+pub const APP_NAME: &str = "PhotoBlaze";
+
+/// The product name as a **space-free identifier**. Used for the Windows ProgIds
+/// (`<APP_IDENT>.Image`), the `SOFTWARE\<APP_IDENT>` registry tree, the
+/// `RegisteredApplications` value name — and the `ms-settings:defaultapps?registeredApp*=`
+/// URI that references it, where a space would need percent-encoding — plus the
+/// single-instance mutex, and the config-dir name on Windows/macOS.
+///
+/// Not [`APP_NAME`] (may have spaces) and not [`APP_SLUG`] (lowercase); this is the
+/// PascalCase middle ground.
+pub const APP_IDENT: &str = "PhotoBlaze";
+
+/// The **lowercase slug**: the executable name (`<APP_SLUG>.exe`), the Linux config dir
+/// (`~/.config/<APP_SLUG>`), and the update-feed path segment.
+pub const APP_SLUG: &str = "photoblaze";
 
 pub mod action;
 pub mod animation;
