@@ -36,8 +36,7 @@ with any pre-release suffix carried only by the tag.
   stalls the viewer — it happens in the background, so a damaged file or one on a slow network share
   can't freeze the window; the panel says "Reading video details…" until it's ready. A video inside a
   ZIP or 7z now reports exactly what the same file reports loose. *Windows currently reports
-  "Present — details unavailable" for audio pending its own track enumeration, and on macOS an
-  archived video still shows the shorter summary unless the build includes the FFmpeg backend.*
+  "Present — details unavailable" for audio, pending its own track enumeration.*
 - The info line (`i`) now defaults to the **bottom-center** of the screen instead of the
   bottom-right. (Existing users keep whatever position they've already set; this only affects
   fresh installs.)

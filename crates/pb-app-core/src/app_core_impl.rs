@@ -4082,12 +4082,14 @@ impl AppCore {
             crate::app_core::ItemDetails {
                 size,
                 fields: rows,
-                // TODO(98.7 remainder): this shell round-trip still carries no catalog, so
-                // on a **`--no-ffvideo` macOS build** (what the shipped DMG is) an archived
-                // video keeps the placeholder `Audio: Yes` row while a loose one lists its
-                // tracks. `probe_job` closes the gap wherever FFmpeg/MF can read the entry's
-                // bytes; closing it *here* means widening this round-trip (and the Swift
-                // `CoreModel`) to carry a catalog + a stale-guard request id.
+                // No catalog on this path. That is **not** a gap in practice: every macOS
+                // build that can play an archived video also links FFmpeg — the shipped DMG
+                // (`release-macos.sh` → `--bundle-ffmpeg`, which implies `--ffvideo`) and
+                // dev builds (`build-swift-host.sh`, `--ffvideo` by default) — so
+                // `media_details::probe_job` reads the entry's bytes and produces the real
+                // catalog, and the guard above keeps it. This path is the fallback for the
+                // one build without FFmpeg (`release-macos.sh --no-video`), where MKV/WebM
+                // don't play at all. Not worth an FFI to carry a catalog across.
                 media: None,
                 has_audio: Some(has_audio),
                 // The shell already probed this one; there is no worker to wait on.
@@ -7605,9 +7607,10 @@ impl AppCore {
     /// `TEXTURE_FORMAT_16BIT_NORM`. No renderer (headless) → no planar path.
     ///
     /// Gated to match its only call site (the session-platform block in
-    /// `start_video_playback`): on a macOS `--no-ffvideo` build — which is what the
-    /// shipped DMG is — video is the native AVFoundation player, so there is no producer
-    /// to hand options to and this would be dead code (`-D warnings` rejects it).
+    /// `start_video_playback`): without `ffvideo` on macOS, video is the native
+    /// AVFoundation player, so there is no producer to hand options to and this is dead
+    /// code — which `cargo clippy --all-targets -- -D warnings`, the documented lint
+    /// command (it passes no features), rejects.
     #[cfg(any(windows, all(unix, feature = "ffvideo")))]
     fn planar_video_options(&self) -> pb_decode::VideoProducerOptions {
         let planar = std::env::var_os("PB_VIDEO_NO_PLANAR").is_none() && self.renderer.is_some();
@@ -11660,8 +11663,9 @@ mod tests {
     /// ZIP* must show identical Details. Before this, the archived one had no path, so every
     /// probe skipped it and the panel showed nothing.
     ///
-    /// `ffvideo`-gated because that is the build where FFmpeg can read the entry's bytes;
-    /// the shipped `--no-ffvideo` macOS build still goes through the thin Swift round-trip.
+    /// `ffvideo`-gated because that is the build where FFmpeg can read the entry's bytes —
+    /// which is every build that ships or plays video: the DMG (`--bundle-ffmpeg` implies
+    /// `--ffvideo`) and dev builds (`--ffvideo` by default).
     #[cfg(feature = "ffvideo")]
     #[test]
     fn an_archived_video_reports_the_same_details_as_the_loose_file() {
