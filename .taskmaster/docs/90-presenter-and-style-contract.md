@@ -150,3 +150,86 @@ Set `contentsScale` on the macOS layer.
   scripts (Arabic RTL, CJK fallback, mixed bidi) so shaping regressions are caught.
 - **Scale:** the same cue at 1× and 2× produces different bitmap dimensions (proving physical
   px), not the same bitmap scaled.
+
+---
+
+# As built (2026-07-14) — what shipped, and where reality corrected this doc
+
+The plan above was frozen before anything was wired. It held up well: the one-rasterizer
+decision, the signed-offset anchor, and the physical-px discipline all survived contact.
+Four things it did **not** anticipate are recorded here, because each one cost real time and
+none is guessable from the design.
+
+## The sequencing mistake (read this before starting a slice)
+
+The four pure modules (discovery, cues, style/placement, rasterizer — ~1500 lines, ~75 tests)
+were all built and merged **before a single caller existed**. The owner twice tried to test
+subtitle playback that did not exist. Tests passing on a module nothing calls is not progress.
+
+The correction — and the rule for the rest of #90: **prove the pipe, then build through it.**
+The thin slice (one real cue on screen, end to end) found five defects in an afternoon that
+the 75 unit tests had not, because they were all *wiring* defects, invisible from inside a
+module.
+
+## Where the bugs actually were
+
+Every one was in a seam, not in the logic the tests covered:
+
+1. **The tick skipped `update()`.** `tick_subtitles` had an `if mode == Off { return }` fast
+   path; `update()` is what hides the overlay. So `C` left the last cue frozen on screen
+   forever. The unit test called `update()` directly and passed. **Rule now: every "nothing
+   should be on screen" case leaves through ONE exit that clears.**
+2. **The preference didn't apply at launch.** `new_host` builds the core from *default*
+   settings and loads the real ones afterward, hand-copying derived state across. The engine
+   was left off that list, so `subtitles = true` on disk launched with captions off.
+   Anything deriving state from settings must be re-derived there.
+3. **A coordinate-space mismatch (the zoom clipping).** The core places the block in the
+   **canvas's** space (full window, physical px ÷ scale). Attached down the SwiftUI chrome
+   chain, the overlay measured `(0, 32, 2651, 1754)` against the canvas's `(0, 0, 2651, 1786)`
+   — SwiftUI re-applies the titlebar safe-area inset. Every subtitle rode ~52 pt low, which
+   is **invisible until the block clamps flush to the bottom** (zoom / Crop-to-Fill) and then
+   the last line is cut by exactly the inset. Fixed by attaching the overlay to the canvas,
+   inside its existing `.ignoresSafeArea()`. A trailing `.ignoresSafeArea()` on the whole
+   chain would have "worked" and silently moved the panels and scrim.
+4. **The backend gate (the subtle one).** Subtitles gated on `video_session_active()`. When
+   Phase 3F made the macOS sample-buffer presenter the default route for MKV/WebM — a
+   `Native`-proxy backend — that check went false and subtitles silently switched off for
+   exactly the files they were built for. No error, no failing test.
+   **Rule: never gate a feature on a *backend*; gate it on the *thing* (`video_showing()` /
+   `video_position()`).** The routing will change again.
+
+## Corrections to the design above
+
+- **The offset is a margin from the nearer edge, not just the video's.** The doc says a
+  negative offset "clamps to the viewport bottom" when there's no letterbox — true, but the
+  same clamp applied to a *positive* offset parked the text flush against the window edge on
+  a zoomed clip. The offset is a legibility margin, so it now holds its gap from whichever
+  bottom edge is nearer. A negative offset is exempt (it deliberately targets the letterbox).
+- **Multi-line cues must be centered.** cosmic-text defaults to left, which rendered a short
+  line over a long one as ragged-left. Every player centers. Pinned by a test that measures
+  the short line's margins.
+- **The rasterizer must be built on a worker.** `FontSystem::new()` is 261 ms. Built once and
+  kept — per-video would be worse. The doc's "lazy-init on first use" would have stalled the
+  event loop.
+- **`PB_SUBTITLE_TRACE=1`** prints why nothing is on screen. The pipe has six gates (clock,
+  placement, sidecar, cues, font system, bitmap) and a silent failure at any one looks
+  identical from outside. It turned "I don't see any subtitles" into a diagnosis in one run.
+
+## Shipped
+
+Discovery (#90.1) · cues (#90.2, sidecar only) · style/placement/rasterizer (#90.3/.4 core) ·
+the engine + macOS presenter · `C` / View ▸ Subtitles + persisted preference.
+
+## Remaining — see `.taskmaster/tasks/tasks.json` #90 and #99
+
+- **#90.2** — embedded subtitle *streams* (in-container SubRip/mov_text) need a demuxer read.
+  Only sidecars render today. This is the biggest functional gap.
+- **#90.3** — seek generations (no stale cue flash on scrub); wire `controls_h` so cues lift
+  above the transport bar (`place()` supports it; nothing measures it).
+- **#90.4** — the Settings UI. All eight axes are implemented, clamped, and tested, but
+  reachable only from code. Owner's read on the defaults so far: *"a bit big for my taste."*
+- **#90.5** — the winit shell has no presenter (`Renderer::set_subtitle_overlay`); Windows /
+  Linux show nothing. Worth deferring until the style defaults settle.
+- **#99** — the track picker. Also what makes `Automatic` mean the specified forced-only +
+  audio-language rule; today it shows the first renderable sidecar (`resolve_track` is already
+  written against the catalog and unit-tested — it just has no catalog to select from yet).

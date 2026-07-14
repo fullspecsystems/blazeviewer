@@ -1,7 +1,51 @@
 # PhotoBlaze — Current Status (session handoff)
 
-_Last updated: 2026-07-14 (rev 3). Supersedes prior status. **0.2.0 shipped** (private beta).
-**The video-playback overhaul (task #91, Phases 0–3) is COMPLETE + owner-validated.**_
+_Last updated: 2026-07-14 (rev 4). Supersedes prior status. **0.2.0 shipped** (private beta).
+**Task #91 (video-playback overhaul, Phases 0–3) is COMPLETE + owner-validated.**
+**Task #98 (media-track catalog) is COMPLETE.** **Task #90 (subtitles) has a working end-to-end
+slice on macOS** — see below._
+
+## ✅ NEW THIS SESSION: subtitles render, end to end (task #90)
+
+**The milestone: the pipe is proven.** A real `.srt` beside a real MKV goes discovery → parse →
+shape → rasterize → screen, clocked off the playhead, toggled with `C`, and the choice persists.
+Owner-verified on the physical machine. Everything remaining is filling in behind a pipe that is
+known to work.
+
+Branch `feat/subtitle-display` (merged to `main` this session). Owner's read on the look:
+*"Subtitles look good, slightly large, but this may be a fine default."*
+
+**What shipped:**
+- **Sidecar discovery** (#90.1) — `Movie.eng.srt` / `.vtt` beside `Movie.mkv`, pure matching over a
+  sibling list. `PhotoSource` gained `sibling_names`/`sibling_bytes` so **archives work too** (a
+  `.srt` in a ZIP was previously unreachable — `bytes(i)` is index-only and sidecars aren't indexed).
+- **Cues** (#90.2, *sidecars only*) — SubRip + WebVTT → timed plain text, overlaps kept.
+- **Style / placement / rasterizer** (#90.3/.4 core) — the owner's eight axes, one cosmic-text
+  rasterizer feeding both shells (`pb-hud::subtitle`), physical-px discipline throughout.
+- **The engine + macOS presenter** — `pb-app-core::subtitle_engine` joins the parts; the bitmap
+  crosses the FFI on a generation (the `thumb_rgba` contract) into a SwiftUI overlay on the canvas.
+- **The switch** — `Action::ToggleSubtitles`, bare `C`, View ▸ Subtitles in both shells, a toast,
+  and a persisted `settings.subtitles`.
+
+**Diagnostics:** `PB_SUBTITLE_TRACE=1` prints *why* nothing is on screen (six gates: clock,
+placement, sidecar, cues, font system, bitmap — a silent failure at any one looks identical from
+outside). It is a diagnostic only; it never turns subtitles on.
+
+### ⚠ The lesson worth carrying (it cost a day)
+
+Four pure modules (~1500 lines, ~75 passing tests) were built and merged **before a single caller
+existed** — the owner twice tried to test playback that did not exist. The thin slice that followed
+(one real cue on screen) found **five defects in an afternoon that the 75 tests never could**,
+because every one was in a *seam*: a tick that skipped the hide, a preference not applied at launch,
+a 52 pt SwiftUI safe-area mismatch, ragged-left multi-line cues, and a feature gated on a *backend*
+that a routing change flipped. **Prove the pipe, then build through it.** Full write-up (with the
+rules each bug produced) in `.taskmaster/docs/90-presenter-and-style-contract.md` § *As built*.
+
+**The one that will bite again:** subtitles gated on `video_session_active()`, so when Phase 3F made
+the sample-buffer presenter the default MKV route (a `Native` backend), subtitles silently switched
+off for exactly the files they were built for. **Never gate a feature on a backend** — use
+`AppCore::video_showing()` / `video_position()`, which answer for whichever route is live. The
+routing will change again.
 
 ## ✅ DONE: Phase 3 — macOS sample-buffer presenter (task #91 complete)
 
@@ -10,140 +54,106 @@ Swift wraps compressed packets into `CMSampleBuffer`s → `AVSampleBufferDisplay
 + **correct Dolby Vision**), audio + video on one `AVSampleBufferRenderSynchronizer`. **Default route
 for loose-file MKV/WebM on macOS** (`68b7fd0f`); `PB_NO_SAMPLE_BUFFER=1` forces the old Session route,
 and the presenter self-probes the codec + falls back to Session for anything it can't sample-decode.
-Built test-first, all on `main`, owner-validated on the physical Neo G9/GN95C:
+Built test-first, owner-validated on the physical Neo G9/GN95C:
 
 - **A — Rust demux-only packet source** (`68efdb8f`) `VideoDemuxer` in `pb-decode`: hvcC/avcC extradata
-  + NAL length + **DoVi config (dvvC box)** + compressed packets, no decoder. Verified on the real
-  corpus (profile 8.1, length-prefixed nal_len=4).
-- **B — FFI bridge + routing** (`4799353c`) `PlaySampleBuffer` effect; `DemuxHandle`/`open_stashed_demux`/
-  `demux_*` FFI (mirrors the session-audio seam). Reuses the `Native` proxy + `native_video_*` callbacks.
-- **C — Swift `SampleBufferPresenter` + `DemuxReader`** (`d818388a`) display layer under the
-  synchronizer, reveal-on-first-frame, park-at-EOS, reused AVPlayer transform math; builds the
-  `CMVideoFormatDescription` + attaches the DoVi box; feeds on `requestMediaDataWhenReady` backpressure.
-  **0C gate PASSED** — owner confirmed DoVi/HDR renders correctly (relied on SPS/SEI color; no CICP needed).
-- **D — synchronized audio** (`9de1bb3d`) `AudioSampleFeeder` (twin of DemuxReader) feeds FFmpeg-decoded
-  LPCM into an `AVSampleBufferAudioRenderer` on the SAME synchronizer (one clock, not a separate
-  AVAudioEngine). Video PTS re-based to a 0-origin so A/V share the timeline. Stereo downmix, honest.
-- **E — generation-safe seek + frame-step + default routing** (`9de1bb3d`, `68b7fd0f`) `performSeek`
-  (hold clock → flush both → seek both → re-anchor + restore rate, `seekEpoch` drops superseded seeks);
-  frame-step = ±one-frame seek; replay-after-EOS race fixed.
+  + NAL length + **DoVi config (dvvC box)** + compressed packets, no decoder.
+- **B — FFI bridge + routing** (`4799353c`) `PlaySampleBuffer` effect; reuses the `Native` proxy +
+  `native_video_*` callbacks.
+- **C — Swift `SampleBufferPresenter` + `DemuxReader`** (`d818388a`) **0C gate PASSED** — owner
+  confirmed DoVi/HDR renders correctly.
+- **D — synchronized audio** (`9de1bb3d`) `AudioSampleFeeder` → `AVSampleBufferAudioRenderer` on the
+  SAME synchronizer (one clock). Stereo downmix, honest.
+- **E — generation-safe seek + frame-step + default routing** (`9de1bb3d`, `68b7fd0f`).
 
-**Remaining (deferred, not blockers):** archive-bytes (ZIP/7z) videos on the sample-buffer route still
-fall back to Session (loose-file only for now); WMV/MPEG/AVCHD stay on Session; audio is capped at
-stereo (no multichannel/Atmos passthrough — a documented downmix). Phase 2 follow-ons still deferred
-(planar rotation-in-geometry, planar-Vec pool + two-plane single-submit upload, MF P010 on Windows).
+**Remaining (deferred, not blockers):** archive-bytes (ZIP/7z) videos fall back to Session; WMV/MPEG/
+AVCHD stay on Session; audio capped at stereo. Phase 2 follow-ons still deferred (planar rotation-in-
+geometry, planar-Vec pool + two-plane single-submit upload, MF P010 on Windows).
 
-_All of task #91 (Phases 0–3) is complete + owner-validated. Prior-cycle detail below._
+## ✅ DONE: task #98 — media-track catalog + Details listings
 
-## State: `main`, everything pushed (latest `ed6a2aed`)
+All four backends (FFmpeg reference, AVFoundation, **Media Foundation** — finished by the Windows
+agent) + the off-thread generation-safe probe + archive parity + the shared formatter. Inspector
+Details (`Shift+I`) lists every audio/subtitle track (language, codec, channels, default/forced/
+commentary/SDH). `Audio: Yes` is retired. **An empty vector cannot represent degradation** — only
+`Complete + total Some(0)` may render "No"; anything else says so honestly.
 
-Video playback on the macOS/FFmpeg (`Session`) backend is now a stable, fast foundation for demanding
-media (4K, 10-bit, HDR10/HLG/**Dolby Vision**, TrueHD/Atmos): smooth playback, near-instant seeking,
-GPU HDR color, fast posters. Owner confirmed this cycle: *"Playback seems really smooth and fluid."*
+## THE authoritative docs — read these first
 
-## THE authoritative doc — read this first
-
-**`.taskmaster/docs/video-playback-overhaul.md`** governs: root causes (R1–R12), locked rules,
-target architecture, Phases 0–3. Phase 2 plan: **`.taskmaster/plans/91-phase2-gpu-planar-color.md`**
-(Codex-reviewed twice). Session findings/gotchas: auto-memory `video-playback-overhaul.md`.
-Diagnostics: `PB_VIDEO_DIAG=1`. Tracked by **task #91** (overhaul), **#92** (poster frame selection
-on MF/AVFoundation), **#98** (Details track listings — merged this cycle), **#99** (playback-bar
-track cycling — new).
-
-## Done — the overhaul (task #91)
-
-- **Phase 1 (reliability)** — feasible preroll (R1), audio-continuous starvation (R2), drop-late
-  (R3), one-audio-commit-per-seek (R4), owned off-main audio decoder (R5/R10/R12), network-seek
-  audio fix (seek the video Cues, not the audio index), 1G bounded-retry / device-wake reprime.
-  Owner-confirmed smooth. Details in the prior status / the doc's §7.
-- **Phase 2 (GPU planar color) — LANDED + measured.** The FFmpeg producer negotiates output format
-  on the first frame and emits planar **NV12 (SDR) / P010 (10-bit + HDR)**; the GPU does YUV + range
-  + PQ/HLG + BT.2020→709 in `fs_scene_planar` (goldens vs an independent from-spec reference). CPU
-  convert (R6) + R8 threads off the fast path; parallel RGBA/fp16 fallback kept for
-  rotated/anamorphic/4:4:4/no-16bit-norm. HDR peak metadata-driven (R11 retired). **Measured 0D A/B
-  (Dune 4K DoVi/HDR10+): 1.48× → 8.45× real-time (35.5 → 203 fps), 5.72× faster.**
-  `PB_VIDEO_NO_PLANAR=1` = escape hatch. Slices: contract `3a81b95d`, render `35348f03`, peak
-  `e349608e`, producer `62c28aac`, measure `dff1355b`.
-- **0D verdict:** decode+convert-bound, NOT network (~15× headroom) → **full 1F deshelved**; Phase 2
-  was the real win.
-
-## Done — this session (2026-07-14, all on `main`)
-
-- **Video posters ~2.4× faster** (`cfd55ffe`). Was ~1.5s on a 4K HDR film (software decode +
-  converting every candidate frame at 4K); now `0.63s`: **hardware decode** in the poster walk
-  (`decoder_for` attaches VideoToolbox/VAAPI like playback) + a **two-scale walk** (score each
-  candidate at ≤480px — brightness is scale-invariant, same frame wins — then convert only the
-  winner at full fit). Golden tests unchanged. This is what made an initial video item stop sitting
-  blank for seconds. Gated bench: `poster_generation_time` (`PB_NET_TEST_MKV`).
-- **Zoom/pan smoothness (#67)** (`338abda8` + `4ebf1233`). New `hold_ramp` = quadratic ease-in so a
-  tap barely moves (fine control) and speed builds on hold; zoom & pan share the curve. Lower floors
-  (ZOOM_MIN 0.5→0.35→**0.18**, PAN_MIN 450→340→**170** — the tap speed, halved per owner for ~1–3 px
-  taps on the 240 Hz display), slightly lower ceilings (ZOOM_MAX 2.5→2.2, PAN_MAX 3200→2700), longer
-  ramp (0.7→0.9s). All one-line tunables in `engine.rs`.
-- **Media-track catalog (#98)** — merged (`c56113a8`). Inspector Details (`Shift+I`) lists every
-  audio + subtitle track (language, codec, channels, default/forced/commentary/SDH); off-event-loop
-  probe; archive parity. The merge also brought `cacf2a67`, which **fixes a real dead-code clippy
-  warning in my Phase-2 `planar_video_options`** (only referenced from a cfg-gated block → failed
-  `clippy -D warnings` on a macOS **non-ffvideo** build, i.e. what `release-macos.sh` ships).
-  Verified clippy-clean + tests green on **both** feature sets.
-- **Initial-video-poster bug** — root cause was the slow poster decode (fixed above) plus a
-  launch geometry-epoch race; the core present path is provably correct (regression test
-  `initial_video_poster_presents_when_it_lands`). Owner reports it's better now.
-- **Tree-scan poster latency — investigated, measured, likely resolved** (`ed6a2aed`). Owner: a
-  tree-structured NAS folder seemed to wait for the whole scan before the first poster; flat folders
-  posted instantly. Measured on `/Volumes/Media/TV Shows` (881 files/58 dirs over SMB): first file
-  **169ms**, total scan 4.26s; poster decode **343ms alone vs 128ms during a concurrent walk** (the
-  walk warms the SMB cache — so **no contention**, and **no logic gate** on `scanning`). So in
-  isolation the poster should present <1s. Owner now says *"things are better"* (the poster
-  speedup). **If it recurs:** the delay is in the live pipeline (pool scheduling on an all-video
-  folder / launch epoch bump / macOS shell render), NOT the scan — add a `PB_VIDEO_DIAG` timestamp
-  (poster requested→completed→presented) to pin the stage. Gated benches:
-  `scan_first_file_vs_total`, `scan_contends_with_the_poster` (`PB_SCAN_DIR`).
+- **Video:** `.taskmaster/docs/video-playback-overhaul.md` (root causes R1–R12, locked rules,
+  Phases 0–3). Phase 2 plan: `.taskmaster/plans/91-phase2-gpu-planar-color.md`.
+- **Subtitles:** `.taskmaster/docs/90-presenter-and-style-contract.md` — the owner's spec, the
+  frozen design decisions, **and the § *As built* post-mortem** (the sequencing rule + the four
+  seam bugs). `.taskmaster/docs/90-p08-text-shaping-spike.md` is the shaping gate.
+- **Track catalog:** `.taskmaster/docs/98-phase0-spike-findings.md` — the four design corrections
+  the spikes produced. Read before #90/#99 work.
+- Diagnostics: `PB_VIDEO_DIAG=1`, `PB_SUBTITLE_TRACE=1`.
 
 ## Next (in priority order)
 
-1. **Phase 3 — Apple `AVSampleBuffer` presenter** (the macOS end-state, NOT yet started).
-   FFmpeg-demux → system decode → `AVSampleBufferDisplayLayer`, for: **correct Dolby Vision** (today
-   we render the HDR10 base layer only — honest but not full DoVi), lower CPU via system decode, one
-   presentation clock, and #5 zoom/pan via layer transform. This is the biggest remaining item and
-   is what "fully done" would mean for the macOS video story. Design it against the doc's Phase 3 spec.
-2. **Phase 2 follow-ons** (deferred, plan §Non-goals; none are blockers): planar **rotation in
-   geometry/UV** (portrait phone video currently takes the parallel RGBA fallback), a bounded
-   planar-`Vec` pool + **two-plane single-submit upload** (true zero-alloc steady state), and **MF
-   P010 on Windows**.
-3. **#99 — playback-bar subtitle/audio track cycling** (natural follow-on to the #98 catalog:
-   `C` subtitle toggle, `A` audio/subtitle cycling, track picker popover).
-4. **#90 — text subtitles** (SRT/mov_text/WebVTT + legibility). Deferred from the beta cycle.
-5. **#94.1 — space-pauses-a-playing-video** — deferred UX; owner wants to workshop the
-   contextual-key idea before committing to changing a key's meaning by context.
+1. **#90.4 — the subtitle Settings UI.** The natural next slice: all eight axes are implemented,
+   clamped, and tested but reachable only from code, and the owner already has a read on the
+   defaults (*"slightly large"*). This is what turns the proof of concept into something usable
+   daily. Build it with the `pb-ui` components (never hand-roll a control in a dialog).
+2. **#90.2 — embedded subtitle streams.** The biggest *functional* gap: in-container SubRip /
+   mov_text needs a demuxer read. Only sidecars render today, so the owner's MKV shows its `.eng.srt`
+   but not its embedded English track. Chunkier than the Settings UI.
+3. **#90.3 remainder** — seek generations (no stale cue flash while scrubbing) and wiring
+   `controls_h` so cues lift above the transport bar (`place()` already supports the lift; nothing
+   measures the bar).
+4. **#99 — the track picker** (`A` cycling + popover). Also what makes `Automatic` mean the
+   specified forced-only + matching-audio-language rule; today it shows the first renderable
+   sidecar. `resolve_track` is already written against the catalog and unit-tested — it just has no
+   catalog to select from yet.
+5. **#90.5 — the winit presenter** (`Renderer::set_subtitle_overlay`). Windows/Linux show nothing.
+   Worth deferring until the style defaults settle — it's a second implementation of decisions still
+   in flux.
+6. **Phase 2 follow-ons** (deferred, none blockers): planar rotation in geometry/UV, planar-`Vec`
+   pool + two-plane single-submit upload, MF P010 on Windows.
+7. **#94.1 — space-pauses-a-playing-video** — deferred UX; owner wants to workshop the
+   contextual-key idea first.
 
-## Owner verification still worth a look (Phase 2)
+## Owner verification still worth a look
 
-The HDR **look** on the real 32:9 EDR panel (7680×2160 Odyssey Neo G9) — colors are verified against
-a from-spec golden, but a physical-panel gut-check on P010/PQ tone-mapping + highlight headroom is
-the last unautomatable check. `PB_VIDEO_NO_PLANAR=1` reverts instantly if anything looks off.
+- **Subtitle defaults** — size/outline/offset are the author's guess. Owner: *"slightly large… I'll
+  scrutinize it more as I spend more time with it."* Worth settling before #90.4's UI is built
+  around them.
+- **HDR look** on the real 32:9 EDR panel (Phase 2) — verified against a from-spec golden, but a
+  physical-panel gut-check on P010/PQ tone-mapping is the last unautomatable check.
+  `PB_VIDEO_NO_PLANAR=1` reverts instantly.
 
 ## Build / test the macOS app
 
-- `scripts/build-swift-host.sh` (defaults `--ffvideo` ON; `--no-ffvideo` to opt out) →
+- `scripts/build-swift-host.sh` (defaults `--ffvideo` **ON**; `--no-ffvideo` to opt out) →
   `target/swift-host/release/PhotoBlaze.app`. `--bundle-ffmpeg` = self-contained (release-style).
 - ⚠ **Always build `--features ffvideo` when testing video code:** `ActiveVideo` has a SECOND
-  literal construction under `cfg(ffvideo/macos)` in `app_core_impl` (~6819) that
-  `cargo test -p pb-app-core` alone misses. Also run `cargo clippy -D warnings` on **both** the
-  default (no-ffvideo, what macOS ships) and `--features ffvideo` sets — dead-code slips through
-  otherwise (the `planar_video_options` case).
+  literal construction under `cfg(ffvideo/macos)` that `cargo test -p pb-app-core` alone misses.
+  Run `cargo clippy -D warnings` on **both** feature sets — dead code slips through otherwise.
+- ⚠ **Don't drive the app from a tool session while the owner is testing.** `pkill PhotoBlaze`
+  kills *their* window, and a bare-path launch can hand the file to their instance. A tool-launched
+  bare binary also comes up **windowless** (the `NSTreatUnknownArgumentsAsOpen` hazard) → no pump,
+  no tick, no trace. Ask the owner to run it instead; that is genuinely faster.
 - Quit the app before rebuilding (`open` won't relaunch a live app — stale-build trap).
-- Perf corpus is on the SMB share `/Volumes/Media/Movies/` (Dune 4K DoVi/HDR10+, Tron). Gated
-  `#[ignore]` benches take `PB_NET_TEST_MKV` / `PB_SCAN_DIR`; run release for real numbers.
+- Perf corpus on the SMB share `/Volumes/Media/`. Real subtitle corpus:
+  `/Volumes/Media/TV Shows/Grey's.Anatomy.S01…/` (embedded eng SubRip **and** an `.eng.srt` of the
+  same content — which is how the "two identical rows" defect was caught; sidecar tracks are marked
+  `external: true`).
 
 ## Notes carried forward
 
 - **Commit + push directly to main** (owner-authorized); fetch/merge origin/main first — a parallel
   Windows agent also pushes there (`feat/media-track-catalog` is their branch; re-merge if it advances).
+- **Windows cross-check from the Mac:** `cargo check -p pb-app --target x86_64-pc-windows-msvc` after
+  two temporary manifest edits (blake3 `pure` as a **direct** pb-app dep + `ureq` `default-features =
+  false` in both crates); restore them and `git checkout Cargo.lock` after. It catches every
+  `AppCore` struct-literal break in `crates/pb-app/src/main.rs` — it has fired every time.
 - swift-bridge bridge module: `//` comments only (`///` panics codegen); non-FFI-able payloads use
   the stash-pull pattern.
 - CLAUDE.md states platform-specific behavior as if global — verify perf/behavior against the
   cfg-gated source, not the doc.
 - Planar path gotcha: `use ff::format::Pixel::*` brings `Pixel::None` into scope — qualify `Option::None`.
+- `settings.save()` is called **unguarded** by the older toggles (e.g. `MuteLiveAudio`), so
+  dispatching them in a test writes the user's real `settings.toml`. `ToggleSubtitles` gates on
+  `persist_prefs` instead — copy that, and consider a cleanup pass on the older ones.
 - Older Windows/loose-end items (#80 slideshow×video, #82 macOS archive natives, #75/#76 CI/mirror)
-  remain in tasks.json; not part of the overhaul.
+  remain in tasks.json.
