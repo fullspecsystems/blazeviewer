@@ -1542,6 +1542,36 @@ struct RingSlot {
     peak: f32,
 }
 
+/// What `render` draws this frame. Pure decision so the priority is unit-testable
+/// without a GPU (task #18 finding #5): a presented ring slot wins; else the frame
+/// **held** across a geometry-change ring rebuild (so a resize / scale-mode switch
+/// isn't blank while the async re-decode is in flight); else the single-image path;
+/// and `blank` (empty state / teardown) overrides everything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DrawSource {
+    Blank,
+    RingSlot,
+    Held,
+    Single,
+}
+
+/// Pick the draw source from the renderer's display flags. `ring_slot_live` = a live
+/// slot is currently presented; `held_present` = a frame was carried across the last
+/// ring rebuild. The bug this fixes: without `Held`, a same-index geometry change fell
+/// through to `Single`, showing a stale single-image bind group instead of the frame
+/// that was actually on screen.
+fn choose_draw_source(blank: bool, ring_slot_live: bool, held_present: bool) -> DrawSource {
+    if blank {
+        DrawSource::Blank
+    } else if ring_slot_live {
+        DrawSource::RingSlot
+    } else if held_present {
+        DrawSource::Held
+    } else {
+        DrawSource::Single
+    }
+}
+
 /// On-screen presenter for a window surface.
 pub struct WgpuRenderer {
     surface: wgpu::Surface<'static>,
@@ -1617,6 +1647,13 @@ pub struct WgpuRenderer {
     ring: Vec<Option<RingSlot>>,
     /// When `Some(i)`, `render` draws ring slot `i` instead of `bind_group`.
     present_idx: Option<usize>,
+    /// The frame that was on screen when the ring was last rebuilt (`reserve_ring` on a
+    /// geometry change), moved out of the ring so it survives the rebuild. While the async
+    /// re-decode is in flight, `render` draws this (GPU-refit to the new viewport) instead of
+    /// the stale single-image `bind_group`, so a resize / scale-mode switch / deck rebuild
+    /// never flashes blank or a wrong frame (task #18 finding #5). One image's worth of
+    /// texture, outside the ring budget; released the moment a real frame is presented.
+    held: Option<RingSlot>,
     /// Background (letterbox) fill, sRGB, shown around a non-covering photo.
     /// Defaults to [`LETTERBOX`]; the app overrides it from user settings.
     letterbox: [u8; 3],
@@ -1884,6 +1921,7 @@ impl WgpuRenderer {
             upload,
             ring: Vec::new(),
             present_idx: None,
+            held: None,
             letterbox: [LETTERBOX[0], LETTERBOX[1], LETTERBOX[2]],
             content_top_inset: 0,
             blank: false,
@@ -2247,6 +2285,7 @@ impl Renderer for WgpuRenderer {
         // drawn until the next set_image / present_slot (see `render`).
         self.blank = true;
         self.present_idx = None;
+        self.held = None; // empty state / teardown: drop any held frame
     }
 
     fn set_image(
@@ -2284,6 +2323,7 @@ impl Renderer for WgpuRenderer {
         self.scene_is_nv12 = false; // an RGBA bind group draws with the RGBA pipeline
         self.blank = false; // an image is showing again
         self.message = None; // hide the empty-state hint
+        self.held = None; // the new single image supersedes any held frame
         self.set_present_peak(peak);
         // Revert to the single-image path; a later present_slot re-selects a slot.
         self.present_idx = None;
@@ -2343,6 +2383,7 @@ impl Renderer for WgpuRenderer {
         self.scene_is_nv12 = true;
         self.blank = false;
         self.message = None;
+        self.held = None; // a live video frame supersedes any held still
         self.set_present_peak(1.0);
         self.present_idx = None;
         self.img_w = width;
@@ -2523,8 +2564,22 @@ impl Renderer for WgpuRenderer {
     }
 
     fn reserve_ring(&mut self, capacity: usize, _slot_w: u32, _slot_h: u32) {
-        // v1 uses image-sized slots, so slot_w/slot_h aren't needed yet (they're
-        // kept for the fixed-size + sub-rect-UV variant). Allocate empty slots.
+        // A geometry change rebuilds the ring empty. Move the frame that was on screen out
+        // of the ring into `held` first, so `render` can keep showing it (GPU-refit to the
+        // new viewport) until the async re-decode presents — no blank/freeze (task #18 #5).
+        // Only overwrite `held` when there IS a live presented slot; a `present_idx` of None
+        // means we're already showing a held (or single-image) frame, which must be
+        // preserved across a *repeated* invalidation rather than dropped.
+        if let Some(slot) = self
+            .present_idx
+            .and_then(|i| self.ring.get_mut(i).and_then(Option::take))
+        {
+            // Keep img_w/img_h in sync with the held frame so the follow-up `resize`/`set_view`
+            // re-places the quad for *its* dimensions (not the incoming image's).
+            self.img_w = slot.w;
+            self.img_h = slot.h;
+            self.held = Some(slot);
+        }
         self.ring = (0..capacity).map(|_| None).collect();
         self.present_idx = None;
     }
@@ -2571,10 +2626,11 @@ impl Renderer for WgpuRenderer {
             .and_then(|s| s.as_ref())
             .map(|s| (s.w, s.h, s.peak))
         else {
-            return; // unknown / not-yet-uploaded slot: keep the current frame
+            return; // unknown / not-yet-uploaded slot: keep the current frame (and its hold)
         };
         self.blank = false; // a photo is showing again
         self.message = None; // hide the empty-state hint
+        self.held = None; // a real frame supersedes the held one — free its texture
         self.set_present_peak(peak);
         self.present_idx = Some(slot);
         self.img_w = w;
@@ -2646,15 +2702,22 @@ impl Renderer for WgpuRenderer {
                     (&self.scene_pipeline, &self.bind_group)
                 }
             };
-            let (pipeline, bind_group) = match self.present_idx {
-                Some(i) => self
-                    .ring
-                    .get(i)
-                    .and_then(|s| s.as_ref())
-                    .map(|s| (&self.scene_pipeline, &s.bind_group))
-                    .unwrap_or_else(single),
-                None => single(),
-            };
+            let ring_slot = self
+                .present_idx
+                .and_then(|i| self.ring.get(i))
+                .and_then(|s| s.as_ref());
+            // `blank` is already handled by the outer branch, so it's false here; the
+            // held-frame preference keeps a geometry change from flashing a stale single
+            // image (task #18 finding #5). See `choose_draw_source`.
+            let (pipeline, bind_group) =
+                match choose_draw_source(false, ring_slot.is_some(), self.held.is_some()) {
+                    DrawSource::RingSlot => (&self.scene_pipeline, &ring_slot.unwrap().bind_group),
+                    DrawSource::Held => (
+                        &self.scene_pipeline,
+                        &self.held.as_ref().unwrap().bind_group,
+                    ),
+                    DrawSource::Single | DrawSource::Blank => single(),
+                };
             draw_scene(
                 &mut encoder,
                 &intermediate_view,
@@ -3154,6 +3217,22 @@ mod tests {
 
     fn close(a: [u8; 4], b: [u8; 4], tol: i32) -> bool {
         (0..4).all(|k| (a[k] as i32 - b[k] as i32).abs() <= tol)
+    }
+
+    #[test]
+    fn choose_draw_source_prefers_ring_then_held_then_single() {
+        use DrawSource::*;
+        // blank overrides everything, whatever else is set.
+        assert_eq!(choose_draw_source(true, true, true), Blank);
+        assert_eq!(choose_draw_source(true, false, false), Blank);
+        // A live presented ring slot wins over a held frame.
+        assert_eq!(choose_draw_source(false, true, true), RingSlot);
+        assert_eq!(choose_draw_source(false, true, false), RingSlot);
+        // No live slot but a held frame (the geometry-change gap): draw the hold, NOT the
+        // stale single-image bind group — this is the task #18 finding #5 fix.
+        assert_eq!(choose_draw_source(false, false, true), Held);
+        // No slot, no hold: the single-image path (post-startup / after set_image).
+        assert_eq!(choose_draw_source(false, false, false), Single);
     }
 
     /// Headless device + the image bind-group layout, for the reuse-slot tests.

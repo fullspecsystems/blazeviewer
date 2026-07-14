@@ -274,6 +274,13 @@ pub struct AppCore {
     pub last_nav: Nav,
     /// What's currently on screen.
     pub displayed_item: Option<usize>,
+    /// The geometry [`epoch`](Self::epoch) at which [`displayed_item`](Self::displayed_item)
+    /// was last **resolved** — presented, or terminally failed — at the *current* fit.
+    /// Readiness ("caught up") is `displayed_item == target_item && presented_epoch ==
+    /// Some(epoch)`, so a geometry change (which bumps `epoch`) marks the on-screen frame
+    /// stale even when the item index is unchanged, forcing an async re-present at the new
+    /// fit instead of silently keeping the old-scale frame (task #18 finding #5).
+    pub presented_epoch: Option<u64>,
     /// The item we're trying to show (== `displayed_item` once caught up).
     pub target_item: Option<usize>,
     /// Flicker-compare pin (task #43): the pinned photo's playlist index. `Y` flips

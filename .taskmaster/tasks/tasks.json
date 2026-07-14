@@ -60,7 +60,44 @@
           16
         ],
         "details": "From docs/heic-decode-plan.md 'Deferred review findings': (1) HDR HEICs bypass preview-first (HDR float branch returns before allow_preview; needs SDR-thumb->HDR-full upgrade, slot format change). (2) Fill mode decodes full-res (decode_fit returns None for Fill+Original; give Fill a cover-to-screen target). (3) Decode-pool byte budget is a soft cap (reserve-before-decode; largely moot now). (4) DecodeKind::{Preview,Full} in the pool key (defensive). (5) Sync load paths (startup/resize/mode) bypass preview-first -> ~250ms HEIC freeze. (6) No unit/property tests for the tier state machine (extract pure bits).",
-        "subtasks": []
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "HDR HEICs bypass preview-first",
+            "description": "Windows WIC reorder tracked as standalone task #95; macOS Image-I/O thumbnail path as task #97.",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "Fill mode decodes full-res -> cover-to-screen target",
+            "description": "Tracked as standalone task #96 (semantic Contain/Cover decode target, per-image).",
+            "status": "pending"
+          },
+          {
+            "id": 3,
+            "title": "Decode-pool byte budget is a soft cap",
+            "description": "Reserve-before-decode instead of check-then-add. Largely moot with displayed-only (<=1 full in flight); revisit if the sharp full-ring (prefetch_fulls) or fp16 HDR upgrades overshoot VRAM.",
+            "status": "pending"
+          },
+          {
+            "id": 4,
+            "title": "DecodeKind::{Preview,Full} in the pool key",
+            "description": "Defensive; no current bug. Distinguish a preview vs full request in the decode-pool job key.",
+            "status": "pending"
+          },
+          {
+            "id": 5,
+            "title": "Sync load paths bypass preview-first (~250ms HEIC freeze)",
+            "description": "DONE 2026-07-14: resize/scale-mode/rebuild no longer decode synchronously on the event loop. Epoch-aware readiness (presented_epoch + target_caught_up/target_pending), a renderer held-frame carried across the ring rebuild (choose_draw_source), and the async prefetch owning the re-decode. load_current_sync kept only for the user-initiated edit/restore paths (save-rotation/undo/restore-still); the redundant startup re-decode removed; the while-hidden initial_image decode kept (documented, non-interactive).",
+            "status": "done"
+          },
+          {
+            "id": 6,
+            "title": "Tier state-machine unit/property tests",
+            "description": "Partly addressed by #5 (pure choose_draw_source in pb-render + target_caught_up/pending + geometry/rebuild/failure tests in pb-app-core). Broader preview->full tier coverage (drain_results upgrade, preview_resident transitions) still to extract/test.",
+            "status": "pending"
+          }
+        ]
       },
       {
         "id": 32,
@@ -1226,6 +1263,42 @@
             "status": "in-progress"
           }
         ]
+      },
+      {
+        "id": 95,
+        "title": "HDR HEIC preview-first on Windows (WIC reorder)",
+        "description": "Task #18 finding #1 (Windows half). PQ/HLG HEICs bypass preview-first: wic.rs decode() returns the fp16 HDR full decode before the allow_preview thumbnail block, so HDR HEICs never get the fast SDR-thumbnail preview while scrolling. Fix: when allow_preview, try wic_decode_thumbnail FIRST (RGBA8, is_preview=true) regardless of HDR; only fall through to the is_hdr_transfer fp16 full when there is no thumbnail. The SDR8-preview -> fp16-full slot flip already works (upload_slot rebuilds the texture per call; drain_results upgrades a preview_resident item).",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          18
+        ],
+        "details": "HDR capture is the iPhone default, so this is a growing class of photos. Verification harness gotchas: crates/pb-decode/examples/decode.rs hardcodes allow_preview=false (can't assert a preview) - use heic_bench or add a --preview mode reporting is_preview + PixelFormat. Confirm the test fixture actually has an nclx transfer 16/18 (an iPhone gain-map aux may not enter the PQ/HLG branch). Validate the WIC thumbnail's color: WIC exposes thumbnail retrieval and per-frame color contexts separately, so applying the primary image's colr to the thumbnail needs evidence, not assumption. Also make slot_bytes_estimate / VRAM planning fp16-aware if the sharp full-ring (prefetch_fulls, up to 8 workers) can leave the ring over budget after multiple 8 B/px upgrades (see #18.3).",
+        "subtasks": []
+      },
+      {
+        "id": 96,
+        "title": "Fill scale mode: cover-to-screen decode target (semantic Contain/Cover)",
+        "description": "Task #18 finding #2. decode_fit() returns None for ScaleMode::Fill, so a 24MP HEIC in Fill decodes/uploads at full res though only a screen-sized cover crop shows. Fix with a SEMANTIC decode target (Contain vs Cover) computed per-image after each decoder knows its oriented dimensions - NOT a single current-dims cover box in decode_fit (that mis-sizes neighbors: a portrait neighbor of a landscape current gets 2x-upscaled and it sticks once resident).",
+        "status": "pending",
+        "priority": "low",
+        "dependencies": [
+          18
+        ],
+        "details": "Owner decision (2026-07-14): use the semantic Contain/Cover target despite ~40 FitBox construction sites across 3 crates - a mechanical change, preferable to shipping a known sharpness regression. downscale_to_fit currently uses min() (contain); Cover uses max(sw/w, sh/h) clamped to no-upscale, computed against each image's own dims, so the box can stay image-independent (the screen box) and neighbors are correct too. AUDIT ALL 9 decode_fit() consumers (not just prefetch + slot_bytes_estimate): it also drives video scaling/budgeting, animation decoding, Live Photo streaming, and macOS archive posters. Benefit for HEIC is upload/VRAM/CPU-downscale (finalize applies the box after a full decode), not decode time.",
+        "subtasks": []
+      },
+      {
+        "id": 97,
+        "title": "macOS HEIC/HDR preview-first (Image I/O embedded-thumbnail decode)",
+        "description": "Task #18 finding #1 (macOS half). imageio.rs ImageIoDecoder::decode has NO thumbnail path and ignores allow_preview for ALL images (SDR and HDR) - so there is nothing to 'reorder' like the Windows WIC fix. Needs a real Image I/O embedded-thumbnail decode: CGImageSourceCreateThumbnailAtIndex (embedded-only, so a missing thumbnail does NOT synthesize a full decode), with orientation + color-space handling, is_preview=true, and primary-dimension reporting; plus macOS compile + real-file preview/full-upgrade verification.",
+        "status": "pending",
+        "priority": "low",
+        "dependencies": [
+          95
+        ],
+        "details": "RATIONALE / IMPORTANCE (owner-requested, 2026-07-14): macOS HEIC preview-first is ENTIRELY ABSENT today - this is a NEW capability, not a regression fix. So Apple-Silicon users currently get no fast-scrub on HEIC/HDR libraries (every HEIC is a full decode on the scroll path). Importance: matters once the macOS build is a real shipping target; LOW URGENCY while Windows is the primary platform. Pairs with #95 (the Windows WIC reorder) as the cross-platform completion of finding #1.",
+        "subtasks": []
       }
     ]
   }

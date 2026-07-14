@@ -146,6 +146,7 @@ impl AppCore {
             targets: Vec::new(),
             last_nav: Nav::Forward,
             displayed_item: None,
+            presented_epoch: None,
             target_item: None,
             compare_pin: None,
             compare_return: None,
@@ -308,7 +309,10 @@ impl AppCore {
             // An off-thread describe (task #44) keeps polling so `poll_describe_scan`
             // installs the result promptly.
             || self.describe_scan.is_some()
-            || self.displayed_item != self.target_item
+            // The target isn't on screen at the current fit yet (incl. a same-index
+            // re-present pending after a geometry change bumped the epoch) — keep polling
+            // so `drain_results` presents it (task #18 finding #5).
+            || self.target_pending()
             || self
                 .targets
                 .iter()
@@ -1324,7 +1328,7 @@ impl AppCore {
             // Advance only when caught up AND the (accelerating) interval elapsed, so every photo
             // is shown and a miss simply holds. The gap ramps slow→fast over `ramp_secs` of held
             // auto-repeat; the ceiling is the max-photos/sec cap (#20) or the refresh rate.
-            let caught_up = self.displayed_item == self.target_item;
+            let caught_up = self.target_caught_up();
             let repeat_elapsed = match self.hold_start {
                 Some(t) => now.saturating_duration_since(t + self.initial_delay),
                 None => Duration::ZERO,
@@ -1361,7 +1365,7 @@ impl AppCore {
         let slideshow_running =
             self.slideshow.on && self.held_nav().is_none() && !self.dialog_open && !video_playing;
         if slideshow_running {
-            let caught_up = self.displayed_item == self.target_item;
+            let caught_up = self.target_caught_up();
             let since_shown = self
                 .last_present
                 .map(|t| now.saturating_duration_since(t))
@@ -2966,12 +2970,23 @@ impl AppCore {
         if !same_root {
             self.undo_stack.clear();
         }
-        // Invalidate the ring + bump the epoch (discards in-flight old decodes),
-        // then synchronously show the new current photo and refill around it.
+        // Invalidate the ring + bump the epoch (discards in-flight old decodes), then refill
+        // around the new current photo. No synchronous decode on the event loop (task #18
+        // finding #5): the async prefetch decodes the new current preview-first and presents
+        // it when ready. `invalidate_geometry` (above) still reads the *old* `current` dims
+        // for its ring-size estimate, so clear the stale metadata only afterward. Nothing is
+        // presented yet (`displayed_item = None`), so readiness holds the old deck's frame
+        // (kept by the renderer) with the loading pie until the first new frame lands.
         self.invalidate_geometry();
+        // Drop the old deck's metadata (a genuinely new frame is incoming) and mark it
+        // un-presented at this epoch: `displayed_item` still names the logical current index,
+        // but `presented_epoch = None` makes `target_caught_up` false, so `drain_results`
+        // presents the new current when its async decode lands. The renderer holds the old
+        // frame (with the loading pie) until then — no synchronous decode on the loop.
+        self.current = None;
         self.displayed_item = self.playlist.current();
         self.target_item = self.playlist.current();
-        self.load_current_sync();
+        self.presented_epoch = None;
         self.request_prefetch();
         self.effects.push(contract::CoreEffect::RequestRender);
     }
@@ -4893,9 +4908,21 @@ impl AppCore {
             self.video_geometry_stale = true;
             return;
         }
-        self.load_current_sync();
+        // No synchronous decode on the event loop (task #18 finding #5). `invalidate_geometry`
+        // just bumped the epoch, so `target_caught_up` is now false for the current item even
+        // though its index is unchanged: the async prefetch re-decodes it at the new fit and
+        // `drain_results` presents it when ready. Meanwhile the renderer holds the current
+        // frame across the ring rebuild and the GPU refits it (via `set_view`) to the new
+        // viewport / scale mode — so the switch is instant, with no freeze and no blank.
         self.target_item = self.playlist.current();
+        if let Some(item) = self.target_item {
+            let view = self.view_for(item);
+            if let Some(r) = self.renderer.as_mut() {
+                r.set_view(view);
+            }
+        }
         self.request_prefetch();
+        self.draw();
     }
 
     /// Grow the playlist in place as a streaming scan delivers more images: swap in the
@@ -5713,7 +5740,7 @@ impl AppCore {
         if self.displayed_item != Some(item) {
             self.anim_hint_shown_for = None;
         }
-        self.displayed_item = Some(item);
+        self.mark_resolved(item);
         self.current = self.meta_cache.get(&item).cloned();
         // The panel (if shown) is now stale for the old photo; `about_to_wait`
         // rebuilds it for `item` next tick (or hides it while flying), so it
@@ -5729,7 +5756,9 @@ impl AppCore {
     /// neither misreports the held-over pixels as the failed photo. The previous
     /// frame stays up rather than flashing black.
     pub fn present_failed(&mut self, item: usize) {
-        self.displayed_item = Some(item);
+        // Terminal at this epoch: a corrupt target counts as "resolved" so readiness
+        // (`target_caught_up`) doesn't leave the loading pie spinning forever on it.
+        self.mark_resolved(item);
         self.current = None;
         let name = file_name_of(self.source.name(item));
         let total = self.source.len();
@@ -5757,13 +5786,40 @@ impl AppCore {
         }
     }
 
+    /// Record that `item` was **resolved** — presented or terminally failed — at the
+    /// *current* geometry epoch. Stamping `presented_epoch` here is what lets
+    /// [`target_caught_up`](Self::target_caught_up) tell a fresh frame from a stale one
+    /// after a geometry change bumps the epoch (task #18 finding #5).
+    fn mark_resolved(&mut self, item: usize) {
+        self.displayed_item = Some(item);
+        self.presented_epoch = Some(self.epoch);
+    }
+
+    /// Whether the on-screen frame is the current target **at the current fit** — i.e.
+    /// nothing more needs presenting. Item identity alone isn't enough: a resize /
+    /// scale-mode change / deck rebuild bumps `epoch` (see [`invalidate_geometry`]), so
+    /// the same item must be re-presented at the new geometry before it's "caught up."
+    /// Drives the present guards, the loading pie, and the nav/slideshow readiness gates.
+    pub fn target_caught_up(&self) -> bool {
+        self.target_item.is_some()
+            && self.displayed_item == self.target_item
+            && self.presented_epoch == Some(self.epoch)
+    }
+
+    /// The inverse used by the readiness gates: there **is** a target and it isn't yet
+    /// on screen at the current fit. Distinct from `!target_caught_up()` in the idle
+    /// case — with no target there is nothing pending (so the loop can sleep).
+    pub fn target_pending(&self) -> bool {
+        self.target_item.is_some() && !self.target_caught_up()
+    }
+
     /// Try to show `target_item`: present it on a ring hit, otherwise keep the
     /// previous frame (a miss is a hold, never a skip). Returns whether shown.
     pub fn try_present_target(&mut self) -> bool {
         let Some(item) = self.target_item else {
             return false;
         };
-        if self.displayed_item == Some(item) {
+        if self.target_caught_up() {
             return true;
         }
         if self.failed.contains(&item) {
@@ -5963,7 +6019,11 @@ impl AppCore {
                     self.preview_resident.remove(&item);
                 }
                 uploads += 1;
-                if self.target_item == Some(item) && self.displayed_item != Some(item) {
+                // Present the target when it lands — including a *re-present of the same
+                // item* after a geometry change (epoch bumped ⇒ `target_caught_up` is false
+                // even though the index matches), so a resize / scale-mode / rebuild swaps
+                // the held stale-scale frame for the fresh one (task #18 finding #5).
+                if self.target_item == Some(item) && !self.target_caught_up() {
                     self.present_item(item, res.slot);
                 }
             }
@@ -6023,7 +6083,9 @@ impl AppCore {
                 self.info_line_shown = false;
                 self.info_line_item = None;
                 self.info_line_h = 0;
-                self.displayed_item = Some(idx);
+                // Resolved at the current epoch (this sync path still serves the kept
+                // edit/restore exceptions), so readiness reads caught-up with no pie.
+                self.mark_resolved(idx);
             }
             Err(e) => {
                 eprintln!("decode failed: {}: {e}", self.source.name(idx));
@@ -7348,30 +7410,40 @@ impl AppCore {
     /// stills, so PQ/HLG video gets real headroom on an EDR/HDR surface and a
     /// correct tone-map on SDR, never an RGBA8 clip.
     fn present_video_frame(&mut self, frame: &pb_decode::VideoFrame) {
-        let Some(a) = self.renderer.as_mut() else {
-            return;
-        };
-        match frame.format {
-            pb_decode::PixelFormat::Nv12 => {
-                let y_len = frame.width as usize * frame.height as usize;
-                let (y, uv) = frame.pixels.split_at(y_len);
-                a.set_video_nv12(
-                    y,
-                    uv,
+        let item = self.video.as_ref().map(|v| v.item());
+        {
+            let Some(a) = self.renderer.as_mut() else {
+                return;
+            };
+            match frame.format {
+                pb_decode::PixelFormat::Nv12 => {
+                    let y_len = frame.width as usize * frame.height as usize;
+                    let (y, uv) = frame.pixels.split_at(y_len);
+                    a.set_video_nv12(
+                        y,
+                        uv,
+                        frame.width,
+                        frame.height,
+                        render_yuv(&frame.color),
+                        render_color(&frame.color.transform),
+                    );
+                }
+                format => a.set_image(
+                    &frame.pixels,
                     frame.width,
                     frame.height,
-                    render_yuv(&frame.color),
                     render_color(&frame.color.transform),
-                );
+                    format == pb_decode::PixelFormat::Rgba16F,
+                    frame.color.peak,
+                ),
             }
-            format => a.set_image(
-                &frame.pixels,
-                frame.width,
-                frame.height,
-                render_color(&frame.color.transform),
-                format == pb_decode::PixelFormat::Rgba16F,
-                frame.color.peak,
-            ),
+        }
+        // Each presented frame re-resolves the video item at the current epoch, so a
+        // resize during playback keeps `target_caught_up` true (no loading pie over live
+        // video) — `present_video_frame` streams frames without going through
+        // `present_item` (task #18 finding #5).
+        if let Some(item) = item {
+            self.mark_resolved(item);
         }
     }
 
@@ -7651,7 +7723,10 @@ impl AppCore {
     /// photo lands, learn from the wait, then snap to full and fade. Returns
     /// whether the pie still needs the loop to keep ticking.
     pub fn tick_pie(&mut self, now: Instant) -> bool {
-        let not_ready = self.target_item.is_some() && self.displayed_item != self.target_item;
+        // Epoch-aware so the pie also shows while a same-index frame is being re-decoded
+        // at a new fit (resize / scale-mode). Live video re-resolves every frame
+        // (`present_video_frame`), so it stays caught-up and never shows the pie.
+        let not_ready = self.target_pending();
         if not_ready {
             self.pie_finish = None;
             let start = *self.wait_started.get_or_insert(now);
@@ -8200,8 +8275,8 @@ impl AppCore {
             return None; // already playing, or a decode/stream is already in flight
         }
         let item = self.displayed_item?;
-        if self.displayed_item != self.target_item {
-            return None; // still catching up to the target — not settled yet
+        if !self.target_caught_up() {
+            return None; // still catching up to the target (incl. a geometry re-present) — not settled
         }
         if self.prepared.as_ref().is_some_and(|p| p.item == item) {
             return None; // already prepped and ready
@@ -11162,6 +11237,138 @@ mod tests {
         );
         assert!(!core.video_paused_by_resize, "one-shot");
         drop(io);
+    }
+
+    // ── task #18 finding #5: epoch-aware readiness / off-loop geometry re-decode ──
+
+    #[test]
+    fn target_caught_up_requires_the_item_and_the_current_epoch() {
+        let mut core = test_core();
+        // No target: never caught up, nothing pending (the loop can sleep).
+        assert!(!core.target_caught_up());
+        assert!(!core.target_pending());
+
+        core.target_item = Some(0);
+        // Target set but not shown yet: pending, not caught up.
+        assert!(!core.target_caught_up());
+        assert!(core.target_pending());
+
+        // Shown at the current epoch: caught up.
+        core.mark_resolved(0);
+        assert!(core.target_caught_up());
+        assert!(!core.target_pending());
+
+        // A geometry change bumps the epoch, so the SAME on-screen item is stale — pending
+        // again even though displayed_item == target_item (the finding #5 bug: it used to
+        // read as caught-up and the fresh decode was never presented).
+        core.invalidate_geometry();
+        assert_eq!(
+            core.displayed_item,
+            Some(0),
+            "invalidate_geometry must not drop the shown item"
+        );
+        assert!(!core.target_caught_up());
+        assert!(core.target_pending());
+
+        // Re-presenting at the new epoch catches up again.
+        core.mark_resolved(0);
+        assert!(core.target_caught_up());
+    }
+
+    #[test]
+    fn invalidate_geometry_preserves_current_metadata() {
+        // A resize / scale-mode change (incl. the video-resize path, which reads
+        // `displayed_item`/`current`) must NOT drop the current photo's metadata — only a
+        // genuinely new deck (`rebuild_playlist`) clears it.
+        use crate::meta::PhotoMeta;
+        let mut core = test_core();
+        core.current = Some(PhotoMeta {
+            rel: "a.jpg".into(),
+            w: 100,
+            h: 80,
+            codec: "PNG",
+            animated: None,
+        });
+        core.invalidate_geometry();
+        assert_eq!(
+            core.current.as_ref().map(|m| (m.w, m.h)),
+            Some((100, 80)),
+            "invalidate_geometry must keep `current`"
+        );
+    }
+
+    #[test]
+    fn rebuild_playlist_clears_metadata_and_marks_nothing_presented() {
+        use crate::meta::PhotoMeta;
+        let mut core = test_core();
+        core.current = Some(PhotoMeta {
+            rel: "old.jpg".into(),
+            w: 100,
+            h: 80,
+            codec: "PNG",
+            animated: None,
+        });
+        core.target_item = Some(0);
+        core.mark_resolved(0);
+        assert!(core.target_caught_up());
+
+        let root = PathBuf::from("photos");
+        let src: Arc<dyn PhotoSource> =
+            Arc::new(FsSource::new(vec![root.join("a.jpg"), root.join("b.jpg")]));
+        core.rebuild_playlist(src, root, None, false, 0);
+
+        assert!(core.current.is_none(), "a new deck drops the old metadata");
+        // `displayed_item` names the logical current, but nothing is presented at this epoch
+        // (presented_epoch = None), so it reads as pending — the held old frame holds (with
+        // the pie) until the async decode lands. No synchronous decode ran on the loop.
+        assert_eq!(core.displayed_item, Some(0));
+        assert_eq!(core.presented_epoch, None);
+        assert_eq!(core.target_item, Some(0));
+        assert!(core.target_pending());
+        assert!(!core.target_caught_up());
+    }
+
+    #[test]
+    fn present_failed_is_terminal_at_the_current_epoch() {
+        // A corrupt target counts as "resolved" so readiness doesn't leave the loading pie
+        // spinning on it forever — even right after a geometry change bumped the epoch.
+        let mut core = test_core();
+        core.target_item = Some(0);
+        core.invalidate_geometry();
+        assert!(core.target_pending());
+        core.present_failed(0);
+        assert!(
+            core.target_caught_up(),
+            "a failed target is terminal, not perpetually pending"
+        );
+        assert!(core.current.is_none());
+    }
+
+    #[test]
+    fn scale_mode_change_does_not_decode_on_the_event_loop() {
+        // The synchronous decode is gone (finding #5): switching scale mode must not attempt
+        // a decode on the loop. With a non-existent file a sync decode would fail and mark the
+        // item failed; instead the async prefetch owns the (re)decode, and the epoch bump
+        // leaves the current item pending a re-present.
+        let mut core = test_core();
+        let root = PathBuf::from("photos");
+        core.source = Arc::new(FsSource::new(vec![root.join("a.jpg")]));
+        core.playlist = Playlist::new(1, 0);
+        core.target_item = Some(0);
+        core.mark_resolved(0);
+        assert!(core.target_caught_up());
+
+        core.set_scale_mode(ScaleMode::Fill);
+
+        assert!(
+            !core.failed.contains(&0),
+            "a scale-mode change must not synchronously decode (and fail) the item"
+        );
+        assert_eq!(core.view.mode, ScaleMode::Fill);
+        assert!(
+            core.target_pending(),
+            "the item is pending an async re-present at the new fit"
+        );
     }
 
     /// Owner-reported (79.10 smoke): toggling fullscreen while a video played went
