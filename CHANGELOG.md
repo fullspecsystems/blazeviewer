@@ -13,6 +13,12 @@ with any pre-release suffix carried only by the tag.
   fresh installs.)
 
 ### Fixed
+- **Short forward jumps in video are near-instant.** An arrow-key ±2 s skip forward now decodes
+  ahead from where you are instead of seeking back to the previous keyframe and grinding the whole
+  GOP. (Backward and long jumps still seek to a keyframe.)
+- **HDR video plays more smoothly in large windows.** The per-frame HDR color conversion now runs
+  across CPU cores (leaving headroom for audio), so it keeps up at higher resolutions instead of
+  dropping frames. (A GPU-based conversion is the planned long-term replacement.)
 - **Seeking in high-bitrate 4K / HDR videos is dramatically faster.** Jumping around a long-GOP
   clip used to stall for 1–3 seconds while it needlessly color-converted (and HDR-tone-mapped)
   every frame between the keyframe and your target — frames it only threw away. It now decodes

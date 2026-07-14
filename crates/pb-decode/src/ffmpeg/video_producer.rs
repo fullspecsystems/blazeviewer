@@ -47,6 +47,13 @@ use crate::{FitBox, PixelFormat};
 /// files/RAM resolve in milliseconds; only hostile input hits this.
 const OP_DEADLINE: Duration = Duration::from_secs(10);
 
+/// How far ahead we'll **decode forward** from the current position instead of
+/// re-seeking to a keyframe. A short *forward* hop (arrow-key ±2 s) lands far
+/// faster by just decoding the few frames to the target than by seeking back to
+/// the previous keyframe and running up the whole GOP — which on long-GOP 4K/HDR
+/// can be many seconds of frames. Beyond this a keyframe seek is the better bet.
+const FORWARD_DECODE_MAX: Duration = Duration::from_secs(4);
+
 /// Temporary perf diagnostics (task #84 follow-up): `PB_VIDEO_DIAG=1` prints the
 /// decode backend (VideoToolbox vs software), the decode resolution, and per-seek
 /// timing to stderr so we can measure the 4K-HDR seek stall instead of guessing.
@@ -149,15 +156,18 @@ pub fn run_ff_video_producer(
         if let Some((target, g)) = pending.take() {
             gen = g;
             let seek_t0 = Instant::now();
-            let target_units = match reader.seek(target) {
-                Ok(t) => t,
-                Err(e) => {
+            let target_units = reader.target_units(target);
+            // Short forward hop → decode forward from here (no keyframe seek/flush,
+            // far less run-up). Backward/far → seek to the keyframe ≤ target.
+            let forward = reader.can_decode_forward(target_units);
+            if !forward {
+                if let Err(e) = reader.seek_to_keyframe(target_units) {
                     fail(e);
                     break 'outer;
                 }
-            };
+            }
             let demux = seek_t0.elapsed();
-            let mut runup = 0u32; // keyframe→target frames decoded then discarded
+            let mut runup = 0u32; // frames decoded then discarded en route to target
             let mut landed: Option<(i64, Vec<u8>)> = None;
             loop {
                 // Watch for supersede/stop between decodes (latest-value).
@@ -187,8 +197,9 @@ pub fn run_ff_video_producer(
                             };
                             if diag() {
                                 eprintln!(
-                                    "[pb-video] seek target={:.2}s demux={}ms runup={} frames total={}ms",
+                                    "[pb-video] seek target={:.2}s mode={} demux={}ms runup={} frames total={}ms",
                                     target.as_secs_f64(),
+                                    if forward { "forward" } else { "keyframe" },
                                     demux.as_millis(),
                                     runup,
                                     seek_t0.elapsed().as_millis(),
@@ -485,11 +496,33 @@ impl Reader {
         v
     }
 
-    /// In-place seek: demuxer to a keyframe ≤ `target`, decoder flushed, EOS
-    /// state cleared. Returns the target in stream units (the landing bar).
-    fn seek(&mut self, target: Duration) -> Result<i64, String> {
+    /// A seek target `Duration` in this stream's PTS units (the landing bar),
+    /// relative to the same origin/start-time base `last_ts` uses — so the two are
+    /// directly comparable for the forward-hop decision.
+    fn target_units(&self, target: Duration) -> i64 {
         let base = self.origin.or(self.facts.start_time).unwrap_or(0);
-        let target_units = base.saturating_add(self.facts.duration_to_pts(target));
+        base.saturating_add(self.facts.duration_to_pts(target))
+    }
+
+    /// The forward-decode budget ([`FORWARD_DECODE_MAX`]) in stream units.
+    fn forward_decode_max_units(&self) -> i64 {
+        self.facts.duration_to_pts(FORWARD_DECODE_MAX)
+    }
+
+    /// Whether a seek to `target_units` should **decode forward** from the current
+    /// position instead of seeking to a keyframe: only a *forward* hop within the
+    /// budget, and not while parked/drained (where there's nothing to decode
+    /// forward from). Backward and far seeks return `false` → keyframe seek.
+    fn can_decode_forward(&self, target_units: i64) -> bool {
+        !self.parked
+            && !self.eof_sent
+            && target_units > self.last_ts
+            && target_units - self.last_ts <= self.forward_decode_max_units()
+    }
+
+    /// In-place keyframe seek to `target_units`: demuxer to a keyframe ≤ target,
+    /// decoder flushed, EOS/parked state cleared.
+    fn seek_to_keyframe(&mut self, target_units: i64) -> Result<(), String> {
         self.input.set_op_deadline(Some(OP_DEADLINE));
         let rc = unsafe {
             ff::ffi::avformat_seek_file(
@@ -524,7 +557,7 @@ impl Reader {
         self.decoder.flush();
         self.eof_sent = false;
         self.parked = false;
-        Ok(target_units)
+        Ok(())
     }
 
     /// Assemble the protocol frame for a converted pixel buffer at `ts`.

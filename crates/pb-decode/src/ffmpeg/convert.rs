@@ -237,6 +237,7 @@ impl FrameConverter {
                 })
                 .collect()
         });
+        let lut: &[f32] = lut;
         let m = self.hdr_matrix;
         let (w, h) = (frame.width() as usize, frame.height() as usize);
         let stride = frame.stride(0);
@@ -244,28 +245,63 @@ impl FrameConverter {
         let row_bytes = w * 8; // RGBA64: 4 × u16
         let one = half::f16::from_f32(1.0).to_le_bytes();
         let mut out = vec![0u8; w * h * 8]; // RGBA16F
-        let mut peak = self.peak;
-        for y in 0..h {
-            let src = &data[y * stride..y * stride + row_bytes];
-            let dst = &mut out[y * row_bytes..(y + 1) * row_bytes];
-            for x in 0..w {
-                let s = &src[x * 8..x * 8 + 8];
-                let r = lut[u16::from_le_bytes([s[0], s[1]]) as usize];
-                let g = lut[u16::from_le_bytes([s[2], s[3]]) as usize];
-                let b = lut[u16::from_le_bytes([s[4], s[5]]) as usize];
-                // Source-linear → sRGB-linear primaries.
-                let ro = m[0][0] * r + m[0][1] * g + m[0][2] * b;
-                let go = m[1][0] * r + m[1][1] * g + m[1][2] * b;
-                let bo = m[2][0] * r + m[2][1] * g + m[2][2] * b;
-                peak = peak.max(ro).max(go).max(bo);
-                let d = &mut dst[x * 8..x * 8 + 8];
-                d[0..2].copy_from_slice(&half::f16::from_f32(ro).to_le_bytes());
-                d[2..4].copy_from_slice(&half::f16::from_f32(go).to_le_bytes());
-                d[4..6].copy_from_slice(&half::f16::from_f32(bo).to_le_bytes());
-                d[6..8].copy_from_slice(&one);
+
+        // This LUT + 3×3 matrix + f16 pack is the dominant per-frame HDR cost and
+        // scales with output area — single-threaded it crossed the frame budget on
+        // a large window (the playback stutter / queue rebuffering). Rows are
+        // independent, so fan them out across cores in row-bands.
+        // Leave a couple of cores for the (main-thread) audio decoder + event loop:
+        // saturating every core during a post-seek convert burst starves a heavy
+        // audio codec (TrueHD/Atmos) and crackles. Mirrors the decode pool's
+        // "cores − 2" budget.
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get().saturating_sub(2))
+            .unwrap_or(1)
+            .clamp(1, h.max(1));
+        let rows_per = h.div_ceil(threads);
+        let base_peak = self.peak;
+        let one_pixel = |src: &[u8], dst: &mut [u8], peak: &mut f32| {
+            let r = lut[u16::from_le_bytes([src[0], src[1]]) as usize];
+            let g = lut[u16::from_le_bytes([src[2], src[3]]) as usize];
+            let b = lut[u16::from_le_bytes([src[4], src[5]]) as usize];
+            // Source-linear → sRGB-linear primaries.
+            let ro = m[0][0] * r + m[0][1] * g + m[0][2] * b;
+            let go = m[1][0] * r + m[1][1] * g + m[1][2] * b;
+            let bo = m[2][0] * r + m[2][1] * g + m[2][2] * b;
+            *peak = peak.max(ro).max(go).max(bo);
+            dst[0..2].copy_from_slice(&half::f16::from_f32(ro).to_le_bytes());
+            dst[2..4].copy_from_slice(&half::f16::from_f32(go).to_le_bytes());
+            dst[4..6].copy_from_slice(&half::f16::from_f32(bo).to_le_bytes());
+            dst[6..8].copy_from_slice(&one);
+        };
+        let frame_peak = std::thread::scope(|s| {
+            let mut handles = Vec::with_capacity(threads);
+            let mut rest: &mut [u8] = &mut out;
+            let mut y0 = 0usize;
+            while y0 < h {
+                let band_rows = rows_per.min(h - y0);
+                let (band, tail) = rest.split_at_mut(band_rows * row_bytes);
+                rest = tail;
+                let start = y0;
+                handles.push(s.spawn(move || {
+                    let mut peak = 0f32;
+                    for i in 0..band_rows {
+                        let src = &data[(start + i) * stride..(start + i) * stride + row_bytes];
+                        let dst = &mut band[i * row_bytes..(i + 1) * row_bytes];
+                        for x in 0..w {
+                            one_pixel(&src[x * 8..x * 8 + 8], &mut dst[x * 8..x * 8 + 8], &mut peak);
+                        }
+                    }
+                    peak
+                }));
+                y0 += band_rows;
             }
-        }
-        self.peak = peak;
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or(0.0))
+                .fold(base_peak, f32::max)
+        });
+        self.peak = frame_peak;
         out
     }
 }
