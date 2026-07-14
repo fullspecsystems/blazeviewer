@@ -1204,6 +1204,28 @@
         "details": "Install the current build via the normal Velopack channel (not a dev/cargo run) so the ProgId's open command points at the real `...\\current\\photoblaze.exe`. In Explorer: select a few hundred image files in one folder (Ctrl+A on a large library folder works well), choose Open / press Enter, and confirm (a) exactly one PhotoBlaze process starts, (b) the playlist matches the full selection (not truncated), (c) the window comes to the foreground, and (d) repeating the selection while PhotoBlaze is already running forwards to the same window instead of spawning a second process. Also sanity-check a selection large enough to approach the ~32K command-line limit (~250+ paths) still arrives complete via the WM_COPYDATA forward path (which has no such cap), and that `--new-window` still spawns a standalone second process on request.",
         "testStrategy": "Manual, on-device only (Explorer-driven, not scriptable the same way as #14.5's process-spawn simulation): fresh Velopack install, Ctrl+A a few hundred files, Open; confirm process count stays 1, playlist is complete, window gets focus. Repeat while PhotoBlaze is already running. Confirm --new-window bypass still works.",
         "subtasks": []
+      },
+      {
+        "id": 94,
+        "title": "Video ergonomics: space pauses a playing video + session-only resume positions",
+        "description": "Solve the instinct to hit space to pause/play a video (space is the next-photo nav key, so today it skips away mid-watch). Contextual override like the arrows-become-seek precedent, not a new binding. Open design call: what space does on a PAUSED video (resume feels natural and stays symmetric; advance-to-next only when no video playback has begun, or on a stopped/ended clip). Applies to both the macOS native (AVPlayer) path and the Session backend; keep P working as-is.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [],
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Space pauses (never advances) while a video is playing",
+            "description": "When the displayed item is a video and it is playing, space pauses it instead of advancing to the next item. Decide + document the paused-video behavior (recommend: space resumes, so space toggles like a media player once playback has begun; navigation resumes on a stopped/ended clip or a non-video item). Route through pb-app-core action dispatch so both shells inherit it; unit-test the contextual dispatch, including hold-to-fly (a held space advancing across items must not get stuck on a video).",
+            "status": "pending"
+          },
+          {
+            "id": 2,
+            "title": "RAM-only per-session resume positions for videos",
+            "description": "Remember each video's last play position for the lifetime of the app session ONLY: a RAM map keyed by item, dropped in clear_session_state on Esc/quit like every other runtime cache, so the ADR-018 privacy guarantee holds (nothing persisted, no on-disk trace, and the no-trace integration test stays green). Returning to a longer video resumes from (slightly before) where you left off instead of restarting; near-start/near-end positions restart from 0 (thresholds TBD). Works on both backends: native = seek before play; Session = seek-after-open or an initial-position plumb-through.",
+            "status": "pending"
+          }
+        ]
       }
     ]
   }
