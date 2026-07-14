@@ -745,6 +745,16 @@ impl VideoSession {
         );
         self.state = to;
         update.state_changed = true;
+        // A terminal session drains its queue so `is_active` goes false and the
+        // tick loop stops polling. Otherwise a Failed session that still had frames
+        // queued (or any terminal state with a non-empty queue) spins forever —
+        // `poll` early-returns on terminal without ever draining it. The parked
+        // last frame lives in the renderer, not the queue, so this is safe; `stop`
+        // already clears the same way for the Stopped path.
+        if to.is_terminal() {
+            self.queue.clear();
+            self.queued_bytes = 0;
+        }
     }
 
     fn drain_events(&mut self, update: &mut SessionUpdate) {
@@ -1510,6 +1520,34 @@ mod tests {
         drop(io2);
         s2.poll(t0);
         assert_eq!(s2.state(), VideoSessionState::Failed);
+    }
+
+    /// 1G lifecycle: a session that fails with frames still queued must go
+    /// INACTIVE, so the tick loop stops polling. Before the terminal-drain fix,
+    /// `is_active` (`!terminal || !queue.is_empty()`) stayed true forever while
+    /// `poll` early-returned on terminal — the loop spun until the backend dropped.
+    #[test]
+    fn a_terminal_session_drains_its_queue_and_goes_inactive() {
+        let (mut s, io) = VideoSession::new(SID, FRAME_BYTES);
+        let t0 = Instant::now();
+        opened(&io, 10_000);
+        // Two frames queue, then the producer fails mid-stream.
+        io.events.send(VideoProducerEvent::Frame(frame(0))).unwrap();
+        io.events.send(VideoProducerEvent::Frame(frame(33))).unwrap();
+        io.events
+            .send(VideoProducerEvent::Failed {
+                session_id: SID,
+                error: "boom".into(),
+            })
+            .unwrap();
+        s.poll(t0);
+        assert_eq!(s.state(), VideoSessionState::Failed);
+        assert!(
+            !s.is_active(),
+            "a terminal session must not keep the tick loop spinning"
+        );
+        // And a second poll is inert (no work, no present).
+        assert!(s.poll(t0).present.is_none());
     }
 
     /// Phase 5: preroll waits for audio readiness when the stream has a track —
