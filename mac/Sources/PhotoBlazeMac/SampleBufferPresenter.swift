@@ -89,8 +89,12 @@ final class SampleBufferPresenter {
         statusObs = displayLayer.observe(\.status, options: [.new]) { [weak self] layer, _ in
             // KVO for `status` isn't guaranteed on the main thread — read the layer
             // state here, then hop to the main actor for the model callback.
-            guard layer.status == .failed else { return }
-            let msg = layer.error?.localizedDescription ?? "Sample-buffer decode failed"
+            let status = layer.status
+            let err = layer.error?.localizedDescription
+            let sid = self?.sessionId ?? 0
+            pbTrace("sample-buffer video \(sid): display status=\(status.rawValue) err=\(err ?? "-")")
+            guard status == .failed else { return }
+            let msg = err ?? "Sample-buffer decode failed"
             DispatchQueue.main.async {
                 guard let self, !self.failedOut else { return }
                 self.failedOut = true

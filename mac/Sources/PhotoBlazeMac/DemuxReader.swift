@@ -37,13 +37,6 @@ final class DemuxReader: @unchecked Sendable {
     private var formatDesc: CMVideoFormatDescription?
     private var tbNum: Int32 = 0
     private var tbDen: Int32 = 0
-    /// One frame's duration in stream units, for synthesizing DTS on packets the
-    /// container leaves without one (common on B-frame H.264 in MKV: the leading
-    /// reorder-priming packets carry no DTS). `0` when fps is unknown.
-    private var frameDurUnits: Int64 = 0
-    /// Last DTS emitted (stream units), so a synthesized DTS stays monotonic across
-    /// the mix of missing and present decode timestamps. `Int64.min` = none yet.
-    private var lastDtsUnits: Int64 = Int64.min
     /// The first packet's PTS (stream units), subtracted from every timestamp so the
     /// presentation timeline is 0-based — matching the audio feeder's 0-based PCM
     /// clock, so both share one synchronizer origin. Set once, constant for the
@@ -59,6 +52,7 @@ final class DemuxReader: @unchecked Sendable {
     private var firstFrameSent = false
     private var requesting = false
     private var done = false
+    private var framesFed = 0 // diagnostics only (PB_TRACE)
 
     /// Open the demuxer for `sessionId` over the container `PlaySampleBuffer`
     /// stashed Rust-side, off the main actor. Builds the `CMVideoFormatDescription`
@@ -80,13 +74,6 @@ final class DemuxReader: @unchecked Sendable {
                 }
                 return
             }
-            // One frame's stream-unit duration (tbNum/tbDen set by buildFormatDescription),
-            // for DTS synthesis on leading packets that lack a decode timestamp.
-            let f = demux_fps(p)
-            self.frameDurUnits =
-                (f > 0 && self.tbDen > 0 && self.tbNum > 0)
-                ? Int64((1.0 / f) * Double(self.tbDen) / Double(self.tbNum) + 0.5)
-                : 0
             let out = DemuxOpen(
                 ok: true,
                 width: demux_width(p),
@@ -95,6 +82,10 @@ final class DemuxReader: @unchecked Sendable {
                 fps: demux_fps(p),
                 hasAudio: demux_has_audio(p),
                 doviProfile: demux_dovi_profile(p))
+            pbTrace(
+                "sb-demux opened: codec=\(demux_codec(p)) \(out.width)x\(out.height) "
+                    + "nal=\(demux_nal_length_size(p)) lp=\(demux_length_prefixed(p)) "
+                    + "audio=\(out.hasAudio) fps=\(out.fps) tb=\(self.tbNum)/\(self.tbDen)")
             DispatchQueue.main.async { then(out) }
         }
     }
@@ -202,14 +193,21 @@ final class DemuxReader: @unchecked Sendable {
                 return
             }
             let pts = demux_packet_pts(ptr)
-            let dts = effectiveDts(pts: pts, rawDts: demux_packet_dts(ptr))
+            let dts = demux_packet_dts(ptr) // always valid — Rust synthesizes missing DTS
             let dur = demux_packet_duration(ptr)
             if origin == Int64.min {
                 origin = pts != Int64.min ? pts : (dts != Int64.min ? dts : 0)
             }
             guard let sb = makeSampleBuffer(rv, count: n, fmt: fmt, pts: pts, dts: dts, dur: dur)
-            else { continue }
+            else {
+                pbTrace("sb-demux: makeSampleBuffer FAILED (\(n) bytes, pts=\(pts) dts=\(dts))")
+                continue
+            }
             layer.enqueue(sb)
+            framesFed += 1
+            if framesFed <= 3 || framesFed % 300 == 0 {
+                pbTrace("sb-demux fed #\(framesFed) pts=\(pts) dts=\(dts) key=\(demux_packet_is_key(ptr)) status=\(layer.status.rawValue)")
+            }
             if !firstFrameSent {
                 firstFrameSent = true
                 let first = cmTime(pts)
@@ -262,28 +260,6 @@ final class DemuxReader: @unchecked Sendable {
         return CMTime(value: units * Int64(tbNum), timescale: tbDen)
     }
 
-    /// The decode timestamp to feed the sample buffer. Passes a real DTS through;
-    /// for a packet the container leaves without one (the leading reorder-priming
-    /// packets of a B-frame stream), synthesizes a **monotonic** DTS so the display
-    /// layer gets a consistent decode timeline — `AVSampleBufferDisplayLayer` fails
-    /// to decode a B-frame stream when DTS is present on some samples and missing on
-    /// others (the Grey's-Anatomy H.264 MKV: first two packets `dts=N/A`). Seeds a
-    /// generously-negative ramp from the PTS so it stays below the first real DTS
-    /// (over-negative is harmless — the layer decodes ahead of the presentation clock).
-    private func effectiveDts(pts: Int64, rawDts: Int64) -> Int64 {
-        let fd = frameDurUnits > 0 ? frameDurUnits : 1
-        if rawDts != Int64.min {
-            lastDtsUnits = rawDts
-            return rawDts
-        }
-        let synth =
-            lastDtsUnits == Int64.min
-            ? (pts == Int64.min ? 0 : pts) - 60 * fd // seed well below any real DTS
-            : lastDtsUnits + fd
-        lastDtsUnits = synth
-        return synth
-    }
-
     /// Seek to `seconds` (keyframe at/before), flush the renderer, and re-feed from
     /// the new position. `then` gets the first landed PTS on the main actor (or `nil`
     /// on failure) so the presenter re-anchors the synchronizer.
@@ -298,7 +274,6 @@ final class DemuxReader: @unchecked Sendable {
             }
             layer.flush()
             demux_seek(self.ptr, seconds)
-            self.lastDtsUnits = Int64.min // re-seed DTS synth for the post-seek keyframe run
             if demux_state(self.ptr) == 2 {
                 DispatchQueue.main.async { then(nil) }
                 return
