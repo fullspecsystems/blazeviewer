@@ -1173,10 +1173,10 @@ final class CoreModel {
             ])
         credits.append(
             NSAttributedString(
-                string: "github.com/jdlien/photoblaze",
+                string: "blazeviewer.app",
                 attributes: [
                     .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
-                    .link: URL(string: "https://github.com/jdlien/photoblaze")!,
+                    .link: URL(string: "https://blazeviewer.app")!,
                     .paragraphStyle: center,
                 ]))
         options[.credits] = credits

@@ -71,27 +71,36 @@ a rebuild or a second Windows box):
    Start-Process msiexec.exe -ArgumentList "/i C:\Windows\Temp\pwsh.msi /quiet /norestart ADD_PATH=1" -Wait
    Restart-Service "actions.runner.jdlien-photoblaze.GREMLIN-win"   # picks up the new machine PATH
    ```
+   > ⚠ **Service name after the 2026-07-14 repo rename.** The runner's Windows service name is
+   > derived from `<owner>-<repo>` at *registration* time, so the runner registered before the
+   > rename is still called `actions.runner.jdlien-photoblaze.GREMLIN-win` on GREMLIN, even
+   > though the repo is now `fullspecsystems/blazeviewer`. Re-registering it (step 5) renames the
+   > service to `actions.runner.fullspecsystems-blazeviewer.GREMLIN-win`. Use whichever matches
+   > the box you're on — `Get-Service actions.runner.*` to see which exists.
 5. **Register (or re-register) the runner as a service.** Tokens are single-use and expire in
    an hour, so fetch a fresh one for each of the remove/register calls:
    ```powershell
    cd C:\actions-runner
-   $token = gh api -X POST repos/jdlien/photoblaze/actions/runners/registration-token --jq .token
+   $token = gh api -X POST repos/fullspecsystems/blazeviewer/actions/runners/registration-token --jq .token
    .\config.cmd remove --token $token   # only if already configured under a different account
 
-   $token = gh api -X POST repos/jdlien/photoblaze/actions/runners/registration-token --jq .token
+   $token = gh api -X POST repos/fullspecsystems/blazeviewer/actions/runners/registration-token --jq .token
    # --unattended requires --windowslogonpassword explicitly -- it does NOT prompt for one,
    # it just aborts ("Invalid configuration provided for windowslogonpassword"). Use a masked
    # Read-Host instead of typing the password as a literal argument.
    $securePw = Read-Host -AsSecureString "gh-runner password"
    $plainPw = [System.Net.NetworkCredential]::new("", $securePw).Password
-   .\config.cmd --url https://github.com/jdlien/photoblaze --token $token `
+   .\config.cmd --url https://github.com/fullspecsystems/blazeviewer --token $token `
      --name "GREMLIN-win" --unattended `
      --runasservice --windowslogonaccount gh-runner --windowslogonpassword $plainPw
    Remove-Variable plainPw, securePw
    ```
-6. **Verify**: `Get-Service actions.runner.jdlien-photoblaze.GREMLIN-win` → `Running`/`Auto`;
-   `Get-CimInstance Win32_Service -Filter "Name='actions.runner.jdlien-photoblaze.GREMLIN-win'"
-   | select StartName` → `.\gh-runner`; `gh api repos/jdlien/photoblaze/actions/runners` shows
+6. **Verify** (a runner re-registered after the rename is
+   `actions.runner.fullspecsystems-blazeviewer.GREMLIN-win`; one registered before it is still
+   `actions.runner.jdlien-photoblaze.GREMLIN-win` — `Get-Service actions.runner.*` shows which):
+   `Get-Service actions.runner.*.GREMLIN-win` → `Running`/`Auto`;
+   `Get-CimInstance Win32_Service -Filter "Name LIKE 'actions.runner.%.GREMLIN-win'"
+   | select Name,StartName` → `.\gh-runner`; `gh api repos/fullspecsystems/blazeviewer/actions/runners` shows
    it `online`; and a real CI run's `windows` job goes green.
 
 Permissions note: `C:\actions-runner` and `C:\vcpkg-pb` already grant `Authenticated Users:
@@ -174,7 +183,7 @@ Setup, in order:
    going local-account; skip it entirely for an MS-account install.
 2. **Bootstrap** (installs Git + VS Build Tools ARM64 + rustup + downloads/registers the
    runner): generate a token on the Mac —
-   `gh api -X POST repos/jdlien/photoblaze/actions/runners/registration-token --jq .token`
+   `gh api -X POST repos/fullspecsystems/blazeviewer/actions/runners/registration-token --jq .token`
    — then in an **elevated** PowerShell in the VM:
    `.\scripts\setup-windows-arm64-runner.ps1 -Token <paste>` (grab the script via a
    shared folder or `Invoke-WebRequest` from the repo). When it finishes it prints the
@@ -183,8 +192,8 @@ Setup, in order:
    open — it prints "Listening for Jobs" when ready. If a prior attempt left a
    half-registered/offline runner behind, `.\config.cmd remove --token <fresh token>`
    before retrying (or remove it from the Mac: `gh api -X DELETE
-   repos/jdlien/photoblaze/actions/runners/<id>`).
-3. **Enable the lane**: `gh variable set WIN_ARM64_RUNNER --body 1 --repo jdlien/photoblaze`.
+   repos/fullspecsystems/blazeviewer/actions/runners/<id>`).
+3. **Enable the lane**: `gh variable set WIN_ARM64_RUNNER --body 1 --repo fullspecsystems/blazeviewer`.
    The `windows-arm64` job is `if`-gated on that variable so a paused/unregistered VM
    never leaves CI runs queued open — **set it back to `0` whenever the VM will be off
    for a while**, and jobs skip cleanly instead of hanging.
@@ -202,8 +211,8 @@ mkdir -p ~/actions-runner && cd ~/actions-runner
 ver=$(gh api repos/actions/runner/releases/latest --jq '.tag_name' | tr -d v)
 curl -o runner.tar.gz -L "https://github.com/actions/runner/releases/download/v${ver}/actions-runner-osx-arm64-${ver}.tar.gz"
 tar xzf runner.tar.gz && rm runner.tar.gz
-token=$(gh api -X POST repos/jdlien/photoblaze/actions/runners/registration-token --jq .token)
-./config.sh --url https://github.com/jdlien/photoblaze --token "$token" \
+token=$(gh api -X POST repos/fullspecsystems/blazeviewer/actions/runners/registration-token --jq .token)
+./config.sh --url https://github.com/fullspecsystems/blazeviewer --token "$token" \
   --name "$(hostname -s)-mac" --unattended
 ./svc.sh install && ./svc.sh start   # launchd service, runs at login
 ```

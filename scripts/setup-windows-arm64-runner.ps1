@@ -2,7 +2,7 @@
 # Parallels/UTM/Fusion, whichever won). One paste in an ELEVATED PowerShell:
 #
 #   1. On the Mac (token is single-use, expires in 1 h):
-#        gh api -X POST repos/jdlien/photoblaze/actions/runners/registration-token --jq .token
+#        gh api -X POST repos/fullspecsystems/blazeviewer/actions/runners/registration-token --jq .token
 #   2. In the VM (elevated):
 #        Set-ExecutionPolicy -Scope Process Bypass -Force
 #        .\setup-windows-arm64-runner.ps1 -Token <paste>
@@ -33,7 +33,7 @@
 param(
     [Parameter(Mandatory)] [string]$Token,
     [string]$RunnerDir = "C:\actions-runner",
-    [string]$Repo = "https://github.com/jdlien/photoblaze",
+    [string]$Repo = "https://github.com/fullspecsystems/blazeviewer",
     [switch]$AsService,
     [string]$ServiceAccount = $env:USERNAME
 )
@@ -123,6 +123,6 @@ if ($AsService) {
     Write-Host ""
     Write-Host "Then (from the Mac): enable the CI lane —" -ForegroundColor Green
 }
-Write-Host "  gh variable set WIN_ARM64_RUNNER --body 1 --repo jdlien/photoblaze"
+Write-Host "  gh variable set WIN_ARM64_RUNNER --body 1 --repo fullspecsystems/blazeviewer"
 Write-Host "Optional (only for Live Photo corpus tests): install 'HEVC Video Extensions'"
 Write-Host "from the Microsoft Store and copy the test clips over."

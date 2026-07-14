@@ -609,7 +609,7 @@ fn sample_frame(dark: bool, tab: InspectorTab, welcome: bool) -> PanelFrame {
         }),
         InspectorTab::Text => InspectorSnapshot::Text(TextPanel {
             body: TextBody::Ready {
-                qr: vec!["https://photoblaze.app".into()],
+                qr: vec!["https://blazeviewer.app".into()],
                 paragraphs: vec![
                     "OPEN HOUSE".into(),
                     "Saturday 1–4 PM · 123 Condo Lane".into(),

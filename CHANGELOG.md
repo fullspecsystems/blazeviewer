@@ -7,6 +7,9 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Changed
+- **About now links to blazeviewer.app** instead of the source repository, which is private.
+
 ### Added
 - **Subtitles on videos.** If a subtitle file sits next to a video — the usual
   `Movie.eng.srt` or `Movie.vtt` beside `Movie.mkv` — PhotoBlaze can now show it. Press `C`
@@ -957,11 +960,11 @@ Initial beta — a fast, keyboard-driven Windows photo viewer.
 - Signed WiX/MSI installer with file associations and an "Open with PhotoBlaze"
   folder verb.
 
-[Unreleased]: https://github.com/jdlien/photoblaze/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/jdlien/photoblaze/compare/v0.1.1...v0.2.0
-[0.1.1]: https://github.com/jdlien/photoblaze/compare/v0.1.0...v0.1.1
-[0.1.0]: https://github.com/jdlien/photoblaze/compare/v0.1.0-beta.4...v0.1.0
-[0.1.0-beta.4]: https://github.com/jdlien/photoblaze/compare/v0.1.0-beta.3...v0.1.0-beta.4
-[0.1.0-beta.3]: https://github.com/jdlien/photoblaze/compare/v0.1.0-beta.2...v0.1.0-beta.3
-[0.1.0-beta.2]: https://github.com/jdlien/photoblaze/compare/v0.1.0-beta.1...v0.1.0-beta.2
-[0.1.0-beta.1]: https://github.com/jdlien/photoblaze/releases/tag/v0.1.0-beta.1
+[Unreleased]: https://github.com/fullspecsystems/blazeviewer/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/fullspecsystems/blazeviewer/compare/v0.1.1...v0.2.0
+[0.1.1]: https://github.com/fullspecsystems/blazeviewer/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/fullspecsystems/blazeviewer/compare/v0.1.0-beta.4...v0.1.0
+[0.1.0-beta.4]: https://github.com/fullspecsystems/blazeviewer/compare/v0.1.0-beta.3...v0.1.0-beta.4
+[0.1.0-beta.3]: https://github.com/fullspecsystems/blazeviewer/compare/v0.1.0-beta.2...v0.1.0-beta.3
+[0.1.0-beta.2]: https://github.com/fullspecsystems/blazeviewer/compare/v0.1.0-beta.1...v0.1.0-beta.2
+[0.1.0-beta.1]: https://github.com/fullspecsystems/blazeviewer/releases/tag/v0.1.0-beta.1
