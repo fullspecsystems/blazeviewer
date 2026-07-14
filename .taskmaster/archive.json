@@ -2050,6 +2050,18 @@
             "status": "done"
           }
         ]
+      },
+      {
+        "id": 17,
+        "title": "Spike: higher-quality HEIC preview than the 320x240 thumbnail",
+        "description": "Owner hunch (likely an easy quality lever): find a better embedded preview than WIC's 320x240 GetThumbnail. From the HEIF dump, an iPhone HEIC has only the 320x240 thumb (item 50) + the full 48-tile grid + a 2016x1512 `auxl/auxC` aux (item 51) believed to be the HDR gain map. Verify item 51 (gain map vs usable preview), and check non-iPhone/Sony HEICs (DSC*.heic) for a true mid-res single-hvc1 preview. If a usable mid-res image exists, decode IT for the preview: ~6x sharper, one fast decode (no grid). Needs libheif or a HEIF item extractor. CANCELLED 2026-07-13: RESOLVED as a dead end, not just deprioritized. Per docs/heic-decode-plan.md 'Preview-quality spike': item 51 is confirmed the HDR gain map (grayscale, not a usable preview), and Sony HEICs embed NO thumbnail at all \u2014 no better embedded preview exists to decode. Doubly moot: Phase 3 (VRAM-bounded current-first full-decode prefetch ring, done 2026-06-28) already removes the wait on a preview upgrade during scrolling, and the separate libheif migration (done) cut full-decode latency ~5x (~115ms vs WIC's ~167ms, pixel-identical on iPhone files) \u2014 that's the real cost floor now, not a preview-pipeline gap.",
+        "status": "cancelled",
+        "priority": "medium",
+        "dependencies": [
+          16
+        ],
+        "details": "See docs/heic-decode-plan.md 'Preview-quality spike'. Corpus: C:/Users/jdlien/Pictures/iCloud Photos/Photos and D:/Media/Pictures/test-images (Sony DSC*.heic).",
+        "subtasks": []
       }
     ]
   }
