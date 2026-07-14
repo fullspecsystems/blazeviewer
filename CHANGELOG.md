@@ -13,6 +13,11 @@ with any pre-release suffix carried only by the tag.
   fresh installs.)
 
 ### Fixed
+- **A brief video hiccup no longer stutters the audio.** A momentary decode spike (a
+  heavy scene, a GOP boundary) used to pause the audio the instant the next frame was
+  late and resume it a beat later — an audible stop/start. Playback now rides out short
+  video stalls (up to ~300 ms) by holding the current frame while audio continues
+  uninterrupted; only a genuine sustained stall pauses for a real rebuffer.
 - **4K HDR video can no longer get stuck "buffering" forever.** The decoded-frame
   memory budget could never hold the two HDR frames playback insisted on before starting
   (each 4K HDR frame is ~63 MiB against a ~95 MiB budget), so some window/scale modes

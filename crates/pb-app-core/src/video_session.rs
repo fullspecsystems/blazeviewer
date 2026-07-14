@@ -40,6 +40,15 @@ pub const PREROLL_FRAMES: usize = 2;
 /// re-syncs). Bounds the damage of a wedged/slow audio path: never a hang.
 pub const AUDIO_READY_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// How long a mid-play empty queue may starve before it becomes a true rebuffer
+/// (freeze + `Buffering` + the shell pauses audio). Inside the window the
+/// session holds the displayed frame, stays `Playing`, and the clock keeps
+/// running against the master — a transient decode spike must never produce an
+/// audible pause/resume (R2, overhaul plan 1B). EOS, decoder failure, and
+/// paused playback never accrue starvation. Initial value per the plan; tune
+/// from corpus traces (Phase 0B).
+pub const STARVATION_REBUFFER: Duration = Duration::from_millis(300);
+
 /// The bounded per-sample clock correction while audio is master (~4 Hz samples ⇒
 /// up to ~200 ms/s of gentle convergence — far beyond any real clock drift).
 const MAX_AUDIO_CORRECTION: Duration = Duration::from_millis(50);
@@ -211,6 +220,9 @@ pub struct VideoSession {
     /// The learned inter-frame gap (the last consecutive presented-PTS delta) —
     /// what a one-frame back-step subtracts. `None` until two frames have shown.
     frame_interval: Option<Duration>,
+    /// When the mid-play queue first polled empty (plan 1B): the short-starvation
+    /// clock. `None` whenever a frame is queued, paused, seeking, or rebuffering.
+    starved_since: Option<Instant>,
 }
 
 impl VideoSession {
@@ -253,6 +265,7 @@ impl VideoSession {
             desired_seek: None,
             audio_seek_ack: None,
             frame_interval: None,
+            starved_since: None,
         };
         (
             session,
@@ -367,6 +380,7 @@ impl VideoSession {
                         .front()
                         .is_some_and(|f| f.pts <= self.clock.position(now));
                     if due {
+                        self.starved_since = None;
                         let frame = self.queue.pop_front().expect("front checked");
                         self.queued_bytes = self.queued_bytes.saturating_sub(frame.byte_len());
                         self.note_interval(frame.pts);
@@ -375,15 +389,27 @@ impl VideoSession {
                     } else if self.queue.is_empty() {
                         if self.eos {
                             // True end: park on the last presented frame.
+                            self.starved_since = None;
                             self.clock.freeze(now);
                             self.transition(Ended, &mut update);
                         } else {
-                            // Underrun: rebuffer, don't drift. Freeze the clock,
-                            // hold the frame, refill to preroll, hard re-anchor
-                            // on resume.
-                            self.clock.freeze(now);
-                            self.transition(Buffering, &mut update);
+                            // Short starvation (plan 1B): hold the displayed
+                            // frame, stay Playing, keep the clock running with
+                            // the master — the shell pauses audio only on a
+                            // Buffering transition, so a transient decode
+                            // spike stays inaudible. Sustained starvation is a
+                            // real underrun: rebuffer, don't drift — freeze,
+                            // refill to preroll, hard re-anchor on resume.
+                            let since = *self.starved_since.get_or_insert(now);
+                            if now.saturating_duration_since(since) >= STARVATION_REBUFFER {
+                                self.starved_since = None;
+                                self.clock.freeze(now);
+                                self.transition(Buffering, &mut update);
+                            }
                         }
+                    } else {
+                        // A future frame is queued — not starving, just early.
+                        self.starved_since = None;
                     }
                 }
                 Paused | Ended | Failed | Stopped => {}
@@ -454,6 +480,7 @@ impl VideoSession {
         self.queued_bytes = 0;
         self.credits_out = 0;
         self.eos = false;
+        self.starved_since = None;
         self.desired_seek = Some(target);
         self.audio_seek_ack = Some(target);
         // Freeze the clock AT the target: the HUD shows where we're going while
@@ -531,9 +558,11 @@ impl VideoSession {
         }
     }
 
-    /// Pause (freeze the clock; the current frame holds).
+    /// Pause (freeze the clock; the current frame holds). Paused playback never
+    /// accrues starvation (plan 1B) — the window restarts fresh after resume.
     pub fn pause(&mut self, now: Instant) {
         if self.state == VideoSessionState::Playing {
+            self.starved_since = None;
             self.clock.freeze(now);
             self.state = VideoSessionState::Paused;
         }
@@ -1119,19 +1148,27 @@ mod tests {
         s.poll(t0); // → Playing, presents pts 0
         let _ = s.poll(t0 + Duration::from_millis(34)); // presents pts 33
 
-        // Queue empty, no EOS → rebuffer at the *frozen* position.
-        let u = s.poll(t0 + Duration::from_millis(40));
+        // Queue empty, no EOS: a short-starvation window first (plan 1B), then
+        // a true rebuffer once it sustains past the threshold.
+        let starve_at = t0 + Duration::from_millis(40);
+        let u = s.poll(starve_at);
+        assert_eq!(s.state(), VideoSessionState::Playing, "short miss holds");
+        assert!(!u.state_changed);
+        let rebuffer_at = starve_at + STARVATION_REBUFFER;
+        let u = s.poll(rebuffer_at);
         assert_eq!(s.state(), VideoSessionState::Buffering);
         assert!(u.state_changed);
-        let frozen = s.position(t0 + Duration::from_millis(500));
+        let frozen = s.position(rebuffer_at + Duration::from_millis(500));
         assert_eq!(
             frozen,
-            s.position(t0 + Duration::from_millis(40)),
+            s.position(rebuffer_at),
             "clock must freeze during rebuffer"
         );
 
-        // A long stall later, two frames arrive → resume; the stall added zero
-        // media time (rebuffer, don't drift) and no frame was skipped.
+        // A long stall later, two frames arrive → resume from the frozen
+        // position; the buffering wall time added zero media time (rebuffer,
+        // don't drift). The starvation window ran the clock past both queued
+        // PTS, so they present as immediate catch-up, oldest first.
         io.events
             .send(VideoProducerEvent::Frame(frame(66)))
             .unwrap();
@@ -1142,17 +1179,93 @@ mod tests {
         let u = s.poll(resume_at);
         assert_eq!(s.state(), VideoSessionState::Playing);
         assert!(u.state_changed);
-        // The next due frame is 66 ms — presented once the re-anchored clock
-        // reaches it (frozen position was ~40 ms, so ~26 ms after resume).
-        assert!(s
-            .poll(resume_at + Duration::from_millis(10))
-            .present
-            .is_none());
+        assert_eq!(
+            u.present.expect("catch-up presents in order").pts,
+            Duration::from_millis(66)
+        );
         let f = s
-            .poll(resume_at + Duration::from_millis(30))
+            .poll(resume_at + Duration::from_millis(1))
             .present
-            .expect("resumes in order");
-        assert_eq!(f.pts, Duration::from_millis(66));
+            .expect("second catch-up frame");
+        assert_eq!(f.pts, Duration::from_millis(100));
+    }
+
+    // --- 1B: audio-continuous short-starvation policy ----------------------
+
+    /// R2 (overhaul plan 1B): one empty poll is NOT a rebuffer. A transient
+    /// decode spike holds the displayed frame and stays `Playing` — the shell
+    /// only pauses audio on a `Buffering` transition, so audio keeps running.
+    #[test]
+    fn transient_starvation_stays_playing_and_recovers_silently() {
+        let (mut s, io) = VideoSession::new(SID, FRAME_BYTES);
+        let t0 = Instant::now();
+        opened(&io, 10_000);
+        s.poll(t0);
+        io.events.send(VideoProducerEvent::Frame(frame(0))).unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(33)))
+            .unwrap();
+        s.poll(t0);
+        let _ = s.poll(t0 + Duration::from_millis(34));
+
+        // Empty polls inside the threshold: still Playing, no state churn.
+        let starve_at = t0 + Duration::from_millis(40);
+        assert!(!s.poll(starve_at).state_changed);
+        let just_short = starve_at + STARVATION_REBUFFER - Duration::from_millis(10);
+        assert!(!s.poll(just_short).state_changed);
+        assert_eq!(s.state(), VideoSessionState::Playing);
+
+        // A frame arrives before the threshold → presents; never buffered, so
+        // no audio pause/resume command was ever triggered.
+        io.events
+            .send(VideoProducerEvent::Frame(frame(66)))
+            .unwrap();
+        let u = s.poll(just_short + Duration::from_millis(5));
+        assert_eq!(s.state(), VideoSessionState::Playing);
+        assert_eq!(
+            u.present.expect("late frame presents").pts,
+            Duration::from_millis(66)
+        );
+
+        // Recovery cleared the accrual: the next empty poll starts a FRESH
+        // starvation window instead of instantly rebuffering.
+        let much_later = just_short + Duration::from_secs(2);
+        assert!(!s.poll(much_later).state_changed);
+        assert_eq!(s.state(), VideoSessionState::Playing);
+    }
+
+    /// Pausing during a short starvation clears the accrual: paused playback
+    /// never accrues starvation (plan 1B), and resume starts a fresh window.
+    #[test]
+    fn pause_clears_starvation_accrual() {
+        let (mut s, io) = VideoSession::new(SID, FRAME_BYTES);
+        let t0 = Instant::now();
+        opened(&io, 10_000);
+        s.poll(t0);
+        io.events.send(VideoProducerEvent::Frame(frame(0))).unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(33)))
+            .unwrap();
+        s.poll(t0);
+        let _ = s.poll(t0 + Duration::from_millis(34));
+
+        // Start starving, then pause inside the window and hold it for ages.
+        s.poll(t0 + Duration::from_millis(40));
+        s.pause(t0 + Duration::from_millis(100));
+        s.resume(t0 + Duration::from_secs(30));
+
+        // The long pause contributed nothing: still Playing after resume, and
+        // the threshold measures from the fresh post-resume window.
+        let after = t0 + Duration::from_secs(30) + Duration::from_millis(5);
+        assert!(!s.poll(after).state_changed);
+        assert_eq!(s.state(), VideoSessionState::Playing);
+        let u = s.poll(after + STARVATION_REBUFFER);
+        assert_eq!(
+            s.state(),
+            VideoSessionState::Buffering,
+            "fresh window still rebuffers"
+        );
+        assert!(u.state_changed);
     }
 
     #[test]
