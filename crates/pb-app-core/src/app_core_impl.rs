@@ -11651,6 +11651,49 @@ mod tests {
         assert!(!core.target_caught_up());
     }
 
+    /// Diagnostic (initial-video-poster bug): a video as the initial item, whose
+    /// pool-decoded poster lands at the launch epoch, MUST become resident AND be
+    /// presented — exactly as a photo does. Reproduces the launch state
+    /// `rebuild_playlist` leaves (displayed==target, presented_epoch=None).
+    #[test]
+    fn initial_video_poster_presents_when_it_lands() {
+        let mut core = test_core();
+        let root = PathBuf::from("videos");
+        core.source = Arc::new(FsSource::new(vec![root.join("clip.mkv")]));
+        core.playlist = Playlist::new(1, 0);
+        core.ring = ResidentRing::new(4);
+        core.displayed_item = Some(0);
+        core.target_item = Some(0);
+        core.presented_epoch = None;
+        core.targets = vec![0];
+        assert!(core.item_is_video(0), "clip.mkv is a video item");
+        let poster = pb_decode::DecodedImage {
+            width: 64,
+            height: 64,
+            orig_width: 64,
+            orig_height: 64,
+            codec: "HEVC",
+            format: pb_decode::PixelFormat::Rgba8,
+            pixels: vec![9; 64 * 64 * 4],
+            is_preview: false,
+            color: pb_decode::ColorTransform::srgb(),
+            peak: 1.0,
+            animated: None,
+        };
+        core.pending_uploads
+            .push(Outcome::synthetic(0, core.epoch, Ok(poster)));
+        core.drain_results();
+        assert!(
+            core.ring.slot_for(0).is_some(),
+            "the poster became resident"
+        );
+        assert_eq!(
+            core.presented_epoch,
+            Some(core.epoch),
+            "the poster was PRESENTED at launch (not left resident-but-unpresented)"
+        );
+    }
+
     #[test]
     fn present_failed_is_terminal_at_the_current_epoch() {
         // A corrupt target counts as "resolved" so readiness doesn't leave the loading pie

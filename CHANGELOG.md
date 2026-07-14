@@ -20,6 +20,11 @@ with any pre-release suffix carried only by the tag.
   the existing window comes to the front.
 
 ### Changed
+- **Video posters appear much faster (macOS/Linux).** The still frame shown for a video (before
+  you press play) is generated ~2–4× quicker: it now uses hardware decode and finds the first
+  non-black frame at a small scale, converting only the chosen frame at full resolution instead of
+  every candidate at 4K. On a 4K HDR film that's ~1.5s → ~0.6s of decode work — so a video opened as
+  the first item stops sitting blank for several seconds.
 - **HDR and 10-bit video now decode with more headroom (macOS/Linux).** The per-frame color
   conversion for 4K HDR (Dolby Vision / HDR10 / HLG) and 10-bit video moved onto the GPU, so the
   CPU does far less work per frame — smoother playback with margin to spare, especially on demanding
