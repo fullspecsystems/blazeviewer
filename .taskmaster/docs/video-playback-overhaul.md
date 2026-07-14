@@ -11,6 +11,18 @@
 The immediate corpus is a 4K Dolby Vision/HDR HEVC MKV with TrueHD/Atmos audio. The plan must
 also leave a durable fallback for codecs Apple cannot decode and must not regress Windows or Linux.
 
+## 0. Status (2026-07-13)
+
+- **DONE:** Phase 0 0A/0C (corpus characterized; remux controls at `~/Downloads/pb-remux-control-*.mp4`);
+  **Phase 1 1A–1D** on `main` (see §7 table for commits) — deadlock (R1) + post-seek audio glitches
+  (R2/R4) fixed, owner-confirmed smoother; plus the seek perf work + `frames_to_units` untangle (1E prep).
+- **NEXT (Opus session):** **1E** — owned off-main audio decoder (usize-pointer FFI) + R10 selection +
+  R12 error-state; the last audio-glitch leg (R5). Concrete seam is in §7/1E. Then **1G** lifecycle.
+- **BLOCKED:** **1F** network read-ahead needs the **0D SMB spike** first (owner's NAS
+  `/Volumes/{JD,Media,appdata}`). **Phase 2** (GPU P010 — the "proper HW HDR", retires the R8 stopgap)
+  and **Phase 3** (Apple `AVSampleBuffer` — the DoVi end-state) are the big post-Phase-1 wins.
+- Session findings + gotchas: memory `video-playback-overhaul.md`; `PB_VIDEO_DIAG=1` for backend/seek timing.
+
 ## 1. Outcome and non-goals
 
 ### Required outcome
@@ -385,82 +397,20 @@ regressing local-file startup/seek latency by more than 5%.
 
 This phase is unconditional because the fallback never disappears.
 
-### 1A. Feasible, bounded preroll
+### 1A–1D — DONE (landed on `main` 2026-07-13, test-first)
 
-Replace the fixed “always two frames” assumption with an explicit capacity calculation:
+| Item | What landed | Commit |
+|---|---|---|
+| **1A** feasible preroll (R1) | byte budget → `3 × 4K-fp16` (~190 MiB) + `effective_preroll` clamp so one oversized frame starts instead of deadlocking; 4K-fp16 preroll test | `a2cc6aa8` |
+| **1B** audio-continuous starvation (R2) | 300 ms window: a transient empty queue holds the displayed frame and keeps audio running; rebuffer + pause audio only past the threshold | `d81a6adc` |
+| **1C** drop-late (R3) | present only the newest due frame per tick, drop older; per-frame interval learning + `dropped_frames` counter | `29c669ed` |
+| **1D** seek coordinator (R4) | core-side over the existing 3 effects: pause once per run; landing stores `pending_audio_commit` (generation-safe via `SessionUpdate::seek_landed`); ONE `SeekVideoAudio` after `VIDEO_SEEK_AUDIO_SETTLE`=250 ms; resume flushes pending | `9fbee85c`, `0a40a8b4` |
 
-```text
-capacity_frames = min(frame_cap, byte_budget / negotiated_frame_bytes)
-effective_preroll = min(PREROLL_FRAMES, max(1, capacity_frames))
-```
+Also landed this session (pre-1E foundation): seek run-up convert-skip `d1760d0c`; short-forward-decode + parallel-HDR-convert stopgap (R8) + `PB_VIDEO_DIAG` `4244a69f`; `frames_to_units` origin untangle `f6fafc3a`. Owner confirmed playback + seeking feel much smoother.
 
-- For supported 4K output, choose a documented byte budget that normally permits two planar or
-  fp16 frames plus one in-flight decode without accidental serialization.
-- Keep an absolute session byte cap. Do not grow to `3 × frame_bytes` without limit for 8K or
-  malformed dimensions.
-- If only one valid oversized frame fits, start from one frame rather than deadlock. The
-  short-starvation policy below protects continuity.
-- Reject impossible dimensions/allocation arithmetic before opening the queue.
-- Recompute admission atomically when `Opened` reports the negotiated format/size; outstanding
-  estimates and credits must remain within the new cap.
+⚠ **Build gotcha:** `ActiveVideo` has a SECOND literal construction under `cfg(ffvideo/macos)` in `app_core_impl` (~6819) — `cargo test -p pb-app-core` alone misses it; always also build `--features ffvideo`.
 
-Tests: 4K RGBA16F, 4K P010, 8K oversized-one-frame mode, tiny frames, frame-size renegotiation
-in **both directions** (the upward case must clamp/revoke — today credits granted at the old
-estimate are never revoked and can overshoot the budget), the producer/session credit-reset
-handshake on seek, and the invariant
-`queued + credited bytes <= max(byte_cap, one explicitly admitted frame)`.
-
-### 1B. Audio-continuous starvation policy
-
-Add a distinct short-starvation state/clock rather than treating one empty poll as a full rebuffer:
-
-- On a transient empty queue: keep audio running, hold the displayed frame, record starvation,
-  grant decode credit immediately.
-- If a fresh frame arrives before the threshold, select against the current audio clock and
-  continue without an audio command.
-- Enter true `Buffering` and pause audio only after a measured time threshold. Start with
-  300 ms behind a tuning constant, then set it from corpus data.
-- A silent clip uses the same policy against the monotonic clock.
-- EOS is not starvation; decoder failure is not starvation; paused playback never accrues it.
-- Report the reason for every audio pause/resume in diagnostics.
-
-### 1C. Drop late video frames deterministically
-
-On each display tick while playing:
-
-1. Read the authoritative media position once.
-2. Drain all frames whose PTS is due.
-3. Present only the newest due frame; account and drop older due frames.
-4. Never drop the only future frame, a paused-seek landing, a frame-step result, or the true EOS
-   parked frame.
-
-Keep interval learning based on consecutive presented PTS only when the delta is valid; dropped
-frames get separate metrics. At most one upload/draw occurs per display tick.
-
-### 1D. One generation-aware seek coordinator
-
-The current `SeekVideoAudio { position }` lacks session/generation identity and fires for every
-intermediate target. Replace it with an explicit contract:
-
-- `BeginVideoScrub { session_id, generation }` pauses audio at most once.
-- `SeekVideo { session_id, generation, target, final_intent }` updates latest intent; video may
-  publish preview landings, but only the current generation affects state.
-- `CommitVideoSeek { session_id, generation, target }` seeks/refills audio once after the final
-  current-generation landing, then resumes only if playback was running before the seek.
-- `CancelVideoSeek`/stop/navigation invalidates all pending work.
-
-Held arrows and scrubber drags must send an unconditional final intent on release. A single tap may
-commit immediately; a held/scrub sequence must not restart audio for intermediate targets. Define a
-bounded fallback timeout if the final video landing fails so audio cannot remain paused forever.
-
-> **Implemented (2026-07-13) as a core-side coordinator over the existing three effects**, not new
-> command variants: every Session seek intent pauses audio once per run and starts a settle window
-> (`VIDEO_SEEK_AUDIO_SETTLE` = 250 ms > the 200 ms held repeat); the landing (inherently
-> generation-safe — only the current generation clears the in-flight target) stores the commit;
-> `poll_video` emits the ONE `SeekVideoAudio` + resume after the run settles, uniformly coalescing
-> taps, held keys, and scrubber drags. Resume-from-pause flushes a pending commit first. Still
-> open from this contract: session-identity fields on the audio effects (ride 1E's owned-handle
-> rework) and the pause-forever fallback timeout if a landing never arrives (1G's watchdog case).
+**Still open from the 1D contract** (fold into 1E/1G): session-identity fields on the audio effects (ride 1E's owned-handle rework); the pause-forever fallback timeout if a final landing never arrives (1G watchdog).
 
 ### 1E. Remove audio decode/refill from `@MainActor`
 
@@ -489,6 +439,36 @@ Also fold in the audit-confirmed audio-decoder defects while this seam is open:
 - The stashed audio input must survive a failed open (no one-shot `take()` on the failure path).
 - Untangle `frames_to_units`'s origin-mutation side effect from unit conversion.
 - Apply the R10 track-selection policy at open instead of blind `best(Audio)`.
+
+**Implementation seam (mapped 2026-07-13 — current file:line, for the Opus session):**
+
+- `crates/pb-decode/src/ffmpeg/audio_decoder.rs`: `FfAudioDecoder` is already `Send` + single-owner
+  (its `unsafe impl Send` note pre-blesses moving it to a feeder thread); `frames_to_units` origin
+  untangle already done (`f6fafc3a`). R10 = the blind `best(ff::media::Type::Audio)` at ~line 88 →
+  a disposition/language-aware `select_audio_stream` (honor default/forced first; diagnostics-
+  visible index; defer the cost-based downgrade — it's route-level/measurement-gated).
+- **FFI to REPLACE** in `crates/pb-mac-ffi/src/lib.rs`: `video_audio_open/rate/channels/read/at_eof/
+  seek/close` (~1135–1235) on `AppCoreHandle` + the `session_audio` / `pending_audio_input` fields.
+  The R12 bug — `read`/`seek` error does `session_audio = None`, then `at_eof` returns true (`is_none_or`)
+  → error reads as clean EOF — is at ~1184 and ~1216. **Keep `video_audio_clock`** (host→core master
+  clock) on the handle.
+- **New usize-pointer seam** (mirror `attach_layer(layer_ptr: usize)` at ~2143 / decl ~3502;
+  swift-bridge 0.1.59 can't return an owned opaque): the `VideoInput` still can't cross the bridge,
+  so `StartVideoAudio` (currently `self.pending_audio_input = Some(input)` at ~2319) stashes it in a
+  **thread-safe global**; a free fn `open_stashed_session_audio(session_id) -> usize` opens **off the
+  main actor** (R10 select; box a `SessionAudioDecoder { inner: FfAudioDecoder, failed: bool }`;
+  `Box::into_raw`; `0` = failure, and **do NOT consume the stash on failure**), plus free fns
+  `session_audio_{rate,channels,read,state,seek,free}(ptr,…)`. `state()` returns Ok/Eof/**Failed** so
+  R12 is a distinct state, not EOF. `free` = `drop(Box::from_raw(..))`, exactly once.
+- **Swift** `mac/Sources/PhotoBlazeMac/SessionAudioPlayer.swift` (today `@MainActor`, calls
+  `core.video_audio_*` in `topUp/seek/sample/stop`): becomes **async two-phase** — a serial feeder
+  `DispatchQueue` owns the pointer (open→read→seek→free all on it), the main actor only builds/controls
+  the `AVAudioEngine` + reads the clock behind a small lock; an `OwnedAudioDecoder` class frees exactly
+  once in `deinit` (guard against double-free). Keep the deinterleave + `sample()` clock code as-is.
+  `CoreModel.StartVideoAudio` (~2027) drops the `== nil` check (open is async; failure → the clock
+  sample reports `Failed`). Tune the 3×250 ms lookahead against corpus/seek data (don't hard-code).
+- **Tests:** double-free guard, use-after-stop, seek/read serialization, replacement-session,
+  R12 error-distinct-from-EOF, and `open_stashed` stash-survives-a-failed-open.
 
 ### 1F. Bounded compressed read-ahead and network recovery
 
