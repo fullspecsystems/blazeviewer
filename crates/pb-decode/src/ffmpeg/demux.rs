@@ -276,7 +276,8 @@ fn read_extradata(stream: &ff::format::stream::Stream) -> Vec<u8> {
 /// too-short atom → `(false, 0)`, which routes the clip to the Session fallback.
 fn parse_nal_length(codec: VideoCodec, extradata: &[u8]) -> (bool, u8) {
     // Annex B parameter sets begin with a start code — not a config atom.
-    let starts_with_start_code = extradata.starts_with(&[0, 0, 0, 1]) || extradata.starts_with(&[0, 0, 1]);
+    let starts_with_start_code =
+        extradata.starts_with(&[0, 0, 0, 1]) || extradata.starts_with(&[0, 0, 1]);
     if extradata.is_empty() || starts_with_start_code {
         return (false, 0);
     }
@@ -313,7 +314,14 @@ fn read_dovi(stream: &ff::format::stream::Stream) -> Option<DoviConfig> {
         }
         let d = std::slice::from_raw_parts((*sd).data, (*sd).size as usize);
         Some(build_dovi(
-            d[0], d[1], d[2], d[3], d[4] != 0, d[5] != 0, d[6] != 0, d[7],
+            d[0],
+            d[1],
+            d[2],
+            d[3],
+            d[4] != 0,
+            d[5] != 0,
+            d[6] != 0,
+            d[7],
         ))
     }
 }
@@ -449,6 +457,7 @@ mod tests {
         assert_eq!(&c.atom, b"dvvC", "profile 8 uses the dvvC box");
         assert_eq!(c.box_payload[0], 1); // version major
         assert_eq!(c.box_payload[1], 0); // version minor
+
         // word = profile<<25 | level<<19 | rpu<<18 | bl<<16 | compat<<12
         let word = u32::from_be_bytes([
             c.box_payload[2],
@@ -488,7 +497,11 @@ mod tests {
         let info = dx.info();
         eprintln!(
             "codec={:?} dims={}x{} nal_len={} length_prefixed={}",
-            info.codec, info.facts.width, info.facts.height, info.nal_length_size, info.length_prefixed
+            info.codec,
+            info.facts.width,
+            info.facts.height,
+            info.nal_length_size,
+            info.length_prefixed
         );
         let dovi = info.dovi.as_ref().expect("DoVi config must be extracted");
         eprintln!(
