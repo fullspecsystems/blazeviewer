@@ -1,4 +1,5 @@
 import AVFoundation
+import AppKit
 import PBCatch
 import PbMacFfi
 
@@ -149,6 +150,11 @@ final class SessionAudioPlayer {
     private var seekGen: UInt64 = 0
     /// A seek requested before open completed — applied once the decoder is up.
     private var pendingSeek: Double?
+    /// Observers that reprime the engine after it stops out from under us (plan 1G):
+    /// an output-device / format change (`AVAudioEngineConfigurationChange` — the
+    /// engine stops and MUST be restarted) and a sleep/wake. Removed on stop/deinit.
+    private var configObs: NSObjectProtocol?
+    private var wakeObs: NSObjectProtocol?
 
     /// ~250 ms per buffer, 3 in flight → ~750 ms of scheduled lookahead. (Tunable
     /// against corpus/seek data per the plan; not hard-locked here.)
@@ -202,6 +208,19 @@ final class SessionAudioPlayer {
             return
         }
         opened = true
+        // Reprime when the engine stops out from under us (plan 1G): AVFoundation
+        // stops the engine on an output-device / format change, and audio hardware
+        // re-inits across sleep/wake. Both restart + re-anchor via `repriming`.
+        configObs = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reprimeAudio(reason: "device/format change") }
+        }
+        wakeObs = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reprimeAudio(reason: "wake") }
+        }
         // A seek issued during the open gap wins over a plain fill.
         if let target = pendingSeek {
             pendingSeek = nil
@@ -210,6 +229,26 @@ final class SessionAudioPlayer {
         }
         topUp()
         if !paused { startNode() }
+    }
+
+    /// Recover after the engine stopped out from under us — a device/format change
+    /// (AVFoundation stops the engine and flushes scheduled buffers) or a sleep/wake
+    /// (plan 1G). Restart the engine if needed, then re-prime from the current played
+    /// position (a seek to "here" re-anchors the clock and refills, so audio doesn't
+    /// jump forward by the flushed lookahead). No-op if already running and idle.
+    private func reprimeAudio(reason: String) {
+        guard opened, !failed else { return }
+        if !engine.isRunning {
+            let err = PBCatchException { [engine] in try? engine.start() }
+            if err != nil || !engine.isRunning {
+                pbTrace("session audio \(sessionId): engine restart failed after \(reason)")
+                failed = true
+                return
+            }
+        }
+        pbTrace("session audio \(sessionId): repriming after \(reason)")
+        // Re-anchor + refill at the current spot (scheduled buffers were flushed).
+        applySeek(sample().positionSecs)
     }
 
     /// Pull-and-schedule until the lookahead target is met. Main-actor; issues
@@ -376,8 +415,27 @@ final class SessionAudioPlayer {
     /// owner) deallocates — exactly once, on the feeder queue, after any in-flight
     /// read finishes. Never blocks the main actor.
     func stop() {
-        failed = true  // gates any straggler completion / decoder callback
+        failed = true  // gates any straggler completion / decoder / reprime callback
+        removeReprimeObservers()
         node.stop()
         engine.stop()
+    }
+
+    private func removeReprimeObservers() {
+        if let configObs {
+            NotificationCenter.default.removeObserver(configObs)
+            self.configObs = nil
+        }
+        if let wakeObs {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObs)
+            self.wakeObs = nil
+        }
+    }
+
+    deinit {
+        // Safety net if `stop()` wasn't called (the observers hold `[weak self]`, so
+        // they can't keep this alive, but removing them stops stale fires promptly).
+        if let configObs { NotificationCenter.default.removeObserver(configObs) }
+        if let wakeObs { NSWorkspace.shared.notificationCenter.removeObserver(wakeObs) }
     }
 }
