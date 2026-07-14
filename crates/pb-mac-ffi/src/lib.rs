@@ -1163,6 +1163,7 @@ impl AppCoreHandle {
             fullscreen: s.fullscreen,
             slideshow: s.slideshow,
             mute_live_audio: s.mute_live_audio,
+            subtitles: s.subtitles,
             compare_pin_enabled: s.compare_pin_enabled,
             compare_pinned_here: s.compare_pinned_here,
             compare_toggle_enabled: s.compare_toggle_enabled,
@@ -2056,6 +2057,7 @@ impl AppCoreHandle {
             // Effective, not raw: a `--mute` launch override must show as a checked
             // menu item (the winit shell passes `effective_mute()` here too).
             self.core.effective_mute(),
+            self.core.settings.subtitles,
             self.core.can_save_rotation(),
             self.core.can_reveal(),
             self.dir_scan.is_some(),
@@ -3920,6 +3922,7 @@ mod ffi {
         fullscreen: bool,
         slideshow: bool,
         mute_live_audio: bool,
+        subtitles: bool,
         compare_pin_enabled: bool,
         compare_pinned_here: bool,
         compare_toggle_enabled: bool,

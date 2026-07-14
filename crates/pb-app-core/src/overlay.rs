@@ -193,6 +193,8 @@ pub enum ToastIcon {
     RotateLeft = 9,
     RotateRight = 10,
     Copy = 11,
+    Captions = 12,
+    CaptionsOff = 13,
 }
 
 impl ToastIcon {

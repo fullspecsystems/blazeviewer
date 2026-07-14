@@ -2332,6 +2332,7 @@ impl App {
             !self.core.windowed, // `windowed` is the inverse of the fullscreen checkbox
             self.core.slideshow.on,
             self.core.effective_mute(),
+            self.core.settings.subtitles,
             self.core.can_save_rotation(),
             self.core.can_reveal(),
             self.dir_scan.is_some(),
@@ -5224,6 +5225,7 @@ mod tests {
             false,
             false,
             false, // mute_live_audio
+            false, // subtitles
             false, // save_rotation_enabled
             false, // reveal_enabled
             false, // cancel_scan_enabled
@@ -5246,6 +5248,7 @@ mod tests {
                 false,
                 false,
                 false, // mute_live_audio
+                false, // subtitles
                 false, // save_rotation_enabled
                 false, // reveal_enabled
                 false, // cancel_scan_enabled
@@ -5274,6 +5277,7 @@ mod tests {
                 false,
                 false,
                 false, // mute_live_audio
+                false, // subtitles
                 false, // save_rotation_enabled
                 false, // reveal_enabled
                 false, // cancel_scan_enabled
@@ -5340,6 +5344,7 @@ mod tests {
             false,
             false,
             false, // mute_live_audio
+            false, // subtitles
             false, // save_rotation_enabled
             false, // reveal_enabled
             false, // cancel_scan_enabled
@@ -5412,6 +5417,7 @@ mod tests {
                 false,
                 false,
                 false, // mute_live_audio
+                false, // subtitles
                 false, // save_rotation_enabled
                 false, // reveal_enabled
                 false, // cancel_scan_enabled
@@ -5451,6 +5457,7 @@ mod tests {
             false,
             true,  // slideshow flipped
             false, // mute_live_audio
+            false, // subtitles
             false, // save_rotation_enabled
             false, // reveal_enabled
             false, // cancel_scan_enabled

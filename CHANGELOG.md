@@ -8,6 +8,13 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
+- **Subtitles on videos.** If a subtitle file sits next to a video — the usual
+  `Movie.eng.srt` or `Movie.vtt` beside `Movie.mkv` — PhotoBlaze can now show it. Press `C`
+  (or View ▸ Subtitles) to turn captions on and off; your choice is remembered. Text is
+  rendered sharply at your display's real resolution, with a black outline so it stays
+  readable over bright scenes. SubRip (`.srt`) and WebVTT (`.vtt`) are supported, including
+  non-Latin scripts and right-to-left languages. Subtitles stored *inside* the video file,
+  and per-track selection when there's more than one, are still to come.
 - **Videos remember where you left off — for the current session.** Switch away from a video and
   come back (for example, press Space expecting pause — which actually advances to the next item —
   then Backspace) and playback resumes near where you were instead of restarting. Positions are kept

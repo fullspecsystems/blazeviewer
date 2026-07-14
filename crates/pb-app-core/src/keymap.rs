@@ -262,6 +262,7 @@ pub const EDITOR_GROUPS: &[(&str, &[Action])] = &[
             Action::FrameNext,
             Action::FramePrev,
             Action::MuteLiveAudio,
+            Action::ToggleSubtitles,
         ],
     ),
     (
@@ -642,6 +643,8 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         one(Action::FrameNext, "."),
         one(Action::FramePrev, ","),
         one(Action::MuteLiveAudio, "M"),
+        // Captions/subtitles on a video (task #90). `C` is free — Copy is Ctrl+C.
+        one(Action::ToggleSubtitles, "C"),
         // Show/hide the docked windowed toolbar (#61) — View-menu only, no default key.
         (Action::ToggleToolbar, vec![]),
         one(Action::Settings, "Ctrl+,"),
@@ -1063,5 +1066,34 @@ mod tests {
                 "{action:?} bindings drifted across the TOML round-trip",
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod subtitle_key_tests {
+    use super::*;
+    use crate::action::Action;
+
+    /// Pressing `C` resolves to the captions toggle — through the same lookup a real
+    /// keypress uses. A default that silently lost to an existing binding would look
+    /// exactly like a broken feature.
+    #[test]
+    fn pressing_c_toggles_subtitles() {
+        let km = Keymap::defaults();
+        let c = KeyChord::parse("C").unwrap();
+        assert_eq!(km.action_for(&c), Some(Action::ToggleSubtitles));
+    }
+
+    /// And nothing else claims bare `C`.
+    #[test]
+    fn nothing_else_claims_bare_c() {
+        let km = Keymap::defaults();
+        let c = KeyChord::parse("C").unwrap();
+        let owners: Vec<Action> = Action::ALL
+            .iter()
+            .copied()
+            .filter(|a| km.bindings_for(*a).contains(&c))
+            .collect();
+        assert_eq!(owners, vec![Action::ToggleSubtitles]);
     }
 }

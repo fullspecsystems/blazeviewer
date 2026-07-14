@@ -17,6 +17,10 @@ use resvg::{tiny_skia, usvg};
 pub mod assets {
     /// Clipboard — the Copy (`Ctrl+C`) toast.
     pub const CLIPBOARD: &str = include_str!("../icons/clipboard.svg");
+    /// Closed captioning — the Subtitles on (`C`) toast.
+    pub const CAPTIONS: &str = include_str!("../icons/closed-captioning.svg");
+    /// Closed captioning, slashed — the Subtitles off (`C`) toast.
+    pub const CAPTIONS_SLASH: &str = include_str!("../icons/closed-captioning-slash.svg");
     /// Clockwise rotate — the Rotate Right (`r`) toast.
     pub const ROTATE_RIGHT: &str = include_str!("../icons/rotate-right.svg");
     /// Counter-clockwise rotate — the Rotate Left (`Shift+R`) toast.

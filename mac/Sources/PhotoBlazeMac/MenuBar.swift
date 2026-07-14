@@ -102,6 +102,7 @@ final class MenuBar: NSObject {
         check("fullscreen", s.fullscreen)
         check("slideshow", s.slideshow)
         check("mute_live_audio", s.mute_live_audio)
+        check("toggle_subtitles", s.subtitles)
         check("compare_pin", s.compare_pinned_here)
         items["compare_pin"]?.isEnabled = s.compare_pin_enabled
         items["compare_toggle"]?.isEnabled = s.compare_toggle_enabled
@@ -261,6 +262,10 @@ final class MenuBar: NSObject {
             item("slideshow", "Slideshow"),
             item("slideshow_faster", "Slideshow Faster"),
             item("slideshow_slower", "Slideshow Slower"),
+            sep(),
+            // Captions on a video (task #90). Lives in View for now — it moves beside the
+            // track picker when that lands (#99).
+            item("toggle_subtitles", "Subtitles"),
             sep(),
             item("info", "Show Image Info"),
             item("full_exif", "Show Detailed Info", key: "i"),

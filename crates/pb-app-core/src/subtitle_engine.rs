@@ -51,7 +51,7 @@ pub struct SubtitleEngine {
     gen: u64,
     bitmap: Option<SubtitleBitmap>,
     rect: Option<Rect>,
-    /// `PB_SUBTITLES=trace` — see [`Self::trace`].
+    /// `PB_SUBTITLE_TRACE=1` — see [`Self::trace`].
     tracing: bool,
     last_trace: Option<String>,
 }
@@ -64,29 +64,27 @@ impl SubtitleEngine {
         }
     }
 
-    /// The **temporary dev gate** for task #90's first slice — the real switch is the #99
-    /// track picker plus a persisted preference (#90.4).
+    /// Start from the user's persisted preference (`C` / View ▸ Subtitles).
     ///
-    /// - `PB_SUBTITLES=1` — show the first renderable sidecar.
-    /// - `PB_SUBTITLES=trace` — the same, plus print to stderr why nothing is showing.
+    /// `PB_SUBTITLE_TRACE=1` additionally prints why nothing is on screen — a diagnostic
+    /// only; it never turns subtitles on.
     ///
-    /// This does **not** implement `Automatic`'s forced-only rule yet; that needs the
-    /// catalog, which [`crate::subtitle::resolve_track`] is already written against.
-    pub fn from_env() -> Self {
-        let v = std::env::var("PB_SUBTITLES").unwrap_or_default();
-        let on = v == "1" || v == "trace";
+    /// `Automatic` does **not** implement the forced-only rule yet: it shows the first
+    /// renderable sidecar. That needs the catalog, which [`crate::subtitle::resolve_track`]
+    /// is already written against (#99).
+    pub fn from_settings(on: bool) -> Self {
         Self {
             mode: if on {
                 SubtitleMode::Automatic
             } else {
                 SubtitleMode::Off
             },
-            tracing: v == "trace",
+            tracing: std::env::var_os("PB_SUBTITLE_TRACE").is_some_and(|v| v == "1"),
             ..Default::default()
         }
     }
 
-    /// `PB_SUBTITLES=trace` prints why nothing is on screen. Deduped on the message, so a
+    /// `PB_SUBTITLE_TRACE=1` prints why nothing is on screen. Deduped on the message, so a
     /// steady state prints once rather than 120×/second — the log stays readable and the
     /// tick stays free (the closure isn't even called when tracing is off).
     pub fn trace(&mut self, msg: impl FnOnce() -> String) {

@@ -158,6 +158,10 @@ pub struct MenuState {
     pub show_toolbar: bool,
     /// Image ▸ Mute Live Photo Audio — checked when Live Photo audio is muted (#38).
     pub mute_live_audio: bool,
+    /// View ▸ Subtitles — checked when captions are on (task #90). Always *enabled*,
+    /// like Mute Live Photo Audio: it's a preference the user sets whenever they like,
+    /// not a property of what's on screen.
+    pub subtitles: bool,
     /// Image ▸ Pin for Compare — enabled with a photo on screen (task #43).
     pub compare_pin_enabled: bool,
     /// Image ▸ Pin for Compare — checked while the current photo IS the pin.

@@ -78,6 +78,7 @@ pub mod ids {
     pub const FRAME_NEXT: &str = "frame_next";
     pub const FRAME_PREV: &str = "frame_prev";
     pub const MUTE_LIVE_AUDIO: &str = "mute_live_audio";
+    pub const TOGGLE_SUBTITLES: &str = "toggle_subtitles";
 
     pub const HELP: &str = "help";
     pub const ABOUT: &str = "about";
@@ -135,6 +136,7 @@ pub enum MenuAction {
     FrameNext,
     FramePrev,
     MuteLiveAudio,
+    ToggleSubtitles,
     Help,
     About,
 }
@@ -192,6 +194,7 @@ impl MenuAction {
             MenuAction::FrameNext => Action::FrameNext,
             MenuAction::FramePrev => Action::FramePrev,
             MenuAction::MuteLiveAudio => Action::MuteLiveAudio,
+            MenuAction::ToggleSubtitles => Action::ToggleSubtitles,
             MenuAction::Help => Action::Help,
             MenuAction::About => Action::About,
         }
@@ -250,6 +253,7 @@ pub fn action_for(id: &str) -> Option<MenuAction> {
         FRAME_NEXT => MenuAction::FrameNext,
         FRAME_PREV => MenuAction::FramePrev,
         MUTE_LIVE_AUDIO => MenuAction::MuteLiveAudio,
+        TOGGLE_SUBTITLES => MenuAction::ToggleSubtitles,
         HELP => MenuAction::Help,
         ABOUT => MenuAction::About,
         _ => return None,
@@ -746,6 +750,15 @@ pub fn menu_bar_spec(keymap: &Keymap, s: &crate::contract::MenuState) -> Vec<Men
                 check(MenuAction::Slideshow, "Slideshow\tS", true, s.slideshow),
                 item(MenuAction::SlideshowFaster, "Slideshow Faster\t[", true),
                 item(MenuAction::SlideshowSlower, "Slideshow Slower\t]", true),
+                sep(),
+                // Captions on a video (task #90). View for now — it moves beside the track
+                // picker when that lands (#99).
+                check(
+                    MenuAction::ToggleSubtitles,
+                    "Subtitles\tC",
+                    true,
+                    s.subtitles,
+                ),
                 sep(),
                 check(
                     MenuAction::ToggleToolbar,

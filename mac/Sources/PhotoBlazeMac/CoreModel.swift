@@ -1391,6 +1391,8 @@ final class CoreModel {
         case 9: return "rotate.left"  // Rotate CCW
         case 10: return "rotate.right"  // Rotate CW
         case 11: return "doc.on.doc"  // Copy
+        case 12: return "captions.bubble.fill"  // Captions on
+        case 13: return "captions.bubble"  // Captions off
         default: return nil  // None
         }
     }

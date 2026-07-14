@@ -122,12 +122,7 @@ impl AppCore {
             exif_cache: std::collections::HashMap::new(),
             details_probe: None,
             details_gen: 0,
-            // Subtitles are off until something turns them on. `PB_SUBTITLES=1` is the
-            // **temporary dev gate** for task #90's first slice — the real switch is the
-            // #99 track picker plus a persisted preference (#90.4). It shows the first
-            // renderable sidecar; it does not yet implement `Automatic`'s forced-only rule
-            // (that needs the catalog, which `resolve_track` is already written against).
-            subtitles: crate::subtitle_engine::SubtitleEngine::from_env(),
+            subtitles: crate::subtitle_engine::SubtitleEngine::from_settings(settings.subtitles),
             recognized_text: std::collections::HashMap::new(),
             text_scan: None,
             text_gen: 0,
@@ -398,6 +393,31 @@ impl AppCore {
             // toast are core; only the ObjC audio player is the shell's (Stop/StartLiveAudio
             // effects). The native menu's mute check re-asserts on the next per-tick
             // `apply_menu_state` diff, so no explicit refresh is needed here.
+            // Captions on/off (task #90). A preference, not a viewing trace (privacy #2):
+            // it records that the user likes subtitles, never which video or which track.
+            // The engine picks the change up on the next tick — no reload, because the cue
+            // track stays loaded while it's off; only drawing stops.
+            Action::ToggleSubtitles => {
+                let on = self.subtitles.mode == crate::subtitle::SubtitleMode::Off;
+                self.subtitles.mode = if on {
+                    crate::subtitle::SubtitleMode::Automatic
+                } else {
+                    crate::subtitle::SubtitleMode::Off
+                };
+                self.settings.subtitles = on;
+                // Gated on `persist_prefs`, unlike the older toggles that call `save()`
+                // straight — so a unit test can dispatch this without writing the real
+                // settings.toml. A live host sets the flag; headless/tests don't.
+                if self.persist_prefs {
+                    self.settings.save();
+                }
+                let (msg, icon) = if on {
+                    ("Subtitles on", ToastIcon::Captions)
+                } else {
+                    ("Subtitles off", ToastIcon::CaptionsOff)
+                };
+                self.show_toast_icon(msg, icon);
+            }
             Action::MuteLiveAudio => {
                 // An explicit toggle supersedes a `--mute` launch override and persists the
                 // user's choice (clearing the session override so it no longer masks the setting).
@@ -1813,6 +1833,7 @@ impl AppCore {
         fullscreen: bool,
         slideshow: bool,
         mute_live_audio: bool,
+        subtitles: bool,
         save_rotation_enabled: bool,
         reveal_enabled: bool,
         cancel_scan_enabled: bool,
@@ -1840,6 +1861,7 @@ impl AppCore {
             // so the choke point defaults it off and the shell overrides it from `settings`.
             show_toolbar: false,
             mute_live_audio,
+            subtitles,
             // Compare (task #43): both raw states cross so the derivation lives HERE,
             // the one choke point, instead of drifting per shell.
             compare_pin_enabled: displayed_item.is_some(),
@@ -4304,6 +4326,7 @@ impl AppCore {
                         two(Action::FramePrev, Action::FrameNext),
                     ),
                     row("Mute Live Photo audio", sc(Action::MuteLiveAudio)),
+                    row("Subtitles on/off", sc(Action::ToggleSubtitles)),
                 ],
             ),
             section(
@@ -7991,6 +8014,8 @@ impl AppCore {
             ToastIcon::RotateLeft => Some(icon::assets::ROTATE_LEFT),
             ToastIcon::RotateRight => Some(icon::assets::ROTATE_RIGHT),
             ToastIcon::Copy => Some(icon::assets::CLIPBOARD),
+            ToastIcon::Captions => Some(icon::assets::CAPTIONS),
+            ToastIcon::CaptionsOff => Some(icon::assets::CAPTIONS_SLASH),
         };
         if let Some(hud) = self.hud.as_ref() {
             if let Some((rgba, w, h)) = hud.render_panel_icon(msg, px, pad, fa, hud.theme().bg) {
@@ -8716,6 +8741,64 @@ mod tests {
 
     /// A minimal `AppCore` for driving `handle` in tests — the public [`AppCore::headless`]
     /// constructor at a 1×1 viewport (one construction literal, shared with the NS1 FFI bridge).
+    /// `C` / View ▸ Subtitles flips the engine's mode, records the preference, and says
+    /// which way it went — the whole switch, replacing the old dev env flag.
+    #[test]
+    fn toggle_subtitles_flips_the_mode_and_the_preference() {
+        use crate::subtitle::SubtitleMode;
+        let mut core = test_core();
+        // The native toast carries the message + icon as data; the CPU one needs a HUD
+        // rasterizer a headless core has no reason to build.
+        core.native_toast = true;
+        assert_eq!(core.subtitles.mode, SubtitleMode::Off, "off by default");
+        assert!(!core.settings.subtitles);
+
+        core.dispatch_action(Action::ToggleSubtitles);
+        assert_eq!(core.subtitles.mode, SubtitleMode::Automatic);
+        assert!(core.settings.subtitles, "the preference records the choice");
+        let t = core.toast_native.as_ref().expect("the user is told");
+        assert_eq!(
+            (t.message.as_str(), t.icon),
+            ("Subtitles on", ToastIcon::Captions)
+        );
+
+        core.dispatch_action(Action::ToggleSubtitles);
+        assert_eq!(core.subtitles.mode, SubtitleMode::Off);
+        assert!(!core.settings.subtitles);
+        let t = core.toast_native.as_ref().expect("told again");
+        assert_eq!(
+            (t.message.as_str(), t.icon),
+            ("Subtitles off", ToastIcon::CaptionsOff),
+            "the toast must say which way it went, not just that it changed"
+        );
+    }
+
+    /// A test must never write the real settings.toml (the `persist_prefs` rule) — this
+    /// toggle is dispatched by the test above, so pin that it stays gated.
+    #[test]
+    fn toggle_subtitles_does_not_persist_in_a_headless_core() {
+        let core = test_core();
+        assert!(
+            !core.persist_prefs,
+            "a headless core must not write the user's config"
+        );
+    }
+
+    /// The saved preference is what the engine starts in — a toggle that forgets across
+    /// launches is the flag we just removed, wearing a menu item.
+    #[test]
+    fn the_engine_starts_from_the_saved_preference() {
+        use crate::subtitle::SubtitleMode;
+        assert_eq!(
+            crate::subtitle_engine::SubtitleEngine::from_settings(true).mode,
+            SubtitleMode::Automatic
+        );
+        assert_eq!(
+            crate::subtitle_engine::SubtitleEngine::from_settings(false).mode,
+            SubtitleMode::Off
+        );
+    }
+
     fn test_core() -> AppCore {
         AppCore::headless(Viewport {
             width: 1,

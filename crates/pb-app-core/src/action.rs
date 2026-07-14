@@ -136,6 +136,8 @@ pub enum Action {
     FramePrev,
     // Live Photo audio (mute toggle; #38).
     MuteLiveAudio,
+    // Subtitles/captions on a video (toggle; task #90).
+    ToggleSubtitles,
     // Docked windowed toolbar (Windows/Linux winit shell only; #61). macOS uses its native
     // toolbar's own Hide Toolbar, so this action is inert there.
     ToggleToolbar,
@@ -201,6 +203,7 @@ impl Action {
         Action::FrameNext,
         Action::FramePrev,
         Action::MuteLiveAudio,
+        Action::ToggleSubtitles,
         Action::ToggleToolbar,
         Action::Settings,
         Action::About,
@@ -262,6 +265,7 @@ impl Action {
             Action::FrameNext => "frame_next",
             Action::FramePrev => "frame_prev",
             Action::MuteLiveAudio => "mute_live_audio",
+            Action::ToggleSubtitles => "toggle_subtitles",
             Action::ToggleToolbar => "toggle_toolbar",
             Action::Settings => "settings",
             Action::About => "about",
@@ -347,6 +351,7 @@ impl Action {
             Action::FrameNext => "Next frame",
             Action::FramePrev => "Previous frame",
             Action::MuteLiveAudio => "Mute Live Photo audio",
+            Action::ToggleSubtitles => "Subtitles",
             Action::ToggleToolbar => "Show toolbar",
             Action::Settings => "Settings",
             Action::About => "About",

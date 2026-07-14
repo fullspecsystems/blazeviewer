@@ -222,6 +222,12 @@ pub struct Settings {
     /// Play a Live Photo's audio when its motion plays (#38). Muted via `M` / the Image
     /// menu; persisted so the choice sticks. Default on (audio plays).
     pub mute_live_audio: bool,
+    /// Show subtitles/captions on a video when a track is available (task #90). Toggled
+    /// via `C` / the View menu; persisted so the choice sticks. Default off.
+    ///
+    /// This is a *preference*, not a viewing trace (privacy #2): it records that the user
+    /// likes captions, never which video or which track.
+    pub subtitles: bool,
     /// Which backend generates AI image descriptions (task #44). Default `Auto`.
     pub describe_backend: DescribeBackend,
     /// The OpenAI-compatible endpoint base URL for the `LocalEndpoint` backend
@@ -294,6 +300,7 @@ impl Default for Settings {
             picker_dir: None,       // start in the current photo's folder
             last_folder: None,      // no folder to reopen until the first open
             mute_live_audio: false, // Live Photo audio plays by default (#38)
+            subtitles: false,       // captions off until asked for (task #90)
             describe_backend: DescribeBackend::Auto,
             // LM Studio's default; a bare install of Ollama uses :11434 instead.
             describe_endpoint: "http://localhost:1234/v1".to_string(),
