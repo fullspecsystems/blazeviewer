@@ -480,6 +480,16 @@ landing should help).
 
 ### 1F. Bounded compressed read-ahead and network recovery
 
+> **Cancel-flag slice DONE (2026-07-14, `803bb5eb`):** the FFmpeg producer's interrupt cancel flag
+> is now armed — `VideoSession`/`VideoSessionIo` share an `Arc<AtomicBool>`, `stop()` flips it, and
+> `FfInput`'s interrupt callback aborts a blocking read at once (an additive OWNED `Arc` armed via
+> `FfInput::set_cancel`, so `FfInput` stays `'static`; the poster's borrowed flag is untouched). A
+> stuck network read now retires the (detached) producer thread promptly instead of on the 10–20 s
+> watchdog. **Audio-decoder cancel deferred** (the owned decoder lives on the Swift feeder queue;
+> a main-thread cancel needs a separately-allocated flag to avoid aliasing the box mid-read — the
+> `FfAudioDecoder::arm_cancel` seam is in place, wiring folds into the audio rework here). The rest
+> of 1F (shared packet source, watermarks, reconnect) is still measurement-gated on 0D.
+
 Land the Phase 0D winner behind the packet-source seam; do not solve SMB playback by inflating the
 decoded `VideoFrame` queue.
 
