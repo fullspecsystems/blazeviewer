@@ -1,7 +1,7 @@
 # Video Playback Overhaul — Execution Plan
 
-> Status: **review-hardened, ready for implementation spikes** · Owner: JD  
-> Started 2026-07-13 from 0.2.0 beta feedback · Revised 2026-07-13 after live-code review  
+> Status: **review-hardened, ready for implementation spikes** · Owner: JD
+> Started 2026-07-13 from 0.2.0 beta feedback · Revised 2026-07-13 after live-code review
 > Scope: smooth, seekable, glitch-free playback for native containers and FFmpeg-backed
 > MKV/WebM/other fallback media, with correct SDR/HDR behavior and bounded resource use.
 
@@ -20,6 +20,8 @@ also leave a durable fallback for codecs Apple cannot decode and must not regres
 - Hardware-decodable media stays hardware decoded. PQ/HLG color work does not run as a large
   per-pixel CPU loop in steady state.
 - All queues and pools remain byte-bounded, including 8K/oversized inputs and archive bytes.
+- Path-backed playback over a mounted network share uses bounded compressed read-ahead and does not
+  turn ordinary network jitter into repeated audio glitches.
 - Stop/navigation/quit/seek can retire work promptly; no stale frame or callback can cross a
   session or seek generation.
 - Viewing remains read-only and RAM-only under ADR-018.
@@ -34,6 +36,10 @@ also leave a durable fallback for codecs Apple cannot decode and must not regres
   improvements without holding the macOS release bar.
 - Zero-copy is not a requirement if the measured P010/NV12 readback-and-upload path clears the
   target with margin.
+- No player can provide uninterrupted playback when sustained source throughput is below the
+  stream's long-run bitrate. In that case the contract is a clean, bounded rebuffer and recovery,
+  not concealed data starvation. HTTP streaming and streaming from solid 7z entries are not added
+  by this overhaul; the network target is a seekable path on a mounted share (initially SMB).
 
 ## 2. Current architecture and verified evidence
 
@@ -61,6 +67,9 @@ producer. `VideoSession` is shared; acquisition, audio, and presentation are pla
 - HDR conversion cost scales with output area: approximately 2036×1100 was smooth while
   approximately 2940×1588 stuttered in the observed run.
 - The existing tests pass but do not cover a full-size 4K RGBA16F preroll feasibility failure.
+- The FFmpeg video producer and audio decoder each own a separate `FfInput`/demuxer over the same
+  path. On a network share this can read/demux the interleaved container twice; local page caching
+  can hide the cost, so duplicated source bytes must be measured rather than assumed harmless.
 
 ## 3. Root-cause inventory
 
@@ -74,10 +83,10 @@ producer. `VideoSession` is shared; acquisition, audio, and presentation are pla
 | R6 | HDR steady state creates CPU P010/NV12, RGBA64, and RGBA16F traffic, then uploads 8 B/px | CPU-bound large-window playback | `ffmpeg/hw.rs`, `ffmpeg/convert.rs` |
 | R7 | macOS route selection is container-extension based; MKV always takes the full custom session even when its codec is Apple-decodable | Native decode/presentation capabilities are left unused | `VideoContainer::macos_native`, `start_video_session` |
 | R8 | The stopgap creates up to `available_parallelism()` OS threads per converted frame | Burst scheduling jitter and unnecessary thread churn | `pack_scrgb_f16` |
-| R9 | Producer and audio decoder demux **synchronously, one packet at a time**; no compressed-packet read-ahead to absorb a slow file/network read | Smooth locally but **stutters/crackles over SMB** even at gigabit (the original beta item #1) | `ffmpeg/video_producer.rs`, `ffmpeg/io.rs`, `audio_decoder.rs` |
+| R9 | Video and audio independently open/demux the same path and have no coordinated compressed-packet read-ahead | SMB jitter or duplicate reads can drain the streams at different times; seeks multiply remote I/O | `ffmpeg/io.rs`, `video_producer.rs`, `audio_decoder.rs` |
 
-R6 is real, but it is not sufficient to explain R1–R5. GPU color conversion alone will not make
-audio reliable.
+R6 is real, but it is not sufficient to explain R1–R5 or R9. GPU color conversion alone will not
+make audio reliable, and decoded-frame buffering is the wrong way to hide network jitter.
 
 ## 4. Locked architectural rules
 
@@ -99,6 +108,11 @@ audio reliable.
    correctness win for supported codecs, not permission to leave VP8/exotic/software paths brittle.
 8. **Do not claim Dolby Vision correctness until it is proven.** A static PQ shader can render an
    HDR10-compatible base layer but does not implement Dolby Vision dynamic metadata.
+9. **Buffer compressed media, not decoded frames, for I/O jitter.** Network read-ahead is bounded
+   jointly by bytes and media-time span and remains RAM-only. Decoded queues stay sized for
+   scheduling/presentation, not seconds of network insurance.
+10. **One demux seek per user intent.** Video and audio must not independently hammer a mounted
+    share for every intermediate seek. A final generation resets both streams atomically.
 
 ## 5. Target architecture
 
@@ -156,6 +170,39 @@ an error cannot loop Native → SampleBuffer → Session → Native.
 - Platform acquisition may differ, but `VideoFrame` timing/color/plane contracts and
   `VideoSession` scheduling policy must remain shared and testable.
 
+### 5.4 Shared FFmpeg input and compressed-packet plane
+
+For FFmpeg-backed path inputs, introduce a `FfPacketSource`/demux coordinator seam that can feed
+both the hardened Session decoders and the macOS sample-buffer presenter:
+
+```text
+seekable path / archive bytes
+          │
+    one FFmpeg demuxer
+          │
+   bounded packet fan-out
+      ├─ video packets -> software/VideoToolbox decoder OR sample-buffer renderer
+      └─ audio packets -> FFmpeg audio decoder OR compressed sample-buffer renderer
+```
+
+- Open and demux a path once per active attempt. Do not add independent read-ahead threads around
+  the existing video and audio demuxers and thereby double remote I/O.
+- Bound the combined packet plane by both bytes and PTS span. Derive a target from measured source
+  bitrate and observed read throughput, clamp it to explicit minimum/maximum caps, and reserve
+  enough audio horizon to avoid crackle during a short video slowdown.
+- Use high/low watermarks. A full queue stops read-ahead; it does not grow. If video falls behind
+  while audio must continue, shed video only at a safe decode boundary (for example, discard a
+  complete dependency run and resume from the next keyframe), never by dropping arbitrary
+  compressed packets.
+- A seek bumps generation, interrupts the current read, clears both packet queues and decoder
+  delay, performs one demux seek, then prerolls both streams from the new dependency point.
+- Reuse probe results and cancel obsolete poster/probe reads when playback starts so startup does
+  not create several competing passes over the network file.
+- `VideoInput::Bytes` remains RAM-resident and seekable. Network-hosted ZIP/7z acquisition retains
+  its existing eager-entry semantics; do not claim packet read-ahead makes a solid archive stream.
+- System-owned AVPlayer/Media Foundation routes may retain their own I/O/buffering. They must still
+  expose buffering/recovery state through the common lifecycle rather than adding a core clock.
+
 ## 6. Phase 0 — Baseline and blocking spikes
 
 No production architecture is selected from intuition alone.
@@ -190,6 +237,8 @@ Extend `PB_VIDEO_DIAG` with batched counters/timers rather than per-frame `eprin
 - audio scheduled duration, completion-to-refill latency, underrun/device-reset count,
   pause/resume count and reason;
 - seek request/generation/landing/audio-resume latency and superseded work;
+- source bytes read, duplicate bytes/passes, blocked-read duration, rolling input throughput,
+  packet-queue bytes/PTS span, low-water events, rebuffer cause, and reconnect attempts;
 - p50/p95/p99 plus worst case, never only a mean.
 
 Diagnostics are opt-in, path-redacted, and written only to stderr/tracing for the run. They must not
@@ -220,6 +269,32 @@ or downmixed; do not represent PCM output as Atmos.
 
 **Gate:** Phase 3 proceeds only if the spike is at least as smooth as the AVPlayer remux control,
 has one stable timebase, preserves required HDR metadata, and survives repeated flush/seek/stop.
+
+### 0D. Network I/O characterization and packet-source spike
+
+The original network symptom must be reproduced separately from CPU/HDR load. Test the same file
+locally and over a mounted SMB share while controlling available throughput, latency, jitter, and
+short outages. Record the source's average and rolling-window peak bitrate; “gigabit SMB” alone is
+not a useful workload description.
+
+Required tiers include:
+
+- ample capacity (at least 2× the measured rolling demand), then progressively constrained
+  capacity around 1.5×, 1.0×, and below the long-run media bitrate;
+- added latency/jitter and deterministic 100 ms, 500 ms, and 2 s read stalls;
+- startup, steady playback, held seeks, a far seek, pause/resume, stop during a blocked read, and
+  reconnect after the share becomes available again;
+- current independent video/audio demuxers versus a one-demux bounded packet-source prototype.
+
+The prototype must demonstrate that one demuxer can feed video and audio without starvation,
+unbounded packets, or arbitrary compressed-packet loss. Verify cancellation inside FFmpeg I/O on
+the mounted filesystem. If the OS can hold a file read past the interrupt deadline, isolate it from
+the UI and session lifecycle, cap abandoned/stuck workers, and prove repeated stop/open cannot leak
+threads indefinitely.
+
+**Gate:** choose the packet-buffer byte/time caps and default preroll from traces. The shared
+packet-source design must reduce remote bytes or starvation versus the two-demux baseline without
+regressing local-file startup/seek latency by more than 5%.
 
 ## 7. Phase 1 — Make the Session backend reliable
 
@@ -311,36 +386,49 @@ Create an exclusively owned audio-decoder handle rather than calling through the
 The raw handle is an implementation constraint, not permission for an unowned lifetime. Add
 double-drop, use-after-stop, seek/read serialization, and replacement-session tests.
 
-### 1F. Lifecycle and failure containment
+### 1F. Bounded compressed read-ahead and network recovery
+
+Land the Phase 0D winner behind the packet-source seam; do not solve SMB playback by inflating the
+decoded `VideoFrame` queue.
+
+- One demux worker performs sequential read-ahead and feeds bounded audio/video packet queues.
+  Consumers decode independently, but all packets carry `session_id` and `seek_generation`.
+- Size the target horizon from bitrate and measured throughput, then clamp it by a hard combined
+  byte cap and a maximum PTS span. Keep explicit audio/video reservations and report both horizons.
+- Start playback only when the required audio horizon and minimum video dependency/preroll are
+  present, or when EOF proves the clip is shorter. Do not wait for a nominal target the file cannot
+  satisfy.
+- Distinguish decode starvation, packet starvation, and source-disconnected states. A video-only
+  miss follows 1B and leaves audio running. If the audio packet/PCM horizon also drains, pause once,
+  refill both streams, re-anchor once, and resume without a crackle or clock jump.
+- Intermediate seeks update intent but do not touch network I/O. The final seek flushes packet and
+  decoder state once; any in-flight old-generation read or packet is ignored.
+- On a transient read failure, attempt a small bounded reconnect/backoff sequence. Reopen and seek
+  from a safe dependency point near the last committed media time, validate that the path still
+  identifies the same file (stable facts such as size plus container/stream signature), and never
+  splice bytes from a replaced file.
+- Exhausted retry produces one error. Stop/navigation cancels retry immediately, never joins a
+  blocked network worker on the main actor, and never starts a retry for a stale session.
+- All buffering is RAM-only. No disk cache, partial-download file, MRU, or path-bearing telemetry.
+
+Tests cover queue high/low watermarks, audio reservation, VBR bursts, insufficient-throughput
+rebuffer, clean resume, safe video dependency shedding, final-seek invalidation, reconnect success,
+file replacement, retry exhaustion, stop during blocked read, and global memory invariants.
+
+### 1G. Lifecycle and failure containment
 
 - Session replacement, navigation, delete, window close, and quit must cancel video + audio work
   and reject stale callbacks by `session_id`.
 - Sleep/wake, display switch, audio-device change, resize/fullscreen, and app activation must have
   explicit resume/reprime behavior.
 - Corrupt/truncated input, decoder disconnect, audio-device loss, and sample-renderer failure
-  produce one user-facing error after the fallback graph is exhausted—never repeated toasts or a
-  retry loop.
+  produce one user-facing error after the fallback graph is exhausted—never repeated toasts or an
+  unbounded retry loop.
 
-### 1G. Compressed-packet read-ahead for network media
-
-The producer and audio decoder block on each `av_read_frame`, so a slow file/network read stalls
-the decode cadence and drains the decoded-frame queue — smooth locally, juddery over SMB (the
-original item #1). The decoded-frame budget is too high a layer to hide read latency.
-
-- Give the producer a demux read-ahead: a bounded ring of *compressed packets* (KB, not decoded
-  frames) filled by a reader that stays ahead of the decoder, so a stalled read drains the packet
-  ring instead of the frame queue. The FFmpeg analog of the Media Foundation Source Reader's
-  internal read-ahead.
-- Cover the audio decoder's read path too (or share one demux), so audio doesn't underrun on the
-  same stalls.
-- Byte-bounded (rule 2) and identity/cancellation-gated (rules 5–6); a seek flushes the packet ring.
-- On the macOS sample-buffer route (Phase 3) the system renderer's bounded buffering covers this,
-  so this primarily hardens the Session path (Windows/Linux + macOS fallback). **Re-test over a
-  gigabit SMB share** — item #1 was only re-tested locally this session.
-
-**Phase 1 exit:** the corpus plays through ordinary decoder spikes without an audio interruption;
-full-size HDR never deadlocks; seek spam results in one final audio commit; **playback over a
-gigabit SMB share is smooth**; all new pure-state tests pass.
+**Phase 1 exit:** the corpus plays through ordinary decoder spikes and qualifying SMB jitter
+without an audio interruption; full-size HDR never deadlocks; seek spam results in one final audio
+commit and one remote seek; insufficient throughput produces a clean bounded rebuffer; all new
+pure-state tests pass.
 
 ## 8. Phase 2 — Planar GPU color and scale path
 
@@ -407,7 +495,8 @@ Proceed only after Phase 0C passes.
 
 ### 3A. Demux and sample construction
 
-- FFmpeg demux runs on an owned background worker over `VideoInput::Path` or shared archive bytes.
+- Consume the shared packet-source seam from 5.4/1F over `VideoInput::Path` or shared archive bytes;
+  do not open a second demuxer for fallback audio.
 - Convert packet time base to `CMTime` without float round-trips. Carry PTS, DTS, duration, sync and
   dependency flags; preserve B-frame decode/presentation order.
 - Build and retain format descriptions from codec private data. Apply the exact required bitstream
@@ -480,8 +569,10 @@ for a codec the sample-buffer presenter cannot cover.
 ## 11. Sequencing
 
 1. Phase 0A/0B: characterize the exact corpus and capture an honest baseline.
-2. Phase 0C: prove or reject the macOS sample-buffer architecture in isolation.
-3. Phase 1: land Session reliability unconditionally, in test-first slices.
+2. Phase 0C/0D: prove or reject the macOS sample-buffer architecture and shared packet-source
+   architecture in isolated spikes.
+3. Phase 1: land Session reliability and bounded network buffering unconditionally, in test-first
+   slices.
 4. If Phase 0C passes, integrate Phase 3 for Apple-decodable MKV while keeping Session fallback.
 5. Land Phase 2 for Windows/Linux and unsupported macOS codecs; it may proceed alongside Phase 3
    only when file ownership does not overlap.
@@ -495,7 +586,8 @@ Recommended Phase 1 commit slices:
 3. Latest-due frame selection/drop accounting.
 4. Generation-aware seek coordinator and final-on-release contracts.
 5. Owned off-main audio decoder/feeder.
-6. Lifecycle/device/sleep stress fixes and diagnostics.
+6. Shared packet source + bounded read-ahead, with the old two-demux path retained only for A/B.
+7. Network recovery, lifecycle/device/sleep stress fixes, and diagnostics.
 
 ## 12. Acceptance gates
 
@@ -520,6 +612,20 @@ Use the AVPlayer remux control as the system baseline where applicable. Phase 3 
 - Paused seek stays paused; frame-step presents one frame; replay starts from zero; EOS parks the
   final frame.
 
+### Mounted-network playback
+
+- On the Phase 0D qualifying profile—transport capacity at least 1.5× the measured rolling source
+  demand with deterministic stalls up to the proven packet horizon—there are zero post-preroll
+  audio underruns/rebuffers and no stale video flash. Final thresholds are recorded with the corpus
+  rather than reduced to the label “gigabit.”
+- At or below the long-run source bitrate, behavior degrades honestly: one clean pause when the
+  audio horizon empties, then remain buffering until enough recovery margin exists (or fail after
+  the bounded retry policy). Re-anchor once on a sustainable resume. There is no crackle,
+  premature pause/resume loop, unbounded memory growth, or silent A/V drift.
+- A final seek performs one remote demux seek. Seek spam, navigation, and stop do not produce
+  duplicate old-generation network work.
+- Local-file startup and seek p95 regress by no more than 5% against the pre-packet-source baseline.
+
 ### Robustness
 
 - Navigate/stop/quit during open, preroll, decode, audio refill, and seek.
@@ -527,6 +633,8 @@ Use the AVPlayer remux control as the system baseline where applicable. Phase 3 
   stream start offsets; odd crop/SAR/rotation; 8K oversized input.
 - Resize/fullscreen/scale changes, display switch, sleep/wake, audio-device change, mute, and archive
   bytes playback.
+- SMB jitter/stalls, share disconnect/reconnect, file replacement during reconnect, insufficient
+  sustained throughput, and stop/navigation while a read is blocked.
 - Every failure is bounded, cancellable, session-gated, and produces at most one final user error.
 
 ### Privacy and distribution
@@ -540,9 +648,11 @@ Use the AVPlayer remux control as the system baseline where applicable. Phase 3 
 ### Automated tests
 
 - `pb-app-core`: property/state tests for queue capacity, starvation threshold, latest-due
-  selection, pause/rebuffer reasons, seek generation/coalescing, stale callback rejection, EOS.
+  selection, pause/rebuffer reasons, seek generation/coalescing, packet/source states, stale
+  callback rejection, EOS.
 - `pb-decode`: PTS/DTS conversion, packet dependency flags, bitstream normalization, P010/NV12
-  plane/stride/crop validation, seek supersession, corrupt input/cancellation.
+  plane/stride/crop validation, packet queue byte/time bounds, stream fairness, safe dependency
+  shedding, one-demux seek, reconnect identity, seek supersession, corrupt input/cancellation.
 - `pb-render`: independent-reference golden tests for NV12/P010 color and geometry; reusable resource
   tests; staging stride/alignment tests.
 - `pb-mac-ffi`: owned audio-handle lifecycle, double-drop/use-after-stop prevention, callback
@@ -556,7 +666,7 @@ Use the AVPlayer remux control as the system baseline where applicable. Phase 3 
 - `crates/pb-app-core/src/video_session.rs`
 - `crates/pb-app-core/src/app_core_impl.rs`
 - `crates/pb-app-core/src/contract.rs`
-- `crates/pb-decode/src/ffmpeg/{probe,video_producer,audio_decoder,convert,hw}.rs`
+- `crates/pb-decode/src/ffmpeg/{io,probe,packet_source,video_producer,audio_decoder,convert,hw}.rs`
 - `crates/pb-render/src/{gpu,upload,yuv}.rs`
 - `crates/pb-mac-ffi/src/lib.rs`
 - `mac/Sources/PhotoBlazeMac/{CoreModel,NativeVideoPlayer,SessionAudioPlayer,MetalCanvas}.swift`
@@ -570,6 +680,8 @@ Use the AVPlayer remux control as the system baseline where applicable. Phase 3 
   Vision profile correctly from reconstructed format descriptions and packets.
 - Whether compressed TrueHD is accepted (do not expect it); required LPCM channel layout/downmix.
 - The Session short-starvation threshold and audio chunk/lookahead sizes.
+- The shared packet-source byte/time caps, reconnect count/backoff, and qualifying SMB profile from
+  Phase 0D; do not hard-code these from a single “gigabit” run.
 - The bounded 4K/8K queue byte caps after P010 measurements.
 - Whether P010 `R16Unorm`/`Rg16Unorm` sampling meets all supported wgpu backend requirements.
 - Whether Phase 2 readback/upload already clears the target; if yes, do not build Phase 4.
@@ -577,8 +689,9 @@ Use the AVPlayer remux control as the system baseline where applicable. Phase 3 
 ## 15. Definition of done
 
 The overhaul is complete when the corpus and representative SDR/HDR/VFR/no-audio/unsupported-codec
-files meet the acceptance gates; the fallback remains bounded and cancellable; macOS routing is
-capability-based without retry loops; native and Session presenters preserve all existing controls
-and lifecycle behavior; automated tests cover the previously missing 4K HDR/preroll/audio-seek
+files meet the acceptance gates; the fallback remains bounded and cancellable; qualifying mounted-
+network playback is smooth and insufficient bandwidth recovers cleanly; macOS routing is capability-
+based without retry loops; native and Session presenters preserve all existing controls and
+lifecycle behavior; automated tests cover the previously missing 4K HDR/preroll/audio-seek/network
 cases; the changelog documents user-visible playback improvements; and the task/architecture docs
 describe the shipped routes rather than interim experiments.
