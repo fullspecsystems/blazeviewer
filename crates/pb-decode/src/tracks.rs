@@ -143,6 +143,27 @@ pub enum AvGroup {
     Legible,
 }
 
+/// Where a **sidecar** subtitle lives (task #90.1) — a *reopenable* locator, deliberately
+/// not a `bool`.
+///
+/// A sidecar is not a stream in the video's container, so it has no stream index, and it is
+/// not a library item either (the archive/scan predicates index images and video containers
+/// only), so it has no item index. What it has is a place we can go back to and read again
+/// — and that is all this needs to be.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SidecarOrigin {
+    /// A sibling file on disk, by absolute path.
+    Path(std::path::PathBuf),
+    /// An entry in the same archive as the video, by its **exact entry name**.
+    ///
+    /// By name, not index: a `.srt` is not indexed as a library item, so no item index for
+    /// it exists — and a name also survives a re-scan, where an index would not.
+    ArchiveEntry {
+        archive: std::path::PathBuf,
+        entry: String,
+    },
+}
+
 /// How the **owning backend** re-finds a track at selection time. Opaque to the UI and
 /// the formatter — those see only [`TrackId`] — and held on the catalog in a side map
 /// (see [`MediaTrackCatalog::locator`]) rather than on [`MediaTrack`], so no display or
@@ -161,6 +182,8 @@ pub enum TrackLocator {
         group: AvGroup,
         property_list: Vec<u8>,
     },
+    /// A subtitle file beside the video, rather than a stream inside it (task #90.1).
+    Sidecar(SidecarOrigin),
 }
 
 /// One audio or subtitle track.

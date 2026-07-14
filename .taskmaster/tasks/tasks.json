@@ -1147,8 +1147,8 @@
           {
             "id": 1,
             "title": "Subtitle stream + sidecar discovery",
-            "description": "Enumerate embedded text subtitle tracks (mov_text/tx3g in MP4, SRT/ASS/VTT in MKV) via the FFmpeg demuxer, and detect a same-stem .srt/.vtt sidecar next to the video (read-only, never written — honors the no-trace guarantee). Expose available tracks + language tags. Filter to the supported text codecs; ignore ASS-styled/bitmap tracks (or degrade ASS to plain text). Track selection UI + keybinding is NOT built here — it moved to task #99 (playback-bar CC toggle on J + track-picker popover); this subtask owns DISCOVERY only and exposes the track list that #98 (Details listing) and #99 (picker) both consume.",
-            "status": "pending"
+            "description": "PURE CORE DONE (pb-app-core/src/sidecar.rs, 17 tests): SidecarOrigin (pb_decode::tracks, a reopenable Path | ArchiveEntry{archive,entry} — by NAME not index, since a .srt is not a library item and has no item index), TrackLocator::Sidecar, the naming rules (movie.srt / movie.en.srt / movie.eng.forced.srt / movie.en.sdh.vtt / written-out names / regional tags / und-consumed), and encoding decode (UTF-8 +/- BOM, UTF-16 LE/BE by BOM, lossy fallback). Design: discovery is PURE over a LIST OF SIBLING NAMES, so one implementation serves FsSource (read_dir) and ZipSource (entry list); it ENUMERATES and never chooses, so a case-collision is just two tracks; matching is case-insensitive BY RULE (not host behaviour) so a ZIP finds the same sidecars on every host. REMAINING (the I/O half): FsSource needs read_dir-the-parent wiring; ARCHIVES ARE BLOCKED ON A SEAM — is_supported_archive_entry indexes images+video only, so a .srt in a ZIP is never indexed, and PhotoSource has no way to read a non-indexed entry (bytes(i) is by item index). ZipSource CAN serve it (its pool holds live ZipArchive handles with the full central directory) but needs a trait addition, e.g. sibling_names()/sibling_bytes(name). Then merge the matches into the catalog subtitles TrackSet.",
+            "status": "in-progress"
           },
           {
             "id": 2,
