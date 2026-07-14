@@ -4023,12 +4023,19 @@ mod tests {
         h.open_path(dir.to_str().unwrap());
         let _ = drain(&mut h);
         let deadline = Instant::now() + std::time::Duration::from_secs(10);
-        while h.core.playlist.current().is_none() && Instant::now() < deadline {
+        // Wait for the photo to bootstrap AND its metadata to load. Decodes moved
+        // off the event loop (#18.5), so `current` (the displayed photo's meta) now
+        // populates asynchronously via a decode-outcome drain in `tick` — the same
+        // precondition the real app has before "Copy Image Details" has dimensions.
+        while (h.core.playlist.current().is_none() || h.core.current.is_none())
+            && Instant::now() < deadline
+        {
             h.tick();
             let _ = drain(&mut h);
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert_eq!(h.core.playlist.current(), Some(0), "fixture bootstraps");
+        assert!(h.core.current.is_some(), "photo metadata loaded");
         (h, file)
     }
 
