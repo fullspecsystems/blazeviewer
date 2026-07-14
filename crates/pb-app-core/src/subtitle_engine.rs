@@ -98,6 +98,25 @@ impl SubtitleEngine {
         }
     }
 
+    /// Test-only: put the engine in a "showing" state directly, so the *wiring's*
+    /// clear-on-exit rules can be tested without decoding a video. The real path only
+    /// gets here through `update()`.
+    #[cfg(test)]
+    pub fn force_showing_for_test(&mut self) {
+        self.bitmap = Some(SubtitleBitmap {
+            rgba: vec![255; 4],
+            w: 1,
+            h: 1,
+        });
+        self.rect = Some(Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+        });
+        self.gen = 1;
+    }
+
     /// The overlay to draw, or `None`. Physical pixels.
     pub fn bitmap(&self) -> Option<&SubtitleBitmap> {
         self.bitmap.as_ref()
@@ -129,8 +148,9 @@ impl SubtitleEngine {
         self.hide();
     }
 
-    /// Stop showing, without forgetting the track.
-    fn hide(&mut self) {
+    /// Stop showing, without forgetting the track. Idempotent — calling it every tick
+    /// while nothing is showing costs one `Option` check.
+    pub fn hide(&mut self) {
         if self.bitmap.is_some() {
             self.bitmap = None;
             self.rect = None;

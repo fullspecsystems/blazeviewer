@@ -252,7 +252,19 @@ pub fn place(
     let (bw, bh) = block;
 
     // Positive offset = up into the picture, so it subtracts.
-    let mut bottom = video.bottom() - style.vertical_offset_pct * vh;
+    let off = style.vertical_offset_pct * vh;
+    let mut bottom = video.bottom() - off;
+
+    // Zoomed (or Crop-to-Fill), the video's bottom edge is off-screen — so "6% up from the
+    // bottom of the picture" would pin the block against the window edge. Hold the same gap
+    // from the screen edge instead: the offset is a *legibility margin*, and it should mean
+    // the same thing whether the nearer edge is the video's or the window's.
+    //
+    // Only for a positive offset: a negative one deliberately parks the block BELOW the
+    // video in the letterbox, and must not be pushed back up by its own value.
+    if off > 0.0 {
+        bottom = bottom.min(vh - off);
+    }
 
     // Lift above the controls while they're on screen.
     if controls_h > 0.0 {
@@ -745,5 +757,42 @@ mod tests {
         let r = place(vp, video, (2000.0, 900.0), &s, 0.0);
         assert_eq!(r.x, 0.0, "wider than the viewport pins to the left");
         assert_eq!(r.y, 0.0, "taller than the viewport pins to the top");
+    }
+}
+
+#[cfg(test)]
+mod zoom_placement_tests {
+    use super::*;
+
+    /// Zooming in pushes the video's bottom edge past the window. The block anchors to
+    /// that edge — so without a clamp it would resolve off-screen and get cut. It must
+    /// stay fully visible: subtitles are for reading.
+    #[test]
+    fn a_zoomed_video_keeps_its_subtitles_on_screen() {
+        let viewport = (1000.0, 500.0);
+        // Zoomed 2x: the video overflows the viewport top and bottom.
+        let video = Rect {
+            x: -500.0,
+            y: -250.0,
+            w: 2000.0,
+            h: 1000.0,
+        };
+        assert!(
+            video.bottom() > viewport.1,
+            "the fixture must actually overflow"
+        );
+
+        let r = place(
+            viewport,
+            video,
+            (600.0, 120.0),
+            &SubtitleStyle::default(),
+            0.0,
+        );
+        assert!(
+            r.bottom() <= viewport.1,
+            "the block ran past the window bottom: {r:?}"
+        );
+        assert!(r.y >= 0.0, "and it must not be pushed off the top: {r:?}");
     }
 }

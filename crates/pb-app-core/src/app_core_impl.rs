@@ -265,6 +265,10 @@ impl AppCore {
         core.slideshow.interval = Duration::from_secs_f64(settings.slideshow_interval_secs);
         core.view.mode = scale_mode_of(settings.scale_mode);
         core.info_line = settings.show_image_info; // the info readout's launch default (task #54)
+                                                   // The engine was built from the *default* settings above (this constructor loads the
+                                                   // real ones only now), so its mode has to be re-derived — otherwise `subtitles = true`
+                                                   // on disk launches with captions off, and the preference looks like it never saved.
+        core.subtitles = crate::subtitle_engine::SubtitleEngine::from_settings(settings.subtitles);
         core.keymap = Keymap::load();
         core.settings = settings;
         core.hud = hud::Hud::load();
@@ -7857,17 +7861,21 @@ impl AppCore {
     pub fn tick_subtitles(&mut self) {
         self.subtitles.poll(self.details_gen);
 
+        // Every "nothing should be on screen" case leaves through HERE, and this exit
+        // always clears. Off used to get its own early `return` — which skipped the clear,
+        // so pressing `C` left the last cue frozen on screen forever. One exit, one rule:
+        // an overlay can never outlive the state that produced it.
         let (displayed, active) = (self.displayed_item, self.video_session_active());
-        let Some(item) = displayed.filter(|_| active) else {
-            self.subtitles
-                .trace(|| format!("idle: displayed_item={displayed:?} session_active={active}"));
+        let on = self.subtitles.mode != crate::subtitle::SubtitleMode::Off;
+        let Some(item) = displayed.filter(|_| active && on) else {
+            self.subtitles.trace(|| {
+                format!("idle: displayed_item={displayed:?} session_active={active} on={on}")
+            });
             self.subtitles.clear_item();
             return;
         };
-        // Off costs one branch: no discovery thread, no font system, no work at all.
-        if self.subtitles.mode == crate::subtitle::SubtitleMode::Off {
-            return;
-        }
+        // Off still costs nothing beyond the branch above: no discovery thread, no font
+        // system, no cue data held.
         let source = Arc::clone(&self.source);
         self.subtitles
             .ensure_loaded(&source, item, self.details_gen);
@@ -7875,6 +7883,10 @@ impl AppCore {
         let Some((x, y, w, h, _rot)) = self.video_placement() else {
             self.subtitles
                 .trace(|| "no video_placement — the still geometry isn't up yet".into());
+            // Hide, don't just leave: with no geometry there is nowhere correct to draw,
+            // and a kept overlay would hang at its last position — the same defect the
+            // exit above had.
+            self.subtitles.hide();
             return;
         };
         let t = Duration::from_secs_f64(self.video_session_elapsed_secs().max(0.0));
@@ -8743,6 +8755,93 @@ mod tests {
 
     /// A minimal `AppCore` for driving `handle` in tests — the public [`AppCore::headless`]
     /// constructor at a 1×1 viewport (one construction literal, shared with the NS1 FFI bridge).
+    /// **Regression.** `new_host` builds the core from *default* settings and only then
+    /// loads the real ones off disk, hand-copying the derived state across. The subtitle
+    /// engine was left out, so `subtitles = true` on disk launched with captions off —
+    /// which reads exactly like the preference never saved.
+    ///
+    /// A headless core can't call `new_host` (it would read the user's real config), so
+    /// this pins the derivation itself: whatever the settings say, the engine must agree.
+    #[test]
+    fn the_engine_mode_is_derived_from_the_loaded_settings_not_the_defaults() {
+        use crate::subtitle::SubtitleMode;
+        let mut core = test_core();
+        assert_eq!(core.subtitles.mode, SubtitleMode::Off);
+
+        // What `new_host` does after `Settings::load()` returns captions-on.
+        let loaded = settings::Settings {
+            subtitles: true,
+            ..Default::default()
+        };
+        core.subtitles = crate::subtitle_engine::SubtitleEngine::from_settings(loaded.subtitles);
+        core.settings = loaded;
+
+        assert_eq!(
+            core.subtitles.mode,
+            SubtitleMode::Automatic,
+            "the engine must follow the settings that were actually loaded"
+        );
+    }
+
+    /// A core with a live `VideoSession` on item 0 — the state `tick_subtitles` only
+    /// does real work in, and the state the switched-off bug needed to appear.
+    fn core_with_a_playing_video() -> AppCore {
+        let mut core = test_core();
+        let (session, _io) =
+            crate::video_session::VideoSession::new(pb_decode::VideoSessionId(1), 1 << 20);
+        core.video = Some(crate::video_native::ActiveVideoBackend::Session(
+            crate::video_session::ActiveVideo::new(session, 0),
+        ));
+        core.displayed_item = Some(0);
+        // Leak the producer end: dropping it would fail the session, and this core never
+        // decodes anything — it exists to make `video_session_active()` true.
+        std::mem::forget(_io);
+        assert!(
+            core.video_session_active(),
+            "the fixture must actually be active"
+        );
+        core
+    }
+
+    /// **Regression.** Pressing `C` with a cue on screen left it frozen there forever.
+    ///
+    /// `update()` hides correctly when the mode is Off — and a unit test proved it. But
+    /// the tick had its own `if Off { return }` fast path that never called `update()`, so
+    /// the bitmap and its generation just sat there and the shell kept drawing the last
+    /// cue. The test passed; the feature was broken. This one drives `tick_subtitles`,
+    /// which is where the bug actually lived.
+    #[test]
+    fn switching_subtitles_off_clears_a_cue_that_is_on_screen() {
+        use crate::subtitle::SubtitleMode;
+        let mut core = core_with_a_playing_video();
+        core.subtitles.mode = SubtitleMode::Automatic;
+        core.subtitles.force_showing_for_test();
+        let before = core.subtitles.gen();
+
+        core.subtitles.mode = SubtitleMode::Off;
+        core.tick_subtitles();
+
+        assert!(
+            core.subtitles.bitmap().is_none(),
+            "the last cue must not survive being switched off"
+        );
+        assert!(
+            core.subtitles.gen() > before,
+            "the shell only stops drawing when the generation moves"
+        );
+    }
+
+    /// The same rule for the other way out: a video that stops must not leave its last cue
+    /// hanging over whatever is on screen next.
+    #[test]
+    fn a_stale_overlay_is_cleared_when_nothing_is_playing() {
+        let mut core = test_core(); // no session
+        core.subtitles.mode = crate::subtitle::SubtitleMode::Automatic;
+        core.subtitles.force_showing_for_test();
+        core.tick_subtitles();
+        assert!(core.subtitles.bitmap().is_none());
+    }
+
     /// `C` / View ▸ Subtitles flips the engine's mode, records the preference, and says
     /// which way it went — the whole switch, replacing the old dev env flag.
     #[test]

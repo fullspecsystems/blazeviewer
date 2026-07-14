@@ -170,6 +170,25 @@ struct ContentView: View {
             // area, which left a titlebar-height strip visible — ignoring it lets the
             // canvas truly fill the screen. A no-op in windowed mode (the content rect
             // excludes the titlebar there, so there's no inset to ignore).
+            //
+            // Subtitles (task #90) ride the canvas itself, not the chrome chain: the core
+            // places them in the CANVAS's space (full window, physical px ÷ scale), and this
+            // is the only place that shares it. Attached here — inside the canvas's own
+            // safe-area escape, before any chrome overlay — the two agree exactly.
+            //
+            // Measured, because it isn't obvious: attached further down the chain the
+            // overlay starts at y=32 and is 1734pt tall against the canvas's 1786, so every
+            // subtitle rides ~52pt low. That's invisible until a zoomed (or Crop-to-Fill)
+            // video clamps the block flush to the bottom — and then the last line is cut off
+            // by exactly the inset. Putting it here fixes the cause instead of the symptom,
+            // and leaves the panels / scrim / info line untouched.
+            .overlay(alignment: .topLeading) {
+                if let img = model.subtitleImage {
+                    Image(nsImage: img)
+                        .offset(x: model.subtitleRect.minX, y: model.subtitleRect.minY)
+                        .allowsHitTesting(false)
+                }
+            }
             .ignoresSafeArea()
             .frame(minWidth: 520, minHeight: 360)
             // Track the OS window-corner radius for the shared edge gap (macOS 26+). Full-bleed
@@ -295,17 +314,6 @@ struct ContentView: View {
                         // Explicit (was the implicit default) so it reads the same as the
                         // corner panels; the fade is driven by `withAnimation` in the model.
                         .transition(.opacity)
-                }
-            }
-            // Subtitles (task #90). The core did all of it — shaping, outline, shadow,
-            // background, placement — so this is a positioned image and nothing more. It
-            // sits under the play hint and toast: transient feedback should win over a
-            // subtitle, not the other way round.
-            .overlay(alignment: .topLeading) {
-                if let img = model.subtitleImage {
-                    Image(nsImage: img)
-                        .offset(x: model.subtitleRect.minX, y: model.subtitleRect.minY)
-                        .allowsHitTesting(false)
                 }
             }
             // The play hint rides the same bottom-center spot as the toast, just above the info
