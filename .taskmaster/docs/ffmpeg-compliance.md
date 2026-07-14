@@ -11,11 +11,18 @@ remain before a public/commercial ship.
 |---|---|---|---|
 | **macOS** | yes (task #84) | **shared dylibs** in `PhotoBlaze.app/Contents/Frameworks` | `scripts/build-ffmpeg-macos.sh` (pinned source, LGPL config) |
 | **Linux** | yes | **shared `.so`** in the AppImage's `usr/lib` | `scripts/release-linux.sh` (system/distro FFmpeg, bundled by linuxdeploy) |
-| **Windows** | **no** | — | Media Foundation handles video; FFmpeg is never linked |
+| **Windows** | **yes** — demux/metadata only (task #100, 2026-07-14) | ⚠ **static** (`*-windows-static-md`) | pinned vcpkg tree, patched demux-only by `scripts/setup-libheif.ps1` |
 
-The compliance argument below is the same on macOS and Linux: **FFmpeg is a shared library
-the user can replace.** Windows carries no FFmpeg, so its separate libheif/libde265 static-link
-item (task #77 original) is unaffected by this.
+The compliance argument below holds on macOS and Linux: **FFmpeg is a shared library the user
+can replace.**
+
+⚠ **Windows no longer sits outside this manifest.** Until 2026-07-14 this table read "Windows:
+no — FFmpeg is never linked", and the whole document rested on that. Task #100 changed it:
+Windows links FFmpeg statically, because Media Foundation cannot enumerate subtitle tracks at
+all. MF still does 100% of decode, so FFmpeg's *role* there is narrow — but LGPL attaches to
+**distribution and linkage**, not to how much of the library gets called. A static link is a
+static link. Windows therefore now carries the **same** unmet §6 relink obligation as its
+libheif/libde265 static link (task #77), and the two must be solved together.
 
 ## License mode — LGPL-2.1-or-later, decode-only
 
@@ -98,8 +105,14 @@ suitable shared library mechanism for linking with the Library."**
   (`COPYING.LGPLv2.1`, `LICENSE.md`) live in that source tree.
 
 Contrast: the Windows **static** link of libheif/libde265 (task #77 original) does **not** get
-this for free — a static link needs object files or another relink path. **FFmpeg here avoids
-that problem entirely by being dynamically linked.**
+this for free — a static link needs object files or another relink path. **On macOS and Linux
+FFmpeg avoids that problem entirely by being dynamically linked.**
+
+**Windows does not.** Since task #100 it links FFmpeg statically from the vcpkg tree
+(`*-windows-static-md`), so it inherits exactly the libheif/libde265 problem rather than
+escaping it. The remedy is the same for all three libraries and should be chosen once — DLL
+linkage (§6(b)) is the conventional answer and the one CLAUDE.md's Licensing section already
+names for libheif. See task #77 (and #100.6, which defers to it).
 
 ## Patent note (separate from copyright license)
 

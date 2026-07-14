@@ -91,13 +91,17 @@ jobs:
       # build and would otherwise rot invisibly. The vcpkg tree persists on the runner
       # machine; only a brand-new machine pays the ~15 min vcpkg C build (dav1d is
       # seconds on top — binary cache; FFmpeg is a few minutes, demuxers-only).
-      # avcodec.lib is in the guard, not just heif/dav1d: a machine provisioned before
-      # #100 HAS heif+dav1d, so a heif-only check would skip setup and fail the build.
+      # The guard probes the **DLL tree's bin dir** (task #77): the ship build links the
+      # dynamic triplet for LGPL relink compliance, and an import lib and a static lib share
+      # a name — so checking lib\heif.lib would accept a pre-#77 static tree, skip setup, and
+      # then fail the build. bin\*.dll exists only in the dynamic tree. Same reason avcodec is
+      # checked and not just heif: a machine provisioned before #100 has heif+dav1d already.
       - name: Ensure libheif + dav1d + ffmpeg (vcpkg, first run on a new machine only)
         shell: pwsh
         run: |
-          $lib = "$env:VCPKG_ROOT\installed\x64-windows-static-md\lib"
-          if (-not ((Test-Path "$lib\heif.lib") -and (Test-Path "$lib\dav1d.lib") -and (Test-Path "$lib\avcodec.lib"))) {
+          $bin = "$env:VCPKG_ROOT\installed\x64-windows\bin"
+          $haveFF = Get-ChildItem "$bin\avcodec-*.dll" -ErrorAction SilentlyContinue
+          if (-not ((Test-Path "$bin\heif.dll") -and (Test-Path "$bin\dav1d.dll") -and $haveFF)) {
             pwsh scripts/setup-libheif.ps1
           } else {
             Write-Host "libheif + dav1d + ffmpeg already present at $env:VCPKG_ROOT"
@@ -144,16 +148,17 @@ jobs:
       # The shipped native features must not rot on the ARM64 channel either
       # (task #76 / #100): ensure the arm64 vcpkg libs, then run the feature-on tests.
       # First run on a fresh VM pays the vcpkg C build; cached after that.
-      # ⚠ FFmpeg on arm64-windows-static-md is UNVERIFIED — no ARM64 box was available
-      # when #100 landed, and vcpkg's ffmpeg port has real arm64 history (assembly,
-      # cpu-detect). This lane is where that gets proven; if the port fails here, that
-      # is the finding, not a flake.
+      # ⚠ FFmpeg on arm64-windows is UNVERIFIED — no ARM64 box was available when #100
+      # landed, and vcpkg's ffmpeg port has real arm64 history (assembly, cpu-detect).
+      # This lane is where that gets proven; if the port fails here, that is the finding,
+      # not a flake. The DLL triplet (task #77) is likewise unproven on arm64.
       - name: Ensure libheif + dav1d + ffmpeg (vcpkg arm64, first run only)
         shell: pwsh
         run: |
-          $lib = "$env:VCPKG_ROOT\installed\arm64-windows-static-md\lib"
-          if (-not ((Test-Path "$lib\heif.lib") -and (Test-Path "$lib\dav1d.lib") -and (Test-Path "$lib\avcodec.lib"))) {
-            pwsh scripts/setup-libheif.ps1 -Triplet arm64-windows-static-md
+          $bin = "$env:VCPKG_ROOT\installed\arm64-windows\bin"
+          $haveFF = Get-ChildItem "$bin\avcodec-*.dll" -ErrorAction SilentlyContinue
+          if (-not ((Test-Path "$bin\heif.dll") -and (Test-Path "$bin\dav1d.dll") -and $haveFF)) {
+            pwsh scripts/setup-libheif.ps1 -Triplet arm64-windows
           } else {
             Write-Host "libheif + dav1d + ffmpeg already present at $env:VCPKG_ROOT"
           }

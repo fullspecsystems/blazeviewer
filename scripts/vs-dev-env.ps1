@@ -63,18 +63,42 @@ Install the missing component via the Visual Studio Installer, then re-run.
 "@
 }
 
+# ⚠ Enter-VsDevShell OVERWRITES VCPKG_ROOT with the vcpkg bundled inside Visual Studio — a tree
+# that has none of our pinned ports. That silently redirects both our own build.rs and
+# ffmpeg-sys-next's `vcpkg` crate lookup at the wrong tree, so capture the intended root first
+# and put it back afterwards. (Setting VCPKG_ROOT before calling this script does NOT survive.)
+# When it's unset, mirror build.rs's own `~/vcpkg` fallback rather than inheriting VS's value:
+# ffmpeg-sys-next has no such fallback, so leaving VS's root in place turns a clear "set
+# VCPKG_ROOT" error into a confusing "FFmpeg not found in a perfectly real vcpkg tree".
+$vcpkgRoot = $env:VCPKG_ROOT
+if (-not $vcpkgRoot) {
+    $default = Join-Path $HOME 'vcpkg'
+    if (Test-Path (Join-Path $default 'installed')) { $vcpkgRoot = $default }
+}
+
+# Cosmetic: VsDevCmd.bat shells out to a bare `vswhere.exe`, so without the Installer dir on PATH
+# it prints "'vswhere.exe' is not recognized" into every build log. Harmless — nothing we need
+# comes from that call — but it reads like a failure, so keep it out of release/CI output.
+$installerDir = Split-Path $vswhere -Parent
+if ($env:PATH -notlike "*$installerDir*") { $env:PATH = "$installerDir;$env:PATH" }
+
 Import-Module "$vsPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
 # -SkipAutomaticLocation: Enter-VsDevShell otherwise cd's to the VS "source path", which would
 # yank the caller out of the repo mid-build.
 Enter-VsDevShell -VsInstallPath $vsPath -DevCmdArguments "-arch=$Arch -host_arch=$Arch" -SkipAutomaticLocation | Out-Null
 $env:LIBCLANG_PATH = "$vsPath\VC\Tools\Llvm\$llvmDir\bin"
 
+if ($vcpkgRoot) { $env:VCPKG_ROOT = $vcpkgRoot }
+elseif (Test-Path Env:\VCPKG_ROOT) { Remove-Item Env:\VCPKG_ROOT }
+
 Write-Host "==> VS Developer environment ($Arch): $vsPath"
+Write-Host "==> VCPKG_ROOT: $(if ($env:VCPKG_ROOT) { $env:VCPKG_ROOT } else { '(unset — FFmpeg will not be found)' })"
 
 # GitHub Actions runs each step in a fresh shell, so hand the env to the later steps.
 if ($env:GITHUB_ENV) {
     "INCLUDE=$env:INCLUDE"             | Add-Content $env:GITHUB_ENV
     "LIB=$env:LIB"                     | Add-Content $env:GITHUB_ENV
     "LIBCLANG_PATH=$env:LIBCLANG_PATH" | Add-Content $env:GITHUB_ENV
-    Write-Host "==> exported INCLUDE / LIB / LIBCLANG_PATH to GITHUB_ENV"
+    if ($env:VCPKG_ROOT) { "VCPKG_ROOT=$env:VCPKG_ROOT" | Add-Content $env:GITHUB_ENV }
+    Write-Host "==> exported INCLUDE / LIB / LIBCLANG_PATH / VCPKG_ROOT to GITHUB_ENV"
 }

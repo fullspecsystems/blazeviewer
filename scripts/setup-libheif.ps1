@@ -34,7 +34,12 @@
 [CmdletBinding()]
 param(
     [string]$VcpkgRoot = $(if ($env:VCPKG_ROOT) { $env:VCPKG_ROOT } else { "$env:USERPROFILE\vcpkg" }),
-    [string]$Triplet = "x64-windows-static-md",
+    # DLLs, not static libs — an LGPL requirement, not a preference (task #77): libheif +
+    # libde265 (LGPL-3.0 §4) and FFmpeg (LGPL-2.1 §6) oblige us to let a user relink the app
+    # against a modified library, which a static link into a proprietary binary does not allow.
+    # vcpkg's plain `x64-windows` / `arm64-windows` triplets are the DLL ones; the historical
+    # `-static-md` default is the non-compliant configuration and must not ship.
+    [string]$Triplet = "x64-windows",
     # The recorded known-good vcpkg commit (2026-06-26 tip: libheif 1.23.0, libde265 1.1.1,
     # dav1d 1.5.3). Override to move the pin deliberately — then update this default so every
     # box (x64, ARM64, CI) builds the same port versions.
@@ -112,6 +117,14 @@ if ($ffContent -match 'PhotoBlaze task #100') {
     # which is the only source of a NAMED channel layout. Without them a 5.1 track reads
     # "6 channels" -- i.e. straight back to MF's limitation. They are keyed to the codecs
     # pb_decode::tracks::audio_codec_display already knows how to name.
+    #
+    # SUBTITLES ARE ASYMMETRIC ON PURPOSE (task #100.8): the subtitle DECODERS are enabled but
+    # the subtitle DEMUXERS (srt/webvtt/ass) are not. Cues inside a container therefore work
+    # (mov+movtext, matroska+subrip/ass/webvtt), while a STANDALONE .srt/.vtt/.ass sidecar
+    # cannot be opened at all -- a decoder turns packets into cues, it cannot open a file.
+    # That is a real constraint on #90's sidecar tier, and Windows-only (Linux/macOS link a
+    # full FFmpeg). If #90 chooses to open sidecars via FFmpeg rather than parse them in Rust,
+    # add `--enable-demuxer=srt,webvtt,ass` here and re-measure. See #100.8.
     $ffTrim = @'
 # --- PhotoBlaze task #100: demux/metadata-only FFmpeg -----------------------
 string(APPEND OPTIONS " --disable-everything --disable-network --disable-encoders"

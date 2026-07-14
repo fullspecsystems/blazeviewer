@@ -48,6 +48,20 @@ mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib" \
          "$APPDIR/usr/share/icons/hicolor/256x256/apps"
 cp "$BIN" "$APPDIR/usr/bin/photoblaze"
 
+# Bundled-library license texts + the notices summary (task #77). The AppImage bundles libheif,
+# its libde265/libaom plugins, and FFmpeg as shared libraries, which satisfies the LGPL *relink*
+# condition by construction — but "You must supply a copy of this License" (LGPL-2.1 §6) and
+# "accompany the Combined Work with a copy of the GNU GPL and this License" (LGPL-3.0 §4(b)) are
+# separate clauses that dynamic linking does not answer. They live inside the AppImage, next to
+# the libraries they cover, and the About dialog names the path.
+mkdir -p "$APPDIR/usr/share/licenses"
+cp licenses/* "$APPDIR/usr/share/licenses/"
+cp THIRD-PARTY-NOTICES.md "$APPDIR/usr/share/licenses/"
+for lic in libheif-COPYING.txt libde265-COPYING.txt ffmpeg-COPYING.LGPLv2.1.txt; do
+    [ -f "$APPDIR/usr/share/licenses/$lic" ] ||
+        { echo "error: licenses/$lic missing from the AppDir — LGPL requires the license text to ship with the binary." >&2; exit 1; }
+done
+
 # Icon (AppImage wants a top-level <name>.png plus the hicolor path).
 cp icons/photoblaze-icon-v3-windows.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/photoblaze.png"
 cp icons/photoblaze-icon-v3-windows.png "$APPDIR/photoblaze.png"

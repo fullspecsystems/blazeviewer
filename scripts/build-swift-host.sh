@@ -134,6 +134,20 @@ chmod +x "$APP_DIR/Contents/MacOS/PhotoBlaze"
 # scripts/build-macos-icons.sh when the icon changes.
 cp packaging/macos/PhotoBlaze.icns packaging/macos/Assets.car "$APP_DIR/Contents/Resources/"
 
+# Bundled-library license texts + the notices summary (task #77). Required, not courtesy:
+# LGPL-2.1 §6 ("You must supply a copy of this License") covers the FFmpeg dylibs in
+# Contents/Frameworks. Dynamic linking satisfies the *relink* condition, but not this one —
+# they are separate clauses, so a compliant linkage does not excuse a missing text.
+# Contents/Resources/licenses is the conventional home, and the About panel names it.
+mkdir -p "$APP_DIR/Contents/Resources/licenses"
+cp licenses/* "$APP_DIR/Contents/Resources/licenses/"
+cp THIRD-PARTY-NOTICES.md "$APP_DIR/Contents/Resources/"
+# FFmpeg is the one macOS actually links (libheif and dav1d are Windows/Linux — macOS uses
+# Image I/O), so that text is the hard requirement here. The rest of the folder rides along:
+# over-including a license is harmless, and one copied folder cannot drift out of step.
+[ -f "$APP_DIR/Contents/Resources/licenses/ffmpeg-COPYING.LGPLv2.1.txt" ] ||
+	{ echo "error: licenses/ffmpeg-COPYING.LGPLv2.1.txt missing from the bundle — LGPL-2.1 §6 requires the license text to ship with the binary." >&2; exit 1; }
+
 # Embed Sparkle.framework (task #65, macOS auto-update). `swift build` LINKS against Sparkle
 # but — a SwiftPM executable has no Xcode "Embed Frameworks" phase — does not copy it into the
 # bundle, so we do it here. The executable's load command is `@rpath/Sparkle.framework/...`

@@ -10,6 +10,7 @@ struct DemuxOpen: Sendable {
     var width: UInt32
     var height: UInt32
     var durationSecs: Double
+    var fps: Double
     var hasAudio: Bool
     var doviProfile: UInt8
 }
@@ -36,6 +37,12 @@ final class DemuxReader: @unchecked Sendable {
     private var formatDesc: CMVideoFormatDescription?
     private var tbNum: Int32 = 0
     private var tbDen: Int32 = 0
+    /// The first packet's PTS (stream units), subtracted from every timestamp so the
+    /// presentation timeline is 0-based — matching the audio feeder's 0-based PCM
+    /// clock, so both share one synchronizer origin. Set once, constant for the
+    /// session (a seek re-anchors the synchronizer, not this origin). `Int64.min`
+    /// until the first packet.
+    private var origin: Int64 = Int64.min
 
     // Feed context (set on `queue` in startFeeding; read on `queue` in the block).
     private var feedLayer: AVSampleBufferDisplayLayer?
@@ -62,7 +69,7 @@ final class DemuxReader: @unchecked Sendable {
             guard p != 0, self.buildFormatDescription(p) else {
                 DispatchQueue.main.async {
                     then(DemuxOpen(ok: false, width: 0, height: 0, durationSecs: 0,
-                                   hasAudio: false, doviProfile: 0))
+                                   fps: 0, hasAudio: false, doviProfile: 0))
                 }
                 return
             }
@@ -71,6 +78,7 @@ final class DemuxReader: @unchecked Sendable {
                 width: demux_width(p),
                 height: demux_height(p),
                 durationSecs: demux_duration_secs(p),
+                fps: demux_fps(p),
                 hasAudio: demux_has_audio(p),
                 doviProfile: demux_dovi_profile(p))
             DispatchQueue.main.async { then(out) }
@@ -182,6 +190,9 @@ final class DemuxReader: @unchecked Sendable {
             let pts = demux_packet_pts(ptr)
             let dts = demux_packet_dts(ptr)
             let dur = demux_packet_duration(ptr)
+            if origin == Int64.min {
+                origin = pts != Int64.min ? pts : (dts != Int64.min ? dts : 0)
+            }
             guard let sb = makeSampleBuffer(rv, count: n, fmt: fmt, pts: pts, dts: dts, dur: dur)
             else { continue }
             layer.enqueue(sb)
@@ -224,10 +235,12 @@ final class DemuxReader: @unchecked Sendable {
         return sb
     }
 
-    /// A stream-unit timestamp → `CMTime` (or `.invalid` for the `i64::MIN` sentinel).
+    /// A stream-unit timestamp → `CMTime` in the 0-based (origin-subtracted)
+    /// presentation timeline (or `.invalid` for the `i64::MIN` sentinel).
     private func cmTime(_ units: Int64) -> CMTime {
         guard units != Int64.min, tbDen > 0 else { return .invalid }
-        return CMTime(value: units * Int64(tbNum), timescale: tbDen)
+        let base = origin == Int64.min ? 0 : origin
+        return CMTime(value: (units - base) * Int64(tbNum), timescale: tbDen)
     }
 
     private func cmDuration(_ units: Int64) -> CMTime {

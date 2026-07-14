@@ -7137,24 +7137,30 @@ impl AppCore {
         }
     }
 
-    /// video-overhaul Phase 3 routing: `true` = try the macOS **sample-buffer
-    /// presenter** (FFmpeg demux → `AVSampleBufferDisplayLayer`) for this item.
-    /// Opt-in behind `PB_SAMPLE_BUFFER` until the 0C gate proves DoVi correctness
-    /// on-device; loose-file videos only for now (archive-bytes support is a later
-    /// increment). The presenter self-probes the codec and reports a classified
-    /// failure — routing the clip to the Session route (level 2) — for anything it
-    /// can't decode from a sample buffer. Reached only for non-native containers
-    /// (the `macos_native_route` check runs first).
+    /// video-overhaul Phase 3 routing: `true` = use the macOS **sample-buffer
+    /// presenter** (FFmpeg demux → `AVSampleBufferDisplayLayer`) for this item —
+    /// system decode with correct Dolby Vision for the containers `AVPlayer` can't
+    /// demux. **Default on** now that the 0C gate + audio/seek are owner-verified;
+    /// `PB_NO_SAMPLE_BUFFER=1` (or `PB_SAMPLE_BUFFER=0`) forces the Session route.
+    /// Restricted to loose-file **MKV/WebM** (the verified containers) — archive
+    /// bytes and the rarer non-native containers stay on the Session route, and the
+    /// presenter still self-probes the codec, reporting a classified failure that
+    /// falls back to Session (level 2) for anything it can't sample-decode. Reached
+    /// only for non-native containers (the `macos_native_route` check runs first).
     #[cfg(all(target_os = "macos", feature = "ffvideo"))]
     fn macos_sample_buffer_route(&self, item: usize) -> bool {
-        if std::env::var_os("PB_SAMPLE_BUFFER").is_none() {
+        let disabled = std::env::var_os("PB_NO_SAMPLE_BUFFER").is_some()
+            || std::env::var("PB_SAMPLE_BUFFER").is_ok_and(|v| v == "0");
+        if disabled || self.source.path(item).is_none() {
             return false;
         }
-        self.source.path(item).is_some()
-            && matches!(
-                crate::video::item_kind(self.source.as_ref(), item),
-                crate::video::LibraryItemKind::Video(_)
-            )
+        match crate::video::item_kind(self.source.as_ref(), item) {
+            crate::video::LibraryItemKind::Video(c) => matches!(
+                c,
+                crate::video::VideoContainer::Mkv | crate::video::VideoContainer::Webm
+            ),
+            crate::video::LibraryItemKind::Image => false,
+        }
     }
 
     /// Start the macOS sample-buffer presenter for `item` (Phase 3). Mirrors
@@ -10774,12 +10780,17 @@ mod tests {
         assert!(core.video.is_none(), "no producer on this platform yet");
     }
 
-    /// macOS §8a level-1 routing (task #84): a known-unsupported container (MKV)
-    /// goes straight to the FFmpeg session — no `AVPlayer`, no `PlayVideo`
-    /// effect — and a missing file fails it through the session's own path.
+    /// macOS Phase 3 routing (video-overhaul): a loose-file MKV now goes to the
+    /// **sample-buffer presenter** (a `Native`-proxy backend + a `PlaySampleBuffer`
+    /// effect) — system decode with correct Dolby Vision — not the FFmpeg session
+    /// and not `AVPlayer`. `PB_NO_SAMPLE_BUFFER=1` would force the session; the
+    /// presenter self-probes the codec and falls back on the shell side.
     #[cfg(all(target_os = "macos", feature = "ffvideo"))]
     #[test]
-    fn mkv_routes_to_the_ffmpeg_session_on_macos() {
+    fn mkv_routes_to_the_sample_buffer_presenter_on_macos() {
+        // No test sets PB_NO_SAMPLE_BUFFER (env is process-global — mutating it
+        // would race parallel tests), so the default route is exercised here; the
+        // opt-out is a one-line env check verified by hand.
         let mut core = test_core();
         core.source = Arc::new(pb_source::FsSource::new(vec![std::path::PathBuf::from(
             "/nope/clip.mkv",
@@ -10789,25 +10800,23 @@ mod tests {
         core.toggle_play_pause();
         let v = core.video.as_ref().expect("P starts playback");
         assert!(
-            v.as_session().is_some(),
-            "MKV routes to the FFmpeg session, not AVPlayer"
+            v.as_native().is_some(),
+            "MKV routes to the sample-buffer presenter (a Native-proxy backend)"
+        );
+        assert!(v.as_session().is_none(), "not the FFmpeg session");
+        assert!(
+            core.effects
+                .iter()
+                .any(|e| matches!(e, contract::CoreEffect::PlaySampleBuffer { .. })),
+            "the sample-buffer presenter is commanded"
         );
         assert!(
             !core
                 .effects
                 .iter()
                 .any(|e| matches!(e, contract::CoreEffect::PlayVideo { .. })),
-            "no native player is commanded"
+            "no AVPlayer is commanded"
         );
-        // The missing file fails the producer; the session surfaces it via poll.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while core.video.is_some() && Instant::now() < deadline {
-            core.now = Instant::now();
-            core.poll_video();
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert!(core.video.is_none(), "failure clears the session");
-        assert!(core.toast_native.is_some(), "the failure surfaces");
     }
 
     /// macOS §8a level-2 fallback (task #84): a *recoverable* native failure on

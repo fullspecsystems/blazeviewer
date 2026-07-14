@@ -25,8 +25,18 @@ with any pre-release suffix carried only by the tag.
   photo, or selecting several and pressing Open, hands them to the PhotoBlaze you already have open
   instead of launching a separate copy for each file. A multi-selection opens as one playlist, and
   the existing window comes to the front.
+- **About now credits the open-source libraries PhotoBlaze builds on** — libheif, libde265, dav1d
+  and FFmpeg — with each one's copyright and license. Their full license texts now ship alongside
+  the app (in the `licenses` folder next to it on Windows and Linux, or inside the app bundle on
+  macOS).
 
 ### Changed
+- **MKV/WebM videos play through the system decoder on macOS, with correct Dolby Vision.** Videos in
+  containers macOS can't open on its own now hand the compressed video to the system (VideoToolbox)
+  decoder — the same engine the built-in player uses — so Dolby Vision and HDR render the way the film
+  was mastered, at lower CPU cost, instead of the app converting color itself. Audio and seeking run
+  on one shared clock for tight A/V sync. Anything the system can't decode from that path falls back
+  automatically to the previous player; set `PB_NO_SAMPLE_BUFFER=1` to force the old path.
 - **Keyboard zoom and pan ease in more gently.** Holding the zoom/pan keys now starts slower and
   builds up along a smooth curve instead of ramping linearly, so small taps make fine adjustments
   (handy for nudging a letterboxed film to fill the screen) while a longer hold still moves quickly.
