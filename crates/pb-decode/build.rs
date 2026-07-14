@@ -51,6 +51,38 @@ fn main() {
         build_dav1d_windows();
         println!("cargo:rustc-cfg=av1_dav1d");
     }
+
+    if std::env::var_os("CARGO_FEATURE_FFMPEG").is_some() && target_os == "windows" {
+        link_ffmpeg_windows_syslibs();
+    }
+}
+
+/// Windows: the system libs a **static** vcpkg FFmpeg needs and `ffmpeg-sys-next`
+/// doesn't emit (task #100).
+///
+/// Its build.rs says as much — *"vcpkg doesn't detect the 'system' dependencies"* — and
+/// then emits only `ole32`, `secur32`, `ws2_32`, `bcrypt` and `user32`. That list is
+/// short of what avformat/avcodec 8.1 actually reference, so the link fails with
+/// `LNK2019` on three groups; each entry below is one of them, kept here rather than
+/// patched upstream because this is the *linking* crate's job.
+///
+/// Nothing here changes the shipped feature set — these are OS import libraries, not
+/// new dependencies. The FFmpeg objects that pull them in (its Schannel TLS and its own
+/// MediaFoundation *encoder*) are dead weight for us: we only demux. Trimming them is
+/// task #100's minimal-build subtask; until then they must resolve.
+fn link_ffmpeg_windows_syslibs() {
+    for lib in [
+        // avformat's tls_schannel.o: Cert*/Crypt* (crypt32) and NCrypt* (ncrypt).
+        "crypt32", "ncrypt",
+        // avcodec's mfenc.o / mf_utils.o: IID_IMFTransform, IID_ICodecAPI,
+        // IID_IMFMediaEventGenerator — the GUID definitions live in mfuuid.
+        "mfuuid",
+        // The DirectShow/MF GUID island mfuuid leans on (IID_IMFMediaEventGenerator's
+        // neighbours); harmless when unreferenced.
+        "strmiids",
+    ] {
+        println!("cargo:rustc-link-lib={lib}");
+    }
 }
 
 /// The vcpkg tree the Windows native backends link from: `(root, triplet)`.
