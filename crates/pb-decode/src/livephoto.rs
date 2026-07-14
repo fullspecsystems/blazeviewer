@@ -50,7 +50,11 @@ use std::time::Duration;
 
 use crate::animation::{MotionCollector, MAX_DECODED_BYTES};
 use crate::common::{bgra_to_rgba_tight, downscale_to_fit, rotate_rgba, transform_to_quadrant};
-use crate::video::VideoStreamInfo;
+use crate::tracks::{
+    self as tracks_mod, AvGroup, MediaBackend, MediaTrack, MediaTrackCatalog, TrackCapability,
+    TrackFlags, TrackId, TrackKind, TrackLocator, TrackSet,
+};
+use crate::video::{VideoDetailsProbe, VideoStreamInfo};
 use crate::{AnimFrame, Animation, ColorTransform, DecodeError, FitBox, MotionChunk, MotionHeader};
 
 /// Safety cap on decoded frames — a real Live Photo is ~3 s, so this is only a
@@ -122,7 +126,20 @@ extern "C" {
 extern "C" {
     static AVMediaTypeVideo: Id;
     static AVMediaTypeAudio: Id;
+    // Media-selection groups + option characteristics (task #98). Always compared as
+    // framework constants, never as hardcoded strings: their values are an inconsistent
+    // mix of `public.*` and literal `AVMediaCharacteristic*` (phase-0 spike).
+    static AVMediaCharacteristicAudible: Id;
+    static AVMediaCharacteristicLegible: Id;
+    static AVMediaCharacteristicIsAuxiliaryContent: Id;
+    static AVMediaCharacteristicContainsOnlyForcedSubtitles: Id;
+    static AVMediaCharacteristicTranscribesSpokenDialogForAccessibility: Id;
+    static AVMediaCharacteristicDescribesMusicAndSoundForAccessibility: Id;
+    static AVMediaCharacteristicDescribesVideoForAccessibility: Id;
 }
+
+/// `NSPropertyListBinaryFormat_v1_0`.
+const NS_PROPERTY_LIST_BINARY_V1_0: usize = 200;
 
 #[link(name = "CoreMedia", kind = "framework")]
 extern "C" {
@@ -258,6 +275,34 @@ unsafe fn send_u32(obj: Id, s: Sel, a: u32) -> Id {
         std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
     f(obj, s, a)
 }
+/// `objectAtIndex:` — an `NSUInteger` argument.
+#[inline]
+unsafe fn send_usize(obj: Id, s: Sel, a: usize) -> Id {
+    let f: unsafe extern "C" fn(Id, Sel, usize) -> Id =
+        std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+    f(obj, s, a)
+}
+/// `count` / `length` — an `NSUInteger` return.
+#[inline]
+unsafe fn send_ret_usize(obj: Id, s: Sel) -> usize {
+    let f: unsafe extern "C" fn(Id, Sel) -> usize =
+        std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+    f(obj, s)
+}
+/// `intValue` — an `int` return (the FourCC out of an `NSNumber`).
+#[inline]
+unsafe fn send_ret_i32(obj: Id, s: Sel) -> i32 {
+    let f: unsafe extern "C" fn(Id, Sel) -> i32 =
+        std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+    f(obj, s)
+}
+/// `dataWithPropertyList:format:options:error:` — 4 args, an `NSError**` out-parameter.
+#[inline]
+unsafe fn send_plist(obj: Id, s: Sel, a: Id, fmt: usize, opts: usize, err: *mut Id) -> Id {
+    let f: unsafe extern "C" fn(Id, Sel, Id, usize, usize, *mut Id) -> Id =
+        std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+    f(obj, s, a, fmt, opts, err)
+}
 /// `initWithAsset:error:` — an `NSError**` out-parameter.
 #[inline]
 unsafe fn send_id_err(obj: Id, s: Sel, a: Id, err: *mut Id) -> Id {
@@ -385,7 +430,8 @@ pub fn probe_video_stream(path: &Path) -> Result<VideoStreamInfo, DecodeError> {
     unsafe { probe_inner(&cpath) }
 }
 
-unsafe fn probe_inner(cpath: &CStr) -> Result<VideoStreamInfo, DecodeError> {
+/// Build the `AVURLAsset` for a path — the one open both probes share.
+unsafe fn make_asset(cpath: &CStr) -> Result<Id, DecodeError> {
     let corrupt = |m: &str| DecodeError::Corrupt(m.to_string());
     let path_ns = send_cstr(
         class(c"NSString"),
@@ -408,6 +454,15 @@ unsafe fn probe_inner(cpath: &CStr) -> Result<VideoStreamInfo, DecodeError> {
     if asset.is_null() {
         return Err(corrupt("AVURLAsset creation failed"));
     }
+    Ok(asset)
+}
+
+unsafe fn probe_inner(cpath: &CStr) -> Result<VideoStreamInfo, DecodeError> {
+    probe_asset(make_asset(cpath)?)
+}
+
+unsafe fn probe_asset(asset: Id) -> Result<VideoStreamInfo, DecodeError> {
+    let corrupt = |m: &str| DecodeError::Corrupt(m.to_string());
     let vtracks = send_id(asset, sel(c"tracksWithMediaType:"), AVMediaTypeVideo);
     let track = if vtracks.is_null() {
         std::ptr::null_mut()
@@ -461,6 +516,302 @@ unsafe fn probe_inner(cpath: &CStr) -> Result<VideoStreamInfo, DecodeError> {
         has_audio,
         color: ColorTransform::default(),
     })
+}
+
+// ---------------------------------------------------------------------------
+// Media-track catalog (task #98, phase 2) — the AVFoundation backend.
+// ---------------------------------------------------------------------------
+
+/// Probe a video's basic facts **and** its audio/subtitle track catalog from one open.
+///
+/// Off-thread only. This walks both `AVMediaSelectionGroup`s, which
+/// [`probe_video_stream`] deliberately does not — that one feeds the poster path, which
+/// runs for every *prefetched* video whether or not the Inspector is ever opened.
+///
+/// Note the honest scope of this backend, all established by the phase-0 spike
+/// (`.taskmaster/docs/98-phase0-spike-findings.md`): AVFoundation exposes *its* model of
+/// the file, not the container's stream table. It synthesizes options (forced variants),
+/// picks its own `defaultOption`, reports BCP-47 short language tags, and surfaces no
+/// per-track title at all (`commonMetadata` is empty even when the container has a
+/// `handler_name`). That is why the catalog names its [`MediaBackend`] rather than
+/// pretending every backend sees the same thing. Containers AVFoundation can't demux
+/// (MKV/WebM) fail at `make_asset`/`probe_asset`, and the caller falls back to the
+/// `--ffvideo` FFmpeg probe exactly as playback does.
+pub fn probe_video_details(path: &Path, generation: u64) -> Result<VideoDetailsProbe, DecodeError> {
+    let cpath = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| DecodeError::Corrupt("video path has an interior NUL".into()))?;
+    let _pool = Pool::new();
+    unsafe {
+        let asset = make_asset(&cpath)?;
+        let video = probe_asset(asset)?;
+        let tracks = catalog_from_asset(asset, generation);
+        Ok(VideoDetailsProbe { video, tracks })
+    }
+}
+
+/// Guard a selector before sending it.
+///
+/// Not defensive programming for its own sake: the phase-0 spike proved that sending a
+/// selector the class doesn't implement raises an **uncatchable** ObjC exception that
+/// aborts the process — `catch_unwind` cannot contain it, so the usual "a hostile file
+/// becomes a `DecodeError`" safety net does not apply here. (The specific trap: the
+/// property is `playable`, but the getter — and therefore the selector — is `isPlayable`.)
+unsafe fn responds(obj: Id, s: Sel) -> bool {
+    !obj.is_null() && send_id_ret_bool(obj, sel(c"respondsToSelector:"), s as Id)
+}
+
+unsafe fn ns_len(array: Id) -> usize {
+    if array.is_null() {
+        0
+    } else {
+        send_ret_usize(array, sel(c"count"))
+    }
+}
+
+unsafe fn ns_at(array: Id, i: usize) -> Id {
+    send_usize(array, sel(c"objectAtIndex:"), i)
+}
+
+/// An `NSString` → Rust `String` (`None` for nil/non-UTF-8).
+unsafe fn ns_string(s: Id) -> Option<String> {
+    if s.is_null() {
+        return None;
+    }
+    let p = send_ret_cstr(s, sel(c"UTF8String"));
+    if p.is_null() {
+        return None;
+    }
+    Some(CStr::from_ptr(p).to_string_lossy().into_owned())
+}
+
+/// Does `option.mediaCharacteristics` contain `want`? Compares against the framework's
+/// own constant rather than a hardcoded literal — the spike found the values are a mix
+/// of `public.*` strings and literal `AVMediaCharacteristic*` names, so hardcoding would
+/// silently miss half of them.
+unsafe fn has_characteristic(chars: Id, want: Id) -> bool {
+    if chars.is_null() || want.is_null() {
+        return false;
+    }
+    send_id_ret_bool(chars, sel(c"containsObject:"), want)
+}
+
+unsafe fn catalog_from_asset(asset: Id, generation: u64) -> MediaTrackCatalog {
+    let mut next_local_id = 0u64;
+    let mut locators: Vec<(u64, TrackLocator)> = Vec::new();
+
+    let read_group = |characteristic: Id,
+                      group_kind: AvGroup,
+                      kind: TrackKind,
+                      locators: &mut Vec<(u64, TrackLocator)>,
+                      next_local_id: &mut u64|
+     -> TrackSet {
+        let group = send_id(
+            asset,
+            sel(c"mediaSelectionGroupForMediaCharacteristic:"),
+            characteristic,
+        );
+        // A nil group means AVFoundation exposes no selection of this kind for this
+        // container — NOT that the file has none. `Unavailable` keeps that distinction.
+        if group.is_null() {
+            return TrackSet::unavailable();
+        }
+        let options = send(group, sel(c"options"));
+        let default_option = send(group, sel(c"defaultOption"));
+        let n = ns_len(options);
+
+        let mut tracks = Vec::with_capacity(n);
+        for i in 0..n {
+            let opt = ns_at(options, i);
+            if opt.is_null() {
+                continue;
+            }
+            let local_id = *next_local_id;
+            *next_local_id += 1;
+
+            // BCP-47 short ("en"), where the FFmpeg backend reports ISO-639-2 ("eng")
+            // for the same file. Both are preserved verbatim; `language_display`
+            // resolves either.
+            let language = ns_string(send(opt, sel(c"extendedLanguageTag")))
+                .and_then(|t| tracks_mod::normalize_lang(&t));
+
+            let chars = send(opt, sel(c"mediaCharacteristics"));
+            let flags = TrackFlags {
+                // The group's *authored* default. Deliberately not the player's runtime
+                // auto-selection, which #99 tracks separately.
+                default: !default_option.is_null()
+                    && send_id_ret_bool(opt, sel(c"isEqual:"), default_option),
+                forced: has_characteristic(chars, AVMediaCharacteristicContainsOnlyForcedSubtitles),
+                // AVFoundation has no commentary flag: the spike confirmed a container
+                // COMMENT disposition does not survive into any characteristic.
+                // `IsAuxiliaryContent` is the nearest real signal; when it's absent we
+                // report false rather than guess.
+                commentary: has_characteristic(chars, AVMediaCharacteristicIsAuxiliaryContent),
+                hearing_impaired: has_characteristic(
+                    chars,
+                    AVMediaCharacteristicTranscribesSpokenDialogForAccessibility,
+                ) || has_characteristic(
+                    chars,
+                    AVMediaCharacteristicDescribesMusicAndSoundForAccessibility,
+                ),
+                visual_impaired: has_characteristic(
+                    chars,
+                    AVMediaCharacteristicDescribesVideoForAccessibility,
+                ),
+            };
+
+            // The first media subtype's FourCC, normalized into the shared codec
+            // vocabulary the pure maps are keyed on.
+            let subtypes = send(opt, sel(c"mediaSubTypes"));
+            let codec_raw = (ns_len(subtypes) > 0)
+                .then(|| send_ret_i32(ns_at(subtypes, 0), sel(c"intValue")) as u32)
+                .map(|fourcc| fourcc_to_codec_raw(fourcc, kind))
+                .unwrap_or_default();
+
+            let (codec, capability, audio) = match kind {
+                TrackKind::Audio => (
+                    tracks_mod::audio_codec_display(&codec_raw, None),
+                    TrackCapability::Playable,
+                    // AVFoundation's option model exposes no channel/rate facts; the
+                    // formatter degrades to the codec token rather than inventing them.
+                    None,
+                ),
+                TrackKind::Subtitle => {
+                    let playable =
+                        responds(opt, sel(c"isPlayable")) && send_ret_bool(opt, sel(c"isPlayable"));
+                    let cap = tracks_mod::subtitle_capability(&codec_raw);
+                    // An option AVFoundation itself won't play can't be offered, whatever
+                    // its codec suggests.
+                    let cap = if playable {
+                        cap
+                    } else {
+                        TrackCapability::Unsupported
+                    };
+                    (tracks_mod::subtitle_codec_display(&codec_raw), cap, None)
+                }
+            };
+
+            // Identity: the propertyList, serialized to a binary plist. The spike proved
+            // it round-trips through `mediaSelectionOptionWithPropertyList:` to an option
+            // that `isEqual:` the original — which is what makes #99 able to re-find this
+            // exact option later without trusting an ordinal.
+            if let Some(property_list) = option_identity(opt) {
+                locators.push((
+                    local_id,
+                    TrackLocator::AvOption {
+                        group: group_kind,
+                        property_list,
+                    },
+                ));
+            }
+
+            tracks.push(MediaTrack {
+                id: TrackId {
+                    catalog_generation: generation,
+                    local_id,
+                },
+                kind,
+                language,
+                // NOT `displayName`: that is a *localized language name* ("English",
+                // "French"), not a container title, and treating it as one would put
+                // "English" in the title column of every track. AVFoundation surfaces no
+                // real title (spike: `commonMetadata` is empty even with a handler_name).
+                title: None,
+                codec_raw,
+                codec,
+                capability,
+                flags,
+                audio,
+            });
+        }
+        TrackSet::complete(tracks)
+    };
+
+    let audio = read_group(
+        AVMediaCharacteristicAudible,
+        AvGroup::Audible,
+        TrackKind::Audio,
+        &mut locators,
+        &mut next_local_id,
+    );
+    let subtitles = read_group(
+        AVMediaCharacteristicLegible,
+        AvGroup::Legible,
+        TrackKind::Subtitle,
+        &mut locators,
+        &mut next_local_id,
+    );
+
+    let mut catalog =
+        MediaTrackCatalog::new(generation, MediaBackend::AVFoundation, audio, subtitles);
+    for (local_id, locator) in locators {
+        catalog.set_locator(local_id, locator);
+    }
+    catalog
+}
+
+/// An option's `propertyList`, serialized to a binary plist for [`TrackLocator`].
+/// `None` when the option carries no plist or it won't serialize.
+unsafe fn option_identity(opt: Id) -> Option<Vec<u8>> {
+    if !responds(opt, sel(c"propertyList")) {
+        return None;
+    }
+    let plist = send(opt, sel(c"propertyList"));
+    if plist.is_null() {
+        return None;
+    }
+    let mut err: Id = std::ptr::null_mut();
+    let data = send_plist(
+        class(c"NSPropertyListSerialization"),
+        sel(c"dataWithPropertyList:format:options:error:"),
+        plist,
+        NS_PROPERTY_LIST_BINARY_V1_0,
+        0,
+        &mut err,
+    );
+    if data.is_null() {
+        return None;
+    }
+    let len = send_ret_usize(data, sel(c"length"));
+    let bytes = send_ret_cstr(data, sel(c"bytes")) as *const u8;
+    if bytes.is_null() || len == 0 {
+        return None;
+    }
+    Some(std::slice::from_raw_parts(bytes, len).to_vec())
+}
+
+/// A CoreMedia FourCC → the shared `avcodec_get_name`-style codec vocabulary the pure
+/// maps in [`crate::tracks`] are keyed on, so one map serves every backend. Unknown
+/// FourCCs pass through as their trimmed literal (e.g. `"mp4a"`), which still displays
+/// better than a generic label.
+fn fourcc_to_codec_raw(fourcc: u32, kind: TrackKind) -> String {
+    let raw = String::from_utf8_lossy(&fourcc.to_be_bytes())
+        .trim()
+        .to_ascii_lowercase();
+    let mapped = match (kind, raw.as_str()) {
+        (TrackKind::Audio, "aac" | "aacp" | "mp4a" | "paac") => "aac",
+        (TrackKind::Audio, "ac-3" | "ac3") => "ac3",
+        (TrackKind::Audio, "ec-3" | "ec3") => "eac3",
+        (TrackKind::Audio, "lpcm" | "sowt" | "twos" | "in24" | "in32" | "fl32" | "fl64") => {
+            "pcm_s16le"
+        }
+        (TrackKind::Audio, "alac") => "alac",
+        (TrackKind::Audio, ".mp3" | "mp3") => "mp3",
+        (TrackKind::Audio, "opus") => "opus",
+        (TrackKind::Audio, "flac") => "flac",
+        (TrackKind::Audio, "dts" | "dtsc" | "dtsh" | "dtsl") => "dts",
+        (TrackKind::Audio, "mlpa") => "truehd",
+        (TrackKind::Audio, "ima4") => "adpcm_ima_qt",
+        (TrackKind::Audio, "qdm2" | "qdmc") => "qdm2",
+        (TrackKind::Audio, "ulaw") => "pcm_mulaw",
+        (TrackKind::Audio, "alaw") => "pcm_alaw",
+        (TrackKind::Subtitle, "tx3g" | "text" | "sbtl") => "mov_text",
+        (TrackKind::Subtitle, "wvtt") => "webvtt",
+        (TrackKind::Subtitle, "c608") => "eia_608",
+        (TrackKind::Subtitle, "c708") => "cea_708",
+        (TrackKind::Subtitle, "ssa " | "ass ") => "ass",
+        _ => return raw,
+    };
+    mapped.to_string()
 }
 
 /// Map a CoreMedia FourCC video subtype to a display codec name (aligned with the Windows
@@ -878,6 +1229,7 @@ unsafe fn buffer_color(img: *const c_void) -> ColorTransform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tracks::TrackCompleteness;
     use std::sync::atomic::AtomicBool;
 
     fn collect(path: &Path, cancel: &AtomicBool) -> Vec<MotionChunk> {
@@ -1045,6 +1397,128 @@ mod tests {
         let dur = info.duration.expect("mp4 reports duration");
         assert!(dur > Duration::from_millis(800) && dur < Duration::from_millis(1500));
         assert!(!info.has_audio);
+    }
+
+    // -- media-track catalog (task #98) -------------------------------------
+
+    #[test]
+    fn fourcc_maps_into_the_shared_codec_vocabulary() {
+        let cc = |b: &[u8; 4]| u32::from_be_bytes(*b);
+        assert_eq!(fourcc_to_codec_raw(cc(b"aac "), TrackKind::Audio), "aac");
+        assert_eq!(fourcc_to_codec_raw(cc(b"ac-3"), TrackKind::Audio), "ac3");
+        assert_eq!(fourcc_to_codec_raw(cc(b"ec-3"), TrackKind::Audio), "eac3");
+        assert_eq!(
+            fourcc_to_codec_raw(cc(b"lpcm"), TrackKind::Audio),
+            "pcm_s16le"
+        );
+        assert_eq!(fourcc_to_codec_raw(cc(b"alac"), TrackKind::Audio), "alac");
+        assert_eq!(
+            fourcc_to_codec_raw(cc(b"tx3g"), TrackKind::Subtitle),
+            "mov_text"
+        );
+        assert_eq!(
+            fourcc_to_codec_raw(cc(b"wvtt"), TrackKind::Subtitle),
+            "webvtt"
+        );
+        // An unmapped FourCC still says what it is rather than becoming a generic label.
+        assert_eq!(fourcc_to_codec_raw(cc(b"zzzz"), TrackKind::Audio), "zzzz");
+        // ...and it lands on the shared display map's own fallback.
+        assert_eq!(
+            crate::tracks::audio_codec_display(
+                &fourcc_to_codec_raw(cc(b"aac "), TrackKind::Audio),
+                None
+            ),
+            "AAC"
+        );
+    }
+
+    /// The catalog over the committed multi-track MP4. Asserts the **AVFoundation
+    /// backend's own** view, which the phase-0 spike proved is not the container's
+    /// stream table: it synthesizes forced variants (2 authored tx3g tracks → 4 legible
+    /// options) and picks its own `defaultOption`. Encoding that here is the point —
+    /// if a macOS update changes it, this fails rather than the panel quietly drifting.
+    #[test]
+    fn catalog_describes_the_multitrack_mp4() {
+        let probe = probe_video_details(&fixture("multitrack.mp4"), 9).expect("details probe");
+        let cat = &probe.tracks;
+        assert_eq!(cat.backend, MediaBackend::AVFoundation);
+        assert_eq!(cat.generation, 9);
+
+        // Basic facts still come through the same probe.
+        assert_eq!(probe.video.codec, "H.264");
+        assert!(probe.video.has_audio);
+
+        // Audible: the 2 real AAC tracks, English authored-default.
+        assert_eq!(cat.audio.completeness, TrackCompleteness::Complete);
+        assert_eq!(cat.audio.tracks.len(), 2);
+        assert!(cat.audio.tracks.iter().all(|t| t.codec == "AAC"));
+        assert!(cat.audio.tracks.iter().all(|t| t.kind == TrackKind::Audio));
+        // BCP-47 short tags, not the FFmpeg backend's "eng"/"fra".
+        assert_eq!(cat.audio.tracks[0].language.as_deref(), Some("en"));
+        assert_eq!(cat.audio.tracks[1].language.as_deref(), Some("fr"));
+        assert!(cat.audio.tracks[0].flags.default);
+        assert!(!cat.audio.tracks[1].flags.default);
+        // AVFoundation surfaces no container title, and no commentary flag survives —
+        // both honest limits of this backend, not bugs to paper over.
+        assert!(cat.audio.tracks.iter().all(|t| t.title.is_none()));
+        assert!(cat.audio.tracks.iter().all(|t| t.audio.is_none()));
+
+        // Legible: AVFoundation expands 2 tracks into 4 options (forced variants).
+        assert_eq!(cat.subtitles.completeness, TrackCompleteness::Complete);
+        assert_eq!(cat.subtitles.tracks.len(), 4);
+        assert!(cat.subtitles.tracks.iter().all(|t| t.codec == "Timed Text"));
+        assert!(cat
+            .subtitles
+            .tracks
+            .iter()
+            .all(|t| t.capability == TrackCapability::SupportedText));
+        assert_eq!(
+            cat.subtitles
+                .tracks
+                .iter()
+                .filter(|t| t.flags.forced)
+                .count(),
+            2,
+            "the two synthesized forced-only options"
+        );
+    }
+
+    /// Identity: every track resolves to an `AvOption` locator carrying its group and a
+    /// real serialized plist — the thing #99 re-finds an option with.
+    #[test]
+    fn catalog_locators_carry_a_serialized_property_list() {
+        let probe = probe_video_details(&fixture("multitrack.mp4"), 9).expect("details probe");
+        let cat = &probe.tracks;
+        assert!(cat.tracks().count() > 0);
+        for t in cat.tracks() {
+            match cat.locator(t.id) {
+                Some(TrackLocator::AvOption {
+                    group,
+                    property_list,
+                }) => {
+                    let want = match t.kind {
+                        TrackKind::Audio => AvGroup::Audible,
+                        TrackKind::Subtitle => AvGroup::Legible,
+                    };
+                    assert_eq!(*group, want);
+                    // A real binary plist, not an empty placeholder.
+                    assert!(property_list.len() > 8, "plist too short to be real");
+                    assert!(property_list.starts_with(b"bplist"), "not a binary plist");
+                }
+                other => panic!("expected an AvOption locator, got {other:?}"),
+            }
+        }
+        // Local ids are unique across both groups.
+        let ids: std::collections::BTreeSet<u64> = cat.tracks().map(|t| t.id.local_id).collect();
+        assert_eq!(ids.len(), cat.tracks().count());
+    }
+
+    /// A container AVFoundation can't demux errors cleanly, so the caller can fall back
+    /// to the FFmpeg probe — it must never be mistaken for "this file has no tracks".
+    #[test]
+    fn details_probe_errors_on_a_container_avfoundation_cannot_demux() {
+        assert!(probe_video_details(&fixture("multitrack.mkv"), 1).is_err());
+        assert!(probe_video_details(Path::new("/nonexistent/clip.mp4"), 1).is_err());
     }
 
     /// A missing file is a clean error, not a panic (hostile-input parity with the decoder).

@@ -19,7 +19,9 @@ use std::time::Duration;
 use super::convert::FrameConverter;
 use super::io::FfInput;
 use super::probe::{fit_dims, video_facts, VideoFacts};
-use crate::video::{poster_frame_score, VideoInput, POSTER_GOOD_SCORE, POSTER_MAX_FRAMES};
+use crate::video::{
+    poster_frame_score, VideoDetailsProbe, VideoInput, POSTER_GOOD_SCORE, POSTER_MAX_FRAMES,
+};
 use crate::{DecodeError, DecodedImage, FitBox, PixelFormat, VideoStreamInfo};
 
 /// Overall watchdog for one poster attempt — a poster is a background nicety,
@@ -72,9 +74,37 @@ pub fn ff_decode_video_poster(
 
 /// One read-only open's stream facts (inspector parity with the Windows
 /// `probe_video_input` / macOS `probe_video_stream`).
+///
+/// **This is the poster/prefetch path** — it runs for every prefetched video, opened or
+/// not, so it stays exactly as cheap as it was: no track enumeration happens here. The
+/// Inspector's richer read is [`ff_probe_video_details`].
 pub fn ff_probe_video_input(input: &VideoInput) -> Result<VideoStreamInfo, DecodeError> {
     let mut opened = FfInput::open(input, None).map_err(DecodeError::Corrupt)?;
     let facts = video_facts(opened.ctx()).map_err(DecodeError::Corrupt)?;
+    stream_info(&mut opened, &facts)
+}
+
+/// The **Details** probe (task #98): basic facts + the full track catalog, from one
+/// open. Off-thread only — never call this from the event loop or the poster path.
+pub fn ff_probe_video_details(
+    input: &VideoInput,
+    generation: u64,
+) -> Result<VideoDetailsProbe, DecodeError> {
+    let mut opened = FfInput::open(input, None).map_err(DecodeError::Corrupt)?;
+    let facts = video_facts(opened.ctx()).map_err(DecodeError::Corrupt)?;
+    // One open serves both reads: the catalog walks the same already-parsed stream
+    // table `video_facts` selected from.
+    let tracks = super::tracks::catalog_from_input(opened.ctx(), generation);
+    let video = stream_info(&mut opened, &facts)?;
+    Ok(VideoDetailsProbe { video, tracks })
+}
+
+/// The shared `VideoFacts` → [`VideoStreamInfo`] read, so the basic and details probes
+/// can never drift on codec/rotation/color policy.
+fn stream_info(
+    opened: &mut FfInput<'static>,
+    facts: &super::probe::VideoFacts,
+) -> Result<VideoStreamInfo, DecodeError> {
     // Decoder-reported color under the shared fallback policy (no frame decode
     // here — the probe is a ~header-only read, like the Windows one).
     let decoder = decoder_for(opened.ctx(), facts.index)?;

@@ -103,6 +103,35 @@ pub struct DeleteRetry {
     pub tries_left: u32,
 }
 
+/// One item's memoized Details data (task #98).
+///
+/// Replaces the old `(u64, Vec<(String, String)>)` tuple. Two reasons, beyond the
+/// obvious readability of a named field:
+///
+/// 1. The tuple's first element was **file size**, while the field's doc comment called
+///    it `mtime` — a mismatch that survived precisely because a bare `u64` in a tuple
+///    can't be wrong out loud.
+/// 2. The track catalog needed somewhere to live, and a *parallel* `media_tracks` map
+///    keyed by the same item would be a second source of truth to keep in sync (and to
+///    forget to evict). One entry, one lifetime, one eviction.
+#[derive(Debug, Clone, Default)]
+pub struct ItemDetails {
+    /// Exact byte size (from a stat, or the archive directory's hint for an entry).
+    pub size: u64,
+    /// The EXIF / basic-fact rows, as label→value pairs.
+    pub fields: Vec<(String, String)>,
+    /// The video's audio/subtitle tracks. `None` for stills, and for a video whose
+    /// probe hasn't run or failed — which is *not* the same as "no tracks", hence the
+    /// catalog's own [`pb_decode::TrackCompleteness`] once it is `Some`.
+    pub media: Option<pb_decode::MediaTrackCatalog>,
+    /// The basic probe's audio-presence fact, **independent of the catalog**. This is
+    /// what lets a backend that can't enumerate tracks still say something true
+    /// ("Present — details unavailable" vs "No"). Deriving it from the catalog instead
+    /// would be circular: an un-enumerable set is empty either way, so the answer would
+    /// always be whatever the emptiness happened to imply. `None` = not probed.
+    pub has_audio: Option<bool>,
+}
+
 pub struct AppCore {
     /// The injected wall-clock "now" for this event/tick — **the core never calls
     /// `Instant::now()`** (NS0 5.5 / Phase 0.3). The shell stamps it at each event-loop entry
@@ -198,9 +227,9 @@ pub struct AppCore {
     pub meta_cache: HashMap<usize, PhotoMeta>,
     /// The displayed photo's metadata (mirror of the `meta_cache` entry for the current item).
     pub current: Option<PhotoMeta>,
-    /// Per-item on-demand full-EXIF read (`Shift+I`): `(mtime, key/value pairs)`, so a
-    /// re-open of the same unchanged file is instant. RAM-only (privacy #2).
-    pub exif_cache: HashMap<usize, (u64, Vec<(String, String)>)>,
+    /// Per-item on-demand Details read (`Shift+I`), so a re-open of the same file is
+    /// instant. RAM-only (privacy #2). See [`ItemDetails`].
+    pub exif_cache: HashMap<usize, ItemDetails>,
     /// Per-item "text in image" results (`T` / Copy Text from Image, task #45):
     /// on-device OCR lines + QR payloads, cached so a revisit is instant. RAM-only
     /// (privacy #2) — dropped on rebuild and exit, never written anywhere.

@@ -116,6 +116,9 @@ mod psd;
 mod raw;
 mod svg;
 mod thumb;
+// The media-track catalog (task #98): the platform-neutral audio/subtitle track
+// description every backend produces. Pure data + pure maps.
+pub mod tracks;
 pub mod video;
 #[cfg(windows)]
 mod wic;
@@ -141,7 +144,7 @@ pub use ff_live::{
 #[cfg(feature = "ffvideo")]
 pub use ffmpeg::audio_decoder::{AudioError, FfAudioDecoder};
 #[cfg(feature = "ffvideo")]
-pub use ffmpeg::poster::{ff_decode_video_poster, ff_probe_video_input};
+pub use ffmpeg::poster::{ff_decode_video_poster, ff_probe_video_details, ff_probe_video_input};
 #[cfg(feature = "ffvideo")]
 pub use ffmpeg::video_producer::run_ff_video_producer;
 pub use image_backend::ImageCrateDecoder;
@@ -151,13 +154,16 @@ pub use jxl::JxlDecoder;
 #[cfg(heic_libheif)]
 pub use libheif::LibHeifDecoder;
 #[cfg(target_os = "macos")]
-pub use livephoto::{decode_live_motion, decode_live_motion_streaming, probe_video_stream};
+pub use livephoto::{
+    decode_live_motion, decode_live_motion_streaming, probe_video_details, probe_video_stream,
+};
 pub use metadata::read_exif_fields;
 #[cfg(windows)]
 pub use mf_audio::{MfAudioDecoder, MfAudioFormat};
 #[cfg(windows)]
 pub use mf_poster::{
-    decode_video_poster, decode_video_poster_input, probe_video_input, probe_video_stream,
+    decode_video_poster, decode_video_poster_input, probe_video_details, probe_video_details_input,
+    probe_video_input, probe_video_stream,
 };
 #[cfg(windows)]
 pub use mf_stream::mem_istream;
@@ -170,11 +176,15 @@ pub use mf_video_producer::run_video_producer;
 pub use psd::PsdDecoder;
 pub use raw::{is_raw_extension, RawPreviewDecoder};
 pub use svg::SvgDecoder;
-pub use video::VideoStreamInfo;
+pub use tracks::{
+    AudioFormat, AvGroup, MediaBackend, MediaTrack, MediaTrackCatalog, TrackCapability,
+    TrackCompleteness, TrackFlags, TrackId, TrackKind, TrackLocator, TrackSet,
+};
 pub use video::{
     SeekGeneration, VideoColorInfo, VideoFrame, VideoInput, VideoProducerEvent, VideoProducerMsg,
     VideoProducerOptions, VideoSessionId, VideoTransfer, YuvMatrix,
 };
+pub use video::{VideoDetailsProbe, VideoStreamInfo};
 #[cfg(windows)]
 pub use wic::WicDecoder;
 pub use zune::ZuneJpegDecoder;

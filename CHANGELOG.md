@@ -25,6 +25,15 @@ with any pre-release suffix carried only by the tag.
   CPU does far less work per frame — smoother playback with margin to spare, especially on demanding
   files. Colors are unchanged (verified against a from-spec reference); rotated and unusual-format
   clips keep the previous path automatically. (Set `PB_VIDEO_NO_PLANAR=1` to opt out.)
+- **Video details now list every audio and subtitle track, instead of just "Audio: Yes".** The
+  Inspector's Details tab (`Shift+I`) shows each track on its own line — language, codec, channel
+  layout, sample rate, and whether it's the default, forced, a commentary, or SDH — so a film with a
+  director's commentary and three subtitle tracks reads as exactly that. Subtitle formats PhotoBlaze
+  can't display (image-based ones like PGS or VobSub) are still listed, marked "Unsupported". Details
+  that genuinely can't be read say so, rather than claiming a file has no audio. Copy all details
+  (`Shift+I` → copy) includes the tracks. *Windows currently reports "Present — details unavailable"
+  for audio pending its own track enumeration; videos inside ZIP/7z archives still show the shorter
+  summary.*
 - The info line (`i`) now defaults to the **bottom-center** of the screen instead of the
   bottom-right. (Existing users keep whatever position they've already set; this only affects
   fresh installs.)
