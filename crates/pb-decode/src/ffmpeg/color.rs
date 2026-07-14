@@ -147,6 +147,8 @@ pub fn video_color_info_rgb(sc: &SourceColor) -> VideoColorInfo {
         cicp: Some((sc.primaries, sc.transfer, sc.matrix)),
         full_range: true,
         yuv_matrix: yuv_matrix(sc.matrix),
+        // RGB output: transfer is inert (already applied); the transform carries it.
+        transfer: crate::VideoTransfer::SrgbLike,
         peak: 1.0,
     }
 }

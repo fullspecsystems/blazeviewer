@@ -138,6 +138,7 @@ pub fn run_video_producer(
         },
         yuv_matrix,
         // The MF paths are SDR (PQ/HLG stays on RGB32, SDR-converted by MF).
+        transfer: crate::VideoTransfer::SrgbLike,
         peak: 1.0,
     };
 

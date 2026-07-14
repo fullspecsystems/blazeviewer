@@ -142,13 +142,45 @@ impl VideoStreamInfo {
     }
 }
 
-/// YUV→RGB matrix coefficients for subsampled ([`PixelFormat::Nv12`]) frames
-/// (task 79.10). Inert for RGB pixel formats (the producer already converted).
+/// YUV→RGB matrix coefficients for subsampled ([`PixelFormat::Nv12`] /
+/// [`PixelFormat::P010`]) frames (task 79.10). Inert for RGB pixel formats (the
+/// producer already converted).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum YuvMatrix {
     Bt601,
     Bt709,
     Bt2020,
+}
+
+/// The transfer function the renderer must invert to reach scene-linear light
+/// for a planar video frame (task #91 Phase 2). **Decoupled from storage
+/// precision** ([`PixelFormat`](crate::PixelFormat) `Nv12` vs `P010`): 10-bit
+/// SDR is `P010` + [`SrgbLike`](Self::SrgbLike)/[`Parametric`](Self::Parametric),
+/// while HDR is `P010` + [`Pq`](Self::Pq)/[`Hlg`](Self::Hlg). The renderer maps
+/// this to its shader transfer mode; it never reads raw CICP integers.
+///
+/// Inert for RGB pixel formats — those carry their transfer in
+/// [`ColorTransform`] already (the producer / OS converter applied it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoTransfer {
+    /// sRGB / BT.709-gamma-like — the renderer's built-in sRGB EOTF. The default
+    /// for ordinary 8-bit SDR video.
+    SrgbLike,
+    /// A source-specific parametric curve carried in [`ColorTransform::trc`].
+    Parametric,
+    /// SMPTE ST 2084 (PQ), absolute-luminance HDR.
+    Pq,
+    /// Hybrid Log-Gamma (ARIB STD-B67 / BT.2100), scene-referred HDR.
+    Hlg,
+}
+
+impl VideoTransfer {
+    /// True for the HDR transfers ([`Pq`](Self::Pq) / [`Hlg`](Self::Hlg)) — the
+    /// ones that expand beyond 1.0 in scene-linear and drive the fp16/EDR present
+    /// path rather than the SDR tone-map.
+    pub fn is_hdr(self) -> bool {
+        matches!(self, VideoTransfer::Pq | VideoTransfer::Hlg)
+    }
 }
 
 /// Source color for a video frame: the resolved shader transform for the pixels as
@@ -171,8 +203,13 @@ pub struct VideoColorInfo {
     pub cicp: Option<(u8, u8, u8)>,
     /// Full-range flag as reported (or assumed) for the source YUV.
     pub full_range: bool,
-    /// Matrix coefficients for NV12 frames (see the contract above).
+    /// Matrix coefficients for planar (NV12 / P010) frames (see the contract above).
     pub yuv_matrix: YuvMatrix,
+    /// Transfer function the renderer inverts for planar frames (task #91 Phase 2).
+    /// Decoupled from storage precision; see [`VideoTransfer`]. Inert for RGB
+    /// pixel formats (they carry their transfer in `transform`). `SrgbLike` for
+    /// the srgb() default.
+    pub transfer: VideoTransfer,
     /// Scene-linear peak for HDR ([`PixelFormat::Rgba16F`]) frames — the
     /// tone-map white point when presenting on an SDR display, exactly like
     /// [`crate::DecodedImage::peak`] for HDR stills. `1.0` for SDR frames
@@ -188,6 +225,7 @@ impl VideoColorInfo {
             cicp: None,
             full_range: true,
             yuv_matrix: YuvMatrix::Bt709,
+            transfer: VideoTransfer::SrgbLike,
             peak: 1.0,
         }
     }
@@ -221,15 +259,18 @@ impl VideoFrame {
         self.pixels.len() as u64
     }
 
-    /// Structural sanity: pixel buffer matches the declared geometry/format
-    /// (and NV12's even-dimension requirement holds).
+    /// Structural sanity: pixel buffer matches the declared geometry/format (and
+    /// the planar formats' even-dimension requirement holds). Uses checked
+    /// arithmetic — a geometry that overflows `usize` fails the check rather than
+    /// wrapping to a length a hostile buffer could match.
     pub fn is_well_formed(&self) -> bool {
-        let even_ok = self.format != crate::PixelFormat::Nv12
+        let even_ok = !self.format.is_planar_video()
             || (self.width.is_multiple_of(2) && self.height.is_multiple_of(2));
-        self.width > 0
-            && self.height > 0
-            && even_ok
-            && self.pixels.len() == self.format.frame_bytes(self.width, self.height)
+        let len_ok = self
+            .format
+            .checked_frame_bytes(self.width, self.height)
+            .is_some_and(|n| self.pixels.len() == n);
+        self.width > 0 && self.height > 0 && even_ok && len_ok
     }
 }
 

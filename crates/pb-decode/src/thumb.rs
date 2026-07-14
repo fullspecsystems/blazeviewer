@@ -16,8 +16,9 @@ use crate::common::downscale_to_fit;
 use crate::{DecodeError, DecodedImage, FitBox, PixelFormat};
 
 /// Derive a display-ready sRGB8 thumbnail (long edge ≤ `max_edge`) from a
-/// decoded image, consuming it. Returns `None` for pixel formats that never
-/// carry a still photo (`Nv12` — video thumbs come from the poster path).
+/// decoded image, consuming it. Returns `None` for the planar video pixel
+/// formats (`Nv12`/`P010`), which never carry a still photo — video thumbs come
+/// from the poster path.
 pub fn derive_thumbnail(img: DecodedImage, max_edge: u32) -> Option<DecodedImage> {
     let fit = FitBox {
         max_width: max_edge.max(1),
@@ -26,7 +27,8 @@ pub fn derive_thumbnail(img: DecodedImage, max_edge: u32) -> Option<DecodedImage
     match img.format {
         PixelFormat::Rgba8 => derive_rgba8(img, fit).ok(),
         PixelFormat::Rgba16F => derive_f16(img, fit),
-        PixelFormat::Nv12 => None,
+        f if f.is_planar_video() => None,
+        _ => None,
     }
 }
 

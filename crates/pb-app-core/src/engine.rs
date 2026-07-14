@@ -733,9 +733,11 @@ pub fn to_clipboard_rgba8(img: &DecodedImage) -> Vec<u8> {
             }
             out
         }
-        // Stills never carry NV12 (it's a video-session frame format — task
-        // 79.10); an empty buffer keeps this total without inventing YUV params.
-        PixelFormat::Nv12 => Vec::new(),
+        // Stills never carry a planar video format (NV12/P010 are video-session
+        // frame formats — task 79.10 / #91); an empty buffer keeps this total
+        // without inventing YUV params.
+        f if f.is_planar_video() => Vec::new(),
+        _ => Vec::new(),
     }
 }
 

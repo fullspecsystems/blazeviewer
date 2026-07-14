@@ -815,6 +815,16 @@ impl VideoSession {
                     if frame.session_id != self.id || frame.seek_generation != self.generation {
                         continue;
                     }
+                    // Structural gate (task #91 Phase 2): a malformed frame (buffer
+                    // length ≠ declared geometry/format, odd planar dims, or a
+                    // geometry that overflows) must never reach presentation, where
+                    // the plane split would panic on hostile media. A credit was
+                    // spent producing it, so still refund the credit; just drop the
+                    // frame rather than queueing it.
+                    if !frame.is_well_formed() {
+                        self.credits_out = self.credits_out.saturating_sub(1);
+                        continue;
+                    }
                     self.credits_out = self.credits_out.saturating_sub(1);
                     self.queued_bytes += frame.byte_len();
                     self.queue.push_back(frame);
@@ -1092,11 +1102,39 @@ mod tests {
         assert_eq!(drain_credits(&io), 1, "one-frame exception: single credit");
     }
 
-    /// A frame with a custom byte size (the queue charges `pixels.len()`).
+    /// A frame with a custom byte size (the queue charges `pixels.len()`). Kept
+    /// **well-formed** (task #91 Phase 2 rejects malformed frames at ingestion):
+    /// declared as a `bytes/4 × 1` RGBA8 frame so `frame_bytes` equals `bytes`.
+    /// `bytes` must be a multiple of 4 (all call sites are).
     fn sized_frame(pts_ms: u64, bytes: usize) -> VideoFrame {
+        assert_eq!(bytes % 4, 0, "sized_frame needs a multiple of 4 (RGBA8)");
         let mut f = frame(pts_ms);
+        f.width = (bytes / 4) as u32;
+        f.height = 1;
         f.pixels = vec![0; bytes];
         f
+    }
+
+    /// Task #91 Phase 2: a structurally malformed frame (buffer length ≠ the
+    /// declared geometry/format — e.g. a short planar buffer that would panic the
+    /// present-time plane split) is dropped at ingestion, never queued or
+    /// presented. The credit it consumed is still refunded so decode keeps flowing.
+    #[test]
+    fn malformed_frame_is_rejected_not_queued() {
+        let (mut s, io) = VideoSession::new(SID, FRAME_BYTES);
+        let t0 = Instant::now();
+        opened(&io, 10_000);
+        s.poll(t0);
+        assert!(drain_credits(&io) >= 1, "session grants credits after Opened");
+        // Claim to be a 2×2 NV12 frame (needs 6 bytes) but ship only 3.
+        let mut bad = frame(0);
+        bad.format = PixelFormat::Nv12;
+        bad.pixels = vec![0u8; 3];
+        assert!(!bad.is_well_formed());
+        io.events.send(VideoProducerEvent::Frame(bad)).unwrap();
+        let u = s.poll(t0 + Duration::from_millis(1));
+        assert!(u.present.is_none(), "malformed frame must not present");
+        assert_eq!(s.queue.len(), 0, "malformed frame must not be queued");
     }
 
     /// R1 (overhaul plan 1A): when the budget admits only ONE frame (frame size

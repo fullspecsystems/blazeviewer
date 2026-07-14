@@ -594,6 +594,8 @@ impl Reader {
                     cicp: Some((sc.primaries, sc.transfer, sc.matrix)),
                     full_range: true,
                     yuv_matrix: super::color::yuv_matrix(sc.matrix),
+                    // fp16 path: pixels are already scene-linear scRGB; transfer inert.
+                    transfer: crate::VideoTransfer::SrgbLike,
                     peak: self.conv.peak(),
                 }
             }

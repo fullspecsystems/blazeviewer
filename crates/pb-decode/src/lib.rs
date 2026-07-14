@@ -173,7 +173,7 @@ pub use svg::SvgDecoder;
 pub use video::VideoStreamInfo;
 pub use video::{
     SeekGeneration, VideoColorInfo, VideoFrame, VideoInput, VideoProducerEvent, VideoProducerMsg,
-    VideoSessionId, YuvMatrix,
+    VideoSessionId, VideoTransfer, YuvMatrix,
 };
 #[cfg(windows)]
 pub use wic::WicDecoder;
@@ -196,28 +196,99 @@ pub enum PixelFormat {
     /// The consumer applies the YUV matrix + range from `VideoColorInfo`
     /// exactly once (nothing upstream has).
     Nv12,
+    /// 4:2:0 planar YUV, **16-bit little-endian per sample with 10 valid bits
+    /// high-aligned** (FFmpeg `P010LE`, task #91 Phase 2): a full-res Y plane
+    /// (`w·h·2` bytes) followed by a half-res interleaved UV plane
+    /// (`(w/2)·(h/2)·2·2` bytes) — 24 bits/px, even dimensions required. Carries
+    /// 10/12-bit SDR and PQ/HLG HDR video for the in-shader color path (the
+    /// transfer is selected by [`VideoTransfer`](crate::video::VideoTransfer),
+    /// independent of this storage precision). **Video frames only**; the
+    /// consumer applies YUV matrix + range + transfer from `VideoColorInfo`
+    /// exactly once. A `u16` sample recovers its 10-bit code as `sample >> 6`.
+    P010,
 }
 
 impl PixelFormat {
-    /// Bytes per pixel of the packed RGBA formats. NV12 is subsampled (12 bits/px)
-    /// and has no whole per-pixel byte count — use [`PixelFormat::frame_bytes`];
-    /// calling this on it is a programming error.
+    /// True for the subsampled planar video formats ([`Nv12`](Self::Nv12) /
+    /// [`P010`](Self::P010)) — the ones with a Y plane + interleaved UV plane and
+    /// no whole per-pixel byte count. Centralizes the "is this a planar video
+    /// frame?" test so still-only branches don't each special-case the variants.
+    pub fn is_planar_video(self) -> bool {
+        matches!(self, PixelFormat::Nv12 | PixelFormat::P010)
+    }
+
+    /// Bytes per sample of a planar video format's Y/UV planes (NV12 = 1, P010 =
+    /// 2). `None` for the non-planar RGBA formats.
+    fn planar_bytes_per_sample(self) -> Option<usize> {
+        match self {
+            PixelFormat::Nv12 => Some(1),
+            PixelFormat::P010 => Some(2),
+            _ => None,
+        }
+    }
+
+    /// Bytes per pixel of the packed RGBA formats. The planar video formats are
+    /// subsampled and have no whole per-pixel byte count — use
+    /// [`PixelFormat::frame_bytes`]; calling this on one is a programming error.
     pub fn bytes_per_pixel(self) -> usize {
         match self {
             PixelFormat::Rgba8 => 4,
             PixelFormat::Rgba16F => 8,
-            PixelFormat::Nv12 => panic!("NV12 is subsampled; use PixelFormat::frame_bytes"),
+            PixelFormat::Nv12 | PixelFormat::P010 => {
+                panic!("{self:?} is subsampled; use PixelFormat::frame_bytes")
+            }
         }
     }
 
-    /// Total tightly-packed byte length of a `width × height` frame in this format.
+    /// Total tightly-packed byte length of a `width × height` frame in this
+    /// format. Convenience over [`checked_frame_bytes`](Self::checked_frame_bytes)
+    /// for trusted (non-media) geometry; **panics on overflow** rather than
+    /// silently wrapping. Prefer the checked form on any hostile-media boundary.
     pub fn frame_bytes(self, width: u32, height: u32) -> usize {
+        self.checked_frame_bytes(width, height)
+            .expect("frame_bytes overflow")
+    }
+
+    /// Total tightly-packed byte length of a `width × height` frame, using
+    /// checked arithmetic throughout — `None` on overflow. The planar formats
+    /// round the half-res UV plane on even dimensions (odd dims are rejected by
+    /// [`VideoFrame::is_well_formed`](crate::video::VideoFrame::is_well_formed)).
+    pub fn checked_frame_bytes(self, width: u32, height: u32) -> Option<usize> {
         let (w, h) = (width as usize, height as usize);
+        let px = w.checked_mul(h)?;
         match self {
-            PixelFormat::Rgba8 => w * h * 4,
-            PixelFormat::Rgba16F => w * h * 8,
-            PixelFormat::Nv12 => w * h * 3 / 2,
+            PixelFormat::Rgba8 => px.checked_mul(4),
+            PixelFormat::Rgba16F => px.checked_mul(8),
+            // Y plane (w·h·bps) + interleaved UV (⌊w/2⌋·⌊h/2⌋·2·bps).
+            PixelFormat::Nv12 | PixelFormat::P010 => {
+                let bps = self.planar_bytes_per_sample()?;
+                let y = px.checked_mul(bps)?;
+                let uv = (w / 2)
+                    .checked_mul(h / 2)?
+                    .checked_mul(2)?
+                    .checked_mul(bps)?;
+                y.checked_add(uv)
+            }
         }
+    }
+
+    /// For a planar video format, the `(y_len, uv_offset, uv_len)` byte spans of
+    /// the two planes in a tightly-packed frame — checked, `None` on overflow or
+    /// a non-planar format. The uploader/presenter splits the buffer here instead
+    /// of open-coding `split_at` (which panics on a short/hostile buffer).
+    pub fn planar_plane_spans(
+        self,
+        width: u32,
+        height: u32,
+    ) -> Option<(usize, usize, usize)> {
+        let bps = self.planar_bytes_per_sample()?;
+        let (w, h) = (width as usize, height as usize);
+        let y_len = w.checked_mul(h)?.checked_mul(bps)?;
+        let uv_len = (w / 2)
+            .checked_mul(h / 2)?
+            .checked_mul(2)?
+            .checked_mul(bps)?;
+        Some((y_len, y_len, uv_len))
     }
 }
 
@@ -806,6 +877,36 @@ mod tests {
     fn bytes_per_pixel_is_correct() {
         assert_eq!(PixelFormat::Rgba8.bytes_per_pixel(), 4);
         assert_eq!(PixelFormat::Rgba16F.bytes_per_pixel(), 8);
+    }
+
+    #[test]
+    fn planar_frame_bytes_and_spans() {
+        // NV12: Y (w·h) + UV (w·h/2) = 12 bits/px.
+        assert_eq!(PixelFormat::Nv12.frame_bytes(4, 2), 4 * 2 * 3 / 2);
+        assert_eq!(PixelFormat::Nv12.checked_frame_bytes(4, 2), Some(12));
+        // P010: everything ×2 (16-bit samples) = 24 bits/px.
+        assert_eq!(PixelFormat::P010.frame_bytes(4, 2), 4 * 2 * 3);
+        assert_eq!(PixelFormat::P010.checked_frame_bytes(4, 2), Some(24));
+        // Plane spans: Y then interleaved UV.
+        assert_eq!(PixelFormat::Nv12.planar_plane_spans(4, 2), Some((8, 8, 4)));
+        assert_eq!(PixelFormat::P010.planar_plane_spans(4, 2), Some((16, 16, 8)));
+        assert!(PixelFormat::Rgba8.planar_plane_spans(4, 2).is_none());
+        assert!(!PixelFormat::Rgba8.is_planar_video());
+        assert!(PixelFormat::Nv12.is_planar_video());
+        assert!(PixelFormat::P010.is_planar_video());
+    }
+
+    #[test]
+    fn checked_frame_bytes_rejects_overflow() {
+        // A hostile geometry that overflows usize returns None instead of wrapping.
+        assert_eq!(PixelFormat::P010.checked_frame_bytes(u32::MAX, u32::MAX), None);
+        assert_eq!(PixelFormat::Rgba16F.checked_frame_bytes(u32::MAX, u32::MAX), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "subsampled")]
+    fn p010_bytes_per_pixel_panics() {
+        let _ = PixelFormat::P010.bytes_per_pixel();
     }
 
     #[test]
