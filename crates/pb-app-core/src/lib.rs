@@ -42,6 +42,9 @@ pub mod fs_tree;
 pub mod image_text;
 pub mod keymap;
 pub mod launch;
+// The off-thread video Details probe (task #98): opening a container is an unbounded
+// wait, so it never happens on the event loop.
+pub mod media_details;
 pub mod meta;
 pub mod metrics;
 pub mod overlay;

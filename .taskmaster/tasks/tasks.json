@@ -1345,14 +1345,14 @@
           {
             "id": 6,
             "title": "Phase 2 — off-thread, generation-safe Details probe",
-            "description": "NOT DONE. ensure_exif_cached still probes synchronously on the core path (pre-existing behavior, now doing slightly more work). Plan wants an async MediaDetailsProbe pipeline: Inspector cold-miss -> Loading, worker probes, result carries deck epoch + item + source identity + request id, core accepts only on full match, PanelsChanged refreshes, navigation drops stale results.",
-            "status": "pending"
+            "description": "DONE. media_details.rs: the container open runs on a worker; ensure_exif_cached records Loading (also the spawn guard) and returns. poll_details_probe (in tick) accepts only on matching deck generation AND item identity; a dead worker marks Failed so it cannot hang on Reading. New details_gen is a DECK generation bumped with text_gen -- NOT AppCore::epoch, which is the geometry generation. Copy Image Details defers via copy_when_done. Stills stay synchronous.",
+            "status": "done"
           },
           {
             "id": 7,
             "title": "Phase 2 — archive-video catalog parity",
-            "description": "NOT DONE. archive_video_meta_ready still carries only codec/fps/duration/has_audio, so an archived video keeps the placeholder Audio row while a loose one lists tracks. Needs the round-trip (and Swift CoreModel) widened to carry a catalog + a stale-guard generation.",
-            "status": "pending"
+            "description": "DONE. media_details::probe_job probes an archive entry over the VideoInput::Bytes seam (the entry has no path, so every probe skipped it before). Verified byte-identical: a loose MKV and the same MKV in a ZIP produce the same catalog + rows. Legal now that 98.6 moved the job off the event loop -- the old objection was inflating the entry ON THE EVENT LOOP. Windows archive videos gain real basic facts (they reported nothing before). archive_video_meta_ready got a richer-wins guard so the thin Swift round-trip cannot clobber the Rust catalog by landing second. NOTE: an earlier plan to widen the Swift FFI to carry a catalog was ABANDONED as dead work -- every macOS build that plays archived video links FFmpeg (release-macos.sh defaults to --bundle-ffmpeg, which implies --ffvideo; build-swift-host.sh defaults --ffvideo ON), so probe_job already covers the shipped DMG. Only release-macos.sh --no-video lacks it, and that build cannot play MKV/WebM at all.",
+            "status": "done"
           },
           {
             "id": 8,

@@ -723,6 +723,8 @@ impl App {
             meta_cache: HashMap::new(),
             current: None,
             exif_cache: HashMap::new(),
+            details_probe: None,
+            details_gen: 0,
             recognized_text: HashMap::new(),
             text_scan: None,
             text_gen: 0,
