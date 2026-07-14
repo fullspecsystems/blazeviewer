@@ -23,7 +23,26 @@ pub use gpu::{
 };
 pub use upload::{StagingUpload, UploadStrategy};
 pub use view::{Placement, Rotation, ViewTransform, MAX_ZOOM, MIN_ZOOM};
-pub use yuv::{YuvMatrix, YuvParams};
+pub use yuv::{PlanarFormat, PlanarTransfer, YuvMatrix, YuvParams};
+
+/// Everything [`Renderer::set_video_planar`] needs to display one planar video
+/// frame (task #91 Phase 2): the storage precision, the transfer to invert, the
+/// YUV matrix + range, the primaries/parametric `color` transform, and the HDR
+/// tone-map `peak`. A typed argument rather than a long parameter list (Codex).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlanarPresentation {
+    /// Storage precision of the two planes (NV12 8-bit / P010 16-bit).
+    pub format: PlanarFormat,
+    /// Transfer function to invert (SDR sRGB/parametric, or HDR PQ/HLG).
+    pub transfer: PlanarTransfer,
+    /// YUV matrix family + full/limited range (applied in-shader exactly once).
+    pub yuv: YuvParams,
+    /// Primaries matrix (source-linear → sRGB-linear, for the non-sRGB transfers)
+    /// + the parametric TRC. Passthrough for sRGB-like BT.709 SDR.
+    pub color: ColorTransform,
+    /// Scene-linear peak (HDR tone-map white point on an SDR display); 1.0 for SDR.
+    pub peak: f32,
+}
 
 /// Serializes GPU-device creation across this crate's tests. The libtest harness runs
 /// tests in parallel by default, and some virtual GPU drivers — notably **VMware SVGA 3D**
@@ -112,13 +131,39 @@ pub trait Renderer {
         hdr: bool,
         peak: f32,
     );
-    /// Display one NV12 video frame (task 79.10): `y` is the `width×height` luma
-    /// plane, `uv` the interleaved half-res chroma plane (`width×height/2` bytes).
-    /// The convert applies `yuv` (matrix + range) **exactly once** — NV12 pixels
-    /// arrive raw — then `color` (primaries + transfer) like any SDR image. This
-    /// default implementation converts on CPU via [`yuv::nv12_to_rgba`] (the
+    /// Display one planar video frame (task 79.10 NV12; task #91 Phase 2 P010 +
+    /// PQ/HLG): `y` is the `width×height` luma plane, `uv` the interleaved half-res
+    /// chroma plane. The convert applies the YUV matrix + range + transfer +
+    /// primaries **exactly once** in-shader — planar pixels arrive raw. This
+    /// default implementation converts on CPU via [`yuv::planar_to_scene`] (the
     /// correctness/portability fallback); `WgpuRenderer` overrides it with the
     /// two-plane in-shader path.
+    fn set_video_planar(
+        &mut self,
+        y: &[u8],
+        uv: &[u8],
+        width: u32,
+        height: u32,
+        p: PlanarPresentation,
+    ) {
+        let f = yuv::planar_to_scene(
+            y, uv, width, height, p.format, p.yuv, p.transfer, &p.color, p.peak,
+        );
+        self.set_image(&f.bytes, width, height, p.color, f.hdr, f.peak);
+    }
+
+    /// Whether this renderer can display P010 (10-bit) frames on the GPU path
+    /// (`TEXTURE_FORMAT_16BIT_NORM`). When false, the producer must emit an 8-bit
+    /// or RGBA fallback for 10-bit sources (task #91 Phase 2, Codex Q3). The CPU
+    /// default fallback handles P010 regardless, so this defaults to `true` for the
+    /// trait; `WgpuRenderer` reports its real device capability.
+    fn supports_p010(&self) -> bool {
+        true
+    }
+
+    /// Convenience for an 8-bit NV12 SDR frame (task 79.10 call sites, e.g. the
+    /// Windows MF producer) — builds a [`PlanarPresentation`] and delegates to
+    /// [`set_video_planar`](Self::set_video_planar).
     fn set_video_nv12(
         &mut self,
         y: &[u8],
@@ -128,8 +173,27 @@ pub trait Renderer {
         yuv: YuvParams,
         color: ColorTransform,
     ) {
-        let rgba = yuv::nv12_to_rgba(y, uv, width, height, yuv);
-        self.set_image(&rgba, width, height, color, false, 1.0);
+        // Preserve the task-79.10 behavior: an enabled color transform (BT.2020 /
+        // wide-gamut SDR) uses the parametric+primaries path (shader mode 1); plain
+        // BT.709 SDR is sRGB-like (mode 0).
+        let transfer = if color.enabled {
+            PlanarTransfer::Parametric
+        } else {
+            PlanarTransfer::SrgbLike
+        };
+        self.set_video_planar(
+            y,
+            uv,
+            width,
+            height,
+            PlanarPresentation {
+                format: PlanarFormat::Nv12,
+                transfer,
+                yuv,
+                color,
+                peak: 1.0,
+            },
+        );
     }
     /// Drop the displayed image and show a blank background (the letterbox fill)
     /// instead — the bare-launch / no-images / last-photo-deleted empty state. The

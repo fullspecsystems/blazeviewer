@@ -20,7 +20,7 @@
 use ffmpeg_next as ff;
 use ffmpeg_next::ffi;
 
-use crate::video::{VideoColorInfo, YuvMatrix};
+use crate::video::{VideoColorInfo, VideoTransfer, YuvMatrix};
 use crate::ColorTransform;
 
 /// H.273 transfer_characteristics values this module special-cases.
@@ -153,6 +153,48 @@ pub fn video_color_info_rgb(sc: &SourceColor) -> VideoColorInfo {
     }
 }
 
+/// [`VideoColorInfo`] for a producer emitting **planar NV12/P010** frames (task
+/// #91 Phase 2): the pixels arrive raw, so the renderer applies YUV matrix +
+/// range + transfer + primaries in-shader exactly once. `transform` carries the
+/// primaries matrix (+ parametric TRC for SDR); `transfer` selects the shader's
+/// EOTF; `full_range`/`yuv_matrix` describe the (value-preserved) YUV. HDR frames
+/// carry the metadata-resolved `hdr_peak`; SDR present at peak 1.0.
+pub fn video_color_info_planar(sc: &SourceColor, hdr_peak: f32) -> VideoColorInfo {
+    match sc.hdr {
+        Some(hdr) => VideoColorInfo {
+            // Primaries matrix (BT.2020→709) with a linear TRC — the shader inverts
+            // PQ/HLG itself, so the TRC here is unused; only the matrix matters.
+            transform: ColorTransform::from_cicp(sc.primaries, 8, 0, true),
+            cicp: Some((sc.primaries, sc.transfer, sc.matrix)),
+            full_range: sc.full_range,
+            yuv_matrix: yuv_matrix(sc.matrix),
+            transfer: match hdr {
+                Hdr::Pq => VideoTransfer::Pq,
+                Hdr::Hlg => VideoTransfer::Hlg,
+            },
+            peak: hdr_peak,
+        },
+        None => {
+            let transform = sdr_transform(sc);
+            // Non-sRGB SDR primaries (BT.2020/P3 SDR) → the parametric path (mode 1,
+            // primaries matrix applied); plain BT.709 SDR → sRGB-like (mode 0).
+            let transfer = if transform.enabled {
+                VideoTransfer::Parametric
+            } else {
+                VideoTransfer::SrgbLike
+            };
+            VideoColorInfo {
+                transform,
+                cicp: Some((sc.primaries, sc.transfer, sc.matrix)),
+                full_range: sc.full_range,
+                yuv_matrix: yuv_matrix(sc.matrix),
+                transfer,
+                peak: 1.0,
+            }
+        }
+    }
+}
+
 /// H.273 matrix_coefficients → the renderer's [`YuvMatrix`] vocabulary (used by
 /// the NV12 hardware path; recorded even on RGB output for diagnostics).
 pub fn yuv_matrix(matrix: u8) -> YuvMatrix {
@@ -193,6 +235,35 @@ pub unsafe fn set_scaler_colorspace(sws: *mut ffi::SwsContext, matrix: u8, full_
         1 << 16,
         1 << 16,
     );
+}
+
+/// Configure a swscale context for **planar YUV→YUV** output (NV12/P010, task #91
+/// Phase 2) so the pixel values are **preserved unchanged** — the renderer applies
+/// the matrix + range in-shader exactly once. Distinct from
+/// [`set_scaler_colorspace`] (which targets full-range RGB): here **src and dst
+/// use the same matrix coefficients and the same range**, so swscale does only the
+/// spatial scale + chroma repack and never a colorspace or range conversion. The
+/// emitted [`VideoColorInfo`] then describes these (destination == source) values.
+///
+/// # Safety
+/// `sws` must be a live `SwsContext` owned by the caller.
+pub unsafe fn set_planar_scaler_colorspace(
+    sws: *mut ffi::SwsContext,
+    matrix: u8,
+    full_range: bool,
+) {
+    if sws.is_null() {
+        return;
+    }
+    let cs = match matrix {
+        5 | 6 => ffi::SWS_CS_ITU601,
+        9 | 10 => ffi::SWS_CS_BT2020,
+        _ => ffi::SWS_CS_ITU709,
+    };
+    let coeffs = ffi::sws_getCoefficients(cs);
+    let range = i32::from(full_range);
+    // Same coefficients + range on both ends → value-preserving YUV→YUV.
+    let _ = ffi::sws_setColorspaceDetails(sws, coeffs, range, coeffs, range, 0, 1 << 16, 1 << 16);
 }
 
 // ── HDR transfer decode (plan §9, task #84 subtask 3) ────────────────────────
@@ -252,6 +323,85 @@ pub fn linear_primaries_matrix(primaries: u8) -> [[f32; 3]; 3] {
     ColorTransform::from_cicp(primaries, 8, 0, true).matrix
 }
 
+/// Default HDR mastering peak (nits) when the container carries no valid
+/// content-light / mastering-display metadata — task #91 Phase 2. 1000 nits is the
+/// common HDR10 grade (and the corpus's MaxCLL), a safe SDR tone-map white point.
+pub const DEFAULT_HDR_NITS: f64 = 1000.0;
+
+/// Resolve the HDR tone-map peak (scene-linear scRGB, 1.0 = 203 nits) from
+/// container metadata, with precedence, validity checks, and a stable default
+/// (task #91 Phase 2, replacing the R11 running-max pixel scan). **MaxCLL**
+/// (content-light) wins over **mastering-display max-luminance**; each is accepted
+/// only when finite and in a sane `[1, 10000]` nit range, else it falls through to
+/// [`DEFAULT_HDR_NITS`]. The result never drops below SDR white (1.0). Static
+/// metadata — it does not change across a session (no decay/reset on seek).
+pub fn resolve_hdr_peak(maxcll_nits: Option<u32>, mastering_nits: Option<f64>) -> f32 {
+    let valid = |n: f64| n.is_finite() && (1.0..=10_000.0).contains(&n);
+    let nits = maxcll_nits
+        .map(f64::from)
+        .filter(|&n| valid(n))
+        .or_else(|| mastering_nits.filter(|&n| valid(n)))
+        .unwrap_or(DEFAULT_HDR_NITS);
+    (nits as f32 / SDR_WHITE_NITS).max(1.0)
+}
+
+// FFmpeg's `AVContentLightMetadata` / `AVMasteringDisplayMetadata` structs aren't
+// in this build's bindgen allowlist, so we mirror their **stable public ABI**
+// (unchanged since FFmpeg 3.x) to read the side-data blob. `AVRational` is bound.
+#[repr(C)]
+struct ContentLightMetadata {
+    max_cll: std::os::raw::c_uint,
+    max_fall: std::os::raw::c_uint,
+}
+#[repr(C)]
+struct MasteringDisplayMetadata {
+    display_primaries: [[ffi::AVRational; 2]; 3],
+    white_point: [ffi::AVRational; 2],
+    min_luminance: ffi::AVRational,
+    max_luminance: ffi::AVRational,
+    has_primaries: std::os::raw::c_int,
+    has_luminance: std::os::raw::c_int,
+}
+
+/// The `(MaxCLL, mastering_max_luminance)` HDR metadata a video stream carries, in
+/// nits — read from codecpar's `coded_side_data` (FFmpeg 8 moved stream side data
+/// there; same walk as [`super::probe::rotation_degrees`]). Either is `None` when
+/// absent. Feed to [`resolve_hdr_peak`]. Static/container-level only (dynamic
+/// HDR10+/DoVi RPU is a non-goal).
+pub fn hdr_metadata_nits(stream: &ff::format::stream::Stream) -> (Option<u32>, Option<f64>) {
+    unsafe {
+        let par = (*stream.as_ptr()).codecpar;
+        if par.is_null() {
+            return (None, None);
+        }
+        let get = |kind| {
+            let sd = ffi::av_packet_side_data_get(
+                (*par).coded_side_data,
+                (*par).nb_coded_side_data,
+                kind,
+            );
+            if sd.is_null() || (*sd).data.is_null() {
+                None
+            } else {
+                Some((*sd).data)
+            }
+        };
+        let maxcll = get(ffi::AVPacketSideDataType::AV_PKT_DATA_CONTENT_LIGHT_LEVEL).map(|d| {
+            let m = &*(d as *const ContentLightMetadata);
+            m.max_cll
+        });
+        let mastering = get(ffi::AVPacketSideDataType::AV_PKT_DATA_MASTERING_DISPLAY_METADATA)
+            .and_then(|d| {
+                let m = &*(d as *const MasteringDisplayMetadata);
+                if m.has_luminance == 0 || m.max_luminance.den == 0 {
+                    return None;
+                }
+                Some(m.max_luminance.num as f64 / m.max_luminance.den as f64)
+            });
+        (maxcll, mastering)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,6 +416,24 @@ mod tests {
             w,
             h,
         )
+    }
+
+    #[test]
+    fn hdr_peak_precedence_validity_and_default() {
+        let w = SDR_WHITE_NITS;
+        // MaxCLL present + valid → wins over mastering.
+        assert!((resolve_hdr_peak(Some(4000), Some(1000.0)) - 4000.0 / w).abs() < 1e-3);
+        // MaxCLL absent → mastering-display max-luminance.
+        assert!((resolve_hdr_peak(None, Some(1000.0)) - 1000.0 / w).abs() < 1e-3);
+        // Neither → the 1000-nit default.
+        assert!((resolve_hdr_peak(None, None) - 1000.0 / w).abs() < 1e-3);
+        // Malformed MaxCLL (0 / absurd) falls through to mastering, then default.
+        assert!((resolve_hdr_peak(Some(0), Some(600.0)) - 600.0 / w).abs() < 1e-3);
+        assert!((resolve_hdr_peak(Some(99_999), None) - 1000.0 / w).abs() < 1e-3);
+        // Conflicting: invalid MaxCLL + invalid mastering → default.
+        assert!((resolve_hdr_peak(Some(0), Some(f64::NAN)) - 1000.0 / w).abs() < 1e-3);
+        // Never below SDR white.
+        assert!(resolve_hdr_peak(Some(50), None) >= 1.0);
     }
 
     #[test]

@@ -4055,6 +4055,7 @@ name = "pb-render"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "half",
  "objc2 0.6.4",
  "pollster",
  "wgpu",

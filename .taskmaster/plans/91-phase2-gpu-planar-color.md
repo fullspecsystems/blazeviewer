@@ -1,6 +1,17 @@
 # Task #91 Phase 2 — Planar GPU color path (P010/NV12 in-shader)
 
-> Status: **revised per Codex review (2026-07-14) — implementation-ready** · Owner: JD
+> Status: **IMPLEMENTED + measured (2026-07-14)** — landed on `main` across pb-decode /
+> pb-render / pb-app-core; awaiting owner end-to-end verification on a real HDR display. · Owner: JD
+>
+> **Measured win (0D A/B, `net_decode_throughput`, Dune 4K DoVi/HDR10+ TrueHD, release):**
+> the RGBA/fp16 CPU-convert path (pre-Phase-2, `pack_scrgb_f16` + R8 threads) ran **1.48× real-time
+> (35.5 fps)**; the planar **P010** GPU-color path runs **8.45× real-time (203 fps)** — **5.72×
+> faster**, clearing the ≥1.5× 4K30 gate by ~5.6×. The per-frame CPU color convert is gone from the
+> hot path. Colors verified against an independent from-spec golden. **Still to verify (owner):**
+> live playback timing / audio sync with the new first-frame negotiation, and the HDR look on a real
+> EDR panel. `PB_VIDEO_NO_PLANAR=1` reverts to the old path instantly.
+>
+> Prior status: **revised per Codex review (2026-07-14) — implementation-ready** · Owner: JD
 > Parent: the video playback overhaul (`.taskmaster/docs/video-playback-overhaul.md` §8), task #91.
 > Prereq: Phase 1 done; **0D proved the bottleneck** (below). v1 of this plan drew a full Codex
 > review; every P0/P1 finding is folded in and each source claim was re-verified against the tree

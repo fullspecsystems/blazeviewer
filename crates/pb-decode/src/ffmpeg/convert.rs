@@ -51,6 +51,17 @@ pub struct FrameConverter {
     dec_range: ff::color::Range,
     /// Resolved at the first frame (frame metadata wins over decoder's).
     resolved: Option<SourceColor>,
+    /// Whether to attempt the planar GPU color path (task #91 Phase 2). Gated
+    /// further per-frame on rotation == 0 and a 4:2:0 source; a 10-bit source also
+    /// needs `allow_p010`. When it doesn't apply, the RGBA8/fp16 path runs.
+    attempt_planar: bool,
+    /// Whether the renderer can display P010 (10-bit). `false` → 10-bit sources
+    /// take the RGBA/fp16 fallback even when `attempt_planar`.
+    allow_p010: bool,
+    /// The negotiated output format, decided once on the first frame from the
+    /// actual (post-HW-transfer) pixel format (Codex P0). `None` until then; then
+    /// one of `Nv12` / `P010` (planar path) or `Rgba8` / `Rgba16F` (fallback).
+    planar_out: Option<PixelFormat>,
     scaler: Option<(ff::format::Pixel, Scaler)>,
     /// HDR: encoded-u16 → scene-linear LUT (256 KiB, built once per clip).
     hdr_lut: Option<Box<[f32]>>,
@@ -68,6 +79,8 @@ impl FrameConverter {
         out: (u32, u32),
         rotation: i32,
         decoder: &ff::decoder::Video,
+        attempt_planar: bool,
+        allow_p010: bool,
     ) -> Self {
         let dec_sc = color::resolve(
             decoder.color_primaries(),
@@ -89,6 +102,12 @@ impl FrameConverter {
             dec_space: decoder.color_space(),
             dec_range: decoder.color_range(),
             resolved: None,
+            // Planar is only ever eligible for upright clips in v1 (rotation is
+            // baked into the RGBA path via rotate_*; planar rotation-in-geometry is
+            // the documented follow-on). Rotated clips keep the parallel RGBA path.
+            attempt_planar: attempt_planar && rotation % 360 == 0,
+            allow_p010,
+            planar_out: None,
             scaler: None,
             hdr_lut: None,
             hdr_matrix: color::linear_primaries_matrix(dec_sc.primaries),
@@ -105,9 +124,17 @@ impl FrameConverter {
         }
     }
 
-    /// What [`convert`](Self::convert) emits: fp16 scene-linear for HDR
-    /// sources, RGBA8 otherwise. Fixed for the clip.
+    /// What [`convert`](Self::convert) emits — the negotiated format. Before the
+    /// first frame it is the *default* (fp16 for HDR, RGBA8 for SDR), used only by
+    /// callers that don't prime; after the first frame it is the resolved format
+    /// (planar `Nv12`/`P010` when eligible, else the RGBA default). Fixed for the
+    /// clip once resolved (Codex P0: negotiated from the actual decoded frame).
     pub fn output_format(&self) -> PixelFormat {
+        self.planar_out.unwrap_or_else(|| self.rgba_default())
+    }
+
+    /// The non-planar fallback format for this clip's HDR-ness.
+    fn rgba_default(&self) -> PixelFormat {
         if self.hdr.is_some() {
             PixelFormat::Rgba16F
         } else {
@@ -145,15 +172,28 @@ impl FrameConverter {
             return Err("video changed size mid-stream".into());
         }
         let fmt = frame.format();
-        let dst_fmt = if self.hdr.is_some() {
+        // Negotiate the output format once, from the ACTUAL decoded pixel format
+        // (Codex P0 — it isn't reliably known at open, esp. after HW transfer).
+        if self.planar_out.is_none() {
+            self.planar_out = Some(self.negotiate_format(fmt));
+        }
+        let out_fmt = self.planar_out.expect("negotiated above");
+        let planar_ten = match out_fmt {
+            PixelFormat::Nv12 => Some(false),
+            PixelFormat::P010 => Some(true),
+            _ => None,
+        };
+        let dst_fmt = match out_fmt {
+            PixelFormat::Nv12 => ff::format::Pixel::NV12,
+            PixelFormat::P010 => ff::format::Pixel::P010LE,
             // 16-bit RGB keeps the HDR code values intact for the LUT pass
             // (swscale applies matrix + range only, never the transfer).
-            ff::format::Pixel::RGBA64LE
-        } else {
-            ff::format::Pixel::RGBA
+            PixelFormat::Rgba16F => ff::format::Pixel::RGBA64LE,
+            PixelFormat::Rgba8 => ff::format::Pixel::RGBA,
         };
+        let planar = planar_ten.is_some();
         // (Re)create the scaler when the source pixel format materializes or
-        // changes mid-stream (output geometry never moves).
+        // changes mid-stream (output geometry / negotiated format never move).
         if self.scaler.as_ref().map(|(f, _)| *f) != Some(fmt) {
             let scaler = Scaler::get(
                 fmt,
@@ -168,11 +208,7 @@ impl FrameConverter {
             self.scaler = Some((fmt, scaler));
             // A recreated scaler needs the colorspace details re-asserted.
             if let Some(sc) = self.resolved {
-                if let Some((_, s)) = self.scaler.as_mut() {
-                    unsafe {
-                        color::set_scaler_colorspace(s.as_mut_ptr(), sc.matrix, sc.full_range);
-                    }
-                }
+                self.apply_scaler_colorspace(sc, planar);
             }
         }
         // First frame: resolve color, frame metadata over decoder's (plan §9
@@ -195,11 +231,7 @@ impl FrameConverter {
             let sc = color::resolve(
                 pick_prim, pick_trc, pick_space, pick_range, self.src_w, self.src_h,
             );
-            if let Some((_, scaler)) = self.scaler.as_mut() {
-                unsafe {
-                    color::set_scaler_colorspace(scaler.as_mut_ptr(), sc.matrix, sc.full_range);
-                }
-            }
+            self.apply_scaler_colorspace(sc, planar);
             self.hdr_matrix = color::linear_primaries_matrix(sc.primaries);
             self.resolved = Some(sc);
         }
@@ -208,6 +240,13 @@ impl FrameConverter {
         scaler
             .run(frame, &mut out_frame)
             .map_err(|e| format!("FFmpeg scale: {e}"))?;
+        // Planar (the task #91 Phase 2 fast path): tight-pack Y + interleaved UV
+        // and hand off raw — the GPU does YUV + range + transfer + primaries. No
+        // CPU color pass (R6), no per-frame thread fan-out (R8), no rotate (the
+        // path is gated on rotation == 0).
+        if let Some(ten) = planar_ten {
+            return Ok((tight_planar(&out_frame, ten), self.out_w, self.out_h));
+        }
         match self.hdr {
             None => {
                 let rgba = tight_rgba(&out_frame);
@@ -218,6 +257,37 @@ impl FrameConverter {
                 let f16 = self.pack_scrgb_f16(&out_frame, curve);
                 let (f16, fw, fh) = rotate_bytes(f16, self.out_w, self.out_h, self.rotation, 8);
                 Ok((f16, fw, fh))
+            }
+        }
+    }
+
+    /// Decide the output format for this clip from the first frame's actual pixel
+    /// format (task #91 Phase 2). Planar (NV12 8-bit / P010 10-bit) for an
+    /// eligible 4:2:0 source when [`attempt_planar`](Self::attempt_planar) and (for
+    /// 10-bit) [`allow_p010`](Self::allow_p010); otherwise the RGBA/fp16 fallback.
+    /// 12-bit and non-4:2:0 (4:2:2 / 4:4:4 / alpha) sources fall back to preserve
+    /// precision/chroma.
+    fn negotiate_format(&self, fmt: ff::format::Pixel) -> PixelFormat {
+        if self.attempt_planar {
+            match planar_kind(fmt) {
+                Some(false) => return PixelFormat::Nv12,
+                Some(true) if self.allow_p010 => return PixelFormat::P010,
+                _ => {}
+            }
+        }
+        self.rgba_default()
+    }
+
+    /// Teach the scaler the source matrix + range: value-preserving YUV→YUV for
+    /// the planar path (the renderer converts), or YUV→full-range-RGB otherwise.
+    fn apply_scaler_colorspace(&mut self, sc: SourceColor, planar: bool) {
+        if let Some((_, s)) = self.scaler.as_mut() {
+            unsafe {
+                if planar {
+                    color::set_planar_scaler_colorspace(s.as_mut_ptr(), sc.matrix, sc.full_range);
+                } else {
+                    color::set_scaler_colorspace(s.as_mut_ptr(), sc.matrix, sc.full_range);
+                }
             }
         }
     }
@@ -317,6 +387,46 @@ fn non_unspec<T: Copy>(frame_v: T, dec_v: T, is_unspec: impl Fn(T) -> bool) -> T
     } else {
         frame_v
     }
+}
+
+/// The planar-video eligibility of a decoded pixel format: `Some(ten_bit)` for a
+/// 4:2:0 8-bit (`false`) or 10-bit (`true`) source, `None` otherwise (4:2:2 /
+/// 4:4:4 / alpha / 12-bit — those take the RGBA/fp16 fallback so no chroma or
+/// precision is lost). Covers the real HW-transfer and software-decode outputs.
+fn planar_kind(fmt: ff::format::Pixel) -> Option<bool> {
+    use ff::format::Pixel::*;
+    // NB: the glob brings `Pixel::None` into scope — qualify `Option::None`.
+    match fmt {
+        YUV420P | YUVJ420P | NV12 | NV21 => Some(false),
+        YUV420P10LE | P010LE => Some(true),
+        _ => Option::None,
+    }
+}
+
+/// Copy an `ff` planar 4:2:0 frame (NV12 8-bit / P010 16-bit) out as the tight
+/// `[Y plane][interleaved UV plane]` layout the renderer's planar path expects,
+/// honoring each plane's row stride (swscale pads rows). `ten` selects 2 bytes
+/// per sample (P010) vs 1 (NV12). The chroma plane is half-height, full-width
+/// (interleaved U,V), matching [`PixelFormat::frame_bytes`].
+fn tight_planar(frame: &ff::frame::Video, ten: bool) -> Vec<u8> {
+    let (w, h) = (frame.width() as usize, frame.height() as usize);
+    let bps = if ten { 2 } else { 1 };
+    let y_row = w * bps;
+    let uv_row = w * bps; // ⌊w/2⌋ UV pairs × 2 samples × bps = w·bps
+    let uv_h = h / 2;
+    let (y_stride, uv_stride) = (frame.stride(0), frame.stride(1));
+    let (y_data, uv_data) = (frame.data(0), frame.data(1));
+    let mut out = vec![0u8; y_row * h + uv_row * uv_h];
+    for r in 0..h {
+        out[r * y_row..(r + 1) * y_row]
+            .copy_from_slice(&y_data[r * y_stride..r * y_stride + y_row]);
+    }
+    let base = y_row * h;
+    for r in 0..uv_h {
+        let d = base + r * uv_row;
+        out[d..d + uv_row].copy_from_slice(&uv_data[r * uv_stride..r * uv_stride + uv_row]);
+    }
+    out
 }
 
 /// Copy an `ff` RGBA frame out as tightly-packed straight-alpha RGBA8, honoring

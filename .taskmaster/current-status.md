@@ -56,13 +56,24 @@ backends — the FFmpeg backend already shipped). Session findings/gotchas: auto
   `net_decode_throughput`/`net_audio_throughput` harnesses. **Full 1F deshelved** (no gain above
   ~44 Mbps; 1G bounded-retry covers below). The real margin win is Phase 2 (GPU convert).
 
+- **Phase 2 — GPU P010/NV12 + PQ/HLG shader — LANDED + measured** (plan
+  `.taskmaster/plans/91-phase2-gpu-planar-color.md`, Codex-reviewed). The FFmpeg producer negotiates
+  the output format on the first frame and emits planar **NV12 (SDR) / P010 (10-bit + HDR)** for
+  eligible clips; the GPU does YUV + range + PQ/HLG transfer + BT.2020→709 primaries in
+  `fs_scene_planar` (goldens vs an independent from-spec reference). The per-frame CPU convert (R6)
+  and its R8 thread fan-out are off the fast path; the parallel RGBA/fp16 path stays as the fallback
+  for rotated/anamorphic/4:4:4/no-16bit-norm clips. HDR peak is metadata-driven (R11 running-max
+  retired). **Measured 0D A/B (Dune 4K DoVi/HDR10+): 1.48× → 8.45× real-time (35.5 → 203 fps),
+  5.72× faster.** `PB_VIDEO_NO_PLANAR=1` = escape hatch. ⚠ **Owner still to verify** live playback
+  timing / audio sync (first-frame negotiation) + the HDR look on a real EDR panel.
+
 ## Next (in order)
 
-1. **Phase 2 — GPU P010/NV12 + PQ/HLG shader** (THE margin win per 0D): move the per-frame CPU HDR
-   convert (R6) off the critical path + retire the R8 parallel stopgap → 4K HDR decode climbs past
-   the current ~1.19× real-time. Cross-platform + the macOS Apple-can't-decode fallback.
-2. **Phase 3 — Apple `AVSampleBuffer` presenter**: FFmpeg-demux → system decode/HDR/**correct
+1. **Phase 3 — Apple `AVSampleBuffer` presenter**: FFmpeg-demux → system decode/HDR/**correct
    DoVi**/one clock; also delivers #5 zoom/pan via layer transform. The macOS end-state.
+2. **Phase 2 follow-ons** (deferred, plan §Non-goals): planar **rotation in geometry/UV** (portrait
+   phone video currently takes the parallel RGBA fallback), a bounded planar-`Vec` pool + two-plane
+   single-submit upload (true zero-alloc steady state), and MF P010 on Windows.
 3. **1F full packet-source rework — DESHELVED** (0D: decode-bound, not network-bound). Only revisit if
    a genuinely constrained network (<~44 Mbps) proves the 1G bounded-retry degrades badly. The
    optional throttled stress trace to check that needs `dnctl`/`pfctl` (sudo).

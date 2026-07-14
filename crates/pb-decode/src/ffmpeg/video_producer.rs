@@ -72,6 +72,7 @@ const MAX_BAD_PACKETS: usize = 512;
 /// ends and the session stops it, the session is dropped, or decoding fails.
 /// The FFmpeg mirror of `run_video_producer` (Windows MF) behind the same
 /// protocol; `input` is a filesystem path or an archive entry's in-RAM bytes.
+#[allow(clippy::too_many_arguments)]
 pub fn run_ff_video_producer(
     input: &VideoInput,
     fit: Option<FitBox>,
@@ -80,6 +81,7 @@ pub fn run_ff_video_producer(
     events: Sender<VideoProducerEvent>,
     msgs: Receiver<VideoProducerMsg>,
     cancel: Arc<AtomicBool>,
+    options: crate::VideoProducerOptions,
 ) {
     let fail = |error: String| {
         let _ = events.send(VideoProducerEvent::Failed { session_id, error });
@@ -87,10 +89,31 @@ pub fn run_ff_video_producer(
     // The session sets `cancel` on stop/teardown; the interrupt callback then
     // aborts a blocking read *inside* libav (plan 1F) — so a stuck network read
     // retires this thread promptly instead of lingering on the per-op watchdog.
-    let mut reader = match Reader::open(input, fit, cancel) {
+    let mut reader = match Reader::open(input, fit, cancel, options) {
         Ok(r) => r,
         Err(e) => return fail(e),
     };
+    // Negotiate the output format (task #91 Phase 2, Codex P0): the planar-vs-RGBA
+    // decision needs the ACTUAL first decoded frame (pixel format after HW
+    // transfer), so — only when the planar path is even a candidate — decode +
+    // convert the first frame now, retain it, and publish it on the first credit.
+    // When planar is off, `output_format` is known at open (RGBA/fp16), so this is
+    // skipped and `Opened` fires immediately, exactly as before (no added latency).
+    let mut pending_first: Option<(i64, Vec<u8>)> = None;
+    let mut primed_empty = false;
+    if options.planar {
+        match reader.next_frame() {
+            Ok(Some((ts, px))) => {
+                reader.origin.get_or_insert(ts);
+                pending_first = Some((ts, px));
+            }
+            Ok(None) => {
+                reader.parked = true;
+                primed_empty = true;
+            }
+            Err(e) => return fail(e),
+        }
+    }
     let (out_w, out_h) = reader.conv.display_dims();
     if diag() {
         let fit_desc = match fit {
@@ -120,10 +143,19 @@ pub fn run_ff_video_producer(
         // shell audio player for real tracks; a shell with no sink reports a
         // Failed clock immediately and playback degrades to silent.
         has_audio: reader.facts.has_audio,
-        // Format-aware (task 79.10): an fp16 HDR clip charges 8 bytes/px, so
-        // the session's byte budget isn't under-credited 2× on PQ/HLG sources.
+        // Format-aware (task 79.10 / #91): an fp16 HDR clip charges 8 bytes/px, a
+        // P010 clip 3 bytes/px — the negotiated (post-prime) format, so the
+        // session's byte budget matches the frames it will receive.
         frame_bytes: reader.conv.output_format().frame_bytes(out_w, out_h) as u64,
     });
+    if primed_empty {
+        // The negotiation prime hit end-of-stream before any frame: report it now
+        // (after Opened) so the session leaves the opening state cleanly.
+        let _ = events.send(VideoProducerEvent::EndOfStream {
+            session_id,
+            seek_generation: generation,
+        });
+    }
 
     // The credit/command/seek loop — the same shape as the MF producer (the
     // protocol tests hold both to it). Blocking recv IS the select.
@@ -161,6 +193,8 @@ pub fn run_ff_video_producer(
         // superseded landing never publishes a frame.
         if let Some((target, g)) = pending.take() {
             gen = g;
+            // A seek supersedes the negotiation-primed first frame — never flash it.
+            pending_first = None;
             let seek_t0 = Instant::now();
             let target_units = reader.target_units(target);
             // Short forward hop → decode forward from here (no keyframe seek/flush,
@@ -266,6 +300,16 @@ pub fn run_ff_video_producer(
 
         // 3. Spend one credit on the next sequential frame.
         if credits > 0 {
+            // The negotiation-primed first frame (task #91 Phase 2) is published
+            // on the first credit, ahead of any fresh decode.
+            if let Some((ts, px)) = pending_first.take() {
+                let frame = reader.make_frame(session_id, gen, ts, px);
+                if events.send(VideoProducerEvent::Frame(frame)).is_err() {
+                    break 'outer;
+                }
+                credits -= 1;
+                continue;
+            }
             if reader.parked {
                 // Parked after EOS: these credits are stale — a seek resets.
                 credits = 0;
@@ -307,6 +351,9 @@ struct Reader {
     facts: VideoFacts,
     decoder: ff::decoder::Video,
     conv: FrameConverter,
+    /// HDR tone-map peak (scene-linear scRGB) from container metadata, resolved
+    /// once at open (task #91 Phase 2 §2D). `≥ 1.0`; drives HDR frames' `peak`.
+    hdr_peak: f32,
     packet: ff::Packet,
     /// `send_eof` delivered — the decoder is draining its B-frame tail.
     eof_sent: bool,
@@ -330,6 +377,7 @@ impl Reader {
         input: &VideoInput,
         fit: Option<FitBox>,
         cancel: Arc<AtomicBool>,
+        options: crate::VideoProducerOptions,
     ) -> Result<Reader, String> {
         let mut opened = FfInput::open(input, None)?;
         // Arm the interrupt cancel flag (plan 1F): the session flips this shared
@@ -393,12 +441,28 @@ impl Reader {
             pre_rot,
             facts.rotation,
             &decoder,
+            options.planar,
+            options.supports_p010,
         );
+        // HDR tone-map peak from container metadata (task #91 Phase 2 §2D): the
+        // MaxCLL / mastering-display max-luminance, resolved once at open — this
+        // replaces the per-frame running-max pixel scan (R11) that lived in the CPU
+        // convert. Static per clip; harmless for SDR (SDR frames present at peak 1).
+        let hdr_peak = {
+            let (cll, mastering) = opened
+                .ctx()
+                .streams()
+                .find(|s| s.index() == facts.index)
+                .map(|s| super::color::hdr_metadata_nits(&s))
+                .unwrap_or((None, None));
+            super::color::resolve_hdr_peak(cll, mastering)
+        };
         Ok(Reader {
             input: opened,
             facts,
             decoder,
             conv,
+            hdr_peak,
             packet: ff::Packet::empty(),
             eof_sent: false,
             parked: false,
@@ -584,6 +648,11 @@ impl Reader {
         let (w, h) = self.conv.display_dims();
         let format = self.conv.output_format();
         let color = match format {
+            // Planar NV12/P010 (task #91 Phase 2): pixels are raw YUV — the renderer
+            // applies matrix + range + transfer + primaries in-shader exactly once.
+            PixelFormat::Nv12 | PixelFormat::P010 => {
+                super::color::video_color_info_planar(&self.conv.source_color(), self.hdr_peak)
+            }
             // fp16 scene-linear scRGB (plan §9): the transform is passthrough
             // (linearization + primaries already applied); `peak` rides the
             // running max so SDR presentation tone-maps like HDR stills do.
@@ -596,7 +665,9 @@ impl Reader {
                     yuv_matrix: super::color::yuv_matrix(sc.matrix),
                     // fp16 path: pixels are already scene-linear scRGB; transfer inert.
                     transfer: crate::VideoTransfer::SrgbLike,
-                    peak: self.conv.peak(),
+                    // Metadata-driven peak (task #91 Phase 2 §2D) — no longer the
+                    // per-frame running-max (`conv.peak()`, R11).
+                    peak: self.hdr_peak,
                 }
             }
             _ => self
@@ -640,38 +711,41 @@ mod tests {
     }
 
     fn spawn_input(input: VideoInput) -> (Sender<VideoProducerMsg>, Receiver<VideoProducerEvent>) {
+        spawn_input_opts(input, crate::VideoProducerOptions::default())
+    }
+
+    fn spawn_input_opts(
+        input: VideoInput,
+        options: crate::VideoProducerOptions,
+    ) -> (Sender<VideoProducerMsg>, Receiver<VideoProducerEvent>) {
         let (events_tx, events_rx) = channel();
         let (msgs_tx, msgs_rx) = channel();
         let cancel = Arc::new(AtomicBool::new(false));
         std::thread::spawn(move || {
-            run_ff_video_producer(&input, None, SID, GEN, events_tx, msgs_rx, cancel);
+            run_ff_video_producer(&input, None, SID, GEN, events_tx, msgs_rx, cancel, options);
         });
         (msgs_tx, events_rx)
     }
 
-    /// 0D headless margin trace (plan §6.0D): how much faster than real-time the
-    /// 4K video producer decodes off a (network) share — the starvation headroom.
-    /// Grants a small credit pipeline, drains frames to ~30 s of media, and reports
-    /// the speed-up (`media_secs / wall_secs`). >~1.5× = comfortable headroom (no
-    /// starvation on this network); ~1× or a stall = the constrained regime 1F is
-    /// for. Point `PB_NET_TEST_MKV` at a large clip; run:
-    /// `PB_NET_TEST_MKV=/path cargo test -p pb-decode --features ffvideo \
-    ///   net_decode_throughput -- --nocapture --ignored`
-    #[test]
-    #[ignore = "needs PB_NET_TEST_MKV pointing at a large (network) container"]
-    fn net_decode_throughput() {
-        let Ok(path) = std::env::var("PB_NET_TEST_MKV") else {
-            eprintln!("skipping: set PB_NET_TEST_MKV to a large (network) container");
-            return;
-        };
+    /// Drain frames to ~30 s of media at the given producer options and report
+    /// `media/wall` (real-time multiple) + fps. The 0D margin metric (task #91:
+    /// >~1.5× = comfortable headroom). Returns `(real_time_multiple, first_format)`.
+    fn throughput_trace(
+        input: VideoInput,
+        options: crate::VideoProducerOptions,
+        label: &str,
+    ) -> (f64, Option<PixelFormat>) {
         let t_open = Instant::now();
-        let (msgs, events) = spawn(std::path::PathBuf::from(path));
+        let (msgs, events) = spawn_input_opts(input, options);
         match events
             .recv_timeout(Duration::from_secs(20))
             .expect("opened")
         {
             VideoProducerEvent::Opened { width, height, .. } => {
-                eprintln!("[0d] open+probe {:?} — {width}x{height}", t_open.elapsed());
+                eprintln!(
+                    "[0d {label}] open+probe {:?} — {width}x{height}",
+                    t_open.elapsed()
+                );
             }
             other => panic!("expected Opened, got {other:?}"),
         }
@@ -681,13 +755,13 @@ mod tests {
             msgs.send(VideoProducerMsg::Credit).unwrap();
         }
         let t = Instant::now();
-        let mut frames = 0u64;
-        let mut last_pts = Duration::ZERO;
+        let (mut frames, mut last_pts, mut fmt) = (0u64, Duration::ZERO, None);
         loop {
             match events.recv_timeout(Duration::from_secs(20)) {
                 Ok(VideoProducerEvent::Frame(f)) => {
                     frames += 1;
                     last_pts = f.pts;
+                    fmt.get_or_insert(f.format);
                     let _ = msgs.send(VideoProducerMsg::Credit); // refill the ring
                     if f.pts >= TARGET {
                         break;
@@ -696,19 +770,44 @@ mod tests {
                 Ok(VideoProducerEvent::EndOfStream { .. }) => break,
                 Ok(_) => {}
                 Err(_) => {
-                    eprintln!("[0d] video decode STALLED after {frames} frames / {last_pts:?}");
+                    eprintln!("[0d {label}] STALLED after {frames} frames / {last_pts:?}");
                     break;
                 }
             }
         }
         let wall = t.elapsed().as_secs_f64();
         let media = last_pts.as_secs_f64();
-        let fps = frames as f64 / wall.max(1e-6);
+        let rt = media / wall.max(1e-6);
         eprintln!(
-            "[0d] video: {frames} frames = {media:.1}s media in {wall:.2}s wall → {:.2}x real-time, {fps:.1} fps decode",
-            media / wall.max(1e-6)
+            "[0d {label}] {frames} frames = {media:.1}s media in {wall:.2}s wall → {rt:.2}x real-time, {:.1} fps ({:?})",
+            frames as f64 / wall.max(1e-6),
+            fmt,
         );
         let _ = msgs.send(VideoProducerMsg::Stop);
+        (rt, fmt)
+    }
+
+    /// 0D headless margin trace (plan §6.0D / task #91 Phase 2), **A/B**: the
+    /// RGBA/fp16 fallback (pre-Phase-2, CPU convert + R8 threads) vs the planar GPU
+    /// color path (P010/NV12, the CPU convert removed). Prints both real-time
+    /// multiples so the Phase-2 decode-headroom win is directly visible. Point
+    /// `PB_NET_TEST_MKV` at a large clip; run:
+    /// `PB_NET_TEST_MKV=/path cargo test -p pb-decode --features ffvideo \
+    ///   net_decode_throughput -- --nocapture --ignored`
+    #[test]
+    #[ignore = "needs PB_NET_TEST_MKV pointing at a large (network) container"]
+    fn net_decode_throughput() {
+        let Ok(path) = std::env::var("PB_NET_TEST_MKV") else {
+            eprintln!("skipping: set PB_NET_TEST_MKV to a large (network) container");
+            return;
+        };
+        let mk = || VideoInput::Path(std::path::PathBuf::from(&path));
+        let (baseline, _) = throughput_trace(mk(), opts(false, false), "RGBA/fp16");
+        let (planar, fmt) = throughput_trace(mk(), opts(true, true), "planar");
+        eprintln!(
+            "[0d] Phase-2 win: {baseline:.2}x → {planar:.2}x real-time ({:.2}× faster) on {fmt:?}",
+            planar / baseline.max(1e-6)
+        );
     }
 
     /// The MF producer's flagship protocol test, ported verbatim: Opened facts,
@@ -966,6 +1065,106 @@ mod tests {
             }
             other => panic!("expected a frame, got {other:?}"),
         }
+    }
+
+    fn opts(planar: bool, p010: bool) -> crate::VideoProducerOptions {
+        crate::VideoProducerOptions {
+            planar,
+            supports_p010: p010,
+        }
+    }
+
+    fn spawn_planar(
+        name: &str,
+        planar: bool,
+        p010: bool,
+    ) -> (Sender<VideoProducerMsg>, Receiver<VideoProducerEvent>) {
+        spawn_input_opts(VideoInput::Path(fixture(name)), opts(planar, p010))
+    }
+
+    /// Drain `Opened`, request one credit, return the first `Frame`.
+    fn first_frame(
+        msgs: &Sender<VideoProducerMsg>,
+        events: &Receiver<VideoProducerEvent>,
+    ) -> VideoFrame {
+        loop {
+            match events.recv_timeout(Duration::from_secs(10)).expect("event") {
+                VideoProducerEvent::Opened { .. } => msgs.send(VideoProducerMsg::Credit).unwrap(),
+                VideoProducerEvent::Frame(f) => return f,
+                other => panic!("expected Opened/Frame, got {other:?}"),
+            }
+        }
+    }
+
+    /// Task #91 Phase 2: with the planar path on and P010 supported, an HDR PQ
+    /// clip negotiates to **P010** frames (3 bytes/px) carrying the PQ transfer
+    /// and a real peak — the raw YUV the GPU shader converts, not a CPU fp16 pack.
+    #[test]
+    fn planar_hdr_clip_emits_p010_pq() {
+        let (msgs, events) = spawn_planar("hdr_pq.mp4", true, true);
+        // Opened must already carry the negotiated P010 budget (3 bytes/px).
+        match events
+            .recv_timeout(Duration::from_secs(10))
+            .expect("opened")
+        {
+            VideoProducerEvent::Opened { frame_bytes, .. } => {
+                assert_eq!(frame_bytes, 64 * 64 * 3, "P010 charges 3 bytes/px");
+            }
+            other => panic!("expected Opened, got {other:?}"),
+        }
+        msgs.send(VideoProducerMsg::Credit).unwrap();
+        match events.recv_timeout(Duration::from_secs(10)).expect("frame") {
+            VideoProducerEvent::Frame(f) => {
+                assert_eq!(f.format, PixelFormat::P010);
+                assert!(f.is_well_formed(), "P010 geometry/buffer contract");
+                assert_eq!(f.color.transfer, crate::VideoTransfer::Pq);
+                assert!(f.color.peak >= 1.0, "HDR peak {}", f.color.peak);
+                assert_eq!(f.color.cicp, Some((9, 16, 9)), "BT.2020 PQ kept");
+            }
+            other => panic!("expected a frame, got {other:?}"),
+        }
+    }
+
+    /// An HDR clip on an adapter WITHOUT 16-bit-norm falls back to the fp16 RGBA
+    /// path (no P010) — the capability gate (Codex Q3).
+    #[test]
+    fn planar_hdr_falls_back_to_fp16_without_p010_support() {
+        let (msgs, events) = spawn_planar("hdr_pq.mp4", true, false);
+        let f = first_frame(&msgs, &events);
+        assert_eq!(f.format, PixelFormat::Rgba16F, "no P010 support → fp16");
+    }
+
+    /// An SDR clip with the planar path on negotiates to **NV12** (raw 8-bit YUV).
+    #[test]
+    fn planar_sdr_clip_emits_nv12() {
+        let (msgs, events) = spawn_planar("black_then_color.mp4", true, true);
+        let f = first_frame(&msgs, &events);
+        assert_eq!(f.format, PixelFormat::Nv12);
+        assert!(f.is_well_formed());
+        assert!(!f.color.transfer.is_hdr(), "SDR transfer");
+    }
+
+    /// A rotated clip keeps the RGBA (parallel-convert) path — planar rotation is
+    /// handled in geometry as a follow-on; v1 gates it out (Codex P1: the
+    /// performant fallback stays, never demoted to serial).
+    #[test]
+    fn planar_rotated_clip_falls_back_to_rgba() {
+        let (msgs, events) = spawn_planar("rotated90.mp4", true, true);
+        let f = first_frame(&msgs, &events);
+        assert!(
+            !f.format.is_planar_video(),
+            "rotated clip must not take the planar path, got {:?}",
+            f.format
+        );
+    }
+
+    /// Planar OFF (the default / `PB_VIDEO_NO_PLANAR`) preserves the pre-Phase-2
+    /// behavior: the HDR clip still emits fp16, and `Opened` fires without priming.
+    #[test]
+    fn planar_off_emits_rgba_as_before() {
+        let (msgs, events) = spawn_planar("hdr_pq.mp4", false, true);
+        let f = first_frame(&msgs, &events);
+        assert_eq!(f.format, PixelFormat::Rgba16F);
     }
 
     #[test]

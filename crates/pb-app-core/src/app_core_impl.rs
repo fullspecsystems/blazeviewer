@@ -6969,6 +6969,11 @@ impl AppCore {
             let id = crate::video::VideoSessionId(self.video_seq);
             let (session, io) = crate::video_session::VideoSession::new(id, frame_bytes);
             let generation = crate::video::SeekGeneration::FIRST;
+            // Planar GPU color path (task #91 Phase 2): the producer emits NV12/P010
+            // for eligible clips when the renderer supports it and the escape hatch
+            // isn't set. Captured here (off the producer thread) from the renderer's
+            // real device capability.
+            let planar_opts = self.planar_video_options();
             // The media slot `poll_video`'s audio start reads; the producer thread
             // shares the same Arc, so both pipelines read ONE copy of the container.
             let media: std::sync::Arc<std::sync::OnceLock<crate::video::VideoInput>> =
@@ -6978,7 +6983,14 @@ impl AppCore {
                 let _ = media.set(input.clone());
                 std::thread::spawn(move || {
                     run_platform_video_producer(
-                        &input, fit, id, generation, io.events, io.msgs, io.cancel,
+                        &input,
+                        fit,
+                        id,
+                        generation,
+                        io.events,
+                        io.msgs,
+                        io.cancel,
+                        planar_opts,
                     );
                 });
             } else {
@@ -7005,7 +7017,14 @@ impl AppCore {
                     let input = crate::video::VideoInput::Bytes { data, name };
                     let _ = media_slot.set(input.clone());
                     run_platform_video_producer(
-                        &input, fit, id, generation, io.events, io.msgs, io.cancel,
+                        &input,
+                        fit,
+                        id,
+                        generation,
+                        io.events,
+                        io.msgs,
+                        io.cancel,
+                        planar_opts,
                     );
                 });
             }
@@ -7579,6 +7598,20 @@ impl AppCore {
         }
     }
 
+    /// The planar-video producer options for a new session (task #91 Phase 2):
+    /// attempt the planar GPU color path unless `PB_VIDEO_NO_PLANAR` disables it
+    /// (the A/B lever / safety hatch), reporting the renderer's real P010
+    /// capability so 10-bit sources fall back to RGBA/fp16 on adapters without
+    /// `TEXTURE_FORMAT_16BIT_NORM`. No renderer (headless) → no planar path.
+    fn planar_video_options(&self) -> pb_decode::VideoProducerOptions {
+        let planar = std::env::var_os("PB_VIDEO_NO_PLANAR").is_none() && self.renderer.is_some();
+        let supports_p010 = self.renderer.as_ref().is_some_and(|r| r.supports_p010());
+        pb_decode::VideoProducerOptions {
+            planar,
+            supports_p010,
+        }
+    }
+
     /// Upload one decoded video frame through the reusable present path,
     /// dispatching on its pixel format (task 79.10): RGBA8 rides `set_image`
     /// exactly as before; NV12 splits its planes and goes through the renderer's
@@ -7593,27 +7626,32 @@ impl AppCore {
             let Some(a) = self.renderer.as_mut() else {
                 return;
             };
-            match frame.format {
-                pb_decode::PixelFormat::Nv12 => {
-                    let y_len = frame.width as usize * frame.height as usize;
-                    let (y, uv) = frame.pixels.split_at(y_len);
-                    a.set_video_nv12(
+            if frame.format.is_planar_video() {
+                // NV12 / P010 (task 79.10 / #91 Phase 2): split at the checked Y-plane
+                // span (never a raw `split_at`, which would panic on a short buffer —
+                // though `VideoSession` already rejects malformed frames) and hand the
+                // two planes to the in-shader planar path.
+                if let Some((y_len, _uv_off, _uv_len)) =
+                    frame.format.planar_plane_spans(frame.width, frame.height)
+                {
+                    let (y, uv) = frame.pixels.split_at(y_len.min(frame.pixels.len()));
+                    a.set_video_planar(
                         y,
                         uv,
                         frame.width,
                         frame.height,
-                        render_yuv(&frame.color),
-                        render_color(&frame.color.transform),
+                        crate::engine::render_planar_present(frame.format, &frame.color),
                     );
                 }
-                format => a.set_image(
+            } else {
+                a.set_image(
                     &frame.pixels,
                     frame.width,
                     frame.height,
                     render_color(&frame.color.transform),
-                    format == pb_decode::PixelFormat::Rgba16F,
+                    frame.format == pb_decode::PixelFormat::Rgba16F,
                     frame.color.peak,
-                ),
+                );
             }
         }
         // Each presented frame re-resolves the video item at the current epoch, so a
@@ -8516,18 +8554,20 @@ fn run_platform_video_producer(
     events: std::sync::mpsc::Sender<crate::video::VideoProducerEvent>,
     msgs: std::sync::mpsc::Receiver<crate::video::VideoProducerMsg>,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    options: pb_decode::VideoProducerOptions,
 ) {
     // The FFmpeg reader honors `cancel` via its interrupt callback (plan 1F). The
     // Windows MF reader has its own Stop/disconnect teardown and isn't wired to
     // this flag yet — its reads are local and don't block on network the way SMB
-    // does; revisit if MF network sources need it.
+    // does; revisit if MF network sources need it. MF already emits its own NV12
+    // (task 79.10); the planar `options` drive only the FFmpeg producer for now.
     #[cfg(windows)]
     {
-        let _ = cancel;
+        let _ = (cancel, options);
         pb_decode::run_video_producer(input, fit, id, generation, events, msgs);
     }
     #[cfg(all(unix, feature = "ffvideo"))]
-    pb_decode::run_ff_video_producer(input, fit, id, generation, events, msgs, cancel);
+    pb_decode::run_ff_video_producer(input, fit, id, generation, events, msgs, cancel, options);
 }
 
 #[cfg(test)]

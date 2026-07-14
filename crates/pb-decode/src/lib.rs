@@ -182,7 +182,7 @@ pub use tracks::{
 };
 pub use video::{
     SeekGeneration, VideoColorInfo, VideoFrame, VideoInput, VideoProducerEvent, VideoProducerMsg,
-    VideoSessionId, VideoTransfer, YuvMatrix,
+    VideoProducerOptions, VideoSessionId, VideoTransfer, YuvMatrix,
 };
 pub use video::{VideoDetailsProbe, VideoStreamInfo};
 #[cfg(windows)]

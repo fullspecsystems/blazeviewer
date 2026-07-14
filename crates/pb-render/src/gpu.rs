@@ -10,7 +10,7 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
 use crate::upload::{StagingUpload, UploadStrategy};
-use crate::{ColorTransform, RenderError, Renderer, ViewTransform};
+use crate::{ColorTransform, PlanarPresentation, RenderError, Renderer, ViewTransform};
 
 /// Background (letterbox) color, straight RGBA8.
 pub const LETTERBOX: [u8; 4] = [10, 10, 12, 255];
@@ -50,6 +50,7 @@ struct ColorXf {
     p0: vec4<f32>,
     p1: vec4<f32>,
     scale: vec4<f32>,   // .x = output scale (SDR→HDR-surface white level, else 1.0)
+    range: vec4<f32>,   // planar range expand: (y_black, y_scale, c_center, c_scale)
 };
 @group(0) @binding(2) var<uniform> cx: ColorXf;
 
@@ -66,6 +67,39 @@ fn srgb_to_linear(x: f32) -> f32 {
         return x / 12.92;
     }
     return pow((x + 0.055) / 1.055, 2.4);
+}
+
+// SMPTE ST 2084 (PQ) EOTF: encoded [0,1] -> scene-linear scRGB (1.0 = 203 nits).
+// Bit-for-bit the CPU `pb_render::yuv::pq_eotf` / `pb_decode ...::pq_to_scrgb`.
+fn pq_eotf(x: f32) -> f32 {
+    let m1 = 2610.0 / 16384.0;
+    let m2 = 2523.0 / 4096.0 * 128.0;
+    let c1 = 3424.0 / 4096.0;
+    let c2 = 2413.0 / 4096.0 * 32.0;
+    let c3 = 2392.0 / 4096.0 * 32.0;
+    let e = clamp(x, 0.0, 1.0);
+    let ep = pow(e, 1.0 / m2);
+    let num = max(ep - c1, 0.0);
+    let den = c2 - c3 * ep;
+    if (den <= 0.0) { return 0.0; }
+    let y = pow(num / den, 1.0 / m1);      // display luminance / 10000
+    return y * 10000.0 / 203.0;
+}
+
+// Hybrid Log-Gamma EOTF (inverse OETF + 1000-nit OOTF) -> scene-linear scRGB.
+fn hlg_eotf(x: f32) -> f32 {
+    let a = 0.17883277;
+    let b = 0.28466892;
+    let c = 0.5599107;
+    let e = clamp(x, 0.0, 1.0);
+    var ys: f32;
+    if (e <= 0.5) {
+        ys = (e * e) / 3.0;
+    } else {
+        ys = (exp((e - c) / a) + b) / 12.0;
+    }
+    let nits = 1000.0 * pow(max(ys, 0.0), 1.2);
+    return nits / 203.0;
 }
 
 @fragment
@@ -85,41 +119,47 @@ fn fs_scene(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(lin * cx.scale.x, s.a);
 }
 
-// NV12 scene variant (task 79.10): Y rides `tex.r`, the interleaved half-res UV
-// plane rides `uv_tex.rg`. Range expansion + the YUV matrix come from the ColorXf
-// spare slots (scale.y = full-range flag; r0.w / r1.w / r2.w / scale.z = the four
-// derived matrix coefficients) and are applied EXACTLY once — NV12 frames arrive
-// raw (the single-application contract). The result is source-encoded R'G'B',
-// fed through the same mode-0/1 linearize the RGBA path uses. Must match
-// `pb_render::yuv::nv12_to_rgba` within quantization (the golden test).
+// Planar scene variant (task 79.10 NV12; task #91 Phase 2 P010 + PQ/HLG): Y rides
+// `tex.r`, the interleaved half-res UV plane rides `uv_tex.rg`. One entry serves
+// both 8-bit (NV12) and 10-bit high-aligned (P010) frames and every transfer,
+// driven by uniforms — no bit-depth branch:
+//   * range expand: `cx.range = (y_black, y_scale, c_center, c_scale)`, computed
+//     in Rust (`planar_range`) so it already folds in full/limited AND 8/10-bit
+//     (P010's `65535/64` code recovery). `yn=(y−y_black)·y_scale`, chroma centered.
+//   * YUV matrix: `r0.w / r1.w / r2.w / scale.z` = the four derived coefficients.
+//   * transfer (mode = `p1.w`): 0 = sRGB-like (no primaries matrix), 1 = parametric
+//     + matrix, 3 = PQ + matrix, 4 = HLG + matrix. The primaries matrix rides
+//     `r0/r1/r2.xyz`, applied AFTER the per-channel EOTF (BT.2020→709 for HDR).
+// The encoded R'G'B' is clamped to [0,1] BEFORE the EOTF (matching the CPU
+// functions); nothing is clamped after — the fp16 scene carries HDR/wide-gamut.
+// Applied EXACTLY once (planar frames arrive raw — the single-application
+// contract). Must match `pb_render::yuv::planar_to_scene` / the golden reference.
 @group(0) @binding(3) var uv_tex: texture_2d<f32>;
 
 @fragment
-fn fs_scene_nv12(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_scene_planar(in: VsOut) -> @location(0) vec4<f32> {
     let yv = textureSample(tex, samp, in.uv).r;
     let uvv = textureSample(uv_tex, samp, in.uv).rg;
-    var yn: f32;
-    var un: f32;
-    var vn: f32;
-    if (cx.scale.y > 0.5) {
-        yn = yv;                                   // full range
-        un = uvv.r - 0.5019608;                    // 128/255
-        vn = uvv.g - 0.5019608;
-    } else {
-        yn = (yv - 0.0627451) * 1.1643836;         // (Y − 16/255) · 255/219
-        un = (uvv.r - 0.5019608) * 1.1383929;      // (C − 128/255) · 255/224
-        vn = (uvv.g - 0.5019608) * 1.1383929;
-    }
+    let yn = (yv - cx.range.x) * cx.range.y;
+    let un = (uvv.r - cx.range.z) * cx.range.w;
+    let vn = (uvv.g - cx.range.z) * cx.range.w;
     let enc = clamp(vec3<f32>(
         yn + cx.r0.w * vn,
         yn - cx.r1.w * un - cx.r2.w * vn,
         yn + cx.scale.z * un,
     ), vec3<f32>(0.0), vec3<f32>(1.0));
+    let mode = cx.p1.w;
     var lin: vec3<f32>;
-    if (cx.p1.w > 0.5) {
+    if (mode > 3.5) {                              // HLG + primaries matrix
+        let e = vec3<f32>(hlg_eotf(enc.r), hlg_eotf(enc.g), hlg_eotf(enc.b));
+        lin = vec3<f32>(dot(cx.r0.xyz, e), dot(cx.r1.xyz, e), dot(cx.r2.xyz, e));
+    } else if (mode > 2.5) {                       // PQ + primaries matrix
+        let e = vec3<f32>(pq_eotf(enc.r), pq_eotf(enc.g), pq_eotf(enc.b));
+        lin = vec3<f32>(dot(cx.r0.xyz, e), dot(cx.r1.xyz, e), dot(cx.r2.xyz, e));
+    } else if (mode > 0.5) {                       // parametric + primaries matrix
         let e = vec3<f32>(eotf(enc.r), eotf(enc.g), eotf(enc.b));
         lin = vec3<f32>(dot(cx.r0.xyz, e), dot(cx.r1.xyz, e), dot(cx.r2.xyz, e));
-    } else {
+    } else {                                       // sRGB-like (source primaries = sRGB)
         lin = vec3<f32>(srgb_to_linear(enc.r), srgb_to_linear(enc.g), srgb_to_linear(enc.b));
     }
     return vec4<f32>(lin * cx.scale.x, 1.0);
@@ -310,11 +350,17 @@ struct ColorUniform {
     p0: [f32; 4],
     p1: [f32; 4],
     scale: [f32; 4],
+    /// Planar range-expansion constants `fs_scene_planar` reads:
+    /// `(y_black, y_scale, c_center, c_scale)` — precomputed in Rust for 8/10-bit
+    /// × full/limited so the shader has no bit-depth branch (task #91 Phase 2).
+    /// Inert for the RGBA path.
+    range: [f32; 4],
 }
 
 impl ColorUniform {
-    /// `mode`: 0 = sRGB-encoded, 1 = convert (matrix+TRC), 2 = scene-linear (HDR).
-    /// `scale`: output multiplier (SDR content → HDR-surface white level, else 1.0).
+    /// `mode`: 0 = sRGB-encoded, 1 = convert (matrix+TRC), 2 = scene-linear (HDR),
+    /// 3 = PQ (matrix, task #91 Phase 2), 4 = HLG (matrix). `scale`: output
+    /// multiplier (SDR content → HDR-surface white level, else 1.0).
     fn new(c: &ColorTransform, mode: f32, scale: f32) -> Self {
         let m = &c.matrix;
         let t = &c.trc;
@@ -325,21 +371,42 @@ impl ColorUniform {
             p0: [t[0], t[1], t[2], t[3]],
             p1: [t[4], t[5], t[6], mode],
             scale: [scale, 0.0, 0.0, 0.0],
+            range: [0.0, 1.0, 0.5, 1.0],
         }
     }
 
-    /// [`Self::new`] plus the NV12 convert parameters packed into the spare slots
-    /// `fs_scene_nv12` reads: `r0.w/r1.w/r2.w/scale.z` = the derived matrix
-    /// coefficients, `scale.y` = the full-range flag (task 79.10).
-    fn new_nv12(c: &ColorTransform, mode: f32, scale: f32, yuv: &crate::YuvParams) -> Self {
+    /// [`Self::new`] plus the planar convert parameters `fs_scene_planar` reads:
+    /// `r0.w/r1.w/r2.w/scale.z` = the derived YUV matrix coefficients, and
+    /// `range = (y_black, y_scale, c_center, c_scale)` = the range-expansion
+    /// constants (which encode full/limited **and** 8/10-bit, so the shader needs
+    /// no branch — task #91 Phase 2, generalizing the task 79.10 NV12 packing).
+    fn new_planar(
+        c: &ColorTransform,
+        mode: f32,
+        scale: f32,
+        yuv: &crate::YuvParams,
+        ten_bit: bool,
+    ) -> Self {
         let (a, b, cq, d) = yuv.matrix.coeffs();
         let mut u = Self::new(c, mode, scale);
         u.r0[3] = a;
         u.r1[3] = b;
         u.r2[3] = cq;
-        u.scale[1] = if yuv.full_range { 1.0 } else { 0.0 };
         u.scale[2] = d;
+        let (yb, ys, cc, cs) = crate::yuv::planar_range(ten_bit, yuv.full_range);
+        u.range = [yb, ys, cc, cs];
         u
+    }
+}
+
+/// The `fs_scene_planar` transfer mode (`p1.w`) for a planar transfer: 0 = sRGB-
+/// like, 1 = parametric + primaries, 3 = PQ + primaries, 4 = HLG + primaries.
+fn planar_mode(transfer: crate::PlanarTransfer) -> f32 {
+    match transfer {
+        crate::PlanarTransfer::SrgbLike => 0.0,
+        crate::PlanarTransfer::Parametric => 1.0,
+        crate::PlanarTransfer::Pq => 3.0,
+        crate::PlanarTransfer::Hlg => 4.0,
     }
 }
 
@@ -448,9 +515,11 @@ fn tex_sampler_uniform_bgl(device: &wgpu::Device, label: &str) -> wgpu::BindGrou
     })
 }
 
-/// [`tex_sampler_uniform_bgl`] plus a second texture at binding 3 — the NV12
-/// two-plane layout (`fs_scene_nv12`: Y at 0, UV at 3; task 79.10).
-fn nv12_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+/// [`tex_sampler_uniform_bgl`] plus a second texture at binding 3 — the planar
+/// two-plane layout (`fs_scene_planar`: Y at 0, UV at 3; task 79.10 / #91). Both
+/// NV12 (`R8Unorm`/`Rg8Unorm`) and P010 (`R16Unorm`/`Rg16Unorm`) are
+/// filterable-float, so one layout serves both.
+fn planar_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     let texture = |binding| wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::FRAGMENT,
@@ -462,7 +531,7 @@ fn nv12_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         count: None,
     };
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("nv12-bgl"),
+        label: Some("planar-bgl"),
         entries: &[
             texture(0),
             wgpu::BindGroupLayoutEntry {
@@ -491,8 +560,9 @@ struct Pipelines {
     /// Scene: photo quad → fp16 scRGB-linear intermediate (alpha-blended over the
     /// letterbox so transparent images composite cleanly).
     scene: wgpu::RenderPipeline,
-    /// Scene variant for NV12 video frames: two planes + in-shader YUV (79.10).
-    scene_nv12: wgpu::RenderPipeline,
+    /// Scene variant for planar video frames: two planes + in-shader YUV +
+    /// transfer (NV12 79.10; P010/PQ/HLG task #91 Phase 2). One pipeline for both.
+    scene_planar: wgpu::RenderPipeline,
     /// Tone-map: fullscreen intermediate → SDR `surface_format`.
     tonemap: wgpu::RenderPipeline,
     /// Overlay: sRGB UI bitmap → surface, alpha-blended on top.
@@ -502,8 +572,8 @@ struct Pipelines {
     egui: wgpu::RenderPipeline,
     /// Layout for the image (and overlay) bind groups: tex + sampler + color uniform.
     scene_bgl: wgpu::BindGroupLayout,
-    /// Layout for the NV12 bind group: Y tex + sampler + color uniform + UV tex.
-    nv12_bgl: wgpu::BindGroupLayout,
+    /// Layout for the planar bind group: Y tex + sampler + color uniform + UV tex.
+    planar_bgl: wgpu::BindGroupLayout,
     /// Layout for the tone-map bind group: intermediate tex + sampler + peak uniform.
     tonemap_bgl: wgpu::BindGroupLayout,
 }
@@ -669,17 +739,19 @@ fn build_pipelines(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -
         cache: None,
     });
 
-    // NV12 scene variant (task 79.10): same module/vertex/target/blend as `scene`,
-    // its own two-texture layout + the `fs_scene_nv12` entry point.
-    let nv12_bgl = nv12_bgl(device);
-    let nv12_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("pb-scene-nv12-layout"),
-        bind_group_layouts: &[&nv12_bgl],
+    // Planar scene variant (task 79.10 NV12; task #91 Phase 2 P010): same
+    // module/vertex/target/blend as `scene`, its own two-texture layout + the
+    // generalized `fs_scene_planar` entry point (one pipeline for NV12 and P010 —
+    // both are filterable-float textures, so one bind-group layout serves both).
+    let planar_bgl = planar_bgl(device);
+    let planar_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("pb-scene-planar-layout"),
+        bind_group_layouts: &[&planar_bgl],
         push_constant_ranges: &[],
     });
-    let scene_nv12 = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("pb-scene-nv12-pipeline"),
-        layout: Some(&nv12_layout),
+    let scene_planar = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("pb-scene-planar-pipeline"),
+        layout: Some(&planar_layout),
         vertex: wgpu::VertexState {
             module: &scene_mod,
             entry_point: "vs_main",
@@ -688,7 +760,7 @@ fn build_pipelines(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -
         },
         fragment: Some(wgpu::FragmentState {
             module: &scene_mod,
-            entry_point: "fs_scene_nv12",
+            entry_point: "fs_scene_planar",
             compilation_options: Default::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format: INTERMEDIATE_FORMAT,
@@ -705,12 +777,12 @@ fn build_pipelines(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -
 
     Pipelines {
         scene,
-        scene_nv12,
+        scene_planar,
         tonemap,
         overlay,
         egui,
         scene_bgl,
-        nv12_bgl,
+        planar_bgl,
         tonemap_bgl,
     }
 }
@@ -1279,8 +1351,15 @@ fn upload_image_reusable(
 /// `Rg8Unorm` one, the YUV parameters packed into the color uniform. The steady
 /// state (every frame of one clip) is two in-place uploads + one uniform write —
 /// zero resource creation, same never-wait staging ring, same slot discipline.
+///
+/// Upload a two-plane planar frame (NV12 8-bit or P010 16-bit) into the reuse
+/// slot and build/refresh its bind group. `mode` selects the shader transfer
+/// branch (0 sRGB-like, 1 parametric, 3 PQ, 4 HLG). The Y/UV texture formats
+/// follow `format`: `R8Unorm`/`Rg8Unorm` for NV12, `R16Unorm`/`Rg16Unorm` for
+/// P010 (task #91 Phase 2). The `StagingUpload` derives bytes-per-row from the
+/// texture format, so the same upload path serves both precisions.
 #[allow(clippy::too_many_arguments)]
-fn upload_nv12_reusable(
+fn upload_planar_reusable(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     bgl: &wgpu::BindGroupLayout,
@@ -1292,15 +1371,25 @@ fn upload_nv12_reusable(
     img_h: u32,
     color: &ColorTransform,
     yuv: crate::YuvParams,
+    format: crate::PlanarFormat,
+    mode: f32,
     scale: f32,
 ) -> ReuseOutcome {
-    let mode = if color.enabled { 1.0 } else { 0.0 };
-    let uniform = ColorUniform::new_nv12(color, mode, scale, &yuv);
+    let ten_bit = format.is_ten_bit();
+    let (y_fmt, uv_fmt) = if ten_bit {
+        (
+            wgpu::TextureFormat::R16Unorm,
+            wgpu::TextureFormat::Rg16Unorm,
+        )
+    } else {
+        (wgpu::TextureFormat::R8Unorm, wgpu::TextureFormat::Rg8Unorm)
+    };
+    let uniform = ColorUniform::new_planar(color, mode, scale, &yuv, ten_bit);
     if let Some(s) = slot.as_ref() {
         if let Some(uv_tex) = s
             .uv_tex
             .as_ref()
-            .filter(|_| s.w == img_w && s.h == img_h && s.format == wgpu::TextureFormat::R8Unorm)
+            .filter(|_| s.w == img_w && s.h == img_h && s.format == y_fmt)
         {
             uploader.upload(device, queue, &s.tex, y, img_w, img_h);
             uploader.upload(device, queue, uv_tex, uv, img_w / 2, img_h / 2);
@@ -1325,13 +1414,8 @@ fn upload_nv12_reusable(
             view_formats: &[],
         })
     };
-    let y_tex = plane("video-y-reuse", img_w, img_h, wgpu::TextureFormat::R8Unorm);
-    let uv_tex = plane(
-        "video-uv-reuse",
-        img_w / 2,
-        img_h / 2,
-        wgpu::TextureFormat::Rg8Unorm,
-    );
+    let y_tex = plane("video-y-reuse", img_w, img_h, y_fmt);
+    let uv_tex = plane("video-uv-reuse", img_w / 2, img_h / 2, uv_fmt);
     uploader.upload(device, queue, &y_tex, y, img_w, img_h);
     uploader.upload(device, queue, &uv_tex, uv, img_w / 2, img_h / 2);
     let y_view = y_tex.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1343,12 +1427,12 @@ fn upload_nv12_reusable(
         ..Default::default()
     });
     let color_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("color-uniform-nv12"),
+        label: Some("color-uniform-planar"),
         contents: bytemuck::bytes_of(&uniform),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("nv12-bg-reuse"),
+        label: Some("planar-bg-reuse"),
         layout: bgl,
         entries: &[
             wgpu::BindGroupEntry {
@@ -1375,7 +1459,7 @@ fn upload_nv12_reusable(
         color_buf,
         w: img_w,
         h: img_h,
-        format: wgpu::TextureFormat::R8Unorm,
+        format: y_fmt,
     });
     ReuseOutcome::Rebuilt(bind_group)
 }
@@ -1513,6 +1597,28 @@ fn device_descriptor(limits: wgpu::Limits) -> wgpu::DeviceDescriptor<'static> {
         required_limits: limits,
         memory_hints: wgpu::MemoryHints::Performance,
     }
+}
+
+/// Request a device, opting into `TEXTURE_FORMAT_16BIT_NORM` (needed for P010's
+/// `R16Unorm`/`Rg16Unorm` planes) when the adapter advertises it. On any
+/// device-creation failure with the feature on, retry **without** it so the
+/// renderer always comes up — P010 then falls back to CPU convert. Returns whether
+/// the feature was granted (`supports_p010`). Task #91 Phase 2 (Codex Q3): Metal
+/// and DX12 expose it; Vulkan and software adapters (WARP/lavapipe) may not.
+async fn request_device_p010(adapter: &wgpu::Adapter) -> (wgpu::Device, wgpu::Queue, bool) {
+    let want = wgpu::Features::TEXTURE_FORMAT_16BIT_NORM;
+    if adapter.features().contains(want) {
+        let mut desc = device_descriptor(device_limits(adapter));
+        desc.required_features = want;
+        if let Ok((d, q)) = adapter.request_device(&desc, None).await {
+            return (d, q, true);
+        }
+    }
+    let (d, q) = adapter
+        .request_device(&device_descriptor(device_limits(adapter)), None)
+        .await
+        .expect("request device");
+    (d, q, false)
 }
 
 /// The corner info-panel overlay, when shown.
@@ -1674,14 +1780,28 @@ pub struct WgpuRenderer {
     /// creating a texture + view + sampler + uniform + bind group **per frame**
     /// (the #76 follow-up). Rebuilt automatically on any size/format change.
     reuse: Option<ReuseSlot>,
-    /// NV12 scene pipeline + its two-texture layout (task 79.10 — video frames
-    /// from the hardware-decode producer; YUV→RGB happens in `fs_scene_nv12`).
-    scene_nv12_pipeline: wgpu::RenderPipeline,
-    nv12_bgl: wgpu::BindGroupLayout,
-    /// Whether `bind_group` currently holds an NV12 two-plane frame — picks the
-    /// scene pipeline for the single-image draw (`set_image` clears it, ring
-    /// slots are always RGBA).
-    scene_is_nv12: bool,
+    /// Planar scene pipeline + its two-texture layout (task 79.10 NV12; task #91
+    /// Phase 2 P010 — video frames from the hardware-decode producer; YUV→RGB +
+    /// transfer happen in `fs_scene_planar`).
+    scene_planar_pipeline: wgpu::RenderPipeline,
+    planar_bgl: wgpu::BindGroupLayout,
+    /// What `bind_group` currently holds — picks the scene pipeline for the
+    /// single-image draw (`set_image` sets `Rgba`, ring slots are always RGBA).
+    scene_kind: SceneKind,
+    /// Whether this device was created with `TEXTURE_FORMAT_16BIT_NORM` — P010's
+    /// `R16Unorm`/`Rg16Unorm` textures need it. When false, the producer must fall
+    /// back to CPU convert for P010 (task #91 Phase 2, Codex Q3).
+    supports_p010: bool,
+}
+
+/// What the single-image `bind_group` currently holds, so `render` picks the
+/// right scene pipeline (task #91 Phase 2 — replaces the `scene_is_nv12` bool).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SceneKind {
+    /// An RGBA8 / Rgba16Float image — the `scene` pipeline.
+    Rgba,
+    /// A planar (NV12 / P010) two-plane video frame — the `scene_planar` pipeline.
+    Planar,
 }
 
 /// See [`WgpuRenderer::reuse`]. Same-queue submission order makes the in-place
@@ -1795,10 +1915,7 @@ impl WgpuRenderer {
             })
             .await
             .expect("no compatible GPU adapter");
-        let (device, queue) = adapter
-            .request_device(&device_descriptor(device_limits(&adapter)), None)
-            .await
-            .expect("request device");
+        let (device, queue, supports_p010) = request_device_p010(&adapter).await;
 
         let caps = surface.get_capabilities(&adapter);
         // HDR/wide-gamut output: when the desktop is in HDR mode and the surface can
@@ -1929,9 +2046,10 @@ impl WgpuRenderer {
             message: None,
             tree: None,
             egui: None,
-            scene_nv12_pipeline: pipelines.scene_nv12,
-            nv12_bgl: pipelines.nv12_bgl,
-            scene_is_nv12: false,
+            scene_planar_pipeline: pipelines.scene_planar,
+            planar_bgl: pipelines.planar_bgl,
+            scene_kind: SceneKind::Rgba,
+            supports_p010,
         }
     }
 
@@ -2320,7 +2438,7 @@ impl Renderer for WgpuRenderer {
             ReuseOutcome::Rebuilt(bg) => self.bind_group = bg,
             ReuseOutcome::Reused => {}
         }
-        self.scene_is_nv12 = false; // an RGBA bind group draws with the RGBA pipeline
+        self.scene_kind = SceneKind::Rgba; // an RGBA bind group draws with the RGBA pipeline
         self.blank = false; // an image is showing again
         self.message = None; // hide the empty-state hint
         self.held = None; // the new single image supersedes any held frame
@@ -2344,47 +2462,62 @@ impl Renderer for WgpuRenderer {
         );
     }
 
-    /// The wgpu override of the trait's CPU fallback (task 79.10): the planes
-    /// upload into the two-plane reuse slot and `fs_scene_nv12` converts on the
-    /// GPU. `PB_VIDEO_CPU_CONVERT=1` forces the default CPU path (the A/B lever
-    /// and the escape hatch if a driver misbehaves).
-    fn set_video_nv12(
+    fn supports_p010(&self) -> bool {
+        self.supports_p010
+    }
+
+    /// The wgpu override of the trait's CPU fallback (task 79.10 NV12; task #91
+    /// Phase 2 P010/PQ/HLG): the planes upload into the two-plane reuse slot and
+    /// `fs_scene_planar` converts (YUV + range + transfer + primaries) on the GPU.
+    /// `PB_VIDEO_CPU_CONVERT=1` forces the CPU path (the A/B lever and the escape
+    /// hatch if a driver misbehaves). P010 on a device without
+    /// `TEXTURE_FORMAT_16BIT_NORM` also takes the CPU path.
+    fn set_video_planar(
         &mut self,
         y: &[u8],
         uv: &[u8],
         width: u32,
         height: u32,
-        yuv: crate::YuvParams,
-        color: ColorTransform,
+        p: PlanarPresentation,
     ) {
-        if std::env::var_os("PB_VIDEO_CPU_CONVERT").is_some_and(|v| v == "1") {
-            let rgba = crate::yuv::nv12_to_rgba(y, uv, width, height, yuv);
-            self.set_image(&rgba, width, height, color, false, 1.0);
+        let cpu_hatch = std::env::var_os("PB_VIDEO_CPU_CONVERT").is_some_and(|v| v == "1");
+        let needs_16bit = p.format.is_ten_bit() && !self.supports_p010;
+        if cpu_hatch || needs_16bit {
+            let f = crate::yuv::planar_to_scene(
+                y, uv, width, height, p.format, p.yuv, p.transfer, &p.color, p.peak,
+            );
+            self.set_image(&f.bytes, width, height, p.color, f.hdr, f.peak);
             return;
         }
-        let scale = self.scene_scale(false);
-        match upload_nv12_reusable(
+        let hdr = p.transfer.is_hdr();
+        let scale = self.scene_scale(hdr);
+        let mode = planar_mode(p.transfer);
+        match upload_planar_reusable(
             &self.device,
             &self.queue,
-            &self.nv12_bgl,
+            &self.planar_bgl,
             self.upload.as_mut(),
             &mut self.reuse,
             y,
             uv,
             width,
             height,
-            &color,
-            yuv,
+            &p.color,
+            p.yuv,
+            p.format,
+            mode,
             scale,
         ) {
             ReuseOutcome::Rebuilt(bg) => self.bind_group = bg,
             ReuseOutcome::Reused => {}
         }
-        self.scene_is_nv12 = true;
+        self.scene_kind = SceneKind::Planar;
         self.blank = false;
         self.message = None;
         self.held = None; // a live video frame supersedes any held still
-        self.set_present_peak(1.0);
+                          // HDR video tone-maps like an HDR still (peak drives the SDR present);
+                          // SDR video is peak 1.0 (identity).
+        self.set_present_peak(if hdr { p.peak } else { 1.0 });
         self.present_idx = None;
         self.img_w = width;
         self.img_h = height;
@@ -2695,12 +2828,9 @@ impl Renderer for WgpuRenderer {
             // Ring slots are always RGBA; only the single-image bind group can hold
             // an NV12 two-plane frame (task 79.10) — pick its pipeline to match, or
             // the bind-group layout mismatch is a validation error.
-            let single = || {
-                if self.scene_is_nv12 {
-                    (&self.scene_nv12_pipeline, &self.bind_group)
-                } else {
-                    (&self.scene_pipeline, &self.bind_group)
-                }
+            let single = || match self.scene_kind {
+                SceneKind::Planar => (&self.scene_planar_pipeline, &self.bind_group),
+                SceneKind::Rgba => (&self.scene_pipeline, &self.bind_group),
             };
             let ring_slot = self
                 .present_idx
@@ -2965,7 +3095,7 @@ pub fn render_offscreen_color(
 }
 
 /// Headless render of one NV12 frame through the real two-plane scene pipeline
-/// (`fs_scene_nv12`) + present pass — the task 79.10 golden harness, compared
+/// (`fs_scene_planar`) + present pass — the task 79.10 golden harness, compared
 /// against [`crate::yuv::nv12_to_rgba`] (the CPU reference) in tests.
 pub fn render_offscreen_nv12(
     y: &[u8],
@@ -2977,7 +3107,17 @@ pub fn render_offscreen_nv12(
     params: crate::YuvParams,
 ) -> Vec<u8> {
     pollster::block_on(render_offscreen_async(
-        OffscreenSource::Nv12 { y, uv, params },
+        OffscreenSource::Planar {
+            y,
+            uv,
+            present: crate::PlanarPresentation {
+                format: crate::PlanarFormat::Nv12,
+                transfer: crate::PlanarTransfer::SrgbLike,
+                yuv: params,
+                color: ColorTransform::srgb(),
+                peak: 1.0,
+            },
+        },
         img_w,
         img_h,
         screen_w,
@@ -2986,13 +3126,13 @@ pub fn render_offscreen_nv12(
     ))
 }
 
-/// What [`render_offscreen_async`] draws: an RGBA8 image or an NV12 plane pair.
+/// What [`render_offscreen_async`] draws: an RGBA8 image or a planar plane pair.
 enum OffscreenSource<'a> {
     Rgba(&'a [u8]),
-    Nv12 {
+    Planar {
         y: &'a [u8],
         uv: &'a [u8],
-        params: crate::YuvParams,
+        present: crate::PlanarPresentation,
     },
 }
 
@@ -3013,10 +3153,7 @@ async fn render_offscreen_async(
         })
         .await
         .expect("no GPU adapter");
-    let (device, queue) = adapter
-        .request_device(&device_descriptor(device_limits(&adapter)), None)
-        .await
-        .expect("request device");
+    let (device, queue, _p010) = request_device_p010(&adapter).await;
 
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let pipelines = build_pipelines(&device, format);
@@ -3037,25 +3174,27 @@ async fn render_offscreen_async(
                 1.0,
             ),
         ),
-        OffscreenSource::Nv12 { y, uv, params } => {
+        OffscreenSource::Planar { y, uv, present } => {
             let mut slot = None;
-            let ReuseOutcome::Rebuilt(bg) = upload_nv12_reusable(
+            let ReuseOutcome::Rebuilt(bg) = upload_planar_reusable(
                 &device,
                 &queue,
-                &pipelines.nv12_bgl,
+                &pipelines.planar_bgl,
                 &mut upload,
                 &mut slot,
                 y,
                 uv,
                 img_w,
                 img_h,
-                &color,
-                params,
+                &present.color,
+                present.yuv,
+                present.format,
+                planar_mode(present.transfer),
                 1.0,
             ) else {
                 unreachable!("a fresh slot always rebuilds");
             };
-            (&pipelines.scene_nv12, bg)
+            (&pipelines.scene_planar, bg)
         }
     };
     let vbuf = vertex_buffer(
@@ -3164,6 +3303,169 @@ async fn render_offscreen_async(
     drop(mapped);
     readback.unmap();
     out
+}
+
+/// Headless render of one planar frame through `fs_scene_planar` into the fp16
+/// **scene intermediate**, returned as scene-linear scRGB `[f32;4]` per pixel —
+/// read back *before* the tone-map so HDR values > 1.0 and wide-gamut negatives
+/// are visible (task #91 Phase 2 golden; Codex: RGBA8 can't prove HDR). `None`
+/// when the adapter lacks `TEXTURE_FORMAT_16BIT_NORM` and the frame is P010 (the
+/// test then asserts the CPU fallback instead). `screen_*` should equal `img_*`
+/// so the quad fills the target and every pixel is the converted image.
+pub fn render_offscreen_planar_scene(
+    y: &[u8],
+    uv: &[u8],
+    present: crate::PlanarPresentation,
+    img_w: u32,
+    img_h: u32,
+    screen_w: u32,
+    screen_h: u32,
+) -> Option<Vec<[f32; 4]>> {
+    pollster::block_on(render_offscreen_planar_scene_async(
+        y, uv, present, img_w, img_h, screen_w, screen_h,
+    ))
+}
+
+async fn render_offscreen_planar_scene_async(
+    y: &[u8],
+    uv: &[u8],
+    present: crate::PlanarPresentation,
+    img_w: u32,
+    img_h: u32,
+    screen_w: u32,
+    screen_h: u32,
+) -> Option<Vec<[f32; 4]>> {
+    let instance = instance();
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+        })
+        .await
+        .expect("no GPU adapter");
+    let (device, queue, p010) = request_device_p010(&adapter).await;
+    if present.format.is_ten_bit() && !p010 {
+        return None; // adapter can't do R16Unorm — the caller checks the CPU path
+    }
+
+    let pipelines = build_pipelines(&device, wgpu::TextureFormat::Rgba8Unorm);
+    let mut upload = StagingUpload::new();
+    let mut slot = None;
+    let ReuseOutcome::Rebuilt(bind_group) = upload_planar_reusable(
+        &device,
+        &queue,
+        &pipelines.planar_bgl,
+        &mut upload,
+        &mut slot,
+        y,
+        uv,
+        img_w,
+        img_h,
+        &present.color,
+        present.yuv,
+        present.format,
+        planar_mode(present.transfer),
+        1.0,
+    ) else {
+        unreachable!("a fresh slot always rebuilds");
+    };
+    let vbuf = vertex_buffer(
+        &device,
+        &ViewTransform::default(),
+        img_w,
+        img_h,
+        screen_w,
+        screen_h,
+    );
+    let ibuf = index_buffer(&device);
+
+    // The fp16 scene intermediate, this time with COPY_SRC so we can read it back
+    // before the tone-map pass runs.
+    let intermediate = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("scene-intermediate-readback"),
+        size: wgpu::Extent3d {
+            width: screen_w,
+            height: screen_h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: INTERMEDIATE_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let intermediate_view = intermediate.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let bpp = 8u32; // Rgba16Float
+    let unpadded = screen_w * bpp;
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let padded = unpadded.div_ceil(align) * align;
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("scene-readback"),
+        size: (padded * screen_h) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("offscreen-scene"),
+    });
+    draw_scene(
+        &mut encoder,
+        &intermediate_view,
+        &pipelines.scene_planar,
+        &bind_group,
+        &vbuf,
+        &ibuf,
+        letterbox_linear([LETTERBOX[0], LETTERBOX[1], LETTERBOX[2]]),
+    );
+    encoder.copy_texture_to_buffer(
+        wgpu::ImageCopyTexture {
+            texture: &intermediate,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::ImageCopyBuffer {
+            buffer: &readback,
+            layout: wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(screen_h),
+            },
+        },
+        wgpu::Extent3d {
+            width: screen_w,
+            height: screen_h,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(std::iter::once(encoder.finish()));
+
+    let slice = readback.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    device.poll(wgpu::Maintain::Wait);
+    rx.recv().expect("map channel").expect("map readback");
+
+    let mapped = slice.get_mapped_range();
+    let mut out = Vec::with_capacity((screen_w * screen_h) as usize);
+    for row in 0..screen_h {
+        let start = (row * padded) as usize;
+        for col in 0..screen_w as usize {
+            let px = start + col * 8;
+            let ch =
+                |o: usize| half::f16::from_le_bytes([mapped[px + o], mapped[px + o + 1]]).to_f32();
+            out.push([ch(0), ch(2), ch(4), ch(6)]);
+        }
+    }
+    drop(mapped);
+    readback.unmap();
+    Some(out)
 }
 
 /// A deterministic test/placeholder image: gray field, colored corner markers
@@ -3424,13 +3726,283 @@ mod tests {
         );
     }
 
+    // ── Task #91 Phase 2: planar GPU color path golden, vs an INDEPENDENT reference ──
+    //
+    // The reference below re-derives everything from spec — YUV matrix from Kr/Kb,
+    // range from explicit 10-bit code formulas (not the `65535/64` normalized-sample
+    // path `planar_range` uses), PQ/HLG from raw SMPTE/ARIB constants, and a
+    // hardcoded BT.2020→709 primaries matrix — so a bug in the production math or
+    // shader can't hide by matching itself (Codex: independent reference mandatory).
+
+    /// BT.2020 → BT.709 linear primaries matrix (Rec. BT.2087), a well-known
+    /// independent constant.
+    #[allow(clippy::excessive_precision)] // deliberate reference constants (Rec. BT.2087)
+    const BT2020_TO_709: [[f32; 3]; 3] = [
+        [1.660491, -0.587641, -0.072850],
+        [-0.124550, 1.132900, -0.008349],
+        [-0.018151, -0.100579, 1.118730],
+    ];
+
+    fn ref_srgb_to_linear(x: f32) -> f32 {
+        if x <= 0.04045 {
+            x / 12.92
+        } else {
+            ((x + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    fn ref_pq(e: f32) -> f32 {
+        let (m1, m2) = (2610.0 / 16384.0f32, 2523.0 / 4096.0 * 128.0);
+        let (c1, c2, c3) = (
+            3424.0 / 4096.0f32,
+            2413.0 / 4096.0 * 32.0,
+            2392.0 / 4096.0 * 32.0,
+        );
+        let e = e.clamp(0.0, 1.0);
+        let ep = e.powf(1.0 / m2);
+        let num = (ep - c1).max(0.0);
+        let den = c2 - c3 * ep;
+        if den <= 0.0 {
+            return 0.0;
+        }
+        (num / den).powf(1.0 / m1) * 10000.0 / 203.0
+    }
+
+    fn ref_hlg(e: f32) -> f32 {
+        let (a, b, c) = (0.17883277f32, 0.28466892, 0.5599107);
+        let e = e.clamp(0.0, 1.0);
+        let ys = if e <= 0.5 {
+            e * e / 3.0
+        } else {
+            (((e - c) / a).exp() + b) / 12.0
+        };
+        1000.0 * ys.max(0.0).powf(1.2) / 203.0
+    }
+
+    /// Independent scene-linear scRGB for one planar code triple.
+    fn ref_scene(
+        yc: u32,
+        uc: u32,
+        vc: u32,
+        ten: bool,
+        m: crate::YuvMatrix,
+        full: bool,
+        tr: crate::PlanarTransfer,
+    ) -> [f32; 3] {
+        let (yf, uf, vf) = (yc as f32, uc as f32, vc as f32);
+        let (yn, un, vn) = match (ten, full) {
+            (true, true) => (yf / 1023.0, (uf - 512.0) / 1023.0, (vf - 512.0) / 1023.0),
+            (true, false) => (
+                (yf - 64.0) / 876.0,
+                (uf - 512.0) / 896.0,
+                (vf - 512.0) / 896.0,
+            ),
+            (false, true) => (yf / 255.0, (uf - 128.0) / 255.0, (vf - 128.0) / 255.0),
+            (false, false) => (
+                (yf - 16.0) / 219.0,
+                (uf - 128.0) / 224.0,
+                (vf - 128.0) / 224.0,
+            ),
+        };
+        let (kr, kb) = match m {
+            crate::YuvMatrix::Bt601 => (0.299f32, 0.114),
+            crate::YuvMatrix::Bt709 => (0.2126, 0.0722),
+            crate::YuvMatrix::Bt2020 => (0.2627, 0.0593),
+        };
+        let kg = 1.0 - kr - kb;
+        let er = (yn + 2.0 * (1.0 - kr) * vn).clamp(0.0, 1.0);
+        let eg = (yn - (2.0 * kb * (1.0 - kb) / kg) * un - (2.0 * kr * (1.0 - kr) / kg) * vn)
+            .clamp(0.0, 1.0);
+        let eb = (yn + 2.0 * (1.0 - kb) * un).clamp(0.0, 1.0);
+        let mat = |l: [f32; 3]| {
+            let m = BT2020_TO_709;
+            [
+                m[0][0] * l[0] + m[0][1] * l[1] + m[0][2] * l[2],
+                m[1][0] * l[0] + m[1][1] * l[1] + m[1][2] * l[2],
+                m[2][0] * l[0] + m[2][1] * l[1] + m[2][2] * l[2],
+            ]
+        };
+        match tr {
+            crate::PlanarTransfer::SrgbLike => [
+                ref_srgb_to_linear(er),
+                ref_srgb_to_linear(eg),
+                ref_srgb_to_linear(eb),
+            ],
+            crate::PlanarTransfer::Pq => mat([ref_pq(er), ref_pq(eg), ref_pq(eb)]),
+            crate::PlanarTransfer::Hlg => mat([ref_hlg(er), ref_hlg(eg), ref_hlg(eb)]),
+            crate::PlanarTransfer::Parametric => unreachable!("not exercised by the golden"),
+        }
+    }
+
+    /// A `w×h` uniform planar frame with the given native-bit-depth code triple.
+    fn uniform_planar(w: u32, h: u32, ten: bool, yc: u32, uc: u32, vc: u32) -> (Vec<u8>, Vec<u8>) {
+        let (w, h) = (w as usize, h as usize);
+        let push = |buf: &mut Vec<u8>, code: u32| {
+            if ten {
+                buf.extend_from_slice(&(((code << 6) as u16).to_le_bytes()));
+            } else {
+                buf.push(code as u8);
+            }
+        };
+        let mut y = Vec::new();
+        for _ in 0..w * h {
+            push(&mut y, yc);
+        }
+        let mut uv = Vec::new();
+        for _ in 0..(w / 2) * (h / 2) {
+            push(&mut uv, uc);
+            push(&mut uv, vc);
+        }
+        (y, uv)
+    }
+
+    /// The golden: the GPU `fs_scene_planar` path (read back from the fp16 scene
+    /// intermediate) matches the independent reference across bit depth × range ×
+    /// matrix × transfer, for a spread of code triples. On an adapter without
+    /// `TEXTURE_FORMAT_16BIT_NORM`, P010 renders `None` and the CPU fallback
+    /// (`planar_to_scene`) is asserted against the same reference instead.
+    #[test]
+    fn planar_scene_matches_independent_reference() {
+        let _guard = crate::gpu_test_lock();
+        // (name, transfer, ten_bit-required, matrix). 10-bit codes; 8-bit = /4.
+        struct Case {
+            tr: crate::PlanarTransfer,
+            ten: bool,
+            m: crate::YuvMatrix,
+        }
+        let cases = [
+            Case {
+                tr: crate::PlanarTransfer::SrgbLike,
+                ten: false,
+                m: crate::YuvMatrix::Bt601,
+            },
+            Case {
+                tr: crate::PlanarTransfer::SrgbLike,
+                ten: false,
+                m: crate::YuvMatrix::Bt709,
+            },
+            Case {
+                tr: crate::PlanarTransfer::SrgbLike,
+                ten: false,
+                m: crate::YuvMatrix::Bt2020,
+            },
+            Case {
+                tr: crate::PlanarTransfer::SrgbLike,
+                ten: true,
+                m: crate::YuvMatrix::Bt709,
+            },
+            Case {
+                tr: crate::PlanarTransfer::Pq,
+                ten: true,
+                m: crate::YuvMatrix::Bt2020,
+            },
+            Case {
+                tr: crate::PlanarTransfer::Hlg,
+                ten: true,
+                m: crate::YuvMatrix::Bt2020,
+            },
+        ];
+        // 10-bit code triples (y,u,v).
+        let codes10 = [
+            (512, 512, 512),
+            (900, 512, 512),
+            (600, 400, 700),
+            (600, 700, 400),
+            (120, 512, 512),
+        ];
+        for case in cases {
+            for full in [false, true] {
+                for (y10, u10, v10) in codes10 {
+                    let (yc, uc, vc) = if case.ten {
+                        (y10, u10, v10)
+                    } else {
+                        (y10 / 4, u10 / 4, v10 / 4)
+                    };
+                    let (y, uv) = uniform_planar(4, 4, case.ten, yc, uc, vc);
+                    let want = ref_scene(yc, uc, vc, case.ten, case.m, full, case.tr);
+                    let color = match case.tr {
+                        crate::PlanarTransfer::Pq | crate::PlanarTransfer::Hlg => ColorTransform {
+                            matrix: BT2020_TO_709,
+                            trc: [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                            enabled: true,
+                        },
+                        _ => ColorTransform::srgb(),
+                    };
+                    let present = PlanarPresentation {
+                        format: if case.ten {
+                            crate::PlanarFormat::P010
+                        } else {
+                            crate::PlanarFormat::Nv12
+                        },
+                        transfer: case.tr,
+                        yuv: crate::YuvParams {
+                            matrix: case.m,
+                            full_range: full,
+                        },
+                        color,
+                        peak: 1.0,
+                    };
+                    let tol = |w: f32| 0.02 + 0.02 * w.abs();
+                    let ctx = format!(
+                        "{:?} ten={} full={full} m={:?} codes=({yc},{uc},{vc})",
+                        case.tr, case.ten, case.m
+                    );
+                    match render_offscreen_planar_scene(&y, &uv, present, 4, 4, 4, 4) {
+                        Some(px) => {
+                            let got = px[2 * 4 + 2]; // center pixel
+                            for c in 0..3 {
+                                assert!(
+                                    (got[c] - want[c]).abs() <= tol(want[c]),
+                                    "GPU {ctx}: ch{c} got {} want {} (±{})",
+                                    got[c],
+                                    want[c],
+                                    tol(want[c])
+                                );
+                            }
+                        }
+                        None => {
+                            // Adapter lacks 16-bit-norm: assert the CPU fallback matches.
+                            assert!(case.ten, "only P010 can be unsupported");
+                            let f = crate::yuv::planar_to_scene(
+                                &y,
+                                &uv,
+                                4,
+                                4,
+                                present.format,
+                                present.yuv,
+                                present.transfer,
+                                &present.color,
+                                present.peak,
+                            );
+                            if f.hdr {
+                                let px = &f.bytes[(2 * 4 + 2) * 8..];
+                                let ch = |o: usize| {
+                                    half::f16::from_le_bytes([px[o], px[o + 1]]).to_f32()
+                                };
+                                let got = [ch(0), ch(2), ch(4)];
+                                for c in 0..3 {
+                                    assert!(
+                                        (got[c] - want[c]).abs() <= tol(want[c]),
+                                        "CPU {ctx}: ch{c} got {} want {}",
+                                        got[c],
+                                        want[c]
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Task 79.10: the NV12 reuse slot — same geometry reuses both plane textures
     /// (zero per-frame creation), and an RGBA↔NV12 flip at the same size rebuilds.
     #[test]
     fn nv12_reuse_slot_reuses_planes_and_format_flips_rebuild() {
         let _guard = crate::gpu_test_lock();
         let (device, queue, _bgl) = test_device();
-        let nv12_layout = super::nv12_bgl(&device);
+        let planar_layout = super::planar_bgl(&device);
         let rgba_layout = tex_sampler_uniform_bgl(&device, "test-rgba");
         let mut uploader = StagingUpload::new();
         let mut slot: Option<ReuseSlot> = None;
@@ -3442,10 +4014,10 @@ mod tests {
         let y = vec![100u8; 64 * 32];
         let uv = vec![128u8; 64 * 16];
 
-        let first = upload_nv12_reusable(
+        let first = upload_planar_reusable(
             &device,
             &queue,
-            &nv12_layout,
+            &planar_layout,
             &mut uploader,
             &mut slot,
             &y,
@@ -3454,16 +4026,18 @@ mod tests {
             32,
             &color,
             params,
+            crate::PlanarFormat::Nv12,
+            0.0,
             1.0,
         );
         assert!(matches!(first, ReuseOutcome::Rebuilt(_)));
         let y0 = slot.as_ref().unwrap().tex.global_id();
         assert!(slot.as_ref().unwrap().uv_tex.is_some(), "two-plane slot");
 
-        let second = upload_nv12_reusable(
+        let second = upload_planar_reusable(
             &device,
             &queue,
-            &nv12_layout,
+            &planar_layout,
             &mut uploader,
             &mut slot,
             &y,
@@ -3472,6 +4046,8 @@ mod tests {
             32,
             &color,
             params,
+            crate::PlanarFormat::Nv12,
+            0.0,
             1.0,
         );
         assert!(

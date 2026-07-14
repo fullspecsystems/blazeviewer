@@ -20,6 +20,11 @@ with any pre-release suffix carried only by the tag.
   the existing window comes to the front.
 
 ### Changed
+- **HDR and 10-bit video now decode with more headroom (macOS/Linux).** The per-frame color
+  conversion for 4K HDR (Dolby Vision / HDR10 / HLG) and 10-bit video moved onto the GPU, so the
+  CPU does far less work per frame — smoother playback with margin to spare, especially on demanding
+  files. Colors are unchanged (verified against a from-spec reference); rotated and unusual-format
+  clips keep the previous path automatically. (Set `PB_VIDEO_NO_PLANAR=1` to opt out.)
 - **Video details now list every audio and subtitle track, instead of just "Audio: Yes".** The
   Inspector's Details tab (`Shift+I`) shows each track on its own line — language, codec, channel
   layout, sample rate, and whether it's the default, forced, a commentary, or SDH — so a film with a
