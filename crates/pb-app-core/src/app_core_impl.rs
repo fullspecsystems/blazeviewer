@@ -6821,6 +6821,9 @@ impl AppCore {
                     item,
                     audio_started: false,
                     media,
+                    scrub_audio_paused: false,
+                    pending_audio_commit: None,
+                    last_seek_intent: None,
                 },
             ));
             self.anim_hint_shown_for = Some(item); // engaged — retire the hint
