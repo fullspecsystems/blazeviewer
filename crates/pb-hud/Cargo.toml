@@ -9,5 +9,12 @@ description = "PhotoBlaze's HUD compositor: a shell-neutral CPU rasterizer that 
 # fontdue for text, resvg (→ usvg/tiny-skia) for the Font Awesome SVG icons. All compile
 # unchanged on macOS/iOS, so this crate ports with zero platform work.
 [dependencies]
+# Subtitle text layout (task #90): SHAPING + system-font fallback, which fontdue
+# cannot do (it is per-scalar, one face, no fallback — fine for "IMG_0001.jpg",
+# unusable for arbitrary human language). Spike-proven: Arabic contextual forms +
+# RTL, Devanagari conjuncts, and zero .notdef across six scripts
+# (.taskmaster/docs/90-p08-text-shaping-spike.md). All pure Rust (harfrust/fontdb;
+# 0.19 dropped rustybuzz) — no C, so ADR-015's no-native-build-risk rule holds.
+cosmic-text = "0.19"
 fontdue = "0.9"
 resvg = { version = "0.47", default-features = false }

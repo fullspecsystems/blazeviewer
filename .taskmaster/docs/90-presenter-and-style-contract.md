@@ -19,11 +19,18 @@ Rejected: native SwiftUI `Text` on macOS + cosmic-text elsewhere.
 mean the same thing on every machine. One rasterizer also makes the whole look
 golden-image testable, which a SwiftUI path cannot be.
 
-It is also the better path for **sharp**, not merely the tidier one: `pb-hud` already
-carries **tiny-skia** (via resvg), so we get real stroked outlines from glyph paths, real
-blurred shadows, and real rounded rects. SwiftUI `Text` cannot stroke at all (you would drop
-to `NSAttributedString` + negative stroke width and fake the rest), and the HUD's own
-existing outline is an 8-way offset halo — good enough for a toast, not for a subtitle.
+It is also the better path for **sharp**, not merely the tidier one. SwiftUI `Text` cannot
+stroke at all (you would drop to `NSAttributedString` + negative stroke width and fake the
+rest), and the HUD's own existing outline is an 8-way offset halo — good enough for a toast,
+not for a subtitle.
+
+*As built (2026-07-14):* the rasterizer composites from a single glyph coverage mask —
+outline = an exact **circular dilate** (mathematically the outer half of a stroke, and
+unlike the 8-way halo it has no diagonal gaps), shadow = a 3-pass separable box blur
+(indistinguishable from Gaussian, O(n)), background = an antialiased rounded-rect SDF. All
+of it CPU, all of it in `pb-hud`. (The earlier note here said "stroked glyph paths via
+tiny-skia"; the dilate is equivalent for an outline *around* text and needs no path
+extraction, so tiny-skia isn't used for this after all.)
 
 **Rejected shortcut:** letting `AVPlayer` render in-container subtitles itself (enable the
 legible `AVMediaSelectionOption`). Nearly free for native-played MP4/MOV, but it fails
@@ -60,7 +67,8 @@ pub struct SubtitleStyle {
                                       // display-independent, so it reads the same on the
                                       // ultrawide and the Studio.
     pub color: [u8; 4],               // RGBA — opacity is the alpha
-    pub outline_px: f32,              // 0 = off. A real tiny-skia stroke of the glyph path.
+    pub outline_pct: f32,             // 0 = off. An exact circular dilate of the glyph
+                                      // coverage = the outer half of a stroke.
     pub outline_color: [u8; 4],
     pub shadow: Option<Shadow>,       // { dx, dy, blur, color }
     pub background: [u8; 4],          // alpha 0 = off

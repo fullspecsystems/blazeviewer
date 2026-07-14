@@ -121,8 +121,11 @@ pub struct SubtitleStyle {
     pub font_family: Option<String>,
     pub size_pct: f32,
     pub color: [u8; 4],
-    /// Outline thickness in % of viewport height; 0 = off. A real stroke of the glyph
-    /// path (tiny-skia), not a fake offset halo.
+    /// Outline thickness in % of viewport height; 0 = off.
+    ///
+    /// A true circular dilate of the glyph coverage — mathematically the outer half of a
+    /// stroke — **not** the HUD's 8-way offset halo, which leaves gaps on diagonals and
+    /// looks chewed at subtitle sizes.
     pub outline_pct: f32,
     pub outline_color: [u8; 4],
     pub shadow: Option<Shadow>,
@@ -272,6 +275,43 @@ pub fn place(
 /// or 50 ms, whichever is looser — a subtitle appearing a frame late is invisible, a
 /// tenth of a second late is not.
 pub const TRANSITION_BUDGET: Duration = Duration::from_millis(50);
+
+impl SubtitleStyle {
+    /// Resolve this style against a viewport into the rasterizer's **physical-pixel**
+    /// params.
+    ///
+    /// This conversion is the *only* place percentages become pixels, and it exists
+    /// because `pb-hud` deliberately cannot see a viewport: px is the only unit that
+    /// crosses that boundary, which makes "rasterized at the wrong scale" unrepresentable
+    /// rather than merely discouraged.
+    ///
+    /// `viewport` is in physical px. Because `size_px` and friends land in the
+    /// rasterizer's cache key, a backing-scale change (1× ↔ 2×) invalidates the cached
+    /// bitmap for free — no shell has to remember to.
+    pub fn to_params(&self, viewport: (f32, f32)) -> pb_hud::subtitle::SubtitleParams {
+        let (vw, vh) = viewport;
+        pb_hud::subtitle::SubtitleParams {
+            font_family: self.font_family.clone(),
+            size_px: self.size_px(vh),
+            color: self.color,
+            outline_px: (self.outline_pct * vh).max(0.0),
+            outline_color: self.outline_color,
+            shadow: self.shadow.map(|s| pb_hud::subtitle::ShadowParams {
+                dx: s.dx_pct * vh,
+                dy: s.dy_pct * vh,
+                blur: (s.blur_pct * vh).max(0.0),
+                color: s.color,
+            }),
+            background: self.background,
+            background_radius_px: (self.background_radius_pct * vh).max(0.0),
+            background_pad_px: (self.background_pad_pct * vh).max(0.0),
+            // Width, not height — a max line length is about how far across the screen
+            // the text runs.
+            max_line_px: (self.max_line_pct * vw).max(1.0),
+            line_spacing: self.line_spacing,
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -644,6 +684,55 @@ mod tests {
             place(vp, video, (300.0, 40.0), &high, 80.0).bottom(),
             place(vp, video, (300.0, 40.0), &high, 0.0).bottom()
         );
+    }
+
+    // -- style -> params ----------------------------------------------------
+
+    /// The conversion that keeps subtitles sharp: percentages in, PHYSICAL PIXELS out.
+    /// The same style on a 1× and a 2× display must produce different pixel numbers —
+    /// that is what makes the rasterizer redraw instead of a layer scaling it up.
+    #[test]
+    fn to_params_resolves_percentages_to_physical_pixels() {
+        let s = SubtitleStyle {
+            size_pct: 0.05,
+            outline_pct: 0.004,
+            background_radius_pct: 0.01,
+            background_pad_pct: 0.02,
+            max_line_pct: 0.8,
+            shadow: Some(Shadow {
+                dx_pct: 0.002,
+                dy_pct: 0.004,
+                blur_pct: 0.006,
+                color: [0, 0, 0, 200],
+            }),
+            ..SubtitleStyle::default()
+        };
+        let p1 = s.to_params((1920.0, 1080.0));
+        assert_eq!(p1.size_px, 54.0);
+        assert!((p1.outline_px - 4.32).abs() < 0.01);
+        assert!((p1.background_radius_px - 10.8).abs() < 0.01);
+        assert_eq!(p1.max_line_px, 1536.0, "max line is % of WIDTH");
+        let sh = p1.shadow.unwrap();
+        assert!((sh.dy - 4.32).abs() < 0.01);
+
+        // The same style at 2x: every pixel number doubles (except width-derived ones,
+        // which follow the width).
+        let p2 = s.to_params((3840.0, 2160.0));
+        assert_eq!(p2.size_px, p1.size_px * 2.0);
+        assert!((p2.outline_px - p1.outline_px * 2.0).abs() < 0.01);
+        assert_eq!(p2.max_line_px, p1.max_line_px * 2.0);
+        assert_ne!(
+            p1, p2,
+            "so the rasterizer's cache key differs => it re-renders"
+        );
+    }
+
+    #[test]
+    fn to_params_never_emits_a_degenerate_size() {
+        let p = SubtitleStyle::default().to_params((0.0, 0.0));
+        assert!(p.size_px >= 1.0);
+        assert!(p.max_line_px >= 1.0);
+        assert!(p.outline_px >= 0.0);
     }
 
     /// A block wider or taller than the viewport still lands on screen rather than at a
