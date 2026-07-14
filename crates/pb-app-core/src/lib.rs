@@ -32,6 +32,7 @@ pub mod app_core_impl;
 pub mod archive;
 pub mod config;
 pub mod contract;
+pub mod cues;
 pub mod decode_pool;
 pub mod delete;
 pub mod describe;
@@ -54,7 +55,13 @@ pub mod prompt;
 pub mod save_rotation;
 pub mod scan;
 pub mod settings;
+// Sidecar subtitle discovery (task #90.1): pure matching rules over a list of sibling
+// names, so one implementation serves both loose files and archive entries.
+pub mod sidecar;
 pub mod slideshow;
+// Subtitle selection + style + placement (task #90.3/#90.4): the pure decisions behind
+// the overlay — which track shows, how it looks, and where it goes.
+pub mod subtitle;
 pub mod thumbs;
 pub mod timing;
 // The shared media-track formatter (task #98): one place a track turns into the line

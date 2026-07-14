@@ -177,8 +177,8 @@ pub use psd::PsdDecoder;
 pub use raw::{is_raw_extension, RawPreviewDecoder};
 pub use svg::SvgDecoder;
 pub use tracks::{
-    AudioFormat, AvGroup, MediaBackend, MediaTrack, MediaTrackCatalog, TrackCapability,
-    TrackCompleteness, TrackFlags, TrackId, TrackKind, TrackLocator, TrackSet,
+    AudioFormat, AvGroup, MediaBackend, MediaTrack, MediaTrackCatalog, SidecarOrigin,
+    TrackCapability, TrackCompleteness, TrackFlags, TrackId, TrackKind, TrackLocator, TrackSet,
 };
 pub use video::{
     SeekGeneration, VideoColorInfo, VideoFrame, VideoInput, VideoProducerEvent, VideoProducerMsg,

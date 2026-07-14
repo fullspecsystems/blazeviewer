@@ -721,6 +721,7 @@ unsafe fn catalog_from_asset(asset: Id, generation: u64) -> MediaTrackCatalog {
                 capability,
                 flags,
                 audio,
+                external: false, // an option of the container's own asset
             });
         }
         TrackSet::complete(tracks)

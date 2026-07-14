@@ -100,6 +100,7 @@ fn read_track(
         capability,
         flags: flags_of(stream.disposition()),
         audio,
+        external: false, // a real stream in the container
     }
 }
 

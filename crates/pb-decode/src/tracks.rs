@@ -143,6 +143,27 @@ pub enum AvGroup {
     Legible,
 }
 
+/// Where a **sidecar** subtitle lives (task #90.1) — a *reopenable* locator, deliberately
+/// not a `bool`.
+///
+/// A sidecar is not a stream in the video's container, so it has no stream index, and it is
+/// not a library item either (the archive/scan predicates index images and video containers
+/// only), so it has no item index. What it has is a place we can go back to and read again
+/// — and that is all this needs to be.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SidecarOrigin {
+    /// A sibling file on disk, by absolute path.
+    Path(std::path::PathBuf),
+    /// An entry in the same archive as the video, by its **exact entry name**.
+    ///
+    /// By name, not index: a `.srt` is not indexed as a library item, so no item index for
+    /// it exists — and a name also survives a re-scan, where an index would not.
+    ArchiveEntry {
+        archive: std::path::PathBuf,
+        entry: String,
+    },
+}
+
 /// How the **owning backend** re-finds a track at selection time. Opaque to the UI and
 /// the formatter — those see only [`TrackId`] — and held on the catalog in a side map
 /// (see [`MediaTrackCatalog::locator`]) rather than on [`MediaTrack`], so no display or
@@ -161,6 +182,8 @@ pub enum TrackLocator {
         group: AvGroup,
         property_list: Vec<u8>,
     },
+    /// A subtitle file beside the video, rather than a stream inside it (task #90.1).
+    Sidecar(SidecarOrigin),
 }
 
 /// One audio or subtitle track.
@@ -192,6 +215,14 @@ pub struct MediaTrack {
     pub flags: TrackFlags,
     /// `Some` for audio, `None` for subtitles.
     pub audio: Option<AudioFormat>,
+    /// This track is a **file beside the video**, not a stream inside it (#90.1).
+    ///
+    /// A display fact, not a locator: releases routinely ship an embedded English SubRip
+    /// stream *and* an `.eng.srt` of the same content, and without this both render as
+    /// "English · SubRip" — two rows a person cannot tell apart, and (worse) two picker
+    /// entries that look like a bug. The [`TrackLocator`] knows, but it is deliberately
+    /// opaque to the formatter, so the fact lives here.
+    pub external: bool,
 }
 
 /// The tracks of one kind, plus how much of them we actually know.
@@ -732,6 +763,7 @@ mod tests {
             capability: TrackCapability::Playable,
             flags: TrackFlags::none(),
             audio: None,
+            external: false,
         }
     }
 

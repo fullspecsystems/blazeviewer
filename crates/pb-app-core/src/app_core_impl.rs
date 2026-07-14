@@ -11398,6 +11398,7 @@ mod tests {
                 layout: Some("stereo".into()),
                 sample_rate: 48000,
             }),
+            external: false,
         }
     }
 
