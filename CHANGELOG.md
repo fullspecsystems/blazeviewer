@@ -28,6 +28,11 @@ with any pre-release suffix carried only by the tag.
   marks as default or forced, instead of a blind guess.
 
 ### Fixed
+- **Resizing the window, switching scale mode, or opening a folder no longer freezes on HEIC
+  libraries.** These used to re-decode the current photo on the spot, stalling the app for a
+  moment (about a quarter second on a 12-megapixel HEIC, longer on RAW). The current frame now
+  stays on screen and rescales instantly while the sharper version is prepared in the
+  background, so the app never hangs.
 - **Seeking a video on a network share no longer kills the audio.** Jumping into a large
   movie stored on a NAS/SMB share used to make the audio cut out for the rest of playback
   (and stutter for a while). Two causes: the audio track was sought the slow way — a byte-by-byte

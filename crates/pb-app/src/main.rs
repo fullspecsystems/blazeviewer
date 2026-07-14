@@ -111,9 +111,13 @@ use pb_app_core::decode_pool::{recommended_workers, DecodeFn, DecodePool};
 // Engine tuning constants + pure helpers migrated to pb-app-core (NS0 5.5 / Phase B) so the
 // orchestration methods that use them can live on `AppCore`. The shell still shares several.
 use pb_app_core::engine::{
-    decode_item, file_name_of, fresh_shuffle_seed, is_hdr, meta_for, render_color, ring_capacity,
-    scale_mode_of, window_for_capacity, RING_BUDGET_BYTES,
+    file_name_of, fresh_shuffle_seed, ring_capacity, scale_mode_of, window_for_capacity,
+    RING_BUDGET_BYTES,
 };
+// Only the order-guarantee tests decode inline now (the runtime paths go through the pool);
+// gate the import so a release build doesn't see it as unused (task #18 finding #5).
+#[cfg(test)]
+use pb_app_core::engine::decode_item;
 use pb_app_core::metrics::StageTimes;
 // Playlist-resolution currency migrated to pb-app-core (NS0 5.6 Step 2): the `Resolved` snapshot
 // + the `ScanUpdate` stream message. The resolver *functions* still run on the shell's scan/archive
@@ -750,6 +754,7 @@ impl App {
             targets: Vec::new(),
             last_nav: Nav::Forward,
             displayed_item: None,
+            presented_epoch: None,
             target_item: None,
             compare_pin: None,
             compare_return: None,
@@ -3380,28 +3385,10 @@ impl ApplicationHandler for App {
                 max_height: now.height.max(1),
             });
             renderer.resize(now.width, now.height);
-            // The real window size differs from what we decoded for — re-decode
-            // the first image at the corrected fit so the first frame isn't soft.
-            if let Some(idx) = self.core.playlist.current() {
-                let t0 = Instant::now();
-                // Preview-first (see `load_current_sync`): the full decode lands off-thread.
-                let decoded =
-                    decode_item(self.core.source.as_ref(), idx, self.core.decode_fit(), true);
-                self.core.metrics.record("decode", t0.elapsed());
-                if let Ok(img) = decoded {
-                    let meta = meta_for(self.core.source.as_ref(), idx, &self.core.root, &img);
-                    self.core.current = Some(meta.clone());
-                    self.core.meta_cache.insert(idx, meta);
-                    renderer.set_image(
-                        &img.pixels,
-                        img.width,
-                        img.height,
-                        render_color(&img.color),
-                        is_hdr(&img),
-                        img.peak,
-                    );
-                }
-            }
+            // The real window size differs from what we decoded for, but we do NOT re-decode
+            // on the event loop (task #18 finding #5): the GPU refits the first frame to the
+            // corrected size, and `request_prefetch` (below) re-decodes the current item at
+            // the right fit off-thread and presents it in place when ready.
         }
 
         // Empty launch (no folder/file given): a blank background instead of an image.
