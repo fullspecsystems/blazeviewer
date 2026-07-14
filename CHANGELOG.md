@@ -13,6 +13,10 @@ with any pre-release suffix carried only by the tag.
   fresh installs.)
 
 ### Fixed
+- **Video recovers instantly after falling behind.** When decoding briefly couldn't keep
+  up, playback used to show every late frame one screen-refresh apart — a slow-motion
+  crawl until it caught up. It now skips straight to the newest frame that should be on
+  screen and stays in step with the audio.
 - **A brief video hiccup no longer stutters the audio.** A momentary decode spike (a
   heavy scene, a GOP boundary) used to pause the audio the instant the next frame was
   late and resume it a beat later — an audible stop/start. Playback now rides out short

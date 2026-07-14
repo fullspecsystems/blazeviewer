@@ -223,6 +223,9 @@ pub struct VideoSession {
     /// When the mid-play queue first polled empty (plan 1B): the short-starvation
     /// clock. `None` whenever a frame is queued, paused, seeking, or rebuffering.
     starved_since: Option<Instant>,
+    /// Late frames discarded by the catch-up drain (plan 1C) — a session-lifetime
+    /// counter for the 0B diagnostics; presented frames are not counted.
+    dropped_frames: u64,
 }
 
 impl VideoSession {
@@ -266,6 +269,7 @@ impl VideoSession {
             audio_seek_ack: None,
             frame_interval: None,
             starved_since: None,
+            dropped_frames: 0,
         };
         (
             session,
@@ -371,20 +375,30 @@ impl VideoSession {
                     }
                 }
                 Playing => {
-                    // Present the next frame once its PTS is due. One per poll:
-                    // the tick loop runs at display rate, which bounds catch-up
-                    // bursts without dropping frames (the drop engine stays a
-                    // future seam).
-                    let due = self
-                        .queue
-                        .front()
-                        .is_some_and(|f| f.pts <= self.clock.position(now));
-                    if due {
-                        self.starved_since = None;
+                    // Drain the whole due run against ONE authoritative position
+                    // read, present only the newest due frame, and account the
+                    // older ones as drops (plan 1C) — once behind, playback
+                    // catches up in a single tick instead of a late one-per-tick
+                    // crawl. At most one upload/draw still happens per poll.
+                    // Future frames, paused-seek landings, frame-step results,
+                    // and the EOS parked frame are never dropped (the first is
+                    // never due; the rest never pass through this arm).
+                    let pos = self.clock.position(now);
+                    let mut newest_due: Option<VideoFrame> = None;
+                    while self.queue.front().is_some_and(|f| f.pts <= pos) {
                         let frame = self.queue.pop_front().expect("front checked");
                         self.queued_bytes = self.queued_bytes.saturating_sub(frame.byte_len());
+                        // Interval learning stays per-frame (dropped frames
+                        // included): a presented-only delta would span the
+                        // dropped run and teach a multiple of the real gap.
                         self.note_interval(frame.pts);
                         self.current_pts = Some(frame.pts);
+                        if newest_due.replace(frame).is_some() {
+                            self.dropped_frames += 1;
+                        }
+                    }
+                    if let Some(frame) = newest_due {
+                        self.starved_since = None;
                         update.present = Some(frame);
                     } else if self.queue.is_empty() {
                         if self.eos {
@@ -689,6 +703,11 @@ impl VideoSession {
     /// mid-play rebuffer — the caller pauses audio only for the latter).
     pub fn has_started(&self) -> bool {
         self.started
+    }
+
+    /// Late frames dropped by the catch-up drain so far (plan 1C/0B metric).
+    pub fn dropped_frames(&self) -> u64 {
+        self.dropped_frames
     }
 
     fn transition(&mut self, to: VideoSessionState, update: &mut SessionUpdate) {
@@ -1168,7 +1187,8 @@ mod tests {
         // A long stall later, two frames arrive → resume from the frozen
         // position; the buffering wall time added zero media time (rebuffer,
         // don't drift). The starvation window ran the clock past both queued
-        // PTS, so they present as immediate catch-up, oldest first.
+        // PTS, so the catch-up drain (plan 1C) drops the older one and
+        // presents the newest due frame immediately.
         io.events
             .send(VideoProducerEvent::Frame(frame(66)))
             .unwrap();
@@ -1180,14 +1200,10 @@ mod tests {
         assert_eq!(s.state(), VideoSessionState::Playing);
         assert!(u.state_changed);
         assert_eq!(
-            u.present.expect("catch-up presents in order").pts,
-            Duration::from_millis(66)
+            u.present.expect("catch-up presents the newest due").pts,
+            Duration::from_millis(100)
         );
-        let f = s
-            .poll(resume_at + Duration::from_millis(1))
-            .present
-            .expect("second catch-up frame");
-        assert_eq!(f.pts, Duration::from_millis(100));
+        assert_eq!(s.dropped_frames(), 1, "the older due frame was dropped");
     }
 
     // --- 1B: audio-continuous short-starvation policy ----------------------
@@ -1232,6 +1248,84 @@ mod tests {
         let much_later = just_short + Duration::from_secs(2);
         assert!(!s.poll(much_later).state_changed);
         assert_eq!(s.state(), VideoSessionState::Playing);
+    }
+
+    // --- 1C: deterministic late-frame drop ----------------------------------
+
+    /// R3 (overhaul plan 1C): a whole backlog of due frames resolves in ONE
+    /// tick — drop the older due frames, present the newest, and keep the
+    /// per-frame interval learning intact across the dropped run.
+    #[test]
+    fn catch_up_drops_older_due_frames_and_presents_the_newest() {
+        let budget = VideoQueueBudget {
+            max_bytes: 1024,
+            max_frames: 8,
+        };
+        let (mut s, io) = VideoSession::with_budget(SID, FRAME_BYTES, budget);
+        let t0 = Instant::now();
+        opened(&io, 10_000);
+        s.poll(t0);
+        io.events.send(VideoProducerEvent::Frame(frame(0))).unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(33)))
+            .unwrap();
+        s.poll(t0); // Playing, presents 0
+        let _ = s.poll(t0 + Duration::from_millis(34)); // presents 33
+
+        // Three more frames arrive, but the tick loop stalled: by the next
+        // poll they are ALL due. Only the newest presents; two drop.
+        for pts in [66u64, 100, 133] {
+            io.events
+                .send(VideoProducerEvent::Frame(frame(pts)))
+                .unwrap();
+        }
+        let u = s.poll(t0 + Duration::from_millis(200));
+        assert_eq!(
+            u.present.expect("newest due frame presents").pts,
+            Duration::from_millis(133)
+        );
+        assert_eq!(s.dropped_frames(), 2);
+        assert_eq!(s.state(), VideoSessionState::Playing);
+        // The learned interval is the true per-frame delta (33 ms), not the
+        // presented-to-presented span across the dropped run (100 ms).
+        assert_eq!(s.frame_interval, Some(Duration::from_millis(33)));
+        s.assert_budget_invariant();
+    }
+
+    /// The newest due frame is never dropped, even at the end of the stream —
+    /// it is the EOS parked frame.
+    #[test]
+    fn catch_up_at_eos_presents_the_final_frame_then_parks() {
+        let (mut s, io) = VideoSession::new(SID, FRAME_BYTES);
+        let t0 = Instant::now();
+        opened(&io, 10_000);
+        s.poll(t0);
+        io.events.send(VideoProducerEvent::Frame(frame(0))).unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(33)))
+            .unwrap();
+        s.poll(t0);
+        let _ = s.poll(t0 + Duration::from_millis(34));
+
+        // The clip's last two frames arrive late, followed by EOS.
+        io.events
+            .send(VideoProducerEvent::Frame(frame(66)))
+            .unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(100)))
+            .unwrap();
+        eos(&io);
+        let u = s.poll(t0 + Duration::from_millis(250));
+        assert_eq!(
+            u.present.expect("final frame presents").pts,
+            Duration::from_millis(100)
+        );
+        assert_eq!(s.dropped_frames(), 1);
+
+        // Next poll parks on it.
+        let _ = s.poll(t0 + Duration::from_millis(260));
+        assert_eq!(s.state(), VideoSessionState::Ended);
+        assert_eq!(s.current_pts, Some(Duration::from_millis(100)));
     }
 
     /// Pausing during a short starvation clears the accrual: paused playback
