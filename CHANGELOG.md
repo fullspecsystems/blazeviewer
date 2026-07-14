@@ -12,9 +12,8 @@ with any pre-release suffix carried only by the tag.
   come back (for example, press Space expecting pause — which actually advances to the next item —
   then Backspace) and playback resumes near where you were instead of restarting. Positions are kept
   only in memory and never written to disk; they're forgotten when you quit. A glance at the first or
-  last few seconds isn't remembered (it just starts over). Works for videos played through the
-  built-in engine — every video on Windows/Linux, and MKV / other non-Apple-native formats on macOS
-  (native-format resume on macOS is coming).
+  last few seconds isn't remembered (it just starts over), and a video you watched to the end restarts
+  from the top. Works for every video and format on all platforms.
 - **Opening photos from Explorer now reuses the running window (Windows).** Double-clicking a
   photo, or selecting several and pressing Open, hands them to the PhotoBlaze you already have open
   instead of launching a separate copy for each file. A multi-selection opens as one playlist, and

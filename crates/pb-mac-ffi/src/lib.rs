@@ -1082,6 +1082,13 @@ impl AppCoreHandle {
         self.core
             .native_video_failed(session_id, error, recoverable);
     }
+    /// The native player's current position + duration (seconds), reported each pump
+    /// so the core can remember a session-only resume position (task #94.2). Cheap;
+    /// session-gated core-side. `duration <= 0` is ignored (not yet known).
+    fn native_video_progress(&mut self, session_id: u64, position_secs: f64, duration_secs: f64) {
+        self.core
+            .native_video_progress(session_id, position_secs, duration_secs);
+    }
 
     // ── Session-backed video (task #84 §8): the FFmpeg fallback renders through
     // the wgpu canvas and reports through these instead of the AVPlayer observer.
@@ -2801,12 +2808,19 @@ fn map_effect(e: contract::CoreEffect) -> ffi::CoreEffectFfi {
             path,
             session_id,
             muted,
-        } => E::PlayVideo(path.to_string_lossy().into_owned(), session_id.0, muted),
+            start_secs,
+        } => E::PlayVideo(
+            path.to_string_lossy().into_owned(),
+            session_id.0,
+            muted,
+            start_secs,
+        ),
         C::PlayVideoBytes {
             name,
             session_id,
             muted,
-        } => E::PlayVideoBytes(name, session_id.0, muted),
+            start_secs,
+        } => E::PlayVideoBytes(name, session_id.0, muted, start_secs),
         C::RequestVideoPoster {
             request_id,
             item,
@@ -3144,15 +3158,17 @@ mod ffi {
         PauseLiveAudio,
         ResumeLiveAudio,
         // macOS native video (task 79.9): the whole media pipeline is the host's
-        // AVPlayer + AVPlayerLayer. PlayVideo(path, session_id, muted) opens the clip
-        // and presents it over the Metal canvas (revealed on the first frame; the
-        // poster shows until then). StopVideo(session_id) tears the player down
-        // (navigate / delete / failure); stale callbacks are rejected by session id.
-        PlayVideo(String, u64, bool),
-        // Play an archive (ZIP/7z) entry from in-RAM bytes (name, session_id, muted): no
-        // file URL, so the host pulls the container bytes via take_pending_video_bytes()
-        // and serves them to AVPlayer through a custom resource loader (never to disk).
-        PlayVideoBytes(String, u64, bool),
+        // AVPlayer + AVPlayerLayer. PlayVideo(path, session_id, muted, start_secs) opens
+        // the clip and presents it over the Metal canvas (revealed on the first frame;
+        // the poster shows until then). start_secs>0 = seek there before revealing (the
+        // session-only resume position, task #94.2). StopVideo(session_id) tears the
+        // player down (navigate / delete / failure); stale callbacks rejected by id.
+        PlayVideo(String, u64, bool, f64),
+        // Play an archive (ZIP/7z) entry from in-RAM bytes (name, session_id, muted,
+        // start_secs): no file URL, so the host pulls the container bytes via
+        // take_pending_video_bytes() and serves them to AVPlayer through a custom
+        // resource loader (never to disk). start_secs as in PlayVideo.
+        PlayVideoBytes(String, u64, bool, f64),
         // Generate a poster for a macOS archive video (request_id, item, name, max_edge): the
         // host pulls the entry's bytes via take_pending_poster_bytes(request_id), grabs a
         // frame with AVAssetImageGenerator, and returns it via video_poster_ready().
@@ -3410,6 +3426,14 @@ mod ffi {
         fn native_video_ended(&mut self, session_id: u64);
         fn native_video_seek_completed(&mut self, session_id: u64, generation: u64, finished: bool);
         fn native_video_failed(&mut self, session_id: u64, error: String, recoverable: bool);
+        // Native player position + duration (seconds), reported each pump for the
+        // session-only resume map (task #94.2).
+        fn native_video_progress(
+            &mut self,
+            session_id: u64,
+            position_secs: f64,
+            duration_secs: f64,
+        );
         fn video_session_active(&self) -> bool;
         fn video_session_elapsed_secs(&self) -> f64;
         fn video_session_duration_secs(&self) -> f64;

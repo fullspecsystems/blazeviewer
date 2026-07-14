@@ -38,6 +38,10 @@ final class NativeVideoPlayer {
     private var revealed = false
     private var reportedOpened = false
     private var ended = false
+    /// Session-only resume position (task #94.2): seek here before the first reveal so
+    /// returning to a video lands where you left off, with no frame-0 flash (the poster
+    /// holds until the seek lands). `0` = play from the start.
+    private let startSecs: Double
     /// The core's scale mode (0 Fit / 1 Fill / 2 Original), mirrored onto the layer so
     /// video honors 8/9/0 like a still. Zoom/pan/rotation parity is a later increment.
     private var scaleMode: UInt8
@@ -73,11 +77,11 @@ final class NativeVideoPlayer {
     /// Play a loose file by URL.
     convenience init(
         url: URL, muted: Bool, sessionId: UInt64, scaleMode: UInt8, canvas: MetalCanvasNSView,
-        model: CoreModel
+        model: CoreModel, startSecs: Double = 0
     ) {
         self.init(
             item: AVPlayerItem(url: url), loader: nil, muted: muted, sessionId: sessionId,
-            scaleMode: scaleMode, canvas: canvas, model: model)
+            scaleMode: scaleMode, canvas: canvas, model: model, startSecs: startSecs)
     }
 
     /// Play an archive (ZIP/7z) entry from in-RAM `data` — no file URL, so an
@@ -86,19 +90,19 @@ final class NativeVideoPlayer {
     /// the loader can resolve the content type AVPlayer needs.
     convenience init(
         data: Data, name: String, muted: Bool, sessionId: UInt64, scaleMode: UInt8,
-        canvas: MetalCanvasNSView, model: CoreModel
+        canvas: MetalCanvasNSView, model: CoreModel, startSecs: Double = 0
     ) {
         let loader = ArchiveVideoLoader(data: data, name: name)
         let asset = AVURLAsset(url: loader.url)
         asset.resourceLoader.setDelegate(loader, queue: loader.queue)
         self.init(
             item: AVPlayerItem(asset: asset), loader: loader, muted: muted, sessionId: sessionId,
-            scaleMode: scaleMode, canvas: canvas, model: model)
+            scaleMode: scaleMode, canvas: canvas, model: model, startSecs: startSecs)
     }
 
     init(
         item: AVPlayerItem, loader: ArchiveVideoLoader?, muted: Bool, sessionId: UInt64,
-        scaleMode: UInt8, canvas: MetalCanvasNSView, model: CoreModel
+        scaleMode: UInt8, canvas: MetalCanvasNSView, model: CoreModel, startSecs: Double = 0
     ) {
         self.sessionId = sessionId
         self.scaleMode = scaleMode
@@ -106,6 +110,7 @@ final class NativeVideoPlayer {
         self.model = model
         self.resourceLoader = loader
         self.item = item
+        self.startSecs = startSecs
         player = AVPlayer(playerItem: item)
         player.isMuted = muted
         // Hold the last frame at EOS (parity: end-of-stream parks; `P` replays).
@@ -121,10 +126,23 @@ final class NativeVideoPlayer {
             MainActor.assumeIsolated {
                 guard let self, layer.isReadyForDisplay, !self.revealed else { return }
                 self.revealed = true
-                layer.isHidden = false
-                self.canvas?.revealVideoLayer() // unhide the container: poster→video, no black flash
-                self.player.play()
-                pbTrace("native video \(self.sessionId): revealed + playing")
+                // Resume position (task #94.2): seek FIRST, reveal + play on the seek's
+                // completion so the layer shows the resume frame, not frame 0 — the wgpu
+                // poster holds until then, so there's no jump. `<= 0.5` plays from the start.
+                if self.startSecs > 0.5 {
+                    self.player.seek(
+                        to: CMTime(seconds: self.startSecs, preferredTimescale: 600),
+                        toleranceBefore: CMTime(seconds: 0.25, preferredTimescale: 600),
+                        toleranceAfter: CMTime(seconds: 0.25, preferredTimescale: 600)
+                    ) { [weak self] _ in
+                        MainActor.assumeIsolated {
+                            guard let self else { return }
+                            self.revealAndPlay(layer)
+                        }
+                    }
+                } else {
+                    self.revealAndPlay(layer)
+                }
             }
         }
         // Report opened facts once ready; surface a decode/open failure.
@@ -176,6 +194,15 @@ final class NativeVideoPlayer {
         }
         let src = resourceLoader == nil ? "file" : "archive-bytes"
         pbTrace("native video \(sessionId): opening (\(src)) muted=\(muted)")
+    }
+
+    /// Unhide the layer (poster → video, no black flash) and start playback. Called
+    /// once, from the first-frame reveal — directly, or after the resume seek lands.
+    private func revealAndPlay(_ layer: AVPlayerLayer) {
+        layer.isHidden = false
+        canvas?.revealVideoLayer()
+        player.play()
+        pbTrace("native video \(sessionId): revealed + playing")
     }
 
     /// Push the current position/duration/playing to the model for the scrubber row.

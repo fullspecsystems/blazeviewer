@@ -2038,10 +2038,12 @@ final class CoreModel {
             sessionAudio?.seek(toSeconds: seconds)
         case .SetVideoAudioMuted(let muted):
             sessionAudio?.setMuted(muted)
-        case .PlayVideo(let path, let sessionId, let muted):
-            playNativeVideo(path: path.toString(), sessionId: sessionId, muted: muted)
-        case .PlayVideoBytes(let name, let sessionId, let muted):
-            playNativeVideoBytes(name: name.toString(), sessionId: sessionId, muted: muted)
+        case .PlayVideo(let path, let sessionId, let muted, let startSecs):
+            playNativeVideo(
+                path: path.toString(), sessionId: sessionId, muted: muted, startSecs: startSecs)
+        case .PlayVideoBytes(let name, let sessionId, let muted, let startSecs):
+            playNativeVideoBytes(
+                name: name.toString(), sessionId: sessionId, muted: muted, startSecs: startSecs)
         case .RequestVideoPoster(let requestId, let item, let name, let maxEdge):
             generateArchivePoster(
                 requestId: requestId, item: item, name: name.toString(), maxEdge: maxEdge)
@@ -2401,7 +2403,7 @@ final class CoreModel {
     /// `CoreEffect::PlayVideo` (task 79.9): open the clip in a native `AVPlayer` and
     /// present it over the canvas. Replaces any prior player. The `AVPlayerLayer` shows
     /// only once its first frame is ready — the wgpu poster holds until then.
-    private func playNativeVideo(path: String, sessionId: UInt64, muted: Bool) {
+    private func playNativeVideo(path: String, sessionId: UInt64, muted: Bool, startSecs: Double) {
         nativeVideo?.stop()
         nativeVideo = nil
         guard let canvas = canvasView else {
@@ -2411,13 +2413,15 @@ final class CoreModel {
         resetVideoControls() // start the new clip's scrubber at 0, not the last clip's spot
         nativeVideo = NativeVideoPlayer(
             url: URL(fileURLWithPath: path), muted: muted, sessionId: sessionId,
-            scaleMode: core.menu_state().scale, canvas: canvas, model: self)
+            scaleMode: core.menu_state().scale, canvas: canvas, model: self, startSecs: startSecs)
     }
 
     /// `CoreEffect::PlayVideoBytes` (macOS archive video, task #30): the core stashed the
     /// entry's in-RAM container bytes — pull them once and open an `AVPlayer` backed by a
     /// resource loader that serves them on demand (never written to disk; privacy #2).
-    private func playNativeVideoBytes(name: String, sessionId: UInt64, muted: Bool) {
+    private func playNativeVideoBytes(
+        name: String, sessionId: UInt64, muted: Bool, startSecs: Double
+    ) {
         nativeVideo?.stop()
         nativeVideo = nil
         guard let canvas = canvasView else {
@@ -2433,7 +2437,7 @@ final class CoreModel {
         resetVideoControls()
         nativeVideo = NativeVideoPlayer(
             data: data, name: name, muted: muted, sessionId: sessionId,
-            scaleMode: core.menu_state().scale, canvas: canvas, model: self)
+            scaleMode: core.menu_state().scale, canvas: canvas, model: self, startSecs: startSecs)
     }
 
     /// `CoreEffect::RequestVideoPoster` (macOS archive-video posters, task #30): pull the
@@ -2610,6 +2614,10 @@ final class CoreModel {
     /// Session-gated. Formats the time labels; the fraction drives the bar + knob.
     func updateVideoProgress(_ sessionId: UInt64, elapsed: Double, total: Double, playing: Bool) {
         guard nativeVideo?.sessionId == sessionId else { return }
+        // Feed the core's session-only resume map (task #94.2): the core keeps no native
+        // clock, so this ~20 Hz report is where "where you left off" comes from. Cheap +
+        // session-gated core-side; a near-start/end position is forgotten there.
+        core.native_video_progress(sessionId, elapsed, total)
         // The fraction updates ~20 Hz to track the real playhead (no animation — that lagged
         // a sample behind and jumped forward on pause). The labels change ~1 Hz, so guard
         // them to avoid needless re-renders at the fraction's rate.

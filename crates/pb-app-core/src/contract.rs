@@ -470,6 +470,9 @@ pub enum CoreEffect {
         path: PathBuf,
         session_id: crate::video::VideoSessionId,
         muted: bool,
+        /// Session-only resume position in seconds (task #94.2): the shell seeks
+        /// the player here before revealing/playing. `0.0` = play from the start.
+        start_secs: f64,
     },
     /// Play a video from **in-RAM bytes** — an archive (ZIP/7z) entry, which has no file
     /// URL (task #30 macOS parity). The container bytes are stashed for the shell to pull
@@ -480,6 +483,8 @@ pub enum CoreEffect {
         name: String,
         session_id: crate::video::VideoSessionId,
         muted: bool,
+        /// Session-only resume position in seconds (task #94.2); see [`Self::PlayVideo`].
+        start_secs: f64,
     },
     /// Ask the shell to generate a **poster** frame for a macOS archive (ZIP/7z) video
     /// (task #30). The core stashed the entry's in-RAM bytes for the shell to pull

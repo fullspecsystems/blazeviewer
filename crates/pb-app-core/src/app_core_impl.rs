@@ -3883,11 +3883,21 @@ impl AppCore {
                 self.update_video_progress();
                 continue;
             }
+            // A remembered position for this archive item (task #94.2).
+            let item = self
+                .video
+                .as_ref()
+                .and_then(ActiveVideoBackend::as_native)
+                .map(|p| p.item);
+            let start_secs = item
+                .and_then(|i| self.video_resume.get(&i))
+                .map_or(0.0, |d| d.as_secs_f64());
             self.pending_video_bytes = Some(bytes);
             self.effects.push(contract::CoreEffect::PlayVideoBytes {
                 name,
                 session_id: id,
                 muted,
+                start_secs,
             });
         }
     }
@@ -6878,6 +6888,12 @@ impl AppCore {
         self.video_seq += 1;
         let id = crate::video::VideoSessionId(self.video_seq);
         let muted = self.effective_mute();
+        // A remembered position for this item (task #94.2) → the shell seeks the
+        // player here before revealing/playing. `0.0` = from the start.
+        let start_secs = self
+            .video_resume
+            .get(&item)
+            .map_or(0.0, |d| d.as_secs_f64());
         if let Some(path) = self.source.path(item).map(Path::to_path_buf) {
             self.video = Some(ActiveVideoBackend::Native(
                 crate::video_native::NativeVideoProxy::new(item, id, muted),
@@ -6886,6 +6902,7 @@ impl AppCore {
                 path,
                 session_id: id,
                 muted,
+                start_secs,
             });
         } else {
             // Archive entry: no file URL. Read the container bytes OFF the event loop (a
@@ -7093,19 +7110,61 @@ impl AppCore {
 
     /// Stop and drop any active video session (navigation, delete, teardown). The
     /// currently displayed frame stays on screen; the caller decides what replaces it.
+    /// Record — or forget — a video's session-only resume position (task #94.2),
+    /// applying the [`video_resume_target`] policy: a spot meaningfully into a
+    /// long-enough clip is remembered (rewound a touch); a near-start / near-end /
+    /// watched-to-the-end position FORGETS any prior entry so returning restarts.
+    /// Keyed by item index; RAM-only. Both backends funnel their position here.
+    fn note_video_position(&mut self, item: usize, pos: Duration, dur: Duration) {
+        match video_resume_target(pos, dur) {
+            Some(target) => {
+                self.video_resume.insert(item, target);
+            }
+            None => {
+                self.video_resume.remove(&item);
+            }
+        }
+    }
+
+    /// Shell → core: the macOS native player's current position (task #94.2). The
+    /// core holds no native clock, so the shell reports it each pump; this folds it
+    /// into the resume map so returning to the item resumes where it left off. Only
+    /// the live session's reports count (session-gated).
+    pub fn native_video_progress(
+        &mut self,
+        session_id: u64,
+        position_secs: f64,
+        duration_secs: f64,
+    ) {
+        let sid = crate::video::VideoSessionId(session_id);
+        let item = self
+            .video
+            .as_ref()
+            .and_then(ActiveVideoBackend::as_native)
+            .filter(|p| p.session_id == sid)
+            .map(|p| p.item);
+        if let Some(item) = item {
+            if duration_secs > 0.0 && position_secs >= 0.0 {
+                self.note_video_position(
+                    item,
+                    Duration::from_secs_f64(position_secs),
+                    Duration::from_secs_f64(duration_secs),
+                );
+            }
+        }
+    }
+
     pub fn stop_video(&mut self) {
         let now = self.now;
         if let Some(v) = self.video.take() {
             match v {
                 ActiveVideoBackend::Session(mut s) => {
                     // Remember where we're leaving off (task #94.2) before teardown,
-                    // so returning to this item resumes near here. RAM-only,
-                    // session-scoped, only when far enough into a long-enough clip.
+                    // so returning to this item resumes near here (or forgets a
+                    // watched-to-the-end clip so it restarts). RAM-only.
                     if let Some(dur) = s.session.duration {
                         let pos = s.session.desired_position(now);
-                        if let Some(target) = video_resume_target(pos, dur) {
-                            self.video_resume.insert(s.item, target);
-                        }
+                        self.note_video_position(s.item, pos, dur);
                     }
                     s.session.stop();
                     self.effects.push(contract::CoreEffect::StopVideoAudio);
@@ -10638,6 +10697,38 @@ mod tests {
         let sought = std::iter::from_fn(|| io.msgs.try_recv().ok())
             .any(|m| matches!(m, VideoProducerMsg::SeekTo { target, .. } if target == Duration::from_secs(30)));
         assert!(sought, "a SeekTo(30s) reached the producer");
+    }
+
+    /// Task #94.2 (native path): the shell's periodic position report folds into
+    /// the resume map — mid-clip remembered (rewound), watched-to-end forgotten,
+    /// a stale session ignored.
+    #[test]
+    fn native_video_progress_records_and_forgets_resume() {
+        use crate::video::VideoSessionId;
+        use crate::video_native::NativeVideoProxy;
+
+        let mut core = test_core();
+        core.video = Some(ActiveVideoBackend::Native(NativeVideoProxy::new(
+            7,
+            VideoSessionId(30),
+            false,
+        )));
+        // Mid-clip → remembered, rewound by RESUME_REWIND.
+        core.native_video_progress(30, 40.0, 100.0);
+        assert_eq!(
+            core.video_resume.get(&7).copied(),
+            Some(Duration::from_secs(38))
+        );
+        // Near the end → forgotten, so returning restarts.
+        core.native_video_progress(30, 99.0, 100.0);
+        assert_eq!(core.video_resume.get(&7), None);
+        // Re-record mid-clip, then a wrong-session report must NOT touch it.
+        core.native_video_progress(30, 50.0, 100.0);
+        core.native_video_progress(999, 10.0, 100.0);
+        assert_eq!(
+            core.video_resume.get(&7).copied(),
+            Some(Duration::from_secs(48))
+        );
     }
 
     /// A paused seek commits the audio position on settle but never resumes —
