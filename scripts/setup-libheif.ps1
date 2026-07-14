@@ -117,6 +117,14 @@ if ($ffContent -match 'PhotoBlaze task #100') {
     # which is the only source of a NAMED channel layout. Without them a 5.1 track reads
     # "6 channels" -- i.e. straight back to MF's limitation. They are keyed to the codecs
     # pb_decode::tracks::audio_codec_display already knows how to name.
+    #
+    # SUBTITLES ARE ASYMMETRIC ON PURPOSE (task #100.8): the subtitle DECODERS are enabled but
+    # the subtitle DEMUXERS (srt/webvtt/ass) are not. Cues inside a container therefore work
+    # (mov+movtext, matroska+subrip/ass/webvtt), while a STANDALONE .srt/.vtt/.ass sidecar
+    # cannot be opened at all -- a decoder turns packets into cues, it cannot open a file.
+    # That is a real constraint on #90's sidecar tier, and Windows-only (Linux/macOS link a
+    # full FFmpeg). If #90 chooses to open sidecars via FFmpeg rather than parse them in Rust,
+    # add `--enable-demuxer=srt,webvtt,ass` here and re-measure. See #100.8.
     $ffTrim = @'
 # --- PhotoBlaze task #100: demux/metadata-only FFmpeg -----------------------
 string(APPEND OPTIONS " --disable-everything --disable-network --disable-encoders"
