@@ -121,6 +121,25 @@ impl ViewTransform {
         (rw * s, rh * s)
     }
 
+    /// Overflow smaller than this (physical px, per side) is fit/zoom **rounding**,
+    /// not real pan headroom. A width-constrained image in Fit computes
+    /// `displayed_w = rw * (screen_w / rw)`, which in f32 can land a hair over
+    /// `screen_w` (e.g. 2560.0002), and an imperceptible zoom (1.000…) leaves the
+    /// same sub-pixel sliver. Below this threshold the image is treated as fitting,
+    /// so a video's horizontal arrows **seek** instead of panning invisibly
+    /// (owner-reported: an unnoticeable overflow silently killed arrow-seek).
+    pub const PAN_DEADZONE_PX: f32 = 1.0;
+
+    /// Whether there is *meaningful* pan headroom on each axis — more than the
+    /// [`Self::PAN_DEADZONE_PX`] rounding deadzone. Drives the seek-vs-pan choice
+    /// for a video's arrow keys and the grab-hand cursor affordance; the pan
+    /// *clamp* still uses the raw [`Self::max_pan`], so a real sub-pixel bound is
+    /// respected even though it doesn't flip the affordance.
+    pub fn pannable_axes(&self, img_w: u32, img_h: u32, screen_w: u32, screen_h: u32) -> [bool; 2] {
+        let mp = self.max_pan(img_w, img_h, screen_w, screen_h);
+        [mp[0] > Self::PAN_DEADZONE_PX, mp[1] > Self::PAN_DEADZONE_PX]
+    }
+
     /// Largest pan offset (px, each axis) that keeps the image covering the
     /// viewport — zero when the image is ≤ the screen on that axis (so it stays
     /// centered and pan is a no-op).
@@ -376,5 +395,43 @@ mod tests {
         };
         let p = v.placement(100, 100, 800, 800);
         assert!(approx(p.w, 100.0 * MAX_ZOOM), "zoom clamped to MAX: {p:?}");
+    }
+
+    #[test]
+    fn sub_pixel_fit_overflow_is_not_pannable() {
+        // A width-constrained 16:9 image fit into a 16:9 area: fit scale =
+        // screen_w / img_w, and img_w * (screen_w / img_w) can land a hair over
+        // screen_w in f32. That rounding sliver must NOT read as pan headroom —
+        // else a video's horizontal arrows pan invisibly instead of seeking
+        // (owner-reported: Fit mode "looked okay" but arrows did nothing).
+        let v = ViewTransform::default(); // Fit, zoom 1.0
+        let mp = v.max_pan(1920, 1080, 2560, 1440);
+        assert!(
+            mp[0] < ViewTransform::PAN_DEADZONE_PX,
+            "fit overflow {} must be within the deadzone",
+            mp[0]
+        );
+        assert!(
+            !v.pannable_axes(1920, 1080, 2560, 1440)[0],
+            "a width-fit video is not horizontally pannable"
+        );
+    }
+
+    #[test]
+    fn imperceptible_zoom_is_not_pannable_but_a_real_one_is() {
+        // A width-filling video (displayed_w == screen_w at zoom 1).
+        let mut v = ViewTransform::default();
+        // ~0.25 px of overflow per side — an unnoticeable zoom → still seek.
+        v.zoom = 1.0 + 0.5 / 2560.0;
+        assert!(
+            !v.pannable_axes(2560, 1440, 2560, 1440)[0],
+            "a sub-pixel zoom must not flip arrows into pan"
+        );
+        // A deliberate zoom with several px of headroom → genuinely pannable.
+        v.zoom = 1.0 + 8.0 / 2560.0;
+        assert!(
+            v.pannable_axes(2560, 1440, 2560, 1440)[0],
+            "a real zoom is horizontally pannable"
+        );
     }
 }
