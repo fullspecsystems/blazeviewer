@@ -55,7 +55,9 @@ final class SampleBufferPresenter {
     private var revealed = false
     private var reportedOpened = false
     private var ended = false
+    private var failedOut = false
     private var audioStarted = false
+    private var statusObs: NSKeyValueObservation?
     private var timeObserver: Any?
     private var durationSecs: Double = 0
     private var fps: Double = 0
@@ -80,6 +82,22 @@ final class SampleBufferPresenter {
         synchronizer.addRenderer(audioRenderer) // audio shares the video's clock (§3B)
         audioRenderer.isMuted = muted
         relayout()
+
+        // Safety net (§3F): if the display layer fails to decode (an unsupported
+        // stream the demux self-probe didn't catch), report a recoverable failure
+        // so the core falls back to the Session route rather than showing nothing.
+        statusObs = displayLayer.observe(\.status, options: [.new]) { [weak self] layer, _ in
+            // KVO for `status` isn't guaranteed on the main thread — read the layer
+            // state here, then hop to the main actor for the model callback.
+            guard layer.status == .failed else { return }
+            let msg = layer.error?.localizedDescription ?? "Sample-buffer decode failed"
+            DispatchQueue.main.async {
+                guard let self, !self.failedOut else { return }
+                self.failedOut = true
+                pbTrace("sample-buffer video \(self.sessionId): display layer FAILED — \(msg)")
+                self.model?.nativeVideoFailed(self.sessionId, error: msg, recoverable: true)
+            }
+        }
 
         // ~20 Hz position → the info-line scrubber (the core keeps no video clock;
         // the synchronizer's timebase is the source, like the AVPlayer route).
@@ -338,6 +356,8 @@ final class SampleBufferPresenter {
     /// observer, detach the layer. Idempotent.
     func stop() {
         synchronizer.rate = 0
+        statusObs?.invalidate()
+        statusObs = nil
         reader.stop(layer: displayLayer)
         audioFeeder.stop(renderer: audioRenderer)
         if let timeObserver {
@@ -349,7 +369,8 @@ final class SampleBufferPresenter {
     }
 
     deinit {
-        // The reader frees its pointer in its own deinit; nothing main-actor-bound
-        // to release here beyond what `stop()` already handled.
+        // Safety net if `stop()` wasn't called; the reader/feeder free their own
+        // pointers in their deinits.
+        statusObs?.invalidate()
     }
 }
