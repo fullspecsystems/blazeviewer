@@ -10,6 +10,7 @@ description = "GPU presentation for PhotoBlaze (wgpu) plus fit-to-screen geometr
 [dependencies]
 wgpu = "22"
 bytemuck = { version = "1", features = ["derive"] }
+half = "2"
 pollster = "0.3"
 
 # Query the display's HDR/wide-gamut state via DXGI (`display::primary_hdr`) to

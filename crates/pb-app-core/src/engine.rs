@@ -235,6 +235,32 @@ pub fn render_yuv(c: &pb_decode::VideoColorInfo) -> pb_render::YuvParams {
     }
 }
 
+/// Assemble the renderer's [`PlanarPresentation`](pb_render::PlanarPresentation)
+/// for a planar (NV12 / P010) video frame (task #91 Phase 2): storage precision,
+/// transfer, YUV matrix + range, primaries/parametric color, and the HDR peak —
+/// all translated across the crate boundary. `format` is the frame's pixel format
+/// (assumed planar; the caller dispatches on [`PixelFormat::is_planar_video`]).
+pub fn render_planar_present(
+    format: PixelFormat,
+    color: &pb_decode::VideoColorInfo,
+) -> pb_render::PlanarPresentation {
+    pb_render::PlanarPresentation {
+        format: match format {
+            PixelFormat::P010 => pb_render::PlanarFormat::P010,
+            _ => pb_render::PlanarFormat::Nv12,
+        },
+        transfer: match color.transfer {
+            pb_decode::VideoTransfer::SrgbLike => pb_render::PlanarTransfer::SrgbLike,
+            pb_decode::VideoTransfer::Parametric => pb_render::PlanarTransfer::Parametric,
+            pb_decode::VideoTransfer::Pq => pb_render::PlanarTransfer::Pq,
+            pb_decode::VideoTransfer::Hlg => pb_render::PlanarTransfer::Hlg,
+        },
+        yuv: render_yuv(color),
+        color: render_color(&color.transform),
+        peak: color.peak,
+    }
+}
+
 /// The navigation direction for a nav [`Action`], or `None` for any non-nav action.
 /// Bridges the central keymap vocabulary to the engine's `Nav` (used by the press
 /// handler and `held_nav`).

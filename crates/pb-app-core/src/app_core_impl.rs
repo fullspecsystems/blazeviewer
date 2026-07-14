@@ -7478,27 +7478,32 @@ impl AppCore {
             let Some(a) = self.renderer.as_mut() else {
                 return;
             };
-            match frame.format {
-                pb_decode::PixelFormat::Nv12 => {
-                    let y_len = frame.width as usize * frame.height as usize;
-                    let (y, uv) = frame.pixels.split_at(y_len);
-                    a.set_video_nv12(
+            if frame.format.is_planar_video() {
+                // NV12 / P010 (task 79.10 / #91 Phase 2): split at the checked Y-plane
+                // span (never a raw `split_at`, which would panic on a short buffer —
+                // though `VideoSession` already rejects malformed frames) and hand the
+                // two planes to the in-shader planar path.
+                if let Some((y_len, _uv_off, _uv_len)) =
+                    frame.format.planar_plane_spans(frame.width, frame.height)
+                {
+                    let (y, uv) = frame.pixels.split_at(y_len.min(frame.pixels.len()));
+                    a.set_video_planar(
                         y,
                         uv,
                         frame.width,
                         frame.height,
-                        render_yuv(&frame.color),
-                        render_color(&frame.color.transform),
+                        crate::engine::render_planar_present(frame.format, &frame.color),
                     );
                 }
-                format => a.set_image(
+            } else {
+                a.set_image(
                     &frame.pixels,
                     frame.width,
                     frame.height,
                     render_color(&frame.color.transform),
-                    format == pb_decode::PixelFormat::Rgba16F,
+                    frame.format == pb_decode::PixelFormat::Rgba16F,
                     frame.color.peak,
-                ),
+                );
             }
         }
         // Each presented frame re-resolves the video item at the current epoch, so a
