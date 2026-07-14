@@ -13,6 +13,11 @@ with any pre-release suffix carried only by the tag.
   fresh installs.)
 
 ### Fixed
+- **Seeking in high-bitrate 4K / HDR videos is dramatically faster.** Jumping around a long-GOP
+  clip used to stall for 1–3 seconds while it needlessly color-converted (and HDR-tone-mapped)
+  every frame between the keyframe and your target — frames it only threw away. It now decodes
+  those frames but converts only the one it lands on, cutting the wait roughly 7–10× (e.g. a 3.1 s
+  seek down to ~0.5 s). macOS MKV/WebM and all Linux video.
 - **Video poster frames for feature films.** Long films that open on a studio logo over black
   or a slow fade-in used to get an all-black thumbnail. The poster picker now seeks past the
   intro and chooses the most visually detailed frame it finds, so you get a real picture.

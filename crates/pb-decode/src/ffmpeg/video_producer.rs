@@ -30,7 +30,7 @@
 //! Failed clock so playback degrades to silent immediately.
 
 use std::sync::mpsc::{Receiver, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ffmpeg_next as ff;
 
@@ -46,6 +46,13 @@ use crate::{FitBox, PixelFormat};
 /// Watchdog budget for one read/decode burst (one credited frame). Local
 /// files/RAM resolve in milliseconds; only hostile input hits this.
 const OP_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Temporary perf diagnostics (task #84 follow-up): `PB_VIDEO_DIAG=1` prints the
+/// decode backend (VideoToolbox vs software), the decode resolution, and per-seek
+/// timing to stderr so we can measure the 4K-HDR seek stall instead of guessing.
+fn diag() -> bool {
+    std::env::var_os("PB_VIDEO_DIAG").is_some()
+}
 /// Packets fed without producing one frame before declaring the input stuck.
 const MAX_PACKETS_PER_FRAME: usize = 4096;
 /// Consecutive rejected packets (decoder said no) before giving up.
@@ -72,6 +79,24 @@ pub fn run_ff_video_producer(
         Err(e) => return fail(e),
     };
     let (out_w, out_h) = reader.conv.display_dims();
+    if diag() {
+        let fit_desc = match fit {
+            Some(f) => format!("fit {}x{}", f.max_width, f.max_height),
+            None => "NATIVE".to_string(),
+        };
+        eprintln!(
+            "[pb-video] open codec={} coded={}x{} display={}x{} decode={} hwaccel={} out_fmt={:?} rot={}",
+            reader.facts.codec,
+            reader.facts.width,
+            reader.facts.height,
+            out_w,
+            out_h,
+            fit_desc,
+            if reader._hw.is_some() { "VideoToolbox" } else { "SOFTWARE" },
+            reader.conv.output_format(),
+            reader.facts.rotation,
+        );
+    }
     let _ = events.send(VideoProducerEvent::Opened {
         session_id,
         duration: reader.facts.duration,
@@ -123,6 +148,7 @@ pub fn run_ff_video_producer(
         // superseded landing never publishes a frame.
         if let Some((target, g)) = pending.take() {
             gen = g;
+            let seek_t0 = Instant::now();
             let target_units = match reader.seek(target) {
                 Ok(t) => t,
                 Err(e) => {
@@ -130,6 +156,8 @@ pub fn run_ff_video_producer(
                     break 'outer;
                 }
             };
+            let demux = seek_t0.elapsed();
+            let mut runup = 0u32; // keyframe→target frames decoded then discarded
             let mut landed: Option<(i64, Vec<u8>)> = None;
             loop {
                 // Watch for supersede/stop between decodes (latest-value).
@@ -144,13 +172,33 @@ pub fn run_ff_video_producer(
                     Err(std::sync::mpsc::TryRecvError::Empty) => {}
                     Err(_) => break 'outer,
                 }
-                match reader.next_frame() {
-                    Ok(Some((ts, rgba))) => {
+                // Decode WITHOUT converting: run-up frames are discarded, so we
+                // never pay their readback + downscale + tone-map (the seek stall).
+                // Only the landing frame is converted.
+                match reader.decode_next_raw() {
+                    Ok(Some((ts, frame))) => {
                         if ts >= target_units {
+                            let rgba = match reader.convert_frame(&frame) {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    fail(e);
+                                    break 'outer;
+                                }
+                            };
+                            if diag() {
+                                eprintln!(
+                                    "[pb-video] seek target={:.2}s demux={}ms runup={} frames total={}ms",
+                                    target.as_secs_f64(),
+                                    demux.as_millis(),
+                                    runup,
+                                    seek_t0.elapsed().as_millis(),
+                                );
+                            }
                             landed = Some((ts, rgba));
                             break;
                         }
-                        // Keyframe→target run-up: discard, keep decoding.
+                        // Keyframe→target run-up: drop the raw frame (no convert).
+                        runup += 1;
                     }
                     Ok(None) => {
                         // Sought at/near the end: the stream is over under the
@@ -349,20 +397,46 @@ impl Reader {
     }
 
     fn next_frame_inner(&mut self) -> Result<Option<(i64, Vec<u8>)>, String> {
+        match self.decode_next_raw_inner()? {
+            Some((ts, frame)) => Ok(Some((ts, self.convert_frame(&frame)?))),
+            None => Ok(None),
+        }
+    }
+
+    /// Decode the next frame **without converting it**: returns its stamped PTS
+    /// and the raw decoded frame (a hardware surface when hwaccel is on). The seek
+    /// run-up uses this to advance to the target without paying the readback +
+    /// downscale + tone-map (`convert_frame`) on frames it will discard — the
+    /// dominant cost of a long-GOP 4K/HDR seek (measured ~25 ms/frame). Bounded by
+    /// the same watchdog as [`Reader::next_frame`].
+    fn decode_next_raw(&mut self) -> Result<Option<(i64, ff::frame::Video)>, String> {
+        self.input.set_op_deadline(Some(OP_DEADLINE));
+        let result = self.decode_next_raw_inner();
+        self.input.set_op_deadline(None);
+        result
+    }
+
+    /// Readback (if the frame is a hardware surface) + color-convert to the output
+    /// RGBA8/fp16 buffer. Split out of the decode so the seek run-up can skip it.
+    fn convert_frame(&mut self, frame: &ff::frame::Video) -> Result<Vec<u8>, String> {
+        // A hardware decode leaves the frame on the GPU (VideoToolbox / VAAPI
+        // surface) — pull it to a CPU NV12/P010 frame before conversion; software
+        // frames pass straight through.
+        let (rgba, _, _) = match super::hw::transfer_if_hw(frame)? {
+            Some(sw) => self.conv.convert(&sw)?,
+            None => self.conv.convert(frame)?,
+        };
+        Ok(rgba)
+    }
+
+    fn decode_next_raw_inner(&mut self) -> Result<Option<(i64, ff::frame::Video)>, String> {
         let mut decoded = ff::frame::Video::empty();
         let mut fed = 0usize;
         let mut bad = 0usize;
         loop {
             if self.decoder.receive_frame(&mut decoded).is_ok() {
                 let ts = self.stamp(decoded.timestamp());
-                // A hardware decode leaves the frame on the GPU (VideoToolbox /
-                // VAAPI surface) — pull it to a CPU NV12/P010 frame before
-                // conversion; software frames pass straight through.
-                let (rgba, _, _) = match super::hw::transfer_if_hw(&decoded)? {
-                    Some(sw) => self.conv.convert(&sw)?,
-                    None => self.conv.convert(&decoded)?,
-                };
-                return Ok(Some((ts, rgba)));
+                return Ok(Some((ts, decoded)));
             }
             if self.eof_sent {
                 return Ok(None); // tail fully drained
