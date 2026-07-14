@@ -204,6 +204,39 @@ pub fn probe_job(source: &dyn PhotoSource, item: usize, generation: u64) -> Item
     }
     let _ = generation; // unused where no platform probe compiles in
 
+    // --- sidecar subtitles (task #90.1) -----------------------------------------------
+    //
+    // Files beside the video (`movie.en.forced.srt`) are subtitle tracks too, and the user
+    // should not have to care that one lives inside the container and one next to it. They
+    // are appended after the container's own streams, sharing the catalog's id namespace.
+    //
+    // Only when there *is* a catalog: with no backend able to describe the container, the
+    // subtitle set's completeness is a statement about the backend, and appending to it
+    // would quietly turn "we couldn't enumerate" into a half-truth.
+    if let Some(catalog) = media.as_mut() {
+        let found = crate::sidecar::discover(source, item);
+        if !found.is_empty() {
+            // Continue the id sequence past every track the backend already minted.
+            let mut next_local_id = catalog
+                .tracks()
+                .map(|t| t.id.local_id + 1)
+                .max()
+                .unwrap_or(0);
+            for (track, locator) in
+                crate::sidecar::sidecar_tracks(&found, generation, &mut next_local_id)
+            {
+                let local_id = track.id.local_id;
+                catalog.subtitles.tracks.push(track);
+                catalog.set_locator(local_id, locator);
+            }
+            // The set now describes container streams *and* sidecars. Its completeness is
+            // still the backend's word about the container — a backend that could not
+            // enumerate does not become `Complete` just because a .srt turned up beside it.
+            catalog.subtitles.total =
+                Some(catalog.subtitles.tracks.len().min(u16::MAX as usize) as u16);
+        }
+    }
+
     ItemDetails {
         size,
         fields,

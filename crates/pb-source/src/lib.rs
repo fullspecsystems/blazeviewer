@@ -105,6 +105,43 @@ pub trait PhotoSource: Send + Sync {
         let _ = i;
         None
     }
+
+    /// Names of the files sitting **beside** item `i` — including the ones that are not
+    /// library items (task #90.1).
+    ///
+    /// This exists because a sidecar subtitle is invisible to every other method here: a
+    /// `.srt` is neither an image nor a video container, so the scan/archive predicates
+    /// never index it, so it has no item index, so `len()`/`name(i)`/`bytes(i)` cannot
+    /// reach it. This is the only door to it.
+    ///
+    /// Returns names in the **same shape as [`name`](PhotoSource::name)** for this source:
+    /// bare file names for a filesystem listing, archive-relative names for an archive.
+    /// Scoped to item `i`'s own directory — a sidecar is a *sibling*, not any file in the
+    /// archive. The video itself and other library items may be included; callers filter.
+    ///
+    /// Deliberately unfiltered and uncached: it is called **off the event loop**, once per
+    /// video item, and the result is memoized by the caller. A `read_dir` of a 50k-photo
+    /// folder is the worst case and it costs a worker tens of milliseconds, once.
+    ///
+    /// Default: none — for a source with no notion of siblings.
+    fn sibling_names(&self, i: usize) -> Vec<String> {
+        let _ = i;
+        Vec::new()
+    }
+
+    /// Read a sibling that [`sibling_names`](PhotoSource::sibling_names) returned for item
+    /// `i`. Read-only and RAM-only, like every other read here (privacy #2).
+    ///
+    /// `name` must be one the source itself produced; anything else is `NotFound`. The
+    /// source resolves it — the caller never builds a path, so this cannot be walked out of
+    /// the archive or the folder.
+    fn sibling_bytes(&self, i: usize, name: &str) -> io::Result<Vec<u8>> {
+        let _ = (i, name);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this source has no siblings",
+        ))
+    }
 }
 
 /// A plain filesystem listing — today's behavior behind the seam. Holds the
@@ -133,6 +170,47 @@ impl PhotoSource for FsSource {
 
     fn path(&self, i: usize) -> Option<&Path> {
         self.paths.get(i).map(PathBuf::as_path)
+    }
+
+    /// The file names in item `i`'s own directory. One `read_dir`; directories are
+    /// skipped (a sidecar is a file).
+    fn sibling_names(&self, i: usize) -> Vec<String> {
+        let Some(dir) = self.paths.get(i).and_then(|p| p.parent()) else {
+            return Vec::new();
+        };
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        rd.filter_map(|e| {
+            let e = e.ok()?;
+            // `file_type` avoids a stat per entry on every platform that carries the
+            // type in the directory record.
+            if !e.file_type().ok()?.is_file() {
+                return None;
+            }
+            e.file_name().to_str().map(str::to_string)
+        })
+        .collect()
+    }
+
+    /// Read a sibling by name, resolved **inside item `i`'s directory**.
+    ///
+    /// The name is rejected unless it is a bare file name: a caller-supplied
+    /// `../../etc/passwd` must not be readable through a sidecar lookup, however it got
+    /// here.
+    fn sibling_bytes(&self, i: usize, name: &str) -> io::Result<Vec<u8>> {
+        let dir = self
+            .paths
+            .get(i)
+            .and_then(|p| p.parent())
+            .ok_or_else(out_of_range)?;
+        if Path::new(name).components().count() != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a sidecar name must be a bare file name",
+            ));
+        }
+        std::fs::read(dir.join(name))
     }
 
     fn bytes(&self, i: usize) -> io::Result<Vec<u8>> {
@@ -438,6 +516,75 @@ impl PhotoSource for ZipSource {
 
     fn size_hint(&self, i: usize) -> Option<u64> {
         self.entries.get(i).map(|e| e.size)
+    }
+
+    /// Every entry name in item `i`'s archive directory — **including the ones this source
+    /// never indexed** (a `.srt` is not a library item, so it is not in `entries`).
+    ///
+    /// Free of I/O: a pooled handle already holds the parsed central directory.
+    fn sibling_names(&self, i: usize) -> Vec<String> {
+        let Some(entry) = self.entries.get(i) else {
+            return Vec::new();
+        };
+        let dir = zip_dir_of(&entry.name);
+        let Ok(archive) = self.checkout() else {
+            return Vec::new();
+        };
+        let names: Vec<String> = archive
+            .file_names()
+            .filter(|n| !n.ends_with('/') && zip_dir_of(n) == dir)
+            .map(str::to_string)
+            .collect();
+        self.checkin(archive);
+        names
+    }
+
+    /// Read a sibling entry by its exact archive name. Same bomb guards as
+    /// [`bytes`](PhotoSource::bytes) — a sidecar is untrusted input like anything else in
+    /// the archive.
+    fn sibling_bytes(&self, i: usize, name: &str) -> io::Result<Vec<u8>> {
+        // Scope the lookup to item `i`'s own directory, so a name from elsewhere in the
+        // archive can't be pulled in through a sidecar read.
+        let entry = self.entries.get(i).ok_or_else(out_of_range)?;
+        if zip_dir_of(name) != zip_dir_of(&entry.name) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "sidecar is not a sibling of the item",
+            ));
+        }
+        let mut archive = self.checkout()?;
+        let mut buf = Vec::new();
+        {
+            let file = match &self.password {
+                Some(pw) => archive.by_name_decrypt(name, pw).map_err(zip_to_io)?,
+                None => archive.by_name(name).map_err(zip_to_io)?,
+            };
+            let size = file.size();
+            if size > MAX_ENTRY_BYTES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "archive entry too large",
+                ));
+            }
+            buf.try_reserve_exact(size as usize).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::OutOfMemory,
+                    "archive entry too large to allocate",
+                )
+            })?;
+            file.take(size).read_to_end(&mut buf)?;
+        }
+        self.checkin(archive);
+        Ok(buf)
+    }
+}
+
+/// The forward-slashed directory part of an archive entry name (`""` at the root).
+/// Archive names are always `/`-separated, whatever host wrote them.
+fn zip_dir_of(name: &str) -> &str {
+    match name.rsplit_once('/') {
+        Some((dir, _)) => dir,
+        None => "",
     }
 }
 
@@ -791,6 +938,21 @@ impl PhotoSource for SevenZSource {
     fn size_hint(&self, i: usize) -> Option<u64> {
         self.entries.get(i).map(|e| e.bytes.len() as u64)
     }
+
+    // `sibling_names`/`sibling_bytes` deliberately keep the default (no siblings), so a
+    // sidecar subtitle inside a 7z is not found (task #90.1).
+    //
+    // This is a real gap, taken knowingly. 7z is **solid + eager**: `open` decompresses
+    // exactly the entries its predicate accepted, and a `.srt` is not one of them, so its
+    // bytes were never produced. Serving it would need either a second predicate at open
+    // (widening a signature every caller passes, to eagerly hold files nothing may ask
+    // for) or a **full re-decompress of the whole solid archive per sidecar read**. ZIP
+    // has neither problem — its central directory is already parsed in RAM and entries are
+    // independently readable — which is why ZIP is supported and this is not.
+    //
+    // The cost/benefit says stop: a 7z containing a video *and* its subtitle file is a
+    // niche of a niche. The trait default makes this a small follow-up if that turns out
+    // to be wrong.
 }
 
 /// A prefix-scoped view of another source — the deck for one internal archive
@@ -845,6 +1007,22 @@ impl PhotoSource for ScopedSource {
 
     fn size_hint(&self, i: usize) -> Option<u64> {
         self.inner.size_hint(*self.index.get(i)?)
+    }
+
+    /// Delegate through the index map. The **scope must not filter these**: a sidecar is
+    /// not a library item, so it was never in `index` to begin with — and the inner source
+    /// already scopes siblings to the item's own directory, which is at or under this
+    /// scope's prefix by construction.
+    fn sibling_names(&self, i: usize) -> Vec<String> {
+        match self.index.get(i) {
+            Some(&j) => self.inner.sibling_names(j),
+            None => Vec::new(),
+        }
+    }
+
+    fn sibling_bytes(&self, i: usize, name: &str) -> io::Result<Vec<u8>> {
+        let &j = self.index.get(i).ok_or_else(out_of_range)?;
+        self.inner.sibling_bytes(j, name)
     }
 }
 
@@ -1602,6 +1780,189 @@ mod tests {
             Err(OpenError::PasswordRequired)
         ));
 
+        let _ = std::fs::remove_file(&z);
+    }
+
+    // -- sidecar siblings (task #90.1) --------------------------------------
+
+    /// The whole point: a `.srt` is NOT a library item, so it never appears in
+    /// `len()`/`name(i)` — `sibling_names` is the only way to see it.
+    #[test]
+    fn fs_siblings_see_files_the_index_never_listed() {
+        let dir = temp_path("sib", "d");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (n, b) in [
+            ("movie.mp4", &b"vid"[..]),
+            (
+                "movie.en.srt",
+                &b"1\n00:00:01,000 --> 00:00:02,000\nHi\n"[..],
+            ),
+            ("notes.txt", &b"x"[..]),
+        ] {
+            std::fs::write(dir.join(n), b).unwrap();
+        }
+        std::fs::create_dir_all(dir.join("subdir")).unwrap();
+
+        let src = FsSource::new(vec![dir.join("movie.mp4")]);
+        assert_eq!(src.len(), 1, "only the video is a library item");
+
+        let mut names = src.sibling_names(0);
+        names.sort();
+        assert_eq!(names, vec!["movie.en.srt", "movie.mp4", "notes.txt"]);
+        assert!(
+            !names.iter().any(|n| n == "subdir"),
+            "directories are not siblings"
+        );
+
+        let bytes = src
+            .sibling_bytes(0, "movie.en.srt")
+            .expect("read the sidecar");
+        assert!(String::from_utf8_lossy(&bytes).contains("Hi"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A sidecar name must be a bare file name — a lookup must not be walkable out of the
+    /// item's own directory, however the name got there.
+    #[test]
+    fn fs_sibling_reads_cannot_escape_the_items_directory() {
+        let dir = temp_path("esc", "d");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("movie.mp4"), b"v").unwrap();
+        let src = FsSource::new(vec![dir.join("movie.mp4")]);
+
+        for bad in ["../secret.srt", "sub/deep.srt", "/etc/passwd"] {
+            let e = src.sibling_bytes(0, bad).expect_err(bad);
+            assert!(
+                matches!(
+                    e.kind(),
+                    io::ErrorKind::InvalidInput | io::ErrorKind::NotFound
+                ),
+                "{bad} -> {e:?}"
+            );
+        }
+        assert!(
+            src.sibling_bytes(9, "movie.mp4").is_err(),
+            "out-of-range item"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The ZIP case the seam exists for: the `.srt` is not indexed, but the central
+    /// directory (already in RAM on a pooled handle) still knows about it.
+    #[test]
+    fn zip_siblings_reach_unindexed_entries() {
+        let z = write_zip(
+            "sib",
+            &[
+                ("a.jpg", b"img"),
+                ("movie.mkv", b"vid"),
+                ("movie.en.srt", b"hello subs"),
+                ("readme.txt", b"x"),
+            ],
+            None,
+        );
+        // Index images only — so neither the mkv nor the srt is a library item.
+        let src = ZipSource::open(&z, None, is_img).unwrap();
+        assert_eq!(src.len(), 1);
+        assert_eq!(src.name(0), "a.jpg");
+
+        let mut names = src.sibling_names(0);
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["a.jpg", "movie.en.srt", "movie.mkv", "readme.txt"],
+            "siblings include entries the index rejected"
+        );
+        let bytes = src.sibling_bytes(0, "movie.en.srt").expect("read");
+        assert_eq!(bytes, b"hello subs");
+        let _ = std::fs::remove_file(&z);
+    }
+
+    /// Siblings are scoped to the item's own archive folder, both ways: the listing only
+    /// shows that folder, and a read of an entry elsewhere is refused.
+    #[test]
+    fn zip_siblings_are_scoped_to_the_items_folder() {
+        let z = write_zip(
+            "scope",
+            &[
+                ("S1/movie.mkv", b"vid"),
+                ("S1/movie.en.srt", b"s1 subs"),
+                ("S1/a.jpg", b"img"),
+                ("S2/other.en.srt", b"s2 subs"),
+                ("root.jpg", b"img"),
+            ],
+            None,
+        );
+        let src = ZipSource::open(&z, None, is_img).unwrap();
+        let s1 = (0..src.len()).find(|&i| src.name(i) == "S1/a.jpg").unwrap();
+
+        let mut names = src.sibling_names(s1);
+        names.sort();
+        assert_eq!(names, vec!["S1/a.jpg", "S1/movie.en.srt", "S1/movie.mkv"]);
+        assert!(
+            !names.iter().any(|n| n.starts_with("S2/")),
+            "another folder is not a sibling"
+        );
+        assert!(
+            !names.iter().any(|n| n == "root.jpg"),
+            "the root is not a sibling"
+        );
+
+        assert_eq!(
+            src.sibling_bytes(s1, "S1/movie.en.srt").unwrap(),
+            b"s1 subs"
+        );
+        assert!(
+            src.sibling_bytes(s1, "S2/other.en.srt").is_err(),
+            "a read outside the item's folder is refused"
+        );
+        let _ = std::fs::remove_file(&z);
+    }
+
+    /// 7z deliberately reports none — it is solid + eager, so an unindexed entry's bytes
+    /// were never produced. Pinned so the gap is a decision, not a surprise.
+    #[test]
+    fn sevenz_reports_no_siblings_by_design() {
+        let path = temp_path("sib7z", "7z");
+        {
+            let mut w = SevenZWriter::create(&path).unwrap();
+            w.push_archive_entry(SevenZArchiveEntry::new_file("a.jpg"), Some(&b"img"[..]))
+                .unwrap();
+            w.push_archive_entry(SevenZArchiveEntry::new_file("a.en.srt"), Some(&b"subs"[..]))
+                .unwrap();
+            w.finish().unwrap();
+        }
+        let src = SevenZSource::open(&path, None, is_img).unwrap();
+        assert_eq!(src.len(), 1);
+        assert!(src.sibling_names(0).is_empty());
+        assert!(src.sibling_bytes(0, "a.en.srt").is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A scoped view must not hide siblings — it maps the index and delegates.
+    #[test]
+    fn scoped_source_delegates_siblings() {
+        let z = write_zip(
+            "scoped",
+            &[
+                ("S1/a.jpg", b"img"),
+                ("S1/movie.en.srt", b"subs"),
+                ("S2/b.jpg", b"img"),
+            ],
+            None,
+        );
+        let inner: Arc<dyn PhotoSource> = Arc::new(ZipSource::open(&z, None, is_img).unwrap());
+        let scoped = ScopedSource::new(inner, "S1");
+        assert_eq!(scoped.len(), 1);
+        assert!(scoped
+            .sibling_names(0)
+            .iter()
+            .any(|n| n == "S1/movie.en.srt"));
+        assert_eq!(scoped.sibling_bytes(0, "S1/movie.en.srt").unwrap(), b"subs");
+        assert!(
+            scoped.sibling_names(9).is_empty(),
+            "out-of-range is empty, not a panic"
+        );
         let _ = std::fs::remove_file(&z);
     }
 }

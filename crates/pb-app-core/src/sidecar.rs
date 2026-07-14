@@ -207,6 +207,74 @@ pub fn match_sidecars(
     out.into_iter().map(|(_, m)| m).collect()
 }
 
+/// Discover the sidecars beside item `i`, ready to merge into the catalog.
+///
+/// The only I/O-touching function here, and it is thin by design: the source lists the
+/// sibling names, the pure rules above decide which are subtitles for this video. Runs on
+/// the Details worker (`media_details::probe_job`), never the event loop.
+///
+/// Read-only and RAM-only; nothing is written and nothing is remembered (privacy #2 — a
+/// per-file subtitle choice would be a record of what you watched).
+pub fn discover(source: &dyn pb_source::PhotoSource, i: usize) -> Vec<SidecarMatch> {
+    let video_name = source.name(i).to_string();
+    // How to get *back* to a sibling later: a real path for a loose file, the archive +
+    // entry name for an archive entry. Neither → nothing to reopen, so nothing to offer.
+    enum Home {
+        Dir(std::path::PathBuf),
+        Archive(std::path::PathBuf),
+    }
+    let home = match (source.path(i).and_then(|p| p.parent()), source.container()) {
+        (Some(dir), _) => Home::Dir(dir.to_path_buf()),
+        (None, Some(archive)) => Home::Archive(archive.to_path_buf()),
+        (None, None) => return Vec::new(),
+    };
+    let siblings = source.sibling_names(i).into_iter().map(|name| {
+        let origin = match &home {
+            Home::Dir(dir) => SidecarOrigin::Path(dir.join(&name)),
+            Home::Archive(archive) => SidecarOrigin::ArchiveEntry {
+                archive: archive.clone(),
+                entry: name.clone(),
+            },
+        };
+        (name, origin)
+    });
+    match_sidecars(&video_name, siblings)
+}
+
+/// Turn discovered sidecars into catalog tracks, appended after the container's own
+/// subtitle streams.
+///
+/// `next_local_id` continues the catalog's id sequence, so a sidecar's [`TrackId`] can
+/// never collide with an embedded stream's — they share one namespace per catalog.
+pub fn sidecar_tracks(
+    matches: &[SidecarMatch],
+    generation: u64,
+    next_local_id: &mut u64,
+) -> Vec<(pb_decode::MediaTrack, pb_decode::TrackLocator)> {
+    matches
+        .iter()
+        .map(|m| {
+            let local_id = *next_local_id;
+            *next_local_id += 1;
+            let track = pb_decode::MediaTrack {
+                id: pb_decode::TrackId {
+                    catalog_generation: generation,
+                    local_id,
+                },
+                kind: pb_decode::TrackKind::Subtitle,
+                language: m.language.clone(),
+                title: m.title.clone(),
+                codec_raw: m.codec_raw.to_string(),
+                codec: pb_decode::tracks::subtitle_codec_display(m.codec_raw),
+                capability: pb_decode::tracks::subtitle_capability(m.codec_raw),
+                flags: m.flags,
+                audio: None,
+            };
+            (track, pb_decode::TrackLocator::Sidecar(m.origin.clone()))
+        })
+        .collect()
+}
+
 /// Decode a sidecar's bytes to text.
 ///
 /// Subtitle files in the wild are a mess of encodings. This handles what the plan requires
@@ -465,6 +533,80 @@ mod tests {
             be.extend_from_slice(&u.to_be_bytes());
         }
         assert_eq!(decode_sidecar_text(&be), text);
+    }
+
+    // -- discovery over a real source ---------------------------------------
+
+    /// End to end over a real `FsSource`: the `.srt` is not a library item, but discovery
+    /// finds it, tags it, and hands back an origin that can be read again.
+    #[test]
+    fn discover_finds_sidecars_beside_a_real_video() {
+        let dir = std::env::temp_dir().join(format!("pb_sc_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for n in [
+            "clip.mkv",
+            "clip.en.srt",
+            "clip.fr.forced.srt",
+            "clip.jpg",     // a sibling library item, not a subtitle
+            "other.en.srt", // another video's subtitle
+        ] {
+            std::fs::write(dir.join(n), b"x").unwrap();
+        }
+        use pb_source::PhotoSource;
+        let src = pb_source::FsSource::new(vec![dir.join("clip.mkv")]);
+        assert_eq!(src.len(), 1, "only the video is a library item");
+
+        let found = discover(&src, 0);
+        assert_eq!(
+            found.len(),
+            2,
+            "the jpg and the other movie's srt are not ours"
+        );
+        // Sorted by name: clip.en.srt, clip.fr.forced.srt.
+        assert_eq!(found[0].language.as_deref(), Some("en"));
+        assert!(!found[0].flags.forced);
+        assert_eq!(found[1].language.as_deref(), Some("fr"));
+        assert!(found[1].flags.forced);
+        // The origin is reopenable, and points at the real file.
+        match &found[0].origin {
+            SidecarOrigin::Path(p) => assert_eq!(p, &dir.join("clip.en.srt")),
+            o => panic!("expected a Path origin, got {o:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Sidecar tracks continue the catalog's id namespace, so a sidecar's `TrackId` can
+    /// never collide with an embedded stream's.
+    #[test]
+    fn sidecar_tracks_continue_the_catalogs_id_namespace() {
+        let m = parse("movie.mkv", "movie.en.sdh.srt").expect("match");
+        let mut next = 7; // the backend already minted 0..=6
+        let out = sidecar_tracks(&[m], 3, &mut next);
+        assert_eq!(out.len(), 1);
+        let (track, locator) = &out[0];
+        assert_eq!(track.id.local_id, 7);
+        assert_eq!(track.id.catalog_generation, 3);
+        assert_eq!(next, 8, "the counter advances for the next caller");
+        assert_eq!(track.kind, pb_decode::TrackKind::Subtitle);
+        assert_eq!(track.codec, "SubRip");
+        assert_eq!(track.capability, pb_decode::TrackCapability::SupportedText);
+        assert!(track.flags.hearing_impaired);
+        assert!(track.audio.is_none());
+        assert!(matches!(locator, pb_decode::TrackLocator::Sidecar(_)));
+    }
+
+    /// A sidecar describes itself exactly like an embedded track — same codec map, same
+    /// capability map — so the formatter cannot tell them apart.
+    #[test]
+    fn a_sidecar_renders_like_an_embedded_track() {
+        let m = parse("movie.mkv", "movie.en.forced.srt").expect("match");
+        let mut next = 0;
+        let (track, _) = sidecar_tracks(&[m], 1, &mut next).remove(0);
+        assert_eq!(
+            crate::tracks::track_summary(&track),
+            "English · SubRip · Forced"
+        );
     }
 
     /// Hostile/mis-encoded bytes must degrade to text, not fail: a cue with a few
