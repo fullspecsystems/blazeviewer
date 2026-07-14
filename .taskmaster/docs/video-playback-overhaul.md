@@ -454,6 +454,16 @@ lands within 0.1 s of target); the forward-discard still lands the audio precise
 unaffected because its producer already seeks the video track. This is a seek-*strategy* fix,
 orthogonal to R9/1F (the double-demuxer); 1F still wins by making the seek happen once.
 
+**Second mechanism (owner report 2026-07-13: large/backward seeks still broke audio on Dune):**
+the `-1` seek lands at a video keyframe *before* the target, then the decoder decodes-and-discards
+audio forward to land precisely. On a sparse-keyframe 4K encode that discard window exceeded
+`MAX_PACKETS_PER_READ` (4096), which counted **total** packets fed — so a long-but-healthy discard
+faked the `"corrupt input"` error → R12 death. Fix: the guard now counts packets **since the last
+produced frame** (reset on every `receive_frame`, even a discarded one) — the true "decoder stuck"
+signal. Confirmed via the `net_seek_read_timing` harness on Dune (43 GB): forward+backward at
+multiple offsets now land within 0.1 s, no errors. The decoder syncs after **1 packet** — it was
+never a resync problem, purely the discard-window bound.
+
 **Still open (fold into 1G):** session-identity on the audio effects (the owned handle is
 generation-gated Swift-side, but the effects themselves aren't session-tagged); the pause-forever
 fallback timeout if a final seek landing never arrives; a *bounded-retry recovery* so a genuinely

@@ -244,10 +244,18 @@ impl FfAudioDecoder {
 
     fn read_inner(&mut self, max_frames: usize) -> Result<Vec<f32>, String> {
         let want = max_frames.saturating_mul(self.out_channels as usize);
-        let mut fed = 0usize;
+        // Packets fed to the decoder SINCE THE LAST PRODUCED FRAME — the true
+        // "decoder is stuck / corrupt" signal. It must NOT count packets during a
+        // long-but-healthy post-seek discard: a keyframe seek lands before the
+        // target and decodes-and-discards audio forward to land precisely, which on
+        // a sparse-keyframe 4K encode is far more than a total-packet bound like
+        // 4096 (the owner's "backward seek breaks audio" — the discard window
+        // overran the guard and faked a corrupt-input error). Reset on every frame.
+        let mut stuck = 0usize;
         while self.pending.len() < want && !self.at_eof {
             let mut decoded = ff::frame::Audio::empty();
             if self.decoder.receive_frame(&mut decoded).is_ok() {
+                stuck = 0; // the decoder is alive (this frame may be discarded)
                 self.absorb(&decoded)?;
                 continue;
             }
@@ -255,13 +263,13 @@ impl FfAudioDecoder {
                 self.at_eof = true;
                 break;
             }
-            if fed >= MAX_PACKETS_PER_READ {
+            if stuck >= MAX_PACKETS_PER_READ {
                 return Err("audio stream produced no frame (corrupt input?)".into());
             }
             match self.packet.read(self.input.ctx()) {
                 Ok(()) => {
                     if self.packet.stream() == self.index {
-                        fed += 1;
+                        stuck += 1;
                         let _ = self.decoder.send_packet(&self.packet); // bad packet → skip
                     }
                 }
@@ -498,7 +506,12 @@ mod tests {
             first.as_ref().map(|c| c.len())
         );
         // Seek to the midpoint (the owner's "seek into the middle" repro).
-        let target = Duration::from_secs(3600);
+        let target = Duration::from_secs(
+            std::env::var("PB_NET_FWD")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3600),
+        );
         let t = Instant::now();
         let landed = a.seek(target);
         eprintln!("[net] seek({target:?}) -> {landed:?} in {:?}", t.elapsed());
@@ -519,8 +532,35 @@ mod tests {
         );
         let pos = a.position();
         assert!(
-            pos >= Duration::from_secs(3590) && pos <= Duration::from_secs(3610),
-            "landed at {pos:?}, expected ~3600s"
+            pos.abs_diff(target) <= Duration::from_secs(10),
+            "landed at {pos:?}, expected ~{target:?}"
+        );
+
+        // A large BACKWARD seek (owner report 2026-07-13: backward still breaks).
+        let back = Duration::from_secs(
+            std::env::var("PB_NET_BACK")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(600),
+        );
+        let t = Instant::now();
+        let landed_b = a.seek(back);
+        eprintln!(
+            "[net] BACK seek({back:?}) -> {landed_b:?} in {:?}",
+            t.elapsed()
+        );
+        let t = Instant::now();
+        let post_b = a.read(4800);
+        eprintln!(
+            "[net] post-BACK read {:?} — {:?}, lands at {:?}",
+            t.elapsed(),
+            post_b.as_ref().map(|c| format!("{} samples", c.len())),
+            a.position()
+        );
+        assert!(landed_b.is_ok(), "back-seek errored: {landed_b:?}");
+        assert!(
+            post_b.as_ref().is_ok_and(|c| !c.is_empty()),
+            "post-back-seek read failed: {post_b:?}"
         );
     }
 
