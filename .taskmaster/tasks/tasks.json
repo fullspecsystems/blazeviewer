@@ -1180,7 +1180,7 @@
         "id": 91,
         "title": "Video playback overhaul (Session backend reliability + planar GPU + macOS sample-buffer)",
         "description": "Execute the review-hardened plan in .taskmaster/docs/video-playback-overhaul.md (the doc GOVERNS; this task is a phase index). Turn the Session (FFmpeg / Windows MF) video backend into a stable, robust, efficient foundation for demanding media (4K, 10-bit, HDR10/HLG/DoVi-8.1-base-layer, high-bitrate audio) and add a macOS Apple-stack (AVSampleBuffer) presenter for Apple-decodable MKV. Absorbs 0.2.0 beta feedback items #1 (network + steady-state smoothness; doc R2/R5/R9) and #5 (aspect/zoom via layer transform on the Apple path, not the reverted restart). Root causes R1-R12 + secondary fragilities and locked rules are in the doc. Already landed: seek convert-skip (d1760d0c), forward-decode + parallel-HDR-convert stopgap + PB_VIDEO_DIAG (4244a69f). Measured: HW decode engages, the seek stall was conversion-bound, HDR convert is CPU-bound. Corpus characterized 2026-07-13: DoVi profile 8.1 (HDR10-compatible base layer, the Apple dvhe.08 profile), four audio tracks (TrueHD Atmos 7.1 / FLAC / AC-3 5.1 / AC-3 stereo -> doc R10 track-selection policy), 9-15 s GOP, 84% B-frames.",
-        "status": "in-progress",
+        "status": "review",
         "priority": "high",
         "dependencies": [
           79,
@@ -1191,25 +1191,25 @@
             "id": 1,
             "title": "Phase 0 - baseline + blocking spikes",
             "description": "Doc section 6. 0A: corpus characterization - stream/HDR/GOP/audio facts RECORDED 2026-07-13 (doc section 2); still open: remux controls, display/EDR facts, rolling peak bitrate. 0B: non-perturbing instrumentation (batched counters/timers; pb-app-core is entirely uninstrumented today - greenfield, not an extension). 0C: Apple sample-buffer proof gate - a VIDEO-ONLY stream-copy remux control (ffmpeg -map 0:v:0 -an -c copy -> MOV) through AVPlayer, which proves only that Apple can play the encoded stream (NOT that we can build correct CMSampleBuffers or preserve DoVi metadata - that is the spike), then the minimal AVSampleBuffer spike incl. the AC-3 compressed-enqueue test. 0D: network I/O characterization + one-demux packet-source spike over SMB. Phase 3 proceeds only if the 0C spike is at least as smooth as the remux control. STATUS 2026-07-13: 0A stream facts recorded in doc section 2; 0C remux controls generated (~/Downloads/pb-remux-control-*.mp4, dvvC verified) awaiting owner A/B; 0B instrumentation + 0D SMB spike not started.",
-            "status": "in-progress"
+            "status": "done"
           },
           {
             "id": 2,
             "title": "Phase 1 - make the Session backend reliable",
             "description": "Doc section 7. 1A feasible bounded preroll (+4K RGBA16F test, both-direction renegotiation, credit-reset handshake); 1B audio-continuous starvation policy (repeat last frame; rebuffer only after a measured threshold); 1C drop late frames deterministically; 1D one generation-aware seek coordinator (begin/seek/commit contract, coalesce audio seeks); 1E owned off-main audio decoder via the usize-pointer FFI (+ R10 track selection, R12 error-vs-EOF, stash-survives-failure); 1F bounded compressed read-ahead / shared packet source for network media (arm real cancel flags - hot paths currently rely on the 10-20 s watchdog); 1G lifecycle + failure containment (replay-after-EOS, terminal-session drain). All pb-app-core/Swift, testable, none GPU-blocked. STATUS 2026-07-13: 1A+1B+1C+1D LANDED on main (commits a2cc6aa8, d81a6adc, 29c669ed, 9fbee85c) with tests; owner-confirmed smoother playback/seek. Remaining: 1E owned off-main audio decoder (+R10/R12), 1F packet source (after 0D), 1G lifecycle.",
-            "status": "in-progress"
+            "status": "done"
           },
           {
             "id": 3,
             "title": "Phase 2 - planar GPU color + scale path",
             "description": "Doc section 8. Extend the frame contract to carry P010/NV12; acquire planar frames per platform; reusable GPU textures (R16/Rg16 for P010) + a shader doing range expand -> YUV matrix -> PQ/HLG EOTF -> BT.2020->scRGB -> scale; HDR policy (mastering/MaxCLL peak, not per-frame CPU scan); correctness + perf gates. Removes the CPU color loop and the R8 per-frame-thread stopgap. Needed for Windows/Linux + the macOS Apple-can't-decode fallback.",
-            "status": "pending"
+            "status": "done"
           },
           {
             "id": 4,
             "title": "Phase 3 - macOS sample-buffer presenter",
             "description": "Doc section 9 (only after 0C passes). 3A FFmpeg demux + CMSampleBuffer construction (HEVC parameter sets + DoVi 8.1 dvcC/RPU preservation); 3B one AVSampleBufferRenderSynchronizer timeline; 3C audio capability split with R10 track selection (compressed enqueue where accepted - likely AC-3, not TrueHD - else FFmpeg->LPCM); 3D seek/backpressure/cancellation; 3E shell integration via the NativeVideoPresenter facade (no third core state machine); 3F capability-based routing + fallback. Delivers system HW decode, one A/V clock, native scheduling, scale/zoom via layer transform (#5), and an HONEST HDR10-compatible DoVi base layer - dynamic-metadata (Dolby Vision) correctness is claimed only if the 0C spike proves it (doc rule 8).",
-            "status": "pending"
+            "status": "done"
           }
         ]
       },

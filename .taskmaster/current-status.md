@@ -1,37 +1,39 @@
 # PhotoBlaze — Current Status (session handoff)
 
-_Last updated: 2026-07-14 (rev 2). Supersedes prior status. **0.2.0 shipped** (private beta)._
+_Last updated: 2026-07-14 (rev 3). Supersedes prior status. **0.2.0 shipped** (private beta).
+**The video-playback overhaul (task #91, Phases 0–3) is COMPLETE + owner-validated.**_
 
-## ⏳ ACTIVE: Phase 3 — macOS sample-buffer presenter (in progress)
+## ✅ DONE: Phase 3 — macOS sample-buffer presenter (task #91 complete)
 
-The DoVi/HDR end-state for containers `AVPlayer` can't demux (MKV): FFmpeg (Rust) demuxes →
-Swift wraps compressed packets into `CMSampleBuffer`s → `AVSampleBufferDisplayLayer` (system
-decode + correct Dolby Vision). Built in test-first slices, all on `main`:
+The DoVi/HDR end-state for containers `AVPlayer` can't demux (MKV/WebM): FFmpeg (Rust) demuxes →
+Swift wraps compressed packets into `CMSampleBuffer`s → `AVSampleBufferDisplayLayer` (system decode
++ **correct Dolby Vision**), audio + video on one `AVSampleBufferRenderSynchronizer`. **Default route
+for loose-file MKV/WebM on macOS** (`68b7fd0f`); `PB_NO_SAMPLE_BUFFER=1` forces the old Session route,
+and the presenter self-probes the codec + falls back to Session for anything it can't sample-decode.
+Built test-first, all on `main`, owner-validated on the physical Neo G9/GN95C:
 
-- **Slice A — Rust demux-only packet source** (`68efdb8f`) ✅ `VideoDemuxer` in `pb-decode`:
-  extradata (hvcC/avcC) + NAL length + **DoVi config** + compressed packets, no decoder. Unit-tested;
-  **verified on the real DoVi corpus** (profile 8.1, `dvvC`, length-prefixed nal_len=4).
-- **Slice B — FFI bridge + routing** (`4799353c`) ✅ `CoreEffect::PlaySampleBuffer` + env-gated
-  (`PB_SAMPLE_BUFFER`) routing; `DemuxHandle` / `open_stashed_demux` / `demux_*` FFI (mirrors the
-  session-audio seam). Reuses the `Native` proxy + `native_video_*` callbacks wholesale.
-- **Slice C — Swift `SampleBufferPresenter` (the 0C spike)** (`d818388a`) ✅ compiles + builds a
-  `PhotoBlaze.app`. `AVSampleBufferDisplayLayer` under an `AVSampleBufferRenderSynchronizer`,
-  reveal-on-first-frame, park-at-EOS, reused AVPlayer transform math; `DemuxReader` builds the
-  `CMVideoFormatDescription` (+ `dvvC` box) and feeds sample buffers on renderer backpressure.
-  **Video-only** so far.
+- **A — Rust demux-only packet source** (`68efdb8f`) `VideoDemuxer` in `pb-decode`: hvcC/avcC extradata
+  + NAL length + **DoVi config (dvvC box)** + compressed packets, no decoder. Verified on the real
+  corpus (profile 8.1, length-prefixed nal_len=4).
+- **B — FFI bridge + routing** (`4799353c`) `PlaySampleBuffer` effect; `DemuxHandle`/`open_stashed_demux`/
+  `demux_*` FFI (mirrors the session-audio seam). Reuses the `Native` proxy + `native_video_*` callbacks.
+- **C — Swift `SampleBufferPresenter` + `DemuxReader`** (`d818388a`) display layer under the
+  synchronizer, reveal-on-first-frame, park-at-EOS, reused AVPlayer transform math; builds the
+  `CMVideoFormatDescription` + attaches the DoVi box; feeds on `requestMediaDataWhenReady` backpressure.
+  **0C gate PASSED** — owner confirmed DoVi/HDR renders correctly (relied on SPS/SEI color; no CICP needed).
+- **D — synchronized audio** (`9de1bb3d`) `AudioSampleFeeder` (twin of DemuxReader) feeds FFmpeg-decoded
+  LPCM into an `AVSampleBufferAudioRenderer` on the SAME synchronizer (one clock, not a separate
+  AVAudioEngine). Video PTS re-based to a 0-origin so A/V share the timeline. Stereo downmix, honest.
+- **E — generation-safe seek + frame-step + default routing** (`9de1bb3d`, `68b7fd0f`) `performSeek`
+  (hold clock → flush both → seek both → re-anchor + restore rate, `seekEpoch` drops superseded seeks);
+  frame-step = ±one-frame seek; replay-after-EOS race fixed.
 
-**🚦 GATE (owner, on-device): does DoVi/HDR render correctly?** Run the dev app, set
-`PB_SAMPLE_BUFFER=1`, open an MKV (the Dune corpus), and confirm correct Dolby Vision/HDR on the
-physical display — "it decoded" ≠ "DoVi is right." Env-gated OFF by default, so nothing changes for
-normal use until this passes. If HDR looks washed-out/wrong, the fix is explicit CICP color
-attachments on the format description (cheap follow-up); if it's right, proceed to D/E.
+**Remaining (deferred, not blockers):** archive-bytes (ZIP/7z) videos on the sample-buffer route still
+fall back to Session (loose-file only for now); WMV/MPEG/AVCHD stay on Session; audio is capped at
+stereo (no multichannel/Atmos passthrough — a documented downmix). Phase 2 follow-ons still deferred
+(planar rotation-in-geometry, planar-Vec pool + two-plane single-submit upload, MF P010 on Windows).
 
-**Remaining Phase 3 slices (after the gate):** D — **audio** under the synchronizer (AC-3 compressed
-enqueue probe, else FFmpeg LPCM); E — **real seek** (flush + re-enqueue + re-anchor, generation-safe),
-frame-step, archive-bytes input, and replacing the extension-only route with a probed capability +
-one-shot Session fallback.
-
-_The rest of task #91 (Phases 0–2) is complete + owner-validated (below)._
+_All of task #91 (Phases 0–3) is complete + owner-validated. Prior-cycle detail below._
 
 ## State: `main`, everything pushed (latest `ed6a2aed`)
 
