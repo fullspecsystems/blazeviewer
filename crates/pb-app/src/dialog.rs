@@ -501,13 +501,7 @@ impl DialogWindow {
         parent: Option<&Window>,
     ) -> Option<DialogWindow> {
         let (w, h, resizable, title) = match kind {
-            // Windows (Segoe UI): the original tuned height.
-            #[cfg(target_os = "windows")]
-            DialogKind::About => (254.0, 321.0, false, "About PhotoBlaze"),
-            // Linux uses the bundled fonts, whose line metrics run taller still — the 321px
-            // Windows height clips the bottom rows, so give it more room.
-            #[cfg(all(unix, not(target_os = "macos")))]
-            DialogKind::About => (254.0, 383.0, false, "About PhotoBlaze"),
+            DialogKind::About => (ABOUT_SIZE.0, ABOUT_SIZE.1, false, ABOUT_TITLE),
             DialogKind::Settings => (560.0, 660.0, true, "PhotoBlaze Settings"),
             DialogKind::Confirm => (450.0, 172.0, false, "Confirm Delete"),
             DialogKind::Message => (470.0, 185.0, false, "PhotoBlaze"),
@@ -1138,6 +1132,85 @@ fn arch_label() -> &'static str {
     }
 }
 
+const ABOUT_TITLE: &str = "About PhotoBlaze";
+
+/// The About window's fixed inner size. It does not scroll and cannot be resized, so this
+/// has to be big enough for the whole card — and the card's height is **font-metric
+/// dependent**, which is why the value is per-platform rather than one number: Linux's
+/// bundled fonts have taller line metrics than Windows' Segoe UI and used to clip the
+/// bottom rows off a height that looked fine on Windows.
+///
+/// `about_card_fits_its_window` pins this per platform, so the clipping is caught by
+/// `cargo test` on the platform that would suffer it instead of by eye, one OS at a time.
+/// Widened from the historical 254px when the bundled-library notices landed: at 254 the card
+/// wanted 578px of height, and every pixel past ~380 of width buys nothing (measured — the
+/// notice lines stop wrapping there, and 380/420/460 all settle at the same height). So 380
+/// is the knee of that curve, not a taste call.
+#[cfg(target_os = "windows")]
+const ABOUT_SIZE: (f64, f64) = (380.0, 540.0);
+/// Linux's bundled fonts run taller than Segoe UI (this is why the height was ever
+/// per-platform), so it gets headroom. The exact value is an estimate from the old
+/// 383/321 ratio — `about_card_fits_its_window` is the check, and the Linux CI gate runs it.
+#[cfg(all(unix, not(target_os = "macos")))]
+const ABOUT_SIZE: (f64, f64) = (380.0, 620.0);
+/// Unused in practice: macOS ships the SwiftUI shell, whose About is its own. Present so the
+/// winit shell still builds there.
+#[cfg(target_os = "macos")]
+const ABOUT_SIZE: (f64, f64) = (380.0, 540.0);
+
+/// The bundled native libraries **this build actually links**, as
+/// `(name, "© holder (License)")`.
+///
+/// Not courtesy attribution — a licence condition (task #77). LGPL-3.0 §4(c) binds a work
+/// that "displays copyright notices during execution" to carry the Library's copyright
+/// notice among them, plus a reference to the licence copies; the About card prints a
+/// copyright line, so it is that work. LGPL-2.1 §6 asks the same prominent notice for
+/// FFmpeg. dav1d is BSD-2-Clause and only needs attribution, but it rides along here for
+/// one list rather than two rules.
+///
+/// Derived from the cargo features on purpose: a hand-kept list drifts, and both directions
+/// are a licence problem — naming a library this build never linked is a false statement,
+/// omitting one it did link is the violation. The notices are copied from the pinned
+/// upstream sources (see `licenses/`), so they match the versions actually shipped.
+fn bundled_libraries() -> Vec<(&'static str, &'static str)> {
+    // `mut` is unused in a default build, which links none of these — that build is the
+    // pure-Rust core (ADR-015), so an empty list is the correct answer and the card simply
+    // omits the section.
+    #[allow(unused_mut)]
+    let mut libs: Vec<(&'static str, &'static str)> = Vec::new();
+    #[cfg(feature = "libheif")]
+    {
+        libs.push(("libheif", "\u{a9} 2017-2025 Dirk Farin (GNU LGPL v3)"));
+        libs.push((
+            "libde265",
+            "\u{a9} 2013-2014 struktur AG, Dirk Farin (GNU LGPL v3)",
+        ));
+    }
+    #[cfg(feature = "dav1d")]
+    libs.push((
+        "dav1d",
+        "\u{a9} 2018-2025 VideoLAN and dav1d authors (BSD-2-Clause)",
+    ));
+    // Any of these three link FFmpeg: `ffvideo` implies `ffprobe`, but `livephoto` pulls the
+    // same libraries by itself, so keying on `ffprobe` alone would silently drop the notice
+    // from a livephoto-only build.
+    #[cfg(any(feature = "ffprobe", feature = "ffvideo", feature = "livephoto"))]
+    libs.push(("FFmpeg", "\u{a9} the FFmpeg developers (GNU LGPL v2.1)"));
+    libs
+}
+
+/// Where the licence texts sit, relative to what the user sees as "the app". The reference
+/// LGPL-3.0 §4(c) requires is a *pointer to the copies*, so this has to name a real path —
+/// and the release scripts put them exactly here (`release-windows.ps1`,
+/// `build-swift-host.sh`, `release-linux.sh`).
+const LICENSE_DIR_HINT: &str = if cfg!(target_os = "macos") {
+    "Full license texts are inside the app bundle, in Contents/Resources/licenses."
+} else if cfg!(target_os = "linux") {
+    "Full license texts are included with the app, in usr/share/licenses."
+} else {
+    "Full license texts are in the licenses folder next to the app."
+};
+
 /// The About card: big centered icon, name, version, tagline, copyright, link.
 fn about_ui(ui: &mut egui::Ui, icon: Option<&egui::TextureHandle>) {
     ui.vertical_centered(|ui| {
@@ -1172,6 +1245,28 @@ fn about_ui(ui: &mut egui::Ui, icon: Option<&egui::TextureHandle>) {
             "github.com/jdlien/photoblaze",
             "https://github.com/jdlien/photoblaze",
         );
+
+        // The bundled-library notices, directly under our own copyright line — which is what
+        // LGPL-3.0 §4(c) asks for ("include the copyright notice for the Library among these
+        // notices"). Small and weak so the card still reads as an About rather than a legal
+        // page, but present and legible rather than buried.
+        let libs = bundled_libraries();
+        if !libs.is_empty() {
+            ui.add_space(16.0);
+            ui.separator();
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("Bundled libraries").size(11.5).weak());
+            ui.add_space(3.0);
+            for (name, notice) in libs {
+                ui.label(
+                    egui::RichText::new(format!("{name}, {notice}"))
+                        .size(10.5)
+                        .weak(),
+                );
+            }
+            ui.add_space(5.0);
+            ui.label(egui::RichText::new(LICENSE_DIR_HINT).size(10.5).weak());
+        }
     });
 }
 
@@ -2554,5 +2649,83 @@ mod tests {
     fn dialog_larger_than_monitor_pins_to_top_left() {
         let (x, y) = clamp_to_monitor((50.0, 50.0), (4000.0, 4000.0), MON);
         assert_eq!((x, y), (0.0, 0.0));
+    }
+}
+
+/// The About card is a **fixed-size, non-scrolling** window whose height depends on font
+/// metrics, so "does it still fit?" is a real question with a platform-specific answer. It
+/// used to be answered by eye, one OS at a time — which is how Linux ended up clipped at the
+/// Windows-tuned 321px.
+///
+/// It matters more than cosmetics now: the card carries the bundled-library copyright
+/// notices LGPL-3.0 §4(c) requires, and a notice clipped off the bottom of a window that
+/// cannot scroll is not a notice.
+#[cfg(test)]
+mod about_layout_tests {
+    use super::*;
+
+    /// Lay the card out exactly as `DialogWindow` does — same width, same CentralPanel, same
+    /// fonts — and report the height it wants.
+    fn about_card_height() -> f32 {
+        let ctx = egui::Context::default();
+        pbui::install_fonts(&ctx);
+        pbui::apply_style(&ctx, true);
+        let raw = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                // Height is deliberately unbounded here: we want the height the card *wants*,
+                // not the one the window forces. Width is the real one, since it drives wrap.
+                egui::vec2(ABOUT_SIZE.0 as f32, 4000.0),
+            )),
+            ..Default::default()
+        };
+        let mut used = 0.0f32;
+        let mut build = |ctx: &egui::Context| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                // No icon: the texture needs a GPU, and its size is a fixed 100px the layout
+                // reserves either way (`ui.image` of a SizedTexture), so its absence shifts
+                // the total by a constant the margin below absorbs.
+                //
+                // Measured through `scope`, not `ui.min_rect()`: a CentralPanel's Ui reports
+                // the whole panel, so min_rect here would just echo the screen_rect we passed
+                // in (4000px) rather than the card's own height.
+                used = ui.scope(|ui| about_ui(ui, None)).response.rect.height();
+            });
+        };
+        // One warm-up frame: the first run lays out against a default screen_rect, so wrapped
+        // text has not settled at the real width yet.
+        let _ = ctx.run(raw(), &mut build);
+        let _ = ctx.run(raw(), &mut build);
+        used
+    }
+
+    #[test]
+    fn about_card_fits_its_window() {
+        let used = about_card_height();
+        // Add back exactly the icon: the `add_space` around it runs either way, so the icon's
+        // own 100px is the whole difference between this layout and the real one.
+        let needed = f64::from(used) + 100.0;
+        assert!(
+            needed <= ABOUT_SIZE.1,
+            "the About card wants {needed:.0}px but its window is only {:.0}px tall, so the \
+             bottom rows clip — and those rows are the bundled-library copyright notices \
+             LGPL-3.0 §4(c) requires (task #77). Raise ABOUT_SIZE for this platform.",
+            ABOUT_SIZE.1
+        );
+    }
+
+    /// The notices are the point of the section, so assert they are actually rendered rather
+    /// than merely that something fits. A build linking libheif must say so, by name.
+    #[test]
+    #[cfg(feature = "libheif")]
+    fn the_card_names_libheif_and_its_license() {
+        let libs = bundled_libraries();
+        let heif = libs.iter().find(|(n, _)| *n == "libheif");
+        assert!(heif.is_some(), "a libheif build must name libheif in About");
+        let (_, notice) = heif.unwrap();
+        assert!(
+            notice.contains("Dirk Farin") && notice.contains("LGPL"),
+            "the notice must carry the copyright holder and the license: got {notice:?}"
+        );
     }
 }

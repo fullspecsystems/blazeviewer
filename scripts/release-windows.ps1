@@ -156,6 +156,18 @@ Copy-Item $Exe (Join-Path $Stage "photoblaze.exe") -Force
 # Third-party license notices ship next to the exe — dav1d's BSD-2 (and friends) require the
 # license text to accompany binary distributions (see THIRD-PARTY-NOTICES.md, task #76).
 Copy-Item (Join-Path $RepoRoot "THIRD-PARTY-NOTICES.md") $Stage -Force
+# ...and the license TEXTS themselves, which the notices file only summarizes (task #77).
+# This is not optional politeness: LGPL-2.1 §6 says "You must supply a copy of this License"
+# (FFmpeg) and LGPL-3.0 §4(b) says to accompany the work with "a copy of the GNU GPL and this
+# License" (libheif/libde265). The About dialog points users here by name, so the folder name
+# is load-bearing — keep them in step.
+$LicSrc = Join-Path $RepoRoot "licenses"
+$LicDst = Join-Path $Stage "licenses"
+New-Item -ItemType Directory -Force $LicDst | Out-Null
+Copy-Item (Join-Path $LicSrc "*") $LicDst -Recurse -Force
+foreach ($lic in "libheif-COPYING.txt", "libde265-COPYING.txt", "ffmpeg-COPYING.LGPLv2.1.txt", "dav1d-COPYING.txt") {
+    if (-not (Test-Path (Join-Path $LicDst $lic))) { throw "licenses\$lic missing from the package — LGPL requires the license text to ship with the binary." }
+}
 
 $packArgs = @(
     "pack",
