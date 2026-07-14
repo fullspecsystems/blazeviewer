@@ -705,6 +705,7 @@ impl App {
             last_cursor: None,
             dragging: false,
             rotations: HashMap::new(),
+            video_resume: HashMap::new(),
             zoom_started: None,
             zoom_last: None,
             pan_started: None,
@@ -3217,6 +3218,7 @@ impl App {
         self.core.describe_scan = None;
         self.core.live_motion_cache.clear();
         self.core.rotations.clear();
+        self.core.video_resume.clear();
         self.core.failed.clear();
         self.core.preview_resident.clear();
         self.core.upgrade_done.clear();

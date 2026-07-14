@@ -105,6 +105,31 @@ pub const VIDEO_SEEK_AUDIO_SETTLE: Duration = Duration::from_millis(250);
 /// — the line's playback row is the better readout (owner call 2026-07-11).
 pub const VIDEO_OSD_HOLD: Duration = Duration::from_millis(1800);
 
+/// Session-only video resume policy (task #94.2). Don't bother remembering a
+/// position in the first [`RESUME_MIN`] (a glance at the opening) or the last
+/// [`RESUME_END_GUARD`] (the credits / a clip about to end and restart anyway);
+/// when we do resume, back up [`RESUME_REWIND`] for a moment of re-orienting
+/// context. These are deliberately generous — resuming the wrong way (mid-credits,
+/// or one second in) is worse than just starting over.
+pub const RESUME_MIN: Duration = Duration::from_secs(5);
+pub const RESUME_END_GUARD: Duration = Duration::from_secs(5);
+pub const RESUME_REWIND: Duration = Duration::from_secs(2);
+
+/// The position to resume a returned-to video at, or `None` to restart from 0
+/// (task #94.2). `pos` is where the viewer left off; `dur` the clip length. Pure
+/// so the policy is unit-tested without a session. Remembers only a position
+/// meaningfully into a long-enough clip and not near the end; the returned target
+/// is rewound a touch (never below 0) for context.
+pub fn video_resume_target(pos: Duration, dur: Duration) -> Option<Duration> {
+    if pos < RESUME_MIN || dur <= RESUME_END_GUARD {
+        return None;
+    }
+    if pos >= dur.saturating_sub(RESUME_END_GUARD) {
+        return None;
+    }
+    Some(pos.saturating_sub(RESUME_REWIND))
+}
+
 /// The hover **controls zone**: the bottom fraction of the window where pointer
 /// movement reveals the playback controls while a video is active (the info
 /// line's home corner — every video player's convention).
@@ -775,6 +800,25 @@ pub fn companion_motion(still: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Task #94.2 resume policy: remember only a position meaningfully into a
+    /// long-enough clip and not near the end, rewound a touch for context.
+    #[test]
+    fn video_resume_target_policy() {
+        let s = Duration::from_secs;
+        // Deep in a long clip → resume, rewound by RESUME_REWIND.
+        assert_eq!(video_resume_target(s(600), s(7200)), Some(s(598)));
+        // In the first RESUME_MIN → don't bother (start over).
+        assert_eq!(video_resume_target(s(3), s(7200)), None);
+        assert_eq!(video_resume_target(RESUME_MIN, s(7200)), Some(s(3)));
+        // Within RESUME_END_GUARD of the end → don't bother (credits / about to loop).
+        assert_eq!(video_resume_target(s(7196), s(7200)), None);
+        assert_eq!(video_resume_target(s(7194), s(7200)), Some(s(7192)));
+        // Too-short clip (≤ end guard) → never resume.
+        assert_eq!(video_resume_target(s(4), s(5)), None);
+        // Rewind never underflows below 0.
+        assert_eq!(video_resume_target(s(6), s(60)), Some(s(4)));
+    }
 
     #[test]
     fn truncate_exif_value_caps_long_values() {

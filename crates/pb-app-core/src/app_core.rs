@@ -169,6 +169,13 @@ pub struct AppCore {
     /// Per-image in-RAM rotation overrides (`r` / `Shift+R`), applied as a GPU transform
     /// at draw; RAM-only until the user Saves (privacy #2). Absent = upright.
     pub rotations: HashMap<usize, Rotation>,
+    /// Per-video last-watched positions, keyed by item index (task #94.2). Written
+    /// when leaving a video far enough into a long-enough clip, read when returning
+    /// to resume near where you left off (so a stray Space→next then Backspace lands
+    /// you back). **RAM-only, session-scoped** — dropped on deck rebuild / Esc /
+    /// quit like every other runtime cache, never persisted (a viewing trace; the
+    /// ADR-018 privacy guarantee holds). Absent = start from 0.
+    pub video_resume: HashMap<usize, Duration>,
     /// Pinch-zoom gesture timing accumulators (start + last event).
     pub zoom_started: Option<Instant>,
     pub zoom_last: Option<Instant>,

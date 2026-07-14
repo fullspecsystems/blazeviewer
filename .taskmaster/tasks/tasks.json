@@ -1223,7 +1223,7 @@
             "id": 2,
             "title": "RAM-only per-session resume positions for videos",
             "description": "Remember each video's last play position for the lifetime of the app session ONLY: a RAM map keyed by item, dropped in clear_session_state on Esc/quit like every other runtime cache, so the ADR-018 privacy guarantee holds (nothing persisted, no on-disk trace, and the no-trace integration test stays green). Returning to a longer video resumes from (slightly before) where you left off instead of restarting; near-start/near-end positions restart from 0 (thresholds TBD). Works on both backends: native = seek before play; Session = seek-after-open or an initial-position plumb-through.",
-            "status": "pending"
+            "status": "in-progress"
           }
         ]
       }

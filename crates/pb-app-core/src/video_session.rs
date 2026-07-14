@@ -171,6 +171,13 @@ pub struct ActiveVideo {
     /// intent has arrived for the settle window, which coalesces held-key
     /// repeats and scrubber drags into one audio seek.
     pub last_seek_intent: Option<Instant>,
+    /// A one-shot resume position to seek to as soon as the fresh session can
+    /// accept a seek (task #94.2): set at start from the RAM-only resume map,
+    /// consumed by `poll_video` once the session leaves `Opening`. The poster is
+    /// held until it lands (the seek flushes the pre-resume frames by generation),
+    /// so returning to a video jumps straight to where you left off with no
+    /// start-flash. `None` = play from the beginning.
+    pub resume_to: Option<Duration>,
 }
 
 impl ActiveVideo {
@@ -185,6 +192,7 @@ impl ActiveVideo {
             scrub_audio_paused: false,
             pending_audio_commit: None,
             last_seek_intent: None,
+            resume_to: None,
         }
     }
 }
@@ -1533,7 +1541,9 @@ mod tests {
         opened(&io, 10_000);
         // Two frames queue, then the producer fails mid-stream.
         io.events.send(VideoProducerEvent::Frame(frame(0))).unwrap();
-        io.events.send(VideoProducerEvent::Frame(frame(33))).unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(frame(33)))
+            .unwrap();
         io.events
             .send(VideoProducerEvent::Failed {
                 session_id: SID,

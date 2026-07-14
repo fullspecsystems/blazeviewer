@@ -109,6 +109,7 @@ impl AppCore {
             video_read_rx,
             dragging: false,
             rotations: std::collections::HashMap::new(),
+            video_resume: std::collections::HashMap::new(),
             zoom_started: None,
             zoom_last: None,
             pan_started: None,
@@ -2829,6 +2830,7 @@ impl AppCore {
         self.archive_scope = None; // the empty deck is not an archive
         self.playlist = Playlist::new(0, 0);
         self.rotations.clear();
+        self.video_resume.clear();
         self.meta_cache.clear();
         self.exif_cache.clear();
         self.recognized_text.clear();
@@ -2936,6 +2938,7 @@ impl AppCore {
         }
         // Indices are reassigned — drop everything keyed by item index.
         self.rotations.clear();
+        self.video_resume.clear();
         self.meta_cache.clear();
         self.exif_cache.clear();
         self.recognized_text.clear();
@@ -6815,6 +6818,9 @@ impl AppCore {
                     run_platform_video_producer(&input, fit, id, generation, io.events, io.msgs);
                 });
             }
+            // A remembered position for this item (task #94.2) → resume there once
+            // the session can seek (`poll_video`), held from a stale re-scan clear.
+            let resume_to = self.video_resume.get(&item).copied();
             self.video = Some(ActiveVideoBackend::Session(
                 crate::video_session::ActiveVideo {
                     session,
@@ -6824,6 +6830,7 @@ impl AppCore {
                     scrub_audio_paused: false,
                     pending_audio_commit: None,
                     last_seek_intent: None,
+                    resume_to,
                 },
             ));
             self.anim_hint_shown_for = Some(item); // engaged — retire the hint
@@ -7087,9 +7094,19 @@ impl AppCore {
     /// Stop and drop any active video session (navigation, delete, teardown). The
     /// currently displayed frame stays on screen; the caller decides what replaces it.
     pub fn stop_video(&mut self) {
+        let now = self.now;
         if let Some(v) = self.video.take() {
             match v {
                 ActiveVideoBackend::Session(mut s) => {
+                    // Remember where we're leaving off (task #94.2) before teardown,
+                    // so returning to this item resumes near here. RAM-only,
+                    // session-scoped, only when far enough into a long-enough clip.
+                    if let Some(dur) = s.session.duration {
+                        let pos = s.session.desired_position(now);
+                        if let Some(target) = video_resume_target(pos, dur) {
+                            self.video_resume.insert(s.item, target);
+                        }
+                    }
                     s.session.stop();
                     self.effects.push(contract::CoreEffect::StopVideoAudio);
                 }
@@ -7134,10 +7151,30 @@ impl AppCore {
         else {
             return;
         };
-        let update = v.session.poll(now);
+        let mut update = v.session.poll(now);
         let state = v.session.state();
         let started = v.session.has_started();
         let session_id = v.session.id;
+        // One-shot resume seek (task #94.2): once the fresh session can accept a
+        // seek, jump to the remembered position. The poster is held (present
+        // suppressed) until then, and the seek flushes the pre-resume frames by
+        // generation, so returning to a video lands where you left off with no
+        // start-flash. Wired into the 1D audio coordinator below (same fields a
+        // user seek sets), so audio lands at the resume point too.
+        let mut resume_pause_audio = false;
+        if v.resume_to.is_some() {
+            if state != crate::video::VideoSessionState::Opening {
+                if let Some(target) = v.resume_to.take() {
+                    if v.session.seek_to(target, now, None).is_some() {
+                        v.pending_audio_commit = None;
+                        resume_pause_audio = !v.scrub_audio_paused;
+                        v.scrub_audio_paused = true;
+                        v.last_seek_intent = Some(now);
+                    }
+                }
+            }
+            update.present = None; // hold the poster until the resume frame lands
+        }
         // 1D audio-seek coordinator: a landing stores the commit position (only
         // the latest generation lands, so this is inherently supersede-safe);
         // the commit fires once the run settles — no new seek intent for
@@ -7184,6 +7221,12 @@ impl AppCore {
                 session_id,
                 muted,
             });
+        }
+        // The resume seek pauses audio once for its run (after StartVideoAudio so
+        // the player exists; it opens paused anyway). Its landing commits the ONE
+        // SeekVideoAudio (+ resume) below via the same 1D path as a user seek.
+        if resume_pause_audio {
+            self.effects.push(contract::CoreEffect::PauseVideoAudio);
         }
         // The settled seek run's ONE audio commit: seek, then resume (in that
         // order) if the clip plays on. Emitted before the state bridge below so
@@ -10481,6 +10524,120 @@ mod tests {
         core.now += Duration::from_millis(100);
         core.poll_video();
         assert_eq!((seeks(&core), resumes(&core)), (1, 1));
+    }
+
+    /// Task #94.2: leaving a video far enough into a long-enough clip remembers a
+    /// (rewound) resume position keyed by item; a near-start leave remembers nothing.
+    #[test]
+    fn stop_video_remembers_a_mid_clip_position() {
+        use crate::video::{VideoProducerEvent, VideoSessionId};
+        use crate::video_session::{ActiveVideo, VideoSession};
+
+        let mut core = test_core();
+        let sid = VideoSessionId(20);
+        let (session, io) = VideoSession::new(sid, 4);
+        core.video = Some(ActiveVideoBackend::Session(ActiveVideo::new(session, 3)));
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: sid,
+                duration: Some(Duration::from_secs(60)),
+                width: 1,
+                height: 1,
+                has_audio: false,
+                frame_bytes: 4,
+            })
+            .unwrap();
+        core.poll_video();
+        // Playhead at ~10 s (a seek sets desired_position without needing frames).
+        if let Some(v) = core
+            .video
+            .as_mut()
+            .and_then(ActiveVideoBackend::as_session_mut)
+        {
+            v.session.seek_to(Duration::from_secs(10), core.now, None);
+        }
+        core.stop_video();
+        assert_eq!(
+            core.video_resume.get(&3).copied(),
+            Some(Duration::from_secs(8)), // 10 s − RESUME_REWIND
+            "leaving mid-clip remembers the rewound position"
+        );
+
+        // A near-start leave remembers nothing (item 3's entry stays as-is; a new
+        // item 4 left at 2 s is not recorded).
+        let (session2, io2) = VideoSession::new(VideoSessionId(21), 4);
+        core.video = Some(ActiveVideoBackend::Session(ActiveVideo::new(session2, 4)));
+        io2.events
+            .send(VideoProducerEvent::Opened {
+                session_id: VideoSessionId(21),
+                duration: Some(Duration::from_secs(60)),
+                width: 1,
+                height: 1,
+                has_audio: false,
+                frame_bytes: 4,
+            })
+            .unwrap();
+        core.poll_video();
+        if let Some(v) = core
+            .video
+            .as_mut()
+            .and_then(ActiveVideoBackend::as_session_mut)
+        {
+            v.session.seek_to(Duration::from_secs(2), core.now, None);
+        }
+        core.stop_video();
+        assert_eq!(
+            core.video_resume.get(&4),
+            None,
+            "near-start is not remembered"
+        );
+    }
+
+    /// Task #94.2: a session started for an item with a remembered position seeks
+    /// there once it can (leaving Opening), holds the poster until then, and pauses
+    /// audio for the resume run.
+    #[test]
+    fn returning_to_a_video_resumes_at_the_remembered_position() {
+        use crate::video::{VideoProducerEvent, VideoProducerMsg, VideoSessionId};
+        use crate::video_session::{ActiveVideo, VideoSession};
+
+        let mut core = test_core();
+        let sid = VideoSessionId(22);
+        let (session, io) = VideoSession::new(sid, 4);
+        let mut av = ActiveVideo::new(session, 5);
+        av.resume_to = Some(Duration::from_secs(30)); // as start_video_session would set it
+        core.video = Some(ActiveVideoBackend::Session(av));
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: sid,
+                duration: Some(Duration::from_secs(120)),
+                width: 1,
+                height: 1,
+                has_audio: false,
+                frame_bytes: 4,
+            })
+            .unwrap();
+        core.poll_video();
+
+        // The resume seek fired to 30 s, and the one-shot target was consumed.
+        let v = core
+            .video
+            .as_ref()
+            .and_then(ActiveVideoBackend::as_session)
+            .expect("session");
+        assert_eq!(
+            v.resume_to, None,
+            "the resume target is consumed once applied"
+        );
+        assert_eq!(
+            v.session.desired_position(core.now),
+            Duration::from_secs(30),
+            "the session sought to the remembered position"
+        );
+        // The producer was told to seek to ~30 s (video Cues path).
+        let sought = std::iter::from_fn(|| io.msgs.try_recv().ok())
+            .any(|m| matches!(m, VideoProducerMsg::SeekTo { target, .. } if target == Duration::from_secs(30)));
+        assert!(sought, "a SeekTo(30s) reached the producer");
     }
 
     /// A paused seek commits the audio position on settle but never resumes —
