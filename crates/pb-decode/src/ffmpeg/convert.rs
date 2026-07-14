@@ -289,7 +289,11 @@ impl FrameConverter {
                         let src = &data[(start + i) * stride..(start + i) * stride + row_bytes];
                         let dst = &mut band[i * row_bytes..(i + 1) * row_bytes];
                         for x in 0..w {
-                            one_pixel(&src[x * 8..x * 8 + 8], &mut dst[x * 8..x * 8 + 8], &mut peak);
+                            one_pixel(
+                                &src[x * 8..x * 8 + 8],
+                                &mut dst[x * 8..x * 8 + 8],
+                                &mut peak,
+                            );
                         }
                     }
                     peak

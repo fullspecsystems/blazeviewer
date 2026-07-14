@@ -278,10 +278,10 @@ impl Default for Settings {
             accent_custom: [0x00, 0x78, 0xd4],       // Windows accent blue — a good neutral
             // starting point when you switch to Custom
             info_line_align: InfoLineAlign::Center, // bottom-center, stacks with the toast
-            show_image_info: false,                // off until opted in (unchanged launch)
-            glass_toolbar: true,                   // transparent toolbar on by default (#59)
-            show_toolbar: true,                    // docked toolbar on by default (#61)
-            info_show_folder: false,               // opt-in — filename alone by default
+            show_image_info: false,                 // off until opted in (unchanged launch)
+            glass_toolbar: true,                    // transparent toolbar on by default (#59)
+            show_toolbar: true,                     // docked toolbar on by default (#61)
+            info_show_folder: false,                // opt-in — filename alone by default
             info_show_filename: true,
             info_show_resolution: true,
             info_show_codec: true,

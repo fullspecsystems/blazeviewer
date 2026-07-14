@@ -13,6 +13,11 @@ with any pre-release suffix carried only by the tag.
   fresh installs.)
 
 ### Fixed
+- **4K HDR video can no longer get stuck "buffering" forever.** The decoded-frame
+  memory budget could never hold the two HDR frames playback insisted on before starting
+  (each 4K HDR frame is ~63 MiB against a ~95 MiB budget), so some window/scale modes
+  never left the buffering state. The budget is now sized for HDR frames, and playback
+  starts from however many frames actually fit rather than waiting for an impossible fill.
 - **Short forward jumps in video are near-instant.** An arrow-key ±2 s skip forward now decodes
   ahead from where you are instead of seeking back to the previous keyframe and grinding the whole
   GOP. (Backward and long jumps still seek to a keyframe.)

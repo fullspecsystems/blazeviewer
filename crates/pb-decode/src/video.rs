@@ -524,7 +524,10 @@ mod tests {
         let gray: Vec<u8> = [128u8, 128, 128, 255].repeat(w * h);
         let gray_score = poster_frame_score(&gray);
         assert!(gray_score > poster_frame_score(&black));
-        assert!(gray_score < POSTER_GOOD_SCORE, "flat gray is not 'good' {gray_score}");
+        assert!(
+            gray_score < POSTER_GOOD_SCORE,
+            "flat gray is not 'good' {gray_score}"
+        );
 
         // A high-contrast, detailed frame (checkerboard) clears the good bar and
         // outscores every frame above.
@@ -537,7 +540,10 @@ mod tests {
             }
         }
         let scene_score = poster_frame_score(&scene);
-        assert!(scene_score >= POSTER_GOOD_SCORE, "detailed scene should be 'good' {scene_score}");
+        assert!(
+            scene_score >= POSTER_GOOD_SCORE,
+            "detailed scene should be 'good' {scene_score}"
+        );
         assert!(scene_score > gray_score && scene_score > poster_frame_score(&logo));
     }
 

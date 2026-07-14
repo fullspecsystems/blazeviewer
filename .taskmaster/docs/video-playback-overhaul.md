@@ -296,8 +296,15 @@ Record, without persisting viewed paths:
 Run separate controls:
 
 1. Original MKV through the Session route.
-2. **Video-only** stream-copy remux to MOV/MP4 (`-map 0:v:0 -an -c copy`) through AVPlayer.
-3. If needed, a second control with audio transcoded to an AVFoundation-supported format.
+2. **Video-only** stream-copy remux through AVPlayer. Muxing gotcha (verified 2026-07-13):
+   the target must be **MP4, not MOV** — FFmpeg's movenc writes the DoVi `dvvC` box only in
+   MP4 mode, and it needs `-strict unofficial`; the working control is
+   `ffmpeg -i in.mkv -map 0:v:0 -an -c copy -tag:v hvc1 -strict unofficial control.mp4`
+   (verify with a binary grep for `dvvC`). A `.mov` output silently degrades the control to
+   plain HDR10.
+3. A second control with the corpus **AC-3 5.1 track copied alongside** (`-map 0:a:2 -c copy`)
+   — AC-3 in MP4 is AVFoundation-supported, so this also previews the R10 track-selection win.
+   Both controls were generated 2026-07-13 as `~/Downloads/pb-remux-control-{video-only,video-ac3}.mp4`.
 
 The remux isolates whether Apple can play the encoded video stream smoothly. It does **not** prove
 that PhotoBlaze can construct correct `CMSampleBuffer`s or preserve Dolby Vision metadata; that is

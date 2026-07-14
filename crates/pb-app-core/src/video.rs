@@ -341,14 +341,17 @@ pub struct AudioClockSample {
 /// lookahead + the one the producer is decoding against a credit.
 pub const VIDEO_QUEUE_MAX_FRAMES: usize = 4;
 
-/// The byte budget for queued + in-flight decoded frames: 3× one fitted 4K RGBA8
-/// frame (~95 MiB, constant). Sized so a 4K60 stream keeps 2-3 frames of real
-/// lookahead (~50 ms — enough to ride the measured 30-100 ms GOP-boundary decode
-/// spikes) *after* charging the in-flight credit; anything smaller serializes the
-/// credit round-trip and playback runs below real time (the owner-reported 2/3×
-/// on a 4K60 HEVC clip). Admission still enforces the one-frame exception when a
-/// single fitted frame exceeds the whole budget.
-pub const VIDEO_QUEUE_BYTE_BUDGET: u64 = 3 * 3840 * 2160 * 4;
+/// The byte budget for queued + in-flight decoded frames: 3× one fitted 4K
+/// RGBA16F frame (~190 MiB, constant — the overhaul plan 1A sizing). Sized so
+/// the *largest supported non-exceptional frame* (4K HDR fp16, 8 B/px) keeps two
+/// queued frames plus one in-flight decode: the old 3×RGBA8 budget (~95 MiB)
+/// admitted only ONE fp16 frame, which deadlocked the 2-frame preroll (R1) —
+/// and anything that serializes the credit round-trip plays below real time
+/// (the owner-reported 2/3× on a 4K60 HEVC clip). SDR 4K RGBA8 frames hit the
+/// [`VIDEO_QUEUE_MAX_FRAMES`] cap long before this byte cap. Admission still
+/// enforces the one-frame exception when a single fitted frame (8K) exceeds the
+/// whole budget, and preroll clamps to what the budget actually admits.
+pub const VIDEO_QUEUE_BYTE_BUDGET: u64 = 3 * 3840 * 2160 * 8;
 
 /// Pure admission rule for the producer→session frame queue. The session owns one;
 /// the producer receives *credits* only when `admits` says the next frame fits, so
@@ -648,13 +651,15 @@ mod tests {
 
     /// One fitted 4K RGBA8 frame.
     const FRAME_4K: u64 = 3840 * 2160 * 4;
+    /// One fitted 4K RGBA16F (HDR) frame — the budget's sizing unit (plan 1A).
+    const FRAME_4K_F16: u64 = 3840 * 2160 * 8;
 
     #[test]
-    fn budget_is_three_fitted_4k_frames() {
-        assert_eq!(VIDEO_QUEUE_BYTE_BUDGET, 3 * FRAME_4K);
-        // ~95 MiB — constant and documented (queue + in-flight, see the consts).
+    fn budget_is_three_fitted_4k_fp16_frames() {
+        assert_eq!(VIDEO_QUEUE_BYTE_BUDGET, 3 * FRAME_4K_F16);
+        // ~190 MiB — constant and documented (queue + in-flight, see the consts).
         let b = VideoQueueBudget::default();
-        assert!(b.max_bytes < 100 * 1024 * 1024);
+        assert!(b.max_bytes < 200 * 1024 * 1024);
         assert_eq!(b.max_frames, VIDEO_QUEUE_MAX_FRAMES);
     }
 
@@ -671,21 +676,27 @@ mod tests {
     }
 
     #[test]
-    fn byte_budget_binds_for_4k() {
+    fn byte_budget_binds_for_4k_fp16() {
         let b = VideoQueueBudget::default();
-        assert!(b.admits(0, 0, FRAME_4K));
-        assert!(b.admits(FRAME_4K, 1, FRAME_4K));
-        assert!(b.admits(2 * FRAME_4K, 2, FRAME_4K), "exactly at budget");
+        assert!(b.admits(0, 0, FRAME_4K_F16));
+        assert!(b.admits(FRAME_4K_F16, 1, FRAME_4K_F16));
         assert!(
-            !b.admits(3 * FRAME_4K, 3, FRAME_4K),
-            "fourth 4K frame exceeds bytes before the frame cap"
+            b.admits(2 * FRAME_4K_F16, 2, FRAME_4K_F16),
+            "exactly at budget"
         );
+        assert!(
+            !b.admits(3 * FRAME_4K_F16, 3, FRAME_4K_F16),
+            "fourth 4K fp16 frame exceeds bytes before the frame cap"
+        );
+        // SDR 4K RGBA8 frames hit the frame cap first, never the byte cap.
+        assert!(b.admits(3 * FRAME_4K, 3, FRAME_4K));
+        assert!(!b.admits(4 * FRAME_4K, 4, FRAME_4K), "frame cap");
     }
 
     #[test]
     fn oversized_single_frame_only_enters_an_empty_queue() {
         let b = VideoQueueBudget::default();
-        let f8k = 7680 * 4320 * 4u64; // one 8K frame > the whole budget
+        let f8k = 7680 * 4320 * 8u64; // one 8K fp16 frame > the whole budget
         assert!(f8k > b.max_bytes);
         assert!(b.admits(0, 0, f8k), "one-frame exception");
         assert!(!b.admits(f8k, 1, f8k), "never two oversized frames");

@@ -280,7 +280,12 @@ fn poster_inner(
     } else {
         (fw, fh)
     };
-    let conv = FrameConverter::new((facts.width, facts.height), pre_rot, facts.rotation, &decoder);
+    let conv = FrameConverter::new(
+        (facts.width, facts.height),
+        pre_rot,
+        facts.rotation,
+        &decoder,
+    );
 
     let duration = facts.duration;
     let mut walk = PosterWalk {

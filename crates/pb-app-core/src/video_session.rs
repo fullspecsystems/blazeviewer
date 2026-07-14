@@ -30,6 +30,9 @@ use pb_decode::VideoFrame;
 
 /// Frames that must be queued (or EOS known) before `Buffering` promotes to
 /// `Playing` — half of the preroll; the other half is audio **ready-or-absent**.
+/// This is a *ceiling*: preroll clamps to what the byte/frame budget can
+/// actually admit (overhaul plan 1A) — a frame size the budget admits only once
+/// (4K RGBA16F, oversized 8K) prerolls from one frame instead of deadlocking.
 pub const PREROLL_FRAMES: usize = 2;
 
 /// How long preroll waits for the shell's audio player to report ready before
@@ -557,9 +560,20 @@ impl VideoSession {
         }
     }
 
+    /// [`PREROLL_FRAMES`] clamped to what the budget can actually admit at the
+    /// current negotiated frame size (plan 1A): a frame in (budget/2, budget]
+    /// fits only once, and an oversized frame (one-frame exception) computes to
+    /// zero — both preroll from one frame rather than deadlock in `Buffering`.
+    fn effective_preroll(&self) -> usize {
+        let by_bytes =
+            usize::try_from(self.budget.max_bytes / self.frame_bytes.max(1)).unwrap_or(usize::MAX);
+        PREROLL_FRAMES
+            .min(by_bytes.min(self.budget.max_frames))
+            .max(1)
+    }
+
     fn preroll_satisfied(&mut self, now: Instant) -> bool {
-        let frames_ready =
-            self.queue.len() >= PREROLL_FRAMES || (self.eos && !self.queue.is_empty()) || self.eos;
+        let frames_ready = self.queue.len() >= self.effective_preroll() || self.eos;
         frames_ready && self.audio_ready_or_absent(now)
     }
 
@@ -964,6 +978,132 @@ mod tests {
             .unwrap();
         s.poll(t0);
         assert_eq!(drain_credits(&io), 1, "one-frame exception: single credit");
+    }
+
+    /// A frame with a custom byte size (the queue charges `pixels.len()`).
+    fn sized_frame(pts_ms: u64, bytes: usize) -> VideoFrame {
+        let mut f = frame(pts_ms);
+        f.pixels = vec![0; bytes];
+        f
+    }
+
+    /// R1 (overhaul plan 1A): when the budget admits only ONE frame (frame size
+    /// in (budget/2, budget], e.g. 4K RGBA16F vs the old ~95 MiB budget), the
+    /// fixed 2-frame preroll could never be satisfied and the session sat in
+    /// `Buffering` forever. Preroll must clamp to the queue's real capacity and
+    /// start playback from a single frame.
+    #[test]
+    fn preroll_clamps_to_queue_capacity_instead_of_deadlocking() {
+        let budget = VideoQueueBudget {
+            max_bytes: 24, // fits one 16-byte frame, never two
+            max_frames: 4,
+        };
+        let (mut s, io) = VideoSession::with_budget(SID, FRAME_BYTES, budget);
+        let t0 = Instant::now();
+        opened(&io, 10_000);
+        s.poll(t0);
+        assert_eq!(drain_credits(&io), 1, "only one frame fits the budget");
+
+        io.events.send(VideoProducerEvent::Frame(frame(0))).unwrap();
+        let u = s.poll(t0);
+        assert_eq!(
+            s.state(),
+            VideoSessionState::Playing,
+            "a full-to-capacity queue must satisfy preroll"
+        );
+        assert_eq!(u.present.expect("first frame presents").pts, Duration::ZERO);
+        s.assert_budget_invariant();
+    }
+
+    /// Locks the budget sizing decision from the overhaul plan (1A): the default
+    /// budget must keep two real 4K RGBA16F frames queued plus one in-flight
+    /// credit, so HDR playback neither deadlocks (R1) nor serializes decode.
+    #[test]
+    fn default_budget_fits_two_4k_fp16_frames_plus_one_in_flight() {
+        let fp16_4k: u64 = 3840 * 2076 * 8; // the corpus geometry, 8 B/px
+        let (mut s, io) = VideoSession::new(SID, fp16_4k);
+        let t0 = Instant::now();
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: SID,
+                duration: Some(Duration::from_secs(10)),
+                width: 3840,
+                height: 2076,
+                has_audio: false,
+                frame_bytes: fp16_4k,
+            })
+            .unwrap();
+        s.poll(t0);
+        assert_eq!(
+            drain_credits(&io),
+            3,
+            "two queueable frames + one in-flight decode"
+        );
+
+        // Two queued frames satisfy preroll → Playing (this was the R1 deadlock).
+        io.events
+            .send(VideoProducerEvent::Frame(sized_frame(0, fp16_4k as usize)))
+            .unwrap();
+        io.events
+            .send(VideoProducerEvent::Frame(sized_frame(33, fp16_4k as usize)))
+            .unwrap();
+        let u = s.poll(t0);
+        assert_eq!(s.state(), VideoSessionState::Playing);
+        assert!(u.present.is_some());
+        s.assert_budget_invariant();
+    }
+
+    /// Upward frame-size renegotiation (plan 1A): construction underestimated
+    /// (e.g. the fit-box RGBA8 guess vs the negotiated fp16 output). Credits
+    /// already granted can't be revoked, but granting must STOP until the
+    /// pipeline drains back inside the budget — never compound the overshoot.
+    #[test]
+    fn upward_frame_size_renegotiation_stops_granting_until_drained() {
+        let budget = VideoQueueBudget {
+            max_bytes: 48,
+            max_frames: 4,
+        };
+        // Estimate 16 → three credits flow (16, 32, 48 ≤ 48).
+        let (mut s, io) = VideoSession::with_budget(SID, 16, budget);
+        let t0 = Instant::now();
+        s.poll(t0);
+        assert_eq!(drain_credits(&io), 3, "estimate grants up the byte budget");
+
+        // Opened corrects the frame size UP to 32: 3 credits × 32 = 96 > 48.
+        io.events
+            .send(VideoProducerEvent::Opened {
+                session_id: SID,
+                duration: Some(Duration::from_secs(10)),
+                width: 2,
+                height: 4,
+                has_audio: false,
+                frame_bytes: 32,
+            })
+            .unwrap();
+        s.poll(t0);
+        assert_eq!(
+            drain_credits(&io),
+            0,
+            "no new credits while the outstanding estimate exceeds the budget"
+        );
+
+        // The producer honors all three credits at the REAL 32-byte size.
+        for pts in [0u64, 33, 66] {
+            io.events
+                .send(VideoProducerEvent::Frame(sized_frame(pts, 32)))
+                .unwrap();
+        }
+        // Fill poll presents pts 0 (queue 96 → 64 bytes): still over budget.
+        let u = s.poll(t0);
+        assert!(u.present.is_some());
+        assert_eq!(drain_credits(&io), 0, "64 > 48: still draining");
+        // pts 33 presents (64 → 32 bytes): 32 + 32 > 48, still none.
+        assert!(s.poll(t0 + Duration::from_millis(34)).present.is_some());
+        assert_eq!(drain_credits(&io), 0, "one queued frame already fills it");
+        // pts 66 presents (32 → 0 bytes): back inside the budget → exactly one.
+        assert!(s.poll(t0 + Duration::from_millis(67)).present.is_some());
+        assert_eq!(drain_credits(&io), 1, "granting resumes once drained");
+        s.assert_budget_invariant();
     }
 
     #[test]
