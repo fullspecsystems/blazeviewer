@@ -201,6 +201,12 @@ impl FfAudioDecoder {
             }
         }
         let take = want.min(self.pending.len());
+        if take > 0 {
+            // Anchor the session-relative zero at the first delivered sample's PTS,
+            // before we advance the cursor. Explicit now — the unit converter below
+            // is side-effect-free (was fused into `frames_to_units`, a refactor trap).
+            self.anchor_origin();
+        }
         let out: Vec<f32> = self.pending.drain(..take).collect();
         self.pending_pts += self.frames_to_units(take / self.out_channels.max(1) as usize);
         Ok(out)
@@ -289,12 +295,19 @@ impl FfAudioDecoder {
         Duration::from_secs_f64(units as f64 * num as f64 / den as f64)
     }
 
-    /// Record the origin from the first delivered audio (called implicitly:
-    /// the first `absorb` sets `pending_pts`; `origin` anchors on first read).
-    fn frames_to_units(&mut self, frames: usize) -> i64 {
-        if self.origin.is_none() && (frames > 0 || !self.pending.is_empty()) {
+    /// Anchor the session-relative zero (`origin`) at the current `pending_pts` —
+    /// the PTS of the first sample actually delivered. Idempotent (sets `origin`
+    /// once, only when there is pending audio to anchor to). Split out of
+    /// `frames_to_units` so unit conversion carries no hidden clock side effect.
+    fn anchor_origin(&mut self) {
+        if self.origin.is_none() && !self.pending.is_empty() {
             self.origin = Some(self.pending_pts);
         }
+    }
+
+    /// Pure conversion: `frames` (per-channel sample count) → stream time-base
+    /// units. No side effects.
+    fn frames_to_units(&self, frames: usize) -> i64 {
         let (num, den) = self.time_base;
         if num <= 0 || den <= 0 || self.rate == 0 {
             return 0;
