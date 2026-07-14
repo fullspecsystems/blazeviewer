@@ -89,6 +89,11 @@ pub struct DemuxStreamInfo {
     /// than needing an in-Rust bitstream filter.
     pub length_prefixed: bool,
     pub dovi: Option<DoviConfig>,
+    /// Max frame-reorder depth (`video_delay` / `has_b_frames`): how many frames a
+    /// B-frame stream is decoded ahead of presentation. Used to seed the DTS
+    /// synthesis for the leading packets a container leaves without a decode
+    /// timestamp (see [`synth_dts`]).
+    pub max_reorder: u8,
 }
 
 /// One compressed access unit, container-native (length-prefixed for MP4/MKV).
@@ -113,6 +118,11 @@ pub struct VideoDemuxer {
     info: DemuxStreamInfo,
     packet: ff::Packet,
     eof: bool,
+    /// One frame's duration in stream time-base units (from fps), for [`synth_dts`].
+    frame_dur: i64,
+    /// The last DTS handed out (stream units) — the running base for synthesizing a
+    /// monotonic DTS when the container omits one. `None` until the first packet.
+    last_dts: Option<i64>,
 }
 
 impl VideoDemuxer {
@@ -122,12 +132,23 @@ impl VideoDemuxer {
         let mut ff_in = FfInput::open(input, None)?;
         ff_in.set_cancel(cancel);
         let facts = video_facts(ff_in.ctx())?;
+        // One frame in stream units, for DTS synthesis. Falls back to 1 when fps is
+        // unknown (keeps the synthesized ramp strictly increasing).
+        let frame_dur = if facts.fps > 0.0 {
+            facts
+                .duration_to_pts(Duration::from_secs_f64(1.0 / facts.fps))
+                .max(1)
+        } else {
+            1
+        };
         let info = build_stream_info(facts, ff_in.ctx())?;
         Ok(Self {
             input: ff_in,
             info,
             packet: ff::Packet::empty(),
             eof: false,
+            frame_dur,
+            last_dts: None,
         })
     }
 
@@ -157,10 +178,23 @@ impl VideoDemuxer {
                     if data.is_empty() {
                         continue; // an empty packet carries nothing to enqueue
                     }
+                    let pts = self.packet.pts();
+                    // Always hand out a valid, monotonic DTS: containers omit it on
+                    // the leading reorder-priming packets of a B-frame stream (e.g.
+                    // H.264-in-MKV), and AVSampleBufferDisplayLayer can't decode a
+                    // reordered stream with a mix of present and missing DTS.
+                    let dts = synth_dts(
+                        self.last_dts,
+                        pts,
+                        self.packet.dts(),
+                        self.frame_dur,
+                        self.info.max_reorder as i64,
+                    );
+                    self.last_dts = Some(dts);
                     return Ok(Some(DemuxPacket {
                         data,
-                        pts: self.packet.pts(),
-                        dts: self.packet.dts(),
+                        pts,
+                        dts: Some(dts),
                         duration: self.packet.duration(),
                         is_key: self.packet.is_key(),
                     }));
@@ -220,7 +254,32 @@ impl VideoDemuxer {
             return Err(format!("demux seek failed: {}", ff::Error::from(rc)));
         }
         self.eof = false;
+        self.last_dts = None; // re-seed DTS synthesis for the post-seek keyframe run
         Ok(())
+    }
+}
+
+/// The decode timestamp to hand out for a packet, synthesizing one the container
+/// omitted. A real `raw` DTS passes through. Otherwise: the first missing one is
+/// seeded `max_reorder` frames *before* its PTS (the true DTS of an IDR that opens
+/// a B-frame GOP), and each subsequent missing one steps up by one frame — a
+/// **monotonic** ramp that lands just below the first real DTS. Keeping the ramp
+/// tight (reorder-depth, not a big constant) preserves a sane PTS–DTS gap, which a
+/// too-negative seed would blow up. Pure, so it is unit-tested against real packet
+/// sequences without a file.
+fn synth_dts(
+    last_dts: Option<i64>,
+    pts: Option<i64>,
+    raw: Option<i64>,
+    frame_dur: i64,
+    max_reorder: i64,
+) -> i64 {
+    if let Some(d) = raw {
+        return d;
+    }
+    match last_dts {
+        Some(prev) => prev + frame_dur.max(1),
+        None => pts.unwrap_or(0) - max_reorder.max(0) * frame_dur.max(1),
     }
 }
 
@@ -244,6 +303,17 @@ fn build_stream_info(
     let extradata = read_extradata(&stream);
     let (length_prefixed, nal_length_size) = parse_nal_length(codec, &extradata);
     let dovi = read_dovi(&stream);
+    // The codec's frame-reorder depth, for DTS synthesis. `video_delay` on
+    // AVCodecParameters (a public field) is `has_b_frames` — the max frames a
+    // decoded picture is held before display.
+    let max_reorder = unsafe {
+        let p = par.as_ptr();
+        if p.is_null() {
+            0
+        } else {
+            (*p).video_delay.clamp(0, 255) as u8
+        }
+    };
     Ok(DemuxStreamInfo {
         facts,
         codec,
@@ -251,6 +321,7 @@ fn build_stream_info(
         nal_length_size,
         length_prefixed,
         dovi,
+        max_reorder,
     })
 }
 
@@ -517,6 +588,52 @@ mod tests {
         assert_eq!(info.codec, VideoCodec::Hevc);
         assert!(dovi.profile > 0, "a real DoVi profile");
         assert!(dovi.bl_present, "the base layer must be present");
+    }
+
+    /// The Grey's Anatomy S01E01 H.264-in-MKV head (from ffprobe): the container
+    /// omits DTS (`None`) on the first two reorder-priming packets, then provides
+    /// it. Verify the synthesis fills them into a monotonic, ≤-PTS decode timeline
+    /// (the mixed present/missing DTS that stalled AVSampleBufferDisplayLayer).
+    #[test]
+    fn synth_dts_fixes_leading_missing_on_a_bframe_stream() {
+        let (fd, mr) = (42i64, 2i64); // ~23.976 fps at 1/1000 time base; has_b_frames=2
+        // (pts, raw_dts) in stream units; None = the container left DTS out.
+        let seq: [(i64, Option<i64>); 5] = [
+            (0, None),
+            (375, None),
+            (209, Some(0)),
+            (42, Some(42)),
+            (83, Some(83)),
+        ];
+        let mut last: Option<i64> = None;
+        let mut out = Vec::new();
+        for (pts, raw) in seq {
+            let d = synth_dts(last, Some(pts), raw, fd, mr);
+            last = Some(d);
+            out.push(d);
+        }
+        assert_eq!(out, vec![-84, -42, 0, 42, 83]);
+        // Monotonic non-decreasing (the decode timeline the display layer needs).
+        assert!(out.windows(2).all(|w| w[1] >= w[0]), "not monotonic: {out:?}");
+        // Every DTS is at or before its PTS.
+        for ((pts, _), &d) in seq.iter().zip(&out) {
+            assert!(d <= *pts, "dts {d} exceeds pts {pts}");
+        }
+        // The synthesized IDR DTS sits exactly `max_reorder` frames before its PTS —
+        // a sane gap, not an arbitrarily large negative one.
+        assert_eq!(out[0], 0 - mr * fd);
+    }
+
+    #[test]
+    fn synth_dts_passes_real_values_and_seeds_from_pts() {
+        // A present DTS is returned verbatim (no B-frame stream is disturbed).
+        assert_eq!(synth_dts(Some(100), Some(200), Some(150), 42, 2), 150);
+        // No prior DTS, none in the packet: seed from PTS minus the reorder depth.
+        assert_eq!(synth_dts(None, Some(0), None, 42, 2), -84);
+        // No B-frames (reorder 0): the seed is the PTS itself (DTS == PTS).
+        assert_eq!(synth_dts(None, Some(500), None, 42, 0), 500);
+        // Frame duration is floored at 1 so the ramp is always strictly increasing.
+        assert_eq!(synth_dts(Some(7), None, None, 0, 2), 8);
     }
 
     #[test]

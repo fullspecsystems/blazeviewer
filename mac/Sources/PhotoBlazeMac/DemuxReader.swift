@@ -52,6 +52,7 @@ final class DemuxReader: @unchecked Sendable {
     private var firstFrameSent = false
     private var requesting = false
     private var done = false
+    private var framesFed = 0 // diagnostics only (PB_TRACE)
 
     /// Open the demuxer for `sessionId` over the container `PlaySampleBuffer`
     /// stashed Rust-side, off the main actor. Builds the `CMVideoFormatDescription`
@@ -81,6 +82,10 @@ final class DemuxReader: @unchecked Sendable {
                 fps: demux_fps(p),
                 hasAudio: demux_has_audio(p),
                 doviProfile: demux_dovi_profile(p))
+            pbTrace(
+                "sb-demux opened: codec=\(demux_codec(p)) \(out.width)x\(out.height) "
+                    + "nal=\(demux_nal_length_size(p)) lp=\(demux_length_prefixed(p)) "
+                    + "audio=\(out.hasAudio) fps=\(out.fps) tb=\(self.tbNum)/\(self.tbDen)")
             DispatchQueue.main.async { then(out) }
         }
     }
@@ -188,18 +193,30 @@ final class DemuxReader: @unchecked Sendable {
                 return
             }
             let pts = demux_packet_pts(ptr)
-            let dts = demux_packet_dts(ptr)
+            let dts = demux_packet_dts(ptr) // always valid — Rust synthesizes missing DTS
             let dur = demux_packet_duration(ptr)
             if origin == Int64.min {
                 origin = pts != Int64.min ? pts : (dts != Int64.min ? dts : 0)
             }
             guard let sb = makeSampleBuffer(rv, count: n, fmt: fmt, pts: pts, dts: dts, dur: dur)
-            else { continue }
+            else {
+                pbTrace("sb-demux: makeSampleBuffer FAILED (\(n) bytes, pts=\(pts) dts=\(dts))")
+                continue
+            }
             layer.enqueue(sb)
+            framesFed += 1
+            if framesFed <= 3 || framesFed % 300 == 0 {
+                pbTrace("sb-demux fed #\(framesFed) pts=\(pts) dts=\(dts) key=\(demux_packet_is_key(ptr)) status=\(layer.status.rawValue)")
+            }
             if !firstFrameSent {
                 firstFrameSent = true
-                let first = cmTime(pts)
-                onFirstFrame.map { cb in DispatchQueue.main.async { cb(first) } }
+                // Anchor the synchronizer at the first DECODE time, not the first
+                // PTS: a B-frame stream's opening IDR has a DTS earlier than its PTS
+                // (here synthesized negative), and starting the clock at the PTS
+                // makes those frames "late" — AVSampleBufferDisplayLayer then drops
+                // the IDR and nothing downstream can decode (no picture).
+                let anchor = cmTime(dts)
+                onFirstFrame.map { cb in DispatchQueue.main.async { cb(anchor) } }
             }
         }
     }

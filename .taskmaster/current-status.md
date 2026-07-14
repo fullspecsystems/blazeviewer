@@ -1,9 +1,23 @@
 # PhotoBlaze — Current Status (session handoff)
 
 _Last updated: 2026-07-14 (rev 4). Supersedes prior status. **0.2.0 shipped** (private beta).
-**Task #91 (video-playback overhaul, Phases 0–3) is COMPLETE + owner-validated.**
+**Task #91 (video-playback overhaul, Phases 0–3) is COMPLETE + owner-validated** — including MKV
+playback through the sample-buffer route (default on macOS), verified end-to-end on H.264 + HEVC.
 **Task #98 (media-track catalog) is COMPLETE.** **Task #90 (subtitles) has a working end-to-end
 slice on macOS** — see below._
+
+## Phase 3 post-landing regression fixes (owner-validated)
+
+After the sample-buffer route went default-on, an H.264-in-MKV clip showed no video. Three fixes,
+all on `main`:
+- **`d8f8f7a8` — the real bug:** the presenter unhid only the letterbox *container*, never the
+  display layer itself (`attachVideoSublayer` hides both; `NativeVideoPlayer` unhides both). It was
+  rendering into a hidden layer → black for every codec (the earlier HEVC "pass" was the Session
+  fallback, not this path). Now unhides the display layer on reveal.
+- **`db7f3e6e` — missing-DTS synth** (pb-decode `synth_dts`, pure + tested): H.264-in-MKV omits DTS
+  on leading reorder packets; feeding a mix of valid/invalid DTS is out-of-spec. Kept for correctness.
+- **`0628361f` — decode-time clock anchor:** anchor at the first frame's DTS (not PTS) so a B-frame
+  IDR isn't dropped as "late." Diagnostics live under `PB_TRACE=1`.
 
 ## ✅ NEW THIS SESSION: subtitles render, end to end (task #90)
 
