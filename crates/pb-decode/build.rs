@@ -51,6 +51,54 @@ fn main() {
         build_dav1d_windows();
         println!("cargo:rustc-cfg=av1_dav1d");
     }
+
+    if std::env::var_os("CARGO_FEATURE_FFMPEG").is_some() && target_os == "windows" {
+        link_ffmpeg_windows_syslibs();
+    }
+}
+
+/// Windows: the system libs a **static** vcpkg FFmpeg needs and `ffmpeg-sys-next`
+/// doesn't emit (task #100).
+///
+/// Its build.rs says as much — *"vcpkg doesn't detect the 'system' dependencies"* — and
+/// then emits only `ole32`, `secur32`, `ws2_32`, `bcrypt` and `user32`. That list is
+/// short of what avformat/avcodec 8.1 actually reference, so the link fails with
+/// `LNK2019` on three groups; each entry below is one of them, kept here rather than
+/// patched upstream because this is the *linking* crate's job.
+///
+/// Nothing here changes the shipped feature set — these are OS import libraries, not
+/// new dependencies. The FFmpeg objects that pull them in (its Schannel TLS and its own
+/// MediaFoundation *encoder*) are dead weight for us: we only demux. Trimming them is
+/// task #100's minimal-build subtask; until then they must resolve.
+fn link_ffmpeg_windows_syslibs() {
+    // Relink when the vcpkg FFmpeg is rebuilt. **This is not a nicety — it is a
+    // correctness guard**, and it cost a real debugging detour to find (#100.1):
+    // `ffmpeg-sys-next` emits no `rerun-if-changed` for the libs it links, and Cargo
+    // cannot see that a `.lib` under vcpkg changed. Rebuild FFmpeg with different
+    // configure options and, with no source edit to force its hand, Cargo happily
+    // re-runs the *previously linked* binary — so a trimmed build silently tests as
+    // the old one. That reads as "the trim broke the layout" when nothing broke at
+    // all, and in a release it would ship an FFmpeg nobody chose. `link_libheif_windows`
+    // guards heif.lib the same way, for the same reason.
+    let (root, triplet) = vcpkg_tree();
+    let libdir = format!("{root}\\installed\\{triplet}\\lib");
+    for lib in ["avcodec", "avformat", "avutil"] {
+        println!("cargo:rerun-if-changed={libdir}\\{lib}.lib");
+    }
+    println!("cargo:rerun-if-env-changed=VCPKG_ROOT");
+
+    for lib in [
+        // avformat's tls_schannel.o: Cert*/Crypt* (crypt32) and NCrypt* (ncrypt).
+        "crypt32", "ncrypt",
+        // avcodec's mfenc.o / mf_utils.o: IID_IMFTransform, IID_ICodecAPI,
+        // IID_IMFMediaEventGenerator — the GUID definitions live in mfuuid.
+        "mfuuid",
+        // The DirectShow/MF GUID island mfuuid leans on (IID_IMFMediaEventGenerator's
+        // neighbours); harmless when unreferenced.
+        "strmiids",
+    ] {
+        println!("cargo:rustc-link-lib={lib}");
+    }
 }
 
 /// The vcpkg tree the Windows native backends link from: `(root, triplet)`.

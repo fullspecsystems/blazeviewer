@@ -66,11 +66,23 @@ ffmpeg = ["dep:ffmpeg-next"]
 # on Linux/BSD — Windows (Media Foundation) and macOS (AVFoundation) have their own backends
 # and ignore it.
 livephoto = ["ffmpeg"]
+# FFmpeg **container reading without decoding** (task #100): the `ffmpeg/details.rs`
+# probes + the `ffmpeg/tracks.rs` catalog, and none of the producer/poster decode path.
+#
+# This exists for Windows, and only because Media Foundation genuinely cannot see
+# subtitle tracks: a source's presentation descriptor — its own complete stream table,
+# not a reader-side filter — reports 3 streams for a multitrack.mkv holding 1 video +
+# 2 audio + 4 subtitle tracks. MF keeps poster + playback (hardware decode, low
+# latency); FFmpeg only reads the track table. Measured cost: +3.06 MB with the
+# demuxers-only vcpkg build (31.98 -> 35.04 MB release exe; vs +16.42 MB untrimmed).
+#
+# Implied by `ffvideo`, which needs the same probes and adds decoding on top.
+ffprobe = ["ffmpeg"]
 # Cross-platform streaming video via FFmpeg (task #84): the `VideoProducerEvent`/`Msg`
-# producer + poster/probe for the containers/codecs the OS backends can't handle — ALL
+# producer + poster for the containers/codecs the OS backends can't handle — ALL
 # video on Linux (which has no OS backend), MKV/WebM/VP8/VP9/AV1 fallback on macOS.
-# Off by default (ADR-015); Windows ignores it (Media Foundation covers tier 2).
-ffvideo = ["ffmpeg"]
+# Off by default (ADR-015). Windows takes only `ffprobe` (Media Foundation decodes).
+ffvideo = ["ffmpeg", "ffprobe"]
 # Animated AVIF (avis) playback on Windows via a vcpkg static dav1d (task #76). OFF by
 # default: links a native C lib (ADR-015). build.rs sets the `av1_dav1d` cfg the backend
 # gates on and compiles the C accessor shim (csrc/dav1d_shim.c) against the pinned vcpkg
@@ -109,3 +121,18 @@ windows = { version = "0.62.2", features = ["Win32_Graphics_Imaging", "Win32_Sys
 # The `#[implement]` COM machinery for the in-RAM read-only IStream (`mf_stream.rs`)
 # that feeds archived videos to Media Foundation without a file ever touching disk.
 windows-core = "0.62"
+# Windows links FFmpeg from the **pinned vcpkg tree** (`setup-libheif.ps1`), the same way
+# libheif + dav1d do — task #100. This entry unions onto the base `ffmpeg-next` dep above
+# and exists solely to add `static`, which must NOT be set on Linux/macOS (they link the
+# system's shared FFmpeg via pkg-config).
+#
+# Why `static` is load-bearing here: `ffmpeg-sys-next`'s build.rs reads
+# `CARGO_FEATURE_STATIC`, and when it is *absent* it sets `VCPKGRS_DYNAMIC=1` — which
+# makes the `vcpkg` crate resolve the **dynamic** `x64-windows` triplet instead of the
+# `x64-windows-static-md` one this project pins, and the lookup fails. With `static` on,
+# the vcpkg crate's default triplet is already `x64-windows-static-md` (and
+# `arm64-windows-static-md` on ARM64), so no `VCPKGRS_TRIPLET` is needed.
+#
+# ⚠ Requires `VCPKG_ROOT` in the build environment: unlike our own `build.rs`, the `vcpkg`
+# crate has no `~/vcpkg` fallback.
+ffmpeg-next = { version = "8.1", default-features = false, features = ["static"], optional = true }

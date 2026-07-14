@@ -29,7 +29,12 @@ livephoto = ["pb-app-core/livephoto", "pb-decode/livephoto", "dep:libc"]
 # Foundation). NOT in the Linux ship feature set until plan phases 5–6 pass
 # (ship-gating by discipline, plan §13).
 # dep:libc = the pw-cat SIGSTOP/SIGCONT pause control in video_audio.rs (Linux).
-ffvideo = ["pb-app-core/ffvideo", "pb-decode/ffvideo", "dep:libc"]
+# Pass-through: FFmpeg container reading without decoding (task #100). This IS in the
+# Windows ship feature set — it is the only way the Details tab can list subtitle
+# tracks, which Media Foundation cannot enumerate. Costs +3.06 MB with the
+# demuxers-only vcpkg build (scripts/setup-libheif.ps1).
+ffprobe = ["pb-app-core/ffprobe", "pb-decode/ffprobe"]
+ffvideo = ["pb-app-core/ffvideo", "pb-decode/ffvideo", "ffprobe", "dep:libc"]
 
 [dependencies]
 # Platform-neutral orchestration model (actions, key model, keymap) — shared with

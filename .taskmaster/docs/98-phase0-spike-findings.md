@@ -75,9 +75,82 @@ Also: `mediaCharacteristics` string values are a mix — some are `public.*`
 (`"AVMediaCharacteristicVisual"`, `"AVMediaCharacteristicFrameBased"`). Compare against the
 framework constants, never hardcoded literals.
 
-## Media Foundation — NOT RUN (no Windows host)
+## Media Foundation — RUN 2026-07-14 (Windows box, subtask 98.5)
 
-This session is macOS-only, so the `GetNativeMediaType` loop / `MF_E_INVALIDSTREAMNUMBER`
-termination / language-and-title location questions are **unanswered**, and the `cfg(windows)`
-code cannot even be compile-checked here. Per the plan's verification item 4, MF is therefore
-implemented conservatively and **recorded as pending a Windows run** rather than claimed.
+Spike `pb-decode/examples/spike_mftracks.rs` (throwaway, deleted after this record) dumped
+**every attribute by index** on each native `IMFMediaType` *and* each `IMFStreamDescriptor`
+over `multitrack.mkv`, `multitrack.mp4`, `tone_51.mp4`, `color_with_tone.mp4`,
+`black_then_color.mp4`, `tone_vp9_opus.webm`. All three open questions answered, plus one
+trap the plan did not anticipate. Backend: `pb-decode/src/mf_tracks.rs`.
+
+**Q1 — the loop terminator: CONFIRMED.** `GetNativeMediaType(i, 0)` returns
+`0xC00D36B3` = `MF_E_INVALIDSTREAMNUMBER` at the first index past the end, on every
+container tested (MP4, MKV, WebM). The loop terminates. Pinned by
+`the_native_media_type_walk_ends_on_invalid_stream_number`, so a future Windows changing the
+code fails a test rather than silently truncating (or never ending) the walk.
+
+**Q2 — language/title location: the plan's warning was RIGHT.** They are **not** on
+`IMFMediaType` (the by-index dump shows neither, on any stream of any fixture). They live on
+the **stream descriptor**: `MF_SD_LANGUAGE` and `MF_SD_STREAM_NAME`, reached via
+`GetServiceForStream(MF_SOURCE_READER_MEDIASOURCE)` → `CreatePresentationDescriptor` →
+`GetStreamDescriptorByIndex`. Two follow-ons:
+- **MF reports BCP-47 short tags** — `"en"` / `"fr"` where FFmpeg says `"eng"` / `"fra"` for
+  the same file. Exactly AVFoundation's *correction 2*; `language_display` already resolves
+  both, so no map change was needed. (Third independent confirmation that keying the map on
+  both forms was right.)
+- `MF_SD_STREAM_NAME` = `"Director's Commentary"` on **both** the MKV and the MP4 — for the
+  MP4 it is the `hdlr` handler name, which `ffprobe` does *not* surface as `tag:title`. With
+  no dispositions available (Q4), this title is the **only** surviving commentary signal, and
+  the formatter's title-derived "Commentary" rule carries it through.
+- A PD created *after* `open_video_reader`'s `SetStreamSelection(ALL, false)` still reports
+  the authored attributes unchanged (measured) — the reader's selection does not poison it.
+
+**Q3 — subtitles: they do not enumerate at all.** `multitrack.mkv`'s **4** subtitle tracks
+(SubRip ×3 + PGS) and `multitrack.mp4`'s **2** tx3g tracks both come back as **nothing** —
+stream-descriptor count 3 in both cases (video + 2 audio), no `MFMediaType_Subtitle` anywhere.
+MF defines `MFSubtitleFormat_*` GUIDs but the MKV/MP4 sources never expose a subtitle stream.
+So the backend reports `subtitles: Unavailable` — **never** `complete(vec![])`, which would
+render "Subtitles: No" about a file with four of them. And a *non-empty* subtitle set (no
+fixture produces one) is reported `Partial`, not `Complete`: having proven MF drops subtitle
+tracks that exist, we cannot claim it ever showed us all of them.
+
+**CORRECTION — `IMFPresentationDescriptor`'s `selected` flag is NOT the authored default.**
+The trap. It looks exactly like a default flag and is wrong:
+
+| | `ffprobe` `disposition:default` | MF `selected` |
+|---|---|---|
+| `multitrack.mp4` audio `eng` | **1** | **false** |
+| `multitrack.mp4` audio `fra` (commentary) | 0 | **true** |
+
+MF simply takes the **first stream of the `MF_SD_MUTUALLY_EXCLUSIVE` group**. Mapping
+`selected` → `TrackFlags::default` would have labelled the **Director's Commentary as
+"Default"**. (It *coincidentally* matches on the MKV, which is how this ships unnoticed.) MF
+exposes no authored disposition at all — no default, forced, commentary, SDH or AD — so the
+backend claims **`TrackFlags::none()` for every track** rather than a plausible guess. Pinned
+by `no_dispositions_are_claimed_because_mf_exposes_none`.
+
+**Also — MF reorders streams relative to the container.** `ffprobe` has the MP4's English
+audio at index 1 and French at 2; **MF's ordinal 0 is the French one** (cross-checked via
+`MF_MT_AVG_BITRATE` 31480 ≈ ffprobe's 31484, vs 30672 ≈ 30679). Two consequences: the
+stream-descriptor index **does** correspond to the source-reader ordinal (confirmed
+empirically by that same bitrate pairing, not just by the docs), and an FFmpeg stream index
+would resolve to the **wrong track** — vindicating `TrackLocator::MfStream` as its own
+namespace. The backend still guards the pairing by comparing the descriptor's handler major
+type to the media type's, dropping the metadata rather than stapling one track's language
+onto another.
+
+**Honest degradations (recorded, not bugs):**
+- **No named channel layout.** No fixture's native audio type carries
+  `MF_MT_AUDIO_CHANNEL_MASK` — not the 5.1 AC-3, not the 5.1 AAC. So `layout: None` and the
+  formatter prints "6 channels" where FFmpeg prints "5.1". This is the "never invent 5.1"
+  rule working as designed.
+- **DTS variants collapse to "DTS".** The marketing names ("DTS-HD MA") are derived from
+  FFmpeg's *profile* int, which MF has no equivalent of; synthesizing one from
+  `MFAudioFormat_DTS_XLL` would be inventing a fact. `profile: None` is passed always.
+
+Net: **audio is `Complete`** (MF's audio stream table matched `ffprobe` exactly on every
+fixture — 2/2 on both multitrack containers, 0 on the silent clip, 1 elsewhere, so the
+`Complete` + `total: Some(0)` that renders "Audio: No" is earned), **subtitles are
+`Unavailable`**, and **dispositions are absent**. MF genuinely sees less than FFmpeg; the
+catalog says so through completeness + `backend` rather than pretending to a single truth —
+which is the third independent vindication of that design choice.

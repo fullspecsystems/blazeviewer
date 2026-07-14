@@ -554,10 +554,20 @@ historical `win` Velopack channel; **ARM64** as `win-arm64` — both land in the
 an install only ever auto-updates within its own channel (Velopack tracks the channel the app was
 installed from, so `update.rs` needs no arch logic and the two never cross). Each arch is built on its
 own **native** box (no cross toolchain wired up), after building that arch's native decode libs
-(libheif **and dav1d**, task #76) once with `scripts/setup-libheif.ps1 -Triplet
+(libheif, dav1d, **and FFmpeg** — tasks #76 / #100) once with `scripts/setup-libheif.ps1 -Triplet
 <arch>-windows-static-md` — the script pins the vcpkg tree to a recorded commit (`-VcpkgRef`) and
-installs both ports; `pb-decode/build.rs` picks the vcpkg triplet from the target arch. The ship
-feature set is `--features libheif,dav1d`. ARM64 uses the `vcredist143-arm64` redist framework.
+installs all three ports; `pb-decode/build.rs` picks the vcpkg triplet from the target arch. The ship
+feature set is `--features libheif,dav1d,ffprobe`. ARM64 uses the `vcredist143-arm64` redist framework.
+
+> **`ffprobe` needs a VS Developer shell — it's the first feature that does.** FFmpeg's
+> `bindgen` runs its own clang, which reads `INCLUDE` to find `stdint.h`; a plain `cargo build`
+> never needed that, because rustc finds the MSVC linker itself. `scripts/vs-dev-env.ps1` handles
+> it (release script + both CI lanes call it; it no-ops if you're already in a dev shell), and VS
+> already ships the required libclang at `VC\Tools\Llvm\{x64,ARM64}\bin` — nothing extra to install.
+> It also needs `VCPKG_ROOT` **exported**: the `vcpkg` crate `ffmpeg-sys-next` uses has no `~/vcpkg`
+> fallback, unlike our own build.rs. FFmpeg here is **demux/metadata only** (MF still decodes
+> everything) — the setup script patches the port to a trimmed build, which is the difference
+> between **+3.06 MB** and +16.42 MB on the exe.
 
 **macOS** is **built locally on the owner's Mac** via `scripts/release-macos.sh` (Developer ID +
 notarization), then published to `downloads.fullspec.ca/photoblaze/mac` with
