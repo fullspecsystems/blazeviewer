@@ -57,7 +57,9 @@ pub const MAX_FULL_RING: usize = 24;
 /// start (fine tuning) to a fast max over `ZOOM_RAMP_SECS`, along the
 /// **quadratic ease-in** [`hold_ramp`] so a brief tap barely moves — the fine
 /// control the owner asked for. Time-based so it's frame-rate independent.
-pub const ZOOM_MIN_RATE: f32 = 0.35;
+/// `MIN_RATE` is the **tap** speed (a quick tap barely leaves the ramp floor):
+/// halved 2026-07-14 so a tap nudges ~1–3 px on a high-refresh display.
+pub const ZOOM_MIN_RATE: f32 = 0.18;
 pub const ZOOM_MAX_RATE: f32 = 2.2;
 pub const ZOOM_RAMP_SECS: f32 = 0.9;
 
@@ -90,8 +92,10 @@ pub const GESTURE_PAN_DIR: f32 = 1.0;
 
 /// Hold-to-pan curve: pan speed (px/sec) ramps from a gentle start to a fast max
 /// over `PAN_RAMP_SECS`, along the same [`hold_ramp`] ease-in as zoom (per the
-/// owner's note). Time-based, frame-rate independent.
-pub const PAN_MIN_SPEED: f32 = 340.0;
+/// owner's note). Time-based, frame-rate independent. `MIN_SPEED` is the **tap**
+/// speed (a quick tap barely leaves the ramp floor): halved 2026-07-14 so a tap
+/// nudges ~1–3 px on a high-refresh display.
+pub const PAN_MIN_SPEED: f32 = 170.0;
 pub const PAN_MAX_SPEED: f32 = 2700.0;
 pub const PAN_RAMP_SECS: f32 = 0.9;
 
