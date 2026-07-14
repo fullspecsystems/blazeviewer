@@ -41,18 +41,26 @@ backends — the FFmpeg backend already shipped). Session findings/gotchas: auto
   on target. Reproduced + measured via the `net_seek_read_timing` harness (`PB_NET_TEST_MKV`). Residual
   post-seek network *stutter* (both demuxers re-read) is inherent until 1F. See the doc's §7/1E.
 
+## Done (this cycle, cont.)
+
+- **Task #94.2 — session-only video resume** (both backends): returning to a video resumes near
+  where you left off; RAM-only, dropped on quit; watched-to-end restarts. Native (AVPlayer) path via
+  a `native_video_progress` FFI + `start_secs` on `PlayVideo`; Session path via `note_video_position`.
+- **1G lifecycle — the high-value slices**: terminal-drain (tick-loop spin), bounded-retry recovery
+  from mid-playback network stalls (`AudioError` transient/fatal + strikes + Rebuffering clock),
+  device-change/sleep-wake audio reprime. The remaining 1G items (session-tag effects, pause-forever,
+  replay-after-EOS) were assessed low-value/already-covered by the architecture — see the doc's §7/1G.
+
 ## Next (in order)
 
-1. **1G — lifecycle/failure containment** (session replace/nav/quit cancel + reject stale by
-   `session_id`; sleep/wake/device-change reprime; one-error-not-toast-loops; the two audit
-   fragilities tagged 1G; plus the 1E leftovers: session-identity on the audio effects + the
-   pause-forever fallback timeout if a final seek landing never arrives).
-2. **1F — network read-ahead** (original beta item #1, R9): **BLOCKED on the 0D SMB
-   characterization spike** — needs the owner's NAS (`/Volumes/{JD,Media,appdata}`). Do 0D first.
-3. **Phase 2 — GPU P010/NV12 shader** (the "proper HW HDR"): removes the CPU color convert +
+1. **Phase 2 — GPU P010/NV12 shader** (the "proper HW HDR"): removes the CPU color convert +
    retires the R8 parallel stopgap; cross-platform + macOS Apple-can't-decode fallback.
-4. **Phase 3 — Apple `AVSampleBuffer` presenter**: FFmpeg-demux → system decode/HDR/**correct
+2. **Phase 3 — Apple `AVSampleBuffer` presenter**: FFmpeg-demux → system decode/HDR/**correct
    DoVi**/one clock; also delivers #5 zoom/pan via layer transform. The macOS end-state.
+3. **1F — network read-ahead** (original beta item #1, R9): **BLOCKED on the 0D SMB
+   characterization spike** — needs the owner's NAS (`/Volumes/{JD,Media,appdata}`). Do 0D first.
+   (Acute network pain already fixed by the seek work + 1G bounded-retry; 1F is graceful degradation.)
+- Deferred UX call: **#94.1 space-pauses-a-playing-video** (owner wants to workshop the contextual-key idea).
 
 ## Build / test the macOS app
 

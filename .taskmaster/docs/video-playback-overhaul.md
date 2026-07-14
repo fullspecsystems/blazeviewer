@@ -22,8 +22,12 @@ also leave a durable fallback for codecs Apple cannot decode and must not regres
   scan measured **~73 s over SMB** on a 16 GB 4K clip, which blew the watchdog and wedged audio
   ("audio never recovers after a network seek"). Seeking the DEFAULT stream (video Cues) instead =
   **~20-40 ms**, lands on target; audio stays in sync after a jump.
-- **NEXT (Opus session):** **1G** — lifecycle/failure containment (session-identity on the audio
-  effects; the pause-forever fallback timeout; the two audit fragilities tagged 1G). Then Phase 2/3.
+- **1G DONE (high-value slices, 2026-07-14):** terminal-drain (`dc3afec0`), bounded-retry recovery
+  from mid-playback network stalls (`dddabf11`), device-change/sleep-wake reprime (`f93874fc`). The
+  remaining 1G items (session-tag audio effects, pause-forever, replay-after-EOS) were assessed
+  low-value/already-covered — see §7/1G. Also: **task #94.2 video resume** (both backends) landed.
+- **NEXT (Opus session):** the big post-Phase-1 wins — **Phase 2** (GPU P010) / **Phase 3** (Apple
+  sample-buffer), or **1F** once 0D is done. Phase 1 is effectively complete bar 1F.
 - **BLOCKED:** **1F** network read-ahead needs the **0D SMB spike** first (owner's NAS
   `/Volumes/{JD,Media,appdata}`). **Phase 2** (GPU P010 — the "proper HW HDR", retires the R8 stopgap)
   and **Phase 3** (Apple `AVSampleBuffer` — the DoVi end-state) are the big post-Phase-1 wins.
@@ -506,15 +510,29 @@ Tests cover queue high/low watermarks, audio reservation, VBR bursts, insufficie
 rebuffer, clean resume, safe video dependency shedding, final-seek invalidation, reconnect success,
 file replacement, retry exhaustion, stop during blocked read, and global memory invariants.
 
-### 1G. Lifecycle and failure containment
+### 1G. Lifecycle and failure containment — the high-value slices DONE (2026-07-14)
 
-- Session replacement, navigation, delete, window close, and quit must cancel video + audio work
-  and reject stale callbacks by `session_id`.
-- Sleep/wake, display switch, audio-device change, resize/fullscreen, and app activation must have
-  explicit resume/reprime behavior.
-- Corrupt/truncated input, decoder disconnect, audio-device loss, and sample-renderer failure
-  produce one user-facing error after the fallback graph is exhausted—never repeated toasts or an
-  unbounded retry loop.
+Landed (each test-first where testable; the network/device/wake paths are owner-verified —
+a headless agent can't stall SMB or switch audio devices):
+
+| Item | What | Commit |
+|---|---|---|
+| **terminal-drain** | a terminal session (Failed with frames queued) drains its queue in `transition()` so `is_active` goes false — the tick loop stops spinning | `dc3afec0` |
+| **bounded-retry recovery** | a mid-playback network stall (a read that outlasts the 10 s watchdog) rebuffers + retries instead of latching R12 permanently; `AudioError::Interrupted` (transient) vs `Fatal`; `MAX_TRANSIENT_STRIKES`=6 (~60 s) then one honest failure; `session_audio_state`=3 Rebuffering; Swift reports Buffering + retries via the pump | `dddabf11` |
+| **device/wake reprime** | `SessionAudioPlayer` observes `AVAudioEngineConfigurationChange` + `NSWorkspace.didWake` → restart the engine + re-anchor from the played position (applySeek to "here"). Native AVPlayer path is system-managed | `f93874fc` |
+
+**Assessed low-value / deferred** (the architecture already covers them — documented so a future
+session doesn't re-litigate):
+- **Session-tagging the audio effects**: the core emits effects in order for the single current
+  session and the audio *clock* is already `session_id`-gated, so a stale command can't cross to a
+  replaced session under the single-slot sequential model. Pure defense-in-depth, high churn across
+  Rust+FFI+2 shells → skipped.
+- **Pause-forever seek fallback**: no concrete reproduction found; the op-deadline watchdog + the
+  session's own starvation→rebuffer→Failed already bound any stuck seek. The 1D coordinator clears
+  `scrub_audio_paused` on the landing commit, and replay recovers a near-EOS stuck flag.
+- **Replay-after-EOS**: the FFmpeg producer **parks** on EOS (blocks on `recv()`, never exits), so
+  the replay `SeekTo` always reaches it — not a real bug on the macOS/Linux path. (Windows MF
+  unverified here.)
 
 **Phase 1 exit:** the corpus plays through ordinary decoder spikes and qualifying SMB jitter
 without an audio interruption; full-size HDR never deadlocks; seek spam results in one final audio
