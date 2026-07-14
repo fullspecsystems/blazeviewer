@@ -5368,6 +5368,7 @@ mod tests {
             true,  // fullscreen
             true,  // slideshow
             true,  // mute_live_audio
+            true,  // subtitles
             true,  // save_rotation_enabled
             true,  // reveal_enabled
             true,  // cancel_scan_enabled
@@ -5380,6 +5381,7 @@ mod tests {
         assert!(all_on.fullscreen);
         assert!(all_on.slideshow);
         assert!(all_on.mute_live_audio);
+        assert!(all_on.subtitles);
         assert!(all_on.save_rotation_enabled);
         assert!(all_on.reveal_enabled);
         assert!(all_on.cancel_scan_enabled);
@@ -5395,6 +5397,7 @@ mod tests {
                 && !b.fullscreen
                 && !b.slideshow
                 && !b.mute_live_audio
+                && !b.subtitles
                 && !b.save_rotation_enabled
                 && !b.reveal_enabled
                 && !b.cancel_scan_enabled
