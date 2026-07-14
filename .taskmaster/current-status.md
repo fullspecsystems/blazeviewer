@@ -50,15 +50,22 @@ backends — the FFmpeg backend already shipped). Session findings/gotchas: auto
   from mid-playback network stalls (`AudioError` transient/fatal + strikes + Rebuffering clock),
   device-change/sleep-wake audio reprime. The remaining 1G items (session-tag effects, pause-forever,
   replay-after-EOS) were assessed low-value/already-covered by the architecture — see the doc's §7/1G.
+- **1F cancel-flag slice + 0D margin trace**: the FFmpeg producer's interrupt flag is armed (stuck
+  network read retires the thread promptly). **0D verdict: the bottleneck is video decode+convert
+  (~1.19× real-time), NOT network (~15× headroom), audio ~29.5×** — measured with the
+  `net_decode_throughput`/`net_audio_throughput` harnesses. **Full 1F deshelved** (no gain above
+  ~44 Mbps; 1G bounded-retry covers below). The real margin win is Phase 2 (GPU convert).
 
 ## Next (in order)
 
-1. **Phase 2 — GPU P010/NV12 shader** (the "proper HW HDR"): removes the CPU color convert +
-   retires the R8 parallel stopgap; cross-platform + macOS Apple-can't-decode fallback.
+1. **Phase 2 — GPU P010/NV12 + PQ/HLG shader** (THE margin win per 0D): move the per-frame CPU HDR
+   convert (R6) off the critical path + retire the R8 parallel stopgap → 4K HDR decode climbs past
+   the current ~1.19× real-time. Cross-platform + the macOS Apple-can't-decode fallback.
 2. **Phase 3 — Apple `AVSampleBuffer` presenter**: FFmpeg-demux → system decode/HDR/**correct
    DoVi**/one clock; also delivers #5 zoom/pan via layer transform. The macOS end-state.
-3. **1F — network read-ahead** (original beta item #1, R9): **BLOCKED on the 0D SMB
-   characterization spike** — needs the owner's NAS (`/Volumes/{JD,Media,appdata}`). Do 0D first.
+3. **1F full packet-source rework — DESHELVED** (0D: decode-bound, not network-bound). Only revisit if
+   a genuinely constrained network (<~44 Mbps) proves the 1G bounded-retry degrades badly. The
+   optional throttled stress trace to check that needs `dnctl`/`pfctl` (sudo).
    (Acute network pain already fixed by the seek work + 1G bounded-retry; 1F is graceful degradation.)
 - Deferred UX call: **#94.1 space-pauses-a-playing-video** (owner wants to workshop the contextual-key idea).
 
