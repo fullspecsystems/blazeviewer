@@ -527,6 +527,44 @@ mod tests {
         FfAudioDecoder::open(&VideoInput::Path(fixture(name))).expect("open audio")
     }
 
+    /// 0D headless audio-decode margin (plan §6.0D): how much faster than
+    /// real-time the selected audio track (e.g. TrueHD folded to stereo) decodes
+    /// off a (network) share. Drains ~30 s of media and reports the speed-up.
+    /// `PB_NET_TEST_MKV=/path cargo test -p pb-decode --features ffvideo \
+    ///   net_audio_throughput -- --nocapture --ignored`
+    #[test]
+    #[ignore = "needs PB_NET_TEST_MKV pointing at a large (network) container"]
+    fn net_audio_throughput() {
+        use std::time::Instant;
+        let Ok(path) = std::env::var("PB_NET_TEST_MKV") else {
+            eprintln!("skipping: set PB_NET_TEST_MKV");
+            return;
+        };
+        let mut a =
+            FfAudioDecoder::open_capped(&VideoInput::Path(PathBuf::from(path)), 2).expect("open");
+        let rate = a.rate() as f64;
+        let ch = a.channels() as f64;
+        let want_frames = (rate * 30.0) as usize; // ~30 s of media
+        let t = Instant::now();
+        let mut got = 0usize;
+        while got < want_frames {
+            match a.read(48_000) {
+                Ok(c) if c.is_empty() => break,
+                Ok(c) => got += c.len() / ch as usize,
+                Err(e) => {
+                    eprintln!("[0d] audio read error: {e}");
+                    break;
+                }
+            }
+        }
+        let wall = t.elapsed().as_secs_f64();
+        let media = got as f64 / rate;
+        eprintln!(
+            "[0d] audio: {media:.1}s media ({ch} ch @ {rate:.0} Hz) in {wall:.2}s wall → {:.1}x real-time",
+            media / wall.max(1e-6)
+        );
+    }
+
     /// Manual perf repro for the network-share post-seek stall (plan §7/1E owner
     /// report; 0D characterization). Point `PB_NET_TEST_MKV` at a large (network)
     /// container and it times open+probe, a first read, a seek to the midpoint,

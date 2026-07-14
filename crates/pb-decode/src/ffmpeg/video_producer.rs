@@ -647,6 +647,68 @@ mod tests {
         (msgs_tx, events_rx)
     }
 
+    /// 0D headless margin trace (plan §6.0D): how much faster than real-time the
+    /// 4K video producer decodes off a (network) share — the starvation headroom.
+    /// Grants a small credit pipeline, drains frames to ~30 s of media, and reports
+    /// the speed-up (`media_secs / wall_secs`). >~1.5× = comfortable headroom (no
+    /// starvation on this network); ~1× or a stall = the constrained regime 1F is
+    /// for. Point `PB_NET_TEST_MKV` at a large clip; run:
+    /// `PB_NET_TEST_MKV=/path cargo test -p pb-decode --features ffvideo \
+    ///   net_decode_throughput -- --nocapture --ignored`
+    #[test]
+    #[ignore = "needs PB_NET_TEST_MKV pointing at a large (network) container"]
+    fn net_decode_throughput() {
+        let Ok(path) = std::env::var("PB_NET_TEST_MKV") else {
+            eprintln!("skipping: set PB_NET_TEST_MKV to a large (network) container");
+            return;
+        };
+        let t_open = Instant::now();
+        let (msgs, events) = spawn(std::path::PathBuf::from(path));
+        match events
+            .recv_timeout(Duration::from_secs(20))
+            .expect("opened")
+        {
+            VideoProducerEvent::Opened { width, height, .. } => {
+                eprintln!("[0d] open+probe {:?} — {width}x{height}", t_open.elapsed());
+            }
+            other => panic!("expected Opened, got {other:?}"),
+        }
+        const PIPELINE: usize = 6; // credits outstanding (mimics the session's ring)
+        const TARGET: Duration = Duration::from_secs(30);
+        for _ in 0..PIPELINE {
+            msgs.send(VideoProducerMsg::Credit).unwrap();
+        }
+        let t = Instant::now();
+        let mut frames = 0u64;
+        let mut last_pts = Duration::ZERO;
+        loop {
+            match events.recv_timeout(Duration::from_secs(20)) {
+                Ok(VideoProducerEvent::Frame(f)) => {
+                    frames += 1;
+                    last_pts = f.pts;
+                    let _ = msgs.send(VideoProducerMsg::Credit); // refill the ring
+                    if f.pts >= TARGET {
+                        break;
+                    }
+                }
+                Ok(VideoProducerEvent::EndOfStream { .. }) => break,
+                Ok(_) => {}
+                Err(_) => {
+                    eprintln!("[0d] video decode STALLED after {frames} frames / {last_pts:?}");
+                    break;
+                }
+            }
+        }
+        let wall = t.elapsed().as_secs_f64();
+        let media = last_pts.as_secs_f64();
+        let fps = frames as f64 / wall.max(1e-6);
+        eprintln!(
+            "[0d] video: {frames} frames = {media:.1}s media in {wall:.2}s wall → {:.2}x real-time, {fps:.1} fps decode",
+            media / wall.max(1e-6)
+        );
+        let _ = msgs.send(VideoProducerMsg::Stop);
+    }
+
     /// The MF producer's flagship protocol test, ported verbatim: Opened facts,
     /// credit-driven frames with normalized monotonic PTS, EOS at the end.
     #[test]
