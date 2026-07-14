@@ -127,13 +127,7 @@ impl AppCore {
             // #99 track picker plus a persisted preference (#90.4). It shows the first
             // renderable sidecar; it does not yet implement `Automatic`'s forced-only rule
             // (that needs the catalog, which `resolve_track` is already written against).
-            subtitles: crate::subtitle_engine::SubtitleEngine::new(
-                if std::env::var_os("PB_SUBTITLES").is_some_and(|v| v == "1") {
-                    crate::subtitle::SubtitleMode::Automatic
-                } else {
-                    crate::subtitle::SubtitleMode::Off
-                },
-            ),
+            subtitles: crate::subtitle_engine::SubtitleEngine::from_env(),
             recognized_text: std::collections::HashMap::new(),
             text_scan: None,
             text_gen: 0,
@@ -7840,7 +7834,10 @@ impl AppCore {
     pub fn tick_subtitles(&mut self) {
         self.subtitles.poll(self.details_gen);
 
-        let Some(item) = self.displayed_item.filter(|_| self.video_session_active()) else {
+        let (displayed, active) = (self.displayed_item, self.video_session_active());
+        let Some(item) = displayed.filter(|_| active) else {
+            self.subtitles
+                .trace(|| format!("idle: displayed_item={displayed:?} session_active={active}"));
             self.subtitles.clear_item();
             return;
         };
@@ -7853,6 +7850,8 @@ impl AppCore {
             .ensure_loaded(&source, item, self.details_gen);
 
         let Some((x, y, w, h, _rot)) = self.video_placement() else {
+            self.subtitles
+                .trace(|| "no video_placement — the still geometry isn't up yet".into());
             return;
         };
         let t = Duration::from_secs_f64(self.video_session_elapsed_secs().max(0.0));

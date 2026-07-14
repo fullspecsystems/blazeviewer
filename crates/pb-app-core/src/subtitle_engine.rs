@@ -51,6 +51,9 @@ pub struct SubtitleEngine {
     gen: u64,
     bitmap: Option<SubtitleBitmap>,
     rect: Option<Rect>,
+    /// `PB_SUBTITLES=trace` — see [`Self::trace`].
+    tracing: bool,
+    last_trace: Option<String>,
 }
 
 impl SubtitleEngine {
@@ -58,6 +61,42 @@ impl SubtitleEngine {
         Self {
             mode,
             ..Default::default()
+        }
+    }
+
+    /// The **temporary dev gate** for task #90's first slice — the real switch is the #99
+    /// track picker plus a persisted preference (#90.4).
+    ///
+    /// - `PB_SUBTITLES=1` — show the first renderable sidecar.
+    /// - `PB_SUBTITLES=trace` — the same, plus print to stderr why nothing is showing.
+    ///
+    /// This does **not** implement `Automatic`'s forced-only rule yet; that needs the
+    /// catalog, which [`crate::subtitle::resolve_track`] is already written against.
+    pub fn from_env() -> Self {
+        let v = std::env::var("PB_SUBTITLES").unwrap_or_default();
+        let on = v == "1" || v == "trace";
+        Self {
+            mode: if on {
+                SubtitleMode::Automatic
+            } else {
+                SubtitleMode::Off
+            },
+            tracing: v == "trace",
+            ..Default::default()
+        }
+    }
+
+    /// `PB_SUBTITLES=trace` prints why nothing is on screen. Deduped on the message, so a
+    /// steady state prints once rather than 120×/second — the log stays readable and the
+    /// tick stays free (the closure isn't even called when tracing is off).
+    pub fn trace(&mut self, msg: impl FnOnce() -> String) {
+        if !self.tracing {
+            return;
+        }
+        let m = msg();
+        if self.last_trace.as_deref() != Some(m.as_str()) {
+            eprintln!("[subtitles] {m}");
+            self.last_trace = Some(m);
         }
     }
 
@@ -148,8 +187,17 @@ impl SubtitleEngine {
                     // Same staleness rule as the Details probe: a load that raced a deck
                     // rebuild names a different file at that index.
                     if l.gen == deck_gen && l.gen == self.load_gen {
+                        let n = l.cues.as_ref().map_or(0, |c| c.len());
+                        self.trace(|| format!("loaded item {}: {n} cues", l.item));
                         self.cues = l.cues;
                         self.loaded_for = Some(l.item);
+                    } else {
+                        let (g, lg) = (l.gen, self.load_gen);
+                        self.trace(|| {
+                            format!(
+                                "dropped a stale load (gen {g}, load_gen {lg}, deck {deck_gen})"
+                            )
+                        });
                     }
                 }
                 Err(TryRecvError::Empty) => {}
@@ -177,10 +225,13 @@ impl SubtitleEngine {
             self.hide();
             return self.gen != before;
         }
-        let (Some(cues), Some(raster)) = (self.cues.as_ref(), self.raster.as_mut()) else {
+        if self.cues.is_none() || self.raster.is_none() {
+            let (c, r) = (self.cues.is_some(), self.raster.is_some());
+            self.trace(|| format!("waiting: cues={c} rasterizer={r}"));
             self.hide();
             return self.gen != before;
-        };
+        }
+        let cues = self.cues.as_ref().expect("checked above");
 
         // Every active cue's lines, stacked in source order (overlaps are kept, #90.2).
         let lines: Vec<String> = cues
@@ -195,20 +246,24 @@ impl SubtitleEngine {
         let params = self.style.to_params(viewport);
         // The rasterizer caches on (text, params), so an unchanged cue costs a compare —
         // this is safe to call every tick even though it only *works* on a change.
+        let raster = self.raster.as_mut().expect("checked above");
         let Some(bmp) = raster.render(&lines, &params) else {
+            self.trace(|| format!("the rasterizer drew nothing for {lines:?}"));
             self.hide();
             return self.gen != before;
         };
+        let (bw, bh) = (bmp.w, bmp.h);
         let changed = self.bitmap.as_ref() != Some(bmp);
         if changed {
             self.bitmap = Some(bmp.clone());
             self.gen = self.gen.wrapping_add(1).max(1);
+            self.trace(|| format!("drew {bw}x{bh} at {t:?}: {lines:?}"));
         }
         // Place in physical px, then hand the shell logical points.
         let px = place(
             viewport,
             video,
-            (bmp.w as f32, bmp.h as f32),
+            (bw as f32, bh as f32),
             &self.style,
             controls_h,
         );
@@ -221,6 +276,11 @@ impl SubtitleEngine {
         };
         if self.rect != Some(rect) {
             self.rect = Some(rect);
+            self.trace(|| {
+                format!(
+                    "placed at {rect:?} pts (video {video:?} px, viewport {viewport:?} px, scale {s})"
+                )
+            });
             // A move with no repaint still needs the shell to reposition.
             if !changed {
                 self.gen = self.gen.wrapping_add(1).max(1);
