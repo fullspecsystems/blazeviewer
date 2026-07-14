@@ -1377,7 +1377,10 @@ fn upload_planar_reusable(
 ) -> ReuseOutcome {
     let ten_bit = format.is_ten_bit();
     let (y_fmt, uv_fmt) = if ten_bit {
-        (wgpu::TextureFormat::R16Unorm, wgpu::TextureFormat::Rg16Unorm)
+        (
+            wgpu::TextureFormat::R16Unorm,
+            wgpu::TextureFormat::Rg16Unorm,
+        )
     } else {
         (wgpu::TextureFormat::R8Unorm, wgpu::TextureFormat::Rg8Unorm)
     };
@@ -2469,7 +2472,14 @@ impl Renderer for WgpuRenderer {
     /// `PB_VIDEO_CPU_CONVERT=1` forces the CPU path (the A/B lever and the escape
     /// hatch if a driver misbehaves). P010 on a device without
     /// `TEXTURE_FORMAT_16BIT_NORM` also takes the CPU path.
-    fn set_video_planar(&mut self, y: &[u8], uv: &[u8], width: u32, height: u32, p: PlanarPresentation) {
+    fn set_video_planar(
+        &mut self,
+        y: &[u8],
+        uv: &[u8],
+        width: u32,
+        height: u32,
+        p: PlanarPresentation,
+    ) {
         let cpu_hatch = std::env::var_os("PB_VIDEO_CPU_CONVERT").is_some_and(|v| v == "1");
         let needs_16bit = p.format.is_ten_bit() && !self.supports_p010;
         if cpu_hatch || needs_16bit {
@@ -2505,8 +2515,8 @@ impl Renderer for WgpuRenderer {
         self.blank = false;
         self.message = None;
         self.held = None; // a live video frame supersedes any held still
-        // HDR video tone-maps like an HDR still (peak drives the SDR present);
-        // SDR video is peak 1.0 (identity).
+                          // HDR video tone-maps like an HDR still (peak drives the SDR present);
+                          // SDR video is peak 1.0 (identity).
         self.set_present_peak(if hdr { p.peak } else { 1.0 });
         self.present_idx = None;
         self.img_w = width;
@@ -3448,9 +3458,8 @@ async fn render_offscreen_planar_scene_async(
         let start = (row * padded) as usize;
         for col in 0..screen_w as usize {
             let px = start + col * 8;
-            let ch = |o: usize| {
-                half::f16::from_le_bytes([mapped[px + o], mapped[px + o + 1]]).to_f32()
-            };
+            let ch =
+                |o: usize| half::f16::from_le_bytes([mapped[px + o], mapped[px + o + 1]]).to_f32();
             out.push([ch(0), ch(2), ch(4), ch(6)]);
         }
     }
@@ -3744,7 +3753,11 @@ mod tests {
 
     fn ref_pq(e: f32) -> f32 {
         let (m1, m2) = (2610.0 / 16384.0f32, 2523.0 / 4096.0 * 128.0);
-        let (c1, c2, c3) = (3424.0 / 4096.0f32, 2413.0 / 4096.0 * 32.0, 2392.0 / 4096.0 * 32.0);
+        let (c1, c2, c3) = (
+            3424.0 / 4096.0f32,
+            2413.0 / 4096.0 * 32.0,
+            2392.0 / 4096.0 * 32.0,
+        );
         let e = e.clamp(0.0, 1.0);
         let ep = e.powf(1.0 / m2);
         let num = (ep - c1).max(0.0);
@@ -3779,9 +3792,17 @@ mod tests {
         let (yf, uf, vf) = (yc as f32, uc as f32, vc as f32);
         let (yn, un, vn) = match (ten, full) {
             (true, true) => (yf / 1023.0, (uf - 512.0) / 1023.0, (vf - 512.0) / 1023.0),
-            (true, false) => ((yf - 64.0) / 876.0, (uf - 512.0) / 896.0, (vf - 512.0) / 896.0),
+            (true, false) => (
+                (yf - 64.0) / 876.0,
+                (uf - 512.0) / 896.0,
+                (vf - 512.0) / 896.0,
+            ),
             (false, true) => (yf / 255.0, (uf - 128.0) / 255.0, (vf - 128.0) / 255.0),
-            (false, false) => ((yf - 16.0) / 219.0, (uf - 128.0) / 224.0, (vf - 128.0) / 224.0),
+            (false, false) => (
+                (yf - 16.0) / 219.0,
+                (uf - 128.0) / 224.0,
+                (vf - 128.0) / 224.0,
+            ),
         };
         let (kr, kb) = match m {
             crate::YuvMatrix::Bt601 => (0.299f32, 0.114),
@@ -3802,9 +3823,11 @@ mod tests {
             ]
         };
         match tr {
-            crate::PlanarTransfer::SrgbLike => {
-                [ref_srgb_to_linear(er), ref_srgb_to_linear(eg), ref_srgb_to_linear(eb)]
-            }
+            crate::PlanarTransfer::SrgbLike => [
+                ref_srgb_to_linear(er),
+                ref_srgb_to_linear(eg),
+                ref_srgb_to_linear(eb),
+            ],
             crate::PlanarTransfer::Pq => mat([ref_pq(er), ref_pq(eg), ref_pq(eb)]),
             crate::PlanarTransfer::Hlg => mat([ref_hlg(er), ref_hlg(eg), ref_hlg(eb)]),
             crate::PlanarTransfer::Parametric => unreachable!("not exercised by the golden"),
@@ -3848,12 +3871,36 @@ mod tests {
             m: crate::YuvMatrix,
         }
         let cases = [
-            Case { tr: crate::PlanarTransfer::SrgbLike, ten: false, m: crate::YuvMatrix::Bt601 },
-            Case { tr: crate::PlanarTransfer::SrgbLike, ten: false, m: crate::YuvMatrix::Bt709 },
-            Case { tr: crate::PlanarTransfer::SrgbLike, ten: false, m: crate::YuvMatrix::Bt2020 },
-            Case { tr: crate::PlanarTransfer::SrgbLike, ten: true, m: crate::YuvMatrix::Bt709 },
-            Case { tr: crate::PlanarTransfer::Pq, ten: true, m: crate::YuvMatrix::Bt2020 },
-            Case { tr: crate::PlanarTransfer::Hlg, ten: true, m: crate::YuvMatrix::Bt2020 },
+            Case {
+                tr: crate::PlanarTransfer::SrgbLike,
+                ten: false,
+                m: crate::YuvMatrix::Bt601,
+            },
+            Case {
+                tr: crate::PlanarTransfer::SrgbLike,
+                ten: false,
+                m: crate::YuvMatrix::Bt709,
+            },
+            Case {
+                tr: crate::PlanarTransfer::SrgbLike,
+                ten: false,
+                m: crate::YuvMatrix::Bt2020,
+            },
+            Case {
+                tr: crate::PlanarTransfer::SrgbLike,
+                ten: true,
+                m: crate::YuvMatrix::Bt709,
+            },
+            Case {
+                tr: crate::PlanarTransfer::Pq,
+                ten: true,
+                m: crate::YuvMatrix::Bt2020,
+            },
+            Case {
+                tr: crate::PlanarTransfer::Hlg,
+                ten: true,
+                m: crate::YuvMatrix::Bt2020,
+            },
         ];
         // 10-bit code triples (y,u,v).
         let codes10 = [
@@ -3917,8 +3964,15 @@ mod tests {
                             // Adapter lacks 16-bit-norm: assert the CPU fallback matches.
                             assert!(case.ten, "only P010 can be unsupported");
                             let f = crate::yuv::planar_to_scene(
-                                &y, &uv, 4, 4, present.format, present.yuv, present.transfer,
-                                &present.color, present.peak,
+                                &y,
+                                &uv,
+                                4,
+                                4,
+                                present.format,
+                                present.yuv,
+                                present.transfer,
+                                &present.color,
+                                present.peak,
                             );
                             if f.hdr {
                                 let px = &f.bytes[(2 * 4 + 2) * 8..];

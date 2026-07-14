@@ -276,11 +276,7 @@ impl PixelFormat {
     /// the two planes in a tightly-packed frame — checked, `None` on overflow or
     /// a non-planar format. The uploader/presenter splits the buffer here instead
     /// of open-coding `split_at` (which panics on a short/hostile buffer).
-    pub fn planar_plane_spans(
-        self,
-        width: u32,
-        height: u32,
-    ) -> Option<(usize, usize, usize)> {
+    pub fn planar_plane_spans(self, width: u32, height: u32) -> Option<(usize, usize, usize)> {
         let bps = self.planar_bytes_per_sample()?;
         let (w, h) = (width as usize, height as usize);
         let y_len = w.checked_mul(h)?.checked_mul(bps)?;
@@ -889,7 +885,10 @@ mod tests {
         assert_eq!(PixelFormat::P010.checked_frame_bytes(4, 2), Some(24));
         // Plane spans: Y then interleaved UV.
         assert_eq!(PixelFormat::Nv12.planar_plane_spans(4, 2), Some((8, 8, 4)));
-        assert_eq!(PixelFormat::P010.planar_plane_spans(4, 2), Some((16, 16, 8)));
+        assert_eq!(
+            PixelFormat::P010.planar_plane_spans(4, 2),
+            Some((16, 16, 8))
+        );
         assert!(PixelFormat::Rgba8.planar_plane_spans(4, 2).is_none());
         assert!(!PixelFormat::Rgba8.is_planar_video());
         assert!(PixelFormat::Nv12.is_planar_video());
@@ -899,8 +898,14 @@ mod tests {
     #[test]
     fn checked_frame_bytes_rejects_overflow() {
         // A hostile geometry that overflows usize returns None instead of wrapping.
-        assert_eq!(PixelFormat::P010.checked_frame_bytes(u32::MAX, u32::MAX), None);
-        assert_eq!(PixelFormat::Rgba16F.checked_frame_bytes(u32::MAX, u32::MAX), None);
+        assert_eq!(
+            PixelFormat::P010.checked_frame_bytes(u32::MAX, u32::MAX),
+            None
+        );
+        assert_eq!(
+            PixelFormat::Rgba16F.checked_frame_bytes(u32::MAX, u32::MAX),
+            None
+        );
     }
 
     #[test]

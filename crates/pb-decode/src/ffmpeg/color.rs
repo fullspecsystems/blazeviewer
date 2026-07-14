@@ -263,9 +263,7 @@ pub unsafe fn set_planar_scaler_colorspace(
     let coeffs = ffi::sws_getCoefficients(cs);
     let range = i32::from(full_range);
     // Same coefficients + range on both ends → value-preserving YUV→YUV.
-    let _ = ffi::sws_setColorspaceDetails(
-        sws, coeffs, range, coeffs, range, 0, 1 << 16, 1 << 16,
-    );
+    let _ = ffi::sws_setColorspaceDetails(sws, coeffs, range, coeffs, range, 0, 1 << 16, 1 << 16);
 }
 
 // ── HDR transfer decode (plan §9, task #84 subtask 3) ────────────────────────
@@ -377,8 +375,11 @@ pub fn hdr_metadata_nits(stream: &ff::format::stream::Stream) -> (Option<u32>, O
             return (None, None);
         }
         let get = |kind| {
-            let sd =
-                ffi::av_packet_side_data_get((*par).coded_side_data, (*par).nb_coded_side_data, kind);
+            let sd = ffi::av_packet_side_data_get(
+                (*par).coded_side_data,
+                (*par).nb_coded_side_data,
+                kind,
+            );
             if sd.is_null() || (*sd).data.is_null() {
                 None
             } else {

@@ -79,7 +79,14 @@ pub fn ff_probe_video_input(input: &VideoInput) -> Result<VideoStreamInfo, Decod
     // here — the probe is a ~header-only read, like the Windows one).
     let decoder = decoder_for(opened.ctx(), facts.index)?;
     // Posters are stills → always RGBA (no planar GPU path).
-    let conv = FrameConverter::new((facts.width, facts.height), (1, 1), 0, &decoder, false, false);
+    let conv = FrameConverter::new(
+        (facts.width, facts.height),
+        (1, 1),
+        0,
+        &decoder,
+        false,
+        false,
+    );
     let sc = conv.source_color();
     Ok(VideoStreamInfo {
         codec: facts.codec,

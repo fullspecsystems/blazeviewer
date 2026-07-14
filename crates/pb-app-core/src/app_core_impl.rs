@@ -6868,7 +6868,14 @@ impl AppCore {
                 let _ = media.set(input.clone());
                 std::thread::spawn(move || {
                     run_platform_video_producer(
-                        &input, fit, id, generation, io.events, io.msgs, io.cancel, planar_opts,
+                        &input,
+                        fit,
+                        id,
+                        generation,
+                        io.events,
+                        io.msgs,
+                        io.cancel,
+                        planar_opts,
                     );
                 });
             } else {
@@ -6895,7 +6902,14 @@ impl AppCore {
                     let input = crate::video::VideoInput::Bytes { data, name };
                     let _ = media_slot.set(input.clone());
                     run_platform_video_producer(
-                        &input, fit, id, generation, io.events, io.msgs, io.cancel, planar_opts,
+                        &input,
+                        fit,
+                        id,
+                        generation,
+                        io.events,
+                        io.msgs,
+                        io.cancel,
+                        planar_opts,
                     );
                 });
             }
@@ -7475,12 +7489,8 @@ impl AppCore {
     /// capability so 10-bit sources fall back to RGBA/fp16 on adapters without
     /// `TEXTURE_FORMAT_16BIT_NORM`. No renderer (headless) → no planar path.
     fn planar_video_options(&self) -> pb_decode::VideoProducerOptions {
-        let planar = std::env::var_os("PB_VIDEO_NO_PLANAR").is_none()
-            && self.renderer.is_some();
-        let supports_p010 = self
-            .renderer
-            .as_ref()
-            .is_some_and(|r| r.supports_p010());
+        let planar = std::env::var_os("PB_VIDEO_NO_PLANAR").is_none() && self.renderer.is_some();
+        let supports_p010 = self.renderer.as_ref().is_some_and(|r| r.supports_p010());
         pb_decode::VideoProducerOptions {
             planar,
             supports_p010,

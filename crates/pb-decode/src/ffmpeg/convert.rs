@@ -418,7 +418,8 @@ fn tight_planar(frame: &ff::frame::Video, ten: bool) -> Vec<u8> {
     let (y_data, uv_data) = (frame.data(0), frame.data(1));
     let mut out = vec![0u8; y_row * h + uv_row * uv_h];
     for r in 0..h {
-        out[r * y_row..(r + 1) * y_row].copy_from_slice(&y_data[r * y_stride..r * y_stride + y_row]);
+        out[r * y_row..(r + 1) * y_row]
+            .copy_from_slice(&y_data[r * y_stride..r * y_stride + y_row]);
     }
     let base = y_row * h;
     for r in 0..uv_h {

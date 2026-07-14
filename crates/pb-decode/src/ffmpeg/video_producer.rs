@@ -737,9 +737,15 @@ mod tests {
     ) -> (f64, Option<PixelFormat>) {
         let t_open = Instant::now();
         let (msgs, events) = spawn_input_opts(input, options);
-        match events.recv_timeout(Duration::from_secs(20)).expect("opened") {
+        match events
+            .recv_timeout(Duration::from_secs(20))
+            .expect("opened")
+        {
             VideoProducerEvent::Opened { width, height, .. } => {
-                eprintln!("[0d {label}] open+probe {:?} — {width}x{height}", t_open.elapsed());
+                eprintln!(
+                    "[0d {label}] open+probe {:?} — {width}x{height}",
+                    t_open.elapsed()
+                );
             }
             other => panic!("expected Opened, got {other:?}"),
         }
@@ -1097,7 +1103,10 @@ mod tests {
     fn planar_hdr_clip_emits_p010_pq() {
         let (msgs, events) = spawn_planar("hdr_pq.mp4", true, true);
         // Opened must already carry the negotiated P010 budget (3 bytes/px).
-        match events.recv_timeout(Duration::from_secs(10)).expect("opened") {
+        match events
+            .recv_timeout(Duration::from_secs(10))
+            .expect("opened")
+        {
             VideoProducerEvent::Opened { frame_bytes, .. } => {
                 assert_eq!(frame_bytes, 64 * 64 * 3, "P010 charges 3 bytes/px");
             }

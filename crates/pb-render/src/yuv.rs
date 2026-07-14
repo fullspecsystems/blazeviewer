@@ -394,7 +394,7 @@ mod tests {
     #[test]
     fn planar_range_p010_endpoints() {
         let s = |code10: u32| (code10 * 64) as f32 / 65535.0; // stored sample
-        // limited: Y 64→0, 940→1; C 64→−0.5, 960→+0.5 (nominal endpoints).
+                                                              // limited: Y 64→0, 940→1; C 64→−0.5, 960→+0.5 (nominal endpoints).
         let (yb, ys, cc, cs) = planar_range(true, false);
         assert!(((s(64) - yb) * ys - 0.0).abs() < 1e-4, "limited Y=64 → 0");
         assert!(((s(940) - yb) * ys - 1.0).abs() < 1e-3, "limited Y=940 → 1");
@@ -412,11 +412,20 @@ mod tests {
     fn pq_hlg_reference_points() {
         // PQ: code 0 → 0; the SMPTE-2084 code for 100 nits ≈ 0.508 → 100/203.
         assert!(pq_eotf(0.0).abs() < 1e-4);
-        assert!((pq_eotf(1.0) - 10000.0 / 203.0).abs() < 0.5, "PQ 1.0 → 10000 nits");
-        assert!((pq_eotf(0.5081) - 100.0 / 203.0).abs() < 0.02, "PQ ~0.508 → 100 nits");
+        assert!(
+            (pq_eotf(1.0) - 10000.0 / 203.0).abs() < 0.5,
+            "PQ 1.0 → 10000 nits"
+        );
+        assert!(
+            (pq_eotf(0.5081) - 100.0 / 203.0).abs() < 0.02,
+            "PQ ~0.508 → 100 nits"
+        );
         // HLG: 0 → 0; 1.0 → 1000/203 (the baked 1000-nit OOTF peak).
         assert!(hlg_eotf(0.0).abs() < 1e-4);
-        assert!((hlg_eotf(1.0) - 1000.0 / 203.0).abs() < 0.05, "HLG 1.0 → 1000 nits");
+        assert!(
+            (hlg_eotf(1.0) - 1000.0 / 203.0).abs() < 0.05,
+            "HLG 1.0 → 1000 nits"
+        );
     }
 
     /// A uniform P010 SDR frame round-trips through `planar_to_scene` (the CPU
@@ -452,7 +461,11 @@ mod tests {
         assert_eq!(f.bytes.len(), 2 * 2 * 4);
         // 512/1023 ≈ 0.5006 → 128; neutral chroma keeps it gray.
         for px in f.bytes.chunks_exact(4) {
-            assert!((px[0] as i32 - 128).abs() <= 1, "gray R ~128, got {}", px[0]);
+            assert!(
+                (px[0] as i32 - 128).abs() <= 1,
+                "gray R ~128, got {}",
+                px[0]
+            );
             assert_eq!(px[0], px[1]);
             assert_eq!(px[1], px[2]);
         }

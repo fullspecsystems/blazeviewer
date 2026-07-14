@@ -138,8 +138,17 @@ pub trait Renderer {
     /// default implementation converts on CPU via [`yuv::planar_to_scene`] (the
     /// correctness/portability fallback); `WgpuRenderer` overrides it with the
     /// two-plane in-shader path.
-    fn set_video_planar(&mut self, y: &[u8], uv: &[u8], width: u32, height: u32, p: PlanarPresentation) {
-        let f = yuv::planar_to_scene(y, uv, width, height, p.format, p.yuv, p.transfer, &p.color, p.peak);
+    fn set_video_planar(
+        &mut self,
+        y: &[u8],
+        uv: &[u8],
+        width: u32,
+        height: u32,
+        p: PlanarPresentation,
+    ) {
+        let f = yuv::planar_to_scene(
+            y, uv, width, height, p.format, p.yuv, p.transfer, &p.color, p.peak,
+        );
         self.set_image(&f.bytes, width, height, p.color, f.hdr, f.peak);
     }
 
