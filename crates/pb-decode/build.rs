@@ -101,6 +101,22 @@ fn link_ffmpeg_windows_syslibs() {
     }
 }
 
+/// Is this a **DLL** build of the native LGPL libraries? (`PB_VCPKG_DYNAMIC=1`)
+///
+/// Task #77 / #100.6: libheif + libde265 (LGPL-3.0 §4) and FFmpeg (LGPL-2.1 §6) are
+/// *statically* linked by default, which does not satisfy the LGPL relink condition in a
+/// proprietary binary. Dynamic linkage does, by construction — it is already how macOS and
+/// Linux comply. This switch builds against the vcpkg **dynamic** triplet so the two can be
+/// compared on real numbers before the owner picks a remedy.
+///
+/// ⚠ Not sufficient on its own: `ffmpeg-sys-next` picks its own triplet from
+/// `CARGO_FEATURE_STATIC`, so a dynamic FFmpeg also needs `static` off in the
+/// `ffmpeg-next` dependency (see pb-decode/Cargo.toml).
+fn vcpkg_dynamic() -> bool {
+    println!("cargo:rerun-if-env-changed=PB_VCPKG_DYNAMIC");
+    std::env::var("PB_VCPKG_DYNAMIC").as_deref() == Ok("1")
+}
+
 /// The vcpkg tree the Windows native backends link from: `(root, triplet)`.
 /// Root is `VCPKG_ROOT` or the conventional `~/vcpkg`; the triplet tracks the
 /// *target* arch (read from `CARGO_CFG_TARGET_ARCH`, correct under
@@ -108,15 +124,24 @@ fn link_ffmpeg_windows_syslibs() {
 /// default MSVC CRT linkage (no DLLs to ship in the installer). Port versions are
 /// pinned by `scripts/setup-libheif.ps1 -VcpkgRef` (libheif 1.23.0, libde265
 /// 1.1.1, dav1d 1.5.3).
+///
+/// Under [`vcpkg_dynamic`] the triplet drops the `-static-md` suffix — vcpkg's plain
+/// `x64-windows` / `arm64-windows` triplets are the DLL ones.
 fn vcpkg_tree() -> (String, &'static str) {
     let root = std::env::var("VCPKG_ROOT").unwrap_or_else(|_| {
         let home = std::env::var("USERPROFILE").unwrap_or_default();
         format!("{home}\\vcpkg")
     });
-    let triplet = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
-        Ok("aarch64") => "arm64-windows-static-md",
-        // x86_64 (and any other Windows arch we haven't special-cased) uses the x64 tree.
-        _ => "x64-windows-static-md",
+    let arm = matches!(
+        std::env::var("CARGO_CFG_TARGET_ARCH").as_deref(),
+        Ok("aarch64")
+    );
+    // x86_64 (and any other Windows arch we haven't special-cased) uses the x64 tree.
+    let triplet = match (arm, vcpkg_dynamic()) {
+        (true, false) => "arm64-windows-static-md",
+        (false, false) => "x64-windows-static-md",
+        (true, true) => "arm64-windows",
+        (false, true) => "x64-windows",
     };
     (root, triplet)
 }
@@ -143,11 +168,15 @@ fn link_libheif_windows() {
     }
 
     println!("cargo:rustc-link-search=native={libdir}");
-    // libheif calls into libde265 for HEVC; both are static, link both. MSVC
-    // embeds the C++ runtime default-lib directives in the objects, so the C++
-    // stdlib resolves automatically under the dynamic CRT (static-md).
-    println!("cargo:rustc-link-lib=static=heif");
-    println!("cargo:rustc-link-lib=static=libde265");
+    // libheif calls into libde265 for HEVC; link both. MSVC embeds the C++ runtime
+    // default-lib directives in the objects, so the C++ stdlib resolves automatically
+    // under the dynamic CRT (static-md).
+    //
+    // Under PB_VCPKG_DYNAMIC these are import libs for heif.dll / libde265.dll (task
+    // #77's LGPL relink remedy) — same file names, different link kind.
+    let kind = if vcpkg_dynamic() { "dylib" } else { "static" };
+    println!("cargo:rustc-link-lib={kind}=heif");
+    println!("cargo:rustc-link-lib={kind}=libde265");
     // Relink if the static lib is rebuilt (e.g. a vcpkg reinstall with different
     // options) — Cargo doesn't otherwise track the external lib.
     println!("cargo:rerun-if-changed={libdir}\\heif.lib");
@@ -179,7 +208,13 @@ fn build_dav1d_windows() {
     }
 
     println!("cargo:rustc-link-search=native={libdir}");
-    println!("cargo:rustc-link-lib=static=dav1d");
+    // dav1d is BSD-2-Clause, so unlike libheif/FFmpeg it has no relink obligation and
+    // could stay static under a DLL remedy. It follows the switch here only because one
+    // vcpkg triplet supplies the whole tree — worth revisiting if the DLL count matters.
+    println!(
+        "cargo:rustc-link-lib={}=dav1d",
+        if vcpkg_dynamic() { "dylib" } else { "static" }
+    );
 
     // cc emits the link line for the shim archive itself.
     cc::Build::new()
