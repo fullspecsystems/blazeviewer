@@ -71,6 +71,22 @@ fn main() {
 /// MediaFoundation *encoder*) are dead weight for us: we only demux. Trimming them is
 /// task #100's minimal-build subtask; until then they must resolve.
 fn link_ffmpeg_windows_syslibs() {
+    // Relink when the vcpkg FFmpeg is rebuilt. **This is not a nicety — it is a
+    // correctness guard**, and it cost a real debugging detour to find (#100.1):
+    // `ffmpeg-sys-next` emits no `rerun-if-changed` for the libs it links, and Cargo
+    // cannot see that a `.lib` under vcpkg changed. Rebuild FFmpeg with different
+    // configure options and, with no source edit to force its hand, Cargo happily
+    // re-runs the *previously linked* binary — so a trimmed build silently tests as
+    // the old one. That reads as "the trim broke the layout" when nothing broke at
+    // all, and in a release it would ship an FFmpeg nobody chose. `link_libheif_windows`
+    // guards heif.lib the same way, for the same reason.
+    let (root, triplet) = vcpkg_tree();
+    let libdir = format!("{root}\\installed\\{triplet}\\lib");
+    for lib in ["avcodec", "avformat", "avutil"] {
+        println!("cargo:rerun-if-changed={libdir}\\{lib}.lib");
+    }
+    println!("cargo:rerun-if-env-changed=VCPKG_ROOT");
+
     for lib in [
         // avformat's tls_schannel.o: Cert*/Crypt* (crypt32) and NCrypt* (ncrypt).
         "crypt32", "ncrypt",
