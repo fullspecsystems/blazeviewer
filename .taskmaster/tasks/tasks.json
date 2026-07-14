@@ -1180,7 +1180,7 @@
         "id": 91,
         "title": "Video playback overhaul (Session backend reliability + planar GPU + macOS sample-buffer)",
         "description": "Execute the review-hardened plan in .taskmaster/docs/video-playback-overhaul.md (the doc GOVERNS; this task is a phase index). Turn the Session (FFmpeg / Windows MF) video backend into a stable, robust, efficient foundation for demanding media (4K, 10-bit, HDR10/HLG/DoVi-8.1-base-layer, high-bitrate audio) and add a macOS Apple-stack (AVSampleBuffer) presenter for Apple-decodable MKV. Absorbs 0.2.0 beta feedback items #1 (network + steady-state smoothness; doc R2/R5/R9) and #5 (aspect/zoom via layer transform on the Apple path, not the reverted restart). Root causes R1-R12 + secondary fragilities and locked rules are in the doc. Already landed: seek convert-skip (d1760d0c), forward-decode + parallel-HDR-convert stopgap + PB_VIDEO_DIAG (4244a69f). Measured: HW decode engages, the seek stall was conversion-bound, HDR convert is CPU-bound. Corpus characterized 2026-07-13: DoVi profile 8.1 (HDR10-compatible base layer, the Apple dvhe.08 profile), four audio tracks (TrueHD Atmos 7.1 / FLAC / AC-3 5.1 / AC-3 stereo -> doc R10 track-selection policy), 9-15 s GOP, 84% B-frames.",
-        "status": "review",
+        "status": "done",
         "priority": "high",
         "dependencies": [
           79,
