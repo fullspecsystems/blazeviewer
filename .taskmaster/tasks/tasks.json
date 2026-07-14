@@ -1139,6 +1139,12 @@
         ],
         "subtasks": [
           {
+            "id": 0,
+            "title": "P0.8 — text-shaping spike (GATE)",
+            "description": "DONE 2026-07-14, findings in .taskmaster/docs/90-p08-text-shaping-spike.md. cosmic-text 0.19 clears the bar: shaping proven (Arabic 12 chars->11 glyphs + RTL; Devanagari 6->4 conjunct), system-font fallback finds Arabic/CJK/Devanagari/Hebrew with ZERO .notdef, RGBA8 CPU output suits both presenters, ~15-20 pure-Rust deps (harfrust, NOT rustybuzz; no C, ADR-015 clean). CORRECTION TO THE PLAN: FontSystem::new() = 261 ms / 1114 faces, so lazy-init on first subtitle use must NOT happen on the event loop -- build it on a worker (the media_details pattern) at track-select/video-open. Per-cue shape+raster = 0.15 ms mean / 0.40 ms worst warm, 1.3-1.5 ms first-use-per-script, vs an 8.3 ms frame. P0.7 presenter premise VERIFIED: NativeVideoPlayer.swift attaches AVPlayerLayer as a sublayer of the Metal canvas, so a wgpu subtitle quad would be invisible under the movie -- macOS needs a CALayer above it.",
+            "status": "done"
+          },
+          {
             "id": 1,
             "title": "Subtitle stream + sidecar discovery",
             "description": "Enumerate embedded text subtitle tracks (mov_text/tx3g in MP4, SRT/ASS/VTT in MKV) via the FFmpeg demuxer, and detect a same-stem .srt/.vtt sidecar next to the video (read-only, never written — honors the no-trace guarantee). Expose available tracks + language tags. Filter to the supported text codecs; ignore ASS-styled/bitmap tracks (or degrade ASS to plain text). Track selection UI + keybinding is NOT built here — it moved to task #99 (playback-bar CC toggle on J + track-picker popover); this subtask owns DISCOVERY only and exposes the track list that #98 (Details listing) and #99 (picker) both consume.",
