@@ -252,6 +252,82 @@ pub fn linear_primaries_matrix(primaries: u8) -> [[f32; 3]; 3] {
     ColorTransform::from_cicp(primaries, 8, 0, true).matrix
 }
 
+/// Default HDR mastering peak (nits) when the container carries no valid
+/// content-light / mastering-display metadata — task #91 Phase 2. 1000 nits is the
+/// common HDR10 grade (and the corpus's MaxCLL), a safe SDR tone-map white point.
+pub const DEFAULT_HDR_NITS: f64 = 1000.0;
+
+/// Resolve the HDR tone-map peak (scene-linear scRGB, 1.0 = 203 nits) from
+/// container metadata, with precedence, validity checks, and a stable default
+/// (task #91 Phase 2, replacing the R11 running-max pixel scan). **MaxCLL**
+/// (content-light) wins over **mastering-display max-luminance**; each is accepted
+/// only when finite and in a sane `[1, 10000]` nit range, else it falls through to
+/// [`DEFAULT_HDR_NITS`]. The result never drops below SDR white (1.0). Static
+/// metadata — it does not change across a session (no decay/reset on seek).
+pub fn resolve_hdr_peak(maxcll_nits: Option<u32>, mastering_nits: Option<f64>) -> f32 {
+    let valid = |n: f64| n.is_finite() && (1.0..=10_000.0).contains(&n);
+    let nits = maxcll_nits
+        .map(f64::from)
+        .filter(|&n| valid(n))
+        .or_else(|| mastering_nits.filter(|&n| valid(n)))
+        .unwrap_or(DEFAULT_HDR_NITS);
+    (nits as f32 / SDR_WHITE_NITS).max(1.0)
+}
+
+// FFmpeg's `AVContentLightMetadata` / `AVMasteringDisplayMetadata` structs aren't
+// in this build's bindgen allowlist, so we mirror their **stable public ABI**
+// (unchanged since FFmpeg 3.x) to read the side-data blob. `AVRational` is bound.
+#[repr(C)]
+struct ContentLightMetadata {
+    max_cll: std::os::raw::c_uint,
+    max_fall: std::os::raw::c_uint,
+}
+#[repr(C)]
+struct MasteringDisplayMetadata {
+    display_primaries: [[ffi::AVRational; 2]; 3],
+    white_point: [ffi::AVRational; 2],
+    min_luminance: ffi::AVRational,
+    max_luminance: ffi::AVRational,
+    has_primaries: std::os::raw::c_int,
+    has_luminance: std::os::raw::c_int,
+}
+
+/// The `(MaxCLL, mastering_max_luminance)` HDR metadata a video stream carries, in
+/// nits — read from codecpar's `coded_side_data` (FFmpeg 8 moved stream side data
+/// there; same walk as [`super::probe::rotation_degrees`]). Either is `None` when
+/// absent. Feed to [`resolve_hdr_peak`]. Static/container-level only (dynamic
+/// HDR10+/DoVi RPU is a non-goal).
+pub fn hdr_metadata_nits(stream: &ff::format::stream::Stream) -> (Option<u32>, Option<f64>) {
+    unsafe {
+        let par = (*stream.as_ptr()).codecpar;
+        if par.is_null() {
+            return (None, None);
+        }
+        let get = |kind| {
+            let sd =
+                ffi::av_packet_side_data_get((*par).coded_side_data, (*par).nb_coded_side_data, kind);
+            if sd.is_null() || (*sd).data.is_null() {
+                None
+            } else {
+                Some((*sd).data)
+            }
+        };
+        let maxcll = get(ffi::AVPacketSideDataType::AV_PKT_DATA_CONTENT_LIGHT_LEVEL).map(|d| {
+            let m = &*(d as *const ContentLightMetadata);
+            m.max_cll
+        });
+        let mastering = get(ffi::AVPacketSideDataType::AV_PKT_DATA_MASTERING_DISPLAY_METADATA)
+            .and_then(|d| {
+                let m = &*(d as *const MasteringDisplayMetadata);
+                if m.has_luminance == 0 || m.max_luminance.den == 0 {
+                    return None;
+                }
+                Some(m.max_luminance.num as f64 / m.max_luminance.den as f64)
+            });
+        (maxcll, mastering)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,6 +342,24 @@ mod tests {
             w,
             h,
         )
+    }
+
+    #[test]
+    fn hdr_peak_precedence_validity_and_default() {
+        let w = SDR_WHITE_NITS;
+        // MaxCLL present + valid → wins over mastering.
+        assert!((resolve_hdr_peak(Some(4000), Some(1000.0)) - 4000.0 / w).abs() < 1e-3);
+        // MaxCLL absent → mastering-display max-luminance.
+        assert!((resolve_hdr_peak(None, Some(1000.0)) - 1000.0 / w).abs() < 1e-3);
+        // Neither → the 1000-nit default.
+        assert!((resolve_hdr_peak(None, None) - 1000.0 / w).abs() < 1e-3);
+        // Malformed MaxCLL (0 / absurd) falls through to mastering, then default.
+        assert!((resolve_hdr_peak(Some(0), Some(600.0)) - 600.0 / w).abs() < 1e-3);
+        assert!((resolve_hdr_peak(Some(99_999), None) - 1000.0 / w).abs() < 1e-3);
+        // Conflicting: invalid MaxCLL + invalid mastering → default.
+        assert!((resolve_hdr_peak(Some(0), Some(f64::NAN)) - 1000.0 / w).abs() < 1e-3);
+        // Never below SDR white.
+        assert!(resolve_hdr_peak(Some(50), None) >= 1.0);
     }
 
     #[test]

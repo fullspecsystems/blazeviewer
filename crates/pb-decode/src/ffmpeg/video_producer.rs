@@ -307,6 +307,9 @@ struct Reader {
     facts: VideoFacts,
     decoder: ff::decoder::Video,
     conv: FrameConverter,
+    /// HDR tone-map peak (scene-linear scRGB) from container metadata, resolved
+    /// once at open (task #91 Phase 2 §2D). `≥ 1.0`; drives HDR frames' `peak`.
+    hdr_peak: f32,
     packet: ff::Packet,
     /// `send_eof` delivered — the decoder is draining its B-frame tail.
     eof_sent: bool,
@@ -394,11 +397,25 @@ impl Reader {
             facts.rotation,
             &decoder,
         );
+        // HDR tone-map peak from container metadata (task #91 Phase 2 §2D): the
+        // MaxCLL / mastering-display max-luminance, resolved once at open — this
+        // replaces the per-frame running-max pixel scan (R11) that lived in the CPU
+        // convert. Static per clip; harmless for SDR (SDR frames present at peak 1).
+        let hdr_peak = {
+            let (cll, mastering) = opened
+                .ctx()
+                .streams()
+                .find(|s| s.index() == facts.index)
+                .map(|s| super::color::hdr_metadata_nits(&s))
+                .unwrap_or((None, None));
+            super::color::resolve_hdr_peak(cll, mastering)
+        };
         Ok(Reader {
             input: opened,
             facts,
             decoder,
             conv,
+            hdr_peak,
             packet: ff::Packet::empty(),
             eof_sent: false,
             parked: false,
@@ -596,7 +613,9 @@ impl Reader {
                     yuv_matrix: super::color::yuv_matrix(sc.matrix),
                     // fp16 path: pixels are already scene-linear scRGB; transfer inert.
                     transfer: crate::VideoTransfer::SrgbLike,
-                    peak: self.conv.peak(),
+                    // Metadata-driven peak (task #91 Phase 2 §2D) — no longer the
+                    // per-frame running-max (`conv.peak()`, R11).
+                    peak: self.hdr_peak,
                 }
             }
             _ => self
