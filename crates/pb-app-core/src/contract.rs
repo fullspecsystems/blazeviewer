@@ -486,6 +486,23 @@ pub enum CoreEffect {
         /// Session-only resume position in seconds (task #94.2); see [`Self::PlayVideo`].
         start_secs: f64,
     },
+    /// Open a video in the macOS **sample-buffer presenter** (video-overhaul Phase 3):
+    /// FFmpeg (in Rust) demuxes the container AVFoundation can't open (MKV/WebM), Swift
+    /// wraps the compressed packets into `CMSampleBuffer`s and hands decode to
+    /// VideoToolbox via an `AVSampleBufferDisplayLayer` — the DoVi/HDR end-state for the
+    /// containers the plain `AVPlayer` route (`PlayVideo`) can't demux. `input` is stashed
+    /// FFI-side (like [`Self::StartVideoAudio`]) for the host to open the demuxer off the
+    /// main actor via `open_stashed_demux(session_id)`; the shell reveals on the first
+    /// displayable frame and reports state back through the shared `native_video_*`
+    /// callbacks (so the core reuses the `Native` proxy). A classified open/decode failure
+    /// falls back to the Session route, exactly as the `AVPlayer` route does (level 2).
+    PlaySampleBuffer {
+        input: crate::video::VideoInput,
+        session_id: crate::video::VideoSessionId,
+        muted: bool,
+        /// Session-only resume position in seconds (task #94.2); see [`Self::PlayVideo`].
+        start_secs: f64,
+    },
     /// Ask the shell to generate a **poster** frame for a macOS archive (ZIP/7z) video
     /// (task #30). The core stashed the entry's in-RAM bytes for the shell to pull
     /// (`AppCore::take_pending_poster_bytes`); the shell grabs a frame via

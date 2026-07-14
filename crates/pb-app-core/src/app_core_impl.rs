@@ -6949,12 +6949,30 @@ impl AppCore {
     #[allow(clippy::needless_return)]
     pub fn start_video_session(&mut self, item: usize) {
         self.stop_video();
-        // macOS routing (§8a): AVPlayer for what it handles well; the FFmpeg
-        // session for known-unsupported containers and the level-2 fallback.
+        // macOS routing (§8a + Phase 3): AVPlayer for what it handles well; the
+        // sample-buffer presenter (FFmpeg demux → AVSampleBufferDisplayLayer) for
+        // the DoVi/HDR end-state on containers AVPlayer can't demux; the FFmpeg
+        // session for the rest and for the level-2 fallback.
         #[cfg(target_os = "macos")]
-        if self.macos_native_route(item) {
-            self.start_native_video(item);
-            return;
+        {
+            // A classified native/sample-buffer failure forces the Session route
+            // exactly once (level 2): consume the flag here so neither Apple route
+            // is retried for this same item.
+            #[cfg(feature = "ffvideo")]
+            let forced_session = self.video_ffmpeg_fallback.take() == Some(item);
+            #[cfg(not(feature = "ffvideo"))]
+            let forced_session = false;
+            if !forced_session {
+                if self.macos_native_route(item) {
+                    self.start_native_video(item);
+                    return;
+                }
+                #[cfg(feature = "ffvideo")]
+                if self.macos_sample_buffer_route(item) {
+                    self.start_sample_buffer_video(item);
+                    return;
+                }
+            }
         }
         // Session platforms: Windows (MF), Linux (FFmpeg), and the macOS FFmpeg
         // route above falling through (task #84 §8a).
@@ -7063,6 +7081,8 @@ impl AppCore {
     /// backend and everything stays native (the failure toast is the outcome).
     #[cfg(target_os = "macos")]
     fn macos_native_route(&mut self, item: usize) -> bool {
+        // The level-2 fallback flag is consumed by the caller (start_video_session)
+        // so it can skip both Apple routes at once; this is now a pure container test.
         #[cfg(not(feature = "ffvideo"))]
         {
             let _ = item;
@@ -7070,15 +7090,67 @@ impl AppCore {
         }
         #[cfg(feature = "ffvideo")]
         {
-            if self.video_ffmpeg_fallback.take() == Some(item) {
-                return false;
-            }
             match crate::video::item_kind(self.source.as_ref(), item) {
                 crate::video::LibraryItemKind::Video(c) => c.macos_native(),
                 // Not a video (unreachable from the play paths) — native no-op.
                 crate::video::LibraryItemKind::Image => true,
             }
         }
+    }
+
+    /// video-overhaul Phase 3 routing: `true` = try the macOS **sample-buffer
+    /// presenter** (FFmpeg demux → `AVSampleBufferDisplayLayer`) for this item.
+    /// Opt-in behind `PB_SAMPLE_BUFFER` until the 0C gate proves DoVi correctness
+    /// on-device; loose-file videos only for now (archive-bytes support is a later
+    /// increment). The presenter self-probes the codec and reports a classified
+    /// failure — routing the clip to the Session route (level 2) — for anything it
+    /// can't decode from a sample buffer. Reached only for non-native containers
+    /// (the `macos_native_route` check runs first).
+    #[cfg(all(target_os = "macos", feature = "ffvideo"))]
+    fn macos_sample_buffer_route(&self, item: usize) -> bool {
+        if std::env::var_os("PB_SAMPLE_BUFFER").is_none() {
+            return false;
+        }
+        self.source.path(item).is_some()
+            && matches!(
+                crate::video::item_kind(self.source.as_ref(), item),
+                crate::video::LibraryItemKind::Video(_)
+            )
+    }
+
+    /// Start the macOS sample-buffer presenter for `item` (Phase 3). Mirrors
+    /// [`Self::start_native_video`]: the core keeps only a passive `Native` proxy
+    /// (the presenter fires the same `native_video_*` callbacks), and the demux
+    /// container input is carried on the effect for the host to stash + open off
+    /// the main actor. Loose-file only for now; an archive item (no file URL)
+    /// falls back to the Session route.
+    #[cfg(all(target_os = "macos", feature = "ffvideo"))]
+    fn start_sample_buffer_video(&mut self, item: usize) {
+        let Some(path) = self.source.path(item).map(Path::to_path_buf) else {
+            // No file URL (archive) — not yet supported on this route. Force the
+            // Session route (the flag is consumed there, so no re-entry here).
+            self.video_ffmpeg_fallback = Some(item);
+            self.start_video_session(item);
+            return;
+        };
+        self.video_seq += 1;
+        let id = crate::video::VideoSessionId(self.video_seq);
+        let muted = self.effective_mute();
+        let start_secs = self
+            .video_resume
+            .get(&item)
+            .map_or(0.0, |d| d.as_secs_f64());
+        self.video = Some(ActiveVideoBackend::Native(
+            crate::video_native::NativeVideoProxy::new(item, id, muted),
+        ));
+        self.effects.push(contract::CoreEffect::PlaySampleBuffer {
+            input: crate::video::VideoInput::Path(path),
+            session_id: id,
+            muted,
+            start_secs,
+        });
+        self.anim_hint_shown_for = Some(item); // engaged — retire the hint
+        self.draw();
     }
 
     /// macOS native playback (task 79.9): the shell's `AVPlayer` owns the whole
