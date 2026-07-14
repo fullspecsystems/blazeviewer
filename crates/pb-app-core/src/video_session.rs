@@ -1125,7 +1125,10 @@ mod tests {
         let t0 = Instant::now();
         opened(&io, 10_000);
         s.poll(t0);
-        assert!(drain_credits(&io) >= 1, "session grants credits after Opened");
+        assert!(
+            drain_credits(&io) >= 1,
+            "session grants credits after Opened"
+        );
         // Claim to be a 2×2 NV12 frame (needs 6 bytes) but ship only 3.
         let mut bad = frame(0);
         bad.format = PixelFormat::Nv12;

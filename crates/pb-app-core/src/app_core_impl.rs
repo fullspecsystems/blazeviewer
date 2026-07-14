@@ -4049,7 +4049,20 @@ impl AppCore {
         }
         rows.push(("Audio".into(), if has_audio { "Yes" } else { "No" }.into()));
         let size = self.source.size_hint(item).unwrap_or(0);
-        self.exif_cache.insert(item, (size, rows));
+        self.exif_cache.insert(
+            item,
+            crate::app_core::ItemDetails {
+                size,
+                fields: rows,
+                // TODO(#98 archive parity): the shell's archive round-trip still carries
+                // only codec/fps/duration/has_audio, so an archived video keeps the old
+                // placeholder `Audio: Yes` row while a loose one gets the real per-track
+                // listing. Closing this means widening the round-trip (and the Swift
+                // `CoreModel` side) to carry a catalog + a stale-guard generation.
+                media: None,
+                has_audio: Some(has_audio),
+            },
+        );
         self.emit_panels_changed();
     }
 
@@ -5323,9 +5336,12 @@ impl AppCore {
             lines.push(format!("Dimensions: {} × {}", meta.w, meta.h));
             lines.push(format!("Codec: {}", meta.codec.to_uppercase()));
         }
-        if let Some((size, fields)) = self.exif_cache.get(&item) {
-            lines.push(format!("File Size: {} bytes", hud::format_thousands(*size)));
-            for (tag, val) in fields {
+        if let Some(details) = self.exif_cache.get(&item) {
+            lines.push(format!(
+                "File Size: {} bytes",
+                hud::format_thousands(details.size)
+            ));
+            for (tag, val) in &details.fields {
                 // Skip binary blobs (Apple MakerNote/Padding) that render as meaningless hex.
                 if is_exif_blob(tag, val) {
                     continue;
@@ -5654,7 +5670,7 @@ impl AppCore {
         let exif: &[(String, String)] = self
             .exif_cache
             .get(&item)
-            .map(|(_, f)| f.as_slice())
+            .map(|d| d.fields.as_slice())
             .unwrap_or(&[]);
         // No calendar clock in the pure core → skip future-date filtering (the epoch-default
         // junk filter still applies); a stray future date is harmless (metadata is unverified).
@@ -6327,12 +6343,12 @@ impl AppCore {
         rows.extend(self.animation_rows(item));
         // File size + EXIF from the memoized read (populated by `ensure_exif_cached`
         // before this is called; a cold miss simply omits them until the next rebuild).
-        if let Some((size, fields)) = self.exif_cache.get(&item) {
+        if let Some(details) = self.exif_cache.get(&item) {
             rows.push(DetailRow::Pair {
                 label: "File Size".to_string(),
-                value: format!("{} bytes", hud::format_thousands(*size)),
+                value: format!("{} bytes", hud::format_thousands(details.size)),
             });
-            for (tag, val) in fields {
+            for (tag, val) in &details.fields {
                 // Skip binary blobs that render as meaningless hex (Apple
                 // MakerNote/Padding are kilobytes long); truncate anything else
                 // that's overlong so one field can't blow out the panel width.
@@ -6343,6 +6359,12 @@ impl AppCore {
                     label: tag.clone(),
                     value: truncate_exif_value(val),
                 });
+            }
+            // The video's audio + subtitle tracks (task #98), under the basic facts.
+            // Completeness-driven, so a probe that failed reads as "details
+            // unavailable", never as "No audio".
+            if let Some(catalog) = &details.media {
+                rows.extend(crate::tracks::track_rows(catalog, details.has_audio));
             }
         }
         // Cap to what fits the screen height (~1.5x the font size per line) — for the
@@ -6395,7 +6417,20 @@ impl AppCore {
                 allow(unused_mut)
             )]
             let mut rows: Vec<(String, String)> = Vec::new();
+            #[cfg_attr(
+                not(any(windows, target_os = "macos", all(unix, feature = "ffvideo"))),
+                allow(unused_mut)
+            )]
+            let mut media: Option<pb_decode::MediaTrackCatalog> = None;
+            #[cfg_attr(
+                not(any(windows, target_os = "macos", all(unix, feature = "ffvideo"))),
+                allow(unused_mut)
+            )]
+            let mut has_audio: Option<bool> = None;
             // One shared row builder so the three platform probes can't drift on copy.
+            // The bare `Audio: Yes/No` row it used to add is gone: the real per-track
+            // listing (task #98) supersedes it, and `track_rows` reports "No" from the
+            // catalog's own completeness rather than from a bool.
             #[cfg(any(windows, target_os = "macos", all(unix, feature = "ffvideo")))]
             let mut fill_rows = |info: &pb_decode::VideoStreamInfo| {
                 if let Some(d) = info.duration {
@@ -6405,23 +6440,28 @@ impl AppCore {
                 if info.fps > 0.0 {
                     rows.push(("Frame rate".into(), format!("{:.2} fps", info.fps)));
                 }
-                rows.push((
-                    "Audio".into(),
-                    if info.has_audio { "Yes" } else { "No" }.into(),
-                ));
+                has_audio = Some(info.has_audio);
             };
+            // The catalog generation: the deck epoch, so a catalog minted before a
+            // rebuild can never resolve a `TrackId` against the deck that replaced it.
+            #[cfg(any(windows, target_os = "macos", all(unix, feature = "ffvideo")))]
+            let generation = self.epoch;
             #[cfg(any(windows, target_os = "macos"))]
             if let Some(path) = self.source.path(item) {
-                match pb_decode::probe_video_stream(path) {
-                    Ok(info) => fill_rows(&info),
+                match pb_decode::probe_video_details(path, generation) {
+                    Ok(probe) => {
+                        fill_rows(&probe.video);
+                        media = Some(probe.tracks);
+                    }
                     // macOS + ffvideo (task #84 §8): AVFoundation can't probe the
                     // containers the FFmpeg backend plays (MKV/WebM/…) — same
                     // fallback split as playback, so the inspector rows appear.
                     #[cfg(all(target_os = "macos", feature = "ffvideo"))]
                     Err(_) => {
                         let input = crate::video::VideoInput::Path(path.to_path_buf());
-                        if let Ok(info) = pb_decode::ff_probe_video_input(&input) {
-                            fill_rows(&info);
+                        if let Ok(probe) = pb_decode::ff_probe_video_details(&input, generation) {
+                            fill_rows(&probe.video);
+                            media = Some(probe.tracks);
                         }
                     }
                     #[cfg(not(all(target_os = "macos", feature = "ffvideo")))]
@@ -6432,16 +6472,33 @@ impl AppCore {
             #[cfg(all(unix, not(target_os = "macos"), feature = "ffvideo"))]
             if let Some(path) = self.source.path(item) {
                 let input = crate::video::VideoInput::Path(path.to_path_buf());
-                if let Ok(info) = pb_decode::ff_probe_video_input(&input) {
-                    fill_rows(&info);
+                if let Ok(probe) = pb_decode::ff_probe_video_details(&input, generation) {
+                    fill_rows(&probe.video);
+                    media = Some(probe.tracks);
                 }
             }
-            self.exif_cache.insert(item, (size, rows));
+            self.exif_cache.insert(
+                item,
+                crate::app_core::ItemDetails {
+                    size,
+                    fields: rows,
+                    media,
+                    has_audio,
+                },
+            );
             return;
         }
         if let Ok(bytes) = self.source.bytes(item) {
             let fields = read_exif_fields(&bytes);
-            self.exif_cache.insert(item, (bytes.len() as u64, fields));
+            self.exif_cache.insert(
+                item,
+                crate::app_core::ItemDetails {
+                    size: bytes.len() as u64,
+                    fields,
+                    media: None,
+                    has_audio: None,
+                },
+            );
         }
     }
 
@@ -11181,13 +11238,136 @@ mod tests {
             .is_ok_and(|img| img.width == 2 && img.height == 2 && !img.is_preview));
     }
 
+    // -- media-track Details rows (task #98) --------------------------------
+
+    /// Seed the Details cache for `item` with a catalog, as a probe would.
+    fn seed_details(
+        core: &mut AppCore,
+        item: usize,
+        media: Option<pb_decode::MediaTrackCatalog>,
+        has_audio: Option<bool>,
+    ) {
+        core.exif_cache.insert(
+            item,
+            crate::app_core::ItemDetails {
+                size: 1234,
+                fields: vec![("Video codec".into(), "HEVC".into())],
+                media,
+                has_audio,
+            },
+        );
+    }
+
+    fn seeded_rows(core: &AppCore, item: usize) -> Vec<String> {
+        let d = core.exif_cache.get(&item).expect("seeded");
+        let mut rows = Vec::new();
+        if let Some(cat) = &d.media {
+            rows = crate::tracks::track_rows(cat, d.has_audio);
+        }
+        rows.iter()
+            .map(|r| match r {
+                DetailRow::Span { text, .. } => format!("[{text}]"),
+                DetailRow::Pair { label, value } => format!("{label}: {value}"),
+            })
+            .collect()
+    }
+
+    fn track(codec: &str, lang: &str) -> pb_decode::MediaTrack {
+        pb_decode::MediaTrack {
+            id: pb_decode::TrackId {
+                catalog_generation: 1,
+                local_id: 0,
+            },
+            kind: pb_decode::TrackKind::Audio,
+            language: Some(lang.into()),
+            title: None,
+            codec_raw: codec.to_ascii_lowercase(),
+            codec: codec.into(),
+            capability: pb_decode::TrackCapability::Playable,
+            flags: pb_decode::TrackFlags::none(),
+            audio: Some(pb_decode::AudioFormat {
+                channels: 2,
+                layout: Some("stereo".into()),
+                sample_rate: 48000,
+            }),
+        }
+    }
+
+    /// A described catalog reaches the Details table as real per-track rows — the
+    /// user-visible point of task #98 (this is what retires the `Audio: Yes` placeholder).
+    #[test]
+    fn a_described_catalog_becomes_per_track_details_rows() {
+        let mut core = test_core();
+        let cat = pb_decode::MediaTrackCatalog::new(
+            1,
+            pb_decode::MediaBackend::FFmpeg,
+            pb_decode::TrackSet::complete(vec![track("AAC", "eng")]),
+            pb_decode::TrackSet::complete(vec![]),
+        );
+        seed_details(&mut core, 0, Some(cat), Some(true));
+        assert_eq!(
+            seeded_rows(&core, 0),
+            vec![
+                "[Audio]",
+                "Track 1: English · AAC stereo · 48 kHz",
+                "Subtitles: No",
+            ]
+        );
+    }
+
+    /// The rule that matters most in the panel: a probe that could not enumerate a file
+    /// which *does* have audio must never render as "No audio".
+    #[test]
+    fn an_unenumerable_catalog_never_renders_as_no_audio() {
+        let mut core = test_core();
+        let cat =
+            pb_decode::MediaTrackCatalog::unavailable(1, pb_decode::MediaBackend::MediaFoundation);
+        seed_details(&mut core, 0, Some(cat), Some(true));
+        let rows = seeded_rows(&core, 0);
+        assert_eq!(rows, vec!["Audio: Present — details unavailable"]);
+        assert!(!rows.iter().any(|r| r == "Audio: No"));
+    }
+
+    /// A still (no catalog) adds no track rows at all.
+    #[test]
+    fn a_still_adds_no_track_rows() {
+        let mut core = test_core();
+        seed_details(&mut core, 0, None, None);
+        assert!(seeded_rows(&core, 0).is_empty());
+    }
+
+    /// The rows stay `Span`/`Pair`, so the Details copy payload (#32) keeps working
+    /// with no shell changes.
+    #[test]
+    fn track_rows_round_trip_through_the_details_copy_payload() {
+        let mut core = test_core();
+        let cat = pb_decode::MediaTrackCatalog::new(
+            1,
+            pb_decode::MediaBackend::FFmpeg,
+            pb_decode::TrackSet::complete(vec![track("AAC", "eng")]),
+            pb_decode::TrackSet::unavailable(),
+        );
+        seed_details(&mut core, 0, Some(cat.clone()), Some(true));
+        let panel = crate::panels::DetailsPanel {
+            rows: crate::tracks::track_rows(&cat, Some(true)),
+        };
+        assert_eq!(
+            panel.copy_text(),
+            "Audio\nTrack 1: English · AAC stereo · 48 kHz"
+        );
+    }
+
     /// A shell-probed archive-video's facts become the inspector's rows (codec/fps/duration/
     /// audio) and re-signal the panel; unknown duration is omitted.
     #[test]
     fn archive_video_meta_ready_builds_inspector_rows() {
         let mut core = test_core();
         core.archive_video_meta_ready(2, "HEVC".to_string(), 30_000, 5_000, true);
-        let (_, rows) = core.exif_cache.get(&2).expect("rows cached for item 2");
+        let rows = &core
+            .exif_cache
+            .get(&2)
+            .expect("rows cached for item 2")
+            .fields;
         assert!(rows.iter().any(|(k, v)| k == "Video codec" && v == "HEVC"));
         assert!(rows
             .iter()
@@ -11201,7 +11381,7 @@ mod tests {
 
         // Unknown duration (-1) is omitted; no audio reads "No".
         core.archive_video_meta_ready(3, "H.264".to_string(), 0, -1, false);
-        let (_, rows) = core.exif_cache.get(&3).unwrap();
+        let rows = &core.exif_cache.get(&3).unwrap().fields;
         assert!(
             !rows.iter().any(|(k, _)| k == "Duration"),
             "unknown duration omitted"

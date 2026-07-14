@@ -1134,7 +1134,8 @@
         "priority": "medium",
         "dependencies": [
           79,
-          84
+          84,
+          98
         ],
         "subtasks": [
           {
@@ -1305,11 +1306,61 @@
         "id": 98,
         "title": "Video Details: real audio + subtitle track listings (retire \"Audio: Yes\")",
         "description": "Replace the placeholder \"Audio: Yes\" row in the Inspector ▸ Details tab with a real per-track listing of the video's audio and subtitle streams: index, language tag, codec, channel layout, and disposition (default/forced/commentary). Read-only FACTS about the file — this is the description half of the audio/subtitle work; the SELECTION half lives on the playback bar (task #99). The split is by verb: Details describes, the playback bar acts. Keeping it here means the existing whole-panel \"copy all details\" payload (task #32) picks the track table up for free, with no new copy semantics to design. \"Audio: Yes\" was honest when audio barely worked at all (task #79 era); now that a 5.1 DTS-HD feature film plays correctly it tells the user nothing — a 2h14m MKV with a commentary track and three sub tracks reports the same single word as a silent 3-second phone clip.",
-        "status": "pending",
+        "status": "in-progress",
         "priority": "medium",
         "dependencies": [],
         "details": "Model: extend the Details panel builder to emit a track section using the EXISTING pb-app-core/src/panels.rs shapes — DetailRow::Span for the \"Audio\" / \"Subtitles\" headings, DetailRow::Pair for each track row. No new DetailRow variant needed; do NOT add one just for this. DetailsPanel::copy_text() then works unchanged, which is the whole reason this belongs in Details rather than a new tab.\n\nSuggested shape (label = track slot, value = the human summary):\n  Span  \"Audio\"        bold\n  Pair  \"Track 1\"      \"English · DTS-HD MA 5.1 · 48 kHz · Default\"\n  Pair  \"Track 2\"      \"English · AC-3 2.0 · Commentary\"\n  Span  \"Subtitles\"    bold\n  Pair  \"Track 1\"      \"English (SDH) · SubRip · Default\"\n  Pair  \"Track 2\"      \"French · SubRip\"\n\nSource: extend the existing probe (pb-decode/src/ffmpeg/probe.rs) that already yields Video codec / Frame rate / the current Audio bool. Enumerate ALL streams, not just the first — audio + subtitle stream indices, codec id, channel layout, sample rate, and the AV_DISPOSITION_* bits (DEFAULT / FORCED / COMMENTARY / HEARING_IMPAIRED) which are what make a listing useful rather than decorative.\n\nBackend coverage mirrors task #90's constraint and is the main scope risk — do not let it balloon: FFmpeg backend (task #84) gets the full listing. Windows MF and macOS AVFoundation expose track metadata through their own APIs (AVAsset.tracks / IMFSourceReader stream descriptors); either map them or degrade gracefully. GRACEFUL DEGRADATION IS ACCEPTABLE HERE and is the tie-breaker if this starts sprawling: a backend that can only report a count should emit \"Audio  2 tracks\" and stop. That is still strictly better than \"Yes\".\n\nLanguage tags are frequently absent or wrong in real files (esp. older rips) — fall back to \"Track N\" / \"Unknown\" and never render an empty \"· ·\" skeleton. Codec names should be the friendly form (DTS-HD MA, not dts (DTS-HD MA)); keep the mapping table small and in one place.\n\nSidecar .srt/.vtt files discovered per task #90 subtask 1 should appear in the Subtitles listing too, marked as sidecars (e.g. \"English · SubRip (sidecar)\") — the user should not have to guess why a track exists that the container does not hold. Read-only; honors the no-trace guarantee (never writes next to the video).\n\nStill-image behavior is unchanged: no audio/subtitle rows for photos. Ordering: keep the track section after the existing video rows (Dimensions/Codec/Duration/Frame rate) so the panel reads general → specific.",
-        "testStrategy": "Pure: unit-test the panel builder — given a synthetic multi-track probe result, assert the emitted DetailRow sequence (heading Spans present, one Pair per track, ordering stable, disposition suffixes correct). Assert DetailsPanel::copy_text() round-trips the track table into \"label: value\" lines with no truncation (the task #32 contract). Assert the degenerate cases: zero audio tracks (silent clip) renders no Audio heading rather than an empty one; missing language tag falls back without a dangling separator; a photo emits no track rows at all.\n\nManual: open the 2160p Captain Phillips MKV (the file that motivated this — DTS-HD MA 5.1, multiple tracks) with Shift+I on Details; confirm every track the container holds is listed and matches `ffprobe -show_streams` on the same file. Copy all details, paste, confirm the track table survives. Repeat on a single-audio-track MP4, a silent clip, and a video with a same-stem .srt sidecar (confirm the sidecar is listed and marked). Check each backend (FFmpeg / MF / AVFoundation) either lists or degrades to a count — never crashes, never prints \"Yes\"."
+        "testStrategy": "Pure: unit-test the panel builder — given a synthetic multi-track probe result, assert the emitted DetailRow sequence (heading Spans present, one Pair per track, ordering stable, disposition suffixes correct). Assert DetailsPanel::copy_text() round-trips the track table into \"label: value\" lines with no truncation (the task #32 contract). Assert the degenerate cases: zero audio tracks (silent clip) renders no Audio heading rather than an empty one; missing language tag falls back without a dangling separator; a photo emits no track rows at all.\n\nManual: open the 2160p Captain Phillips MKV (the file that motivated this — DTS-HD MA 5.1, multiple tracks) with Shift+I on Details; confirm every track the container holds is listed and matches `ffprobe -show_streams` on the same file. Copy all details, paste, confirm the track table survives. Repeat on a single-audio-track MP4, a silent clip, and a video with a same-stem .srt sidecar (confirm the sidecar is listed and marked). Check each backend (FFmpeg / MF / AVFoundation) either lists or degrades to a count — never crashes, never prints \"Yes\".",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Phase 0 — enumeration proof spikes",
+            "description": "FFmpeg channel-layout/profile FFI + AVFoundation propertyList identity proven on real fixtures; findings in .taskmaster/docs/98-phase0-spike-findings.md. MF spike NOT run (no Windows host).",
+            "status": "done"
+          },
+          {
+            "id": 2,
+            "title": "Phase 1 — the catalog model (pb-decode/src/tracks.rs)",
+            "description": "MediaTrackCatalog/TrackSet/TrackCompleteness/MediaTrack/TrackId/TrackLocator + pure codec, capability and language maps. 20 unit tests.",
+            "status": "done"
+          },
+          {
+            "id": 3,
+            "title": "Phase 2 — FFmpeg backend (reference)",
+            "description": "ffmpeg/tracks.rs catalog_from_input + ff_probe_video_details; multitrack.mkv fixture with an ffprobe oracle test. Complete completeness.",
+            "status": "done"
+          },
+          {
+            "id": 4,
+            "title": "Phase 2 — AVFoundation backend",
+            "description": "livephoto::probe_video_details walks both media-selection groups; propertyList identity locators; multitrack.mp4 fixture.",
+            "status": "done"
+          },
+          {
+            "id": 5,
+            "title": "Phase 2 — Media Foundation backend",
+            "description": "BLOCKED on a Windows host. mf_poster::probe_video_details exists and compiles (cross-checked for x86_64-pc-windows-msvc) but honestly reports TrackCompleteness::Unavailable, so Details reads \"Present — details unavailable\", never \"No audio\". Finish: GetNativeMediaType loop to MF_E_INVALIDSTREAMNUMBER, major/subtype -> kind+codec, MF_MT_AUDIO_NUM_CHANNELS/SAMPLES_PER_SECOND, and prove where language/title live (NOT assumed to be on IMFMediaType).",
+            "status": "pending"
+          },
+          {
+            "id": 6,
+            "title": "Phase 2 — off-thread, generation-safe Details probe",
+            "description": "NOT DONE. ensure_exif_cached still probes synchronously on the core path (pre-existing behavior, now doing slightly more work). Plan wants an async MediaDetailsProbe pipeline: Inspector cold-miss -> Loading, worker probes, result carries deck epoch + item + source identity + request id, core accepts only on full match, PanelsChanged refreshes, navigation drops stale results.",
+            "status": "pending"
+          },
+          {
+            "id": 7,
+            "title": "Phase 2 — archive-video catalog parity",
+            "description": "NOT DONE. archive_video_meta_ready still carries only codec/fps/duration/has_audio, so an archived video keeps the placeholder Audio row while a loose one lists tracks. Needs the round-trip (and Swift CoreModel) widened to carry a catalog + a stale-guard generation.",
+            "status": "pending"
+          },
+          {
+            "id": 8,
+            "title": "Phase 3 — shared formatter + completeness-driven Details rows",
+            "description": "pb-app-core/src/tracks.rs track_summary + track_rows (all five completeness states), wired into exif_rows via the typed ItemDetails cache. 27 unit + 4 core integration tests.",
+            "status": "done"
+          }
+        ]
       },
       {
         "id": 99,

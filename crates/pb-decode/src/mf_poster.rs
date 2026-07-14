@@ -70,6 +70,53 @@ pub fn probe_video_input(input: &crate::VideoInput) -> Result<VideoStreamInfo, D
     }
 }
 
+/// The **Details** probe (task #98): basic facts + the audio/subtitle track catalog.
+/// Off-thread only.
+///
+/// ⚠ **Media Foundation track enumeration is not implemented yet, and this reports that
+/// honestly rather than guessing.** The catalog comes back
+/// [`TrackCompleteness::Unavailable`](crate::TrackCompleteness::Unavailable), which the
+/// Details rows render as "Present — details unavailable" (using the reader's real
+/// `has_audio`) — *never* as "No audio". That distinction is the entire reason the
+/// catalog carries completeness instead of an empty vector.
+///
+/// Why it stops here: the phase-0 spikes that de-risked the FFmpeg and AVFoundation
+/// backends were run on macOS, so the MF questions the plan raised — does the
+/// `GetNativeMediaType(i, 0, …)` loop really terminate on `MF_E_INVALIDSTREAMNUMBER`,
+/// and *where* do language/title actually live (they are **not** safely assumed to be on
+/// `IMFMediaType`; they may require the presentation descriptor) — are still unanswered,
+/// and this code cannot even be compile-checked from that host. Writing the enumeration
+/// blind would risk a Windows build break and a mislabelled panel; the honest
+/// `Unavailable` costs a Windows session to upgrade and cannot lie in the meantime.
+///
+/// Finishing it means: walk the native media types to `MF_E_INVALIDSTREAMNUMBER`,
+/// map major type → [`TrackKind`](crate::TrackKind) and subtype → codec, read
+/// `MF_MT_AUDIO_NUM_CHANNELS` / `MF_MT_AUDIO_SAMPLES_PER_SECOND`, prove where
+/// language/title live, and set `Complete` / `CountOnly` per what MF genuinely exposes
+/// (subtitle exposure is limited, so `CountOnly`/`Unavailable` there may well be the
+/// truthful answer). `TrackLocator::MfStream` already exists for the ids.
+pub fn probe_video_details(
+    path: &Path,
+    generation: u64,
+) -> Result<crate::video::VideoDetailsProbe, DecodeError> {
+    probe_video_details_input(&crate::VideoInput::Path(path.to_path_buf()), generation)
+}
+
+/// [`probe_video_details`] over any [`VideoInput`](crate::VideoInput).
+pub fn probe_video_details_input(
+    input: &crate::VideoInput,
+    generation: u64,
+) -> Result<crate::video::VideoDetailsProbe, DecodeError> {
+    let video = probe_video_input(input)?;
+    Ok(crate::video::VideoDetailsProbe {
+        video,
+        tracks: crate::tracks::MediaTrackCatalog::unavailable(
+            generation,
+            crate::tracks::MediaBackend::MediaFoundation,
+        ),
+    })
+}
+
 /// Decode the clip's poster frame — the first non-black frame within the capped
 /// walk — fitted to `fit`. `cancel` stops the walk between samples (the pool's
 /// per-job flag). The frame is display-oriented (processor-rotated) and carries

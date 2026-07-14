@@ -54,6 +54,9 @@ pub mod settings;
 pub mod slideshow;
 pub mod thumbs;
 pub mod timing;
+// The shared media-track formatter (task #98): one place a track turns into the line
+// a human reads — Details now, the #99 picker later.
+pub mod tracks;
 pub mod undo;
 pub mod video;
 pub mod video_native;

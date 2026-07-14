@@ -142,6 +142,23 @@ impl VideoStreamInfo {
     }
 }
 
+/// What the **Details** probe reports (task #98): the basic facts *plus* the full
+/// audio/subtitle [`MediaTrackCatalog`], from one open of the container.
+///
+/// Deliberately a separate type from [`VideoStreamInfo`], and produced by a separate
+/// entry point, because the two have different callers and different costs.
+/// `VideoStreamInfo` feeds the **poster** path, which runs for every *prefetched* video
+/// whether or not the Inspector is ever opened — a media-selection-group walk or a full
+/// stream enumeration must never be charged to it. This one runs only when the Inspector
+/// actually asks, and only off the event loop.
+// (No `Eq`: `VideoStreamInfo::fps` is an `f64`. The catalog itself is `Eq`, so track
+// assertions compare directly.)
+#[derive(Debug, Clone)]
+pub struct VideoDetailsProbe {
+    pub video: VideoStreamInfo,
+    pub tracks: crate::tracks::MediaTrackCatalog,
+}
+
 /// YUV→RGB matrix coefficients for subsampled ([`PixelFormat::Nv12`] /
 /// [`PixelFormat::P010`]) frames (task 79.10). Inert for RGB pixel formats (the
 /// producer already converted).

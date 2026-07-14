@@ -7,6 +7,8 @@
 //!   and a per-operation watchdog so hostile input can't block forever.
 //! - [`probe`] — stream selection (best non-attached-picture video stream),
 //!   rotation / SAR / duration / fps / audio-presence facts.
+//! - [`tracks`] — the audio/subtitle [`crate::MediaTrackCatalog`] (task #98); the
+//!   reference backend, since FFmpeg reads the container's real stream table.
 //! - [`color`] — FFmpeg color metadata (H.273 CICP) → [`crate::ColorTransform`]
 //!   / [`crate::video::VideoColorInfo`], plus correct swscale coefficients.
 //! - [`hw`] *(`ffvideo`)* — hardware decode setup (VideoToolbox / VAAPI) +
@@ -24,6 +26,7 @@ pub mod init;
 pub mod io;
 pub mod pcm;
 pub mod probe;
+pub mod tracks;
 
 #[cfg(feature = "ffvideo")]
 pub mod audio_decoder;
