@@ -78,7 +78,8 @@ pub fn ff_probe_video_input(input: &VideoInput) -> Result<VideoStreamInfo, Decod
     // Decoder-reported color under the shared fallback policy (no frame decode
     // here — the probe is a ~header-only read, like the Windows one).
     let decoder = decoder_for(opened.ctx(), facts.index)?;
-    let conv = FrameConverter::new((facts.width, facts.height), (1, 1), 0, &decoder);
+    // Posters are stills → always RGBA (no planar GPU path).
+    let conv = FrameConverter::new((facts.width, facts.height), (1, 1), 0, &decoder, false, false);
     let sc = conv.source_color();
     Ok(VideoStreamInfo {
         codec: facts.codec,
@@ -285,6 +286,8 @@ fn poster_inner(
         pre_rot,
         facts.rotation,
         &decoder,
+        false, // posters are stills → RGBA, never the planar GPU path
+        false,
     );
 
     let duration = facts.duration;

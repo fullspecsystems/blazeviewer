@@ -173,7 +173,7 @@ pub use svg::SvgDecoder;
 pub use video::VideoStreamInfo;
 pub use video::{
     SeekGeneration, VideoColorInfo, VideoFrame, VideoInput, VideoProducerEvent, VideoProducerMsg,
-    VideoSessionId, VideoTransfer, YuvMatrix,
+    VideoProducerOptions, VideoSessionId, VideoTransfer, YuvMatrix,
 };
 #[cfg(windows)]
 pub use wic::WicDecoder;

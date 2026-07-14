@@ -20,7 +20,7 @@
 use ffmpeg_next as ff;
 use ffmpeg_next::ffi;
 
-use crate::video::{VideoColorInfo, YuvMatrix};
+use crate::video::{VideoColorInfo, VideoTransfer, YuvMatrix};
 use crate::ColorTransform;
 
 /// H.273 transfer_characteristics values this module special-cases.
@@ -153,6 +153,48 @@ pub fn video_color_info_rgb(sc: &SourceColor) -> VideoColorInfo {
     }
 }
 
+/// [`VideoColorInfo`] for a producer emitting **planar NV12/P010** frames (task
+/// #91 Phase 2): the pixels arrive raw, so the renderer applies YUV matrix +
+/// range + transfer + primaries in-shader exactly once. `transform` carries the
+/// primaries matrix (+ parametric TRC for SDR); `transfer` selects the shader's
+/// EOTF; `full_range`/`yuv_matrix` describe the (value-preserved) YUV. HDR frames
+/// carry the metadata-resolved `hdr_peak`; SDR present at peak 1.0.
+pub fn video_color_info_planar(sc: &SourceColor, hdr_peak: f32) -> VideoColorInfo {
+    match sc.hdr {
+        Some(hdr) => VideoColorInfo {
+            // Primaries matrix (BT.2020→709) with a linear TRC — the shader inverts
+            // PQ/HLG itself, so the TRC here is unused; only the matrix matters.
+            transform: ColorTransform::from_cicp(sc.primaries, 8, 0, true),
+            cicp: Some((sc.primaries, sc.transfer, sc.matrix)),
+            full_range: sc.full_range,
+            yuv_matrix: yuv_matrix(sc.matrix),
+            transfer: match hdr {
+                Hdr::Pq => VideoTransfer::Pq,
+                Hdr::Hlg => VideoTransfer::Hlg,
+            },
+            peak: hdr_peak,
+        },
+        None => {
+            let transform = sdr_transform(sc);
+            // Non-sRGB SDR primaries (BT.2020/P3 SDR) → the parametric path (mode 1,
+            // primaries matrix applied); plain BT.709 SDR → sRGB-like (mode 0).
+            let transfer = if transform.enabled {
+                VideoTransfer::Parametric
+            } else {
+                VideoTransfer::SrgbLike
+            };
+            VideoColorInfo {
+                transform,
+                cicp: Some((sc.primaries, sc.transfer, sc.matrix)),
+                full_range: sc.full_range,
+                yuv_matrix: yuv_matrix(sc.matrix),
+                transfer,
+                peak: 1.0,
+            }
+        }
+    }
+}
+
 /// H.273 matrix_coefficients → the renderer's [`YuvMatrix`] vocabulary (used by
 /// the NV12 hardware path; recorded even on RGB output for diagnostics).
 pub fn yuv_matrix(matrix: u8) -> YuvMatrix {
@@ -192,6 +234,37 @@ pub unsafe fn set_scaler_colorspace(sws: *mut ffi::SwsContext, matrix: u8, full_
         0,
         1 << 16,
         1 << 16,
+    );
+}
+
+/// Configure a swscale context for **planar YUV→YUV** output (NV12/P010, task #91
+/// Phase 2) so the pixel values are **preserved unchanged** — the renderer applies
+/// the matrix + range in-shader exactly once. Distinct from
+/// [`set_scaler_colorspace`] (which targets full-range RGB): here **src and dst
+/// use the same matrix coefficients and the same range**, so swscale does only the
+/// spatial scale + chroma repack and never a colorspace or range conversion. The
+/// emitted [`VideoColorInfo`] then describes these (destination == source) values.
+///
+/// # Safety
+/// `sws` must be a live `SwsContext` owned by the caller.
+pub unsafe fn set_planar_scaler_colorspace(
+    sws: *mut ffi::SwsContext,
+    matrix: u8,
+    full_range: bool,
+) {
+    if sws.is_null() {
+        return;
+    }
+    let cs = match matrix {
+        5 | 6 => ffi::SWS_CS_ITU601,
+        9 | 10 => ffi::SWS_CS_BT2020,
+        _ => ffi::SWS_CS_ITU709,
+    };
+    let coeffs = ffi::sws_getCoefficients(cs);
+    let range = i32::from(full_range);
+    // Same coefficients + range on both ends → value-preserving YUV→YUV.
+    let _ = ffi::sws_setColorspaceDetails(
+        sws, coeffs, range, coeffs, range, 0, 1 << 16, 1 << 16,
     );
 }
 

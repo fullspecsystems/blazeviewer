@@ -253,6 +253,32 @@ pub struct VideoFrame {
     pub color: VideoColorInfo,
 }
 
+/// Renderer capabilities the producer needs to negotiate its output format
+/// (task #91 Phase 2, Codex: a typed contract, not a loose bool). Threaded from
+/// the shell's renderer into `run_ff_video_producer`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoProducerOptions {
+    /// Whether to attempt the planar GPU color path at all — the master switch
+    /// (A/B lever / safety hatch). When false the producer always emits
+    /// RGBA8/fp16 (the pre-Phase-2 behavior, and the negotiation prime is skipped
+    /// so startup latency is unchanged).
+    pub planar: bool,
+    /// Whether the renderer can display P010 (`TEXTURE_FORMAT_16BIT_NORM`). When
+    /// false, 10-bit sources fall back to RGBA/fp16 rather than P010.
+    pub supports_p010: bool,
+}
+
+impl Default for VideoProducerOptions {
+    /// The conservative default: no planar path (RGBA/fp16), used by callers that
+    /// don't (yet) have a renderer capability to report.
+    fn default() -> Self {
+        VideoProducerOptions {
+            planar: false,
+            supports_p010: false,
+        }
+    }
+}
+
 impl VideoFrame {
     /// The byte count this frame charges against the session's queue budget.
     pub fn byte_len(&self) -> u64 {
