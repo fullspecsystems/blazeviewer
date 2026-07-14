@@ -35,6 +35,7 @@ final class SampleBufferPresenter {
     let sessionId: UInt64
 
     private let displayLayer = AVSampleBufferDisplayLayer()
+    private let audioRenderer = AVSampleBufferAudioRenderer()
     private let synchronizer = AVSampleBufferRenderSynchronizer()
     private weak var canvas: MetalCanvasNSView?
     private weak var model: CoreModel?
@@ -48,12 +49,19 @@ final class SampleBufferPresenter {
 
     /// The owned off-main demux pointer + feed loop (mirrors `OwnedAudioDecoder`).
     private let reader = DemuxReader()
+    /// The owned off-main audio decoder + feed loop, on the same synchronizer (§3C).
+    private let audioFeeder = AudioSampleFeeder()
 
     private var revealed = false
     private var reportedOpened = false
     private var ended = false
+    private var audioStarted = false
     private var timeObserver: Any?
     private var durationSecs: Double = 0
+    private var fps: Double = 0
+    /// Bumped on every seek so a superseded seek's completion can't re-anchor the
+    /// clock after a newer one has taken over (generation-safe, §3D).
+    private var seekEpoch: UInt64 = 0
 
     init(
         sessionId: UInt64, scaleMode: UInt8, muted: Bool, startSecs: Double,
@@ -69,6 +77,8 @@ final class SampleBufferPresenter {
         displayLayer.videoGravity = .resizeAspect
         canvas.attachVideoSublayer(displayLayer) // hidden until the first frame
         synchronizer.addRenderer(displayLayer)
+        synchronizer.addRenderer(audioRenderer) // audio shares the video's clock (§3B)
+        audioRenderer.isMuted = muted
         relayout()
 
         // ~20 Hz position → the info-line scrubber (the core keeps no video clock;
@@ -100,6 +110,7 @@ final class SampleBufferPresenter {
             return
         }
         durationSecs = result.durationSecs
+        fps = result.fps
         let durationMs: Int64 = result.durationSecs > 0
             ? Int64((result.durationSecs * 1000).rounded()) : -1
         if !reportedOpened {
@@ -110,6 +121,20 @@ final class SampleBufferPresenter {
         pbTrace(
             "sample-buffer video \(sessionId): opened \(result.width)x\(result.height) "
                 + "dovi=\(result.doviProfile)")
+
+        // Audio (§3C): open the FFmpeg decoder over the same container and feed the
+        // audio renderer on the shared synchronizer. It buffers (enqueued 0-based)
+        // until the first video frame starts the clock — so audio never leads the
+        // picture. Silent when the clip has no openable audio track.
+        if result.hasAudio {
+            audioFeeder.open(sessionId: sessionId) { [weak self] ok in
+                MainActor.assumeIsolated {
+                    guard let self, ok, !self.audioStarted else { return }
+                    self.audioStarted = true
+                    self.audioFeeder.startFeeding(into: self.audioRenderer)
+                }
+            }
+        }
 
         // Drive the layer from renderer readiness; reveal + start the clock on the
         // first enqueued frame.
@@ -168,18 +193,20 @@ final class SampleBufferPresenter {
 
     func resume() {
         if ended {
-            // Replay: seek back to the start, then play (slice E supplies the real
-            // flush+re-enqueue; for now re-feed from zero).
+            // Replay: set the play rate first so the replay seek captures "was
+            // playing" and re-anchors at rate 1 on completion (avoids the async
+            // seek landing at rate 0 and overriding a resume set here).
             ended = false
+            synchronizer.rate = 1.0
             seek(toFraction: 0)
+        } else {
+            synchronizer.rate = 1.0
         }
-        synchronizer.rate = 1.0
         model?.nativeVideoStateChanged(sessionId, state: 2) // Playing
     }
 
     func setMuted(_ muted: Bool) {
-        // Audio is a follow-on slice (§3C); no audio renderer yet to mute.
-        _ = muted
+        audioRenderer.isMuted = muted
     }
 
     func setScaleMode(_ mode: UInt8) {
@@ -188,39 +215,56 @@ final class SampleBufferPresenter {
         relayout()
     }
 
-    /// Seek to a fraction of the duration. Placeholder for slice §3D (generation-safe
-    /// flush + re-enqueue + re-anchor); wired so the scrubber routing is total.
+    /// Seek to a fraction of the duration (the scrubber).
     func seek(toFraction fraction: Double) {
         guard durationSecs > 0 else { return }
-        let secs = max(0.0, min(1.0, fraction)) * durationSecs
-        ended = false
-        reader.seek(seconds: secs, layer: displayLayer) { [weak self] landedPTS in
-            MainActor.assumeIsolated {
-                guard let self, let landedPTS else { return }
-                self.synchronizer.setRate(self.synchronizer.rate, time: landedPTS)
-            }
-        }
+        performSeek(toSeconds: max(0.0, min(1.0, fraction)) * durationSecs, report: nil)
     }
 
-    /// Seek by a signed millisecond delta (arrow keys). Placeholder (§3D) — reports
-    /// completion so the proxy generation bookkeeping stays honest.
+    /// Seek by a signed millisecond delta (arrow keys). Reports completion tagged
+    /// with the core's `generation` so a superseded seek is told from a clean landing.
     func seek(byMilliseconds deltaMs: Int64, generation: UInt64) {
         let cur = max(0, CMTimeGetSeconds(synchronizer.currentTime()))
-        let target = max(0.0, min(durationSecs, cur + Double(deltaMs) / 1000.0))
+        performSeek(toSeconds: cur + Double(deltaMs) / 1000.0, report: generation)
+    }
+
+    /// Frame-step (`,`/`.`): pause, then nudge by one frame via a tiny seek. The
+    /// display layer buffers ahead while paused, so a forward step usually lands
+    /// from the buffer; backward re-seeks to the keyframe and decodes forward.
+    func step(forward: Bool) {
+        synchronizer.rate = 0
+        let cur = max(0, CMTimeGetSeconds(synchronizer.currentTime()))
+        let frame = fps > 0 ? 1.0 / fps : 1.0 / 30.0
+        performSeek(toSeconds: cur + (forward ? frame : -frame), report: nil)
+        model?.nativeVideoStateChanged(sessionId, state: 3) // Paused
+    }
+
+    /// Generation-safe seek (§3D): hold the clock, flush + re-seek both renderers,
+    /// re-feed from the keyframe, then re-anchor the synchronizer at the target and
+    /// restore the pre-seek rate — but only if a newer seek hasn't superseded this
+    /// one. `report` (when set) tags the core's seek-completion callback.
+    private func performSeek(toSeconds secs: Double, report: UInt64?) {
+        let target = max(0.0, min(durationSecs > 0 ? durationSecs : secs, secs))
         ended = false
+        seekEpoch &+= 1
+        let epoch = seekEpoch
+        let wasPlaying = synchronizer.rate != 0
+        synchronizer.rate = 0 // hold the clock while both renderers reflush
+        audioFeeder.seek(seconds: target, renderer: audioRenderer)
         reader.seek(seconds: target, layer: displayLayer) { [weak self] landedPTS in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                if let landedPTS { self.synchronizer.setRate(self.synchronizer.rate, time: landedPTS) }
-                self.model?.nativeVideoSeekCompleted(
-                    self.sessionId, generation: generation, finished: landedPTS != nil)
+                let current = epoch == self.seekEpoch
+                if current {
+                    let anchor = landedPTS ?? CMTime(seconds: target, preferredTimescale: 600)
+                    self.synchronizer.setRate(wasPlaying ? 1.0 : 0.0, time: anchor)
+                }
+                if let g = report {
+                    self.model?.nativeVideoSeekCompleted(
+                        self.sessionId, generation: g, finished: current && landedPTS != nil)
+                }
             }
         }
-    }
-
-    /// Frame-step (§3D placeholder): no-op until the paused single-frame path lands.
-    func step(forward: Bool) {
-        _ = forward
     }
 
     // MARK: - Transform placement (parity with a still / the AVPlayer route)
@@ -295,6 +339,7 @@ final class SampleBufferPresenter {
     func stop() {
         synchronizer.rate = 0
         reader.stop(layer: displayLayer)
+        audioFeeder.stop(renderer: audioRenderer)
         if let timeObserver {
             synchronizer.removeTimeObserver(timeObserver)
             self.timeObserver = nil

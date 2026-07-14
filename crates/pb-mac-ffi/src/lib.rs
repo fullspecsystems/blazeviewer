@@ -2223,6 +2223,11 @@ impl AppCoreHandle {
                     muted,
                     start_secs,
                 } => {
+                    // Stash the same container for BOTH the video demux and the
+                    // audio decoder: the presenter opens an owned FFmpeg audio
+                    // decoder over it and feeds an AVSampleBufferAudioRenderer under
+                    // the video's synchronizer (one clock — Phase 3 §3B/§3C).
+                    stash_audio_input(session_id.0, input.clone());
                     stash_demux_input(session_id.0, input);
                     return Some(ffi::CoreEffectFfi::PlaySampleBuffer(
                         session_id.0,
