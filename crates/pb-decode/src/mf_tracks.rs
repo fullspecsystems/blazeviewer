@@ -180,6 +180,9 @@ pub(crate) unsafe fn catalog_from_reader(
             // the title, which the formatter reads.
             flags: TrackFlags::none(),
             audio: audio_fmt,
+            // Every stream MF walks came out of the container itself; sidecars (#90.1)
+            // are discovered beside the file and appended by the caller, never here.
+            external: false,
         };
         locators.push((local_id, TrackLocator::MfStream(ordinal)));
         match kind {

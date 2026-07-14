@@ -161,6 +161,11 @@ pub use ffmpeg::details::{ff_probe_video_details, ff_probe_video_input};
 pub use ffmpeg::poster::ff_decode_video_poster;
 #[cfg(feature = "ffvideo")]
 pub use ffmpeg::video_producer::run_ff_video_producer;
+// The demux-only compressed packet source (video-overhaul Phase 3): feeds the
+// macOS AVSampleBufferDisplayLayer presenter compressed access units + the
+// hvcC/avcC/DoVi config a CMVideoFormatDescription needs.
+#[cfg(feature = "ffvideo")]
+pub use ffmpeg::demux::{DemuxPacket, DemuxStreamInfo, DoviConfig, VideoCodec, VideoDemuxer};
 pub use image_backend::ImageCrateDecoder;
 #[cfg(target_os = "macos")]
 pub use imageio::ImageIoDecoder;
@@ -191,8 +196,8 @@ pub use psd::PsdDecoder;
 pub use raw::{is_raw_extension, RawPreviewDecoder};
 pub use svg::SvgDecoder;
 pub use tracks::{
-    AudioFormat, AvGroup, MediaBackend, MediaTrack, MediaTrackCatalog, TrackCapability,
-    TrackCompleteness, TrackFlags, TrackId, TrackKind, TrackLocator, TrackSet,
+    AudioFormat, AvGroup, MediaBackend, MediaTrack, MediaTrackCatalog, SidecarOrigin,
+    TrackCapability, TrackCompleteness, TrackFlags, TrackId, TrackKind, TrackLocator, TrackSet,
 };
 pub use video::{
     SeekGeneration, VideoColorInfo, VideoFrame, VideoInput, VideoProducerEvent, VideoProducerMsg,

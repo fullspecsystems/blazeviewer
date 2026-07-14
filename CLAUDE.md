@@ -15,6 +15,11 @@ Corollary: **we do not guess about speed — we measure it.** Performance claims
 require numbers from the benchmark corpus. Architecture choices that affect the
 hot path are built behind swappable seams and A/B tested (see *Instrumentation*).
 
+> ⚠️ **Before you report a licensing bug:** a dev build linking
+> `/opt/homebrew/opt/ffmpeg/...` (GPL) is **expected and correct** — dev and
+> release use different FFmpeg. This trips up almost every fresh reader. See
+> *Licensing* below before acting on it.
+
 ## The performance model (read this before optimizing anything)
 
 The naive intuition is "tune the GPU rendering." That's wrong. Drawing one
@@ -304,6 +309,81 @@ measurable here.
 - Isolate every platform-specific call (refresh-rate query, swapchain latency
   hook, photon timestamp) behind a single helper so the eventual port is a small
   surface.
+
+## Licensing — LGPL discipline (read before touching FFmpeg, libheif, or dist)
+
+PhotoBlaze is **proprietary and sold**. That makes third-party native deps a hard
+ship gate, not a chore. The rule, in one line:
+
+> **We only ever DECODE. Ship LGPL; never ship GPL.** GPL-only encoders and
+> filters (x264, x265, GPL avfilter) are irrelevant to a viewer — we don't encode
+> anything, so we give up nothing by excluding them.
+
+### 🪤 The Homebrew trap — the #1 false alarm in this repo
+
+**Dev and release link different FFmpeg. This is deliberate.**
+
+| Build | FFmpeg | License | Shippable? |
+|---|---|---|---|
+| `build-swift-host.sh --ffvideo` (**dev**) | Homebrew `/opt/homebrew/opt/ffmpeg` | **GPL-3.0** (`--enable-gpl`, x264/x265) | ❌ never |
+| `build-swift-host.sh --bundle-ffmpeg` (**release**) | pinned source → `third_party/ffmpeg/<arch>` | **LGPL-2.1+** | ✅ yes |
+
+So: **`otool -L` on `target/swift-host/**` showing Homebrew GPL dylibs is not a
+bug.** It is the dev path working as designed. Before concluding the *product*
+has a licensing problem, check the artifact that actually ships:
+
+```sh
+# Inspect the SHIPPED app, not the dev build:
+hdiutil attach dist/PhotoBlaze-*.dmg -nobrowse -readonly -mountpoint /tmp/pb
+otool -L /tmp/pb/PhotoBlaze.app/Contents/MacOS/PhotoBlaze | grep -i homebrew   # must be EMPTY
+ls  /tmp/pb/PhotoBlaze.app/Contents/Frameworks/                                # bundled LGPL dylibs live here
+hdiutil detach /tmp/pb
+```
+
+A release .app must reference FFmpeg **only** via `@rpath/…` out of
+`Contents/Frameworks`. Zero absolute `/opt/homebrew` paths. If you see one in a
+`dist/` artifact, *that* is a real bug — the dev path leaked into a release.
+
+### How each platform stays clean
+
+- **macOS** — `scripts/build-ffmpeg-macos.sh` builds a pinned FFmpeg 8.1.1 from
+  source: no `--enable-gpl`, no `--enable-nonfree`, `--disable-encoders
+  --disable-muxers`, `--install-name-dir=@rpath`. It **asserts** LGPL at the end
+  (belt-and-suspenders against a flag leaking in). `bundle-ffmpeg-macos.sh` copies
+  the dylibs into `Contents/Frameworks`; `release-macos.sh` re-signs them with our
+  Developer ID. HEIC on macOS uses **Apple Image I/O** — libheif is deliberately
+  *not* linked here (see `crates/pb-decode/build.rs`), so macOS has no libheif
+  exposure at all.
+- **Linux** — system/AppImage-bundled shared libheif + FFmpeg via `linuxdeploy`;
+  dynamic linkage, so LGPL §4 is satisfied by construction.
+- **Windows** — ⚠️ the open one. `pb-decode/build.rs` links vcpkg **static**
+  libheif + libde265 (`static-md`). Static-linking LGPL into a proprietary binary
+  triggers the §4 relink obligation, which is *not* satisfied by attribution
+  alone. The fix is DLL linkage (ship the two DLLs in the installer); the current
+  static choice was a convenience call ("no DLLs to ship"), not a constraint.
+  **Verify status against task #77 before shipping a paid Windows build.**
+  (`dav1d` is BSD-2-Clause — static is fine, attribution only.)
+
+### Distribution model
+
+Direct sale + **Sparkle** auto-update. This sidesteps the App Store's long-running
+incompatibility with LGPL relink requirements. If an App Store channel is ever
+added, the LGPL bundling question must be re-opened *first* — it is not a
+packaging detail.
+
+### Non-code assets
+
+**Font Awesome Pro** is licensed to the owner and **not redistributable** — see
+*HUD / toast icons* above. Any FA Pro glyph baked into a shipped artifact is a
+compliance defect regardless of platform.
+
+### Where the truth lives (in precedence order)
+
+1. `scripts/build-ffmpeg-macos.sh` — the authoritative configure flags + the *why*
+2. `THIRD-PARTY-NOTICES.md` — the shipped compliance manifest
+3. `crates/pb-decode/build.rs` — per-target linkage (static vs shared, which cfgs)
+
+If those three disagree with this section, **they win** — and fix this section.
 
 ## Current library picks
 

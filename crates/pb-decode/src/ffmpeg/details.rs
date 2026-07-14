@@ -77,7 +77,7 @@ pub fn ff_probe_video_details(
 
 /// The shared `VideoFacts` → [`VideoStreamInfo`] read, so the basic and details probes
 /// can never drift on codec/rotation/color policy.
-pub(super) fn stream_info(
+fn stream_info(
     opened: &mut FfInput<'static>,
     facts: &super::probe::VideoFacts,
 ) -> Result<VideoStreamInfo, DecodeError> {
@@ -109,7 +109,14 @@ pub(super) fn stream_info(
 /// A decoder *context* for the stream — built from the container's parameters, never
 /// opened against a frame. On a demuxers-only build this still yields the codec's
 /// declared color/format metadata, which is all [`stream_info`] reads.
-pub(super) fn decoder_for(
+///
+/// **Not** `poster::decoder_for`, and the near-duplication is deliberate: that
+/// one attaches hardware decode (VideoToolbox / VAAPI) because it decodes real frames
+/// for the poster walk. This one must not. `super::hw` is `#[cfg(feature = "ffvideo")]`
+/// and this module compiles on a bare `ffprobe` build, so it cannot even name it — and a
+/// demuxers-only FFmpeg has no decoder to accelerate anyway. Merging the two would break
+/// the Windows build (task #100).
+fn decoder_for(
     ctx: &mut ff::format::context::Input,
     index: usize,
 ) -> Result<ff::decoder::Video, DecodeError> {

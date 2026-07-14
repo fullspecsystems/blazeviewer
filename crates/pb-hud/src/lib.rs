@@ -14,4 +14,7 @@
 //! and returns RGBA bitmaps the renderer uploads as quads.
 
 pub mod hud;
+// The subtitle rasterizer (task #90.3): cues + style -> one RGBA8 bitmap, shell-neutral
+// so the wgpu overlay and the macOS SwiftUI overlay show identical pixels.
 pub mod icon;
+pub mod subtitle;
