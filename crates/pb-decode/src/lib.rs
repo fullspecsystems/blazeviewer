@@ -37,6 +37,10 @@ mod mf_video;
 // first non-black frame and its reader-sourced stream facts, no RAM reads.
 #[cfg(windows)]
 mod mf_poster;
+// Media Foundation audio/subtitle track enumeration (task #98, subtask 98.5): the
+// Windows media-track catalog backend, over the same reader the poster probe opens.
+#[cfg(windows)]
+mod mf_tracks;
 // The Windows video playback producer (task #79 phase 4): a demand-driven MF reader
 // thread speaking the VideoProducerEvent/Msg protocol to the VideoSession.
 #[cfg(windows)]

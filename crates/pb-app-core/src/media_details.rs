@@ -192,9 +192,9 @@ pub fn probe_job(source: &dyn PhotoSource, item: usize, generation: u64) -> Item
                 fill_rows(&probe.video);
                 media = Some(probe.tracks);
             }
-            // Windows: Media Foundation reads the entry through its in-RAM byte stream.
-            // The catalog is still `Unavailable` (98.5), but the basic facts are real —
-            // an archived video reported *nothing* before this.
+            // Windows: Media Foundation reads the entry through its in-RAM byte stream —
+            // the same reader the filesystem path uses, so an archived video now gets the
+            // same facts *and* the same track catalog (98.5) as a loose one.
             #[cfg(all(windows, not(feature = "ffvideo")))]
             if let Ok(probe) = pb_decode::probe_video_details_input(&input, generation) {
                 fill_rows(&probe.video);

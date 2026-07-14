@@ -71,30 +71,15 @@ pub fn probe_video_input(input: &crate::VideoInput) -> Result<VideoStreamInfo, D
 }
 
 /// The **Details** probe (task #98): basic facts + the audio/subtitle track catalog.
-/// Off-thread only.
+/// Off-thread only — never on the poster path, which runs for every prefetched video
+/// whether the Inspector opens or not.
 ///
-/// ⚠ **Media Foundation track enumeration is not implemented yet, and this reports that
-/// honestly rather than guessing.** The catalog comes back
-/// [`TrackCompleteness::Unavailable`](crate::TrackCompleteness::Unavailable), which the
-/// Details rows render as "Present — details unavailable" (using the reader's real
-/// `has_audio`) — *never* as "No audio". That distinction is the entire reason the
-/// catalog carries completeness instead of an empty vector.
-///
-/// Why it stops here: the phase-0 spikes that de-risked the FFmpeg and AVFoundation
-/// backends were run on macOS, so the MF questions the plan raised — does the
-/// `GetNativeMediaType(i, 0, …)` loop really terminate on `MF_E_INVALIDSTREAMNUMBER`,
-/// and *where* do language/title actually live (they are **not** safely assumed to be on
-/// `IMFMediaType`; they may require the presentation descriptor) — are still unanswered,
-/// and this code cannot even be compile-checked from that host. Writing the enumeration
-/// blind would risk a Windows build break and a mislabelled panel; the honest
-/// `Unavailable` costs a Windows session to upgrade and cannot lie in the meantime.
-///
-/// Finishing it means: walk the native media types to `MF_E_INVALIDSTREAMNUMBER`,
-/// map major type → [`TrackKind`](crate::TrackKind) and subtype → codec, read
-/// `MF_MT_AUDIO_NUM_CHANNELS` / `MF_MT_AUDIO_SAMPLES_PER_SECOND`, prove where
-/// language/title live, and set `Complete` / `CountOnly` per what MF genuinely exposes
-/// (subtitle exposure is limited, so `CountOnly`/`Unavailable` there may well be the
-/// truthful answer). `TrackLocator::MfStream` already exists for the ids.
+/// The catalog comes from [`crate::mf_tracks`], whose module docs carry what MF was
+/// measured to actually expose (audio: fully; subtitles: not at all; dispositions:
+/// none). Audio lands `Complete` — including the `Complete` + zero that lets Details say
+/// "Audio: No" about a silent clip — while subtitles stay
+/// [`Unavailable`](crate::TrackCompleteness::Unavailable), because MF's silence about
+/// them is not evidence of their absence.
 pub fn probe_video_details(
     path: &Path,
     generation: u64,
@@ -102,19 +87,26 @@ pub fn probe_video_details(
     probe_video_details_input(&crate::VideoInput::Path(path.to_path_buf()), generation)
 }
 
-/// [`probe_video_details`] over any [`VideoInput`](crate::VideoInput).
+/// [`probe_video_details`] over any [`VideoInput`](crate::VideoInput) — an archive entry
+/// probes its in-RAM bytes through the same reader, so archived videos get the same
+/// catalog as filesystem ones.
+///
+/// One container open serves both reads: the track enumeration borrows the reader the
+/// stream facts were just read from, rather than opening the file a second time.
 pub fn probe_video_details_input(
     input: &crate::VideoInput,
     generation: u64,
 ) -> Result<crate::video::VideoDetailsProbe, DecodeError> {
-    let video = probe_video_input(input)?;
-    Ok(crate::video::VideoDetailsProbe {
-        video,
-        tracks: crate::tracks::MediaTrackCatalog::unavailable(
-            generation,
-            crate::tracks::MediaBackend::MediaFoundation,
-        ),
-    })
+    ensure_mf();
+    unsafe {
+        let reader = open_video_reader(input)?;
+        let result = stream_info(&reader).map(|video| crate::video::VideoDetailsProbe {
+            tracks: crate::mf_tracks::catalog_from_reader(&reader, generation),
+            video,
+        });
+        retire_reader(reader);
+        result
+    }
 }
 
 /// Decode the clip's poster frame — the first non-black frame within the capped
