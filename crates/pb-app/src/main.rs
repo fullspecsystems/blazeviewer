@@ -3118,6 +3118,7 @@ impl App {
                     // Matched explicitly (the no-wildcard rule) and inert here.
                     contract::CoreEffect::PlayVideo { .. }
                     | contract::CoreEffect::PlayVideoBytes { .. }
+                    | contract::CoreEffect::PlaySampleBuffer { .. }
                     | contract::CoreEffect::RequestVideoPoster { .. }
                     | contract::CoreEffect::PauseVideo { .. }
                     | contract::CoreEffect::ResumeVideo { .. }

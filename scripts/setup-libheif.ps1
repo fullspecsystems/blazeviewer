@@ -92,9 +92,74 @@ Write-Host "Installing libheif[core]:$Triplet ..." -ForegroundColor Cyan
 Write-Host "Installing dav1d:$Triplet ..." -ForegroundColor Cyan
 & "$VcpkgRoot\vcpkg.exe" install "dav1d:$Triplet" --disable-metrics
 
+# 5. FFmpeg — container reading ONLY (task #100). Media Foundation keeps every decode;
+# FFmpeg is here because MF's media sources cannot enumerate subtitle tracks at all (a
+# source's presentation descriptor reports 3 streams for a file holding 7). The port is
+# patched to a demux/metadata build: no video decoders, no encoders, no network. That is
+# the difference between +3.06 MB and +16.42 MB on the shipped exe (measured).
+$ffPortfile = "$VcpkgRoot\ports\ffmpeg\portfile.cmake"
+if (-not (Test-Path $ffPortfile)) { throw "ffmpeg portfile not found at $ffPortfile" }
+$ffContent = Get-Content $ffPortfile -Raw
+if ($ffContent -match 'PhotoBlaze task #100') {
+    Write-Host "ffmpeg portfile already patched (demux-only)." -ForegroundColor DarkGray
+} else {
+    $ffAnchor = 'set(OPTIONS "--enable-pic --disable-doc --enable-runtime-cpudetect --disable-autodetect")'
+    if ($ffContent -notmatch [regex]::Escape($ffAnchor)) {
+        throw "Could not find the base OPTIONS anchor in $ffPortfile; upstream layout changed. Re-derive the trim from task #100.5 and apply it to the configure OPTIONS manually."
+    }
+    # The audio decoders look droppable and are NOT: nothing decodes audio with them
+    # (MF does), but avformat_find_stream_info opens each audio codec to read its config,
+    # which is the only source of a NAMED channel layout. Without them a 5.1 track reads
+    # "6 channels" -- i.e. straight back to MF's limitation. They are keyed to the codecs
+    # pb_decode::tracks::audio_codec_display already knows how to name.
+    $ffTrim = @'
+# --- PhotoBlaze task #100: demux/metadata-only FFmpeg -----------------------
+string(APPEND OPTIONS " --disable-everything --disable-network --disable-encoders"
+       " --disable-muxers --disable-devices --disable-filters --disable-programs"
+       " --disable-mediafoundation --disable-d3d11va --disable-d3d12va --disable-dxva2"
+       " --enable-protocol=file"
+       " --enable-demuxer=matroska,mov,avi,asf,mpegts,mp3,flac,ogg,wav,aac,ac3"
+       " --enable-decoder=subrip,ass,ssa,movtext,webvtt,text"
+       " --enable-decoder=aac,aac_latm,ac3,eac3,dca,truehd,mlp,flac,alac,opus,vorbis"
+       " --enable-decoder=mp1,mp1float,mp2,mp2float,mp3,mp3float"
+       " --enable-decoder=wmav1,wmav2,wmapro,wmalossless,amrnb,amrwb"
+       " --enable-decoder=pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,pcm_f32le"
+       " --enable-decoder=pcm_f64le,pcm_u8,pcm_alaw,pcm_mulaw,pcm_bluray,pcm_dvd"
+       " --enable-decoder=adpcm_ima_qt,adpcm_ms"
+       " --enable-parser=h264,hevc,aac,aac_latm,ac3,dca,flac,opus,vorbis,mpegaudio"
+       " --enable-parser=vp8,vp9,av1,mpeg4video,mpegvideo,vc1,webp,png,mjpeg"
+       " --enable-bsf=extract_extradata,aac_adtstoasc,h264_mp4toannexb,hevc_mp4toannexb"
+       " --enable-bsf=vp9_superframe,av1_frame_split,mpeg4_unpack_bframes,vp9_superframe_split")
+# ---------------------------------------------------------------------------
+'@
+    $ffPatched = $ffContent -replace [regex]::Escape($ffAnchor), "$ffAnchor`r`n$ffTrim"
+    Set-Content -Path $ffPortfile -Value $ffPatched -NoNewline
+    Write-Host "Patched ffmpeg portfile: demux/metadata-only build" -ForegroundColor Green
+    # vcpkg classic mode only asks "is it installed?" -- it never re-evaluates a changed
+    # portfile, so without this an install over an existing ffmpeg is a no-op that
+    # silently keeps the UNTRIMMED build. Same reason libheif is removed above.
+    & "$VcpkgRoot\vcpkg.exe" remove "ffmpeg:$Triplet" --disable-metrics 2>$null
+}
+Write-Host "Installing ffmpeg[core,avcodec,avformat,swresample,swscale]:$Triplet ..." -ForegroundColor Cyan
+& "$VcpkgRoot\vcpkg.exe" install "ffmpeg[core,avcodec,avformat,swresample,swscale]:$Triplet" --disable-metrics
+
 $libdir = "$VcpkgRoot\installed\$Triplet\lib"
-foreach ($lib in "heif.lib", "dav1d.lib") {
+foreach ($lib in "heif.lib", "dav1d.lib", "avcodec.lib", "avformat.lib") {
     if (-not (Test-Path "$libdir\$lib")) { throw "Install reported success but $libdir\$lib is missing." }
 }
-Write-Host "`nNative decode libs ready: $libdir\{heif,dav1d}.lib" -ForegroundColor Green
-Write-Host "Set VCPKG_ROOT=$VcpkgRoot (or keep it at ~/vcpkg) and build with --features libheif,dav1d." -ForegroundColor Green
+# A guard against the trap above: the untrimmed avcodec.lib is ~131 MB, the trimmed one
+# ~23 MB (measured 2026-07-14 from this exact recipe). If a stale full build survived,
+# say so rather than silently ship it.
+$avcodecMB = [math]::Round((Get-Item "$libdir\avcodec.lib").Length / 1MB, 1)
+if ($avcodecMB -gt 40) {
+    Write-Host "WARNING: avcodec.lib is $avcodecMB MB - expected ~23 MB for the demux-only build." -ForegroundColor Yellow
+    Write-Host "         The portfile patch likely did not take effect. Run:" -ForegroundColor Yellow
+    Write-Host "         $VcpkgRoot\vcpkg.exe remove ffmpeg:$Triplet   # then re-run this script" -ForegroundColor Yellow
+}
+Write-Host "`nNative decode libs ready: $libdir\{heif,dav1d,avcodec,avformat}.lib" -ForegroundColor Green
+Write-Host "Set VCPKG_ROOT=$VcpkgRoot (or keep it at ~/vcpkg) and build with --features libheif,dav1d,ffprobe." -ForegroundColor Green
+Write-Host "ffprobe (FFmpeg) additionally needs, at BUILD time only:" -ForegroundColor Green
+Write-Host "  * LIBCLANG_PATH -> a libclang for bindgen. Visual Studio already ships one:" -ForegroundColor Green
+Write-Host "      <VS>\VC\Tools\Llvm\{x64,ARM64}\bin   (no separate LLVM install needed)" -ForegroundColor Green
+Write-Host "  * a Developer shell (Enter-VsDevShell / vcvars): bindgen's clang reads INCLUDE" -ForegroundColor Green
+Write-Host "    to find stdint.h. A plain cargo build does not need this; bindgen does." -ForegroundColor Green

@@ -19,10 +19,8 @@ use std::time::Duration;
 use super::convert::FrameConverter;
 use super::io::FfInput;
 use super::probe::{fit_dims, video_facts, VideoFacts};
-use crate::video::{
-    poster_frame_score, VideoDetailsProbe, VideoInput, POSTER_GOOD_SCORE, POSTER_MAX_FRAMES,
-};
-use crate::{DecodeError, DecodedImage, FitBox, PixelFormat, VideoStreamInfo};
+use crate::video::{poster_frame_score, VideoInput, POSTER_GOOD_SCORE, POSTER_MAX_FRAMES};
+use crate::{DecodeError, DecodedImage, FitBox, PixelFormat};
 
 /// Overall watchdog for one poster attempt — a poster is a background nicety,
 /// never worth pinning a pool worker longer than this on hostile input.
@@ -72,64 +70,6 @@ pub fn ff_decode_video_poster(
     poster_inner(input, fit, cancel).map_err(DecodeError::Corrupt)
 }
 
-/// One read-only open's stream facts (inspector parity with the Windows
-/// `probe_video_input` / macOS `probe_video_stream`).
-///
-/// **This is the poster/prefetch path** — it runs for every prefetched video, opened or
-/// not, so it stays exactly as cheap as it was: no track enumeration happens here. The
-/// Inspector's richer read is [`ff_probe_video_details`].
-pub fn ff_probe_video_input(input: &VideoInput) -> Result<VideoStreamInfo, DecodeError> {
-    let mut opened = FfInput::open(input, None).map_err(DecodeError::Corrupt)?;
-    let facts = video_facts(opened.ctx()).map_err(DecodeError::Corrupt)?;
-    stream_info(&mut opened, &facts)
-}
-
-/// The **Details** probe (task #98): basic facts + the full track catalog, from one
-/// open. Off-thread only — never call this from the event loop or the poster path.
-pub fn ff_probe_video_details(
-    input: &VideoInput,
-    generation: u64,
-) -> Result<VideoDetailsProbe, DecodeError> {
-    let mut opened = FfInput::open(input, None).map_err(DecodeError::Corrupt)?;
-    let facts = video_facts(opened.ctx()).map_err(DecodeError::Corrupt)?;
-    // One open serves both reads: the catalog walks the same already-parsed stream
-    // table `video_facts` selected from.
-    let tracks = super::tracks::catalog_from_input(opened.ctx(), generation);
-    let video = stream_info(&mut opened, &facts)?;
-    Ok(VideoDetailsProbe { video, tracks })
-}
-
-/// The shared `VideoFacts` → [`VideoStreamInfo`] read, so the basic and details probes
-/// can never drift on codec/rotation/color policy.
-fn stream_info(
-    opened: &mut FfInput<'static>,
-    facts: &super::probe::VideoFacts,
-) -> Result<VideoStreamInfo, DecodeError> {
-    // Decoder-reported color under the shared fallback policy (no frame decode
-    // here — the probe is a ~header-only read, like the Windows one).
-    let decoder = decoder_for(opened.ctx(), facts.index)?;
-    // Posters are stills → always RGBA (no planar GPU path).
-    let conv = FrameConverter::new(
-        (facts.width, facts.height),
-        (1, 1),
-        0,
-        &decoder,
-        false,
-        false,
-    );
-    let sc = conv.source_color();
-    Ok(VideoStreamInfo {
-        codec: facts.codec,
-        width: facts.width,
-        height: facts.height,
-        rotation: facts.rotation.rem_euclid(360) as u32,
-        fps: facts.fps,
-        duration: facts.duration,
-        has_audio: facts.has_audio,
-        color: super::color::sdr_transform(&sc),
-    })
-}
-
 /// The poster walk's accept rule for an fp16 scene-linear frame — the linear
 /// equivalent of [`poster_frame_bright_enough`]'s ~10% sRGB floor (sRGB 0.10
 /// linearizes to ≈0.01). Subsampled like the RGBA8 walk.
@@ -170,25 +110,57 @@ fn scrgb_frame_score(f16_bytes: &[u8]) -> f32 {
     }
 }
 
-/// The decoder for stream `index` of an opened input.
+/// Build the video decoder for `index`, attaching hardware decode
+/// (VideoToolbox / VAAPI) when the platform + codec allow — the same accel the
+/// playback [`Reader`](super::video_producer) uses. A 4K HEVC/HDR poster walk
+/// decodes up to ~30 head frames + 12-frame deep-seek bursts; in **software**
+/// that's seconds (the "video takes ~5 s to show a poster" cost). The returned
+/// [`HwSession`](super::hw::HwSession) must outlive the decoder — the caller
+/// stores it. Falls back to software transparently (a rare HW-open failure
+/// retries software; `PB_NO_HWACCEL` forces it).
 fn decoder_for(
     ctx: &mut ff::format::context::Input,
     index: usize,
-) -> Result<ff::decoder::Video, DecodeError> {
-    let stream = ctx
+) -> Result<(ff::decoder::Video, Option<super::hw::HwSession>), DecodeError> {
+    let corrupt = |e: String| DecodeError::Corrupt(e);
+    let params = ctx
         .streams()
         .find(|s| s.index() == index)
-        .ok_or_else(|| DecodeError::Corrupt("video stream vanished".into()))?;
-    ff::codec::context::Context::from_parameters(stream.parameters())
-        .and_then(|c| c.decoder().video())
-        .map_err(|e| DecodeError::Corrupt(format!("FFmpeg decoder: {e}")))
+        .ok_or_else(|| DecodeError::Corrupt("video stream vanished".into()))?
+        .parameters();
+    let codec_id = params.id();
+    let mut cctx = ff::codec::context::Context::from_parameters(params)
+        .map_err(|e| corrupt(format!("FFmpeg decoder: {e}")))?;
+    let mut hw = super::hw::try_enable(&mut cctx, codec_id);
+    match cctx.decoder().video() {
+        Ok(d) => Ok((d, hw)),
+        // A rare HW-attached open failure: drop the device and retry pure software
+        // (mirrors the playback reader — belt-and-suspenders, not the usual path).
+        Err(_) if hw.is_some() => {
+            hw = None;
+            let params = ctx
+                .streams()
+                .find(|s| s.index() == index)
+                .ok_or_else(|| DecodeError::Corrupt("video stream vanished".into()))?
+                .parameters();
+            let d = ff::codec::context::Context::from_parameters(params)
+                .and_then(|c| c.decoder().video())
+                .map_err(|e| corrupt(format!("FFmpeg decoder: {e}")))?;
+            Ok((d, hw))
+        }
+        Err(e) => Err(corrupt(format!("FFmpeg decoder: {e}"))),
+    }
 }
 
 /// The best-scoring poster candidate seen so far. Only the winning frame is
 /// kept resident; every other decoded frame is scored and dropped.
 struct Best {
     score: f32,
-    frame: Option<(Vec<u8>, u32, u32)>,
+    /// The winning **raw** (CPU) decoded frame — held (a cheap refcounted clone)
+    /// so only this one frame is converted at the full display fit afterward. The
+    /// walk itself scores at a reduced scale (task #91 follow-up: the ~4× poster
+    /// cost was swscaling every scored frame at 4K when only one is kept).
+    frame: Option<ff::frame::Video>,
 }
 
 impl Best {
@@ -199,14 +171,14 @@ impl Best {
         }
     }
 
-    /// Offer a scored frame. Keeps it if it beats the current best (first max
-    /// wins — deterministic, so the path and in-RAM posters stay bit-identical).
-    /// Returns `true` when this frame clears [`POSTER_GOOD_SCORE`] — the signal
-    /// that the walk has a clearly-good poster and can stop.
-    fn consider(&mut self, score: f32, pixels: Vec<u8>, w: u32, h: u32) -> bool {
+    /// Offer a scored raw frame. Clones + keeps it if it beats the current best
+    /// (first max wins — deterministic, so the path and in-RAM posters stay
+    /// bit-identical). Returns `true` when this frame clears [`POSTER_GOOD_SCORE`]
+    /// — the signal that the walk has a clearly-good poster and can stop.
+    fn consider(&mut self, score: f32, frame: &ff::frame::Video) -> bool {
         if self.frame.is_none() || score > self.score {
             self.score = score;
-            self.frame = Some((pixels, w, h));
+            self.frame = Some(frame.clone());
         }
         score >= POSTER_GOOD_SCORE
     }
@@ -218,7 +190,12 @@ impl Best {
 struct PosterWalk<'a> {
     opened: FfInput<'a>,
     decoder: ff::decoder::Video,
-    conv: FrameConverter,
+    /// Hardware decode device, kept alive for the decoder's lifetime (`None` in
+    /// software). Declared after `decoder` so it drops after it.
+    _hw: Option<super::hw::HwSession>,
+    /// The **reduced-scale** converter used only to score each candidate's
+    /// brightness cheaply; the winner is converted at full fit afterward.
+    walk_conv: FrameConverter,
     facts: VideoFacts,
     packet: ff::Packet,
     eof_sent: bool,
@@ -237,14 +214,22 @@ impl PosterWalk<'_> {
             // Pull every ready frame before feeding more packets.
             let mut decoded = ff::frame::Video::empty();
             while decoded_count < limit && self.decoder.receive_frame(&mut decoded).is_ok() {
-                let (pixels, w, h) = self.conv.convert(&decoded)?;
+                // A hardware decode leaves the frame on the GPU (VideoToolbox /
+                // VAAPI surface) — pull it to a CPU NV12/P010 frame before
+                // scoring; software frames pass straight through.
+                let transferred = super::hw::transfer_if_hw(&decoded)?;
+                let src = transferred.as_ref().unwrap_or(&decoded);
+                // Score at the reduced WALK scale (brightness is scale-invariant,
+                // so the same frame wins) — the full-res convert happens once, on
+                // the winner only. `best` holds the raw frame for that.
+                let (pixels, _w, _h) = self.walk_conv.convert(src)?;
                 decoded_count += 1;
-                let score = if self.conv.output_format() == PixelFormat::Rgba16F {
+                let score = if self.walk_conv.output_format() == PixelFormat::Rgba16F {
                     scrgb_frame_score(&pixels)
                 } else {
                     poster_frame_score(&pixels)
                 };
-                if best.consider(score, pixels, w, h) {
+                if best.consider(score, src) {
                     return Ok(true);
                 }
             }
@@ -304,7 +289,7 @@ fn poster_inner(
     let mut opened = FfInput::open(input, Some(cancel))?;
     opened.set_op_deadline(Some(POSTER_DEADLINE));
     let facts = video_facts(opened.ctx())?;
-    let decoder = decoder_for(opened.ctx(), facts.index).map_err(|e| e.to_string())?;
+    let (decoder, hw) = decoder_for(opened.ctx(), facts.index).map_err(|e| e.to_string())?;
 
     // Output geometry: fit the SAR-corrected display dims, then map back to
     // pre-rotation axes for the scaler (the converter rotates after).
@@ -313,25 +298,36 @@ fn poster_inner(
         Some(f) => fit_dims(disp_w, disp_h, f),
         None => (disp_w, disp_h),
     };
-    let pre_rot = if facts.rotation % 180 == 90 {
-        (fh, fw)
-    } else {
-        (fw, fh)
+    let pre_rot = |w: u32, h: u32| {
+        if facts.rotation % 180 == 90 {
+            (h, w)
+        } else {
+            (w, h)
+        }
     };
-    let conv = FrameConverter::new(
-        (facts.width, facts.height),
-        pre_rot,
-        facts.rotation,
-        &decoder,
-        false, // posters are stills → RGBA, never the planar GPU path
-        false,
-    );
+    let mk_conv = |out: (u32, u32)| {
+        FrameConverter::new(
+            (facts.width, facts.height),
+            out,
+            facts.rotation,
+            &decoder,
+            false, // posters are stills → RGBA, never the planar GPU path
+            false,
+        )
+    };
+    // Two converters: a reduced-scale one to *score* every candidate cheaply, and
+    // the full-fit one that converts the winner exactly once. Scoring at 4K was the
+    // dominant poster cost (measured ~4× the small-scale walk).
+    let (ww, wh) = walk_dims(fw, fh);
+    let walk_conv = mk_conv(pre_rot(ww, wh));
+    let full_conv = mk_conv(pre_rot(fw, fh));
 
     let duration = facts.duration;
     let mut walk = PosterWalk {
         opened,
         decoder,
-        conv,
+        _hw: hw,
+        walk_conv,
         facts,
         packet: ff::Packet::empty(),
         eof_sent: false,
@@ -340,65 +336,99 @@ fn poster_inner(
 
     // Phase 1 — the cheap head walk from the start. A clip that opens on content
     // settles here; a dark/logo/fade opening leaves `best` weak and falls through.
-    if walk.scan(POSTER_HEAD_FRAMES, &mut best)? {
-        return walk.finish(best, disp_w, disp_h);
-    }
+    let good = walk.scan(POSTER_HEAD_FRAMES, &mut best)?
+        // Phase 2 — seek past the intro (feature-film case), shallow → deep,
+        // stopping at the first good frame so the poster is as early as the intro
+        // allows.
+        || deep_scan(&mut walk, duration, &mut best)?;
+    let _ = good; // both outcomes assemble from `best` (fallback = least-black frame)
 
-    // Phase 2 — seek past the intro (feature-film case), shallow → deep, stopping
-    // at the first good frame so the poster is as early as the intro allows.
-    if let Some(dur) = duration {
-        if dur >= POSTER_DEEP_MIN {
-            let cap = poster_deep_cap(dur);
-            let mut last = Duration::ZERO;
-            for off in POSTER_SEEK_OFFSETS {
-                let target = off.min(cap);
-                // Skip offsets the head walk already covered (~1 s) and duplicates
-                // (a short clip collapses the deeper offsets onto the cap).
-                if target <= Duration::from_secs(1) || target <= last {
-                    continue;
-                }
-                last = target;
-                if walk.opened.cancelled() {
-                    return Err("cancelled".into());
-                }
-                if walk.seek(target).is_ok() && walk.scan(POSTER_BURST_FRAMES, &mut best)? {
-                    return walk.finish(best, disp_w, disp_h);
-                }
-            }
-        }
-    }
-
-    walk.finish(best, disp_w, disp_h)
+    assemble_poster(full_conv, best, walk.facts.codec, disp_w, disp_h)
 }
 
-impl PosterWalk<'_> {
-    /// Assemble the winning candidate into a `DecodedImage` (poster ≡ HDR-still
-    /// shape for the renderer). `Err` only when no frame decoded at all.
-    fn finish(&self, best: Best, disp_w: u32, disp_h: u32) -> Result<DecodedImage, String> {
-        let (pixels, w, h) = best.frame.ok_or("video decoded no frames")?;
-        let sc = self.conv.source_color();
-        // HDR (PQ/HLG) posters leave as fp16 scene-linear scRGB — the exact shape
-        // `common::finalize_hdr_scrgb` gives HDR stills, so the renderer treats a
-        // video poster and an HDR photo identically (plan §9).
-        let hdr = self.conv.output_format() == PixelFormat::Rgba16F;
-        Ok(DecodedImage {
-            width: w,
-            height: h,
-            orig_width: disp_w,
-            orig_height: disp_h,
-            codec: self.facts.codec,
-            format: self.conv.output_format(),
-            pixels,
-            is_preview: false,
-            color: if hdr {
-                crate::ColorTransform::srgb() // already scene-linear; passthrough
-            } else {
-                super::color::sdr_transform(&sc)
-            },
-            peak: self.conv.peak(),
-            animated: None,
-        })
+/// The reduced scale to *score* candidates at — brightness is scale-invariant, so
+/// the same frame wins, but each scored frame is a tiny convert instead of a 4K
+/// one. Capped so small clips (test fixtures) walk at their native size unchanged.
+fn walk_dims(fw: u32, fh: u32) -> (u32, u32) {
+    const WALK_MAX_EDGE: u32 = 480;
+    let long = fw.max(fh);
+    if long <= WALK_MAX_EDGE {
+        return (fw, fh);
     }
+    let s = WALK_MAX_EDGE as f32 / long as f32;
+    (
+        ((fw as f32 * s).round() as u32).max(2) & !1,
+        ((fh as f32 * s).round() as u32).max(2) & !1,
+    )
+}
+
+/// Phase 2 of the walk: seek past the intro (feature-film case), shallow → deep,
+/// stopping at the first good frame. Returns whether a clearly-good frame landed.
+fn deep_scan(
+    walk: &mut PosterWalk<'_>,
+    duration: Option<Duration>,
+    best: &mut Best,
+) -> Result<bool, String> {
+    let Some(dur) = duration else {
+        return Ok(false);
+    };
+    if dur < POSTER_DEEP_MIN {
+        return Ok(false);
+    }
+    let cap = poster_deep_cap(dur);
+    let mut last = Duration::ZERO;
+    for off in POSTER_SEEK_OFFSETS {
+        let target = off.min(cap);
+        // Skip offsets the head walk already covered (~1 s) and duplicates
+        // (a short clip collapses the deeper offsets onto the cap).
+        if target <= Duration::from_secs(1) || target <= last {
+            continue;
+        }
+        last = target;
+        if walk.opened.cancelled() {
+            return Err("cancelled".into());
+        }
+        if walk.seek(target).is_ok() && walk.scan(POSTER_BURST_FRAMES, best)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Assemble the winning **raw** frame into a `DecodedImage` (poster ≡ HDR-still
+/// shape for the renderer), converting it once at the full display fit. `Err`
+/// only when no frame decoded at all.
+fn assemble_poster(
+    mut full_conv: FrameConverter,
+    best: Best,
+    codec: &'static str,
+    disp_w: u32,
+    disp_h: u32,
+) -> Result<DecodedImage, String> {
+    let winner = best.frame.ok_or("video decoded no frames")?;
+    let (pixels, w, h) = full_conv.convert(&winner)?;
+    let sc = full_conv.source_color();
+    // HDR (PQ/HLG) posters leave as fp16 scene-linear scRGB — the exact shape
+    // `common::finalize_hdr_scrgb` gives HDR stills, so the renderer treats a
+    // video poster and an HDR photo identically (plan §9).
+    let hdr = full_conv.output_format() == PixelFormat::Rgba16F;
+    Ok(DecodedImage {
+        width: w,
+        height: h,
+        orig_width: disp_w,
+        orig_height: disp_h,
+        codec,
+        format: full_conv.output_format(),
+        pixels,
+        is_preview: false,
+        color: if hdr {
+            crate::ColorTransform::srgb() // already scene-linear; passthrough
+        } else {
+            super::color::sdr_transform(&sc)
+        },
+        peak: full_conv.peak(),
+        animated: None,
+    })
 }
 
 #[cfg(test)]
@@ -477,8 +507,10 @@ mod tests {
 
     #[test]
     fn probe_reports_the_stream_facts() {
-        let info =
-            ff_probe_video_input(&VideoInput::Path(fixture("color_with_tone.mp4"))).expect("probe");
+        let info = super::super::details::ff_probe_video_input(&VideoInput::Path(fixture(
+            "color_with_tone.mp4",
+        )))
+        .expect("probe");
         assert_eq!(info.codec, "H.264");
         assert!(info.has_audio);
         assert!(info.duration.is_some());
@@ -511,5 +543,46 @@ mod tests {
             &AtomicBool::new(false),
         );
         assert!(r.is_err());
+    }
+
+    /// Poster-generation wall time on a real 4K HEVC/HDR clip — the "why does the
+    /// initial video take ~5 s to show a poster" measurement. Fit to a big display
+    /// box (like the owner's ultrawide). Run:
+    /// `PB_NET_TEST_MKV=/path cargo test -p pb-decode --release --features ffvideo \
+    ///   poster_generation_time -- --nocapture --ignored`
+    #[test]
+    #[ignore = "needs PB_NET_TEST_MKV pointing at a real 4K HEVC clip"]
+    fn poster_generation_time() {
+        let Ok(path) = std::env::var("PB_NET_TEST_MKV") else {
+            eprintln!("skipping: set PB_NET_TEST_MKV");
+            return;
+        };
+        for fit in [
+            FitBox {
+                max_width: 7680,
+                max_height: 2160,
+            },
+            FitBox {
+                max_width: 480,
+                max_height: 270,
+            },
+        ] {
+            let t = std::time::Instant::now();
+            let img = ff_decode_video_poster(
+                &VideoInput::Path(PathBuf::from(&path)),
+                Some(fit),
+                &AtomicBool::new(false),
+            )
+            .expect("poster");
+            eprintln!(
+                "[poster] fit={}x{} → {}x{} {:?} in {:.2}s",
+                fit.max_width,
+                fit.max_height,
+                img.width,
+                img.height,
+                img.format,
+                t.elapsed().as_secs_f64()
+            );
+        }
     }
 }

@@ -335,6 +335,17 @@ final class MetalCanvasNSView: NSView {
     /// shows until then — no black/stale flash). Nukes any prior/orphaned video layers first,
     /// so there is never a second (background) video showing through.
     func attachVideoLayer(_ playerLayer: AVPlayerLayer) {
+        playerLayer.videoGravity = .resizeAspect
+        attachVideoSublayer(playerLayer)
+    }
+
+    /// Generalized attach for the Phase 3 sample-buffer presenter: hosts ANY
+    /// `CALayer`-backed video presentation (an `AVPlayerLayer` or an
+    /// `AVSampleBufferDisplayLayer`) inside the same opaque letterbox container,
+    /// hidden until the caller reveals it on the first displayable frame. The
+    /// caller owns its own `videoGravity` (both layer types have it); everything
+    /// else — container, letterbox color, clipping, hidden-until-reveal — is shared.
+    func attachVideoSublayer(_ videoLayer: CALayer) {
         detachVideoLayer()
         let container = CALayer()
         container.name = Self.videoLayerName
@@ -352,15 +363,14 @@ final class MetalCanvasNSView: NSView {
         // it (called from the player's isReadyForDisplay callback), swapping poster→video in
         // one step with nothing solid in between.
         container.isHidden = true
-        playerLayer.videoGravity = .resizeAspect
-        playerLayer.isHidden = true
+        videoLayer.isHidden = true
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         container.frame = layer?.bounds ?? bounds
         container.contentsScale = backingScale
-        playerLayer.frame = container.bounds
-        playerLayer.contentsScale = backingScale
-        container.addSublayer(playerLayer)
+        videoLayer.frame = container.bounds
+        videoLayer.contentsScale = backingScale
+        container.addSublayer(videoLayer)
         layer?.addSublayer(container)
         CATransaction.commit()
         videoContainer = container

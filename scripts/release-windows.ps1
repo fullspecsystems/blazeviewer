@@ -91,17 +91,25 @@ if (-not $env:VCPKG_ROOT) {
         Where-Object { (Test-Path "$_\installed\$Triplet\lib\heif.lib") -and (Test-Path "$_\installed\$Triplet\lib\dav1d.lib") } |
         Select-Object -First 1
 }
-foreach ($lib in "heif.lib", "dav1d.lib") {
+foreach ($lib in "heif.lib", "dav1d.lib", "avcodec.lib", "avformat.lib") {
     if (-not $env:VCPKG_ROOT -or -not (Test-Path "$env:VCPKG_ROOT\installed\$Triplet\lib\$lib")) {
-        throw "$lib ($Triplet) not found (checked VCPKG_ROOT, C:\vcpkg-pb, ~\vcpkg). Run ``scripts/setup-libheif.ps1 -Triplet $Triplet`` first — the release ships --features libheif,dav1d."
+        throw "$lib ($Triplet) not found (checked VCPKG_ROOT, C:\vcpkg-pb, ~\vcpkg). Run ``scripts/setup-libheif.ps1 -Triplet $Triplet`` first — the release ships --features libheif,dav1d,ffprobe."
     }
 }
 Write-Host "==> native decode libs: $env:VCPKG_ROOT ($Triplet)"
 
+# ── 2b. FFmpeg's bindgen needs libclang AND the MSVC/SDK include paths (task #100) — new
+#       with `ffprobe`, since a plain cargo build never needed a Developer shell. Skipped
+#       when the caller is already inside one (INCLUDE set), so running this from a VS
+#       prompt costs nothing. The host builds natively, so the triplet's arch is the host's.
+if (-not $env:INCLUDE -or -not $env:LIBCLANG_PATH) {
+    & "$PSScriptRoot\vs-dev-env.ps1" -Arch $(if ($Triplet -like 'arm64*') { 'arm64' } else { 'x64' })
+}
+
 # ── 3. Always build fresh — a stale exe must never be silently signed/packaged. Building for the
 #      host arch, so no --target (keeps the output in target\release and avoids a full rebuild).
-Write-Host "==> cargo build --release -p pb-app --features libheif,dav1d" -ForegroundColor Cyan
-cargo build --release -p pb-app --features libheif,dav1d
+Write-Host "==> cargo build --release -p pb-app --features libheif,dav1d,ffprobe" -ForegroundColor Cyan
+cargo build --release -p pb-app --features libheif,dav1d,ffprobe
 if ($LASTEXITCODE -ne 0) { throw "build failed" }
 $Exe = "target\release\photoblaze.exe"
 if (-not (Test-Path $Exe)) { throw "$Exe not found after build" }

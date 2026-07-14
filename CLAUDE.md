@@ -15,6 +15,11 @@ Corollary: **we do not guess about speed — we measure it.** Performance claims
 require numbers from the benchmark corpus. Architecture choices that affect the
 hot path are built behind swappable seams and A/B tested (see *Instrumentation*).
 
+> ⚠️ **Before you report a licensing bug:** a dev build linking
+> `/opt/homebrew/opt/ffmpeg/...` (GPL) is **expected and correct** — dev and
+> release use different FFmpeg. This trips up almost every fresh reader. See
+> *Licensing* below before acting on it.
+
 ## The performance model (read this before optimizing anything)
 
 The naive intuition is "tune the GPU rendering." That's wrong. Drawing one
@@ -305,6 +310,81 @@ measurable here.
   hook, photon timestamp) behind a single helper so the eventual port is a small
   surface.
 
+## Licensing — LGPL discipline (read before touching FFmpeg, libheif, or dist)
+
+PhotoBlaze is **proprietary and sold**. That makes third-party native deps a hard
+ship gate, not a chore. The rule, in one line:
+
+> **We only ever DECODE. Ship LGPL; never ship GPL.** GPL-only encoders and
+> filters (x264, x265, GPL avfilter) are irrelevant to a viewer — we don't encode
+> anything, so we give up nothing by excluding them.
+
+### 🪤 The Homebrew trap — the #1 false alarm in this repo
+
+**Dev and release link different FFmpeg. This is deliberate.**
+
+| Build | FFmpeg | License | Shippable? |
+|---|---|---|---|
+| `build-swift-host.sh --ffvideo` (**dev**) | Homebrew `/opt/homebrew/opt/ffmpeg` | **GPL-3.0** (`--enable-gpl`, x264/x265) | ❌ never |
+| `build-swift-host.sh --bundle-ffmpeg` (**release**) | pinned source → `third_party/ffmpeg/<arch>` | **LGPL-2.1+** | ✅ yes |
+
+So: **`otool -L` on `target/swift-host/**` showing Homebrew GPL dylibs is not a
+bug.** It is the dev path working as designed. Before concluding the *product*
+has a licensing problem, check the artifact that actually ships:
+
+```sh
+# Inspect the SHIPPED app, not the dev build:
+hdiutil attach dist/PhotoBlaze-*.dmg -nobrowse -readonly -mountpoint /tmp/pb
+otool -L /tmp/pb/PhotoBlaze.app/Contents/MacOS/PhotoBlaze | grep -i homebrew   # must be EMPTY
+ls  /tmp/pb/PhotoBlaze.app/Contents/Frameworks/                                # bundled LGPL dylibs live here
+hdiutil detach /tmp/pb
+```
+
+A release .app must reference FFmpeg **only** via `@rpath/…` out of
+`Contents/Frameworks`. Zero absolute `/opt/homebrew` paths. If you see one in a
+`dist/` artifact, *that* is a real bug — the dev path leaked into a release.
+
+### How each platform stays clean
+
+- **macOS** — `scripts/build-ffmpeg-macos.sh` builds a pinned FFmpeg 8.1.1 from
+  source: no `--enable-gpl`, no `--enable-nonfree`, `--disable-encoders
+  --disable-muxers`, `--install-name-dir=@rpath`. It **asserts** LGPL at the end
+  (belt-and-suspenders against a flag leaking in). `bundle-ffmpeg-macos.sh` copies
+  the dylibs into `Contents/Frameworks`; `release-macos.sh` re-signs them with our
+  Developer ID. HEIC on macOS uses **Apple Image I/O** — libheif is deliberately
+  *not* linked here (see `crates/pb-decode/build.rs`), so macOS has no libheif
+  exposure at all.
+- **Linux** — system/AppImage-bundled shared libheif + FFmpeg via `linuxdeploy`;
+  dynamic linkage, so LGPL §4 is satisfied by construction.
+- **Windows** — ⚠️ the open one. `pb-decode/build.rs` links vcpkg **static**
+  libheif + libde265 (`static-md`). Static-linking LGPL into a proprietary binary
+  triggers the §4 relink obligation, which is *not* satisfied by attribution
+  alone. The fix is DLL linkage (ship the two DLLs in the installer); the current
+  static choice was a convenience call ("no DLLs to ship"), not a constraint.
+  **Verify status against task #77 before shipping a paid Windows build.**
+  (`dav1d` is BSD-2-Clause — static is fine, attribution only.)
+
+### Distribution model
+
+Direct sale + **Sparkle** auto-update. This sidesteps the App Store's long-running
+incompatibility with LGPL relink requirements. If an App Store channel is ever
+added, the LGPL bundling question must be re-opened *first* — it is not a
+packaging detail.
+
+### Non-code assets
+
+**Font Awesome Pro** is licensed to the owner and **not redistributable** — see
+*HUD / toast icons* above. Any FA Pro glyph baked into a shipped artifact is a
+compliance defect regardless of platform.
+
+### Where the truth lives (in precedence order)
+
+1. `scripts/build-ffmpeg-macos.sh` — the authoritative configure flags + the *why*
+2. `THIRD-PARTY-NOTICES.md` — the shipped compliance manifest
+3. `crates/pb-decode/build.rs` — per-target linkage (static vs shared, which cfgs)
+
+If those three disagree with this section, **they win** — and fix this section.
+
 ## Current library picks
 
 These are the starting points from the research in `.taskmaster/docs/`. Each is
@@ -474,10 +554,20 @@ historical `win` Velopack channel; **ARM64** as `win-arm64` — both land in the
 an install only ever auto-updates within its own channel (Velopack tracks the channel the app was
 installed from, so `update.rs` needs no arch logic and the two never cross). Each arch is built on its
 own **native** box (no cross toolchain wired up), after building that arch's native decode libs
-(libheif **and dav1d**, task #76) once with `scripts/setup-libheif.ps1 -Triplet
+(libheif, dav1d, **and FFmpeg** — tasks #76 / #100) once with `scripts/setup-libheif.ps1 -Triplet
 <arch>-windows-static-md` — the script pins the vcpkg tree to a recorded commit (`-VcpkgRef`) and
-installs both ports; `pb-decode/build.rs` picks the vcpkg triplet from the target arch. The ship
-feature set is `--features libheif,dav1d`. ARM64 uses the `vcredist143-arm64` redist framework.
+installs all three ports; `pb-decode/build.rs` picks the vcpkg triplet from the target arch. The ship
+feature set is `--features libheif,dav1d,ffprobe`. ARM64 uses the `vcredist143-arm64` redist framework.
+
+> **`ffprobe` needs a VS Developer shell — it's the first feature that does.** FFmpeg's
+> `bindgen` runs its own clang, which reads `INCLUDE` to find `stdint.h`; a plain `cargo build`
+> never needed that, because rustc finds the MSVC linker itself. `scripts/vs-dev-env.ps1` handles
+> it (release script + both CI lanes call it; it no-ops if you're already in a dev shell), and VS
+> already ships the required libclang at `VC\Tools\Llvm\{x64,ARM64}\bin` — nothing extra to install.
+> It also needs `VCPKG_ROOT` **exported**: the `vcpkg` crate `ffmpeg-sys-next` uses has no `~/vcpkg`
+> fallback, unlike our own build.rs. FFmpeg here is **demux/metadata only** (MF still decodes
+> everything) — the setup script patches the port to a trimmed build, which is the difference
+> between **+3.06 MB** and +16.42 MB on the exe.
 
 **macOS** is **built locally on the owner's Mac** via `scripts/release-macos.sh` (Developer ID +
 notarization), then published to `downloads.fullspec.ca/photoblaze/mac` with

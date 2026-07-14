@@ -88,6 +88,11 @@ pub use overlay::{InspectorTab, LeftTab, NativeToast, Panels, SlotContent, Toast
 /// crate can feed its AVAudioEngine sink without a direct pb-decode edge.
 #[cfg(feature = "ffvideo")]
 pub use pb_decode::{AudioError, FfAudioDecoder};
+/// The demux-only compressed packet source (video-overhaul Phase 3), re-exported
+/// so the macOS FFI crate can feed the AVSampleBufferDisplayLayer presenter
+/// without a direct pb-decode edge.
+#[cfg(feature = "ffvideo")]
+pub use pb_decode::{DemuxPacket, DemuxStreamInfo, DoviConfig, VideoCodec, VideoDemuxer};
 pub use pb_key::PbKey;
 pub use slideshow::Slideshow;
 pub use undo::UndoAction;

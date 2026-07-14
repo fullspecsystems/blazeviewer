@@ -20,6 +20,15 @@ with any pre-release suffix carried only by the tag.
   the existing window comes to the front.
 
 ### Changed
+- **Keyboard zoom and pan ease in more gently.** Holding the zoom/pan keys now starts slower and
+  builds up along a smooth curve instead of ramping linearly, so small taps make fine adjustments
+  (handy for nudging a letterboxed film to fill the screen) while a longer hold still moves quickly.
+  The top speed is also a touch lower.
+- **Video posters appear much faster (macOS/Linux).** The still frame shown for a video (before
+  you press play) is generated ~2–4× quicker: it now uses hardware decode and finds the first
+  non-black frame at a small scale, converting only the chosen frame at full resolution instead of
+  every candidate at 4K. On a 4K HDR film that's ~1.5s → ~0.6s of decode work — so a video opened as
+  the first item stops sitting blank for several seconds.
 - **HDR and 10-bit video now decode with more headroom (macOS/Linux).** The per-frame color
   conversion for 4K HDR (Dolby Vision / HDR10 / HLG) and 10-bit video moved onto the GPU, so the
   CPU does far less work per frame — smoother playback with margin to spare, especially on demanding
@@ -35,8 +44,8 @@ with any pre-release suffix carried only by the tag.
   waits and gives you the complete set rather than a half-filled one. Reading a video's details never
   stalls the viewer — it happens in the background, so a damaged file or one on a slow network share
   can't freeze the window; the panel says "Reading video details…" until it's ready. A video inside a
-  ZIP or 7z now reports exactly what the same file reports loose. *Windows currently reports
-  "Present — details unavailable" for audio, pending its own track enumeration.*
+  ZIP or 7z now reports exactly what the same file reports loose, and Windows, macOS and Linux all
+  read the same file the same way.
 - The info line (`i`) now defaults to the **bottom-center** of the screen instead of the
   bottom-right. (Existing users keep whatever position they've already set; this only affects
   fresh installs.)
