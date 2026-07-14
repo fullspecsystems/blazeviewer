@@ -2211,6 +2211,25 @@ impl AppCoreHandle {
                     stash_audio_input(session_id.0, input);
                     return Some(ffi::CoreEffectFfi::StartVideoAudio(session_id.0, muted));
                 }
+                // Sample-buffer video (video-overhaul Phase 3): stash the container
+                // input; the host pulls it OFF the main actor via
+                // `open_stashed_demux(session_id)` on its serial reader queue, feeding
+                // an AVSampleBufferDisplayLayer. Same stash rationale as StartVideoAudio
+                // (a `VideoInput` can't cross the bridge). Emitted only on macOS+ffvideo.
+                #[cfg(feature = "ffvideo")]
+                C::PlaySampleBuffer {
+                    input,
+                    session_id,
+                    muted,
+                    start_secs,
+                } => {
+                    stash_demux_input(session_id.0, input);
+                    return Some(ffi::CoreEffectFfi::PlaySampleBuffer(
+                        session_id.0,
+                        muted,
+                        start_secs,
+                    ));
+                }
                 // A natively-presented panel changed (task #54) — the host calls
                 // `help_refresh()` + `help_visible()` and updates its SwiftUI view.
                 C::PanelsChanged => return Some(ffi::CoreEffectFfi::PanelsChanged),
@@ -3163,6 +3182,453 @@ fn session_audio_free(ptr: usize) {
     }
 }
 
+// ── Sample-buffer video demux: the owned off-main packet source (video-overhaul Phase 3) ──
+//
+// The AVSampleBufferDisplayLayer presenter wants compressed access units, not decoded
+// pixels. FFmpeg (Rust) demuxes the container; the host owns the demuxer behind a raw
+// `usize` pointer — opened off the main actor via `open_stashed_demux(session_id)` (input
+// stashed by the `PlaySampleBuffer` effect) on a serial reader queue, driven through the
+// `demux_*(ptr, …)` free functions, and freed exactly once. Same rationale as the
+// session-audio seam above: swift-bridge can't return an owned opaque type, and a
+// `VideoInput` can't cross the bridge. `demux_read_packet` advances the demuxer, caches
+// the packet's timing/keyframe flags on the handle, and returns the bytes; the host then
+// reads the cached metadata via the `demux_packet_*` getters (mirrors the session-audio
+// read + separate state-getter split). `demux_state` is 0 Ok / 1 Eof / 2 Failed.
+
+/// The boxed, exclusively-owned demuxer handed to Swift as a raw `usize`. `last`
+/// caches the most recently read packet's timing/keyframe flags so the host can read
+/// them after `demux_read_packet` returns the bytes; `state` distinguishes a clean EOF
+/// (1) from a demux error (2) so the presenter parks vs fails honestly.
+#[cfg(feature = "ffvideo")]
+struct DemuxHandle {
+    demux: pb_app_core::VideoDemuxer,
+    last_pts: i64,
+    last_dts: i64,
+    last_duration: i64,
+    last_is_key: bool,
+    state: u8,
+}
+
+/// One-slot stash for the `PlaySampleBuffer` container input, keyed by session id.
+/// Written on the main actor (`next_effect`), read on the host's reader queue
+/// (`open_stashed_demux`) — the `Mutex` bridges the two. `VideoInput` is `Send`.
+#[cfg(feature = "ffvideo")]
+static DEMUX_STASH: std::sync::Mutex<Option<(u64, pb_app_core::video::VideoInput)>> =
+    std::sync::Mutex::new(None);
+
+/// Stash the container input for `session_id`, replacing any prior slot.
+#[cfg(feature = "ffvideo")]
+fn stash_demux_input(session_id: u64, input: pb_app_core::video::VideoInput) {
+    *DEMUX_STASH.lock().unwrap_or_else(|e| e.into_inner()) = Some((session_id, input));
+}
+
+/// Open the demuxer over the container `PlaySampleBuffer` stashed for `session_id`,
+/// **off the main actor**. Returns a nonzero pointer to a boxed [`DemuxHandle`] on
+/// success, or `0` on a missing stash / open failure (the presenter then reports a
+/// classified failure so the core falls back to the Session route). The stash is
+/// consumed on success and kept on failure (retry-safe), mirroring the audio seam.
+fn open_stashed_demux(session_id: u64) -> usize {
+    #[cfg(feature = "ffvideo")]
+    {
+        let input = {
+            let guard = DEMUX_STASH.lock().unwrap_or_else(|e| e.into_inner());
+            match guard.as_ref() {
+                Some((id, input)) if *id == session_id => input.clone(),
+                _ => return 0,
+            }
+        };
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        match pb_app_core::VideoDemuxer::open(&input, cancel) {
+            Ok(demux) => {
+                let mut guard = DEMUX_STASH.lock().unwrap_or_else(|e| e.into_inner());
+                if guard.as_ref().is_some_and(|(id, _)| *id == session_id) {
+                    *guard = None; // consumed on success
+                }
+                Box::into_raw(Box::new(DemuxHandle {
+                    demux,
+                    last_pts: i64::MIN,
+                    last_dts: i64::MIN,
+                    last_duration: 0,
+                    last_is_key: false,
+                    state: 0,
+                })) as usize
+            }
+            Err(e) => {
+                eprintln!("sample-buffer demux open failed: {e}"); // stash survives for retry
+                0
+            }
+        }
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = session_id;
+        0
+    }
+}
+
+/// Shared borrow of a live [`DemuxHandle`] from a nonzero pointer. The host serializes
+/// every pointer call on its reader queue, so `&`/`&mut` aliasing can't occur.
+#[cfg(feature = "ffvideo")]
+fn demux_ref<'a>(ptr: usize) -> Option<&'a DemuxHandle> {
+    (ptr != 0).then(|| unsafe { &*(ptr as *const DemuxHandle) })
+}
+
+/// Video codec: 0 H.264, 1 HEVC, 2 other (routes to the Session fallback).
+fn demux_codec(ptr: usize) -> u8 {
+    #[cfg(feature = "ffvideo")]
+    {
+        match demux_ref(ptr).map(|h| h.demux.info().codec) {
+            Some(pb_app_core::VideoCodec::H264) => 0,
+            Some(pb_app_core::VideoCodec::Hevc) => 1,
+            _ => 2,
+        }
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = ptr;
+        2
+    }
+}
+
+/// Coded (pre-rotation) width / height.
+fn demux_width(ptr: usize) -> u32 {
+    #[cfg(feature = "ffvideo")]
+    {
+        demux_ref(ptr).map_or(0, |h| h.demux.info().facts.width)
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = ptr;
+        0
+    }
+}
+fn demux_height(ptr: usize) -> u32 {
+    #[cfg(feature = "ffvideo")]
+    {
+        demux_ref(ptr).map_or(0, |h| h.demux.info().facts.height)
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = ptr;
+        0
+    }
+}
+
+/// Stream time base (numerator / denominator) — PTS/DTS units → `CMTime`.
+fn demux_time_base_num(ptr: usize) -> i32 {
+    #[cfg(feature = "ffvideo")]
+    {
+        demux_ref(ptr).map_or(0, |h| h.demux.info().facts.time_base.0)
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = ptr;
+        0
+    }
+}
+fn demux_time_base_den(ptr: usize) -> i32 {
+    #[cfg(feature = "ffvideo")]
+    {
+        demux_ref(ptr).map_or(0, |h| h.demux.info().facts.time_base.1)
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = ptr;
+        0
+    }
+}
+
+/// Average frame rate (0 when the container doesn't declare one).
+fn demux_fps(ptr: usize) -> f64 {
+    #[cfg(feature = "ffvideo")]
+    {
+        demux_ref(ptr).map_or(0.0, |h| h.demux.info().facts.fps)
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = ptr;
+        0.0
+    }
+}
+
+/// Total duration in seconds (0 when unknown/unbounded).
+fn demux_duration_secs(ptr: usize) -> f64 {
+    #[cfg(feature = "ffvideo")]
+    {
+        demux_ref(ptr).map_or(0.0, |h| {
+            h.demux
+                .info()
+                .facts
+                .duration
+                .map_or(0.0, |d| d.as_secs_f64())
+        })
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = ptr;
+        0.0
+    }
+}
+
+/// Clockwise display rotation (0/90/180/270) from the display matrix.
+fn demux_rotation(ptr: usize) -> i32 {
+    #[cfg(feature = "ffvideo")]
+    {
+        demux_ref(ptr).map_or(0, |h| h.demux.info().facts.rotation)
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = ptr;
+        0
+    }
+}
+
+/// NAL length-prefix size (1/2/4); 0 when the stream is Annex B.
+fn demux_nal_length_size(ptr: usize) -> u8 {
+    #[cfg(feature = "ffvideo")]
+    {
+        demux_ref(ptr).map_or(0, |h| h.demux.info().nal_length_size)
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = ptr;
+        0
+    }
+}
+
+/// Whether packets are length-prefixed (MP4/MKV) — the representation the
+/// CMSampleBuffer path consumes directly. `false` routes to the Session fallback.
+fn demux_length_prefixed(ptr: usize) -> bool {
+    #[cfg(feature = "ffvideo")]
+    {
+        demux_ref(ptr).is_some_and(|h| h.demux.info().length_prefixed)
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = ptr;
+        false
+    }
+}
+
+/// Whether the container carries an audio track (drives the presenter's audio start).
+fn demux_has_audio(ptr: usize) -> bool {
+    #[cfg(feature = "ffvideo")]
+    {
+        demux_ref(ptr).is_some_and(|h| h.demux.info().facts.has_audio)
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = ptr;
+        false
+    }
+}
+
+/// Codec-private data (the hvcC/avcC atom) for the `CMVideoFormatDescription`.
+fn demux_extradata(ptr: usize) -> Vec<u8> {
+    #[cfg(feature = "ffvideo")]
+    {
+        demux_ref(ptr).map_or_else(Vec::new, |h| h.demux.info().extradata.clone())
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = ptr;
+        Vec::new()
+    }
+}
+
+/// The Dolby Vision configuration box four-CC (`dvcC`/`dvvC`), or empty if the
+/// stream carries no DoVi config. Paired with [`demux_dovi_box`].
+fn demux_dovi_atom(ptr: usize) -> Vec<u8> {
+    #[cfg(feature = "ffvideo")]
+    {
+        demux_ref(ptr)
+            .and_then(|h| h.demux.info().dovi.as_ref())
+            .map_or_else(Vec::new, |d| d.atom.to_vec())
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = ptr;
+        Vec::new()
+    }
+}
+
+/// The 24-byte DoVi configuration record the host attaches to the sample
+/// description under the `demux_dovi_atom` four-CC. Empty when no DoVi config.
+fn demux_dovi_box(ptr: usize) -> Vec<u8> {
+    #[cfg(feature = "ffvideo")]
+    {
+        demux_ref(ptr)
+            .and_then(|h| h.demux.info().dovi.as_ref())
+            .map_or_else(Vec::new, |d| d.box_payload.to_vec())
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = ptr;
+        Vec::new()
+    }
+}
+
+/// Dolby Vision profile (0 = none), for diagnostics/routing.
+fn demux_dovi_profile(ptr: usize) -> u8 {
+    #[cfg(feature = "ffvideo")]
+    {
+        demux_ref(ptr)
+            .and_then(|h| h.demux.info().dovi.as_ref())
+            .map_or(0, |d| d.profile)
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = ptr;
+        0
+    }
+}
+
+/// Advance the demuxer to the next video access unit and return its compressed
+/// bytes. An **empty** result means no packet this call — read [`demux_state`] to
+/// tell EOF (1) from a demux error (2). On success the packet's PTS/DTS/duration/
+/// keyframe flags are cached for the `demux_packet_*` getters. Exclusive `&mut`
+/// (the reader queue serializes read/seek).
+fn demux_read_packet(ptr: usize) -> Vec<u8> {
+    #[cfg(feature = "ffvideo")]
+    {
+        if ptr == 0 {
+            return Vec::new();
+        }
+        // SAFETY: nonzero `ptr` is a live box from `open_stashed_demux`; the reader
+        // queue guarantees single-threaded, non-freed access.
+        let h = unsafe { &mut *(ptr as *mut DemuxHandle) };
+        match h.demux.read_packet() {
+            Ok(Some(pkt)) => {
+                h.last_pts = pkt.pts.unwrap_or(i64::MIN);
+                h.last_dts = pkt.dts.unwrap_or(i64::MIN);
+                h.last_duration = pkt.duration;
+                h.last_is_key = pkt.is_key;
+                h.state = 0;
+                pkt.data
+            }
+            Ok(None) => {
+                h.state = 1; // clean EOF — the presenter parks the last frame
+                Vec::new()
+            }
+            Err(e) => {
+                eprintln!("sample-buffer demux read failed: {e}");
+                h.state = 2;
+                Vec::new()
+            }
+        }
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = ptr;
+        Vec::new()
+    }
+}
+
+/// PTS of the last [`demux_read_packet`] in time-base units; `i64::MIN` if none.
+fn demux_packet_pts(ptr: usize) -> i64 {
+    #[cfg(feature = "ffvideo")]
+    {
+        demux_ref(ptr).map_or(i64::MIN, |h| h.last_pts)
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = ptr;
+        i64::MIN
+    }
+}
+/// DTS of the last read packet in time-base units; `i64::MIN` if none.
+fn demux_packet_dts(ptr: usize) -> i64 {
+    #[cfg(feature = "ffvideo")]
+    {
+        demux_ref(ptr).map_or(i64::MIN, |h| h.last_dts)
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = ptr;
+        i64::MIN
+    }
+}
+/// Duration of the last read packet in time-base units (0 if unknown).
+fn demux_packet_duration(ptr: usize) -> i64 {
+    #[cfg(feature = "ffvideo")]
+    {
+        demux_ref(ptr).map_or(0, |h| h.last_duration)
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = ptr;
+        0
+    }
+}
+/// Whether the last read packet is a sync sample (keyframe).
+fn demux_packet_is_key(ptr: usize) -> bool {
+    #[cfg(feature = "ffvideo")]
+    {
+        demux_ref(ptr).is_some_and(|h| h.last_is_key)
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = ptr;
+        false
+    }
+}
+
+/// Demux state after the last read: 0 Ok, 1 Eof, 2 Failed.
+fn demux_state(ptr: usize) -> u8 {
+    #[cfg(feature = "ffvideo")]
+    {
+        demux_ref(ptr).map_or(2, |h| h.state)
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = ptr;
+        2
+    }
+}
+
+/// Seek the demuxer to a keyframe at or before `secs`, clearing EOF. The host
+/// flushes its renderer and re-enqueues from the next keyframe. Exclusive `&mut`.
+fn demux_seek(ptr: usize, secs: f64) {
+    #[cfg(feature = "ffvideo")]
+    {
+        if ptr == 0 {
+            return;
+        }
+        // SAFETY: see `demux_read_packet`; the reader queue serializes read/seek.
+        let h = unsafe { &mut *(ptr as *mut DemuxHandle) };
+        let target = std::time::Duration::from_secs_f64(secs.max(0.0));
+        match h.demux.seek(target) {
+            Ok(()) => h.state = 0,
+            Err(e) => {
+                eprintln!("sample-buffer demux seek failed: {e}");
+                h.state = 2;
+            }
+        }
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = (ptr, secs);
+    }
+}
+
+/// Free the owned demuxer. Must be called **exactly once** per non-null pointer
+/// from [`open_stashed_demux`] (the Swift wrapper guards this in `deinit`); a null
+/// pointer is a no-op. After this the pointer is dangling.
+fn demux_free(ptr: usize) {
+    #[cfg(feature = "ffvideo")]
+    {
+        if ptr != 0 {
+            // SAFETY: nonzero `ptr` is a live box from `open_stashed_demux`, freed
+            // exactly once by the host's deinit-once contract.
+            drop(unsafe { Box::from_raw(ptr as *mut DemuxHandle) });
+        }
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = ptr;
+    }
+}
+
 // NOTE: inside `#[swift_bridge::bridge]`, use `//` comments only — a `///` doc comment
 // becomes a `#[doc]` attribute that swift-bridge-ir's parser rejects (panics in codegen).
 #[swift_bridge::bridge]
@@ -3211,6 +3677,13 @@ mod ffi {
         // take_pending_video_bytes() and serves them to AVPlayer through a custom
         // resource loader (never to disk). start_secs as in PlayVideo.
         PlayVideoBytes(String, u64, bool, f64),
+        // Sample-buffer video (video-overhaul Phase 3): open the clip in the
+        // AVSampleBufferDisplayLayer presenter (session_id, muted, start_secs). FFmpeg
+        // (Rust) demuxes; the host opens the demuxer via open_stashed_demux(session_id)
+        // off the main actor, wraps compressed packets into CMSampleBuffers, and hands
+        // decode to VideoToolbox — the DoVi/HDR end-state for MKV/WebM that AVPlayer
+        // can't demux. Reveal/stop/pause/seek reuse the native_video_* callback contract.
+        PlaySampleBuffer(u64, bool, f64),
         // Generate a poster for a macOS archive video (request_id, item, name, max_edge): the
         // host pulls the entry's bytes via take_pending_poster_bytes(request_id), grabs a
         // frame with AVAssetImageGenerator, and returns it via video_poster_ready().
@@ -3495,6 +3968,37 @@ mod ffi {
         fn session_audio_state(ptr: usize) -> u8;
         fn session_audio_seek(ptr: usize, secs: f64) -> f64;
         fn session_audio_free(ptr: usize);
+        // Sample-buffer video demux (video-overhaul Phase 3): the host opens the
+        // FFmpeg demuxer via open_stashed_demux(session_id) (input stashed Rust-side by
+        // PlaySampleBuffer) on its serial reader queue, reads the format-description
+        // facts once, then pulls compressed packets to enqueue into an
+        // AVSampleBufferDisplayLayer. demux_read_packet advances + caches the packet's
+        // timing/keyframe flags (read via demux_packet_*); demux_state is 0 Ok/1 Eof/2
+        // Failed. Freed exactly once via demux_free.
+        fn open_stashed_demux(session_id: u64) -> usize;
+        fn demux_codec(ptr: usize) -> u8;
+        fn demux_width(ptr: usize) -> u32;
+        fn demux_height(ptr: usize) -> u32;
+        fn demux_time_base_num(ptr: usize) -> i32;
+        fn demux_time_base_den(ptr: usize) -> i32;
+        fn demux_fps(ptr: usize) -> f64;
+        fn demux_duration_secs(ptr: usize) -> f64;
+        fn demux_rotation(ptr: usize) -> i32;
+        fn demux_nal_length_size(ptr: usize) -> u8;
+        fn demux_length_prefixed(ptr: usize) -> bool;
+        fn demux_has_audio(ptr: usize) -> bool;
+        fn demux_extradata(ptr: usize) -> Vec<u8>;
+        fn demux_dovi_atom(ptr: usize) -> Vec<u8>;
+        fn demux_dovi_box(ptr: usize) -> Vec<u8>;
+        fn demux_dovi_profile(ptr: usize) -> u8;
+        fn demux_read_packet(ptr: usize) -> Vec<u8>;
+        fn demux_packet_pts(ptr: usize) -> i64;
+        fn demux_packet_dts(ptr: usize) -> i64;
+        fn demux_packet_duration(ptr: usize) -> i64;
+        fn demux_packet_is_key(ptr: usize) -> bool;
+        fn demux_state(ptr: usize) -> u8;
+        fn demux_seek(ptr: usize, secs: f64);
+        fn demux_free(ptr: usize);
         fn video_audio_clock(&mut self, session_id: u64, state: u8, position_secs: f64);
         fn context_menu(&mut self);
 
