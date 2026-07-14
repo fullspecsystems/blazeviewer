@@ -37,8 +37,17 @@ pub struct NativeVideoProxy {
     seek_generation: SeekGeneration,
     /// Whether a seek issued by the core has not yet been acknowledged by a
     /// matching-generation `seek_completed`. Lets the core know a seek is pending
-    /// (e.g. to show a seeking affordance) without holding a position.
+    /// (e.g. to show a seeking affordance).
     seek_in_flight: bool,
+    /// The playhead, as last reported by the shell (~20 Hz, `native_video_progress`).
+    ///
+    /// The shell owns the clock on this backend — AVPlayer's, or the sample-buffer
+    /// route's render synchronizer — so this is a *mirror*, not the authority: it can
+    /// only be as fresh as the last report. That is fine for what reads it (subtitle
+    /// cue timing, ~50 ms granularity against cues that last seconds) and is why the
+    /// core does not try to extrapolate between reports — an invented position that
+    /// disagrees with the pixels on screen would be worse than a slightly stale one.
+    position: Option<std::time::Duration>,
     /// Authoritative playback state, as last reported by the shell.
     state: VideoSessionState,
     /// Total duration, once the player reports it (`native_video_opened`).
@@ -60,6 +69,7 @@ impl NativeVideoProxy {
             session_id,
             seek_generation: SeekGeneration::FIRST,
             seek_in_flight: false,
+            position: None,
             state: VideoSessionState::Opening,
             duration: None,
             has_audio: false,
@@ -79,6 +89,17 @@ impl NativeVideoProxy {
     pub fn is_playing(&self) -> bool {
         self.state == VideoSessionState::Playing
     }
+    /// The last playhead the shell reported; `None` before the first report.
+    pub fn position(&self) -> Option<std::time::Duration> {
+        self.position
+    }
+
+    /// Mirror the shell's clock (~20 Hz). Also clears a pending seek's staleness: a
+    /// report only arrives once the player is actually there.
+    pub fn set_position(&mut self, pos: std::time::Duration) {
+        self.position = Some(pos);
+    }
+
     pub fn duration(&self) -> Option<std::time::Duration> {
         self.duration
     }
@@ -248,6 +269,20 @@ impl ActiveVideoBackend {
 
     pub fn is_playing(&self) -> bool {
         self.state() == VideoSessionState::Playing
+    }
+
+    /// The playhead, whichever backend is live — the **one** place that knows how to ask.
+    ///
+    /// `Session` owns its clock, so it answers exactly (`now` paces the frames). `Native`
+    /// mirrors the shell's clock from ~20 Hz reports, so it answers with the last one.
+    /// Callers that need "where is the picture right now" (subtitle cues) must go through
+    /// here rather than reaching for the session — on macOS the sample-buffer route is a
+    /// `Native` backend, and a session-only check silently reports nothing.
+    pub fn position(&self, now: std::time::Instant) -> Option<std::time::Duration> {
+        match self {
+            Self::Session(v) => Some(v.session.desired_position(now)),
+            Self::Native(p) => p.position(),
+        }
     }
 
     pub fn duration(&self) -> Option<std::time::Duration> {

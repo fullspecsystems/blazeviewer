@@ -7456,6 +7456,20 @@ impl AppCore {
         duration_secs: f64,
     ) {
         let sid = crate::video::VideoSessionId(session_id);
+        // Mirror the playhead onto the proxy (task #90): on this backend the shell owns the
+        // clock, so this ~20 Hz report is the core's only view of where the picture is —
+        // and subtitle cues need it. Stored on every report, independent of the resume
+        // bookkeeping below, which deliberately ignores a near-start/end position.
+        if position_secs >= 0.0 {
+            if let Some(p) = self
+                .video
+                .as_mut()
+                .and_then(ActiveVideoBackend::as_native_mut)
+                .filter(|p| p.session_id == sid)
+            {
+                p.set_position(Duration::from_secs_f64(position_secs));
+            }
+        }
         let item = self
             .video
             .as_ref()
@@ -7854,16 +7868,39 @@ impl AppCore {
         }
     }
 
+    /// Is a video actually on screen right now — **on either backend**?
+    ///
+    /// [`video_session_active`](Self::video_session_active) answers only for the
+    /// `VideoSession` route. On macOS the sample-buffer presenter (the default for
+    /// MKV/WebM since Phase 3F) and AVPlayer are both `Native` backends, so a
+    /// session-only check reads false while a video plays — which silently disabled
+    /// subtitles the moment that route became the default. Anything asking "is the user
+    /// watching a video" wants this, not that.
+    pub fn video_showing(&self) -> bool {
+        use crate::video::VideoSessionState::*;
+        self.video.as_ref().is_some_and(|b| {
+            Some(b.item()) == self.displayed_item && !matches!(b.state(), Failed | Stopped)
+        })
+    }
+
+    /// The playhead of whatever is playing, on either backend. `None` when nothing is, or
+    /// before the shell's first position report on the `Native` route.
+    pub fn video_position(&self) -> Option<Duration> {
+        self.video
+            .as_ref()
+            .filter(|_| self.video_showing())
+            .and_then(|b| b.position(self.now))
+    }
+
     /// Rebuild the subtitle overlay against the playhead (task #90) — the one call that
     /// joins discovery, the cue track, placement, and the rasterizer to the screen. Runs
     /// every tick; both shells then read [`AppCore::subtitles`] and composite.
     ///
-    /// The clock is the **session's** `desired_position` — the same one the video frames
-    /// are presented against, so a subtitle can't drift from the picture. It covers the
-    /// `VideoSession` backend (FFmpeg on macOS/Linux, MF on Windows). The macOS *native*
-    /// AVPlayer route pushes its position through `native_video_progress` at ~4 Hz, which
-    /// is too coarse to cut a cue on and is only a resume record — so subtitles stay dark
-    /// there until that path exposes a real playhead.
+    /// The clock is [`video_position`](Self::video_position) — the playhead of whichever
+    /// backend is live, so a subtitle can't drift from the picture and can't be silently
+    /// switched off by a routing change. On `Session` that's the session's own
+    /// `desired_position`; on `Native` (macOS AVPlayer *and* the sample-buffer route) it's
+    /// the shell's ~20 Hz report, which is ~50 ms granular against cues that last seconds.
     pub fn tick_subtitles(&mut self) {
         self.subtitles.poll(self.details_gen);
 
@@ -7871,7 +7908,7 @@ impl AppCore {
         // always clears. Off used to get its own early `return` — which skipped the clear,
         // so pressing `C` left the last cue frozen on screen forever. One exit, one rule:
         // an overlay can never outlive the state that produced it.
-        let (displayed, active) = (self.displayed_item, self.video_session_active());
+        let (displayed, active) = (self.displayed_item, self.video_showing());
         let on = self.subtitles.mode != crate::subtitle::SubtitleMode::Off;
         let Some(item) = displayed.filter(|_| active && on) else {
             self.subtitles.trace(|| {
@@ -7895,7 +7932,12 @@ impl AppCore {
             self.subtitles.hide();
             return;
         };
-        let t = Duration::from_secs_f64(self.video_session_elapsed_secs().max(0.0));
+        let Some(t) = self.video_position() else {
+            self.subtitles
+                .trace(|| "no playhead yet — the shell hasn't reported one".into());
+            self.subtitles.hide();
+            return;
+        };
         let vp = (self.viewport.width as f32, self.viewport.height as f32);
         let video = crate::subtitle::Rect { x, y, w, h };
         // `controls_h` is 0 until a shell reports its transport bar's height — the lift
@@ -8786,6 +8828,66 @@ mod tests {
             core.subtitles.mode,
             SubtitleMode::Automatic,
             "the engine must follow the settings that were actually loaded"
+        );
+    }
+
+    /// A core with a live **Native** backend on item 0 — the macOS sample-buffer /
+    /// AVPlayer shape, which is what MKV and WebM actually take since Phase 3F.
+    fn core_with_a_native_video() -> AppCore {
+        let mut core = test_core();
+        let sid = pb_decode::VideoSessionId(7);
+        let mut proxy = crate::video_native::NativeVideoProxy::new(0, sid, false);
+        proxy.on_state_changed(sid, crate::video::VideoSessionState::Playing);
+        core.video = Some(crate::video_native::ActiveVideoBackend::Native(proxy));
+        core.displayed_item = Some(0);
+        core
+    }
+
+    /// **Regression.** Subtitles gated on `video_session_active()`, which is false for the
+    /// Native backend. When the macOS sample-buffer route became the default for MKV/WebM,
+    /// that silently turned subtitles off for exactly the files they were built for — no
+    /// error, no failing test, just nothing on screen.
+    ///
+    /// "Is a video on screen" must not depend on which backend is drawing it.
+    #[test]
+    fn a_native_backed_video_counts_as_showing() {
+        let core = core_with_a_native_video();
+        assert!(
+            core.video_showing(),
+            "the sample-buffer / AVPlayer route is still a video playing"
+        );
+        assert!(
+            !core.video_session_active(),
+            "and it is NOT session-backed — which is exactly why the old check failed"
+        );
+    }
+
+    /// The playhead has to come from whichever backend is live. On Native the shell owns
+    /// the clock and reports it ~20 Hz; before the first report there is simply no answer,
+    /// and inventing one would put cues out of step with the picture.
+    #[test]
+    fn the_native_playhead_comes_from_the_shells_reports() {
+        let mut core = core_with_a_native_video();
+        assert_eq!(core.video_position(), None, "no report yet — no answer");
+
+        core.native_video_progress(7, 12.5, 100.0);
+        assert_eq!(core.video_position(), Some(Duration::from_secs_f64(12.5)));
+
+        core.native_video_progress(7, 13.0, 100.0);
+        assert_eq!(core.video_position(), Some(Duration::from_secs_f64(13.0)));
+    }
+
+    /// A report from a torn-down player must never move the live one's clock — the same
+    /// session-identity rule every other native callback follows.
+    #[test]
+    fn a_stale_sessions_progress_does_not_move_the_playhead() {
+        let mut core = core_with_a_native_video();
+        core.native_video_progress(7, 12.5, 100.0);
+        core.native_video_progress(999, 88.0, 100.0); // a straggler from a dead session
+        assert_eq!(
+            core.video_position(),
+            Some(Duration::from_secs_f64(12.5)),
+            "a straggler must not be believed"
         );
     }
 
