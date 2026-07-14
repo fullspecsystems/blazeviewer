@@ -26,11 +26,14 @@ also leave a durable fallback for codecs Apple cannot decode and must not regres
   from mid-playback network stalls (`dddabf11`), device-change/sleep-wake reprime (`f93874fc`). The
   remaining 1G items (session-tag audio effects, pause-forever, replay-after-EOS) were assessed
   low-value/already-covered — see §7/1G. Also: **task #94.2 video resume** (both backends) landed.
-- **NEXT (Opus session):** the big post-Phase-1 wins — **Phase 2** (GPU P010) / **Phase 3** (Apple
-  sample-buffer), or **1F** once 0D is done. Phase 1 is effectively complete bar 1F.
-- **BLOCKED:** **1F** network read-ahead needs the **0D SMB spike** first (owner's NAS
-  `/Volumes/{JD,Media,appdata}`). **Phase 2** (GPU P010 — the "proper HW HDR", retires the R8 stopgap)
-  and **Phase 3** (Apple `AVSampleBuffer` — the DoVi end-state) are the big post-Phase-1 wins.
+- **0D DONE (2026-07-14) → 1F DESHELVED.** Headless margin trace (§6.0D): video decode+convert is
+  the bottleneck at **~1.19× real-time**, network has **~15×** headroom, audio **~29.5×**. So full 1F
+  network read-ahead is not worth the regression risk (only matters below ~44 Mbps, far below the
+  owner's gigabit; 1G bounded-retry covers that). The **1F cancel-flag** slice already landed.
+- **NEXT (Opus session): Phase 2 — GPU P010/NV12 + PQ/HLG shader.** THE real margin win: takes the
+  per-frame CPU convert (R6) off the critical path and retires the R8 parallel-thread stopgap, so 4K
+  HDR decode climbs well past the current ~1.19×. Then **Phase 3** (Apple `AVSampleBuffer` — the DoVi
+  end-state + zoom/pan). Phase 1 is effectively complete.
 - Session findings + gotchas: memory `video-playback-overhaul.md`; `PB_VIDEO_DIAG=1` for backend/seek timing.
 
 ## 1. Outcome and non-goals
@@ -378,6 +381,27 @@ cleanly, the R10 track-selection policy may make the whole TrueHD problem option
 has one stable timebase, preserves required HDR metadata, and survives repeated flush/seek/stop.
 
 ### 0D. Network I/O characterization and packet-source spike
+
+> **Headless margin trace DONE (2026-07-14, owner's BeeNAS over gigabit WiFi 6E/7).** Measured with
+> the `net_decode_throughput` / `net_audio_throughput` harnesses (pb-decode, `PB_NET_TEST_MKV`) on the
+> Dune 4K DoVi/HDR/TrueHD corpus:
+>
+> | Stage | Margin over real-time |
+> |---|---|
+> | SMB raw read | ~15× |
+> | Audio decode (TrueHD → stereo) | ~29.5× |
+> | **Video decode + convert** (VideoToolbox HW + CPU P010→scRGB fp16) | **~1.19× (28.6 fps)** |
+>
+> Warm-cache video was identical to cold (1.19× vs 1.17×) → the video margin is **decode-bound, not
+> network-bound**. **Conclusion: the playback bottleneck is the video decode+convert pipeline (R6/R8),
+> not the network.** Full **1F** network read-ahead yields no user-perceptible gain until the link
+> drops below ~44 Mbps (1.19× the ~37 Mbps stream) — far below gigabit — and the **1G bounded-retry**
+> already covers that degraded regime with a clean rebuffer. **So the full 1F packet-source rework is
+> DESHELVED as not-worth-the-regression-risk; the real margin win is Phase 2 (GPU P010/HDR shader),
+> which moves the CPU convert off the critical path.** The 1F **cancel-flag** slice (prompt teardown)
+> already landed as the worthwhile part. Remaining 0D work (a *throttled* stress trace to validate 1G's
+> graceful degradation below the bitrate) needs `dnctl`/`pfctl` shaping (sudo) — optional, since it
+> validates 1G rather than justifying 1F.
 
 The original network symptom must be reproduced separately from CPU/HDR load. Test the same file
 locally and over a mounted SMB share while controlling available throughput, latency, jitter, and
