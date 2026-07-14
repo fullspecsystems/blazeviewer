@@ -28,14 +28,18 @@ backends — the FFmpeg backend already shipped). Session findings/gotchas: auto
 - **Phase 1 1A–1D** (see the doc's §7 table for commits): feasible preroll (R1 deadlock dead),
   audio-continuous starvation (R2), drop-late (R3), one-audio-commit-per-seek coordinator (R4).
   Owner-confirmed playback + seeking feel much smoother. `frames_to_units` untangle (`f6fafc3a`, 1E prep).
-- **Phase 1 1E — owned off-main audio decoder** (R5 + R10 + R12): **code-complete + unit-tested,
-  audio quality pending owner-listen** (untestable in a headless agent). The FFmpeg audio decoder
-  moved off `@MainActor` behind a **usize-pointer FFI** (`open_stashed_session_audio` + `session_audio_*`
-  free fns over a thread-safe global stash), driven on a Swift serial feeder queue
-  (`OwnedAudioDecoder`, frees once in `deinit`); `SessionAudioPlayer` rewritten async (Opening clock
-  during the open gap, generation-gated reads). R10 = disposition-aware track selection (forced >
-  default > best). R12 = `session_audio_state` reports Failed distinctly from EOF; stash survives a
-  failed open. Full app builds (`build-swift-host.sh`). Details + owner-listen checklist in the doc's §7/1E.
+- **Phase 1 1E — owned off-main audio decoder** (R5 + R10 + R12): **owner-confirmed** smooth local
+  playback + seeking, no glitches. The FFmpeg audio decoder moved off `@MainActor` behind a
+  **usize-pointer FFI** (`open_stashed_session_audio` + `session_audio_*` free fns over a thread-safe
+  global stash), driven on a Swift serial feeder queue (`OwnedAudioDecoder`, frees once in `deinit`);
+  `SessionAudioPlayer` rewritten async (Opening clock during the open gap, generation-gated reads).
+  R10 = disposition-aware track selection; R12 = Failed distinct from EOF; stash survives a failed open.
+- **Network-seek audio fix** (owner-reported, same cycle): seeking a large movie on an SMB share used
+  to permanently kill audio. Root cause: the audio decoder sought by the AUDIO stream index → MKV Cues
+  (video-only) → byte-position linear scan **~73 s over SMB** (16 GB 4K corpus) → blew the watchdog,
+  wedged the demuxer, R12-latched. Fix: seek the **default stream** (video Cues) = **~20-40 ms**, lands
+  on target. Reproduced + measured via the `net_seek_read_timing` harness (`PB_NET_TEST_MKV`). Residual
+  post-seek network *stutter* (both demuxers re-read) is inherent until 1F. See the doc's §7/1E.
 
 ## Next (in order)
 

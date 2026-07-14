@@ -319,14 +319,25 @@ impl FfAudioDecoder {
     pub fn seek(&mut self, to: Duration) -> Result<Duration, String> {
         let base = self.origin.or(self.start_time).unwrap_or(0);
         let target = base.saturating_add(self.duration_to_units(to));
+        // Seek the DEFAULT stream (index -1, AV_TIME_BASE units), NOT the audio
+        // stream. Matroska Cues index the VIDEO track, so `avformat_seek_file` by
+        // the audio stream index finds no index entries and falls back to a
+        // byte-position linear scan — measured ~73 s over SMB on a 16 GB 4K clip,
+        // which then blew the op-deadline watchdog and corrupted the demuxer (the
+        // owner's "audio never recovers after a network seek", plan §7/1E). Seeking
+        // by -1 uses the video Cues (~20-40 ms) and the forward-discard below still
+        // lands the audio precisely on `target` (audio units, within a GOP). The
+        // coarse target ignores a container start offset — harmless: a keyframe ≤
+        // av_target lands at or before the audio target, and the discard corrects.
+        let av_target = (to.as_secs_f64() * f64::from(ff::ffi::AV_TIME_BASE)) as i64;
         self.input.set_op_deadline(Some(OP_DEADLINE));
         let rc = unsafe {
             ff::ffi::avformat_seek_file(
                 self.input.ctx().as_mut_ptr(),
-                self.index as i32,
+                -1,
                 i64::MIN,
-                target,
-                target,
+                av_target,
+                av_target,
                 0,
             )
         };
@@ -334,9 +345,9 @@ impl FfAudioDecoder {
             unsafe {
                 ff::ffi::avformat_seek_file(
                     self.input.ctx().as_mut_ptr(),
-                    self.index as i32,
+                    -1,
                     i64::MIN,
-                    target,
+                    av_target,
                     i64::MAX,
                     0,
                 )
@@ -451,6 +462,66 @@ mod tests {
 
     fn open(name: &str) -> FfAudioDecoder {
         FfAudioDecoder::open(&VideoInput::Path(fixture(name))).expect("open audio")
+    }
+
+    /// Manual perf repro for the network-share post-seek stall (plan §7/1E owner
+    /// report; 0D characterization). Point `PB_NET_TEST_MKV` at a large (network)
+    /// container and it times open+probe, a first read, a seek to the midpoint,
+    /// and the post-seek read — the exact `FfAudioDecoder` path the macOS sink
+    /// drives — printing whether the post-seek read errors (the watchdog `Exit`,
+    /// an SMB I/O error, …). Not run in CI (no fixture). Run with:
+    /// `PB_NET_TEST_MKV=/path cargo test -p pb-decode --features ffvideo \
+    ///   net_seek_read_timing -- --nocapture --ignored`
+    #[test]
+    #[ignore = "needs PB_NET_TEST_MKV pointing at a large (network) container"]
+    fn net_seek_read_timing() {
+        use std::time::Instant;
+        let Ok(path) = std::env::var("PB_NET_TEST_MKV") else {
+            eprintln!("skipping: set PB_NET_TEST_MKV to a large (network) container");
+            return;
+        };
+        let input = VideoInput::Path(PathBuf::from(&path));
+        let t = Instant::now();
+        let mut a = FfAudioDecoder::open_capped(&input, 2).expect("open");
+        eprintln!(
+            "[net] open+probe {:?} — rate {} ch {} (stream #{})",
+            t.elapsed(),
+            a.rate(),
+            a.channels(),
+            a.index
+        );
+        let t = Instant::now();
+        let first = a.read(4800);
+        eprintln!(
+            "[net] first read {:?} — {:?} samples",
+            t.elapsed(),
+            first.as_ref().map(|c| c.len())
+        );
+        // Seek to the midpoint (the owner's "seek into the middle" repro).
+        let target = Duration::from_secs(3600);
+        let t = Instant::now();
+        let landed = a.seek(target);
+        eprintln!("[net] seek({target:?}) -> {landed:?} in {:?}", t.elapsed());
+        let t = Instant::now();
+        let post = a.read(4800);
+        eprintln!(
+            "[net] post-seek read {:?} — {:?}, lands at {:?}",
+            t.elapsed(),
+            post.as_ref().map(|c| format!("{} samples", c.len())),
+            a.position()
+        );
+        // The seek must be fast (video-Cues path, not the ~73 s audio-index linear
+        // scan), error-free, and land within a GOP of the target.
+        assert!(landed.is_ok(), "seek errored: {landed:?}");
+        assert!(
+            post.as_ref().is_ok_and(|c| !c.is_empty()),
+            "post-seek read failed: {post:?}"
+        );
+        let pos = a.position();
+        assert!(
+            pos >= Duration::from_secs(3590) && pos <= Duration::from_secs(3610),
+            "landed at {pos:?}, expected ~3600s"
+        );
     }
 
     /// RMS of interleaved samples — a sine has substantial energy (~0.7 × peak).

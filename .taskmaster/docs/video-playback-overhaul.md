@@ -16,8 +16,12 @@ also leave a durable fallback for codecs Apple cannot decode and must not regres
 - **DONE:** Phase 0 0A/0C (corpus characterized; remux controls at `~/Downloads/pb-remux-control-*.mp4`);
   **Phase 1 1A–1E** on `main` (see §7 table for commits) — deadlock (R1) + post-seek audio glitches
   (R2/R4) fixed, owner-confirmed smoother; plus the seek perf work + `frames_to_units` untangle.
-  **1E** (owned off-main audio decoder, R5 + R10 + R12) is **code-complete + unit-tested; audio quality
-  pending owner-listen** (untestable in a headless agent).
+  **1E** (owned off-main audio decoder, R5 + R10 + R12) — owner-confirmed smooth local playback +
+  seeking, no glitches. **Plus a big win (owner-reported network bug, fixed 2026-07-13):** the audio
+  decoder was seeking by the AUDIO stream index, which MKV Cues don't cover → a byte-position linear
+  scan measured **~73 s over SMB** on a 16 GB 4K clip, which blew the watchdog and wedged audio
+  ("audio never recovers after a network seek"). Seeking the DEFAULT stream (video Cues) instead =
+  **~20-40 ms**, lands on target; audio stays in sync after a jump.
 - **NEXT (Opus session):** **1G** — lifecycle/failure containment (session-identity on the audio
   effects; the pause-forever fallback timeout; the two audit fragilities tagged 1G). Then Phase 2/3.
 - **BLOCKED:** **1F** network read-ahead needs the **0D SMB spike** first (owner's NAS
@@ -439,12 +443,26 @@ Tests: `choose_audio_honors_disposition_intent`, `select_audio_stream_picks_the_
 `state_maps_failure_apart_from_eof` (R12/null), `owned_decoder_seeks_and_continues` (pb-mac-ffi,
 `--features ffvideo`). All green; `build-swift-host.sh` links the full app.
 
+**Network seek fix (2026-07-13, owner-reported, in the 1E follow-up commit):** the audio decoder
+sought by the AUDIO stream index (`avformat_seek_file(ctx, self.index, …)`). MKV Cues index the
+VIDEO track, so that found no index entries and fell back to a byte-position linear scan —
+**measured ~73 s over SMB** on the 16 GB 4K corpus (`net_seek_read_timing` harness, gated by
+`PB_NET_TEST_MKV`) — which blew the 10 s op-deadline watchdog *mid-seek*, returned `Ok` with a
+corrupted demuxer, and then failed every read → (with the fresh R12 latch) permanent audio death.
+Fix: seek the **default stream** (`-1`, AV_TIME_BASE units) so the video Cues are used (**~20-40 ms**,
+lands within 0.1 s of target); the forward-discard still lands the audio precisely. Video was
+unaffected because its producer already seeks the video track. This is a seek-*strategy* fix,
+orthogonal to R9/1F (the double-demuxer); 1F still wins by making the seek happen once.
+
 **Still open (fold into 1G):** session-identity on the audio effects (the owned handle is
 generation-gated Swift-side, but the effects themselves aren't session-tagged); the pause-forever
-fallback timeout if a final seek landing never arrives. Chunk lookahead is still 3×250 ms — tune
-against corpus/seek traces when the owner profiles. **Owner-listen checklist:** heavy-codec
-(TrueHD/Atmos) start smoothness, no UI hitch during rapid seeks, clean post-seek audio resume,
-no start glitch from the async-open gap, multi-track files pick the intended track.
+fallback timeout if a final seek landing never arrives; a *bounded-retry recovery* so a genuinely
+slow seek/read (some other container/route) rebuffers instead of latching R12 permanently — no
+longer urgent now the linear scan is gone, but the right 1G robustness. Chunk lookahead still
+3×250 ms. **Owner status:** local playback + seeking confirmed smooth; network seek confirmed fixed
+(no more permanent audio cut-out); residual post-seek network *stutter* while both demuxers re-read
+is inherent until 1F. Possible A/V-sync improvement post-seek (owner to confirm — the precise
+landing should help).
 
 ### 1F. Bounded compressed read-ahead and network recovery
 

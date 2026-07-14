@@ -22,6 +22,13 @@ with any pre-release suffix carried only by the tag.
   marks as default or forced, instead of a blind guess.
 
 ### Fixed
+- **Seeking a video on a network share no longer kills the audio.** Jumping into a large
+  movie stored on a NAS/SMB share used to make the audio cut out for the rest of playback
+  (and stutter for a while). The audio track was being sought the slow way — a byte-by-byte
+  scan through the file because the seek index only covers the video track — which took ~73
+  seconds over the network on a 16 GB 4K film and left the audio decoder wedged. Audio now
+  seeks through the video index like the picture does (tens of milliseconds) and lands right
+  on target, so sound stays in sync after a jump.
 - **Demanding video audio no longer competes with the interface (macOS).** The audio for
   session-backed videos (MKV/WebM and other FFmpeg-decoded formats) is now decoded on its own
   background thread instead of the main UI thread, so heavy tracks (Dolby TrueHD/Atmos, large
