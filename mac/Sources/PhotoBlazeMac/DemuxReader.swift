@@ -210,8 +210,13 @@ final class DemuxReader: @unchecked Sendable {
             }
             if !firstFrameSent {
                 firstFrameSent = true
-                let first = cmTime(pts)
-                onFirstFrame.map { cb in DispatchQueue.main.async { cb(first) } }
+                // Anchor the synchronizer at the first DECODE time, not the first
+                // PTS: a B-frame stream's opening IDR has a DTS earlier than its PTS
+                // (here synthesized negative), and starting the clock at the PTS
+                // makes those frames "late" — AVSampleBufferDisplayLayer then drops
+                // the IDR and nothing downstream can decode (no picture).
+                let anchor = cmTime(dts)
+                onFirstFrame.map { cb in DispatchQueue.main.async { cb(anchor) } }
             }
         }
     }

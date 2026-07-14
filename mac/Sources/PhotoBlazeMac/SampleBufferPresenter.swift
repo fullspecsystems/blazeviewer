@@ -61,6 +61,10 @@ final class SampleBufferPresenter {
     private var timeObserver: Any?
     private var durationSecs: Double = 0
     private var fps: Double = 0
+    /// The rate to apply at the next decode anchor (first frame after open or seek):
+    /// `1` playing, `0` paused. A seek captures the pre-seek rate here so the
+    /// post-seek re-anchor restores it.
+    private var pendingRate: Float = 1.0
     /// Bumped on every seek so a superseded seek's completion can't re-anchor the
     /// clock after a newer one has taken over (generation-safe, §3D).
     private var seekEpoch: UInt64 = 0
@@ -162,8 +166,8 @@ final class SampleBufferPresenter {
         // first enqueued frame.
         reader.startFeeding(
             into: displayLayer,
-            onFirstFrame: { [weak self] firstPTS in
-                MainActor.assumeIsolated { self?.revealAndStart(at: firstPTS) }
+            onFirstFrame: { [weak self] anchor in
+                MainActor.assumeIsolated { self?.onDecodeAnchor(anchor) }
             },
             onEnd: { [weak self] in
                 MainActor.assumeIsolated { self?.onEnded() }
@@ -177,15 +181,20 @@ final class SampleBufferPresenter {
             })
     }
 
-    /// Unhide the container (poster → video, no flash) and start the synchronizer
-    /// anchored at the first frame's PTS so the timeline matches the media clock.
-    private func revealAndStart(at firstPTS: CMTime) {
-        guard !revealed else { return }
-        revealed = true
-        synchronizer.setRate(1.0, time: firstPTS)
-        canvas?.revealVideoLayer()
-        model?.nativeVideoStateChanged(sessionId, state: 2) // Playing
-        pbTrace("sample-buffer video \(sessionId): revealed + playing")
+    /// Anchor the synchronizer at a **decode-time** anchor — the DTS of the first
+    /// frame after open or after a seek — and apply the pending rate. The DTS (not
+    /// the PTS) is the anchor because a B-frame stream's opening IDR decodes before
+    /// it presents (a negative synthesized DTS here); anchoring at the PTS would make
+    /// those frames "late" and the display layer would drop the IDR (no picture). The
+    /// first anchor also reveals the layer (poster → video, no flash).
+    private func onDecodeAnchor(_ anchor: CMTime) {
+        if !revealed {
+            revealed = true
+            canvas?.revealVideoLayer()
+            pbTrace("sample-buffer video \(sessionId): revealed")
+        }
+        synchronizer.setRate(pendingRate, time: anchor)
+        model?.nativeVideoStateChanged(sessionId, state: pendingRate != 0 ? 2 : 3)
     }
 
     private func onEnded() {
@@ -270,21 +279,18 @@ final class SampleBufferPresenter {
         ended = false
         seekEpoch &+= 1
         let epoch = seekEpoch
-        let wasPlaying = synchronizer.rate != 0
+        // Restore this rate at the post-seek decode anchor (the accurate re-anchor
+        // happens in onDecodeAnchor when the first post-seek frame lands — at its DTS,
+        // so a negative-DTS keyframe isn't dropped as late, same as initial playback).
+        pendingRate = synchronizer.rate != 0 ? 1.0 : 0.0
         synchronizer.rate = 0 // hold the clock while both renderers reflush
         audioFeeder.seek(seconds: target, renderer: audioRenderer)
         reader.seek(seconds: target, layer: displayLayer) { [weak self] landedPTS in
             MainActor.assumeIsolated {
-                guard let self else { return }
+                guard let self, let g = report else { return }
                 let current = epoch == self.seekEpoch
-                if current {
-                    let anchor = landedPTS ?? CMTime(seconds: target, preferredTimescale: 600)
-                    self.synchronizer.setRate(wasPlaying ? 1.0 : 0.0, time: anchor)
-                }
-                if let g = report {
-                    self.model?.nativeVideoSeekCompleted(
-                        self.sessionId, generation: g, finished: current && landedPTS != nil)
-                }
+                self.model?.nativeVideoSeekCompleted(
+                    self.sessionId, generation: g, finished: current && landedPTS != nil)
             }
         }
     }
