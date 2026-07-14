@@ -1191,6 +1191,19 @@
             "status": "pending"
           }
         ]
+      },
+      {
+        "id": 93,
+        "title": "Verify #14 single-instance + multi-select on a real installed Windows build",
+        "description": "Owner ask 2026-07-13: #14's own subtask 5 verified the mutex/WM_COPYDATA mechanism via scripted process spawns (1/2/6/102-path forwards), but explicitly left the realistic case as 'owner-eyeball': a genuine Explorer Ctrl+A selection of hundreds of files, driven through the real registered ProgId (MultiSelectModel=Player) and an actually-installed build (Velopack per-user install, not `cargo run`). Simulated CLI invocation isn't equivalent — Explorer's own multi-select batching, the installed open-command path, and real foreground handoff only exercise correctly through a genuine install.",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          14
+        ],
+        "details": "Install the current build via the normal Velopack channel (not a dev/cargo run) so the ProgId's open command points at the real `...\\current\\photoblaze.exe`. In Explorer: select a few hundred image files in one folder (Ctrl+A on a large library folder works well), choose Open / press Enter, and confirm (a) exactly one PhotoBlaze process starts, (b) the playlist matches the full selection (not truncated), (c) the window comes to the foreground, and (d) repeating the selection while PhotoBlaze is already running forwards to the same window instead of spawning a second process. Also sanity-check a selection large enough to approach the ~32K command-line limit (~250+ paths) still arrives complete via the WM_COPYDATA forward path (which has no such cap), and that `--new-window` still spawns a standalone second process on request.",
+        "testStrategy": "Manual, on-device only (Explorer-driven, not scriptable the same way as #14.5's process-spawn simulation): fresh Velopack install, Ctrl+A a few hundred files, Open; confirm process count stays 1, playlist is complete, window gets focus. Repeat while PhotoBlaze is already running. Confirm --new-window bypass still works.",
+        "subtasks": []
       }
     ]
   }
