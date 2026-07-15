@@ -31,7 +31,6 @@ struct SubtitlesPane: View {
     let model: CoreModel
     @State private var draft = SubtitleStyleDraft()
     @State private var loaded = false
-    @State private var showLayout = false
     @State private var applyTask: Task<Void, Never>?
 
     var body: some View {
@@ -88,30 +87,24 @@ struct SubtitlesPane: View {
                     .foregroundStyle(.secondary)
             }
 
-            Section {
-                // ⚠ The label carries its own tap target. SwiftUI's DisclosureGroup only
-                // arms the chevron, which is a ~12pt hit box — "kind of hard to open"
-                // (owner). `contentShape` makes the whole row hittable; the chevron keeps
-                // working on its own, and the two do not double-fire because the chevron
-                // is not part of the label.
-                DisclosureGroup(isExpanded: $showLayout) {
-                    // Colours live here, opacities do not (owner): the hue is a
-                    // once-a-year decision, the opacity is the one you actually reach for.
-                    ColorPicker("Text color", selection: $draft.color, supportsOpacity: false)
-                    ColorPicker(
-                        "Outline color", selection: $draft.outlineColor, supportsOpacity: false)
-                    ColorPicker(
-                        "Shadow color", selection: $draft.shadowColor, supportsOpacity: false)
-                    ColorPicker(
-                        "Background color", selection: $draft.background, supportsOpacity: false)
-                    slider("Max width", pct($draft.maxLinePct), 20...100, "%.0f%%")
-                    slider("Line spacing", $draft.lineSpacing, 0.8...maxLineSpacing, "%.2f×")
-                } label: {
-                    Text("Layout & Color")
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                        .onTapGesture { withAnimation { showLayout.toggle() } }
-                }
+            // A plain Section, like every other one here — NOT a DisclosureGroup.
+            //
+            // It was collapsed to save height, and that cost more than it saved: a
+            // DisclosureGroup's *content* sits outside the grouped Form's row treatment,
+            // so these rows lost their normal rhythm and insets (crowded, uneven, swatches
+            // jammed against the edge) and the whole thing hid behind a ~12 pt chevron.
+            // The window has the room now (+45 pt), and consistency is worth more than the
+            // 6 rows it saved.
+            //
+            // Colours live here, opacities do not (owner): the hue is a once-a-year
+            // decision, the opacity is the one you actually reach for.
+            Section("Layout & Color") {
+                ColorPicker("Text color", selection: $draft.color, supportsOpacity: false)
+                ColorPicker("Outline color", selection: $draft.outlineColor, supportsOpacity: false)
+                ColorPicker("Shadow color", selection: $draft.shadowColor, supportsOpacity: false)
+                ColorPicker("Background color", selection: $draft.background, supportsOpacity: false)
+                slider("Max width", pct($draft.maxLinePct), 20...100, "%.0f%%")
+                slider("Line spacing", $draft.lineSpacing, 0.8...maxLineSpacing, "%.2f×")
             }
 
             Section {
