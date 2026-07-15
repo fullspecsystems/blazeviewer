@@ -210,6 +210,71 @@ pub fn capability_note(cap: TrackCapability) -> Option<&'static str> {
 }
 
 // ---------------------------------------------------------------------------
+// The track picker's rows (task #99).
+// ---------------------------------------------------------------------------
+
+/// The label for the subtitle picker's first row. Not a track — a real choice.
+pub const OFF_ROW: &str = "Off";
+
+/// One row of the track picker: the playback bar's popover and the Playback ▸ Subtitles
+/// menu flyout, which must never disagree about what the choices are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickerRow {
+    /// The line a human reads — [`track_summary`], or [`OFF_ROW`].
+    pub label: String,
+    /// Whether this row is **what is on screen right now** (the checkmark / tick).
+    pub active: bool,
+}
+
+/// The subtitle picker's rows: `Off` first, then every renderable track.
+///
+/// **A row's index is its index into [`crate::subtitle::cycle_choices`]** — same list, same
+/// order, built from that very call. That is the load-bearing property: it is what lets the
+/// picker cross the FFI as a bare index (Swift can't take a `Vec<TrackId>`), and it is why
+/// the popover, the menu flyout, and `Shift+C` cannot drift apart. Selecting row *i* means
+/// applying `cycle_choices()[i]`, so there is exactly one list in the program.
+///
+/// The tick marks **what is actually on screen**, not the mode. `Automatic` ticks the track
+/// it resolved to — so the user can see *which* one that is, which is the whole question they
+/// opened the picker to answer — and anything resolving to nothing (`Off`, or a stale id left
+/// over from another file) ticks `Off`. A tick sitting on a row you are not seeing is worse
+/// than no tick at all.
+pub fn subtitle_picker_rows(
+    catalog: &MediaTrackCatalog,
+    mode: crate::subtitle::SubtitleMode,
+    audio_language: Option<&str>,
+) -> Vec<PickerRow> {
+    use crate::subtitle::SubtitleMode;
+
+    let showing = crate::subtitle::resolve_track(mode, catalog, audio_language).map(|t| t.id);
+    crate::subtitle::cycle_choices(catalog)
+        .into_iter()
+        .map(|choice| match choice {
+            SubtitleMode::Off => PickerRow {
+                label: OFF_ROW.to_string(),
+                active: showing.is_none(),
+            },
+            SubtitleMode::Track(id) => PickerRow {
+                label: catalog
+                    .subtitles
+                    .tracks
+                    .iter()
+                    .find(|t| t.id == id)
+                    .map(track_summary)
+                    .unwrap_or_default(),
+                active: showing == Some(id),
+            },
+            // `cycle_choices` documents that Automatic is never a step, so this is
+            // unreachable — but a UI list is the wrong place to prove it with a panic.
+            SubtitleMode::Automatic => PickerRow {
+                label: "Automatic".to_string(),
+                active: false,
+            },
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Details rows (task #98, phase 3).
 // ---------------------------------------------------------------------------
 
@@ -576,6 +641,154 @@ mod tests {
         let mut t = audio("AAC", 2, Some("stereo"), 48000);
         t.id.local_id = 7;
         assert!(!track_summary(&t).contains('7'));
+    }
+
+    // -- the picker's rows (#99) --------------------------------------------
+
+    use crate::subtitle::{cycle_choices, SubtitleMode};
+
+    /// A renderable subtitle track with a distinct id and language.
+    fn sub_track(local_id: u64, lang: &str) -> MediaTrack {
+        let mut t = subtitle("SubRip", TrackCapability::SupportedText);
+        t.id.local_id = local_id;
+        t.language = Some(lang.into());
+        t
+    }
+
+    fn picker_labels(rows: &[PickerRow]) -> Vec<String> {
+        rows.iter()
+            .map(|r| format!("{}{}", if r.active { "✓ " } else { "" }, r.label))
+            .collect()
+    }
+
+    /// **The invariant the FFI rests on:** row *i* is `cycle_choices()[i]`. Selecting a row
+    /// means applying that choice, so if these two lists ever diverge the picker silently
+    /// selects the wrong track.
+    #[test]
+    fn rows_correspond_index_for_index_with_cycle_choices() {
+        let c = catalog(
+            TrackSet::complete(vec![]),
+            TrackSet::complete(vec![
+                sub_track(0, "eng"),
+                subtitle("PGS", TrackCapability::Bitmap), // dropped by both
+                sub_track(2, "fra"),
+            ]),
+        );
+        let rows = subtitle_picker_rows(&c, SubtitleMode::Off, None);
+        let choices = cycle_choices(&c);
+        assert_eq!(rows.len(), choices.len());
+        assert_eq!(choices[0], SubtitleMode::Off);
+        assert_eq!(rows[0].label, OFF_ROW);
+        // Every non-Off row names the very track its choice selects.
+        for (row, choice) in rows.iter().zip(&choices).skip(1) {
+            let SubtitleMode::Track(id) = choice else {
+                panic!("cycle_choices must not yield {choice:?}");
+            };
+            let track = c.subtitles.tracks.iter().find(|t| t.id == *id).unwrap();
+            assert_eq!(row.label, track_summary(track));
+        }
+    }
+
+    /// Off leads, and it is ticked when nothing is on screen.
+    #[test]
+    fn off_leads_and_is_ticked_when_nothing_shows() {
+        let c = catalog(
+            TrackSet::complete(vec![]),
+            TrackSet::complete(vec![sub_track(0, "eng")]),
+        );
+        let rows = subtitle_picker_rows(&c, SubtitleMode::Off, Some("eng"));
+        assert_eq!(picker_labels(&rows), vec!["✓ Off", "English · SubRip"]);
+    }
+
+    /// The headline rule: `Automatic` ticks the track it actually resolved to — the
+    /// question the user opened the picker to answer — never a row reading "Automatic".
+    #[test]
+    fn automatic_ticks_the_track_it_actually_resolved_to() {
+        let mut forced = sub_track(1, "eng");
+        forced.flags.forced = true;
+        let c = catalog(
+            TrackSet::complete(vec![]),
+            TrackSet::complete(vec![sub_track(0, "fra"), forced]),
+        );
+        let rows = subtitle_picker_rows(&c, SubtitleMode::Automatic, Some("eng"));
+        assert_eq!(
+            picker_labels(&rows),
+            vec!["Off", "French · SubRip", "✓ English · SubRip · Forced"]
+        );
+        // Exactly one tick, and never a bare "Automatic" row.
+        assert_eq!(rows.iter().filter(|r| r.active).count(), 1);
+        assert!(!rows.iter().any(|r| r.label == "Automatic"));
+    }
+
+    #[test]
+    fn an_explicit_track_ticks_itself() {
+        let c = catalog(
+            TrackSet::complete(vec![]),
+            TrackSet::complete(vec![sub_track(0, "eng"), sub_track(1, "fra")]),
+        );
+        let id = c.subtitles.tracks[1].id;
+        let rows = subtitle_picker_rows(&c, SubtitleMode::Track(id), Some("eng"));
+        assert_eq!(
+            picker_labels(&rows),
+            vec!["Off", "English · SubRip", "✓ French · SubRip"]
+        );
+    }
+
+    /// A track we cannot draw must never be offered — the picker's rows are an offer in a
+    /// way the Details listing (which marks them "Unsupported") is not.
+    #[test]
+    fn unrenderable_tracks_are_never_offered() {
+        let c = catalog(
+            TrackSet::complete(vec![]),
+            TrackSet::complete(vec![
+                subtitle("PGS", TrackCapability::Bitmap),
+                subtitle("EIA-608", TrackCapability::Unsupported),
+            ]),
+        );
+        let rows = subtitle_picker_rows(&c, SubtitleMode::Automatic, Some("eng"));
+        assert_eq!(picker_labels(&rows), vec!["✓ Off"], "PGS-only: just Off");
+        assert!(!rows.iter().any(|r| r.label.contains("Unsupported")));
+    }
+
+    /// A stale id (minted against the file you were watching a moment ago) resolves to
+    /// nothing, so nothing is on screen — and the tick must say so rather than vanish,
+    /// which would read as a broken picker.
+    #[test]
+    fn a_stale_id_ticks_off_rather_than_ticking_nothing() {
+        let c = catalog(
+            TrackSet::complete(vec![]),
+            TrackSet::complete(vec![sub_track(0, "eng")]),
+        );
+        let stale = TrackId {
+            catalog_generation: c.generation + 1,
+            local_id: 0,
+        };
+        let rows = subtitle_picker_rows(&c, SubtitleMode::Track(stale), Some("eng"));
+        assert_eq!(picker_labels(&rows), vec!["✓ Off", "English · SubRip"]);
+        assert_eq!(rows.iter().filter(|r| r.active).count(), 1);
+    }
+
+    /// Whatever the mode, exactly one row is ticked — the property the menu's radio
+    /// semantics depend on.
+    #[test]
+    fn exactly_one_row_is_always_ticked() {
+        let c = catalog(
+            TrackSet::complete(vec![]),
+            TrackSet::complete(vec![sub_track(0, "eng"), sub_track(1, "jpn")]),
+        );
+        let id = c.subtitles.tracks[0].id;
+        for mode in [
+            SubtitleMode::Off,
+            SubtitleMode::Automatic,
+            SubtitleMode::Track(id),
+        ] {
+            let rows = subtitle_picker_rows(&c, mode, Some("eng"));
+            assert_eq!(
+                rows.iter().filter(|r| r.active).count(),
+                1,
+                "exactly one tick for {mode:?}"
+            );
+        }
     }
 
     // -- completeness -> rows (all five states) -----------------------------

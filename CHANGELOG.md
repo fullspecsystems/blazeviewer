@@ -8,8 +8,7 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
-- **Subtitles on videos.** Press `C` (or View ▸ Subtitles) to turn captions on and off; your
-  choice is remembered. Blaze Viewer reads both the subtitle tracks stored **inside** an MKV
+- **Subtitles on videos.** Press `C` to turn captions on and off; your choice is remembered. Blaze Viewer reads both the subtitle tracks stored **inside** an MKV
   or MP4 and a subtitle file sitting **beside** the video (the usual `Movie.eng.srt` or
   `Movie.vtt`) — SubRip (`.srt`), WebVTT (`.vtt`), ASS/SSA, and MP4's own timed text, all
   including non-Latin scripts and right-to-left languages. Text is rendered sharply at your
@@ -17,9 +16,14 @@ with any pre-release suffix carried only by the tag.
   `C` prefers a forced/signs track matching the audio, then the file's own default track,
   then whatever it can read. (Image-based subtitles — PGS, VobSub — are not text and are
   still not shown.)
-- **`Shift+C` switches subtitle track**, showing the language and format of whatever you
-  land on, and cycling back to off. Handy when a file carries several — a full track, a
-  signs-only one, and a `.srt` beside it can now all be reached.
+- **Pick a subtitle track from a list** (macOS): a button on the playback bar, just right of
+  the running time, opens every track the file carries — named by language and format
+  ("English · SubRip · Forced"), with a tick on the one you're watching and **Off** at the
+  top. The same list is in the new **Playback ▸ Subtitles** menu. `Shift+C` still steps
+  through the very same tracks in order if you'd rather not reach for the mouse.
+- **A new Playback menu** (macOS) gathers the things that only apply to something playing —
+  Play/Pause, frame stepping, subtitle tracks, and Live Photo audio — instead of leaving them
+  scattered through View and Image.
 - **Garbled subtitles repair themselves.** Subtitle text that arrives mangled — `â™ª`
   instead of `♪`, `Iâ€™m` instead of `I'm` — is a mis-encoding that has been quietly
   breaking subtitles everywhere for decades. Blaze Viewer now detects and undoes it, and

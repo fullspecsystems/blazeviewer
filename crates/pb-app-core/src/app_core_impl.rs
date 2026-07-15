@@ -7944,16 +7944,28 @@ impl AppCore {
         else {
             return;
         };
+        self.apply_subtitle_choice(next);
+    }
 
-        // The label BEFORE the borrow of `subtitles`, and through the same `track_summary`
-        // the Details panel uses (#98) — two formatters would drift.
+    /// Commit a chosen subtitle mode: the state, the persisted on/off preference, and the
+    /// toast.
+    ///
+    /// Shared by `Shift+C` and the picker (#99) so a choice made either way behaves
+    /// identically — the alternative is two paths that agree until one of them is edited.
+    ///
+    /// The picker toasts too, even though its tick already moved: a track can be silent for
+    /// half a minute, so without it "did that work?" has no answer until a cue happens to be
+    /// due.
+    fn apply_subtitle_choice(&mut self, next: crate::subtitle::SubtitleMode) {
+        // The label through the same `track_summary` the Details panel uses (#98) — two
+        // formatters would drift. Resolved before the mutable borrows below.
         let label = match next {
             crate::subtitle::SubtitleMode::Off => "Subtitles off".to_string(),
-            crate::subtitle::SubtitleMode::Track(id) => catalog
-                .subtitles
-                .tracks
-                .iter()
-                .find(|t| t.id == id)
+            crate::subtitle::SubtitleMode::Track(id) => self
+                .displayed_item
+                .and_then(|item| self.exif_cache.get(&item))
+                .and_then(|d| d.media.as_ref())
+                .and_then(|c| c.subtitles.tracks.iter().find(|t| t.id == id))
                 .map(crate::tracks::track_summary)
                 .unwrap_or_else(|| "Subtitles on".into()),
             crate::subtitle::SubtitleMode::Automatic => "Subtitles automatic".to_string(),
@@ -7976,6 +7988,55 @@ impl AppCore {
                 ToastIcon::Captions
             },
         );
+    }
+
+    /// The subtitle picker's rows for the video on screen (#99) — the playback bar's
+    /// popover and the Playback ▸ Subtitles flyout read this.
+    ///
+    /// Empty means "offer nothing": no video, or the track probe hasn't landed yet. The
+    /// shells distinguish those with [`subtitle_tracks_known`](Self::subtitle_tracks_known)
+    /// rather than reading an empty list as "this file has none".
+    pub fn subtitle_picker_rows(&mut self) -> Vec<crate::tracks::PickerRow> {
+        let Some(item) = self.displayed_item.filter(|_| self.video_showing()) else {
+            return Vec::new();
+        };
+        self.ensure_exif_cached(item);
+        let Some(catalog) = self.exif_cache.get(&item).and_then(|d| d.media.as_ref()) else {
+            return Vec::new();
+        };
+        crate::tracks::subtitle_picker_rows(
+            catalog,
+            self.subtitles.mode,
+            crate::subtitle::audio_language_of(catalog),
+        )
+    }
+
+    /// Has the track probe landed for the video on screen? `false` = "still reading", which
+    /// is not the same answer as "no tracks" and must not be drawn as one.
+    pub fn subtitle_tracks_known(&self) -> bool {
+        self.displayed_item
+            .filter(|_| self.video_showing())
+            .and_then(|item| self.exif_cache.get(&item))
+            .is_some_and(|d| d.media.is_some())
+    }
+
+    /// Apply picker row `row` — an index into the very list
+    /// [`subtitle_picker_rows`](Self::subtitle_picker_rows) returned.
+    ///
+    /// Out-of-range is ignored rather than clamped: the only way to get one is a list that
+    /// changed under the user (a nav mid-popover), and silently selecting *a different
+    /// track than the one clicked* is the worst available answer.
+    pub fn select_subtitle_row(&mut self, row: usize) {
+        let Some(item) = self.displayed_item.filter(|_| self.video_showing()) else {
+            return;
+        };
+        let Some(catalog) = self.exif_cache.get(&item).and_then(|d| d.media.as_ref()) else {
+            return;
+        };
+        let Some(&next) = crate::subtitle::cycle_choices(catalog).get(row) else {
+            return;
+        };
+        self.apply_subtitle_choice(next);
     }
 
     pub fn tick_subtitles(&mut self) {
@@ -9074,6 +9135,149 @@ mod tests {
             ("Subtitles off", ToastIcon::CaptionsOff),
             "the toast must say which way it went, not just that it changed"
         );
+    }
+
+    // -- the track picker (#99) ---------------------------------------------
+
+    /// A subtitle track on the catalog the picker reads.
+    fn sub(local_id: u64, lang: &str) -> pb_decode::MediaTrack {
+        pb_decode::MediaTrack {
+            id: pb_decode::TrackId {
+                catalog_generation: 1,
+                local_id,
+            },
+            kind: pb_decode::TrackKind::Subtitle,
+            language: Some(lang.into()),
+            title: None,
+            codec_raw: "subrip".into(),
+            codec: "SubRip".into(),
+            capability: pb_decode::TrackCapability::SupportedText,
+            flags: pb_decode::TrackFlags::none(),
+            audio: None,
+            external: false,
+        }
+    }
+
+    /// A playing MKV whose catalog carries `subs`.
+    fn core_with_subtitle_tracks(subs: Vec<pb_decode::MediaTrack>) -> AppCore {
+        let mut core = core_with_a_native_video();
+        core.native_toast = true;
+        let catalog = pb_decode::MediaTrackCatalog::new(
+            1,
+            pb_decode::MediaBackend::FFmpeg,
+            pb_decode::TrackSet::complete(vec![track("AAC", "eng")]),
+            pb_decode::TrackSet::complete(subs),
+        );
+        seed_details(&mut core, 0, Some(catalog), Some(true));
+        core
+    }
+
+    fn labels(core: &mut AppCore) -> Vec<String> {
+        core.subtitle_picker_rows()
+            .iter()
+            .map(|r| format!("{}{}", if r.active { "✓ " } else { "" }, r.label))
+            .collect()
+    }
+
+    /// The picker lists Off + the file's tracks, and selecting a row puts that track on.
+    #[test]
+    fn selecting_a_picker_row_applies_that_track() {
+        use crate::subtitle::SubtitleMode;
+        let mut core = core_with_subtitle_tracks(vec![sub(0, "eng"), sub(1, "fra")]);
+        assert_eq!(
+            labels(&mut core),
+            vec!["✓ Off", "English · SubRip", "French · SubRip"]
+        );
+
+        core.select_subtitle_row(2);
+        assert_eq!(
+            core.subtitles.mode,
+            SubtitleMode::Track(pb_decode::TrackId {
+                catalog_generation: 1,
+                local_id: 1
+            }),
+        );
+        assert!(core.settings.subtitles, "the preference follows the choice");
+        // The tick moves with it, and the toast names what was picked.
+        assert_eq!(
+            labels(&mut core),
+            vec!["Off", "English · SubRip", "✓ French · SubRip"]
+        );
+        let t = core.toast_native.as_ref().expect("the user is told");
+        assert_eq!(
+            (t.message.as_str(), t.icon),
+            ("French · SubRip", ToastIcon::Captions)
+        );
+
+        // ...and row 0 is a real way back to off.
+        core.select_subtitle_row(0);
+        assert_eq!(core.subtitles.mode, SubtitleMode::Off);
+        assert!(!core.settings.subtitles);
+        assert_eq!(labels(&mut core)[0], "✓ Off");
+    }
+
+    /// **The point of the shared list.** The picker's row order and `Shift+C`'s cycle are
+    /// one list, so walking the keyboard cycle must visit exactly the picker's rows in
+    /// exactly its order. If these ever diverge, clicking row *i* selects a different track
+    /// than the picker drew there — silently.
+    #[test]
+    fn the_picker_and_shift_c_walk_the_same_list() {
+        let mut core = core_with_subtitle_tracks(vec![sub(0, "eng"), sub(1, "fra")]);
+        let rows: Vec<String> = core
+            .subtitle_picker_rows()
+            .iter()
+            .map(|r| r.label.clone())
+            .collect();
+
+        // Cycle right round and record which row is ticked at each step.
+        let mut visited = Vec::new();
+        for _ in 0..rows.len() {
+            core.dispatch_action(Action::SubtitleCycle);
+            let ticked = core
+                .subtitle_picker_rows()
+                .into_iter()
+                .find(|r| r.active)
+                .expect("something is always ticked");
+            visited.push(ticked.label);
+        }
+        // Starting from Off, the cycle steps to row 1, 2, then wraps to row 0.
+        assert_eq!(
+            visited,
+            vec![rows[1].clone(), rows[2].clone(), rows[0].clone()]
+        );
+    }
+
+    /// An index that no longer exists (the list changed under an open popover) must be
+    /// ignored — never clamped onto a neighbouring track the user did not click.
+    #[test]
+    fn an_out_of_range_row_selects_nothing() {
+        use crate::subtitle::SubtitleMode;
+        let mut core = core_with_subtitle_tracks(vec![sub(0, "eng")]);
+        core.select_subtitle_row(99);
+        assert_eq!(core.subtitles.mode, SubtitleMode::Off, "unchanged");
+        assert!(core.toast_native.is_none(), "and says nothing");
+    }
+
+    /// "Still reading the tracks" and "this file has none" are different answers, and an
+    /// empty list must not be drawn as the second one.
+    #[test]
+    fn an_unprobed_video_is_not_the_same_as_a_video_with_no_tracks() {
+        let mut core = core_with_a_native_video();
+        assert!(core.subtitle_picker_rows().is_empty());
+        assert!(!core.subtitle_tracks_known(), "the probe has not landed");
+
+        let mut probed = core_with_subtitle_tracks(vec![]);
+        assert!(probed.subtitle_tracks_known(), "it landed, and said none");
+        assert_eq!(labels(&mut probed), vec!["✓ Off"], "just the Off row");
+    }
+
+    /// A still is not a video: the picker offers nothing rather than the last film's tracks.
+    #[test]
+    fn a_still_offers_no_picker_rows() {
+        let mut core = test_core();
+        core.displayed_item = Some(0);
+        assert!(core.subtitle_picker_rows().is_empty());
+        assert!(!core.subtitle_tracks_known());
     }
 
     /// A test must never write the real settings.toml (the `persist_prefs` rule) — this

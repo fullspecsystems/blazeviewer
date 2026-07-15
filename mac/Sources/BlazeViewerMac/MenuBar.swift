@@ -23,6 +23,11 @@ final class MenuBar: NSObject {
     /// content check can detect it: if this item is no longer in our menu, SwiftUI
     /// rewrote the bar.
     private var sentinel: NSMenuItem?
+    /// The Playback ▸ Subtitles flyout and its holder (task #99). Held so `menuNeedsUpdate`
+    /// can recognize which menu is asking, and so the holder can be enabled/disabled with
+    /// the video. Rebuilt with the bar on a SwiftUI clobber, like everything else here.
+    private var subtitlesMenu: NSMenu?
+    private var subtitlesHolder: NSMenuItem?
 
     init(model: CoreModel) {
         self.model = model
@@ -102,7 +107,9 @@ final class MenuBar: NSObject {
         check("fullscreen", s.fullscreen)
         check("slideshow", s.slideshow)
         check("mute_live_audio", s.mute_live_audio)
-        check("toggle_subtitles", s.subtitles)
+        // `s.subtitles` deliberately drives nothing here: the Subtitles flyout replaced the
+        // old checkmark toggle, and it marks the *track* on screen (radio semantics) rather
+        // than a binary the field could carry. The winit menu still reads the field.
         check("compare_pin", s.compare_pinned_here)
         items["compare_pin"]?.isEnabled = s.compare_pin_enabled
         items["compare_toggle"]?.isEnabled = s.compare_toggle_enabled
@@ -138,6 +145,40 @@ final class MenuBar: NSObject {
         let holder = NSMenuItem()
         holder.submenu = menu
         return holder
+    }
+
+    /// The Playback ▸ Subtitles flyout (task #99).
+    ///
+    /// Its rows are **pulled in `menuNeedsUpdate(_:)`**, never pushed: the track list is
+    /// per-file, while `SetMenuState` is a fixed struct, so pushing it would mean plumbing a
+    /// catalog generation through the menu state and keeping the two in sync. AppKit already
+    /// answers this — the delegate fires just before the menu opens, so the list is built
+    /// from the file that is on screen *at that moment*. No push, no sync, never stale.
+    private func subtitlesFlyout() -> NSMenuItem {
+        let menu = NSMenu(title: "Subtitles")
+        menu.autoenablesItems = false
+        menu.delegate = self
+        subtitlesMenu = menu
+        let holder = NSMenuItem(title: "Subtitles", action: nil, keyEquivalent: "")
+        holder.submenu = menu
+        subtitlesHolder = holder
+        return holder
+    }
+
+    /// A non-firing informational row ("Reading tracks…").
+    private func note(_ title: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        return item
+    }
+
+    /// A subtitle row was chosen. Carries the row **index** in `representedObject` — the
+    /// currency the core's picker takes (`select_subtitle_track`) — rather than
+    /// string-encoding a track id into the `fire(_:)` Action-id path, which that path has
+    /// no way to express.
+    @objc private func pickSubtitleTrack(_ sender: NSMenuItem) {
+        guard let row = sender.representedObject as? Int else { return }
+        model?.selectSubtitleTrack(row)
     }
 
     private func system(_ title: String, _ action: Selector, key: String = "") -> NSMenuItem {
@@ -263,10 +304,6 @@ final class MenuBar: NSObject {
             item("slideshow_faster", "Slideshow Faster"),
             item("slideshow_slower", "Slideshow Slower"),
             sep(),
-            // Captions on a video (task #90). Lives in View for now — it moves beside the
-            // track picker when that lands (#99).
-            item("toggle_subtitles", "Subtitles"),
-            sep(),
             item("info", "Show Image Info"),
             item("full_exif", "Show Detailed Info", key: "i"),
             item("folder_tree", "Show Folder Tree"),
@@ -322,10 +359,22 @@ final class MenuBar: NSObject {
             // key-equivalents. SetMenuState drives enabled + the pin's checkmark.
             item("compare_pin", "Pin for Compare", enabled: false),
             item("compare_toggle", "Compare with Pinned", enabled: false),
-            sep(),
-            item("play_pause", "Play/Pause Animation"),
+        ]))
+
+        // Playback (task #99) — everything time-based, in one place: the transport, and the
+        // track choices beside it. The owner's call (2026-07-15) over a View ▸ Subtitles
+        // flyout, and for the reason IINA and VLC both land here: audio and subtitle track
+        // pickers belong side by side, and "View" is where neither of them belongs. The
+        // transport items moved here from Image, which keeps the still-image verbs.
+        main.addItem(submenu("Playback", [
+            item("play_pause", "Play/Pause"),
             item("frame_next", "Next Frame"),
             item("frame_prev", "Previous Frame"),
+            sep(),
+            // The Subtitles flyout REPLACES View's old checkmark toggle: its first row is
+            // Off, so it carries radio semantics (the tick marks what's on screen) that a
+            // checkbox can't. `C` still toggles regardless — the keymap owns that key.
+            subtitlesFlyout(),
             sep(),
             item("mute_live_audio", "Mute Live Photo Audio"),
         ]))
@@ -348,5 +397,46 @@ final class MenuBar: NSObject {
         NSApp.helpMenu = help.submenu
 
         return main
+    }
+}
+
+// MARK: - The Subtitles flyout's live track list (task #99)
+
+extension MenuBar: NSMenuDelegate {
+    /// Fires immediately before a menu opens — which is the whole mechanism behind the
+    /// Subtitles flyout. The track list is a property of the file on screen, so it is built
+    /// **here**, at open, instead of being pushed through `SetMenuState` and kept in sync
+    /// with a catalog generation. There is nothing to invalidate.
+    ///
+    /// The rows come from the same core list the playback bar's popover and `Shift+C` use,
+    /// so the three cannot disagree; row 0 is always Off.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === subtitlesMenu, let model else { return }
+        menu.removeAllItems()
+
+        // Three distinct answers, and they must not be collapsed: no video at all, a video
+        // whose tracks we haven't read yet, and a video we've read and which genuinely has
+        // none. Saying "Reading tracks…" over a photograph would be nonsense.
+        guard model.videoShowing else {
+            subtitlesHolder?.isEnabled = false
+            menu.addItem(note("No Video"))
+            return
+        }
+        subtitlesHolder?.isEnabled = true
+
+        let rows = model.subtitleTrackRows()
+        guard !rows.isEmpty else {
+            menu.addItem(note(model.subtitleTracksKnown ? "No Subtitle Tracks" : "Reading Tracks…"))
+            return
+        }
+        for row in rows {
+            let item = NSMenuItem(
+                title: row.label, action: #selector(pickSubtitleTrack(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = row.id
+            item.state = row.active ? .on : .off
+            item.isEnabled = true
+            menu.addItem(item)
+        }
     }
 }

@@ -90,6 +90,12 @@ final class CoreModel {
     /// pointer, so canvas hover moves stop and the reveal flash would decay mid-drag — the
     /// pump keeps the controls up while this is set (not `@Published`; only `pump()` reads it).
     var videoScrubbing = false
+    /// True while the track picker's popover is open (task #99) — the same "pin the controls
+    /// up" need as `videoScrubbing`, and separate from it for the same reason the two can't
+    /// share one flag: whichever ended last would unpin the other. The pointer is inside the
+    /// popover, not over the canvas, so the hover flash stops refreshing and the bar the
+    /// popover is anchored to would fade out from under it.
+    var videoPickerOpen = false
 
     /// The subtitle overlay (task #90): the core rasterizes the cue — shaping, outline,
     /// shadow, background, placement — and hands us a bitmap and a rect. The whole Swift
@@ -1716,7 +1722,7 @@ final class CoreModel {
         // up: the drag captures the pointer, so the hover flash would decay out from
         // under the user's own knob (see `videoScrubbing`).
         let controls =
-            (infoVis || videoScrubbing)
+            (infoVis || videoScrubbing || videoPickerOpen)
             && (nativeVideo != nil || sampleBufferVideo != nil || sessionVideo)
         if controls != videoControlsVisible {
             withAnimation(Layout.chromeFade) { videoControlsVisible = controls }
@@ -2850,6 +2856,51 @@ final class CoreModel {
     /// The playback row's play/pause button — same path as `P` / the toolbar.
     func toggleVideoPlay() {
         menuAction("play_pause")
+    }
+
+    /// The track picker's popover opened/closed (task #99). While open it pins the controls
+    /// up (the pointer is in the popover, not over the canvas, so the hover flash stops
+    /// refreshing); on close, re-arm the core flash so the bar fades on its normal timer
+    /// instead of snapping away — exactly the scrubber's contract.
+    func pickerOpenChanged(_ open: Bool) {
+        videoPickerOpen = open
+        if !open {
+            core.flash_video_controls()
+        }
+        kick()
+    }
+
+    /// The subtitle track picker's rows (task #99), pulled **fresh**.
+    ///
+    /// Read at the moment the surface opens rather than pushed and cached: the list is
+    /// per-file, and a cached one is a list that is wrong exactly when the user navigates.
+    /// The core snapshots it so the rows can't shift between the count and the labels.
+    func subtitleTrackRows() -> [SubtitleTrackRow] {
+        core.subtitle_picker_refresh()
+        let n = Int(core.subtitle_track_count())
+        return (0..<n).map { i in
+            SubtitleTrackRow(
+                id: i,
+                label: core.subtitle_track_label(UInt(i)).toString(),
+                active: core.subtitle_track_active(UInt(i))
+            )
+        }
+    }
+
+    /// Has the track probe landed for the video on screen? `false` = still reading, which is
+    /// **not** the same answer as "this file has no subtitle tracks" and must not be drawn
+    /// as one.
+    var subtitleTracksKnown: Bool { core.subtitle_tracks_known() }
+
+    /// Is a video on screen at all — on **either** backend? The Playback menu's enable
+    /// check. (`videoControlsVisible` answers a different question: whether the *chrome* is
+    /// revealed, which is false for a playing video whose info line has faded out.)
+    var videoShowing: Bool { core.video_showing() }
+
+    /// Apply a picker row — the index into whatever `subtitleTrackRows()` last returned.
+    func selectSubtitleTrack(_ row: Int) {
+        core.select_subtitle_track(UInt(row))
+        kick()
     }
 
     /// `m:ss` under an hour, `h:mm:ss` above — mirrors the core's `format_video_duration`.

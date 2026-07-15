@@ -35,8 +35,146 @@ struct VideoPlaybackRow: View {
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
             }
+
+            TrackPickerButton(model: model)
         }
         // Width is governed by the info-line pill (min/max); the scrubber fills what's left.
+    }
+}
+
+/// One row of the subtitle track picker (task #99). `id` is the row's index in the core's
+/// list — the currency `selectSubtitleTrack` takes, not a display detail.
+struct SubtitleTrackRow: Identifiable {
+    let id: Int
+    let label: String
+    let active: Bool
+}
+
+/// The track picker (task #99, owner placement 2026-07-15): a button to the **right of the
+/// total runtime**, complementing the play button on the left, opening the subtitle track
+/// list.
+///
+/// The list is pulled on open and never cached — it is per-file, and a cached one is stale
+/// exactly when the user navigates.
+struct TrackPickerButton: View {
+    let model: CoreModel
+
+    @State private var open = false
+    @State private var rows: [SubtitleTrackRow] = []
+    @State private var known = false
+
+    var body: some View {
+        Button(action: { open.toggle() }) {
+            Image(systemName: "captions.bubble")
+                .font(.system(size: 14))
+                .foregroundStyle(.primary)
+                .frame(width: 20, height: 20)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Subtitles")
+        .accessibilityLabel("Subtitle track")
+        // `.top`: the playback bar lives at the *bottom* of the window, so the list opens
+        // upward, over the picture. (AppKit only treats the edge as a preference and would
+        // flip it anyway for want of room — but the preference should still say what we mean.)
+        .popover(isPresented: $open, arrowEdge: .top) {
+            TrackPickerPopover(rows: rows, known: known) { row in
+                model.selectSubtitleTrack(row)
+                reload()
+            }
+        }
+        .onChange(of: open) { _, isOpen in
+            // Pin the controls up for as long as the popover is anchored to them, and
+            // re-arm the fade on close. Without this the bar decays out from under an open
+            // popover on its 1.8s timer.
+            model.pickerOpenChanged(isOpen)
+            if isOpen { reload() }
+        }
+    }
+
+    private func reload() {
+        rows = model.subtitleTrackRows()
+        known = model.subtitleTracksKnown
+    }
+}
+
+/// The picker's list. Deliberately dumb — it draws the rows it is handed and reports a
+/// click; every decision about *what* the rows are lives in the core.
+struct TrackPickerPopover: View {
+    let rows: [SubtitleTrackRow]
+    let known: Bool
+    let select: (Int) -> Void
+
+    /// Films carry mind-boggling subtitle counts (a 30-track Blu-ray rip is unremarkable),
+    /// so the list scrolls past this rather than growing a popover taller than the display.
+    private let maxHeight: CGFloat = 320
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Subtitles")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.top, 10)
+
+            if rows.isEmpty {
+                // 0 rows never means "no tracks" — the Off row would be there if we knew.
+                // It means the probe hasn't landed, so say *that*.
+                Text(known ? "No subtitle tracks" : "Reading tracks…")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 10)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(rows) { row in
+                            TrackPickerRow(row: row) { select(row.id) }
+                        }
+                    }
+                    .padding(.horizontal, 6)
+                }
+                .frame(maxHeight: maxHeight)
+                .scrollBounceBehavior(.basedOnSize)
+                .padding(.bottom, 6)
+            }
+        }
+        .frame(minWidth: 220)
+    }
+}
+
+/// A single selectable row: a checkmark gutter (always reserved, so labels don't shift as
+/// the tick moves) and the track's shared `track_summary` line.
+private struct TrackPickerRow: View {
+    let row: SubtitleTrackRow
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 11, weight: .semibold))
+                    .opacity(row.active ? 1 : 0)
+                    .frame(width: 12)
+                Text(row.label)
+                    .font(.callout)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(hovering ? Color.primary.opacity(0.1) : .clear)
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .accessibilityAddTraits(row.active ? [.isSelected] : [])
     }
 }
 

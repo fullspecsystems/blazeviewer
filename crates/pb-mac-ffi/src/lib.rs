@@ -111,6 +111,17 @@ pub struct AppCoreHandle {
     /// indexed `help_row_*` accessors — the keymap-editor pull pattern, avoiding a
     /// `Vec<struct>` FFI return. The native SwiftUI Help view renders from it.
     help_snapshot: Vec<(bool, String, String)>,
+    /// The subtitle track picker's rows `(label, active)` (task #99) — snapshotted by
+    /// `subtitle_picker_refresh` when the popover/menu is about to draw, then read by the
+    /// indexed `subtitle_track_*` accessors. Same pull pattern as `help_snapshot`, for the
+    /// same reason (`Vec<PickerRow>` can't cross back to Swift), plus one of its own: a
+    /// snapshot is a *stable* list, so a probe landing between the host's `count()` and its
+    /// `label(i)` calls can't shift the rows out from under a half-drawn menu.
+    ///
+    /// **A row's index is its index into `cycle_choices`** — that correspondence is what
+    /// `select_subtitle_track(i)` relies on, and it's pinned by
+    /// `rows_correspond_index_for_index_with_cycle_choices` in pb-app-core.
+    subtitle_picker_snapshot: Vec<(String, bool)>,
     /// Flattened Inspector rows `(kind, a, b)` for the active tab (task #54): `kind` is
     /// 0 header, 1 label/value pair, 2 body paragraph, 3 status/muted; `a`/`b` are the
     /// text (pair = label/value, else `a` = text, `b` = ""). Snapshotted by
@@ -184,6 +195,7 @@ impl AppCoreHandle {
             keymap_dirty: false,
             keymap_note: String::new(),
             help_snapshot: Vec::new(),
+            subtitle_picker_snapshot: Vec::new(),
             inspector_snapshot: Vec::new(),
             tree_snapshot: Vec::new(),
             pending_launch_paths: Vec::new(),
@@ -210,6 +222,64 @@ impl AppCoreHandle {
     /// Whether the native SwiftUI Help view should be shown (Help open, not Tab-hidden).
     fn help_visible(&self) -> bool {
         self.core.help_panel_visible()
+    }
+
+    // ── The subtitle track picker (task #99) ──────────────────────────────
+    //
+    // The playback bar's popover and the Playback ▸ Subtitles flyout both draw from this
+    // snapshot: refresh once as the surface opens (`menuNeedsUpdate:` / the popover's
+    // appear), then read the indexed accessors.
+
+    /// Snapshot the subtitle picker's rows — call before reading `subtitle_track_*`.
+    ///
+    /// Cheap enough to call on every menu open (a catalog lookup and a few `format!`s), and
+    /// that is the point: the list is per-file and must never be a stale push. See
+    /// `menuNeedsUpdate(_:)` in MenuBar.swift.
+    fn subtitle_picker_refresh(&mut self) {
+        self.subtitle_picker_snapshot = self
+            .core
+            .subtitle_picker_rows()
+            .into_iter()
+            .map(|r| (r.label, r.active))
+            .collect();
+    }
+
+    /// How many rows the picker has — **0 means offer nothing**, which is *not* the same
+    /// claim as "this file has no subtitles". Pair it with `subtitle_tracks_known()`: 0 rows
+    /// plus not-known means the probe is still reading. A file that genuinely has none still
+    /// reports 1 — the Off row — because Off is a real choice, not the absence of one.
+    fn subtitle_track_count(&self) -> usize {
+        self.subtitle_picker_snapshot.len()
+    }
+
+    /// Row `i`'s label: "Off", or the shared `track_summary` line ("English · SubRip ·
+    /// Forced"). Out-of-range → "" (defensive, like the keymap accessors).
+    fn subtitle_track_label(&self, i: usize) -> String {
+        self.subtitle_picker_snapshot
+            .get(i)
+            .map(|r| r.0.clone())
+            .unwrap_or_default()
+    }
+
+    /// Is row `i` what is on screen right now (the tick)? Exactly one row is ever active.
+    fn subtitle_track_active(&self, i: usize) -> bool {
+        self.subtitle_picker_snapshot
+            .get(i)
+            .map(|r| r.1)
+            .unwrap_or(false)
+    }
+
+    /// Has the track probe landed for the video on screen? `false` = "still reading" — draw
+    /// that as *reading*, never as "no tracks".
+    fn subtitle_tracks_known(&self) -> bool {
+        self.core.subtitle_tracks_known()
+    }
+
+    /// Apply row `i` — the index into the list the accessors above just described. Refreshes
+    /// the snapshot so the tick has already moved when the caller redraws.
+    fn select_subtitle_track(&mut self, i: usize) {
+        self.core.select_subtitle_row(i);
+        self.subtitle_picker_refresh();
     }
 
     /// Whether the native empty-state Open panel should be shown (no photos loaded).
@@ -1098,6 +1168,16 @@ impl AppCoreHandle {
     /// on this alongside its own `nativeVideo` checks.
     fn video_session_active(&self) -> bool {
         self.core.video_session_active()
+    }
+
+    /// Is a video actually on screen — on **either** backend? Unlike
+    /// `video_session_active`, this is true for the Native routes (AVPlayer and the
+    /// sample-buffer presenter) too, which is what MKV and WebM actually take.
+    ///
+    /// The Playback ▸ Subtitles flyout enables on this. Without it the flyout can't tell a
+    /// still from an unprobed video, and would offer "Reading tracks…" over a photograph.
+    fn video_showing(&self) -> bool {
+        self.core.video_showing()
     }
 
     /// The session's playhead / duration in seconds (`0` = none/unknown) and
@@ -4287,6 +4367,10 @@ mod ffi {
             duration_secs: f64,
         );
         fn video_session_active(&self) -> bool;
+        // Is a video on screen on EITHER backend (Native included) -- the Playback menu's
+        // enable check. video_session_active() is false for MKV/WebM and would disable the
+        // flyout for exactly the files that carry subtitle tracks.
+        fn video_showing(&self) -> bool;
         fn video_session_elapsed_secs(&self) -> f64;
         fn video_session_duration_secs(&self) -> f64;
         fn video_session_playing(&self) -> bool;
@@ -4349,6 +4433,18 @@ mod ffi {
         fn help_row_is_header(&self, i: usize) -> bool;
         fn help_row_text(&self, i: usize) -> String;
         fn help_row_shortcut(&self, i: usize) -> String;
+
+        // The subtitle track picker (task #99): subtitle_picker_refresh() as the popover /
+        // the Playback > Subtitles flyout opens, then read the indexed accessors. Row i is
+        // the argument select_subtitle_track takes. Row 0 is always Off (a real choice), so
+        // a count of 1 means "this file has no readable subtitle tracks" -- but only once
+        // subtitle_tracks_known() is true; before that, 0 rows means "still reading".
+        fn subtitle_picker_refresh(&mut self);
+        fn subtitle_track_count(&self) -> usize;
+        fn subtitle_track_label(&self, i: usize) -> String;
+        fn subtitle_track_active(&self, i: usize) -> bool;
+        fn subtitle_tracks_known(&self) -> bool;
+        fn select_subtitle_track(&mut self, i: usize);
 
         // The native empty-state Open panel (task #54): its visibility, plus a generic
         // shortcut lookup by Action id for the welcome surface's tips.
