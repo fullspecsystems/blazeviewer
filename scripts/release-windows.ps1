@@ -49,7 +49,10 @@ param(
     # so a plain run just produces the feed locally. SSH host is jdlien.com (same droplet); the path
     # is the downloads.blazeviewer.app site root. Pass a full `[user@]host:/path` to override.
     [switch]$Upload,
-    [string]$UploadTarget = "jdlien.com:/var/www/downloads.blazeviewer.app/win/"
+    [string]$UploadTarget = "jdlien.com:/var/www/downloads.blazeviewer.app/win/",
+    # Escape hatch for a deliberate throwaway build. NEVER for a real release: the artifact is
+    # stamped -dirty and the About dialog shows it. See the gates at steps 1b and 2b.
+    [switch]$AllowDirty
 )
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
@@ -65,8 +68,29 @@ if (Test-Path .env.release) {
 }
 
 # ── 1. Version from Cargo.toml (pb-app) — the package and the app always agree.
+#      `cargo metadata` also SETTLES Cargo.lock, which matters for the gate below: a version
+#      bump changes pb-app's lockfile entry, and nothing rewrites it until cargo runs.
 $Version = ((cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
     Where-Object { $_.name -eq 'pb-app' }).version
+
+# ── 1b. Gate 1 of 2: refuse a dirty tree. crates/pb-app/build.rs stamps the build id -dirty
+#       on ANY git status output (untracked included) and it ships in the About dialog.
+#       Deliberately AFTER cargo metadata: checking first would sail past a pending Cargo.lock
+#       rewrite, which is exactly how 0.2.1 shipped dirty on its first attempt despite a tree
+#       verified clean minutes earlier. The bash twin lives in scripts/release-preflight.sh
+#       (PowerShell can't source it, so the logic is mirrored here).
+$Dirty = (git status --porcelain 2>$null | Out-String).Trim()
+if ($Dirty) {
+    if ($AllowDirty) {
+        Write-Host "==> WARNING: -AllowDirty — this build WILL be stamped -dirty. Never ship it." -ForegroundColor Yellow
+    } else {
+        Write-Host $Dirty
+        throw ("Refusing to release from a dirty working tree (above). build.rs stamps the build id " +
+               "-dirty and it ships in the About dialog. If that is only Cargo.lock, this gate just " +
+               "did its job: the version bump changes pb-app's lockfile entry — commit it with the " +
+               "bump. Commit or .gitignore, then re-run. -AllowDirty overrides (dev only).")
+    }
+}
 
 # Per-arch knobs: the vcpkg triplet pb-decode/build.rs links, the Rust target triple, the Velopack
 # VC++ redist framework that Setup installs if missing, and the Velopack channel. x64 keeps the
@@ -127,6 +151,26 @@ cargo build --release -p pb-app --features libheif,dav1d,ffprobe
 if ($LASTEXITCODE -ne 0) { throw "build failed" }
 $Exe = "target\release\blazeviewer.exe"
 if (-not (Test-Path $Exe)) { throw "$Exe not found after build" }
+
+# ── 3b. Gate 2 of 2: the build we just ran is itself what rewrites Cargo.lock after a version
+#       bump, so a tree that passed the preflight can be dirty NOW — and build.rs stamped that
+#       into the exe above. Abort before Azure Trusted Signing rather than sign a dead build.
+#       The mac script asserts the id the artifact actually carries (read from Info.plist);
+#       here we re-check the tree instead, because a release exe is GUI-subsystem
+#       (windows_subsystem = "windows" — crates/pb-app/src/main.rs:1) and its `--version`
+#       goes to the attached console, not a pipe pwsh can capture.
+$Dirty = (git status --porcelain 2>$null | Out-String).Trim()
+if ($Dirty) {
+    if ($AllowDirty) {
+        Write-Host "==> WARNING: tree went dirty during the build (-AllowDirty). Never ship it." -ForegroundColor Yellow
+    } else {
+        Write-Host $Dirty
+        throw ("The tree went dirty DURING the build, so the exe is stamped -dirty. The preflight " +
+               "could not have caught this — it was clean when it looked. Commit the above and re-run.")
+    }
+} else {
+    Write-Host "==> tree still clean after the build (build id is not -dirty)" -ForegroundColor Green
+}
 
 # ── 4. vpk (Velopack CLI) — a dotnet global tool; install on first use, cache after.
 if (-not (Get-Command vpk -ErrorAction SilentlyContinue)) {

@@ -637,19 +637,27 @@ next launch is the new version). Self-gates when `$APPIMAGE` is unset (a `cargo 
 binary) or the AppImage's directory isn't writable (installed read-only) — then it just stays put.
 `PB_UPDATE_FEED` overrides the feed base URL for offline testing.
 
-> **Release only from a clean, committed workspace.** `crates/pb-app/build.rs` stamps the build
-> id `-dirty` on **any** `git status --porcelain` output — **untracked files included** — and that
-> shows in the About dialog. Commit (or `.gitignore`) everything first: both release scripts build
-> fresh from the working tree, so a stray file (a local `vendor/` dir, a scratch note) silently
-> ships a `-dirty` build. Check `git status` is clean before running a release script.
+> **Release only from a clean, committed workspace — now enforced, not remembered.**
+> `crates/pb-app/build.rs` stamps the build id `-dirty` on **any** `git status --porcelain`
+> output — **untracked files included** — and that ships in the About dialog. Every release
+> script refuses to run from a dirty tree; `scripts/release-preflight.sh` is the shared bash
+> gate (release-windows.ps1 mirrors it inline — PowerShell can't source bash).
 >
-> 🪤 **The version bump dirties `Cargo.lock` — run cargo BEFORE you commit.** This one bites
-> every release and `git status` won't warn you: bumping `crates/pb-app/Cargo.toml` changes
-> `pb-app`'s entry in `Cargo.lock`, but *nothing rewrites the lockfile until a cargo command
-> runs* — which is the release build itself. So a "clean" tree goes dirty **mid-build**, and
-> the DMG ships `0.2.1 (abc1234-dirty)` having been verified clean minutes earlier (hit on
-> 0.2.1, 2026-07-14). After bumping the version: run any cargo command (`cargo check -p
-> pb-app-core` is enough), commit the lockfile with the bump, *then* release.
+> 🪤 **Why the gate is two-sided — a pre-flight `git status` is NOT enough.** Bumping
+> `crates/pb-app/Cargo.toml` changes `pb-app`'s entry in `Cargo.lock`, but *nothing rewrites
+> the lockfile until a cargo command runs* — which is the release build itself. So a tree that
+> is genuinely clean when checked goes dirty **mid-build**, and the DMG ships
+> `0.2.1 (abc1234-dirty)` having been verified clean minutes earlier (hit on 0.2.1,
+> 2026-07-14). Hence:
+> 1. **`release_preflight`** runs `cargo metadata` *first* to settle the lockfile, *then*
+>    checks — turning that mid-build rewrite into an up-front, actionable failure.
+> 2. **`assert_build_id_clean` / `assert_tree_clean_after_build`** run *after* the build and
+>    assert what was actually stamped, so causes we haven't thought of still get caught.
+>    Placed **before** codesign/notarize, so a doomed build never costs an Apple round-trip.
+>
+> Both honour an escape hatch — `--allow-dirty` (mac), `PB_ALLOW_DIRTY=1` (linux),
+> `-AllowDirty` (windows) — for a deliberate throwaway build. **Never for a real release:** it
+> only downgrades the abort to a warning; the artifact is still stamped `-dirty`.
 
 > **Never let a tool auto-invoke a paid CI run.** Hosted runners cost real money (a macOS run is
 > billed at 10×), so releases are scripted and run locally — the `v*`-tag trigger was removed from

@@ -25,27 +25,38 @@
 # app binary), so hardened-runtime library validation + notarization accept them. Pass
 # --no-video for a video-less DMG (skips the FFmpeg build/bundle entirely).
 #
-# Usage: scripts/release-macos.sh [--release|--debug] [--no-video]
+# Usage: scripts/release-macos.sh [--release|--debug] [--no-video] [--allow-dirty]
 #   Builds the SwiftUI host ("Blaze Viewer.app" via build-swift-host.sh) — it IS the Mac app
 #   since the 2026-07-02 cutover (the old egui/winit bundle was retired in task #70).
 #   Runs fine LOCALLY with a Developer ID identity in the login keychain + the three APPLE_*
 #   env vars — no CI required (Actions credits are finite).
+#   --allow-dirty downgrades the clean-tree gate to a warning (see scripts/release-preflight.sh).
+#   It is for a deliberate throwaway build ONLY — the artifact is still stamped -dirty.
 set -euo pipefail
 
 PROFILE="release"
 BUNDLE_VIDEO=1   # ship the FFmpeg video backend by default (task #84); --no-video opts out
+ALLOW_DIRTY=0    # escape hatch for a throwaway build; never for a real release
 for a in "$@"; do
 	case "$a" in
 		--debug) PROFILE="debug" ;;
 		--release) PROFILE="release" ;;
 		--no-video) BUNDLE_VIDEO=0 ;;
+		--allow-dirty) ALLOW_DIRTY=1 ;;
 		--swift-host) ;; # accepted for compat; the SwiftUI host is the only target now
-		*) echo "unknown arg: $a (usage: release-macos.sh [--release|--debug] [--no-video])" >&2; exit 2 ;;
+		*) echo "unknown arg: $a (usage: release-macos.sh [--release|--debug] [--no-video] [--allow-dirty])" >&2; exit 2 ;;
 	esac
 done
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+
+# Gate 1 of 2: refuse a dirty tree, having first run cargo so a pending Cargo.lock rewrite
+# surfaces HERE rather than mid-build. See scripts/release-preflight.sh for why a plain
+# `git status` check is not enough (it isn't — 0.2.1 proved it).
+# shellcheck source=scripts/release-preflight.sh
+source "$REPO_ROOT/scripts/release-preflight.sh"
+release_preflight "$ALLOW_DIRTY"
 
 DIST="dist"
 SHORT_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/pb-app/Cargo.toml | head -1)"
@@ -111,6 +122,15 @@ find_identity() {
 #    re-signed/re-packaged (build-swift-host.sh already rm -rf's its own output).
 $BUILD_CMD
 [[ -d "$APP" ]] || { echo "error: $APP not found" >&2; exit 1; }
+
+# Gate 2 of 2 — the one that actually holds. The preflight above is a *precondition*, and
+# 0.2.1 slipped past exactly that: the tree was clean when checked and went dirty during
+# the build. So read what the build really stamped into the bundle (PBBuildID), and do it
+# here — before codesign/notarytool — so a dirty artifact never costs an Apple round-trip.
+assert_build_id_clean \
+	"$(/usr/libexec/PlistBuddy -c 'Print :PBBuildID' "$APP/Contents/Info.plist" 2>/dev/null || true)" \
+	"$ALLOW_DIRTY"
+
 # An interrupted codesign leaves a .cstemp beside the binary; a later BUNDLE sign then
 # fails on it ("invalid or unsupported format ... In subcomponent: *.cstemp"). Sweep.
 find "$APP" -name "*.cstemp" -delete

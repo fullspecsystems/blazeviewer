@@ -13,7 +13,9 @@
 # `pw-cat` (PipeWire) on the user's PATH at runtime — present on any modern desktop, and
 # it degrades to silent motion if absent, so it isn't bundled.
 #
-# Usage:  ./scripts/release-linux.sh
+# Usage:  ./scripts/release-linux.sh          (PB_ALLOW_DIRTY=1 to downgrade the clean-tree
+#                                              gate to a warning — throwaway builds ONLY; the
+#                                              artifact is still stamped -dirty)
 # Output: dist/BlazeViewer-<version>-<arch>.AppImage
 #
 # NOTE: the AppImage is built for the *host* architecture. Run it on an x86_64 box to
@@ -22,6 +24,15 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
+
+# Gate 1 of 2: refuse a dirty tree (build.rs would stamp the About dialog -dirty), having
+# run cargo first so a pending Cargo.lock rewrite surfaces here instead of mid-build.
+# PB_ALLOW_DIRTY=1 is the dev escape hatch — this script takes no flags.
+# shellcheck source=scripts/release-preflight.sh
+source "$ROOT/scripts/release-preflight.sh"
+ALLOW_DIRTY="${PB_ALLOW_DIRTY:-0}"
+release_preflight "$ALLOW_DIRTY"
+
 VERSION="$(grep -m1 '^version' crates/pb-app/Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
 ARCH="$(uname -m)"
 DIST="$ROOT/dist"
@@ -37,6 +48,10 @@ export APPIMAGE_EXTRACT_AND_RUN=1
 
 # ── 1. Build the full-feature release binary ─────────────────────────────────────────
 cargo build --release -p pb-app --features livephoto,pb-decode/libheif
+# Gate 2 of 2: this build is what rewrites Cargo.lock after a version bump, so a tree that
+# passed the preflight can be dirty NOW — and build.rs already stamped that into the binary
+# above. Check before we spend minutes on linuxdeploy + AppImage packaging.
+assert_tree_clean_after_build "$ALLOW_DIRTY"
 # Honor a custom target dir (the Docker builder points this at a cached volume so it never
 # clashes with the host's macOS `target/`).
 BIN="${CARGO_TARGET_DIR:-target}/release/blazeviewer"
