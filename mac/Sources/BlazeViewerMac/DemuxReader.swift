@@ -150,7 +150,32 @@ final class DemuxReader: @unchecked Sendable {
         formatDesc = fmt
         tbNum = demux_time_base_num(p)
         tbDen = demux_time_base_den(p)
+        // Fix "zero" HERE, from the container — not from whichever packet arrives first.
+        //
+        // ⚠ They are the same thing only when feeding starts at the top of the file. A
+        // resume (task #94.2) starts at a keyframe minutes in, and taking the origin from
+        // that packet would redefine zero as the resume point: the clock, the scrubber, and
+        // the subtitles would all shift by the resume offset, and the seek pre-roll would
+        // measure every frame as before its own target and hide the whole film.
+        // `i64.min` (no declared start_time) still falls back to the first packet below.
+        origin = demux_start_time_units(p)
         return true
+    }
+
+    /// Position the demuxer before the first feed — the resume position (task #94.2).
+    ///
+    /// Separate from [`seek(seconds:layer:then:)`] because there is nothing to flush or
+    /// re-anchor yet: the layer has never been fed and the clock has never started. All it
+    /// shares is `seekTargetSecs`, which does the real work either way — the landed
+    /// keyframe is at/before the target, so the frames up to it must be decoded but not
+    /// shown, and the clock must anchor at the target rather than at the keyframe.
+    func seekBeforeStart(seconds: Double) {
+        queue.async { [weak self] in
+            guard let self, self.ptr != 0 else { return }
+            demux_seek(self.ptr, max(0, seconds))
+            guard demux_state(self.ptr) != 2 else { return } // open failed; feed from 0
+            self.seekTargetSecs = max(0, seconds)
+        }
     }
 
     /// Start (or restart) feeding `layer` from renderer readiness. The block runs on

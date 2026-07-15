@@ -137,7 +137,13 @@ final class NativeVideoPlayer {
                     ) { [weak self] _ in
                         MainActor.assumeIsolated {
                             guard let self else { return }
-                            self.revealAndPlay(layer)
+                            // `self.playerLayer`, not the `layer` the KVO handed us — they
+                            // are the same object, but `seek`'s completion is @Sendable and
+                            // escaping, so capturing a bare AVPlayerLayer there crosses a
+                            // concurrency boundary with a non-Sendable type (a hard error
+                            // in Swift 6). Reaching it through `self` keeps the crossing to
+                            // the one thing that is already isolated.
+                            self.revealAndPlay(self.playerLayer)
                         }
                     }
                 } else {

@@ -106,7 +106,18 @@ echo "==> create-package (swift-bridge glue + staticlib → Swift package)"
 cargo run -q -p pb-mac-ffi --features package --bin create-package -- "--$PROFILE"
 
 echo "==> swift build ($PROFILE)"
-swift build --package-path mac -c "$PROFILE" $FF_LINK_ARGS
+# Homebrew's FFmpeg is built for a much newer macOS than our 14.0 floor (ADR-021), so the
+# linker warns once per dylib — five lines, every dev build, telling us only that we are on
+# the dev path, which the line above already said. The release build doesn't link Homebrew
+# at all (see CLAUDE.md's "Homebrew trap"), so this can never fire on a shipped artifact.
+#
+# Filtered EXACTLY: the pattern is scoped to `/opt/homebrew`, so a linker warning about
+# anything else — including our own code or the bundled LGPL dylibs — still comes through.
+# `|| true` keeps grep's "matched nothing" exit code from failing the pipeline under
+# `pipefail`; swift build's own status is what PIPESTATUS checks.
+swift build --package-path mac -c "$PROFILE" $FF_LINK_ARGS 2>&1 |
+	{ grep -v "^ld: warning: building for macOS-.*but linking with dylib '/opt/homebrew/" || true; }
+[[ "${PIPESTATUS[0]}" -eq 0 ]] || { echo "error: swift build failed" >&2; exit 1; }
 BIN="$(swift build --package-path mac -c "$PROFILE" --show-bin-path)/BlazeViewerMac"
 [[ -x "$BIN" ]] || { echo "error: $BIN not found" >&2; exit 1; }
 

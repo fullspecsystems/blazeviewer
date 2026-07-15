@@ -3618,6 +3618,28 @@ fn demux_duration_secs(ptr: usize) -> f64 {
     }
 }
 
+/// The video stream's `start_time` in stream time-base units, or `i64::MIN` when the
+/// container declares none.
+///
+/// ⚠ This is what the presentation timeline is measured FROM, and the reader must take it
+/// from here rather than from the first packet it happens to see. Those are the same thing
+/// only when feeding begins at the top of the file — and a resume (task #94.2) begins at a
+/// keyframe minutes in, which would silently redefine "zero" as the resume point and shift
+/// the whole timeline under the clock, the scrubber, and the subtitles.
+fn demux_start_time_units(ptr: usize) -> i64 {
+    #[cfg(feature = "ffvideo")]
+    {
+        demux_ref(ptr).map_or(i64::MIN, |h| {
+            h.demux.info().facts.start_time.unwrap_or(i64::MIN)
+        })
+    }
+    #[cfg(not(feature = "ffvideo"))]
+    {
+        let _ = ptr;
+        i64::MIN
+    }
+}
+
 /// Clockwise display rotation (0/90/180/270) from the display matrix.
 fn demux_rotation(ptr: usize) -> i32 {
     #[cfg(feature = "ffvideo")]
@@ -4298,6 +4320,7 @@ mod ffi {
         fn demux_time_base_den(ptr: usize) -> i32;
         fn demux_fps(ptr: usize) -> f64;
         fn demux_duration_secs(ptr: usize) -> f64;
+        fn demux_start_time_units(ptr: usize) -> i64;
         fn demux_rotation(ptr: usize) -> i32;
         fn demux_nal_length_size(ptr: usize) -> u8;
         fn demux_length_prefixed(ptr: usize) -> bool;

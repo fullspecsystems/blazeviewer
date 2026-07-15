@@ -162,6 +162,19 @@ final class SampleBufferPresenter {
             }
         }
 
+        // Resume position (task #94.2). The core remembers where you left a clip and hands
+        // it back as `startSecs`; this route accepted it and **never used it**, so every
+        // MKV restarted from zero while MP4s resumed correctly — the resume was being
+        // recorded fine, this end just dropped it on the floor (owner, 2026-07-15).
+        //
+        // Seeking BEFORE feeding, rather than playing from 0 and seeking after, means the
+        // first frame revealed is already the resume frame — the wgpu poster holds until
+        // then, so there is no jump to frame 0 and back. `<= 0.5` plays from the start,
+        // matching NativeVideoPlayer's rule.
+        if startSecs > 0.5, durationSecs <= 0 || startSecs < durationSecs {
+            reader.seekBeforeStart(seconds: startSecs)
+        }
+
         // Drive the layer from renderer readiness; reveal + start the clock on the
         // first enqueued frame.
         reader.startFeeding(
