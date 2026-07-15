@@ -422,6 +422,7 @@ impl AppCore {
                 };
                 self.show_toast_icon(msg, icon);
             }
+            Action::SubtitleCycle => self.cycle_subtitle_track(),
             Action::MuteLiveAudio => {
                 // An explicit toggle supersedes a `--mute` launch override and persists the
                 // user's choice (clearing the session override so it no longer masks the setting).
@@ -4331,6 +4332,7 @@ impl AppCore {
                     ),
                     row("Mute Live Photo audio", sc(Action::MuteLiveAudio)),
                     row("Subtitles on/off", sc(Action::ToggleSubtitles)),
+                    row("Next subtitle track", sc(Action::SubtitleCycle)),
                 ],
             ),
             section(
@@ -7901,6 +7903,74 @@ impl AppCore {
     /// switched off by a routing change. On `Session` that's the session's own
     /// `desired_position`; on `Native` (macOS AVPlayer *and* the sample-buffer route) it's
     /// the shell's ~20 Hz report, which is ~50 ms granular against cues that last seconds.
+    /// `Shift+C` — the next subtitle track, `Off` included (#99).
+    ///
+    /// Toasts **optimistically**, which is safe here and would not be for audio: swapping
+    /// a subtitle track only re-aims a cue reader, so there is no clock to re-prime and
+    /// nothing to fail silently. (Task #99's rule that audio must toast only on a
+    /// *confirmed* switch stands — it is a different risk, not the same one.)
+    pub fn cycle_subtitle_track(&mut self) {
+        let Some(item) = self.displayed_item.filter(|_| self.video_showing()) else {
+            return; // not a video: `Shift+C` says nothing rather than lying
+        };
+        self.ensure_exif_cached(item);
+        let Some(catalog) = self.exif_cache.get(&item).and_then(|d| d.media.as_ref()) else {
+            self.show_toast_icon("Reading tracks…", ToastIcon::Captions);
+            return;
+        };
+        let choices = crate::subtitle::cycle_choices(catalog);
+        // Off plus nothing = nothing to cycle. Say so rather than no-op'ing: a key that
+        // does nothing is indistinguishable from a key that is broken.
+        if choices.len() < 2 {
+            self.show_toast_icon("No subtitle tracks", ToastIcon::CaptionsOff);
+            return;
+        }
+        // What Automatic is *currently showing* — so the cycle advances from the track on
+        // screen rather than jumping back to it.
+        let resolved = crate::subtitle::resolve_track(
+            self.subtitles.mode,
+            catalog,
+            crate::subtitle::audio_language_of(catalog),
+        )
+        .map(|t| t.id);
+        let Some(next) = crate::subtitle::next_choice(&choices, self.subtitles.mode, resolved)
+        else {
+            return;
+        };
+
+        // The label BEFORE the borrow of `subtitles`, and through the same `track_summary`
+        // the Details panel uses (#98) — two formatters would drift.
+        let label = match next {
+            crate::subtitle::SubtitleMode::Off => "Subtitles off".to_string(),
+            crate::subtitle::SubtitleMode::Track(id) => catalog
+                .subtitles
+                .tracks
+                .iter()
+                .find(|t| t.id == id)
+                .map(crate::tracks::track_summary)
+                .unwrap_or_else(|| "Subtitles on".into()),
+            crate::subtitle::SubtitleMode::Automatic => "Subtitles automatic".to_string(),
+        };
+        let off = next == crate::subtitle::SubtitleMode::Off;
+
+        self.subtitles.mode = next;
+        // `settings.subtitles` is the on/off preference the toggle persists; keep it
+        // honest when the cycle passes through Off, or `C` would come back on to a state
+        // the file no longer describes.
+        self.settings.subtitles = !off;
+        if self.persist_prefs {
+            self.settings.save();
+        }
+        self.show_toast_icon(
+            &label,
+            if off {
+                ToastIcon::CaptionsOff
+            } else {
+                ToastIcon::Captions
+            },
+        );
+    }
+
     pub fn tick_subtitles(&mut self) {
         self.subtitles.poll(self.details_gen);
 
@@ -7919,9 +7989,26 @@ impl AppCore {
         };
         // Off still costs nothing beyond the branch above: no discovery thread, no font
         // system, no cue data held.
+        //
+        // The track catalog is the Details probe's, and it is what holds the container's
+        // own subtitle streams *and* the sidecars beside it in one id namespace — so
+        // subtitles cannot select anything until it lands. Drive the probe rather than
+        // waiting for someone to open the Inspector: idempotent, guarded by its own
+        // `Loading` placeholder, ~20 ms of container header, and only ever reached with
+        // subtitles on and a video playing.
+        self.ensure_exif_cached(item);
         let source = Arc::clone(&self.source);
-        self.subtitles
-            .ensure_loaded(&source, item, self.details_gen);
+        let deck_gen = self.details_gen;
+        // Split the borrow: `ensure_loaded` needs `&mut subtitles` while it reads the
+        // catalog out of `exif_cache`, and they are disjoint fields.
+        let Self {
+            subtitles,
+            exif_cache,
+            ..
+        } = self;
+        let catalog = exif_cache.get(&item).and_then(|d| d.media.as_ref());
+        let audio_lang = catalog.and_then(crate::subtitle::audio_language_of);
+        subtitles.ensure_loaded(&source, item, deck_gen, catalog, audio_lang);
 
         let Some((x, y, w, h, _rot)) = self.video_placement() else {
             self.subtitles

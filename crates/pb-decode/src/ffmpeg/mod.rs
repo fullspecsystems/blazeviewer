@@ -9,6 +9,9 @@
 //!   rotation / SAR / duration / fps / audio-presence facts.
 //! - [`tracks`] — the audio/subtitle [`crate::MediaTrackCatalog`] (task #98); the
 //!   reference backend, since FFmpeg reads the container's real stream table.
+//! - [`cues`] — an *embedded* subtitle stream's timed text (task #90.2). Like
+//!   [`tracks`], it needs no video decoder, so it works on the trimmed Windows build
+//!   too — which is exactly why it is here and not beside [`demux`].
 //! - [`color`] — FFmpeg color metadata (H.273 CICP) → [`crate::ColorTransform`]
 //!   / [`crate::video::VideoColorInfo`], plus correct swscale coefficients.
 //! - [`hw`] *(`ffvideo`)* — hardware decode setup (VideoToolbox / VAAPI) +
@@ -33,6 +36,7 @@
 
 pub mod color;
 pub mod convert;
+pub mod cues;
 pub mod details;
 pub mod init;
 pub mod io;

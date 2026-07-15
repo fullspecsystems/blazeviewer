@@ -138,6 +138,10 @@ pub enum Action {
     MuteLiveAudio,
     // Subtitles/captions on a video (toggle; task #90).
     ToggleSubtitles,
+    // Cycle to the next subtitle track, Off included (task #99). Separate from the
+    // toggle because subtitles have two verbs — an on/off AND a pick — which is also
+    // why `Shift` reads as "cycle" here and will read as "reverse" on audio's `A`.
+    SubtitleCycle,
     // Docked windowed toolbar (Windows/Linux winit shell only; #61). macOS uses its native
     // toolbar's own Hide Toolbar, so this action is inert there.
     ToggleToolbar,
@@ -204,6 +208,7 @@ impl Action {
         Action::FramePrev,
         Action::MuteLiveAudio,
         Action::ToggleSubtitles,
+        Action::SubtitleCycle,
         Action::ToggleToolbar,
         Action::Settings,
         Action::About,
@@ -266,6 +271,7 @@ impl Action {
             Action::FramePrev => "frame_prev",
             Action::MuteLiveAudio => "mute_live_audio",
             Action::ToggleSubtitles => "toggle_subtitles",
+            Action::SubtitleCycle => "subtitle_cycle",
             Action::ToggleToolbar => "toggle_toolbar",
             Action::Settings => "settings",
             Action::About => "about",
@@ -352,6 +358,7 @@ impl Action {
             Action::FramePrev => "Previous frame",
             Action::MuteLiveAudio => "Mute Live Photo audio",
             Action::ToggleSubtitles => "Subtitles",
+            Action::SubtitleCycle => "Next Subtitle Track",
             Action::ToggleToolbar => "Show toolbar",
             Action::Settings => "Settings",
             Action::About => "About",

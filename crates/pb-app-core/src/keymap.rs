@@ -648,6 +648,11 @@ fn default_bindings() -> Vec<(Action, Vec<KeyChord>)> {
         one(Action::MuteLiveAudio, "M"),
         // Captions/subtitles on a video (task #90). `C` is free — Copy is Ctrl+C.
         one(Action::ToggleSubtitles, "C"),
+        // Cycle subtitle tracks (task #99). Mnemonic, not lineage: mpv's `j`/`J` were
+        // rejected — its `j` switches TRACK while its `v` toggles visibility, so
+        // borrowing it would hand the wrong verb to the fingers it claimed to borrow
+        // from. See task #99 for the full argument; don't re-derive it.
+        one(Action::SubtitleCycle, "Shift+C"),
         // Show/hide the docked windowed toolbar (#61) — View-menu only, no default key.
         (Action::ToggleToolbar, vec![]),
         one(Action::Settings, "Ctrl+,"),

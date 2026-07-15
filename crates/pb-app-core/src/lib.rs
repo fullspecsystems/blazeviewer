@@ -69,6 +69,10 @@ pub mod launch;
 pub mod media_details;
 pub mod meta;
 pub mod metrics;
+// Double-encoded-UTF-8 repair (task #90.2). Subtitles are the worst-encoded text on a
+// computer; this undoes the `â™ª`-for-`♪` transform when — and only when — it can prove
+// the text really was double-encoded. Pure.
+pub mod mojibake;
 pub mod overlay;
 pub mod panels;
 pub mod pb_key;

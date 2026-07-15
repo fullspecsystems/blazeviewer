@@ -9,26 +9,70 @@
 //! **Nothing expensive happens on the event loop.** Two jobs go to workers:
 //! - Building the rasterizer — `FontSystem::new()` is **261 ms** (spike). Built **once**,
 //!   lazily, and kept: paying that per video would be worse than paying it once.
-//! - Loading + parsing a sidecar — an `fs::read` of an arbitrary file, per item.
+//! - Loading cues — an `fs::read` for a sidecar, or a **full walk of the container** for
+//!   an embedded stream (39 s on the corpus MKV over SMB).
 //!
 //! Until they land, no subtitle draws. A cue arriving 200 ms into the first play of a
 //! session is invisible; a frozen window is not.
+//!
+//! ## Cues stream; they do not arrive in a lump
+//!
+//! An embedded stream's reader hands cues over **as it finds them**, in presentation
+//! order, and it walks the file ~70× faster than playback consumes it — so the first cue
+//! is on screen in well under a second and the reader stays far ahead of the playhead
+//! forever. Waiting for the whole 39 s read would be indistinguishable from broken. A
+//! sidecar sends one batch and closes, through the same channel: no special case.
+//! See `pb_decode::ffmpeg::cues` for the ratio this rests on.
+//!
+//! ## Selection goes through the catalog
+//!
+//! The engine does **not** discover anything itself. It reads the Details probe's
+//! [`MediaTrackCatalog`] — which already holds the container's own subtitle streams *and*
+//! the sidecars beside it, in one id namespace — and asks [`resolve_track`]. That is what
+//! lets an embedded track be selected at all (#90.2), and what makes `Automatic`'s rules
+//! real rather than "the first sidecar we tripped over".
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::Duration;
 
+use pb_decode::tracks::{MediaTrackCatalog, TrackLocator};
 use pb_hud::subtitle::{SubtitleBitmap, SubtitleRasterizer};
 use pb_source::ItemSource;
 
-use crate::cues::CueTrack;
-use crate::subtitle::{place, Rect, SubtitleMode, SubtitleStyle};
+use crate::cues::{CueTrack, SubtitleCue};
+use crate::subtitle::{place, resolve_track, Rect, SubtitleMode, SubtitleStyle};
 
-/// What a worker loaded for one item.
-struct LoadedCues {
-    item: usize,
+/// Which track's cues are loaded / loading: an item plus a track's `local_id`.
+///
+/// The pair, not just the item — switching track (#99's `Shift+C`) has to restart the
+/// load even though the item never changed.
+type TrackKey = (usize, u64);
+
+/// A cue load in flight.
+///
+/// Cues arrive in **batches**, not one lump: an embedded stream's reader walks the whole
+/// container (39 s on the corpus MKV) and hands cues over as it finds them, staying far
+/// ahead of the playhead. See `pb_decode::ffmpeg::cues`. A sidecar sends exactly one
+/// batch and closes — same channel, no special case.
+struct CueLoad {
+    key: TrackKey,
+    /// The deck generation this was started in. A load that outlives a rebuild describes
+    /// a different file at that index — the Details probe's rule.
     gen: u64,
-    cues: Option<CueTrack>,
+    rx: Receiver<Vec<SubtitleCue>>,
+    cancel: Arc<AtomicBool>,
+}
+
+impl Drop for CueLoad {
+    /// **Dropping the load cancels the read.** This is the whole cancellation design: a
+    /// nav, a track switch, or a deck rebuild just replaces/clears the `Option`, and the
+    /// worker aborts inside libav's blocking I/O rather than chewing through 20 GB of a
+    /// film nobody is watching any more. Nothing has to remember to call anything.
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
 }
 
 #[derive(Default)]
@@ -38,14 +82,12 @@ pub struct SubtitleEngine {
     /// Built once on a worker; `None` until it lands.
     raster: Option<SubtitleRasterizer>,
     raster_rx: Option<Receiver<SubtitleRasterizer>>,
-    /// The cues for `loaded_for`, once a worker has parsed them.
+    /// The cues accumulated so far. `Some` but empty while a load is still filling in.
     cues: Option<CueTrack>,
-    loaded_for: Option<usize>,
-    cues_rx: Option<Receiver<LoadedCues>>,
-    /// The deck generation the load was requested in — a load that lands after a rebuild
-    /// describes a different file at that index and is dropped, exactly like the Details
-    /// probe's rule.
-    load_gen: u64,
+    /// Set once a load has *finished*. While one is in flight, `load` is the guard that
+    /// stops `ensure_loaded` from starting another.
+    loaded_for: Option<TrackKey>,
+    load: Option<CueLoad>,
     /// Bumped whenever the bitmap changes, so a shell can skip an unchanged transfer
     /// (the `thumb_gen` pattern). `0` = nothing to show.
     gen: u64,
@@ -68,10 +110,6 @@ impl SubtitleEngine {
     ///
     /// `PB_SUBTITLE_TRACE=1` additionally prints why nothing is on screen — a diagnostic
     /// only; it never turns subtitles on.
-    ///
-    /// `Automatic` does **not** implement the forced-only rule yet: it shows the first
-    /// renderable sidecar. That needs the catalog, which [`crate::subtitle::resolve_track`]
-    /// is already written against (#99).
     pub fn from_settings(on: bool) -> Self {
         Self {
             mode: if on {
@@ -136,15 +174,24 @@ impl SubtitleEngine {
 
     /// Is a worker still doing something? Keeps the tick alive so results land promptly.
     pub fn working(&self) -> bool {
-        self.raster_rx.is_some() || self.cues_rx.is_some()
+        self.raster_rx.is_some() || self.load.is_some()
+    }
+
+    /// The track whose cues are loaded or loading, if any — what the #99 picker checks to
+    /// put its checkmark on the right row.
+    pub fn active_track(&self) -> Option<u64> {
+        self.load
+            .as_ref()
+            .map(|l| l.key.1)
+            .or(self.loaded_for.map(|k| k.1))
     }
 
     /// Drop everything for the current item — navigation, stop, a new session. The next
-    /// `ensure_loaded` re-discovers.
+    /// `ensure_loaded` re-discovers. Cancels an in-flight read (see [`CueLoad::drop`]).
     pub fn clear_item(&mut self) {
         self.cues = None;
         self.loaded_for = None;
-        self.cues_rx = None;
+        self.load = None;
         self.hide();
     }
 
@@ -159,7 +206,22 @@ impl SubtitleEngine {
     }
 
     /// Kick the workers for `item` if needed. Idempotent and cheap when warm.
-    pub fn ensure_loaded(&mut self, source: &Arc<dyn ItemSource>, item: usize, deck_gen: u64) {
+    ///
+    /// `catalog` is the item's [`MediaTrackCatalog`] — the Details probe's, which already
+    /// merges the container's own subtitle streams *and* the sidecars beside it into one
+    /// id namespace. Consulting it is what lets an embedded track be selected at all
+    /// (#90.2); before this, the engine did its own sidecar discovery and could not see
+    /// inside the container. `None` = the probe hasn't landed yet; nothing to do but wait.
+    ///
+    /// `audio_language` is what `Automatic`'s forced rule matches against.
+    pub fn ensure_loaded(
+        &mut self,
+        source: &Arc<dyn ItemSource>,
+        item: usize,
+        deck_gen: u64,
+        catalog: Option<&MediaTrackCatalog>,
+        audio_language: Option<&str>,
+    ) {
         // The rasterizer: once, ever. 261 ms is worth paying a single time.
         if self.raster.is_none() && self.raster_rx.is_none() {
             let (tx, rx) = std::sync::mpsc::channel();
@@ -168,25 +230,81 @@ impl SubtitleEngine {
             });
             self.raster_rx = Some(rx);
         }
-        // The cues: per item.
-        if self.loaded_for == Some(item) || self.cues_rx.is_some() {
+
+        let Some(catalog) = catalog else {
+            self.trace(|| "waiting: the track catalog hasn't been probed yet".into());
+            return;
+        };
+        // The selection. `resolve_track` was written against the catalog long before
+        // anything called it; this is that bridge finally carrying traffic.
+        let Some(track) = resolve_track(self.mode, catalog, audio_language) else {
+            let n = catalog.subtitles.tracks.len();
+            self.trace(|| format!("no track resolved from {n} subtitle track(s)"));
+            // Not an error — "show nothing" is a normal answer. But it must actually
+            // show nothing, including forgetting a track selected a moment ago.
+            self.cues = None;
+            self.loaded_for = None;
+            self.load = None;
+            return;
+        };
+        let key: TrackKey = (item, track.id.local_id);
+
+        // Warm, or already in flight for this exact track in this exact generation.
+        if self.loaded_for == Some(key) {
             return;
         }
-        let source = Arc::clone(source);
+        if let Some(l) = &self.load {
+            if l.key == key && l.gen == deck_gen {
+                return;
+            }
+        }
+
+        let Some(locator) = catalog.locator(track.id).cloned() else {
+            self.trace(|| "the resolved track has no locator — cannot read it".into());
+            return;
+        };
+        let codec_raw = track.codec_raw.clone();
+        let forced = track.flags.forced;
+        let path = source.path(item).map(|p| p.to_path_buf());
+        let name = track.language.clone().unwrap_or_else(|| "?".into());
+
+        // Replacing the Option cancels any previous read (see `CueLoad::drop`) — a track
+        // switch must not leave the old reader racing the new one.
+        let cancel = Arc::new(AtomicBool::new(false));
         let (tx, rx) = std::sync::mpsc::channel();
-        self.load_gen = deck_gen;
-        std::thread::spawn(move || {
-            let cues = load_cues(source.as_ref(), item);
-            let _ = tx.send(LoadedCues {
-                item,
-                gen: deck_gen,
-                cues,
-            });
+        let source = Arc::clone(source);
+        let c2 = Arc::clone(&cancel);
+        self.trace(|| {
+            format!(
+                "loading track {} ({name}, {codec_raw}) — {locator:?}",
+                key.1
+            )
         });
-        self.cues_rx = Some(rx);
+        std::thread::spawn(move || {
+            stream_cues(
+                source.as_ref(),
+                item,
+                &locator,
+                &codec_raw,
+                forced,
+                path.as_deref(),
+                c2,
+                &tx,
+            );
+        });
+        // Some, not None: a load that has started but delivered nothing yet is a real,
+        // distinct state from "no track". `update` reads it as "no cue right now".
+        self.cues = Some(CueTrack::default());
+        self.loaded_for = None;
+        self.load = Some(CueLoad {
+            key,
+            gen: deck_gen,
+            rx,
+            cancel,
+        });
     }
 
-    /// Pick up whatever the workers finished. Call each tick.
+    /// Pick up whatever the workers produced. Call each tick.
     pub fn poll(&mut self, deck_gen: u64) {
         if let Some(rx) = &self.raster_rx {
             match rx.try_recv() {
@@ -198,29 +316,45 @@ impl SubtitleEngine {
                 Err(TryRecvError::Disconnected) => self.raster_rx = None, // worker died
             }
         }
-        if let Some(rx) = &self.cues_rx {
-            match rx.try_recv() {
-                Ok(l) => {
-                    self.cues_rx = None;
-                    // Same staleness rule as the Details probe: a load that raced a deck
-                    // rebuild names a different file at that index.
-                    if l.gen == deck_gen && l.gen == self.load_gen {
-                        let n = l.cues.as_ref().map_or(0, |c| c.len());
-                        self.trace(|| format!("loaded item {}: {n} cues", l.item));
-                        self.cues = l.cues;
-                        self.loaded_for = Some(l.item);
-                    } else {
-                        let (g, lg) = (l.gen, self.load_gen);
-                        self.trace(|| {
-                            format!(
-                                "dropped a stale load (gen {g}, load_gen {lg}, deck {deck_gen})"
-                            )
-                        });
-                    }
-                }
-                Err(TryRecvError::Empty) => {}
-                Err(TryRecvError::Disconnected) => self.cues_rx = None,
+
+        let Some(load) = &mut self.load else { return };
+
+        // The staleness rule, applied to the load rather than to each message: a deck
+        // rebuild reassigned the indices, so this load names a different file now.
+        if load.gen != deck_gen {
+            let g = load.gen;
+            self.trace(|| format!("dropped a stale load (gen {g}, deck {deck_gen})"));
+            self.clear_item();
+            return;
+        }
+
+        // Drain everything waiting — a fast reader can deliver several batches between
+        // two ticks, and leaving them queued would make cues lag the playhead for no
+        // reason.
+        let mut batches = Vec::new();
+        let finished = loop {
+            match load.rx.try_recv() {
+                Ok(b) => batches.push(b),
+                Err(TryRecvError::Empty) => break false,
+                // The sender dropped: the read finished, was cancelled, or the worker
+                // died. Whichever — there is nothing more coming, and what already
+                // arrived is still good.
+                Err(TryRecvError::Disconnected) => break true,
             }
+        };
+
+        let key = load.key;
+        if !batches.is_empty() {
+            let cues = self.cues.get_or_insert_with(CueTrack::default);
+            for b in batches {
+                cues.extend(b);
+            }
+            let n = cues.len();
+            self.trace(|| format!("track {} now has {n} cue(s)", key.1));
+        }
+        if finished {
+            self.loaded_for = Some(key);
+            self.load = None;
         }
     }
 
@@ -249,6 +383,8 @@ impl SubtitleEngine {
             self.hide();
             return self.gen != before;
         }
+        // `Some` but empty is NOT a wait state — it is a load that has started and not
+        // reached this part of the film yet, which reads the same as "no cue right now".
         let cues = self.cues.as_ref().expect("checked above");
 
         // Every active cue's lines, stacked in source order (overlaps are kept, #90.2).
@@ -308,22 +444,74 @@ impl SubtitleEngine {
     }
 }
 
-/// The worker's job: find this item's sidecars, pick one, read it, parse it.
+/// The worker's job: read one track's cues and send them, in batches, until done or
+/// cancelled.
+///
+/// The two tiers meet here and nowhere else — a sidecar is one batch, an embedded stream
+/// is many — and both hand over the same [`SubtitleCue`], normalized by the same
+/// [`CueTrack`]. Everything downstream is tier-blind.
 ///
 /// Read-only and RAM-only (privacy #2): the bytes are parsed and dropped, and nothing
 /// about which subtitle was shown is remembered.
-fn load_cues(source: &dyn ItemSource, item: usize) -> Option<CueTrack> {
-    let found = crate::sidecar::discover(source, item);
-    // Until the #99 picker exists there is nothing to choose *with*, so take the first
-    // renderable one. This is the temporary bit: #99 replaces it with a real selection.
-    let m = found
-        .iter()
-        .find(|m| pb_decode::tracks::subtitle_capability(m.codec_raw).is_renderable_text())?;
-    let bytes = read_sidecar(source, item, &m.origin)?;
-    let text = crate::sidecar::decode_sidecar_text(&bytes);
-    let mut track = CueTrack::parse(&text, m.codec_raw);
-    track.set_forced(m.flags.forced);
-    (!track.is_empty()).then_some(track)
+#[allow(clippy::too_many_arguments)]
+fn stream_cues(
+    source: &dyn ItemSource,
+    item: usize,
+    locator: &TrackLocator,
+    codec_raw: &str,
+    forced: bool,
+    // Only the embedded tier reads these, and it only exists with `ffprobe`. A build
+    // without it still serves sidecars — which is a real configuration (`--no-ffvideo`),
+    // not a hypothetical.
+    #[cfg_attr(not(feature = "ffprobe"), allow(unused_variables))] path: Option<&std::path::Path>,
+    #[cfg_attr(not(feature = "ffprobe"), allow(unused_variables))] cancel: Arc<AtomicBool>,
+    tx: &std::sync::mpsc::Sender<Vec<SubtitleCue>>,
+) {
+    match locator {
+        // Beside the file. Parsed in Rust, never through FFmpeg — which is also what
+        // makes sidecars work on Windows, whose trimmed FFmpeg has no srt/webvtt/ass
+        // *demuxer* and so cannot open a standalone `.srt` at all (task #100.8).
+        TrackLocator::Sidecar(origin) => {
+            let Some(bytes) = read_sidecar(source, item, origin) else {
+                return;
+            };
+            let text = crate::sidecar::decode_sidecar_text(&bytes);
+            let mut cues = crate::cues::parse_cues(&text, codec_raw);
+            for c in &mut cues {
+                c.forced = forced;
+            }
+            let _ = tx.send(cues);
+        }
+
+        // Inside the container (#90.2).
+        #[cfg(feature = "ffprobe")]
+        TrackLocator::FfStream(index) => {
+            // A real path only. An archive'd video would mean decompressing the whole
+            // entry into RAM to demux it — the same reason archive videos already fall
+            // back elsewhere. Sidecars inside archives still work (above), so a `.srt` in
+            // a ZIP is not affected.
+            let Some(p) = path else {
+                return;
+            };
+            let input = pb_decode::video::VideoInput::Path(p.to_path_buf());
+            let mut order = 0usize;
+            let _ = pb_decode::ff_stream_subtitle_cues(&input, *index, cancel, |batch| {
+                let mut cues = crate::cues::text_cues_to_cues(batch, order);
+                order += cues.len();
+                for c in &mut cues {
+                    c.forced = forced;
+                }
+                // A closed channel means the engine dropped the load — stop reading.
+                // This is the second half of `CueLoad::drop`'s cancellation: the flag
+                // aborts a blocking read, this ends a running one.
+                tx.send(cues).is_ok()
+            });
+        }
+
+        // MF/AVFoundation stream locators carry no text we can read, and a bitmap track
+        // never resolves in the first place. Nothing to do.
+        _ => {}
+    }
 }
 
 /// Read a sidecar back through the source that found it — never by building a path
@@ -457,13 +645,56 @@ mod tests {
         );
     }
 
-    /// The whole load path over a **real** filesystem, not a fake: an `.srt` beside a
-    /// video is discovered through `ItemSource`, read back through it, decoded, and
-    /// parsed into cues. Every piece between "a file exists on disk" and "the engine has
-    /// a track" is exercised here — the parts a fake source would paper over.
+    /// A load in flight, wired to a channel the test drives by hand — so the poll/append
+    /// rules can be exercised without a worker, a container, or a clock.
+    fn loading(
+        key: TrackKey,
+        gen: u64,
+    ) -> (SubtitleEngine, std::sync::mpsc::Sender<Vec<SubtitleCue>>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let e = SubtitleEngine {
+            cues: Some(CueTrack::default()),
+            load: Some(CueLoad {
+                key,
+                gen,
+                rx,
+                cancel: Arc::new(AtomicBool::new(false)),
+            }),
+            ..Default::default()
+        };
+        (e, tx)
+    }
+
+    /// A catalog with no tracks yet, at `generation` — the shape the Details probe
+    /// produces before anything is appended to it.
+    fn empty_catalog(generation: u64) -> MediaTrackCatalog {
+        use pb_decode::tracks::{MediaBackend, TrackSet};
+        MediaTrackCatalog::new(
+            generation,
+            MediaBackend::FFmpeg,
+            TrackSet::complete(vec![]),
+            TrackSet::complete(vec![]),
+        )
+    }
+
+    fn cue_at(secs: u64, text: &str) -> SubtitleCue {
+        SubtitleCue {
+            start: Duration::from_secs(secs),
+            end: Duration::from_secs(secs + 1),
+            lines: vec![text.into()],
+            forced: false,
+            source_order: 0,
+        }
+    }
+
+    /// The whole sidecar load path over a **real** filesystem, driven the way the app
+    /// drives it: a catalog with a sidecar track, resolved through `resolve_track`, read
+    /// back through `ItemSource`, decoded, parsed, and delivered over the load channel.
+    /// Every piece between "a file exists on disk" and "the engine has cues" is real —
+    /// the parts a fake source would paper over.
     #[test]
     fn a_real_srt_beside_a_real_video_loads_end_to_end() {
-        let dir = std::env::temp_dir().join(format!("pb-sub-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("pb-sub-e2e-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let video = dir.join("Show.S01E01.1080p.mkv");
         std::fs::write(&video, b"not a real mkv, never decoded").unwrap();
@@ -473,8 +704,32 @@ mod tests {
         )
         .unwrap();
 
-        let source = pb_source::FsSource::new(vec![video]);
-        let track = load_cues(&source, 0).expect("found, read, and parsed the sidecar");
+        let source: Arc<dyn ItemSource> = Arc::new(pb_source::FsSource::new(vec![video]));
+        // The catalog the Details probe would have built, sidecars and all.
+        let found = crate::sidecar::discover(source.as_ref(), 0);
+        assert_eq!(found.len(), 1, "the .srt is discovered");
+        let mut catalog = empty_catalog(7);
+        let mut next = 0u64;
+        for (track, locator) in crate::sidecar::sidecar_tracks(&found, 7, &mut next) {
+            let id = track.id.local_id;
+            catalog.subtitles.tracks.push(track);
+            catalog.set_locator(id, locator);
+        }
+
+        let mut e = SubtitleEngine {
+            mode: SubtitleMode::Automatic,
+            ..Default::default()
+        };
+        e.ensure_loaded(&source, 0, 7, Some(&catalog), Some("en"));
+        assert!(e.load.is_some(), "a load was started");
+
+        // Wait for the worker rather than sleeping a magic number.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while e.load.is_some() && std::time::Instant::now() < deadline {
+            e.poll(7);
+        }
+        assert_eq!(e.loaded_for, Some((0, 0)), "the load finished");
+        let track = e.cues.as_ref().expect("cues");
         assert_eq!(track.len(), 1);
         let cue = track.active_at(Duration::from_millis(1500)).next().unwrap();
         assert_eq!(cue.lines, vec!["Hello there".to_string()]);
@@ -487,7 +742,7 @@ mod tests {
         let mut e = SubtitleEngine {
             mode: SubtitleMode::Automatic,
             cues: Some(cue_track()),
-            loaded_for: Some(3),
+            loaded_for: Some((3, 0)),
             raster: Some(SubtitleRasterizer::new()),
             ..Default::default()
         };
@@ -500,44 +755,138 @@ mod tests {
         assert_eq!(e.loaded_for, None);
     }
 
-    /// A cue load that lands after a deck rebuild describes a different file — dropped,
-    /// the same rule the Details probe applies.
+    /// A load that outlives a deck rebuild describes a different file at that index —
+    /// dropped, the same rule the Details probe applies.
     #[test]
     fn a_cue_load_landing_after_a_deck_rebuild_is_dropped() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        tx.send(LoadedCues {
-            item: 1,
-            gen: 3,
-            cues: Some(cue_track()),
-        })
-        .unwrap();
-        let mut e = SubtitleEngine {
-            cues_rx: Some(rx),
-            load_gen: 3,
-            ..Default::default()
-        };
+        let (mut e, tx) = loading((1, 0), 3);
+        tx.send(vec![cue_at(1, "Hello there")]).unwrap();
         e.poll(4); // the deck was rebuilt while the worker ran
         assert!(e.cues.is_none(), "a stale load must not be installed");
         assert_eq!(e.loaded_for, None);
+        assert!(e.load.is_none(), "and the read is cancelled");
     }
 
+    /// Cues arrive in **batches** and accumulate — this is what lets an embedded stream
+    /// show its first cue in under a second instead of after a 39 s full-container walk.
     #[test]
-    fn a_matching_cue_load_installs() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        tx.send(LoadedCues {
-            item: 1,
-            gen: 3,
-            cues: Some(cue_track()),
-        })
+    fn streamed_batches_accumulate_and_stay_ordered() {
+        let (mut e, tx) = loading((1, 2), 3);
+
+        tx.send(vec![cue_at(1, "first")]).unwrap();
+        e.poll(3);
+        assert_eq!(e.cues.as_ref().unwrap().len(), 1, "usable before it's done");
+        assert!(e.working(), "still reading");
+        assert_eq!(e.loaded_for, None, "not finished, so not marked loaded");
+
+        tx.send(vec![cue_at(2, "second"), cue_at(3, "third")])
+            .unwrap();
+        e.poll(3);
+        assert_eq!(e.cues.as_ref().unwrap().len(), 3);
+
+        // Dropping the sender is the worker finishing.
+        drop(tx);
+        e.poll(3);
+        assert_eq!(e.loaded_for, Some((1, 2)));
+        assert!(!e.working());
+
+        let cues = e.cues.as_ref().unwrap();
+        let texts: Vec<&str> = cues.cues().iter().map(|c| c.lines[0].as_str()).collect();
+        assert_eq!(texts, ["first", "second", "third"], "presentation order");
+    }
+
+    /// Several batches can queue between two ticks; the poll must take them all, or cues
+    /// lag the playhead for no reason.
+    #[test]
+    fn one_poll_drains_every_queued_batch() {
+        let (mut e, tx) = loading((1, 0), 3);
+        for i in 0..5 {
+            tx.send(vec![cue_at(i, "x")]).unwrap();
+        }
+        e.poll(3);
+        assert_eq!(e.cues.as_ref().unwrap().len(), 5);
+    }
+
+    /// Dropping the load cancels the read — the whole cancellation design. A nav or a
+    /// track switch must not leave a worker walking 20 GB of a film nobody is watching.
+    #[test]
+    fn dropping_a_load_cancels_the_read() {
+        let (mut e, _tx) = loading((1, 0), 3);
+        let cancel = Arc::clone(&e.load.as_ref().unwrap().cancel);
+        assert!(!cancel.load(Ordering::Relaxed));
+        e.clear_item();
+        assert!(
+            cancel.load(Ordering::Relaxed),
+            "clear_item must cancel the in-flight read"
+        );
+    }
+
+    /// A track switch (#99's `Shift+C`) restarts the load even though the item didn't
+    /// change — which is why the key is (item, track), not item.
+    #[test]
+    fn switching_track_on_the_same_item_restarts_the_load() {
+        let (mut e, _tx) = loading((1, 0), 3);
+        let old = Arc::clone(&e.load.as_ref().unwrap().cancel);
+
+        let dir = std::env::temp_dir().join(format!("pb-sub-sw-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let video = dir.join("Clip.mkv");
+        std::fs::write(&video, b"x").unwrap();
+        std::fs::write(
+            dir.join("Clip.fr.srt"),
+            "1\n00:00:01,000 --> 00:00:02,000\nBonjour\n",
+        )
         .unwrap();
+        let source: Arc<dyn ItemSource> = Arc::new(pb_source::FsSource::new(vec![video]));
+        let found = crate::sidecar::discover(source.as_ref(), 0);
+        let mut catalog = empty_catalog(3);
+        let mut next = 9u64; // a different local_id than the load in flight
+        for (track, locator) in crate::sidecar::sidecar_tracks(&found, 3, &mut next) {
+            let id = track.id.local_id;
+            catalog.subtitles.tracks.push(track);
+            catalog.set_locator(id, locator);
+        }
+        e.mode = SubtitleMode::Track(catalog.subtitles.tracks[0].id);
+        e.ensure_loaded(&source, 1, 3, Some(&catalog), Some("en"));
+
+        assert!(old.load(Ordering::Relaxed), "the old read is cancelled");
+        assert_eq!(
+            e.load.as_ref().unwrap().key,
+            (1, 9),
+            "and the new one started"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Resolving to nothing must forget a track that *was* showing — the "one exit that
+    /// clears" rule, applied to selection rather than to the tick.
+    #[test]
+    fn resolving_to_no_track_forgets_the_previous_one() {
+        let source: Arc<dyn ItemSource> = Arc::new(pb_source::FsSource::new(vec![]));
         let mut e = SubtitleEngine {
-            cues_rx: Some(rx),
-            load_gen: 3,
+            mode: SubtitleMode::Automatic,
+            cues: Some(cue_track()),
+            loaded_for: Some((0, 0)),
             ..Default::default()
         };
-        e.poll(3);
-        assert!(e.cues.is_some());
-        assert_eq!(e.loaded_for, Some(1));
-        assert!(!e.working(), "the receiver is consumed");
+        // An empty catalog resolves to nothing.
+        let catalog = empty_catalog(0);
+        e.ensure_loaded(&source, 0, 0, Some(&catalog), Some("en"));
+        assert!(e.cues.is_none());
+        assert_eq!(e.loaded_for, None);
+    }
+
+    /// No catalog yet is a wait, not a decision: it must not clear cues that are already
+    /// good, and must not start a load it cannot aim.
+    #[test]
+    fn no_catalog_yet_starts_nothing() {
+        let source: Arc<dyn ItemSource> = Arc::new(pb_source::FsSource::new(vec![]));
+        let mut e = SubtitleEngine {
+            mode: SubtitleMode::Automatic,
+            ..Default::default()
+        };
+        e.ensure_loaded(&source, 0, 0, None, None);
+        assert!(e.load.is_none());
+        assert!(e.cues.is_none());
     }
 }

@@ -5,15 +5,19 @@
 //! what this owns is the model, the parsing, and the normalization that makes a
 //! hand-authored file safe to schedule against.
 //!
-//! **Scope:** the sidecar text formats (SubRip, WebVTT), which is what #90.1 just made
-//! discoverable. Embedded `mov_text`/subtitle *streams* need a demuxer read (FFmpeg's
-//! subtitle decoder / AVFoundation) and land separately; they produce the same
-//! [`SubtitleCue`], so nothing here changes when they do.
+//! **Both tiers land here.** Sidecar text (SubRip, WebVTT) is parsed *in this module*;
+//! embedded streams (MKV `subrip`/`ass`/`webvtt`, MP4 `mov_text`) are demuxed by
+//! `pb_decode::ffmpeg::cues` and arrive as [`pb_decode::text_cue::TextCue`] via
+//! [`CueTrack::from_text_cues`]. They converge on the same [`strip_markup`] and the same
+//! [`CueTrack::from_cues`] on purpose: the corpus has an MKV whose embedded English track
+//! and `.eng.srt` are the same content, and any divergence would render as two different
+//! versions of one line.
 //!
 //! **Subtitle files are hand-authored and hostile by accident.** Overlaps, out-of-order
-//! blocks, ends before starts, missing indices, `.` where `,` belongs, stray markup — all
-//! of it is normal, none of it is an error worth refusing a file over. Every rule below
-//! degrades toward *showing the text* rather than toward correctness theatre.
+//! blocks, ends before starts, missing indices, `.` where `,` belongs, stray markup,
+//! text that was UTF-8 and got decoded as CP1252 somewhere upstream ([`crate::mojibake`])
+//! — all of it is normal, none of it is an error worth refusing a file over. Every rule
+//! below degrades toward *showing the text* rather than toward correctness theatre.
 
 use std::time::Duration;
 
@@ -59,18 +63,73 @@ impl CueTrack {
     /// error — there is nothing a caller could usefully do with the error that "no
     /// subtitles appeared" doesn't already say.
     pub fn parse(text: &str, codec_raw: &str) -> CueTrack {
-        let cues = match codec_raw {
-            "subrip" | "srt" => parse_blocks(text, false),
-            "webvtt" => parse_blocks(text, true),
-            _ => Vec::new(),
-        };
-        CueTrack::from_cues(cues)
+        CueTrack::from_cues(parse_cues(text, codec_raw))
+    }
+
+    /// Append more cues and re-normalize.
+    ///
+    /// This is what lets an *embedded* stream stream (#90.2): the reader hands over cues
+    /// in presentation order as it walks the container, far ahead of the playhead, rather
+    /// than making the first cue wait for the last (39 s on the corpus MKV — see
+    /// `pb_decode::ffmpeg::cues`).
+    ///
+    /// Re-normalizing the whole set on every batch is deliberate and cheap (a sort of a
+    /// few thousand, a few dozen times). The alternative — normalizing each batch in
+    /// isolation — gets the *repairs* wrong, because "how long does this cue last" is
+    /// answered by the **next** cue, which may be in the next batch.
+    ///
+    /// One honest seam remains: a cue with a broken end that lands last in a batch is
+    /// repaired against `FALLBACK_CUE` rather than its true successor, and re-normalizing
+    /// cannot undo that (a repaired end is indistinguishable from an authored one). It
+    /// needs a container that both omits the duration *and* splits that cue onto a batch
+    /// boundary; the cost is one cue lingering, and only sidecars — which never stream —
+    /// would notice.
+    pub fn extend(&mut self, more: Vec<SubtitleCue>) {
+        if more.is_empty() {
+            return;
+        }
+        let mut all = std::mem::take(&mut self.cues);
+        all.extend(more);
+        *self = CueTrack::from_cues(all);
+    }
+
+    /// The next `source_order` to hand out, so a streamed batch continues the sequence
+    /// instead of restarting it and re-tying every tie at zero.
+    pub fn next_source_order(&self) -> usize {
+        self.cues
+            .iter()
+            .map(|c| c.source_order + 1)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Every embedded stream's cues (#90.2), normalized exactly like a parsed sidecar's.
+    ///
+    /// [`pb_decode::text_cue::TextCue`] arrives de-enveloped but not de-marked-up — see
+    /// that type's docs for why the split falls there. This is where the two tiers
+    /// converge: an `.srt` and the same content muxed into an MKV go through the same
+    /// [`strip_markup`] and the same [`Self::from_cues`], so they cannot render
+    /// differently. (The corpus has exactly that pair, which is how the double-shown
+    /// duplicate was caught in the first place.)
+    pub fn from_text_cues(cues: Vec<pb_decode::text_cue::TextCue>) -> CueTrack {
+        CueTrack::from_cues(text_cues_to_cues(cues, 0))
     }
 
     /// Normalize an arbitrary cue list into a track: drop the empty, fix the impossible,
-    /// sort stably. The one entry point, so a hand-built cue list (tests, a future
-    /// demuxer) gets the same guarantees a parsed file does.
+    /// repair the mis-encoded, sort stably. The one entry point, so a hand-built cue list
+    /// (tests, a demuxer, a parsed file) gets the same guarantees.
     pub fn from_cues(mut cues: Vec<SubtitleCue>) -> CueTrack {
+        // Undo double-encoded UTF-8 (`â™ª` → `♪`) — here, at the single point BOTH tiers
+        // pass through, so a sidecar and an embedded stream can never disagree about the
+        // same text. Provable and per-run; see `crate::mojibake`. A no-op (and a borrow)
+        // on the clean text that is the overwhelming majority.
+        for c in &mut cues {
+            for l in &mut c.lines {
+                if let std::borrow::Cow::Owned(fixed) = crate::mojibake::repair(l) {
+                    *l = fixed;
+                }
+            }
+        }
         // A cue with no text after stripping is invisible; keeping it would only make
         // `active_at` return nothing to draw.
         cues.retain(|c| !c.lines.is_empty());
@@ -149,6 +208,50 @@ impl CueTrack {
             .filter(|&b| b > t)
             .min()
     }
+}
+
+/// The raw parse, before normalization — what a streaming loader hands to
+/// [`CueTrack::extend`], which normalizes the accumulated whole.
+///
+/// An unknown format yields nothing rather than an error: there is nothing a caller could
+/// usefully do with the error that "no subtitles appeared" doesn't already say.
+pub fn parse_cues(text: &str, codec_raw: &str) -> Vec<SubtitleCue> {
+    match codec_raw {
+        "subrip" | "srt" => parse_blocks(text, false),
+        "webvtt" => parse_blocks(text, true),
+        _ => Vec::new(),
+    }
+}
+
+/// An embedded stream's [`pb_decode::text_cue::TextCue`]s → cues, continuing the
+/// `source_order` sequence at `order_base` so a streamed batch doesn't restart it.
+///
+/// This is where the two tiers converge: the text goes through the very same
+/// [`strip_markup`] a sidecar's does, so an `.srt` and the same content muxed into an MKV
+/// cannot render differently. (The corpus has exactly that pair.)
+pub fn text_cues_to_cues(
+    cues: Vec<pb_decode::text_cue::TextCue>,
+    order_base: usize,
+) -> Vec<SubtitleCue> {
+    cues.into_iter()
+        .enumerate()
+        .map(|(i, c)| SubtitleCue {
+            start: c.start,
+            end: c.end,
+            // A container cue carries its own hard breaks; the renderer re-wraps to the
+            // viewport but must honour an authored break.
+            lines: c
+                .text
+                .lines()
+                .map(strip_markup)
+                .filter(|l| !l.is_empty())
+                .collect(),
+            // Per-cue `forced` is not a thing a container says — the *track* says it, and
+            // the loader stamps it. Same rule as the sidecar path.
+            forced: false,
+            source_order: order_base + i,
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -648,5 +751,126 @@ mod tests {
         let t = CueTrack::parse(&decoded, "subrip");
         assert_eq!(t.len(), 1);
         assert_eq!(t.cues()[0].lines, vec!["こんにちは"]);
+    }
+
+    // -- the embedded tier (#90.2) -----------------------------------------
+
+    use pb_decode::text_cue::TextCue;
+
+    fn tc(start_ms: u64, end_ms: u64, text: &str) -> TextCue {
+        TextCue {
+            start: Duration::from_millis(start_ms),
+            end: Duration::from_millis(end_ms),
+            text: text.into(),
+        }
+    }
+
+    /// An embedded stream's cues become a track exactly like a parsed sidecar's.
+    #[test]
+    fn embedded_text_cues_become_a_track() {
+        let t = CueTrack::from_text_cues(vec![
+            tc(1000, 2000, "Hello there"),
+            tc(2000, 3000, "Line one\nLine two"),
+        ]);
+        assert_eq!(t.len(), 2);
+        assert_eq!(t.cues()[0].lines, vec!["Hello there"]);
+        assert_eq!(t.cues()[1].lines, vec!["Line one", "Line two"]);
+    }
+
+    /// The two tiers share ONE stripper. An embedded cue's markup must come off exactly
+    /// as a sidecar's does — the corpus has the same content in both, so any divergence
+    /// shows up as two differently-rendered versions of the same line.
+    #[test]
+    fn embedded_cues_go_through_the_same_stripper_as_a_sidecar() {
+        let embedded = CueTrack::from_text_cues(vec![tc(1000, 2000, "{\\an8}<i>A sign</i>")]);
+        let sidecar = CueTrack::parse(
+            "1\n00:00:01,000 --> 00:00:02,000\n{\\an8}<i>A sign</i>\n",
+            "subrip",
+        );
+        assert_eq!(embedded.cues()[0].lines, vec!["A sign"]);
+        assert_eq!(embedded.cues()[0].lines, sidecar.cues()[0].lines);
+    }
+
+    /// A container that reports no duration leaves end == start; the normalizer repairs
+    /// it from the next cue rather than dropping the author's text.
+    #[test]
+    fn an_embedded_cue_with_no_duration_is_repaired_from_its_neighbour() {
+        let t =
+            CueTrack::from_text_cues(vec![tc(1000, 1000, "no duration"), tc(3000, 4000, "next")]);
+        assert_eq!(
+            t.cues()[0].end,
+            Duration::from_secs(3),
+            "bounded by the next start"
+        );
+    }
+
+    // -- mojibake, at the choke point --------------------------------------
+
+    /// The corpus defect, through the real path: the Grey's Anatomy MKV's embedded subrip
+    /// track carries the music note double-encoded. Repair happens in `from_cues`, so
+    /// BOTH tiers get it and neither can drift.
+    #[test]
+    fn double_encoded_text_is_repaired_for_both_tiers() {
+        let embedded = CueTrack::from_text_cues(vec![tc(
+            1000,
+            2000,
+            "\u{e2}\u{2122}\u{aa} WAKE UP \u{e2}\u{2122}\u{aa}",
+        )]);
+        assert_eq!(embedded.cues()[0].lines, vec!["\u{266a} WAKE UP \u{266a}"]);
+
+        let sidecar = CueTrack::parse(
+            "1\n00:00:01,000 --> 00:00:02,000\n\u{e2}\u{2122}\u{aa} WAKE UP \u{e2}\u{2122}\u{aa}\n",
+            "subrip",
+        );
+        assert_eq!(sidecar.cues()[0].lines, embedded.cues()[0].lines);
+    }
+
+    /// ...and correct text is never "repaired". The guard that matters most.
+    #[test]
+    fn correctly_encoded_text_is_untouched_by_the_repair() {
+        let t = CueTrack::from_text_cues(vec![
+            tc(1000, 2000, "caf\u{e9} na\u{ef}ve se\u{f1}or"),
+            tc(2000, 3000, "\u{266a} already correct \u{266a}"),
+        ]);
+        assert_eq!(t.cues()[0].lines, vec!["caf\u{e9} na\u{ef}ve se\u{f1}or"]);
+        assert_eq!(t.cues()[1].lines, vec!["\u{266a} already correct \u{266a}"]);
+    }
+
+    // -- streaming (#90.2) --------------------------------------------------
+
+    /// `extend` is what lets an embedded stream stream. Batches accumulate, and the whole
+    /// set re-sorts — the reader walks the container in presentation order, but the
+    /// normalizer must not depend on that.
+    #[test]
+    fn extend_accumulates_batches_and_keeps_them_ordered() {
+        let mut t = CueTrack::default();
+        t.extend(vec![SubtitleCue {
+            start: Duration::from_secs(3),
+            end: Duration::from_secs(4),
+            lines: vec!["third".into()],
+            forced: false,
+            source_order: 0,
+        }]);
+        t.extend(vec![SubtitleCue {
+            start: Duration::from_secs(1),
+            end: Duration::from_secs(2),
+            lines: vec!["first".into()],
+            forced: false,
+            source_order: 1,
+        }]);
+        assert_eq!(t.len(), 2);
+        let texts: Vec<&str> = t.cues().iter().map(|c| c.lines[0].as_str()).collect();
+        assert_eq!(texts, ["first", "third"], "sorted by start, not arrival");
+    }
+
+    /// A streamed batch continues the source_order sequence rather than restarting it —
+    /// otherwise every batch would re-tie at zero and two cues starting on the same frame
+    /// could swap.
+    #[test]
+    fn source_order_continues_across_batches() {
+        let t = CueTrack::from_text_cues(vec![tc(1000, 2000, "a"), tc(2000, 3000, "b")]);
+        assert_eq!(t.next_source_order(), 2);
+        let more = text_cues_to_cues(vec![tc(3000, 4000, "c")], t.next_source_order());
+        assert_eq!(more[0].source_order, 2);
     }
 }

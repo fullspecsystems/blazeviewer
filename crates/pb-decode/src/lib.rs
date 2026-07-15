@@ -120,6 +120,10 @@ mod psd;
 mod raw;
 mod svg;
 mod thumb;
+// The container-neutral timed-text cue (task #90.2): what an embedded subtitle
+// stream produces, plus the ASS envelope rules. Pure — no FFmpeg — so the wire
+// format is testable in a build with none linked.
+pub mod text_cue;
 // The media-track catalog (task #98): the platform-neutral audio/subtitle track
 // description every backend produces. Pure data + pure maps.
 pub mod tracks;
@@ -152,6 +156,11 @@ pub use ffmpeg::audio_decoder::{AudioError, FfAudioDecoder};
 // entry point that needs no decoder, which is what makes the demuxers-only build viable.
 #[cfg(feature = "ffprobe")]
 pub use ffmpeg::details::ff_probe_tracks;
+// Embedded subtitle cues (task #90.2) ride with `ffprobe` for the same reason the
+// catalog does: reading a subtitle stream needs a demuxer and a *subtitle* decoder,
+// never a video one — so the trimmed Windows build serves it.
+#[cfg(feature = "ffprobe")]
+pub use ffmpeg::cues::{ff_read_subtitle_cues, ff_stream_subtitle_cues};
 // The stream-facts probes read the video codec's colour metadata through a decoder, so
 // they belong to the builds that have one. Windows deliberately uses Media Foundation
 // for these instead — same reader that decodes its posters.
