@@ -8,9 +8,15 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Added
-- **Subtitles built into the video now work.** Until now only a `.srt` or `.vtt` sitting
-  *beside* a file could be shown; the subtitle tracks muxed inside an MKV or MP4 were
-  invisible. Press `C` and Blaze Viewer reads them straight out of the container.
+- **Subtitles on videos.** Press `C` (or View ▸ Subtitles) to turn captions on and off; your
+  choice is remembered. Blaze Viewer reads both the subtitle tracks stored **inside** an MKV
+  or MP4 and a subtitle file sitting **beside** the video (the usual `Movie.eng.srt` or
+  `Movie.vtt`) — SubRip (`.srt`), WebVTT (`.vtt`), ASS/SSA, and MP4's own timed text, all
+  including non-Latin scripts and right-to-left languages. Text is rendered sharply at your
+  display's real resolution, with a black outline so it stays readable over bright scenes.
+  `C` prefers a forced/signs track matching the audio, then the file's own default track,
+  then whatever it can read. (Image-based subtitles — PGS, VobSub — are not text and are
+  still not shown.)
 - **`Shift+C` switches subtitle track**, showing the language and format of whatever you
   land on, and cycling back to off. Handy when a file carries several — a full track, a
   signs-only one, and a `.srt` beside it can now all be reached.
@@ -19,29 +25,18 @@ with any pre-release suffix carried only by the tag.
   breaking subtitles everywhere for decades. Blaze Viewer now detects and undoes it, and
   only ever when it can prove the text really was mangled, so correctly-written text
   (`café`, `señor`) is never touched.
-
-- **Subtitle appearance is now yours to set** (macOS): a new **Settings ▸ Subtitles** tab
-  with font, size, colour and opacity, outline, drop shadow, background, and vertical
-  position — including **below the picture, down in the black letterbox bar**, which
-  almost no player lets you do. A live preview shows exactly what you'll get, drawn by the
+- **Subtitle appearance is yours to set** (macOS): a new **Settings ▸ Subtitles** tab with
+  font, size, colour and opacity, outline, drop shadow, background, and vertical position —
+  including **below the picture, down in the black letterbox bar**, which almost no player
+  lets you do. Outline, shadow, and background scale with the text, so changing the size
+  keeps everything in proportion. A live preview shows exactly what you'll get, drawn by the
   same renderer that draws the real thing, so it can't mislead you. Your choices are
   remembered.
-- **Outline, shadow, and background now scale with the text.** Change the subtitle size
-  and everything else keeps its proportions, instead of an outline that was right at one
-  size looking like a hairline at the next.
-
-- **Subtitle opacity fades the whole caption**, not just the letters — outline, shadow and
-  background go with it. Fading only the text made it see-through onto its own outline,
-  which rather defeated the point.
 
 ### Fixed
 - **Seeking forward in an MKV now actually goes forward.** Pressing `→` jumped the film
   *back* to the nearest 5-second mark instead of advancing 2 seconds; seeking backward was
   unaffected, which is why it looked so strange.
-
-### Changed
-- **`C` now reliably shows subtitles when a file has them.** It prefers a forced/signs
-  track matching the audio, then the file's own default track, then whatever it can read.
 
 ## [0.2.1] - 2026-07-14
 
@@ -55,10 +50,9 @@ computer sees Blaze Viewer as a different program: it installs *alongside* Photo
 rather than replacing it, and PhotoBlaze will never update itself into it. Your settings
 and shortcuts don't carry over, so any custom keys need setting once more.
 
-Also in this release: **subtitles on videos** (drop a `.srt` or `.vtt` beside the file and
-press `C`), **audio and subtitle tracks listed properly** in the Details panel instead of a
-bare "Audio: Yes", **MKV and WebM playing through the system decoder on macOS** with correct
-Dolby Vision, and **video posters appearing 2–4× faster**.
+Also in this release: **audio and subtitle tracks listed properly** in the Details panel
+instead of a bare "Audio: Yes", **MKV and WebM playing through the system decoder on macOS**
+with correct Dolby Vision, and **video posters appearing 2–4× faster**.
 
 ### Changed
 - **PhotoBlaze is now Blaze Viewer.** The app, its website (blazeviewer.app), and everything
@@ -75,13 +69,6 @@ Dolby Vision, and **video posters appearing 2–4× faster**.
 - **About now links to blazeviewer.app** instead of the source repository, which is private.
 
 ### Added
-- **Subtitles on videos.** If a subtitle file sits next to a video — the usual
-  `Movie.eng.srt` or `Movie.vtt` beside `Movie.mkv` — Blaze Viewer can now show it. Press `C`
-  (or View ▸ Subtitles) to turn captions on and off; your choice is remembered. Text is
-  rendered sharply at your display's real resolution, with a black outline so it stays
-  readable over bright scenes. SubRip (`.srt`) and WebVTT (`.vtt`) are supported, including
-  non-Latin scripts and right-to-left languages. Subtitles stored *inside* the video file,
-  and per-track selection when there's more than one, are still to come.
 - **Videos remember where you left off — for the current session.** Switch away from a video and
   come back (for example, press Space expecting pause — which actually advances to the next item —
   then Backspace) and playback resumes near where you were instead of restarting. Positions are kept
@@ -121,8 +108,8 @@ Dolby Vision, and **video posters appearing 2–4× faster**.
 - **Video details now list every audio and subtitle track, instead of just "Audio: Yes".** The
   Inspector's Details tab (`Shift+I`) shows each track on its own line — language, codec, channel
   layout, sample rate, and whether it's the default, forced, a commentary, or SDH — so a film with a
-  director's commentary and three subtitle tracks reads as exactly that. Subtitle formats Blaze Viewer
-  can't display (image-based ones like PGS or VobSub) are still listed, marked "Unsupported". Details
+  director's commentary and three subtitle tracks reads as exactly that. Image-based subtitle formats
+  (like PGS or VobSub) are still listed, marked "Unsupported". Details
   that genuinely can't be read say so, rather than claiming a file has no audio. Copy all details
   (`Shift+I` → copy) includes the tracks; if you copy while a video is still being read, the copy
   waits and gives you the complete set rather than a half-filled one. Reading a video's details never
