@@ -220,16 +220,95 @@ Every one was in a seam, not in the logic the tests covered:
 Discovery (#90.1) · cues (#90.2, sidecar only) · style/placement/rasterizer (#90.3/.4 core) ·
 the engine + macOS presenter · `C` / View ▸ Subtitles + persisted preference.
 
-## Remaining — see `.taskmaster/tasks/tasks.json` #90 and #99
+---
 
-- **#90.2** — embedded subtitle *streams* (in-container SubRip/mov_text) need a demuxer read.
-  Only sidecars render today. This is the biggest functional gap.
+# As built, part 2 (2026-07-15) — the embedded tier
+
+#90.2 is complete: cues *inside* the container render, and selection finally goes through
+the catalog. Four things reality taught that the design above could not have known.
+
+## The sequencing rule paid off again — use it
+
+The reader was run against a **real MKV before anything was built on it**. That one step,
+before any wiring, is why the two findings below were design-time facts rather than owner
+bug reports. Do this on every slice.
+
+## 1. Reading an embedded track costs a full pass over the container — so it streams
+
+Subtitle blocks are scattered through every cluster; `av_read_frame` must walk every
+interleaved packet to find them. **Measured: 39 s** on the corpus MKV (4.4 GB over SMB).
+There is no index to seek — this is inherent to the format, not a tuning failure.
+
+The resolution is a **ratio**, and it is the most important thing on this page: the reader
+walks in *presentation order* at ~113 MB/s, while playback consumes at ~1.6 MB/s — **~70×
+faster than playback needs**. So it hands cues over as it finds them instead of returning
+a lump. **Measured: first cue at 1.06 s**, 177 batches. Cancelling stops a read in ~1 s.
+
+> **The optimization NOT to take:** the playback demuxer already reads these exact packets
+> and throws the subtitle ones away; forwarding them would make cues free. But it exists
+> only on the routes that use *our* demuxer — and this task's own scar (bug 4 above) is
+> that **a feature must never be gated on a backend**. Layer it *under* the reader if it is
+> ever built. Never replace it.
+
+## 2. `ffmpeg-next` has two landmines in the subtitle API (verified in 8.1.0)
+
+- **No `Drop` for `Subtitle`, and it never calls `avsubtitle_free`.** The decoder
+  heap-allocates rects on every successful decode. Free them yourself or leak per cue.
+- **`Text::get()` / `Ass::get()` are `from_utf8_unchecked`** — UB on the non-UTF-8 payloads
+  that genuinely exist (a CP1252 `.srt` muxed without `sub_charenc`). We read the C string
+  through the raw pointer with `from_utf8_lossy`. We parse hostile bytes for a living.
+
+One genuinely nice surprise: **FFmpeg normalizes every text decoder's output to one ASS
+envelope** (`ff_ass_get_dialog` → `ReadOrder,Layer,Style,Name,MarginL,MarginR,MarginV,
+Effect,Text`). Eight commas, then text. So `subrip`, `webvtt`, `mov_text`, `text`, `ass`
+and `ssa` all cost exactly one pure function to unwrap — count the separators, don't split
+(dialogue is full of commas).
+
+## 3. Subtitles are the worst-encoded text on a computer — and it is fixable
+
+The corpus MKV's embedded track carries `â™ª` where `♪` belongs. **`ffprobe -show_data`
+proves it is in the file** (`c3a2 e284 a2c2 aa`), while the `.eng.srt` beside it is clean
+(`e299 aa`). The muxer double-encoded it. Nobody noticed because nothing rendered the
+embedded track before.
+
+`pb_app_core::mojibake` undoes it — and the reason this is safe is that **it is a proof,
+not a guess**. Mojibake is lossless and reversible: re-encode the run to CP1252 and require
+the bytes to be valid UTF-8. `café` → `63 61 66 E9` → `E9` is a lead with no continuation →
+invalid → untouched. Applied per-**run** at the single choke point both tiers pass through.
+
+Two things a future editor must not undo:
+
+- **`SAFE_LEADS` excludes `à`/`á` on purpose.** French `voilà «` is `E0 A0 AB`, which *is*
+  valid UTF-8 and round-trips into a Samaritan letter. Validity alone is not enough. The
+  cost — mojibake'd Thai/Devanagari stays broken — is the right trade against corrupting
+  correct French/Spanish/Portuguese. Pinned by a test.
+- **The five WHATWG windows-1252 passthrough bytes** (0x81/8D/8F/90/9D) must be mapped even
+  though IBM leaves them unassigned. `”` is `E2 80 9D`: without 0x9D, every *closing* curly
+  quote stays broken while the opening one repairs. **Found by a test failing for a real
+  reason** — the spec would have talked you out of it.
+
+## 4. `Automatic` needed a fallback chain (⚠ owner review)
+
+The frozen rule was forced-only-matching-the-audio. It is exactly right for its stated
+purpose — stopping `Automatic` from enabling subtitles *by itself*. But `Off` is the
+default, so the mode is only ever `Automatic` because the user pressed `C` and read a toast
+saying "Subtitles on" — and strict forced-only then shows **nothing** for the most common
+case in existence (English film, full English track, no forced track). That is the same
+surprise pointing the other way, and it would have silently regressed the 2026-07-14
+validated behaviour.
+
+Now: forced+matching-audio → the container's default → anything renderable. Nothing can
+turn subtitles on by itself; the fallback only fires once you have asked. Flagged in
+`SubtitleMode`'s docs. **Owner: confirm or overrule.**
+
+## Remaining — see `.taskmaster/tasks/tasks.json` #90 and #99
 - **#90.3** — seek generations (no stale cue flash on scrub); wire `controls_h` so cues lift
   above the transport bar (`place()` supports it; nothing measures it).
 - **#90.4** — the Settings UI. All eight axes are implemented, clamped, and tested, but
   reachable only from code. Owner's read on the defaults so far: *"a bit big for my taste."*
 - **#90.5** — the winit shell has no presenter (`Renderer::set_subtitle_overlay`); Windows /
   Linux show nothing. Worth deferring until the style defaults settle.
-- **#99** — the track picker. Also what makes `Automatic` mean the specified forced-only +
-  audio-language rule; today it shows the first renderable sidecar (`resolve_track` is already
-  written against the catalog and unit-tested — it just has no catalog to select from yet).
+- **#99** — the picker. `Shift+C` cycling + toast shipped 2026-07-15 (`cycle_choices` /
+  `next_choice`, pure + tested); the engine now reads the catalog, so `resolve_track` is live.
+  Remaining: `A`/`Shift+A` audio cycling, the CC button, the popover. ⚠ Audio must toast only
+  on a *confirmed* switch — subtitles may toast optimistically. The asymmetry is deliberate.

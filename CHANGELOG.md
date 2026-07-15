@@ -7,6 +7,23 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Added
+- **Subtitles built into the video now work.** Until now only a `.srt` or `.vtt` sitting
+  *beside* a file could be shown; the subtitle tracks muxed inside an MKV or MP4 were
+  invisible. Press `C` and Blaze Viewer reads them straight out of the container.
+- **`Shift+C` switches subtitle track**, showing the language and format of whatever you
+  land on, and cycling back to off. Handy when a file carries several — a full track, a
+  signs-only one, and a `.srt` beside it can now all be reached.
+- **Garbled subtitles repair themselves.** Subtitle text that arrives mangled — `â™ª`
+  instead of `♪`, `Iâ€™m` instead of `I'm` — is a mis-encoding that has been quietly
+  breaking subtitles everywhere for decades. Blaze Viewer now detects and undoes it, and
+  only ever when it can prove the text really was mangled, so correctly-written text
+  (`café`, `señor`) is never touched.
+
+### Changed
+- **`C` now reliably shows subtitles when a file has them.** It prefers a forced/signs
+  track matching the audio, then the file's own default track, then whatever it can read.
+
 ## [0.2.1] - 2026-07-14
 
 ### Highlights
