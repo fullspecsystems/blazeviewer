@@ -561,8 +561,10 @@ an install only ever auto-updates within its own channel (Velopack tracks the ch
 installed from, so `update.rs` needs no arch logic and the two never cross). Each arch is built on its
 own **native** box (no cross toolchain wired up), after building that arch's native decode libs
 (libheif, dav1d, **and FFmpeg** — tasks #76 / #100) once with `scripts/setup-libheif.ps1 -Triplet
-<arch>-windows-static-md` — the script pins the vcpkg tree to a recorded commit (`-VcpkgRef`) and
-installs all three ports; `pb-decode/build.rs` picks the vcpkg triplet from the target arch. The ship
+<arch>-windows` — the **DLL** triplet, *not* `-static-md` (task #77: LGPL relink; a static build
+cannot ship, and `release-windows.ps1` throws if it can't find `installed\<triplet>\bin\heif.dll`).
+The script pins the vcpkg tree to a recorded commit (`-VcpkgRef`) and installs all three ports;
+`pb-decode/build.rs` picks the vcpkg triplet from the target arch. The ship
 feature set is `--features libheif,dav1d,ffprobe`. ARM64 uses the `vcredist143-arm64` redist framework.
 
 > **`ffprobe` needs a VS Developer shell — it's the first feature that does.** FFmpeg's

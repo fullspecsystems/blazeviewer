@@ -24,7 +24,8 @@
   Architecture: defaults to the host arch. x64 ships as the historical `win` channel; arm64 as
   `win-arm64`. Both channels live in the same flat feed dir and an install only auto-updates within
   its own channel (Velopack tracks the install channel), so the two arches never cross. Build each on
-  its own native box (no cross toolchain here) after `setup-libheif.ps1 -Triplet <arch>-windows-static-md`.
+  its own native box (no cross toolchain here) after `setup-libheif.ps1 -Triplet <arch>-windows`
+  (the DLL triplet — NOT `-static-md`; see the $ArchCfg note on task #77).
 
 .EXAMPLE
   pwsh scripts/release-windows.ps1            # host arch: build + sign + pack → dist\feed
@@ -37,8 +38,9 @@ param(
     # ARM64 build must run on an ARM64 box, an x64 build on x64; there's no cross-compile here).
     # Each arch ships as its OWN Velopack channel (x64 = `win`, arm64 = `win-arm64`) into the SAME
     # flat feed dir, so an install only ever auto-updates within its own arch (Velopack tracks the
-    # channel the app was installed from — see crates/pb-app/src/update.rs). libheif must be built for
-    # the matching vcpkg triplet first: `scripts/setup-libheif.ps1 -Triplet <arch>-windows-static-md`.
+    # channel the app was installed from — see crates/pb-app/src/update.rs). The native decode libs must
+    # be built for the matching vcpkg triplet first: `scripts/setup-libheif.ps1 -Triplet <arch>-windows`
+    # — the DLL triplet, NOT `-static-md` (task #77: LGPL relink; step 2 below throws without it).
     [ValidateSet("x64", "arm64")]
     [string]$Arch = $(if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }),
     # Signing account defaults to the owner's public-trust setup; override for a different account.

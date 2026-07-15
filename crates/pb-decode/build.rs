@@ -224,10 +224,13 @@ fn vcpkg_tree() -> (String, &'static str) {
     (root, triplet)
 }
 
-/// Windows: point the linker at the vcpkg static libheif + libde265.
+/// Windows: point the linker at the vcpkg libheif + libde265 — as **DLLs** by default
+/// (task #77: LGPL-3.0 §4 relink), or static libs under the `PB_VCPKG_STATIC=1` escape
+/// hatch, per [`vcpkg_tree`].
 ///
-/// Phase 0 setup (one-time, see docs/heic-decode-plan.md):
-///   pwsh scripts/setup-libheif.ps1 -Triplet <arch>-windows-static-md
+/// Phase 0 setup (one-time, see docs/heic-decode-plan.md) — the DLL triplet, since that
+/// is what ships; `-static-md` only for a `PB_VCPKG_STATIC=1` A/B measurement:
+///   pwsh scripts/setup-libheif.ps1 -Triplet <arch>-windows
 /// `core` drops the x265 *encoder* default; libde265 (HEVC *decode*) is a hard
 /// dependency so it's always present.
 fn link_libheif_windows() {
