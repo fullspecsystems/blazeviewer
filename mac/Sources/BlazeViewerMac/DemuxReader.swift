@@ -2,6 +2,7 @@ import AVFoundation
 import CoreMedia
 import Foundation
 import PbMacFfi
+import PbSeek
 import VideoToolbox
 
 /// Facts read once when the demuxer opens, handed back to the main actor.
@@ -44,11 +45,23 @@ final class DemuxReader: @unchecked Sendable {
     /// until the first packet.
     private var origin: Int64 = Int64.min
 
+    /// The pure seek-frame classification (plan §T1). Every "is this pre-roll? does this
+    /// frame anchor, at what time?" decision goes through this, so it is unit-tested in
+    /// `PbSeek` rather than buried in the feed loop untestable, which is how `97f80bb4`
+    /// shipped a backwards forward-seek.
+    private let seekPolicy = SeekFramePolicy()
+
     // Feed context (set on `queue` in startFeeding; read on `queue` in the block).
     private var feedLayer: AVSampleBufferDisplayLayer?
-    private var onFirstFrame: (@Sendable (CMTime) -> Void)?
+    /// Fires on the first *displayable* frame with the epoch of the feed that produced it,
+    /// so the presenter can reject a stale anchor from a superseded seek before it moves
+    /// the clock (plan §H1c). `0` = the initial feed.
+    private var onFirstFrame: (@Sendable (CMTime, UInt64) -> Void)?
     private var onEnd: (@Sendable () -> Void)?
     private var onError: (@Sendable () -> Void)?
+    /// The epoch of the feed currently in flight (`0` = initial). A seek stamps its epoch
+    /// here and `provide` fires `onFirstFrame` with it (plan §H1c).
+    private var feedEpoch: UInt64 = 0
     private var firstFrameSent = false
     /// While a seek's **pre-roll** is being fed: the requested target, in the same 0-based
     /// presentation timeline `cmTime` produces. `nil` = not seeking (initial playback).
@@ -67,6 +80,28 @@ final class DemuxReader: @unchecked Sendable {
     private var requesting = false
     private var done = false
     private var framesFed = 0 // diagnostics only (PB_TRACE)
+
+    // §0 seek-scoped diagnostics — reset per seek so the trace reads one seek, not a
+    // lifetime tally. (v1's §0 could not work: `framesFed` is a lifetime counter, so
+    // "look for a run of preroll=true" printed almost nothing.) All touched only on
+    // `queue`; emitted behind `pbTrace` (PB_TRACE), so they compile to nothing hot.
+    private var diagPrerollCount = 0
+    private var diagLastPrerollPtsSecs = Double.nan
+    private var diagFirstPacketLogged = false
+    private var diagSawNotReady = false
+    private var diagProvideCalls = 0
+    private var diagSeekStart = DispatchTime.now()
+
+    /// Reset the per-seek diagnostic tally (plan §0). Called on `queue` whenever a fresh
+    /// feed epoch begins (a seek re-arm, or the initial feed).
+    private func resetSeekDiag() {
+        diagPrerollCount = 0
+        diagLastPrerollPtsSecs = .nan
+        diagFirstPacketLogged = false
+        diagSawNotReady = false
+        diagProvideCalls = 0
+        diagSeekStart = DispatchTime.now()
+    }
 
     /// Open the demuxer for `sessionId` over the container `PlaySampleBuffer`
     /// stashed Rust-side, off the main actor. Builds the `CMVideoFormatDescription`
@@ -183,7 +218,7 @@ final class DemuxReader: @unchecked Sendable {
     /// actor. Idempotent — a second call while already requesting is a no-op.
     func startFeeding(
         into layer: AVSampleBufferDisplayLayer,
-        onFirstFrame: @escaping @Sendable (CMTime) -> Void,
+        onFirstFrame: @escaping @Sendable (CMTime, UInt64) -> Void,
         onEnd: @escaping @Sendable () -> Void,
         onError: @escaping @Sendable () -> Void
     ) {
@@ -193,6 +228,8 @@ final class DemuxReader: @unchecked Sendable {
             self.onFirstFrame = onFirstFrame
             self.onEnd = onEnd
             self.onError = onError
+            self.feedEpoch = 0 // the initial feed (a seekBeforeStart resume is still epoch 0)
+            self.resetSeekDiag()
             self.armFeeding()
         }
     }
@@ -211,6 +248,15 @@ final class DemuxReader: @unchecked Sendable {
     /// buffers while the renderer wants data; stop at EOF/error (parking the last
     /// frame) or when torn down.
     private func provide(into layer: AVSampleBufferDisplayLayer) {
+        diagProvideCalls += 1
+        if diagSawNotReady {
+            // The direct H1 discriminator (plan §0): the readiness callback DID re-invoke
+            // provide after the queue reported full — the layer is draining, i.e. NOT
+            // starved. If this line never appears after the "not-ready" line below while a
+            // seek is still held with no anchor, that is the starvation signature.
+            pbTrace(
+                "sb-seek diag epoch=\(feedEpoch): provide re-invoked (#\(diagProvideCalls)) after not-ready")
+        }
         while layer.isReadyForMoreMediaData {
             guard ptr != 0, !done, let fmt = formatDesc else {
                 layer.stopRequestingMediaData()
@@ -228,11 +274,15 @@ final class DemuxReader: @unchecked Sendable {
                 // clip, or a stream whose last frames precede it) would otherwise never
                 // anchor — leaving the clock held at rate 0 forever, i.e. a frozen picture
                 // with no way out. Anchor at the target anyway and let EOS handle the rest.
-                if !firstFrameSent, let t = seekTargetSecs {
+                if let t = seekPolicy.eosAnchor(
+                    seekTarget: seekTargetSecs, firstFrameSent: firstFrameSent)
+                {
                     firstFrameSent = true
                     seekTargetSecs = nil
                     let anchor = CMTime(seconds: t, preferredTimescale: 600)
-                    onFirstFrame.map { cb in DispatchQueue.main.async { cb(anchor) } }
+                    let ep = feedEpoch
+                    pbTrace("sb-seek diag epoch=\(ep): EOS before target — forcing anchor at \(t)s")
+                    onFirstFrame.map { cb in DispatchQueue.main.async { cb(anchor, ep) } }
                 }
                 if state == 1 {
                     onEnd.map { cb in DispatchQueue.main.async { cb() } }
@@ -247,44 +297,72 @@ final class DemuxReader: @unchecked Sendable {
             if origin == Int64.min {
                 origin = pts != Int64.min ? pts : (dts != Int64.min ? dts : 0)
             }
+            if !diagFirstPacketLogged {
+                diagFirstPacketLogged = true
+                // The real first post-seek packet timestamp (the landed keyframe) — recorded
+                // rather than fabricated (plan §T4), so a human can see whether the demuxer
+                // took the normal (≤ target) or fallback (> target) branch.
+                pbTrace(
+                    "sb-seek diag epoch=\(feedEpoch): first post-seek packet pts=\(pts) dts=\(dts) "
+                        + "key=\(demux_packet_is_key(ptr)) target=\(seekTargetSecs.map { String($0) } ?? "nil")")
+            }
             guard let sb = makeSampleBuffer(rv, count: n, fmt: fmt, pts: pts, dts: dts, dur: dur)
             else {
                 pbTrace("sb-demux: makeSampleBuffer FAILED (\(n) bytes, pts=\(pts) dts=\(dts))")
                 continue
             }
-            // Seek pre-roll: everything between the landed keyframe and the requested
-            // target. Decoded (the target's frame references it) but never shown.
             let ptsSecs = CMTimeGetSeconds(cmTime(pts))
-            let preroll =
-                seekTargetSecs.map { ptsSecs.isFinite && ptsSecs < $0 - 0.001 } ?? false
-            if preroll { Self.markDoNotDisplay(sb) }
+            let dtsSecs = CMTimeGetSeconds(cmTime(dts))
+            // The pure policy decides pre-roll (decode-only, keyframe → target) and whether
+            // this is the first displayable frame that anchors the clock (plan §T1).
+            let decision = seekPolicy.decide(
+                seekTarget: seekTargetSecs, ptsSecs: ptsSecs, dtsSecs: dtsSecs,
+                firstFrameSent: firstFrameSent)
+            if decision.doNotDisplay {
+                Self.markDoNotDisplay(sb)
+                diagPrerollCount += 1
+                diagLastPrerollPtsSecs = ptsSecs
+            }
             layer.enqueue(sb)
             framesFed += 1
             if framesFed <= 3 || framesFed % 300 == 0 {
-                pbTrace("sb-demux fed #\(framesFed) pts=\(pts) dts=\(dts) key=\(demux_packet_is_key(ptr)) preroll=\(preroll) status=\(layer.status.rawValue)")
+                pbTrace(
+                    "sb-demux fed #\(framesFed) pts=\(pts) dts=\(dts) key=\(demux_packet_is_key(ptr)) preroll=\(decision.doNotDisplay) status=\(layer.status.rawValue)")
             }
             // Anchor on the first frame that will actually be SEEN — so the pre-roll is
             // already enqueued (and decoding) before the clock starts.
-            if !firstFrameSent && !preroll {
+            if let anchorSecs = decision.anchorSecs {
                 firstFrameSent = true
-                let anchor: CMTime
-                if let t = seekTargetSecs {
-                    // A seek: anchor at the TARGET. The first displayable frame's PTS is
-                    // at/after it, so it is on time rather than late, and the pre-roll's
-                    // DoNotDisplay keeps the replay invisible.
-                    anchor = CMTime(seconds: t, preferredTimescale: 600)
-                    pbTrace("sb-demux seek anchor at target \(t)s (landed pts=\(ptsSecs))")
-                } else {
-                    // Initial playback: anchor at the first DECODE time, not the first
-                    // PTS. A B-frame stream's opening IDR has a DTS earlier than its PTS
-                    // (here synthesized negative), and starting the clock at the PTS makes
-                    // those frames "late" — AVSampleBufferDisplayLayer then drops the IDR
-                    // and nothing downstream can decode (no picture).
-                    anchor = cmTime(dts)
-                }
+                let wasSeek = seekTargetSecs != nil
                 seekTargetSecs = nil
-                onFirstFrame.map { cb in DispatchQueue.main.async { cb(anchor) } }
+                // A seek anchors at the target (quantized, as before). The initial feed
+                // anchors at the EXACT decode time `cmTime(dts)` — a B-frame stream's
+                // opening IDR has a DTS earlier than its PTS (here synthesized negative),
+                // and starting the clock at the PTS makes those frames "late" so the layer
+                // drops the IDR (no picture). Using the exact CMTime avoids a 1/600 requant.
+                let anchor =
+                    wasSeek ? CMTime(seconds: anchorSecs, preferredTimescale: 600) : cmTime(dts)
+                let ep = feedEpoch
+                let elapsedMs =
+                    Double(DispatchTime.now().uptimeNanoseconds &- diagSeekStart.uptimeNanoseconds)
+                    / 1e6
+                pbTrace(
+                    "sb-seek diag epoch=\(ep): ANCHOR at \(anchorSecs)s (wasSeek=\(wasSeek) landed pts=\(ptsSecs)) "
+                        + "preroll=\(diagPrerollCount) lastPrerollPts=\(diagLastPrerollPtsSecs) "
+                        + "elapsed=\(String(format: "%.1f", elapsedMs))ms")
+                onFirstFrame.map { cb in DispatchQueue.main.async { cb(anchor, ep) } }
             }
+        }
+        // Fell out of the loop because the layer stopped wanting data (a `done`/`ptr==0`
+        // exit returned above). If a seek is still holding the clock with no anchor yet,
+        // this is the starvation signature (plan §0/H1): the pre-roll filled the renderer
+        // queue and the held clock cannot drain it. The follow-up "provide re-invoked" line
+        // (top of this function) tells starvation (never re-invoked) from a normal refill.
+        if !firstFrameSent, seekTargetSecs != nil, !diagSawNotReady {
+            diagSawNotReady = true
+            pbTrace(
+                "sb-seek diag epoch=\(feedEpoch): isReadyForMoreMediaData=false, preroll=\(diagPrerollCount), "
+                    + "NO anchor yet — H1 starvation if provide does not re-fire")
         }
     }
 
@@ -346,22 +424,27 @@ final class DemuxReader: @unchecked Sendable {
         return CMTime(value: units * Int64(tbNum), timescale: tbDen)
     }
 
-    /// Seek to `seconds` (keyframe at/before), flush the renderer, and re-feed from
-    /// the new position. `then` gets the first landed PTS on the main actor (or `nil`
-    /// on failure) so the presenter re-anchors the synchronizer.
+    /// Seek to `seconds` (keyframe at/before), flush the renderer, and re-feed from the new
+    /// position under generation `epoch`. `then(ok)` reports on the main actor whether the
+    /// **demux command** succeeded — NOT that the target frame is visible (plan §H1c: that
+    /// is `onFirstFrame`, which the presenter epoch-gates). The old return fabricated a
+    /// `CMTime(target)` the caller only ever tested for nil-ness, so this is a plain Bool.
     func seek(
-        seconds: Double, layer: AVSampleBufferDisplayLayer,
-        then: @escaping @Sendable (CMTime?) -> Void
+        seconds: Double, epoch: UInt64, layer: AVSampleBufferDisplayLayer,
+        then: @escaping @Sendable (Bool) -> Void
     ) {
         queue.async { [weak self] in
             guard let self, self.ptr != 0 else {
-                DispatchQueue.main.async { then(nil) }
+                DispatchQueue.main.async { then(false) }
                 return
             }
             layer.flush()
+            self.feedEpoch = epoch
+            self.resetSeekDiag()
+            pbTrace("sb-seek diag epoch=\(epoch): seek→\(max(0, seconds))s (demux command issued)")
             demux_seek(self.ptr, seconds)
             if demux_state(self.ptr) == 2 {
-                DispatchQueue.main.async { then(nil) }
+                DispatchQueue.main.async { then(false) }
                 return
             }
             // Re-feed from the landed keyframe. `seekTargetSecs` is what makes the frames
@@ -371,8 +454,7 @@ final class DemuxReader: @unchecked Sendable {
             self.firstFrameSent = false
             self.done = false
             self.armFeeding()
-            let landed = CMTime(seconds: max(0, seconds), preferredTimescale: 600)
-            DispatchQueue.main.async { then(landed) }
+            DispatchQueue.main.async { then(true) }
         }
     }
 

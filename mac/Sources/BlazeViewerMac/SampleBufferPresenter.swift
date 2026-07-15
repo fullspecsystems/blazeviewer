@@ -2,6 +2,7 @@ import AVFoundation
 import AppKit
 import CoreMedia
 import PbMacFfi
+import PbSeek
 import VideoToolbox
 
 /// The macOS **sample-buffer video presenter** (video-overhaul Phase 3): plays a
@@ -61,13 +62,13 @@ final class SampleBufferPresenter {
     private var timeObserver: Any?
     private var durationSecs: Double = 0
     private var fps: Double = 0
-    /// The rate to apply at the next decode anchor (first frame after open or seek):
-    /// `1` playing, `0` paused. A seek captures the pre-seek rate here so the
-    /// post-seek re-anchor restores it.
-    private var pendingRate: Float = 1.0
-    /// Bumped on every seek so a superseded seek's completion can't re-anchor the
-    /// clock after a newer one has taken over (generation-safe, §3D).
-    private var seekEpoch: UInt64 = 0
+    /// The seek currently in flight (plan §H1c). Its `epoch` gates every callback — the
+    /// video anchor, the audio completion, the reader completion — so a stale seek can't
+    /// re-anchor the clock after a newer one has taken over (the scrubber issues up to
+    /// ~16/s, so this is expected traffic). Its `desiredRateAfterSeek` is the rate to
+    /// restore at the post-seek anchor; its `target`/`source` label the §0 trace. Starts as
+    /// the initial feed (epoch 0, play); rebuilt per seek in `performSeek`.
+    private var seek: SeekContext = .initial(desiredRate: 1.0)
 
     init(
         sessionId: UInt64, scaleMode: UInt8, muted: Bool, startSecs: Double,
@@ -148,12 +149,24 @@ final class SampleBufferPresenter {
             "sample-buffer video \(sessionId): opened \(result.width)x\(result.height) "
                 + "dovi=\(result.doviProfile)")
 
+        // The resume position (task #94.2) shared by BOTH renderers. The core remembers
+        // where you left a clip and hands it back as `startSecs`; `<= 0.5` plays from the
+        // start (matches NativeVideoPlayer). Nil = play from zero.
+        let resumeTarget: Double? =
+            (startSecs > 0.5 && (durationSecs <= 0 || startSecs < durationSecs)) ? startSecs : nil
+
         // Audio (§3C): open the FFmpeg decoder over the same container and feed the
         // audio renderer on the shared synchronizer. It buffers (enqueued 0-based)
         // until the first video frame starts the clock — so audio never leads the
         // picture. Silent when the clip has no openable audio track.
+        //
+        // `startSecs: resumeTarget` is the fix for the resume-audio bug (plan §H2', new
+        // today): the old code seeked only the video reader (below), so a resumed MKV
+        // played its picture minutes in while the audio sat 0-based in the past and was
+        // discarded. The audio decoder now resumes to the same spot at open.
         if result.hasAudio {
-            audioFeeder.open(sessionId: sessionId) { [weak self] ok in
+            audioFeeder.open(sessionId: sessionId, startSecs: resumeTarget ?? 0) {
+                [weak self] ok in
                 MainActor.assumeIsolated {
                     guard let self, ok, !self.audioStarted else { return }
                     self.audioStarted = true
@@ -165,25 +178,20 @@ final class SampleBufferPresenter {
             }
         }
 
-        // Resume position (task #94.2). The core remembers where you left a clip and hands
-        // it back as `startSecs`; this route accepted it and **never used it**, so every
-        // MKV restarted from zero while MP4s resumed correctly — the resume was being
-        // recorded fine, this end just dropped it on the floor (owner, 2026-07-15).
-        //
-        // Seeking BEFORE feeding, rather than playing from 0 and seeking after, means the
-        // first frame revealed is already the resume frame — the wgpu poster holds until
-        // then, so there is no jump to frame 0 and back. `<= 0.5` plays from the start,
-        // matching NativeVideoPlayer's rule.
-        if startSecs > 0.5, durationSecs <= 0 || startSecs < durationSecs {
-            reader.seekBeforeStart(seconds: startSecs)
+        // Seek the video reader BEFORE feeding, so the first frame revealed is already the
+        // resume frame — the wgpu poster holds until then, so there is no jump to frame 0
+        // and back. Accepted here but **never used** before (owner, 2026-07-15), which is
+        // why MKVs "forgot" while MP4s resumed.
+        if let resumeTarget {
+            reader.seekBeforeStart(seconds: resumeTarget)
         }
 
         // Drive the layer from renderer readiness; reveal + start the clock on the
         // first enqueued frame.
         reader.startFeeding(
             into: displayLayer,
-            onFirstFrame: { [weak self] anchor in
-                MainActor.assumeIsolated { self?.onDecodeAnchor(anchor) }
+            onFirstFrame: { [weak self] anchor, epoch in
+                MainActor.assumeIsolated { self?.onDecodeAnchor(anchor, epoch: epoch) }
             },
             onEnd: { [weak self] in
                 MainActor.assumeIsolated { self?.onEnded() }
@@ -203,7 +211,16 @@ final class SampleBufferPresenter {
     /// it presents (a negative synthesized DTS here); anchoring at the PTS would make
     /// those frames "late" and the display layer would drop the IDR (no picture). The
     /// first anchor also reveals the layer (poster → video, no flash).
-    private func onDecodeAnchor(_ anchor: CMTime) {
+    private func onDecodeAnchor(_ anchor: CMTime, epoch: UInt64) {
+        // Epoch gate (plan §H1c): a stale anchor from a superseded seek must not touch the
+        // clock, the renderers, or the reveal. The newest seek's anchor (or the initial
+        // feed's, epoch 0) is the only one allowed through; it does the reveal, so gating
+        // never strands the poster — it just defers the reveal to the settled seek.
+        guard epoch == seek.epoch else {
+            pbTrace(
+                "sample-buffer video \(sessionId): stale anchor epoch=\(epoch) (current \(seek.epoch)) — ignored")
+            return
+        }
         if !revealed {
             revealed = true
             // Unhide BOTH the display layer and its container: attachVideoSublayer
@@ -215,8 +232,9 @@ final class SampleBufferPresenter {
             canvas?.revealVideoLayer()
             pbTrace("sample-buffer video \(sessionId): revealed")
         }
-        synchronizer.setRate(pendingRate, time: anchor)
-        model?.nativeVideoStateChanged(sessionId, state: pendingRate != 0 ? 2 : 3)
+        let rate = seek.desiredRateAfterSeek
+        synchronizer.setRate(rate, time: anchor)
+        model?.nativeVideoStateChanged(sessionId, state: rate != 0 ? 2 : 3)
     }
 
     private func onEnded() {
@@ -271,14 +289,15 @@ final class SampleBufferPresenter {
     /// Seek to a fraction of the duration (the scrubber).
     func seek(toFraction fraction: Double) {
         guard durationSecs > 0 else { return }
-        performSeek(toSeconds: max(0.0, min(1.0, fraction)) * durationSecs, report: nil)
+        performSeek(
+            toSeconds: max(0.0, min(1.0, fraction)) * durationSecs, source: .scrub, report: nil)
     }
 
     /// Seek by a signed millisecond delta (arrow keys). Reports completion tagged
     /// with the core's `generation` so a superseded seek is told from a clean landing.
     func seek(byMilliseconds deltaMs: Int64, generation: UInt64) {
         let cur = max(0, CMTimeGetSeconds(synchronizer.currentTime()))
-        performSeek(toSeconds: cur + Double(deltaMs) / 1000.0, report: generation)
+        performSeek(toSeconds: cur + Double(deltaMs) / 1000.0, source: .arrow, report: generation)
     }
 
     /// Frame-step (`,`/`.`): pause, then nudge by one frame via a tiny seek. The
@@ -288,31 +307,46 @@ final class SampleBufferPresenter {
         synchronizer.rate = 0
         let cur = max(0, CMTimeGetSeconds(synchronizer.currentTime()))
         let frame = fps > 0 ? 1.0 / fps : 1.0 / 30.0
-        performSeek(toSeconds: cur + (forward ? frame : -frame), report: nil)
+        performSeek(toSeconds: cur + (forward ? frame : -frame), source: .step, report: nil)
         model?.nativeVideoStateChanged(sessionId, state: 3) // Paused
     }
 
-    /// Generation-safe seek (§3D): hold the clock, flush + re-seek both renderers,
-    /// re-feed from the keyframe, then re-anchor the synchronizer at the target and
-    /// restore the pre-seek rate — but only if a newer seek hasn't superseded this
-    /// one. `report` (when set) tags the core's seek-completion callback.
-    private func performSeek(toSeconds secs: Double, report: UInt64?) {
+    /// Generation-safe seek (§3D/§H1c): build a fresh `SeekContext` (new epoch, the target,
+    /// the pre-seek rate as the desired-after rate, the source), hold the clock, and flush +
+    /// re-seek both renderers under that epoch. The re-anchor happens in `onDecodeAnchor`
+    /// when the first post-seek frame lands — and only if this seek is still current, so a
+    /// superseded seek can't move the clock. `report` (when set) tags the core's
+    /// seek-completion callback.
+    private func performSeek(toSeconds secs: Double, source: SeekSource, report: UInt64?) {
         let target = max(0.0, min(durationSecs > 0 ? durationSecs : secs, secs))
         ended = false
-        seekEpoch &+= 1
-        let epoch = seekEpoch
-        // Restore this rate at the post-seek decode anchor (the accurate re-anchor
-        // happens in onDecodeAnchor when the first post-seek frame lands — at its DTS,
-        // so a negative-DTS keyframe isn't dropped as late, same as initial playback).
-        pendingRate = synchronizer.rate != 0 ? 1.0 : 0.0
+        // The rate to restore after the seek settles — the user's intent, preserved.
+        let desired: Float = synchronizer.rate != 0 ? 1.0 : 0.0
+        let epoch = seek.epoch &+ 1
+        seek = SeekContext(
+            epoch: epoch, target: target, desiredRateAfterSeek: desired, source: source)
         synchronizer.rate = 0 // hold the clock while both renderers reflush
-        audioFeeder.seek(seconds: target, renderer: audioRenderer)
-        reader.seek(seconds: target, layer: displayLayer) { [weak self] landedPTS in
+        pbTrace(
+            "sample-buffer video \(sessionId): seek epoch=\(epoch) → \(target)s source=\(source.rawValue) desiredRate=\(desired)")
+        // Audio: epoch-tagged, and NOT dropped if the decoder is still opening (held +
+        // applied at open). `applied == false` means "held for open" here, not a failure.
+        audioFeeder.seek(seconds: target, epoch: epoch, renderer: audioRenderer) {
+            [weak self] applied in
+            MainActor.assumeIsolated {
+                guard let self, epoch == self.seek.epoch else { return }
+                pbTrace(
+                    "sample-buffer video \(self.sessionId): audio seek epoch=\(epoch) applied=\(applied)")
+            }
+        }
+        reader.seek(seconds: target, epoch: epoch, layer: displayLayer) { [weak self] ok in
             MainActor.assumeIsolated {
                 guard let self, let g = report else { return }
-                let current = epoch == self.seekEpoch
+                // `ok` is "demux command succeeded", not "frame visible" (plan §H1c); the
+                // real landing is the epoch-gated `onDecodeAnchor`. This tells the core the
+                // seek command finished so its generation bookkeeping can settle.
+                let current = epoch == self.seek.epoch
                 self.model?.nativeVideoSeekCompleted(
-                    self.sessionId, generation: g, finished: current && landedPTS != nil)
+                    self.sessionId, generation: g, finished: current && ok)
             }
         }
     }

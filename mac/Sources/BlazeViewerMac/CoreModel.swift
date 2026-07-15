@@ -96,6 +96,18 @@ final class CoreModel {
     /// popover, not over the canvas, so the hover flash stops refreshing and the bar the
     /// popover is anchored to would fade out from under it.
     var videoPickerOpen = false
+    /// While a scrubber seek is settling, the fraction the knob (and time label) should hold
+    /// — the *target* — so a ~20 Hz progress report at the pre-seek position can't snap the
+    /// knob back before the seek visually lands (plan §H3: the scrubber-flash symptom — click
+    /// ahead, jump to target, snap back, land on target). Set on each fractional seek (the
+    /// latest wins, so a superseding scrub replaces it); cleared when a report reaches the
+    /// target in the seek's direction (the landing), or on a new/ended/failed video. `nil` =
+    /// not settling, so the knob tracks the live playhead. A stalled seek (H1) simply stays
+    /// pinned at the target, which is the correct scrubber behaviour regardless of H1's fix.
+    @ObservationIgnored private var pendingSeekTarget: Double?
+    /// The direction of the settling seek, so the pin clears when the playhead *catches up to
+    /// or passes* the target — duration-independent, unlike a fractional tolerance.
+    @ObservationIgnored private var pendingSeekForward = false
     /// Whether subtitles are switched on (the `C` state) — the picker button fills its icon
     /// on this, so it must be observable rather than read through on each draw. Refreshed in
     /// `pump()` while the controls are up.
@@ -2805,9 +2817,24 @@ final class CoreModel {
         // The fraction updates ~20 Hz to track the real playhead (no animation — that lagged
         // a sample behind and jumped forward on pause). The labels change ~1 Hz, so guard
         // them to avoid needless re-renders at the fraction's rate.
-        videoFraction = total > 0 ? min(1.0, max(0.0, elapsed / total)) : 0.0
-        let e = Self.formatTime(elapsed)
-        if e != videoElapsed { videoElapsed = e }
+        let reported = total > 0 ? min(1.0, max(0.0, elapsed / total)) : 0.0
+        // Scrubber pin (plan §H3): while a sample-buffer seek is settling, hold the target on
+        // BOTH knob and time so they agree, and don't let a pre-seek report snap them back.
+        // Clear when the playhead reaches the target in the seek's direction (the landing).
+        if let target = pendingSeekTarget {
+            let landed =
+                pendingSeekForward ? (reported >= target - 1e-4) : (reported <= target + 1e-4)
+            if landed { pendingSeekTarget = nil }
+        }
+        if let target = pendingSeekTarget {
+            videoFraction = target
+            let e = Self.formatTime(target * total)
+            if e != videoElapsed { videoElapsed = e }
+        } else {
+            videoFraction = reported
+            let e = Self.formatTime(elapsed)
+            if e != videoElapsed { videoElapsed = e }
+        }
         let t = total > 0 ? Self.formatTime(total) : ""
         if t != videoTotal { videoTotal = t }
         if playing != videoPlaying { videoPlaying = playing }
@@ -2820,6 +2847,7 @@ final class CoreModel {
         videoTotal = ""
         videoFraction = 0
         videoPlaying = false
+        pendingSeekTarget = nil  // a fresh clip cancels any settling-seek pin (plan §H3)
     }
 
     /// The session-backed (FFmpeg, task #84 §8) twin of `updateVideoProgress`: the pump
@@ -2844,8 +2872,13 @@ final class CoreModel {
     /// core action so it matches `P`.
     func seekVideoFraction(_ fraction: Double) {
         if let nv = nativeVideo {
-            nv.seek(toFraction: fraction)
+            nv.seek(toFraction: fraction)  // AVPlayer owns its clock; no pin (plan §H3)
         } else if let sbv = sampleBufferVideo {
+            // Pin the scrubber to the target until the seek visually lands (plan §H3), so a
+            // pre-seek progress report can't snap the knob back. The latest seek wins.
+            pendingSeekForward = fraction >= videoFraction
+            pendingSeekTarget = fraction
+            videoFraction = fraction
             sbv.seek(toFraction: fraction)
         } else if sessionVideoActive {
             core.video_seek_fraction(Float(fraction))
@@ -3045,6 +3078,7 @@ final class CoreModel {
     }
     func nativeVideoEnded(_ sessionId: UInt64) {
         core.native_video_ended(sessionId)
+        pendingSeekTarget = nil  // EOS clears any settling-seek pin (plan §H3)
         kick()
         drainEffects()
         syncToolbar() // ended → no longer playing → drop the blue
@@ -3058,6 +3092,7 @@ final class CoreModel {
         // A `recoverable` demux/codec failure retries through the FFmpeg session
         // core-side before any error surfaces (task #84 §8a level 2).
         core.native_video_failed(sessionId, error, recoverable)
+        pendingSeekTarget = nil  // a failed seek/session clears the pin (plan §H3)
         kick()
         drainEffects()
         syncToolbar() // failure cleared the session → drop the blue

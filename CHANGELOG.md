@@ -51,6 +51,14 @@ with any pre-release suffix carried only by the tag.
 - **Seeking forward in an MKV now actually goes forward.** Pressing `→` jumped the film
   *back* to the nearest 5-second mark instead of advancing 2 seconds; seeking backward was
   unaffected, which is why it looked so strange.
+- **Resumed MKV/WebM videos keep their sound in step** (macOS). Reopening a video where you
+  left off moved the picture to your spot but left the audio playing from the start, so it
+  was silent or lagging until the sound caught up. Both now resume together.
+- **The scrubber no longer flashes back after a click-seek** (macOS). Clicking ahead on the
+  playback bar jumped to the spot, snapped back to where you were, then landed on the spot
+  again; the knob now holds the position you asked for until the video actually gets there.
+- **Rapid scrubbing lands where you let go** (macOS). Dragging quickly could let an earlier
+  position win over your final one; only the last seek now takes effect.
 
 ## [0.2.1] - 2026-07-14
 

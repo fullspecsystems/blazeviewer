@@ -14,6 +14,10 @@ let package = Package(
     platforms: [.macOS(.v14)],
     dependencies: [
         .package(path: "../crates/pb-mac-ffi/PbMacFfi"),
+        // PbSeek: the pure, FFI-free seek-decision logic (seek-robustness plan §T1). A
+        // nested SwiftPM package so `cd mac/PbSeek && swift test` runs the seek unit tests
+        // with zero native deps — including on a hosted CI runner without the xcframework.
+        .package(path: "PbSeek"),
         // Sparkle: the Mac-native auto-updater (task #65). Binary-target XCFramework — a
         // *link* dependency only; `swift build` produces a bare executable and does NOT
         // embed Sparkle.framework into the .app (no Xcode "Embed Frameworks" phase), so
@@ -31,6 +35,7 @@ let package = Package(
             dependencies: [
                 "PBCatch",
                 .product(name: "PbMacFfi", package: "PbMacFfi"),
+                .product(name: "PbSeek", package: "PbSeek"),
                 .product(name: "Sparkle", package: "Sparkle"),
             ],
             // A staticlib carries no framework references, so the frameworks the Rust

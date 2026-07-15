@@ -34,6 +34,10 @@ final class AudioSampleFeeder: @unchecked Sendable {
     private var feedRenderer: AVSampleBufferAudioRenderer?
     private var requesting = false
     private var done = false
+    /// A seek issued **before the decoder finished opening** — held here and applied at
+    /// open, rather than silently dropped (plan §H2': the old `guard ptr != 0 else return`
+    /// lost the seek and nothing retried it). The most recent one wins. `.1` is the epoch.
+    private var pendingSeek: (seconds: Double, epoch: UInt64)?
 
     /// Frames pulled per decode call (a few tens of ms at 48 kHz).
     private static let framesPerPull: UInt32 = 4096
@@ -42,7 +46,14 @@ final class AudioSampleFeeder: @unchecked Sendable {
     /// off the main actor, and build the LPCM format description. `then(hasAudio)`
     /// runs back on the main actor — `false` when the clip has no (openable) audio,
     /// so the presenter simply plays silent.
-    func open(sessionId: UInt64, then: @escaping @Sendable (Bool) -> Void) {
+    ///
+    /// `startSecs > 0` resumes the audio at that position (task #94.2). This is the fix
+    /// for the resume-audio bug (plan §H2', new today): `startSecs` seeked only the video
+    /// reader, so a resumed MKV played its picture minutes in while the audio sat 0-based in
+    /// the past and was discarded. Applying the resume **here at open** — the single moment
+    /// the decoder pointer becomes valid — is the natural, race-free place, and it also
+    /// applies any user seek that arrived while the decoder was still opening (`pendingSeek`).
+    func open(sessionId: UInt64, startSecs: Double = 0, then: @escaping @Sendable (Bool) -> Void) {
         queue.async { [weak self] in
             guard let self else {
                 DispatchQueue.main.async { then(false) }
@@ -60,8 +71,27 @@ final class AudioSampleFeeder: @unchecked Sendable {
                 DispatchQueue.main.async { then(false) }
                 return
             }
+            // Resume position, then any seek that landed before the decoder opened (a user
+            // scrub during the open window) — the later one wins, so it goes last. No
+            // renderer flush needed: feeding hasn't been armed yet (startFeeding is next).
+            if startSecs > 0 {
+                self.rebaseClock(to: startSecs)
+            }
+            if let pending = self.pendingSeek {
+                self.pendingSeek = nil
+                self.rebaseClock(to: pending.seconds)
+            }
             DispatchQueue.main.async { then(true) }
         }
+    }
+
+    /// Position the decoder at `seconds` and re-base the PTS clock to the landed spot, so
+    /// the next enqueued buffer's timestamp matches the video timeline. Must run on `queue`
+    /// with `ptr != 0`. Does **not** flush a renderer or arm feeding — the caller owns that
+    /// (open hasn't armed yet; `seek` flushes because it may be mid-playback).
+    private func rebaseClock(to seconds: Double) {
+        let landed = session_audio_seek(self.ptr, seconds)
+        self.ptsFrames = Int64((landed.isFinite ? landed : seconds) * Double(self.rate))
     }
 
     private func buildFormat() -> Bool {
@@ -223,18 +253,32 @@ final class AudioSampleFeeder: @unchecked Sendable {
         }
     }
 
-    /// Seek the audio decoder to `seconds`, flush the renderer, and re-anchor the
-    /// PTS clock so audio lines up with the video after a seek (§3D).
-    func seek(seconds: Double, renderer: AVSampleBufferAudioRenderer) {
+    /// Seek the audio decoder to `seconds` under generation `epoch`, flush the renderer, and
+    /// re-anchor the PTS clock so audio lines up with the video after a seek (§3D). `then(ok)`
+    /// runs on the main actor: `true` = applied now; `false` = **held** because the decoder
+    /// isn't open yet (applied at open) — so the presenter can wait on real A/V readiness
+    /// instead of the seek being silently lost (plan §H2').
+    func seek(
+        seconds: Double, epoch: UInt64, renderer: AVSampleBufferAudioRenderer,
+        then: @escaping @Sendable (Bool) -> Void
+    ) {
         queue.async { [weak self] in
-            guard let self, self.ptr != 0 else { return }
+            guard let self else {
+                DispatchQueue.main.async { then(false) }
+                return
+            }
+            guard self.ptr != 0 else {
+                // Not open yet — hold it (most recent wins) and apply at open, rather than
+                // dropping the seek. This is the same machinery the resume-at-open uses.
+                self.pendingSeek = (seconds, epoch)
+                DispatchQueue.main.async { then(false) }
+                return
+            }
             renderer.flush()
-            let landed = session_audio_seek(self.ptr, seconds)
-            // Re-base the PTS clock to the landed position so the next buffer's
-            // timestamp matches the video timeline the synchronizer re-anchors to.
-            self.ptsFrames = Int64((landed.isFinite ? landed : seconds) * Double(self.rate))
+            self.rebaseClock(to: seconds)
             self.done = false
             self.armFeeding()
+            DispatchQueue.main.async { then(true) }
         }
     }
 
