@@ -1,213 +1,209 @@
 # Blaze Viewer — Current Status (session handoff)
 
-_Last updated: 2026-07-15 (rev 5). Supersedes prior status. **0.2.1 shipped.** Task #91
-(video-playback overhaul, Phases 0–3) and **#98** (media-track catalog) are COMPLETE +
-owner-validated. **Task #90.2 (subtitle cues) is now COMPLETE — embedded streams included.**_
+_Last updated: 2026-07-15 (rev 6). Supersedes prior status. **0.2.1 shipped.** Tasks #91
+(video-playback overhaul, Phases 0–3) and #98 (media-track catalog) are COMPLETE +
+owner-validated. **Subtitles (#90) now render, are selectable, and are configurable** —
+see below for the map._
 
-## ✅ ALSO NEW (2026-07-15, session 2): the Subtitles settings tab (#90.4)
+---
 
-On `main` (`cb7bcadd`). **Not yet owner-tested.** All eight style axes were implemented,
-clamped, and tested — and reachable only from code. Now: a **5th Settings tab**, macOS,
-over a **live preview**.
+# Subtitles (#90) — where it stands
 
-- **Persistence** — `SubtitleStyle` gained serde + a nested `Settings.subtitle_style`.
-  ⚠ `#[serde(default)]` on it *and* on `Shadow` is load-bearing: it lives **by value**, so
-  a partial `[subtitle_style]` table must fill gaps from `Default` — otherwise a
-  hand-edited config setting one key fails to parse, and `Settings::load`'s "malformed →
-  defaults" rule **discards every other setting in the file** to punish one typo here.
-- **`from_settings` now takes `&Settings`, not a bool** — post-mortem bug #2 was a
-  preference dropped at one of its three call sites. A signature that asks for the object
-  cannot be called while forgetting a field of it.
-- **The preview** uses the **same rasterizer, `to_params`, and `place()`** as the real
-  overlay, so it cannot drift — that *is* the one-rasterizer decision paying off. Because
-  it uses the real `place()`, dragging the vertical offset negative visibly walks the text
-  into the letterbox.
+## ✅ Done + owner-tested (all on `main`, 2026-07-15)
 
-**macOS only, deliberately:** #90.5 isn't done, so the winit shell has no subtitle
-presenter and an egui tab would configure an invisible feature. `SettingsDraft::to_settings`
-preserves unexposed fields, so `subtitle_style` round-trips untouched there meanwhile
-(Windows cross-check clean).
+| | |
+|---|---|
+| **#90.1** discovery | Sidecars (`Movie.eng.srt`) beside a file **and inside archives** (`ItemSource::sibling_*`). |
+| **#90.2** cues | **Both tiers.** Sidecars parsed in pure Rust; **embedded streams** (MKV subrip/ass/webvtt, MP4 mov_text) demuxed via `avcodec_decode_subtitle2`. Plus **mojibake repair** and **ASS drawing-mode** handling. |
+| **#90.3** engine | Rasterizer + placement + the macOS presenter, clocked off `video_position()`. Selection goes through the **catalog** + `resolve_track`. |
+| **#90.4** settings | A **5th Settings tab** (macOS) over a **live preview**, all eight axes, owner-tuned defaults. |
+| **#99** (part) | `C` toggles, **`Shift+C` cycles tracks** with a toast. |
 
-### Test in the morning — the Subtitles tab
+**Owner-tuned defaults** (settled 2026-07-15): size **4%**, outline **2.00 px**, vertical
+**7%** (clear of the info line + scrubber), shadow **off** — and when switched on: blur 2 px,
+offset (0, 2), 80% black.
 
-Open **Settings ▸ Subtitles** (the `captions.bubble` tab).
+## 🔜 Remaining, in priority order
 
-1. **The preview draws** within ~0.3 s (a spinner first — that's the 261 ms font system).
-2. **Drag "Vertical" negative** → the text should walk **down into the black bar**. This is
-   the headline feature; the caption under the slider says which way is which.
-3. **Every control moves the preview live**, and the look **persists across a relaunch**.
-4. **Then play a film and press `C`** — the film must match the preview. If it doesn't,
-   that's a real bug: they share one rasterizer, so they cannot legitimately disagree.
-5. **The defaults are still the author's guess** — you said *"slightly large"*. This tab is
-   what lets you settle that; tell me the number you land on and I'll make it the default.
+1. **The track picker — the owner's #1 ask.** A control **to the right of the total runtime**
+   on the playback bar (complementing the play icon) opening a subtitle + audio track list.
+   See *The three new asks* below. This is #99's popover with the placement now specified.
+2. **View ▸ Subtitles flyout** (owner's #2) — direct track selection from the menu bar.
+3. **`A` / `Shift+A` audio cycling** (#99). ⚠ **Audio may only toast on a *confirmed*
+   switch** — subtitles may toast optimistically; the asymmetry is deliberate and documented
+   in #99. A toast naming a track over dead audio trains distrust of every other toast.
+4. **#90.3 remainder** — seek generations (no stale cue flash while scrubbing) and wiring
+   `controls_h` so cues lift above the transport bar (`place()` supports the lift; nothing
+   measures the bar yet).
+5. **#90.5 — the winit presenter** (`Renderer::set_subtitle_overlay`). **Windows/Linux show
+   no subtitles at all.** This is why the egui Settings tab was deferred: it would configure
+   an invisible feature. `SettingsDraft::to_settings` preserves `subtitle_style` untouched
+   meanwhile, so nothing rots (Windows cross-check clean).
+6. **Archive'd videos have no embedded cues** — `stream_cues` needs a real path; an archive
+   entry would mean decompressing the whole thing to RAM. Sidecars in archives still work.
 
-⚠ **Layout is the least-verified part** (I can build the app but not see it). The window is
-a fixed 560×680 and the pane is dense: preview + ~10 rows. Max width / line spacing are
-behind a collapsed **Advanced** group to buy room. If it's cramped or the preview is too
-small to judge, say so — that's a layout tuning pass, not a rework.
+## ⚠ Two open owner calls
 
-## ✅ NEW THIS SESSION (2026-07-15, session 1): embedded subtitle streams, streaming cues, mojibake repair
+- **`Automatic` falls back past the frozen forced-only rule.** Order is now
+  forced+matching-audio → the container's default → anything renderable. Strict forced-only
+  showed **nothing** for the commonest case (English film, full English track, no forced
+  track) right after a toast saying "Subtitles on". Flagged in `SubtitleMode`'s docs —
+  **confirm or overrule.**
+- **Forward seek fix is UNVERIFIED end-to-end** (I can't drive the app while you test in it).
+  If a forward seek shows a brief smear before settling, the pre-roll's reference frames are
+  being dropped and the clock needs holding differently.
 
-All on `main` (`38462733`). **Not yet owner-tested — see "Test in the morning" below.**
+---
 
-Before this, only *sidecars* rendered: the owner's MKV showed its `.eng.srt` and not the
-English track muxed inside it. The engine did its own sidecar discovery and never consulted
-the track catalog, so `resolve_track` was a finished bridge with no traffic on it.
+# The three new asks (owner, 2026-07-15) — with feasibility
 
-- **Embedded streams** (`pb_decode::ffmpeg::cues`) — demux + `avcodec_decode_subtitle2` for
-  MKV `subrip`/`ass`/`webvtt` and MP4 `mov_text`. Proven on a real MKV: **850 cues**.
-- **The engine reads the catalog** — `ensure_loaded` takes the Details probe's
-  `MediaTrackCatalog` (which already merges embedded streams *and* sidecars into one id
-  namespace) and asks `resolve_track`. `tick_subtitles` drives `ensure_exif_cached` itself
-  rather than waiting for someone to open the Inspector.
-- **Cues stream** — see the perf note below; this is the design decision worth knowing.
-- **Mojibake repair** (`pb_app_core::mojibake`) — `â™ª` → `♪`, provable-only.
-- **`Shift+C` cycles subtitle tracks** with a toast (#99's first slice).
-- **Real-ASS handling**, both found by *printing real cues* rather than by any assertion:
-  ASS **drawing mode** (`{\p1}`…`{\p0}` = vector geometry for logos/signs) was rendering as
-  screenfuls of coordinates on a real Chinese track; and **Half-SBS 3D rips author every
-  subtitle twice** (one per eye, identical but for the margins we ignore), which drew as
-  literal double vision. Both fixed + tested.
+## 1. A track-picker button right of the total runtime — **straightforward**
 
-Verified: 18/18 suites green (both feature sets), clippy clean, macOS host builds, Windows
-cross-check passes.
+`VideoControls.swift` is a plain SwiftUI `HStack`: play · elapsed · scrubber · `videoTotal`.
+A button after `videoTotal` + a SwiftUI `.popover` is the natural fit. `Icon::Sliders` already
+exists (#99 suggests reusing it over vendoring a gear).
 
-### The perf decision worth knowing: cues STREAM
+What it needs:
+- **Track lists across the FFI** — indexed accessors (`subtitle_track_count()` /
+  `subtitle_track_label(i)` …), *not* a `Vec<String>`, which does not cross back to Swift.
+  Same pattern as the Shortcuts editor.
+- **Rows reuse `pb_app_core::tracks::track_summary`** (#98). Do NOT format tracks twice.
+- ⚠ **Interacting must re-arm the controls reveal**, or the bar fades out from under an open
+  popover (`AppCore::flash_video_controls`).
+- Off is a **real first row** for subtitles; audio has no Off. `cycle_choices` already models
+  exactly this — reuse it rather than rebuilding the list.
 
-Reading an embedded track is a **full linear pass over the container** — subtitle blocks are
-scattered through every cluster, so finding them means reading the film. **Measured: 39 s**
-on the corpus MKV (4.4 GB over SMB). As a blocking wait that is indistinguishable from broken.
+## 2. View ▸ Subtitles flyout — **doable, and the mechanism already exists**
 
-The way out is a ratio, not an optimization: the reader walks in **presentation order** at
-~113 MB/s while playback consumes at ~1.6 MB/s — **~70× faster than playback needs**. So it
-hands cues over as it finds them. **Measured: first batch at 1.06 s**, 177 batches; cancelling
-stops a read in ~1 s instead of 40. `CueLoad::drop` cancels, so a nav can't leave a worker
-chewing through 20 GB.
+`MenuBar.swift` builds a native `NSMenu` and **already has a `submenu(title, children)`
+helper**. The one wrinkle is that the track list is per-file while `MenuState` is a fixed
+struct pushed via `SetMenuState`.
+
+**Don't plumb a generation into MenuState.** Use **`NSMenuDelegate.menuNeedsUpdate(_:)`** —
+it fires just before the menu opens, so the flyout can pull the current tracks *then*. No
+push, no sync, never stale. That is the idiomatic AppKit answer and it sidesteps the whole
+problem.
+
+- Items carry the track's `local_id` in `representedObject` (the existing `fire(_:)` pattern
+  uses a String id; a dedicated select-track FFI call is cleaner than string-encoding an id).
+- **The submenu replaces the checkmark-toggle**, so its first row must be **Off** (radio
+  semantics, checkmark on the active row). `C` keeps toggling regardless.
+
+## 3. Audio flyout under View — **works, but the owner is right that it's a stretch**
+
+Same machinery as #2, so it is nearly free once #2 exists. But "View" is the wrong home:
+every player that does this well puts them side by side — IINA and VLC both have top-level
+**Audio** and **Subtitle** menus. If #3 happens, the likely end state is a **Playback menu**
+holding both, and Subtitles moves out of View with it. Worth deciding before building #2's
+home, not after.
+
+---
+
+# The load-bearing knowledge (don't re-derive these)
+
+## Cues STREAM — the ratio, not an optimization
+
+Reading an embedded track is a **full linear pass over the container** (subtitle blocks are
+scattered through every cluster). **Measured: 39 s** on the corpus MKV (4.4 GB over SMB) —
+as a blocking wait, indistinguishable from broken. But the reader walks in **presentation
+order** at ~113 MB/s while playback consumes ~1.6 MB/s — **~70× faster than playback needs**
+— so it hands cues over as it finds them: **first batch at 1.06 s**, 177 batches. Cancelling
+stops a read in ~1 s instead of 40 (`CueLoad::drop`), so a nav can't leave a worker chewing
+20 GB.
 
 *Known hole:* seek past the read frontier in the first ~40 s and those cues aren't there yet.
-They arrive as the reader reaches them; once the pass completes it's moot forever.
+Moot once the pass completes.
 
-*Future optimization (do NOT make it the only path):* the playback demuxer already reads these
-packets and discards them — forwarding them would make cues cost zero extra I/O. But that only
-exists on routes using *our* demuxer, and **the hard-won rule of this task is that a feature
-must never be gated on a backend**. Layer it under this reader, never replace it.
+*The optimization NOT to take:* the playback demuxer already reads these packets and discards
+them — forwarding them would make cues free. But that exists only on routes using **our**
+demuxer, and **a feature must never be gated on a backend** (see below). Layer it *under* this
+reader; never replace it.
 
-### ⚠ Three things the owner should know before judging what they see
+## The rules that were bought with real time
 
-1. **The Grey's Anatomy MKV's embedded track is genuinely mojibake'd — in the file.**
-   Verified with `ffprobe -show_data`: the raw packet payload is `c3a2 e284 a2c2 aa` where
-   `e299 aa` (`♪`) belongs. The `.eng.srt` beside it is clean. **Our reader is faithful; the
-   muxer was wrong.** The new repair fixes it on the fly, so it should now look correct — but
-   that's us un-breaking a broken file, not us decoding properly in the first place.
-2. **`Automatic` now falls back past the frozen forced-only rule.** Flagged in
-   `SubtitleMode`'s docs. Strict forced-only would show **nothing** for the common case (an
-   English film, a full English track, no forced track) right after a toast saying "Subtitles
-   on" — and it would have silently regressed what was validated on 2026-07-14. New order:
-   forced+matching-audio → the container's default → anything renderable. **Owner call:
-   confirm or overrule.**
-3. **Subtitles now cost a Details probe.** With subtitles on, `tick_subtitles` triggers the
-   ~20 ms container probe itself. That's new I/O on the video path — only ever with subtitles
-   on and a video playing, but it's a real change.
+- **Prove the pipe, then build through it.** ~1500 lines / ~75 tests of pure subtitle modules
+  were once merged before a single caller existed; the thin slice that followed found five
+  defects in an afternoon, every one in a *seam*. It paid again: the embedded reader was run
+  against a real MKV **before** anything was built on it, which is the only reason the 39 s
+  cost and the in-file mojibake were design-time facts rather than owner bug reports.
+- **Look at the output.** Both ASS defects (drawing-mode coordinates; 3D rips authoring every
+  subtitle twice) were found by *printing real cues*. Every unit test passed. Use
+  `PB_PREVIEW_OUT=<dir> cargo test -p pb-app-core --lib -- --ignored dump_preview` and the
+  corpus-gated `embedded_cues_read_from_a_real_container`.
+- **Never gate a feature on a backend.** Subtitles once switched off for exactly the files
+  they were built for when a routing change made MKV a `Native` backend. Use
+  `AppCore::video_showing()` / `video_position()`. The routing will change again.
+- **The unit rule:** position and size are **viewport**-relative; decoration is **text**-relative
+  (outline/shadow/radius/padding are fractions of the font size). `REFERENCE_FONT_PX` is a
+  **fixed anchor at 47.5** and must not track the default size, or changing that default
+  silently re-labels every user's saved settings.
+- **`#[serde(default)]` on a by-value nested settings struct is load-bearing.** Without it one
+  typo in `[subtitle_style]` makes the file unparseable, and `Settings::load` answers that by
+  discarding **every other setting** in it.
 
-## Test in the morning (macOS, `scripts/build-swift-host.sh`)
+## Verify with the corpus
 
-Corpus: `/Volumes/Media/TV Shows/Grey's.Anatomy.S01…/` has both an embedded `eng subrip`
-(stream 2) **and** an `.eng.srt` of the same content — the ideal A/B. `/Volumes/Media/Movies`
-has 163 more (several with forced tracks + ASS worth trying).
+- `/Volumes/Media/TV Shows/Grey's.Anatomy.S01…/` — embedded `eng subrip` (stream 2) **and** an
+  `.eng.srt` of the same content: the ideal A/B. ⚠ **Its embedded track is genuinely
+  mojibake'd in the file** (`ffprobe -show_data` proves it); the repair un-breaks it on the fly.
+- `/Volumes/Media/Movies` — 163 more. `Ad.Astra` has Chinese ASS (stream 5, drawing mode);
+  `Avatar…3D` (stream 3) is a Half-SBS rip with every subtitle authored twice;
+  `Alita.Battle.Angel` is **PGS-only** → "No subtitle tracks" is **correct**, bitmap is an
+  explicit non-goal.
+- Small reusable ASS test files (subtitle-stream-only remuxes, ~300 KB, 8 ms instead of 39 s):
+  `ffmpeg -i <film>.mkv -map 0:<sub-stream> -c copy /tmp/ass-test.mkv`, then
+  `PB_TEST_SUB_MKV=/tmp/ass-test.mkv PB_TEST_SUB_STREAM=0 cargo test -p pb-decode --features ffvideo -- --ignored --nocapture embedded`
+- Diagnostics: `PB_SUBTITLE_TRACE=1` (six gates: clock, placement, sidecar, cues, font system,
+  bitmap), `PB_VIDEO_DIAG=1`.
 
-1. **The headline:** open an MKV with an embedded track and **no** sidecar, press `C`.
-   Subtitles should appear within ~1–2 s. This never worked before.
-2. **`Shift+C`** cycles: Off → track → track → Off, toasting each ("English · SubRip").
-   On a Grey's episode you should be able to switch between the embedded track and the
-   sidecar and see they're the same content.
-3. **Mojibake:** on Grey's, the `♪` should now render as a music note, not `â™ª`.
-4. **ASS tracks** (`/Volumes/Media/Movies`): `Ad.Astra…mkv` has Chinese ASS (stream 5) —
-   should show Chinese text, **not** a wall of `m 211 -8 b 217 -6…` coordinates.
-   `Avatar.The.Way.of.Water…3D…mkv` (stream 3) is a 3D rip whose subs are authored twice —
-   should show each line **once**, not doubled.
-5. **Nothing regressed:** a plain `.srt` beside an MP4 still works via `C`.
-6. **Nav mid-load:** press `C` on a big MKV, then immediately arrow to the next photo.
-   Should be instant — no hitch (the read cancels).
-7. **`PB_SUBTITLE_TRACE=1`** prints why nothing is on screen if any of the above is blank.
+## THE authoritative docs
 
-**PGS-only files show nothing, correctly** — `Alita.Battle.Angel…mkv` is `hdmv_pgs_subtitle`
-only, which is bitmap, an explicit #90 non-goal. `C` says "No subtitle tracks". Not a bug.
-
-Small reusable ASS test files (subtitle-stream-only remuxes, ~300 KB, read in 8 ms instead
-of 39 s) can be rebuilt with:
-`ffmpeg -i <film>.mkv -map 0:<sub-stream> -c copy /tmp/ass-test.mkv`, then
-`PB_TEST_SUB_MKV=/tmp/ass-test.mkv PB_TEST_SUB_STREAM=0 cargo test -p pb-decode --features ffvideo -- --ignored --nocapture embedded`
-
-## Next (in priority order)
-
-1. **#90.4 — settle the defaults.** The tab ships; the *numbers* are still the author's
-   guess. Owner verdict wanted (see above).
-2. **#90.3 remainder** — seek generations (no stale cue flash while scrubbing) and wiring
-   `controls_h` so cues lift above the transport bar (`place()` supports the lift; nothing
-   measures the bar).
-3. **#99 remainder** — `A`/`Shift+A` audio cycling, the CC button, the popover. Note the
-   task's rule: **audio must toast only on a *confirmed* switch** (subtitles may toast
-   optimistically — that asymmetry is deliberate).
-4. **#90.5 — the winit presenter** (`Renderer::set_subtitle_overlay`). Windows/Linux still
-   show nothing. Worth deferring until the style defaults settle.
-5. **Archive'd videos have no embedded cues** — `stream_cues` needs a real path; an archive
-   would mean decompressing the whole entry to RAM. Sidecars in archives still work.
-6. **Phase 2 follow-ons** (deferred, no blockers): planar rotation in geometry/UV, planar-`Vec`
-   pool + two-plane single-submit upload, MF P010 on Windows.
-7. **#94.1 — space-pauses-a-playing-video** — deferred UX; owner wants to workshop the
-   contextual-key idea first.
-
-## THE authoritative docs — read these first
-
-- **Video:** `.taskmaster/docs/video-playback-overhaul.md` (root causes R1–R12, locked rules,
-  Phases 0–3). Phase 2 plan: `.taskmaster/plans/91-phase2-gpu-planar-color.md`.
 - **Subtitles:** `.taskmaster/docs/90-presenter-and-style-contract.md` — the owner's spec, the
-  frozen design decisions, **and the § *As built* post-mortem** (the sequencing rule + the four
-  seam bugs). `.taskmaster/docs/90-p08-text-shaping-spike.md` is the shaping gate.
+  frozen decisions, and **two post-mortems** (§ *As built*, § *As built, part 2*).
+- **Video:** `.taskmaster/docs/video-playback-overhaul.md` (root causes R1–R12, Phases 0–3).
 - **Track catalog:** `.taskmaster/docs/98-phase0-spike-findings.md`.
-- Diagnostics: `PB_VIDEO_DIAG=1`, `PB_SUBTITLE_TRACE=1`.
 
-## The lesson that keeps paying (it cost a day once)
+---
 
-**Prove the pipe, then build through it.** ~1500 lines / ~75 tests of pure subtitle modules
-were once merged before a single caller existed; the thin slice that followed found five
-defects in an afternoon that the 75 tests never could, because every one was in a *seam*.
+# Other open work (not subtitles)
 
-It paid again this session: the embedded reader was run against a real MKV **before** anything
-was built on it, which is the only reason the 39 s cost and the in-file mojibake were found at
-design time rather than by the owner. Two of this session's best tests (the WHATWG passthrough
-bytes; the streaming assertion) exist because a test failed for a *real* reason, not a typo.
+- **Phase 2 follow-ons** (deferred, no blockers): planar rotation in geometry/UV, planar-`Vec`
+  pool + two-plane single-submit upload, MF P010 on Windows.
+- **#94.1 — space-pauses-a-playing-video** — deferred UX; owner wants to workshop the
+  contextual-key idea first.
+- Older Windows/loose ends (#80 slideshow×video, #82 macOS archive natives, #75/#76 CI/mirror).
 
-**Never gate a feature on a backend.** Subtitles once silently switched off for exactly the
-files they were built for when a routing change made MKV a `Native` backend. Use
-`AppCore::video_showing()` / `video_position()`. The routing will change again.
-
-## Notes carried forward
+# Notes carried forward
 
 - **Commit + push directly to main** (owner-authorized); fetch/merge origin/main first — a
   parallel Windows agent also pushes there.
 - **Windows cross-check from the Mac:** `cargo check -p pb-app --target x86_64-pc-windows-msvc`
   after two temporary manifest edits — **blake3 `pure` must be a DIRECT dep under
-  `[dependencies]`** (putting it in the Linux-only target section does nothing, and blake3's
-  build script then fails compiling C for the host) + `ureq` `default-features = false` in both
+  `[dependencies]`** (in the Linux-only target section it does nothing, and blake3's build
+  script then fails compiling C for the host) + `ureq` `default-features = false` in both
   crates. Restore them and `git checkout Cargo.lock` after. It catches every `AppCore`
   struct-literal break; it has fired every time.
 - ⚠ **`cargo test --workspace` cannot build `pb-app` on macOS** (by design — it's the winit
-  shell). Use `--workspace --exclude pb-app`. Also: an `examples/` file in `pb-decode` that
-  uses a feature-gated symbol breaks the *default* build — feature-gate or don't add one.
+  shell). Use `--workspace --exclude pb-app`. An `examples/` file in `pb-decode` using a
+  feature-gated symbol breaks the *default* build — feature-gate it or don't add one.
 - ⚠ **Always build `--features ffvideo` when testing video code:** `ActiveVideo` has a SECOND
-  literal construction under `cfg(ffvideo/macos)` that `cargo test -p pb-app-core` alone misses.
-  Run clippy on **both** feature sets — dead code slips through otherwise.
+  literal construction under `cfg(ffvideo/macos)` that `cargo test -p pb-app-core` alone
+  misses. Run clippy on **both** feature sets.
 - ⚠ **Don't drive the app from a tool session while the owner is testing.** `pkill` kills
   *their* window, and a tool-launched bare binary comes up **windowless** (the
   `NSTreatUnknownArgumentsAsOpen` hazard) → no pump, no tick, no trace.
 - Quit the app before rebuilding (`open` won't relaunch a live app — stale-build trap).
 - swift-bridge bridge module: `//` comments only (`///` panics codegen); non-FFI-able payloads
-  use the stash-pull pattern.
+  use the stash-pull pattern. `Vec<String>` does **not** cross back to Swift — use indexed
+  accessors.
+- The build is quiet now: the Homebrew-FFmpeg `ld:` warnings are filtered by a pattern scoped
+  to `/opt/homebrew` (a real linker warning still comes through; a broken build still exits 1
+  — verified). `block v0.1.6`'s future-incompat notice is transitive through wgpu 22's Metal
+  backend and is left alone.
 - CLAUDE.md states platform-specific behavior as if global — verify perf/behavior against the
   cfg-gated source, not the doc.
 - `settings.save()` is called **unguarded** by the older toggles (e.g. `MuteLiveAudio`), so
   dispatching them in a test writes the user's real `settings.toml`. `ToggleSubtitles` /
   `SubtitleCycle` gate on `persist_prefs` instead — copy that, and consider a cleanup pass.
-- Older Windows/loose-end items (#80 slideshow×video, #82 macOS archive natives, #75/#76
-  CI/mirror) remain in tasks.json.
+- ⚠ `apply_settings` does **not** check `persist_prefs`, so a test that drives it writes the
+  real config. Never test settings-apply end to end.
