@@ -50,6 +50,20 @@ final class DemuxReader: @unchecked Sendable {
     private var onEnd: (@Sendable () -> Void)?
     private var onError: (@Sendable () -> Void)?
     private var firstFrameSent = false
+    /// While a seek's **pre-roll** is being fed: the requested target, in the same 0-based
+    /// presentation timeline `cmTime` produces. `nil` = not seeking (initial playback).
+    ///
+    /// ⚠ This is what makes a forward seek work at all. `demux_seek` lands on the keyframe
+    /// **at or before** the target — so a 2 s hop inside a 5 s GOP lands on the keyframe you
+    /// are already in, and anchoring the clock there sends the film *backwards* to 5/10/15 s
+    /// while looking like a glitch that "does nothing" (owner, 2026-07-15). A backward seek
+    /// always crosses into an earlier keyframe, which is why only forward looked broken.
+    ///
+    /// The frames from that keyframe up to the target must still be **decoded** — the frame
+    /// at the target references them — but must not be **shown**. So they are fed with
+    /// `kCMSampleAttachmentKey_DoNotDisplay` and the clock is anchored at the target, not at
+    /// the keyframe.
+    private var seekTargetSecs: Double?
     private var requesting = false
     private var done = false
     private var framesFed = 0 // diagnostics only (PB_TRACE)
@@ -185,6 +199,16 @@ final class DemuxReader: @unchecked Sendable {
                 done = true
                 layer.stopRequestingMediaData()
                 requesting = false
+                // A seek that hit EOS without ever reaching its target (near the end of a
+                // clip, or a stream whose last frames precede it) would otherwise never
+                // anchor — leaving the clock held at rate 0 forever, i.e. a frozen picture
+                // with no way out. Anchor at the target anyway and let EOS handle the rest.
+                if !firstFrameSent, let t = seekTargetSecs {
+                    firstFrameSent = true
+                    seekTargetSecs = nil
+                    let anchor = CMTime(seconds: t, preferredTimescale: 600)
+                    onFirstFrame.map { cb in DispatchQueue.main.async { cb(anchor) } }
+                }
                 if state == 1 {
                     onEnd.map { cb in DispatchQueue.main.async { cb() } }
                 } else if state == 2 {
@@ -203,22 +227,54 @@ final class DemuxReader: @unchecked Sendable {
                 pbTrace("sb-demux: makeSampleBuffer FAILED (\(n) bytes, pts=\(pts) dts=\(dts))")
                 continue
             }
+            // Seek pre-roll: everything between the landed keyframe and the requested
+            // target. Decoded (the target's frame references it) but never shown.
+            let ptsSecs = CMTimeGetSeconds(cmTime(pts))
+            let preroll =
+                seekTargetSecs.map { ptsSecs.isFinite && ptsSecs < $0 - 0.001 } ?? false
+            if preroll { Self.markDoNotDisplay(sb) }
             layer.enqueue(sb)
             framesFed += 1
             if framesFed <= 3 || framesFed % 300 == 0 {
-                pbTrace("sb-demux fed #\(framesFed) pts=\(pts) dts=\(dts) key=\(demux_packet_is_key(ptr)) status=\(layer.status.rawValue)")
+                pbTrace("sb-demux fed #\(framesFed) pts=\(pts) dts=\(dts) key=\(demux_packet_is_key(ptr)) preroll=\(preroll) status=\(layer.status.rawValue)")
             }
-            if !firstFrameSent {
+            // Anchor on the first frame that will actually be SEEN — so the pre-roll is
+            // already enqueued (and decoding) before the clock starts.
+            if !firstFrameSent && !preroll {
                 firstFrameSent = true
-                // Anchor the synchronizer at the first DECODE time, not the first
-                // PTS: a B-frame stream's opening IDR has a DTS earlier than its PTS
-                // (here synthesized negative), and starting the clock at the PTS
-                // makes those frames "late" — AVSampleBufferDisplayLayer then drops
-                // the IDR and nothing downstream can decode (no picture).
-                let anchor = cmTime(dts)
+                let anchor: CMTime
+                if let t = seekTargetSecs {
+                    // A seek: anchor at the TARGET. The first displayable frame's PTS is
+                    // at/after it, so it is on time rather than late, and the pre-roll's
+                    // DoNotDisplay keeps the replay invisible.
+                    anchor = CMTime(seconds: t, preferredTimescale: 600)
+                    pbTrace("sb-demux seek anchor at target \(t)s (landed pts=\(ptsSecs))")
+                } else {
+                    // Initial playback: anchor at the first DECODE time, not the first
+                    // PTS. A B-frame stream's opening IDR has a DTS earlier than its PTS
+                    // (here synthesized negative), and starting the clock at the PTS makes
+                    // those frames "late" — AVSampleBufferDisplayLayer then drops the IDR
+                    // and nothing downstream can decode (no picture).
+                    anchor = cmTime(dts)
+                }
+                seekTargetSecs = nil
                 onFirstFrame.map { cb in DispatchQueue.main.async { cb(anchor) } }
             }
         }
+    }
+
+    /// Mark one sample **decode-only**: VideoToolbox decodes it (later frames reference
+    /// it) and the layer never shows it. The seek pre-roll's whole reason for existing.
+    private static func markDoNotDisplay(_ sb: CMSampleBuffer) {
+        guard
+            let arr = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: true),
+            CFArrayGetCount(arr) > 0
+        else { return }
+        let dict = unsafeBitCast(CFArrayGetValueAtIndex(arr, 0), to: CFMutableDictionary.self)
+        CFDictionarySetValue(
+            dict,
+            Unmanaged.passUnretained(kCMSampleAttachmentKey_DoNotDisplay).toOpaque(),
+            Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
     }
 
     /// Wrap one compressed access unit in a `CMSampleBuffer` with the format
@@ -283,12 +339,13 @@ final class DemuxReader: @unchecked Sendable {
                 DispatchQueue.main.async { then(nil) }
                 return
             }
-            // Re-feed from the seek target; the next enqueued frame is the anchor.
+            // Re-feed from the landed keyframe. `seekTargetSecs` is what makes the frames
+            // between it and the target decode-only, and what the clock anchors at — see
+            // that field. Without it a forward seek walks BACKWARD to the keyframe.
+            self.seekTargetSecs = max(0, seconds)
             self.firstFrameSent = false
             self.done = false
             self.armFeeding()
-            // The landed PTS is the requested target (the renderer starts at the
-            // next keyframe ≤ it; close enough for the synchronizer anchor).
             let landed = CMTime(seconds: max(0, seconds), preferredTimescale: 600)
             DispatchQueue.main.async { then(landed) }
         }

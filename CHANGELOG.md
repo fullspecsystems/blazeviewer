@@ -30,6 +30,15 @@ with any pre-release suffix carried only by the tag.
   and everything else keeps its proportions, instead of an outline that was right at one
   size looking like a hairline at the next.
 
+- **Subtitle opacity fades the whole caption**, not just the letters — outline, shadow and
+  background go with it. Fading only the text made it see-through onto its own outline,
+  which rather defeated the point.
+
+### Fixed
+- **Seeking forward in an MKV now actually goes forward.** Pressing `→` jumped the film
+  *back* to the nearest 5-second mark instead of advancing 2 seconds; seeking backward was
+  unaffected, which is why it looked so strange.
+
 ### Changed
 - **`C` now reliably shows subtitles when a file has them.** It prefers a forced/signs
   track matching the audio, then the file's own default track, then whatever it can read.

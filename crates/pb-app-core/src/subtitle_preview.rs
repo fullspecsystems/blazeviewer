@@ -376,6 +376,17 @@ mod tests {
                 ..Default::default()
             },
         ));
+        // The master opacity over a full-dress subtitle: text, outline, shadow AND box
+        // must fade together as one object.
+        shots.push((
+            "opacity-50",
+            SubtitleStyle {
+                opacity: 0.5,
+                background: [0, 0, 0, 153],
+                shadow: Some(crate::subtitle::Shadow::default()),
+                ..Default::default()
+            },
+        ));
         shots.push((
             "big-yellow",
             SubtitleStyle {

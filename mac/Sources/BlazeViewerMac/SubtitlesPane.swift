@@ -54,7 +54,10 @@ struct SubtitlesPane: View {
                     ForEach(fontChoices, id: \.self) { Text($0).tag($0) }
                 }
                 slider("Size", pct($draft.sizePct), 1...maxSizePct, "%.1f%%")
-                slider("Opacity", $draft.colorOpacity, 0...100, "%.0f%%")
+                // The MASTER opacity: the whole subtitle, faded as one object. Fading
+                // just the glyphs would make them translucent onto their own outline,
+                // which shows through and defeats the point (owner, 2026-07-15).
+                slider("Opacity", $draft.opacity, 0...100, "%.0f%%")
             }
 
             Section("Legibility") {
@@ -265,7 +268,7 @@ struct SubtitleStyleDraft: Equatable {
     var fontFamily = ""
     var sizePct: Double = 0
     var color = Color.white
-    var colorOpacity: Double = 100
+    var opacity: Double = 100
     var outlinePx: Double = 0
     var outlineColor = Color.black
     var outlineOpacity: Double = 100
@@ -297,7 +300,9 @@ struct SubtitleStyleDraft: Equatable {
     init(form f: SubtitleStyleFfi) {
         fontFamily = f.font_family.toString()
         sizePct = Double(f.size_pct)
-        (color, colorOpacity) = splitRGBA(f.color_r, f.color_g, f.color_b, f.color_a)
+        color = Color(.sRGB, red: Double(f.color_r) / 255, green: Double(f.color_g) / 255,
+            blue: Double(f.color_b) / 255, opacity: 1)
+        opacity = Double(f.opacity) * 100
         outlinePx = Double(f.outline_px)
         (outlineColor, outlineOpacity) = splitRGBA(
             f.outline_r, f.outline_g, f.outline_b, f.outline_a)
@@ -321,7 +326,8 @@ struct SubtitleStyleDraft: Equatable {
         return SubtitleStyleFfi(
             font_family: RustString(fontFamily),
             size_pct: Float(sizePct),
-            color_r: c.0, color_g: c.1, color_b: c.2, color_a: alpha(colorOpacity),
+            color_r: c.0, color_g: c.1, color_b: c.2,
+            opacity: Float(opacity / 100),
             outline_px: Float(outlinePx),
             outline_r: o.0, outline_g: o.1, outline_b: o.2, outline_a: alpha(outlineOpacity),
             shadow_on: shadowOn,

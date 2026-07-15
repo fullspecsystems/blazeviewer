@@ -2740,7 +2740,7 @@ fn subtitle_style_to_form(s: &pb_app_core::subtitle::SubtitleStyle) -> ffi::Subt
         color_r: s.color[0],
         color_g: s.color[1],
         color_b: s.color[2],
-        color_a: s.color[3],
+        opacity: s.opacity,
         outline_px: ratio_to_px(s.outline_ratio),
         outline_r: s.outline_color[0],
         outline_g: s.outline_color[1],
@@ -2782,7 +2782,10 @@ fn fold_subtitle_style_form(
         // the read side, so a stray whitespace name can't reach the shaper either.
         font_family: Some(f.font_family.clone()).filter(|s| !s.trim().is_empty()),
         size_pct: f.size_pct,
-        color: [f.color_r, f.color_g, f.color_b, f.color_a],
+        // The text's own alpha has no control and is preserved: the pane's Opacity is the
+        // master below.
+        color: [f.color_r, f.color_g, f.color_b, base.color[3]],
+        opacity: f.opacity,
         outline_ratio: px_to_ratio(f.outline_px),
         outline_color: [f.outline_r, f.outline_g, f.outline_b, f.outline_a],
         shadow: f.shadow_on.then_some(pb_app_core::subtitle::Shadow {
@@ -4104,7 +4107,11 @@ mod ffi {
         color_r: u8,
         color_g: u8,
         color_b: u8,
-        color_a: u8,
+        // MASTER opacity 0..=1 — the whole subtitle faded as one object, NOT the text
+        // colour's alpha (which stays out of the form and is preserved from the base).
+        // Fading the glyphs alone makes them translucent onto their own outline, which
+        // shows through and defeats the point.
+        opacity: f32,
         // Every field below in px is on the REFERENCE_FONT_PX scale: stored as a fraction
         // of the real font size (so it holds its proportions as the text resizes) and
         // shown as the px it would be at the default text size, because "0.06" is not a
@@ -5417,9 +5424,31 @@ mod tests {
             vertical_offset_pct: -0.11,
             max_line_pct: 0.83,
             line_spacing: 1.35,
+            opacity: 0.65,
         };
         let got = fold_subtitle_style_form(&want, &subtitle_style_to_form(&want));
         assert_eq!(got, want);
+    }
+
+    /// The master opacity crosses the form; the text colour's own alpha does not (it has
+    /// no control) and is preserved from the base. Fading the glyphs alone would make them
+    /// translucent onto their own outline — see `SubtitleStyle::opacity`.
+    #[test]
+    fn the_master_opacity_crosses_and_the_text_alpha_is_preserved() {
+        let base = pb_app_core::subtitle::SubtitleStyle {
+            color: [255, 255, 255, 200], // a config-set text alpha, no control for it
+            opacity: 1.0,
+            ..Default::default()
+        };
+        let mut form = subtitle_style_to_form(&base);
+        assert_eq!(form.opacity, 1.0);
+        form.opacity = 0.4; // the user drags Opacity
+        let got = fold_subtitle_style_form(&base, &form);
+        assert_eq!(got.opacity, 0.4, "the master lands");
+        assert_eq!(
+            got.color[3], 200,
+            "...and the text's own alpha is untouched"
+        );
     }
 
     /// ⚠ The reason the fold takes a `base`. The radius and padding have no controls (a

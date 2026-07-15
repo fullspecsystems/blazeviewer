@@ -207,16 +207,20 @@ pub struct Shadow {
 }
 
 impl Default for Shadow {
-    /// A soft drop shadow, slightly down-right — the classic. Only reached when a config
-    /// names the table without filling it in, or when the pane needs values to offer for a
-    /// shadow you are about to switch on; the shipped default is no shadow at all (see
-    /// [`SubtitleStyle::default`]), because the outline already carries legibility.
+    /// A soft drop shadow, straight down — owner-tuned (2026-07-15): blur 2 px, offset
+    /// (0, 2) px on the [`REFERENCE_FONT_PX`] scale, 80% black.
+    ///
+    /// These are what the pane offers for a shadow you are **about to switch on**, and what
+    /// a config that names the table without filling it in gets. The shipped default is no
+    /// shadow at all (see [`SubtitleStyle::default`]) — the outline already carries
+    /// legibility — so this is the "on" preset, not the "on by default" one. It has to look
+    /// right immediately: a shadow that switches on invisible reads as a broken toggle.
     fn default() -> Self {
         Shadow {
-            dx_ratio: 0.04,
-            dy_ratio: 0.04,
-            blur_ratio: 0.08,
-            color: [0, 0, 0, 200],
+            dx_ratio: 0.0,
+            dy_ratio: 2.0 / REFERENCE_FONT_PX,
+            blur_ratio: 2.0 / REFERENCE_FONT_PX,
+            color: [0, 0, 0, 204], // 80%
         }
     }
 }
@@ -292,6 +296,15 @@ pub struct SubtitleStyle {
     pub max_line_pct: f32,
     /// Line height as a multiple of the font size.
     pub line_spacing: f32,
+    /// **Master opacity, 0..=1** — the whole subtitle, faded as one object.
+    ///
+    /// ⚠ Deliberately NOT `color`'s alpha, which is the wrong tool for the job: fading the
+    /// glyphs alone makes them translucent *onto their own outline*, which shows straight
+    /// through, so the subtitle never actually gets closer to the picture — it just goes
+    /// muddy (owner, 2026-07-15). This is applied to the finished composite instead. The
+    /// per-element alphas remain, and remain useful: they balance the parts against each
+    /// other, this balances the whole against the film.
+    pub opacity: f32,
 }
 
 impl Default for SubtitleStyle {
@@ -320,6 +333,7 @@ impl Default for SubtitleStyle {
             // textbook 5%: it lifts the text clear of the info line and the scrubber, which
             // live in the same strip (owner, 2026-07-15).
             vertical_offset_pct: 0.07,
+            opacity: 1.0,
             max_line_pct: 0.9,
             line_spacing: 1.2,
         }
@@ -444,6 +458,7 @@ impl SubtitleStyle {
             (&mut self.vertical_offset_pct, d.vertical_offset_pct),
             (&mut self.max_line_pct, d.max_line_pct),
             (&mut self.line_spacing, d.line_spacing),
+            (&mut self.opacity, d.opacity),
         ] {
             if !v.is_finite() {
                 *v = dv;
@@ -477,6 +492,7 @@ impl SubtitleStyle {
         // Above ~2 the lines read as unrelated rather than as one cue (owner: "much above
         // 2 looks pretty silly").
         self.line_spacing = self.line_spacing.clamp(0.8, MAX_LINE_SPACING);
+        self.opacity = self.opacity.clamp(0.0, 1.0);
         if let Some(s) = &mut self.shadow {
             s.dx_ratio = s
                 .dx_ratio
@@ -643,6 +659,7 @@ impl SubtitleStyle {
             // "don't run more than 90% across the screen" is a screen fact.
             max_line_px: (self.max_line_pct * vw).max(1.0),
             line_spacing: self.line_spacing,
+            opacity: self.opacity,
         }
     }
 
@@ -999,6 +1016,29 @@ mod tests {
         // And the defaults must survive their own clamp — a default the clamp would move
         // is a default nobody actually ships.
         assert_eq!(d.clone().clamped(), d);
+    }
+
+    /// The shadow preset a user gets when they switch the toggle on — owner-tuned
+    /// (2026-07-15). It is NOT on by default; this is what "on" looks like, and it has to
+    /// look right immediately, because a shadow that switches on invisible reads as a
+    /// broken toggle.
+    #[test]
+    fn the_shadow_preset_is_visible_the_moment_it_is_switched_on() {
+        let sh = Shadow::default();
+        assert!(SubtitleStyle::default().shadow.is_none(), "off by default");
+        assert!(
+            (ratio_to_px(sh.blur_ratio) - 2.0).abs() < 0.001,
+            "2 px blur"
+        );
+        assert_eq!(sh.dx_ratio, 0.0, "straight down, no sideways drift");
+        assert!((ratio_to_px(sh.dy_ratio) - 2.0).abs() < 0.001, "2 px down");
+        assert_eq!(sh.color, [0, 0, 0, 204], "80% black");
+        // ...and it must survive its own clamp, or it is not the preset that ships.
+        let styled = SubtitleStyle {
+            shadow: Some(sh),
+            ..Default::default()
+        };
+        assert_eq!(styled.clone().clamped().shadow, Some(sh));
     }
 
     // -- persistence (#90.4) -----------------------------------------------

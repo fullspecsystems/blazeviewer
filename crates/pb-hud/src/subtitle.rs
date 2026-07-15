@@ -84,6 +84,15 @@ pub struct SubtitleParams {
     pub max_line_px: f32,
     /// Line height as a multiple of `size_px`.
     pub line_spacing: f32,
+    /// **Master opacity, 0..=1** — applied to the whole composited overlay, last.
+    ///
+    /// Not the same thing as the text colour's alpha, and it exists because that alpha is
+    /// the wrong tool: fading only the glyphs makes them translucent *onto their own
+    /// outline*, which shows straight through and defeats the point (owner, 2026-07-15).
+    /// Fading the finished composite is what "make my subtitles less obtrusive" actually
+    /// means. The per-element alphas stay, and stay useful — they tune the parts against
+    /// each other; this tunes the whole against the picture.
+    pub opacity: f32,
 }
 
 /// The cheapest thing that identifies a rendered bitmap, so an unchanged cue is not
@@ -298,6 +307,17 @@ impl SubtitleRasterizer {
         }
         over(&mut rgba, &mask, p.color);
 
+        // Master opacity, LAST — over the finished composite, so text/outline/shadow/box
+        // fade together as one object instead of dissolving into each other.
+        // Premultiplied, so every channel scales (not just alpha).
+        let o = p.opacity.clamp(0.0, 1.0);
+        if o < 1.0 {
+            let a = (o * 255.0).round() as u32;
+            for c in rgba.iter_mut() {
+                *c = ((*c as u32 * a + 127) / 255) as u8;
+            }
+        }
+
         Some(SubtitleBitmap {
             rgba,
             w,
@@ -495,6 +515,7 @@ mod tests {
             background_pad_px: 0.0,
             max_line_px: 1600.0,
             line_spacing: 1.2,
+            opacity: 1.0,
         }
     }
 
@@ -934,6 +955,101 @@ mod tests {
         assert!(
             (v_pad as f32 - h_pad as f32 * BACKGROUND_PAD_Y_SCALE).abs() <= 1.0,
             "vertical should be ~half: h={h_pad} v={v_pad}"
+        );
+    }
+
+    /// ⚠ The master opacity fades the WHOLE object — text, outline, shadow, and box
+    /// together — and that is the point of it existing at all.
+    ///
+    /// The text colour's alpha cannot do this job: fading the glyphs alone makes them
+    /// translucent *onto their own outline*, which shows straight through, so the subtitle
+    /// goes muddy instead of getting out of the picture's way (owner, 2026-07-15).
+    #[test]
+    fn master_opacity_fades_every_layer_not_just_the_glyphs() {
+        let mut r = SubtitleRasterizer::new();
+        let styled = SubtitleParams {
+            outline_px: 3.0,
+            outline_color: [0, 0, 0, 255],
+            background: [0, 0, 255, 255],
+            background_pad_px: 10.0,
+            shadow: Some(ShadowParams {
+                dx: 2.0,
+                dy: 2.0,
+                blur: 2.0,
+                color: [255, 0, 0, 255],
+            }),
+            ..params()
+        };
+        let full = r.render(&["Hg".into()], &styled).expect("drew").clone();
+        let half = r
+            .render(
+                &["Hg".into()],
+                &SubtitleParams {
+                    opacity: 0.5,
+                    ..styled.clone()
+                },
+            )
+            .expect("drew")
+            .clone();
+
+        assert_eq!(
+            (full.w, full.h),
+            (half.w, half.h),
+            "opacity must not resize"
+        );
+        // EVERY pixel's alpha halves — the outline and the box included, not only where
+        // the glyphs are.
+        for (f, h) in full.rgba.chunks_exact(4).zip(half.rgba.chunks_exact(4)) {
+            let want = ((f[3] as u32 * 128 + 127) / 255) as u8;
+            assert!(
+                (h[3] as i32 - want as i32).abs() <= 1,
+                "alpha {} should halve to ~{want}, got {}",
+                f[3],
+                h[3]
+            );
+        }
+    }
+
+    /// Premultiplied: the colour channels scale with the alpha, or a faded subtitle would
+    /// blend as though it were still opaque and look washed out rather than transparent.
+    #[test]
+    fn master_opacity_keeps_the_bitmap_premultiplied() {
+        let mut r = SubtitleRasterizer::new();
+        let p = SubtitleParams {
+            background: [255, 255, 255, 255],
+            background_pad_px: 8.0,
+            opacity: 0.5,
+            ..params()
+        };
+        let b = r.render(&["Hg".into()], &p).expect("drew");
+        for px in b.rgba.chunks_exact(4) {
+            for c in 0..3 {
+                assert!(
+                    px[c] <= px[3],
+                    "premultiplied means channel {} ({}) <= alpha ({})",
+                    c,
+                    px[c],
+                    px[3]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zero_opacity_draws_nothing_visible() {
+        let mut r = SubtitleRasterizer::new();
+        let b = r
+            .render(
+                &["Hg".into()],
+                &SubtitleParams {
+                    opacity: 0.0,
+                    ..params()
+                },
+            )
+            .expect("still a bitmap");
+        assert!(
+            b.rgba.chunks_exact(4).all(|p| p[3] == 0),
+            "fully transparent"
         );
     }
 }
