@@ -520,6 +520,99 @@ mod tests {
         assert!(p.is_key, "a seek lands the demuxer on a keyframe");
     }
 
+    /// The first packet's PTS after a seek, in seconds (the container has `start_time == 0`,
+    /// so the stream-unit PTS is the presentation time directly).
+    fn first_seek_pts_secs(dx: &mut VideoDemuxer, target: Duration) -> (f64, bool) {
+        dx.seek(target).unwrap();
+        let p = dx
+            .read_packet()
+            .unwrap()
+            .expect("a packet after seek");
+        let pts = p.pts.expect("a seeked keyframe carries a PTS");
+        (dx.info().facts.pts_to_duration(pts).as_secs_f64(), p.is_key)
+    }
+
+    /// T4 (plan §"Testing"): the property the sample-buffer presenter leans on that
+    /// `seek_returns_to_readable_keyframe` never exercised — it only seeks to zero. A nonzero
+    /// forward seek must land on the keyframe **at or before** the target, so the pre-roll
+    /// (keyframe → target) that `DoNotDisplay` hides is non-empty and the anchor-at-target
+    /// rule has something to skip past. `longgop.mkv` has keyframes exactly every 5 s.
+    #[test]
+    fn seek_lands_on_keyframe_at_or_before_target() {
+        let mut dx = VideoDemuxer::open(&fixture("longgop.mkv"), cancel()).unwrap();
+        // (target seconds, the 5 s-GOP keyframe it must land on)
+        for &(target, expect_kf) in &[(3.0, 0.0), (7.0, 5.0), (12.5, 10.0), (23.9, 20.0)] {
+            let (landed, is_key) = first_seek_pts_secs(&mut dx, Duration::from_secs_f64(target));
+            assert!(is_key, "seek to {target}s must land on a keyframe");
+            assert!(
+                landed <= target + 1e-3,
+                "seek to {target}s landed on keyframe {landed}s — must be AT OR BEFORE the target \
+                 (a landing after it is what sent forward seeks backward pre-97f80bb4)"
+            );
+            assert!(
+                (landed - expect_kf).abs() < 1e-2,
+                "seek to {target}s should land on the {expect_kf}s keyframe, got {landed}s"
+            );
+        }
+    }
+
+    /// A seek landing exactly on a keyframe boundary yields that keyframe (an empty pre-roll —
+    /// the presenter then anchors immediately with no DoNotDisplay run).
+    #[test]
+    fn seek_exactly_on_keyframe() {
+        let mut dx = VideoDemuxer::open(&fixture("longgop.mkv"), cancel()).unwrap();
+        let (landed, is_key) = first_seek_pts_secs(&mut dx, Duration::from_secs_f64(15.0));
+        assert!(is_key);
+        assert!((landed - 15.0).abs() < 1e-2, "landed {landed}s, expected the 15 s keyframe");
+    }
+
+    /// A seek near EOS lands on the last keyframe and still reads packets — the presenter's
+    /// EOS-before-target anchor path (`SeekFramePolicy.eosAnchor`) depends on the demuxer
+    /// producing something rather than erroring out here. `longgop.mkv`'s last keyframe is 25 s.
+    #[test]
+    fn seek_near_eos_lands_on_last_keyframe() {
+        let mut dx = VideoDemuxer::open(&fixture("longgop.mkv"), cancel()).unwrap();
+        let (landed, is_key) = first_seek_pts_secs(&mut dx, Duration::from_secs_f64(29.5));
+        assert!(is_key, "a near-EOS seek still lands on a keyframe");
+        assert!(
+            (landed - 25.0).abs() < 1e-2,
+            "seek to 29.5s should land on the 25 s keyframe, got {landed}s"
+        );
+    }
+
+    /// The control (plan §T3): the same property on a 0.5 s-GOP clip — must pass before AND
+    /// after any seek fix, so a regression that only bites long GOPs can't hide behind it.
+    #[test]
+    fn short_gop_seek_control() {
+        let mut dx = VideoDemuxer::open(&fixture("shortgop.mkv"), cancel()).unwrap();
+        let (landed, is_key) = first_seek_pts_secs(&mut dx, Duration::from_secs_f64(3.2));
+        assert!(is_key);
+        // 0.5 s GOP: 3.2 s lands on the 3.0 s keyframe, so the pre-roll is at most ~0.5 s.
+        assert!(landed <= 3.2 + 1e-3, "landed {landed}s must be <= target");
+        assert!(3.2 - landed < 0.5 + 1e-2, "a 0.5 s GOP keeps the pre-roll under one GOP");
+    }
+
+    /// The demuxer's fallback branch (`seek`'s `i64::MAX` retry) is documented but **not
+    /// reachable by a generated fixture**: `target_units = start_time + duration_to_pts(t)`
+    /// with `t >= 0`, so the target is always `>= start_time >= the first keyframe`, and the
+    /// first `avformat_seek_file` never returns < 0 for a well-formed index. It is a defensive
+    /// path for a malformed container whose first keyframe sits after its declared start_time.
+    /// Point `PB_SEEK_FALLBACK_FIXTURE` at such a file to exercise it; otherwise skipped.
+    #[test]
+    #[ignore = "needs PB_SEEK_FALLBACK_FIXTURE — a container whose first keyframe is after start_time"]
+    fn seek_fallback_lands_after_target() {
+        let Ok(path) = std::env::var("PB_SEEK_FALLBACK_FIXTURE") else {
+            eprintln!("skipping: set PB_SEEK_FALLBACK_FIXTURE to a start-offset container");
+            return;
+        };
+        let mut dx = VideoDemuxer::open(&VideoInput::Path(path.into()), cancel()).unwrap();
+        // Seek before the first keyframe; the fallback must still land readable (a keyframe),
+        // even if its PTS is AFTER the requested target.
+        dx.seek(Duration::ZERO).unwrap();
+        let p = dx.read_packet().unwrap().expect("fallback still yields a packet");
+        assert!(p.is_key, "the fallback lands on the first usable keyframe");
+    }
+
     #[test]
     fn dovi_box_packs_profile_8_1() {
         // Corpus profile 8.1: BL+RPU, no EL, HDR10-compatible base

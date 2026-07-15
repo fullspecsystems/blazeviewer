@@ -7,6 +7,23 @@ the box on every supported Windows; codec-extension formats (HEVC/AV1) are exerc
 by the opt-in corpus there. The **FFmpeg tests also use the VP8/VP9/MKV fixtures
 below** — those decoders are built into every FFmpeg, so committing them is safe.
 
+## longgop.mkv / shortgop.mkv (seek-robustness plan §T3)
+
+320×240 @ 24 fps, 30 s, H.264 + a 440 Hz AAC tone. Identical but for GOP length:
+
+- **longgop.mkv** — 5 s GOP (keyframes at 0/5/10/15/20/25 s). The H1
+  pre-roll-starvation repro: a 2 s hop inside a 5 s GOP decodes a long
+  `DoNotDisplay` pre-roll. Used by the demux seek-contract tests (`seek_lands_on_
+  keyframe_at_or_before_target`, `seek_exactly_on_keyframe`, `seek_near_eos_…`).
+- **shortgop.mkv** — 0.5 s GOP. The control: the same seek property must hold on it
+  before AND after any seek fix, so a long-GOP-only regression can't hide.
+
+Regen (both): `./generate-gop-fixtures.sh`. ⚠ These carry **no burned-in timecode** —
+this box's ffmpeg lacks `drawtext`. That is fine for the Rust demux seek tests (they
+assert packet timestamps, not the picture); the Swift **visual** harness (plan §T2)
+must regenerate them on a `--enable-libfreetype` ffmpeg, which the script does
+automatically when `drawtext` is present.
+
 ## black_then_color.mp4
 
 64×64 @ 30 fps, ~1 s, H.264 yuv420p, no audio: ~12 black frames then solid orange —
