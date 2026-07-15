@@ -150,19 +150,30 @@ Other Apple facts (knowledge cutoff Jan 2026 — confirm against Apple's docs be
 **Do the free part now, if anything — and it may matter more than expected.** The only real
 lead time is the **D-U-N-S number**; it's free and needs no Apple enrolment or payment.
 
-⚠ **There is an existing D-U-N-S `245285353`, but it is probably stale.** It was registered
-to the *original* FullSpec Systems, and the owner has **re-incorporated** since. Apple
-matches the D-U-N-S record on the **legal entity name**, not the address — so "it has all
-my info" is not the test. If the re-incorporation created a new legal entity (dissolve +
-form), the D&B record may describe an entity that no longer exists, and Apple rejects on
-the name mismatch.
+⚠ **CHECKED 2026-07-14 — the D-U-N-S exists but names the WRONG ENTITY.** Apple's lookup
+returned:
 
-**The check is free and instant:** Apple's D-U-N-S lookup (`developer.apple.com/enroll/
-duns-lookup/`) with the *current* legal name + address shows exactly what Apple will see.
-- Returns `245285353` under the current entity → set, no lead time.
-- Returns nothing / the old entity → D&B must update the record or issue a new one. **This
-  is where weeks go** — which is precisely why it's worth discovering now rather than the
-  week an iOS build needs to go into review.
+> The D-U-N-S Number for **FullSpec Systems** is `245285353`. … Before enrolling, please
+> ensure that **FullSpec Systems is a legal entity.**
+
+**No "Inc."** — and that is the whole problem. `CLA.md` records the entity as *"FullSpec
+Systems Inc., an Alberta corporation"*, and under Alberta's Business Corporations Act a
+corporation's name **must** carry a legal element (Ltd./Inc./Corp.). So "FullSpec Systems"
+**cannot be the corporation's legal name** — the D&B record almost certainly describes the
+*pre-incorporation* sole proprietorship / trade name that the re-incorporation replaced.
+
+Apple's closing line is not boilerplate: **Organization enrollment rejects sole
+proprietorships, DBAs and trade names.** A D-U-N-S pointing at one is the classic stall —
+the lookup succeeds, you pay, then verification bounces you.
+
+**Fix (free, days-to-weeks):** have D&B update record `245285353` via their self-service
+update (iUpdate) to the corporation — legal name `FullSpec Systems Inc.`, incorporation
+date, business number. Then re-run Apple's lookup until it echoes back the **Inc.** form.
+Enrollment is same-day after that.
+
+This is the payoff from doing the free step early: there is a **weeks-long** correction
+sitting between us and an Org account, found on a quiet evening rather than the week an iOS
+build needs review. It changes **nothing** about the money — still don't pay Apple yet.
 
 **What's actually on the Individual account** (checked with the owner 2026-07-14):
 - **Two sticker packs.** These are why "just let the Individual lapse" is wrong: **a lapsed
