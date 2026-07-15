@@ -1486,6 +1486,17 @@
             "status": "done"
           }
         ]
+      },
+      {
+        "id": 102,
+        "title": "Redraw the Windows Velopack install splash (still says PhotoBlaze)",
+        "description": "The Windows installer's splash still reads \"PhotoBlaze\". Root cause (verified 2026-07-15): the #101 rename renamed the FILE photoblaze-splash.jpg -> crates/pb-app/icons/blazeviewer-splash.jpg but never redrew the PIXELS -- the blob is byte-identical to the 0.1.0 PhotoBlaze splash (hash a45bdf18, confirmed against 839ee537:...photoblaze-splash.jpg). So the path is already correct and release-windows.ps1 needs NO change; only the image content is stale. Deliverable: replace crates/pb-app/icons/blazeviewer-splash.jpg with a 600x500 baseline JPEG (match the current dimensions/format -- vpk --splashImage wants a static image) reading \"Blaze Viewer\", keeping the existing fiery-photo-frames art and the black background so it still pairs with --splashProgressColor #FF4915 (release-windows.ps1:275-276). No design source exists in the repo (flat JPG only), so it must be re-authored. Windows-only surface: the splash shows briefly during install/update before the app window; macOS/Linux have no equivalent. Verify by eye on an actual install, or at least by opening the new JPG -- there is no automated check for splash text. Tail of #101 (the rename); the last known user-visible 'PhotoBlaze' string the #101 sweep missed because it lives in pixels, not text.",
+        "status": "pending",
+        "priority": "low",
+        "dependencies": [
+          101
+        ],
+        "subtasks": []
       }
     ]
   }
