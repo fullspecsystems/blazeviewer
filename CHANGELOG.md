@@ -7,6 +7,15 @@ with any pre-release suffix carried only by the tag.
 
 ## [Unreleased]
 
+### Added
+- **Subtitles on videos (early, in progress).** If a subtitle file sits next to a video — the
+  usual `Movie.eng.srt` or `Movie.vtt` beside `Movie.mkv` — Blaze Viewer can show it. Press `C`
+  (or View ▸ Subtitles) to turn captions on and off; your choice is remembered. Text is
+  rendered sharply at your display's real resolution, with a black outline so it stays
+  readable over bright scenes. SubRip (`.srt`) and WebVTT (`.vtt`) are supported, including
+  non-Latin scripts and right-to-left languages. Subtitles stored *inside* the video file,
+  and per-track selection when there's more than one, are still to come.
+
 ## [0.2.1] - 2026-07-14
 
 ### Highlights
@@ -19,10 +28,9 @@ computer sees Blaze Viewer as a different program: it installs *alongside* Photo
 rather than replacing it, and PhotoBlaze will never update itself into it. Your settings
 and shortcuts don't carry over, so any custom keys need setting once more.
 
-Also in this release: **subtitles on videos** (drop a `.srt` or `.vtt` beside the file and
-press `C`), **audio and subtitle tracks listed properly** in the Details panel instead of a
-bare "Audio: Yes", **MKV and WebM playing through the system decoder on macOS** with correct
-Dolby Vision, and **video posters appearing 2–4× faster**.
+Also in this release: **audio and subtitle tracks listed properly** in the Details panel
+instead of a bare "Audio: Yes", **MKV and WebM playing through the system decoder on macOS**
+with correct Dolby Vision, and **video posters appearing 2–4× faster**.
 
 ### Changed
 - **PhotoBlaze is now Blaze Viewer.** The app, its website (blazeviewer.app), and everything
@@ -39,13 +47,6 @@ Dolby Vision, and **video posters appearing 2–4× faster**.
 - **About now links to blazeviewer.app** instead of the source repository, which is private.
 
 ### Added
-- **Subtitles on videos.** If a subtitle file sits next to a video — the usual
-  `Movie.eng.srt` or `Movie.vtt` beside `Movie.mkv` — Blaze Viewer can now show it. Press `C`
-  (or View ▸ Subtitles) to turn captions on and off; your choice is remembered. Text is
-  rendered sharply at your display's real resolution, with a black outline so it stays
-  readable over bright scenes. SubRip (`.srt`) and WebVTT (`.vtt`) are supported, including
-  non-Latin scripts and right-to-left languages. Subtitles stored *inside* the video file,
-  and per-track selection when there's more than one, are still to come.
 - **Videos remember where you left off — for the current session.** Switch away from a video and
   come back (for example, press Space expecting pause — which actually advances to the next item —
   then Backspace) and playback resumes near where you were instead of restarting. Positions are kept
@@ -85,8 +86,8 @@ Dolby Vision, and **video posters appearing 2–4× faster**.
 - **Video details now list every audio and subtitle track, instead of just "Audio: Yes".** The
   Inspector's Details tab (`Shift+I`) shows each track on its own line — language, codec, channel
   layout, sample rate, and whether it's the default, forced, a commentary, or SDH — so a film with a
-  director's commentary and three subtitle tracks reads as exactly that. Subtitle formats Blaze Viewer
-  can't display (image-based ones like PGS or VobSub) are still listed, marked "Unsupported". Details
+  director's commentary and three subtitle tracks reads as exactly that. Image-based subtitle formats
+  (like PGS or VobSub) are still listed, marked "Unsupported". Details
   that genuinely can't be read say so, rather than claiming a file has no audio. Copy all details
   (`Shift+I` → copy) includes the tracks; if you copy while a video is still being read, the copy
   waits and gives you the complete set rather than a half-filled one. Reading a video's details never
