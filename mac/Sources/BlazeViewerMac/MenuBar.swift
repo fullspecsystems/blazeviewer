@@ -23,14 +23,19 @@ final class MenuBar: NSObject {
     /// content check can detect it: if this item is no longer in our menu, SwiftUI
     /// rewrote the bar.
     private var sentinel: NSMenuItem?
-    /// The Playback ▸ Subtitles flyout and its holder (task #99). Held so `menuNeedsUpdate`
-    /// can recognize which menu is asking, and so the holder can be enabled/disabled with
-    /// the video. Rebuilt with the bar on a SwiftUI clobber, like everything else here.
+    /// The Playback ▸ Subtitle Track and ▸ Audio flyouts (task #99), held so
+    /// `menuNeedsUpdate` can tell which one is asking. Rebuilt with the bar on a SwiftUI
+    /// clobber, like everything else here.
+    ///
+    /// ⚠ **Their holder items are deliberately NOT retained, and must never be disabled from
+    /// inside `menuNeedsUpdate`.** That is a one-way door: a disabled submenu item cannot be
+    /// hovered, so its delegate never fires again — and the delegate is the only thing that
+    /// would re-enable it. Both flyouts did exactly that (`holder.isEnabled = false` when no
+    /// video was showing), which meant opening Playback once before a video was up greyed
+    /// them **permanently**, on every film thereafter. The submenu's own contents say "No
+    /// Video" instead; the holder stays enabled and the state is always re-derivable.
     private var subtitlesMenu: NSMenu?
-    private var subtitlesHolder: NSMenuItem?
-    /// The Playback ▸ Audio flyout and its holder (task #99).
     private var audioMenu: NSMenu?
-    private var audioHolder: NSMenuItem?
 
     init(model: CoreModel) {
         self.model = model
@@ -164,7 +169,6 @@ final class MenuBar: NSObject {
         subtitlesMenu = menu
         let holder = NSMenuItem(title: "Subtitle Track", action: nil, keyEquivalent: "")
         holder.submenu = menu
-        subtitlesHolder = holder
         return holder
     }
 
@@ -178,7 +182,6 @@ final class MenuBar: NSObject {
         audioMenu = menu
         let holder = NSMenuItem(title: "Audio", action: nil, keyEquivalent: "")
         holder.submenu = menu
-        audioHolder = holder
         return holder
     }
 
@@ -454,11 +457,9 @@ extension MenuBar: NSMenuDelegate {
         // whose tracks we haven't read yet, and a video we've read and which genuinely has
         // none. Saying "Reading tracks…" over a photograph would be nonsense.
         guard model.videoShowing else {
-            subtitlesHolder?.isEnabled = false
             menu.addItem(note("No Video"))
             return
         }
-        subtitlesHolder?.isEnabled = true
 
         // Row 0 is Off, which the "Subtitles" toggle above this item owns — so it is
         // dropped here while every other row KEEPS ITS CANONICAL INDEX. Hiding a row is
@@ -491,11 +492,9 @@ extension MenuBar: NSMenuDelegate {
     private func audioNeedsUpdate(_ menu: NSMenu, _ model: CoreModel) {
         menu.removeAllItems()
         guard model.videoShowing else {
-            audioHolder?.isEnabled = false
             menu.addItem(note("No Video"))
             return
         }
-        audioHolder?.isEnabled = true
 
         let rows = model.audioTrackRows()
         guard !rows.isEmpty else {
