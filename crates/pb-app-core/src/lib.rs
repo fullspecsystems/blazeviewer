@@ -29,10 +29,8 @@ pub const TAGLINE: &str = "An ultra-fast, capable image viewer";
 /// `ApplicationName` capability, Explorer's ProgId labels, the folder verb.
 ///
 /// Deliberately separate from [`APP_IDENT`]: a display name may contain spaces where an
-/// identifier may not. The two are equal today only because "PhotoBlaze" happens to be
-/// both; the rename to "Blaze Viewer" / "BlazeViewer" splits them (task #101). Do not
-/// collapse them back into one constant.
-pub const APP_NAME: &str = "PhotoBlaze";
+/// identifier may not. Do not collapse them back into one constant.
+pub const APP_NAME: &str = "Blaze Viewer";
 
 /// The product name as a **space-free identifier**. Used for the Windows ProgIds
 /// (`<APP_IDENT>.Image`), the `SOFTWARE\<APP_IDENT>` registry tree, the
@@ -42,11 +40,11 @@ pub const APP_NAME: &str = "PhotoBlaze";
 ///
 /// Not [`APP_NAME`] (may have spaces) and not [`APP_SLUG`] (lowercase); this is the
 /// PascalCase middle ground.
-pub const APP_IDENT: &str = "PhotoBlaze";
+pub const APP_IDENT: &str = "BlazeViewer";
 
-/// The **lowercase slug**: the executable name (`<APP_SLUG>.exe`), the Linux config dir
-/// (`~/.config/<APP_SLUG>`), and the update-feed path segment.
-pub const APP_SLUG: &str = "photoblaze";
+/// The **lowercase slug**: the executable name (`<APP_SLUG>.exe`) and the Linux config
+/// dir (`~/.config/<APP_SLUG>`).
+pub const APP_SLUG: &str = "blazeviewer";
 
 pub mod action;
 pub mod animation;

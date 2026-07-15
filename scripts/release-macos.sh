@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Sign, package (DMG), notarize, and staple PhotoBlaze.app for distribution.
+# Sign, package (DMG), notarize, and staple "Blaze Viewer.app" for distribution.
 #
 # Pipeline: build the SwiftUI host .app (scripts/build-swift-host.sh) → codesign with the Developer ID
 # Application cert under the hardened runtime → hdiutil DMG (drag-to-/Applications) →
 # codesign the DMG → notarytool submit --wait → stapler staple → SHA256 sidecar.
-# Output: dist/PhotoBlaze-<version>.dmg (+ .sha256).
+# Output: dist/BlazeViewer-<version>.dmg (+ .sha256). The DMG name has NO space (see DMG_BASE).
 #
 # Gated like the Windows job: each stage skips cleanly when its inputs are absent, so a
 # fork or a local dry-run still produces an (unsigned) DMG.
@@ -26,8 +26,8 @@
 # --no-video for a video-less DMG (skips the FFmpeg build/bundle entirely).
 #
 # Usage: scripts/release-macos.sh [--release|--debug] [--no-video]
-#   Builds the SwiftUI host (PhotoBlaze.app via build-swift-host.sh) — it IS PhotoBlaze on
-#   macOS since the 2026-07-02 cutover (the old egui/winit bundle was retired in task #70).
+#   Builds the SwiftUI host ("Blaze Viewer.app" via build-swift-host.sh) — it IS the Mac app
+#   since the 2026-07-02 cutover (the old egui/winit bundle was retired in task #70).
 #   Runs fine LOCALLY with a Developer ID identity in the login keychain + the three APPLE_*
 #   env vars — no CI required (Actions credits are finite).
 set -euo pipefail
@@ -49,9 +49,17 @@ cd "$REPO_ROOT"
 
 DIST="dist"
 SHORT_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/pb-app/Cargo.toml | head -1)"
-# The SwiftUI host is PhotoBlaze on macOS (the egui/winit bundle was retired in task #70).
-APP_NAME="PhotoBlaze"
-BIN_NAME="PhotoBlaze"
+# The SwiftUI host is the Mac app (the egui/winit bundle was retired in task #70).
+#
+# APP_NAME carries a space; DMG_BASE deliberately does NOT. That split is load-bearing:
+# generate-mac-appcast.sh builds the Sparkle <enclosure url="$BASE_URL/$DMG_NAME"> by raw
+# string concatenation with NO URL-encoding, so a space in the DMG filename would emit a
+# literal space inside an XML URL attribute and Sparkle would fail to fetch the update.
+# Spaces belong in the Finder-facing bundle ("Visual Studio Code.app"), never in the
+# URL-facing artifact — which is exactly what VS Code does (VSCode-darwin-universal.zip).
+APP_NAME="Blaze Viewer"
+BIN_NAME="Blaze Viewer"
+DMG_BASE="BlazeViewer"
 APP="target/swift-host/$PROFILE/$APP_NAME.app"
 BUILD_CMD="./scripts/build-swift-host.sh --$PROFILE"
 if [[ $BUNDLE_VIDEO == 1 ]]; then
@@ -70,11 +78,11 @@ else
 	# --ffvideo ON for dev convenience; a shipped DMG can't depend on Homebrew dylibs).
 	BUILD_CMD="$BUILD_CMD --no-ffvideo"
 fi
-DMG="$DIST/$APP_NAME-$SHORT_VERSION.dmg"
+DMG="$DIST/$DMG_BASE-$SHORT_VERSION.dmg"
 
 # Local credentials, two ways (CI keeps using repo-secret env vars):
 #   a) PREFERRED — a notarytool keychain profile (secrets never touch disk). One-time:
-#        xcrun notarytool store-credentials photoblaze-notary \
+#        xcrun notarytool store-credentials photoblaze-notary   # NB: alias kept from the old name \
 #          --apple-id you@example.com --team-id TEAMID   (prompts for the app password)
 #      The script auto-uses it when the APPLE_* env vars are absent.
 #   b) .env.release at the repo root (gitignored; see .env.release.example) — sourced

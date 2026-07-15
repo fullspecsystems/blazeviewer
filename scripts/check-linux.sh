@@ -24,7 +24,7 @@ case "$ARCH" in
   *) echo "usage: $0 [amd64|arm64]" >&2; exit 1 ;;
 esac
 PLATFORM="linux/$ARCH"
-IMAGE="photoblaze-appimage-builder:$ARCH"
+IMAGE="blazeviewer-appimage-builder:$ARCH"
 ENGINE="${DOCKER:-docker}" # OrbStack provides the `docker` CLI; override for podman/etc.
 
 command -v "$ENGINE" >/dev/null 2>&1 || {
@@ -50,8 +50,8 @@ FEATURES="pb-app/livephoto,pb-app/libheif"
 # cargo registry volume is read-mostly. APPIMAGE_EXTRACT_AND_RUN isn't needed (no packaging here).
 "$ENGINE" run --rm --platform "$PLATFORM" \
   -v "$PWD":/src -w /src \
-  -v "photoblaze-target-$ARCH:/cargo-target" \
-  -v "photoblaze-cargo-registry:/opt/cargo/registry" \
+  -v "blazeviewer-target-$ARCH:/cargo-target" \
+  -v "blazeviewer-cargo-registry:/opt/cargo/registry" \
   -e CARGO_TARGET_DIR=/cargo-target \
   "$IMAGE" bash -euo pipefail -c "
     echo '== toolchain (must match rust-toolchain.toml) =='

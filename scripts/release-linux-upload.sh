@@ -1,26 +1,26 @@
 #!/usr/bin/env bash
-# Publish the PhotoBlaze Linux AppImage(s) to the downloads.fullspec.ca feed — the Linux
+# Publish the Blaze Viewer Linux AppImage(s) to the downloads.blazeviewer.app feed — the Linux
 # equivalent of scripts/release-mac-upload.sh. Uploads straight from the build machine (the
 # Mac that ran scripts/release-linux-docker.sh), one hop.
 #
 # For each arch present in dist/ (x86_64 and/or aarch64) it uploads:
-#   • PhotoBlaze-<version>-<arch>.AppImage      the bundle
-#   • PhotoBlaze-<version>-<arch>.AppImage.sha256   integrity sidecar (generated if absent)
+#   • BlazeViewer-<version>-<arch>.AppImage      the bundle
+#   • BlazeViewer-<version>-<arch>.AppImage.sha256   integrity sidecar (generated if absent)
 # then writes a shared latest.json manifest (version + per-arch url/sha256/size) and repoints
-# the permanent symlinks PhotoBlaze-latest-<arch>.AppImage → the versioned file, so
-# /photoblaze/latest/linux (x86_64) and /photoblaze/latest/linux-arm64 (aarch64) serve the newest.
+# the permanent symlinks BlazeViewer-latest-<arch>.AppImage → the versioned file, so
+# /latest/linux (x86_64) and /latest/linux-arm64 (aarch64) serve the newest.
 #
 # Idempotent: re-running with the same build re-uploads and re-points to the same targets.
 #
 # Usage:
-#   scripts/release-linux-upload.sh                 # every PhotoBlaze-<ver>-*.AppImage in dist/
+#   scripts/release-linux-upload.sh                 # every BlazeViewer-<ver>-*.AppImage in dist/
 #   scripts/release-linux-upload.sh --source <dir>  # from another folder
 set -euo pipefail
 
 SOURCE="dist"
 UPLOAD_HOST="jdlien.com"
-REMOTE_DIR="/var/www/downloads.fullspec.ca/photoblaze/linux"
-BASE_URL="https://downloads.fullspec.ca/photoblaze/linux"
+REMOTE_DIR="/var/www/downloads.blazeviewer.app/linux"
+BASE_URL="https://downloads.blazeviewer.app/linux"
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 		--source) SOURCE="$2"; shift 2 ;;
@@ -39,10 +39,10 @@ SRC_DIR="$(cd "$SOURCE" && pwd)"
 # 1) Locate the versioned AppImage(s) for this version — never the 'latest' aliases.
 declare -a ARCHES FILES
 for arch in x86_64 aarch64; do
-	f="PhotoBlaze-$VERSION-$arch.AppImage"
+	f="BlazeViewer-$VERSION-$arch.AppImage"
 	if [[ -f "$SRC_DIR/$f" ]]; then ARCHES+=("$arch"); fi
 done
-[[ ${#ARCHES[@]} -gt 0 ]] || { echo "error: no PhotoBlaze-$VERSION-{x86_64,aarch64}.AppImage in $SRC_DIR (build first, or pass --source)" >&2; exit 1; }
+[[ ${#ARCHES[@]} -gt 0 ]] || { echo "error: no BlazeViewer-$VERSION-{x86_64,aarch64}.AppImage in $SRC_DIR (build first, or pass --source)" >&2; exit 1; }
 echo "==> version $VERSION  arch(es): ${ARCHES[*]}"
 
 # 2) Per-arch sha256 sidecar (generate if missing) + collect the upload set.
@@ -50,7 +50,7 @@ sha_of() { shasum -a 256 "$1" | awk '{print $1}'; }
 UPLOAD=()
 declare -A SHA SIZE
 for arch in "${ARCHES[@]}"; do
-	f="PhotoBlaze-$VERSION-$arch.AppImage"
+	f="BlazeViewer-$VERSION-$arch.AppImage"
 	if [[ ! -f "$SRC_DIR/$f.sha256" ]]; then
 		( cd "$SRC_DIR" && shasum -a 256 "$f" > "$f.sha256" )
 	fi
@@ -64,12 +64,12 @@ done
 #    the newest build per arch. Written into dist/ then uploaded with the bundles.
 {
 	echo "{"
-	echo "  \"product\": \"PhotoBlaze\","
+	echo "  \"product\": \"Blaze Viewer\","
 	echo "  \"version\": \"$VERSION\","
 	echo "  \"platform\": \"linux\","
 	echo "  \"assets\": {"
 	for i in "${!ARCHES[@]}"; do
-		arch="${ARCHES[$i]}"; f="PhotoBlaze-$VERSION-$arch.AppImage"
+		arch="${ARCHES[$i]}"; f="BlazeViewer-$VERSION-$arch.AppImage"
 		comma=","; [[ $i -eq $((${#ARCHES[@]} - 1)) ]] && comma=""
 		echo "    \"$arch\": {"
 		echo "      \"file\": \"$f\","
@@ -89,9 +89,9 @@ echo "==> scp ${#UPLOAD[@]} file(s) -> ${UPLOAD_HOST}:${REMOTE_DIR}/"
 
 # 5) Repoint the permanent per-arch symlinks (relative targets, valid within the dir).
 for arch in "${ARCHES[@]}"; do
-	f="PhotoBlaze-$VERSION-$arch.AppImage"
-	echo "==> repoint PhotoBlaze-latest-$arch.AppImage -> $f"
-	ssh -o BatchMode=yes "$UPLOAD_HOST" "cd '$REMOTE_DIR' && ln -sfn '$f' 'PhotoBlaze-latest-$arch.AppImage'"
+	f="BlazeViewer-$VERSION-$arch.AppImage"
+	echo "==> repoint BlazeViewer-latest-$arch.AppImage -> $f"
+	ssh -o BatchMode=yes "$UPLOAD_HOST" "cd '$REMOTE_DIR' && ln -sfn '$f' 'BlazeViewer-latest-$arch.AppImage'"
 done
 
 # 6) Verify the permanent URLs serve this build. latest/linux* are 302 → the AppImage; follow.
@@ -99,9 +99,9 @@ echo "==> Live:"
 for pair in "x86_64:latest/linux" "aarch64:latest/linux-arm64"; do
 	arch="${pair%%:*}"; path="${pair#*:}"
 	[[ " ${ARCHES[*]} " == *" $arch "* ]] || continue
-	code="$(curl -sL -o /dev/null -w '%{http_code}' "https://downloads.fullspec.ca/photoblaze/$path" || true)"
-	[[ "$code" == "200" ]] || { echo "error: /photoblaze/$path returned HTTP $code" >&2; exit 1; }
-	echo "    https://downloads.fullspec.ca/photoblaze/$path   (HTTP 200, $arch)"
+	code="$(curl -sL -o /dev/null -w '%{http_code}' "https://downloads.blazeviewer.app/$path" || true)"
+	[[ "$code" == "200" ]] || { echo "error: /$path returned HTTP $code" >&2; exit 1; }
+	echo "    https://downloads.blazeviewer.app/$path   (HTTP 200, $arch)"
 done
 mcode="$(curl -sL -o /dev/null -w '%{http_code}' "$BASE_URL/latest.json" || true)"
 [[ "$mcode" == "200" ]] || { echo "error: latest.json returned HTTP $mcode" >&2; exit 1; }

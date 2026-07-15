@@ -22,7 +22,7 @@ import PbMacFfi
 /// the video's re-based (origin-subtracted) timeline.
 final class AudioSampleFeeder: @unchecked Sendable {
     private let queue = DispatchQueue(
-        label: "ca.fullspec.photoblaze.sample-buffer-audio", qos: .userInitiated)
+        label: "ca.fullspec.blazeviewer.sample-buffer-audio", qos: .userInitiated)
     private var ptr: UInt = 0
 
     private var rate: Int32 = 0

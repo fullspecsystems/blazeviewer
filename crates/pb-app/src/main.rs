@@ -271,8 +271,9 @@ fn build_event_loop() -> Result<EventLoop<()>, winit::error::EventLoopError> {
             }
             _ if in_wsl && x11_available => {
                 eprintln!(
-                    "PhotoBlaze: WSL detected — using the X11 (XWayland) backend \
-                     (set PB_BACKEND=wayland to override)"
+                    "{}: WSL detected — using the X11 (XWayland) backend \
+                     (set PB_BACKEND=wayland to override)",
+                    pb_app_core::APP_NAME
                 );
                 builder.with_x11();
             }
@@ -1376,7 +1377,7 @@ impl App {
     /// (too-large / corrupt / password / OOM / empty), and log it.
     fn report_archive_error(&mut self, e: &archive::ArchiveOpenError) {
         let msg = e.user_message();
-        eprintln!("PhotoBlaze: {msg}");
+        eprintln!("{}: {msg}", pb_app_core::APP_NAME);
         self.open_message(&msg);
     }
 
@@ -3276,7 +3277,7 @@ impl ApplicationHandler for App {
         // client size and the unpainted area never shows during GPU setup; let
         // the OS size fullscreen (correct under any scale factor).
         let mut attrs = Window::default_attributes()
-            .with_title("PhotoBlaze")
+            .with_title(pb_app_core::APP_NAME)
             .with_visible(false);
         if let Some(icon) = load_window_icon() {
             attrs = attrs.with_window_icon(Some(icon));
@@ -3886,7 +3887,11 @@ impl ApplicationHandler for App {
         {
             let forwarded = single_instance::take_forwarded();
             if !forwarded.is_empty() {
-                println!("PhotoBlaze: opened {} forwarded path(s)", forwarded.len());
+                println!(
+                    "{}: opened {} forwarded path(s)",
+                    pb_app_core::APP_NAME,
+                    forwarded.len()
+                );
                 if let Some(w) = self.window.as_ref() {
                     w.set_minimized(false);
                     w.focus_window();
@@ -4318,7 +4323,7 @@ fn report_cli_error_and_exit(err: pb_cli::clap::Error, have_output: bool) -> ! {
 /// double-click / association launch). Uses the OS dialog directly — no event loop needed yet.
 fn show_startup_message_dialog(text: &str) {
     rfd::MessageDialog::new()
-        .set_title("PhotoBlaze")
+        .set_title(pb_app_core::APP_NAME)
         .set_description(text)
         .set_level(rfd::MessageLevel::Warning)
         .show();
@@ -4348,8 +4353,11 @@ fn main() {
             .or_else(|| args.get(i + 1).filter(|a| !a.starts_with('-')).cloned())
             .unwrap_or_else(|| "hud-gallery.png".to_string());
         match hud_gallery::write_sheet(Path::new(&out)) {
-            Ok(()) => println!("PhotoBlaze: wrote HUD gallery \u{2192} {out}"),
-            Err(e) => eprintln!("PhotoBlaze: HUD gallery failed: {e}"),
+            Ok(()) => println!(
+                "{}: wrote HUD gallery \u{2192} {out}",
+                pb_app_core::APP_NAME
+            ),
+            Err(e) => eprintln!("{}: HUD gallery failed: {e}", pb_app_core::APP_NAME),
         }
         return;
     }
@@ -4375,8 +4383,11 @@ fn main() {
         };
         let welcome = args.iter().any(|a| a == "--welcome");
         match egui_shot::write_shot(Path::new(&out), dark, tab, welcome) {
-            Ok(()) => println!("PhotoBlaze: wrote egui panels \u{2192} {out}"),
-            Err(e) => eprintln!("PhotoBlaze: egui shot failed: {e}"),
+            Ok(()) => println!(
+                "{}: wrote egui panels \u{2192} {out}",
+                pb_app_core::APP_NAME
+            ),
+            Err(e) => eprintln!("{}: egui shot failed: {e}", pb_app_core::APP_NAME),
         }
         return;
     }
@@ -4399,8 +4410,8 @@ fn main() {
             .find_map(|a| a.strip_prefix("--tab="))
             .unwrap_or("general");
         match egui_shot::write_settings_shot(Path::new(&out), dark, tab) {
-            Ok(()) => println!("PhotoBlaze: wrote settings \u{2192} {out}"),
-            Err(e) => eprintln!("PhotoBlaze: settings shot failed: {e}"),
+            Ok(()) => println!("{}: wrote settings \u{2192} {out}", pb_app_core::APP_NAME),
+            Err(e) => eprintln!("{}: settings shot failed: {e}", pb_app_core::APP_NAME),
         }
         return;
     }
@@ -4490,10 +4501,14 @@ fn main() {
     };
 
     match &plan.source {
-        Source::Archive(_) => println!("PhotoBlaze: opening archive…"),
-        Source::Scan { .. } => println!("PhotoBlaze: scanning folder…"),
+        Source::Archive(_) => println!("{}: opening archive…", pb_app_core::APP_NAME),
+        Source::Scan { .. } => println!("{}: scanning folder…", pb_app_core::APP_NAME),
         _ => {
-            println!("PhotoBlaze: {} image(s)", resolved.source.len());
+            println!(
+                "{}: {} image(s)",
+                pb_app_core::APP_NAME,
+                resolved.source.len()
+            );
             if resolved.source.is_empty() {
                 eprintln!(
                     "(no images - drop an image or folder on the window, or press O to open)"
@@ -4545,7 +4560,10 @@ fn main() {
         // unwinds and drops the GPU + windowing resources on the now-dead connection, which
         // segfaults (core dump). Exit hard instead: skip the destructors (there's no live
         // connection to release them against) and report cleanly.
-        eprintln!("PhotoBlaze: display connection lost — exiting ({e:?})");
+        eprintln!(
+            "{}: display connection lost — exiting ({e:?})",
+            pb_app_core::APP_NAME
+        );
         std::process::exit(1);
     }
 

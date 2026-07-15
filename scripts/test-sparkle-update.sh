@@ -16,9 +16,13 @@
 # production feed.
 #
 # Usage: scripts/test-sparkle-update.sh <notarized-dmg> [--old-version X.Y.Z] [--port N]
-#   e.g. scripts/test-sparkle-update.sh dist/PhotoBlaze-0.1.1.dmg
+#   e.g. scripts/test-sparkle-update.sh dist/BlazeViewer-0.2.0.dmg
 set -euo pipefail
 
+# Must match CFBundleName/CFBundleExecutable in packaging/macos/Info-swift-host.plist and
+# APP_NAME in build-swift-host.sh. The space is deliberate (macOS convention) — every use
+# below stays quoted.
+APP_NAME="Blaze Viewer"
 DMG=""
 OLD_VERSION="0.1.0"
 PORT="8765"
@@ -43,7 +47,7 @@ IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | grep 'Develop
 
 WORK="$(mktemp -d)"
 FEED="$WORK/feed"          # served over http: appcast.xml + the DMG (the enclosure)
-OLD_APP="$WORK/PhotoBlaze.app"
+OLD_APP="$WORK/$APP_NAME.app"
 MOUNT=""
 SERVER_PID=""
 cleanup() {
@@ -56,15 +60,15 @@ trap cleanup EXIT
 # 1) Pull the .app out of the DMG — it becomes the "old" build we downgrade + run.
 echo "==> Mounting $DMG"
 MOUNT="$(hdiutil attach -nobrowse -readonly "$DMG" | awk -F'\t' '/\/Volumes\//{print $NF; exit}')"
-[[ -n "$MOUNT" && -d "$MOUNT/PhotoBlaze.app" ]] || { echo "error: PhotoBlaze.app not found in the DMG" >&2; exit 1; }
-REAL_VERSION="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$MOUNT/PhotoBlaze.app/Contents/Info.plist")"
+[[ -n "$MOUNT" && -d "$MOUNT/$APP_NAME.app" ]] || { echo "error: $APP_NAME.app not found in the DMG" >&2; exit 1; }
+REAL_VERSION="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$MOUNT/$APP_NAME.app/Contents/Info.plist")"
 echo "    DMG advertises version $REAL_VERSION"
 # old must be strictly older, or Sparkle sees no update.
 if [[ "$OLD_VERSION" == "$REAL_VERSION" ]] || [[ "$(printf '%s\n%s\n' "$OLD_VERSION" "$REAL_VERSION" | sort -V | tail -1)" == "$OLD_VERSION" ]]; then
 	echo "error: --old-version ($OLD_VERSION) must be strictly LOWER than the DMG's version ($REAL_VERSION)" >&2
 	exit 1
 fi
-cp -R "$MOUNT/PhotoBlaze.app" "$OLD_APP"
+cp -R "$MOUNT/$APP_NAME.app" "$OLD_APP"
 hdiutil detach "$MOUNT" -quiet; MOUNT=""
 
 # 2) Downgrade + repoint the old build's Info.plist, then re-sign (editing the plist breaks the
@@ -94,7 +98,7 @@ if [[ -d "$FW" ]]; then
 	done
 	codesign --force --options runtime --timestamp=none --sign "$IDENTITY" "$FW"
 fi
-codesign --force --options runtime --timestamp=none --sign "$IDENTITY" "$OLD_APP/Contents/MacOS/PhotoBlaze"
+codesign --force --options runtime --timestamp=none --sign "$IDENTITY" "$OLD_APP/Contents/MacOS/$APP_NAME"
 codesign --force --options runtime --timestamp=none --sign "$IDENTITY" "$OLD_APP"
 codesign --verify --strict "$OLD_APP" && echo "    old build re-signed OK"
 xattr -dr com.apple.quarantine "$OLD_APP" 2>/dev/null || true
@@ -111,9 +115,9 @@ SERVER_PID=$!
 sleep 1
 curl -fsS "http://localhost:$PORT/appcast.xml" >/dev/null || { echo "error: local feed not reachable on port $PORT" >&2; exit 1; }
 
-# 5) Launch the old build (quit any running PhotoBlaze first so LaunchServices doesn't just
+# 5) Launch the old build (quit any running instance first so LaunchServices doesn't just
 #    activate a different instance by bundle id).
-osascript -e 'quit app id "com.jdlien.PhotoBlaze"' >/dev/null 2>&1 || true
+osascript -e 'quit app id "ca.fullspec.BlazeViewer"' >/dev/null 2>&1 || true
 sleep 1
 echo "==> Launching the old build ($OLD_VERSION)"
 open -n "$OLD_APP"
@@ -123,12 +127,12 @@ cat <<INSTRUCTIONS
 ────────────────────────────────────────────────────────────────────────────
   Sparkle update test is live.
 
-  In the launched PhotoBlaze ($OLD_VERSION):
-    1. Menu ▸ PhotoBlaze ▸ Check for Updates…
-    2. Expect: "A new version of PhotoBlaze is available" → version $REAL_VERSION
+  In the launched $APP_NAME ($OLD_VERSION):
+    1. Menu ▸ $APP_NAME ▸ Check for Updates…
+    2. Expect: "A new version of $APP_NAME is available" → version $REAL_VERSION
        (if you see it, the EdDSA signature verified and the feed parsed correctly)
     3. Click Install Update → it downloads, verifies, and installs on quit,
-       then relaunches as $REAL_VERSION (check PhotoBlaze ▸ About).
+       then relaunches as $REAL_VERSION (check $APP_NAME ▸ About).
 
   A FAILURE to find/verify the update is exactly what this test exists to catch
   BEFORE the seed ships. Common culprits: SUPublicEDKey mismatch, a broken

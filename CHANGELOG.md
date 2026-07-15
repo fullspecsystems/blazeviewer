@@ -8,6 +8,17 @@ with any pre-release suffix carried only by the tag.
 ## [Unreleased]
 
 ### Changed
+- **PhotoBlaze is now Blaze Viewer.** The app, its website (blazeviewer.app), and everything
+  in it have been renamed. The fast-flick feature this app exists for is now called
+  **Blaze** — holding a key to race through photos is "Hold to Blaze".
+  > ⚠️ **This version installs alongside the old one rather than replacing it.** The rename
+  > changes the app's identity, so your computer treats Blaze Viewer as a brand-new
+  > program: PhotoBlaze will not auto-update into it. **Uninstall PhotoBlaze first**
+  > (Windows: Settings ▸ Apps — this also cleans up its "Open with" entries, which is why
+  > deleting the folder by hand isn't enough; macOS: drag it to the Trash; Linux: delete
+  > the old AppImage), *then* install Blaze Viewer. Your settings and keyboard shortcuts
+  > are not carried over — they live in a new folder — so you'll need to redo any
+  > customised shortcuts once.
 - **About now links to blazeviewer.app** instead of the source repository, which is private.
 
 ### Added

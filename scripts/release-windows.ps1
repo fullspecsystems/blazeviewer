@@ -1,12 +1,12 @@
 <#
 .SYNOPSIS
-  Build, sign, and package the PhotoBlaze Windows release with **Velopack** (per-user installer +
+  Build, sign, and package the Blaze Viewer Windows release with **Velopack** (per-user installer +
   built-in auto-update), locally. Replaces the retired WiX/MSI flow. Twin of scripts/release-macos.sh.
 
 .DESCRIPTION
   Pipeline: cargo build --release --features libheif → `vpk pack` (Azure Trusted Signing signs the
   app exe + Setup.exe + Update.exe; bundles the icon, install splash, and the VC++ redist check) →
-  the flat feed lands in dist\feed (releases.win.json + .nupkg packages + PhotoBlaze-win-Setup.exe).
+  the flat feed lands in dist\feed (releases.win.json + .nupkg packages + BlazeViewer-win-Setup.exe).
   Pass -Upload to rsync that feed to the downloads.fullspec.ca web root, which the app reads over
   HTTP for auto-update (see crates/pb-app/src/update.rs FEED_URL).
 
@@ -49,7 +49,7 @@ param(
     # so a plain run just produces the feed locally. SSH host is jdlien.com (same droplet); the path
     # is the downloads.fullspec.ca site root. Pass a full `[user@]host:/path` to override.
     [switch]$Upload,
-    [string]$UploadTarget = "jdlien.com:/var/www/downloads.fullspec.ca/photoblaze/win/"
+    [string]$UploadTarget = "jdlien.com:/var/www/downloads.blazeviewer.app/win/"
 )
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
@@ -80,7 +80,7 @@ $ArchCfg = @{
     arm64 = @{ Triplet = "arm64-windows"; Target = "aarch64-pc-windows-msvc"; Framework = "vcredist143-arm64"; Channel = "win-arm64" }
 }[$Arch]
 $HostArch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
-Write-Host "==> PhotoBlaze $Version (Windows / Velopack / $Arch → channel '$($ArchCfg.Channel)')" -ForegroundColor Cyan
+Write-Host "==> Blaze Viewer $Version (Windows / Velopack / $Arch → channel '$($ArchCfg.Channel)')" -ForegroundColor Cyan
 if ($Arch -ne $HostArch) {
     # This script builds native (no cross toolchain wired up): the vcpkg libheif and the Rust MSVC
     # link both need the arch's native tools. Build arm64 on an arm64 box, x64 on x64.
@@ -125,7 +125,7 @@ if (-not $env:INCLUDE -or -not $env:LIBCLANG_PATH) {
 Write-Host "==> cargo build --release -p pb-app --features libheif,dav1d,ffprobe" -ForegroundColor Cyan
 cargo build --release -p pb-app --features libheif,dav1d,ffprobe
 if ($LASTEXITCODE -ne 0) { throw "build failed" }
-$Exe = "target\release\photoblaze.exe"
+$Exe = "target\release\blazeviewer.exe"
 if (-not (Test-Path $Exe)) { throw "$Exe not found after build" }
 
 # ── 4. vpk (Velopack CLI) — a dotnet global tool; install on first use, cache after.
@@ -166,7 +166,7 @@ $Stage = Join-Path $RepoRoot "dist\stage"
 $Feed = Join-Path $RepoRoot "dist\feed"
 if (Test-Path $Stage) { Remove-Item -Recurse -Force $Stage }
 New-Item -ItemType Directory -Force $Stage, $Feed | Out-Null
-Copy-Item $Exe (Join-Path $Stage "photoblaze.exe") -Force
+Copy-Item $Exe (Join-Path $Stage "blazeviewer.exe") -Force
 
 # ── 6a. The native libraries ship as DLLs beside the exe (task #77). This *is* the LGPL
 #       compliance mechanism, not packaging trivia: shipping libheif/libde265 (LGPL-3.0 §4) and
@@ -219,11 +219,11 @@ foreach ($lic in "libheif-COPYING.txt", "libde265-COPYING.txt", "ffmpeg-COPYING.
 
 $packArgs = @(
     "pack",
-    "--packId", "PhotoBlaze",
+    "--packId", "BlazeViewer",
     "--packVersion", $Version,
     "--packDir", $Stage,
-    "--mainExe", "photoblaze.exe",
-    "--packTitle", "PhotoBlaze",
+    "--mainExe", "blazeviewer.exe",
+    "--packTitle", "Blaze Viewer",
     "--packAuthors", "FullSpec Systems",
     "--icon", "crates\pb-app\icons\photoblaze.ico",
     "--splashImage", "crates\pb-app\icons\photoblaze-splash.jpg",
@@ -268,7 +268,7 @@ if ($Upload) {
         }
     } finally { Pop-Location }
     if (-not $uploaded) { throw "upload failed — no working rsync/scp (scp ships with Windows OpenSSH)." }
-    Write-Host "==> Live at https://downloads.fullspec.ca/photoblaze/win/" -ForegroundColor Green
+    Write-Host "==> Live at https://downloads.blazeviewer.app/win/" -ForegroundColor Green
 } else {
     Write-Host "==> Not uploaded (pass -Upload). Feed: $Feed" -ForegroundColor Yellow
 }

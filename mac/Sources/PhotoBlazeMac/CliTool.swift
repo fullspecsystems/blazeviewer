@@ -1,6 +1,6 @@
-// The opt-in `photoblaze` command-line tool (task #78.14) — the VS Code / iTerm
+// The opt-in `blaze` command-line tool (task #78.14) — the VS Code / iTerm
 // pattern: an explicit menu action ("Install Command-Line Tool…") that symlinks
-// /usr/local/bin/photoblaze → this app's embedded binary. NEVER automatic: a silent
+// /usr/local/bin/blaze → this app's embedded binary. NEVER automatic: a silent
 // PATH write on launch is bad citizenship (and usually needs admin rights). An
 // explicit, user-initiated write is the ADR-018-sanctioned category (same as saving
 // a rotation) — the no-trace guarantee is about involuntary traces of *viewing*.
@@ -19,7 +19,7 @@ import AppKit
 final class CliTool: NSObject {
     static let shared = CliTool()
 
-    private static let linkPath = "/usr/local/bin/photoblaze"
+    private static let linkPath = "/usr/local/bin/blaze"
 
     /// The install target: the real embedded binary of the running app. For a bare
     /// `swift run` this is the debug executable — installing from a dev run is allowed
@@ -66,30 +66,30 @@ final class CliTool: NSObject {
         switch Self.status() {
         case .notInstalled:
             confirm(
-                "Install the photoblaze command?",
-                info: "Creates \(Self.linkPath) → this app, so you can run photoblaze "
-                    + "from the Terminal (try photoblaze --help). You may be asked for "
+                "Install the blaze command?",
+                info: "Creates \(Self.linkPath) → this app, so you can run blaze "
+                    + "from the Terminal (try blaze --help). You may be asked for "
                     + "an administrator password.",
                 button: "Install"
             ) { self.install(target: target) }
         case .installed:
             confirm(
-                "The photoblaze command is installed.",
+                "The blaze command is installed.",
                 info: "\(Self.linkPath) points at this app. Remove it?",
                 button: "Remove"
             ) { self.remove() }
         case .elsewhere(let dest):
             confirm(
-                "Repair the photoblaze command?",
+                "Repair the blaze command?",
                 info: "\(Self.linkPath) points at\n\(dest)\nwhich isn't this copy of "
-                    + "PhotoBlaze (moved or reinstalled?). Point it here instead?",
+                    + "Blaze Viewer (moved or reinstalled?). Point it here instead?",
                 button: "Repair"
             ) { self.install(target: target) }
         case .foreign:
             let a = NSAlert()
-            a.messageText = "Can't install the photoblaze command"
+            a.messageText = "Can't install the blaze command"
             a.informativeText =
-                "\(Self.linkPath) already exists and isn't a PhotoBlaze link. "
+                "\(Self.linkPath) already exists and isn't a Blaze Viewer link. "
                 + "Remove it manually first."
             a.alertStyle = .warning
             a.runModal()
@@ -119,13 +119,13 @@ final class CliTool: NSObject {
         if (try? fm.createSymbolicLink(
             atPath: Self.linkPath, withDestinationPath: target)) != nil
         {
-            done("The photoblaze command is ready — try photoblaze --help in a Terminal.")
+            done("The blaze command is ready — try blaze --help in a Terminal.")
             return
         }
         // Escalate: mkdir + ln through the standard admin prompt.
         let cmd = "mkdir -p /usr/local/bin && ln -sfn \(shQuote(target)) \(shQuote(Self.linkPath))"
         if runPrivileged(cmd) {
-            done("The photoblaze command is ready — try photoblaze --help in a Terminal.")
+            done("The blaze command is ready — try blaze --help in a Terminal.")
         } else {
             failed(
                 "Couldn't create \(Self.linkPath). You can create it yourself:\n"
@@ -164,14 +164,14 @@ final class CliTool: NSObject {
 
     private func done(_ text: String) {
         let a = NSAlert()
-        a.messageText = "PhotoBlaze"
+        a.messageText = "Blaze Viewer"
         a.informativeText = text
         a.runModal()
     }
 
     private func failed(_ text: String) {
         let a = NSAlert()
-        a.messageText = "PhotoBlaze"
+        a.messageText = "Blaze Viewer"
         a.informativeText = text
         a.alertStyle = .warning
         a.runModal()

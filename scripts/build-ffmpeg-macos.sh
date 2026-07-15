@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build a pinned, **LGPL-clean, decode-only** FFmpeg for bundling into the macOS
-# PhotoBlaze .app (task #84 plan §9-dist / §7 distribution; task #77 compliance).
+# the shipped .app (task #84 plan §9-dist / §7 distribution; task #77 compliance).
 #
 # WHY a custom build (not Homebrew): Homebrew's FFmpeg is `--enable-gpl` (x264/x265
 # and GPL filters) and **not redistributable**. `build-swift-host.sh --ffvideo`
@@ -147,4 +147,4 @@ for f in "$PREFIX"/lib/libav*.dylib "$PREFIX"/lib/libsw*.dylib; do
 	otool -D "$f" | tail -1 | sed 's/^/  /'
 done
 echo
-echo "Next: scripts/bundle-ffmpeg-macos.sh <PhotoBlaze.app> --libdir $PREFIX/lib"
+echo "Next: scripts/bundle-ffmpeg-macos.sh <"Blaze Viewer.app"> --libdir $PREFIX/lib"

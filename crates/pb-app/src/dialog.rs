@@ -500,16 +500,23 @@ impl DialogWindow {
         keymap: &Keymap,
         parent: Option<&Window>,
     ) -> Option<DialogWindow> {
+        // Titles are owned: the ones carrying the product name are built from
+        // `pb_app_core::APP_NAME` rather than baked in (task #101).
         let (w, h, resizable, title) = match kind {
-            DialogKind::About => (ABOUT_SIZE.0, ABOUT_SIZE.1, false, ABOUT_TITLE),
-            DialogKind::Settings => (560.0, 660.0, true, "PhotoBlaze Settings"),
-            DialogKind::Confirm => (450.0, 172.0, false, "Confirm Delete"),
-            DialogKind::Message => (470.0, 185.0, false, "PhotoBlaze"),
-            DialogKind::Password => (500.0, 250.0, false, "Password Required"),
-            DialogKind::AskImage => (500.0, 320.0, false, "Ask About Image"),
-            DialogKind::Loading => (500.0, 210.0, false, "Opening Archive"),
+            DialogKind::About => (ABOUT_SIZE.0, ABOUT_SIZE.1, false, about_title()),
+            DialogKind::Settings => (
+                560.0,
+                660.0,
+                true,
+                format!("{} Settings", pb_app_core::APP_NAME),
+            ),
+            DialogKind::Confirm => (450.0, 172.0, false, "Confirm Delete".to_string()),
+            DialogKind::Message => (470.0, 185.0, false, pb_app_core::APP_NAME.to_string()),
+            DialogKind::Password => (500.0, 250.0, false, "Password Required".to_string()),
+            DialogKind::AskImage => (500.0, 320.0, false, "Ask About Image".to_string()),
+            DialogKind::Loading => (500.0, 210.0, false, "Opening Archive".to_string()),
             // A touch taller than Loading for the extra current-folder line under the count.
-            DialogKind::Scanning => (500.0, 220.0, false, "Scanning Folder"),
+            DialogKind::Scanning => (500.0, 220.0, false, "Scanning Folder".to_string()),
         };
         // Created HIDDEN: we render the first (themed) frame before revealing, so the
         // OS never flashes the default white window before our dark frame lands.
@@ -1132,7 +1139,11 @@ fn arch_label() -> &'static str {
     }
 }
 
-const ABOUT_TITLE: &str = "About PhotoBlaze";
+/// The About window's title. Built at runtime from [`pb_app_core::APP_NAME`] rather than
+/// `const`, so the product name lives in exactly one place (task #101).
+fn about_title() -> String {
+    format!("About {}", pb_app_core::APP_NAME)
+}
 
 /// The About window's fixed inner size. It does not scroll and cannot be resized, so this
 /// has to be big enough for the whole card — and the card's height is **font-metric
@@ -1222,7 +1233,7 @@ fn about_ui(ui: &mut egui::Ui, icon: Option<&egui::TextureHandle>) {
             ));
         }
         ui.add_space(12.0);
-        ui.heading("PhotoBlaze");
+        ui.heading(pb_app_core::APP_NAME);
         ui.add_space(2.0);
         ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
         // The build's git commit (set by build.rs) plus the CPU architecture this binary was
@@ -2275,7 +2286,7 @@ fn general_tab(ui: &mut egui::Ui, p: &pbui::Palette, d: &mut SettingsDraft) {
             p,
             None,
             "Default image viewer",
-            Some("Opens PhotoBlaze's page in Windows Default apps"),
+            Some("Opens the app's page in Windows Default apps"),
             |ui| {
                 if pbui::secondary_button(ui, "Set default\u{2026}").clicked() {
                     open_default_apps();

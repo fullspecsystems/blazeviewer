@@ -17,7 +17,7 @@ final class OwnedAudioDecoder: @unchecked Sendable {
     /// The serial feeder queue that owns `ptr`. `userInitiated` — audio refill is
     /// latency-sensitive, but it is off the main thread.
     private let queue = DispatchQueue(
-        label: "ca.fullspec.photoblaze.session-audio", qos: .userInitiated)
+        label: "ca.fullspec.blazeviewer.session-audio", qos: .userInitiated)
     /// Nonzero once opened; `0` = unopened / open failed. Touched **only** on `queue`
     /// (and in `deinit`, when no other reference — hence no queue work — remains).
     private var ptr: UInt = 0

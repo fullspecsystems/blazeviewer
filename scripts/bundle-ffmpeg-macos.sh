@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bundle FFmpeg dylibs into a PhotoBlaze.app so it runs with NO external FFmpeg
+# Bundle FFmpeg dylibs into the .app so it runs with NO external FFmpeg
 # (no Homebrew, no /usr/local) — task #84 plan §9-dist / §7 distribution.
 #
 # Pipeline:
@@ -23,7 +23,7 @@
 # either way; licensing is on you.
 #
 # Usage:
-#   scripts/bundle-ffmpeg-macos.sh <PhotoBlaze.app> --libdir <dir> [--no-sign] [--audit-only]
+#   scripts/bundle-ffmpeg-macos.sh <"Blaze Viewer.app"> --libdir <dir> [--no-sign] [--audit-only]
 set -euo pipefail
 
 APP=""
@@ -40,8 +40,13 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-[[ -n "$APP" && -d "$APP" ]] || { echo "error: pass the path to PhotoBlaze.app" >&2; exit 2; }
-BIN="$APP/Contents/MacOS/PhotoBlaze"
+[[ -n "$APP" && -d "$APP" ]] || { echo "error: pass the path to the .app bundle" >&2; exit 2; }
+# Read the executable's name out of the bundle rather than hardcoding it. It contains a
+# space ("Blaze Viewer") and it has already been renamed once (task #101) — deriving it
+# means a future rename can never silently break this audit.
+BIN_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist" 2>/dev/null || true)"
+[[ -n "$BIN_NAME" ]] || { echo "error: no CFBundleExecutable in $APP/Contents/Info.plist" >&2; exit 1; }
+BIN="$APP/Contents/MacOS/$BIN_NAME"
 FRAMEWORKS="$APP/Contents/Frameworks"
 [[ -x "$BIN" ]] || { echo "error: $BIN not found" >&2; exit 1; }
 
@@ -80,7 +85,7 @@ audit_macho() {
 run_audit() {
 	echo "==> Auditing dependency closure (no external FFmpeg allowed)"
 	local fail=0
-	audit_macho "$BIN" "PhotoBlaze" || fail=1
+	audit_macho "$BIN" "$BIN_NAME" || fail=1
 	for f in "$FRAMEWORKS"/libav*.dylib "$FRAMEWORKS"/libsw*.dylib; do
 		[[ -f "$f" ]] || continue
 		audit_macho "$f" "$(basename "$f")" || fail=1

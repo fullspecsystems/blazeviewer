@@ -1,22 +1,33 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Bundle metadata for the NS1 SwiftUI host (ADR-021) — the strangler-fig target that will
-  IS the Mac app (cutover 2026-07-02): the real com.jdlien.PhotoBlaze identity, so file
-  associations and TCC grants carry over from the egui beta it replaces. Assembled into
-  PhotoBlaze.app by scripts/build-swift-host.sh (version placeholders from the pb-app
-  crate version; icon assets copied into Resources).
+  Bundle metadata for the SwiftUI host (ADR-021) — it IS the Mac app (cutover 2026-07-02).
+  Assembled into "Blaze Viewer.app" by scripts/build-swift-host.sh (version placeholders
+  from the pb-app crate version; icon assets copied into Resources).
+
+  RENAMED 2026-07-14 (task #101): PhotoBlaze → Blaze Viewer, and the bundle id moved from
+  com.jdlien.PhotoBlaze to ca.fullspec.BlazeViewer (reverse-DNS of the company domain
+  fullspec.ca; four Swift dispatch-queue labels already used the ca.fullspec.* prefix).
+  This is a DELIBERATE clean break: a new bundle id means macOS treats this as a new app,
+  so the old file associations, TCC grants and Sparkle update continuity do NOT carry
+  over. Accepted — the product is pre-release with a single user. Trash the old
+  PhotoBlaze.app and run `lsregister -kill -r -domain local -domain user` to flush its
+  stale LaunchServices associations.
+
+  The name appears in three forms on purpose (see pb_app_core::APP_NAME/APP_IDENT):
+  "Blaze Viewer" displays (spaces are the Mac convention — Visual Studio Code.app), while
+  "BlazeViewer" is the space-free identifier used for the bundle id leaf and the DMG name.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
 	<key>CFBundleName</key>
-	<string>PhotoBlaze</string>
+	<string>Blaze Viewer</string>
 	<key>CFBundleDisplayName</key>
-	<string>PhotoBlaze</string>
+	<string>Blaze Viewer</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.jdlien.PhotoBlaze</string>
+	<string>ca.fullspec.BlazeViewer</string>
 	<key>CFBundleExecutable</key>
-	<string>PhotoBlaze</string>
+	<string>Blaze Viewer</string>
 	<!-- Modern (Tahoe+): the Liquid Glass icon from Assets.car; legacy: the flat icns —
 	     the same prebuilt assets the egui bundle ships (packaging/macos/). -->
 	<key>CFBundleIconName</key>
@@ -50,7 +61,7 @@
 	<string>© FullSpec Systems Inc. 2026</string>
 
 	<!-- Sparkle auto-update (task #65). The app checks this EdDSA-signed appcast next to
-	     the DMG on downloads.fullspec.ca and, when a newer version is published, downloads
+	     the DMG on downloads.blazeviewer.app and, when a newer version is published, downloads
 	     it in the background and installs on quit (the same UX Windows gets from Velopack).
 	     SUPublicEDKey verifies the enclosure signature — a tampered/unsigned DMG is rejected.
 	     The matching PRIVATE key lives only in the release Mac's login keychain (never
@@ -59,7 +70,7 @@
 	     ▸ Startup toggles override them and Sparkle persists the user's choice. Privacy #2:
 	     an appcast GET carries only version + OS, never a viewing trace. -->
 	<key>SUFeedURL</key>
-	<string>https://downloads.fullspec.ca/photoblaze/mac/appcast.xml</string>
+	<string>https://downloads.blazeviewer.app/mac/appcast.xml</string>
 	<key>SUPublicEDKey</key>
 	<string>1Fm8FpIfRApW1x2C/HFdSGRLQqH4TJ4F9w9ntggzg3A=</string>
 	<key>SUEnableAutomaticChecks</key>
@@ -75,7 +86,7 @@
 	     non-empty — opening that tab probes it once (to fill the Model picker), and
 	     Describe/Ask send the photo itself; nothing else in the app touches the network. -->
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>PhotoBlaze connects to the local AI model server you configure in Settings to describe images on your own machine or network.</string>
+	<string>Blaze Viewer connects to the local AI model server you configure in Settings to describe images on your own machine or network.</string>
 
 	<!-- File associations — the same Viewer/Alternate stance as the egui bundle (a
 	     candidate "Open With" handler, never silently the default). Delivered via

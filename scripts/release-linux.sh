@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Build a self-contained PhotoBlaze **AppImage** for Linux.
+# Build a self-contained Blaze Viewer **AppImage** for Linux.
 #
 # Philosophy (matches the AppImage excludelist): bundle the *specialized* libraries a
 # desktop won't already have — libheif (+ its dlopen'd HEVC/AV1 plugins), FFmpeg, and the
@@ -14,7 +14,7 @@
 # it degrades to silent motion if absent, so it isn't bundled.
 #
 # Usage:  ./scripts/release-linux.sh
-# Output: dist/PhotoBlaze-<version>-<arch>.AppImage
+# Output: dist/BlazeViewer-<version>-<arch>.AppImage
 #
 # NOTE: the AppImage is built for the *host* architecture. Run it on an x86_64 box to
 # produce the x86_64 artifact (and on aarch64 for the arm64 one); there is no cross-build.
@@ -25,11 +25,11 @@ ROOT="$(pwd)"
 VERSION="$(grep -m1 '^version' crates/pb-app/Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
 ARCH="$(uname -m)"
 DIST="$ROOT/dist"
-APPDIR="$DIST/PhotoBlaze.AppDir"
+APPDIR="$DIST/BlazeViewer.AppDir"
 TOOLS="$DIST/appimage-tools"
-OUTPUT="PhotoBlaze-$VERSION-$ARCH.AppImage"
+OUTPUT="BlazeViewer-$VERSION-$ARCH.AppImage"
 
-echo ">> PhotoBlaze $VERSION  ($ARCH)  ->  $OUTPUT"
+echo ">> Blaze Viewer $VERSION  ($ARCH)  ->  $OUTPUT"
 
 # Running an AppImage-packaged tool *inside* this build (linuxdeploy, appimagetool) can nest
 # FUSE mounts awkwardly (especially in a VM), so extract-and-run sidesteps FUSE entirely.
@@ -39,14 +39,14 @@ export APPIMAGE_EXTRACT_AND_RUN=1
 cargo build --release -p pb-app --features livephoto,pb-decode/libheif
 # Honor a custom target dir (the Docker builder points this at a cached volume so it never
 # clashes with the host's macOS `target/`).
-BIN="${CARGO_TARGET_DIR:-target}/release/photoblaze"
+BIN="${CARGO_TARGET_DIR:-target}/release/blazeviewer"
 
 # ── 2. Assemble the AppDir skeleton ──────────────────────────────────────────────────
 rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib" \
          "$APPDIR/usr/share/applications" \
          "$APPDIR/usr/share/icons/hicolor/256x256/apps"
-cp "$BIN" "$APPDIR/usr/bin/photoblaze"
+cp "$BIN" "$APPDIR/usr/bin/blazeviewer"
 
 # Bundled-library license texts + the notices summary (task #77). The AppImage bundles libheif,
 # its libde265/libaom plugins, and FFmpeg as shared libraries, which satisfies the LGPL *relink*
@@ -63,24 +63,24 @@ for lic in libheif-COPYING.txt libde265-COPYING.txt ffmpeg-COPYING.LGPLv2.1.txt;
 done
 
 # Icon (AppImage wants a top-level <name>.png plus the hicolor path).
-cp icons/photoblaze-icon-v3-windows.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/photoblaze.png"
-cp icons/photoblaze-icon-v3-windows.png "$APPDIR/photoblaze.png"
+cp icons/photoblaze-icon-v3-windows.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/blazeviewer.png"
+cp icons/photoblaze-icon-v3-windows.png "$APPDIR/blazeviewer.png"
 
 # Desktop entry (the app's identity + the image types it opens).
-DESKTOP="$APPDIR/usr/share/applications/photoblaze.desktop"
+DESKTOP="$APPDIR/usr/share/applications/blazeviewer.desktop"
 cat > "$DESKTOP" <<'EOF'
 [Desktop Entry]
 Type=Application
-Name=PhotoBlaze
+Name=Blaze Viewer
 GenericName=Photo Viewer
 Comment=A blazing-fast, keyboard-driven photo viewer
-Exec=photoblaze %F
-Icon=photoblaze
+Exec=blazeviewer %F
+Icon=blazeviewer
 Categories=Graphics;Viewer;Photography;
 Terminal=false
 MimeType=image/jpeg;image/png;image/gif;image/webp;image/avif;image/heic;image/heif;image/tiff;image/bmp;image/x-adobe-dng;image/jxl;image/svg+xml;video/mp4;video/quicktime;video/x-matroska;video/webm;video/x-msvideo;video/x-ms-wmv;video/mpeg;video/mp2t;video/3gpp;video/3gpp2;
 EOF
-cp "$DESKTOP" "$APPDIR/photoblaze.desktop"
+cp "$DESKTOP" "$APPDIR/blazeviewer.desktop"
 
 # Custom launcher: point libheif at the bundled plugins and our lib dir at load time.
 # Written *outside* the AppDir — linuxdeploy copies it in as AppRun (copying it onto itself
@@ -92,7 +92,7 @@ HERE="$(dirname "$(readlink -f "${0}")")"
 export LD_LIBRARY_PATH="$HERE/usr/lib:${LD_LIBRARY_PATH:-}"
 # libheif dlopen's its HEVC/AV1 decoders (libde265, …) at runtime — tell it where they are.
 export LIBHEIF_PLUGIN_PATH="$HERE/usr/lib/libheif/plugins"
-exec "$HERE/usr/bin/photoblaze" "$@"
+exec "$HERE/usr/bin/blazeviewer" "$@"
 EOF
 chmod +x "$APPRUN_TMPL"
 

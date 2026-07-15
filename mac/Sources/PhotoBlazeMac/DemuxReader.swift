@@ -29,7 +29,7 @@ struct DemuxOpen: Sendable {
 /// the renderer's `isReadyForMoreMediaData` appetite (plan §3A backpressure).
 final class DemuxReader: @unchecked Sendable {
     private let queue = DispatchQueue(
-        label: "ca.fullspec.photoblaze.sample-buffer-demux", qos: .userInitiated)
+        label: "ca.fullspec.blazeviewer.sample-buffer-demux", qos: .userInitiated)
     /// Nonzero once opened; `0` = unopened / open failed. Touched only on `queue`
     /// (and in `deinit`, when no other reference remains).
     private var ptr: UInt = 0

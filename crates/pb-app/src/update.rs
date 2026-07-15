@@ -119,12 +119,12 @@ mod feed {
             // Exactly the schema scripts/release-linux-upload.sh writes.
             let m = manifest(
                 r#"{
-                  "product": "PhotoBlaze",
+                  "product": "Blaze Viewer",
                   "version": "0.1.2",
                   "platform": "linux",
                   "assets": {
-                    "x86_64":  { "file": "PhotoBlaze-0.1.2-x86_64.AppImage",  "url": "https://x/a", "sha256": "aa", "size": 1 },
-                    "aarch64": { "file": "PhotoBlaze-0.1.2-aarch64.AppImage", "url": "https://x/b", "sha256": "bb", "size": 2 }
+                    "x86_64":  { "file": "BlazeViewer-0.1.2-x86_64.AppImage",  "url": "https://x/a", "sha256": "aa", "size": 1 },
+                    "aarch64": { "file": "BlazeViewer-0.1.2-aarch64.AppImage", "url": "https://x/b", "sha256": "bb", "size": 2 }
                   }
                 }"#,
             );
@@ -172,7 +172,7 @@ mod linux {
     /// The public Linux release feed: the flat directory holding `latest.json` + the versioned
     /// AppImages, published by `scripts/release-linux-upload.sh`. `PB_UPDATE_FEED` overrides the
     /// base URL for testing an update loop against a local HTTP server.
-    const FEED_BASE: &str = "https://downloads.fullspec.ca/photoblaze/linux";
+    const FEED_BASE: &str = "https://downloads.blazeviewer.app/linux";
 
     /// A verified, executable AppImage downloaded this session, waiting to replace `$APPIMAGE` on
     /// quit. `None` until a background download completes and passes its checksum.
@@ -201,7 +201,7 @@ mod linux {
             .name("pb-update-check".into())
             .spawn(|| {
                 if let Err(e) = check_and_stage() {
-                    eprintln!("PhotoBlaze: update check skipped: {e}");
+                    eprintln!("{}: update check skipped: {e}", pb_app_core::APP_NAME);
                 }
             });
     }
@@ -265,7 +265,8 @@ mod linux {
 
         *staged().lock().unwrap() = Some(Staged { tmp, target });
         eprintln!(
-            "PhotoBlaze: update {} downloaded; it installs when you quit.",
+            "{}: update {} downloaded; it installs when you quit.",
+            pb_app_core::APP_NAME,
             manifest.version
         );
         Ok(())
@@ -335,7 +336,10 @@ mod linux {
             return;
         };
         if let Err(e) = std::fs::rename(&s.tmp, &s.target) {
-            eprintln!("PhotoBlaze: applying the downloaded update failed: {e}");
+            eprintln!(
+                "{}: applying the downloaded update failed: {e}",
+                pb_app_core::APP_NAME
+            );
             let _ = std::fs::remove_file(&s.tmp);
         }
     }
@@ -378,10 +382,16 @@ mod win {
 
     /// The release feed: a flat HTTP directory holding `releases.win.json` + the `.nupkg` packages.
     /// `HttpSource` fetches `<FEED_URL>/releases.win.json` and the referenced `.nupkg` from here.
-    /// Hosted on a Caddy static server (DigitalOcean, `downloads.fullspec.ca`); product-namespaced so
-    /// the same host can serve other apps / a future macOS channel (`…/photoblaze/osx`). Until the
-    /// first release is uploaded, an update check simply finds nothing (a failed lookup is silent).
-    const FEED_URL: &str = "https://downloads.fullspec.ca/photoblaze/win";
+    ///
+    /// Hosted on a Caddy static server (DigitalOcean) behind a domain **we own**, which is the
+    /// whole point: this URL is compiled into every installed binary and can never move without
+    /// orphaning that install, so moving the *bytes* elsewhere later (e.g. GitHub Releases for
+    /// free bandwidth) must stay a server-side config change. No product namespace — the domain
+    /// is the product (task #101; it was `downloads.fullspec.ca/photoblaze/win`).
+    ///
+    /// Until the first release is uploaded, an update check simply finds nothing (a failed
+    /// lookup is silent).
+    const FEED_URL: &str = "https://downloads.blazeviewer.app/win";
 
     /// A downloaded, staged update waiting to be applied on quit (`None` until a download completes).
     static STAGED: OnceLock<Mutex<Option<UpdateInfo>>> = OnceLock::new();
@@ -434,7 +444,10 @@ mod win {
                 };
                 if let Ok(Some(update)) = checked {
                     *staged().lock().unwrap() = Some(update);
-                    eprintln!("PhotoBlaze: update downloaded; it installs when you quit.");
+                    eprintln!(
+                        "{}: update downloaded; it installs when you quit.",
+                        pb_app_core::APP_NAME
+                    );
                 }
                 // No update, or any error (offline, private feed, not a Velopack install): stay quiet.
                 // Updates must never interrupt viewing.
@@ -481,7 +494,10 @@ mod win {
             Err(_) => apply(HttpSource::new(FEED_URL), &update),
         };
         if let Err(e) = result {
-            eprintln!("PhotoBlaze: applying the downloaded update failed: {e}");
+            eprintln!(
+                "{}: applying the downloaded update failed: {e}",
+                pb_app_core::APP_NAME
+            );
         }
     }
 

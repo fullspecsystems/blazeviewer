@@ -19,7 +19,7 @@
 # --upload runs scripts/release-linux-upload.sh AFTER the build(s) succeed — from the host (it
 # needs your ssh keys), scp'ing whatever this run produced to downloads.fullspec.ca.
 #
-# Output: dist/PhotoBlaze-<version>-<arch>.AppImage  (owned by you via the bind mount)
+# Output: dist/BlazeViewer-<version>-<arch>.AppImage  (owned by you via the bind mount)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -49,8 +49,8 @@ fi
 VERSION="$(grep -m1 '^version' crates/pb-app/Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
 
 build_arch() {
-  local arch="$1" platform="linux/$1" image="photoblaze-appimage-builder:$1"
-  echo ">> PhotoBlaze AppImage  ($platform, via $ENGINE)"
+  local arch="$1" platform="linux/$1" image="blazeviewer-appimage-builder:$1"
+  echo ">> Blaze Viewer AppImage  ($platform, via $ENGINE)"
 
   # 1. Builder image — cached; only rebuilds when the Dockerfile / toolchain pin change.
   "$ENGINE" build --platform "$platform" -t "$image" -f scripts/appimage.Dockerfile .
@@ -60,8 +60,8 @@ build_arch() {
   # APPIMAGE_EXTRACT_AND_RUN avoids FUSE (no --privileged / /dev/fuse needed).
   "$ENGINE" run --rm --platform "$platform" \
     -v "$PWD":/src -w /src \
-    -v "photoblaze-target-$arch:/cargo-target" \
-    -v "photoblaze-cargo-registry:/opt/cargo/registry" \
+    -v "blazeviewer-target-$arch:/cargo-target" \
+    -v "blazeviewer-cargo-registry:/opt/cargo/registry" \
     -e CARGO_TARGET_DIR=/cargo-target \
     -e APPIMAGE_EXTRACT_AND_RUN=1 \
     "$image" bash scripts/release-linux.sh
@@ -70,7 +70,7 @@ build_arch() {
 for arch in "${ARCHES[@]}"; do
   build_arch "$arch"
   triple=x86_64; [ "$arch" = arm64 ] && triple=aarch64
-  echo ">> done -> dist/PhotoBlaze-$VERSION-$triple.AppImage"
+  echo ">> done -> dist/BlazeViewer-$VERSION-$triple.AppImage"
   echo ""
 done
 

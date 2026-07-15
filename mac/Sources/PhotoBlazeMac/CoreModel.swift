@@ -654,7 +654,7 @@ final class CoreModel {
     @ObservationIgnored private var fullscreenHintFromMouse = false
 
     /// The titlebar filename, driven through SwiftUI's `.navigationTitle` (see `ContentView`).
-    var windowTitleText = "PhotoBlaze"
+    var windowTitleText = "Blaze Viewer"
     /// The titlebar subtitle ("N of M"), driven through SwiftUI's `.navigationSubtitle`.
     var windowSubtitleText = ""
 

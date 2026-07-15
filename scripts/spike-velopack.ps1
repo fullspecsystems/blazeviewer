@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  PhotoBlaze local update-loop tester — build + pack a throwaway release into a local feed you
+  Blaze Viewer local update-loop tester — build + pack a throwaway release into a local feed you
   can install and self-update entirely offline. This is NOT the production pipeline (that's
   scripts/release-windows.ps1: libheif + Azure Trusted Signing + upload to downloads.fullspec.ca);
   it's a fast, unsigned local harness for exercising the per-user install + file-association +
@@ -58,7 +58,7 @@ Write-Host "==> vpk: $((Get-Command vpk).Source)"
 Write-Host "==> cargo build --release -p pb-app (feed v$Version)" -ForegroundColor Cyan
 cargo build --release -p pb-app
 if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
-$Exe = "target\release\photoblaze.exe"
+$Exe = "target\release\blazeviewer.exe"
 if (-not (Test-Path $Exe)) { throw "$Exe not found after build" }
 
 # ── 3. Stage a clean pack dir with just the exe. A release Rust build needs no sidecar
@@ -66,18 +66,18 @@ if (-not (Test-Path $Exe)) { throw "$Exe not found after build" }
 #      add `--framework vcredist143-x64` so Setup installs it when missing).
 if (Test-Path $StageDir) { Remove-Item -Recurse -Force $StageDir }
 New-Item -ItemType Directory -Force $StageDir | Out-Null
-Copy-Item $Exe (Join-Path $StageDir "photoblaze.exe") -Force
+Copy-Item $Exe (Join-Path $StageDir "blazeviewer.exe") -Force
 
 # ── 4. Pack into the local feed (also the FileSource the installed app reads for updates).
 #      Default channel is "win" -> writes releases.win.json, which FileSource expects.
 New-Item -ItemType Directory -Force $FeedDir | Out-Null
 Write-Host "==> vpk pack $Version -> $FeedDir" -ForegroundColor Cyan
 vpk pack `
-    --packId PhotoBlaze `
+    --packId BlazeViewer `
     --packVersion $Version `
     --packDir $StageDir `
-    --mainExe photoblaze.exe `
-    --packTitle "PhotoBlaze" `
+    --mainExe blazeviewer.exe `
+    --packTitle "Blaze Viewer" `
     --packAuthors "FullSpec Systems" `
     --icon "crates\pb-app\icons\photoblaze.ico" `
     --splashImage "crates\pb-app\icons\photoblaze-splash.jpg" `
@@ -86,7 +86,7 @@ vpk pack `
 if ($LASTEXITCODE -ne 0) { throw "vpk pack failed" }
 
 $Setup = Get-ChildItem (Join-Path $FeedDir "*Setup.exe") -ErrorAction SilentlyContinue | Select-Object -First 1
-$InstalledExe = Join-Path $env:LOCALAPPDATA "PhotoBlaze\current\photoblaze.exe"
+$InstalledExe = Join-Path $env:LOCALAPPDATA "BlazeViewer\current\blazeviewer.exe"
 
 Write-Host ""
 Write-Host "==> Done. Feed: $FeedDir" -ForegroundColor Green
@@ -95,11 +95,11 @@ Write-Host "NEXT STEPS" -ForegroundColor Cyan
 if ($Version -eq "0.0.1") {
     Write-Host "  1. Install (per-user, no UAC, a few seconds):"
     Write-Host "       $($Setup.FullName)"
-    Write-Host "     Velopack runs 'photoblaze.exe --veloapp-install', which registers the HKCU"
+    Write-Host "     Velopack runs 'blazeviewer.exe --veloapp-install', which registers the HKCU"
     Write-Host "     file associations, then auto-launches the app."
-    Write-Host "  2. Test associations: double-click a .jpg -> 'Open with' -> PhotoBlaze"
+    Write-Host "  2. Test associations: double-click a .jpg -> 'Open with' -> Blaze Viewer"
     Write-Host "     (or Settings > Apps > Default apps). Confirm the command targets ...\current\:"
-    Write-Host "       Get-ItemProperty 'HKCU:\Software\Classes\PhotoBlaze.Image\shell\open\command'"
+    Write-Host "       Get-ItemProperty 'HKCU:\Software\Classes\BlazeViewer.Image\shell\open\command'"
     Write-Host "  3. Publish an update:  pwsh scripts/spike-velopack.ps1 -Version 0.0.2"
 }
 else {

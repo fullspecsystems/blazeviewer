@@ -15,7 +15,7 @@
 # Info.plist). sign_update reads that key automatically.
 #
 # Usage: scripts/generate-mac-appcast.sh <dmg> <version> [out.xml]
-#   <dmg>      path to the notarized PhotoBlaze-<version>.dmg
+#   <dmg>      path to the notarized BlazeViewer-<version>.dmg
 #   <version>  the release version (matches CFBundleVersion / CFBundleShortVersionString)
 #   [out.xml]  output path (default: dist/appcast.xml)
 set -euo pipefail
@@ -41,7 +41,7 @@ SIG_ATTRS="$("$SIGN" "$DMG")"   # e.g. sparkle:edSignature="AbC…" length="1048
 DMG_NAME="$(basename "$DMG")"
 # The base the <enclosure> URL is built on. Defaults to the production feed; the local
 # Sparkle staging test (scripts/test-sparkle-update.sh) overrides it to a localhost server.
-BASE_URL="${PB_APPCAST_BASE_URL:-https://downloads.fullspec.ca/photoblaze/mac}"
+BASE_URL="${PB_APPCAST_BASE_URL:-https://downloads.blazeviewer.app/mac}"
 ENCLOSURE_URL="$BASE_URL/$DMG_NAME"
 PUB_DATE="$(date -u "+%a, %d %b %Y %H:%M:%S +0000")"
 
@@ -87,9 +87,9 @@ cat > "$OUT" <<XML
 <?xml version="1.0" encoding="utf-8"?>
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
   <channel>
-    <title>PhotoBlaze</title>
-    <link>https://downloads.fullspec.ca/photoblaze/mac/appcast.xml</link>
-    <description>PhotoBlaze updates for macOS.</description>
+    <title>Blaze Viewer</title>
+    <link>https://downloads.blazeviewer.app/mac/appcast.xml</link>
+    <description>Blaze Viewer updates for macOS.</description>
     <language>en</language>
     <item>
       <title>Version $VERSION</title>

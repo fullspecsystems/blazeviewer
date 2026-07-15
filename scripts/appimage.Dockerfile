@@ -1,6 +1,6 @@
-# Reproducible Linux AppImage builder for PhotoBlaze.
+# Reproducible Linux AppImage builder for Blaze Viewer.
 #
-# Base = Ubuntu 26.04 to MATCH the dev distro: PhotoBlaze's `livephoto` backend targets
+# Base = Ubuntu 26.04 to MATCH the dev distro: Blaze Viewer's `livephoto` backend targets
 # FFmpeg 8 (libavcodec 62) via `ffmpeg-next 8.1`, and libheif 1.21 — both bleeding-edge, so
 # an older LTS image (24.04 ships FFmpeg 6 / libavcodec 60) would fail to link. glibc here is
 # 2.43, which becomes the AppImage's runtime floor: it runs on similarly-recent distros.

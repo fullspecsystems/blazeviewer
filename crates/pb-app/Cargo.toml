@@ -7,7 +7,7 @@ authors = ["JD Lien <jd@jdlien.com>"]
 description = "PhotoBlaze binary: the winit window + event loop wiring core, decode, and render together."
 
 [[bin]]
-name = "photoblaze"
+name = "blazeviewer"
 path = "src/main.rs"
 
 [features]

@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Build (and optionally run) PhotoBlaze on Windows for **manual testing** — the dev twin of
+  Build (and optionally run) Blaze Viewer on Windows for **manual testing** — the dev twin of
   scripts/release-windows.ps1, without the sign/pack/upload steps.
 
 .DESCRIPTION
@@ -55,7 +55,7 @@ Write-Host "==> cargo $($buildArgs -join ' ')" -ForegroundColor Cyan
 cargo @buildArgs
 if ($LASTEXITCODE -ne 0) { throw "build failed" }
 
-$Exe = "target\$profileName\photoblaze.exe"
+$Exe = "target\$profileName\blazeviewer.exe"
 Write-Host "==> Built $Exe" -ForegroundColor Green
 
 if ($Run) {

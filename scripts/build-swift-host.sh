@@ -5,9 +5,9 @@
 #   1. cargo build -p pb-mac-ffi        (staticlib; build.rs regenerates generated/ glue)
 #   2. create-package                   → crates/pb-mac-ffi/PbMacFfi (xcframework Swift pkg)
 #   3. swift build --package-path mac   (the SwiftUI executable)
-#   4. assemble target/swift-host/<profile>/PhotoBlaze.app
-#      (the official Mac app since the 2026-07-02 cutover: name AND bundle id are
-#      PhotoBlaze / com.jdlien.PhotoBlaze — the only macOS build since task #70)
+#   4. assemble "target/swift-host/<profile>/Blaze Viewer.app"
+#      (the official Mac app since the 2026-07-02 cutover; renamed to Blaze Viewer /
+#      ca.fullspec.BlazeViewer in task #101 — the only macOS build since task #70)
 #
 # Usage:
 #   scripts/build-swift-host.sh [--debug|--release] [--run] [--ffvideo|--no-ffvideo|--bundle-ffmpeg]
@@ -32,7 +32,7 @@
 #
 # This is the only macOS build now — the old egui/winit "strangler-fig" bundle was retired
 # in task #70 (pb-app no longer compiles on macOS; the guard lives in crates/pb-app/build.rs).
-# `--run` quits any running PhotoBlaze first: `open` never relaunches a live app
+# `--run` quits any running instance first: `open` never relaunches a live app
 # (LaunchServices activates the existing instance by bundle id — even an installed
 # /Applications copy), which otherwise silently tests a stale build.
 set -euo pipefail
@@ -118,7 +118,14 @@ BUILD_ID="$(git rev-parse --short HEAD 2>/dev/null || true)"
 if [[ -n "$BUILD_ID" ]] && [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
 	BUILD_ID="$BUILD_ID-dirty"
 fi
-APP_DIR="target/swift-host/$PROFILE/PhotoBlaze.app"
+# The shipped bundle + its inner executable. The space is deliberate and matches
+# CFBundleName/CFBundleExecutable in Info-swift-host.plist: spaces are the macOS
+# convention ("Visual Studio Code.app") and Finder shows the exact brand. Every use of
+# these MUST stay quoted. (The SwiftPM product is still PhotoBlazeMac — an internal
+# target name, renamed separately.) The DMG deliberately does NOT take the space — see
+# release-macos.sh.
+APP_NAME="Blaze Viewer"
+APP_DIR="target/swift-host/$PROFILE/$APP_NAME.app"
 echo "==> Assembling $APP_DIR (v$SHORT_VERSION${BUILD_ID:+, build $BUILD_ID})"
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
@@ -127,8 +134,8 @@ sed -e "s/__SHORT_VERSION__/$SHORT_VERSION/g" \
 	-e "s/__BUILD_ID__/$BUILD_ID/g" \
 	packaging/macos/Info-swift-host.plist > "$APP_DIR/Contents/Info.plist"
 printf 'APPL????' > "$APP_DIR/Contents/PkgInfo"
-cp "$BIN" "$APP_DIR/Contents/MacOS/PhotoBlaze"
-chmod +x "$APP_DIR/Contents/MacOS/PhotoBlaze"
+cp "$BIN" "$APP_DIR/Contents/MacOS/$APP_NAME"
+chmod +x "$APP_DIR/Contents/MacOS/$APP_NAME"
 # The app icon: the prebuilt Liquid Glass Assets.car (Tahoe+, CFBundleIconName=AppIcon)
 # + the flat icns fallback (CFBundleIconFile=PhotoBlaze). Regenerate via
 # scripts/build-macos-icons.sh when the icon changes.
@@ -180,15 +187,20 @@ if [[ "$RUN" == 1 ]]; then
 	# `open` will NOT relaunch an already-running app — LaunchServices just activates
 	# the live instance (matched by bundle id, so even an installed /Applications copy
 	# shadows this fresh build). That's the classic "why am I testing a stale build"
-	# trap; quit any running PhotoBlaze first and wait for it to exit.
-	if pgrep -qf 'PhotoBlaze.app/Contents/MacOS/PhotoBlaze'; then
-		echo "==> Quitting running PhotoBlaze (stale-instance guard)"
-		osascript -e 'quit app id "com.jdlien.PhotoBlaze"' >/dev/null 2>&1 || true
+	# trap; quit any running instance first and wait for it to exit.
+	#
+	# The pattern carries a space ("Blaze Viewer.app/Contents/MacOS/Blaze Viewer") — keep
+	# it quoted. pgrep/pkill -f match against the full command line, so the space is data,
+	# not a separator.
+	RUNNING_PATTERN="$APP_NAME.app/Contents/MacOS/$APP_NAME"
+	if pgrep -qf "$RUNNING_PATTERN"; then
+		echo "==> Quitting running $APP_NAME (stale-instance guard)"
+		osascript -e 'quit app id "ca.fullspec.BlazeViewer"' >/dev/null 2>&1 || true
 		for _ in 1 2 3 4 5 6 7 8 9 10; do
-			pgrep -qf 'PhotoBlaze.app/Contents/MacOS/PhotoBlaze' || break
+			pgrep -qf "$RUNNING_PATTERN" || break
 			sleep 0.5
 		done
-		pkill -f 'PhotoBlaze.app/Contents/MacOS/PhotoBlaze' 2>/dev/null || true
+		pkill -f "$RUNNING_PATTERN" 2>/dev/null || true
 	fi
 	open "$APP_DIR"
 fi

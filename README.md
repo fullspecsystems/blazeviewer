@@ -81,7 +81,7 @@ command line.
 
 The same options work on macOS. Install the `photoblaze` command once via
 **PhotoBlaze ▸ Install Command-Line Tool…** (creates
-`/usr/local/bin/photoblaze`; the same menu item removes or repairs it), then:
+`/usr/local/bin/blaze`; the same menu item removes or repairs it), then:
 
 ```sh
 photoblaze ~/Photos --slideshow=3s --shuffle

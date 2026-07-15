@@ -12,7 +12,7 @@ final class ArchiveVideoLoader: NSObject, AVAssetResourceLoaderDelegate {
     /// routes every read through this delegate instead of the file/network loaders.
     let url: URL
     /// The delegate callbacks run here (off the main thread), reading the immutable `Data`.
-    let queue = DispatchQueue(label: "ca.fullspec.photoblaze.archive-video-loader")
+    let queue = DispatchQueue(label: "ca.fullspec.blazeviewer.archive-video-loader")
 
     private let data: Data
     private let contentType: String?  // UTI, e.g. "public.mpeg-4"
