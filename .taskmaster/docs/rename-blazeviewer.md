@@ -137,7 +137,8 @@ and feed URL — those were "free now, expensive once you have users"; this one 
 same whenever, so there is **no deadline to beat**.
 
 Other Apple facts (knowledge cutoff Jan 2026 — confirm against Apple's docs before acting):
-- Individual and Organization memberships are **both $99/yr**. No premium for the corp.
+- Individual and Organization memberships are **both $99/yr** (~$129 CAD). No premium for
+  the corp.
 - **No self-serve conversion** Individual → Organization: enroll fresh, with a **D-U-N-S
   number** for FullSpec Systems Inc.
 - An Apple ID holds only **one** membership as Account Holder → the Org needs a **new
@@ -145,6 +146,43 @@ Other Apple facts (knowledge cutoff Jan 2026 — confirm against Apple's docs be
   `jd@`; either beats a personal Apple ID). Then invite the personal Apple ID in as Admin.
 - An Individual membership is bound to your **legal name** — Apple will not display
   "FullSpec Systems Inc." on it. The Org account is the only real path.
+
+**Do the free part now, if anything — and it may matter more than expected.** The only real
+lead time is the **D-U-N-S number**; it's free and needs no Apple enrolment or payment.
+
+⚠ **There is an existing D-U-N-S `245285353`, but it is probably stale.** It was registered
+to the *original* FullSpec Systems, and the owner has **re-incorporated** since. Apple
+matches the D-U-N-S record on the **legal entity name**, not the address — so "it has all
+my info" is not the test. If the re-incorporation created a new legal entity (dissolve +
+form), the D&B record may describe an entity that no longer exists, and Apple rejects on
+the name mismatch.
+
+**The check is free and instant:** Apple's D-U-N-S lookup (`developer.apple.com/enroll/
+duns-lookup/`) with the *current* legal name + address shows exactly what Apple will see.
+- Returns `245285353` under the current entity → set, no lead time.
+- Returns nothing / the old entity → D&B must update the record or issue a new one. **This
+  is where weeks go** — which is precisely why it's worth discovering now rather than the
+  week an iOS build needs to go into review.
+
+**What's actually on the Individual account** (checked with the owner 2026-07-14):
+- **Two sticker packs.** These are why "just let the Individual lapse" is wrong: **a lapsed
+  membership removes your apps from sale.** The eventual move is *transfer, then lapse* —
+  App Store Connect supports app transfers, and sticker packs use none of the things that
+  block one (iCloud, Apple Pay), but confirm eligibility against Apple's "Transfer an app"
+  doc before relying on it. One of the two is being removed by Apple anyway → not a
+  transfer candidate.
+- **Client iPad work — irrelevant to this decision.** Being a *member* of someone else's
+  team is **free and needs no membership of your own**; the client just invites an Apple ID.
+  Never a reason to keep the Individual account.
+
+⇒ Long run this is still **one** membership, not two: transfer the keeper, let the
+Individual lapse, done. The double-pay is only the overlap window, and only when *we*
+choose to start it. Nothing here has a clock on it.
+
+**TCC caveat:** changing the Team ID resets macOS TCC grants (the Local Network permission
+for AI descriptions), because TCC keys on the signature's designated requirement. Phase C's
+bundle-id change already resets TCC once, so deferring means taking that hit a second time
+— one re-prompt, for one user. Not worth $129.
 
 **Where it actually bites: iOS, not macOS.** The App Store shows the **seller name
 publicly** on the product page; Developer ID on macOS surfaces the signer almost nowhere
