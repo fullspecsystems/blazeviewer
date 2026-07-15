@@ -173,12 +173,22 @@ struct SubtitlesPane: View {
         Binding(get: { b.wrappedValue * 100 }, set: { b.wrappedValue = $0 / 100 })
     }
 
+    /// One slider row.
+    ///
+    /// ⚠ The label and the readout are both **fixed-width**, and that is the whole point:
+    /// a bare `HStack` gives each label its natural width, so "Size" and "Outline opacity"
+    /// leave different remainders and every slider on the page ends up a different length
+    /// — which reads as sloppy and, worse, makes two sliders' travel incomparable when you
+    /// are trying to judge them against each other. Pinning both ends pins the middle.
+    /// `LABEL_W` fits the longest label here ("Outline opacity").
     private func slider(
         _ label: String, _ value: Binding<Double>, _ range: ClosedRange<Double>,
         _ format: String, step: Double? = nil
     ) -> some View {
-        HStack {
+        HStack(spacing: 8) {
             Text(label)
+                .lineLimit(1)
+                .frame(width: Self.labelW, alignment: .leading)
             if let step {
                 Slider(value: value, in: range, step: step)
             } else {
@@ -187,9 +197,15 @@ struct SubtitlesPane: View {
             Text(String(format: format, value.wrappedValue))
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
-                .frame(width: 58, alignment: .trailing)
+                .frame(width: Self.valueW, alignment: .trailing)
         }
     }
+
+    /// Wide enough for "Outline opacity", the longest label on the page.
+    private static let labelW: CGFloat = 104
+    /// Wide enough for "-10.0 px" and "100%" without the slider twitching as digits come
+    /// and go — a value box that resizes drags the slider with it.
+    private static let valueW: CGFloat = 58
 }
 
 /// The live swatch.

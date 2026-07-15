@@ -360,12 +360,21 @@ pub fn px_to_ratio(px: f32) -> f32 {
 /// ~4.7 px on default-size text. Past this the outline eats the letterforms.
 pub const MAX_OUTLINE_RATIO: f32 = 0.10;
 
-/// A blur wider than the text itself is a smudge, not a shadow. The old 5%-of-viewport
-/// ceiling could fill the screen (owner, 2026-07-15).
-pub const MAX_SHADOW_BLUR_RATIO: f32 = 0.30;
+/// ~10 px on default-size text (owner, 2026-07-15). Past this a shadow is a smudge rather
+/// than depth — the original 5%-of-viewport ceiling could fill the screen.
+///
+/// Derived from the px the owner asked for, like [`MAX_SHADOW_OFFSET_RATIO`], so the cap
+/// keeps meaning "10 px worth" at every text size instead of 10 literal pixels that would
+/// swamp small text and vanish on large.
+pub const MAX_SHADOW_BLUR_RATIO: f32 = 10.0 / REFERENCE_FONT_PX;
 
-/// A shadow offset beyond a fifth of the text's height reads as a second, broken copy.
-pub const MAX_SHADOW_OFFSET_RATIO: f32 = 0.20;
+/// ~5 px on default-size text (owner, 2026-07-15). Past this the shadow stops reading as
+/// depth and starts reading as a second, broken copy of the text.
+///
+/// Expressed as the ratio it really is, derived from the px the owner asked for — so the
+/// two never drift, and so the cap keeps meaning "5 px worth" at every text size rather
+/// than 5 literal pixels that would look enormous on small text and invisible on large.
+pub const MAX_SHADOW_OFFSET_RATIO: f32 = 5.0 / REFERENCE_FONT_PX;
 
 /// Above ~2, lines read as unrelated rather than as one cue.
 pub const MAX_LINE_SPACING: f32 = 2.0;
@@ -950,6 +959,16 @@ mod tests {
         s.set_outline_px_scale(999.0);
         assert_eq!(s.outline_ratio, MAX_OUTLINE_RATIO);
         assert_eq!(s.clone().clamped().outline_ratio, s.outline_ratio);
+    }
+
+    #[test]
+    fn the_shadow_caps_are_the_px_the_owner_asked_for() {
+        // Owner, 2026-07-15: offsets ±5 px, blur 10 px — on the reference scale, so they
+        // keep meaning "5 px worth" at every text size.
+        assert!((ratio_to_px(MAX_SHADOW_OFFSET_RATIO) - 5.0).abs() < 0.01);
+        assert!((ratio_to_px(MAX_SHADOW_BLUR_RATIO) - 10.0).abs() < 0.01);
+        // ...and the outline slider's 0..4 fits inside its clamp with room to spare.
+        assert!(ratio_to_px(MAX_OUTLINE_RATIO) >= 4.0);
     }
 
     // -- persistence (#90.4) -----------------------------------------------

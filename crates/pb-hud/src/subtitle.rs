@@ -37,6 +37,25 @@ pub struct SubtitleBitmap {
     pub pad: u32,
 }
 
+/// The background's vertical padding, as a fraction of its horizontal padding.
+///
+/// **Half — and this is an optical correction, not a fudge.** The padding is measured
+/// from the text box, and the two axes of that box are not the same kind of thing:
+///
+/// - **Horizontally** it hugs the real glyph ink (`max_x - min_x`).
+/// - **Vertically** it is a stack of *line boxes* (`size_px * line_spacing`), which
+///   already carry leading above the ascenders and below the descenders — a 1.2 line
+///   spacing alone is 20% of free air before the padding is added at all.
+///
+/// So equal padding *numbers* produce visibly unequal padding: a box with noticeably more
+/// room above and below the text than at its sides. Halving the vertical is what makes the
+/// two read as matching (owner, 2026-07-15).
+///
+/// This lives here rather than in the style because it is a fact about **how the text was
+/// laid out**, which is knowledge only the rasterizer has. `pb_app_core` sees one padding
+/// knob and should keep seeing one.
+const BACKGROUND_PAD_Y_SCALE: f32 = 0.5;
+
 /// A drop shadow, in physical pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ShadowParams {
@@ -246,17 +265,21 @@ impl SubtitleRasterizer {
         // --- composite ------------------------------------------------------
         let mut rgba = vec![0u8; (w * h * 4) as usize];
         if p.background[3] > 0 {
-            // The text's ink box, grown by the background padding — NOT the whole bitmap.
+            // The text's box, grown by the background padding — NOT the whole bitmap.
             // Filling the bitmap would make the box swell whenever an outline or shadow
             // grew it, so "padding" would silently mean something different depending on
             // settings that have nothing to do with the background.
+            //
+            // Vertically the padding is a *different number*, because the line box already
+            // carries leading: see `BACKGROUND_PAD_Y_SCALE`.
+            let bg_pad_y = bg_pad * BACKGROUND_PAD_Y_SCALE;
             let x0 = pad - bg_pad;
-            let y0 = pad - bg_pad;
+            let y0 = pad - bg_pad_y;
             let rect = (
                 x0,
                 y0,
                 x0 + text_w + bg_pad * 2.0,
-                y0 + text_h + bg_pad * 2.0,
+                y0 + text_h + bg_pad_y * 2.0,
             );
             fill_rounded_rect(&mut rgba, w, h, rect, p.background_radius_px, p.background);
         }
@@ -614,8 +637,15 @@ mod tests {
                 },
             )
             .unwrap();
-        // A background fills the whole bitmap.
-        assert_eq!(ink(boxed), (boxed.w * boxed.h) as usize);
+        // A background covers a big contiguous block — but NOT the whole bitmap: it hugs
+        // the text's box plus its padding, so it can't swell when an outline or shadow
+        // grows the bitmap around it.
+        let area = (boxed.w * boxed.h) as usize;
+        assert!(ink(boxed) > area / 2, "a background is a big block of ink");
+        assert!(
+            ink(boxed) < area,
+            "...but it hugs the text, it does not fill the bitmap"
+        );
     }
 
     /// A background's corners must actually be rounded — the owner asked for it
@@ -648,9 +678,14 @@ mod tests {
             .unwrap()
             .clone();
         assert_eq!((square.w, square.h), (rounded.w, rounded.h));
-        // The top-left pixel: opaque when square, transparent when rounded away.
-        assert_eq!(square.rgba[3], 255, "a square box fills its corner");
-        assert_eq!(rounded.rgba[3], 0, "a radius cuts the corner");
+        // The BOX's own top-left corner, not the bitmap's — the box is inset from the
+        // bitmap by whatever the outline and shadow needed.
+        let corner = |b: &SubtitleBitmap| -> u8 {
+            let (x, y) = (b.pad - 12, b.pad - 6); // pad - bg_pad, pad - bg_pad_y
+            b.rgba[(((y * b.w) + x) * 4 + 3) as usize]
+        };
+        assert_eq!(corner(&square), 255, "a square box fills its corner");
+        assert_eq!(corner(&rounded), 0, "a radius cuts the corner");
         assert!(ink(&rounded) < ink(&square));
     }
 
@@ -858,5 +893,47 @@ mod tests {
         let mut dst = vec![9u8, 9, 9, 9];
         over(&mut dst, &[0], [255, 0, 0, 255]);
         assert_eq!(dst, vec![9, 9, 9, 9]);
+    }
+
+    /// ⚠ The background's vertical padding is HALF its horizontal, on purpose.
+    ///
+    /// Equal numbers look lopsided, because the two axes measure different things: the
+    /// horizontal hugs the glyph ink, the vertical is a line box that already carries
+    /// leading. If this ever "looks like a bug" and gets equalised, the box goes back to
+    /// having visibly more air above and below than at its sides.
+    #[test]
+    fn the_background_pads_less_vertically_than_horizontally() {
+        let mut r = SubtitleRasterizer::new();
+        let p = SubtitleParams {
+            background: [255, 0, 0, 255],
+            background_pad_px: 20.0,
+            background_radius_px: 0.0,
+            outline_px: 0.0,
+            ..params()
+        };
+        let b = r.render(&["Hg".into()], &p).expect("drew").clone();
+
+        // The red box's extents inside the bitmap.
+        let is_bg = |x: u32, y: u32| -> bool {
+            let i = ((y * b.w + x) * 4) as usize;
+            b.rgba[i] > 100 && b.rgba[i + 3] > 0
+        };
+        let cx = b.w / 2;
+        let cy = b.h / 2;
+        let left = (0..b.w).find(|&x| is_bg(x, cy)).expect("a left edge");
+        let top = (0..b.h).find(|&y| is_bg(cx, y)).expect("a top edge");
+
+        // The text box starts at `pad` on both axes, so the gap from the bitmap edge to
+        // the box IS `pad - bg_pad` horizontally and `pad - bg_pad_y` vertically.
+        let h_pad = b.pad - left;
+        let v_pad = b.pad - top;
+        assert!(
+            h_pad > v_pad,
+            "vertical padding ({v_pad}) must be less than horizontal ({h_pad})"
+        );
+        assert!(
+            (v_pad as f32 - h_pad as f32 * BACKGROUND_PAD_Y_SCALE).abs() <= 1.0,
+            "vertical should be ~half: h={h_pad} v={v_pad}"
+        );
     }
 }
